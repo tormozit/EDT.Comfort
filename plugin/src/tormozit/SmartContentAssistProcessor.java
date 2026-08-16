@@ -225,19 +225,12 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
 
         if (types.isEmpty())
         {
-            Global.tempLog("assist-parent", "resolveReceiverTypeLabel result= empty" //$NON-NLS-1$
-                + " fullN=" + (fullListCache == null ? 0 : fullListCache.length) //$NON-NLS-1$
-                + " stockN=" + (memberStockFullList == null ? 0 : memberStockFullList.length)); //$NON-NLS-1$
             return ""; //$NON-NLS-1$
         }
 
         String result = types.size() == 1
             ? types.iterator().next()
             : "(" + types.size() + ") " + types.iterator().next(); //$NON-NLS-1$ //$NON-NLS-2$
-        Global.tempLog("assist-parent", "resolveReceiverTypeLabel result=" + result //$NON-NLS-1$
-            + " fullN=" + (fullListCache == null ? 0 : fullListCache.length) //$NON-NLS-1$
-            + " stockN=" + (memberStockFullList == null ? 0 : memberStockFullList.length) //$NON-NLS-1$
-            + " types=" + types); //$NON-NLS-1$
         return result;
     }
 
@@ -257,27 +250,6 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
                 types.add(parentType);
         }
         return types;
-    }
-
-    String dumpAssistParentState()
-    {
-        StringBuilder sb = new StringBuilder();
-        sb.append("ctxKey=").append(fullListContextKey); //$NON-NLS-1$
-        sb.append(" ctxRecv=").append(ContentAssistDebug.jsonEscapeForLog(fullListContextReceiver)); //$NON-NLS-1$
-        sb.append(" fullN=").append(fullListCache == null ? 0 : fullListCache.length); //$NON-NLS-1$
-        sb.append(" stockN=").append(memberStockFullList == null ? 0 : memberStockFullList.length); //$NON-NLS-1$
-        sb.append(" fullParents=").append(collectParentTypesFromProposals(fullListCache)); //$NON-NLS-1$
-        sb.append(" stockParents=").append(collectParentTypesFromProposals(memberStockFullList)); //$NON-NLS-1$
-        int n = fullListCache == null ? 0 : Math.min(3, fullListCache.length);
-        for (int i = 0; i < n; i++)
-        {
-            String d = displayString(unwrapProposal(fullListCache[i]));
-            if (d != null && d.length() > 80)
-                d = d.substring(0, 80);
-            sb.append(" d").append(i).append("=") //$NON-NLS-1$ //$NON-NLS-2$
-                .append(ContentAssistDebug.jsonEscapeForLog(d));
-        }
-        return sb.toString();
     }
 
     /**
@@ -1863,23 +1835,7 @@ ContentAssistSessionReloader reloader = viewer instanceof SourceViewer sv
         boolean selectionIrOnly = reloader != null && reloader.isSelectionIrOnlyContext();
         if ((manualDetect || selectionIrOnly) && reloader != null)
             reloader.tryBeginManualDualAssist(literalCaret);
-        boolean diagIrPending = reloader != null && reloader.isManualIrAssistPending();
-        boolean diagIrResolved = isIrWordsResolvedForContext();
         boolean awaitingWords = reloader != null && reloader.isCompletionAutoOpenAwaitingWords();
-        // #region agent log — trace selection Ctrl+Space (временное, безусловное)
-        {
-            int selLen = reloader != null ? reloader.widgetSelectionLength() : -2;
-            if (selLen > 0)
-            {
-                boolean irConn = reloader != null && reloader.irConnectedForAssist();
-                Global.tempLog("assist-trace", "compute: off=" + offset //$NON-NLS-1$ //$NON-NLS-2$
-                    + " caret=" + literalCaret + " selLen=" + selLen
-                    + " inLit=" + inLiteral + " manual=" + manualDetect
-                    + " irOnly=" + irOnlyManualMode + " irPending=" + diagIrPending
-                    + " irResolved=" + diagIrResolved + " irConn=" + irConn);
-            }
-        }
-        // #endregion
         if (reloader != null && reloader.isManualIrAssistPending()
             && !isIrWordsResolvedForContext())
         {
@@ -3539,7 +3495,6 @@ if (!isIrAssistOrderingEnabled())
      * не сужая его по тексту выделения. Список EDT уже исключён через
      * {@link #irOnlyManualMode} (см. {@code ContentAssistSessionReloader.beginManualDualAssist}).
      */
-    private static volatile int lastLoggedSelectionLen = Integer.MIN_VALUE;
 
     /** Выделение фрагмента + подключённый ИР + replaceListFilters (см. {@code ContentAssistSessionReloader#isSelectionIrOnlyContext}). */
     private static boolean selectionIrOnlyActive()
@@ -3561,12 +3516,6 @@ if (!isIrAssistOrderingEnabled())
         int len = sel != null ? sel.y : -1;
         if (len <= 0)
             return false;
-        if (len != lastLoggedSelectionLen)
-        {
-            lastLoggedSelectionLen = len;
-            Global.tempLog("assist-sel", "proposalMatchesFilter: irOnly + selection len=" //$NON-NLS-1$ //$NON-NLS-2$
-                + len + " -> full IR list"); //$NON-NLS-1$
-        }
         return true;
     }
 
@@ -5074,15 +5023,11 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
         {
             if (doc == null || caret < 0)
             {
-                Global.tempLog("assist-parent", "findDot caret=" + caret + " result=-1 reason=noDocOrCaret"); //$NON-NLS-1$
                 return -1;
             }
             boolean inLiteral = isStringLiteralAssistContext(doc, caret);
             if (inLiteral)
             {
-                Global.tempLog("assist-parent", "findDot caret=" + caret //$NON-NLS-1$
-                    + " result=-1 reason=inLiteral snippet=" //$NON-NLS-1$
-                    + ContentAssistDebug.jsonEscapeForLog(caretSnippet(doc, caret)));
                 return -1;
             }
             try
@@ -5100,36 +5045,17 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
                 }
                 if (pos <= 0 || doc.getChar(pos - 1) != '.')
                 {
-                    Global.tempLog("assist-parent", "findDot caret=" + caret //$NON-NLS-1$
-                        + " result=-1 reason=noDot pos=" + pos //$NON-NLS-1$
-                        + " snippet=" + ContentAssistDebug.jsonEscapeForLog(caretSnippet(doc, caret))); //$NON-NLS-1$
                     return -1;
                 }
                 int dot = pos - 1;
-                Global.tempLog("assist-parent", "findDot caret=" + caret + " result=" + dot //$NON-NLS-1$
-                    + " snippet=" + ContentAssistDebug.jsonEscapeForLog(caretSnippet(doc, caret))); //$NON-NLS-1$
                 return dot;
             }
             catch (Exception e)
             {
-                Global.tempLog("assist-parent", "findDot caret=" + caret + " result=-1 reason=ex " + e); //$NON-NLS-1$
                 return -1;
             }
         }
 
-        private static String caretSnippet(IDocument doc, int caret)
-        {
-            try
-            {
-                int start = Math.max(0, caret - 40);
-                int end = Math.min(doc.getLength(), caret + 20);
-                return doc.get(start, end - start).replace("\r", "\\r").replace("\n", "\\n"); //$NON-NLS-1$
-            }
-            catch (Exception e)
-            {
-                return ""; //$NON-NLS-1$
-            }
-        }
 
         private static final java.util.Set<String> NON_OBJECT_TYPE_NAMES = java.util.Set.of(
             "Число", "Строка", "Булево", "Дата", "Неопределено", //$NON-NLS-1$

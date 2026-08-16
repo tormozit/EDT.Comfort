@@ -163,6 +163,43 @@ public class SmartMatcher {
     }
 
     /**
+     * Как {@link #matchesTree}, но каждая секция фильтра должна совпасть с
+     * секцией имени целиком ({@code Реквизит.Банк} не совпадёт с {@code БанкПолучателя}).
+     */
+    public boolean matchesTreeExact(String elementFullName)
+    {
+        if (isEmpty)
+            return true;
+        if (elementFullName == null)
+            return false;
+        String[] elemSections = elementFullName.toLowerCase().split("\\."); //$NON-NLS-1$
+        int filterCount = sections.size();
+        if (filterCount <= 1)
+        {
+            String elemOnly = elemSections.length == 0
+                ? "" //$NON-NLS-1$
+                : elemSections[elemSections.length - 1];
+            return sectionEquals(elemOnly, filterCount == 0 ? List.of() : sections.get(0));
+        }
+        if (filterCount > elemSections.length)
+            return false;
+        int offset = elemSections.length - filterCount;
+        for (int i = 0; i < filterCount; i++)
+        {
+            if (!sectionEquals(elemSections[offset + i], sections.get(i)))
+                return false;
+        }
+        return true;
+    }
+
+    private static boolean sectionEquals(String elemSection, List<String> frags)
+    {
+        if (frags == null || frags.isEmpty())
+            return elemSection == null || elemSection.isEmpty();
+        return elemSection.equals(String.join(" ", frags)); //$NON-NLS-1$
+    }
+
+    /**
      * Как {@link #matchesTree}, но секции пути уже разделены по узлам дерева
      * (имя файла {@code RecordSetModule.bsl} — одна секция, точка расширения не режет путь).
      * Хвостовые секции фильтра, которые все входят в имя последнего узла, относятся к нему;

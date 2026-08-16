@@ -1,4 +1,4 @@
-﻿package tormozit;
+package tormozit;
 
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -354,13 +354,10 @@ public final class LongOperationNotifyHook implements IStartup
     {
         if (!shouldNotifyUser())
         {
-            Global.tempLog("long-op-notify", "skip decision user-busy job=" + jobName); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         String workspace = resolveWorkspaceName();
         String toastTitle = workspace.isEmpty() ? "EDT" : "EDT: " + workspace; //$NON-NLS-1$ //$NON-NLS-2$
-        Global.tempLog("long-op-notify", "SHOW decision job=" + jobName //$NON-NLS-1$ //$NON-NLS-2$
-            + " shell=[" + decisionShell.getText() + "]"); //$NON-NLS-1$ //$NON-NLS-2$
         evictJobToastsBeyondLimit();
         Shell toast = ToastNotification.show(toastTitle, DECISION_PREFIX + jobName, 0,
             () -> activateDecisionShell(decisionShell), ACTIVATE_LINK);
@@ -438,7 +435,6 @@ public final class LongOperationNotifyHook implements IStartup
         }
         catch (Exception e)
         {
-            Global.tempLog("long-op-notify", "addLogListener fail: " + e); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 
@@ -458,7 +454,6 @@ public final class LongOperationNotifyHook implements IStartup
         }
         catch (Exception e)
         {
-            Global.tempLog("long-op-notify", "count error fail: " + e); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 
@@ -474,7 +469,7 @@ public final class LongOperationNotifyHook implements IStartup
             int state = existing.getState();
             if (state == Job.NONE)
                 continue;
-            rememberJobStart(existing, "seed"); //$NON-NLS-1$
+            rememberJobStart(existing);
         }
         Job.getJobManager().addJobChangeListener(new IJobChangeListener()
         {
@@ -489,13 +484,13 @@ public final class LongOperationNotifyHook implements IStartup
             @Override
             public void scheduled(IJobChangeEvent event)
             {
-                rememberJobStart(event.getJob(), "scheduled"); //$NON-NLS-1$
-            }
+        rememberJobStart(event.getJob());
+    }
 
             @Override
             public void aboutToRun(IJobChangeEvent event)
             {
-                rememberJobStart(event.getJob(), "aboutToRun"); //$NON-NLS-1$
+                rememberJobStart(event.getJob());
                 bindJobThread(event.getJob());
             }
 
@@ -522,13 +517,6 @@ public final class LongOperationNotifyHook implements IStartup
                 String tracked = track != null ? track.projectNames : ""; //$NON-NLS-1$
                 // Имя проекта у DeployConfigurationJob есть только в имени самого Job.
                 final String projectNames = tracked.isEmpty() ? projectFromJobName(job) : tracked;
-                Global.tempLog("long-op-notify", "done op=" + operation //$NON-NLS-1$
-                    + " ok=" + ok //$NON-NLS-1$
-                    + " fgAtStart=" + (track != null && track.edtForegroundAtStart) //$NON-NLS-1$
-                    + " sev=" + (result != null ? result.getSeverity() : -1) //$NON-NLS-1$
-                    + " durMs=" + durationMs //$NON-NLS-1$
-                    + " projects=[" + projectNames + "]" //$NON-NLS-1$
-                    + " track=" + (track != null)); //$NON-NLS-1$
                 Display display = Display.getDefault();
                 if (display == null || display.isDisposed())
                     return;
@@ -540,8 +528,6 @@ public final class LongOperationNotifyHook implements IStartup
                     int errorCount = finished != null ? finished.errors.get() : 0;
                     ErrorRef firstError = finished != null ? finished.firstError.get() : null;
                     unbindJobThreads(finished);
-                    Global.tempLog("long-op-notify", "errors op=" + operation //$NON-NLS-1$
-                        + " count=" + errorCount); //$NON-NLS-1$
                     // Без ошибок — прежнее поведение (тост только при успехе).
                     if (errorCount == 0 && !ok)
                         return;
@@ -556,7 +542,7 @@ public final class LongOperationNotifyHook implements IStartup
     /**
      * Фиксирует момент старта для любого Job; имена проектов — только для активации контекста.
      */
-    private static void rememberJobStart(Job job, String phase)
+    private static void rememberJobStart(Job job)
     {
         if (job == null)
             return;
@@ -565,13 +551,9 @@ public final class LongOperationNotifyHook implements IStartup
         String operation = matchOperation(job);
         if (operation == null)
             return;
-        Global.tempLog("long-op-notify", phase + " op=" + operation //$NON-NLS-1$
-            + " job=" + job.getClass().getSimpleName() //$NON-NLS-1$
-            + " name=[" + job.getName() + "]"); //$NON-NLS-1$
         if (!TITLE_PROJECT_CONTEXT.equals(operation))
             return;
         String projects = snapshotContextActivatorProjects(job);
-        Global.tempLog("long-op-notify", phase + " projects=[" + projects + "]"); //$NON-NLS-1$
         if (projects.isEmpty())
             return;
         jobTracks.computeIfPresent(job, (j, prev) -> prev.projectNames.isEmpty()
@@ -702,7 +684,6 @@ public final class LongOperationNotifyHook implements IStartup
         }
         catch (Exception e)
         {
-            Global.tempLog("long-op-notify", "snapshot projects fail: " + e); //$NON-NLS-1$
             return ""; //$NON-NLS-1$
         }
     }
@@ -730,16 +711,12 @@ public final class LongOperationNotifyHook implements IStartup
         // durationMs < 0 — старт не видели (не путать с коротким Job).
         if (!hasErrors && startedInBackground && durationMs >= 0L && durationMs < MIN_DURATION_MS)
         {
-            Global.tempLog("long-op-notify", "skip short durMs=" + durationMs //$NON-NLS-1$
-                + " op=" + operation); //$NON-NLS-1$
             return;
         }
         boolean focused = isEdtWorkbenchFocused();
         long idleMs = System.currentTimeMillis() - lastInputMs.get();
         if (!hasErrors && !shouldNotifyUser())
         {
-            Global.tempLog("long-op-notify", "skip user-busy focused=" + focused //$NON-NLS-1$
-                + " idleMs=" + idleMs + " op=" + operation); //$NON-NLS-1$
             return;
         }
         long now = System.currentTimeMillis();
@@ -751,7 +728,6 @@ public final class LongOperationNotifyHook implements IStartup
         Long prev = lastNotifyByTitle.get(dedupKey);
         if (prev != null && now - prev < DEDUP_MS)
         {
-            Global.tempLog("long-op-notify", "skip dedup key=" + dedupKey); //$NON-NLS-1$
             return;
         }
         lastNotifyByTitle.put(dedupKey, now);
@@ -769,10 +745,6 @@ public final class LongOperationNotifyHook implements IStartup
         message.append(" в ").append(completedAt); //$NON-NLS-1$
         if (durationMs >= 0L)
             message.append(" за ").append(formatDuration(durationMs)); //$NON-NLS-1$
-
-        Global.tempLog("long-op-notify", "SHOW focused=" + focused //$NON-NLS-1$
-            + " idleMs=" + idleMs + " errors=" + errorCount //$NON-NLS-1$
-            + " msg=" + message); //$NON-NLS-1$
 
         evictJobToastsBeyondLimit();
         // Есть ошибки — ссылка на журнал ошибок (она же активирует окно),
@@ -885,7 +857,6 @@ public final class LongOperationNotifyHook implements IStartup
         }
         catch (Exception e)
         {
-            Global.tempLog("long-op-notify", "showView error log fail: " + e); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 
@@ -901,7 +872,6 @@ public final class LongOperationNotifyHook implements IStartup
         if (!(provider instanceof TreeViewer viewer) || viewer.getTree() == null
             || viewer.getTree().isDisposed())
         {
-            Global.tempLog("long-op-notify", "log view selection provider=" + provider); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         Object input = viewer.getInput() != null ? viewer.getInput() : view;
@@ -914,8 +884,6 @@ public final class LongOperationNotifyHook implements IStartup
                     () -> selectErrorEntry(view, ref, attempt + 1));
                 return;
             }
-            Global.tempLog("long-op-notify", "log entry not found msg=[" //$NON-NLS-1$ //$NON-NLS-2$
-                + ref.message + "]"); //$NON-NLS-1$
             return;
         }
         viewer.setSelection(new StructuredSelection(match), true);
@@ -1023,7 +991,6 @@ public final class LongOperationNotifyHook implements IStartup
         }
         catch (Throwable e)
         {
-            Global.tempLog("long-op-notify", "process foreground check fail: " + e); //$NON-NLS-1$ //$NON-NLS-2$
             return true;
         }
     }
@@ -1045,7 +1012,6 @@ public final class LongOperationNotifyHook implements IStartup
         }
         catch (Throwable e)
         {
-            Global.tempLog("long-op-notify", "foreground check fail: " + e); //$NON-NLS-1$ //$NON-NLS-2$
         }
         return isEdtWorkbenchFocusedBySwt();
     }

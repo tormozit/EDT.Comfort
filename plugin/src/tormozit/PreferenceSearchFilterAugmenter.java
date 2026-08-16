@@ -184,14 +184,9 @@ final class PreferenceSearchFilterAugmenter
         Object jobObj = Global.getField(filteredTree, REFRESH_JOB_FIELD);
         if (!(jobObj instanceof Job job))
         {
-            Global.tempLog(REVEAL_LOG_TOPIC,
-                    "bumpRefreshJobPriority: field '" + REFRESH_JOB_FIELD + "' is not a Job: " + jobObj); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
-        int oldPriority = job.getPriority();
         job.setPriority(Job.INTERACTIVE);
-        Global.tempLog(REVEAL_LOG_TOPIC,
-                "bumpRefreshJobPriority: priority " + oldPriority + " -> " + job.getPriority()); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     /** scopeId для {@link FilterHistoryStore} — отдельный от фильтра страницы «Клавиши». */
@@ -546,8 +541,6 @@ final class PreferenceSearchFilterAugmenter
      * путь к нему через {@link TreeViewer#reveal(Object)} — без смены самого
      * выделения, только видимость текущей строки.
      */
-    private static final String REVEAL_LOG_TOPIC = "prefSearchRevealOnClear"; //$NON-NLS-1$
-
     private static final String REFRESH_JOB_FIELD = "refreshJob"; //$NON-NLS-1$
 
     /**
@@ -565,14 +558,11 @@ final class PreferenceSearchFilterAugmenter
     private static void wireRevealSelectionOnClear(FilteredTree filteredTree, TreeViewer viewer, Text filterControl)
     {
         String[] previousText = {filterControl.getText()};
-        Global.tempLog(REVEAL_LOG_TOPIC, "wireRevealSelectionOnClear: initial text=[" + previousText[0] + "]"); //$NON-NLS-1$ //$NON-NLS-2$
         filterControl.addModifyListener(e ->
         {
             String now = filterControl.getText();
             boolean wasFilled = previousText[0] != null && !previousText[0].isBlank();
             boolean nowEmpty = now == null || now.isBlank();
-            Global.tempLog(REVEAL_LOG_TOPIC, "modify: previous=[" + previousText[0] + "] now=[" + now //$NON-NLS-1$ //$NON-NLS-2$
-                    + "] wasFilled=" + wasFilled + " nowEmpty=" + nowEmpty); //$NON-NLS-1$ //$NON-NLS-2$
             if (wasFilled && nowEmpty)
                 scheduleRevealAfterRefreshJob(filteredTree, viewer);
             previousText[0] = now;
@@ -584,14 +574,10 @@ final class PreferenceSearchFilterAugmenter
         Tree tree = viewer.getTree();
         if (tree.isDisposed())
         {
-            Global.tempLog(REVEAL_LOG_TOPIC, "scheduleRevealAfterRefreshJob: tree disposed, abort"); //$NON-NLS-1$
             return;
         }
         if (!(viewer.getSelection() instanceof IStructuredSelection selection) || selection.isEmpty())
         {
-            Global.tempLog(REVEAL_LOG_TOPIC,
-                    "scheduleRevealAfterRefreshJob: no structured/non-empty selection, selection=" //$NON-NLS-1$
-                            + viewer.getSelection());
             return;
         }
         Object element = selection.getFirstElement();
@@ -600,42 +586,30 @@ final class PreferenceSearchFilterAugmenter
         Object jobObj = Global.getField(filteredTree, REFRESH_JOB_FIELD);
         if (!(jobObj instanceof Job job))
         {
-            Global.tempLog(REVEAL_LOG_TOPIC,
-                    "scheduleRevealAfterRefreshJob: field '" + REFRESH_JOB_FIELD + "' is not a Job: " + jobObj); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
-        Global.tempLog(REVEAL_LOG_TOPIC, "scheduleRevealAfterRefreshJob: captured element=" + elementLabel //$NON-NLS-1$
-                + " jobState=" + job.getState() + " jobClass=" + job.getClass().getName() //$NON-NLS-1$ //$NON-NLS-2$
-                + " jobThread=" + job.getThread()); //$NON-NLS-1$
 
         job.addJobChangeListener(new JobChangeAdapter()
         {
             @Override
             public void scheduled(IJobChangeEvent event)
             {
-                Global.tempLog(REVEAL_LOG_TOPIC, "refreshJob.scheduled: element=" + elementLabel //$NON-NLS-1$
-                        + " delay=" + event.getDelay() + " state=" + job.getState()); //$NON-NLS-1$ //$NON-NLS-2$
             }
 
             @Override
             public void aboutToRun(IJobChangeEvent event)
             {
-                Global.tempLog(REVEAL_LOG_TOPIC, "refreshJob.aboutToRun: element=" + elementLabel); //$NON-NLS-1$
             }
 
             @Override
             public void running(IJobChangeEvent event)
             {
-                Global.tempLog(REVEAL_LOG_TOPIC,
-                        "refreshJob.running: element=" + elementLabel + " thread=" + Thread.currentThread()); //$NON-NLS-1$ //$NON-NLS-2$
             }
 
             @Override
             public void done(IJobChangeEvent event)
             {
                 job.removeJobChangeListener(this);
-                Global.tempLog(REVEAL_LOG_TOPIC, "refreshJob.done: element=" + elementLabel //$NON-NLS-1$
-                        + " result=" + event.getResult()); //$NON-NLS-1$
                 Display display = tree.getDisplay();
                 if (display.isDisposed())
                     return;
@@ -643,7 +617,6 @@ final class PreferenceSearchFilterAugmenter
                 {
                     if (tree.isDisposed())
                     {
-                        Global.tempLog(REVEAL_LOG_TOPIC, "asyncExec after refreshJob.done: tree disposed"); //$NON-NLS-1$
                         return;
                     }
                     // reveal() только прокручивает/разворачивает узел до видимости — он НЕ
@@ -652,12 +625,6 @@ final class PreferenceSearchFilterAugmenter
                     // TreeItem при сворачивании родителя) — поэтому нужно явно восстановить
                     // выделение через setSelection(reveal=true), а не полагаться на reveal().
                     viewer.setSelection(new StructuredSelection(element), true);
-                    TreeItem[] sel = tree.getSelection();
-                    String selLabel = sel.length > 0 ? sel[0].getText() : "<none>"; //$NON-NLS-1$
-                    boolean visible = sel.length > 0 && isTreeItemVisible(sel[0]);
-                    Global.tempLog(REVEAL_LOG_TOPIC,
-                            "asyncExec after refreshJob.done: setSelection done, element=" + elementLabel //$NON-NLS-1$
-                                    + " treeSelection=" + selLabel + " visible=" + visible); //$NON-NLS-1$ //$NON-NLS-2$
                 });
             }
         });
@@ -679,25 +646,11 @@ final class PreferenceSearchFilterAugmenter
         {
             long elapsed = System.currentTimeMillis() - start;
             int state = job.getState();
-            Global.tempLog(REVEAL_LOG_TOPIC,
-                    "heartbeat: element=" + elementLabel + " elapsedMs=" + elapsed + " state=" + state); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             if (state == Job.NONE || elapsed > 30000 || display.isDisposed())
                 return;
             display.timerExec(300, tickHolder[0]);
         };
         display.timerExec(300, tickHolder[0]);
-    }
-
-    private static boolean isTreeItemVisible(TreeItem item)
-    {
-        TreeItem parent = item.getParentItem();
-        while (parent != null)
-        {
-            if (!parent.getExpanded())
-                return false;
-            parent = parent.getParentItem();
-        }
-        return true;
     }
 
     private static void wireHighlighting(TreeViewer viewer, Text filterControl)

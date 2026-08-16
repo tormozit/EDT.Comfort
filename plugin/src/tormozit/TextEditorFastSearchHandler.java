@@ -169,6 +169,12 @@ public final class TextEditorFastSearchHandler extends AbstractHandler
         boolean caseSensitive = isCaseSensitiveSearch();
         boolean wholeWord = isWholeWordSearch();
         boolean regex = fromFindBuffer && isRegExSearch();
+        /*
+         * Маркерам вхождений — та же строка и тот же флажок регистра, что у поиска: иначе
+         * при поиске без учёта регистра найденные вхождения с другим регистром остаются
+         * неподсвеченными.
+         */
+        TextEditorOccurrencesSupport.setSearchContext(searchString, caseSensitive, wholeWord, regex);
         int searchFrom = forward ? (fromFindBuffer ? offset : offset + 1) : offset - 1;
 
         if (Global.isLogEnabled())
@@ -214,18 +220,41 @@ public final class TextEditorFastSearchHandler extends AbstractHandler
                 ext5.exposeModelRange(new Region(offset, length));
             viewer.setSelectedRange(offset, length);
             viewer.revealRange(offset, length);
-            return;
         }
-        textWidget.setSelectionRange(offset, length);
-        textWidget.showSelection();
+        else
+        {
+            textWidget.setSelectionRange(offset, length);
+            textWidget.showSelection();
+        }
+        /*
+         * Горизонтальная прокрутка — в самое левое положение, при котором найденное видно
+         * целиком (без контекста слева конец длинной строки малополезен). В редакторах это
+         * же делает BslEditorRevealScrollFixHook, но быстрый поиск работает и в полях без
+         * редактора (панели сравнения, редактор запроса) — там его нет.
+         */
+        Point selection = textWidget.getSelectionRange();
+        SearchMatchScrollSupport.applyLeftmost(textWidget, selection.x,
+            selection.x + Math.max(0, selection.y));
+        /*
+         * Выделение поставлено поиском (Ctrl+F3 / Ctrl+Shift+F3, «найти далее» из буфера) —
+         * маркеры вхождений включаются, даже если найденное не совпадает с границами слова.
+         * Пересчёт запускаем сами: на программное выделение StyledText события не шлёт.
+         */
+        TextEditorOccurrencesSupport.refreshAfterSearch(textWidget);
     }
 
-    private static boolean isCaseSensitiveSearch()
+    /**
+     * Флажок «С учётом регистра» диалога «Найти/Заменить» (сохранённое значение). Читает
+     * также {@link TextEditorOccurrencesSupport} — маркеры вхождений ищут с теми же
+     * настройками, что и поиск.
+     */
+    static boolean isCaseSensitiveSearch()
     {
         return readFindReplaceFlag(KEY_CASE_SENSITIVE);
     }
 
-    private static boolean isWholeWordSearch()
+    /** Флажок «Только слово целиком» диалога «Найти/Заменить» (сохранённое значение). */
+    static boolean isWholeWordSearch()
     {
         return readFindReplaceFlag(KEY_WHOLE_WORD);
     }

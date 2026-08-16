@@ -278,17 +278,7 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
                 result = plain != null ? plain : ""; //$NON-NLS-1$
             }
         }
-        Global.tempLog("search-copy-dispatch", "resolveCellText: column=" + column
-            + " element=" + (item.getData() != null ? item.getData().getClass().getSimpleName() : "null")
-            + " result=" + logShort(result));
         return result;
-    }
-
-    private static String logShort(String s)
-    {
-        if (s == null)
-            return "null";
-        return s.length() > 120 ? s.substring(0, 120) + "…(" + s.length() + ")" : s;
     }
 
     private static String textFromColumnLabelProvider(
@@ -306,12 +296,8 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
         }
         catch (RuntimeException ignored)
         {
-            Global.tempLog("search-copy-dispatch", "textFromColumnLabelProvider: getLabelProvider(" + column + ") threw "
-                + ignored);
             return null;
         }
-        Global.tempLog("search-copy-dispatch", "textFromColumnLabelProvider: column=" + column
-            + " provider=" + (cellLp != null ? cellLp.getClass().getSimpleName() : "null"));
         if (cellLp == null)
             return null;
         if (cellLp instanceof SelectionAwareStyledCellLabelProvider selectionAware)
@@ -1729,8 +1715,6 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
             ? selectedItem
             : currentSelectedRow();
         int idx = activeColumnIndex();
-        Global.tempLog("search-copy-dispatch", "activeCellText: itemData=" + (item != null ? item.getData() : "null")
-            + " activeColumnIndex=" + idx + " selectedItemLive=" + (selectedItem != null && !selectedItem.isDisposed()));
         if (item == null || item.isDisposed() || idx < 0)
             return null;
         String text = resolveCellText(item, idx);
@@ -2277,8 +2261,6 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
         }
         if (stretchCount == 0)
             return;
-        Global.tempLog("formTable-fill", "grow total=" + total + " clientW=" + clientW //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " extra=" + (clientW - total) + " stretch=" + stretchCount); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private void shrinkColumnsToFit(int total, int clientW, int cols)
@@ -2305,8 +2287,6 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
         // не результат сужения ТАБЛИЦЫ, а нехватка места по факту: дальше не наш случай (как обычный overflow).
         columnsFitBefore = actualTotal <= clientW;
         columnsExactFillBefore = actualTotal == clientW;
-        Global.tempLog("formTable-fill", "shrink total=" + total + " clientW=" + clientW //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " deficit=" + deficit + " shrinkCount=" + shrinkCount + " actualTotal=" + actualTotal); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
     }
 
     /**

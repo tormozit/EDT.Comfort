@@ -52,7 +52,6 @@ import com.e1c.g5.v8.dt.check.settings.ICheckRepository;
  */
 public final class ProblemViewPropertyFocusHook implements IStartup
 {
-    private static final String LOG_TOPIC = "problem-view-propfocus"; //$NON-NLS-1$
     private static final String VIEWER_MARKER = "tormozit.problemViewPropertyFocusHook"; //$NON-NLS-1$
     private static final String TREE_MARKER = "tormozit.problemViewPropertyFocusTree"; //$NON-NLS-1$
 
@@ -87,7 +86,6 @@ public final class ProblemViewPropertyFocusHook implements IStartup
             return;
         display.addFilter(SWT.MouseDoubleClick, ProblemViewPropertyFocusHook::onDisplayDoubleClick);
         displayFilterInstalled = true;
-        Global.tempLog(LOG_TOPIC, "displayFilter installed"); //$NON-NLS-1$
     }
 
     private static void hookWindow(IWorkbenchWindow window)
@@ -136,7 +134,6 @@ public final class ProblemViewPropertyFocusHook implements IStartup
         TreeViewer viewer = resolveTreeViewer(view);
         if (viewer == null)
         {
-            Global.tempLog(LOG_TOPIC, "tryHook: viewer=null view=" + view.getClass().getName()); //$NON-NLS-1$
             return;
         }
         if (!Boolean.TRUE.equals(viewer.getData(VIEWER_MARKER)))
@@ -144,7 +141,6 @@ public final class ProblemViewPropertyFocusHook implements IStartup
             viewer.addDoubleClickListener(new FocusDoubleClickListener());
             viewer.addOpenListener(new FocusOpenListener());
             viewer.setData(VIEWER_MARKER, Boolean.TRUE);
-            Global.tempLog(LOG_TOPIC, "hooked viewer listeners=" + viewer.getClass().getSimpleName()); //$NON-NLS-1$
         }
         Tree tree = viewer.getTree();
         if (tree != null && !tree.isDisposed() && !Boolean.TRUE.equals(tree.getData(TREE_MARKER)))
@@ -152,12 +148,10 @@ public final class ProblemViewPropertyFocusHook implements IStartup
             Listener treeListener = event -> {
                 if (event.button != 1)
                     return;
-                Global.tempLog(LOG_TOPIC, "tree MouseDoubleClick"); //$NON-NLS-1$
                 handleOpenFromViewer(viewer, "treeMouseDblClick"); //$NON-NLS-1$
             };
             tree.addListener(SWT.MouseDoubleClick, treeListener);
             tree.setData(TREE_MARKER, Boolean.TRUE);
-            Global.tempLog(LOG_TOPIC, "hooked tree MouseDoubleClick"); //$NON-NLS-1$
         }
     }
 
@@ -177,7 +171,6 @@ public final class ProblemViewPropertyFocusHook implements IStartup
         TreeViewer viewer = resolveTreeViewer(problemView);
         if (viewer == null || viewer.getTree() != tree)
             return;
-        Global.tempLog(LOG_TOPIC, "displayFilter MouseDoubleClick"); //$NON-NLS-1$
         handleOpenFromViewer(viewer, "displayFilter"); //$NON-NLS-1$
     }
 
@@ -208,7 +201,6 @@ public final class ProblemViewPropertyFocusHook implements IStartup
         @Override
         public void doubleClick(DoubleClickEvent event)
         {
-            Global.tempLog(LOG_TOPIC, "IDoubleClickListener fired"); //$NON-NLS-1$
             if (event == null || !(event.getSelection() instanceof IStructuredSelection structured))
                 return;
             handleOpenFromSelection(structured, "doubleClick"); //$NON-NLS-1$
@@ -220,7 +212,6 @@ public final class ProblemViewPropertyFocusHook implements IStartup
         @Override
         public void open(OpenEvent event)
         {
-            Global.tempLog(LOG_TOPIC, "IOpenListener fired"); //$NON-NLS-1$
             if (event == null || !(event.getSelection() instanceof IStructuredSelection structured))
                 return;
             handleOpenFromSelection(structured, "open"); //$NON-NLS-1$
@@ -233,7 +224,6 @@ public final class ProblemViewPropertyFocusHook implements IStartup
             return;
         if (!(viewer.getSelection() instanceof IStructuredSelection structured) || structured.isEmpty())
         {
-            Global.tempLog(LOG_TOPIC, source + " empty selection"); //$NON-NLS-1$
             return;
         }
         handleOpenFromSelection(structured, source);
@@ -243,10 +233,6 @@ public final class ProblemViewPropertyFocusHook implements IStartup
     {
         Object element = structured.getFirstElement();
         Marker marker = resolveMarker(element);
-        Global.tempLog(LOG_TOPIC, source + " element=" + (element != null ? element.getClass().getName() : "null") //$NON-NLS-1$ //$NON-NLS-2$
-            + " marker=" + (marker != null) //$NON-NLS-1$
-            + " checkId=" + (marker != null ? marker.getCheckId() : "null") //$NON-NLS-1$ //$NON-NLS-2$
-            + " ours=" + (marker != null && isBrokenFormPictureMarker(marker))); //$NON-NLS-1$
         if (marker == null || !isBrokenFormPictureMarker(marker))
             return;
 
@@ -259,16 +245,11 @@ public final class ProblemViewPropertyFocusHook implements IStartup
         EObject object = marker.provideObject(identity);
         if (object == null)
         {
-            Global.tempLog(LOG_TOPIC, source + " provideObject=null"); //$NON-NLS-1$
             return;
         }
 
         EStructuralFeature feature = resolveFeature(object, marker);
         EObject paletteMember = resolvePaletteMember(object);
-        Global.tempLog(LOG_TOPIC, source + " object=" + object.eClass().getName() //$NON-NLS-1$
-            + " member=" + (paletteMember != null ? paletteMember.eClass().getName() : "null") //$NON-NLS-1$ //$NON-NLS-2$
-            + " feature=" + (feature != null ? feature.getName() : "null") //$NON-NLS-1$ //$NON-NLS-2$
-            + " featureId=" + marker.getFeatureId()); //$NON-NLS-1$
         if (paletteMember == null || feature == null)
             return;
 
@@ -278,7 +259,6 @@ public final class ProblemViewPropertyFocusHook implements IStartup
         }
         catch (Exception e)
         {
-            Global.tempLog(LOG_TOPIC, "showView: " + e); //$NON-NLS-1$
         }
         // После штатного openEditor палитра обновляется асинхронно — scheduleExact ждёт до ~6с.
         ConfigSearchResultsHook.PropertyFieldFocus.scheduleExact(page, paletteMember, feature);

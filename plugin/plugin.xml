@@ -6,6 +6,7 @@
     <startup class="tormozit.LwtComboPopupFixHook"/>
     <startup class="tormozit.ActiveProjectTracker"/>
     <startup class="tormozit.CompareConfigMenuHook"/>
+    <startup class="tormozit.NavigatorDropSearchHook"/>
     <startup class="tormozit.ApplicationsViewHook"/>
     <startup class="tormozit.ApplicationEditorHook"/>
     <startup class="tormozit.DataCompositionSchemaEditorHook"/> 
@@ -20,7 +21,7 @@
     <startup class="tormozit.TextEditorRightClickCaretHook"/>
     <startup class="tormozit.TextEditorCtrlClickSelectWordHook"/>
     <startup class="tormozit.TextEditorIdentifierSelectionHook"/>
-    <startup class="tormozit.UniversalOccurrencesHook"/>
+    <startup class="tormozit.TextEditorOccurrencesHook"/>
     <startup class="tormozit.OccurrencesToggleHook"/>
     <startup class="tormozit.TextEditorMenuHook"/>
     <startup class="tormozit.XmlEditorShowInNavigatorHook"/>
@@ -43,6 +44,9 @@
     <startup class="tormozit.MdEventHandlersPageHook"/>
     <startup class="tormozit.MdEditorTitleNavigatorMenuHook"/>
     <startup class="tormozit.MdEditorListTabCountHook"/>
+    <startup class="tormozit.MdEditorAttributeMenuHook"/>
+    <startup class="tormozit.MdEditorFunctionalOptionsCountHook"/>
+    <startup class="tormozit.MdEditorSubsystemsExpandHook"/>
     <startup class="tormozit.EventHandlersFilterHook"/>
     <startup class="tormozit.EventHandlersOpenHandlerHook"/>
     <!-- ГЛОБАЛЬНЫЙ СКАН ОТКЛЮЧЁН ОКОНЧАТЕЛЬНО (issue #165), 2026-07-20. История фиксов: v1
@@ -117,6 +121,8 @@
     <startup class="tormozit.ConfigSearchDialogHook"/>
     <startup class="tormozit.PictureDialogHook"/>
     <startup class="tormozit.RightsDialogFilterHook"/>
+    <startup class="tormozit.RightsEditorFilterHook"/>
+    <startup class="tormozit.SetFilterDialogFilterHook"/>
     <startup class="tormozit.ModuleMergeStructureFilterHook"/>
     <startup class="tormozit.FilteredListDialogFilterHook"/>
     <startup class="tormozit.NewAttributeNameIdentifierHook"/>

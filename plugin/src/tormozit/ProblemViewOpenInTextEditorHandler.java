@@ -31,7 +31,6 @@ import com._1c.g5.v8.dt.validation.marker.Marker;
  */
 public class ProblemViewOpenInTextEditorHandler extends AbstractHandler
 {
-    private static final String LOG_TOPIC = "problem-view-commands"; //$NON-NLS-1$
 
     /** ID встроенного в Eclipse простого текстового редактора; литералом — как в {@code FileSearchResultsHook}. */
     private static final String DEFAULT_TEXT_EDITOR_ID = "org.eclipse.ui.DefaultTextEditor"; //$NON-NLS-1$
@@ -113,7 +112,6 @@ public class ProblemViewOpenInTextEditorHandler extends AbstractHandler
         }
         catch (PartInitException e)
         {
-            Global.tempLogException(LOG_TOPIC, "openEditor failed for " + file, e); //$NON-NLS-1$
             return;
         }
         revealObjectName(editor, objectName);
@@ -140,7 +138,6 @@ public class ProblemViewOpenInTextEditorHandler extends AbstractHandler
         offset = offset >= 0 ? offset + 1 : text.indexOf(objectName);
         if (offset < 0)
         {
-            Global.tempLog(LOG_TOPIC, "имя не найдено в тексте: " + objectName); //$NON-NLS-1$
             return;
         }
         int selectionOffset = offset;

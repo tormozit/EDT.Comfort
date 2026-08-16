@@ -140,7 +140,6 @@ public final class FileSearchResultsHook implements IStartup
             {
                 @Override public void queryAdded(ISearchQuery query)
                 {
-                    Global.tempLog("search-tree-empty", "file.queryAdded: " + describeQuery(query));
                     // Только поиск по файлам — иначе guard залипает после поиска по конфигурации
                     // и каждый клик в дереве FileSearch редиректит на корень.
                     if (!(query instanceof FileSearchQuery))
@@ -156,7 +155,6 @@ public final class FileSearchResultsHook implements IStartup
                 @Override public void queryRemoved(ISearchQuery query)    {}
                 @Override public void queryStarting(ISearchQuery query)
                 {
-                    Global.tempLog("search-tree-empty", "file.queryStarting: " + describeQuery(query));
                     if (!(query instanceof FileSearchQuery))
                         return;
                     // Панель не закрывается — Dispose не вызовется; сохранить ширины до новых результатов.
@@ -171,7 +169,6 @@ public final class FileSearchResultsHook implements IStartup
                 }
                 @Override public void queryFinished(ISearchQuery query)
                 {
-                    Global.tempLog("search-tree-empty", "file.queryFinished: " + describeQuery(query));
                     if (!(query instanceof FileSearchQuery))
                         return;
                     searchQueryRunning = false;
@@ -217,16 +214,6 @@ public final class FileSearchResultsHook implements IStartup
         boolean multi = projects.size() > 1;
         log("computeCoversMultipleProjects: " + multi + " (" + projects.size() + ")");
         return multi;
-    }
-
-    private static String describeQuery(ISearchQuery query)
-    {
-        if (query == null)
-            return "null";
-        return query.getClass().getName() + "@" + System.identityHashCode(query)
-            + " result=" + (query.getSearchResult() != null
-                ? query.getSearchResult().getClass().getName() + "@" + System.identityHashCode(query.getSearchResult())
-                : "null");
     }
 
     private static void onQueryEvent()
@@ -324,8 +311,6 @@ public final class FileSearchResultsHook implements IStartup
             if (!(view instanceof ISearchResultViewPart))
                 return false;
             ISearchResultPage activePage = ((ISearchResultViewPart) view).getActivePage();
-            Global.tempLog("search-tree-empty", "file.tryPatch: activePage="
-                + (activePage != null ? activePage.getClass().getName() + "@" + System.identityHashCode(activePage) : "null"));
             if (activePage == null)
                 return false;
             if (!activePage.getClass().getName().contains(PAGE_CLASS_MARKER))
@@ -345,7 +330,6 @@ public final class FileSearchResultsHook implements IStartup
 
             if (tree.getData(HOOKED_KEY) != null)
             {
-                Global.tempLog("search-tree-empty", "file.tryPatch: already hooked, treeItems=" + tree.getItemCount());
                 reinstallHandlers(activePage, view);
                 // EDT мог сменить label provider на новом поиске — вернуть decorating + счётчики.
                 installFileTreeMatchCount(treeViewer);
@@ -360,8 +344,6 @@ public final class FileSearchResultsHook implements IStartup
             CreateDebuggerBreakpoints.installToolbarAction(view);
 
             tree.setData(HOOKED_KEY, Boolean.TRUE);
-            Global.tempLog("search-tree-empty", "file.tryPatch: PATCH OK treeItems=" + tree.getItemCount()
-                + " input=" + (treeViewer.getInput() != null ? treeViewer.getInput().getClass().getName() : "null"));
             log("tryPatch: OK");
             return true;
         }

@@ -12,6 +12,7 @@ import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.IStatus;
 import org.eclipse.core.runtime.Status;
 import org.eclipse.core.runtime.jobs.Job;
+import org.eclipse.jface.action.IAction;
 import org.eclipse.jface.dialogs.IPageChangedListener;
 import org.eclipse.jface.text.ITextViewerExtension5;
 import org.eclipse.jface.text.source.ISourceViewer;
@@ -29,6 +30,8 @@ import org.eclipse.ui.IWorkbenchPart;
 import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
+import org.eclipse.ui.texteditor.ITextEditor;
+import org.eclipse.ui.texteditor.ITextEditorActionConstants;
 import org.eclipse.xtext.ui.editor.XtextSourceViewer;
 import org.eclipse.xtext.ui.editor.model.IXtextDocument;
 import org.eclipse.xtext.ui.editor.model.IXtextModelListener;
@@ -195,7 +198,7 @@ public final class BracketContentHintHook implements IStartup
             // XtextSourceViewer extends ProjectionViewer implements ITextViewerExtension5 —
             // нужен для перевода номеров строк документа в номера строк виджета
             // с учётом свёрнутых (folding) блоков, см. BracketContentHintPresenter.
-            PatchState state = new PatchState(widget, document, viewer);
+            PatchState state = new PatchState(widget, document, viewer, editor);
             patched.put(widget, state);
 
             widget.addPaintListener(state.paintListener);
@@ -261,17 +264,19 @@ public final class BracketContentHintHook implements IStartup
         final StyledText widget;
         final IXtextDocument document;
         final ITextViewerExtension5 lineMapper;
+        final ITextEditor editor;
         final PaintListener paintListener;
         final CaretListener caretListener;
         final IXtextModelListener modelListener;
         final Job rebuildJob;
         volatile List<BracketContentHintIndex.Entry> index = Collections.emptyList();
 
-        PatchState(StyledText widget, IXtextDocument document, ITextViewerExtension5 lineMapper)
+        PatchState(StyledText widget, IXtextDocument document, ITextViewerExtension5 lineMapper, ITextEditor editor)
         {
             this.widget = widget;
             this.document = document;
             this.lineMapper = lineMapper;
+            this.editor = editor;
             this.paintListener = this::onPaint;
             this.caretListener = e -> {
                 if (!widget.isDisposed())
@@ -329,7 +334,26 @@ public final class BracketContentHintHook implements IStartup
 
             List<BracketContentHintPresenter.VisibleHint> visible = BracketContentHintPresenter.computeVisibleHints(
                 widget, lineMapper, index, ComfortSettings.getBracketContentHintMinLines());
-            BracketContentHintPresenter.paint(e, widget, visible);
+            BracketContentHintPresenter.paint(e, widget, lineMapper, visible, isWhitespaceCharactersShown());
+        }
+
+        /**
+         * Включён ли режим «Показывать непечатаемые символы». Состояние берём у
+         * самой штатной команды редактора (её {@code isChecked} синхронизируется
+         * с настройкой при каждом её изменении) — так не приходится гадать, в
+         * каком из хранилищ настроек цепочки XtextEditor лежит значение.
+         */
+        private boolean isWhitespaceCharactersShown()
+        {
+            try
+            {
+                IAction action = editor.getAction(ITextEditorActionConstants.SHOW_WHITESPACE_CHARACTERS);
+                return action != null && action.isChecked();
+            }
+            catch (Exception e)
+            {
+                return false;
+            }
         }
     }
 

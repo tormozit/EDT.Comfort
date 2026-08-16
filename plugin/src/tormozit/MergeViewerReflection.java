@@ -49,9 +49,9 @@ public final class MergeViewerReflection
         /*
          * Единственная точка, где панель сравнения отдаёт свой SourceViewer: сам он не
          * Control, по цепочке родителей StyledText его не найти — регистрируем пару
-         * «виджет → вьюер» для маркеров вхождений (UniversalOccurrencesSupport).
+         * «виджет → вьюер» для маркеров вхождений (TextEditorOccurrencesSupport).
          */
-        UniversalOccurrencesSupport.registerViewer(sv);
+        TextEditorOccurrencesSupport.registerViewer(sv);
         return sv;
     }
 

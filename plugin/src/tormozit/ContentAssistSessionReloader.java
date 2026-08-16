@@ -1526,7 +1526,6 @@ return false;
     {
         try
         {
-            Global.tempLog("linked-mode", location + " " + (json == null || json.isEmpty() ? "{}" : json)); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         }
         catch (Exception ignored)
         {
@@ -1537,7 +1536,6 @@ return false;
     {
         try
         {
-            Global.tempLog("assist-open", location + " " + (json == null || json.isEmpty() ? "{}" : json)); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         }
         catch (Exception ignored)
         {
@@ -3303,7 +3301,6 @@ if (!inLiteral)
         return manualIrAssistPending;
     }
 
-    // #region agent log — trace selection Ctrl+Space (временное, безусловное)
     boolean irConnectedForAssist()
     {
         return IrBslExpressionHtmlSupport.resolveIrSessionForAssist(facade, viewer) != null;
@@ -3324,7 +3321,6 @@ if (!inLiteral)
             return false;
         return widgetSelectionLength() > 0;
     }
-    // #endregion
 
     private IrBslCompletionSupport.Snapshot buildSnapshotFromRaw(
         int caret, IrBslCompletionSupport.Snapshot raw)
@@ -4088,12 +4084,9 @@ scheduleFilterToggleUiSync();
                 + ",\"irPending\":" + manualIrAssistPending //$NON-NLS-1$
                 + ",\"autoOpenPending\":" + completionAutoOpenPending //$NON-NLS-1$
                 + ",\"awaitingWords\":" + isCompletionAutoOpenAwaitingWords() + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            if (hasTextSelection)
-                Global.tempLog("assist-sel", "CtrlSpace: selection caret=" + probeCaret //$NON-NLS-1$ //$NON-NLS-2$
-                    + " popup=" + popupVisible + " inLiteral=" + inLiteralProbe);
- if (popupVisible)
+            if (popupVisible)
             {
-event.doit = false;
+                event.doit = false;
                 return;
             }
             if (probeCaret >= 0

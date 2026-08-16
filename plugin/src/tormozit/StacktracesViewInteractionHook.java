@@ -170,7 +170,6 @@ public final class StacktracesViewInteractionHook implements IStartup
     private static final String REPO_PROBE_KEY = "tormozit.comfort.stacktraces.repoProbe"; //$NON-NLS-1$
     private static final String MEMENTO_GUARD_KEY = "tormozit.comfort.stacktraces.mementoGuard"; //$NON-NLS-1$
     private static final String FOLDER_TAB_PROBE_KEY = "tormozit.comfort.stacktraces.folderTabProbe"; //$NON-NLS-1$
-    private static final String LIST_LOG_TOPIC = "stacktraces-list"; //$NON-NLS-1$
     /** Признак невидимых строк описания ошибки в строке дерева (issue 276). */
     static final String HIDDEN_LINES_MARK = " ..."; //$NON-NLS-1$
     /**
@@ -319,7 +318,6 @@ public final class StacktracesViewInteractionHook implements IStartup
                 return;
             Object first = Global.invoke(dialog, "getFirstResult"); //$NON-NLS-1$
             boolean catchAll = Boolean.TRUE.equals(Global.invoke(dialog, "isCatchAllExceptions")); //$NON-NLS-1$
-            Global.tempLog("stop-on-error", "dialog OK first=[" + first + "] catchAll=" + catchAll); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             createExceptionBreakpoint(first instanceof String message ? message : null, catchAll);
         }
         catch (Exception e)
@@ -337,17 +335,14 @@ public final class StacktracesViewInteractionHook implements IStartup
      */
     private static void createExceptionBreakpoint(String message, boolean catchAllExceptions)
     {
-        Global.tempLog("stop-on-error", "create message=[" + message + "] catchAll=" + catchAllExceptions); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         if (!catchAllExceptions && (message == null || message.isEmpty()))
             return;
         IBslBreakpointFactory factory = CreateDebuggerBreakpoints.resolveFactory();
-        Global.tempLog("stop-on-error", "factory=" + factory); //$NON-NLS-1$ //$NON-NLS-2$
         if (factory == null)
             return;
         try
         {
             IBslExceptionBreakpoint existing = findExceptionBreakpoint(message, catchAllExceptions);
-            Global.tempLog("stop-on-error", "existing=" + existing); //$NON-NLS-1$ //$NON-NLS-2$
             if (existing != null)
             {
                 existing.setEnabled(true);
@@ -357,20 +352,11 @@ public final class StacktracesViewInteractionHook implements IStartup
             IBslExceptionBreakpoint created = catchAllExceptions
                     ? factory.createExceptionBreakpoint()
                     : factory.createExceptionBreakpoint(message);
-            Global.tempLog("stop-on-error", "created=" + created //$NON-NLS-1$ //$NON-NLS-2$
-                    + " marker=" + created.getMarker() //$NON-NLS-1$
-                    + " markerExists=" + (created.getMarker() != null && created.getMarker().exists()) //$NON-NLS-1$
-                    + " msg=[" + created.getExceptionMessage() + "]"); //$NON-NLS-1$ //$NON-NLS-2$
             DebugPlugin.getDefault().getBreakpointManager().addBreakpoint(created);
-            Global.tempLog("stop-on-error", "added registered=" //$NON-NLS-1$ //$NON-NLS-2$
-                    + DebugPlugin.getDefault().getBreakpointManager().isRegistered(created)
-                    + " total=" //$NON-NLS-1$
-                    + DebugPlugin.getDefault().getBreakpointManager().getBreakpoints(BSL_DEBUG_MODEL_ID).length);
             CreateDebuggerBreakpoints.revealInBreakpointsView(List.of(created));
         }
         catch (CoreException e)
         {
-            Global.tempLog("stop-on-error", "CoreException " + e); //$NON-NLS-1$ //$NON-NLS-2$
             Global.log("StacktracesViewInteraction", "createExceptionBreakpoint: " + e); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
@@ -753,7 +739,6 @@ public final class StacktracesViewInteractionHook implements IStartup
 
     private static void listLog(String text)
     {
-        Global.tempLog(LIST_LOG_TOPIC, text);
     }
 
     /** Аудит в постоянный файл — только при {@link Global#isLogEnabled()}. */
@@ -1780,7 +1765,6 @@ public final class StacktracesViewInteractionHook implements IStartup
         Object data = page.getData(PAGE_STATE_KEY);
         if (!(data instanceof PageState state))
         {
-            Global.tempLog("stacktraces-icons", "ensure: no PageState"); //$NON-NLS-1$ //$NON-NLS-2$
             return false;
         }
         return installFrameStatusLabelProvider(page, state);
@@ -1791,7 +1775,6 @@ public final class StacktracesViewInteractionHook implements IStartup
         Object viewerObj = Global.getField(page, "viewer"); //$NON-NLS-1$
         if (!(viewerObj instanceof TreeViewer viewer))
         {
-            Global.tempLog("stacktraces-icons", "install: viewer not ready"); //$NON-NLS-1$ //$NON-NLS-2$
             return false;
         }
         IBaseLabelProvider current = viewer.getLabelProvider();
@@ -1804,7 +1787,6 @@ public final class StacktracesViewInteractionHook implements IStartup
         viewer.setLabelProvider(wrapped);
         state.treeViewer = viewer;
         viewer.refresh();
-        Global.tempLog("stacktraces-icons", "install: wrapped + refresh"); //$NON-NLS-1$ //$NON-NLS-2$
         return true;
     }
 
@@ -3022,53 +3004,15 @@ public final class StacktracesViewInteractionHook implements IStartup
                 if (o instanceof StackRow row)
                     previousSelection.add(row);
             }
-            Object repository = Global.getField(view, "repository"); //$NON-NLS-1$
-            int repoSize = -1;
-            if (repository != null)
-            {
-                Object all = Global.invoke(repository, "getStacktraces"); //$NON-NLS-1$
-                if (all instanceof List<?> list)
-                    repoSize = list.size();
-            }
             List<StackRow> rows = new ArrayList<>();
-            Map<String, Integer> contentFirst = new java.util.HashMap<>();
-            IdentityHashMap<IStacktrace, Integer> stFirst = new IdentityHashMap<>();
-            int tabIndex = 0;
-            int contentDupMark = 0;
-            int identityDupMark = 0;
-            StringBuilder tabDump = new StringBuilder();
             for (CTabItem item : folder.getItems())
             {
-                int idx = tabIndex++;
                 if (item == null || item.isDisposed())
                     continue;
-                Control control = item.getControl();
-                IStacktrace stacktrace = control instanceof Composite page && !page.isDisposed()
-                        ? resolveStacktrace(page) : null;
-                int stId = stacktrace != null ? System.identityHashCode(stacktrace) : 0;
                 StackRow row = StackRow.from(item);
                 if (row == null)
                 {
-                    tabDump.append(" |#").append(idx).append(" nullRow stId=").append(stId); //$NON-NLS-1$ //$NON-NLS-2$
                     continue;
-                }
-                String contentKey = row.error + "\t" + row.date; //$NON-NLS-1$
-                Integer contentPrev = contentFirst.putIfAbsent(contentKey, Integer.valueOf(idx));
-                Integer stPrev = stacktrace != null
-                        ? stFirst.putIfAbsent(stacktrace, Integer.valueOf(idx)) : null;
-                tabDump.append(" |#").append(idx) //$NON-NLS-1$
-                        .append(" st=").append(Integer.toHexString(stId)) //$NON-NLS-1$
-                        .append(" '").append(shortLog(row.error)).append("' ") //$NON-NLS-1$ //$NON-NLS-2$
-                        .append(row.date);
-                if (stPrev != null)
-                {
-                    identityDupMark++;
-                    tabDump.append(" ID_DUP_of#").append(stPrev.intValue()); //$NON-NLS-1$
-                }
-                if (contentPrev != null)
-                {
-                    contentDupMark++;
-                    tabDump.append(" CONTENT_DUP_of#").append(contentPrev.intValue()); //$NON-NLS-1$
                 }
                 rows.add(row);
                 if (item.getData("tormozit.comfort.stacktraces.listDispose") == null) //$NON-NLS-1$
@@ -3084,16 +3028,6 @@ public final class StacktracesViewInteractionHook implements IStartup
             }
             CTabItem selected = folder.getSelection();
             installFolderTabProbe(folder);
-            Global.tempLog("stacktraces-list", //$NON-NLS-1$
-                    "refresh tabs=" + folder.getItemCount() //$NON-NLS-1$
-                            + " repo=" + repoSize //$NON-NLS-1$
-                            + " rows=" + rows.size() //$NON-NLS-1$
-                            + " contentDupMark=" + contentDupMark //$NON-NLS-1$
-                            + " idDupMark=" + identityDupMark //$NON-NLS-1$
-                            + " tableItems=" + viewer.getTable().getItemCount() //$NON-NLS-1$
-                            + " folderSel=" + (selected != null && !selected.isDisposed() //$NON-NLS-1$
-                                    ? selected.getText() : "null") //$NON-NLS-1$
-                            + tabDump);
             syncingSelection = true;
             try
             {
@@ -3193,14 +3127,6 @@ public final class StacktracesViewInteractionHook implements IStartup
                 // остаётся на старом TableItem (переиспользованном SWT).
                 interaction.resyncSelectionTheme();
             }
-        }
-
-        private static String shortLog(String text)
-        {
-            if (text == null || text.isEmpty())
-                return ""; //$NON-NLS-1$
-            String one = text.replace('\n', ' ').replace('\r', ' ');
-            return one.length() <= 40 ? one : one.substring(0, 40) + "..."; //$NON-NLS-1$
         }
 
         private StackRow rowAtTableIndex(int index)

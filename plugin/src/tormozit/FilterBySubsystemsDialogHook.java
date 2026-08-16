@@ -3048,11 +3048,6 @@ public final class FilterBySubsystemsDialogHook implements IStartup
                 + " scope=" + scope.size() //$NON-NLS-1$
                 + " explicit=" + explicitCount //$NON-NLS-1$
                 + " cleared=" + markBrief(clicked)); //$NON-NLS-1$
-        Global.tempLog("subsystems-mark", //$NON-NLS-1$
-            "materialize clicked=" + markBrief(clicked) //$NON-NLS-1$
-                + " staticMark=" + markBrief(staticMark) //$NON-NLS-1$
-                + " grayed=" + (grayed != null ? grayed.length : -1) //$NON-NLS-1$
-                + " explicit=" + explicitCount); //$NON-NLS-1$
     }
 
     /** Ближайшая статическая пометка ({@code checked && !grayed}) среди предков элемента. */
@@ -3147,28 +3142,8 @@ public final class FilterBySubsystemsDialogHook implements IStartup
                 return;
             }
 
-            Object parent = provider.getParent(element);
             boolean last = isLastUncheckedChildNowChecked(viewer, provider, element);
             boolean reset = wouldStaffResetParentSubtree(viewer, provider, element);
-            StringBuilder kids = new StringBuilder();
-            Object[] children = parent != null ? provider.getChildren(parent) : null;
-            if (children != null)
-            {
-                for (Object child : children)
-                {
-                    if (kids.length() > 0)
-                        kids.append(',');
-                    kids.append(markBrief(child))
-                        .append(isMarked(viewer, child) ? '+' : '-');
-                }
-            }
-            Global.tempLog("subsystems-mark", //$NON-NLS-1$
-                "el=" + markBrief(element) //$NON-NLS-1$
-                    + " parent=" + markBrief(parent) //$NON-NLS-1$
-                    + " parentClass=" + (parent != null ? parent.getClass().getName() : "null") //$NON-NLS-1$ //$NON-NLS-2$
-                    + " projectParent=" + isProjectOrFolderParent(parent) //$NON-NLS-1$
-                    + " last=" + last + " reset=" + reset //$NON-NLS-1$ //$NON-NLS-2$
-                    + " kids=[" + kids + "]"); //$NON-NLS-1$ //$NON-NLS-2$
 
             if (last || reset)
             {

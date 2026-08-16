@@ -93,5 +93,8 @@ public class ComfortInitializer extends AbstractPreferenceInitializer
         store.setDefault(
             ComfortSettings.PREF_GROUP_COMMON_MODULES_SUFFIXES_2,
             ComfortSettings.DEFAULT_GROUP_COMMON_MODULES_SUFFIXES_2);
+        store.setDefault(
+            ComfortSettings.PREF_MD_EDITOR_VERTICAL_TABS,
+            ComfortSettings.DEFAULT_MD_EDITOR_VERTICAL_TABS);
     }
 }

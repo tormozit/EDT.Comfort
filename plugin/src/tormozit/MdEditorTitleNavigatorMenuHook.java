@@ -65,9 +65,11 @@ import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
  * становится гиперссылкой, открывающей контекстное меню навигатора для строки этого
  * объекта.
  *
- * <p>Заголовок страницы («Справочники→_ДемоКассы→Основные») — это заголовок формы
+ * <p>Заголовок страницы («Справочник._ДемоКассы.Основные») — это заголовок формы
  * Eclipse Forms: {@code DtGranularEditorPage.createFormContentInternal} вызывает
- * {@code ScrolledForm.setText(getPageTitle())}. Область заголовка ({@code TitleRegion})
+ * {@code ScrolledForm.setText(getPageTitle())}. Комфорт приводит штатный путь
+ * («Справочники → … → Основные») к полному имени: системные слова в единственном
+ * числе, сегменты через точку. Область заголовка ({@code TitleRegion})
  * всегда содержит два контрола — {@code Label} и {@code StyledText}, видим ровно один;
  * переключение — {@link Form#setTitleTextSelectable(boolean)}. Ссылку можно оформить только на
  * {@code StyledText} ({@code Label} не поддерживает стили части текста), поэтому хук
@@ -218,6 +220,7 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
             if (scrolledForm == null || scrolledForm.isDisposed())
                 return;
 
+            applyPageTitleFormat(scrolledForm);
             install(scrolledForm.getForm(), mdObject, editor);
         }
         catch (Exception e)
@@ -249,7 +252,50 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
             return;
 
         head.setData(KEY_INSTALLED, Boolean.TRUE);
-        new TitleObjectLink(titleText, mdObject, editor);
+        // Win32: Ctrl+C забирает global Copy редактора (дерево вкладки), не StyledText.
+        CopyCommandSupport.wireCopyOverride(titleText);
+        new TitleObjectLink(form, titleText, mdObject, editor);
+    }
+
+    /**
+     * Штатный заголовок EDT — «Справочники → Валюты → Формы → …». Комфорт приводит
+     * его к полному имени: «Справочник.Валюты.Форма.…».
+     */
+    private static void applyPageTitleFormat(ScrolledForm scrolledForm)
+    {
+        if (scrolledForm == null || scrolledForm.isDisposed())
+            return;
+        String text = scrolledForm.getText();
+        String formatted = formatPageTitle(text);
+        if (formatted != null && !formatted.equals(text))
+            scrolledForm.setText(formatted);
+    }
+
+    /**
+     * Сегменты штатного пути (разделитель {@code →}) → ед.ч. системных слов, стык через точку.
+     * Уже отформатированный заголовок (без стрелки) не меняет.
+     */
+    private static String formatPageTitle(String title)
+    {
+        if (title == null || title.isEmpty() || title.indexOf('→') < 0)
+            return title;
+
+        String[] parts = title.split("\\s*→\\s*", -1); //$NON-NLS-1$
+        if (parts.length < 2)
+            return title;
+
+        StringBuilder formatted = new StringBuilder();
+        for (int i = 0; i < parts.length; i++)
+        {
+            String segment = parts[i].strip();
+            if (segment.isEmpty())
+                continue;
+            if (formatted.length() > 0)
+                formatted.append('.');
+            String singular = MdTypeMapping.systemLabelToSingular(segment);
+            formatted.append(singular != null ? singular : segment);
+        }
+        return formatted.length() == 0 ? title : formatted.toString();
     }
 
     /** Область заголовка формы — {@code org.eclipse.ui.internal.forms.widgets.TitleRegion}. */
@@ -288,6 +334,8 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
     {
         private final StyledText titleText;
 
+        private final Form form;
+
         private final MdObject mdObject;
 
         /** Редактор, которому возвращается фокус после закрытия меню. */
@@ -309,8 +357,12 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
 
         private Menu ownMenu;
 
-        TitleObjectLink(StyledText titleText, MdObject mdObject, IEditorPart editor)
+        /** Идёт запись отформатированного заголовка — не входить в {@link #applyLinkStyle} рекурсивно. */
+        private boolean applyingTitle;
+
+        TitleObjectLink(Form form, StyledText titleText, MdObject mdObject, IEditorPart editor)
         {
+            this.form = form;
             this.titleText = titleText;
             this.mdObject = mdObject;
             this.editor = editor;
@@ -345,10 +397,27 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
          */
         private void applyLinkStyle()
         {
-            if (titleText.isDisposed())
+            if (titleText.isDisposed() || applyingTitle)
                 return;
 
             String text = titleText.getText();
+            String formatted = formatPageTitle(text);
+            if (formatted != null && !formatted.equals(text))
+            {
+                applyingTitle = true;
+                try
+                {
+                    if (form != null && !form.isDisposed())
+                        form.setText(formatted);
+                    else
+                        titleText.setText(formatted);
+                }
+                finally
+                {
+                    applyingTitle = false;
+                }
+                text = titleText.getText();
+            }
             nameStart = findNameStart(text, mdObject.getName());
             nameLength = nameStart < 0 ? 0 : mdObject.getName().length();
             if (nameStart < 0)

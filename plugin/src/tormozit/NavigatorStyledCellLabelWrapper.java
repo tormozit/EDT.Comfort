@@ -57,7 +57,13 @@ public final class NavigatorStyledCellLabelWrapper extends StyledCellLabelProvid
     {
         if (cell == null)
             return;
+        updateHighlight(cell);
+        // Серое число элементов папки — последним, чтобы цифры не попадали в подсветку фильтра.
+        FolderItemCountDecoration.appendCount(cell);
+    }
 
+    private void updateHighlight(ViewerCell cell)
+    {
         Object element = cell.getElement();
         base.update(cell);
 

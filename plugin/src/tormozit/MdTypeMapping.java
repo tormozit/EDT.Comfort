@@ -55,6 +55,12 @@ public final class MdTypeMapping
      */
     private static final Map<String, String> TREE_GROUP_LABEL_TO_RU = new LinkedHashMap<>();
 
+    /**
+     * Системные подписи во мн.ч. (навигатор, шапка редактора, папки EDT) → ед.ч.
+     * Собирается в конце статического блока из остальных таблиц.
+     */
+    private static final Map<String, String> SYSTEM_LABEL_TO_SINGULAR = new LinkedHashMap<>();
+
     /** EN ед.ч. типа под-объекта → имя EMF-коллекции (attributes, forms…). */
     private static final Map<String, String> SUB_OBJECT_TO_EMF_FEATURE = new LinkedHashMap<>();
 
@@ -250,6 +256,12 @@ public final class MdTypeMapping
 
         for (Map.Entry<String, String> entry : TREE_GROUP_LABEL_TO_RU.entrySet())
             RU_TO_GROUP_LABEL.put(entry.getValue(), entry.getKey());
+
+        SYSTEM_LABEL_TO_SINGULAR.putAll(TREE_GROUP_LABEL_TO_RU);
+        SYSTEM_LABEL_TO_SINGULAR.putAll(RU_PLURAL_TO_RU);
+        for (Map.Entry<String, String> entry : SUB_OBJECT_RU_PLURAL.entrySet())
+            SYSTEM_LABEL_TO_SINGULAR.put(entry.getValue(), entry.getKey());
+        SYSTEM_LABEL_TO_SINGULAR.putAll(FOLDER_TO_EN_SING);
     }
 
     // =========================================================================
@@ -290,6 +302,18 @@ public final class MdTypeMapping
     public static String treeGroupLabelToRu(String label)
     {
         return TREE_GROUP_LABEL_TO_RU.get(label);
+    }
+
+    /**
+     * Системное слово во множественном числе («Справочники», «Формы», «Catalogs») →
+     * единственное («Справочник», «Форма», «Catalog»). Имена объектов и прочие
+     * подписи, которых нет в таблицах типов, не трогает ({@code null}).
+     */
+    public static String systemLabelToSingular(String label)
+    {
+        if (label == null || label.isBlank())
+            return null;
+        return SYSTEM_LABEL_TO_SINGULAR.get(label.strip());
     }
 
     /**

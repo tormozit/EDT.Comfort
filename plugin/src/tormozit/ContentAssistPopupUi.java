@@ -202,7 +202,6 @@ public final class ContentAssistPopupUi
     {
         if (viewer == null || viewer.getDocument() == null)
         {
-            Global.tempLog("assist-parent", "resolve label= empty reason=noViewer"); //$NON-NLS-1$
             return ""; //$NON-NLS-1$
         }
         int modelCaret = resolveViewerCaret(viewer);
@@ -210,31 +209,24 @@ public final class ContentAssistPopupUi
         int filterOff = assistant != null ? ContentAssistPopupSync.getFilterOffset(assistant) : -1;
         int invOff = assistant != null ? ContentAssistPopupSync.getInvocationOffset(assistant) : -1;
         int lastOff = assistant != null ? ContentAssistPopupSync.getLastCompletionOffset(assistant) : -1;
-        String caretSource;
         int caret;
         if (filterOff >= 0)
         {
             caret = filterOff;
-            caretSource = "filter"; //$NON-NLS-1$
         }
         else if (invOff >= 0)
         {
             caret = invOff;
-            caretSource = "inv"; //$NON-NLS-1$
         }
         else if (lastOff >= 0)
         {
             caret = lastOff;
-            caretSource = "last"; //$NON-NLS-1$
         }
         else
         {
             caret = modelCaret;
-            caretSource = "model"; //$NON-NLS-1$
         }
         boolean inLiteral = SmartContentAssistProcessor.isStringLiteralAssistContext(viewer, caret);
-        SmartContentAssistProcessor processor = ContentAssistSessionReloader.getActiveProcessor();
-        String state = processor != null ? processor.dumpAssistParentState() : "noProcessor"; //$NON-NLS-1$
         if (inLiteral)
         {
             ContentAssistSessionReloader reloader =
@@ -244,10 +236,6 @@ public final class ContentAssistPopupUi
             cachedContextLabelReceiver = ""; //$NON-NLS-1$
             cachedContextLabelText = ctx != null && !ctx.isEmpty()
                 ? "Родитель: " + ctx : PARENT_PLACEHOLDER;
-            Global.tempLog("assist-parent", "resolve inLiteral=true modelCaret=" + modelCaret //$NON-NLS-1$
-                + " caret=" + caret + " caretSource=" + caretSource //$NON-NLS-1$
-                + " filter=" + filterOff + " inv=" + invOff + " last=" + lastOff //$NON-NLS-1$
-                + " label=" + cachedContextLabelText + " " + state); //$NON-NLS-1$
             return cachedContextLabelText;
         }
         int dot = SmartContentAssistProcessor.ReceiverTypeLabel.findMemberAccessDot(
@@ -257,10 +245,6 @@ public final class ContentAssistPopupUi
             cachedContextLabelDot = -1;
             cachedContextLabelReceiver = ""; //$NON-NLS-1$
             cachedContextLabelText = ""; //$NON-NLS-1$
-            Global.tempLog("assist-parent", "resolve dot=-1 modelCaret=" + modelCaret //$NON-NLS-1$
-                + " caret=" + caret + " caretSource=" + caretSource //$NON-NLS-1$
-                + " filter=" + filterOff + " inv=" + invOff + " last=" + lastOff //$NON-NLS-1$
-                + " label= empty " + state); //$NON-NLS-1$
             return ""; //$NON-NLS-1$
         }
         String receiver = SmartContentAssistProcessor.memberAccessReceiver(
@@ -270,9 +254,6 @@ public final class ContentAssistPopupUi
             && !cachedContextLabelText.isEmpty()
             && !PARENT_PLACEHOLDER.equals(cachedContextLabelText))
         {
-            Global.tempLog("assist-parent", "resolve cacheHit dot=" + dot //$NON-NLS-1$
-                + " recv=" + receiver + " caretSource=" + caretSource //$NON-NLS-1$
-                + " label=" + cachedContextLabelText + " " + state); //$NON-NLS-1$
             return cachedContextLabelText;
         }
 
@@ -282,9 +263,6 @@ public final class ContentAssistPopupUi
             cachedContextLabelDot = dot;
             cachedContextLabelReceiver = receiver;
             cachedContextLabelText = fromList;
-            Global.tempLog("assist-parent", "resolve fromList dot=" + dot //$NON-NLS-1$
-                + " recv=" + receiver + " caretSource=" + caretSource //$NON-NLS-1$
-                + " label=" + fromList + " " + state); //$NON-NLS-1$
             return cachedContextLabelText;
         }
         String ast = SmartContentAssistProcessor.ReceiverTypeLabel.resolve(viewer);
@@ -293,16 +271,11 @@ public final class ContentAssistPopupUi
             cachedContextLabelDot = dot;
             cachedContextLabelReceiver = receiver;
             cachedContextLabelText = "Родитель: " + ast;
-            Global.tempLog("assist-parent", "resolve ast dot=" + dot //$NON-NLS-1$
-                + " recv=" + receiver + " caretSource=" + caretSource //$NON-NLS-1$
-                + " label=" + cachedContextLabelText + " " + state); //$NON-NLS-1$
             return cachedContextLabelText;
         }
         cachedContextLabelDot = dot;
         cachedContextLabelReceiver = receiver;
         cachedContextLabelText = PARENT_PLACEHOLDER;
-        Global.tempLog("assist-parent", "resolve placeholder dot=" + dot //$NON-NLS-1$
-            + " recv=" + receiver + " caretSource=" + caretSource + " " + state); //$NON-NLS-1$
         return cachedContextLabelText;
     }
 

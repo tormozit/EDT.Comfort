@@ -512,7 +512,6 @@ public final class BslModuleSpellCheckHook implements IStartup
                     scheduleAttachEditor(bsl);
             }
         });
-        Global.tempLog("bsl-spell-attach", "pageListener+ " + partLabel(granular)); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private static void hookGranularActivePage(DtGranularEditor<?> granular)
@@ -523,8 +522,6 @@ public final class BslModuleSpellCheckHook implements IStartup
         IEditorPart embedded = xtextPage.getEmbeddedEditor();
         if (embedded instanceof BslXtextEditor bsl)
             scheduleAttachEditor(bsl);
-        else
-            Global.tempLog("bsl-spell-attach", "granular no-embedded " + partLabel(granular)); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private static void detachPart(IWorkbenchPart part)
@@ -565,20 +562,10 @@ public final class BslModuleSpellCheckHook implements IStartup
         {
             if (attempt >= MAX_ATTACH_ATTEMPTS)
             {
-                Global.tempLog("bsl-spell-attach", //$NON-NLS-1$
-                    "give-up viewer/doc attempt=" + attempt //$NON-NLS-1$
-                        + " viewer=" + (viewer != null) //$NON-NLS-1$
-                        + " doc=" + (document != null) //$NON-NLS-1$
-                        + " " + partLabel(editor)); //$NON-NLS-1$
                 return;
             }
             if (attempt == 0 || attempt % 10 == 0)
             {
-                Global.tempLog("bsl-spell-attach", //$NON-NLS-1$
-                    "retry viewer/doc attempt=" + attempt //$NON-NLS-1$
-                        + " viewer=" + (viewer != null) //$NON-NLS-1$
-                        + " doc=" + (document != null) //$NON-NLS-1$
-                        + " " + partLabel(editor)); //$NON-NLS-1$
             }
             Display display = Display.getDefault();
             if (display != null && !display.isDisposed())
@@ -593,18 +580,12 @@ public final class BslModuleSpellCheckHook implements IStartup
                 existing.schedule(0);
             if (attempt > 0)
             {
-                Global.tempLog("bsl-spell-attach", //$NON-NLS-1$
-                    "already attempt=" + attempt + " " + partLabel(editor)); //$NON-NLS-1$ //$NON-NLS-2$
             }
             return;
         }
         EditorSession session = new EditorSession(editor, viewer);
         SESSIONS.put(editor, session);
         session.install();
-        Global.tempLog("bsl-spell-attach", //$NON-NLS-1$
-            "ok attempt=" + attempt + " active=" //$NON-NLS-1$ //$NON-NLS-2$
-                + SpellCheckHook.isComfortPlatformSpellingActive()
-                + " " + partLabel(editor)); //$NON-NLS-1$
         if (SpellCheckHook.isComfortPlatformSpellingActive())
         {
             session.schedule(0);
@@ -621,16 +602,6 @@ public final class BslModuleSpellCheckHook implements IStartup
                 });
             }
         }
-    }
-
-    private static String partLabel(IWorkbenchPart part)
-    {
-        if (part == null)
-            return "null"; //$NON-NLS-1$
-        String title = part.getTitle();
-        if (title == null || title.isBlank())
-            title = part.getClass().getSimpleName();
-        return title + "/" + System.identityHashCode(part); //$NON-NLS-1$
     }
 
     private static void detachEditor(BslXtextEditor editor)

@@ -217,6 +217,7 @@ public final class FindReplaceLiveMatchCountHook implements IStartup
             cancelJob();
 
             String findString = findField.getText();
+            publishSearchContext(findString);
             if (findString.length() < MIN_CHARS)
             {
                 generation++;
@@ -261,6 +262,23 @@ public final class FindReplaceLiveMatchCountHook implements IStartup
             };
             job.setSystem(true);
             job.schedule(SEARCH_DELAY_MS);
+        }
+
+        /**
+         * Отдаёт искомую строку маркерам вхождений: после «Найти» найденное вхождение
+         * выделено, и {@link TextEditorOccurrencesSupport} включает подсветку, не требуя,
+         * чтобы выделение совпадало с границами слова (сам поиск вхождений при этом
+         * обычный).
+         */
+        private void publishSearchContext(String findString)
+        {
+            boolean caseSensitive = caseCheckBox != null && !caseCheckBox.isDisposed()
+                && caseCheckBox.getSelection();
+            boolean wholeWord = wholeWordCheckBox != null && !wholeWordCheckBox.isDisposed()
+                && wholeWordCheckBox.getSelection();
+            boolean regEx = regExCheckBox != null && !regExCheckBox.isDisposed()
+                && regExCheckBox.getSelection();
+            TextEditorOccurrencesSupport.setSearchContext(findString, caseSensitive, wholeWord, regEx);
         }
 
         private void cancelJob()

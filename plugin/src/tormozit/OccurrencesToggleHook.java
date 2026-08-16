@@ -42,7 +42,7 @@ import org.eclipse.xtext.ui.editor.XtextEditor;
 
 /**
  * Переключатели «Переключить маркеры вхождений» для
- * {@link UniversalOccurrencesSupport}, все с единым глобальным состоянием:
+ * {@link TextEditorOccurrencesSupport}, все с единым глобальным состоянием:
  * <ul>
  * <li>немодальные Xtext/BSL-редакторы — штатная кнопка Xtext (скрытая
  * {@code setVisible(false)} в {@code MarkOccurrenceActionContributor}) становится видимой
@@ -52,11 +52,11 @@ import org.eclipse.xtext.ui.editor.XtextEditor;
  * <li>модальные окна с текстовым полем — кнопка-аналог в тулбаре окна.</li>
  * </ul>
  * Свои кнопки обновляют вид при смене состояния откуда угодно (включая штатную кнопку
- * BSL-редактора) через {@link UniversalOccurrencesSupport#addStateListener}.
+ * BSL-редактора) через {@link TextEditorOccurrencesSupport#addStateListener}.
  */
 public final class OccurrencesToggleHook implements IStartup
 {
-    private static final String TOGGLE_ID = "tormozit.universalOccurrencesToggle"; //$NON-NLS-1$
+    private static final String TOGGLE_ID = "tormozit.textEditorOccurrencesToggle"; //$NON-NLS-1$
     /** Идентификатор кнопки в тулбаре панели сравнения ({@link #createToggleAction()}). */
     private static final String TOGGLE_COMPARE_ID = TOGGLE_ID + ".compareDialog"; //$NON-NLS-1$
     private static final String TOGGLE_TOOLTIP = "Переключить маркеры вхождений"; //$NON-NLS-1$
@@ -67,8 +67,10 @@ public final class OccurrencesToggleHook implements IStartup
     /** Запасная, если бандл Xtext недоступен. */
     private static final String FALLBACK_ICON_PATH = "icons/etool16/occurrences_toggle.png"; //$NON-NLS-1$
 
-    private static final String SHELL_HOOKED_KEY = "tormozit.occurrencesToggleShellHooked"; //$NON-NLS-1$
-    private static final String TOOLBAR_ITEM_KEY = "tormozit.occurrencesToggleItem"; //$NON-NLS-1$
+    private static final String SHELL_HOOKED_KEY =
+        "tormozit.textEditorOccurrencesToggleShellHooked"; //$NON-NLS-1$
+    private static final String TOOLBAR_ITEM_KEY =
+        "tormozit.textEditorOccurrencesToggleItem"; //$NON-NLS-1$
 
     /** Попытки дождаться контента диалогового шелла и его тулбара. */
     private static final int MAX_DIALOG_ATTEMPTS = 25;
@@ -115,7 +117,7 @@ public final class OccurrencesToggleHook implements IStartup
     public void earlyStartup()
     {
         Display.getDefault().asyncExec(() -> {
-            UniversalOccurrencesSupport.addStateListener(OccurrencesToggleHook::syncToggles);
+            TextEditorOccurrencesSupport.addStateListener(OccurrencesToggleHook::syncToggles);
             hookDialogShells(Display.getDefault());
             hookWorkbench();
         });
@@ -181,7 +183,7 @@ public final class OccurrencesToggleHook implements IStartup
                 // Активация редактора не меняет выделение — событие пересчёта не
                 // придёт; восстанавливаем подсветку выделенного слова сами
                 Display.getDefault().asyncExec(() -> {
-                    UniversalOccurrencesSupport.refreshFromActiveEditor();
+                    TextEditorOccurrencesSupport.refreshFromActiveEditor();
                     // после смены активного редактора командная панель окна уже перестроена
                     updateToggleVisibility();
                 });
@@ -218,9 +220,6 @@ public final class OccurrencesToggleHook implements IStartup
     private void hookEditor(IEditorPart editor, int attempt)
     {
         ITextEditor textEditor = TextEditor.resolveTextEditor(editor);
-        Global.tempLog("occtoggle", "hookEditor attempt=" + attempt + " part=" + className(editor)
-            + " -> textEditor=" + className(textEditor)
-            + " isXtext=" + (textEditor instanceof XtextEditor));
         if (textEditor == null || textEditor.getEditorSite() == null)
             return;
         if (textEditor instanceof XtextEditor)
@@ -241,69 +240,6 @@ public final class OccurrencesToggleHook implements IStartup
         addOwnToggle(textEditor);
     }
 
-    private static String className(Object o)
-    {
-        return o == null ? "null" : o.getClass().getName();
-    }
-
-    private static void logToolbar(IToolBarManager toolbar, String where)
-    {
-        try
-        {
-            StringBuilder sb = new StringBuilder();
-            sb.append("toolbar ").append(where).append(" manager=").append(toolbar.getClass().getName())
-                .append(" items=[");
-            for (IContributionItem item : toolbar.getItems())
-            {
-                String kind = item.getClass().getSimpleName();
-                String id = item.getId();
-                String text = null;
-                String tip = null;
-                boolean visible = item.isVisible();
-                if (item instanceof ActionContributionItem contribution && contribution.getAction() != null)
-                {
-                    text = contribution.getAction().getText();
-                    tip = contribution.getAction().getToolTipText();
-                }
-                sb.append("{").append(kind).append(" id=").append(id)
-                    .append(" vis=").append(visible)
-                    .append(" text=").append(text)
-                    .append(" tip=").append(tip).append("}");
-            }
-            sb.append("]");
-            if (toolbar instanceof org.eclipse.jface.action.ToolBarManager manager)
-            {
-                sb.append(" widget=[");
-                try
-                {
-                    org.eclipse.swt.widgets.ToolBar widget = manager.getControl();
-                    if (widget == null || widget.isDisposed())
-                        sb.append("null");
-                    else
-                    {
-                        for (org.eclipse.swt.widgets.ToolItem ti : widget.getItems())
-                        {
-                            sb.append("{text=").append(ti.getText())
-                                .append(" tip=").append(ti.getToolTipText())
-                                .append(" enabled=").append(ti.getEnabled())
-                                .append(" data=").append(ti.getData()).append("}");
-                        }
-                    }
-                }
-                catch (RuntimeException e)
-                {
-                    sb.append("<err:").append(e.getMessage()).append(">");
-                }
-                sb.append("]");
-            }
-            Global.tempLog("occtoggle", sb.toString());
-        }
-        catch (RuntimeException e)
-        {
-            Global.tempLogException("occtoggle", "logToolbar failed in " + where, e);
-        }
-    }
-
     /**
      * Показывает штатную скрытую кнопку Xtext «Переключить маркеры вхождений» в тулбаре
      * редактора (её текст/тултип стабилен в ru/en локали Xtext).
@@ -313,7 +249,6 @@ public final class OccurrencesToggleHook implements IStartup
     private static boolean revealNativeToggle(XtextEditor editor)
     {
         IToolBarManager toolbar = editor.getEditorSite().getActionBars().getToolBarManager();
-        logToolbar(toolbar, "revealNativeToggle BEFORE");
         if (toolbar == null)
             return false;
         for (IContributionItem item : toolbar.getItems())
@@ -326,12 +261,10 @@ public final class OccurrencesToggleHook implements IStartup
             if (isMarkOccurrencesLabel(action.getText()) || isMarkOccurrencesLabel(action.getToolTipText()))
             {
                 managedToggles.put(editor, new ToggleBinding(toolbar, contribution));
-                logToolbar(toolbar, "revealNativeToggle AFTER found " + idOf(item));
                 updateToggleVisibility();
                 return true;
             }
         }
-        logToolbar(toolbar, "revealNativeToggle AFTER not-found");
         return false;
     }
 
@@ -360,7 +293,6 @@ public final class OccurrencesToggleHook implements IStartup
     private static void addOwnToggle(ITextEditor textEditor)
     {
         IToolBarManager toolbar = textEditor.getEditorSite().getActionBars().getToolBarManager();
-        logToolbar(toolbar, "addOwnToggle editor=" + className(textEditor) + " BEFORE");
         if (toolbar == null)
             return;
 
@@ -368,7 +300,7 @@ public final class OccurrencesToggleHook implements IStartup
         if (existing instanceof ActionContributionItem contribution
             && contribution.getAction() instanceof Action action)
         {
-            action.setChecked(UniversalOccurrencesSupport.isEnabled());
+            action.setChecked(TextEditorOccurrencesSupport.isEnabled());
             managedToggles.put(textEditor, new ToggleBinding(toolbar, contribution));
             updateToggleVisibility();
             return;
@@ -381,32 +313,53 @@ public final class OccurrencesToggleHook implements IStartup
             @Override
             public void run()
             {
-                UniversalOccurrencesSupport.setEnabled(isChecked());
+                TextEditorOccurrencesSupport.setEnabled(isChecked());
             }
         };
         action.setId(TOGGLE_ID);
         action.setImageDescriptor(toggleIconDescriptor());
         action.setToolTipText(TOGGLE_TOOLTIP + Global.pluginSignForTooltip());
-        action.setChecked(UniversalOccurrencesSupport.isEnabled());
+        action.setChecked(TextEditorOccurrencesSupport.isEnabled());
         toggleActions.addIfAbsent(action);
         toolbar.add(action);
-        toolbar.update(true);
         IContributionItem added = toolbar.find(TOGGLE_ID);
         if (added != null)
+        {
+            /*
+             * Создаём скрытой: новый вклад по умолчанию видим, и если активный редактор в
+             * этот момент не определится, кнопка останется в общей панели окна рядом с
+             * кнопкой другого редактора — это и был «дубль». Покажет её
+             * updateToggleVisibility, когда её редактор окажется активным.
+             */
+            added.setVisible(false);
             managedToggles.put(textEditor, new ToggleBinding(toolbar, added));
-        logToolbar(toolbar, "addOwnToggle AFTER");
+        }
+        toolbar.update(true);
         updateToggleVisibility();
     }
 
     /**
-     * Показывает кнопку вхождений только у активного редактора, у остальных — прячет.
-     * Иначе в общей командной панели окна рядом с рабочей кнопкой висит её неактивный
-     * дубль от другого открытого редактора (в т.ч. штатная кнопка Xtext, которую мы
-     * показали в BSL-редакторе).
+     * Показывает кнопку вхождений у активного редактора и прячет у остальных: иначе в общей
+     * командной панели окна рядом с рабочей кнопкой висит её неактивный дубль от другого
+     * открытого редактора (в т.ч. штатная кнопка Xtext, показанная в BSL-редакторе).
+     *
+     * <p>Сравниваются именно кнопки, а не редакторы: {@code EditorActionBars} общие для всех
+     * редакторов одного типа, поэтому у двух открытых XML-редакторов кнопка ОДНА на двоих.
+     * Прежний расчёт «видима у активного, скрыта у остальных» показывал и тут же прятал один
+     * и тот же элемент (в логе — пара {@code visibility=true}/{@code visibility=false}
+     * подряд), и кнопка пропадала совсем.
+     *
+     * <p>Если активный текстовый редактор не определился (активен не текстовый редактор,
+     * вкладка «Дизайн» многостраничного, момент переключения окна), видимость не трогаем.
+     * А вот когда текстовый редактор активен, но кнопки у него нет, прячем все — иначе в
+     * панели осталась бы висеть кнопка соседнего редактора.
      */
     private static void updateToggleVisibility()
     {
         ITextEditor active = activeTextEditor();
+        if (active == null)
+            return;
+        ToggleBinding activeBinding = managedToggles.get(active);
         List<Map.Entry<ITextEditor, ToggleBinding>> entries;
         synchronized (managedToggles)
         {
@@ -415,21 +368,18 @@ public final class OccurrencesToggleHook implements IStartup
         for (Map.Entry<ITextEditor, ToggleBinding> entry : entries)
         {
             ToggleBinding binding = entry.getValue();
-            boolean visible = entry.getKey() == active;
+            boolean visible = activeBinding != null && binding.item == activeBinding.item;
             try
             {
                 if (binding.item.isVisible() == visible)
                     continue;
                 binding.item.setVisible(visible);
                 binding.toolbar.update(true);
-                Global.tempLog("occtoggle", "visibility=" + visible //$NON-NLS-1$ //$NON-NLS-2$
-                    + " editor=" + className(entry.getKey())); //$NON-NLS-1$
             }
             catch (RuntimeException e)
             {
                 // тулбар редактора уже разобран — забываем о кнопке
                 managedToggles.remove(entry.getKey());
-                Global.tempLogException("occtoggle", "updateToggleVisibility", e); //$NON-NLS-1$ //$NON-NLS-2$
             }
         }
     }
@@ -458,13 +408,13 @@ public final class OccurrencesToggleHook implements IStartup
             @Override
             public void run()
             {
-                UniversalOccurrencesSupport.setEnabled(isChecked());
+                TextEditorOccurrencesSupport.setEnabled(isChecked());
             }
         };
         action.setId(TOGGLE_COMPARE_ID);
         action.setImageDescriptor(toggleIconDescriptor());
         action.setToolTipText(TOGGLE_TOOLTIP + Global.pluginSignForTooltip());
-        action.setChecked(UniversalOccurrencesSupport.isEnabled());
+        action.setChecked(TextEditorOccurrencesSupport.isEnabled());
         toggleActions.addIfAbsent(action);
         return action;
     }
@@ -480,10 +430,7 @@ public final class OccurrencesToggleHook implements IStartup
         if (item == null)
             return false;
         String id = idOf(item);
-        boolean stale = TOGGLE_COMPARE_ID.equals(id) || TOGGLE_ID.equals(id);
-        if (stale)
-            Global.tempLog("occtoggle", "drop stale toggle item id=" + id); //$NON-NLS-1$ //$NON-NLS-2$
-        return stale;
+        return TOGGLE_COMPARE_ID.equals(id) || TOGGLE_ID.equals(id);
     }
 
     /**
@@ -547,10 +494,8 @@ public final class OccurrencesToggleHook implements IStartup
         if (isWorkbenchShell(shell))
         {
             shell.setData(SHELL_HOOKED_KEY, Boolean.TRUE);
-            Global.tempLog("occtoggle", "handleShellShow WORKBENCH skip " + shell.getClass().getName());
             return;
         }
-        Global.tempLog("occtoggle", "handleShellShow SCHEDULE " + shell.getClass().getName());
         scheduleDialogShellHook(shell, 0);
     }
 
@@ -567,7 +512,7 @@ public final class OccurrencesToggleHook implements IStartup
         if (shell.isDisposed() || Boolean.TRUE.equals(shell.getData(SHELL_HOOKED_KEY)))
             return;
 
-        StyledText text = findStyledText(shell);
+        StyledText text = findHighlightableText(shell);
         if (text == null)
         {
             if (attempt < MAX_DIALOG_ATTEMPTS)
@@ -580,29 +525,24 @@ public final class OccurrencesToggleHook implements IStartup
         }
 
         ToolBar toolbar = findToolBar(shell);
-        Global.tempLog("occtoggle", "hookDialogShell attempt=" + attempt
-            + " shell=" + shell.getClass().getName() + " styledTextFound=true toolbar="
-            + (toolbar == null ? "null" : "found items=" + toolbar.getItemCount()));
         if (toolbar != null && toolbar.getData(TOOLBAR_ITEM_KEY) == null)
         {
             ToolItem item = new ToolItem(toolbar, SWT.CHECK);
             item.setImage(toggleImage());
             item.setToolTipText(TOGGLE_TOOLTIP + Global.pluginSignForTooltip());
-            item.setSelection(UniversalOccurrencesSupport.isEnabled());
+            item.setSelection(TextEditorOccurrencesSupport.isEnabled());
             item.addSelectionListener(new SelectionAdapter()
             {
                 @Override
                 public void widgetSelected(SelectionEvent e)
                 {
-                    UniversalOccurrencesSupport.setEnabled(item.getSelection());
+                    TextEditorOccurrencesSupport.setEnabled(item.getSelection());
                 }
             });
             toolbar.setData(TOOLBAR_ITEM_KEY, item);
             item.setData(TOOLBAR_ITEM_KEY, Boolean.TRUE);
             toggleItems.addIfAbsent(item);
             toolbar.pack();
-            Global.tempLog("occtoggle", "hookDialogShell ADDED item to shell="
-                + shell.getClass().getName());
         }
         shell.setData(SHELL_HOOKED_KEY, Boolean.TRUE);
     }
@@ -619,15 +559,25 @@ public final class OccurrencesToggleHook implements IStartup
         return false;
     }
 
-    private static StyledText findStyledText(Composite composite)
+    /**
+     * Поле окна, в котором подсветка вхождений вообще работает — то есть с
+     * {@link org.eclipse.jface.text.source.ISourceViewer} (редактор запроса, панель
+     * сравнения). Просто «первый попавшийся {@link StyledText}» не годится: в окнах вроде
+     * «Выбор объектов» это поле фильтра, и переключатель там бессмысленен.
+     */
+    private static StyledText findHighlightableText(Composite composite)
     {
         for (Control child : composite.getChildren())
         {
             if (child instanceof StyledText styledText)
-                return styledText;
+            {
+                if (TextEditorOccurrencesSupport.supportsHighlight(styledText))
+                    return styledText;
+                continue;
+            }
             if (child instanceof Composite childComposite)
             {
-                StyledText found = findStyledText(childComposite);
+                StyledText found = findHighlightableText(childComposite);
                 if (found != null)
                     return found;
             }

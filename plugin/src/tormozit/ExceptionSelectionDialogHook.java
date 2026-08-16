@@ -229,7 +229,6 @@ public final class ExceptionSelectionDialogHook implements IStartup
     {
         String trusted = pendingReason;
         pendingReason = null;
-        Global.tempLog("ExceptionSelectionDialog", "fillOnOpen pendingReason=[" + trusted + "]"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         if (trusted != null && !trusted.isEmpty())
         {
             filterInput.setText(trusted);
@@ -270,11 +269,9 @@ public final class ExceptionSelectionDialogHook implements IStartup
         if (filterInput.isDisposed())
             return;
         String clipboardText = TextEditor.readClipboardText(shell);
-        Global.tempLog("ExceptionSelectionDialog", "pasteFromClipboard clipboardText=[" + clipboardText + "]"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         if (clipboardText == null || clipboardText.isBlank())
             return;
         String reason = extractErrorReasonViaParser(clipboardText);
-        Global.tempLog("ExceptionSelectionDialog", "pasteFromClipboard reason=[" + reason + "]"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         if (reason.isEmpty())
             return;
         filterInput.setText(reason);

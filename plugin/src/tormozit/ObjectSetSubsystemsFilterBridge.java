@@ -73,7 +73,6 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
         "com._1c.g5.v8.dt.navigator.ui.filterBySubsystems"; //$NON-NLS-1$
     private static final String FOCUS_NAVIGATOR_COMMAND_ID =
         "com._1c.g5.v8.dt.ui.commands.focusNavigator"; //$NON-NLS-1$
-    private static final String ISSUE307_LOG = "issue307"; //$NON-NLS-1$
 
     /** Повтор Data→Settings после открытия view: индекс подсистем может ещё не быть готов. */
     private static final int MEMENTO_REAPPLY_MAX_ATTEMPTS = 24;
@@ -143,16 +142,15 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
             @Override
             public void preExecute(String commandId, ExecutionEvent event)
             {
-                Issue307Probe.onCommandPre(commandId);
+                // ничего: реагируем только на завершение команд
             }
 
             @Override
             public void postExecuteSuccess(String commandId, Object returnValue)
             {
-                Issue307Probe.onCommandPost(commandId, "ok"); //$NON-NLS-1$
                 if (FOCUS_NAVIGATOR_COMMAND_ID.equals(commandId)
                     || commandId != null && commandId.contains("showInNavigator")) //$NON-NLS-1$
-                    scheduleSyncVisibleChevrons("cmd:" + commandId); //$NON-NLS-1$
+                    scheduleSyncVisibleChevrons();
                 if (!SUBSYSTEMS_FILTER_COMMAND_ID.equals(commandId))
                     return;
                 Display display = Display.getDefault();
@@ -173,13 +171,13 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
             @Override
             public void postExecuteFailure(String commandId, ExecutionException exception)
             {
-                Issue307Probe.onCommandPost(commandId, "fail"); //$NON-NLS-1$
+                // ничего
             }
 
             @Override
             public void notHandled(String commandId, NotHandledException exception)
             {
-                Issue307Probe.onCommandPost(commandId, "notHandled"); //$NON-NLS-1$
+                // ничего
             }
         });
     }
@@ -300,15 +298,10 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
         if (display == null || display.isDisposed())
             return;
         int delay = attempt == 0 ? 0 : 250;
-        Issue307Probe.log("scheduleRefreshAll source=" + source + " attempt=" + attempt //$NON-NLS-1$ //$NON-NLS-2$
-            + " delay=" + delay //$NON-NLS-1$
-            + " filterActive=" + ObjectSetsNavigatorFilterSupport.isActive()); //$NON-NLS-1$
         display.timerExec(delay, () -> {
             if (!ObjectSetsNavigatorFilterSupport.isActive())
                 return;
             boolean refreshed = refreshAllNavigators();
-            Issue307Probe.log("refreshAll done source=" + source + " attempt=" + attempt //$NON-NLS-1$ //$NON-NLS-2$
-                + " refreshed=" + refreshed); //$NON-NLS-1$
             if (!refreshed && attempt < 12)
                 scheduleFilterRefreshAll(attempt + 1, source);
         });
@@ -322,12 +315,7 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
         if (display == null || display.isDisposed())
             return;
         int delay = attempt == 0 ? 0 : 200;
-        Issue307Probe.log("scheduleRefresh source=" + source + " attempt=" + attempt //$NON-NLS-1$ //$NON-NLS-2$
-            + " delay=" + delay //$NON-NLS-1$
-            + " filterActive=" + ObjectSetsNavigatorFilterSupport.isActive() //$NON-NLS-1$
-            + " stack=" + Issue307Probe.shortStack()); //$NON-NLS-1$
         display.timerExec(delay, () -> {
-            Issue307Probe.log("refresh-run source=" + source + " attempt=" + attempt); //$NON-NLS-1$ //$NON-NLS-2$
             if (!ObjectSetsNavigatorFilterSupport.isActive())
                 return;
             CommonViewer viewer = getCommonViewer(navigator);
@@ -339,14 +327,11 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
             }
             installBridge(navigator, viewer);
             refreshNavigator(navigator);
-            Issue307Probe.log("refresh-run-done source=" + source + " attempt=" + attempt); //$NON-NLS-1$ //$NON-NLS-2$
         });
     }
 
     static void onFilterStateChanged()
     {
-        Issue307Probe.log("onFilterStateChanged filterActive=" //$NON-NLS-1$
-            + ObjectSetsNavigatorFilterSupport.isActive());
         Display display = Display.getDefault();
         if (display == null || display.isDisposed())
             return;
@@ -383,32 +368,13 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
 
     static void refreshNavigator(IViewPart navigator)
     {
-        long t0 = System.nanoTime();
         CommonViewer viewer = getCommonViewer(navigator);
         if (viewer == null)
-        {
-            Issue307Probe.log("refreshNavigator viewer=null"); //$NON-NLS-1$
             return;
-        }
         ObjectSetsItems.beginAddTargetTreeFilterRefresh();
-        long t1 = System.nanoTime();
         installBridge(navigator, viewer);
-        long t2 = System.nanoTime();
         viewer.refresh();
-        long t3 = System.nanoTime();
         syncGroupExpandIndicators(viewer);
-        long t4 = System.nanoTime();
-        Issue307Probe.log("refreshNavigator ms total=" + nsToMs(t4 - t0) //$NON-NLS-1$
-            + " clearCache=" + nsToMs(t1 - t0) //$NON-NLS-1$
-            + " installBridge=" + nsToMs(t2 - t1) //$NON-NLS-1$
-            + " viewer.refresh=" + nsToMs(t3 - t2) //$NON-NLS-1$
-            + " syncExpand=" + nsToMs(t4 - t3) //$NON-NLS-1$
-            + " " + Issue307Probe.stats()); //$NON-NLS-1$
-    }
-
-    private static long nsToMs(long ns)
-    {
-        return ns / 1_000_000L;
     }
 
     private static void hookWindow(IWorkbenchWindow window)
@@ -445,8 +411,6 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
         if (isNavigatorView(part))
         {
             IViewPart navigator = (IViewPart) part;
-            Issue307Probe.log("partEvent source=" + source //$NON-NLS-1$
-                + " filterActive=" + ObjectSetsNavigatorFilterSupport.isActive()); //$NON-NLS-1$
             tryHook(navigator);
             scheduleSubsystemsMementoReapply(navigator);
         }
@@ -470,9 +434,6 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
         if (tree == null || tree.isDisposed())
             return;
         boolean alreadyHooked = Boolean.TRUE.equals(tree.getData(HOOK_MARKER));
-        Issue307Probe.log("tryHook alreadyHooked=" + alreadyHooked //$NON-NLS-1$
-            + " filterActive=" + ObjectSetsNavigatorFilterSupport.isActive() //$NON-NLS-1$
-            + " hasWrapper=" + hasWrapperFilter(viewer)); //$NON-NLS-1$
         installBridge(navigator, viewer);
         tree.setData(HOOK_MARKER, Boolean.TRUE);
         scheduleSubsystemsMementoReapply(navigator);
@@ -562,13 +523,10 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
             Object canStart = Global.invoke(nativeFilter, "canStartFiltering", data); //$NON-NLS-1$
             if (!Boolean.TRUE.equals(canStart))
             {
-                Global.tempLog("NavigatorBlacklist", "mementoReapply attempt=" + attempt //$NON-NLS-1$ //$NON-NLS-2$
-                        + " canStart=false"); //$NON-NLS-1$
                 return -2;
             }
         }
 
-        int fqnExpected = countFqnsInFilterData(data);
         Object newSettings = Global.invoke(manager, "getFilterSettings", data); //$NON-NLS-1$
         if (newSettings == null)
             return -2;
@@ -581,9 +539,6 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
             invalidateNativeFilterCaches(nativeFilter, newSettings);
         }
 
-        Global.tempLog("NavigatorBlacklist", "mementoReapply attempt=" + attempt //$NON-NLS-1$ //$NON-NLS-2$
-                + " fqn=" + fqnExpected //$NON-NLS-1$
-                + " checked=" + checkedActual); //$NON-NLS-1$
         return checkedActual;
     }
 
@@ -611,23 +566,6 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
             if (project != null && project.exists())
                 recalc.put(project, Boolean.TRUE);
         }
-    }
-
-    private static int countFqnsInFilterData(Object data)
-    {
-        Object allProjects = Global.invoke(data, "getAllProjects"); //$NON-NLS-1$
-        if (!(allProjects instanceof Set<?> projects))
-            return 0;
-        int total = 0;
-        for (Object projectName : projects)
-        {
-            if (!(projectName instanceof String name))
-                continue;
-            Object fqns = Global.invoke(data, "getCheckedSubsystems", name); //$NON-NLS-1$
-            if (fqns instanceof Set<?> set)
-                total += set.size();
-        }
-        return total;
     }
 
     private static int countCheckedSubsystemIds(Object settings)
@@ -673,8 +611,6 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
         if (viewer == null)
             return;
         installBridge(navigator, viewer);
-        Global.tempLog("NavigatorBlacklist", "rebind source=" + source //$NON-NLS-1$ //$NON-NLS-2$
-                + " hasWrapper=" + hasWrapperFilter(viewer)); //$NON-NLS-1$
         viewer.refresh();
     }
 
@@ -690,8 +626,6 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
         if (viewer == null)
             return;
         installBridge(navigator, viewer);
-        Global.tempLog("NavigatorBlacklist", "adopt source=" + source //$NON-NLS-1$ //$NON-NLS-2$
-                + " hasWrapper=" + hasWrapperFilter(viewer)); //$NON-NLS-1$
     }
 
     /**
@@ -712,9 +646,6 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
         if (trie == null)
             return false;
         boolean hidden = isCoveredBySelectedSubsystemsTrie(trie, path);
-        if (hidden)
-            Global.tempLog("NavigatorBlacklist", "search-skip qn=" + path //$NON-NLS-1$ //$NON-NLS-2$
-                    + " project=" + project.getName()); //$NON-NLS-1$
         return hidden;
     }
 
@@ -803,9 +734,6 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
             tree.setData(WRAPPER_MARKER, Boolean.TRUE);
             installGroupExpandSyncListener(navigator, viewer, tree);
         }
-        Global.tempLog("NavigatorBlacklist", nativeMissing //$NON-NLS-1$
-            ? "installed wrapper pass-through" //$NON-NLS-1$
-            : "installed wrapper with native"); //$NON-NLS-1$
         ObjectSetsDebug.step("bridge", nativeMissing //$NON-NLS-1$
             ? "installed CombinedSubsystemsFilter (pass-through native)" //$NON-NLS-1$
             : "installed CombinedSubsystemsFilter"); //$NON-NLS-1$
@@ -824,7 +752,6 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
         if (Boolean.valueOf(want).equals(current))
             return;
         Global.setField(treeViewer, "isExpandableCheckFilters", want); //$NON-NLS-1$
-        Issue307Probe.log("expandPreCheckFilters=" + want); //$NON-NLS-1$
     }
 
     /**
@@ -853,20 +780,6 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
             return;
         wrapper.nativeFilter = adopted;
         wrapper.passThroughNative = false;
-        Global.tempLog("NavigatorBlacklist", "rebound native into wrapper" //$NON-NLS-1$ //$NON-NLS-2$
-                + " settings=" + (Global.getField(adopted, "filterBySubsystemsSettings") != null)); //$NON-NLS-1$ //$NON-NLS-2$
-    }
-
-    private static boolean hasWrapperFilter(CommonViewer viewer)
-    {
-        if (viewer == null)
-            return false;
-        for (ViewerFilter filter : viewer.getFilters())
-        {
-            if (filter instanceof CombinedSubsystemsFilter)
-                return true;
-        }
-        return false;
     }
 
     private static ViewerFilter resolveNativeFilter(IViewPart navigator, CommonViewer viewer)
@@ -921,19 +834,19 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
      * (фильтр не влияет на ITreeContentProvider.hasChildren). Убираем кнопку «>»
      * только у уже построенных узлов — без полного обхода модели.
      */
-    static void scheduleSyncVisibleChevrons(String source)
+    static void scheduleSyncVisibleChevrons()
     {
         if (!ObjectSetsNavigatorFilterSupport.isActive())
             return;
         Display display = Display.getDefault();
         if (display == null || display.isDisposed())
             return;
-        display.asyncExec(() -> syncVisibleEmptyGroupChevrons(source + "-async")); //$NON-NLS-1$
-        display.timerExec(0, () -> syncVisibleEmptyGroupChevrons(source + "-timer0")); //$NON-NLS-1$
-        scheduleDebouncedVisibleChevronStrip(source + "-debounce"); //$NON-NLS-1$
+        display.asyncExec(ObjectSetSubsystemsFilterBridge::syncVisibleEmptyGroupChevrons);
+        display.timerExec(0, ObjectSetSubsystemsFilterBridge::syncVisibleEmptyGroupChevrons);
+        scheduleDebouncedVisibleChevronStrip();
     }
 
-    private static void scheduleDebouncedVisibleChevronStrip(String source)
+    private static void scheduleDebouncedVisibleChevronStrip()
     {
         if (!ObjectSetsNavigatorFilterSupport.isActive())
             return;
@@ -944,11 +857,11 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
         display.timerExec(80, () -> {
             if (gen != visibleChevronStripGen)
                 return;
-            syncVisibleEmptyGroupChevrons(source);
+            syncVisibleEmptyGroupChevrons();
         });
     }
 
-    private static void syncVisibleEmptyGroupChevrons(String source)
+    private static void syncVisibleEmptyGroupChevrons()
     {
         if (!ObjectSetsNavigatorFilterSupport.isActive() || !PlatformUI.isWorkbenchRunning())
             return;
@@ -962,14 +875,13 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
                     continue;
                 IViewPart view = page.findView(Global.NAVIGATOR_VIEW_ID);
                 if (view != null)
-                    syncMaterializedExpandIndicators(getCommonViewer(view), source);
+                    syncMaterializedExpandIndicators(getCommonViewer(view));
             }
         }
     }
 
-    private static void syncMaterializedExpandIndicators(CommonViewer viewer, String source)
+    private static void syncMaterializedExpandIndicators(CommonViewer viewer)
     {
-        long t0 = System.nanoTime();
         if (!ObjectSetsNavigatorFilterSupport.isActive() || viewer == null)
             return;
         if (!(viewer instanceof TreeViewer treeViewer))
@@ -984,9 +896,6 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
         if (tree == null || tree.isDisposed())
             return;
         syncMaterializedTreeItems(tree, treeViewer, viewer, treeContentProvider, wrapper);
-        Issue307Probe.log("syncVisible source=" + source //$NON-NLS-1$
-            + " ms=" + ((System.nanoTime() - t0) / 1_000_000L) //$NON-NLS-1$
-            + " " + Issue307Probe.stats()); //$NON-NLS-1$
     }
 
     /**
@@ -994,7 +903,6 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
      */
     private static void syncGroupExpandIndicators(CommonViewer viewer)
     {
-        long t0 = System.nanoTime();
         if (!ObjectSetsNavigatorFilterSupport.isActive() || viewer == null)
             return;
         if (!(viewer instanceof TreeViewer treeViewer))
@@ -1008,13 +916,11 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
         Object input = viewer.getInput();
         if (input == null)
             return;
-        syncGroupExpandRecursive(
+        syncGroupExpandLevel(
             treeViewer, viewer, treeContentProvider, wrapper, treeContentProvider.getElements(input));
         Tree tree = viewer.getTree();
         if (tree != null && !tree.isDisposed())
             syncMaterializedTreeItems(tree, treeViewer, viewer, treeContentProvider, wrapper);
-        Issue307Probe.log("syncGroupExpand ms=" + ((System.nanoTime() - t0) / 1_000_000L) //$NON-NLS-1$
-            + " " + Issue307Probe.stats()); //$NON-NLS-1$
     }
 
     private static void installGroupExpandSyncListener(IViewPart navigator, CommonViewer viewer, Tree tree)
@@ -1028,7 +934,6 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
             {
                 if (!ObjectSetsNavigatorFilterSupport.isActive())
                     return;
-                long t0 = System.nanoTime();
                 CombinedSubsystemsFilter wrapper = findWrapperFilter(viewer);
                 var contentProvider = viewer.getContentProvider();
                 if (wrapper == null || !(contentProvider instanceof ITreeContentProvider tcp))
@@ -1036,19 +941,15 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
                 if (!(viewer instanceof TreeViewer treeViewer))
                     return;
                 Object element = event.item != null ? event.item.getData() : null;
-                Issue307Probe.log("treeExpanded el=" + Issue307Probe.typeName(element)); //$NON-NLS-1$
                 if (element != null && treeContentProviderHasChildren(tcp, element))
                 {
                     Object[] rawChildren = tcp.getChildren(element);
                     Object[] visible = filterVisibleChildren(viewer, wrapper, element, rawChildren);
-                    syncGroupExpandRecursive(treeViewer, viewer, tcp, wrapper, visible);
+                    syncGroupExpandLevel(treeViewer, viewer, tcp, wrapper, visible);
                 }
                 if (event.item instanceof TreeItem treeItem)
                     syncMaterializedTreeItemsFromItem(treeItem, treeViewer, viewer, tcp, wrapper);
-                scheduleDebouncedVisibleChevronStrip("treeExpanded"); //$NON-NLS-1$
-                Issue307Probe.log("treeExpanded-end el=" + Issue307Probe.typeName(element) //$NON-NLS-1$
-                    + " ms=" + ((System.nanoTime() - t0) / 1_000_000L) //$NON-NLS-1$
-                    + " " + Issue307Probe.stats()); //$NON-NLS-1$
+                scheduleDebouncedVisibleChevronStrip();
             }
         });
         tree.setData(EXPAND_SYNC_MARKER, Boolean.TRUE);
@@ -1084,7 +985,13 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
             syncMaterializedTreeItemsFromItem(child, treeViewer, viewer, treeContentProvider, wrapper);
     }
 
-    private static void syncGroupExpandRecursive(
+    /**
+     * Только один уровень: у переданных узлов снимаем «&gt;», вглубь не идём. Рекурсия по всей
+     * модели заставляла провайдер EDT построить всё поддерево («Общие» — тысячи узлов, ~1 с на
+     * разворот), тогда как дерево строит детей лениво. Плюс у потомков пересчитывается своим
+     * {@code treeExpanded}, когда их родителя реально развернут.
+     */
+    private static void syncGroupExpandLevel(
             TreeViewer treeViewer,
             Viewer viewer,
             ITreeContentProvider treeContentProvider,
@@ -1098,11 +1005,6 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
             if (element == null)
                 continue;
             applyGroupExpandIndicator(treeViewer, viewer, treeContentProvider, wrapper, element);
-            Object[] rawChildren = treeContentProvider.hasChildren(element)
-                ? treeContentProvider.getChildren(element) : new Object[0];
-            Object[] visibleChildren = filterVisibleChildren(viewer, wrapper, element, rawChildren);
-            syncGroupExpandRecursive(
-                treeViewer, viewer, treeContentProvider, wrapper, visibleChildren);
         }
     }
 
@@ -1147,21 +1049,13 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
         Object[] visibleChildren = filterVisibleChildren(viewer, wrapper, element, rawChildren);
         if (visibleChildren.length > 0)
             return;
-        int before = item.getItemCount();
-        boolean expanded = item.getExpanded();
-        TreeItem[] kids = item.getItems();
-        for (TreeItem kid : kids)
+        for (TreeItem kid : item.getItems())
         {
             if (!kid.isDisposed())
                 kid.dispose();
         }
         if (!item.isDisposed())
             treeViewer.setHasChildren(element, false);
-        Issue307Probe.log("strip el=" + Issue307Probe.typeName(element) //$NON-NLS-1$
-            + " group=true visKids=" + visibleChildren.length //$NON-NLS-1$
-            + " before=" + before //$NON-NLS-1$
-            + " after=" + (item.isDisposed() ? -1 : item.getItemCount()) //$NON-NLS-1$
-            + " expanded=" + expanded); //$NON-NLS-1$
     }
 
     private static Object[] filterVisibleChildren(
@@ -1208,14 +1102,6 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
 
         @Override
         public boolean select(Viewer viewer, Object parentElement, Object element)
-        {
-            long t0 = System.nanoTime();
-            boolean result = selectImpl(viewer, parentElement, element);
-            Issue307Probe.select(element, parentElement, System.nanoTime() - t0);
-            return result;
-        }
-
-        private boolean selectImpl(Viewer viewer, Object parentElement, Object element)
         {
             ViewerFilter effective = adoptNativeIfPresent(viewer);
             boolean nativeVisible = passThroughNative
@@ -1294,10 +1180,6 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
             if (decideLogsLeft > 0)
             {
                 decideLogsLeft--;
-                Global.tempLog("NavigatorBlacklist", "top invert native=" + nativeVisible //$NON-NLS-1$ //$NON-NLS-2$
-                        + " → " + visible //$NON-NLS-1$
-                        + " el=" + typeName //$NON-NLS-1$
-                        + " settings=" + (settings != null)); //$NON-NLS-1$
             }
             return visible;
         }
@@ -1394,197 +1276,6 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
                 }
             }
             return null;
-        }
-    }
-
-    static void probeVisible(boolean cacheHit, long ns, Object element)
-    {
-        Issue307Probe.visible(cacheHit, ns, element);
-    }
-
-    static void probeChildren(Object element, int childCount)
-    {
-        Issue307Probe.children(element, childCount);
-    }
-
-    static void probeCacheClear()
-    {
-        Issue307Probe.log("AddTargetTreeCache.clear"); //$NON-NLS-1$
-    }
-
-    static void probeStart(String source)
-    {
-        Issue307Probe.start(source);
-    }
-
-    private static final class Issue307Probe
-    {
-        private static final int DETAIL_LIMIT = 40;
-        private static final int WINDOW_MS = 20000;
-        private static final int DUMP_MS = 500;
-
-        private static volatile boolean active;
-        private static long startMs;
-        private static long selectCount;
-        private static long selectNs;
-        private static long visibleCount;
-        private static long visibleNs;
-        private static long visibleCacheHits;
-        private static long childrenCalls;
-        private static long childrenSum;
-        private static int selectDetailLeft;
-        private static int visibleDetailLeft;
-        private static boolean dumpScheduled;
-
-        private Issue307Probe() {}
-
-        static void log(String text)
-        {
-            Global.tempLog(ISSUE307_LOG, text);
-        }
-
-        static String typeName(Object o)
-        {
-            return o == null ? "null" : o.getClass().getSimpleName(); //$NON-NLS-1$
-        }
-
-        static String stats()
-        {
-            return "selectN=" + selectCount //$NON-NLS-1$
-                + " selectMs=" + (selectNs / 1_000_000L) //$NON-NLS-1$
-                + " visN=" + visibleCount //$NON-NLS-1$
-                + " visMs=" + (visibleNs / 1_000_000L) //$NON-NLS-1$
-                + " visCacheHits=" + visibleCacheHits //$NON-NLS-1$
-                + " getChildrenN=" + childrenCalls //$NON-NLS-1$
-                + " getChildrenSum=" + childrenSum; //$NON-NLS-1$
-        }
-
-        static String shortStack()
-        {
-            StringBuilder sb = new StringBuilder();
-            StackWalker.getInstance().walk(stream -> {
-                stream.skip(1).limit(8).forEach(frame -> {
-                    if (sb.length() > 0)
-                        sb.append(" | "); //$NON-NLS-1$
-                    String cls = frame.getClassName();
-                    int dot = cls.lastIndexOf('.');
-                    sb.append(dot >= 0 ? cls.substring(dot + 1) : cls)
-                        .append('.').append(frame.getMethodName())
-                        .append(':').append(frame.getLineNumber());
-                });
-                return null;
-            });
-            return sb.toString();
-        }
-
-        static void onCommandPre(String commandId)
-        {
-            if (isTracked(commandId))
-            {
-                start(commandId);
-                return;
-            }
-            if (active)
-                log("cmd-pre " + commandId); //$NON-NLS-1$
-        }
-
-        static void onCommandPost(String commandId, String status)
-        {
-            if (!active && !isTracked(commandId))
-                return;
-            log("cmd-post id=" + commandId + " status=" + status //$NON-NLS-1$ //$NON-NLS-2$
-                + " elapsedMs=" + elapsed() //$NON-NLS-1$
-                + " " + stats()); //$NON-NLS-1$
-        }
-
-        static void select(Object element, Object parent, long ns)
-        {
-            selectCount++;
-            selectNs += ns;
-            if (!active || selectDetailLeft <= 0)
-                return;
-            selectDetailLeft--;
-            log("select #" + selectCount //$NON-NLS-1$
-                + " ns=" + ns //$NON-NLS-1$
-                + " el=" + typeName(element) //$NON-NLS-1$
-                + " parent=" + typeName(parent)); //$NON-NLS-1$
-        }
-
-        static void visible(boolean cacheHit, long ns, Object element)
-        {
-            visibleCount++;
-            visibleNs += ns;
-            if (cacheHit)
-                visibleCacheHits++;
-            if (!active || visibleDetailLeft <= 0)
-                return;
-            visibleDetailLeft--;
-            log("visible #" + visibleCount //$NON-NLS-1$
-                + " cache=" + cacheHit //$NON-NLS-1$
-                + " ns=" + ns //$NON-NLS-1$
-                + " el=" + typeName(element)); //$NON-NLS-1$
-        }
-
-        static void children(Object element, int childCount)
-        {
-            childrenCalls++;
-            childrenSum += childCount;
-            if (active && childrenCalls <= DETAIL_LIMIT)
-                log("getChildren n=" + childCount + " el=" + typeName(element)); //$NON-NLS-1$ //$NON-NLS-2$
-        }
-
-        private static boolean isTracked(String commandId)
-        {
-            if (commandId == null)
-                return false;
-            return FOCUS_NAVIGATOR_COMMAND_ID.equals(commandId)
-                || commandId.contains("showInNavigator") //$NON-NLS-1$
-                || commandId.contains("filterByObjectSet"); //$NON-NLS-1$
-        }
-
-        private static void start(String commandId)
-        {
-            active = true;
-            startMs = System.currentTimeMillis();
-            selectCount = 0;
-            selectNs = 0;
-            visibleCount = 0;
-            visibleNs = 0;
-            visibleCacheHits = 0;
-            childrenCalls = 0;
-            childrenSum = 0;
-            selectDetailLeft = DETAIL_LIMIT;
-            visibleDetailLeft = DETAIL_LIMIT;
-            log("CMD-START id=" + commandId //$NON-NLS-1$
-                + " filterActive=" + ObjectSetsNavigatorFilterSupport.isActive() //$NON-NLS-1$
-                + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
-            scheduleDump();
-        }
-
-        private static long elapsed()
-        {
-            return startMs == 0 ? 0 : System.currentTimeMillis() - startMs;
-        }
-
-        private static void scheduleDump()
-        {
-            Display display = Display.getDefault();
-            if (display == null || display.isDisposed() || dumpScheduled)
-                return;
-            dumpScheduled = true;
-            display.timerExec(DUMP_MS, () -> {
-                dumpScheduled = false;
-                if (!active)
-                    return;
-                log("dump elapsedMs=" + elapsed() + " " + stats()); //$NON-NLS-1$ //$NON-NLS-2$
-                if (elapsed() < WINDOW_MS)
-                    scheduleDump();
-                else
-                {
-                    log("probe-window-end " + stats()); //$NON-NLS-1$
-                    active = false;
-                }
-            });
         }
     }
 }

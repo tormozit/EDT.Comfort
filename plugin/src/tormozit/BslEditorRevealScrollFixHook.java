@@ -20,6 +20,7 @@ import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.forms.editor.IFormPage;
+import org.eclipse.ui.texteditor.ITextEditor;
 
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
@@ -30,12 +31,17 @@ import java.util.Set;
 
 /**
  * Штатный {@code selectAndReveal}/{@code revealRange} (переход по «Иерархии вызовов», «Перейти к
- * определению», брейкпоинтам и т.п. на уже открытый BSL-редактор) подкручивает окно по горизонтали
+ * определению», по вхождениям F3/Ctrl+F3, брейкпоинтам и т.п. на уже открытый редактор) подкручивает
+ * окно по горизонтали
  * так, что строка технически видна, но неудобно — например, у самого правого края, без контекста
  * слева. Раньше это лечилось точечно, только для перехода из панелей поиска (см.
  * {@link SearchMatchScrollSupport}, вызывался из {@code ConfigSearchResultsHook} /
  * {@code FileSearchResultsHook} сразу после открытия). Здесь то же самое включено на уровне самого
  * редактора — единый слушатель ловит любой прыжок каретки, а не конкретный путь навигации.
+ *
+ * <p>Кроме BSL-редакторов подключается ко всем прочим текстовым редакторам (XML, простой
+ * текстовый, {@code .log}) — через общий {@link TextEditor#resolveTextEditor}: подключение
+ * одно и то же, отличается только способ добраться до {@link ISourceViewer}.
  *
  * <p>Отличить «настоящий» прыжок (revealRange уже успел подкрутить экран до срабатывания нашего
  * listener'а — реальный порядок в {@code AbstractTextEditor.selectAndReveal}: сначала
@@ -151,6 +157,37 @@ public class BslEditorRevealScrollFixHook implements IStartup
             hookBslEditor((BslXtextEditor)editor);
         else if (editor instanceof DtGranularEditor<?>)
             hookGranularEditor((DtGranularEditor<?>)editor);
+        else
+            hookPlainTextEditor(editor);
+    }
+
+    /**
+     * Прочие текстовые редакторы (XML, простой текстовый, {@code .log} и т.п.) — через общий
+     * {@link TextEditor#resolveTextEditor(org.eclipse.ui.IWorkbenchPart)}: переход по
+     * вхождениям (F3/Ctrl+F3), к определению и т.п. должен так же оставлять горизонтальную
+     * прокрутку в самом левом положении, при котором вхождение видно целиком.
+     */
+    private void hookPlainTextEditor(IEditorPart editor)
+    {
+        ITextEditor textEditor = TextEditor.resolveTextEditor(editor);
+        if (textEditor == null)
+            return;
+        Display.getDefault().asyncExec(() -> attachToTextEditor(textEditor, 0));
+    }
+
+    private void attachToTextEditor(ITextEditor editor, int attempt)
+    {
+        if (editor.getSite() == null || isWorkbenchClosing())
+            return;
+        ISourceViewer viewer = TextEditor.getSourceViewer(editor);
+        if (viewer == null || viewer.getTextWidget() == null)
+        {
+            if (attempt >= MAX_ATTACH_ATTEMPTS)
+                return;
+            Display.getDefault().asyncExec(() -> attachToTextEditor(editor, attempt + 1));
+            return;
+        }
+        attachToViewer(viewer);
     }
 
     private void hookGranularEditor(DtGranularEditor<?> editor)
@@ -215,7 +252,13 @@ public class BslEditorRevealScrollFixHook implements IStartup
             return;
         }
 
-        StyledText textWidget = ((SourceViewer)viewer).getTextWidget();
+        attachToViewer(viewer);
+    }
+
+    /** Общая часть подключения к полю редактора — одинакова для BSL и прочих редакторов. */
+    private static void attachToViewer(ISourceViewer viewer)
+    {
+        StyledText textWidget = viewer.getTextWidget();
         if (textWidget == null || textWidget.isDisposed())
             return;
 

@@ -211,7 +211,6 @@ public class OpenMdObjectHook implements IStartup {
                             }
                             catch (Exception ex)
                             {
-                                Global.tempLogException("OpenMdObject", "modifyTimer", ex); //$NON-NLS-1$ //$NON-NLS-2$
                             }
                         }
                     };
@@ -249,7 +248,6 @@ public class OpenMdObjectHook implements IStartup {
             }
             catch (Exception ex)
             {
-                Global.tempLogException("OpenMdObject", "initialApply", ex); //$NON-NLS-1$ //$NON-NLS-2$
             }
 
             filterControl.getDisplay().asyncExec(() -> {
@@ -372,8 +370,6 @@ public class OpenMdObjectHook implements IStartup {
         }
         catch (Exception e)
         {
-            Global.tempLog("OpenMdObject", "createSmartFilter FAIL pat=\"" + pattern + "\": " + e); //$NON-NLS-1$ //$NON-NLS-2$
-            Global.tempLogException("OpenMdObject", "createSmartFilter", e); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         smartFilterRef[0] = nextFilter;
@@ -387,7 +383,6 @@ public class OpenMdObjectHook implements IStartup {
         {
             clearSearchCache(dialog);
             refreshHistoryOnUiThread(dialog, nextFilter, comparator);
-            Global.tempLog("OpenMdObject", "applySmartFilter history-only"); //$NON-NLS-1$
             return;
         }
 
@@ -477,13 +472,10 @@ public class OpenMdObjectHook implements IStartup {
                     Job filterJob = getJobField(dialog, "filterJob", "fFilterJob"); //$NON-NLS-1$ //$NON-NLS-2$
                     if (filterJob != null)
                         filterJob.schedule();
-                    Global.tempLog("OpenMdObject", "comfortJob OK gen=" + gen //$NON-NLS-1$
-                            + " pat=\"" + filter.getPattern() + "\""); //$NON-NLS-1$ //$NON-NLS-2$
                     return Status.OK_STATUS;
                 }
                 catch (Exception e)
                 {
-                    Global.tempLogException("OpenMdObject", "comfortJob", e); //$NON-NLS-1$ //$NON-NLS-2$
                     return Status.CANCEL_STATUS;
                 }
             }
@@ -657,7 +649,6 @@ public class OpenMdObjectHook implements IStartup {
         }
         dedupeProviderListByKey(dialog, cp, "lastFilteredItems"); //$NON-NLS-1$
         dedupeProviderListByKey(dialog, cp, "lastSortedItems"); //$NON-NLS-1$
-        Global.tempLog("OpenMdObject", "dedupe removed=" + removed + " left=" + unique.size()); //$NON-NLS-1$ //$NON-NLS-2$
         return removed;
     }
 

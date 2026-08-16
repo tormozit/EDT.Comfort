@@ -3,6 +3,7 @@ package tormozit;
 import java.util.ArrayList;
 import java.util.List;
 
+import org.eclipse.jface.preference.IPreferenceStore;
 import org.eclipse.jface.text.ITextViewerExtension5;
 import org.eclipse.swt.custom.StyleRange;
 import org.eclipse.swt.custom.StyledText;
@@ -10,6 +11,8 @@ import org.eclipse.swt.events.PaintEvent;
 import org.eclipse.swt.graphics.Color;
 import org.eclipse.swt.graphics.GC;
 import org.eclipse.swt.graphics.Point;
+import org.eclipse.ui.editors.text.EditorsUI;
+import org.eclipse.ui.texteditor.AbstractTextEditor;
 
 /**
  * Определяет видимые в данный момент подсказки и рисует их полупрозрачным
@@ -30,6 +33,9 @@ final class BracketContentHintPresenter
 {
     /** Высокая прозрачность (0 — невидимо, 255 — непрозрачно). */
     private static final int ALPHA = 90;
+    /** Знаки конца строки штатного {@code WhitespaceCharacterPainter} (его константы приватны). */
+    private static final char CARRIAGE_RETURN_SIGN = '¤';
+    private static final char LINE_FEED_SIGN = '¶';
 
     private BracketContentHintPresenter()
     {
@@ -108,7 +114,8 @@ final class BracketContentHintPresenter
         return widgetLine;
     }
 
-    static void paint(PaintEvent e, StyledText widget, List<VisibleHint> visibleHints)
+    static void paint(PaintEvent e, StyledText widget, ITextViewerExtension5 lineMapper,
+        List<VisibleHint> visibleHints, boolean whitespaceCharactersShown)
     {
         if (visibleHints.isEmpty())
             return;
@@ -121,10 +128,12 @@ final class BracketContentHintPresenter
                 int lineEndOffset = widget.getOffsetAtLine(hint.widgetLine)
                     + widget.getLine(hint.widgetLine).length();
                 Point location = widget.getLocationAtOffset(lineEndOffset);
+                int shift = whitespaceCharactersShown
+                    ? lineDelimiterSignsWidth(gc, widget, lineMapper, hint.widgetLine, lineEndOffset) : 0;
 
                 gc.setForeground(resolveHintColor(widget, hint.widgetColorOffset));
                 gc.setAlpha(ALPHA);
-                gc.drawString(" " + hint.text, location.x, location.y, true); //$NON-NLS-1$
+                gc.drawString(" " + hint.text, location.x + shift, location.y, true); //$NON-NLS-1$
             }
             catch (IllegalArgumentException ignored)
             {
@@ -135,6 +144,63 @@ final class BracketContentHintPresenter
                 gc.setAlpha(255);
             }
         }
+    }
+
+    /**
+     * Ширина индикаторов конца строки, которые штатный
+     * {@code org.eclipse.jface.text.WhitespaceCharacterPainter} рисует при
+     * включённом режиме «Показывать непечатаемые символы».
+     *
+     * <p>Он рисует их той же строкой ({@code gc.drawString}) и в той же точке
+     * {@code getLocationAtOffset(конец строки без разделителя)}, куда мы ставим
+     * подсказку — поэтому без сдвига подсказка ложится поверх индикаторов.
+     * Для CRLF рисуются сразу два знака одной строкой: {@code ¤} за {@code \r}
+     * и {@code ¶} за {@code \n} (каждый — только если включена своя настройка
+     * в «Текстовые редакторы»). Для последней строки документа разделителя нет,
+     * как и для строки, за которой начинается свёрнутый блок — там штатный
+     * художник индикатор не рисует, и сдвиг не нужен.
+     */
+    private static int lineDelimiterSignsWidth(GC gc, StyledText widget, ITextViewerExtension5 lineMapper,
+        int widgetLine, int lineEndOffset)
+    {
+        if (widgetLine >= widget.getLineCount() - 1)
+            return 0; // последняя строка — разделителя нет
+        if (isFoldedLine(lineMapper, widgetLine))
+            return 0; // за строкой свёрнутый блок — индикатор не рисуется
+
+        int delimiterLength = widget.getOffsetAtLine(widgetLine + 1) - lineEndOffset;
+        if (delimiterLength <= 0)
+            return 0;
+
+        String delimiter = widget.getTextRange(lineEndOffset, delimiterLength);
+        StringBuilder signs = new StringBuilder(2);
+        for (int i = 0; i < delimiter.length(); i++)
+        {
+            char c = delimiter.charAt(i);
+            if (c == '\r' && isWhitespaceOptionEnabled(AbstractTextEditor.PREFERENCE_SHOW_CARRIAGE_RETURN))
+                signs.append(CARRIAGE_RETURN_SIGN);
+            else if (c == '\n' && isWhitespaceOptionEnabled(AbstractTextEditor.PREFERENCE_SHOW_LINE_FEED))
+                signs.append(LINE_FEED_SIGN);
+        }
+        return signs.length() == 0 ? 0 : gc.stringExtent(signs.toString()).x;
+    }
+
+    /**
+     * Строка, за которой начинается свёрнутый блок: следующая строка модели не
+     * отображается. Повторяет проверку {@code WhitespaceCharacterPainter.isFoldedLine}.
+     */
+    private static boolean isFoldedLine(ITextViewerExtension5 lineMapper, int widgetLine)
+    {
+        if (lineMapper == null)
+            return false;
+        int modelLine = lineMapper.widgetLine2ModelLine(widgetLine);
+        return lineMapper.modelLine2WidgetLine(modelLine + 1) == -1;
+    }
+
+    private static boolean isWhitespaceOptionEnabled(String preference)
+    {
+        IPreferenceStore store = EditorsUI.getPreferenceStore();
+        return store == null || store.getBoolean(preference);
     }
 
     /**

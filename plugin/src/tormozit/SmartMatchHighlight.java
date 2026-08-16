@@ -808,9 +808,6 @@ public final class SmartMatchHighlight
             if (!colorsOnSelectionFieldWarned)
             {
                 colorsOnSelectionFieldWarned = true;
-                Global.tempLogException("enableColorsOnSelection", //$NON-NLS-1$
-                    "не удалось включить COLORS_ON_SELECTION рефлексией (провайдер=" + provider.getClass() + ")", //$NON-NLS-1$ //$NON-NLS-2$
-                    ex);
             }
         }
     }

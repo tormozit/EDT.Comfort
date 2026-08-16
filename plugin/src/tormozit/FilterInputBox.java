@@ -7,6 +7,7 @@ import org.eclipse.core.runtime.preferences.InstanceScope;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.layout.GridData;
+import org.eclipse.swt.layout.GridLayout;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
@@ -46,6 +47,16 @@ final class FilterInputBox
         + "• ищет по полному имени объекта метаданных и имени файла"; //$NON-NLS-1$
 
     /**
+     * Диалоги «Установить фильтр по объектам и ролям» / «Установить фильтр по правам»:
+     * плоский AND по словам, матч по видимой подписи узла.
+     */
+    static final String SET_FILTER_DIALOG_TOOLTIP =
+        "Многословный фильтр:\n" //$NON-NLS-1$
+        + "• пробел или точка между словами — И (все слова должны совпасть)\n" //$NON-NLS-1$
+        + "• \"текст в кавычках\" — точная фраза целиком; точки и пробелы внутри неё не разделяют\n" //$NON-NLS-1$
+        + "• ищет по имени в списке; родители совпадений не скрываются"; //$NON-NLS-1$
+
+    /**
      * Текст подсказки для «Фильтра по подсистемам» EDT: простой плоский AND по словам
      * (точка — такой же разделитель слов, как пробел), матч по имени узла дерева подсистем.
      */
@@ -70,6 +81,10 @@ final class FilterInputBox
     static final int MAX_WIDTH = 300;
     /** Отступ справа от compact-поля до следующего элемента строки. */
     static final int COMPACT_RIGHT_MARGIN = 10;
+
+    private static final String HISTORY_SCOPE_DATA = "tormozit.filterHistoryScope"; //$NON-NLS-1$
+
+    private static final String HISTORY_SAVE_INSTALLED_DATA = "tormozit.filterHistorySaveInstalled"; //$NON-NLS-1$
 
     enum Scope
     {
@@ -97,6 +112,15 @@ final class FilterInputBox
         RIGHTS_DIALOG(
             "comfort.rightsDialog.filter.history.count", //$NON-NLS-1$
             "comfort.rightsDialog.filter.history."), //$NON-NLS-1$
+        RIGHTS_EDITOR(
+            "comfort.rightsEditor.filter.history.count", //$NON-NLS-1$
+            "comfort.rightsEditor.filter.history."), //$NON-NLS-1$
+        RIGHTS_EDITOR_LEAVES(
+            "comfort.rightsEditor.leaves.filter.history.count", //$NON-NLS-1$
+            "comfort.rightsEditor.leaves.filter.history."), //$NON-NLS-1$
+        SET_FILTER_DIALOG(
+            "comfort.setFilterDialog.filter.history.count", //$NON-NLS-1$
+            "comfort.setFilterDialog.filter.history."), //$NON-NLS-1$
         FILTER_BY_SUBSYSTEMS(
             "comfort.filterBySubsystems.filter.history.count", //$NON-NLS-1$
             "comfort.filterBySubsystems.filter.history."), //$NON-NLS-1$
@@ -340,6 +364,7 @@ final class FilterInputBox
             return null;
         if (layoutData != null)
             result.widget().setLayoutData(layoutData);
+        applyCompactLayout(result.widget());
         if (siblingBelow != null && !siblingBelow.isDisposed())
             result.widget().moveAbove(siblingBelow);
         result.setText(initial != null ? initial : ""); //$NON-NLS-1$
@@ -366,6 +391,7 @@ final class FilterInputBox
             return;
         searchBox.setHistory(new PrefsSearchHistory(scope));
         installDeferredHistorySave(searchBox, scope);
+        applyCompactLayout(searchBox);
     }
 
     private static FilterInputBox createForScope(Composite parent, Scope scope, Runnable onSearch)
@@ -381,6 +407,9 @@ final class FilterInputBox
             case GIT_HISTORY -> forGitHistory(parent, onSearch);
             case FILTERED_LIST_DIALOG -> forFilteredListDialog(parent, onSearch);
             case RIGHTS_DIALOG -> throw new IllegalStateException("RIGHTS_DIALOG: use attachHistory(SearchBox, Scope.RIGHTS_DIALOG)"); //$NON-NLS-1$
+            case RIGHTS_EDITOR -> throw new IllegalStateException("RIGHTS_EDITOR: use attachHistory(SearchBox, Scope.RIGHTS_EDITOR)"); //$NON-NLS-1$
+            case RIGHTS_EDITOR_LEAVES -> throw new IllegalStateException("RIGHTS_EDITOR_LEAVES: use attachHistory(SearchBox, Scope.RIGHTS_EDITOR_LEAVES)"); //$NON-NLS-1$
+            case SET_FILTER_DIALOG -> throw new IllegalStateException("SET_FILTER_DIALOG: use attachHistory(SearchBox, Scope.SET_FILTER_DIALOG)"); //$NON-NLS-1$
             case FILTER_BY_SUBSYSTEMS -> throw new IllegalStateException("FILTER_BY_SUBSYSTEMS: use attachHistory(SearchBox, Scope.FILTER_BY_SUBSYSTEMS)"); //$NON-NLS-1$
             case INFOBASES -> throw new IllegalStateException("INFOBASES: use attachHistory(SearchBox, Scope.INFOBASES)"); //$NON-NLS-1$
             case COMPARE_STRUCTURE -> forCompareStructure(parent, onSearch);
@@ -398,6 +427,34 @@ final class FilterInputBox
         gd.widthHint = MAX_WIDTH;
         gd.minimumWidth = 80;
         return gd;
+    }
+
+    /**
+     * Стандартная ширина поля фильтра: не шире {@link #MAX_WIDTH}, без растягивания
+     * на всю строку. {@link #attachHistory} вызывает сам; снаружи — если layout
+     * ставится отдельно.
+     */
+    static void applyCompactLayout(Control control)
+    {
+        if (control == null || control.isDisposed())
+            return;
+        Composite parent = control.getParent();
+        if (parent == null || parent.isDisposed() || !(parent.getLayout() instanceof GridLayout))
+            return;
+        GridData gd;
+        Object existing = control.getLayoutData();
+        if (existing instanceof GridData data)
+            gd = data;
+        else
+            gd = compactLayoutData();
+        gd.grabExcessHorizontalSpace = false;
+        gd.horizontalAlignment = SWT.BEGINNING;
+        gd.verticalAlignment = SWT.CENTER;
+        if (gd.widthHint <= 0 || gd.widthHint > MAX_WIDTH)
+            gd.widthHint = MAX_WIDTH;
+        if (gd.minimumWidth < 80)
+            gd.minimumWidth = 80;
+        control.setLayoutData(gd);
     }
 
     static GridData recentPlacesLayoutData()
@@ -494,12 +551,19 @@ final class FilterInputBox
     {
         if (box == null || box.isDisposed() || historyScope == null)
             return;
+        box.setData(HISTORY_SCOPE_DATA, historyScope);
+        if (Boolean.TRUE.equals(box.getData(HISTORY_SAVE_INSTALLED_DATA)))
+            return;
+        box.setData(HISTORY_SAVE_INSTALLED_DATA, Boolean.TRUE);
         Runnable persist = () -> {
             if (box.isDisposed())
                 return;
+            Object scopeObj = box.getData(HISTORY_SCOPE_DATA);
+            if (!(scopeObj instanceof Scope activeScope))
+                return;
             String text = box.getText();
             if (text != null && !text.trim().isEmpty())
-                remember(historyScope, text);
+                remember(activeScope, text);
         };
         Control input = findTextControl(box);
         if (input != null && !input.isDisposed())

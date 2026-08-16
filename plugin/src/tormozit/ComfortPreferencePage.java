@@ -82,6 +82,10 @@ public class ComfortPreferencePage
             + "\n"
             + "Изменение настройки применяется сразу для большинства механизмов; доработка поля «Тип» применяется только при следующем старте EDT."; //$NON-NLS-1$
 
+    private static final String MD_EDITOR_VERTICAL_TABS_TOOLTIP =
+            "Если вкладок больше 10, их список показывается слева, с картинками.\n"
+            + "При выключенном флажке вкладки остаются снизу — тоже с картинками."; //$NON-NLS-1$
+
     private static final String THEME_AWARE_COLOR_TOOLTIP =
             "В контроле — цвет текущей темы. В хранилище — всегда вариант для светлой темы.\n"
             + "При сохранении в тёмной теме цвет из контрола обратно пересчитывается (HSL: инверсия светлоты)."; //$NON-NLS-1$
@@ -207,6 +211,13 @@ public class ComfortPreferencePage
         setFieldTooltip(improveDebuggerField, IMPROVE_DEBUGGER_WINDOWS_TOOLTIP);
 
         createGroupCommonModulesFields();
+
+        BooleanFieldEditor verticalTabsField = new BooleanFieldEditor(
+            ComfortSettings.PREF_MD_EDITOR_VERTICAL_TABS,
+            "Вертикальные вкладки в редакторе объекта", //$NON-NLS-1$
+            getFieldEditorParent());
+        addField(verticalTabsField);
+        setFieldTooltip(verticalTabsField, MD_EDITOR_VERTICAL_TABS_TOOLTIP);
 
         // === Группа «Редактор кода» ===
         Group codeEditorGroup = new Group(getFieldEditorParent(), SWT.NONE);
@@ -1416,6 +1427,8 @@ public class ComfortPreferencePage
                 ComfortSettings.isImproveDebuggerWindowsEnabled());
             appendFlag(sb, "Группировать общие модули в навигаторе по имени", //$NON-NLS-1$
                 ComfortSettings.isGroupCommonModulesEnabled());
+            appendFlag(sb, "Вертикальные вкладки в редакторе объекта", //$NON-NLS-1$
+                ComfortSettings.isMdEditorVerticalTabsEnabled());
             appendFlag(sb, "Автооткрытие подсказок при вводе", isContentAssistAutoOpen()); //$NON-NLS-1$
             appendFlag(sb, "Ctrl+клик выделяет слово", //$NON-NLS-1$
                 ComfortSettings.isCtrlClickSelectWordEnabled());

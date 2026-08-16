@@ -235,7 +235,6 @@ final class ObjectSetsItems
 
     static void beginAddTargetTreeFilterRefresh()
     {
-        ObjectSetSubsystemsFilterBridge.probeCacheClear();
         AddTargetTreeCache.clear();
     }
 
@@ -302,16 +301,11 @@ final class ObjectSetsItems
 
         boolean isVisible(Viewer viewer, Object element)
         {
-            long t0 = System.nanoTime();
             Boolean cached = memo.get(element);
             if (cached != null)
-            {
-                ObjectSetSubsystemsFilterBridge.probeVisible(true, System.nanoTime() - t0, element);
                 return cached;
-            }
             boolean result = computeVisible(viewer, element);
             memo.put(element, result);
-            ObjectSetSubsystemsFilterBridge.probeVisible(false, System.nanoTime() - t0, element);
             return result;
         }
 
@@ -356,7 +350,6 @@ final class ObjectSetsItems
             if (!treeContentProvider.hasChildren(element))
                 return false;
             Object[] children = treeContentProvider.getChildren(element);
-            ObjectSetSubsystemsFilterBridge.probeChildren(element, children == null ? 0 : children.length);
             if (children == null)
                 return false;
             for (Object child : children)

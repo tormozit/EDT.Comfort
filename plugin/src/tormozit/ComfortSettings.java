@@ -78,6 +78,15 @@ public final class ComfortSettings
             "Переопределяемый,Изменяемый,Служебный"; //$NON-NLS-1$
 
     /**
+     * Ключ: вкладки редактора объекта метаданных списком слева,
+     * если вкладок больше 10 ({@link MdEditorListTabCountHook}).
+     */
+    public static final String PREF_MD_EDITOR_VERTICAL_TABS = "comfort.mdEditor.verticalTabs"; //$NON-NLS-1$
+
+    /** Вертикальные вкладки выключены по умолчанию. */
+    public static final boolean DEFAULT_MD_EDITOR_VERTICAL_TABS = false;
+
+    /**
      * Ключ: цвет подсветки вхождений smart-фильтра (хранятся RGB светлой темы, строка "R,G,B").
      * В тёмной теме при отображении пересчитывается формулой {@link SmartMatchHighlight}.
      */
@@ -349,6 +358,15 @@ public final class ComfortSettings
         if (settings == null)
             return DEFAULT_GROUP_COMMON_MODULES_ENABLED;
         return settings.preferenceStore.getBoolean(PREF_GROUP_COMMON_MODULES_ENABLED);
+    }
+
+    /** Вкладки редактора объекта метаданных списком слева. */
+    public static boolean isMdEditorVerticalTabsEnabled()
+    {
+        ContentAssistSettings settings = ContentAssistSettings.getInstance();
+        if (settings == null)
+            return DEFAULT_MD_EDITOR_VERTICAL_TABS;
+        return settings.getPreferenceStore().getBoolean(PREF_MD_EDITOR_VERTICAL_TABS);
     }
 
     /** Набор 1 комбинируемых суффиксов группировки общих модулей. */

@@ -3,8 +3,6 @@ package tormozit;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.List;
 
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.graphics.Point;
@@ -43,11 +41,10 @@ public final class ExportConfigurationXmlFixHook implements IStartup
     private static final String CHECKBOX_TOOLTIP =
         "Убирает известный баг конвертации форм в формат конфигуратора 8.5: лишний ButtonImportance=Main " //$NON-NLS-1$
             + "у кнопок (issue 1C-Company/1c-edt-issues#2157)."; //$NON-NLS-1$
-    private static final String FORM_XML_NAME = "Form.xml"; //$NON-NLS-1$
-    private static final String TEMP_LOG_TOPIC = "ExportConfigFix"; //$NON-NLS-1$
+private static final String FORM_XML_NAME = "Form.xml"; //$NON-NLS-1$
 
-    @Override
-    public void earlyStartup()
+@Override
+public void earlyStartup()
     {
         Display.getDefault().asyncExec(() -> install(Display.getDefault()));
     }
@@ -66,7 +63,6 @@ public final class ExportConfigurationXmlFixHook implements IStartup
                 return;
             if (!isExportDialogShell(shell))
                 return;
-            Global.tempLog(TEMP_LOG_TOPIC, "shell matched by title='" + shell.getText() + "', scheduling"); //$NON-NLS-1$ //$NON-NLS-2$
             schedulePatchAttempt(display, shell, 0);
         };
 
@@ -96,9 +92,6 @@ public final class ExportConfigurationXmlFixHook implements IStartup
             {
                 if (attempt >= 20)
                 {
-                    Global.tempLog(TEMP_LOG_TOPIC, "giving up after " + attempt //$NON-NLS-1$
-                        + " attempts, dirRadio=" + dirRadio + ", finishButton=" + finishButton //$NON-NLS-1$ //$NON-NLS-2$
-                        + ", allControls=" + collectAllControls(shell)); //$NON-NLS-1$
                 }
                 else
                 {
@@ -110,8 +103,6 @@ public final class ExportConfigurationXmlFixHook implements IStartup
             shell.setData(PATCHED_KEY, Boolean.TRUE);
             Button ourCheckbox = addFixCheckbox(dirRadio);
             wrapFinishButton(shell, finishButton, ourCheckbox);
-            Global.tempLog(TEMP_LOG_TOPIC, "checkbox added and finish button wrapped, allControls=" //$NON-NLS-1$
-                + collectAllControls(shell)); //$NON-NLS-1$
         });
     }
 
@@ -147,8 +138,6 @@ public final class ExportConfigurationXmlFixHook implements IStartup
         shell.layout(true, true);
         Point current = shell.getSize();
         int growBy = control.getBounds().height + 12;
-        Global.tempLog(TEMP_LOG_TOPIC, "relayoutFromShell: current=" + current + ", growBy=" + growBy //$NON-NLS-1$
-            + ", checkboxBounds=" + control.getBounds()); //$NON-NLS-1$
         shell.setSize(current.x, current.y + growBy);
         shell.layout(true, true);
     }
@@ -168,13 +157,11 @@ public final class ExportConfigurationXmlFixHook implements IStartup
                 // Дубли Configuration.mdo — всегда до штатной выгрузки (не от флажка Form.xml).
                 ConfigurationMdoFix.fixBeforeUnload(shell);
                 shouldFix = ourCheckbox != null && !ourCheckbox.isDisposed() && ourCheckbox.getSelection();
-                Global.tempLog(TEMP_LOG_TOPIC, "finish clicked, shouldFix=" + shouldFix); //$NON-NLS-1$
                 if (shouldFix)
                     targetDir = findTargetDirectoryPath(shell);
             }
             catch (Exception e)
             {
-                Global.tempLog(TEMP_LOG_TOPIC, "pre-finish handling failed: " + e); //$NON-NLS-1$
             }
 
             // Оригинальные слушатели (реальный экспорт) должны отработать в любом
@@ -186,12 +173,9 @@ public final class ExportConfigurationXmlFixHook implements IStartup
             {
                 if (shouldFix && targetDir != null && !targetDir.isEmpty())
                     patchExportedDirectory(targetDir);
-                else if (shouldFix)
-                    Global.tempLog(TEMP_LOG_TOPIC, "targetDir not resolved, skip patching"); //$NON-NLS-1$
             }
             catch (Exception e)
             {
-                Global.tempLog(TEMP_LOG_TOPIC, "post-finish patching failed: " + e); //$NON-NLS-1$
             }
         });
     }
@@ -212,8 +196,6 @@ public final class ExportConfigurationXmlFixHook implements IStartup
         if (parent == null)
             return null;
         int radioY = dirRadio.getBounds().y;
-        Global.tempLog(TEMP_LOG_TOPIC, "findTargetDirectoryPath: radioY=" + radioY //$NON-NLS-1$
-            + ", allControls=" + collectAllControls(parent)); //$NON-NLS-1$
         for (Control c : parent.getChildren())
         {
             if (c == dirRadio || Math.abs(c.getBounds().y - radioY) > 4)
@@ -231,7 +213,6 @@ public final class ExportConfigurationXmlFixHook implements IStartup
         Path root = Path.of(targetDir);
         if (!Files.isDirectory(root))
         {
-            Global.tempLog(TEMP_LOG_TOPIC, "targetDir is not a directory: " + targetDir); //$NON-NLS-1$
             return;
         }
         // [0] найдено Form.xml, [1] реально исправлено, [2] ошибок
@@ -251,62 +232,19 @@ public final class ExportConfigurationXmlFixHook implements IStartup
                     catch (Exception e)
                     {
                         counters[2]++;
-                        Global.tempLog(TEMP_LOG_TOPIC, "patch failed for " + p + ": " + e.getMessage()); //$NON-NLS-1$ //$NON-NLS-2$
                     }
                 });
         }
         catch (IOException e)
         {
-            Global.tempLog(TEMP_LOG_TOPIC, "walk failed for " + root + ": " + e.getMessage()); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
-        Global.tempLog(TEMP_LOG_TOPIC,
-            "done, formXmlFound=" + counters[0] + ", fixed=" + counters[1] + ", errors=" + counters[2]); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         FormXmlPatcher.showResultToast(counters[1], counters[2]);
     }
 
     private static String stripMnemonic(String text)
     {
         return text == null ? null : text.replace("&", ""); //$NON-NLS-1$ //$NON-NLS-2$
-    }
-
-    private static List<String> collectAllControls(Control root)
-    {
-        List<String> result = new ArrayList<>();
-        collectAllControls(root, result);
-        return result;
-    }
-
-    private static void collectAllControls(Control root, List<String> out)
-    {
-        String bounds = root.getBounds().toString();
-        if (root instanceof Button)
-        {
-            Button b = (Button) root;
-            out.add("Button" + bounds + "[style=" + b.getStyle() + "] '" + b.getText() + "'"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-        }
-        else if (root instanceof Combo)
-        {
-            out.add("Combo" + bounds + " '" + ((Combo) root).getText() + "'"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        }
-        else if (root instanceof Text)
-        {
-            out.add("Text" + bounds + " '" + ((Text) root).getText() + "'"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        }
-        else if (root instanceof org.eclipse.swt.widgets.Label)
-        {
-            out.add("Label" + bounds + " '" + ((org.eclipse.swt.widgets.Label) root).getText() + "'"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        }
-        else if (root instanceof Composite && !(root instanceof Shell))
-        {
-            out.add("Composite" + bounds + " layout=" //$NON-NLS-1$ //$NON-NLS-2$
-                + (((Composite) root).getLayout() == null ? "null" : ((Composite) root).getLayout().getClass().getSimpleName())); //$NON-NLS-1$
-        }
-        if (root instanceof Composite)
-        {
-            for (Control child : ((Composite) root).getChildren())
-                collectAllControls(child, out);
-        }
     }
 
     private static Button findButtonContaining(Control root, String snippet)

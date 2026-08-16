@@ -41,9 +41,6 @@ public final class NavigatorReveal
      */
     public static void revealAndActivateIfHidden(EObject eObject)
     {
-        Global.tempLog("issue307", "revealAndActivateIfHidden eObject=" //$NON-NLS-1$ //$NON-NLS-2$
-            + (eObject == null ? "null" : eObject.eClass().getName())); //$NON-NLS-1$
-        ObjectSetSubsystemsFilterBridge.probeStart("revealAndActivateIfHidden"); //$NON-NLS-1$
         if (eObject == null)
             return;
 
@@ -76,12 +73,8 @@ public final class NavigatorReveal
 
             if (view instanceof CommonNavigator navigator)
             {
-                long t0 = System.nanoTime();
                 navigator.selectReveal(new StructuredSelection(eObject));
-                Global.tempLog("issue307", "selectReveal ms=" //$NON-NLS-1$ //$NON-NLS-2$
-                    + ((System.nanoTime() - t0) / 1_000_000L)
-                    + " viewVisible=" + page.isPartVisible(view)); //$NON-NLS-1$
-                ObjectSetSubsystemsFilterBridge.scheduleSyncVisibleChevrons("selectReveal"); //$NON-NLS-1$
+                ObjectSetSubsystemsFilterBridge.scheduleSyncVisibleChevrons();
             }
         });
     }
@@ -147,11 +140,8 @@ public final class NavigatorReveal
             if (navigator.getSite() == null)
                 return;
             StructuredSelection navSelection = new StructuredSelection(eObject);
-            long t0 = System.nanoTime();
             navigator.selectReveal(navSelection);
-            Global.tempLog("issue307", "reveal.selectReveal force=" + force //$NON-NLS-1$ //$NON-NLS-2$
-                + " ms=" + ((System.nanoTime() - t0) / 1_000_000L)); //$NON-NLS-1$
-            ObjectSetSubsystemsFilterBridge.scheduleSyncVisibleChevrons("reveal.selectReveal"); //$NON-NLS-1$
+            ObjectSetSubsystemsFilterBridge.scheduleSyncVisibleChevrons();
 
             if (editorToReactivate == null)
                 return;

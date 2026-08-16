@@ -65,9 +65,8 @@ import org.eclipse.ui.handlers.IHandlerService;
 public final class DebugErrorSuffixHook implements IStartup
 {
     /** Признак невидимых строк описания ошибки (как в панели «Трассировки стеков»). */
-    static final String HIDDEN_LINES_MARK = " ..."; //$NON-NLS-1$
-    private static final String LOG_TOPIC = "debug-error-suffix"; //$NON-NLS-1$
-    private static final String PROCESSOR_IFACE =
+static final String HIDDEN_LINES_MARK = " ..."; //$NON-NLS-1$
+private static final String PROCESSOR_IFACE =
             "com._1c.g5.v8.dt.debug.core.model.IRuntimeEventProcessor"; //$NON-NLS-1$
     private static final String SUSPENSION_METHOD = "handleSuspensionByException"; //$NON-NLS-1$
     private static final String REASON_SEPARATOR = "по причине:"; //$NON-NLS-1$
@@ -113,7 +112,6 @@ public final class DebugErrorSuffixHook implements IStartup
         }
         catch (Exception e)
         {
-            Global.tempLogException(LOG_TOPIC, "installViewHooks failed", e); //$NON-NLS-1$
         }
     }
 
@@ -214,7 +212,6 @@ public final class DebugErrorSuffixHook implements IStartup
             if (full != null)
                 ErrorDescriptionWindow.open(tree.getShell(), full);
         });
-        Global.tempLog(LOG_TOPIC, "debug view hooked"); //$NON-NLS-1$
     }
 
     /**
@@ -228,7 +225,6 @@ public final class DebugErrorSuffixHook implements IStartup
         IActionBars bars = view.getViewSite().getActionBars();
         if (bars == null)
         {
-            Global.tempLog(LOG_TOPIC, "copy handler: no action bars"); //$NON-NLS-1$
             return;
         }
         String copyId = ActionFactory.COPY.getId();
@@ -238,8 +234,6 @@ public final class DebugErrorSuffixHook implements IStartup
         FullTextCopyAction action = new FullTextCopyAction(view, current);
         bars.setGlobalActionHandler(copyId, action);
         bars.updateActionBars();
-        Global.tempLog(LOG_TOPIC, "copy handler installed over=" //$NON-NLS-1$
-                + (current == null ? "null" : current.getClass().getName())); //$NON-NLS-1$
 
         // Штатное «Копировать» панели — вклад в контекстное меню с definitionId
         // org.eclipse.ui.edit.copy; он может обрабатывать команду мимо global action handler,
@@ -381,11 +375,9 @@ public final class DebugErrorSuffixHook implements IStartup
             Object proxy = Proxy.newProxyInstance(iface.getClassLoader(), new Class<?>[] { iface },
                     new EventProcessorInterceptor(processor));
             boolean ok = Global.setFieldForce(dispatcher, "eventProcessor", proxy); //$NON-NLS-1$
-            Global.tempLog(LOG_TOPIC, "wrap eventProcessor=" + processor.getClass().getName() + " ok=" + ok); //$NON-NLS-1$ //$NON-NLS-2$
         }
         catch (Exception e)
         {
-            Global.tempLogException(LOG_TOPIC, "wrap failed", e); //$NON-NLS-1$
         }
     }
 
@@ -422,9 +414,6 @@ public final class DebugErrorSuffixHook implements IStartup
             try
             {
                 String full = fullExceptionText(exception);
-                Global.tempLog(LOG_TOPIC, "suspension exception=" //$NON-NLS-1$
-                        + (exception == null ? "null" : exception.getClass().getName()) //$NON-NLS-1$
-                        + " text=[" + escape(full) + "]"); //$NON-NLS-1$ //$NON-NLS-2$
                 if (full == null || full.isBlank())
                     return;
 
@@ -436,18 +425,14 @@ public final class DebugErrorSuffixHook implements IStartup
                 Object thread = Global.invoke(delegate, "getThread", debugTargetId); //$NON-NLS-1$
                 if (thread == null)
                 {
-                    Global.tempLog(LOG_TOPIC, "thread not found for suspension"); //$NON-NLS-1$
                     return;
                 }
                 Object current = Global.getField(thread, "nameSuffix"); //$NON-NLS-1$
-                Global.tempLog(LOG_TOPIC, "suffix current=[" + escape(current == null ? null : current.toString()) //$NON-NLS-1$
-                        + "] new=[" + escape(suffix) + "]"); //$NON-NLS-1$ //$NON-NLS-2$
                 FULL_TEXTS.put(thread, full);
                 if (suffix.equals(current))
                     return;
 
                 boolean applied = Global.invokeVoid(thread, "setNameSuffix", suffix); //$NON-NLS-1$
-                Global.tempLog(LOG_TOPIC, "setNameSuffix applied=" + applied); //$NON-NLS-1$
                 if (!applied)
                     return;
                 DebugPlugin.getDefault().fireDebugEventSet(
@@ -455,7 +440,6 @@ public final class DebugErrorSuffixHook implements IStartup
             }
             catch (Exception e)
             {
-                Global.tempLogException(LOG_TOPIC, "apply failed", e); //$NON-NLS-1$
             }
         }
     }
@@ -503,10 +487,5 @@ public final class DebugErrorSuffixHook implements IStartup
         String normalized = text.replace("\r\n", "\n").replace('\r', '\n').strip(); //$NON-NLS-1$ //$NON-NLS-2$
         int nl = normalized.indexOf('\n');
         return nl >= 0 && !normalized.substring(nl + 1).isBlank();
-    }
-
-    private static String escape(String text)
-    {
-        return text == null ? "null" : text.replace("\r", "\\r").replace("\n", "\\n"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
     }
 }

@@ -12,7 +12,6 @@ import java.security.ProtectionDomain;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 import java.util.jar.Attributes;
 import java.util.jar.JarEntry;
@@ -69,7 +68,6 @@ public final class BslDocCommentDescriptionFix
         "C:\\Program Files\\1C\\1CE\\components\\axiom-jdk-full-17.0.16+12-x86_64\\bin\\javac.exe"; //$NON-NLS-1$
 
     private static final AtomicBoolean installed = new AtomicBoolean();
-    private static final AtomicInteger afterParseCalls = new AtomicInteger();
     private static volatile Instrumentation instrumentation;
     private static volatile boolean transformerRegistered;
 
@@ -79,51 +77,38 @@ public final class BslDocCommentDescriptionFix
     {
         if (!installed.compareAndSet(false, true))
         {
-            ndjson("install", "skip", "{\"reason\":\"already\"}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return;
         }
 
         System.getProperties().put(PROP_AFTER_PARSE,
             (Consumer<Object>) BslDocCommentDescriptionFix::afterParse);
-        ndjson("install", "start", "{}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
 
         Bundle bundle = FrameworkUtil.getBundle(BslDocCommentDescriptionFix.class);
         BundleContext context = bundle != null ? bundle.getBundleContext() : null;
         if (context != null)
         {
             context.registerService(WeavingHook.class, new ParseWeavingHook(), null);
-            ndjson("install", "weavingHook", "{\"ok\":true}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         }
-        else
-            ndjson("install", "weavingHook", "{\"ok\":false,\"reason\":\"noContext\"}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
 
         try
         {
             Instrumentation inst = ensureInstrumentation();
             if (inst == null)
             {
-                ndjson("install", "attach", "{\"ok\":false}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 return;
             }
-            ndjson("install", "attach", "{\"ok\":true}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             registerPermanentTransformer(inst);
 
-            int retried = 0;
             for (Class<?> c : inst.getAllLoadedClasses())
             {
                 String name = c.getName();
                 if (!TARGET_COMMENT.equals(name) && !TARGET_UTILS.equals(name))
                     continue;
-                if (retransform(inst, c))
-                    retried++;
+                retransform(inst, c);
             }
-            ndjson("install", "retransform", "{\"count\":" + retried + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
         }
         catch (Throwable t)
         {
-            ndjson("install", "error", "{\"type\":\"" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + t.getClass().getSimpleName() + "\",\"msg\":\"" //$NON-NLS-1$
-                + ContentAssistDebug.jsonEscapeForLog(String.valueOf(t.getMessage())) + "\"}"); //$NON-NLS-1$
         }
     }
 
@@ -134,18 +119,12 @@ public final class BslDocCommentDescriptionFix
         String cn = commentObj.getClass().getName();
         if (!TARGET_COMMENT.equals(cn))
             return;
-        int n = afterParseCalls.incrementAndGet();
         try
         {
-            int moved = normalize(commentObj);
-            if (n <= 20 || moved > 0)
-                ndjson("afterParse", "ok", "{\"n\":" + n + ",\"moved\":" + moved + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
+            normalize(commentObj);
         }
         catch (Throwable t)
         {
-            ndjson("afterParse", "error", "{\"type\":\"" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + t.getClass().getSimpleName() + "\",\"msg\":\"" //$NON-NLS-1$
-                + ContentAssistDebug.jsonEscapeForLog(String.valueOf(t.getMessage())) + "\"}"); //$NON-NLS-1$
         }
     }
 
@@ -219,7 +198,6 @@ public final class BslDocCommentDescriptionFix
             return null;
         if (!(method instanceof EObject eObject))
         {
-            ndjson("recover", "skip", "{\"reason\":\"notEObject\"}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return null;
         }
         try
@@ -227,7 +205,6 @@ public final class BslDocCommentDescriptionFix
             Bundle commentBundle = Platform.getBundle(BSL_COMMENT_BUNDLE);
             if (commentBundle == null)
             {
-                ndjson("recover", "skip", "{\"reason\":\"noBundle\"}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 return null;
             }
             Class<?> utilsClass = commentBundle.loadClass(TARGET_UTILS);
@@ -235,40 +212,33 @@ public final class BslDocCommentDescriptionFix
             Bundle bslModel = Platform.getBundle("com._1c.g5.v8.dt.bsl.model"); //$NON-NLS-1$
             if (bslModel == null)
             {
-                ndjson("recover", "skip", "{\"reason\":\"noBslModelBundle\"}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 return null;
             }
             Class<?> bslMethodClass = bslModel.loadClass("com._1c.g5.v8.dt.bsl.model.Method"); //$NON-NLS-1$
             if (!bslMethodClass.isInstance(method))
             {
-                ndjson("recover", "skip", "{\"reason\":\"notBslMethod\",\"class\":\"" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + method.getClass().getName() + "\"}"); //$NON-NLS-1$
                 return null;
             }
 
             Resource resource = eObject.eResource();
             if (resource == null || resource.getURI() == null)
             {
-                ndjson("recover", "skip", "{\"reason\":\"noResource\"}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 return null;
             }
             IResourceServiceProvider rsp = IResourceServiceProvider.Registry.INSTANCE
                 .getResourceServiceProvider(resource.getURI());
             if (rsp == null)
             {
-                ndjson("recover", "skip", "{\"reason\":\"noRsp\"}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 return null;
             }
             Object provider = rsp.get(providerClass);
             if (provider == null)
             {
-                ndjson("recover", "skip", "{\"reason\":\"noProvider\"}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 return null;
             }
             Object linesObj = Global.invoke(provider, "getCommentLines", eObject); //$NON-NLS-1$
             if (!(linesObj instanceof List<?> lines) || lines.isEmpty())
             {
-                ndjson("recover", "skip", "{\"reason\":\"noLines\"}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 return null;
             }
 
@@ -279,21 +249,14 @@ public final class BslDocCommentDescriptionFix
                 Object comment = parseMethod.invoke(null, lines, method, Boolean.valueOf(oldFormat));
                 if (comment == null)
                     continue;
-                int moved = normalize(comment);
+                normalize(comment);
                 String text = readFieldDescriptionText(comment, paramName);
-                ndjson("recover", "try", "{\"oldFormat\":" + oldFormat //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + ",\"moved\":" + moved //$NON-NLS-1$
-                    + ",\"descLen\":" + (text == null ? -1 : text.length()) //$NON-NLS-1$
-                    + ",\"param\":\"" + ContentAssistDebug.jsonEscapeForLog(paramName) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
                 if (text != null && !text.isBlank())
                     return text.trim();
             }
         }
         catch (Throwable t)
         {
-            ndjson("recover", "error", "{\"type\":\"" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + t.getClass().getSimpleName() + "\",\"msg\":\"" //$NON-NLS-1$
-                + ContentAssistDebug.jsonEscapeForLog(String.valueOf(t.getMessage())) + "\"}"); //$NON-NLS-1$
         }
         return null;
     }
@@ -305,8 +268,7 @@ public final class BslDocCommentDescriptionFix
         String current = asString(Global.invoke(valueContent, "getDescription")); //$NON-NLS-1$
         if (current != null && !current.isBlank())
             return;
-        boolean ok = Global.setFieldForce(valueContent, "description", description); //$NON-NLS-1$
-        ndjson("applyValue", ok ? "ok" : "fail", "{\"len\":" + description.length() + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
+        Global.setFieldForce(valueContent, "description", description); //$NON-NLS-1$
     }
 
     public static void onInstrumentation(Instrumentation inst)
@@ -333,22 +295,16 @@ public final class BslDocCommentDescriptionFix
             }
             catch (Throwable t)
             {
-                ndjson("registerExtra", "attachFail", "{\"type\":\"" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + t.getClass().getSimpleName() + "\",\"msg\":\"" //$NON-NLS-1$
-                    + ContentAssistDebug.jsonEscapeForLog(String.valueOf(t.getMessage()))
-                    + "\"}"); //$NON-NLS-1$
                 return false;
             }
         }
         if (instrumentation == null)
         {
-            ndjson("registerExtra", "fail", "{\"reason\":\"noInstrumentation\"}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return false;
         }
         try
         {
             instrumentation.addTransformer(transformer, true);
-            int retried = 0;
             if (retransformClassNames != null)
             {
                 for (Class<?> c : instrumentation.getAllLoadedClasses())
@@ -358,20 +314,16 @@ public final class BslDocCommentDescriptionFix
                     {
                         if (want.equals(name))
                         {
-                            if (retransform(instrumentation, c))
-                                retried++;
+                            retransform(instrumentation, c);
                             break;
                         }
                     }
                 }
             }
-            ndjson("registerExtra", "ok", "{\"retransform\":" + retried + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
             return true;
         }
         catch (Throwable t)
         {
-            ndjson("registerExtra", "fail", "{\"type\":\"" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + t.getClass().getSimpleName() + "\"}"); //$NON-NLS-1$
             return false;
         }
     }
@@ -441,7 +393,6 @@ public final class BslDocCommentDescriptionFix
             return;
         inst.addTransformer(new ParseClassFileTransformer(), true);
         transformerRegistered = true;
-        ndjson("install", "transformer", "{\"ok\":true}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
     }
 
     private static boolean retransform(Instrumentation inst, Class<?> target)
@@ -450,24 +401,17 @@ public final class BslDocCommentDescriptionFix
         {
             if (!inst.isModifiableClass(target))
             {
-                ndjson("retransform", "skip", "{\"class\":\"" + target.getName() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + "\",\"reason\":\"notModifiable\"}"); //$NON-NLS-1$
                 return false;
             }
             inst.retransformClasses(target);
-            ndjson("retransform", "ok", "{\"class\":\"" + target.getName() + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
             return true;
         }
         catch (UnmodifiableClassException e)
         {
-            ndjson("retransform", "fail", "{\"class\":\"" + target.getName() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + "\",\"reason\":\"UnmodifiableClassException\"}"); //$NON-NLS-1$
             return false;
         }
         catch (Throwable t)
         {
-            ndjson("retransform", "fail", "{\"class\":\"" + target.getName() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + "\",\"type\":\"" + t.getClass().getSimpleName() + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
             return false;
         }
     }
@@ -708,11 +652,6 @@ public final class BslDocCommentDescriptionFix
         mv.visitLabel(end);
     }
 
-    private static void ndjson(String location, String message, String dataJson)
-    {
-//        Global.log("bslDocComment", location + ": " + message + " " + dataJson); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-    }
-
     private static final class ParseWeavingHook implements WeavingHook
     {
         @Override
@@ -730,13 +669,10 @@ public final class BslDocCommentDescriptionFix
                 if (transformed != null)
                 {
                     wovenClass.setBytes(transformed);
-                    ndjson("weave", "ok", "{\"class\":\"" + name + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
                 }
             }
             catch (Throwable t)
             {
-                ndjson("weave", "error", "{\"class\":\"" + name //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + "\",\"type\":\"" + t.getClass().getSimpleName() + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
             }
         }
     }
@@ -756,8 +692,6 @@ public final class BslDocCommentDescriptionFix
             }
             catch (Throwable t)
             {
-                ndjson("transform", "error", "{\"class\":\"" + className //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + "\",\"type\":\"" + t.getClass().getSimpleName() + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
                 return null;
             }
         }

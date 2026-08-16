@@ -102,7 +102,6 @@ public class CompareSearchResultPage implements ISearchResultPage
     private Image checkImageGrayed;
 
     private static final int TREE_CHECK_SYNC_DELAY_MS = 1000;
-    private static final String CHECK_SYNC_LOG = "compare-search-check-sync"; //$NON-NLS-1$
     private static final String KEY_CHECKED = "tormozit.compareSearchChecked"; //$NON-NLS-1$
     private static final String KEY_GRAYED = "tormozit.compareSearchGrayed"; //$NON-NLS-1$
 
@@ -778,14 +777,10 @@ public class CompareSearchResultPage implements ISearchResultPage
             return;
         treeCheckDirty.set(false);
         CheckboxTreeViewer ctv = getCheckboxTreeViewer();
-        long t0 = System.nanoTime();
-        int rows = 0;
-        int fromTreeItem = 0;
         for (TableItem item : table.getItems())
         {
             if (item.isDisposed() || !(item.getData() instanceof CompareSearchMatch match))
                 continue;
-            rows++;
             if (!match.isCheckable())
             {
                 item.setData(KEY_CHECKED, null);
@@ -801,7 +796,6 @@ public class CompareSearchResultPage implements ISearchResultPage
                 // Строка дерева создана — берём её UI-состояние.
                 checked = ti.getChecked();
                 grayed = ti.getGrayed();
-                fromTreeItem++;
             }
             else if (node instanceof IPartialModelNode partial)
             {
@@ -820,9 +814,6 @@ public class CompareSearchResultPage implements ISearchResultPage
             Rectangle bounds = item.getBounds(0);
             table.redraw(bounds.x, bounds.y, bounds.width, bounds.height, false);
         }
-        Global.tempLog(CHECK_SYNC_LOG, "sync rows=" + rows //$NON-NLS-1$
-                + " treeItems=" + fromTreeItem //$NON-NLS-1$
-                + " ms=" + ((System.nanoTime() - t0) / 1_000_000L)); //$NON-NLS-1$
     }
 
     private static Widget findTreeRow(CheckboxTreeViewer ctv, Object node)
@@ -905,7 +896,6 @@ public class CompareSearchResultPage implements ISearchResultPage
             if (treeCheckDirty.get() && searchResult != null
                     && monitor != null && !monitor.isCanceled() && treeCheckSyncJob != null)
                 treeCheckSyncJob.schedule(100);
-            Global.tempLog(CHECK_SYNC_LOG, "job finished dirty=" + treeCheckDirty.get()); //$NON-NLS-1$
         }
     }
 
@@ -964,7 +954,6 @@ public class CompareSearchResultPage implements ISearchResultPage
         treeCheckListener = event -> noteTreeCheckChanged();
         ctv.addCheckStateListener(treeCheckListener);
         hookedTreeViewer = ctv;
-        Global.tempLog(CHECK_SYNC_LOG, "listener installed (dirty-flag + Job.DECORATE)"); //$NON-NLS-1$
     }
 
     private void uninstallTreeCheckListener()

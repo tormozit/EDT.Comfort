@@ -37,7 +37,6 @@ public final class FormXmlPatcher
 {
     private static final String EXT_SEGMENT = "Ext"; //$NON-NLS-1$
     private static final String FORM_FILE_NAME = "Form.form"; //$NON-NLS-1$
-    private static final String TEMP_LOG_TOPIC = "DeployConfigFix"; //$NON-NLS-1$
     private static final String TOAST_TITLE = "Комфорт"; //$NON-NLS-1$
 
     private FormXmlPatcher()
@@ -90,7 +89,6 @@ public final class FormXmlPatcher
         {
             transformer.transform(new DOMSource(doc), new StreamResult(out));
         }
-        Global.tempLog(TEMP_LOG_TOPIC, "patched " + formXmlPath); //$NON-NLS-1$
         return true;
     }
 
@@ -162,7 +160,6 @@ public final class FormXmlPatcher
         }
         catch (Exception e)
         {
-            Global.tempLog(TEMP_LOG_TOPIC, "loadSourceForm: " + e.getMessage()); //$NON-NLS-1$
             return null;
         }
     }
@@ -238,7 +235,6 @@ public final class FormXmlPatcher
         }
         catch (Exception e)
         {
-            Global.tempLog(TEMP_LOG_TOPIC, "findUniqueByTail: " + e.getMessage()); //$NON-NLS-1$
         }
         return found.size() == 1 ? found.get(0) : null;
     }

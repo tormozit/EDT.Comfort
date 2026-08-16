@@ -87,7 +87,8 @@ public final class TreeExpander implements IStartup
             Target.SEARCH_CONFIG,
             Target.SEARCH_FILES,
             Target.FORM_ITEMS,
-            Target.CONFIG_ERRORS);
+            Target.CONFIG_ERRORS,
+            Target.RIGHTS_EDITOR);
 
     private static final ThreadLocal<Boolean> SUPPRESSED = ThreadLocal.withInitial(() -> Boolean.FALSE);
     private static final ThreadLocal<Boolean> IN_AUTO_EXPAND = ThreadLocal.withInitial(() -> Boolean.FALSE);
@@ -104,7 +105,9 @@ public final class TreeExpander implements IStartup
         /** Редактор формы — дерево элементов (не реквизиты). */
         FORM_ITEMS,
         /** Панель «Ошибки конфигурации». */
-        CONFIG_ERRORS
+        CONFIG_ERRORS,
+        /** Дерево прав (вкладка «Права» редактора объекта / роли). */
+        RIGHTS_EDITOR
     }
 
     @FunctionalInterface
@@ -586,6 +589,8 @@ public final class TreeExpander implements IStartup
                         tree.setRedraw(true);
                 }
             });
+            // Программный разворот не шлёт SWT.Expand — надписи с числом элементов обновляем сами.
+            FolderItemCountDecoration.refreshAfterProgrammaticExpand(viewer, tree, item);
             return;
         }
         runSuppressed(() -> expandAllDescendantsSwt(item, 0,
@@ -1017,9 +1022,12 @@ public final class TreeExpander implements IStartup
 
     private static boolean defaultVisible(AbstractTreeViewer viewer, Object parent, Object child)
     {
-        for (ViewerFilter vf : viewer.getFilters())
+        ViewerFilter[] filters = viewer.getFilters();
+        if (filters == null)
+            return true;
+        for (ViewerFilter vf : filters)
         {
-            if (!vf.select(viewer, parent, child))
+            if (vf != null && !vf.select(viewer, parent, child))
                 return false;
         }
         return true;

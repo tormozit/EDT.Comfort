@@ -317,8 +317,6 @@ public final class SpellCheckHook implements IStartup
         StyledText widget = sourceViewer.getTextWidget();
         if (widget != null && !widget.isDisposed())
             widget.setData(XML_SPELL_MUTE_KEY, Boolean.TRUE);
-        Global.tempLog("xml-spell-mute", //$NON-NLS-1$
-            "ok attempt=" + attempt + " " + editor.getTitle()); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private static boolean ensureXmlSpellNoop(SourceViewer viewer)

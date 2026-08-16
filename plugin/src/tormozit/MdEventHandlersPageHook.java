@@ -32,6 +32,7 @@ import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Label;
+import org.eclipse.swt.widgets.Layout;
 import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.TreeItem;
 import org.eclipse.ui.IEditorPart;
@@ -50,7 +51,7 @@ import org.eclipse.ui.PartInitException;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.commands.ICommandService;
 import org.eclipse.ui.forms.IManagedForm;
-import org.eclipse.ui.forms.editor.FormPage;
+import org.eclipse.ui.forms.widgets.ScrolledForm;
 import org.eclipse.ui.handlers.IHandlerService;
 import org.osgi.framework.Bundle;
 
@@ -59,12 +60,13 @@ import com._1c.g5.v8.dt.core.platform.IExtensionProject;
 import com._1c.g5.v8.dt.core.platform.IV8Project;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
+import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorPage;
 import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com.google.inject.Injector;
 
 /**
- * Встраивает страницу «Подписки на события» в редактор объекта метаданных
+ * Встраивает страницу «Подписки» в редактор объекта метаданных
  * ({@link DtGranularEditor}).
  *
  * <p>Страница воспроизводит результат команды «Все подписки на события» из контекстного
@@ -73,6 +75,10 @@ import com.google.inject.Injector;
  *
  * <p>Страница добавляется только для объектов с производными типами (ссылочные объекты,
  * регистры, константы) — критерий тот же, что у {@code ProdusedTypesUtil} EDT.
+ *
+ * <p>Страница — {@link DtGranularEditorPage}, поэтому заголовок формы тот же, что у
+ * остальных вкладок редактора: тип → имя объекта → «Подписки». Встроенный
+ * {@code EventHandlersEditor} свою шапку («Все подписки на события») не показывает.
  *
  * <p>Тяжёлое наполнение (создание встроенного редактора и фильтра) выполняется лениво —
  * при первой активации вкладки, а не при открытии редактора.
@@ -100,12 +106,9 @@ public final class MdEventHandlersPageHook implements IStartup
     /** Обработчик «Открыть» (двойной клик EDT вызывает его напрямую, минуя команду). */
     private static final String OPEN_OBJECT_HANDLER_CLASS = BUNDLE_ID + ".handlers.OpenObjectHandler"; //$NON-NLS-1$
 
-    /** Тема временного лога двойного клика по строкам страницы. */
-    private static final String OPEN_LOG_TOPIC = "eventhandlers-open-handler"; //$NON-NLS-1$
-
     private static final String PAGE_ID = "tormozit.mdEventHandlers"; //$NON-NLS-1$
 
-    private static final String PAGE_TITLE = "Подписки на события"; //$NON-NLS-1$
+    private static final String PAGE_TITLE = "Подписки"; //$NON-NLS-1$
 
     /** Заголовок ERD-вкладки {@code editors.diagrams.page} — наша страница строго перед ней. */
     private static final String DATA_SCHEMA_TAB = "Схема данных"; //$NON-NLS-1$
@@ -394,8 +397,13 @@ public final class MdEventHandlersPageHook implements IStartup
      * Вкладка granular-редактора: лёгкий каркас создаётся при добавлении, тяжёлое
      * наполнение (встроенный {@code EventHandlersEditor} EDT + фильтр по объекту) —
      * при первой активации ({@link #setActive(boolean)}).
+     *
+     * <p>Наследует {@link DtGranularEditorPage}, чтобы шапка формы совпадала со штатной
+     * («Справочники → Имя → Подписки»). {@code createFormContent} у базового класса
+     * {@code final} — контент в {@link #createPageControls}, раскладка — {@link FillLayout},
+     * иначе штатный {@code ColumnLayout} сожмёт встроенный редактор.
      */
-    private static final class EventHandlersPage extends FormPage
+    private static final class EventHandlersPage extends DtGranularEditorPage<MdObject>
     {
         private final MdObject mdObject;
 
@@ -426,11 +434,15 @@ public final class MdEventHandlersPageHook implements IStartup
         }
 
         @Override
-        protected void createFormContent(IManagedForm managedForm)
+        protected Layout createPageLayout()
         {
-            Composite body = managedForm.getForm().getBody();
-            body.setLayout(new FillLayout());
-            host = new Composite(body, SWT.NONE);
+            return new FillLayout();
+        }
+
+        @Override
+        protected void createPageControls(IManagedForm managedForm)
+        {
+            host = new Composite(managedForm.getForm().getBody(), SWT.NONE);
             host.setLayout(new FillLayout());
         }
 
@@ -514,6 +526,7 @@ public final class MdEventHandlersPageHook implements IStartup
 
                 Global.invoke(editor, "init", site, input); //$NON-NLS-1$
                 Global.invoke(editor, "createPartControl", host); //$NON-NLS-1$
+                hideEmbeddedFormHeading();
                 configureObjectFilter(editor);
 
                 embeddedEditor = editor;
@@ -604,12 +617,8 @@ public final class MdEventHandlersPageHook implements IStartup
             if (object == null)
                 return false;
 
-            boolean same = object == mdObject
+            return object == mdObject
                 || (EcoreUtil.getURI(object) != null && EcoreUtil.getURI(object).equals(EcoreUtil.getURI(mdObject)));
-            Global.tempLog(OPEN_LOG_TOPIC, "строка=" + element.getClass().getSimpleName() //$NON-NLS-1$
-                + ", объект строки=" + EcoreUtil.getURI(object) //$NON-NLS-1$
-                + ", объект страницы=" + EcoreUtil.getURI(mdObject) + ", свой=" + same); //$NON-NLS-1$ //$NON-NLS-2$
-            return same;
         }
 
         private void openTreeSelection(Tree tree)
@@ -630,10 +639,7 @@ public final class MdEventHandlersPageHook implements IStartup
             // Строка источника/обработчика, ведущая на объект ЭТОГО же редактора: открывать
             // его заново не нужно — редактор уже открыт, страница подписок в нём и находится.
             if (elements.size() == 1 && isHostObject(elements.get(0)))
-            {
-                Global.tempLog(OPEN_LOG_TOPIC, "двойной клик по строке своего объекта — не открываем"); //$NON-NLS-1$
                 return;
-            }
 
             try
             {
@@ -838,11 +844,50 @@ public final class MdEventHandlersPageHook implements IStartup
             }
         }
 
+        /**
+         * Встроенный {@code EventHandlersEditor} рисует свою шапку формы
+         * («Все подписки на события»). На вкладке редактора объекта её место занимает
+         * штатный заголовок {@link DtGranularEditorPage}.
+         */
+        private void hideEmbeddedFormHeading()
+        {
+            ScrolledForm inner = findScrolledForm(host);
+            if (inner == null || inner.isDisposed())
+                return;
+            inner.setText(""); //$NON-NLS-1$
+            // В бандле forms EDT нет Form.setHeadVisible — прячем шапку сами.
+            Composite head = inner.getForm().getHead();
+            if (head != null && !head.isDisposed())
+            {
+                head.setVisible(false);
+                inner.getForm().layout(true, true);
+            }
+            if (host != null && !host.isDisposed())
+                host.layout(true, true);
+        }
+
+        private static ScrolledForm findScrolledForm(Composite composite)
+        {
+            if (composite == null || composite.isDisposed())
+                return null;
+            for (Control child : composite.getChildren())
+            {
+                if (child instanceof ScrolledForm form)
+                    return form;
+                if (child instanceof Composite inner)
+                {
+                    ScrolledForm found = findScrolledForm(inner);
+                    if (found != null)
+                        return found;
+                }
+            }
+            return null;
+        }
+
         private void showError(String message)
         {
             if (host == null || host.isDisposed())
                 return;
-            Global.tempLog(TAG, "fill failed: " + message); //$NON-NLS-1$
             for (Control child : host.getChildren())
                 child.dispose();
             Label label = new Label(host, SWT.WRAP);

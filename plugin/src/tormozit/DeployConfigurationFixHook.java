@@ -8,8 +8,6 @@ import java.nio.file.StandardWatchEventKinds;
 import java.nio.file.WatchEvent;
 import java.nio.file.WatchKey;
 import java.nio.file.WatchService;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -50,19 +48,17 @@ public final class DeployConfigurationFixHook implements IStartup
             + "у кнопок (issue 1C-Company/1c-edt-issues#2157)."; //$NON-NLS-1$
     private static final String CHECKBOX_KEY = "tormozit.deployConfigFixCheckbox"; //$NON-NLS-1$
 
-    private static final String TEMP_ROOT_NAME = "1cedt"; //$NON-NLS-1$
-    private static final String FORM_XML_NAME = "Form.xml"; //$NON-NLS-1$
-    private static final String TEMP_LOG_TOPIC = "DeployConfigFix"; //$NON-NLS-1$
+private static final String TEMP_ROOT_NAME = "1cedt"; //$NON-NLS-1$
+private static final String FORM_XML_NAME = "Form.xml"; //$NON-NLS-1$
 
-    @Override
-    public void earlyStartup()
+@Override
+public void earlyStartup()
     {
         Display.getDefault().asyncExec(() -> install(Display.getDefault()));
     }
 
     static void install(Display display)
     {
-        Global.tempLog(TEMP_LOG_TOPIC, "install() called, display=" + display); //$NON-NLS-1$
         if (display == null || display.isDisposed())
             return;
 
@@ -73,10 +69,7 @@ public final class DeployConfigurationFixHook implements IStartup
             Shell shell = (Shell) event.widget;
             if (shell.getData(PATCHED_KEY) != null)
                 return;
-            String title = shell.getText();
             boolean isDeployShell = isDeployDialogShell(shell);
-            if (isDeployShell)
-                Global.tempLog(TEMP_LOG_TOPIC, "shell event, title='" + title + "', matched=true"); //$NON-NLS-1$ //$NON-NLS-2$
             if (!isDeployShell)
                 return;
             schedulePatchAttempt(display, shell, 0);
@@ -84,7 +77,6 @@ public final class DeployConfigurationFixHook implements IStartup
 
         display.addFilter(SWT.Activate, listener);
         display.addFilter(SWT.Show, listener);
-        Global.tempLog(TEMP_LOG_TOPIC, "filters installed"); //$NON-NLS-1$
     }
 
     private static boolean isDeployDialogShell(Shell shell)
@@ -109,10 +101,6 @@ public final class DeployConfigurationFixHook implements IStartup
             {
                 if (attempt >= 20)
                 {
-                    Global.tempLog(TEMP_LOG_TOPIC, "giving up after " + attempt //$NON-NLS-1$
-                        + " attempts, fullLoadCheckbox=" + fullLoadCheckbox //$NON-NLS-1$
-                        + ", finishButton=" + finishButton //$NON-NLS-1$
-                        + ", allButtonTexts=" + collectAllButtonTexts(shell)); //$NON-NLS-1$
                 }
                 else
                 {
@@ -121,11 +109,9 @@ public final class DeployConfigurationFixHook implements IStartup
                 return;
             }
 
-            Global.tempLog(TEMP_LOG_TOPIC, "found both anchor buttons on attempt " + attempt); //$NON-NLS-1$
             shell.setData(PATCHED_KEY, Boolean.TRUE);
             Button ourCheckbox = addFixCheckbox(fullLoadCheckbox);
             wrapFinishButton(finishButton, ourCheckbox);
-            Global.tempLog(TEMP_LOG_TOPIC, "checkbox added and finish button wrapped"); //$NON-NLS-1$
         });
     }
 
@@ -163,8 +149,6 @@ public final class DeployConfigurationFixHook implements IStartup
         shell.layout(true, true);
         Point current = shell.getSize();
         int growBy = control.getBounds().height + 12;
-        Global.tempLog(TEMP_LOG_TOPIC, "relayoutFromShell: current=" + current + ", growBy=" + growBy //$NON-NLS-1$
-            + ", checkboxBounds=" + control.getBounds()); //$NON-NLS-1$
         shell.setSize(current.x, current.y + growBy);
         shell.layout(true, true);
     }
@@ -183,13 +167,11 @@ public final class DeployConfigurationFixHook implements IStartup
                 // Дубли Configuration.mdo — всегда до штатной выгрузки (не от флажка Form.xml).
                 ConfigurationMdoFix.fixBeforeUnload(finishButton.getShell());
                 boolean shouldFix = ourCheckbox != null && !ourCheckbox.isDisposed() && ourCheckbox.getSelection();
-                Global.tempLog(TEMP_LOG_TOPIC, "finish clicked, shouldFix=" + shouldFix); //$NON-NLS-1$
                 if (shouldFix)
                     watcher = FormXmlFixWatcher.startIfPossible();
             }
             catch (Exception e)
             {
-                Global.tempLog(TEMP_LOG_TOPIC, "pre-finish handling failed: " + e); //$NON-NLS-1$
             }
             final FormXmlFixWatcher startedWatcher = watcher;
 
@@ -205,7 +187,6 @@ public final class DeployConfigurationFixHook implements IStartup
             }
             catch (Exception e)
             {
-                Global.tempLog(TEMP_LOG_TOPIC, "post-finish handling failed: " + e); //$NON-NLS-1$
             }
         });
     }
@@ -266,27 +247,6 @@ public final class DeployConfigurationFixHook implements IStartup
     private static String stripMnemonic(String text)
     {
         return text == null ? null : text.replace("&", ""); //$NON-NLS-1$ //$NON-NLS-2$
-    }
-
-    private static List<String> collectAllButtonTexts(Control root)
-    {
-        List<String> result = new ArrayList<>();
-        collectAllButtonTexts(root, result);
-        return result;
-    }
-
-    private static void collectAllButtonTexts(Control root, List<String> out)
-    {
-        if (root instanceof Button)
-        {
-            Button b = (Button) root;
-            out.add("[style=" + b.getStyle() + "] '" + b.getText() + "'"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        }
-        if (root instanceof Composite)
-        {
-            for (Control child : ((Composite) root).getChildren())
-                collectAllButtonTexts(child, out);
-        }
     }
 
     private static Button findButtonContaining(Control root, String snippet)
@@ -366,7 +326,6 @@ public final class DeployConfigurationFixHook implements IStartup
             }
             catch (IOException e)
             {
-                Global.tempLog(TEMP_LOG_TOPIC, "watcher start failed: " + e.getMessage()); //$NON-NLS-1$
                 return null;
             }
         }
@@ -436,7 +395,6 @@ public final class DeployConfigurationFixHook implements IStartup
             }
             catch (IOException e)
             {
-                Global.tempLog(TEMP_LOG_TOPIC, "handleCreated: " + e.getMessage()); //$NON-NLS-1$
             }
         }
 
@@ -464,7 +422,6 @@ public final class DeployConfigurationFixHook implements IStartup
             }
             catch (Exception e)
             {
-                Global.tempLog(TEMP_LOG_TOPIC, "patch failed for " + path + ": " + e.getMessage()); //$NON-NLS-1$
             }
         }
 

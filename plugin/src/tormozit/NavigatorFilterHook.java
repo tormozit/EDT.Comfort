@@ -357,6 +357,7 @@ public final class NavigatorFilterHook implements IStartup
         }
 
         storeNavigatorHookState(tree, viewer, highlight, rawLp);
+        FolderItemCountDecoration.installExpandRefresh(viewer, tree);
         tree.setData(PATCHED_KEY, Boolean.TRUE);
         tree.setData(SEARCH_CACHE_KEY, searchCache);
         tree.setData(HIGHLIGHT_KEY, highlight);
@@ -371,6 +372,10 @@ public final class NavigatorFilterHook implements IStartup
         if (viewer == null || tree == null || tree.isDisposed() || highlight == null)
             return;
         String safePattern = pattern != null ? pattern : ""; //$NON-NLS-1$
+        if (!safePattern.equals(tree.getData(LAST_PATTERN_KEY)))
+            // Число элементов считается по строкам дерева, т.е. уже после фильтра — при смене
+            // подстроки запомненные числа относятся к прежнему отбору.
+            FolderItemCountDecoration.invalidateCounts();
         if (searchCache != null)
             searchCache.onPatternChanged(safePattern);
         highlight.setHighlightPattern(safePattern);
@@ -414,6 +419,7 @@ public final class NavigatorFilterHook implements IStartup
                             labelSource, matchTextFn, searchCache)
                     : new NavigatorHighlightStyledProvider(null, filterLabels, NavigatorTreeElementLabels::isGroupNode,
                             labelSource, matchTextFn, searchCache);
+            smartLp.setCountViewer(viewer);
             smartLp.setHighlightPattern(initialPattern);
             injectStyledStringProvider(delegating, smartLp);
             SmartMatchHighlight.enableColorsOnSelection(delegating);
@@ -815,6 +821,8 @@ public final class NavigatorFilterHook implements IStartup
     {
         private final NavigatorSearchTextCache searchCache;
         private String highlightPattern = ""; //$NON-NLS-1$
+        /** Для поиска {@code TreeItem} элемента — см. {@link FolderItemCountDecoration}. */
+        private CommonViewer countViewer;
 
         NavigatorHighlightStyledProvider(IStyledLabelProvider baseStyled, ILabelProvider basePlain,
                 Predicate<Object> skipHighlight, Object labelSource, Function<Object, String> matchTextFn,
@@ -833,8 +841,20 @@ public final class NavigatorFilterHook implements IStartup
                 searchCache.onPatternChanged(highlightPattern);
         }
 
+        void setCountViewer(CommonViewer viewer)
+        {
+            countViewer = viewer;
+        }
+
         @Override
         public StyledString getStyledText(Object element)
+        {
+            // Серое число элементов папки — поверх готовой надписи, чтобы цифры не попадали
+            // в подсветку фильтра (её диапазоны считаются по тексту без суффикса).
+            return FolderItemCountDecoration.appendCount(highlightedStyledText(element), element, countViewer);
+        }
+
+        private StyledString highlightedStyledText(Object element)
         {
             StyledString styled = obtainBaseStyledText(element);
             if (highlightPattern.isEmpty())

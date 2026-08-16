@@ -1958,11 +1958,6 @@ public class CompareConfigMenuHook implements IStartup
             Composite outer = host.getParent();
             if (outer != null && !outer.isDisposed())
                 outer.layout(true, true);
-            Global.tempLog("compare-filter-checkbox", //$NON-NLS-1$
-                    "available=" + available + " label=" + labelWidth + " check=" + checkWidth //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        + " combo=" + comboWidth + " hostBounds=" + host.getBounds() //$NON-NLS-1$ //$NON-NLS-2$
-                        + " checkBounds=" + check.getBounds() //$NON-NLS-1$
-                        + " checkVisible=" + check.isVisible()); //$NON-NLS-1$
         }
 
         private static void applyFilterAwareChecksToggle(IEditorPart editor, boolean enabled)

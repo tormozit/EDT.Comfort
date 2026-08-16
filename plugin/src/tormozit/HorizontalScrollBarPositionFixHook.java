@@ -233,8 +233,6 @@ public class HorizontalScrollBarPositionFixHook implements IStartup
 
         private void onSelection(Event event)
         {
-            Global.tempLog("hScrollPosFix", "onSelection: detail=" + event.detail //$NON-NLS-1$ //$NON-NLS-2$
-                + " (DRAG=" + SWT.DRAG + ") x=" + event.x); //$NON-NLS-1$ //$NON-NLS-2$
             if (textWidget.isDisposed())
                 return;
             ScrollBar hBar = textWidget.getHorizontalBar();
@@ -296,14 +294,6 @@ public class HorizontalScrollBarPositionFixHook implements IStartup
                 ? min + Math.round(desiredThumbX * (float)selRange / maxThumbX)
                 : min;
             desiredSelection = clamp(desiredSelection, min, max - thumb);
-
-            Global.tempLog("hScrollPosFix", "onSelection: isDragEvent=" + isDragEvent + " min=" + min //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " max=" + max + " thumb=" + thumb //$NON-NLS-1$ //$NON-NLS-2$
-                + " textBoundsW=" + textBounds.width + " buttonWidth=" + buttonWidth + " trackWidth=" + trackWidth //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " cursor=" + cursor + " local=" + local + " cursorTrackX=" + cursorTrackX //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " dragOffsetPx=" + dragOffsetPx + " desiredThumbX=" + desiredThumbX //$NON-NLS-1$ //$NON-NLS-2$
-                + " nativeSelection=" + hBar.getSelection() + " currentPixel=" + textWidget.getHorizontalPixel() //$NON-NLS-1$ //$NON-NLS-2$
-                + " desiredSelection=" + desiredSelection); //$NON-NLS-1$
 
             if (desiredSelection != textWidget.getHorizontalPixel())
                 textWidget.setHorizontalPixel(desiredSelection);

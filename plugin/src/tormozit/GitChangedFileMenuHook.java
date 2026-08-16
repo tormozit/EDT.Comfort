@@ -1160,8 +1160,6 @@ public final class GitChangedFileMenuHook implements IStartup
 
         StringBuilder messageBuilder = new StringBuilder();
         List<OrphanedMdo> orphaned = findOrphanedMdo(files);
-        Global.tempLog("orphanedMdoFix", "replaceWithHeadRevision: files=" + files.size() //$NON-NLS-1$ //$NON-NLS-2$
-            + " orphaned=" + orphaned.stream().map(OrphanedMdo::enFullName).toList()); //$NON-NLS-1$
         if (!orphaned.isEmpty())
         {
             List<String> names = orphaned.stream().map(OrphanedMdo::ruFullName).toList();
@@ -1239,7 +1237,6 @@ public final class GitChangedFileMenuHook implements IStartup
             String ruFullName = GetRef.pathToFullName(relPath);
             if (ruFullName == null)
             {
-                Global.tempLog("orphanedMdoFix", "findOrphanedMdo: pathToFullName(null) для " + relPath); //$NON-NLS-1$ //$NON-NLS-2$
                 continue;
             }
             int dot = ruFullName.indexOf('.');
@@ -1248,8 +1245,6 @@ public final class GitChangedFileMenuHook implements IStartup
             String typeEn = MdTypeMapping.ruToEnSingRequired(ruFullName.substring(0, dot));
             if (typeEn == null)
             {
-                Global.tempLog("orphanedMdoFix", "findOrphanedMdo: ruToEnSingRequired(null) для " //$NON-NLS-1$ //$NON-NLS-2$
-                    + ruFullName.substring(0, dot));
                 continue;
             }
             String enFullName = typeEn + "." + ruFullName.substring(dot + 1); //$NON-NLS-1$
@@ -1257,8 +1252,6 @@ public final class GitChangedFileMenuHook implements IStartup
             IFile configurationMdo = findConfigurationMdo(file);
             if (configurationMdo == null)
             {
-                Global.tempLog("orphanedMdoFix", "findOrphanedMdo: findConfigurationMdo(null) для " //$NON-NLS-1$ //$NON-NLS-2$
-                    + file.getFullPath());
                 continue;
             }
 
@@ -1266,15 +1259,10 @@ public final class GitChangedFileMenuHook implements IStartup
                 files.contains(cfg) ? readHeadContent(cfg) : readWorkingCopyContent(cfg));
             if (configurationContent == null)
             {
-                Global.tempLog("orphanedMdoFix", "findOrphanedMdo: не удалось прочитать " //$NON-NLS-1$ //$NON-NLS-2$
-                    + configurationMdo.getFullPath() + " (headBatch=" + files.contains(configurationMdo) + ")"); //$NON-NLS-1$ //$NON-NLS-2$
                 continue; // не удалось прочитать — не блокируем операцию нашей проверкой
             }
 
             boolean alreadyPresent = configurationContent.contains(">" + enFullName + "<"); //$NON-NLS-1$ //$NON-NLS-2$
-            Global.tempLog("orphanedMdoFix", "findOrphanedMdo: file=" + file.getFullPath() //$NON-NLS-1$ //$NON-NLS-2$
-                + " enFullName=" + enFullName + " configurationMdo=" + configurationMdo.getFullPath() //$NON-NLS-1$ //$NON-NLS-2$
-                + " alreadyPresent=" + alreadyPresent); //$NON-NLS-1$
             if (!alreadyPresent)
                 orphaned.add(new OrphanedMdo(file, ruFullName, typeEn, enFullName, configurationMdo));
         }
@@ -1318,10 +1306,6 @@ public final class GitChangedFileMenuHook implements IStartup
     private static void applyOrphanFixesToOneConfiguration(IFile configurationMdo, List<OrphanedMdo> fixes,
         MultiStatus errors)
     {
-        String topic = "orphanedMdoFix"; //$NON-NLS-1$
-        Global.tempLog(topic, "applyOrphanFixesToOneConfiguration: start configurationMdo=" //$NON-NLS-1$ //$NON-NLS-2$
-            + configurationMdo.getFullPath() + " fixes=" //$NON-NLS-1$
-            + fixes.stream().map(OrphanedMdo::enFullName).toList());
         try
         {
             configurationMdo.refreshLocal(IResource.DEPTH_ZERO, null);
@@ -1342,7 +1326,6 @@ public final class GitChangedFileMenuHook implements IStartup
             {
                 if (content.contains(">" + fix.enFullName() + "<") || !insertedNow.add(fix.enFullName())) //$NON-NLS-1$ //$NON-NLS-2$
                 {
-                    Global.tempLog(topic, "пропущен (уже есть): " + fix.enFullName()); //$NON-NLS-1$ //$NON-NLS-2$
                     continue;
                 }
                 String folder = MdTypeMapping.enSingToFolder(fix.typeEn());
@@ -1392,19 +1375,16 @@ public final class GitChangedFileMenuHook implements IStartup
                 String newLine = indent + openTag + fix.enFullName() + closeTag;
                 lines.add(insertAt, newLine);
                 changed = true;
-                Global.tempLog(topic, "вставлено на позицию " + insertAt + ": " + newLine); //$NON-NLS-1$ //$NON-NLS-2$
             }
 
             if (!changed)
             {
-                Global.tempLog(topic, "нет изменений для записи"); //$NON-NLS-1$
                 return;
             }
 
             String newContent = String.join(eol, lines);
             if (!isWellFormedXml(newContent))
             {
-                Global.tempLog(topic, "валидация XML провалена — запись отменена, файл не тронут"); //$NON-NLS-1$ //$NON-NLS-2$
                 errors.add(new Status(IStatus.ERROR, Activator.PLUGIN_ID,
                     "Автопривязка отменена: результат текстовой вставки в " + configurationMdo.getFullPath() //$NON-NLS-1$
                         + " не прошёл проверку на валидность XML — файл НЕ изменён")); //$NON-NLS-1$
@@ -1416,12 +1396,9 @@ public final class GitChangedFileMenuHook implements IStartup
             {
                 configurationMdo.setContents(in, IResource.FORCE, null);
             }
-            Global.tempLog(topic, "записано: modificationStamp=" + configurationMdo.getModificationStamp() //$NON-NLS-1$ //$NON-NLS-2$
-                + " length=" + newContent.length()); //$NON-NLS-1$
         }
         catch (Exception e)
         {
-            Global.tempLog(topic, "исключение: " + e); //$NON-NLS-1$ //$NON-NLS-2$
             errors.add(new Status(IStatus.ERROR, Activator.PLUGIN_ID,
                 "Ошибка автопривязки к Configuration.mdo (" + configurationMdo.getFullPath() + "): " + e, e)); //$NON-NLS-1$ //$NON-NLS-2$
         }

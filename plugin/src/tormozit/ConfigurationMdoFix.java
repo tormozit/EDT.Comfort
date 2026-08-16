@@ -47,7 +47,6 @@ import org.eclipse.compare.CompareEditorInput;
  */
 public final class ConfigurationMdoFix
 {
-    private static final String TEMP_LOG_TOPIC = "ConfigurationMdoFix"; //$NON-NLS-1$
     private static final String TOAST_TITLE = "Комфорт"; //$NON-NLS-1$
     private static final String ACTION_LABEL = "Показать различия"; //$NON-NLS-1$
     private static final String CONFIGURATION_MDO = "Configuration.mdo"; //$NON-NLS-1$
@@ -67,7 +66,6 @@ public final class ConfigurationMdoFix
         IProject project = resolveProject(shell);
         if (project == null || !project.isAccessible())
         {
-            Global.tempLog(TEMP_LOG_TOPIC, "fixBeforeUnload: project not resolved"); //$NON-NLS-1$
             return;
         }
         List<FixedFile> fixed = fixProject(project);
@@ -89,13 +87,10 @@ public final class ConfigurationMdoFix
                 if (one != null)
                 {
                     fixed.add(one);
-                    Global.tempLog(TEMP_LOG_TOPIC, "file=" + mdo.getFullPath() //$NON-NLS-1$
-                        + " removed=" + one.removedCount()); //$NON-NLS-1$
                 }
             }
             catch (Exception e)
             {
-                Global.tempLog(TEMP_LOG_TOPIC, "fix failed for " + mdo.getFullPath() + ": " + e); //$NON-NLS-1$ //$NON-NLS-2$
             }
         }
         return fixed;
@@ -123,7 +118,6 @@ public final class ConfigurationMdoFix
         }
         catch (Exception e)
         {
-            Global.tempLog(TEMP_LOG_TOPIC, "findConfigurationMdos ext: " + e); //$NON-NLS-1$
         }
         return result;
     }
@@ -171,8 +165,6 @@ public final class ConfigurationMdoFix
         String newContent = String.join(eol, kept);
         if (!isWellFormedXml(newContent))
         {
-            Global.tempLog(TEMP_LOG_TOPIC, "XML validation failed, file not written: " //$NON-NLS-1$
-                + configurationMdo.getFullPath());
             return null;
         }
 
@@ -208,7 +200,6 @@ public final class ConfigurationMdoFix
         }
         catch (Exception e)
         {
-            Global.tempLog(TEMP_LOG_TOPIC, "resolveProject fallback: " + e); //$NON-NLS-1$
             return null;
         }
     }
@@ -278,7 +269,6 @@ public final class ConfigurationMdoFix
         }
         catch (Exception e)
         {
-            Global.tempLog(TEMP_LOG_TOPIC, "isWellFormedXml: " + e); //$NON-NLS-1$
             return false;
         }
     }
@@ -318,7 +308,6 @@ public final class ConfigurationMdoFix
             }
             catch (Exception e)
             {
-                Global.tempLog(TEMP_LOG_TOPIC, "openDiffs: " + e); //$NON-NLS-1$
                 ToastNotification.show(TOAST_TITLE,
                     "Не удалось открыть сравнение: " + e.getMessage(), 5_000); //$NON-NLS-1$
             }

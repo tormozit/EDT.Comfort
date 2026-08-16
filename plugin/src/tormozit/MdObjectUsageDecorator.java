@@ -62,19 +62,14 @@ public final class MdObjectUsageDecorator extends LabelProvider implements ILigh
         {
             IDecoratorManager manager = PlatformUI.getWorkbench().getDecoratorManager();
             boolean enabled = manager.getEnabled(DECORATOR_ID);
-            Global.tempLog("md-usage-decorator", "ensureEnabledOnce: enabled=" + enabled //$NON-NLS-1$ //$NON-NLS-2$
-                + " autoDone=" + (store != null && store.getBoolean(PREF_AUTO_ENABLED))); //$NON-NLS-1$
             if (store != null && store.getBoolean(PREF_AUTO_ENABLED))
                 return;
             if (!enabled)
                 manager.setEnabled(DECORATOR_ID, true);
-            Global.tempLog("md-usage-decorator", "ensureEnabledOnce: after setEnabled=" //$NON-NLS-1$
-                + manager.getEnabled(DECORATOR_ID));
         }
         catch (Exception ex)
         {
             Global.log("MdObjectUsageDecorator ensureEnabledOnce error: " + ex); //$NON-NLS-1$
-            Global.tempLog("md-usage-decorator", "ensureEnabledOnce ERROR: " + ex); //$NON-NLS-1$
         }
         finally
         {

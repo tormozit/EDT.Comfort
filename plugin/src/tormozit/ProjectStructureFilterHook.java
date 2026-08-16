@@ -496,7 +496,6 @@ public final class ProjectStructureFilterHook implements IStartup
 
     private static void probe(String text)
     {
-        Global.tempLog("project-structure-filter", text); //$NON-NLS-1$
     }
 
     /**
