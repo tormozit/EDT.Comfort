@@ -33,7 +33,15 @@ public final class CommonModuleGroupSorter extends TreePathViewerSorter
         this.delegate = delegate;
     }
 
-    /** Ставит обёртку один раз на компаратор навигатора. */
+    /**
+     * Ставит обёртку один раз на компаратор навигатора.
+     *
+     * <p>Вызывается из {@code inputChanged} контент-провайдера CNF, а тот инициализируется лениво —
+     * прямо внутри {@code createChildren}/{@code setSelectionToWidget} дерева. В этот момент viewer
+     * занят, и {@code setComparator} → {@code refresh()} JFace молча гасит («Ignored reentrant call
+     * while viewer is busy»), т.е. пересортировка теряется. Поэтому установка откладывается на
+     * следующий цикл событий, когда viewer уже свободен и refresh реально отрабатывает.
+     */
     static void installOn(Viewer viewer)
     {
         if (!(viewer instanceof StructuredViewer structured))
@@ -41,10 +49,16 @@ public final class CommonModuleGroupSorter extends TreePathViewerSorter
         Control control = structured.getControl();
         if (control == null || control.isDisposed())
             return;
-        ViewerComparator current = structured.getComparator();
-        if (current instanceof CommonModuleGroupSorter)
+        if (structured.getComparator() instanceof CommonModuleGroupSorter)
             return;
-        structured.setComparator(new CommonModuleGroupSorter(current));
+        control.getDisplay().asyncExec(() -> {
+            if (control.isDisposed())
+                return;
+            ViewerComparator current = structured.getComparator();
+            if (current instanceof CommonModuleGroupSorter)
+                return;
+            structured.setComparator(new CommonModuleGroupSorter(current));
+        });
     }
 
     @Override
