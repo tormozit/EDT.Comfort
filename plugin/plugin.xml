@@ -47,6 +47,7 @@
     <startup class="tormozit.MdEditorAttributeMenuHook"/>
     <startup class="tormozit.MdEditorFunctionalOptionsCountHook"/>
     <startup class="tormozit.MdEditorSubsystemsExpandHook"/>
+    <startup class="tormozit.MdEditorMarkerMessageHook"/>
     <startup class="tormozit.EventHandlersFilterHook"/>
     <startup class="tormozit.EventHandlersOpenHandlerHook"/>
     <!-- ГЛОБАЛЬНЫЙ СКАН ОТКЛЮЧЁН ОКОНЧАТЕЛЬНО (issue #165), 2026-07-20. История фиксов: v1

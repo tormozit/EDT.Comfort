@@ -2,7 +2,6 @@ package tormozit;
 
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -10,8 +9,6 @@ import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
-import org.eclipse.core.commands.Command;
-import org.eclipse.core.commands.ParameterizedCommand;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.emf.common.util.TreeIterator;
@@ -19,10 +16,7 @@ import org.eclipse.emf.ecore.EObject;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.IWorkbenchWindow;
-import org.eclipse.ui.PartInitException;
 import org.eclipse.ui.PlatformUI;
-import org.eclipse.ui.commands.ICommandService;
-import org.eclipse.ui.handlers.IHandlerService;
 
 import com._1c.g5.v8.bm.core.IBmObject;
 import com._1c.g5.v8.bm.integration.IBmModel;
@@ -68,11 +62,6 @@ public final class ComfortCheckRecompute
 
     /** Сколько ждать завершения перепроверки в фоне, прежде чем сообщить о таймауте. */
     private static final long WAIT_COMPLETION_TIMEOUT_MS = 60_000L;
-
-    /** Команда панели «Ошибки конфигурации» для переключения области отбора (radio). */
-    private static final String SCOPE_COMMAND_ID = "com._1c.g5.v8.dt.ui.command.filtersScopeRadio"; //$NON-NLS-1$
-    private static final String SCOPE_PARAMETER_ID = "org.eclipse.ui.commands.radioStateParameter"; //$NON-NLS-1$
-    private static final String SCOPE_CURRENT_OBJECT = "CURRENT_OBJECT"; //$NON-NLS-1$
 
     private ComfortCheckRecompute() {}
 
@@ -299,11 +288,9 @@ public final class ComfortCheckRecompute
     }
 
     /**
-     * По клику на тост: для одного проверенного объекта — активирует его редактор и переключает
-     * область отбора панели «Ошибки конфигурации» на «Текущий объект» (штатная команда
-     * {@value #SCOPE_COMMAND_ID}, см. {@code plugin.xml} бандла {@code com._1c.g5.v8.dt.ui.validation}),
-     * чтобы в панели остались только его ошибки; затем выводит панель на передний план.
-     * Для нескольких объектов «текущий объект» не имеет смысла — просто показывает панель как есть.
+     * По клику на тост: для одного проверенного объекта — активирует его редактор и открывает
+     * панель «Ошибки конфигурации» с отбором «Текущий объект». Для нескольких объектов
+     * «текущий объект» не имеет смысла — просто показывает панель как есть.
      */
     private static void showResults(Collection<? extends EObject> objects)
     {
@@ -322,37 +309,11 @@ public final class ComfortCheckRecompute
             catch (RuntimeException ignored)
             {
             }
-            // Переключение области — после открытия редактора: панель определяет «текущий объект»
-            // по активной части (редактору), а showView ниже сразу же увёл бы фокус на панель.
-            switchScopeToCurrentObject();
+            ProblemViewMarkers.showForCurrentObject();
+            return;
         }
 
-        try
-        {
-            page.showView(ProblemViewMarkers.PROBLEM_VIEW_ID);
-        }
-        catch (PartInitException ignored)
-        {
-        }
-    }
-
-    private static void switchScopeToCurrentObject()
-    {
-        try
-        {
-            ICommandService commandService = PlatformUI.getWorkbench().getService(ICommandService.class);
-            IHandlerService handlerService = PlatformUI.getWorkbench().getService(IHandlerService.class);
-            if (commandService == null || handlerService == null)
-                return;
-            Command command = commandService.getCommand(SCOPE_COMMAND_ID);
-            Map<String, Object> parameters = new HashMap<>();
-            parameters.put(SCOPE_PARAMETER_ID, SCOPE_CURRENT_OBJECT);
-            ParameterizedCommand parameterizedCommand = ParameterizedCommand.generateCommand(command, parameters);
-            handlerService.executeCommand(parameterizedCommand, null);
-        }
-        catch (Exception ignored)
-        {
-        }
+        ProblemViewMarkers.show();
     }
 
     /**

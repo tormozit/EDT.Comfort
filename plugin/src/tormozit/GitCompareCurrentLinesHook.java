@@ -817,6 +817,38 @@ public final class GitCompareCurrentLinesHook
             Shell shell = pane.getShell();
             OccurrencesToggleHook.markShellHandled(shell);
             OccurrencesToggleHook.removeDialogItems(shell);
+
+            /*
+             * Кнопка «Показать в модуле» добавлена — с этого момента отслеживаем окно
+             * для «Последних мест» (см. CompareRecentPlacesTracker): редактор сравнения
+             * длительно активен → текущий метод модуля рабочей копии (или сам модуль,
+             * если каретка вне метода). Только у рабочей копии есть реальный файл —
+             * тем же правилом живёт и сама кнопка. Метод — по каретке фокусной панели;
+             * если фокус в панели без файла, строка мапится в панель рабочей копии.
+             */
+            CompareRecentPlacesTracker.track(shell, () -> {
+                if (workingCopyFile == null || workingCopyText == null || workingCopyText.isDisposed())
+                    return null;
+                if (!isActiveEditor(editor))
+                    return null;
+                StyledText leftPane = MergeViewerReflection.extractStyledText(viewer, "fLeft"); //$NON-NLS-1$
+                StyledText rightPane = MergeViewerReflection.extractStyledText(viewer, "fRight"); //$NON-NLS-1$
+                return CompareRecentPlacesTracker.forTwoSides(workingCopyFile, workingCopyText,
+                    workingCopyText == leftPane ? rightPane : leftPane);
+            });
+        }
+    }
+
+    /** Редактор сравнения ещё открыт и активен (в одном окне может быть несколько таких вкладок). */
+    private static boolean isActiveEditor(IEditorPart editor)
+    {
+        try
+        {
+            return editor != null && editor.getEditorSite().getPage().getActiveEditor() == editor;
+        }
+        catch (Exception e)
+        {
+            return false;
         }
     }
 

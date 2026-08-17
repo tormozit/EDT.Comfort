@@ -1,6 +1,8 @@
 package tormozit;
 
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.List;
 import java.util.Set;
 import java.util.WeakHashMap;
 
@@ -22,7 +24,9 @@ import org.eclipse.jface.viewers.StructuredSelection;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.StyleRange;
 import org.eclipse.swt.custom.StyledText;
+import org.eclipse.swt.graphics.Color;
 import org.eclipse.swt.graphics.Point;
+import org.eclipse.swt.graphics.RGB;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
@@ -58,6 +62,9 @@ import org.eclipse.ui.services.IServiceLocator;
 import com._1c.g5.v8.dt.core.platform.IV8Project;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
+import com._1c.g5.v8.dt.metadata.mdclass.BasicForm;
+import com._1c.g5.v8.dt.metadata.mdclass.BasicTemplate;
+import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 
 /**
@@ -78,7 +85,9 @@ import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
  *
  * <p>Ссылкой становится сегмент заголовка, точно совпадающий с именем модели редактора,
  * — то есть имя самого объекта, а не тип и не название текущей страницы. Поэтому
- * положение ссылки не зависит от того, какая страница открыта.
+ * положение ссылки не зависит от того, какая страница открыта. В редакторе формы или
+ * макета то же для имени объекта-владельца ({@code Справочник.Валюты.Форма.…} —
+ * кликабельны и {@code Валюты}, и имя формы).
  *
  * <p>Меню — не копия, а само меню навигатора: панель «Навигатор» делается активной частью,
  * объект выделяется в дереве ({@code selectReveal}), затем показывается {@link Menu} дерева.
@@ -344,8 +353,8 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
     // =========================================================================
 
     /**
-     * Оформляет имя объекта в заголовке как гиперссылку и открывает по щелчку меню
-     * навигатора.
+     * Оформляет имя объекта (и владельца формы/макета) в заголовке как гиперссылку
+     * и открывает по щелчку меню навигатора.
      */
     private static final class TitleObjectLink
     {
@@ -353,26 +362,17 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
 
         private final Form form;
 
-        private final MdObject mdObject;
-
         /** Редактор, которому возвращается фокус после закрытия меню. */
         private final IEditorPart editor;
 
-        /** Начало имени объекта в тексте заголовка; {@code -1} — имя не найдено. */
-        private int nameStart = -1;
+        /** Ссылки в заголовке: объект редактора и, если есть, его владелец. */
+        private final LinkedName[] names;
 
-        private int nameLength;
+        /** Нажатие левой кнопки пришлось на имя — ждём отпускания на том же имени. */
+        private LinkedName pressedName;
 
-        /** Нажатие левой кнопки пришлось на имя объекта — ждём отпускания там же. */
-        private boolean pressedOnName;
-
-        /** Экземпляр объекта из BM-модели проекта; вычисляется лениво (см. {@link #menuObject}). */
-        private MdObject bmObject;
-
-        /** Своё меню (ветка «объект скрыт фильтром»): создаётся один раз, живёт с редактором. */
-        private MenuManager ownManager;
-
-        private Menu ownMenu;
+        /** Смесь цвета гиперссылки с цветом текста заголовка; свой ресурс, dispose при уничтожении. */
+        private Color linkColor;
 
         /** Идёт запись отформатированного заголовка — не входить в {@link #applyLinkStyle} рекурсивно. */
         private boolean applyingTitle;
@@ -381,13 +381,17 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
         {
             this.form = form;
             this.titleText = titleText;
-            this.mdObject = mdObject;
             this.editor = editor;
+            this.names = linkedNames(mdObject, editor);
 
             applyLinkStyle();
 
             // EDT переустанавливает заголовок при обновлении модели — стиль надо вернуть
-            titleText.addListener(SWT.Dispose, event -> disposeOwnMenu());
+            titleText.addListener(SWT.Dispose, event ->
+            {
+                disposeOwnMenus();
+                disposeLinkColor();
+            });
             titleText.addListener(SWT.Modify, event -> applyLinkStyle());
             titleText.addListener(SWT.MouseMove, event -> updateHover(event.x, event.y));
             titleText.addListener(SWT.MouseExit, event -> updateHover(-1, -1));
@@ -395,21 +399,30 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
             // запускает вложенный цикл событий, и MouseUp уходит в меню — StyledText
             // остаётся в режиме протягивания выделения, будто кнопка всё ещё нажата.
             titleText.addListener(SWT.MouseDown, event ->
-                pressedOnName = event.button == 1 && isOnName(event.x, event.y));
+                pressedName = event.button == 1 ? nameAt(event.x, event.y) : null);
             titleText.addListener(SWT.MouseUp, event ->
             {
                 // Непустое выделение — пользователь выделял текст заголовка, а не щёлкал ссылку
-                boolean click = pressedOnName && event.button == 1
+                LinkedName clicked = pressedName;
+                pressedName = null;
+                boolean click = clicked != null && event.button == 1
                     && titleText.getSelectionCount() == 0
-                    && isOnName(event.x, event.y);
-                pressedOnName = false;
+                    && nameAt(event.x, event.y) == clicked;
                 if (click)
-                    openNavigatorMenu();
+                    openNavigatorMenu(clicked);
             });
         }
 
+        private static LinkedName[] linkedNames(MdObject mdObject, IEditorPart editor)
+        {
+            MdObject owner = findOwnerMdObject(mdObject, editor);
+            if (owner == null || owner == mdObject)
+                return new LinkedName[] { new LinkedName(mdObject, false) };
+            return new LinkedName[] { new LinkedName(owner, true), new LinkedName(mdObject, false) };
+        }
+
         /**
-         * Красит имя объекта цветом гиперссылки. Диапазоны именно заменяются, а не
+         * Красит имена объектов цветом гиперссылки. Диапазоны именно заменяются, а не
          * добавляются: иначе после смены текста остаётся стиль от прошлого заголовка.
          */
         private void applyLinkStyle()
@@ -435,44 +448,147 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
                 }
                 text = titleText.getText();
             }
-            nameStart = findNameStart(text, mdObject.getName());
-            nameLength = nameStart < 0 ? 0 : mdObject.getName().length();
-            if (nameStart < 0)
+
+            locateNames(text);
+            List<StyleRange> ranges = new ArrayList<>();
+            for (LinkedName name : names)
             {
-                titleText.setStyleRanges(new StyleRange[0]);
+                if (name.start < 0)
+                    continue;
+                // Без подчёркивания: имена объектов часто начинаются с «_» («_ДемоКассы»),
+                // и линия ссылки сливается с самим символом подчёркивания в имени.
+                ranges.add(new StyleRange(name.start, name.length, linkForeground(), null));
+            }
+            ranges.sort((left, right) -> Integer.compare(left.start, right.start));
+            titleText.setStyleRanges(ranges.toArray(StyleRange[]::new));
+        }
+
+        /**
+         * Цвет гиперссылки, сдвинутый на 30% к цвету текста заголовка — ссылка остаётся
+         * отличимой, но не спорит с шапкой.
+         */
+        private Color linkForeground()
+        {
+            Color hyperlink = JFaceColors.getHyperlinkText(titleText.getDisplay());
+            Color base = titleText.getForeground();
+            if (hyperlink == null || hyperlink.isDisposed())
+                return base;
+            if (base == null || base.isDisposed())
+                return hyperlink;
+            RGB desired = blendTowards(hyperlink.getRGB(), base.getRGB(), 0.30);
+            if (linkColor != null && !linkColor.isDisposed() && linkColor.getRGB().equals(desired))
+                return linkColor;
+            disposeLinkColor();
+            linkColor = new Color(titleText.getDisplay(), desired);
+            return linkColor;
+        }
+
+        /** {@code amount} = 0 — {@code from}, 1 — {@code to}. */
+        private static RGB blendTowards(RGB from, RGB to, double amount)
+        {
+            int r = (int) Math.round(from.red + (to.red - from.red) * amount);
+            int g = (int) Math.round(from.green + (to.green - from.green) * amount);
+            int b = (int) Math.round(from.blue + (to.blue - from.blue) * amount);
+            return new RGB(clampChannel(r), clampChannel(g), clampChannel(b));
+        }
+
+        private static int clampChannel(int value)
+        {
+            if (value < 0)
+                return 0;
+            if (value > 255)
+                return 255;
+            return value;
+        }
+
+        private void disposeLinkColor()
+        {
+            if (linkColor == null || linkColor.isDisposed())
+            {
+                linkColor = null;
                 return;
             }
+            linkColor.dispose();
+            linkColor = null;
+        }
 
-            // Без подчёркивания: имена объектов часто начинаются с «_» («_ДемоКассы»),
-            // и линия ссылки сливается с самим символом подчёркивания в имени.
-            StyleRange link = new StyleRange(nameStart, nameLength,
-                JFaceColors.getHyperlinkText(titleText.getDisplay()), null);
-            titleText.setStyleRanges(new StyleRange[] { link });
+        /**
+         * Имя редактируемого объекта — самое правое вхождение (оно ближе к концу пути),
+         * владелец — самое левое, не пересекающееся с уже занятым диапазоном. Так два
+         * одинаковых имени (форма названа как справочник) попадают на разные сегменты.
+         */
+        private void locateNames(String title)
+        {
+            for (LinkedName name : names)
+            {
+                name.start = -1;
+                name.length = 0;
+            }
+            for (LinkedName name : names)
+            {
+                if (!name.owner)
+                {
+                    name.start = findNameStart(title, name.mdObject.getName(), true, -1, 0);
+                    name.length = name.start < 0 ? 0 : name.mdObject.getName().length();
+                    break;
+                }
+            }
+            LinkedName self = selfName();
+            int occupiedStart = self == null ? -1 : self.start;
+            int occupiedLength = self == null ? 0 : self.length;
+            for (LinkedName name : names)
+            {
+                if (!name.owner)
+                    continue;
+                name.start = findNameStart(title, name.mdObject.getName(), false,
+                    occupiedStart, occupiedLength);
+                name.length = name.start < 0 ? 0 : name.mdObject.getName().length();
+            }
+        }
+
+        private LinkedName selfName()
+        {
+            for (LinkedName name : names)
+            {
+                if (!name.owner)
+                    return name;
+            }
+            return names.length == 0 ? null : names[0];
         }
 
         /**
          * Начало сегмента заголовка, точно совпадающего с именем объекта. Соседние символы
          * не должны быть частью имени — иначе «Валюты» нашлось бы внутри «ВалютыСписок».
          *
+         * @param last {@code true} — последнее подходящее вхождение, {@code false} — первое
+         * @param skipStart занятый диапазон, который нельзя пересечь; {@code -1} — нет
          * @return {@code -1}, если такого сегмента нет
          */
-        private static int findNameStart(String title, String name)
+        private static int findNameStart(String title, String name, boolean last,
+            int skipStart, int skipLength)
         {
             if (title == null || name == null || name.isEmpty())
                 return -1;
 
             int from = 0;
+            int found = -1;
             while (true)
             {
                 int index = title.indexOf(name, from);
                 if (index < 0)
-                    return -1;
+                    return found;
 
                 boolean leftFree = index == 0 || !isNameChar(title.charAt(index - 1));
                 int after = index + name.length();
                 boolean rightFree = after >= title.length() || !isNameChar(title.charAt(after));
-                if (leftFree && rightFree)
-                    return index;
+                boolean overlapsSkip = skipLength > 0 && skipStart >= 0
+                    && index < skipStart + skipLength && after > skipStart;
+                if (leftFree && rightFree && !overlapsSkip)
+                {
+                    if (!last)
+                        return index;
+                    found = index;
+                }
 
                 from = index + 1;
             }
@@ -489,7 +605,7 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
             if (titleText.isDisposed())
                 return;
 
-            boolean onName = isOnName(x, y);
+            boolean onName = nameAt(x, y) != null;
             titleText.setCursor(titleText.getDisplay()
                 .getSystemCursor(onName ? SWT.CURSOR_HAND : SWT.CURSOR_IBEAM));
             titleText.setToolTipText(onName
@@ -497,26 +613,32 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
                 : null);
         }
 
-        private boolean isOnName(int x, int y)
+        private LinkedName nameAt(int x, int y)
         {
-            if (nameStart < 0 || titleText.isDisposed())
-                return false;
+            if (titleText.isDisposed())
+                return null;
+            int offset;
             try
             {
-                int offset = titleText.getOffsetAtPoint(new Point(x, y));
-                return offset >= nameStart && offset < nameStart + nameLength;
+                offset = titleText.getOffsetAtPoint(new Point(x, y));
             }
             catch (IllegalArgumentException e)
             {
-                return false; // точка вне текста
+                return null; // точка вне текста
             }
+            for (LinkedName name : names)
+            {
+                if (name.start >= 0 && offset >= name.start && offset < name.start + name.length)
+                    return name;
+            }
+            return null;
         }
 
         /**
          * Выделяет объект в навигаторе и показывает меню его дерева под именем объекта.
          * Панель «Навигатор» не активируется — фокус остаётся в редакторе.
          */
-        private void openNavigatorMenu()
+        private void openNavigatorMenu(LinkedName name)
         {
             try
             {
@@ -529,18 +651,18 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
                     return;
                 }
 
-                navigator.selectReveal(new StructuredSelection(mdObject));
+                navigator.selectReveal(new StructuredSelection(name.mdObject));
 
-                if (isObjectRevealed(viewer))
+                if (isObjectRevealed(viewer, name.mdObject))
                 {
-                    showNavigatorMenu(navigator, viewer);
+                    showNavigatorMenu(navigator, viewer, name);
                     return;
                 }
 
                 // Строка скрыта фильтром навигатора — выделить её нельзя (SWT-элемента нет),
                 // а без выделения штатное меню строится «ни для чего». Собираем своё из тех же
                 // источников, но с нашим выделением.
-                showOwnMenu(navigator);
+                showOwnMenu(navigator, name);
             }
             catch (Exception e)
             {
@@ -554,7 +676,7 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
          * <p>Сравнение по URI, а не по ссылке: навигатор и редактор держат разные экземпляры
          * одного объекта, поэтому сравнение по ссылке здесь всегда даёт {@code false}.
          */
-        private boolean isObjectRevealed(CommonViewer viewer)
+        private static boolean isObjectRevealed(CommonViewer viewer, MdObject mdObject)
         {
             Object selected = viewer.getStructuredSelection().getFirstElement();
             return selected instanceof EObject eObject
@@ -562,13 +684,13 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
         }
 
         /** Штатное меню дерева навигатора — объект в дереве выделен, подменять нечего. */
-        private void showNavigatorMenu(CommonNavigator navigator, CommonViewer viewer)
+        private void showNavigatorMenu(CommonNavigator navigator, CommonViewer viewer, LinkedName name)
         {
             Menu menu = viewer.getTree().getMenu();
             if (menu == null || menu.isDisposed())
                 return;
             hookMenuClose(menu, null);
-            menu.setLocation(menuLocation());
+            menu.setLocation(menuLocation(name));
             menu.setVisible(true);
         }
 
@@ -593,19 +715,19 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
          * extender в сайт навигатора, и делать это на каждый щелчок нельзя. Содержимое
          * пересобирается при каждом показе ({@code setRemoveAllWhenShown}).
          */
-        private void showOwnMenu(CommonNavigator navigator)
+        private void showOwnMenu(CommonNavigator navigator, LinkedName name)
         {
-            IStructuredSelection selection = new StructuredSelection(menuObject());
+            IStructuredSelection selection = new StructuredSelection(menuObject(name));
             SelectionSpoof spoof = SelectionSpoof.apply(navigator, selection);
 
-            if (ownMenu == null || ownMenu.isDisposed())
-                createOwnMenu(navigator, selection);
-            if (ownMenu == null)
+            if (name.ownMenu == null || name.ownMenu.isDisposed())
+                createOwnMenu(navigator, selection, name);
+            if (name.ownMenu == null)
                 return;
 
-            hookMenuClose(ownMenu, spoof);
-            ownMenu.setLocation(menuLocation());
-            ownMenu.setVisible(true);
+            hookMenuClose(name.ownMenu, spoof);
+            name.ownMenu.setLocation(menuLocation(name));
+            name.ownMenu.setVisible(true);
         }
 
         /**
@@ -622,33 +744,33 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
          *
          * @return BM-экземпляр объекта, а если его не удалось получить — экземпляр редактора
          */
-        private MdObject menuObject()
+        private MdObject menuObject(LinkedName name)
         {
-            if (bmObject != null)
-                return bmObject;
+            if (name.bmObject != null)
+                return name.bmObject;
 
-            bmObject = mdObject;
+            name.bmObject = name.mdObject;
             try
             {
                 IProject project = Global.getActiveProject(editor, false);
                 IV8ProjectManager projectManager = Global.getOsgiService(IV8ProjectManager.class);
                 IV8Project v8Project = project == null || projectManager == null
                     ? null : projectManager.getProject(project);
-                String fullName = GetRef.eObjectToFullName(mdObject);
+                String fullName = GetRef.eObjectToFullName(name.mdObject);
                 if (v8Project != null && fullName != null
                     && GoToDefinition.resolveEObjectByQualifiedName(fullName, v8Project) instanceof MdObject resolved)
                 {
-                    bmObject = resolved;
+                    name.bmObject = resolved;
                 }
             }
             catch (Exception e)
             {
                 Global.logError(TAG, "resolve BM instance", e); //$NON-NLS-1$
             }
-            return bmObject;
+            return name.bmObject;
         }
 
-        private void createOwnMenu(CommonNavigator navigator, IStructuredSelection selection)
+        private void createOwnMenu(CommonNavigator navigator, IStructuredSelection selection, LinkedName name)
         {
             try
             {
@@ -668,16 +790,16 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
                 actionService.prepareMenuForPlatformContributions(manager,
                     new FixedSelectionProvider(selection), true);
 
-                ownManager = manager;
-                ownMenu = manager.createContextMenu(titleText);
+                name.ownManager = manager;
+                name.ownMenu = manager.createContextMenu(titleText);
 
                 // Подменю «Комфорт» добавляется SWT-пунктами, а менеджер меню создан с
                 // setRemoveAllWhenShown: при показе он очищает меню и строит заново. Поэтому
                 // наполняем в своём SWT.Show — он добавлен после слушателя менеджера, то есть
                 // отработает уже по готовому меню. Пункты, работающие с деревом навигатора
                 // («Свернуть все другие»), сюда не попадают: они не регистрируются как внешние.
-                ownMenu.addListener(SWT.Show, event ->
-                    ComfortSubmenuHelper.fillExternalMenu(ownMenu, navigator, selection));
+                name.ownMenu.addListener(SWT.Show, event ->
+                    ComfortSubmenuHelper.fillExternalMenu(name.ownMenu, navigator, selection));
             }
             catch (Exception e)
             {
@@ -799,21 +921,27 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
             menu.addListener(SWT.Hide, onHide[0]);
         }
 
-        /** Своё меню живёт вместе с редактором — освобождается при уничтожении заголовка. */
-        private void disposeOwnMenu()
+        /** Свои меню живут вместе с редактором — освобождаются при уничтожении заголовка. */
+        private void disposeOwnMenus()
         {
-            if (ownManager == null)
+            for (LinkedName name : names)
+                disposeOwnMenu(name);
+        }
+
+        private static void disposeOwnMenu(LinkedName name)
+        {
+            if (name.ownManager == null)
                 return;
             try
             {
-                ownManager.dispose();
+                name.ownManager.dispose();
             }
             catch (Exception e)
             {
                 Global.logError(TAG, "dispose own menu", e); //$NON-NLS-1$
             }
-            ownManager = null;
-            ownMenu = null;
+            name.ownManager = null;
+            name.ownMenu = null;
         }
 
         private static boolean isNavigatorActive()
@@ -825,10 +953,127 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
         }
 
         /** Точка под именем объекта в экранных координатах. */
-        private Point menuLocation()
+        private Point menuLocation(LinkedName name)
         {
-            Point at = titleText.getLocationAtOffset(nameStart);
+            int start = name.start < 0 ? 0 : name.start;
+            Point at = titleText.getLocationAtOffset(start);
             return titleText.toDisplay(at.x, at.y + titleText.getLineHeight());
+        }
+
+        /**
+         * Владелец формы или макета — объект метаданных, в котором они лежат
+         * ({@code Справочник.Валюты} для {@code Справочник.Валюты.Форма.ФормаСписка}).
+         * Общие форма и макет принадлежат конфигурации — для них {@code null}.
+         */
+        private static MdObject findOwnerMdObject(MdObject child, IEditorPart editor)
+        {
+            MdObject owner = ownerFromContainer(child);
+            if (owner != null)
+                return isNestedFormOrTemplate(child) ? owner : null;
+            if (!isNestedFormOrTemplate(child))
+                return null;
+            return resolveOwnerByFullName(child, editor);
+        }
+
+        private static boolean isNestedFormOrTemplate(MdObject child)
+        {
+            if (child instanceof BasicForm || child instanceof BasicTemplate)
+            {
+                for (EObject current = child.eContainer(); current != null; current = current.eContainer())
+                {
+                    if (current instanceof Configuration)
+                        return false;
+                    if (current instanceof MdObject)
+                        return true;
+                }
+            }
+            return ownerFullName(GetRef.eObjectToFullName(child)) != null;
+        }
+
+        private static MdObject ownerFromContainer(MdObject child)
+        {
+            for (EObject current = child.eContainer(); current != null; current = current.eContainer())
+            {
+                if (current instanceof Configuration)
+                    return null;
+                if (current instanceof MdObject owner)
+                {
+                    String name = owner.getName();
+                    if (name != null && !name.isEmpty())
+                        return owner;
+                }
+            }
+            return null;
+        }
+
+        private static MdObject resolveOwnerByFullName(MdObject child, IEditorPart editor)
+        {
+            String ownerName = ownerFullName(GetRef.eObjectToFullName(child));
+            if (ownerName == null)
+                return null;
+            try
+            {
+                IProject project = Global.getActiveProject(editor, false);
+                IV8ProjectManager projectManager = Global.getOsgiService(IV8ProjectManager.class);
+                IV8Project v8Project = project == null || projectManager == null
+                    ? null : projectManager.getProject(project);
+                if (v8Project != null
+                    && GoToDefinition.resolveEObjectByQualifiedName(ownerName, v8Project) instanceof MdObject resolved)
+                {
+                    return resolved;
+                }
+            }
+            catch (Exception e)
+            {
+                Global.logError(TAG, "resolve owner MdObject", e); //$NON-NLS-1$
+            }
+            return null;
+        }
+
+        /**
+         * Полное имя владельца вложенной формы или макета:
+         * {@code Справочник.Валюты.Форма.ФормаСписка} → {@code Справочник.Валюты}.
+         */
+        private static String ownerFullName(String fullName)
+        {
+            if (fullName == null || fullName.isEmpty())
+                return null;
+            int lastDot = fullName.lastIndexOf('.');
+            if (lastDot <= 0)
+                return null;
+            String withoutObjectName = fullName.substring(0, lastDot);
+            int typeDot = withoutObjectName.lastIndexOf('.');
+            if (typeDot <= 0)
+                return null;
+            String nestedType = withoutObjectName.substring(typeDot + 1);
+            if (!"Форма".equals(nestedType) && !"Макет".equals(nestedType)) //$NON-NLS-1$ //$NON-NLS-2$
+                return null;
+            return withoutObjectName.substring(0, typeDot);
+        }
+
+        /** Имя в заголовке, ведущее в меню навигатора для конкретного объекта. */
+        private static final class LinkedName
+        {
+            final MdObject mdObject;
+
+            /** {@code true} — владелец формы/макета, {@code false} — объект редактора. */
+            final boolean owner;
+
+            int start = -1;
+
+            int length;
+
+            MdObject bmObject;
+
+            MenuManager ownManager;
+
+            Menu ownMenu;
+
+            LinkedName(MdObject mdObject, boolean owner)
+            {
+                this.mdObject = mdObject;
+                this.owner = owner;
+            }
         }
 
         /**

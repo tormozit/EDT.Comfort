@@ -37,7 +37,7 @@ final class RecentPlacesKeys
         return stripModuleTypeSuffix(trimmed);
     }
 
-    private static String stripModuleTypeSuffix(String modulePath)
+    static String stripModuleTypeSuffix(String modulePath)
     {
         if (modulePath == null)
             return ""; //$NON-NLS-1$

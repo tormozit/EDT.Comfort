@@ -324,6 +324,23 @@ public final class PasteWithCompareActions
                 toolBarManager.add(item);
 
             toolBarManager.update(true);
+
+            /*
+             * Кнопка «Показать в модуле» добавлена — с этого момента отслеживаем окно
+             * для «Последних мест» (см. CompareRecentPlacesTracker): окно вставки
+             * длительно активно → текущий метод модуля вызывающего редактора (левая
+             * панель — его фрагмент, той же строкой живёт и сама кнопка). Метод — по
+             * каретке фокусной панели; если фокус в правой панели (буфер обмена), её
+             * строка мапится в левую.
+             */
+            CompareRecentPlacesTracker.track(pane.getShell(), () -> {
+                if (ctx == null || ctx.editor == null || leftEditorText == null || leftEditorText.isDisposed())
+                    return null;
+                IFile file = ctx.editor.getEditorInput().getAdapter(IFile.class);
+                if (file == null)
+                    return null;
+                return CompareRecentPlacesTracker.forTwoSides(file, leftEditorText, rightEditorText);
+            });
             return true;
         }
 

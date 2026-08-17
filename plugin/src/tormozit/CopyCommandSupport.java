@@ -1,5 +1,6 @@
 package tormozit;
 
+import java.util.ArrayList;
 import java.util.Map;
 import java.util.WeakHashMap;
 import java.util.concurrent.ConcurrentHashMap;
@@ -10,15 +11,15 @@ import org.eclipse.core.commands.IExecutionListener;
 import org.eclipse.core.commands.NotHandledException;
 import org.eclipse.jface.action.Action;
 import org.eclipse.jface.action.IAction;
+import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.dnd.Clipboard;
 import org.eclipse.swt.dnd.TextTransfer;
 import org.eclipse.swt.dnd.Transfer;
-import org.eclipse.swt.events.FocusAdapter;
-import org.eclipse.swt.events.FocusEvent;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.List;
+import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Table;
 import org.eclipse.swt.widgets.TableItem;
 import org.eclipse.swt.widgets.Tree;
@@ -47,6 +48,11 @@ import org.eclipse.ui.commands.ICommandService;
  * не зовётся.</li>
  * </ul>
  *
+ * <p>Подмена {@code IActionBars} живёт только пока фокус на нашем виджете. Иначе
+ * всегда включённый Copy перехватывает Ctrl+C у остальных полей той же части
+ * (AEF-поля редактора МД, модуль, «История Git») — Win32 тогда не отдаёт клавишу
+ * штатному контролу.
+ *
  * <p>Любой новый {@code Table}/{@code List}/{@code Tree} в {@code plugin/src} — сразу
  * {@link #wireCopyOverride(Control)} (или {@code FormTableInteraction.install()}, он уже
  * вызывает этот метод). Внутри редактора EDT ни {@code List}, ни {@code Table} сами
@@ -61,6 +67,8 @@ public final class CopyCommandSupport
     private static final Map<IActionBars, IAction> wrappedBars = new WeakHashMap<>();
 
     private static boolean listenerInstalled;
+
+    private static boolean focusFilterInstalled;
 
     private CopyCommandSupport()
     {
@@ -78,23 +86,23 @@ public final class CopyCommandSupport
     /**
      * Подключает {@code copyAction} при фокусе на {@code control}. Внутри редактора также
      * подменяет global Copy, иначе штатный обработчик перезапишет буфер.
+     * Саму подмену ставим только пока фокус на нашем виджете — иначе Ctrl+C
+     * перехватывается у остальных полей активной части.
      */
     public static void wireCopyOverride(Control control, Runnable copyAction)
     {
         if (control == null || control.isDisposed() || copyAction == null)
             return;
         targets.put(control, copyAction);
-        control.addDisposeListener(e -> targets.remove(control));
-        control.addFocusListener(new FocusAdapter()
+        control.addDisposeListener(e ->
         {
-            @Override
-            public void focusGained(FocusEvent e)
-            {
-                installActivePartCopyWrapper();
-            }
+            targets.remove(control);
+            restoreCopyWrapperIfUnused();
         });
-        installActivePartCopyWrapper();
+        installFocusTracker();
         installExecutionListener();
+        if (isOurTargetFocused())
+            installActivePartCopyWrapper();
     }
 
     private static void installActivePartCopyWrapper()
@@ -119,6 +127,52 @@ public final class CopyCommandSupport
             wrappedBars.put(bars, original);
             bars.setGlobalActionHandler(ActionFactory.COPY.getId(), wrapper);
             bars.updateActionBars();
+        }
+    }
+
+    /**
+     * Следит за фокусом всего Display: подмена Copy только пока фокус на нашем виджете.
+     * {@code FocusIn} приходит уже после смены {@code getFocusControl}, поэтому
+     * достаточно одного фильтра, без слушателей на каждом контроле.
+     */
+    private static void installFocusTracker()
+    {
+        if (focusFilterInstalled)
+            return;
+        Display display = Display.getDefault();
+        if (display == null)
+            return;
+        Listener listener = event ->
+        {
+            if (isOurTargetFocused())
+                installActivePartCopyWrapper();
+            else
+                restoreCopyWrapperIfUnused();
+        };
+        display.addFilter(SWT.FocusIn, listener);
+        focusFilterInstalled = true;
+    }
+
+    private static void restoreCopyWrapperIfUnused()
+    {
+        if (isOurTargetFocused())
+            return;
+        synchronized (wrappedBars)
+        {
+            if (isOurTargetFocused())
+                return;
+            for (IActionBars bars : new ArrayList<>(wrappedBars.keySet()))
+            {
+                IAction original = wrappedBars.remove(bars);
+                if (bars == null)
+                    continue;
+                IAction current = bars.getGlobalActionHandler(ActionFactory.COPY.getId());
+                if (current instanceof PartCopyWrapper)
+                {
+                    bars.setGlobalActionHandler(ActionFactory.COPY.getId(), original);
+                    bars.updateActionBars();
+                }
+            }
         }
     }
 
@@ -187,22 +241,35 @@ public final class CopyCommandSupport
      */
     private static boolean tryCopyFocused()
     {
+        Control target = focusedTarget();
+        if (target == null)
+            return false;
+        Runnable action = targets.get(target);
+        if (action == null)
+            return false;
+        action.run();
+        return true;
+    }
+
+    private static boolean isOurTargetFocused()
+    {
+        return focusedTarget() != null;
+    }
+
+    private static Control focusedTarget()
+    {
         Display display = Display.getCurrent();
         if (display == null)
-            return false;
+            return null;
         Control focus = display.getFocusControl();
         if (focus == null)
-            return false;
+            return null;
         for (Control c = focus; c != null && !c.isDisposed(); c = c.getParent())
         {
-            Runnable action = targets.get(c);
-            if (action != null)
-            {
-                action.run();
-                return true;
-            }
+            if (targets.containsKey(c))
+                return c;
         }
-        return false;
+        return null;
     }
 
     private static void copyDefaultSelection(Control control)
@@ -292,6 +359,14 @@ public final class CopyCommandSupport
                 setActionDefinitionId(original.getActionDefinitionId());
             }
             setActionDefinitionId(ActionFactory.COPY.getCommandId());
+        }
+
+        @Override
+        public boolean isEnabled()
+        {
+            if (isOurTargetFocused())
+                return true;
+            return original == null || original.isEnabled();
         }
 
         @Override

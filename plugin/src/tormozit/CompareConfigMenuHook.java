@@ -255,6 +255,7 @@ public class CompareConfigMenuHook implements IStartup
             TextMergeEditorHook.install(Display.getDefault());
             GitCompareCurrentLinesHook.install();
             CompareDialogCurrentLinesHook.install(Display.getDefault());
+            RefactoringPreviewCurrentLinesHook.install(Display.getDefault());
 
             IWorkbench wb = PlatformUI.getWorkbench();
             for (IWorkbenchWindow w : wb.getWorkbenchWindows())

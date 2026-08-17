@@ -385,13 +385,33 @@ final class FilterInputBox
         return null;
     }
 
+    /**
+     * Подключает персистентную историю и ставит compact-ширину
+     * (см. {@link #applyCompactLayout}).
+     */
     static void attachHistory(SearchBox searchBox, Scope scope)
+    {
+        attachHistory(searchBox, scope, true);
+    }
+
+    /**
+     * Как {@link #attachHistory(SearchBox, Scope)}, без compact-layout:
+     * штатный {@code GridData} поля не трогаем. Для страницы «Валидация»,
+     * где {@code SearchBox} штатно тянется в строке с тулбаром.
+     */
+    static void attachHistoryKeepLayout(SearchBox searchBox, Scope scope)
+    {
+        attachHistory(searchBox, scope, false);
+    }
+
+    private static void attachHistory(SearchBox searchBox, Scope scope, boolean compactLayout)
     {
         if (searchBox == null || searchBox.isDisposed() || scope == null)
             return;
         searchBox.setHistory(new PrefsSearchHistory(scope));
         installDeferredHistorySave(searchBox, scope);
-        applyCompactLayout(searchBox);
+        if (compactLayout)
+            applyCompactLayout(searchBox);
     }
 
     private static FilterInputBox createForScope(Composite parent, Scope scope, Runnable onSearch)
@@ -431,8 +451,8 @@ final class FilterInputBox
 
     /**
      * Стандартная ширина поля фильтра: не шире {@link #MAX_WIDTH}, без растягивания
-     * на всю строку. {@link #attachHistory} вызывает сам; снаружи — если layout
-     * ставится отдельно.
+     * на всю строку. {@link #attachHistory} вызывает сам; {@link #attachHistoryKeepLayout}
+     * — нет. Снаружи — если layout ставится отдельно.
      */
     static void applyCompactLayout(Control control)
     {

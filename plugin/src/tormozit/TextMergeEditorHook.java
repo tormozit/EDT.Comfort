@@ -31,6 +31,7 @@ import org.eclipse.jface.action.IContributionItem;
 import org.eclipse.jface.action.IToolBarManager;
 import org.eclipse.jface.action.Separator;
 import org.eclipse.jface.resource.ImageDescriptor;
+import org.eclipse.jface.text.Document;
 import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.source.SourceViewer;
 import org.eclipse.jface.viewers.TreeViewer;
@@ -521,7 +522,80 @@ public final class TextMergeEditorHook
             Shell shell = viewerControl.getShell();
             OccurrencesToggleHook.markShellHandled(shell);
             OccurrencesToggleHook.removeDialogItems(shell);
+
+            /*
+             * Кнопка «Показать в модуле» добавлена — с этого момента отслеживаем окно
+             * для «Последних мест» (см. CompareRecentPlacesTracker). Метод — по позиции
+             * пользователя: фокусная панель (итоговая/левая/правая), у секции дерева —
+             * имя секции; см. resolveMergeRecentPlace.
+             */
+            CompareRecentPlacesTracker.track(shell,
+                () -> resolveMergeRecentPlace(provider, viewer, activePair));
         }
+    }
+
+    /**
+     * Место для «Последних мест» из 3-way окна объединения:
+     * <ul>
+     * <li>Секция дерева структурированного диалога — имя метода из узла секции
+     *     (каретка панелей при выборе дерева не двигается и стоит на 0); имя
+     *     подтверждается объявлением в файле модуля (отсекает не-методы).</li>
+     * <li>Иначе — панель с фокусом: левая/правая → её файл и её каретка;
+     *     итоговая → метод из её текста, файл стороны модуля (как у кнопки
+     *     «Показать в модуле»; каретка панели-партнёра всегда на 0).</li>
+     * <li>Без фокуса — пара activePair (как у кнопки «Сравнить ИР»).</li>
+     * </ul>
+     */
+    private static CompareRecentPlacesTracker.Place resolveMergeRecentPlace(
+        IThreeSideTextMergeViewerProvider provider, ThreeSideTextMergeViewer viewer, ActivePair activePair)
+    {
+        StyledText left = MergeViewerReflection.extractStyledText(viewer, "leftViewer"); //$NON-NLS-1$
+        StyledText right = MergeViewerReflection.extractStyledText(viewer, "rightViewer"); //$NON-NLS-1$
+        StyledText result = MergeViewerReflection.extractStyledText(viewer, "resultViewer"); //$NON-NLS-1$
+
+        ComparisonSide moduleSide = activePair.indexA == RIGHT ? ComparisonSide.OTHER : ComparisonSide.MAIN;
+
+        if (Global.getField(provider, "currentSelectedNode") instanceof IPartialModelNode sectionNode //$NON-NLS-1$
+            && sectionNode.retrieveComparisonNode() instanceof BslModuleSectionComparisonNode section)
+        {
+            IFile sectionFile = resolveModuleFile(provider, viewer, moduleSide);
+            if (sectionFile != null)
+            {
+                CompareRecentPlacesTracker.Place byName = CompareRecentPlacesTracker.forMethodName(sectionFile,
+                    MethodLineRestore.sectionName(section, moduleSide), left, right, result);
+                if (byName != null)
+                    return byName;
+                return new CompareRecentPlacesTracker.Place(sectionFile, null, null, left, right, result);
+            }
+        }
+
+        StyledText primary = null;
+        if (left != null && !left.isDisposed() && left.isFocusControl())
+            primary = left;
+        else if (right != null && !right.isDisposed() && right.isFocusControl())
+            primary = right;
+        else if (result != null && !result.isDisposed() && result.isFocusControl())
+            primary = result;
+        if (primary == null)
+            primary = activePair.widgetA;
+        if (primary == null || primary.isDisposed())
+            return null;
+
+        if (primary == result)
+        {
+            IFile resultFile = resolveModuleFile(provider, viewer, moduleSide);
+            if (resultFile == null)
+                return null;
+            int line1 = CompareLineRangeMatcher.lineAtCaret(result) + 1;
+            String method = GetRef.findEnclosingMethodName(new Document(result.getText()), line1);
+            return new CompareRecentPlacesTracker.Place(resultFile, null, method, left, right, result);
+        }
+
+        ComparisonSide side = primary == right ? ComparisonSide.OTHER : ComparisonSide.MAIN;
+        IFile sideFile = resolveModuleFile(provider, viewer, side);
+        if (sideFile == null)
+            return null;
+        return new CompareRecentPlacesTracker.Place(sideFile, primary, null, left, right, result);
     }
 
     private static boolean isMxlxViewerInput(ThreeSideTextMergeViewer viewer)

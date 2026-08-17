@@ -47,10 +47,11 @@ import com.e1c.g5.v8.dt.check.settings.INamedElement;
  * <p>Согласовано с пользователем: поверх штатного дерева добавляется
  * собственный {@link ViewerFilter} на {@link SmartMatcher}, а штатный
  * {@code CheckFilter} не трогается вовсе — вместо него {@code SearchBox}
- * получает свою персистентную историю ({@link FilterInputBox#attachHistory}
+ * получает свою персистентную историю ({@link FilterInputBox#attachHistoryKeepLayout}
  * / {@link FilterInputBox.Scope#VALIDATION_CHECKS} — обязательно, см. правило
  * «Подключение фильтра» в AGENTS.md: голая {@code InMemorySearchHistory} теряет
- * историю при закрытии диалога), поэтому {@code CheckFilter.getActivePattern()}
+ * историю при закрытии диалога; compact-ширину не ставим — штатное поле
+ * тянется в строке с тулбаром), поэтому {@code CheckFilter.getActivePattern()}
  * остаётся пустым навсегда и его текстовый матчинг (fuzzy) становится
  * безусловно {@code true} ({@code testSearchWithoutId} — байткод подтверждает
  * short-circuit на пустом паттерне); фильтры по важности/типу/умолчанию в
@@ -194,7 +195,9 @@ public final class ValidationChecksFilterHook implements IStartup
             // Персистентная история (см. правило «Подключение фильтра» в AGENTS.md) —
             // штатный CheckFilter (см. javadoc класса) больше не получает savePattern()
             // и его activePattern остаётся пустым.
-            FilterInputBox.attachHistory(searchBox, FilterInputBox.Scope.VALIDATION_CHECKS);
+            // Compact 300 px здесь слишком узкий: штатно SearchBox тянется
+            // в строке с тулбаром (fillDefaults + minSize 100 + grab).
+            FilterInputBox.attachHistoryKeepLayout(searchBox, FilterInputBox.Scope.VALIDATION_CHECKS);
             searchBox.setSearchListener((text, monitor) -> applySearch(treeViewer, filter, highlight, text));
             searchBox.setToolTipText(FilterInputBox.FLAT_FILTER_TOOLTIP);
 
