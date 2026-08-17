@@ -19,7 +19,7 @@ import org.eclipse.swt.widgets.Shell;
  * (аналог {@link RecentPlacesTracker} для обычных редакторов).
  *
  * <p>Отслеживание запускается в момент добавления кнопки «Показать в модуле»
- * в тулбар окна ({@link GitCompareCurrentLinesHook}, {@link TextMergeEditorHook},
+ * в тулбар окна ({@link CompareEditorCurrentLinesHook}, {@link TextMergeEditorHook},
  * {@link PasteWithCompareActions}) и живёт, пока жив шелл окна. Правило то же,
  * что у {@link RecentPlacesTracker}: окно держит фокус {@link #DWELL_MS} мс —
  * место фиксируется; движение каретки перезапускает отсчёт, чтобы зафиксировать

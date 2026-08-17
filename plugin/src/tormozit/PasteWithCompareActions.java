@@ -285,7 +285,7 @@ public final class PasteWithCompareActions
              * .tmp/bundles/ecompare/CompareViewerPane.javap-c.txt). Если topLeft подменить своей
              * обёрткой, любой последующий вызов pane.setText(...)/setImage(...) (заголовок
              * обновляется при смене входа) кидает ClassCastException — что и снесло штатный
-             * тулбар при реальном тесте (см. GitCompareCurrentLinesHook). Первым в toolBarManager —
+             * тулбар при реальном тесте (см. CompareEditorCurrentLinesHook). Первым в toolBarManager —
              * компромисс (дальше от заголовка, зато не ломает pane).
              */
             installStructureToggleLater(pane, toolBarManager);

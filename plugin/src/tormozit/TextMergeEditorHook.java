@@ -312,7 +312,7 @@ public final class TextMergeEditorHook
         /*
          * Итоговая сторона в паре всегда «новая» (INSERT) — добавления должны быть зелёными,
          * удаления из источника — красными. Режим «слева зелёное / справа красное» нужен
-         * только 2-way EGit (см. GitCompareCurrentLinesHook).
+         * только 2-way EGit (см. CompareEditorCurrentLinesHook).
          */
         panel.setSideAlignedDiffColors(false);
         refreshLabels(panel, provider, viewer);
@@ -395,7 +395,7 @@ public final class TextMergeEditorHook
      * {@code mergeViewerComposite}, как «Текущая строка») — оборачиваем текущее содержимое
      * {@code ViewForm} (сам вьюер, {@code viewer.getControl()}) в свой composite и подставляем
      * его через {@code ViewForm.setContent(...)}, как это уже делает
-     * {@link CompareDialogCurrentLinesHook}/{@link GitCompareCurrentLinesHook} с
+     * {@link CompareDialogCurrentLinesHook}/{@link CompareEditorCurrentLinesHook} с
      * {@code CompareViewerSwitchingPane}.
      */
     private static void createStructureController(Control viewFormControl,

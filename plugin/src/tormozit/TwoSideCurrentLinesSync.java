@@ -14,7 +14,7 @@ import org.eclipse.swt.widgets.Display;
  *
  * <p>Общая логика для {@link PasteWithCompareActions} (свой диалог, панели —
  * {@code fLeft}/{@code fRight} штатного {@code TextMergeViewer}) и
- * {@link GitCompareCurrentLinesHook} (чужой редактор Git-сравнения, тот же
+ * {@link CompareEditorCurrentLinesHook} (чужой редактор сравнения Git / локальной истории, тот же
  * {@code TextMergeViewer}, но встроенный реактивно).
  *
  * <p>«Поменять местами» ({@link CompareConfiguration#MIRRORED}) запоминается в preference

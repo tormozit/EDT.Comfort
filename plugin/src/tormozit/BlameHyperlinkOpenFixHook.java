@@ -106,7 +106,7 @@ public final class BlameHyperlinkOpenFixHook implements IStartup
             return;
         int[] pendingReveal = resolveCompareLineReveal(link, table);
         if (pendingReveal != null)
-            GitCompareCurrentLinesHook.setPendingLineReveal(pendingReveal[0], pendingReveal[1] != 0);
+            CompareEditorCurrentLinesHook.setPendingLineReveal(pendingReveal[0], pendingReveal[1] != 0);
     }
 
     /**
@@ -141,9 +141,9 @@ public final class BlameHyperlinkOpenFixHook implements IStartup
                 return;
             int col = offset - text.getOffsetAtLine(line);
             if (col >= m.start(1) && col <= m.end(1))
-                GitCompareCurrentLinesHook.setPendingLineReveal(Integer.parseInt(m.group(1)) - 1, true);
+                CompareEditorCurrentLinesHook.setPendingLineReveal(Integer.parseInt(m.group(1)) - 1, true);
             else if (col >= m.start(2) && col <= m.end(2))
-                GitCompareCurrentLinesHook.setPendingLineReveal(Integer.parseInt(m.group(2)) - 1, false);
+                CompareEditorCurrentLinesHook.setPendingLineReveal(Integer.parseInt(m.group(2)) - 1, false);
         }
         catch (Exception e)
         {
@@ -206,12 +206,12 @@ public final class BlameHyperlinkOpenFixHook implements IStartup
          * Переход на строку у "Открыть двухпанельное сравнение" — НАША добавка (в апстриме
          * CompareLink.open() её не делает вовсе, см. resolveCompareLineReveal) — нужна ВСЕГДА,
          * независимо от того, кто в итоге открывает сравнение: сами мы или штатный клик
-         * (см. ниже). GitCompareCurrentLinesHook.attach() подхватит pendingLineReveal у
+         * (см. ниже). CompareEditorCurrentLinesHook.attach() подхватит pendingLineReveal у
          * СЛЕДУЮЩЕГО открытого им сравнения, кем бы оно ни было открыто.
          */
         int[] pendingReveal = resolveCompareLineReveal(link, table);
         if (pendingReveal != null)
-            GitCompareCurrentLinesHook.setPendingLineReveal(pendingReveal[0], pendingReveal[1] != 0);
+            CompareEditorCurrentLinesHook.setPendingLineReveal(pendingReveal[0], pendingReveal[1] != 0);
         if (nativeClickHandled)
         {
             // Клик долетел штатно (mouseUp сам вызвал openSelectedLink) — открывать САМИМ нельзя,

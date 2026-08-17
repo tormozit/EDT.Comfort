@@ -27,7 +27,7 @@ import org.eclipse.swt.widgets.Shell;
  * {@link CompareViewerSwitchingPane} со своим {@code CompareConfiguration} (создаётся прямо в
  * нём, {@link org.eclipse.compare.CompareEditorInput} нет вовсе). Поэтому pane ищем обходом
  * дерева виджетов окна, а не через {@code fContentInputPane} входа сравнения, как
- * {@link CompareDialogCurrentLinesHook} / {@link GitCompareCurrentLinesHook}. Внутри — обычный
+ * {@link CompareDialogCurrentLinesHook} / {@link CompareEditorCurrentLinesHook}. Внутри — обычный
  * {@link TextMergeViewer} (для BSL — вариант EDT), значит синхронизация та же:
  * {@link TwoSideCurrentLinesSync}.
  *
@@ -231,7 +231,7 @@ public final class RefactoringPreviewCurrentLinesHook
     /**
      * Пишет подписи сторон в {@link CompareConfiguration} и прямо в
      * {@code ContentMergeViewer.fLeftLabel}/{@code fRightLabel} — тот же приём, что в
-     * {@link GitCompareCurrentLinesHook}: только config недостаточно (шапка уже нарисована),
+     * {@link CompareEditorCurrentLinesHook}: только config недостаточно (шапка уже нарисована),
      * только CLabel недостаточно (штатный {@code updateHeader} при смене выбранного изменения
      * перечитывает подписи из config и откатывает наши).
      */

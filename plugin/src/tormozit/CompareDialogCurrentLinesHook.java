@@ -263,7 +263,7 @@ public final class CompareDialogCurrentLinesHook
     /**
      * Пишет подписи сторон в {@link CompareConfiguration} и в
      * {@code ContentMergeViewer.fLeftLabel}/{@code fRightLabel}. Тот же приём, что
-     * {@link GitCompareCurrentLinesHook}: штатный {@code updateHeader} иначе откатывает шапку.
+     * {@link CompareEditorCurrentLinesHook}: штатный {@code updateHeader} иначе откатывает шапку.
      */
     private static void applyHeaderLabels(CompareConfiguration config, TextMergeViewer viewer,
         String leftLabel, String rightLabel)

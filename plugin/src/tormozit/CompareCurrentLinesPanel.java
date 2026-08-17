@@ -196,7 +196,7 @@ public final class CompareCurrentLinesPanel
      * Вызывает «Сравнить ИР» с полными текстами сторон (не текущих строк) из
      * {@link #compareInIrSupplier}. Кнопку/пункт меню, вызывающие этот метод, размещает
      * вызывающая сторона — в верхней командной панели просмотрщика сравнения
-     * ({@link PasteWithCompareActions}, {@link GitCompareCurrentLinesHook},
+     * ({@link PasteWithCompareActions}, {@link CompareEditorCurrentLinesHook},
      * {@link TextMergeEditorHook}), а не в этой панели.
      */
     public void triggerCompareInIr()

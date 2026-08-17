@@ -39,29 +39,48 @@ import com._1c.g5.v8.dt.core.platform.IDtProject;
 import java.nio.file.Path;
 
 /**
- * Панель «Текущая строка» (см. {@link CompareCurrentLinesPanel}) в редакторах сравнения EGit:
+ * Панель «Текущая строка» (см. {@link CompareCurrentLinesPanel}) и остальные доработки
+ * сравнения текстов (переключение на вариант «Сравнение встроенного языка», «Структура»,
+ * «Сравнить ИР», «Показать в модуле», подсветка вхождений, «Последние места») в редакторах
+ * сравнения EGit:
  * <ul>
  *   <li>{@code GitCompareFileRevisionEditorInput} — рабочая копия/индекс с ревизией
  *   (Staging, «Сравнить с HEAD» и т.п.);</li>
  *   <li>{@code GitCompareEditorInput} — две ревизии / рабочее дерево с коммитом
  *   (список файлов коммита, «Сравнить с предыдущей»).</li>
  * </ul>
+ * и в редакторе сравнения с локальной историей:
+ * <ul>
+ *   <li>{@code org.eclipse.team.internal.ui.history.CompareFileRevisionEditorInput} —
+ *   «Сравнить текущую с локальной» / «Сравнить друг с другом» в панели «История»
+ *   (см. {@code CompareRevisionAction}). Стороны — {@code LocalResourceTypedElement}
+ *   (рабочая копия, подпись «Локальный: …») и {@code FileRevisionTypedElement}
+ *   (подпись «Локальная история: имя дата»), поэтому вся логика подписей/резолва файла
+ *   работает без изменений: «Локальный: …» распознаётся как рабочая копия, а сравнение
+ *   двух ревизий локальной истории — как сравнение без рабочей копии.</li>
+ * </ul>
  *
  * <p>Это не наш редактор — встраиваем панель в уже существующее дерево виджетов после
  * открытия, а не через переопределение {@code createContents} (как в
- * {@link PasteWithCompareActions}). Классы лежат во внутренних пакетах
- * {@code org.eclipse.egit.ui} — детектируем по имени класса, без компилируемой зависимости.
+ * {@link PasteWithCompareActions}). Классы входов лежат во внутренних пакетах
+ * {@code org.eclipse.egit.ui} и {@code org.eclipse.team.internal.ui} — детектируем по имени
+ * класса, без компилируемой зависимости.
  *
  * <p>Внутри — стандартный {@link TextMergeViewer} (те же {@code fLeft}/{@code fRight}, что
  * и в «Вставить со сравнением»), поэтому синхронизация — тот же {@link TwoSideCurrentLinesSync}.
  */
-public final class GitCompareCurrentLinesHook
+public final class CompareEditorCurrentLinesHook
 {
     private static final String INPUT_FILE_REVISION = "GitCompareFileRevisionEditorInput"; //$NON-NLS-1$
     /** Точное окончание FQCN — не путать с {@code GitCompareFileRevisionEditorInput}. */
     private static final String INPUT_GIT_COMPARE_SUFFIX = ".GitCompareEditorInput"; //$NON-NLS-1$
+    /**
+     * Сравнение с локальной историей (штатный {@code org.eclipse.team}); точное окончание FQCN —
+     * у EGit-класса перед этим именем идёт {@code Git}, поэтому проверки не пересекаются.
+     */
+    private static final String INPUT_LOCAL_HISTORY_SUFFIX = ".CompareFileRevisionEditorInput"; //$NON-NLS-1$
 
-    private static final String PANEL_ATTACHED_KEY = "tormozit.gitCompareCurrentLinesAttached"; //$NON-NLS-1$
+    private static final String PANEL_ATTACHED_KEY = "tormozit.compareEditorCurrentLinesAttached"; //$NON-NLS-1$
 
     private static final String SUFFIX_WORKING = " (рабочий)"; //$NON-NLS-1$
     private static final String SUFFIX_MAIN = " (основной)"; //$NON-NLS-1$
@@ -106,7 +125,7 @@ public final class GitCompareCurrentLinesHook
     private static final java.util.Set<CompareEditorInput> scheduledEditorInputs =
         java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>());
 
-    private GitCompareCurrentLinesHook()
+    private CompareEditorCurrentLinesHook()
     {
     }
 
@@ -189,7 +208,8 @@ public final class GitCompareCurrentLinesHook
         if (input == null)
             return false;
         String name = input.getClass().getName();
-        return name.contains(INPUT_FILE_REVISION) || name.endsWith(INPUT_GIT_COMPARE_SUFFIX);
+        return name.contains(INPUT_FILE_REVISION) || name.endsWith(INPUT_GIT_COMPARE_SUFFIX)
+            || name.endsWith(INPUT_LOCAL_HISTORY_SUFFIX);
     }
 
     /**
@@ -327,7 +347,7 @@ public final class GitCompareCurrentLinesHook
         return ATTACH_DONE;
     }
 
-    private static final String BSL_VIEWER_APPLIED_KEY = "tormozit.gitCompareBslViewerApplied"; //$NON-NLS-1$
+    private static final String BSL_VIEWER_APPLIED_KEY = "tormozit.compareEditorBslViewerApplied"; //$NON-NLS-1$
     /** id из {@code plugin.xml} бандла {@code com._1c.g5.v8.dt.bsl.ui} — см. {@code PasteWithCompareActions}. */
     private static final String BSL_XTEXT_VIEWER_ID =
         "com._1c.g5.v8.dt.bsl.Bsl.compare.contentMergeViewers"; //$NON-NLS-1$
@@ -378,7 +398,7 @@ public final class GitCompareCurrentLinesHook
         }
         catch (Exception e)
         {
-            Global.log("GitCompareCurrentLinesHook.switchToBslViewerIfNeeded: " + e); //$NON-NLS-1$
+            Global.log("CompareEditorCurrentLinesHook.switchToBslViewerIfNeeded: " + e); //$NON-NLS-1$
             return false;
         }
     }

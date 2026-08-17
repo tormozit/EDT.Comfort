@@ -23,7 +23,8 @@ import org.eclipse.swt.widgets.ToolBar;
  * секций модуля, см. {@link BslModuleStructureDiff}) над текстом попарного сравнения BSL.
  * Общий для всех видов окон «Сравнение текста», поддерживающих встроенный язык —
  * {@link CompareDialogCurrentLinesHook} (штатный EDT {@code DtCompareEditorInput}),
- * {@link GitCompareCurrentLinesHook} (EGit «Сравнить с … »), см. также, где ещё добавляется
+ * {@link CompareEditorCurrentLinesHook} (EGit «Сравнить с … » и сравнение с локальной историей),
+ * см. также, где ещё добавляется
  * «Сравнить ИР» ({@code IrCompareValuesHandler.MENU_LABEL}) — тот же охват, плюс 3-way
  * «Объединение» ({@link TextMergeEditorHook}) — но ТОЛЬКО у plain-варианта
  * ({@code ThreeSideTextMergeDialog}, без разбора структуры); у structured-варианта
@@ -337,7 +338,7 @@ final class StructureToggleController
      * встроенная навигация точно знала, откуда искать), затем штатная же команда
      * {@code org.eclipse.compare.selectNextChange} («Следующее различие» в тулбаре — та же
      * команда работает и в 2-way, и в 3-way, см. лог фактического порядка тулбара в
-     * GitCompareCurrentLinesHook, где она видна как штатный пункт).
+     * CompareEditorCurrentLinesHook, где она видна как штатный пункт).
      *
      * <p>Только для {@code CHANGED} (метод есть с обеих сторон, есть что сравнивать внутри).
      * У ADDED/REMOVED/SYNTAX_ERROR другой стороны для сравнения нет — «следующее различие»
