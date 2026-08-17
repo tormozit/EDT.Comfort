@@ -418,8 +418,11 @@ final class ObjectSetsItems
             ObjectSets.SetDef set = ObjectSetsAddTargetState.getInstance().getAddTargetSet(projectName);
             if (set == null)
                 return new ArrayList<>();
-            if (set.system)
+            if (set.kind == ObjectSets.SetKind.GIT_CHANGED)
                 return collectGitChangedRefs(projectName);
+            if (set.kind == ObjectSets.SetKind.INFOBASE_CHANGED)
+                return new ArrayList<>(InfobaseChangedObjects.changedRefs(
+                    set.projectName, ObjectSets.infobaseUuidOf(set)));
             for (ObjectSets.Item item : set.items)
             {
                 String ref = RecentPlacesKeys.mdObjectRefFromKey(item.key);
@@ -524,6 +527,28 @@ final class ObjectSetsItems
         {
             ObjectSetsDebug.problem("isProjectUnderGit: " + e.getMessage()); //$NON-NLS-1$
             return false;
+        }
+    }
+
+    /**
+     * Элементы динамического набора: состав зависит от вида набора — git-изменения проекта или
+     * объекты, ожидающие синхронизации с информационной базой.
+     *
+     * @param set набор; для обычного набора возвращается его сохранённый состав
+     * @return состав набора, не {@code null}
+     */
+    static List<ObjectSets.Item> collectDynamicItems(ObjectSets.SetDef set)
+    {
+        if (set == null)
+            return List.of();
+        switch (set.kind)
+        {
+            case GIT_CHANGED:
+                return collectGitChangedItems(set.projectName);
+            case INFOBASE_CHANGED:
+                return InfobaseChangedObjects.changedItems(set);
+            default:
+                return ObjectSets.getInstance().getItemsForDisplay(set.id);
         }
     }
 

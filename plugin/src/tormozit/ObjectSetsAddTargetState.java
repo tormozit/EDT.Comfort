@@ -69,14 +69,13 @@ public final class ObjectSetsAddTargetState
             if (setId == null || setId.isBlank())
                 continue;
             ObjectSets.SetDef set = ObjectSets.getInstance().getSetById(setId);
-            if (set != null && ((set.system && ObjectSetsItems.isProjectUnderGit(set.projectName))
-                    || !set.items.isEmpty()))
+            if (set != null && ((set.system && ObjectSets.isApplicable(set)) || !set.items.isEmpty()))
                 return false;
         }
         return true;
     }
 
-    /** Есть ли среди активных (●) наборов системный (например, «<Измененные>»). */
+    /** Есть ли среди активных (●) наборов динамический (например, «<Измененные>»). */
     public synchronized boolean isAnyAddTargetSystemSet()
     {
         for (String setId : addTargetByProject.values())
@@ -84,7 +83,7 @@ public final class ObjectSetsAddTargetState
             if (setId == null || setId.isBlank())
                 continue;
             ObjectSets.SetDef set = ObjectSets.getInstance().getSetById(setId);
-            if (set != null && set.system && ObjectSetsItems.isProjectUnderGit(set.projectName))
+            if (set != null && set.system && ObjectSets.isApplicable(set))
                 return true;
         }
         return false;

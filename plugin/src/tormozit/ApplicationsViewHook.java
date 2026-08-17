@@ -725,6 +725,7 @@ public class ApplicationsViewHook implements IStartup
             registerRedrawOnPoolChange(viewer);
             registerRedrawOnIrChange(viewer);
             tree.setData(HOOKED_KEY, Boolean.TRUE);
+            fillLabelsAfterColumnsReplaced(viewer, tree);
         }
         else
         {
@@ -733,6 +734,32 @@ public class ApplicationsViewHook implements IStartup
             registerRedrawOnPoolChange(viewer);
             registerRedrawOnIrChange(viewer);
         }
+    }
+
+    /**
+     * Перезаполнить подписи строк после пересоздания колонок.
+     *
+     * <p>{@link #setupColumns} уничтожает штатные колонки и создаёт свои. Если дерево к этому
+     * моменту уже заполнено (переоткрытие панели: строки восстанавливаются раньше, чем срабатывает
+     * хук), тексты ячеек пропадают вместе со старыми колонками, а новые никто не заполняет —
+     * SWT при добавлении колонки ничего не перезапрашивает. Видно это как «заполнена только
+     * „Инфобаза“, остальные колонки пустые»: первая колонка показывает текст самого
+     * {@code TreeItem}, заданный без индекса, и потому переживает замену колонок.
+     *
+     * <p>При первом открытии панель успевала обновиться сама уже после подключения хука, поэтому
+     * дефект проявлялся только при переоткрытии.
+     */
+    private static void fillLabelsAfterColumnsReplaced(ColumnViewer viewer, Tree tree)
+    {
+        if (tree.getItemCount() == 0)
+            return;
+        Display display = tree.getDisplay();
+        if (display == null || display.isDisposed())
+            return;
+        display.asyncExec(() ->
+        {
+            safeUpdateLabels(viewer);
+        });
     }
 
     // =======================================================================
@@ -1002,8 +1029,9 @@ public class ApplicationsViewHook implements IStartup
             {
                 Column col          = Column.forIndex(columnAt(tree, e.x, e.y));
                 TreeItem item       = itemAt(tree, e.x, e.y);
-                InfobaseReference ib = item == null ? null : getInfobase(item.getData());
-                tree.setCursor(isCursorHand(col, ib)
+                Object element      = item == null ? null : item.getData();
+                InfobaseReference ib = element == null ? null : getInfobase(element);
+                tree.setCursor(isCursorHand(col, ib, element)
                     ? tree.getDisplay().getSystemCursor(SWT.CURSOR_HAND) : null);
             }
         });
@@ -1024,15 +1052,50 @@ public class ApplicationsViewHook implements IStartup
     }
 
     /** Добавить кликабельную колонку = добавить case. */
-    private static boolean isCursorHand(Column col, InfobaseReference ib)
+    private static boolean isCursorHand(Column col, InfobaseReference ib, Object element)
     {
         if (col == null || ib == null) return false;
         switch (col)
         {
-            case SSH: return DesignerSessionPoolAccessor.getInstance().isConnected(ib);
-            case IR:  return true;
-            default:  return false;
+            case SSH:     return DesignerSessionPoolAccessor.getInstance().isConnected(ib);
+            case IR:      return true;
+            default:      return false;
         }
+    }
+
+    // =======================================================================
+    // 2б. Команда «Показать изменения»
+    // =======================================================================
+
+    /** Проект строки панели «Приложения». */
+    private static IProject applicationProject(Object element)
+    {
+        Object project = Global.getField(element, "project"); //$NON-NLS-1$
+        return project instanceof IProject p ? p : null;
+    }
+
+    /**
+     * Создать (или обновить) динамический набор объектов «&lt;Измененные <i>ИмяБазы</i>&gt;»
+     * и сделать его строку активной в панели «Наборы объектов». Состав набора вычисляется
+     * динамически при каждом показе, поэтому здесь только регистрируется сам набор.
+     *
+     * <p>Раньше это же делала колонка «Изменения» с числом объектов. От неё отказались: расчёт
+     * состава стоит ~375 мс (открытие служебного потока синхронизации EDT — 190 мс, сравнение
+     * сигнатур — 174 мс), а колонка требовала его при каждой отрисовке панели и после каждой
+     * правки ресурсов, то есть в UI-потоке и постоянно. По команде он выполняется только когда
+     * пользователь действительно попросил.
+     */
+    private static void openChangedObjectSet(Object element)
+    {
+        IProject project = applicationProject(element);
+        InfobaseReference ib = getInfobase(element);
+        if (project == null || ib == null || ib.getUuid() == null)
+            return;
+        ObjectSets.SetDef set = ObjectSets.getInstance().ensureInfobaseChangedSet(
+            project.getName(), ib.getUuid().toString(), ib.getName());
+        if (set == null)
+            return;
+        ObjectSetsView.revealSet(set.id);
     }
 
     /** Добавить обработку для новой колонки = добавить case. */
@@ -1356,6 +1419,7 @@ public class ApplicationsViewHook implements IStartup
         viewer.getControl().addDisposeListener(e -> ir.removeChangeListener(r));
     }
 
+
     // =======================================================================
     // Вспомогательные методы
     // =======================================================================
@@ -1376,6 +1440,31 @@ public class ApplicationsViewHook implements IStartup
     {
         Control c = viewer.getControl();
         if (c != null && !c.isDisposed()) viewer.refresh();
+    }
+
+    /**
+     * Перерисовать подписи уже показанных строк, не перезапрашивая модель.
+     *
+     * <p>Изменения ресурсов идут потоком, а {@link ColumnViewer#refresh()} — это полный
+     * перезапрос содержимого у штатного провайдера панели, которую плагин и без того патчит
+     * (открепление штатного слушателя выделения, свой набор колонок). Дёргать его на каждое
+     * движение в workspace нельзя: наблюдалось опустошение всех дополнительных колонок.
+     * {@code update} обновляет только подписи существующих элементов.
+     */
+    private static void safeUpdateLabels(ColumnViewer viewer)
+    {
+        Control c = viewer.getControl();
+        if (!(c instanceof Tree) || c.isDisposed())
+            return;
+        Tree tree = (Tree) c;
+        List<Object> elements = new ArrayList<>();
+        for (TreeItem item : tree.getItems())
+        {
+            if (!item.isDisposed() && item.getData() != null)
+                elements.add(item.getData());
+        }
+        if (!elements.isEmpty())
+            viewer.update(elements.toArray(), null);
     }
 
     private static boolean sshConnected(DesignerSessionPoolAccessor acc, Object element)
@@ -1415,6 +1504,10 @@ public class ApplicationsViewHook implements IStartup
         new MenuItem(menu, SWT.SEPARATOR);
         addItem(menu, "Отключить конфигуратор", anySsh, () -> { //$NON-NLS-1$
             disconnectSsh(sel.toList(), viewer);
+        });
+        new MenuItem(menu, SWT.SEPARATOR);
+        addItem(menu, "Показать изменения", sel.size() == 1, () -> { //$NON-NLS-1$
+            openChangedObjectSet(sel.getFirstElement());
         });
         Control control = viewer != null ? viewer.getControl() : null;
         if (control instanceof Tree tree && TreeCollapseOthers.isApplicable(tree))

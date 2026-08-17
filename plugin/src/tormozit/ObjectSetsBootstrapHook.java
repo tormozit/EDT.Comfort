@@ -29,7 +29,22 @@ public final class ObjectSetsBootstrapHook implements IStartup
         display.asyncExec(() ->
         {
             ObjectSets.getInstance().ensureDefaultSetsForAllOpenProjects();
+            InfobaseChangedObjects.installApplicationRemovalListener();
+            pruneRemovedApplicationSetsForAllOpenProjects();
         });
+    }
+
+    /**
+     * Приложение могли удалить, пока EDT была закрыта: набор «&lt;Измененные <i>ИмяБазы</i>&gt;»
+     * по такой базе больше не нужен.
+     */
+    private static void pruneRemovedApplicationSetsForAllOpenProjects()
+    {
+        for (IProject project : ResourcesPlugin.getWorkspace().getRoot().getProjects())
+        {
+            if (project.isOpen())
+                InfobaseChangedObjects.pruneRemovedApplicationSets(project.getName());
+        }
     }
 
     private static void installProjectListener()
@@ -60,6 +75,7 @@ public final class ObjectSetsBootstrapHook implements IStartup
             {
                 ObjectSets.getInstance().ensureDefaultSetForProject(projectName);
                 ObjectSets.getInstance().ensureSystemSetForProject(projectName);
+                InfobaseChangedObjects.pruneRemovedApplicationSets(projectName);
             }
             if (!openedProjectNames.isEmpty() || !closedProjectNames.isEmpty())
                 ObjectSets.getInstance().fireChanged();

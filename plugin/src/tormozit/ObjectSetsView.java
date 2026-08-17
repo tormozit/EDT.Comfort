@@ -100,6 +100,11 @@ public final class ObjectSetsView extends ViewPart
     private static final String ACTIVE_COLUMN_TOOLTIP =
         "Двойной щелчок делает набор активным"; //$NON-NLS-1$
 
+    /** Подсказка заголовка колонки «Объектов»: что значит «?». */
+    private static final String COUNT_COLUMN_TOOLTIP =
+        "Число объектов в наборе. «?» — состав вычисляется дорого " //$NON-NLS-1$
+            + "и обновляется, только пока набор выбран"; //$NON-NLS-1$
+
     private static final String SETTINGS_SECTION = "ObjectSetsView"; //$NON-NLS-1$
     private static final String KEY_SASH = "sashWeights"; //$NON-NLS-1$
     private static final String KEY_ITEMS_PANE_WIDTH     = "itemsPaneWidth"; //$NON-NLS-1$
@@ -187,11 +192,13 @@ public final class ObjectSetsView extends ViewPart
     private Button deleteButton;
     private Button loadButton;
 
-    /** Динамический состав системного набора («<Измененные>»); сброс при активации строки. */
-    private List<ObjectSets.Item> gitChangedItemsCache;
-    /** Число объектов системного набора по проекту; сброс при изменении git-статуса. */
-    private final Map<String, Integer> gitChangedCountByProject = new HashMap<>();
+    /** Динамический состав выбранного набора («<Измененные…>»); сброс при активации строки. */
+    private List<ObjectSets.Item> dynamicItemsCache;
+    /** Число объектов динамического набора по его идентификатору; сброс при изменении состава. */
+    private final Map<String, Integer> dynamicCountBySetId = new HashMap<>();
     private IResourceChangeListener gitChangedRefreshListener;
+    /** Актуализация набора «<Измененные ИмяБазы>», пока он показан в панели. */
+    private Runnable infobaseChangedListener;
     private boolean gitChangedRefreshPending;
 
     /** Ключ объекта для восстановления после закрытия вкладки (однократно). */
@@ -211,6 +218,55 @@ public final class ObjectSetsView extends ViewPart
     public ObjectSets.SetDef getSelectedSet()
     {
         return selectedSet;
+    }
+
+    /**
+     * Открыть панель «Наборы объектов» и сделать активной строку набора.
+     * Состав динамического набора при этом пересчитывается.
+     *
+     * @param setId идентификатор набора
+     */
+    public static void revealSet(String setId)
+    {
+        if (setId == null || setId.isBlank())
+            return;
+        ObjectSetsHandler.showView(IWorkbenchPage.VIEW_ACTIVATE);
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        display.asyncExec(() ->
+        {
+            ObjectSetsView view = getActiveInstance();
+            if (view != null)
+                view.selectSetById(setId);
+        });
+    }
+
+    private void selectSetById(String setId)
+    {
+        if (setsViewer == null || setsViewer.getControl().isDisposed())
+        {
+            return;
+        }
+        dynamicItemsCache = null;
+        dynamicCountBySetId.remove(setId);
+        ObjectSets.SetDef set = ObjectSets.getInstance().getSetById(setId);
+        if (set == null)
+            return;
+        // Строка набора могла быть скрыта фильтром панели — иначе её не выделить.
+        if (filterInput != null && !filterInput.getText().isBlank())
+            filterInput.setText(""); //$NON-NLS-1$
+        refreshSetsTable();
+        for (ObjectSets.SetDef candidate : filteredSets)
+        {
+            if (!setId.equals(candidate.id))
+                continue;
+            selectedSet = candidate;
+            setsViewer.setSelection(new StructuredSelection(candidate), true);
+            setsViewer.refresh();
+            refreshItemsTable();
+            return;
+        }
     }
 
     public ObjectSets.Item getSelectedItem()
@@ -297,6 +353,7 @@ public final class ObjectSetsView extends ViewPart
         ObjectSets.getInstance().addChangeListener(storeListener);
         ObjectSetsAddTargetState.getInstance().addListener(storeListener);
         installGitChangedRefreshListener();
+        installInfobaseChangedRefreshListener();
         installContextProjectListener();
         refreshSetsTable();
         activateKeyContext();
@@ -338,6 +395,7 @@ public final class ObjectSetsView extends ViewPart
         ObjectSets.getInstance().removeChangeListener(storeListener);
         ObjectSetsAddTargetState.getInstance().removeListener(storeListener);
         uninstallGitChangedRefreshListener();
+        uninstallInfobaseChangedRefreshListener();
         IWorkbenchPage page = getSite() != null ? getSite().getPage() : null;
         if (page != null && contextProjectListener != null)
             ActiveProjectTracker.removeListener(page, contextProjectListener);
@@ -539,6 +597,7 @@ public final class ObjectSetsView extends ViewPart
         TableViewerColumn colCount = new TableViewerColumn(setsViewer, SWT.NONE);
         countColumn = colCount.getColumn();
         countColumn.setText("Объектов"); //$NON-NLS-1$
+        countColumn.setToolTipText(COUNT_COLUMN_TOOLTIP);
         colCount.setLabelProvider(new ColumnLabelProvider()
         {
             @Override
@@ -546,7 +605,7 @@ public final class ObjectSetsView extends ViewPart
             {
                 if (!(element instanceof ObjectSets.SetDef set))
                     return ""; //$NON-NLS-1$
-                return Integer.toString(displayItemCount(set));
+                return displayItemCountText(set);
             }
         });
         layout.setColumnData(countColumn, new ColumnPixelData(64, false, false));
@@ -600,6 +659,7 @@ public final class ObjectSetsView extends ViewPart
                 return;
             }
             selectedSet = set;
+            refreshInfobaseCountCells();
             refreshItemsTable();
         });
 
@@ -678,7 +738,7 @@ public final class ObjectSetsView extends ViewPart
         ensureDefaultSetForActiveProject();
         filteredSets = new ArrayList<>(ObjectSets.getInstance().getAllSets());
         filteredSets.removeIf(set -> !ObjectSets.isProjectOpen(set.projectName)
-            || (set.system && !ObjectSetsItems.isProjectUnderGit(set.projectName)));
+            || !ObjectSets.isApplicable(set));
         filteredSets.sort(SETS_DISPLAY_ORDER);
         applyFilter();
         ObjectSets.SetDef keep = selectedSet;
@@ -830,33 +890,163 @@ public final class ObjectSetsView extends ViewPart
         ObjectSets.getInstance().ensureSystemSetForProject(projectName);
     }
 
-    /** Число объектов в строке набора: для «<Измененные>» — текущий git-состав, не пустой set.items. */
+    /** Число объектов неизвестно: считать дорого, а набор сейчас не показан. */
+    private static final int COUNT_UNKNOWN = -1;
+
+    /**
+     * Число для набора по базе показано «на паузе»: набор не выбран, поэтому состав не
+     * пересчитывается и показанное значение было бы недостоверным.
+     */
+    private boolean isPausedInfobaseCount(ObjectSets.SetDef set)
+    {
+        return set != null && set.kind == ObjectSets.SetKind.INFOBASE_CHANGED
+            && (selectedSet == null || !set.id.equals(selectedSet.id));
+    }
+
+    /**
+     * Перерисовать колонку «Объектов» у наборов по базе после смены выделения.
+     *
+     * <p>Текст ячейки для такого набора зависит от того, выбран он или нет («?» либо число), но
+     * JFace пересчитывает подписи только при обновлении элемента — смена выделения обновления не
+     * вызывает. Без этого строка сохраняла число, посчитанное когда она была выбрана, и «?» не
+     * появлялся после ухода выделения на другой набор.
+     */
+    private void refreshInfobaseCountCells()
+    {
+        if (setsViewer == null || setsViewer.getControl().isDisposed())
+            return;
+        for (ObjectSets.SetDef set : filteredSets)
+        {
+            if (set.kind == ObjectSets.SetKind.INFOBASE_CHANGED)
+                setsViewer.refresh(set, true);
+        }
+    }
+
+    /** Текст колонки «Объектов»: для невыбранного набора по базе — «?». */
+    private String displayItemCountText(ObjectSets.SetDef set)
+    {
+        int count = displayItemCount(set);
+        return count == COUNT_UNKNOWN ? "?" : Integer.toString(count); //$NON-NLS-1$
+    }
+
+    /**
+     * Число объектов в строке набора: для динамических — текущий состав, не пустой set.items.
+     *
+     * <p>Состав набора «&lt;Измененные <i>ИмяБазы</i>&gt;» считается через служебный поток
+     * синхронизации EDT (~375 мс), поэтому для него расчёт выполняется только когда набор выбран
+     * в таблице. Для невыбранного показывается «?» ({@link #COUNT_UNKNOWN}), а не последнее
+     * известное число: пока набор не выбран, состав не обновляется, и любое число будет
+     * недостоверным — вопросительный знак честнее.
+     */
     private int displayItemCount(ObjectSets.SetDef set)
     {
         if (set == null)
             return 0;
         if (!set.system)
             return set.items.size();
-        if (gitChangedItemsCache != null && selectedSet != null && set.id.equals(selectedSet.id))
-            return gitChangedItemsCache.size();
-        Integer cached = gitChangedCountByProject.get(set.projectName);
+        if (isPausedInfobaseCount(set))
+            return COUNT_UNKNOWN;
+        boolean selected = selectedSet != null && set.id.equals(selectedSet.id);
+        if (dynamicItemsCache != null && selected)
+            return dynamicItemsCache.size();
+        Integer cached = dynamicCountBySetId.get(set.id);
         if (cached != null)
             return cached;
-        List<ObjectSets.Item> items = ObjectSetsItems.collectGitChangedItems(set.projectName);
-        gitChangedCountByProject.put(set.projectName, items.size());
+        List<ObjectSets.Item> items = ObjectSetsItems.collectDynamicItems(set);
+        dynamicCountBySetId.put(set.id, items.size());
         return items.size();
     }
 
     private void syncSystemSetCountAfterItemsRefresh()
     {
-        if (selectedSet == null || !selectedSet.system || gitChangedItemsCache == null)
+        if (selectedSet == null || !selectedSet.system || dynamicItemsCache == null)
             return;
-        int count = gitChangedItemsCache.size();
-        Integer previous = gitChangedCountByProject.put(selectedSet.projectName, count);
+        int count = dynamicItemsCache.size();
+        Integer previous = dynamicCountBySetId.put(selectedSet.id, count);
         if (previous != null && previous.intValue() == count)
             return;
         if (setsViewer != null && !setsViewer.getControl().isDisposed())
             setsViewer.refresh(selectedSet, true);
+    }
+
+    /**
+     * Пока набор «&lt;Измененные <i>ИмяБазы</i>&gt;» показан в панели, его состав должен оставаться
+     * актуальным: правки в проекте меняют список объектов, ожидающих синхронизации.
+     *
+     * <p>Пересчёт стоит ~375 мс (служебный поток синхронизации EDT), поэтому он выполняется только
+     * когда такой набор действительно выбран в таблице — для остальных наборов и при закрытой
+     * панели ничего не считается. Сам сброс кэша уже подавляет дребезг правок.
+     */
+    private void installInfobaseChangedRefreshListener()
+    {
+        infobaseChangedListener = this::onInfobaseChangedInvalidated;
+        InfobaseChangedObjects.addChangeListener(infobaseChangedListener);
+    }
+
+    private void uninstallInfobaseChangedRefreshListener()
+    {
+        if (infobaseChangedListener == null)
+            return;
+        InfobaseChangedObjects.removeChangeListener(infobaseChangedListener);
+        infobaseChangedListener = null;
+    }
+
+    /** Пауза между повторами расчёта состава набора по базе, мс. */
+    private static final int INFOBASE_RETRY_DELAY_MS = 3500;
+
+    /** Сколько раз повторять, пока сервисы EDT поднимаются (примерно полминуты). */
+    private static final int INFOBASE_RETRY_MAX_ATTEMPTS = 10;
+
+    private int infobaseRetryAttempt;
+    private boolean infobaseRetryPending;
+
+    /**
+     * Повторить расчёт состава, если он вернул «пока неизвестно».
+     *
+     * <p>Сразу после старта EDT сервис синхронизации ещё не поднят, и выбранный в панели набор
+     * «&lt;Измененные <i>ИмяБазы</i>&gt;» показывался пустым до тех пор, пока пользователь не
+     * перевыберет строку вручную. Пока ответ недостоверный, повторяем — расчёт в этом состоянии
+     * упирается в дешёвую проверку и почти ничего не стоит.
+     */
+    private void scheduleInfobaseRetryIfPending(ObjectSets.SetDef set)
+    {
+        if (set == null || set.kind != ObjectSets.SetKind.INFOBASE_CHANGED
+            || infobaseRetryPending
+            || !InfobaseChangedObjects.isResultPending(set))
+        {
+            return;
+        }
+        if (infobaseRetryAttempt >= INFOBASE_RETRY_MAX_ATTEMPTS)
+            return;
+        Display display = setsViewer.getControl().getDisplay();
+        if (display.isDisposed())
+            return;
+        infobaseRetryPending = true;
+        infobaseRetryAttempt++;
+        display.timerExec(INFOBASE_RETRY_DELAY_MS, () ->
+        {
+            infobaseRetryPending = false;
+            if (setsViewer == null || setsViewer.getControl().isDisposed())
+                return;
+            if (selectedSet == null || selectedSet.kind != ObjectSets.SetKind.INFOBASE_CHANGED)
+                return;
+            dynamicItemsCache = null;
+            dynamicCountBySetId.remove(selectedSet.id);
+            setsViewer.refresh(selectedSet, true);
+            refreshItemsTable();
+        });
+    }
+
+    private void onInfobaseChangedInvalidated()
+    {
+        if (setsViewer == null || setsViewer.getControl().isDisposed())
+            return;
+        if (selectedSet == null || selectedSet.kind != ObjectSets.SetKind.INFOBASE_CHANGED)
+            return;
+        dynamicItemsCache = null;
+        dynamicCountBySetId.remove(selectedSet.id);
+        setsViewer.refresh(selectedSet, true);
+        refreshItemsTable();
     }
 
     private void installGitChangedRefreshListener()
@@ -901,8 +1091,9 @@ public final class ObjectSetsView extends ViewPart
             gitChangedRefreshPending = false;
             if (setsViewer == null || setsViewer.getControl().isDisposed())
                 return;
-            gitChangedItemsCache = null;
-            gitChangedCountByProject.clear();
+            dynamicItemsCache = null;
+            dynamicCountBySetId.clear();
+            InfobaseChangedObjects.invalidate(null);
             refreshSetsTable();
         });
     }
@@ -978,7 +1169,7 @@ public final class ObjectSetsView extends ViewPart
             return;
         }
         if (selectedSet.system)
-            gitChangedItemsCache = null;
+            dynamicItemsCache = null;
         applyFilter();
         scheduleItemIconsRefresh();
     }
@@ -990,7 +1181,7 @@ public final class ObjectSetsView extends ViewPart
         if (renameButton != null && !renameButton.isDisposed())
             renameButton.setEnabled(!fixed);
         if (deleteButton != null && !deleteButton.isDisposed())
-            deleteButton.setEnabled(!system);
+            deleteButton.setEnabled(selectedSet != null && selectedSet.isDeletable());
         if (loadButton != null && !loadButton.isDisposed())
             loadButton.setEnabled(!system);
     }
@@ -1042,9 +1233,12 @@ public final class ObjectSetsView extends ViewPart
         List<ObjectSets.Item> all;
         if (selectedSet.system)
         {
-            if (gitChangedItemsCache == null)
-                gitChangedItemsCache = ObjectSetsItems.collectGitChangedItems(selectedSet.projectName);
-            all = gitChangedItemsCache;
+            if (dynamicItemsCache == null)
+            {
+                dynamicItemsCache = ObjectSetsItems.collectDynamicItems(selectedSet);
+                scheduleInfobaseRetryIfPending(selectedSet);
+            }
+            all = dynamicItemsCache;
         }
         else
         {
@@ -1262,7 +1456,9 @@ public final class ObjectSetsView extends ViewPart
 
     private void deleteSet()
     {
-        if (selectedSet == null || selectedSet.system)
+        // Удаляемость определяет вид набора, а не признак «динамический»: набор по изменениям
+        // базы динамический, но удалять его можно — команда «Показать изменения» создаст заново.
+        if (selectedSet == null || !selectedSet.isDeletable())
             return;
         ObjectSets.getInstance().deleteSet(selectedSet.id);
         selectedSet = null;
@@ -1533,7 +1729,7 @@ public final class ObjectSetsView extends ViewPart
         if (col == setNameColumn)
             return set.name != null ? set.name : ""; //$NON-NLS-1$
         if (col == countColumn)
-            return Integer.toString(displayItemCount(set));
+            return displayItemCountText(set);
         if (col == projectColumn)
             return set.projectName != null ? set.projectName : ""; //$NON-NLS-1$
         return ""; //$NON-NLS-1$

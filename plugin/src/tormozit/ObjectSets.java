@@ -8,6 +8,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 
@@ -26,7 +27,52 @@ public final class ObjectSets
     private static final String DEFAULT_SET_NAME = "<Основной>"; //$NON-NLS-1$
     private static final String SYSTEM_CHANGED_SET_NAME = "<Измененные>"; //$NON-NLS-1$
     private static final String SYSTEM_CHANGED_ID_PREFIX = "@changed:"; //$NON-NLS-1$
+    private static final String INFOBASE_CHANGED_ID_PREFIX = "@ibchanged:"; //$NON-NLS-1$
+    /** Разделитель имени проекта и UUID базы в идентификаторе набора: в имени проекта недопустим. */
+    private static final char INFOBASE_CHANGED_ID_SEPARATOR = '|';
     private static final char SEP = '\t';
+
+    /**
+     * Вид набора. Определяет, откуда берётся состав и что с набором можно делать.
+     *
+     * <ul>
+     *   <li>{@link #USER} — обычный набор: состав редактируется вручную и хранится в настройках;</li>
+     *   <li>{@link #GIT_CHANGED} — «&lt;Измененные&gt;»: состав вычисляется по git-статусу проекта,
+     *       набор создаётся автоматически и не удаляется;</li>
+     *   <li>{@link #INFOBASE_CHANGED} — «&lt;Измененные <i>ИмяБазы</i>&gt;»: состав вычисляется по
+     *       объектам, ожидающим синхронизации с информационной базой; набор создаётся по требованию
+     *       и может быть удалён пользователем.</li>
+     * </ul>
+     */
+    public enum SetKind
+    {
+        USER("0"), //$NON-NLS-1$
+        GIT_CHANGED("1"), //$NON-NLS-1$
+        INFOBASE_CHANGED("2"); //$NON-NLS-1$
+
+        final String code;
+
+        SetKind(String code)
+        {
+            this.code = code;
+        }
+
+        /** Состав вычисляется динамически, вручную не редактируется. */
+        public boolean isDynamic()
+        {
+            return this != USER;
+        }
+
+        static SetKind byCode(String code)
+        {
+            for (SetKind kind : values())
+            {
+                if (kind.code.equals(code))
+                    return kind;
+            }
+            return USER;
+        }
+    }
 
     private static final ObjectSets INSTANCE = new ObjectSets();
 
@@ -56,27 +102,42 @@ public final class ObjectSets
         public final String id;
         public String name;
         public final String projectName;
-        /** Системный набор (например, «<Измененные>»): состав не редактируется. */
+        /** Вид набора: обычный или один из динамических. */
+        public final SetKind kind;
+        /**
+         * Динамический набор (например, «<Измененные>»): состав не редактируется вручную.
+         * Синоним {@code kind.isDynamic()} — оставлен, т.к. на него опирается весь UI наборов.
+         */
         public final boolean system;
         public final List<Item> items = new ArrayList<>();
 
-        /** Имя фиксировано: системный набор или набор «<Основной>» — переименование запрещено. */
+        /** Имя фиксировано: динамический набор или набор «<Основной>» — переименование запрещено. */
         public boolean isFixed()
         {
             return system || DEFAULT_SET_NAME.equals(name);
         }
 
-        SetDef(String id, String name, String projectName)
+        /**
+         * Набор можно удалить: «<Измененные>» по git создаётся автоматически и удалению не
+         * подлежит, набор по изменениям базы — подлежит (пересоздаётся кликом в «Приложениях»).
+         */
+        public boolean isDeletable()
         {
-            this(id, name, projectName, false);
+            return kind != SetKind.GIT_CHANGED;
         }
 
-        SetDef(String id, String name, String projectName, boolean system)
+        SetDef(String id, String name, String projectName)
+        {
+            this(id, name, projectName, SetKind.USER);
+        }
+
+        SetDef(String id, String name, String projectName, SetKind kind)
         {
             this.id = id;
             this.name = name;
             this.projectName = projectName != null ? projectName : ""; //$NON-NLS-1$
-            this.system = system;
+            this.kind = kind != null ? kind : SetKind.USER;
+            this.system = this.kind.isDynamic();
         }
     }
 
@@ -132,7 +193,7 @@ public final class ObjectSets
     public synchronized boolean deleteSet(String setId)
     {
         SetDef set = setsById.get(setId);
-        if (set == null || set.system)
+        if (set == null || !set.isDeletable())
             return false;
         SetDef removed = setsById.remove(setId);
         if (removed == null)
@@ -293,16 +354,142 @@ public final class ObjectSets
         String id = systemSetId(projectName);
         if (setsById.containsKey(id))
             return null;
-        SetDef set = new SetDef(id, SYSTEM_CHANGED_SET_NAME, projectName.trim(), true);
+        SetDef set = new SetDef(id, SYSTEM_CHANGED_SET_NAME, projectName.trim(), SetKind.GIT_CHANGED);
         setsById.put(id, set);
         return set;
     }
 
-    /** Привести имя к каноническому виду: системные наборы и старые «Основной» (без скобок). */
-    private static String normalizeSetName(String name, boolean system)
+    /**
+     * Набор «&lt;Измененные <i>ИмяБазы</i>&gt;» с составом по объектам, ожидающим синхронизации
+     * с информационной базой. Если набор уже есть — возвращается он же (с обновлённым именем базы,
+     * если базу переименовали).
+     *
+     * @param projectName имя проекта
+     * @param infobaseUuid UUID информационной базы
+     * @param infobaseName отображаемое имя информационной базы
+     * @return набор или {@code null}, если аргументы пусты
+     */
+    public synchronized SetDef ensureInfobaseChangedSet(
+        String projectName, String infobaseUuid, String infobaseName)
     {
-        if (system)
+        if (projectName == null || projectName.isBlank()
+            || infobaseUuid == null || infobaseUuid.isBlank())
+        {
+            return null;
+        }
+        String id = infobaseChangedSetId(projectName.trim(), infobaseUuid.trim());
+        String name = infobaseChangedSetName(infobaseName);
+        SetDef existing = setsById.get(id);
+        if (existing != null)
+        {
+            if (name.equals(existing.name))
+                return existing;
+            existing.name = name;
+            save();
+            notifyChanged();
+            return existing;
+        }
+        SetDef set = new SetDef(id, name, projectName.trim(), SetKind.INFOBASE_CHANGED);
+        setsById.put(id, set);
+        save();
+        notifyChanged();
+        return set;
+    }
+
+    /**
+     * Удалить набор «&lt;Измененные <i>ИмяБазы</i>&gt;» — приложение с этой базой убрали из проекта.
+     *
+     * @param projectName имя проекта
+     * @param infobaseUuid UUID информационной базы
+     * @return {@code true}, если набор был и удалён
+     */
+    public synchronized boolean deleteInfobaseChangedSet(String projectName, String infobaseUuid)
+    {
+        if (projectName == null || projectName.isBlank() || infobaseUuid == null || infobaseUuid.isBlank())
+            return false;
+        return deleteSet(infobaseChangedSetId(projectName.trim(), infobaseUuid.trim()));
+    }
+
+    /**
+     * Убрать наборы по базам, которых у проекта больше нет (приложение удалили, пока EDT была
+     * закрыта, либо событие об удалении не дошло).
+     *
+     * @param projectName имя проекта
+     * @param liveInfobaseUuids UUID баз, связанных с проектом сейчас; {@code null} — не проверять
+     *            (список недоступен, удалять ничего нельзя)
+     * @return число удалённых наборов
+     */
+    public synchronized int pruneInfobaseChangedSets(String projectName, Set<String> liveInfobaseUuids)
+    {
+        if (projectName == null || projectName.isBlank() || liveInfobaseUuids == null)
+            return 0;
+        List<String> staleIds = new ArrayList<>();
+        for (SetDef set : setsById.values())
+        {
+            if (set.kind != SetKind.INFOBASE_CHANGED || !projectName.equals(set.projectName))
+                continue;
+            String uuid = infobaseUuidOf(set);
+            if (uuid == null || !liveInfobaseUuids.contains(uuid))
+                staleIds.add(set.id);
+        }
+        int deleted = 0;
+        for (String setId : staleIds)
+        {
+            if (deleteSet(setId))
+                deleted++;
+        }
+        return deleted;
+    }
+
+    /**
+     * Набор применим к проекту в его нынешнем состоянии.
+     *
+     * <p>Существенно только для {@link SetKind#GIT_CHANGED}: без git-репозитория такой набор
+     * смысла не имеет и в таблице не показывается. Набор по изменениям базы от git не зависит —
+     * раньше это правило распространялось на все динамические наборы через флаг {@code system},
+     * из-за чего набор «&lt;Измененные <i>ИмяБазы</i>&gt;» пропадал из таблицы в проектах без git.
+     *
+     * @param set набор
+     * @return {@code false}, если набор в текущем состоянии проекта неприменим
+     */
+    public static boolean isApplicable(SetDef set)
+    {
+        if (set == null)
+            return false;
+        if (set.kind == SetKind.GIT_CHANGED)
+            return ObjectSetsItems.isProjectUnderGit(set.projectName);
+        return true;
+    }
+
+    /** UUID информационной базы набора {@link SetKind#INFOBASE_CHANGED} (иначе {@code null}). */
+    public static String infobaseUuidOf(SetDef set)
+    {
+        if (set == null || set.kind != SetKind.INFOBASE_CHANGED || set.id == null)
+            return null;
+        int sep = set.id.lastIndexOf(INFOBASE_CHANGED_ID_SEPARATOR);
+        if (sep < 0 || sep + 1 >= set.id.length())
+            return null;
+        return set.id.substring(sep + 1);
+    }
+
+    private static String infobaseChangedSetName(String infobaseName)
+    {
+        String suffix = infobaseName != null ? infobaseName.trim() : ""; //$NON-NLS-1$
+        return suffix.isEmpty()
+            ? SYSTEM_CHANGED_SET_NAME
+            : "<Измененные " + suffix + ">"; //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /**
+     * Привести имя к каноническому виду. Имя набора по базе хранится как есть (в нём имя базы),
+     * git-набор всегда «&lt;Измененные&gt;», старое «Основной» — в «&lt;Основной&gt;».
+     */
+    private static String normalizeSetName(String name, SetKind kind)
+    {
+        if (kind == SetKind.GIT_CHANGED)
             return SYSTEM_CHANGED_SET_NAME;
+        if (kind == SetKind.INFOBASE_CHANGED)
+            return name;
         if ("Основной".equals(name)) //$NON-NLS-1$
             return DEFAULT_SET_NAME;
         return name;
@@ -311,6 +498,11 @@ public final class ObjectSets
     static String systemSetId(String projectName)
     {
         return SYSTEM_CHANGED_ID_PREFIX + projectName;
+    }
+
+    static String infobaseChangedSetId(String projectName, String infobaseUuid)
+    {
+        return INFOBASE_CHANGED_ID_PREFIX + projectName + INFOBASE_CHANGED_ID_SEPARATOR + infobaseUuid;
     }
 
     /** Есть ли у проекта хоть один несистемный (пользовательский) набор. */
@@ -435,8 +627,10 @@ public final class ObjectSets
         SetDef set = setsById.get(setId);
         if (set == null)
             return List.of();
-        if (set.system)
+        if (set.kind == SetKind.GIT_CHANGED)
             return ObjectSetsItems.collectGitChangedItems(set.projectName);
+        if (set.kind == SetKind.INFOBASE_CHANGED)
+            return InfobaseChangedObjects.changedItems(set);
         List<Item> copy = new ArrayList<>(set.items);
         copy.sort(ItemSort.COMPARATOR);
         return copy;
@@ -476,7 +670,7 @@ public final class ObjectSets
                 sb.append('\n');
             sb.append(SET_MARKER).append(SEP).append(escape(set.name))
                 .append(SEP).append(escape(set.projectName)).append(SEP).append(escape(set.id))
-                .append(SEP).append(set.system ? "1" : "0"); //$NON-NLS-1$ //$NON-NLS-2$
+                .append(SEP).append(set.kind.code);
             sortItemsInPlace(set);
             for (Item item : set.items)
             {
@@ -507,10 +701,10 @@ public final class ObjectSets
                 String name = unescape(parts[1]);
                 String projectName = unescape(parts[2]);
                 String id = parts.length >= 4 ? unescape(parts[3]) : UUID.randomUUID().toString();
-                boolean system = parts.length >= 5 && "1".equals(unescape(parts[4])); //$NON-NLS-1$ //$NON-NLS-2$
+                SetKind kind = parts.length >= 5 ? SetKind.byCode(unescape(parts[4])) : SetKind.USER;
                 if (name.isBlank() || projectName.isBlank())
                     continue;
-                current = findOrCreateSet(name, projectName, id, merge, system);
+                current = findOrCreateSet(name, projectName, id, merge, kind);
                 imported++;
                 continue;
             }
@@ -533,9 +727,9 @@ public final class ObjectSets
         return imported;
     }
 
-    private SetDef findOrCreateSet(String name, String projectName, String id, boolean merge, boolean system)
+    private SetDef findOrCreateSet(String name, String projectName, String id, boolean merge, SetKind kind)
     {
-        name = normalizeSetName(name, system);
+        name = normalizeSetName(name, kind);
         if (merge)
         {
             for (SetDef set : setsById.values())
@@ -544,7 +738,7 @@ public final class ObjectSets
                     return set;
             }
         }
-        SetDef set = new SetDef(id.isBlank() ? UUID.randomUUID().toString() : id, name, projectName, system);
+        SetDef set = new SetDef(id.isBlank() ? UUID.randomUUID().toString() : id, name, projectName, kind);
         setsById.put(set.id, set);
         return set;
     }
@@ -610,11 +804,11 @@ public final class ObjectSets
                 String projectName = unescape(parts[2]);
                 String id = parts.length >= 4 && !unescape(parts[3]).isBlank()
                     ? unescape(parts[3]) : UUID.randomUUID().toString();
-                boolean system = parts.length >= 5 && "1".equals(unescape(parts[4])); //$NON-NLS-1$ //$NON-NLS-2$
+                SetKind kind = parts.length >= 5 ? SetKind.byCode(unescape(parts[4])) : SetKind.USER;
                 if (name.isBlank() || projectName.isBlank())
                     continue;
-                name = normalizeSetName(name, system);
-                current = new SetDef(id, name, projectName, system);
+                name = normalizeSetName(name, kind);
+                current = new SetDef(id, name, projectName, kind);
                 setsById.put(id, current);
                 continue;
             }
