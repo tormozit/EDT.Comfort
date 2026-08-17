@@ -179,6 +179,11 @@ public final class GitChangedFileMenuHook implements IStartup
 
     private static final String COMPARE_WITH_COMMIT_TEXT =
         "Сравнить рабочий каталог с коммитом"; //$NON-NLS-1$
+    /** Отбор «Все изменения ресурса» списка коммитов — константа перечисления {@code GitHistoryPage.ShowFilter}. */
+    private static final String SHOW_ALL_RESOURCE_FILTER = "SHOWALLRESOURCE"; //$NON-NLS-1$
+    /** Активация строки объекта в дереве сравнения: число попыток и пауза между ними. */
+    private static final int REVEAL_ROW_MAX_ATTEMPTS = 20;
+    private static final int REVEAL_ROW_RETRY_MILLIS = 250;
     private static final String COMPARE_UI_BUNDLE_ID = "com._1c.g5.v8.dt.compare.ui"; //$NON-NLS-1$
     private static final String COMPARE_DIALOG_CLASS =
         "com._1c.g5.v8.dt.internal.compare.git.ui.dialogs.DtCommitSelectionDialog"; //$NON-NLS-1$
@@ -1735,6 +1740,44 @@ public final class GitChangedFileMenuHook implements IStartup
     }
 
     /**
+     * BM-fqn объекта активного редактора — только когда список коммитов панели «История»
+     * действительно про этот объект: выбран отбор «Все изменения ресурса»
+     * ({@code GitHistoryPage.showAllFilter == SHOWALLRESOURCE}). При отборе по папке,
+     * проекту или репозиторию список коммитов не относится к объекту редактора, и
+     * активировать его строку в дереве сравнения незачем.
+     *
+     * @return {@code null}, если условие не выполнено или объект не определяется
+     */
+    private static String resolveLinkedEditorFqn(IViewPart view)
+    {
+        try
+        {
+            Object historyPage = Global.call(view, "getHistoryPage"); //$NON-NLS-1$
+            Object showAllFilter = historyPage != null
+                ? Global.getField(historyPage, "showAllFilter") : null; //$NON-NLS-1$
+            if (!(showAllFilter instanceof Enum<?> filter)
+                || !SHOW_ALL_RESOURCE_FILTER.equals(filter.name()))
+                return null;
+
+            IWorkbenchPage page = view.getSite() != null ? view.getSite().getPage() : null;
+            IEditorPart editor = page != null ? page.getActiveEditor() : null;
+            if (editor == null)
+                return null;
+
+            String fullName = GetRef.getRefFromEditor(editor);
+            if (fullName == null || fullName.isBlank())
+                return null;
+            String fqn = MdTypeMapping.anyFullNameToBmFqn(fullName);
+            return fqn == null || fqn.isBlank() ? null : fqn;
+        }
+        catch (Exception ex)
+        {
+            Global.log("CompareWithCommit: объект активного редактора: " + ex); //$NON-NLS-1$
+            return null;
+        }
+    }
+
+    /**
      * Репозиторий, с которым сейчас работает панель «История»
      * ({@code GenericHistoryView}/{@code HistoryView}), через рефлексию к его
      * {@code IHistoryPage.currentRepo}.
@@ -1771,6 +1814,10 @@ public final class GitChangedFileMenuHook implements IStartup
                 Global.log("CompareWithCommit: не удалось извлечь SHA коммита"); //$NON-NLS-1$
                 return;
             }
+
+            // Объект редактора фиксируется здесь, до долгого сравнения: к моменту готовности
+            // дерева активным может быть уже другой редактор.
+            String linkedEditorFqn = resolveLinkedEditorFqn(view);
 
             Repository repository = resolveRepository(view);
             if (repository == null)
@@ -1888,7 +1935,7 @@ public final class GitChangedFileMenuHook implements IStartup
             new CompareWithCommitWorker(repository, project, chosenSha, displayRepr, strategy,
                 readOnly, parseBsl, mergeSettingsFileName, filePathConverter, v8ProjectManager,
                 comparisonManager, comparisonEditorOpenHelper, helperCls, shell,
-                mainSideObjectsDeletionAllowed).schedule();
+                mainSideObjectsDeletionAllowed, linkedEditorFqn).schedule();
         }
         catch (Exception ex)
         {
@@ -2593,13 +2640,15 @@ public final class GitChangedFileMenuHook implements IStartup
         private final Class<?> helperCls;
         private final Shell shell;
         private final boolean mainSideObjectsDeletionAllowed;
+        /** BM-fqn объекта активного редактора; {@code null} — строку в дереве не активировать. */
+        private final String linkedEditorFqn;
 
         CompareWithCommitWorker(Repository repository, IProject project, String revisionToCompareWith,
             String revisionToCompareWithName, MatchingStrategy matchingStrategy, boolean noMerge,
             boolean parseBslModuleStructure, String mergeSettingsFileName,
             IQualifiedNameFilePathConverter filePathConverter, IV8ProjectManager v8ProjectManager,
             IComparisonManager comparisonManager, Object comparisonEditorOpenHelper, Class<?> helperCls,
-            Shell shell, boolean mainSideObjectsDeletionAllowed)
+            Shell shell, boolean mainSideObjectsDeletionAllowed, String linkedEditorFqn)
         {
             super(COMPARE_WITH_COMMIT_TEXT);
             this.repository = repository;
@@ -2617,6 +2666,7 @@ public final class GitChangedFileMenuHook implements IStartup
             this.helperCls = helperCls;
             this.shell = shell;
             this.mainSideObjectsDeletionAllowed = mainSideObjectsDeletionAllowed;
+            this.linkedEditorFqn = linkedEditorFqn;
         }
 
         @Override
@@ -2693,23 +2743,27 @@ public final class GitChangedFileMenuHook implements IStartup
                     Global.log("CompareWithCommit: openComparisonEditor: " + ex); //$NON-NLS-1$
                 }
             });
-            if (!mainSideObjectsDeletionAllowed)
-                disableMainSideDeletions(openedEditor[0]);
+            scheduleAfterComparisonTasks(openedEditor[0]);
         }
 
         /**
-         * При выключенном «Разрешить удаление объектов главного источника» запрещает
-         * слияние узлам, где объект есть только в главном источнике (рабочий каталог), —
+         * Действия, которым нужно готовое дерево сравнения:
+         * <ul>
+         * <li>при выключенном «Разрешить удаление объектов главного источника» — запрет
+         * слияния узлам, где объект есть только в главном источнике (рабочий каталог), —
          * применение коммита удалило бы такой объект. Вендорский флаг
          * {@code mainSideObjectsDeletionAllowed} в сравнении с коммитом (всегда
-         * трёхстороннее) не используется, поэтому блокировка делается здесь: после
-         * завершения сравнения по дереву сессии отключается слияние таких узлов.
+         * трёхстороннее) не используется, поэтому блокировка делается здесь;</li>
+         * <li>активация строки объекта активного редактора ({@link #linkedEditorFqn}).</li>
+         * </ul>
+         * Оба действия ждут одного и того же события (завершения сравнения) и выполняются
+         * одной задачей, чтобы активация строки шла после обновления дерева.
          */
-        private void disableMainSideDeletions(IEditorPart editor)
+        private void scheduleAfterComparisonTasks(IEditorPart editor)
         {
-            if (editor == null)
+            if (editor == null || (mainSideObjectsDeletionAllowed && linkedEditorFqn == null))
                 return;
-            Job disableJob = new Job("CompareWithCommit: блокировка удаления объектов главного источника") //$NON-NLS-1$
+            Job disableJob = new Job("CompareWithCommit: постобработка дерева сравнения") //$NON-NLS-1$
             {
                 @Override
                 protected IStatus run(IProgressMonitor monitor)
@@ -2723,7 +2777,7 @@ public final class GitChangedFileMenuHook implements IStartup
                             || editor.getSite().getShell().isDisposed())
                         {
                             Global.log("CompareWithCommit: редактор сравнения закрыт до завершения " //$NON-NLS-1$
-                                + "сравнения, блокировка удаления отменена"); //$NON-NLS-1$
+                                + "сравнения, постобработка отменена"); //$NON-NLS-1$
                             return Status.CANCEL_STATUS;
                         }
                         session = CompareConfigSelectionListener.getSession(editor);
@@ -2735,7 +2789,7 @@ public final class GitChangedFileMenuHook implements IStartup
                             if (status == ComparisonProcessStatus.COMPARISON_MERGE_PROCESS_CANCELLED)
                             {
                                 Global.log("CompareWithCommit: сравнение отменено пользователем, " //$NON-NLS-1$
-                                    + "блокировка удаления не выполняется"); //$NON-NLS-1$
+                                    + "постобработка не выполняется"); //$NON-NLS-1$
                                 return Status.CANCEL_STATUS;
                             }
                         }
@@ -2753,7 +2807,7 @@ public final class GitChangedFileMenuHook implements IStartup
                     {
                         Global.log("CompareWithCommit: не удалось дождаться завершения сравнения за " //$NON-NLS-1$
                             + waitedMillis + " мс (таймаут " + SESSION_WAIT_TIMEOUT_MILLIS //$NON-NLS-1$
-                            + " мс), блокировка удаления не выполнена, статус=" //$NON-NLS-1$
+                            + " мс), постобработка не выполнена, статус=" //$NON-NLS-1$
                             + (session != null ? session.getStatus() : null)); //$NON-NLS-1$
                     }
                     else
@@ -2767,32 +2821,13 @@ public final class GitChangedFileMenuHook implements IStartup
                             if (finishedSession == null
                                 || finishedSession.getStatus() != ComparisonProcessStatus.COMPARISON_PROCESS_FINISHED)
                                 return;
-                            Object comparisonManager = Global.getField(finishedSession, "comparisonManager"); //$NON-NLS-1$
-                            int[] disabledHolder = { 0 };
-                            if (comparisonManager != null)
-                            {
-                                AbstractBmTask<Object> task = new AbstractBmTask<>(
-                                    "CompareWithCommit: блокировка удаления объектов главного источника") //$NON-NLS-1$
-                                {
-                                    @Override
-                                    public Object execute(IBmTransaction transaction, IProgressMonitor progressMonitor)
-                                    {
-                                        disabledHolder[0] = disableDeletionNodes(finishedSession.getRootNode());
-                                        return null;
-                                    }
-                                };
-                                Global.invoke(comparisonManager, "runComparisonTreeBmModelTask", //$NON-NLS-1$
-                                    finishedSession, task);
-                            }
-                            int disabled = disabledHolder[0];
-                            Global.log("CompareWithCommit: заблокировано слияние для " //$NON-NLS-1$
-                                + disabled + " узлов удаления объектов главного источника"); //$NON-NLS-1$
-                            if (editor.getSite() != null && !editor.getSite().getShell().isDisposed())
-                                refreshComparisonTree(editor);
+                            if (!mainSideObjectsDeletionAllowed)
+                                disableMainSideDeletions(editor, finishedSession);
+                            revealLinkedEditorRow(editor);
                         }
                         catch (Exception ex)
                         {
-                            Global.log("CompareWithCommit: блокировка удаления: " + ex); //$NON-NLS-1$
+                            Global.log("CompareWithCommit: постобработка дерева сравнения: " + ex); //$NON-NLS-1$
                         }
                     });
                     return Status.OK_STATUS;
@@ -2800,6 +2835,90 @@ public final class GitChangedFileMenuHook implements IStartup
             };
             disableJob.setSystem(true);
             disableJob.schedule();
+        }
+
+        /**
+         * Запрещает слияние узлам, где объект есть только в главном источнике
+         * (рабочий каталог): применение коммита удалило бы такой объект.
+         */
+        private void disableMainSideDeletions(IEditorPart editor, IComparisonSession finishedSession)
+        {
+            Object comparisonManager = Global.getField(finishedSession, "comparisonManager"); //$NON-NLS-1$
+            int[] disabledHolder = { 0 };
+            if (comparisonManager != null)
+            {
+                AbstractBmTask<Object> task = new AbstractBmTask<>(
+                    "CompareWithCommit: блокировка удаления объектов главного источника") //$NON-NLS-1$
+                {
+                    @Override
+                    public Object execute(IBmTransaction transaction, IProgressMonitor progressMonitor)
+                    {
+                        disabledHolder[0] = disableDeletionNodes(finishedSession.getRootNode());
+                        return null;
+                    }
+                };
+                Global.invoke(comparisonManager, "runComparisonTreeBmModelTask", finishedSession, task); //$NON-NLS-1$
+            }
+            Global.log("CompareWithCommit: заблокировано слияние для " + disabledHolder[0] //$NON-NLS-1$
+                + " узлов удаления объектов главного источника"); //$NON-NLS-1$
+            if (editor.getSite() != null && !editor.getSite().getShell().isDisposed())
+                refreshComparisonTree(editor);
+        }
+
+        /**
+         * Активирует в построенном дереве строку объекта активного редактора
+         * (см. {@link GitChangedFileMenuHook#resolveLinkedEditorFqn}). Фокус дереву передаётся
+         * только если редактор сравнения и так активен: сравнение идёт долго, и к его
+         * завершению пользователь может работать в другом месте.
+         */
+        private void revealLinkedEditorRow(IEditorPart editor)
+        {
+            if (linkedEditorFqn == null)
+                return;
+            revealLinkedEditorRow(editor, 1);
+        }
+
+        /**
+         * Статус «сравнение завершено» опережает готовность дерева в UI (модель узлов
+         * панели строится после), поэтому попытка повторяется ограниченное число раз.
+         */
+        private void revealLinkedEditorRow(IEditorPart editor, int attempt)
+        {
+            if (editor.getSite() == null || editor.getSite().getShell().isDisposed())
+                return;
+
+            boolean editorIsActive = editor.getSite().getPage() != null
+                && editor.getSite().getPage().getActiveEditor() == editor;
+            // Редактор может быть открыт на под-объекте (форма, макет): если его строки в дереве
+            // нет, поднимаемся к владельцу — «Catalog.Товары.Form.Список» → «Catalog.Товары».
+            for (String fqn = linkedEditorFqn; fqn != null; fqn = ownerFqn(fqn))
+            {
+                if (!CompareConfigMenuHook.revealObjectInTree(editor, fqn, editorIsActive))
+                    continue;
+                Global.log("CompareWithCommit: строка объекта " + fqn //$NON-NLS-1$
+                    + " активирована в дереве сравнения (попытка " + attempt + ")"); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            }
+            if (attempt >= REVEAL_ROW_MAX_ATTEMPTS)
+            {
+                Global.log("CompareWithCommit: строка объекта редактора " + linkedEditorFqn //$NON-NLS-1$
+                    + " в дереве сравнения не найдена за " + attempt + " попыток"); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            }
+            Display.getDefault().timerExec(REVEAL_ROW_RETRY_MILLIS,
+                () -> revealLinkedEditorRow(editor, attempt + 1));
+        }
+
+        /**
+         * Fqn владельца под-объекта («тип.имя» пары отбрасываются с конца);
+         * {@code null} для самого объекта верхнего уровня.
+         */
+        private static String ownerFqn(String fqn)
+        {
+            String[] parts = fqn.split("\\."); //$NON-NLS-1$
+            if (parts.length <= 2)
+                return null;
+            return String.join(".", Arrays.copyOf(parts, parts.length - 2)); //$NON-NLS-1$
         }
 
         /**

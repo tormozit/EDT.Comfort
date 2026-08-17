@@ -459,6 +459,22 @@ public class CompareConfigMenuHook implements IStartup
         TreeExpander.resetExpansionAfterReveal(viewer, true);
     }
 
+    /**
+     * Активирует в дереве сравнения строку объекта метаданных по его BM-fqn
+     * (например {@code Catalog.Товары}) — тем же способом, что и перетаскивание объекта
+     * из Навигатора в дерево сравнения.
+     *
+     * @param activateAndFocus активировать редактор сравнения и передать фокус дереву
+     * @return {@code true}, если строка найдена и выделена
+     */
+    public static boolean revealObjectInTree(IEditorPart editor, String fqn, boolean activateAndFocus)
+    {
+        if (editor == null || fqn == null || fqn.isBlank())
+            return false;
+        return NavigatorDropSupport.revealFqn(editor, fqn, activateAndFocus)
+            == NavigatorDropSupport.RevealResult.OK;
+    }
+
     private static AbstractTreeViewer getTreeViewerFromEditor(IEditorPart editor)
     {
         Object view = Global.getField(editor, "comparisonView"); //$NON-NLS-1$
@@ -6271,26 +6287,41 @@ public class CompareConfigMenuHook implements IStartup
                 return;
             }
 
+            switch (revealFqn(editor, fqn, true))
+            {
+            case NOT_IN_COMPARISON ->
+                ToastNotification.show(TOAST_TITLE, "Объект не найден в дереве сравнения", 4000); //$NON-NLS-1$
+            case ROW_UNAVAILABLE ->
+                ToastNotification.show(TOAST_TITLE,
+                    "Объект есть в сравнении, но строка недоступна (возможно, скрыта фильтром)", 5000); //$NON-NLS-1$
+            default -> { }
+            }
+        }
+
+        /**
+         * Активирует в дереве сравнения строку объекта по его BM-fqn: раскрывает предков,
+         * выделяет строку и показывает её в видимой области. Общий механизм для
+         * перетаскивания объекта из Навигатора и для автоматической активации строки после
+         * построения дерева ({@link GitChangedFileMenuHook}).
+         *
+         * @param activateAndFocus активировать редактор сравнения и передать фокус дереву;
+         *        {@code false} — только выделить строку, не забирая фокус у пользователя.
+         */
+        static RevealResult revealFqn(IEditorPart editor, String fqn, boolean activateAndFocus)
+        {
             AbstractTreeViewer viewer = getTreeViewerFromEditor(editor);
             IComparisonSession session = CompareConfigSelectionListener.getSession(editor);
             if (viewer == null || session == null)
-                return;
+                return RevealResult.NOT_IN_COMPARISON;
 
             TopComparisonNode top = findTopNode(session, fqn);
             if (top == null)
-            {
-                ToastNotification.show(TOAST_TITLE, "Объект не найден в дереве сравнения", 4000); //$NON-NLS-1$
-                return;
-            }
+                return RevealResult.NOT_IN_COMPARISON;
 
             ensurePartialModel(editor);
             IPartialModelNode node = resolvePartialNode(editor, viewer, top);
             if (node == null)
-            {
-                ToastNotification.show(TOAST_TITLE,
-                    "Объект есть в сравнении, но строка недоступна (возможно, скрыта фильтром)", 5000); //$NON-NLS-1$
-                return;
-            }
+                return RevealResult.ROW_UNAVAILABLE;
 
             Control control = viewer.getControl();
             CompareConfigMultiMarkSupport multi =
@@ -6307,10 +6338,20 @@ public class CompareConfigMenuHook implements IStartup
                 if (selected.length > 0)
                     tree.showItem(selected[0]);
             }
-            if (editor.getSite() != null && editor.getSite().getPage() != null)
-                editor.getSite().getPage().activate(editor);
-            if (control != null && !control.isDisposed())
-                control.setFocus();
+            if (activateAndFocus)
+            {
+                if (editor.getSite() != null && editor.getSite().getPage() != null)
+                    editor.getSite().getPage().activate(editor);
+                if (control != null && !control.isDisposed())
+                    control.setFocus();
+            }
+            return RevealResult.OK;
+        }
+
+        /** Итог {@link #revealFqn}: строка активирована / объекта нет в сравнении / строка недоступна. */
+        enum RevealResult
+        {
+            OK, NOT_IN_COMPARISON, ROW_UNAVAILABLE
         }
 
         /** Развернуть цепочку родителей, не трогая сам {@code node}. */
