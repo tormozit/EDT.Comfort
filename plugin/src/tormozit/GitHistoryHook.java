@@ -92,11 +92,12 @@ import org.eclipse.ui.preferences.ScopedPreferenceStore;
  *       ({@link SmartMatchHighlight}).</li>
  *   <li>История запросов в штатном поле «Найти» ({@code FindToolbar#patternField}):
  *       кнопка ▾ и Ctrl+↓ ({@link FilterHistoryUi}), отдельно от фильтра файлов.</li>
- *   <li>Если при открытии нет {@code GitHistoryPage} (связь с редактором выключена,
- *       штатный {@code GenericHistoryView} не восстанавливает вход), показывается
- *       история последнего репозитория или репозитория активного проекта — иначе
- *       панель остаётся пустой без кнопок Git, в том числе без подменю выбора
- *       репозитория.</li>
+ *   <li>Если при открытии страница пуста и нет {@code GitHistoryPage} (связь с
+ *       редактором выключена, штатный {@code GenericHistoryView} не восстанавливает
+ *       вход), показывается история последнего репозитория или репозитория активного
+ *       проекта — иначе панель остаётся пустой без кнопок Git, в том числе без
+ *       подменю выбора репозитория. Уже показанную другую страницу (локальная
+ *       история) не подменяем.</li>
  * </ul>
  *
  * <p>Колонки и фильтр файлов: Параметры → Комфорт → «Улучшать списки»
@@ -229,7 +230,7 @@ public final class GitHistoryHook implements IStartup
             @Override public void partClosed(IWorkbenchPartReference r) {}
             @Override public void partDeactivated(IWorkbenchPartReference r) {}
             @Override public void partHidden(IWorkbenchPartReference r) {}
-            @Override public void partInputChanged(IWorkbenchPartReference r) {}
+            @Override public void partInputChanged(IWorkbenchPartReference ref) { tryFromRef(ref); }
 
             private void tryFromRef(IWorkbenchPartReference ref)
             {
@@ -282,6 +283,11 @@ public final class GitHistoryHook implements IStartup
             {
                 Debug.log("tryPatch: getHistoryPage() returned null"); //$NON-NLS-1$
                 return false;
+            }
+            if (!isGitHistoryPage(historyPage))
+            {
+                Debug.log("tryPatch: skip non-git page=" + historyPage.getClass().getName()); //$NON-NLS-1$
+                return true;
             }
 
             Debug.log("tryPatch: historyPage=" + historyPage.getClass().getName()); //$NON-NLS-1$
@@ -339,9 +345,12 @@ public final class GitHistoryHook implements IStartup
      * {@code GitHistoryPage} (нет bootstrap-входа) — пустая страница без кнопок Git,
      * в том числе без подменю выбора репозитория. Показываем историю последнего
      * репозитория или репозитория активного проекта.
+     * Уже показанную другую страницу (локальная история и т.п.) не трогаем:
+     * клик по строке активирует панель и не должен переключать её в Git.
      *
-     * @return {@code true}, если страница Git уже есть; {@code false} — повторить
-     *         позже (панель ещё не видима или репозитории не готовы)
+     * @return {@code true}, если восстанавливать нечего (Git уже есть, другая
+     *         страница на месте, или это не панель истории); {@code false} —
+     *         повторить позже (панель ещё пуста, репозитории не готовы)
      */
     private static boolean ensureGitHistoryPage(IViewPart view)
     {
@@ -351,6 +360,11 @@ public final class GitHistoryHook implements IStartup
         if (isGitHistoryPage(page))
         {
             rememberLastRepo(page);
+            return true;
+        }
+        if (page != null)
+        {
+            Debug.log("ensureGitHistoryPage: skip existing page=" + page.getClass().getName()); //$NON-NLS-1$
             return true;
         }
         if (restoringGitHistoryPage)

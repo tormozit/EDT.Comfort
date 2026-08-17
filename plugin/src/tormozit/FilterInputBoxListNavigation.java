@@ -13,7 +13,6 @@ import org.eclipse.swt.widgets.TableItem;
 import org.eclipse.swt.widgets.Text;
 import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.TreeItem;
-import org.eclipse.swt.widgets.TypedListener;
 
 import com._1c.g5.v8.dt.common.ui.controls.search.SearchBox;
 
@@ -802,10 +801,8 @@ public final class FilterInputBoxListNavigation
 
     private static boolean isSearchBoxStockKeyListener(Listener listener)
     {
-        if (!(listener instanceof TypedListener typed))
-            return false;
-        Object inner = typed.getEventListener();
-        if (inner == null)
+        Object inner = Global.unwrapTypedListener(listener);
+        if (inner == null || inner == listener)
             return false;
         return inner.getClass().getName().contains("SearchBox$"); //$NON-NLS-1$
     }

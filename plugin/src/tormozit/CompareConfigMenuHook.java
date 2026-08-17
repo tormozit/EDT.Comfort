@@ -69,7 +69,6 @@ import org.eclipse.swt.widgets.ToolBar;
 import org.eclipse.swt.widgets.ToolItem;
 import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.TreeItem;
-import org.eclipse.swt.widgets.TypedListener;
 import org.eclipse.swt.widgets.Widget;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.layout.RowData;
@@ -1559,9 +1558,7 @@ public class CompareConfigMenuHook implements IStartup
         {
             if (listeners == null || listeners.length == 0)
                 return "none"; //$NON-NLS-1$
-            Object eventListener = listeners[0];
-            if (listeners[0] instanceof TypedListener)
-                eventListener = ((TypedListener) listeners[0]).getEventListener();
+            Object eventListener = Global.unwrapTypedListener(listeners[0]);
             if (eventListener == null)
                 return "null-event"; //$NON-NLS-1$
             StringBuilder sb = new StringBuilder(eventListener.getClass().getName());
@@ -1617,9 +1614,7 @@ public class CompareConfigMenuHook implements IStartup
                 return null;
             for (Listener listener : listeners)
             {
-                Object eventListener = listener;
-                if (listener instanceof TypedListener)
-                    eventListener = ((TypedListener) listener).getEventListener();
+                Object eventListener = Global.unwrapTypedListener(listener);
                 ComboViewer found = extractComboViewer(eventListener);
                 if (found != null)
                     return found;

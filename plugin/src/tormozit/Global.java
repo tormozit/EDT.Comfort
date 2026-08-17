@@ -226,6 +226,23 @@ public final class Global
     }
 
     /**
+     * Внутренний слушатель {@link TypedListener} без прямого {@code getEventListener()}.
+     * Тип возврата сменился в SWT 3.132 (EDT 2026.2) — байткод со старым дескриптором
+     * даёт {@link NoSuchMethodError}. Поиск метода — по имени, через {@link #invoke}.
+     *
+     * @return внутренний слушатель; сам {@code listener}, если это не {@link TypedListener};
+     *         {@code null}, если {@code listener == null} или вызов не удался
+     */
+    public static Object unwrapTypedListener(Listener listener)
+    {
+        if (listener == null)
+            return null;
+        if (!(listener instanceof TypedListener typed))
+            return listener;
+        return invoke(typed, "getEventListener"); //$NON-NLS-1$
+    }
+
+    /**
      * Вызывает публичный метод {@code methodName} без аргументов на объекте {@code obj}.
      *
      * @return результат вызова, или {@code null} при любой ошибке / отсутствии метода

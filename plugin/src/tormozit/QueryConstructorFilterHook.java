@@ -389,8 +389,7 @@ public final class QueryConstructorFilterHook implements IStartup
             Listener[] lost = searchBox.getListeners(SWT.FocusOut);
             for (Listener l : lost)
             {
-                Object real = l instanceof org.eclipse.swt.widgets.TypedListener typed
-                    ? typed.getEventListener() : l;
+                Object real = Global.unwrapTypedListener(l);
                 String className = real.getClass().getName();
                 if (className.startsWith("com._1c.g5.v8.dt.common.ui.controls.search.SearchBox$")) //$NON-NLS-1$
                     continue;

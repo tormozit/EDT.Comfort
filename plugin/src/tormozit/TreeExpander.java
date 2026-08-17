@@ -26,7 +26,6 @@ import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.TreeItem;
-import org.eclipse.swt.widgets.TypedListener;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IEditorReference;
 import org.eclipse.ui.IPartListener2;
@@ -659,8 +658,7 @@ public final class TreeExpander implements IStartup
         {
             for (Listener listener : tree.getListeners(eventType))
             {
-                Object candidate = listener instanceof TypedListener typed
-                    ? typed.getEventListener() : listener;
+                Object candidate = Global.unwrapTypedListener(listener);
                 if (candidate instanceof AbstractTreeViewer viewer && sameTree(viewer, tree))
                     return viewer;
                 Object outer = Global.getField(candidate, "this$0"); //$NON-NLS-1$
