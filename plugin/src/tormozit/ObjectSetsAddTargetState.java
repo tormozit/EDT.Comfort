@@ -75,7 +75,7 @@ public final class ObjectSetsAddTargetState
         return true;
     }
 
-    /** Есть ли среди активных (●) наборов динамический (например, «<Измененные>»). */
+    /** Есть ли среди активных (●) наборов динамический (например, «<Измененные Git>»). */
     public synchronized boolean isAnyAddTargetSystemSet()
     {
         for (String setId : addTargetByProject.values())

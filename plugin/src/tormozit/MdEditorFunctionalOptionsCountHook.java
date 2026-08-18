@@ -57,7 +57,7 @@ import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 /**
  * Колонка с числом функциональных опций у строк дерева «Состав объекта»
  * на вкладке «Функц. опции». Считается в фоне; у папок числа нет, у элементов
- * ноль показывается. Сумма — только в заголовке вкладки, не по узлам дерева.
+ * ноль показывается. В заголовке вкладки — число строк с ненулевым значением колонки.
  * Пересчёт — при добавлении и удалении опций в правом списке этой вкладки.
  */
 public final class MdEditorFunctionalOptionsCountHook implements IStartup
@@ -402,10 +402,10 @@ public final class MdEditorFunctionalOptionsCountHook implements IStartup
     }
 
     /**
-     * Сумма чисел колонки ФО в дереве «Состав объекта». {@code null}, пока индекс
-     * ещё не посчитан.
+     * Число строк дерева «Состав объекта» с ненулевым значением колонки ФО.
+     * {@code null}, пока индекс ещё не посчитан.
      */
-    static Integer columnSum(IFormPage page)
+    static Integer nonZeroRowCount(IFormPage page)
     {
         if (page == null)
             return null;
@@ -415,7 +415,7 @@ public final class MdEditorFunctionalOptionsCountHook implements IStartup
         Tree tree = viewer != null ? viewer.getTree() : null;
         if (tree == null || tree.isDisposed())
             return null;
-        return tree.getData(SUM_KEY) instanceof Integer sum ? sum : null;
+        return tree.getData(SUM_KEY) instanceof Integer count ? count : null;
     }
 
     private static EObject modelOf(Object mapper, Object element)
@@ -437,7 +437,7 @@ public final class MdEditorFunctionalOptionsCountHook implements IStartup
         }
     }
 
-    private static Integer sumDisplayedColumn(TreeViewer viewer)
+    private static Integer countNonZeroDisplayedRows(TreeViewer viewer)
     {
         if (viewer == null)
             return null;
@@ -457,21 +457,21 @@ public final class MdEditorFunctionalOptionsCountHook implements IStartup
         {
             return null;
         }
-        int[] sum = { 0 };
-        walkDisplayedColumn(content, roots, tree, sum, 0);
-        return Integer.valueOf(sum[0]);
+        int[] count = { 0 };
+        walkNonZeroDisplayedRows(content, roots, tree, count, 0);
+        return Integer.valueOf(count[0]);
     }
 
-    private static void walkDisplayedColumn(ITreeContentProvider content, Object[] elements, Tree tree,
-        int[] sum, int depth)
+    private static void walkNonZeroDisplayedRows(ITreeContentProvider content, Object[] elements, Tree tree,
+        int[] count, int depth)
     {
         if (elements == null || depth > 24)
             return;
         for (Object element : elements)
         {
-            Integer count = countForElement(tree, element);
-            if (count != null)
-                sum[0] += count.intValue();
+            Integer value = countForElement(tree, element);
+            if (value != null && value.intValue() > 0)
+                count[0]++;
             Object[] children;
             try
             {
@@ -481,7 +481,7 @@ public final class MdEditorFunctionalOptionsCountHook implements IStartup
             {
                 continue;
             }
-            walkDisplayedColumn(content, children, tree, sum, depth + 1);
+            walkNonZeroDisplayedRows(content, children, tree, count, depth + 1);
         }
     }
 
@@ -743,9 +743,9 @@ public final class MdEditorFunctionalOptionsCountHook implements IStartup
                         return;
                     index.apply(toApply);
                     Tree tree = viewer.getTree();
-                    Integer sum = sumDisplayedColumn(viewer);
-                    if (sum != null)
-                        tree.setData(SUM_KEY, sum);
+                    Integer count = countNonZeroDisplayedRows(viewer);
+                    if (count != null)
+                        tree.setData(SUM_KEY, count);
                     viewer.refresh();
                     scheduleColumnLayout(tree);
                     if (tree.getData(EDITOR_KEY) instanceof DtGranularEditor<?> editor)

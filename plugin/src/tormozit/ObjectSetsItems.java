@@ -553,7 +553,7 @@ final class ObjectSetsItems
     }
 
     /**
-     * Элементы набора «&lt;Измененные&gt;»: динамический состав по git-изменениям проекта.
+     * Элементы набора «&lt;Измененные Git&gt;»: динамический состав по git-изменениям проекта.
      */
     static List<ObjectSets.Item> collectGitChangedItems(String projectName)
     {

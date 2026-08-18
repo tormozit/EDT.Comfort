@@ -109,6 +109,7 @@
     <startup class="tormozit.StacktraceCompileFormatHook"/>
     <startup class="tormozit.InfobaseSyncQuestionDialogHook"/>
     <startup class="tormozit.DeployConfigurationFixHook"/>
+    <startup class="tormozit.DeployChangesColumnHook"/>
     <startup class="tormozit.LongOperationNotifyHook"/>
     <startup class="tormozit.LaunchArgumentsHistoryHook"/>
     <startup class="tormozit.ExportConfigurationXmlFixHook"/>

@@ -267,7 +267,7 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
     }
 
     /**
-     * При активном фильтре навигатора и активном системном наборе («<Измененные>») —
+     * При активном фильтре навигатора и активном системном наборе («<Измененные Git>») —
      * отложенное (debounce) пересчитывание фильтра после изменений ресурсов.
      */
     private static void maybeRefreshGitChangedFilter()
@@ -1116,7 +1116,7 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
                         ObjectSetsAddTargetState.getInstance().getAddTargetSet(projectName);
                     if (set != null && (set.system || !set.items.isEmpty()))
                     {
-                        // Непустой add-target набор (или системный «<Измененные>»)
+                        // Непустой add-target набор (или системный «<Измененные Git>»)
                         // вытесняет фильтр подсистем (в т.ч. чёрный список).
                         return ObjectSetsItems.isVisibleInAddTargetSetTree(
                             viewer, element, projectName);

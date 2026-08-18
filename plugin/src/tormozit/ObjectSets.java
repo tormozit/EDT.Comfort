@@ -25,7 +25,7 @@ public final class ObjectSets
     private static final String PREF_KEY = "objectSets.data"; //$NON-NLS-1$
     private static final String SET_MARKER = "@SET"; //$NON-NLS-1$
     private static final String DEFAULT_SET_NAME = "<Основной>"; //$NON-NLS-1$
-    private static final String SYSTEM_CHANGED_SET_NAME = "<Измененные>"; //$NON-NLS-1$
+    private static final String SYSTEM_CHANGED_SET_NAME = "<Измененные Git>"; //$NON-NLS-1$
     private static final String SYSTEM_CHANGED_ID_PREFIX = "@changed:"; //$NON-NLS-1$
     private static final String INFOBASE_CHANGED_ID_PREFIX = "@ibchanged:"; //$NON-NLS-1$
     /** Разделитель имени проекта и UUID базы в идентификаторе набора: в имени проекта недопустим. */
@@ -37,7 +37,7 @@ public final class ObjectSets
      *
      * <ul>
      *   <li>{@link #USER} — обычный набор: состав редактируется вручную и хранится в настройках;</li>
-     *   <li>{@link #GIT_CHANGED} — «&lt;Измененные&gt;»: состав вычисляется по git-статусу проекта,
+     *   <li>{@link #GIT_CHANGED} — «&lt;Измененные Git&gt;»: состав вычисляется по git-статусу проекта,
      *       набор создаётся автоматически и не удаляется;</li>
      *   <li>{@link #INFOBASE_CHANGED} — «&lt;Измененные <i>ИмяБазы</i>&gt;»: состав вычисляется по
      *       объектам, ожидающим синхронизации с информационной базой; набор создаётся по требованию
@@ -105,7 +105,7 @@ public final class ObjectSets
         /** Вид набора: обычный или один из динамических. */
         public final SetKind kind;
         /**
-         * Динамический набор (например, «<Измененные>»): состав не редактируется вручную.
+         * Динамический набор (например, «<Измененные Git>»): состав не редактируется вручную.
          * Синоним {@code kind.isDynamic()} — оставлен, т.к. на него опирается весь UI наборов.
          */
         public final boolean system;
@@ -118,7 +118,7 @@ public final class ObjectSets
         }
 
         /**
-         * Набор можно удалить: «<Измененные>» по git создаётся автоматически и удалению не
+         * Набор можно удалить: «<Измененные Git>» по git создаётся автоматически и удалению не
          * подлежит, набор по изменениям базы — подлежит (пересоздаётся кликом в «Приложениях»).
          */
         public boolean isDeletable()
@@ -331,7 +331,7 @@ public final class ObjectSets
     }
 
     /**
-     * Системный набор «<Измененные>» для проекта (если ещё не создан).
+     * Системный набор «<Измененные Git>» для проекта (если ещё не создан).
      * @return созданный набор или {@code null}
      */
     public synchronized SetDef ensureSystemSetForProject(String projectName)
@@ -476,13 +476,13 @@ public final class ObjectSets
     {
         String suffix = infobaseName != null ? infobaseName.trim() : ""; //$NON-NLS-1$
         return suffix.isEmpty()
-            ? SYSTEM_CHANGED_SET_NAME
+            ? "<Измененные>" //$NON-NLS-1$
             : "<Измененные " + suffix + ">"; //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     /**
      * Привести имя к каноническому виду. Имя набора по базе хранится как есть (в нём имя базы),
-     * git-набор всегда «&lt;Измененные&gt;», старое «Основной» — в «&lt;Основной&gt;».
+     * git-набор всегда «&lt;Измененные Git&gt;», старое «Основной» — в «&lt;Основной&gt;».
      */
     private static String normalizeSetName(String name, SetKind kind)
     {

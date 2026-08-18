@@ -249,6 +249,28 @@ public final class InfobaseChangedObjects
         return changedRefs(project.getName(), infobase.getUuid().toString()).size();
     }
 
+    /**
+     * Создать (или обновить) набор «&lt;Измененные <i>ИмяБазы</i>&gt;» и активировать его строку
+     * в панели «Наборы объектов».
+     *
+     * <p>Общая точка для команды «Показать изменения» панели «Приложения» и для клика по числу
+     * в колонке «Изменений» мастера обновления конфигурации. Состав набора вычисляется при показе,
+     * здесь только регистрируется сам набор.
+     *
+     * @param project проект
+     * @param infobase информационная база
+     */
+    public static void showChangedSet(IProject project, InfobaseReference infobase)
+    {
+        if (project == null || infobase == null || infobase.getUuid() == null)
+            return;
+        ObjectSets.SetDef set = ObjectSets.getInstance().ensureInfobaseChangedSet(
+            project.getName(), infobase.getUuid().toString(), infobase.getName());
+        if (set == null)
+            return;
+        ObjectSetsView.revealSet(set.id);
+    }
+
     /** Элементы набора «<Измененные <i>ИмяБазы</i>>» по его определению. */
     static List<ObjectSets.Item> changedItems(ObjectSets.SetDef set)
     {
@@ -591,7 +613,7 @@ public final class InfobaseChangedObjects
      * показывать изменения с детализацией до форм, макетов и команд
      * ({@code Справочник.Валюты.Форма.ФормаСписка}, а не {@code Справочник.Валюты}). Модуль объекта
      * при этом естественно даёт имя самого объекта — владелец такого модуля и есть объект МД.
-     * Этим набор по базе отличается от git-набора «&lt;Измененные&gt;», который сворачивает
+     * Этим набор по базе отличается от git-набора «&lt;Измененные Git&gt;», который сворачивает
      * изменения до владельца.
      *
      * @param object объект из потока

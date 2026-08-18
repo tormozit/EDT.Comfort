@@ -1087,15 +1087,7 @@ public class ApplicationsViewHook implements IStartup
      */
     private static void openChangedObjectSet(Object element)
     {
-        IProject project = applicationProject(element);
-        InfobaseReference ib = getInfobase(element);
-        if (project == null || ib == null || ib.getUuid() == null)
-            return;
-        ObjectSets.SetDef set = ObjectSets.getInstance().ensureInfobaseChangedSet(
-            project.getName(), ib.getUuid().toString(), ib.getName());
-        if (set == null)
-            return;
-        ObjectSetsView.revealSet(set.id);
+        InfobaseChangedObjects.showChangedSet(applicationProject(element), getInfobase(element));
     }
 
     /** Добавить обработку для новой колонки = добавить case. */

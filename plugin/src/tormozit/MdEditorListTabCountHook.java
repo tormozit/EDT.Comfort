@@ -59,15 +59,21 @@ import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.forms.editor.IFormPage;
 
 import com._1c.g5.v8.dt.bsl.ui.BslSharedImages;
+import com._1c.g5.v8.dt.core.platform.IConfigurationProject;
 import com._1c.g5.v8.dt.core.platform.IResourceLookup;
+import com._1c.g5.v8.dt.core.platform.IV8Project;
+import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
 import com._1c.g5.v8.dt.md.ui.editor.aef.AbstractDtGranularEditorAefPage;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorEmbeddedEditorPage;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorXtextEditorPage;
 import com._1c.g5.v8.dt.md.ui.shared.MdUiSharedImages;
+import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
 import com._1c.g5.v8.dt.metadata.mdclass.EventSubscription;
 import com._1c.g5.v8.dt.metadata.mdclass.MdClassPackage;
+import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com._1c.g5.v8.dt.metadata.mdclass.Predefined;
+import com._1c.g5.v8.dt.metadata.mdclass.Subsystem;
 
 /**
  * В заголовки вкладок-списков редактора объекта метаданных добавляет число строк
@@ -82,6 +88,7 @@ import com._1c.g5.v8.dt.metadata.mdclass.Predefined;
  * «Ввод на основании»: сразу число левого списка со знаком вопроса ({@code 3?}),
  * после открытия вкладки — сумма обоих списков.
  * «Права»: при открытии — «?», после перехода на вкладку — число верхних строк дерева.
+ * «Подсистемы»: при открытии — «?», после перехода — число подсистем в составе объекта.
  * Вкладки модулей: если модуль один — «Модуль»; если несколько — короткое имя
  * без «Модуль» («Объект», «Менеджер», …). «+» если файл не пустой, «-» если файла нет или размер 0.
  * У вкладок — картинка EDT (как в навигаторе); значок ошибки/предупреждения штатной
@@ -971,10 +978,25 @@ public final class MdEditorListTabCountHook implements IStartup
 
         if (isFunctionalOptionsPage(page, baseTitle))
         {
-            Integer sum = MdEditorFunctionalOptionsCountHook.columnSum(page);
-            if (sum != null)
+            Integer count = MdEditorFunctionalOptionsCountHook.nonZeroRowCount(page);
+            if (count != null)
             {
-                applyTitle(item, baseTitle, Integer.toString(sum.intValue()));
+                applyTitle(item, baseTitle, Integer.toString(count.intValue()));
+                return;
+            }
+            applyTitle(item, baseTitle, "?"); //$NON-NLS-1$
+            if (created && attempt < COUNT_MAX_ATTEMPTS)
+                scheduleCountRetry(editor, item, page, attempt);
+            return;
+        }
+
+        if (isSubsystemsPage(page, baseTitle))
+        {
+            Integer marked = created ? countMarkedSubsystems(editor) : null;
+            if (marked != null)
+            {
+                applyTitle(item, baseTitle, Integer.toString(marked.intValue()));
+                watchList(editor, item, page, partControl);
                 return;
             }
             applyTitle(item, baseTitle, "?"); //$NON-NLS-1$
@@ -1429,6 +1451,20 @@ public final class MdEditorListTabCountHook implements IStartup
         }
         return "Функциональные опции".equals(base) //$NON-NLS-1$
             || "Functional options".equals(base); //$NON-NLS-1$
+    }
+
+    private static boolean isSubsystemsPage(IFormPage page, String base)
+    {
+        if (page != null)
+        {
+            String id = page.getId();
+            if (id != null && id.toLowerCase(Locale.ROOT).contains("subsystems")) //$NON-NLS-1$
+                return true;
+            if (page.getClass().getName().toLowerCase(Locale.ROOT).contains("subsystemspage")) //$NON-NLS-1$
+                return true;
+        }
+        return "Подсистемы".equals(base) //$NON-NLS-1$
+            || "Subsystems".equals(base); //$NON-NLS-1$
     }
 
     private static boolean isAdditionalIndexesPage(IFormPage page, String base)
@@ -2126,6 +2162,66 @@ public final class MdEditorListTabCountHook implements IStartup
             || lower.contains("standalone"); //$NON-NLS-1$
     }
 
+    /**
+     * Число подсистем, в состав которых входит объект — как пометки в дереве.
+     * Не {@code MdObject.getSubsystems()}: это обход дерева конфигурации,
+     * поэтому только после активации вкладки.
+     */
+    private static Integer countMarkedSubsystems(DtGranularEditor<?> editor)
+    {
+        EObject model = editor != null ? editor.getModel() : null;
+        if (!(model instanceof MdObject mdObject) || mdObject.eIsProxy())
+            return null;
+        Configuration configuration = configurationOf(model);
+        if (configuration == null)
+            return null;
+        int[] count = { 0 };
+        walkMarkedSubsystems(configuration.getSubsystems(), mdObject, count, 0);
+        Global.tempLog("subsys-count", mdObject.getName() + " marked=" + count[0]); //$NON-NLS-1$ //$NON-NLS-2$
+        return Integer.valueOf(count[0]);
+    }
+
+    private static Configuration configurationOf(EObject model)
+    {
+        for (EObject current = model; current != null; current = current.eContainer())
+        {
+            if (current instanceof Configuration configuration)
+                return configuration;
+        }
+        if (!(model instanceof MdObject mdObject))
+            return null;
+        IV8ProjectManager projectManager =
+            (IV8ProjectManager) Global.getServiceByClass(IV8ProjectManager.class);
+        if (projectManager == null)
+            return null;
+        IV8Project project = projectManager.getProject(mdObject);
+        if (project instanceof IConfigurationProject configurationProject)
+            return configurationProject.getConfiguration();
+        Object configuration = Global.invoke(project, "getConfiguration"); //$NON-NLS-1$
+        return configuration instanceof Configuration conf ? conf : null;
+    }
+
+    private static void walkMarkedSubsystems(List<? extends Subsystem> subsystems, MdObject mdObject,
+        int[] count, int depth)
+    {
+        if (subsystems == null || depth > 24)
+            return;
+        for (Subsystem subsystem : subsystems)
+        {
+            if (subsystem == null)
+                continue;
+            try
+            {
+                if (subsystem.getContent().contains(mdObject))
+                    count[0]++;
+            }
+            catch (RuntimeException ignored)
+            {
+            }
+            walkMarkedSubsystems(subsystem.getSubsystems(), mdObject, count, depth + 1);
+        }
+    }
+
     // =========================================================================
     // Подсчёт строк списка
     // =========================================================================
@@ -2243,11 +2339,18 @@ public final class MdEditorListTabCountHook implements IStartup
             if (checked != null)
                 return checked.intValue();
         }
+        Integer itemChecked = countCheckedInTreeItems(tree.getItems());
+        if (itemChecked != null)
+            return itemChecked.intValue();
         if ((tree.getStyle() & SWT.CHECK) != 0)
             return countSwtChecked(tree.getItems());
         return tree.getItemCount();
     }
 
+    /**
+     * Число помеченных узлов. Пометки часто только у вложенных строк
+     * (вкладка «Подсистемы»: у корней {@code NO_CHECK}), поэтому обходим всё дерево.
+     */
     private static Integer countCheckedInViewer(TreeViewer viewer)
     {
         Object provider = viewer.getContentProvider();
@@ -2266,31 +2369,24 @@ public final class MdEditorListTabCountHook implements IStartup
         if (roots == null)
             return null;
 
-        boolean hasCheckUi = false;
-        for (Object root : roots)
-        {
-            if (checkKind(root) != CheckKind.NONE)
-            {
-                hasCheckUi = true;
-                break;
-            }
-        }
-        if (!hasCheckUi)
+        int[] acc = { 0, 0 }; // [0] помеченные, [1] есть ли пометки в дереве
+        walkChecked(content, roots, acc, 0);
+        if (acc[1] == 0)
             return null;
-
-        int[] checked = { 0 };
-        walkChecked(content, roots, checked);
-        return Integer.valueOf(checked[0]);
+        return Integer.valueOf(acc[0]);
     }
 
-    private static void walkChecked(ITreeContentProvider content, Object[] elements, int[] checked)
+    private static void walkChecked(ITreeContentProvider content, Object[] elements, int[] acc, int depth)
     {
-        if (elements == null)
+        if (elements == null || depth > 24)
             return;
         for (Object element : elements)
         {
-            if (checkKind(element) == CheckKind.CHECKED)
-                checked[0]++;
+            CheckKind kind = checkKind(element);
+            if (kind != CheckKind.NONE)
+                acc[1] = 1;
+            if (kind == CheckKind.CHECKED)
+                acc[0]++;
             Object[] children;
             try
             {
@@ -2300,7 +2396,33 @@ public final class MdEditorListTabCountHook implements IStartup
             {
                 continue;
             }
-            walkChecked(content, children, checked);
+            walkChecked(content, children, acc, depth + 1);
+        }
+    }
+
+    private static Integer countCheckedInTreeItems(TreeItem[] items)
+    {
+        if (items == null || items.length == 0)
+            return null;
+        int[] acc = { 0, 0 };
+        walkCheckedTreeItems(items, acc, 0);
+        return acc[1] == 0 ? null : Integer.valueOf(acc[0]);
+    }
+
+    private static void walkCheckedTreeItems(TreeItem[] items, int[] acc, int depth)
+    {
+        if (items == null || depth > 24)
+            return;
+        for (TreeItem item : items)
+        {
+            if (item == null || item.isDisposed())
+                continue;
+            CheckKind kind = checkKind(item.getData());
+            if (kind != CheckKind.NONE)
+                acc[1] = 1;
+            if (kind == CheckKind.CHECKED)
+                acc[0]++;
+            walkCheckedTreeItems(item.getItems(), acc, depth + 1);
         }
     }
 

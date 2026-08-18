@@ -131,7 +131,7 @@ public final class ObjectSetsView extends ViewPart
     private static ObjectSetsView activeInstance;
 
     /**
-     * Порядок наборов в таблице: сначала «Основной», затем системные («<Измененные>»),
+     * Порядок наборов в таблице: сначала «Основной», затем системные («<Измененные Git>»),
      * затем все остальные по алфавиту.
      */
     private static final Comparator<ObjectSets.SetDef> SETS_DISPLAY_ORDER = (a, b) ->
