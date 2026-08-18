@@ -9,6 +9,10 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 
+import org.eclipse.xtext.nodemodel.INode;
+import org.eclipse.xtext.nodemodel.SyntaxErrorMessage;
+import org.eclipse.xtext.parser.IParseResult;
+
 import com._1c.g5.v8.dt.bsl.compare.BslCompareUtils;
 import com._1c.g5.v8.dt.compare.core.IComparisonSession;
 import com.google.inject.Injector;
@@ -79,6 +83,9 @@ final class BslModuleStructureParser
      * это та часть структуры, которую всё же удалось построить (у Xtext/ANTLR есть
      * error-recovery — частичный AST обычно доступен), плюс {@code syntaxError*} с местом
      * ошибки — {@link BslModuleStructureDiff} добавляет по ним отдельный узел-ошибку в дерево.
+     * {@code syntaxError*} заполняются только для ошибок, оборвавших разбор
+     * ({@link BslAstCompleteness}): при сработавшем восстановлении структура полная, и
+     * сообщать пользователю не о чем.
      * {@code root == null} — только при полном фиаско (см. {@link #fatalError}), тогда дерево
      * вообще не строится (см. {@code BslModuleStructureDiff.diff}).
      */
@@ -125,7 +132,15 @@ final class BslModuleStructureParser
             if (parseResult == null)
                 return ParseOutcome.fatal("Не удалось разобрать модуль"); //$NON-NLS-1$
 
-            SyntaxErrorInfo syntaxError = extractSyntaxError(parseResult);
+            /*
+             * Показываем только те ошибки, после которых восстановление не сработало и дерево
+             * оборвалось (см. BslAstCompleteness). Остальные на структуру не влияют: разбивка
+             * на методы по восстановленному AST полная, узел «Неполная структура» был бы
+             * ложной тревогой — тем более что EDT такие модули теперь тоже сравнивает
+             * структурно (см. BslCompareParseErrorSuppressor).
+             */
+            SyntaxErrorInfo syntaxError = parseResult instanceof IParseResult result
+                && BslAstCompleteness.isTruncated(result) ? extractSyntaxError(parseResult) : null;
 
             Object module = Global.call(parseResult, "getRootASTElement"); //$NON-NLS-1$
             Class<?> moduleClass = Class.forName(MODULE_CLASS);
@@ -192,28 +207,43 @@ final class BslModuleStructureParser
         return false;
     }
 
-    /** {@code IParseResult.hasSyntaxErrors()}/{@code getSyntaxErrors()} — оба публичные 0-arg методы. */
+    /**
+     * Берём ту ошибку, что оборвала дерево ({@link BslAstCompleteness#truncatingError}), а не
+     * первую по тексту: в модуле их обычно несколько, и первая обычно безобидная — разбор
+     * после неё восстановился. Показав её, мы отправили бы пользователя править не то место
+     * (а то и другой метод).
+     *
+     * <p>Доброкачественный паттерн «пропущена {@code ;} перед КонецПроцедуры» (см.
+     * {@link #isBenignMissingSemicolonBeforeBlockEnd}) в подпись не пускаем и здесь: если
+     * обрыв «назначен» именно на него, берём ближайшую содержательную формулировку.
+     */
     private static SyntaxErrorInfo extractSyntaxError(Object parseResult)
     {
-        Object hasErrors = Global.call(parseResult, "hasSyntaxErrors"); //$NON-NLS-1$
-        if (!(hasErrors instanceof Boolean has) || !has)
+        if (!(parseResult instanceof IParseResult result) || !result.hasSyntaxErrors())
             return null;
-        Object syntaxErrors = Global.call(parseResult, "getSyntaxErrors"); //$NON-NLS-1$
-        if (syntaxErrors instanceof Iterable<?> nodes)
+
+        INode truncating = BslAstCompleteness.truncatingError(result);
+        SyntaxErrorInfo info = toSyntaxErrorInfo(truncating);
+        if (info != null && !isBenignMissingSemicolonBeforeBlockEnd(info.message))
+            return info;
+
+        for (INode node : result.getSyntaxErrors())
         {
-            for (Object node : nodes)
-            {
-                Object errorMessage = Global.call(node, "getSyntaxErrorMessage"); //$NON-NLS-1$
-                Object message = errorMessage != null ? Global.call(errorMessage, "getMessage") : null; //$NON-NLS-1$
-                String text = message instanceof String s && !s.isBlank() ? s : "Синтаксическая ошибка"; //$NON-NLS-1$
-                if (isBenignMissingSemicolonBeforeBlockEnd(text))
-                    continue;
-                Object offset = Global.call(node, "getOffset"); //$NON-NLS-1$
-                return new SyntaxErrorInfo(text, offset instanceof Integer off ? off : 0);
-            }
-            return null; // все найденные "ошибки" оказались доброкачественным паттерном
+            SyntaxErrorInfo candidate = toSyntaxErrorInfo(node);
+            if (candidate != null && !isBenignMissingSemicolonBeforeBlockEnd(candidate.message))
+                return candidate;
         }
-        return new SyntaxErrorInfo("Синтаксическая ошибка", 0); //$NON-NLS-1$
+        return info; // все формулировки доброкачественные — показываем оборвавшую как есть
+    }
+
+    private static SyntaxErrorInfo toSyntaxErrorInfo(INode node)
+    {
+        if (node == null)
+            return null;
+        SyntaxErrorMessage errorMessage = node.getSyntaxErrorMessage();
+        String message = errorMessage != null ? errorMessage.getMessage() : null;
+        String text = message != null && !message.isBlank() ? message : "Синтаксическая ошибка"; //$NON-NLS-1$
+        return new SyntaxErrorInfo(text, Math.max(0, node.getOffset()));
     }
 
     /**

@@ -26,6 +26,8 @@ import org.eclipse.jface.viewers.ViewerFilter;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.CTabFolder;
 import org.eclipse.swt.custom.CTabItem;
+import org.eclipse.swt.graphics.Point;
+import org.eclipse.swt.graphics.Rectangle;
 import org.eclipse.swt.layout.FillLayout;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
@@ -51,6 +53,8 @@ import org.eclipse.ui.PartInitException;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.commands.ICommandService;
 import org.eclipse.ui.forms.IManagedForm;
+import org.eclipse.ui.forms.editor.IFormPage;
+import org.eclipse.ui.forms.widgets.Form;
 import org.eclipse.ui.forms.widgets.ScrolledForm;
 import org.eclipse.ui.handlers.IHandlerService;
 import org.osgi.framework.Bundle;
@@ -77,7 +81,7 @@ import com.google.inject.Injector;
  * регистры, константы) — критерий тот же, что у {@code ProdusedTypesUtil} EDT.
  *
  * <p>Страница — {@link DtGranularEditorPage}, поэтому заголовок формы тот же, что у
- * остальных вкладок редактора: тип → имя объекта → «Подписки». Встроенный
+ * остальных вкладок редактора: тип → имя объекта → «Подписки на события». Встроенный
  * {@code EventHandlersEditor} свою шапку («Все подписки на события») не показывает.
  *
  * <p>Тяжёлое наполнение (создание встроенного редактора и фильтра) выполняется лениво —
@@ -108,9 +112,18 @@ public final class MdEventHandlersPageHook implements IStartup
 
     private static final String PAGE_ID = "tormozit.mdEventHandlers"; //$NON-NLS-1$
 
-    private static final String PAGE_TITLE = "Подписки"; //$NON-NLS-1$
+    private static final String PAGE_TITLE = "Подписки на события"; //$NON-NLS-1$
 
-    /** Заголовок ERD-вкладки {@code editors.diagrams.page} — наша страница строго перед ней. */
+    /** Пометка: шапка встроенного {@code EventHandlersEditor} уже сжата в 0. */
+    private static final String KEY_HEAD_COLLAPSED = "tormozit.eventHandlers.headCollapsed"; //$NON-NLS-1$
+
+    /** Пометка: сжатие шапки уже поставлено в очередь UI. */
+    private static final String KEY_HEAD_COLLAPSE_SCHEDULED = "tormozit.eventHandlers.headCollapseScheduled"; //$NON-NLS-1$
+
+    /** Вкладка «Обмен данными» — наша страница строго перед ней. */
+    private static final String DATA_EXCHANGE_TAB = "Обмен данными"; //$NON-NLS-1$
+
+    /** Запасная позиция, если вкладки «Обмен данными» нет: ERD {@code editors.diagrams.page}. */
     private static final String DATA_SCHEMA_TAB = "Схема данных"; //$NON-NLS-1$
 
     /**
@@ -304,21 +317,50 @@ public final class MdEventHandlersPageHook implements IStartup
     }
 
     /**
-     * Индекс вкладки «Схема данных» (ERD) — вставлять строго перед ней.
-     * Если вкладки нет — {@code -1} (добавить в конец).
+     * Индекс вкладки «Обмен данными» — вставлять строго перед ней.
+     * Если её нет — перед «Схема данных». Если и той нет — {@code -1} (в конец).
      */
     private static int resolveInsertIndex(DtGranularEditor<?> editor)
     {
+        int dataExchange = indexOfTab(editor, DATA_EXCHANGE_TAB, "Data exchange"); //$NON-NLS-1$
+        if (dataExchange >= 0)
+            return dataExchange;
+        return indexOfTab(editor, DATA_SCHEMA_TAB, "Data schema"); //$NON-NLS-1$
+    }
+
+    /**
+     * Индекс страницы/вкладки по заголовку. Учитывает суффикс числа в тексте вкладки
+     * ({@code «Обмен данными ?»}), если счётчик уже успел подписаться.
+     */
+    private static int indexOfTab(DtGranularEditor<?> editor, String titleRu, String titleEn)
+    {
+        Object pagesObj = Global.getField(editor, "pages"); //$NON-NLS-1$
+        if (pagesObj instanceof List<?> pages)
+        {
+            for (int i = 0; i < pages.size(); i++)
+            {
+                if (pages.get(i) instanceof IFormPage page && isTabTitle(page.getTitle(), titleRu, titleEn))
+                    return i;
+            }
+        }
         Object container = Global.invoke(editor, "getContainer"); //$NON-NLS-1$
         if (container instanceof CTabFolder folder)
         {
             for (CTabItem item : folder.getItems())
             {
-                if (DATA_SCHEMA_TAB.equals(item.getText()))
+                if (isTabTitle(item.getText(), titleRu, titleEn))
                     return folder.indexOf(item);
             }
         }
         return -1;
+    }
+
+    private static boolean isTabTitle(String text, String titleRu, String titleEn)
+    {
+        if (text == null || text.isEmpty())
+            return false;
+        return titleRu.equals(text) || titleEn.equals(text)
+            || text.startsWith(titleRu + " ") || text.startsWith(titleEn + " "); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     // =========================================================================
@@ -399,7 +441,7 @@ public final class MdEventHandlersPageHook implements IStartup
      * при первой активации ({@link #setActive(boolean)}).
      *
      * <p>Наследует {@link DtGranularEditorPage}, чтобы шапка формы совпадала со штатной
-     * («Справочники → Имя → Подписки»). {@code createFormContent} у базового класса
+     * («Справочники → Имя → Подписки на события»). {@code createFormContent} у базового класса
      * {@code final} — контент в {@link #createPageControls}, раскладка — {@link FillLayout},
      * иначе штатный {@code ColumnLayout} сожмёт встроенный редактор.
      */
@@ -848,22 +890,97 @@ public final class MdEventHandlersPageHook implements IStartup
          * Встроенный {@code EventHandlersEditor} рисует свою шапку формы
          * («Все подписки на события»). На вкладке редактора объекта её место занимает
          * штатный заголовок {@link DtGranularEditorPage}.
+         *
+         * <p>В бандле forms EDT нет {@code Form.setHeadVisible}. {@code Form} создаётся
+         * с {@code SWT.NO_BACKGROUND}, а штатный layout резервирует высоту шапки даже
+         * при {@code setVisible(false)} — получается прозрачная полоса, через которую
+         * видны соседние вкладки. Поэтому шапку не только прячем, но и сжимаем в 0
+         * после каждой раскладки формы.
          */
         private void hideEmbeddedFormHeading()
         {
             ScrolledForm inner = findScrolledForm(host);
             if (inner == null || inner.isDisposed())
                 return;
+            Form form = inner.getForm();
+            if (form == null || form.isDisposed())
+                return;
+
             inner.setText(""); //$NON-NLS-1$
-            // В бандле forms EDT нет Form.setHeadVisible — прячем шапку сами.
-            Composite head = inner.getForm().getHead();
+            form.setText(""); //$NON-NLS-1$
+            form.setImage(null);
+            form.setSeparatorVisible(false);
+
+            Composite head = form.getHead();
             if (head != null && !head.isDisposed())
-            {
                 head.setVisible(false);
-                inner.getForm().layout(true, true);
+
+            if (form.getData(KEY_HEAD_COLLAPSED) == null)
+            {
+                form.setData(KEY_HEAD_COLLAPSED, Boolean.TRUE);
+                // Form.layout() во время WM_SIZE идёт после Resize-слушателей и
+                // перезаписывает границы. Сжатие — asyncExec, после полной раскладки.
+                form.addListener(SWT.Resize, e -> scheduleCollapseEmbeddedFormHead(form));
+                if (head != null && !head.isDisposed())
+                    head.addListener(SWT.Resize, e ->
+                    {
+                        if (!head.isDisposed() && head.getSize().y > 0)
+                            scheduleCollapseEmbeddedFormHead(form);
+                    });
             }
+
+            form.layout(true, true);
             if (host != null && !host.isDisposed())
                 host.layout(true, true);
+            collapseEmbeddedFormHead(form);
+        }
+
+        /**
+         * Ставит сжатие шапки в очередь UI: штатный {@code FormLayout} успеет
+         * закончить текущую раскладку и не перезапишет границы в том же ходе.
+         */
+        private static void scheduleCollapseEmbeddedFormHead(Form form)
+        {
+            if (form == null || form.isDisposed())
+                return;
+            if (Boolean.TRUE.equals(form.getData(KEY_HEAD_COLLAPSE_SCHEDULED)))
+                return;
+            form.setData(KEY_HEAD_COLLAPSE_SCHEDULED, Boolean.TRUE);
+            form.getDisplay().asyncExec(() ->
+            {
+                if (form.isDisposed())
+                    return;
+                form.setData(KEY_HEAD_COLLAPSE_SCHEDULED, Boolean.FALSE);
+                collapseEmbeddedFormHead(form);
+            });
+        }
+
+        /**
+         * Штатный {@code FormLayout} всегда кладёт тело под шапку. После него
+         * сжимаем шапку в 0 и растягиваем тело на всю клиентскую область.
+         */
+        private static void collapseEmbeddedFormHead(Form form)
+        {
+            if (form == null || form.isDisposed())
+                return;
+            Rectangle ca = form.getClientArea();
+            Composite head = form.getHead();
+            if (head != null && !head.isDisposed())
+            {
+                if (head.getVisible())
+                    head.setVisible(false);
+                Point headSize = head.getSize();
+                if (headSize.y != 0 || headSize.x != ca.width)
+                    head.setBounds(0, 0, ca.width, 0);
+            }
+            Composite body = form.getBody();
+            if (body != null && !body.isDisposed())
+            {
+                Point loc = body.getLocation();
+                Point size = body.getSize();
+                if (loc.x != 0 || loc.y != 0 || size.x != ca.width || size.y != ca.height)
+                    body.setBounds(0, 0, ca.width, ca.height);
+            }
         }
 
         private static ScrolledForm findScrolledForm(Composite composite)

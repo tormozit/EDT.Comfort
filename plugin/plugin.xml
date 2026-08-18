@@ -12,6 +12,7 @@
     <startup class="tormozit.DataCompositionSchemaEditorHook"/> 
     <startup class="tormozit.MoxelEditorHook"/>
     <startup class="tormozit.BSLEditorMenuHook"/>
+    <startup class="tormozit.BslParseTruncationMarkHook"/>
     <startup class="tormozit.BslModulePositionMemoryHook"/>
     <startup class="tormozit.HorizontalScrollBarPositionFixHook"/>
     <startup class="tormozit.BslEditorRevealScrollFixHook"/>
@@ -309,7 +310,7 @@
     </key>
     <key
         commandId="tormozit.GoToParentInTree"
-        contextId="org.eclipse.ui.contexts.window"
+        contextId="org.eclipse.ui.contexts.dialogAndWindow"
         schemeId="org.eclipse.ui.defaultAcceleratorConfiguration"
         sequence="M1+ARROW_UP">
     </key>
@@ -1158,6 +1159,62 @@
         <contentExtension pattern="tormozit.groupCommonModules.filter"/>
       </includes>
     </viewerContentBinding>
+  </extension>
+
+  <!--
+    Пометка синтаксической ошибки, обрывающей разбор модуля (см. BslParseTruncationMarkHook):
+    точка на строке ошибки — с иконкой на левой линейке, и полоса на весь неразобранный
+    остаток модуля — только на полосе обзора, иначе иконка повторялась бы на каждой строке
+    хвоста. Штатную аннотацию ошибки EDT не подменяем — наша идёт в дополнение к ней.
+
+    presentationLayer у точки — 10: на левой линейке в одной строке рисуется значок
+    аннотации с наибольшим слоем, и со значением 6 наш значок оставался под штатным красным
+    крестом ошибки (она на той же строке всегда). Хвост рисуется только на полосе обзора,
+    ему слой не важен.
+  -->
+  <extension point="org.eclipse.ui.editors.annotationTypes">
+    <type name="tormozit.bslParseTruncation"/>
+    <type name="tormozit.bslParseTruncationTail"/>
+  </extension>
+
+  <extension point="org.eclipse.ui.editors.markerAnnotationSpecification">
+    <specification
+        annotationType="tormozit.bslParseTruncation"
+        label="Обрыв разбора модуля (Комфорт)"
+        icon="icons/obj16/parse_truncation.png"
+        presentationLayer="10"
+        textPreferenceKey="comfort.bslParseTruncation.text"
+        textPreferenceValue="false"
+        highlightPreferenceKey="comfort.bslParseTruncation.highlight"
+        highlightPreferenceValue="false"
+        overviewRulerPreferenceKey="comfort.bslParseTruncation.overview"
+        overviewRulerPreferenceValue="true"
+        verticalRulerPreferenceKey="comfort.bslParseTruncation.vertical"
+        verticalRulerPreferenceValue="true"
+        colorPreferenceKey="comfort.bslParseTruncation.color"
+        colorPreferenceValue="140,0,160"
+        showInNextPrevDropdownToolbarActionKey="comfort.bslParseTruncation.navigation"
+        showInNextPrevDropdownToolbarAction="true"
+        isGoToNextNavigationTargetKey="comfort.bslParseTruncation.next"
+        isGoToNextNavigationTarget="true"
+        isGoToPreviousNavigationTargetKey="comfort.bslParseTruncation.previous"
+        isGoToPreviousNavigationTarget="true"
+        contributesToHeader="false"/>
+    <specification
+        annotationType="tormozit.bslParseTruncationTail"
+        label="Неразобранный остаток модуля (Комфорт)"
+        presentationLayer="6"
+        textPreferenceKey="comfort.bslParseTruncationTail.text"
+        textPreferenceValue="false"
+        highlightPreferenceKey="comfort.bslParseTruncationTail.highlight"
+        highlightPreferenceValue="false"
+        overviewRulerPreferenceKey="comfort.bslParseTruncationTail.overview"
+        overviewRulerPreferenceValue="true"
+        verticalRulerPreferenceKey="comfort.bslParseTruncationTail.vertical"
+        verticalRulerPreferenceValue="false"
+        colorPreferenceKey="comfort.bslParseTruncationTail.color"
+        colorPreferenceValue="205,150,215"
+        contributesToHeader="false"/>
   </extension>
 
 </plugin>

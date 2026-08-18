@@ -635,6 +635,7 @@ public final class FileSearchResultsHook implements IStartup
         FormTableInteraction interaction = new FormTableInteraction(table, tableViewer);
         interaction.setOwnerDrawColumns(textCol.getColumn());
         interaction.install(hasSavedColumnWidths);
+        interaction.enableHeaderSort();
         cachedTableInteraction = interaction;
         cachedPathColumn = pathCol.getColumn();
         cachedFileColumn = fileCol.getColumn();

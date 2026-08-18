@@ -48,18 +48,23 @@ import com.sun.jna.platform.win32.WinDef.HWND;
  * пользователь, скорее всего, не смотрит на workbench: окно без фокуса ОС
  * или нет событий мыши/клавиатуры ≥ 30 с. Белый список: загрузка конфигурации,
  * сравнение конфигураций, объединение конфигураций, выгрузка конфигурации
- * в файлы XML, активация проектного контекста, переключение на ветку Git.
+ * в файлы XML, активация проектного контекста, переключение на ветку Git,
+ * отправка на сервер Git.
  * <p>Отдельный триггер — ошибки: если сама операция записала в журнал ошибок платформы
  * хотя бы одну запись уровня ERROR, тост показывается всегда (независимо
  * от фокуса, активности пользователя, длительности и статуса Job), содержит число
- * ошибок и ссылку «Открыть журнал ошибок».
+ * ошибок и ссылку «Открыть журнал ошибок». Отправка Git при ошибке без штатного
+ * диалога результата — тост тоже всегда; если диалог «Результаты отправки» уже
+ * на экране и окно EDT (включая этот диалог) на переднем плане, тост не дублирует его.
  * <p>Отдельный триггер — модальное окно, ждущее решения пользователя во время
  * отслеживаемой операции: тост «Требуется решение пользователя: &lt;имя Job&gt;»
  * со ссылкой активации этого окна.
  * <p>Формат тоста: заголовок {@code EDT: <workspace>}, текст
  * {@code Завершено: <операция> [проект…] в HH:mm:ss за <длительность>}
- * (без даты — только время) и ссылка «Активировать окно»; при ошибках —
- * {@code Завершено с ошибками (N): …} и ссылка «Открыть журнал ошибок».
+ * (без даты — только время) и ссылка «Активировать окно»; при ошибках журнала —
+ * {@code Завершено с ошибками (N): …} и ссылка «Открыть журнал ошибок»;
+ * при ошибке отправки Git без диалога результата — {@code Завершено с ошибкой: …}
+ * и ссылка «Активировать окно».
  * Для активации проектного контекста имена проектов снимаются в {@code aboutToRun}
  * из очереди {@code DefaultContextsStartJob} (у Job нет поля проекта — batch).
  * <p>Загрузка и сравнение — только {@link IJobChangeListener} (в EDT 2026 загрузка
@@ -81,6 +86,7 @@ public final class LongOperationNotifyHook implements IStartup
     private static final String TITLE_COMPARE = "Сравнение конфигураций"; //$NON-NLS-1$
     private static final String TITLE_MERGE = "Объединение конфигураций"; //$NON-NLS-1$
     private static final String TITLE_CHECKOUT = "Переключение на ветку"; //$NON-NLS-1$
+    private static final String TITLE_PUSH = "Отправка на сервер Git"; //$NON-NLS-1$
     private static final String TITLE_EXPORT = "Выгрузка конфигурации в файлы XML"; //$NON-NLS-1$
     private static final String TITLE_PROJECT_CONTEXT =
         "Активация проектного контекста"; //$NON-NLS-1$
@@ -126,6 +132,9 @@ public final class LongOperationNotifyHook implements IStartup
         // EGit BranchOperationUI$CheckoutJob: «Checking out <репозиторий> - <ветка>»
         // (перевода на русский в EGit нет).
         new OpMatcher(TITLE_CHECKOUT, name -> name.startsWith("Checking out")), //$NON-NLS-1$
+        // EGit PushJob: «Отправить в <репозиторий - remote>» / «Push to …».
+        new OpMatcher(TITLE_PUSH, name -> name.startsWith("Отправить в") //$NON-NLS-1$
+            || name.startsWith("Push to")), //$NON-NLS-1$
         new OpMatcher(TITLE_EXPORT, name -> name.contains("Экспорт проекта") //$NON-NLS-1$
             || name.contains("Выгрузка конфигурации") //$NON-NLS-1$
             || name.contains("Инкрементальный экспорт")), //$NON-NLS-1$
@@ -510,8 +519,10 @@ public final class LongOperationNotifyHook implements IStartup
                     unbindJobThreads(track);
                     return;
                 }
-                // OK и INFO — успех; WARNING/ERROR/CANCEL — не тостим (кроме ошибок в журнале).
+                // OK и INFO — успех; WARNING/ERROR/CANCEL — не тостим (кроме ошибок
+                // в журнале и ошибки отправки Git без диалога результата).
                 boolean ok = result != null && result.getSeverity() <= IStatus.INFO;
+                final boolean jobFailed = isPushFailed(job, result, operation);
                 long doneMs = System.currentTimeMillis();
                 long durationMs = track != null ? Math.max(0L, doneMs - track.startMs) : -1L;
                 String tracked = track != null ? track.projectNames : ""; //$NON-NLS-1$
@@ -529,11 +540,11 @@ public final class LongOperationNotifyHook implements IStartup
                     ErrorRef firstError = finished != null ? finished.firstError.get() : null;
                     unbindJobThreads(finished);
                     // Без ошибок — прежнее поведение (тост только при успехе).
-                    if (errorCount == 0 && !ok)
+                    if (errorCount == 0 && !ok && !jobFailed)
                         return;
                     boolean startedInBackground = finished != null && !finished.edtForegroundAtStart;
                     notifyIfNeeded(operation, projectNames, durationMs, errorCount, firstError,
-                        startedInBackground);
+                        startedInBackground, jobFailed);
                 }));
             }
         });
@@ -564,7 +575,8 @@ public final class LongOperationNotifyHook implements IStartup
 
     /**
      * Уточнение операции из имени Job: проект из «Загружается конфигурация &lt;проект&gt;»,
-     * ветка из «Checking out &lt;репозиторий&gt; - &lt;ветка&gt;». Иначе пусто.
+     * ветка из «Checking out &lt;репозиторий&gt; - &lt;ветка&gt;», назначение из
+     * «Отправить в &lt;репозиторий - remote&gt;». Иначе пусто.
      */
     private static String projectFromJobName(Job job)
     {
@@ -584,6 +596,12 @@ public final class LongOperationNotifyHook implements IStartup
             if (to >= 0)
                 return shortBranchName(name.substring(to + 4).trim());
         }
+        String pushRu = "Отправить в "; //$NON-NLS-1$
+        if (name.startsWith(pushRu))
+            return name.substring(pushRu.length()).trim();
+        String pushEn = "Push to "; //$NON-NLS-1$
+        if (name.startsWith(pushEn))
+            return name.substring(pushEn.length()).trim();
         return ""; //$NON-NLS-1$
     }
 
@@ -635,6 +653,9 @@ public final class LongOperationNotifyHook implements IStartup
             return TITLE_MERGE;
         if (className.contains("BranchOperationUI$CheckoutJob")) //$NON-NLS-1$
             return TITLE_CHECKOUT;
+        // EGit PushJob: org.eclipse.egit.ui.internal.push.PushJob.
+        if (className.contains("egit.ui.internal.push.PushJob")) //$NON-NLS-1$
+            return TITLE_PUSH;
 
         String jobName = job.getName();
         if (jobName == null || jobName.isEmpty())
@@ -691,7 +712,7 @@ public final class LongOperationNotifyHook implements IStartup
     private static void notifyIfNeeded(String operation, String projectNames, long durationMs)
     {
         // Визард «Экспорт»: операцию запускает сам пользователь из окна EDT.
-        notifyIfNeeded(operation, projectNames, durationMs, 0, null, false);
+        notifyIfNeeded(operation, projectNames, durationMs, 0, null, false, false);
     }
 
     /**
@@ -703,19 +724,25 @@ public final class LongOperationNotifyHook implements IStartup
      * @param startedInBackground операция стартовала, когда окно EDT не было на переднем
      *        плане (фоновая, не запущенная пользователем «здесь и сейчас») — только к таким
      *        применяется отсечка по длительности
+     * @param jobFailed ошибка самой Job без записи в журнал (отправка Git). Тост
+     *        всегда, только если нет штатного диалога результата; иначе — как у
+     *        успеха (только когда пользователь, скорее всего, не смотрит на EDT)
      */
     private static void notifyIfNeeded(String operation, String projectNames, long durationMs,
-        int errorCount, ErrorRef firstError, boolean startedInBackground)
+        int errorCount, ErrorRef firstError, boolean startedInBackground, boolean jobFailed)
     {
-        boolean hasErrors = errorCount > 0;
+        boolean hasLogErrors = errorCount > 0;
+        boolean pushDialogOpen = TITLE_PUSH.equals(operation) && isPushResultDialogOpen();
+        // Диалог результата уже перед пользователем — отдельный тост не нужен.
+        if (pushDialogOpen && isEdtProcessForeground())
+            return;
+        boolean forceNotify = hasLogErrors || (jobFailed && !pushDialogOpen);
         // durationMs < 0 — старт не видели (не путать с коротким Job).
-        if (!hasErrors && startedInBackground && durationMs >= 0L && durationMs < MIN_DURATION_MS)
+        if (!forceNotify && startedInBackground && durationMs >= 0L && durationMs < MIN_DURATION_MS)
         {
             return;
         }
-        boolean focused = isEdtWorkbenchFocused();
-        long idleMs = System.currentTimeMillis() - lastInputMs.get();
-        if (!hasErrors && !shouldNotifyUser())
+        if (!forceNotify && !shouldNotifyUser())
         {
             return;
         }
@@ -723,7 +750,7 @@ public final class LongOperationNotifyHook implements IStartup
         String dedupKey = projectNames == null || projectNames.isEmpty()
             ? operation
             : operation + "|" + projectNames; //$NON-NLS-1$
-        if (hasErrors)
+        if (forceNotify)
             dedupKey = dedupKey + "|errors"; //$NON-NLS-1$
         Long prev = lastNotifyByTitle.get(dedupKey);
         if (prev != null && now - prev < DEDUP_MS)
@@ -737,9 +764,14 @@ public final class LongOperationNotifyHook implements IStartup
             ? "EDT" //$NON-NLS-1$
             : "EDT: " + workspace; //$NON-NLS-1$
         String completedAt = LocalDateTime.now().format(COMPLETION_FMT);
-        StringBuilder message = new StringBuilder(hasErrors
-            ? "Завершено с ошибками (" + errorCount + "): " //$NON-NLS-1$ //$NON-NLS-2$
-            : "Завершено: ").append(operation); //$NON-NLS-1$
+        String prefix;
+        if (hasLogErrors)
+            prefix = "Завершено с ошибками (" + errorCount + "): "; //$NON-NLS-1$ //$NON-NLS-2$
+        else if (jobFailed)
+            prefix = "Завершено с ошибкой: "; //$NON-NLS-1$
+        else
+            prefix = "Завершено: "; //$NON-NLS-1$
+        StringBuilder message = new StringBuilder(prefix).append(operation);
         if (projectNames != null && !projectNames.isEmpty())
             message.append(' ').append(projectNames);
         message.append(" в ").append(completedAt); //$NON-NLS-1$
@@ -747,11 +779,10 @@ public final class LongOperationNotifyHook implements IStartup
             message.append(" за ").append(formatDuration(durationMs)); //$NON-NLS-1$
 
         evictJobToastsBeyondLimit();
-        // Есть ошибки — ссылка на журнал ошибок (она же активирует окно),
-        // иначе — ссылка активации окна. Её даём всегда: определить «смотрит ли
-        // пользователь на EDT» точно нельзя, а при активном окне ссылка безвредна.
+        // Журнал ошибок — ссылка на него (она же активирует окно),
+        // иначе — ссылка активации окна EDT.
         Shell toast;
-        if (hasErrors)
+        if (hasLogErrors)
         {
             toast = ToastNotification.show(toastTitle, message.toString(), 0,
                 () -> openErrorLog(firstError), ERROR_LOG_LINK);
@@ -762,6 +793,75 @@ public final class LongOperationNotifyHook implements IStartup
                 LongOperationNotifyHook::activateEdtWindow, ACTIVATE_LINK);
         }
         registerJobToast(toast);
+    }
+
+    /**
+     * Ошибка отправки Git без записи в журнал: статус Job WARNING/ERROR либо отклонённые
+     * обновления ссылок при OK-статусе ({@code PushJob.getDeferredStatus}).
+     * <p>Отмена пользователем — не ошибка. Если EGit показал диалог «Результаты отправки»,
+     * тост не форсируется — см. {@link #notifyIfNeeded}.
+     */
+    private static boolean isPushFailed(Job job, IStatus result, String operation)
+    {
+        if (!TITLE_PUSH.equals(operation))
+            return false;
+        if (result != null)
+        {
+            int severity = result.getSeverity();
+            if (severity == IStatus.CANCEL)
+                return false;
+            if (severity > IStatus.INFO)
+                return true;
+        }
+        if (job == null || Global.getField(job, "operationResult") == null) //$NON-NLS-1$
+            return false;
+        try
+        {
+            Object deferred = Global.invoke(job, "getDeferredStatus"); //$NON-NLS-1$
+            return deferred instanceof IStatus status && status.getSeverity() > IStatus.INFO;
+        }
+        catch (Exception e)
+        {
+            return false;
+        }
+    }
+
+    /**
+     * Немодальный диалог EGit «Результаты отправки» / «Push Results» уже открыт.
+     * Вызывать только из UI-потока.
+     */
+    private static boolean isPushResultDialogOpen()
+    {
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return false;
+        Shell[] shells;
+        try
+        {
+            shells = display.getShells();
+        }
+        catch (Exception e)
+        {
+            return false;
+        }
+        for (Shell shell : shells)
+        {
+            if (shell == null || shell.isDisposed() || !shell.isVisible())
+                continue;
+            String title;
+            try
+            {
+                title = shell.getText();
+            }
+            catch (Exception e)
+            {
+                continue;
+            }
+            if (title != null && (title.contains("Результаты отправки") //$NON-NLS-1$
+                || title.startsWith("Push Results"))) //$NON-NLS-1$
+                return true;
+        }
+        return false;
     }
 
     /** Перед показом нового: если уже 3 — закрыть самый старый. */

@@ -17,6 +17,7 @@ import org.eclipse.swt.dnd.Transfer;
 import org.eclipse.swt.graphics.Color;
 import org.eclipse.swt.graphics.Font;
 import org.eclipse.swt.graphics.FontData;
+import org.eclipse.swt.graphics.GC;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.graphics.Rectangle;
 import org.eclipse.swt.graphics.TextLayout;
@@ -34,6 +35,8 @@ public final class ToastNotification
     private static final int SLIDE_IN_DURATION_MS = 500;
     private static final int FADE_OUT_DURATION_MS = 2000;
     private static final int ANIMATION_STEP_MS    = 30;
+    /** Стандартное время показа до начала затухания. */
+    private static final int DEFAULT_DURATION_MS  = 4000;
 
     private static final int WIDTH          = 400;
     private static final int PADDING        = 10;
@@ -46,6 +49,7 @@ public final class ToastNotification
 
     private static final int MAX_MESSAGE_LINES = 3;
     private static final String ELLIPSIS = "..."; //$NON-NLS-1$
+    private static final String COUNTDOWN_INFINITY = "∞";
     private static final int BLOCKING_MODAL = SWT.APPLICATION_MODAL | SWT.SYSTEM_MODAL;
 
     // =======================================================================
@@ -88,7 +92,7 @@ public final class ToastNotification
 
     public static Shell show(String title, String message)
     {
-        return show(title, message, 4000, null, null);
+        return show(title, message, DEFAULT_DURATION_MS, null, null);
     }
 
     public static Shell show(String title, String message, int durationMs)
@@ -112,7 +116,9 @@ public final class ToastNotification
      * @param title       заголовок (null = не отображать)
      * @param message     основной текст
      * @param durationMs  время показа в мс до начала затухания;
-     *                    {@code <= 0} — без автоскрытия (только крестик / клик)
+     *                    {@code <= 0} — без автоскрытия, пока указатель не наведён
+     *                    на тост (∞ слева от крестика); при наведении — стандартное
+     *                    время, отсчёт секунд; после ухода указателя начинается затухание
      * @param actionLabel текст гиперссылки «Выполнить» (null = не отображать)
      * @param action      действие при клике на гиперссылку; произвольные параметры
      *                    передаются через замыкание лямбды (null = не отображать)
@@ -177,10 +183,12 @@ public final class ToastNotification
                 }
             };
 
-            // --- Заголовок + кнопка × (всегда одна строка) ---
+            // --- Заголовок + отсчёт слева от × ---
+            Label countdownLbl;
             Composite header = new Composite(shell, SWT.NONE);
             {
-                GridLayout hl    = new GridLayout(2, false);
+                boolean sticky = durationMs <= 0;
+                GridLayout hl    = new GridLayout(3, false);
                 hl.marginWidth   = 0;
                 hl.marginHeight  = 0;
                 hl.verticalSpacing = 0;
@@ -190,7 +198,6 @@ public final class ToastNotification
                 header.setBackground(bgColor);
                 header.addListener(SWT.MouseDown, clickListener);
 
-                // Заголовок (левая ячейка — всё доступное пространство)
                 if (title != null && !title.isEmpty())
                 {
                     Label titleLbl = new Label(header, SWT.WRAP);
@@ -203,16 +210,37 @@ public final class ToastNotification
                 }
                 else
                 {
-                    // Пустой разделитель, чтобы × остался в правом углу
                     new Label(header, SWT.NONE).setLayoutData(
                         new GridData(SWT.FILL, SWT.CENTER, true, false));
                 }
 
-                // Кнопка × (правая ячейка, фиксированная ширина)
+                Color mutedColor = mixColors(display, fgColor, bgColor, 40);
+                shell.addDisposeListener(e -> mutedColor.dispose());
+                countdownLbl = new Label(header, SWT.RIGHT);
+                countdownLbl.setBackground(bgColor);
+                countdownLbl.setForeground(mutedColor);
+                countdownLbl.setFont(makeCountdownFont(countdownLbl, display));
+                countdownLbl.setText(sticky
+                    ? COUNTDOWN_INFINITY
+                    : Integer.toString((durationMs + 999) / 1000));
+                GridData cd = new GridData(SWT.RIGHT, SWT.CENTER, false, false);
+                GC gc = new GC(countdownLbl);
+                try
+                {
+                    cd.widthHint = Math.max(
+                        gc.stringExtent(COUNTDOWN_INFINITY).x,
+                        gc.stringExtent("99").x);
+                }
+                finally
+                {
+                    gc.dispose();
+                }
+                countdownLbl.setLayoutData(cd);
+                countdownLbl.addListener(SWT.MouseDown, clickListener);
+
                 ToolBar toolBar = new ToolBar(header, SWT.FLAT | SWT.RIGHT);
                 toolBar.setBackground(shell.getBackground());
-                GridData tbData = new GridData(SWT.RIGHT, SWT.TOP, false, false);
-                toolBar.setLayoutData(tbData);
+                toolBar.setLayoutData(new GridData(SWT.RIGHT, SWT.CENTER, false, false));
 
                 ToolItem closeItem = new ToolItem(toolBar, SWT.PUSH);
                 closeItem.setText("✕");
@@ -236,10 +264,9 @@ public final class ToastNotification
             }
 
             // --- Гиперссылка «Выполнить» (опционально) ---
-            final Link actionLink;
             if (actionLabel != null && !actionLabel.isEmpty() && action != null)
             {
-                actionLink = new Link(shell, SWT.NONE);
+                Link actionLink = new Link(shell, SWT.NONE);
                 actionLink.setLayoutData(new GridData(SWT.LEFT, SWT.TOP, true, false));
                 actionLink.setText("<a>" + actionLabel + "</a>"); //$NON-NLS-1$ //$NON-NLS-2$
                 actionLink.setBackground(bgColor);
@@ -248,10 +275,6 @@ public final class ToastNotification
                     if (!shell.isDisposed()) shell.dispose();
                     display.asyncExec(action::run);
                 });
-            }
-            else
-            {
-                actionLink = null;
             }
 
             // --- Рамка (рисуется поверх содержимого) ---
@@ -307,79 +330,7 @@ public final class ToastNotification
                 }
             }
             WinWindowActivator.ensureToastClickable(shell);
-
-            // --- 2–3. Ховер + таймер удержания/затухания (пропуск при sticky) ---
-            if (durationMs > 0)
-            {
-                final boolean[] isHovered    = { false };
-                final boolean[] isFading     = { false };
-                final int[]     currentAlpha = { 255 };
-                final int[]     remainingMs  = { durationMs };
-
-                Listener hoverListener = e ->
-                {
-                    if (shell.isDisposed())
-                        return;
-                    if (e.type == SWT.MouseEnter)
-                    {
-                        isHovered[0] = true;
-                    }
-                    else if (e.type == SWT.MouseExit
-                        && !shell.getBounds().contains(display.getCursorLocation()))
-                    {
-                        isHovered[0] = false;
-                    }
-                };
-                shell.addListener(SWT.MouseEnter, hoverListener);
-                shell.addListener(SWT.MouseExit,  hoverListener);
-                for (Control child : shell.getChildren())
-                {
-                    child.addListener(SWT.MouseEnter, hoverListener);
-                    child.addListener(SWT.MouseExit,  hoverListener);
-                }
-                if (actionLink != null)
-                {
-                    actionLink.addListener(SWT.MouseEnter, hoverListener);
-                    actionLink.addListener(SWT.MouseExit,  hoverListener);
-                }
-
-                Runnable[] loop = new Runnable[1];
-                loop[0] = () ->
-                {
-                    if (shell.isDisposed()) return;
-
-                    if (isHovered[0] || shell.getBounds().contains(display.getCursorLocation()))
-                    {
-                        if (isFading[0] || currentAlpha[0] < 255)
-                        {
-                            shell.setAlpha(255);
-                            currentAlpha[0] = 255;
-                            isFading[0]     = false;
-                        }
-                        remainingMs[0] = durationMs;
-                        display.timerExec(100, loop[0]);
-                        return;
-                    }
-
-                    if (remainingMs[0] > 0)
-                    {
-                        remainingMs[0] -= 100;
-                        display.timerExec(100, loop[0]);
-                    }
-                    else
-                    {
-                        isFading[0]     = true;
-                        int decrement   = Math.max(1, 255 * ANIMATION_STEP_MS / FADE_OUT_DURATION_MS);
-                        currentAlpha[0] = Math.max(0, currentAlpha[0] - decrement);
-                        shell.setAlpha(currentAlpha[0]);
-                        if (currentAlpha[0] > 0)
-                            display.timerExec(ANIMATION_STEP_MS, loop[0]);
-                        else
-                            shell.dispose();
-                    }
-                };
-                display.timerExec(skipSlide ? 50 : SLIDE_IN_DURATION_MS + 50, loop[0]);
-            }
+            installAutoHide(display, shell, durationMs, skipSlide, countdownLbl);
         });
 
         return holder[0];
@@ -411,6 +362,172 @@ public final class ToastNotification
                 entry.shell.dispose();
         }
         activeToasts.clear();
+    }
+
+    /**
+     * Автоскрытие: при {@code durationMs > 0} — сразу; при {@code <= 0} — после
+     * наведения указателя на тост знак ∞ сменяется секундами, после ухода
+     * указателя идёт стандартное время до затухания.
+     */
+    private static void installAutoHide(Display display, Shell shell, int durationMs,
+        boolean skipSlide, Label countdownLbl)
+    {
+        final int hideDurationMs = durationMs > 0 ? durationMs : DEFAULT_DURATION_MS;
+        final boolean[] stickyUntilHover = { durationMs <= 0 };
+        final boolean[] armed = { false };
+        final boolean[] everHovered = { false };
+        final boolean[] isHovered = { false };
+        final boolean[] isFading = { false };
+        final boolean[] loopStarted = { false };
+        final int[] currentAlpha = { 255 };
+        final int[] remainingMs = { hideDurationMs };
+
+        Runnable switchStickyToTimed = () ->
+        {
+            if (!stickyUntilHover[0])
+                return;
+            stickyUntilHover[0] = false;
+            remainingMs[0] = hideDurationMs;
+            refreshCountdown(countdownLbl, false, remainingMs[0]);
+        };
+
+        Runnable[] loop = new Runnable[1];
+        loop[0] = () ->
+        {
+            if (shell.isDisposed())
+                return;
+
+            boolean pointerInside = isHovered[0]
+                || shell.getBounds().contains(display.getCursorLocation());
+            if (pointerInside)
+            {
+                everHovered[0] = true;
+                switchStickyToTimed.run();
+                if (isFading[0] || currentAlpha[0] < 255)
+                {
+                    shell.setAlpha(255);
+                    currentAlpha[0] = 255;
+                    isFading[0] = false;
+                }
+                remainingMs[0] = hideDurationMs;
+                refreshCountdown(countdownLbl, false, remainingMs[0]);
+                display.timerExec(100, loop[0]);
+                return;
+            }
+
+            if (stickyUntilHover[0])
+            {
+                refreshCountdown(countdownLbl, true, 0);
+                display.timerExec(100, loop[0]);
+                return;
+            }
+
+            if (remainingMs[0] > 0)
+            {
+                remainingMs[0] -= 100;
+                refreshCountdown(countdownLbl, false, remainingMs[0]);
+                display.timerExec(100, loop[0]);
+            }
+            else
+            {
+                refreshCountdown(countdownLbl, false, 0);
+                isFading[0] = true;
+                int decrement = Math.max(1, 255 * ANIMATION_STEP_MS / FADE_OUT_DURATION_MS);
+                currentAlpha[0] = Math.max(0, currentAlpha[0] - decrement);
+                shell.setAlpha(currentAlpha[0]);
+                if (currentAlpha[0] > 0)
+                    display.timerExec(ANIMATION_STEP_MS, loop[0]);
+                else
+                    shell.dispose();
+            }
+        };
+
+        Listener hoverListener = e ->
+        {
+            if (shell.isDisposed())
+                return;
+            if (e.type == SWT.MouseEnter)
+            {
+                isHovered[0] = true;
+                if (!armed[0])
+                    return;
+                everHovered[0] = true;
+                switchStickyToTimed.run();
+                if (!loopStarted[0])
+                {
+                    loopStarted[0] = true;
+                    display.timerExec(100, loop[0]);
+                }
+            }
+            else if (e.type == SWT.MouseExit
+                && !shell.getBounds().contains(display.getCursorLocation()))
+            {
+                isHovered[0] = false;
+            }
+        };
+        addHoverListeners(shell, hoverListener);
+
+        int startDelay = skipSlide ? 50 : SLIDE_IN_DURATION_MS + 50;
+        if (!stickyUntilHover[0])
+        {
+            loopStarted[0] = true;
+            display.timerExec(startDelay, loop[0]);
+            return;
+        }
+        display.timerExec(startDelay, () ->
+        {
+            if (shell.isDisposed())
+                return;
+            armed[0] = true;
+            boolean inside = isHovered[0]
+                || shell.getBounds().contains(display.getCursorLocation());
+            if (!inside)
+                return;
+            everHovered[0] = true;
+            isHovered[0] = true;
+            switchStickyToTimed.run();
+            if (!loopStarted[0])
+            {
+                loopStarted[0] = true;
+                display.timerExec(100, loop[0]);
+            }
+        });
+    }
+
+    private static void addHoverListeners(Control control, Listener listener)
+    {
+        control.addListener(SWT.MouseEnter, listener);
+        control.addListener(SWT.MouseExit, listener);
+        if (control instanceof Composite composite)
+        {
+            for (Control child : composite.getChildren())
+                addHoverListeners(child, listener);
+        }
+    }
+
+    /** Едва заметный отсчёт слева от крестика: ∞ пока тост бесконечный, иначе секунды. */
+    private static void refreshCountdown(Label label, boolean infinite, int remainingMs)
+    {
+        if (label == null || label.isDisposed())
+            return;
+        String text;
+        if (infinite)
+            text = COUNTDOWN_INFINITY;
+        else if (remainingMs > 0)
+            text = Integer.toString((remainingMs + 999) / 1000);
+        else
+            text = "";
+        if (!text.equals(label.getText()))
+            label.setText(text);
+    }
+
+    private static Color mixColors(Display display, Color fg, Color bg, int fgPercent)
+    {
+        int bgPercent = 100 - fgPercent;
+        return new Color(display,
+            (fg.getRed() * fgPercent + bg.getRed() * bgPercent) / 100,
+            (fg.getGreen() * fgPercent + bg.getGreen() * bgPercent) / 100,
+            (fg.getBlue() * fgPercent + bg.getBlue() * bgPercent) / 100);
     }
 
     private static void logNotification(String title, String message)
@@ -648,6 +765,15 @@ public final class ToastNotification
     {
         FontData[] fd = control.getFont().getFontData();
         fd[0].setHeight(fd[0].getHeight() + FONT_SIZE_DELTA);
+        Font f = new Font(display, fd);
+        control.addDisposeListener(e -> f.dispose());
+        return f;
+    }
+
+    private static Font makeCountdownFont(Control control, Display display)
+    {
+        FontData[] fd = control.getFont().getFontData();
+        fd[0].setHeight(Math.max(6, fd[0].getHeight() - 1));
         Font f = new Font(display, fd);
         control.addDisposeListener(e -> f.dispose());
         return f;

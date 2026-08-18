@@ -698,6 +698,30 @@ public final class MdEditorListTabCountHook implements IStartup
         });
     }
 
+    static void refreshFunctionalOptionsTitle(DtGranularEditor<?> editor)
+    {
+        if (editor == null)
+            return;
+        Object container = Global.invoke(editor, "getContainer"); //$NON-NLS-1$
+        if (!(container instanceof CTabFolder folder) || folder.isDisposed())
+            return;
+        Object pagesObj = Global.getField(editor, "pages"); //$NON-NLS-1$
+        List<?> pages = pagesObj instanceof List<?> list ? list : List.of();
+        CTabItem[] items = folder.getItems();
+        for (int i = 0; i < items.length; i++)
+        {
+            CTabItem item = items[i];
+            if (item == null || item.isDisposed())
+                continue;
+            Object pageObj = i < pages.size() ? pages.get(i) : null;
+            IFormPage page = pageObj instanceof IFormPage formPage ? formPage : null;
+            if (!isFunctionalOptionsPage(page, null))
+                continue;
+            refreshTab(editor, item, page, COUNT_MAX_ATTEMPTS);
+            return;
+        }
+    }
+
     private static void onEditorBecameVisible(DtGranularEditor<?> editor)
     {
         Object container = Global.invoke(editor, "getContainer"); //$NON-NLS-1$
@@ -937,6 +961,20 @@ public final class MdEditorListTabCountHook implements IStartup
                 return;
             }
             applyTitle(item, baseTitle, "?"); //$NON-NLS-1$
+            return;
+        }
+
+        if (isFunctionalOptionsPage(page, baseTitle))
+        {
+            Integer sum = MdEditorFunctionalOptionsCountHook.columnSum(page);
+            if (sum != null)
+            {
+                applyTitle(item, baseTitle, Integer.toString(sum.intValue()));
+                return;
+            }
+            applyTitle(item, baseTitle, "?"); //$NON-NLS-1$
+            if (created && attempt < COUNT_MAX_ATTEMPTS)
+                scheduleCountRetry(editor, item, page, attempt);
             return;
         }
 

@@ -7,9 +7,12 @@ import org.eclipse.compare.contentmergeviewer.TextMergeViewer;
 import org.eclipse.jface.action.IContributionItem;
 import org.eclipse.jface.action.IToolBarManager;
 import org.eclipse.jface.action.Separator;
+import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.jface.viewers.Viewer;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.StyledText;
+import org.eclipse.swt.graphics.Point;
+import org.eclipse.swt.graphics.Rectangle;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.layout.GridLayout;
 import org.eclipse.swt.widgets.Composite;
@@ -20,8 +23,9 @@ import org.eclipse.swt.widgets.Shell;
 
 /**
  * Панель «Текущая строка» ({@link CompareCurrentLinesPanel}) в предпросмотре изменений мастера
- * рефакторинга LTK — окна «Переименовать элемент» и т.п. (страница «Вносимые изменения» +
- * панель сравнения «Начальный исходный текст» / «Исходный текст после рефакторинга»).
+ * рефакторинга LTK — окна «Рефакторинг», «Переименовать элемент» и т.п. (страница «Вносимые
+ * изменения» + панель сравнения «Начальный исходный текст» / «Исходный текст после рефакторинга»).
+ * Размер окна запоминается между открытиями.
  *
  * <p>Панель сравнения там — {@code TextEditChangePreviewViewer$ComparePreviewer}, наследник
  * {@link CompareViewerSwitchingPane} со своим {@code CompareConfiguration} (создаётся прямо в
@@ -48,6 +52,11 @@ public final class RefactoringPreviewCurrentLinesHook
 
     private static final String SHELL_HANDLED_KEY = "tormozit.refactoringPreviewCurrentLinesShell"; //$NON-NLS-1$
     private static final String PANEL_ATTACHED_KEY = "tormozit.refactoringPreviewCurrentLinesAttached"; //$NON-NLS-1$
+    private static final String SIZE_MEMORY_KEY = "tormozit.refactoringWizardSizeMemory"; //$NON-NLS-1$
+    private static final String SIZE_RESTORED_ON_PREVIEW_KEY = "tormozit.refactoringWizardSizeRestoredOnPreview"; //$NON-NLS-1$
+    private static final String SETTINGS_SECTION = "tormozit.refactoringWizardDialog"; //$NON-NLS-1$
+    private static final String KEY_DIALOG_WIDTH = "DIALOG_WIDTH"; //$NON-NLS-1$
+    private static final String KEY_DIALOG_HEIGHT = "DIALOG_HEIGHT"; //$NON-NLS-1$
 
     /**
      * Диалог мастера рефакторинга: LTK открывает {@code RefactoringWizardDialog2} (реже
@@ -86,6 +95,7 @@ public final class RefactoringPreviewCurrentLinesHook
         if (!isRefactoringWizardDialog(shell))
             return;
         shell.setData(SHELL_HANDLED_KEY, Boolean.TRUE);
+        installShellSizeMemory(shell);
         scheduleAttach(shell, 0, false);
     }
 
@@ -96,6 +106,100 @@ public final class RefactoringPreviewCurrentLinesHook
             return false;
         String name = data.getClass().getName();
         return name.contains(DIALOG_NAME_PART_REFACTORING) && name.contains(DIALOG_NAME_PART_DIALOG);
+    }
+
+    /**
+     * Размер окна мастера рефакторинга — восстановление при открытии и запоминание при закрытии.
+     * Штатный {@code RefactoringWizardDialog2} размер не сохраняет.
+     */
+    private static void installShellSizeMemory(Shell shell)
+    {
+        if (Boolean.TRUE.equals(shell.getData(SIZE_MEMORY_KEY)))
+            return;
+        shell.setData(SIZE_MEMORY_KEY, Boolean.TRUE);
+
+        // Размер запоминается по событию Resize: в DisposeListener окно ОС уже уничтожено
+        // и getSize() отдаёт неверные значения.
+        Point[] lastSize = { null };
+        shell.addListener(SWT.Resize, e ->
+        {
+            if (shell.getMaximized() || shell.getMinimized())
+                return;
+            Point size = shell.getSize();
+            if (size.x > 0 && size.y > 0)
+                lastSize[0] = size;
+        });
+        shell.addDisposeListener(e -> saveShellSize(lastSize[0]));
+
+        restoreShellSize(shell);
+        Display display = shell.getDisplay();
+        if (display != null && !display.isDisposed())
+        {
+            display.asyncExec(() -> restoreShellSize(shell));
+            display.timerExec(100, () -> restoreShellSize(shell));
+        }
+    }
+
+    private static void restoreShellSize(Shell shell)
+    {
+        if (shell == null || shell.isDisposed() || shell.getMaximized())
+            return;
+        IDialogSettings settings = dialogSettings();
+        if (settings.get(KEY_DIALOG_WIDTH) == null || settings.get(KEY_DIALOG_HEIGHT) == null)
+            return;
+
+        int width;
+        int height;
+        try
+        {
+            width = settings.getInt(KEY_DIALOG_WIDTH);
+            height = settings.getInt(KEY_DIALOG_HEIGHT);
+        }
+        catch (NumberFormatException e)
+        {
+            return;
+        }
+        if (width <= 0 || height <= 0)
+            return;
+
+        Point current = shell.getSize();
+        if (current.x == width && current.y == height)
+            return;
+
+        Rectangle old = shell.getBounds();
+        // Центр окна не сдвигаем — иначе увеличенное окно «уползает» вправо-вниз.
+        Rectangle target = new Rectangle(old.x + (old.width - width) / 2,
+            old.y + (old.height - height) / 2, width, height);
+        shell.setBounds(clampToMonitor(shell, target));
+    }
+
+    private static void saveShellSize(Point size)
+    {
+        if (size == null || size.x <= 0 || size.y <= 0)
+            return;
+        IDialogSettings settings = dialogSettings();
+        settings.put(KEY_DIALOG_WIDTH, size.x);
+        settings.put(KEY_DIALOG_HEIGHT, size.y);
+    }
+
+    private static Rectangle clampToMonitor(Shell shell, Rectangle bounds)
+    {
+        Rectangle area = shell.getMonitor().getClientArea();
+        Point minimum = shell.getMinimumSize();
+        int width = Math.max(minimum.x, Math.min(bounds.width, area.width));
+        int height = Math.max(minimum.y, Math.min(bounds.height, area.height));
+        int x = Math.max(area.x, Math.min(bounds.x, area.x + area.width - width));
+        int y = Math.max(area.y, Math.min(bounds.y, area.y + area.height - height));
+        return new Rectangle(x, y, width, height);
+    }
+
+    private static IDialogSettings dialogSettings()
+    {
+        IDialogSettings top = Activator.getDefault().getDialogSettings();
+        IDialogSettings section = top.getSection(SETTINGS_SECTION);
+        if (section == null)
+            section = top.addNewSection(SETTINGS_SECTION);
+        return section;
     }
 
     private static void scheduleAttach(Shell shell, int attempt, boolean slow)
@@ -145,6 +249,16 @@ public final class RefactoringPreviewCurrentLinesHook
 
         pane.setData(PANEL_ATTACHED_KEY, Boolean.TRUE);
         attach(pane, viewerControl, mergeViewer, leftText, rightText, shell);
+        // Мастер может ещё раз подогнать размер под страницу предпросмотра — перекрываем
+        // один раз, чтобы смена выбранного изменения не откатывала ручной размер.
+        if (!Boolean.TRUE.equals(shell.getData(SIZE_RESTORED_ON_PREVIEW_KEY)))
+        {
+            shell.setData(SIZE_RESTORED_ON_PREVIEW_KEY, Boolean.TRUE);
+            restoreShellSize(shell);
+            Display display = shell.getDisplay();
+            if (display != null && !display.isDisposed())
+                display.asyncExec(() -> restoreShellSize(shell));
+        }
         return ATTACH_DONE;
     }
 

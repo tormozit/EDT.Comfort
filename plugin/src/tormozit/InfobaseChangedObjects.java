@@ -20,7 +20,6 @@ import org.eclipse.swt.widgets.Display;
 
 import com._1c.g5.v8.bm.core.IBmObject;
 import com._1c.g5.v8.dt.bsl.model.Module;
-import com._1c.g5.v8.dt.common.Pair;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
 import com._1c.g5.v8.dt.core.platform.IDtProjectManager;
 import com._1c.g5.v8.dt.platform.services.core.infobases.IInfobaseAssociation;
@@ -28,7 +27,6 @@ import com._1c.g5.v8.dt.platform.services.core.infobases.IInfobaseAssociationLis
 import com._1c.g5.v8.dt.platform.services.core.infobases.IInfobaseAssociationManager;
 import com._1c.g5.v8.dt.platform.services.core.infobases.InfobaseAssociationContext;
 import com._1c.g5.v8.dt.platform.services.core.infobases.InfobaseAssociationSettings;
-import com._1c.g5.v8.dt.platform.services.core.infobases.sync.v2.IInfobaseSynchronizationFlow;
 import com._1c.g5.v8.dt.platform.services.core.infobases.sync.v2.IInfobaseSynchronizationStateManager;
 import com._1c.g5.v8.dt.platform.services.model.InfobaseReference;
 
@@ -314,7 +312,6 @@ public final class InfobaseChangedObjects
         catch (Throwable e)
         {
             ObjectSetsDebug.problem("InfobaseChangedObjects.installApplicationRemovalListener: " + e); //$NON-NLS-1$
-            Global.tempLog("apps-changes", "installApplicationRemovalListener FAILED: " + e); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 
@@ -488,32 +485,57 @@ public final class InfobaseChangedObjects
     }
 
     /**
-     * <b>Почему {@code startUpdateInfobaseFlow} вызывается рефлексией.</b> Его тип возврата
-     * {@code IUpdateInfobaseFlow} наследует не только {@link IInfobaseSynchronizationFlow}, но и
-     * {@code ILoadOption} из пакета {@code …infobases.sync.connections}, который бандл EDT
-     * <i>не экспортирует</i>. Прямой вызов компилируется (javac видит голый JAR), но в среде OSGi
-     * загрузка {@code IUpdateInfobaseFlow} нашим загрузчиком падает с {@code NoClassDefFoundError}
-     * на {@code ILoadOption}. Через рефлексию тип возврата разрешается загрузчиком самой EDT,
-     * а нам достаточно экспортируемого {@link IInfobaseSynchronizationFlow}, на котором объявлены
-     * все нужные методы.
+     * <b>Почему поток используется только через рефлексию.</b> Типы потока несовместимы между
+     * сборками EDT, и компиляционная привязка к ним ломалась дважды:
+     *
+     * <ul>
+     *   <li>тип возврата {@code IUpdateInfobaseFlow} наследует {@code ILoadOption} из пакета
+     *       {@code …infobases.sync.connections}, который бандл <i>не экспортирует</i> — загрузка
+     *       этого типа нашим загрузчиком падала с {@code NoClassDefFoundError};</li>
+     *   <li>в EDT 2026.1.2 метод {@code collectAddedAndModifiedInEdtObjects()} не объявлен на
+     *       {@code IInfobaseSynchronizationFlow} (в сборках 21.0.0 он там есть) — прямой вызов
+     *       давал {@code NoSuchMethodError}.</li>
+     * </ul>
+     *
+     * <p>Поэтому поток держится как {@code Object}, а все обращения к нему идут через
+     * {@link Global#invoke}: он ищет метод по классу реализации и его суперклассам, независимо от
+     * того, каким интерфейсом метод объявлен в конкретной сборке. Единственная компиляционная
+     * опоры на типы EDT здесь нет вообще: имя метода и разбор его результата подбираются в
+     * рантайме (см. {@link #COLLECT_METHOD_NAMES} и {@link #eObjectsOf}).
      */
     private static List<String> collectViaFlow(
         IInfobaseSynchronizationStateManager stateManager, IDtProject dtProject, InfobaseReference infobase)
     {
-        IInfobaseSynchronizationFlow flow = null;
+        Object flow = null;
         try
         {
-            Object started = Global.invoke(
-                stateManager, "startUpdateInfobaseFlow", dtProject, infobase); //$NON-NLS-1$
-            if (!(started instanceof IInfobaseSynchronizationFlow))
+            flow = Global.invoke(stateManager, "startUpdateInfobaseFlow", dtProject, infobase); //$NON-NLS-1$
+            if (flow == null)
                 return null;
-            flow = (IInfobaseSynchronizationFlow)started;
-            Pair<Set<EObject>, Set<EObject>> addedAndModified = flow.collectAddedAndModifiedInEdtObjects();
-            if (addedAndModified == null)
-                return List.of();
+            Object collected = null;
+            for (String methodName : COLLECT_METHOD_NAMES)
+            {
+                collected = callFlow(flow, methodName);
+                if (collected != null)
+                    break;
+            }
+            if (collected == null)
+            {
+                // Метода нет — это «пока неизвестно», а не «изменений нет».
+                String detail = "сбор изменений недоступен" + describeFlowType(flow); //$NON-NLS-1$
+                ObjectSetsDebug.problem("InfobaseChangedObjects: " + detail); //$NON-NLS-1$
+                return null;
+            }
+            Set<EObject> changed = eObjectsOf(collected);
+            if (changed == null)
+            {
+                String detail = "не удалось разобрать результат " //$NON-NLS-1$
+                    + collected.getClass().getName() + describeFlowType(flow);
+                ObjectSetsDebug.problem("InfobaseChangedObjects: " + detail); //$NON-NLS-1$
+                return null;
+            }
             Set<String> refs = new LinkedHashSet<>();
-            addRefs(refs, addedAndModified.getFirst());
-            addRefs(refs, addedAndModified.getSecond());
+            addRefs(refs, changed);
             return List.copyOf(refs);
         }
         catch (Exception e)
@@ -528,14 +550,15 @@ public final class InfobaseChangedObjects
         }
     }
 
-    private static void cancelQuietly(IInfobaseSynchronizationFlow flow)
+    /** Закрыть поток при любом исходе: незакрытый держит межпроцессный замок базы. */
+    private static void cancelQuietly(Object flow)
     {
         if (flow == null)
             return;
         try
         {
-            if (!flow.isFinished())
-                flow.cancel();
+            if (!Boolean.TRUE.equals(callFlow(flow, "isFinished"))) //$NON-NLS-1$
+                callFlow(flow, "cancel"); //$NON-NLS-1$
         }
         catch (Exception e)
         {
@@ -624,6 +647,176 @@ public final class InfobaseChangedObjects
         return value == null || value.isBlank();
     }
 
+
+    /**
+     * Имена метода сбора изменений в разных сборках EDT, от новых к старым.
+     *
+     * <p>В бандле 23.0.1 (EDT 2026.1) — {@code collectEdtObjectChanges()}, возвращает
+     * {@code org.apache.commons.lang3.tuple.Triple<Set<EObject>, Set<EObject>, Set<String>>}.
+     * В бандле 21.0.0 — {@code collectAddedAndModifiedInEdtObjects()}, возвращает
+     * {@code com._1c.g5.v8.dt.common.Pair<Set<EObject>, Set<EObject>>}.
+     */
+    private static final String[] COLLECT_METHOD_NAMES =
+        { "collectEdtObjectChanges", "collectAddedAndModifiedInEdtObjects" }; //$NON-NLS-1$ //$NON-NLS-2$
+
+    /**
+     * Достать изменённые объекты из кортежа, который вернул поток.
+     *
+     * <p>Тип кортежа между сборками EDT разный ({@code Pair} из бандла EDT против {@code Triple}
+     * из {@code commons-lang3}, которого у нас в зависимостях нет), а из-за стирания обобщений
+     * геттеры объявлены возвращающими {@code Object}. Поэтому опираться на тип нельзя: перебираем
+     * все публичные {@code getXxx()} без аргументов и берём те, что вернули множество из
+     * {@link EObject}. Множество строк (в {@code Triple} это третий элемент — удалённые ресурсы)
+     * отсеивается само по типу элементов.
+     *
+     * @return изменённые объекты либо {@code null}, если у результата вообще нет таких геттеров
+     */
+    private static Set<EObject> eObjectsOf(Object tuple)
+    {
+        if (tuple == null)
+            return null;
+        Set<EObject> result = new LinkedHashSet<>();
+        boolean anyAccessor = false;
+        for (Class<?> type : typeHierarchy(tuple.getClass()))
+        {
+            for (java.lang.reflect.Method method : type.getDeclaredMethods())
+            {
+                if (method.getParameterCount() != 0
+                    || !java.lang.reflect.Modifier.isPublic(method.getModifiers())
+                    || !method.getName().startsWith("get")) //$NON-NLS-1$
+                {
+                    continue;
+                }
+                Object value;
+                try
+                {
+                    value = method.invoke(tuple);
+                }
+                catch (Exception e)
+                {
+                    continue;
+                }
+                if (!(value instanceof Set))
+                    continue;
+                anyAccessor = true;
+                for (Object each : (Set<?>)value)
+                {
+                    if (each instanceof EObject eObject)
+                        result.add(eObject);
+                }
+            }
+        }
+        return anyAccessor ? result : null;
+    }
+
+    /**
+     * Вызвать метод потока без аргументов, перебирая всю иерархию типов.
+     *
+     * <p>{@link Global#invoke} здесь не годится: он обходит только класс и его суперклассы, а
+     * реализация потока лежит во внутреннем пакете EDT. Публичный метод такого класса нашим
+     * загрузчиком не вызывается — {@code setAccessible}/{@code invoke} дают отказ доступа, и
+     * {@code Global.invoke} молча возвращает {@code null} (наблюдалось в EDT 2026.1.2:
+     * {@code collectAddedAndModifiedInEdtObjects -> null}).
+     *
+     * <p>Поэтому метод ищется сначала по <b>интерфейсам</b> — они экспортируются и доступны, —
+     * и только затем по классам. Какой именно интерфейс объявляет метод, в разных сборках EDT
+     * отличается, поэтому перебираются все.
+     *
+     * @return результат вызова либо {@code null}, если метод не найден или недоступен
+     */
+    private static Object callFlow(Object flow, String methodName)
+    {
+        if (flow == null)
+            return null;
+        for (Class<?> type : typeHierarchy(flow.getClass()))
+        {
+            java.lang.reflect.Method method;
+            try
+            {
+                method = type.getDeclaredMethod(methodName);
+            }
+            catch (NoSuchMethodException e)
+            {
+                continue;
+            }
+            if (!java.lang.reflect.Modifier.isPublic(method.getModifiers()))
+                continue;
+            try
+            {
+                return method.invoke(flow);
+            }
+            catch (java.lang.reflect.InvocationTargetException e)
+            {
+                Throwable cause = e.getCause();
+                throw cause instanceof RuntimeException re ? re : new IllegalStateException(cause);
+            }
+            catch (Exception e)
+            {
+                // Этот носитель метода недоступен — пробуем следующий супертип.
+                continue;
+            }
+        }
+        return null;
+    }
+
+    /** Интерфейсы (сначала) и классы объекта — порядок важен: интерфейсы доступнее. */
+    private static List<Class<?>> typeHierarchy(Class<?> type)
+    {
+        LinkedHashSet<Class<?>> interfaces = new LinkedHashSet<>();
+        LinkedHashSet<Class<?>> classes = new LinkedHashSet<>();
+        for (Class<?> c = type; c != null && c != Object.class; c = c.getSuperclass())
+        {
+            classes.add(c);
+            collectInterfaces(c, interfaces);
+        }
+        List<Class<?>> result = new ArrayList<>(interfaces.size() + classes.size());
+        result.addAll(interfaces);
+        result.addAll(classes);
+        return result;
+    }
+
+    private static void collectInterfaces(Class<?> type, Set<Class<?>> result)
+    {
+        for (Class<?> each : type.getInterfaces())
+        {
+            if (result.add(each))
+                collectInterfaces(each, result);
+        }
+    }
+
+    /**
+     * Для журнала: чем оказался поток и какие у него есть методы сбора изменений.
+     *
+     * <p>Сигнатура {@code collectAddedAndModifiedInEdtObjects} между сборками EDT менялась, поэтому
+     * при неудаче в журнал выводится не только тип, но и все подходящие по имени методы с их
+     * параметрами — по ним видно, чем именно отличается конкретная сборка.
+     */
+    private static String describeFlowType(Object flow)
+    {
+        if (flow == null)
+            return ""; //$NON-NLS-1$
+        StringBuilder sb = new StringBuilder(" (flow=").append(flow.getClass().getName()); //$NON-NLS-1$
+        sb.append(", кандидаты: "); //$NON-NLS-1$
+        boolean any = false;
+        for (Class<?> type : typeHierarchy(flow.getClass()))
+        {
+            for (java.lang.reflect.Method method : type.getDeclaredMethods())
+            {
+                if (!method.getName().toLowerCase(java.util.Locale.ROOT).contains("collect")) //$NON-NLS-1$
+                    continue;
+                sb.append(any ? "; " : "").append(type.getSimpleName()).append('.') //$NON-NLS-1$ //$NON-NLS-2$
+                    .append(method.getName()).append('(');
+                Class<?>[] params = method.getParameterTypes();
+                for (int i = 0; i < params.length; i++)
+                    sb.append(i > 0 ? ", " : "").append(params[i].getSimpleName()); //$NON-NLS-1$ //$NON-NLS-2$
+                sb.append(") -> ").append(method.getReturnType().getSimpleName()); //$NON-NLS-1$
+                any = true;
+            }
+        }
+        if (!any)
+            sb.append("нет методов со словом collect"); //$NON-NLS-1$
+        return sb.append(')').toString();
+    }
 
     private static String cacheKey(String projectName, String infobaseUuid)
     {

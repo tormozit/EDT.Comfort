@@ -550,6 +550,7 @@ public final class ConfigSearchResultsHook implements IStartup
         boolean hasSavedColumnWidths = FormTableColumnState.hasSavedColumnWidths(matchSettings, KEY_COL_FILL_MODE,
             KEY_COL_PATH_WIDTH, KEY_COL_PROPERTY_WIDTH, KEY_COL_LINE_WIDTH, KEY_COL_TEXT_WIDTH);
         interaction.install(hasSavedColumnWidths);
+        interaction.enableHeaderSort();
         // Второстепенные данные — при закрытии панели; при повторном поиске — явно в
         // {@link #saveMatchColumnStateOnUiThread} (Dispose не срабатывает, панель остаётся открытой).
         outer.addDisposeListener(e -> saveMatchColumnState());

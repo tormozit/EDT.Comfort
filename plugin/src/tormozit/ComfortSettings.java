@@ -71,7 +71,7 @@ public final class ComfortSettings
 
     /** Набор 1 по умолчанию — контекстные/режимные суффиксы соглашения 1С. */
     public static final String DEFAULT_GROUP_COMMON_MODULES_SUFFIXES_1 =
-            "Клиент,Сервер,ПовтИсп,ВызовСервера,Кэш,Глобальный"; //$NON-NLS-1$
+            "Клиент,Сервер,ПовтИсп,ВызовСервера,Вызова,Кэш,Глобальный"; //$NON-NLS-1$
 
     /** Набор 2 по умолчанию — роль модуля в семействе (не более одного в хвосте). */
     public static final String DEFAULT_GROUP_COMMON_MODULES_SUFFIXES_2 =

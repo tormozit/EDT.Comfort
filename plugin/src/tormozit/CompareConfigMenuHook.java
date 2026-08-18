@@ -89,7 +89,9 @@ import org.eclipse.ui.contexts.IContextService;
 import org.eclipse.ui.dialogs.ElementListSelectionDialog;
 import org.eclipse.ui.plugin.AbstractUIPlugin;
 
+import com._1c.g5.v8.dt.bsl.compare.BslCompareUtils;
 import com._1c.g5.v8.dt.bsl.compare.BslModuleComparisonNode;
+import com._1c.g5.v8.dt.bsl.compare.BslModuleContentInfo;
 import com._1c.g5.v8.dt.bsl.compare.BslModuleSectionComparisonNode;
 import com._1c.g5.v8.dt.compare.model.MatchedObjectsComparisonNode;
 import com._1c.g5.v8.dt.compare.ui.editor.ISelectionProviderDelegate;
@@ -245,6 +247,8 @@ public class CompareConfigMenuHook implements IStartup
     @Override
     public void earlyStartup()
     {
+        // До UI: сравнение может стартовать раньше, чем отработает asyncExec ниже.
+        BslCompareParseErrorSuppressor.ensureInstalled();
         Display.getDefault().asyncExec(() ->
         {
 //          Activator.getDefault().getInjector().injectMembers(this); // Слишком рано?
@@ -367,6 +371,8 @@ public class CompareConfigMenuHook implements IStartup
 
     private void attachTreeListeners(IEditorPart editor, Tree tree)
     {
+        // Запись в реестре Xtext могла быть перезаписана поздней регистрацией языка BSL.
+        BslCompareParseErrorSuppressor.ensureInstalled();
         attachMenuListener(editor, tree);
         CompareConfigOpenModuleMergeHandler.attachDoubleClickListener(editor, tree);
         CompareModuleStructureColumnHook.install(tree);
@@ -723,6 +729,21 @@ public class CompareConfigMenuHook implements IStartup
                             }
                         });
                         addedItems.add(item3);
+                    }
+
+                    if (BslModuleTextCompareHandler.isApplicable(nativeElement))
+                    {
+                        MenuItem itemModuleText = new MenuItem(menu, SWT.PUSH);
+                        itemModuleText.setText(BslModuleTextCompareHandler.ITEM_TEXT);
+                        itemModuleText.addSelectionListener(new SelectionAdapter()
+                        {
+                            @Override
+                            public void widgetSelected(SelectionEvent ev)
+                            {
+                                BslModuleTextCompareHandler.open(editor, nativeElement);
+                            }
+                        });
+                        addedItems.add(itemModuleText);
                     }
                 }
 
@@ -4701,6 +4722,106 @@ public class CompareConfigMenuHook implements IStartup
      * секция BSL-модуля — диалог модуля с выбором секции;
      * макет табличного документа — «Сравнить в приложении ИР».
      */
+    /**
+     * Команда «Сравнить модуль как текст» на узле модуля.
+     *
+     * <p>Нужна из-за {@link BslCompareParseErrorSuppressor}: раньше модуль с синтаксической
+     * ошибкой EDT сравнивала как текст сама (см. её ранний выход по непустому
+     * {@code Resource.getErrors()}), теперь же он сравнивается структурно — по
+     * восстановленному после ошибки AST. Команда возвращает пользователю прежний способ
+     * посмотреть на модуль целиком, если структурному разбору в конкретном случае доверия нет.
+     *
+     * <p>Пункт показывается на двустороннем узле модуля, который EDT сравнила структурно:
+     * если структуры и так нет ({@code isParseModuleStructure() == false} — в том числе когда
+     * разбор оборвался и подавление не сработало, см. {@link BslAstCompleteness}), модуль уже
+     * сравнивается текстом и предлагать нечего.
+     */
+    private static final class BslModuleTextCompareHandler
+    {
+        private static final String TAG = "CompareConfig"; //$NON-NLS-1$
+        private static final String ITEM_TEXT = "Сравнить модуль как текст"; //$NON-NLS-1$
+        private static final String TOAST_TITLE = "Сравнение модуля"; //$NON-NLS-1$
+
+        private BslModuleTextCompareHandler()
+        {
+        }
+
+        /** Двусторонний узел BSL-модуля из элемента дерева, иначе {@code null}. */
+        static BslModuleComparisonNode resolveModule(Object element)
+        {
+            if (!(element instanceof IPartialModelNode node))
+                return null;
+            ComparisonNode comparisonNode = node.retrieveComparisonNode();
+            return comparisonNode instanceof BslModuleComparisonNode module && !module.isOneSideNode()
+                ? module : null;
+        }
+
+        static boolean isApplicable(Object element)
+        {
+            BslModuleComparisonNode module = resolveModule(element);
+            return module != null && module.isParseModuleStructure();
+        }
+
+        static void open(IEditorPart editor, Object element)
+        {
+            BslModuleComparisonNode module = resolveModule(element);
+            IComparisonSession session = CompareConfigSelectionListener.getSession(editor);
+            if (module == null || session == null)
+                return;
+            IQualifiedNameFilePathConverter converter = filePathConverter();
+            if (converter == null)
+            {
+                ToastNotification.show(TOAST_TITLE, "Не удалось получить доступ к файлам модуля", 5000); //$NON-NLS-1$
+                return;
+            }
+            try
+            {
+                String mainText = readContent(module, session, ComparisonSide.MAIN, converter);
+                String otherText = readContent(module, session, ComparisonSide.OTHER, converter);
+                String fileName = moduleFileName(module);
+                ProjectSettingsFilesHandler.SettingsFileCompareInput input =
+                    new ProjectSettingsFilesHandler.SettingsFileCompareInput(mainText, otherText,
+                        ProjectSettingsFilesHandler.sideLabel(editor, true),
+                        ProjectSettingsFilesHandler.sideLabel(editor, false), fileName);
+                CompareUI.openCompareDialog(input);
+            }
+            catch (Exception e)
+            {
+                Global.logError(TAG, "openModuleTextCompare", e); //$NON-NLS-1$
+                ToastNotification.show(TOAST_TITLE, "Не удалось открыть сравнение: " + e.getMessage(), 5000); //$NON-NLS-1$
+            }
+        }
+
+        private static String readContent(BslModuleComparisonNode module, IComparisonSession session,
+            ComparisonSide side, IQualifiedNameFilePathConverter converter)
+        {
+            BslModuleContentInfo info = BslCompareUtils.readBslModuleContentInfo(module, session, side, true,
+                converter);
+            String content = info != null ? info.getContent() : null;
+            return content != null ? content : ""; //$NON-NLS-1$
+        }
+
+        /** Из symlink модуля («…/Модуль») берём последний сегмент — им подписываем сравнение. */
+        private static String moduleFileName(BslModuleComparisonNode module)
+        {
+            String symlink = module.getMainSymlink() != null ? module.getMainSymlink() : module.getOtherSymlink();
+            if (symlink == null || symlink.isBlank())
+                return "Модуль.bsl"; //$NON-NLS-1$
+            int slash = Math.max(symlink.lastIndexOf('/'), symlink.lastIndexOf('.'));
+            String name = slash >= 0 && slash < symlink.length() - 1 ? symlink.substring(slash + 1) : symlink;
+            return name + ".bsl"; //$NON-NLS-1$
+        }
+
+        private static IQualifiedNameFilePathConverter filePathConverter()
+        {
+            BundleContext context = Global.ourContext();
+            ServiceReference<?> reference = context.getServiceReference(IComparisonManager.class);
+            Object manager = reference != null ? context.getService(reference) : null;
+            Object converter = Global.getField(manager, "qualifiedNameFilePathConverter"); //$NON-NLS-1$
+            return converter instanceof IQualifiedNameFilePathConverter c ? c : null;
+        }
+    }
+
     private static final class CompareConfigOpenModuleMergeHandler
     {
         private static final String TAG = "CompareConfig"; //$NON-NLS-1$

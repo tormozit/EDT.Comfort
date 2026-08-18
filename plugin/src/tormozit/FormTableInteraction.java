@@ -29,6 +29,7 @@ import org.eclipse.jface.viewers.TableViewer;
 import org.eclipse.jface.viewers.TableViewerColumn;
 import org.eclipse.jface.viewers.Viewer;
 import org.eclipse.jface.viewers.ViewerCell;
+import org.eclipse.jface.viewers.ViewerComparator;
 import org.eclipse.jface.viewers.ViewerFilter;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.dnd.Clipboard;
@@ -73,6 +74,7 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
 {
     private static final String COPY_MENU_KEY = "tormozit.formTableCopyMenu"; //$NON-NLS-1$
     private static final String COLUMN_HEADER_KEY = "tormozit.formTableColHeader"; //$NON-NLS-1$
+    private static final String HEADER_SORT_KEY = "tormozit.formTableHeaderSort"; //$NON-NLS-1$
     private static final String AUTO_HEADER_TOOLTIP_KEY = "tormozit.formTableColAutoHeaderTip"; //$NON-NLS-1$
     /** Колонка скрыта хозяином таблицы через {@link #setColumnHidden} (не пользователем drag'ом до нуля). */
     private static final String COLUMN_HIDDEN_KEY = "tormozit.formTableColHidden"; //$NON-NLS-1$
@@ -157,6 +159,9 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
     private int suppressTableToViewerSync;
     private TableColumn activeColumnWidget;
     private boolean columnReorderEnabled = true;
+    private boolean headerSortEnabled;
+    private TableColumn headerSortColumn;
+    private boolean headerSortAscending = true;
     private Color ownedRowBg;
     private Color ownedInactiveRowBg;
     private Color ownedActiveCellBg;
@@ -392,6 +397,102 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
             ownerDrawColumns = NO_OWNER_DRAW_COLUMNS;
         else
             ownerDrawColumns = columns.clone();
+    }
+
+    /**
+     * Клик по заголовку колонки сортирует строки по тексту этой колонки.
+     * Повторный клик меняет направление; в шапке — штатный индикатор SWT.
+     * Вызывать после {@link #install()} (нужен {@link TableViewer}).
+     */
+    void enableHeaderSort()
+    {
+        if (headerSortEnabled || multiSelectViewer == null || table == null || table.isDisposed())
+            return;
+        headerSortEnabled = true;
+        for (TableColumn column : table.getColumns())
+            installHeaderSortListener(column);
+    }
+
+    private void installHeaderSortListener(TableColumn column)
+    {
+        if (column == null || column.isDisposed() || column.getData(HEADER_SORT_KEY) != null)
+            return;
+        column.setData(HEADER_SORT_KEY, Boolean.TRUE);
+        column.addListener(SWT.Selection, e -> sortByHeader(column));
+    }
+
+    private void sortByHeader(TableColumn column)
+    {
+        if (!headerSortEnabled || multiSelectViewer == null || column == null || column.isDisposed())
+            return;
+        headerSortAscending = column == headerSortColumn ? !headerSortAscending : true;
+        headerSortColumn = column;
+        Object[] selected = multiSelectViewer.getStructuredSelection().toArray();
+        final TableColumn sortColumn = column;
+        final boolean ascending = headerSortAscending;
+        multiSelectViewer.setComparator(new ViewerComparator()
+        {
+            @Override
+            public int compare(Viewer viewer, Object e1, Object e2)
+            {
+                int cmp = compareHeaderSortKeys(headerSortKey(e1, sortColumn), headerSortKey(e2, sortColumn));
+                return ascending ? cmp : -cmp;
+            }
+        });
+        table.setSortColumn(column);
+        table.setSortDirection(ascending ? SWT.UP : SWT.DOWN);
+        if (selected.length > 0)
+            multiSelectViewer.setSelection(new StructuredSelection(selected), true);
+        resyncSelectionTheme();
+    }
+
+    private String headerSortKey(Object element, TableColumn column)
+    {
+        if (element == null || column == null || column.isDisposed())
+            return ""; //$NON-NLS-1$
+        int index = table.indexOf(column);
+        String text = textFromColumnLabelProvider(multiSelectViewer, null, index, element);
+        return text != null ? text : ""; //$NON-NLS-1$
+    }
+
+    private static int compareHeaderSortKeys(String a, String b)
+    {
+        if (a == null)
+            a = ""; //$NON-NLS-1$
+        if (b == null)
+            b = ""; //$NON-NLS-1$
+        Long na = parseWholeLong(a);
+        Long nb = parseWholeLong(b);
+        if (na != null && nb != null)
+            return Long.compare(na.longValue(), nb.longValue());
+        return String.CASE_INSENSITIVE_ORDER.compare(a, b);
+    }
+
+    private static Long parseWholeLong(String s)
+    {
+        if (s == null || s.isEmpty())
+            return null;
+        int i = 0;
+        if (s.charAt(0) == '-')
+        {
+            if (s.length() == 1)
+                return null;
+            i = 1;
+        }
+        for (; i < s.length(); i++)
+        {
+            char c = s.charAt(i);
+            if (c < '0' || c > '9')
+                return null;
+        }
+        try
+        {
+            return Long.valueOf(s);
+        }
+        catch (NumberFormatException e)
+        {
+            return null;
+        }
     }
 
     void setColumnReorderEnabled(boolean columnReorderEnabled)

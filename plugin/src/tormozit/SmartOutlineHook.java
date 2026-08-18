@@ -87,6 +87,7 @@ public class SmartOutlineHook implements IStartup {
     private static final String PENDING_CLEAR_SELECTION_KEY = "tormozit.outlinePendingClearSelection"; //$NON-NLS-1$
     private static final String OUTLINE_RECENT_ON_OPEN_KEY = "tormozit.outlineRecentOnOpen"; //$NON-NLS-1$
     private static final String TYPE_MARKED_CHECKBOX_KEY = "tormozit.typeMarkedCheckbox"; //$NON-NLS-1$
+    private static final String OBJECT_PICKER_HOOK_KEY = "tormozit.objectPickerDialogHook"; //$NON-NLS-1$
     /** Заголовок {@code SelectTypeDialog_title} / {@code TypeDescriptionDialogComponent_DialogTitle}. */
     private static final String SELECT_TYPE_DIALOG_TITLE =
             "Редактирование типа данных"; //$NON-NLS-1$
@@ -1768,14 +1769,16 @@ public class SmartOutlineHook implements IStartup {
         patchedShell.setData(TYPE_MARKED_CHECKBOX_KEY, onlyMarkedBtn);
 
         Object multiItems = resolveMultiItems(patchedShell);
-        updateOnlyMarkedButtonText(onlyMarkedBtn, multiItems, buttonParent);
+        updateOnlyMarkedButtonText(onlyMarkedBtn, multiItems, buttonParent, viewer);
         if (multiItems != null)
         {
             Global.addGenericListener(multiItems, "addListListener", //$NON-NLS-1$
                 "com._1c.g5.aef2.models.list.IListListener", //$NON-NLS-1$
                 () -> onlyMarkedBtn.getDisplay().asyncExec(
-                    () -> updateOnlyMarkedButtonText(onlyMarkedBtn, multiItems, buttonParent)));
+                    () -> updateOnlyMarkedButtonText(onlyMarkedBtn, multiItems, buttonParent, viewer)));
         }
+        else
+            installObjectPickerExtras(patchedShell, viewer, onlyMarkedBtn, buttonParent);
 
         boolean stored = ComfortSettings.isSelectTypeOnlyMarked();
         if (!stored)
@@ -1878,13 +1881,194 @@ public class SmartOutlineHook implements IStartup {
         return size instanceof Integer ? (Integer) size : 0;
     }
 
-    private static void updateOnlyMarkedButtonText(Button button, Object multiItems, Composite buttonParent)
+    private static void updateOnlyMarkedButtonText(Button button, Object multiItems, Composite buttonParent,
+            TreeViewer viewer)
     {
         if (button == null || button.isDisposed())
             return;
-        button.setText("Только помеченные (" + multiItemsSize(multiItems) + ")"); //$NON-NLS-1$ //$NON-NLS-2$
+        int count = multiItems != null ? multiItemsSize(multiItems) : countCheckedInTree(viewer);
+        button.setText("Только помеченные (" + count + ")"); //$NON-NLS-1$ //$NON-NLS-2$
         if (buttonParent != null && !buttonParent.isDisposed())
             buttonParent.layout(true, true);
+    }
+
+    /**
+     * Диалог «Выбор объектов» (AEF Lwt): число пометок в подписи флажка и двойной
+     * клик при пустом наборе пометок — пометить текущую строку и закрыть по OK.
+     */
+    private static void installObjectPickerExtras(Shell shell, TreeViewer viewer, Button onlyMarkedBtn,
+            Composite buttonParent)
+    {
+        Tree tree = viewer != null ? viewer.getTree() : null;
+        if (shell == null || shell.isDisposed() || tree == null || tree.isDisposed())
+            return;
+        if (Boolean.TRUE.equals(tree.getData(OBJECT_PICKER_HOOK_KEY)))
+            return;
+        tree.setData(OBJECT_PICKER_HOOK_KEY, Boolean.TRUE);
+
+        Runnable refreshCount = () ->
+        {
+            if (onlyMarkedBtn == null || onlyMarkedBtn.isDisposed())
+                return;
+            updateOnlyMarkedButtonText(onlyMarkedBtn, null, buttonParent, viewer);
+        };
+        Listener recount = event ->
+        {
+            Display display = tree.getDisplay();
+            if (display == null || display.isDisposed())
+                return;
+            display.asyncExec(refreshCount);
+        };
+        tree.addListener(SWT.MouseUp, recount);
+        tree.addListener(SWT.KeyUp, recount);
+        refreshCount.run();
+
+        tree.addListener(SWT.MouseDoubleClick, event ->
+        {
+            if (countCheckedInTree(viewer) > 0)
+                return;
+            markCurrentRowAndOk(shell, viewer);
+        });
+    }
+
+    private static int countCheckedInTree(TreeViewer viewer)
+    {
+        if (viewer == null)
+            return 0;
+        Tree tree = viewer.getTree();
+        if (tree == null || tree.isDisposed())
+            return 0;
+        return countCheckedItems(tree.getItems());
+    }
+
+    private static int countCheckedItems(TreeItem[] items)
+    {
+        if (items == null)
+            return 0;
+        int count = 0;
+        for (TreeItem item : items)
+        {
+            if (item == null || item.isDisposed())
+                continue;
+            if (SmartOutlineFilter.isElementChecked(item.getData()))
+                count++;
+            count += countCheckedItems(item.getItems());
+        }
+        return count;
+    }
+
+    private static void markCurrentRowAndOk(Shell shell, TreeViewer viewer)
+    {
+        if (shell == null || shell.isDisposed() || viewer == null)
+            return;
+        Tree tree = viewer.getTree();
+        if (tree == null || tree.isDisposed() || tree.getSelectionCount() == 0)
+            return;
+        Object element = tree.getSelection()[0].getData();
+        if (element == null || SmartOutlineFilter.isElementChecked(element))
+            return;
+        if (!isCheckablePickerElement(element))
+            return;
+        Object dtTreeView = findDtTreeView(tree);
+        if (dtTreeView == null || !invokeIfArgMatches(dtTreeView, "handleTreeItemSelection", element)) //$NON-NLS-1$
+            return;
+        Display display = tree.getDisplay();
+        if (display == null || display.isDisposed())
+            return;
+        display.asyncExec(() -> pressDialogOk(shell));
+    }
+
+    private static boolean isCheckablePickerElement(Object element)
+    {
+        Object editable = Global.invoke(element, "isEditable"); //$NON-NLS-1$
+        if (Boolean.FALSE.equals(editable))
+            return false;
+        Object state = Global.invoke(element, "getCheckState"); //$NON-NLS-1$
+        if (state == null)
+            return false;
+        String name = state instanceof Enum ? ((Enum<?>) state).name() : String.valueOf(state);
+        return !"NO_CHECK".equals(name); //$NON-NLS-1$
+    }
+
+    private static Object findDtTreeView(Tree tree)
+    {
+        if (tree == null || tree.isDisposed())
+            return null;
+        int[] types = { SWT.MouseDown, SWT.MouseDoubleClick, SWT.KeyDown };
+        for (int type : types)
+        {
+            for (Listener listener : tree.getListeners(type))
+            {
+                Object inner = Global.unwrapTypedListener(listener);
+                Object outer = inner != null ? Global.getField(inner, "this$0") : null; //$NON-NLS-1$
+                if (outer == null)
+                    continue;
+                String name = outer.getClass().getName();
+                if (name.contains("DtTreeView") && !name.contains("$")) //$NON-NLS-1$ //$NON-NLS-2$
+                    return outer;
+            }
+        }
+        return null;
+    }
+
+    private static boolean invokeIfArgMatches(Object target, String methodName, Object arg)
+    {
+        if (target == null || methodName == null || arg == null)
+            return false;
+        for (Class<?> type = target.getClass(); type != null; type = type.getSuperclass())
+        {
+            for (java.lang.reflect.Method method : type.getDeclaredMethods())
+            {
+                if (!methodName.equals(method.getName()) || method.getParameterCount() != 1)
+                    continue;
+                if (!method.getParameterTypes()[0].isInstance(arg))
+                    continue;
+                try
+                {
+                    method.setAccessible(true);
+                    method.invoke(target, arg);
+                    return true;
+                }
+                catch (ReflectiveOperationException e)
+                {
+                    return false;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static void pressDialogOk(Shell shell)
+    {
+        if (shell == null || shell.isDisposed())
+            return;
+        Button def = shell.getDefaultButton();
+        if (def != null && !def.isDisposed() && def.isEnabled())
+        {
+            def.notifyListeners(SWT.Selection, new Event());
+            return;
+        }
+        Button ok = findButtonRecursive(shell, "OK"); //$NON-NLS-1$
+        if (ok != null && !ok.isDisposed() && ok.isEnabled())
+            ok.notifyListeners(SWT.Selection, new Event());
+    }
+
+    private static Button findButtonRecursive(Composite root, String text)
+    {
+        if (root == null || root.isDisposed() || text == null)
+            return null;
+        for (Control child : root.getChildren())
+        {
+            if (child instanceof Button button && text.equals(button.getText()))
+                return button;
+            if (child instanceof Composite composite)
+            {
+                Button nested = findButtonRecursive(composite, text);
+                if (nested != null)
+                    return nested;
+            }
+        }
+        return null;
     }
 
     /** Текст выбранного типа для {@link GetRef} и Ctrl+C в диалоге выбора типа. */

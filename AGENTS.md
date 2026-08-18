@@ -163,7 +163,9 @@ powershell -NoProfile -File "C:\VC\EDT.Comfort\.cursor\scripts\repair-double-eol
 Не искать в `Program Files\1C\…` без явной просьбы. Target platform:
 
 - Workspace: `C:\VC\EDT-plugin-WS`
-- JAR: `C:\VC\EDT-plugin-WS\.metadata\.plugins\org.eclipse.pde.core\.bundle_pool\plugins\`
+- JAR: `C:\VC\EDT-plugin-WS\.metadata\.plugins\org.eclipse.pde.core\.bundle_pool\plugins\` (бандлы `21.0.0`)
+
+EDT 2026.1 (бандлы `23.0.1`, API местами несовместим): JAR в `C:\Users\Сергей\.p2\pool\plugins\`, `<bundle-id>` кэша с суффиксом версии — `platform-services-core-23`.
 
 ### Распаковка и разбор
 

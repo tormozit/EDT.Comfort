@@ -24,6 +24,7 @@ import org.eclipse.jface.text.IInformationControlExtension3;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.graphics.Rectangle;
 import org.eclipse.swt.widgets.Control;
+import org.eclipse.swt.widgets.ScrollBar;
 import org.eclipse.swt.widgets.TreeItem;
 import com._1c.g5.v8.dt.bsl.model.Method;
 import com._1c.g5.v8.dt.bsl.ui.hover.BslDispatchingEObjectTextHover;
@@ -688,16 +689,33 @@ public final class BslSideHintOutlineInstall
         }
 
         /**
-         * Якорь ANCHOR_RIGHT: правый край видимой области дерева, на строку ниже выбранного элемента
-         * (не по полной ширине текста — иначе подсказка уезжает за окно; сдвиг вниз — без пересечения с тултипом).
+         * Якорь ANCHOR_RIGHT: правый край дерева включая полосы прокрутки, на строку ниже выбранного
+         * элемента (не по полной ширине текста — иначе подсказка уезжает за окно; сдвиг вниз — без
+         * пересечения с тултипом). {@code getClientArea()} не включает скроллбары: без них подсказка
+         * наезжает на вертикальную полосу (и на угол с горизонтальной).
          */
         private static Rectangle outlineTreeAnchorArea(Tree tree, TreeItem item)
         {
 
             Rectangle itemBounds = item.getBounds();
-            int clientW = tree.getClientArea().width;
+            Rectangle client = tree.getClientArea();
             int lineH = tree.getItemHeight();
-            return new Rectangle(0, itemBounds.y + lineH, clientW, itemBounds.height);
+            int width = client.x + client.width + visibleVerticalBarWidth(tree);
+            int y = itemBounds.y + lineH;
+            int clientBottom = client.y + client.height;
+            if (y >= clientBottom)
+                y = itemBounds.y;
+            return new Rectangle(0, y, width, itemBounds.height);
+        }
+
+        /** Ширина видимой вертикальной полосы прокрутки; 0 если полосы нет. */
+        private static int visibleVerticalBarWidth(Tree tree)
+        {
+
+            ScrollBar bar = tree.getVerticalBar();
+            if (bar == null || bar.isDisposed() || !bar.getVisible())
+                return 0;
+            return Math.max(0, bar.getSize().x);
         }
 
         private boolean hasReuseableControl()

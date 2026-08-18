@@ -1,10 +1,13 @@
 package tormozit;
 
+import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -13,12 +16,11 @@ import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.IStatus;
 import org.eclipse.core.runtime.Status;
 import org.eclipse.core.runtime.jobs.Job;
-import org.eclipse.emf.common.notify.Adapter;
-import org.eclipse.emf.common.notify.Notification;
 import org.eclipse.emf.ecore.EObject;
-import org.eclipse.emf.ecore.util.EContentAdapter;
 import org.eclipse.emf.ecore.util.EcoreUtil;
 import org.eclipse.jface.dialogs.PageChangedEvent;
+import org.eclipse.jface.viewers.ITreeContentProvider;
+import org.eclipse.jface.viewers.StructuredSelection;
 import org.eclipse.jface.viewers.StyledCellLabelProvider;
 import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.jface.viewers.TreeViewerColumn;
@@ -30,6 +32,7 @@ import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.ScrollBar;
 import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.TreeColumn;
+import org.eclipse.swt.widgets.TreeItem;
 import org.eclipse.ui.IEditorReference;
 import org.eclipse.ui.IPartListener2;
 import org.eclipse.ui.IStartup;
@@ -53,7 +56,9 @@ import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 
 /**
  * Колонка с числом функциональных опций у строк дерева «Состав объекта»
- * на вкладке «Функц. опции». Считается в фоне; ноль тоже показывается.
+ * на вкладке «Функц. опции». Считается в фоне; у папок числа нет, у элементов
+ * ноль показывается. Сумма — только в заголовке вкладки, не по узлам дерева.
+ * Пересчёт — при добавлении и удалении опций в правом списке этой вкладки.
  */
 public final class MdEditorFunctionalOptionsCountHook implements IStartup
 {
@@ -64,6 +69,12 @@ public final class MdEditorFunctionalOptionsCountHook implements IStartup
     private static final String FO_CONTENT_COMPONENT_CLASS =
         "com._1c.g5.v8.dt.internal.md.ui.editors.pages.functionaloptions.DtGranularEditorFunctionalOptionsMdObjectContentComponent"; //$NON-NLS-1$
 
+    private static final String FO_LIST_COMPONENT_CLASS =
+        "com._1c.g5.v8.dt.internal.md.ui.editors.pages.functionaloptions.DtGranularEditorFunctionalOptionsPageComponent"; //$NON-NLS-1$
+
+    private static final String BM_SERVICE_EVENT_CLASS =
+        "com._1c.g5.v8.dt.aef2.bm.events.BmServiceEvent"; //$NON-NLS-1$
+
     private static final String DT_TREE_VIEWER_KEY =
         "com._1c.g5.v8.dt.ui.aef.swt.views.DtTreeView.treeViewer"; //$NON-NLS-1$
 
@@ -73,7 +84,15 @@ public final class MdEditorFunctionalOptionsCountHook implements IStartup
 
     private static final String MAPPER_KEY = "tormozit.foContentCountMapper"; //$NON-NLS-1$
 
-    private static final String ADAPTER_KEY = "tormozit.foContentCountAdapter"; //$NON-NLS-1$
+    private static final String LIST_LISTENER_KEY = "tormozit.foContentCountListListener"; //$NON-NLS-1$
+
+    private static final String FO_LIST_WATCH_KEY = "tormozit.foContentCountListWatched"; //$NON-NLS-1$
+
+    private static final String SUM_KEY = "tormozit.foContentCountSum"; //$NON-NLS-1$
+
+    private static final String EDITOR_KEY = "tormozit.foContentCountEditor"; //$NON-NLS-1$
+
+    private static final String VIEWER_KEY = "tormozit.foContentCountViewer"; //$NON-NLS-1$
 
     private static final String LAYOUT_PENDING_KEY = "tormozit.foContentCountLayoutPending"; //$NON-NLS-1$
 
@@ -182,9 +201,10 @@ public final class MdEditorFunctionalOptionsCountHook implements IStartup
             return true;
         Object root = Global.getField(page, "pageComponent"); //$NON-NLS-1$
         Object component = findComponentByClass(root, FO_CONTENT_COMPONENT_CLASS, 0);
+        Object listComponent = findComponentByClass(root, FO_LIST_COMPONENT_CLASS, 0);
         TreeViewer viewer = component != null ? findContentTreeViewer(component, page) : null;
         Tree tree = viewer != null ? viewer.getTree() : null;
-        if (component == null || viewer == null || tree == null || tree.isDisposed())
+        if (component == null || listComponent == null || viewer == null || tree == null || tree.isDisposed())
             return false;
         boolean hooked = Boolean.TRUE.equals(tree.getData(HOOK_MARKER));
         Object mapper = Global.invoke(component, "getMapper"); //$NON-NLS-1$
@@ -207,7 +227,15 @@ public final class MdEditorFunctionalOptionsCountHook implements IStartup
             tree.setData(HOOK_MARKER, Boolean.TRUE);
         }
         Configuration configuration = configurationOf(editor);
-        attachModelListener(tree, configuration, index, viewer);
+        tree.setData(EDITOR_KEY, editor);
+        tree.setData(VIEWER_KEY, viewer);
+        attachFoListListener(tree, listComponent, configuration, index, viewer);
+        TreeViewer foListViewer = findOtherTreeViewer(page, viewer);
+        watchFoListChanges(foListViewer, viewer, index, configuration);
+        if (tree.getData(LIST_LISTENER_KEY) == null
+            && (foListViewer == null || foListViewer.getTree().isDisposed()
+                || foListViewer.getTree().getData(FO_LIST_WATCH_KEY) == null))
+            return false;
         scheduleRebuild(index, configuration, viewer);
         return true;
     }
@@ -231,6 +259,7 @@ public final class MdEditorFunctionalOptionsCountHook implements IStartup
         swtColumn.setResizable(false);
         swtColumn.setMoveable(false);
         column.setLabelProvider(new CountColumnProvider(tree));
+        tree.setData(VIEWER_KEY, viewer);
         tree.addListener(SWT.Resize, event -> scheduleColumnLayout(tree));
         tree.addListener(SWT.Expand, event -> scheduleColumnLayout(tree));
         tree.addListener(SWT.Collapse, event -> scheduleColumnLayout(tree));
@@ -288,7 +317,105 @@ public final class MdEditorFunctionalOptionsCountHook implements IStartup
     {
         if (tree == null || !(tree.getData(INDEX_KEY) instanceof CountIndex index))
             return null;
-        return index.countOf(modelOf(tree.getData(MAPPER_KEY), element));
+        if (isGroupingFolder(tree, element))
+            return null;
+        Integer count = index.countOf(modelOf(tree.getData(MAPPER_KEY), element));
+        return count;
+    }
+
+    private static boolean isGroupingFolder(Tree tree, Object element)
+    {
+        if (element == null)
+            return false;
+        Object current = element;
+        for (int i = 0; i < 8 && current != null; i++)
+        {
+            if (classLooksLikeNavigatorFolder(current))
+                return true;
+            Object next = Global.invoke(current, "getElement"); //$NON-NLS-1$
+            if (next == null || next == current)
+                next = Global.invoke(current, "getModel"); //$NON-NLS-1$
+            if (next == null || next == current)
+                break;
+            current = next;
+        }
+        TreeViewer viewer = tree != null && tree.getData(VIEWER_KEY) instanceof TreeViewer stored
+            ? stored
+            : tree != null && tree.getData(DT_TREE_VIEWER_KEY) instanceof TreeViewer nativeViewer
+                ? nativeViewer
+                : null;
+        if (viewer == null || !(viewer.getContentProvider() instanceof ITreeContentProvider content))
+            return false;
+        Object rootElement = firstRoot(content, viewer.getInput());
+        if (rootElement != null && (element == rootElement || element.equals(rootElement)))
+            return false;
+        Object mapper = tree.getData(MAPPER_KEY);
+        EObject self = modelOf(mapper, element);
+        EObject rootModel = modelOf(mapper, rootElement);
+        if (self instanceof MdObject && sameMd(self, rootModel))
+            return true;
+        Object parent;
+        try
+        {
+            parent = content.getParent(element);
+        }
+        catch (RuntimeException e)
+        {
+            return false;
+        }
+        if (parent == null)
+            return false;
+        EObject owner = modelOf(mapper, parent);
+        return self instanceof MdObject && sameMd(self, owner);
+    }
+
+    private static Object firstRoot(ITreeContentProvider content, Object input)
+    {
+        try
+        {
+            Object[] roots = content.getElements(input);
+            return roots != null && roots.length > 0 ? roots[0] : null;
+        }
+        catch (RuntimeException e)
+        {
+            return null;
+        }
+    }
+
+    private static boolean sameMd(EObject first, EObject second)
+    {
+        if (first == null || second == null)
+            return false;
+        if (first == second)
+            return true;
+        Long firstId = bmId(first);
+        Long secondId = bmId(second);
+        return firstId != null && firstId.equals(secondId);
+    }
+
+    private static boolean classLooksLikeNavigatorFolder(Object object)
+    {
+        String name = object.getClass().getName();
+        return name.contains("$Folder") //$NON-NLS-1$
+            || name.contains("CollectionNavigatorAdapter") //$NON-NLS-1$
+            || name.contains("VirtualNavigatorAdapter"); //$NON-NLS-1$
+    }
+
+    /**
+     * Сумма чисел колонки ФО в дереве «Состав объекта». {@code null}, пока индекс
+     * ещё не посчитан.
+     */
+    static Integer columnSum(IFormPage page)
+    {
+        if (page == null)
+            return null;
+        Object root = Global.getField(page, "pageComponent"); //$NON-NLS-1$
+        Object component = findComponentByClass(root, FO_CONTENT_COMPONENT_CLASS, 0);
+        TreeViewer viewer = component != null ? findContentTreeViewer(component, page) : null;
+        Tree tree = viewer != null ? viewer.getTree() : null;
+        if (tree == null || tree.isDisposed())
+            return null;
+        return tree.getData(SUM_KEY) instanceof Integer sum ? sum : null;
     }
 
     private static EObject modelOf(Object mapper, Object element)
@@ -310,43 +437,284 @@ public final class MdEditorFunctionalOptionsCountHook implements IStartup
         }
     }
 
-    private static void attachModelListener(Tree tree, Configuration configuration, CountIndex index,
+    private static Integer sumDisplayedColumn(TreeViewer viewer)
+    {
+        if (viewer == null)
+            return null;
+        Tree tree = viewer.getTree();
+        if (tree == null || tree.isDisposed())
+            return null;
+        if (!(tree.getData(INDEX_KEY) instanceof CountIndex index) || !index.ready)
+            return null;
+        if (!(viewer.getContentProvider() instanceof ITreeContentProvider content))
+            return null;
+        Object[] roots;
+        try
+        {
+            roots = content.getElements(viewer.getInput());
+        }
+        catch (RuntimeException e)
+        {
+            return null;
+        }
+        int[] sum = { 0 };
+        walkDisplayedColumn(content, roots, tree, sum, 0);
+        return Integer.valueOf(sum[0]);
+    }
+
+    private static void walkDisplayedColumn(ITreeContentProvider content, Object[] elements, Tree tree,
+        int[] sum, int depth)
+    {
+        if (elements == null || depth > 24)
+            return;
+        for (Object element : elements)
+        {
+            Integer count = countForElement(tree, element);
+            if (count != null)
+                sum[0] += count.intValue();
+            Object[] children;
+            try
+            {
+                children = content.getChildren(element);
+            }
+            catch (RuntimeException e)
+            {
+                continue;
+            }
+            walkDisplayedColumn(content, children, tree, sum, depth + 1);
+        }
+    }
+
+    /**
+     * Правый список вкладки сам подписан на {@code BmServiceEvent} по
+     * {@code FUNCTIONAL_OPTION__CONTENT} — то же событие, что после добавления
+     * и удаления опций. Слушаем его, а не EMF-адаптер конфигурации: состав опций
+     * меняется на самих ФО, не в списке конфигурации.
+     */
+    private static void attachFoListListener(Tree tree, Object listComponent, Configuration configuration,
+        CountIndex index, TreeViewer viewer)
+    {
+        if (tree == null || tree.isDisposed() || listComponent == null || configuration == null)
+            return;
+        if (tree.getData(LIST_LISTENER_KEY) != null)
+            return;
+        Object listener = foListEventListener(listComponent, tree, configuration, index, viewer);
+        if (listener == null)
+            return;
+        if (!Global.invokeVoid(listComponent, "addListener", listener)) //$NON-NLS-1$
+            return;
+        tree.setData(LIST_LISTENER_KEY, listener);
+        tree.addDisposeListener(ev -> Global.invoke(listComponent, "removeListener", listener)); //$NON-NLS-1$
+    }
+
+    /**
+     * Правый список после добавления/удаления опций перерисовывается, а выбор
+     * слева тот же. После смены строки слева список тоже меняется — это отбор,
+     * колонку не трогаем.
+     */
+    private static void watchFoListChanges(TreeViewer foListViewer, TreeViewer contentViewer,
+        CountIndex index, Configuration configuration)
+    {
+        Tree foListTree = foListViewer != null ? foListViewer.getTree() : null;
+        if (foListTree == null || foListTree.isDisposed() || contentViewer == null)
+            return;
+        if (Boolean.TRUE.equals(foListTree.getData(FO_LIST_WATCH_KEY)))
+            return;
+        foListTree.setData(FO_LIST_WATCH_KEY, Boolean.TRUE);
+        index.lastLeftKey = leftSelectionKey(contentViewer);
+        index.lastFoListSig = foListSignature(foListTree);
+        foListTree.addListener(SWT.Paint, event ->
+        {
+            if (Boolean.TRUE.equals(index.watchPending))
+                return;
+            index.watchPending = Boolean.TRUE;
+            foListTree.getDisplay().timerExec(200, () ->
+            {
+                index.watchPending = Boolean.FALSE;
+                if (foListTree.isDisposed() || contentViewer.getTree().isDisposed())
+                    return;
+                Object leftKey = leftSelectionKey(contentViewer);
+                String previousSig = index.lastFoListSig;
+                String sig = foListSignature(foListTree);
+                boolean sameLeft = Objects.equals(leftKey, index.lastLeftKey);
+                boolean listChanged = !Objects.equals(sig, previousSig);
+                index.lastLeftKey = leftKey;
+                index.lastFoListSig = sig;
+                if (!sameLeft || !listChanged)
+                    return;
+                Global.tempLog("fo-count", "list-watch rebuild left=" + leftKey + " sig=" + sig); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                selectFirstAdded(foListViewer, previousSig);
+                requestRebuild(contentViewer.getTree(), configuration, index, contentViewer);
+            });
+        });
+    }
+
+    private static void selectFirstAdded(TreeViewer foListViewer, String previousSig)
+    {
+        if (foListViewer == null)
+            return;
+        Tree tree = foListViewer.getTree();
+        if (tree == null || tree.isDisposed())
+            return;
+        Set<String> oldLabels = new HashSet<>();
+        if (previousSig != null && !previousSig.isEmpty())
+        {
+            for (String line : previousSig.split("\n", -1)) //$NON-NLS-1$
+                oldLabels.add(line);
+        }
+        Object first = firstNewElement(tree.getItems(), oldLabels);
+        if (first == null)
+            return;
+        foListViewer.setSelection(new StructuredSelection(first), true);
+        if (!tree.isDisposed())
+            tree.setFocus();
+    }
+
+    private static Object firstNewElement(TreeItem[] items, Set<String> oldLabels)
+    {
+        if (items == null)
+            return null;
+        for (TreeItem item : items)
+        {
+            if (item == null || item.isDisposed())
+                continue;
+            String label = item.getText(0);
+            if (!oldLabels.contains(label == null ? "" : label)) //$NON-NLS-1$
+                return item.getData();
+            Object nested = firstNewElement(item.getItems(), oldLabels);
+            if (nested != null)
+                return nested;
+        }
+        return null;
+    }
+
+    private static Object leftSelectionKey(TreeViewer viewer)
+    {
+        if (viewer == null)
+            return null;
+        var selection = viewer.getStructuredSelection();
+        if (selection == null || selection.isEmpty())
+            return null;
+        EObject model = modelOf(viewer.getTree().getData(MAPPER_KEY), selection.getFirstElement());
+        Long id = bmId(model);
+        return id != null ? id : uriKey(model);
+    }
+
+    private static String foListSignature(Tree tree)
+    {
+        if (tree == null || tree.isDisposed())
+            return ""; //$NON-NLS-1$
+        StringBuilder text = new StringBuilder();
+        appendTreeSignature(tree.getItems(), text);
+        return text.toString();
+    }
+
+    private static void appendTreeSignature(TreeItem[] items, StringBuilder text)
+    {
+        if (items == null)
+            return;
+        for (TreeItem item : items)
+        {
+            if (item == null || item.isDisposed())
+                continue;
+            String label = item.getText(0);
+            text.append(label == null ? "" : label).append('\n'); //$NON-NLS-1$
+            appendTreeSignature(item.getItems(), text);
+        }
+    }
+
+    private static Object foListEventListener(Object listComponent, Tree tree, Configuration configuration,
+        CountIndex index, TreeViewer viewer)
+    {
+        Class<?> listenerClass = eventListenerClass(listComponent);
+        if (listenerClass == null)
+            return null;
+        return Proxy.newProxyInstance(listenerClass.getClassLoader(), new Class<?>[] { listenerClass },
+            (proxy, method, args) ->
+            {
+                String name = method.getName();
+                if ("eventReceived".equals(name) && args != null && args.length == 1) //$NON-NLS-1$
+                {
+                    Object event = args[0];
+                    Global.tempLog("fo-count", "aef " //$NON-NLS-1$ //$NON-NLS-2$
+                        + (event == null ? "null" : event.getClass().getName())); //$NON-NLS-1$
+                    if (isFoContentChangeEvent(event)
+                        || isFoListTreeRefresh(event, index, viewer))
+                        requestRebuild(tree, configuration, index, viewer);
+                }
+                if ("hashCode".equals(name) && (args == null || args.length == 0)) //$NON-NLS-1$
+                    return Integer.valueOf(System.identityHashCode(proxy));
+                if ("equals".equals(name) && args != null && args.length == 1) //$NON-NLS-1$
+                    return Boolean.valueOf(proxy == args[0]);
+                if ("toString".equals(name) && (args == null || args.length == 0)) //$NON-NLS-1$
+                    return LIST_LISTENER_KEY;
+                Class<?> returnType = method.getReturnType();
+                if (returnType == boolean.class)
+                    return Boolean.FALSE;
+                if (returnType == int.class || returnType == long.class || returnType == short.class
+                    || returnType == byte.class)
+                    return Integer.valueOf(0);
+                return null;
+            });
+    }
+
+    private static Class<?> eventListenerClass(Object listComponent)
+    {
+        if (listComponent == null)
+            return null;
+        for (Class<?> current = listComponent.getClass(); current != null; current = current.getSuperclass())
+        {
+            for (java.lang.reflect.Method method : current.getDeclaredMethods())
+            {
+                if ("addListener".equals(method.getName()) && method.getParameterCount() == 1) //$NON-NLS-1$
+                    return method.getParameterTypes()[0];
+            }
+        }
+        if (Global.isLogEnabled())
+            Global.log(TAG, "addListener не найден"); //$NON-NLS-1$
+        return null;
+    }
+
+    private static boolean isFoListTreeRefresh(Object event, CountIndex index, TreeViewer contentViewer)
+    {
+        if (event == null)
+            return false;
+        String name = event.getClass().getName();
+        if (name.contains("FunctionalOptionsSetFilterEvent")) //$NON-NLS-1$
+        {
+            index.lastLeftKey = leftSelectionKey(contentViewer);
+            return false;
+        }
+        if (!name.endsWith(".TreeRefreshEvent")) //$NON-NLS-1$
+            return false;
+        Object leftKey = leftSelectionKey(contentViewer);
+        boolean sameLeft = Objects.equals(leftKey, index.lastLeftKey);
+        index.lastLeftKey = leftKey;
+        return sameLeft && leftKey != null;
+    }
+
+    private static boolean isFoContentChangeEvent(Object event)
+    {
+        if (event == null || !BM_SERVICE_EVENT_CLASS.equals(event.getClass().getName()))
+            return false;
+        Object notifications = Global.invoke(event, "getNotifications"); //$NON-NLS-1$
+        if (!(notifications instanceof Map<?, ?> map))
+            return false;
+        Object list = map.get(MdClassPackage.Literals.FUNCTIONAL_OPTION__CONTENT);
+        return list instanceof List<?> items && !items.isEmpty();
+    }
+
+    private static void requestRebuild(Tree tree, Configuration configuration, CountIndex index,
         TreeViewer viewer)
     {
-        if (tree == null || tree.isDisposed() || configuration == null)
+        int gen = index.debounceGen.incrementAndGet();
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
             return;
-        Object existing = tree.getData(ADAPTER_KEY);
-        if (existing instanceof Adapter adapter && configuration.eAdapters().contains(adapter))
-            return;
-        Adapter adapter = new EContentAdapter()
+        display.timerExec(200, () ->
         {
-            @Override
-            public void notifyChanged(Notification notification)
-            {
-                super.notifyChanged(notification);
-                if (notification == null || notification.isTouch())
-                    return;
-                Object feature = notification.getFeature();
-                if (feature != MdClassPackage.Literals.FUNCTIONAL_OPTION__CONTENT
-                    && feature != MdClassPackage.Literals.CONFIGURATION__FUNCTIONAL_OPTIONS)
-                    return;
-                int gen = index.debounceGen.incrementAndGet();
-                Display display = Display.getDefault();
-                if (display == null || display.isDisposed())
-                    return;
-                display.timerExec(200, () ->
-                {
-                    if (!tree.isDisposed() && gen == index.debounceGen.get())
-                        scheduleRebuild(index, configuration, viewer);
-                });
-            }
-        };
-        configuration.eAdapters().add(adapter);
-        tree.setData(ADAPTER_KEY, adapter);
-        tree.addDisposeListener(ev ->
-        {
-            if (configuration.eAdapters().contains(adapter))
-                configuration.eAdapters().remove(adapter);
+            if (!tree.isDisposed() && gen == index.debounceGen.get())
+                scheduleRebuild(index, configuration, viewer);
         });
     }
 
@@ -374,8 +742,14 @@ public final class MdEditorFunctionalOptionsCountHook implements IStartup
                     if (toApply == null)
                         return;
                     index.apply(toApply);
+                    Tree tree = viewer.getTree();
+                    Integer sum = sumDisplayedColumn(viewer);
+                    if (sum != null)
+                        tree.setData(SUM_KEY, sum);
                     viewer.refresh();
-                    scheduleColumnLayout(viewer.getTree());
+                    scheduleColumnLayout(tree);
+                    if (tree.getData(EDITOR_KEY) instanceof DtGranularEditor<?> editor)
+                        MdEditorListTabCountHook.refreshFunctionalOptionsTitle(editor);
                 });
                 return Status.OK_STATUS;
             }
@@ -423,6 +797,21 @@ public final class MdEditorFunctionalOptionsCountHook implements IStartup
         if (fromNative != null)
             return fromNative;
         return findViewerViaPartControl(page, component);
+    }
+
+    private static TreeViewer findOtherTreeViewer(IFormPage page, TreeViewer contentViewer)
+    {
+        Control root = page != null ? page.getPartControl() : null;
+        if (!(root instanceof Composite composite) || composite.isDisposed())
+            return null;
+        List<TreeViewer> viewers = new ArrayList<>();
+        collectTreeViewers(composite, viewers, 0);
+        for (TreeViewer candidate : viewers)
+        {
+            if (candidate != contentViewer)
+                return candidate;
+        }
+        return null;
     }
 
     private static TreeViewer findViewerViaNativeControls(Object component)
@@ -573,8 +962,12 @@ public final class MdEditorFunctionalOptionsCountHook implements IStartup
             Object element = cell.getElement();
             Integer count = countForElement(tree, element);
             cell.setText(count == null ? "" : Integer.toString(count)); //$NON-NLS-1$
-            if (count != null && !tree.isDisposed())
+            if (tree.isDisposed())
+                return;
+            if (count != null && count.intValue() == 0)
                 cell.setForeground(tree.getDisplay().getSystemColor(SWT.COLOR_DARK_GRAY));
+            else
+                cell.setForeground(null);
         }
     }
 
@@ -645,6 +1038,12 @@ public final class MdEditorFunctionalOptionsCountHook implements IStartup
         private volatile Map<Long, Integer> byBmId = Map.of();
 
         private volatile Map<String, Integer> byUri = Map.of();
+
+        private volatile Object lastLeftKey;
+
+        private volatile String lastFoListSig;
+
+        private volatile Boolean watchPending;
 
         void apply(CountSnapshot snapshot)
         {

@@ -59,7 +59,7 @@ final class StructureToggleController
     private Sash sash;
     private GridData panelLayoutData;
     private boolean lineHighlightPrimed;
-    /** Только для разовой активации {@code CursorLinePainter} — см. {@link #setSourceViewers}. */
+    /** Разовая активация {@code CursorLinePainter} и постановка каретки — см. {@link #setSourceViewers}. */
     private SourceViewer leftSourceViewer;
     private SourceViewer rightSourceViewer;
 
@@ -87,10 +87,12 @@ final class StructureToggleController
     }
 
     /**
-     * {@link SourceViewer} лево/право — только для {@link #primeLineHighlightOnce}, не для
-     * навигации (там по-прежнему работаем с {@link StyledText} напрямую). Опционально: если
-     * вызывающий код их не передал (или они недоступны через рефлексию), приоритет — вызов
-     * {@code setFocus()} остаётся как запасной вариант.
+     * {@link SourceViewer} лево/право — для {@link #primeLineHighlightOnce} и для постановки
+     * каретки при выборе узла дерева ({@code setSelectedRange} вместо виджетного
+     * {@code setSelectionRange}: иначе {@code CursorLinePainter} не перерисовывает подсветку
+     * текущей строки, см. {@code activateFirstLine}). Опционально: если вызывающий код их не
+     * передал (или они недоступны через рефлексию), остаются виджетные вызовы и
+     * {@code setFocus()} как запасной вариант.
      */
     void setSourceViewers(SourceViewer leftSourceViewer, SourceViewer rightSourceViewer)
     {
@@ -325,9 +327,9 @@ final class StructureToggleController
         // оказалась на ОДНОМ уровне везде, а не у каждого поля по своей пропорции высоты.
         int topOffsetLines = computeSharedTopOffsetLines();
         if (node.hasLeft())
-            activateFirstLine(leftText, node.leftOffset, node.leftLength, topOffsetLines);
+            activateFirstLine(leftText, leftSourceViewer, node.leftOffset, node.leftLength, topOffsetLines);
         if (node.hasRight())
-            activateFirstLine(rightText, node.rightOffset, node.rightLength, topOffsetLines);
+            activateFirstLine(rightText, rightSourceViewer, node.rightOffset, node.rightLength, topOffsetLines);
         if (node.kind != BslModuleStructureDiff.Kind.SYNTAX_ERROR)
             activateMatchingSectionInResult(node.label, topOffsetLines);
     }
@@ -396,7 +398,7 @@ final class StructureToggleController
             return;
         BslModuleStructureParser.SectionNode section = findSection(outcome.root.children, label);
         if (section != null)
-            activateFirstLine(resultText, section.offset, section.length, topOffsetLines);
+            activateFirstLine(resultText, null, section.offset, section.length, topOffsetLines);
     }
 
     private static BslModuleStructureParser.SectionNode findSection(
@@ -423,7 +425,8 @@ final class StructureToggleController
      * Не найдено (раздел без такого заголовка, например «ОписаниеПеременных») — берём первую
      * строку диапазона как есть.
      */
-    private static void activateFirstLine(StyledText text, int offset, int length, int topOffsetLines)
+    private static void activateFirstLine(StyledText text, SourceViewer sourceViewer, int offset, int length,
+        int topOffsetLines)
     {
         if (text == null || text.isDisposed())
             return;
@@ -444,7 +447,19 @@ final class StructureToggleController
         }
 
         int lineStartOffset = text.getOffsetAtLine(line);
-        text.setSelectionRange(lineStartOffset, 0); // только каретка, без выделения текста
+        /*
+         * Каретку ставим через SourceViewer, а не только в виджет: подсветку текущей строки
+         * рисует CursorLinePainter уровня вьюера, и на изменение каретки в обход вьюера
+         * (setSelectionRange у StyledText) он не перерисовывается — строка в поле остаётся
+         * невыделенной, хотя каретка уже там. Особенно заметно у односторонних узлов
+         * (добавленный/удалённый метод): активируется единственное поле, и если подсветка в
+         * нём не обновилась, визуально не происходит ничего. Виджетный setSelectionRange
+         * оставляем запасным вариантом — вьюер есть не во всех окнах (см. setSourceViewers).
+         */
+        if (sourceViewer != null && sourceViewer.getTextWidget() == text)
+            sourceViewer.setSelectedRange(lineStartOffset, 0);
+        else
+            text.setSelectionRange(lineStartOffset, 0); // только каретка, без выделения текста
         text.setTopIndex(Math.max(0, line - topOffsetLines));
     }
 

@@ -439,10 +439,11 @@ public final class ErrorDialogLinksHook implements IStartup
             return null;
         i++;
 
-        String objectName = readSegment(normalized, i);
+        int nameEnd = scanSegmentEnd(normalized, i);
+        String objectName = segmentName(normalized, i, nameEnd);
         if (objectName == null)
             return null;
-        i += objectName.length();
+        i = nameEnd;
 
         StringBuilder path = new StringBuilder(folder).append('/').append(objectName);
         if (i < normalized.length() && normalized.charAt(i) == '/')
@@ -453,7 +454,9 @@ public final class ErrorDialogLinksHook implements IStartup
                 int afterFolder = i + 1 + nestedFolder.length();
                 if (afterFolder < normalized.length() && normalized.charAt(afterFolder) == '/')
                 {
-                    String nestedName = readSegment(normalized, afterFolder + 1);
+                    int nestedFrom = afterFolder + 1;
+                    String nestedName = segmentName(normalized, nestedFrom,
+                        scanSegmentEnd(normalized, nestedFrom));
                     if (nestedName != null)
                         path.append('/').append(nestedFolder).append('/').append(nestedName);
                 }
@@ -464,8 +467,13 @@ public final class ErrorDialogLinksHook implements IStartup
 
     private static String readSegment(String text, int from)
     {
+        return segmentName(text, from, scanSegmentEnd(text, from));
+    }
+
+    private static int scanSegmentEnd(String text, int from)
+    {
         if (from >= text.length())
-            return null;
+            return from;
         int end = from;
         while (end < text.length())
         {
@@ -476,11 +484,31 @@ public final class ErrorDialogLinksHook implements IStartup
                 break;
             end++;
         }
-        if (end == from)
+        return end;
+    }
+
+    /**
+     * Имя сегмента пути: у файла объекта выгрузки ({@code Имя.xml}) и EDT ({@code Имя.mdo})
+     * расширение срезается, прочие имена с точкой ({@code Module.bsl}) отбрасываются.
+     */
+    private static String segmentName(String text, int from, int end)
+    {
+        if (end <= from)
             return null;
-        String seg = trimTrailingPunct(text.substring(from, end));
+        String seg = stripObjectFileExt(trimTrailingPunct(text.substring(from, end)));
         if (seg.isEmpty() || "Ext".equals(seg) || seg.indexOf('.') >= 0) //$NON-NLS-1$
             return null;
+        return seg;
+    }
+
+    private static String stripObjectFileExt(String seg)
+    {
+        int dot = seg.lastIndexOf('.');
+        if (dot <= 0)
+            return seg;
+        String ext = seg.substring(dot);
+        if (".xml".equalsIgnoreCase(ext) || ".mdo".equalsIgnoreCase(ext)) //$NON-NLS-1$ //$NON-NLS-2$
+            return seg.substring(0, dot);
         return seg;
     }
 
