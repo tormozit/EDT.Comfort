@@ -8,6 +8,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.WeakHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.eclipse.core.commands.Command;
 import org.eclipse.core.commands.ExecutionEvent;
@@ -17,7 +18,13 @@ import org.eclipse.core.commands.NotHandledException;
 import org.eclipse.core.commands.ParameterizedCommand;
 import org.eclipse.core.expressions.EvaluationContext;
 import org.eclipse.core.expressions.IEvaluationContext;
+import org.eclipse.core.runtime.IProgressMonitor;
+import org.eclipse.core.runtime.IStatus;
 import org.eclipse.core.runtime.Platform;
+import org.eclipse.core.runtime.Status;
+import org.eclipse.core.runtime.jobs.IJobChangeEvent;
+import org.eclipse.core.runtime.jobs.Job;
+import org.eclipse.core.runtime.jobs.JobChangeAdapter;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.util.EcoreUtil;
 import org.eclipse.jface.viewers.StructuredSelection;
@@ -66,6 +73,7 @@ import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorPage;
 import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
+import com._1c.g5.v8.dt.metadata.mdclass.EventSubscription;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com.google.inject.Injector;
 
@@ -84,8 +92,10 @@ import com.google.inject.Injector;
  * остальных вкладок редактора: тип → имя объекта → «Подписки на события». Встроенный
  * {@code EventHandlersEditor} свою шапку («Все подписки на события») не показывает.
  *
- * <p>Тяжёлое наполнение (создание встроенного редактора и фильтра) выполняется лениво —
- * при первой активации вкладки, а не при открытии редактора.
+ * <p>Тяжёлое наполнение выполняется лениво при первой активации вкладки: прогрев типов
+ * платформы и списка подписок — фоновым заданием, создание SWT-виджетов — в
+ * {@code asyncExec}. Пока список не готов, на странице сообщение о загрузке; клик по
+ * вкладке UI-поток не блокирует.
  *
  * <p>Бандл {@code com._1c.g5.v8.dt.eventhandlers.ui} не экспортирует пакеты, поэтому
  * его классы ({@code EventHandlersEditor}, {@code EventHandlersEditorInput},
@@ -97,6 +107,18 @@ public final class MdEventHandlersPageHook implements IStartup
     private static final String TAG = "MdEventHandlersPageHook"; //$NON-NLS-1$
 
     private static final String BUNDLE_ID = "com._1c.g5.v8.dt.eventhandlers.ui"; //$NON-NLS-1$
+
+    private static final String MODEL_BUNDLE_ID = "com._1c.g5.v8.dt.eventhandlers"; //$NON-NLS-1$
+
+    private static final String UTIL_CLASS = MODEL_BUNDLE_ID + ".services.EventHandlersUtil"; //$NON-NLS-1$
+
+    private static final String LOADING_TEXT = "Загрузка подписок на события…"; //$NON-NLS-1$
+
+    private static final AtomicBoolean WARMUP_STARTED = new AtomicBoolean();
+
+    private static volatile boolean warmupDone;
+
+    private static volatile Job warmupJob;
 
     private static final String EDITOR_CLASS = BUNDLE_ID + ".editor.EventHandlersEditor"; //$NON-NLS-1$
 
@@ -145,6 +167,64 @@ public final class MdEventHandlersPageHook implements IStartup
 
     /** Лимит повторов ожидания инициализации (30 с на редактор). */
     private static final int HOOK_MAX_ATTEMPTS = 150;
+
+    /**
+     * Прогрев {@code EventHandlersUtil.getConfigurationEvents} и списка подписок
+     * вне UI-потока. Запускается только при первой активации вкладки «Подписки»,
+     * не при открытии редактора. Первый вызов тянет типы платформы
+     * ({@code PlatformTypesLoader.requestData}); повторные заходы на вкладку это уже не ждут.
+     */
+    private static void ensureWarmup(Configuration configuration)
+    {
+        if (!WARMUP_STARTED.compareAndSet(false, true))
+            return;
+        Job job = new Job("Комфорт: прогрев подписок на события") //$NON-NLS-1$
+        {
+            @Override
+            protected IStatus run(IProgressMonitor monitor)
+            {
+                try
+                {
+                    if (configuration != null && !monitor.isCanceled())
+                        warmupConfigurationEvents(configuration);
+                }
+                finally
+                {
+                    warmupDone = true;
+                }
+                return Status.OK_STATUS;
+            }
+        };
+        job.setSystem(true);
+        job.setPriority(Job.LONG);
+        warmupJob = job;
+        job.schedule();
+    }
+
+    private static void warmupConfigurationEvents(Configuration configuration)
+    {
+        try
+        {
+            Bundle modelBundle = Platform.getBundle(MODEL_BUNDLE_ID);
+            if (modelBundle != null)
+            {
+                Class<?> util = modelBundle.loadClass(UTIL_CLASS);
+                Global.invoke(util, "getConfigurationEvents", configuration); //$NON-NLS-1$
+            }
+            if (configuration.getEventSubscriptions() != null)
+            {
+                for (EventSubscription subscription : configuration.getEventSubscriptions())
+                {
+                    if (subscription != null)
+                        subscription.getEvent();
+                }
+            }
+        }
+        catch (Exception | LinkageError e)
+        {
+            Global.logError(TAG, "warmup event handlers", e); //$NON-NLS-1$
+        }
+    }
 
     // =========================================================================
     // IStartup
@@ -438,7 +518,8 @@ public final class MdEventHandlersPageHook implements IStartup
     /**
      * Вкладка granular-редактора: лёгкий каркас создаётся при добавлении, тяжёлое
      * наполнение (встроенный {@code EventHandlersEditor} EDT + фильтр по объекту) —
-     * при первой активации ({@link #setActive(boolean)}).
+     * фоном при первой активации ({@link #setActive(boolean)}): вкладка сразу
+     * показывает сообщение о загрузке и не блокирует UI.
      *
      * <p>Наследует {@link DtGranularEditorPage}, чтобы шапка формы совпадала со штатной
      * («Справочники → Имя → Подписки на события»). {@code createFormContent} у базового класса
@@ -456,6 +537,9 @@ public final class MdEventHandlersPageHook implements IStartup
         private Object embeddedEditor;
 
         private boolean filled;
+
+        /** Наполнение уже поставлено в очередь (фон + asyncExec), повторно не планировать. */
+        private boolean fillScheduled;
 
         /** Мост команд {@code com._1c.g5.v8.dt.eventhandlers.ui.*} к встроенному редактору. */
         private IExecutionListener commandBridge;
@@ -491,18 +575,73 @@ public final class MdEventHandlersPageHook implements IStartup
         @Override
         public void setActive(boolean active)
         {
-            if (active && host != null && !host.isDisposed())
+            if (!active || host == null || host.isDisposed())
             {
-                if (!filled)
-                    fill();
-                // Пользователь мог снять фильтр по объекту (случайно или штатным
-                // «Удалить фильтр») — восстанавливаем его при каждой активации страницы,
-                // но только если фильтр уже не равен целевому: иначе повторное применение
-                // (clear + addAll + refresh + expandAll) сбросит состояния деревьев.
-                else if (embeddedEditor != null && !isObjectFilterApplied(embeddedEditor))
-                    configureObjectFilter(embeddedEditor);
+                super.setActive(active);
+                return;
             }
+
+            if (!filled && !fillScheduled)
+            {
+                fillScheduled = true;
+                showLoading();
+                scheduleFillAfterWarmup();
+            }
+            else if (filled && embeddedEditor != null && !isObjectFilterApplied(embeddedEditor))
+                configureObjectFilter(embeddedEditor);
             super.setActive(active);
+        }
+
+        private void scheduleFillAfterWarmup()
+        {
+            Display display = host.getDisplay();
+            if (display == null || display.isDisposed())
+                return;
+            ensureWarmup(resolveBaseConfiguration(mdObject));
+            Runnable fillUi = () ->
+            {
+                if (display.isDisposed() || host == null || host.isDisposed() || filled)
+                    return;
+                fill();
+            };
+            if (warmupDone)
+            {
+                display.asyncExec(fillUi);
+                return;
+            }
+            Job job = warmupJob;
+            if (job == null)
+            {
+                display.asyncExec(fillUi);
+                return;
+            }
+            job.addJobChangeListener(new JobChangeAdapter()
+            {
+                @Override
+                public void done(IJobChangeEvent event)
+                {
+                    if (!display.isDisposed())
+                        display.asyncExec(fillUi);
+                }
+            });
+            if (warmupDone)
+                display.asyncExec(fillUi);
+        }
+
+        private void showLoading()
+        {
+            clearHost();
+            Label label = new Label(host, SWT.WRAP);
+            label.setText(LOADING_TEXT);
+            host.layout(true, true);
+        }
+
+        private void clearHost()
+        {
+            if (host == null || host.isDisposed())
+                return;
+            for (Control child : host.getChildren())
+                child.dispose();
         }
 
         @Override
@@ -567,6 +706,7 @@ public final class MdEventHandlersPageHook implements IStartup
                 IEditorSite site = granularEditor.createEmbeddedEditorSite((IEditorPart)editor);
 
                 Global.invoke(editor, "init", site, input); //$NON-NLS-1$
+                clearHost();
                 Global.invoke(editor, "createPartControl", host); //$NON-NLS-1$
                 hideEmbeddedFormHeading();
                 configureObjectFilter(editor);
@@ -582,6 +722,7 @@ public final class MdEventHandlersPageHook implements IStartup
                 EventHandlersOpenHandlerHook.patchEditor(editor, granularEditor);
                 installDoubleClickOpen();
                 installCommandBridge();
+                MdEditorListTabCountHook.requestRefresh(granularEditor);
             }
             catch (Exception | LinkageError e)
             {
@@ -882,7 +1023,8 @@ public final class MdEventHandlersPageHook implements IStartup
             if (viewer != null && !viewer.getControl().isDisposed())
             {
                 viewer.expandAll();
-                viewer.getTree().setFocus();
+                if (isActivePage())
+                    viewer.getTree().setFocus();
             }
         }
 
