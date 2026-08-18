@@ -1146,66 +1146,33 @@ public final class MdEditorListTabCountHook implements IStartup
      */
     private static Integer countEventHandlerSubscriptions(IFormPage page)
     {
-        long t0 = System.nanoTime();
-        Integer result = null;
-        String outcome = "unset"; //$NON-NLS-1$
-        int treeItems = -1;
+        if (page == null || !Boolean.TRUE.equals(Global.getField(page, "filled"))) //$NON-NLS-1$
+            return null;
+        Object editor = Global.getField(page, "embeddedEditor"); //$NON-NLS-1$
+        Object mainSection = editor != null ? Global.invoke(editor, "getMainSection") : null; //$NON-NLS-1$
+        Object viewerObj = mainSection != null
+            ? Global.invoke(mainSection, "getEventHandlersTreeViewer") : null; //$NON-NLS-1$
+        if (!(viewerObj instanceof TreeViewer viewer))
+            return null;
+        Tree tree = viewer.getTree();
+        if (tree == null || tree.isDisposed())
+            return null;
+        Object provider = viewer.getContentProvider();
+        if (!(provider instanceof ITreeContentProvider content))
+            return Integer.valueOf(countVisibleEventSubscriptions(tree.getItems()));
+        Object[] roots;
         try
         {
-            if (page == null || !Boolean.TRUE.equals(Global.getField(page, "filled"))) //$NON-NLS-1$
-            {
-                outcome = "not-filled"; //$NON-NLS-1$
-                return null;
-            }
-            Object editor = Global.getField(page, "embeddedEditor"); //$NON-NLS-1$
-            Object mainSection = editor != null ? Global.invoke(editor, "getMainSection") : null; //$NON-NLS-1$
-            Object viewerObj = mainSection != null
-                ? Global.invoke(mainSection, "getEventHandlersTreeViewer") : null; //$NON-NLS-1$
-            if (!(viewerObj instanceof TreeViewer viewer))
-            {
-                outcome = "no-viewer"; //$NON-NLS-1$
-                return null;
-            }
-            Tree tree = viewer.getTree();
-            if (tree == null || tree.isDisposed())
-            {
-                outcome = "no-tree"; //$NON-NLS-1$
-                return null;
-            }
-            treeItems = tree.getItemCount();
-            Object provider = viewer.getContentProvider();
-            if (!(provider instanceof ITreeContentProvider content))
-            {
-                result = Integer.valueOf(countVisibleEventSubscriptions(tree.getItems()));
-                outcome = "visible-items"; //$NON-NLS-1$
-                return result;
-            }
-            Object[] roots;
-            try
-            {
-                roots = content.getElements(viewer.getInput());
-            }
-            catch (RuntimeException e)
-            {
-                result = Integer.valueOf(countVisibleEventSubscriptions(tree.getItems()));
-                outcome = "getElements-fail"; //$NON-NLS-1$
-                return result;
-            }
-            int[] count = { 0 };
-            walkFilteredEventSubscriptions(viewer, content, viewer.getFilters(), viewer.getInput(), roots,
-                count);
-            result = Integer.valueOf(count[0]);
-            outcome = "walk-filters"; //$NON-NLS-1$
-            return result;
+            roots = content.getElements(viewer.getInput());
         }
-        finally
+        catch (RuntimeException e)
         {
-            Global.tempLog("eh-page-ui", "countSubs outcome=" + outcome //$NON-NLS-1$ //$NON-NLS-2$
-                + " count=" + result //$NON-NLS-1$
-                + " treeTop=" + treeItems //$NON-NLS-1$
-                + " ms=" + ((System.nanoTime() - t0) / 1_000_000L) //$NON-NLS-1$
-                + " ui=" + (Display.getCurrent() != null)); //$NON-NLS-1$
+            return Integer.valueOf(countVisibleEventSubscriptions(tree.getItems()));
         }
+        int[] count = { 0 };
+        walkFilteredEventSubscriptions(viewer, content, viewer.getFilters(), viewer.getInput(), roots,
+            count);
+        return Integer.valueOf(count[0]);
     }
 
     private static void walkFilteredEventSubscriptions(TreeViewer viewer, ITreeContentProvider content,
