@@ -126,10 +126,10 @@ import org.eclipse.ui.PlatformUI;
  * {@link #GitStagingTreeInteraction} + {@link CopyCommandSupport#wireCopyOverride} (control остаётся
  * штатным {@code Tree}/{@code TreeViewer} — мультивыделение Ctrl/Shift, drag&drop stage/unstage,
  * открытие сравнения по двойному клику и автоподстановка commit message остаются штатными EGit,
- * не переопределяются). Сброс объекта метаданных из навигатора на дерево — отдельно:
- * снимает выделение и выделяет файлы этого объекта без вложенных (форм, макетов, команд…);
- * штатный drop EGit для такого жеста перехватывается, иначе он мог бы индексировать всю
- * папку объекта.
+ * не переопределяются). Сброс объекта метаданных из навигатора, последних мест
+ * или наборов объектов на дерево — отдельно: снимает выделение и выделяет файлы
+ * этого объекта без вложенных (форм, макетов, команд…); штатный drop EGit для
+ * такого жеста перехватывается, иначе он мог бы индексировать всю папку объекта.
  * Штатное контекстное меню только дополняется группой пунктов отбора по значению ячейки (issue
  * #266, п.2–5: «Отобрать/Снять отбор», «Различные значения колонки», «Отключить все отборы»,
  * «Отобрано элементов: N») — {@link TreeColumnValueFilterSupport}, общий код с {@link
@@ -784,13 +784,22 @@ public final class GitStagingFilterHook implements IStartup
                 continue;
             if (isStagingModelElement(element))
                 return List.of();
-            if (NavigatorTreeElementLabels.isGroupNode(element))
-                continue;
-            String fullName = GetRef.fullNameFromNavigatorElement(element);
+            String fullName = fullNameFromDraggedElement(element);
             if (fullName != null && !fullName.isBlank())
                 names.add(fullName);
         }
         return names;
+    }
+
+    private static String fullNameFromDraggedElement(Object element)
+    {
+        if (element instanceof RecentPlaces.Entry entry)
+            return RecentPlacesKeys.mdObjectRef(entry);
+        if (element instanceof ObjectSets.Item item)
+            return RecentPlacesKeys.mdObjectRefFromKey(item.key);
+        if (NavigatorTreeElementLabels.isGroupNode(element))
+            return null;
+        return GetRef.fullNameFromNavigatorElement(element);
     }
 
     private static boolean isEgitStagingDrag(IStructuredSelection sel)
