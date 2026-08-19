@@ -8,6 +8,7 @@ import org.eclipse.emf.ecore.EObject;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.IWorkbenchWindow;
+import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.handlers.HandlerUtil;
 
 import com._1c.g5.v8.dt.core.platform.IV8Project;
@@ -71,5 +72,27 @@ public final class RecentPlacesShowInNavigatorHandler extends AbstractHandler
 
         NavigatorReveal.revealAndActivateIfHidden(eObject);
         return null;
+    }
+
+    static EObject resolveEObject(RecentPlaces.Entry entry)
+    {
+        if (entry == null)
+            return null;
+        IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+        if (window == null)
+            return null;
+        IWorkbenchPage page = window.getActivePage();
+        IProject project = RecentPlacesHandler.resolveProject(entry, page);
+        if (project == null)
+            return null;
+        IV8ProjectManager projectManager =
+            (IV8ProjectManager) Global.getServiceByClass(IV8ProjectManager.class);
+        IV8Project v8Project = projectManager.getProject(project);
+        if (v8Project == null)
+            return null;
+        String mdRef = RecentPlacesKeys.mdObjectRef(entry);
+        if (mdRef == null || mdRef.isBlank())
+            return null;
+        return GoToDefinition.resolveEObjectForFullName(mdRef, page, project);
     }
 }

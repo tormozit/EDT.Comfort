@@ -658,8 +658,11 @@ public final class NavigatorFilterHook implements IStartup
                     // синхронный вызов; вернули как было.)
                     if (viewer != null)
                     {
-                        viewer.refresh();
-                        restoreTopScrollElement(viewer, tree, topElementBefore);
+                        if (!NavigatorAddToObjectSetMenuHook.deferNavigatorRefresh())
+                        {
+                            viewer.refresh();
+                            restoreTopScrollElement(viewer, tree, topElementBefore);
+                        }
                     }
                 }
             }
@@ -776,7 +779,8 @@ public final class NavigatorFilterHook implements IStartup
                     if (!isNavigatorView(view))
                         continue;
                     CommonViewer viewer = getCommonViewer(view);
-                    if (viewer != null && !viewer.getControl().isDisposed())
+                    if (viewer != null && !viewer.getControl().isDisposed()
+                            && !NavigatorAddToObjectSetMenuHook.deferNavigatorRefresh())
                         viewer.refresh();
                 }
             }
@@ -985,8 +989,11 @@ public final class NavigatorFilterHook implements IStartup
             // Активация поиска снова addFilter'ит штатный фильтр подсистем — вернуть обёртку.
             ObjectSetSubsystemsFilterBridge.adoptNativeAfterFilterUiChange(navigator,
                     "navigatorSearchActivated"); //$NON-NLS-1$
-            viewer.refresh();
-            expandFilteredTree(viewer);
+            if (!NavigatorAddToObjectSetMenuHook.deferNavigatorRefresh())
+            {
+                viewer.refresh();
+                expandFilteredTree(viewer);
+            }
         }
 
         /** Переустановка comfortEngine без {@code addFilter} на viewer (после очистки поиска). */

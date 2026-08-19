@@ -35,6 +35,8 @@ import com._1c.g5.v8.dt.platform.services.model.InfobaseReference;
  *
  * <p>Число выводится <b>только для строк, помеченных «Обновить»</b>: расчёт стоит около половины
  * секунды на базу, и делать его для строк, которые обновляться не будут, незачем.
+ * Пока сервис синхронизации не готов, {@link InfobaseChangedObjects} сам повторяет расчёт
+ * и уведомляет слушателя — колонка только перерисовывается.
  *
  * <p>Доступ к штатной таблице: у диалога JFace сам диалог лежит в {@code shell.getData()}
  * ({@code Window#createShell}), оттуда — текущая страница мастера и её поле
@@ -121,6 +123,13 @@ public final class DeployChangesColumnHook implements IStartup
         applyColumnWidth(table, tableColumn);
 
         addClickHandlers(tableViewer, table, tableColumn);
+        Runnable onChanged = () ->
+        {
+            if (!table.isDisposed())
+                tableViewer.refresh();
+        };
+        InfobaseChangedObjects.addChangeListener(onChanged);
+        table.addDisposeListener(e -> InfobaseChangedObjects.removeChangeListener(onChanged));
         tableViewer.refresh();
         return true;
     }
@@ -199,9 +208,10 @@ public final class DeployChangesColumnHook implements IStartup
                 return;
             }
             int count = changedCount(element);
-            cell.setText(count > 0 ? Integer.toString(count) : "—"); //$NON-NLS-1$
+            boolean pending = isPending(element);
+            cell.setText(InfobaseChangedObjects.displayCountText(count, pending));
             cell.setForeground(ThemeAwareColors.effectiveSystemColor(display,
-                count > 0 ? SWT.COLOR_DARK_BLUE : SWT.COLOR_DARK_GRAY));
+                !pending && count > 0 ? SWT.COLOR_DARK_BLUE : SWT.COLOR_DARK_GRAY));
         }
 
         @Override
@@ -209,7 +219,10 @@ public final class DeployChangesColumnHook implements IStartup
         {
             if (!isSelectedForUpdate(viewer, element))
                 return "Пометьте «Обновить», чтобы посчитать изменения"; //$NON-NLS-1$
-            return changedCount(element) > 0
+            int count = changedCount(element);
+            if (isPending(element))
+                return "Число изменений ещё считается"; //$NON-NLS-1$
+            return count > 0
                 ? "Нажмите, чтобы открыть набор изменённых объектов" //$NON-NLS-1$
                 : "Нет объектов, ожидающих синхронизации с базой"; //$NON-NLS-1$
         }
@@ -301,6 +314,18 @@ public final class DeployChangesColumnHook implements IStartup
         {
             // Вызывается из отрисовки ячейки и из MouseMove — падать здесь нельзя.
             return 0;
+        }
+    }
+
+    private static boolean isPending(Object element)
+    {
+        try
+        {
+            return InfobaseChangedObjects.isResultPending(projectOf(element), infobaseOf(element));
+        }
+        catch (Throwable e)
+        {
+            return false;
         }
     }
 

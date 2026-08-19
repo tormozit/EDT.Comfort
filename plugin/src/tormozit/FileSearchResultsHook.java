@@ -11,6 +11,7 @@ import java.util.Set;
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.IResource;
+import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.action.Action;
 import org.eclipse.jface.action.MenuManager;
 import org.eclipse.jface.dialogs.IDialogSettings;
@@ -413,6 +414,10 @@ public final class FileSearchResultsHook implements IStartup
         registerContextMenu(tableViewer, treeViewer, page);
         registerTreeContextMenu(treeViewer, page);
         blockRemoveMatches(page, treeViewer, tableViewer);
+        NavigatorRevealDropHook.installViewerDrag(treeViewer,
+            sel -> resolveFileSearchDrag(sel, treeViewer));
+        NavigatorRevealDropHook.installViewerDrag(tableViewer,
+            sel -> resolveFileSearchDrag(sel, treeViewer));
 
         IDialogSettings sashSettings = dialogSettings();
         sashForm.setWeights(new int[] {
@@ -736,6 +741,23 @@ public final class FileSearchResultsHook implements IStartup
             this.matchOffsets = matchOffsets;
             this.matchLengths = matchLengths;
         }
+    }
+
+    private static EObject resolveFileSearchDrag(IStructuredSelection sel, TreeViewer treeViewer)
+    {
+        if (sel == null || sel.isEmpty())
+            return null;
+        Object first = sel.getFirstElement();
+        if (first instanceof FileSearchRow row)
+            return row.iFile != null ? GitChangedFileMenuHook.resolveEObject(row.iFile) : null;
+        if (first instanceof IFile file)
+            return GitChangedFileMenuHook.resolveEObject(file);
+        if (first instanceof LineElement le && treeViewer != null)
+        {
+            IFile file = findFileForLineElement(le, treeViewer);
+            return file != null ? GitChangedFileMenuHook.resolveEObject(file) : null;
+        }
+        return null;
     }
 
     private static void updateTableFromSelection(TreeViewer treeViewer, TableViewer tableViewer)

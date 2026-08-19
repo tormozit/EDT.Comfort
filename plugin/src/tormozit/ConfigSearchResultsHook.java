@@ -375,6 +375,56 @@ public final class ConfigSearchResultsHook implements IStartup
         }
     }
 
+    private static EObject resolveSearchDrag(IStructuredSelection sel)
+    {
+        if (sel == null || sel.isEmpty())
+            return null;
+        Object first = sel.getFirstElement();
+        if (first instanceof MatchRow row)
+            return resolveMatchRow(row);
+        List<Object> items = new ArrayList<>();
+        collectTableItemsRecursively(first, items);
+        if (items.isEmpty())
+            return null;
+        Object tableItem = items.get(0);
+        Object match = Global.invoke(tableItem, "getData"); //$NON-NLS-1$
+        IFile file = match instanceof TextSearchFileMatch fm ? fm.getFile() : null;
+        if (file != null)
+        {
+            EObject byFile = GitChangedFileMenuHook.resolveEObject(file);
+            if (byFile != null)
+                return byFile;
+        }
+        return resolvePathToEObject(formatPathForTableItem(tableItem, null), file);
+    }
+
+    private static EObject resolveMatchRow(MatchRow row)
+    {
+        if (row == null)
+            return null;
+        if (row.file != null)
+        {
+            EObject byFile = GitChangedFileMenuHook.resolveEObject(row.file);
+            if (byFile != null)
+                return byFile;
+        }
+        return resolvePathToEObject(row.path, row.file);
+    }
+
+    private static EObject resolvePathToEObject(String path, IFile file)
+    {
+        if (path == null || path.isBlank())
+            return null;
+        IProject project = file != null ? file.getProject() : null;
+        IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+        IWorkbenchPage page = window != null ? window.getActivePage() : null;
+        if (project == null && page != null)
+            project = ActiveProjectTracker.resolveContextProject(page);
+        if (project == null || page == null)
+            return null;
+        return GoToDefinition.resolveEObjectForFullName(path, page, project);
+    }
+
     private static void installMatchTableSplitPane(IViewPart view, Object activePage, Object treeLayout,
             TreeViewer treeViewer)
     {
@@ -581,6 +631,8 @@ public final class ConfigSearchResultsHook implements IStartup
         });
 
         installMatchTableOpenSupport(matchViewer, activePage, view.getSite().getPage());
+        NavigatorRevealDropHook.installViewerDrag(matchViewer, ConfigSearchResultsHook::resolveSearchDrag);
+        NavigatorRevealDropHook.installViewerDrag(treeViewer, ConfigSearchResultsHook::resolveSearchDrag);
 
         treeViewer.addPostSelectionChangedListener(event -> {
             if (!ComfortSettings.isReplaceListFiltersEnabled())

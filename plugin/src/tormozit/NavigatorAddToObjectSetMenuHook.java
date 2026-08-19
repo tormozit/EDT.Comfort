@@ -1,5 +1,7 @@
 package tormozit;
 
+import java.util.Arrays;
+
 import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.jface.util.LocalSelectionTransfer;
 import org.eclipse.swt.SWT;
@@ -32,7 +34,9 @@ import org.eclipse.ui.handlers.IHandlerService;
 import org.eclipse.ui.navigator.CommonViewer;
 
 /**
- * DnD из навигатора и «Комфорт / Добавить в &lt;набор&gt;» в контекстном меню дерева.
+ * DnD из навигатора в наборы объектов и «Комфорт / Добавить в &lt;набор&gt;» в контекстном меню дерева.
+ *
+ * <p>Сброс на навигатор из наборов и других списков — {@link NavigatorRevealDropHook}.
  */
 public final class NavigatorAddToObjectSetMenuHook implements IStartup
 {
@@ -42,6 +46,9 @@ public final class NavigatorAddToObjectSetMenuHook implements IStartup
     private static final String DRAG_MARKER = "tormozit.navigatorObjectSetDrag"; //$NON-NLS-1$
     private static final String COMMAND_ID = "tormozit.navigator.addToObjectSet"; //$NON-NLS-1$
     private static volatile boolean hooksInstalled;
+    /** OLE-drag из дерева навигатора: штатный {@code viewer.refresh()} в это время оставляет дерево пустым. */
+    private static volatile boolean dragInProgress;
+    private static volatile boolean refreshDeferredDuringDrag;
 
     @Override
     public void earlyStartup()
@@ -155,11 +162,9 @@ public final class NavigatorAddToObjectSetMenuHook implements IStartup
         Tree tree = viewer.getTree();
         if (tree == null || tree.isDisposed())
             return;
+        installDragSource(viewer);
         if (!Boolean.TRUE.equals(tree.getData(TREE_MARKER)))
-        {
-            installDragSource(viewer);
             tree.setData(TREE_MARKER, Boolean.TRUE);
-        }
         Menu menu = tree.getMenu();
         if (menu == null || menu.isDisposed())
         {
@@ -212,7 +217,7 @@ public final class NavigatorAddToObjectSetMenuHook implements IStartup
             + set.name + "»" + Global.pluginSignForTooltip()); //$NON-NLS-1$
         IStructuredSelection selection = viewer.getStructuredSelection();
         boolean enabled = !selection.isEmpty()
-            && !ObjectSetsItems.fromNavigatorSelection(selection, set).isEmpty();
+            && ObjectSetsItems.canAddFromNavigatorSelection(selection, set);
         item.setEnabled(enabled);
     }
 
@@ -260,22 +265,45 @@ public final class NavigatorAddToObjectSetMenuHook implements IStartup
         return item;
     }
 
+    /**
+     * Отложить полный refresh навигатора, пока идёт перетаскивание из его дерева.
+     * {@code TreeViewer.refresh()} внутри OLE-loop делает {@code setRedraw(false)}/{@code removeAll}
+     * и часто не дорисовывает узлы — дерево остаётся белым при живом выделении.
+     */
+    static boolean deferNavigatorRefresh()
+    {
+        if (!dragInProgress)
+            return false;
+        refreshDeferredDuringDrag = true;
+        Global.tempLog("navigator-dnd", "defer refresh"); //$NON-NLS-1$ //$NON-NLS-2$
+        return true;
+    }
+
     private static void installDragSource(CommonViewer viewer)
     {
         Tree tree = viewer.getTree();
         if (tree == null || tree.isDisposed() || Boolean.TRUE.equals(tree.getData(DRAG_MARKER)))
             return;
         DragSource source;
-        try
+        Object existing = tree.getData(DND.DRAG_SOURCE_KEY);
+        boolean reused = existing instanceof DragSource;
+        if (existing instanceof DragSource ds)
+            source = ds;
+        else
         {
-            source = new DragSource(tree, DND.DROP_COPY | DND.DROP_MOVE);
+            try
+            {
+                source = new DragSource(tree, DND.DROP_COPY | DND.DROP_MOVE);
+            }
+            catch (RuntimeException | SWTError e)
+            {
+                Global.log("DragSource init error: " + e); //$NON-NLS-1$
+                return;
+            }
+            source.setTransfer(new Transfer[] { LocalSelectionTransfer.getTransfer() });
         }
-        catch (RuntimeException | SWTError e)
-        {
-            Global.log("DragSource init error: " + e); //$NON-NLS-1$
-            return;
-        }
-        source.setTransfer(new Transfer[] { LocalSelectionTransfer.getTransfer() });
+        ensureDragLocalSelectionTransfer(source);
+        boolean reusedSource = reused;
         source.addDragListener(new DragSourceAdapter()
         {
             @Override
@@ -283,7 +311,13 @@ public final class NavigatorAddToObjectSetMenuHook implements IStartup
             {
                 IStructuredSelection selection = viewer.getStructuredSelection();
                 LocalSelectionTransfer.getTransfer().setSelection(selection);
-                event.doit = !selection.isEmpty();
+                logNavigatorDnd("start", viewer, tree, event, reusedSource); //$NON-NLS-1$
+                // CommonDragAdapter уже выставил event.doit; не переопределяем.
+                if (event.doit)
+                {
+                    dragInProgress = true;
+                    refreshDeferredDuringDrag = false;
+                }
             }
 
             @Override
@@ -291,8 +325,68 @@ public final class NavigatorAddToObjectSetMenuHook implements IStartup
             {
                 LocalSelectionTransfer.getTransfer().setSelection(viewer.getStructuredSelection());
             }
+
+            @Override
+            public void dragFinished(DragSourceEvent event)
+            {
+                boolean needRefresh = refreshDeferredDuringDrag;
+                refreshDeferredDuringDrag = false;
+                dragInProgress = false;
+                logNavigatorDnd("finish", viewer, tree, event, reusedSource); //$NON-NLS-1$
+                restoreNavigatorAfterDrag(viewer, tree, needRefresh);
+            }
         });
         tree.setData(DRAG_MARKER, Boolean.TRUE);
+    }
+
+    private static void restoreNavigatorAfterDrag(CommonViewer viewer, Tree tree, boolean needRefresh)
+    {
+        if (tree == null || tree.isDisposed())
+            return;
+        tree.setRedraw(true);
+        int items = tree.getItemCount();
+        if (needRefresh || items == 0)
+        {
+            Global.tempLog("navigator-dnd", "restore refresh items=" + items //$NON-NLS-1$ //$NON-NLS-2$
+                + " deferred=" + needRefresh); //$NON-NLS-1$
+            if (viewer != null && viewer.getControl() != null && !viewer.getControl().isDisposed())
+                viewer.refresh();
+        }
+        else
+            tree.redraw();
+    }
+
+    private static void logNavigatorDnd(String phase, CommonViewer viewer, Tree tree,
+            DragSourceEvent event, boolean reused)
+    {
+        int items = tree == null || tree.isDisposed() ? -1 : tree.getItemCount();
+        IStructuredSelection sel = viewer != null ? viewer.getStructuredSelection() : null;
+        int selSize = sel == null ? -1 : sel.size();
+        Global.tempLog("navigator-dnd", phase //$NON-NLS-1$
+            + " items=" + items //$NON-NLS-1$
+            + " sel=" + selSize //$NON-NLS-1$
+            + " doit=" + (event != null && event.doit) //$NON-NLS-1$
+            + " detail=" + (event != null ? event.detail : -1) //$NON-NLS-1$
+            + " reused=" + reused); //$NON-NLS-1$
+    }
+
+    private static void ensureDragLocalSelectionTransfer(DragSource source)
+    {
+        Transfer local = LocalSelectionTransfer.getTransfer();
+        Transfer[] current = source.getTransfer();
+        if (current != null)
+        {
+            for (Transfer t : current)
+            {
+                if (t == local)
+                    return;
+            }
+            Transfer[] expanded = Arrays.copyOf(current, current.length + 1);
+            expanded[current.length] = local;
+            source.setTransfer(expanded);
+        }
+        else
+            source.setTransfer(new Transfer[] { local });
     }
 
     private static ObjectSets.SetDef resolveTargetSet(IViewPart navigator, CommonViewer viewer)

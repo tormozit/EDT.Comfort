@@ -61,9 +61,8 @@ public final class InfobaseChangedObjects
      * Результат расчёта с временем годности.
      *
      * <p>Достоверный ответ (сравнение реально выполнено) живёт до явного сброса. Ответ «пока
-     * неизвестно» — сервисы EDT ещё не поднялись, идёт синхронизация — живёт {@link #UNKNOWN_TTL_MS}:
-     * иначе ноль, посчитанный на старте до готовности сервисов, застревает в колонке до первой
-     * правки ресурсов (наблюдалось: {@code hasSyncInfo=false} через секунду после запуска).
+     * неизвестно» — сервисы EDT ещё не поднялись, идёт синхронизация — живёт {@link #UNKNOWN_TTL_MS},
+     * после чего слушатели ({@link #addChangeListener}) получают уведомление и пересчитывают.
      */
     private static final class Entry
     {
@@ -82,14 +81,37 @@ public final class InfobaseChangedObjects
         }
     }
 
+    /** Текст, пока число изменений неизвестно. */
+    public static final String UNKNOWN_COUNT_TEXT = "?"; //$NON-NLS-1$
+
+    /**
+     * Текст числа изменений: «?» пока неизвестно, иначе само число (в том числе 0).
+     *
+     * @param count число объектов; при {@code unknown} не используется
+     * @param unknown {@code true}, если достоверного ответа ещё нет
+     */
+    public static String displayCountText(int count, boolean unknown)
+    {
+        return unknown ? UNKNOWN_COUNT_TEXT : Integer.toString(count);
+    }
+
     /** Сколько живёт недостоверный ответ, мс. */
     private static final long UNKNOWN_TTL_MS = 3000;
+
+    /** Пауза между повторами, пока сервисы EDT поднимаются; чуть больше {@link #UNKNOWN_TTL_MS}. */
+    private static final int PENDING_RETRY_DELAY_MS = 3500;
+
+    /** Сколько раз повторять расчёт по одной базе (примерно полминуты). */
+    private static final int PENDING_RETRY_MAX_ATTEMPTS = 10;
 
     /** Полные имена объектов МД по (проект, база); отсутствие ключа — ещё не считалось. */
     private static final Map<String, Entry> CACHE = new ConcurrentHashMap<>();
 
     /** Слушатели сброса кэша: перерисовать свои представления. */
     private static final List<Runnable> LISTENERS = new CopyOnWriteArrayList<>();
+
+    /** Сколько раз подряд по ключу кэша ответ был «пока неизвестно». */
+    private static final Map<String, Integer> PENDING_ATTEMPTS = new ConcurrentHashMap<>();
 
     /** Задержка перед сбросом кэша после правок ресурсов, мс. */
     private static final int INVALIDATE_DELAY_MS = 600;
@@ -101,13 +123,16 @@ public final class InfobaseChangedObjects
 
     private static boolean invalidatePending;
 
+    private static boolean pendingRetryScheduled;
+
     private InfobaseChangedObjects()
     {
     }
 
     /**
      * Подписаться на сброс кэша (состав изменённых объектов мог измениться).
-     * Слушатель вызывается в потоке UI.
+     * Слушатель вызывается в потоке UI — в том числе когда недостоверный ответ
+     * («сервис синхронизации ещё не готов») пора пересчитать.
      *
      * @param listener слушатель; повторные вызовы с тем же объектом накапливаются
      */
@@ -184,17 +209,52 @@ public final class InfobaseChangedObjects
         {
             invalidatePending = false;
             invalidate(null);
-            for (Runnable listener : LISTENERS)
+            notifyListeners();
+        });
+    }
+
+    private static void notifyListeners()
+    {
+        for (Runnable listener : LISTENERS)
+        {
+            try
             {
-                try
-                {
-                    listener.run();
-                }
-                catch (Exception e)
-                {
-                    ObjectSetsDebug.problem("InfobaseChangedObjects.listener: " + e); //$NON-NLS-1$
-                }
+                listener.run();
             }
+            catch (Exception e)
+            {
+                ObjectSetsDebug.problem("InfobaseChangedObjects.listener: " + e); //$NON-NLS-1$
+            }
+        }
+    }
+
+    /**
+     * Пока сервисы EDT не готовы, ответ «пока неизвестно». Через паузу уведомляем слушателей —
+     * они перерисуют свои представления, и расчёт пойдёт ещё раз. Без этого «—» / пустой набор
+     * застревали бы до первой правки ресурсов.
+     */
+    private static void rememberUnknown(String key)
+    {
+        int attempt = PENDING_ATTEMPTS.merge(key, 1, Integer::sum);
+        CACHE.put(key, new Entry(List.of(), System.currentTimeMillis() + UNKNOWN_TTL_MS));
+        if (attempt <= PENDING_RETRY_MAX_ATTEMPTS)
+            schedulePendingRetry();
+    }
+
+    private static void schedulePendingRetry()
+    {
+        if (pendingRetryScheduled)
+            return;
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        pendingRetryScheduled = true;
+        display.timerExec(PENDING_RETRY_DELAY_MS, () ->
+        {
+            pendingRetryScheduled = false;
+            if (display.isDisposed())
+                return;
+            notifyListeners();
         });
     }
 
@@ -227,10 +287,11 @@ public final class InfobaseChangedObjects
         if (computed == null)
         {
             // Достоверного ответа нет — запомнить ненадолго, чтобы не дёргать API на каждой
-            // отрисовке ячейки, но и не застрять на нуле до первой правки ресурсов.
-            CACHE.put(key, new Entry(List.of(), System.currentTimeMillis() + UNKNOWN_TTL_MS));
+            // отрисовке ячейки; слушатели получат повтор после {@link #PENDING_RETRY_DELAY_MS}.
+            rememberUnknown(key);
             return List.of();
         }
+        PENDING_ATTEMPTS.remove(key);
         CACHE.put(key, new Entry(computed, Long.MAX_VALUE));
         return computed;
     }
@@ -303,7 +364,25 @@ public final class InfobaseChangedObjects
         String infobaseUuid = ObjectSets.infobaseUuidOf(set);
         if (infobaseUuid == null || set.projectName == null || set.projectName.isBlank())
             return false;
-        Entry entry = CACHE.get(cacheKey(set.projectName, infobaseUuid));
+        return isResultPending(set.projectName, infobaseUuid);
+    }
+
+    /**
+     * @param project проект
+     * @param infobase информационная база
+     * @return {@code true}, если последний расчёт недостоверный и его стоит повторить
+     * @see #isResultPending(ObjectSets.SetDef)
+     */
+    public static boolean isResultPending(IProject project, InfobaseReference infobase)
+    {
+        if (project == null || infobase == null || infobase.getUuid() == null)
+            return false;
+        return isResultPending(project.getName(), infobase.getUuid().toString());
+    }
+
+    private static boolean isResultPending(String projectName, String infobaseUuid)
+    {
+        Entry entry = CACHE.get(cacheKey(projectName, infobaseUuid));
         return entry == null || entry.expiresAt != Long.MAX_VALUE;
     }
 
@@ -313,10 +392,281 @@ public final class InfobaseChangedObjects
         if (projectName == null || projectName.isBlank())
         {
             CACHE.clear();
+            PENDING_ATTEMPTS.clear();
             return;
         }
         String prefix = projectName + "\n"; //$NON-NLS-1$
         CACHE.keySet().removeIf(key -> key.startsWith(prefix));
+        PENDING_ATTEMPTS.keySet().removeIf(key -> key.startsWith(prefix));
+    }
+
+    /**
+     * Пометить объекты как ожидающие синхронизации с базой: вычеркнуть их файлы из
+     * запомненных сигнатур последней синхронизации. Файлы проекта и git не меняются.
+     *
+     * @param projectName имя проекта
+     * @param infobaseUuid UUID информационной базы
+     * @param fullNames полные имена объектов МД
+     * @return сколько объектов помечено, сколько уже были в составе, либо ошибка
+     */
+    static MarkResult markChanged(String projectName, String infobaseUuid, Collection<String> fullNames)
+    {
+        if (projectName == null || projectName.isBlank()
+            || infobaseUuid == null || infobaseUuid.isBlank()
+            || fullNames == null)
+        {
+            return MarkResult.fail("Не заданы проект или информационная база"); //$NON-NLS-1$
+        }
+        LinkedHashSet<String> requested = new LinkedHashSet<>();
+        for (String name : fullNames)
+        {
+            if (name != null && !name.isBlank())
+                requested.add(name);
+        }
+        if (requested.isEmpty())
+            return MarkResult.none();
+
+        IProject project = ResourcesPlugin.getWorkspace().getRoot().getProject(projectName);
+        if (project == null || !project.isOpen())
+            return MarkResult.fail("Проект не открыт"); //$NON-NLS-1$
+        InfobaseReference infobase = findInfobase(project, infobaseUuid);
+        if (infobase == null)
+            return MarkResult.fail("Информационная база не связана с проектом"); //$NON-NLS-1$
+
+        Set<String> already = new LinkedHashSet<>(changedRefs(projectName, infobaseUuid));
+        LinkedHashSet<String> toMark = new LinkedHashSet<>();
+        int existing = 0;
+        for (String name : requested)
+        {
+            if (already.contains(name))
+                existing++;
+            else
+                toMark.add(name);
+        }
+        if (toMark.isEmpty())
+            return new MarkResult(0, existing, null);
+
+        IInfobaseSynchronizationStateManager stateManager =
+            Global.getOsgiService(IInfobaseSynchronizationStateManager.class);
+        if (stateManager == null)
+            return MarkResult.fail("Сервис синхронизации EDT недоступен"); //$NON-NLS-1$
+        try
+        {
+            if (stateManager.isFlowActive(infobase))
+                return MarkResult.fail("Идёт синхронизация с базой — состав сейчас нельзя изменить"); //$NON-NLS-1$
+        }
+        catch (Exception e)
+        {
+            ObjectSetsDebug.problem("InfobaseChangedObjects.markChanged isFlowActive: " + e); //$NON-NLS-1$
+            return MarkResult.fail("Не удалось проверить состояние синхронизации"); //$NON-NLS-1$
+        }
+
+        int added;
+        try
+        {
+            added = removeStoredSignatures(stateManager, project, infobase, toMark);
+        }
+        catch (Exception e)
+        {
+            ObjectSetsDebug.problem("InfobaseChangedObjects.markChanged: " + e); //$NON-NLS-1$
+            return MarkResult.fail("Не удалось пометить объекты к синхронизации"); //$NON-NLS-1$
+        }
+        if (added < 0)
+            return MarkResult.fail("Не удалось пометить объекты к синхронизации"); //$NON-NLS-1$
+        if (added == 0)
+            return new MarkResult(0, existing, null);
+
+        invalidate(projectName);
+        notifyMarkChangedListeners();
+        return new MarkResult(added, existing, null);
+    }
+
+    /**
+     * Вычеркнуть из запомненных сигнатур ключи файлов указанных объектов.
+     *
+     * @return число объектов, для которых снята хотя бы одна сигнатура; {@code -1} при сбое
+     */
+    private static int removeStoredSignatures(
+        IInfobaseSynchronizationStateManager stateManager,
+        IProject project,
+        InfobaseReference infobase,
+        Set<String> fullNames)
+    {
+        Object delegate = Global.invoke(stateManager, "getDelegate"); //$NON-NLS-1$
+        if (delegate == null)
+            return -1;
+        Global.invoke(delegate, "updateInternalSyncStateIfNecessary", infobase); //$NON-NLS-1$
+        Object states = Global.getField(delegate, "synchronizationStates"); //$NON-NLS-1$
+        if (!(states instanceof Map<?, ?> statesMap))
+            return -1;
+        Object holder = statesMap.get(infobase.getUuid());
+        if (holder == null)
+            return -1;
+
+        // Нельзя звать captureLock/MemoryMappedLock.unlock: tryLock поднимает поток
+        // IB_sync_flow_lock_touch (Unsafe.putLong в mapped-файл), а unlock снимает
+        // отображение, пока поток ещё пишет — EXCEPTION_ACCESS_VIOLATION.
+        Object monitor = Global.getField(delegate, "lock"); //$NON-NLS-1$
+        if (monitor == null)
+            monitor = delegate;
+        synchronized (monitor)
+        {
+            Object syncState = syncStateOf(holder, project);
+            if (syncState == null)
+                return -1;
+            Object rawSignatures = Global.invoke(syncState, "getEdtResourceSignatures"); //$NON-NLS-1$
+            if (!(rawSignatures instanceof Map<?, ?> signaturesRaw))
+                return -1;
+            @SuppressWarnings("unchecked")
+            Map<String, byte[]> signatures = (Map<String, byte[]>) signaturesRaw;
+            Set<String> addedNames = new LinkedHashSet<>();
+            List<String> toRemove = new ArrayList<>();
+            for (String path : signatures.keySet())
+            {
+                if (path == null || path.isBlank())
+                    continue;
+                String matched = matchedName(fullNameFromSignaturePath(path), fullNames);
+                if (matched == null)
+                    continue;
+                toRemove.add(path);
+                addedNames.add(matched);
+            }
+            if (toRemove.isEmpty())
+                return 0;
+            for (String path : toRemove)
+                signatures.remove(path);
+            Object store = Global.getField(holder, "synchronizationStore"); //$NON-NLS-1$
+            Object rootState = Global.getField(holder, "state"); //$NON-NLS-1$
+            if (store == null || rootState == null)
+                return -1;
+            Global.invoke(store, "updateSyncrhonizationState", rootState); //$NON-NLS-1$
+            markProjectDirty(holder, project);
+            return addedNames.size();
+        }
+    }
+
+    private static Object syncStateOf(Object holder, IProject project)
+    {
+        Object root = Global.getField(holder, "state"); //$NON-NLS-1$
+        if (root == null)
+            return null;
+        try
+        {
+            if (project.hasNature("com._1c.g5.v8.dt.core.V8ExtensionNature")) //$NON-NLS-1$
+            {
+                Object extensions = Global.invoke(root, "getExtensionSyncStates"); //$NON-NLS-1$
+                if (extensions instanceof Map<?, ?> byName)
+                {
+                    Object extensionState = byName.get(project.getName());
+                    return extensionState != null ? extensionState : root;
+                }
+            }
+        }
+        catch (Exception e)
+        {
+            ObjectSetsDebug.problem("InfobaseChangedObjects.syncStateOf: " + e); //$NON-NLS-1$
+        }
+        return root;
+    }
+
+    private static void markProjectDirty(Object holder, IProject project)
+    {
+        Object timestamps = Global.getField(holder, "lastEdtUpdateTimestamps"); //$NON-NLS-1$
+        if (!(timestamps instanceof Map<?, ?>))
+            return;
+        IDtProjectManager projectManager = Global.getOsgiService(IDtProjectManager.class);
+        IDtProject dtProject = projectManager != null ? projectManager.getDtProject(project) : null;
+        if (dtProject == null)
+            return;
+        @SuppressWarnings("unchecked")
+        Map<Object, Object> map = (Map<Object, Object>) timestamps;
+        map.put(dtProject, Long.valueOf(-1L));
+    }
+
+    /**
+     * Полное имя объекта МД по ключу сигнатуры EDT. Ключи — пути для {@code IProject.getFile}:
+     * обычно {@code src/Catalogs/…}, иногда без префикса {@code src/}.
+     */
+    private static String fullNameFromSignaturePath(String path)
+    {
+        String fullName = GetRef.pathToFullName(path);
+        if (fullName != null && !fullName.isBlank())
+            return fullName;
+        if (path != null && !path.startsWith("src/") && !path.startsWith("src\\")) //$NON-NLS-1$ //$NON-NLS-2$
+            return GetRef.pathToFullName("src/" + path.replace('\\', '/')); //$NON-NLS-1$
+        return fullName;
+    }
+
+    /**
+     * Какой из запрашиваемых объектов покрывает это полное имя файла.
+     * Корневой объект МД — только точное совпадение (не все его формы).
+     * Вложенный (форма, макет, команда) — он сам и потомки {@code имя.}.
+     */
+    private static String matchedName(String pathFullName, Set<String> fullNames)
+    {
+        if (pathFullName == null || pathFullName.isBlank())
+            return null;
+        for (String name : fullNames)
+        {
+            if (pathFullName.equals(name))
+                return name;
+            if (MdTypeMapping.isRootMdObjectRef(name))
+                continue;
+            if (pathFullName.startsWith(name + ".")) //$NON-NLS-1$
+                return name;
+        }
+        return null;
+    }
+
+    private static void notifyMarkChangedListeners()
+    {
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        Runnable run = () ->
+        {
+            for (Runnable listener : LISTENERS)
+            {
+                try
+                {
+                    listener.run();
+                }
+                catch (Exception e)
+                {
+                    ObjectSetsDebug.problem("InfobaseChangedObjects.listener: " + e); //$NON-NLS-1$
+                }
+            }
+            if (ObjectSetsNavigatorFilterSupport.isActive())
+                ObjectSetsNavigatorFilterSupport.refreshNavigators();
+        };
+        if (display.getThread() == Thread.currentThread())
+            run.run();
+        else
+            display.asyncExec(run);
+    }
+
+    static final class MarkResult
+    {
+        final int added;
+        final int existing;
+        final String error;
+
+        MarkResult(int added, int existing, String error)
+        {
+            this.added = added;
+            this.existing = existing;
+            this.error = error;
+        }
+
+        static MarkResult none()
+        {
+            return new MarkResult(0, 0, null);
+        }
+
+        static MarkResult fail(String error)
+        {
+            return new MarkResult(0, 0, error);
+        }
     }
 
     /**
@@ -376,7 +726,9 @@ public final class InfobaseChangedObjects
             return;
         String projectName = project.getName();
         String infobaseUuid = infobase.getUuid().toString();
-        CACHE.remove(cacheKey(projectName, infobaseUuid));
+        String key = cacheKey(projectName, infobaseUuid);
+        CACHE.remove(key);
+        PENDING_ATTEMPTS.remove(key);
         ObjectSets.getInstance().deleteInfobaseChangedSet(projectName, infobaseUuid);
     }
 

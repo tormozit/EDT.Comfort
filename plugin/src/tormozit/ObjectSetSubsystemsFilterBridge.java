@@ -373,6 +373,8 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
             return;
         ObjectSetsItems.beginAddTargetTreeFilterRefresh();
         installBridge(navigator, viewer);
+        if (NavigatorAddToObjectSetMenuHook.deferNavigatorRefresh())
+            return;
         viewer.refresh();
         syncGroupExpandIndicators(viewer);
     }
@@ -611,6 +613,8 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
         if (viewer == null)
             return;
         installBridge(navigator, viewer);
+        if (NavigatorAddToObjectSetMenuHook.deferNavigatorRefresh())
+            return;
         viewer.refresh();
     }
 

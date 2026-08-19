@@ -82,6 +82,7 @@
     <startup class="tormozit.ObjectSetsBootstrapHook"/>
     <startup class="tormozit.ObjectSetSubsystemsFilterBridge"/>
     <startup class="tormozit.NavigatorAddToObjectSetMenuHook"/>
+    <startup class="tormozit.NavigatorRevealDropHook"/>
     <startup class="tormozit.NavigatorCopyProjectMenuHook"/>
     <startup class="tormozit.NavigatorRecomputeChecksMenuHook"/>
     <startup class="tormozit.NavigatorAttributePropertiesHook"/>

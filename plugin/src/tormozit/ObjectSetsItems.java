@@ -1,7 +1,10 @@
 package tormozit;
 
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -11,11 +14,13 @@ import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.ResourcesPlugin;
 import org.eclipse.emf.ecore.EObject;
+import org.eclipse.emf.ecore.EStructuralFeature;
 import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.jface.viewers.ITreeContentProvider;
 import org.eclipse.jface.viewers.StructuredViewer;
 import org.eclipse.jface.viewers.Viewer;
 import org.eclipse.swt.widgets.Shell;
+import org.eclipse.ui.IViewPart;
 
 import org.eclipse.egit.core.project.RepositoryMapping;
 import org.eclipse.jgit.lib.Repository;
@@ -32,19 +37,180 @@ final class ObjectSetsItems
 {
     private ObjectSetsItems() {}
 
+    /**
+     * Объекты выделения навигатора. Группа дерева («Формы», «Справочники»,
+     * группа общих модулей) разворачивается в свои элементы.
+     */
     static List<ObjectSets.Item> fromNavigatorSelection(
             IStructuredSelection selection, ObjectSets.SetDef targetSet)
     {
         List<ObjectSets.Item> result = new ArrayList<>();
         if (selection == null || targetSet == null)
             return result;
+        ITreeContentProvider content = navigatorContentProvider();
+        Set<Object> visited = Collections.newSetFromMap(new IdentityHashMap<>());
+        Set<String> seenKeys = new LinkedHashSet<>();
+        for (Object element : selection.toList())
+            collectNavigatorItems(element, targetSet.projectName, content, visited, seenKeys, result);
+        return result;
+    }
+
+    /**
+     * Можно ли добавить выделение навигатора — без разворота верхних коллекций
+     * («Справочники»): {@code getChildren} там ходит в индекс проекта.
+     */
+    static boolean canAddFromNavigatorSelection(
+            IStructuredSelection selection, ObjectSets.SetDef targetSet)
+    {
+        if (selection == null || targetSet == null)
+            return false;
+        ITreeContentProvider content = navigatorContentProvider();
+        Set<Object> visited = Collections.newSetFromMap(new IdentityHashMap<>());
         for (Object element : selection.toList())
         {
-            ObjectSets.Item item = fromNavigatorElement(element, targetSet.projectName);
+            if (canCollectNavigatorItem(element, targetSet.projectName, content, visited))
+                return true;
+        }
+        return false;
+    }
+
+    private static void collectNavigatorItems(
+            Object element, String projectName, ITreeContentProvider content,
+            Set<Object> visited, Set<String> seenKeys, List<ObjectSets.Item> result)
+    {
+        if (element == null || !visited.add(element))
+            return;
+        if (NavigatorTreeElementLabels.isNavigatorConfigurationRoot(element))
+            return;
+        if (shouldExpandNavigatorGroup(element))
+        {
+            for (Object child : navigatorGroupChildren(element, content))
+                collectNavigatorItems(child, projectName, content, visited, seenKeys, result);
+            return;
+        }
+        ObjectSets.Item item = fromNavigatorElement(element, projectName);
+        if (item != null && item.key != null && !item.key.isBlank() && seenKeys.add(item.key))
+            result.add(item);
+    }
+
+    private static boolean canCollectNavigatorItem(
+            Object element, String projectName, ITreeContentProvider content, Set<Object> visited)
+    {
+        if (element == null || !visited.add(element))
+            return false;
+        if (NavigatorTreeElementLabels.isNavigatorConfigurationRoot(element))
+            return false;
+        if (shouldExpandNavigatorGroup(element))
+            return groupHasAddableChildren(element, content);
+        return fromNavigatorElement(element, projectName) != null;
+    }
+
+    private static boolean shouldExpandNavigatorGroup(Object element)
+    {
+        if (element instanceof CommonModuleGroupNode)
+            return true;
+        if (NavigatorTreeElementLabels.isInsideObjectCollectionFolder(element))
+            return true;
+        return NavigatorTreeElementLabels.isGroupNode(element);
+    }
+
+    private static boolean groupHasAddableChildren(Object element, ITreeContentProvider content)
+    {
+        if (element instanceof CommonModuleGroupNode group)
+            return !group.getMembers().isEmpty();
+        if (NavigatorTreeElementLabels.isInsideObjectCollectionFolder(element))
+        {
+            Integer size = collectionFeatureSize(element);
+            if (size != null)
+                return size.intValue() > 0;
+        }
+        if (content == null)
+            return false;
+        try
+        {
+            return content.hasChildren(element);
+        }
+        catch (RuntimeException e)
+        {
+            ObjectSetsDebug.problem("groupHasAddableChildren: " + e); //$NON-NLS-1$
+            return false;
+        }
+    }
+
+    private static List<Object> navigatorGroupChildren(Object element, ITreeContentProvider content)
+    {
+        if (element instanceof CommonModuleGroupNode group)
+            return new ArrayList<>(group.getMembers());
+        if (content != null)
+        {
+            try
+            {
+                if (content.hasChildren(element))
+                {
+                    Object[] children = content.getChildren(element);
+                    if (children != null && children.length > 0)
+                    {
+                        List<Object> result = new ArrayList<>(children.length);
+                        for (Object child : children)
+                        {
+                            if (child != null)
+                                result.add(child);
+                        }
+                        return result;
+                    }
+                }
+            }
+            catch (RuntimeException e)
+            {
+                ObjectSetsDebug.problem("navigatorGroupChildren: " + e); //$NON-NLS-1$
+            }
+        }
+        return childrenFromCollectionFeature(element);
+    }
+
+    private static List<Object> childrenFromCollectionFeature(Object element)
+    {
+        Object featureObj = Global.invoke(element, "getContentFeature"); //$NON-NLS-1$
+        if (!(featureObj instanceof EStructuralFeature feature))
+            return List.of();
+        Object model = Global.invoke(element, "getModel", Boolean.TRUE); //$NON-NLS-1$
+        if (!(model instanceof EObject eObject))
+            return List.of();
+        Object value = eObject.eGet(feature);
+        if (!(value instanceof Collection<?> collection))
+            return List.of();
+        List<Object> result = new ArrayList<>();
+        for (Object item : collection)
+        {
             if (item != null)
                 result.add(item);
         }
         return result;
+    }
+
+    private static Integer collectionFeatureSize(Object element)
+    {
+        Object featureObj = Global.invoke(element, "getContentFeature"); //$NON-NLS-1$
+        if (!(featureObj instanceof EStructuralFeature feature))
+            return null;
+        Object model = Global.invoke(element, "getModel", Boolean.FALSE); //$NON-NLS-1$
+        if (!(model instanceof EObject eObject))
+            return null;
+        Object value = eObject.eGet(feature);
+        return value instanceof Collection<?> collection
+            ? Integer.valueOf(collection.size()) : null;
+    }
+
+    private static ITreeContentProvider navigatorContentProvider()
+    {
+        IViewPart view = Global.getViewById(Global.NAVIGATOR_VIEW_ID);
+        if (view == null)
+            return null;
+        Object viewer = Global.invoke(view, "getCommonViewer"); //$NON-NLS-1$
+        if (!(viewer instanceof StructuredViewer structured))
+            return null;
+        Object provider = structured.getContentProvider();
+        return provider instanceof ITreeContentProvider tree ? tree : null;
     }
 
     static List<ObjectSets.Item> fromRecentPlaceEntries(
@@ -138,6 +304,8 @@ final class ObjectSetsItems
         }
         if (keys.isEmpty())
             return AddResult.none();
+        if (target.kind == ObjectSets.SetKind.INFOBASE_CHANGED)
+            return addItemsToInfobaseChangedSet(target, keys, shell);
         int existing = ObjectSets.getInstance().countExistingKeys(target, keys);
         int added = ObjectSets.getInstance().addItems(target.id, items);
         showAddToast(target.name, added, existing, keys.size(), shell);
@@ -148,6 +316,32 @@ final class ObjectSetsItems
                 view.refreshItemsForSetIfSelected(target.id);
         }
         return new AddResult(added, existing);
+    }
+
+    private static AddResult addItemsToInfobaseChangedSet(
+        ObjectSets.SetDef target, List<String> keys, Shell shell)
+    {
+        InfobaseChangedObjects.MarkResult marked = InfobaseChangedObjects.markChanged(
+            target.projectName, ObjectSets.infobaseUuidOf(target), keys);
+        if (marked.error != null)
+        {
+            ToastNotification.show("Наборы объектов", marked.error, 5000); //$NON-NLS-1$
+            return AddResult.none();
+        }
+        if (marked.added <= 0 && marked.existing <= 0)
+        {
+            ToastNotification.show("Наборы объектов",
+                "Не найдены файлы объектов в хранилище синхронизации", 5000); //$NON-NLS-1$
+            return AddResult.none();
+        }
+        showAddToast(target.name, marked.added, marked.existing, keys.size(), shell);
+        if (marked.added > 0)
+        {
+            ObjectSetsView view = ObjectSetsView.getActiveInstance();
+            if (view != null)
+                view.refreshItemsForSetIfSelected(target.id);
+        }
+        return new AddResult(marked.added, marked.existing);
     }
 
     static MoveResult moveItemsToSet(ObjectSets.SetDef source, ObjectSets.SetDef target,
@@ -168,7 +362,26 @@ final class ObjectSetsItems
         List<String> keys = new ArrayList<>();
         for (ObjectSets.Item item : unique)
             keys.add(item.key);
-        int added = ObjectSets.getInstance().addItems(target.id, unique);
+        int added;
+        if (target.kind == ObjectSets.SetKind.INFOBASE_CHANGED)
+        {
+            InfobaseChangedObjects.MarkResult marked = InfobaseChangedObjects.markChanged(
+                target.projectName, ObjectSets.infobaseUuidOf(target), keys);
+            if (marked.error != null)
+            {
+                ToastNotification.show("Наборы объектов", marked.error, 5000); //$NON-NLS-1$
+                return MoveResult.none();
+            }
+            if (marked.added <= 0 && marked.existing <= 0)
+            {
+                ToastNotification.show("Наборы объектов",
+                    "Не найдены файлы объектов в хранилище синхронизации", 5000); //$NON-NLS-1$
+                return MoveResult.none();
+            }
+            added = marked.added;
+        }
+        else
+            added = ObjectSets.getInstance().addItems(target.id, unique);
         int removed = ObjectSets.getInstance().removeItems(source.id, keys);
         showMoveToast(target.name, added, removed, keys.size(), shell);
         if (added > 0 || removed > 0)

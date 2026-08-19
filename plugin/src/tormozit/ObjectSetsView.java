@@ -442,6 +442,7 @@ public final class ObjectSetsView extends ViewPart
 
         TableViewerColumn colIcon = new TableViewerColumn(itemsViewer, SWT.NONE);
         colIcon.getColumn().setText(""); //$NON-NLS-1$
+        colIcon.getColumn().setResizable(false);
         colIcon.setLabelProvider(new ColumnLabelProvider()
         {
             @Override
@@ -679,7 +680,7 @@ public final class ObjectSetsView extends ViewPart
     {
         Listener hover = e ->
         {
-            String tip = null;
+            String tip = "";
             if (e.type != SWT.MouseExit)
             {
                 Point p = new Point(e.x, e.y);
@@ -926,7 +927,7 @@ public final class ObjectSetsView extends ViewPart
     private String displayItemCountText(ObjectSets.SetDef set)
     {
         int count = displayItemCount(set);
-        return count == COUNT_UNKNOWN ? "?" : Integer.toString(count); //$NON-NLS-1$
+        return InfobaseChangedObjects.displayCountText(count, count == COUNT_UNKNOWN);
     }
 
     /**
@@ -948,11 +949,17 @@ public final class ObjectSetsView extends ViewPart
             return COUNT_UNKNOWN;
         boolean selected = selectedSet != null && set.id.equals(selectedSet.id);
         if (dynamicItemsCache != null && selected)
+        {
+            if (InfobaseChangedObjects.isResultPending(set))
+                return COUNT_UNKNOWN;
             return dynamicItemsCache.size();
+        }
         Integer cached = dynamicCountBySetId.get(set.id);
         if (cached != null)
             return cached;
         List<ObjectSets.Item> items = ObjectSetsItems.collectDynamicItems(set);
+        if (set.kind == ObjectSets.SetKind.INFOBASE_CHANGED && InfobaseChangedObjects.isResultPending(set))
+            return COUNT_UNKNOWN;
         dynamicCountBySetId.put(set.id, items.size());
         return items.size();
     }
@@ -971,7 +978,8 @@ public final class ObjectSetsView extends ViewPart
 
     /**
      * Пока набор «&lt;Измененные <i>ИмяБазы</i>&gt;» показан в панели, его состав должен оставаться
-     * актуальным: правки в проекте меняют список объектов, ожидающих синхронизации.
+     * актуальным: правки в проекте и повтор расчёта, пока сервис синхронизации ещё не готов
+     * ({@link InfobaseChangedObjects#addChangeListener}).
      *
      * <p>Пересчёт стоит ~375 мс (служебный поток синхронизации EDT), поэтому он выполняется только
      * когда такой набор действительно выбран в таблице — для остальных наборов и при закрытой
@@ -989,52 +997,6 @@ public final class ObjectSetsView extends ViewPart
             return;
         InfobaseChangedObjects.removeChangeListener(infobaseChangedListener);
         infobaseChangedListener = null;
-    }
-
-    /** Пауза между повторами расчёта состава набора по базе, мс. */
-    private static final int INFOBASE_RETRY_DELAY_MS = 3500;
-
-    /** Сколько раз повторять, пока сервисы EDT поднимаются (примерно полминуты). */
-    private static final int INFOBASE_RETRY_MAX_ATTEMPTS = 10;
-
-    private int infobaseRetryAttempt;
-    private boolean infobaseRetryPending;
-
-    /**
-     * Повторить расчёт состава, если он вернул «пока неизвестно».
-     *
-     * <p>Сразу после старта EDT сервис синхронизации ещё не поднят, и выбранный в панели набор
-     * «&lt;Измененные <i>ИмяБазы</i>&gt;» показывался пустым до тех пор, пока пользователь не
-     * перевыберет строку вручную. Пока ответ недостоверный, повторяем — расчёт в этом состоянии
-     * упирается в дешёвую проверку и почти ничего не стоит.
-     */
-    private void scheduleInfobaseRetryIfPending(ObjectSets.SetDef set)
-    {
-        if (set == null || set.kind != ObjectSets.SetKind.INFOBASE_CHANGED
-            || infobaseRetryPending
-            || !InfobaseChangedObjects.isResultPending(set))
-        {
-            return;
-        }
-        if (infobaseRetryAttempt >= INFOBASE_RETRY_MAX_ATTEMPTS)
-            return;
-        Display display = setsViewer.getControl().getDisplay();
-        if (display.isDisposed())
-            return;
-        infobaseRetryPending = true;
-        infobaseRetryAttempt++;
-        display.timerExec(INFOBASE_RETRY_DELAY_MS, () ->
-        {
-            infobaseRetryPending = false;
-            if (setsViewer == null || setsViewer.getControl().isDisposed())
-                return;
-            if (selectedSet == null || selectedSet.kind != ObjectSets.SetKind.INFOBASE_CHANGED)
-                return;
-            dynamicItemsCache = null;
-            dynamicCountBySetId.remove(selectedSet.id);
-            setsViewer.refresh(selectedSet, true);
-            refreshItemsTable();
-        });
     }
 
     private void onInfobaseChangedInvalidated()
@@ -1234,10 +1196,7 @@ public final class ObjectSetsView extends ViewPart
         if (selectedSet.system)
         {
             if (dynamicItemsCache == null)
-            {
                 dynamicItemsCache = ObjectSetsItems.collectDynamicItems(selectedSet);
-                scheduleInfobaseRetryIfPending(selectedSet);
-            }
             all = dynamicItemsCache;
         }
         else
@@ -1320,7 +1279,7 @@ public final class ObjectSetsView extends ViewPart
     {
         if (target == null || dragSelection == null || dragSelection.isEmpty())
             return;
-        if (target.system)
+        if (!target.allowsAddedItems())
         {
             showSystemSetNotEditableToast(target);
             return;
@@ -1350,9 +1309,9 @@ public final class ObjectSetsView extends ViewPart
     {
         if (source == null || target == null || dragSelection == null || dragSelection.isEmpty())
             return;
-        if (source.system || target.system)
+        if (source.kind.isDynamic() || !target.allowsAddedItems())
         {
-            showSystemSetNotEditableToast(target.system ? target : source);
+            showSystemSetNotEditableToast(target.allowsAddedItems() ? source : target);
             return;
         }
         List<ObjectSets.Item> items = collectObjectSetItems(dragSelection);
@@ -1367,7 +1326,7 @@ public final class ObjectSetsView extends ViewPart
     {
         if (target == null || dragSelection == null || dragSelection.isEmpty())
             return;
-        if (target.system)
+        if (!target.allowsAddedItems())
         {
             showSystemSetNotEditableToast(target);
             return;
@@ -1383,7 +1342,7 @@ public final class ObjectSetsView extends ViewPart
             "Набор «" + set.name + "» — состав не редактируется", 4000); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
     }
 
-    private static boolean isObjectSetItemsDrag(IStructuredSelection selection)
+    static boolean isObjectSetItemsDrag(IStructuredSelection selection)
     {
         if (selection == null || selection.isEmpty())
             return false;
@@ -1412,7 +1371,7 @@ public final class ObjectSetsView extends ViewPart
     {
         if (source == null || target == null || source.id.equals(target.id)
                 || !source.projectName.equals(target.projectName)
-                || source.system || target.system)
+                || source.kind.isDynamic() || !target.allowsAddedItems())
             return DND.DROP_NONE;
         return isCtrlKeyDown() ? DND.DROP_COPY : DND.DROP_MOVE;
     }
@@ -1547,14 +1506,38 @@ public final class ObjectSetsView extends ViewPart
 
     void showSelectedInNavigator()
     {
-        ObjectSets.Item item = getSelectedItem();
-        if (item == null || selectedSet == null)
+        showItemInNavigator(getSelectedItem());
+    }
+
+    EObject resolveItemToEObject(ObjectSets.Item item)
+    {
+        ObjectSets.SetDef set = dragSourceSet != null ? dragSourceSet : selectedSet;
+        if (item == null || set == null)
+            return null;
+        IProject project = ResourcesPlugin.getWorkspace().getRoot().getProject(set.projectName);
+        if (project == null || !project.exists())
+            return null;
+        IV8ProjectManager projectManager =
+            (IV8ProjectManager) Global.getServiceByClass(IV8ProjectManager.class);
+        IV8Project v8Project = projectManager.getProject(project);
+        if (v8Project == null)
+            return null;
+        String mdRef = RecentPlacesKeys.mdObjectRefFromKey(item.key);
+        if (mdRef == null || mdRef.isBlank())
+            return null;
+        return GoToDefinition.resolveEObjectForFullName(mdRef, getSite().getPage(), project);
+    }
+
+    void showItemInNavigator(ObjectSets.Item item)
+    {
+        ObjectSets.SetDef set = dragSourceSet != null ? dragSourceSet : selectedSet;
+        if (item == null || set == null)
             return;
-        IProject project = ResourcesPlugin.getWorkspace().getRoot().getProject(selectedSet.projectName);
+        IProject project = ResourcesPlugin.getWorkspace().getRoot().getProject(set.projectName);
         if (project == null || !project.exists())
         {
             ToastNotification.show("Наборы объектов",
-                "Проект «" + selectedSet.projectName + "» не найден", 4000); //$NON-NLS-1$ //$NON-NLS-2$
+                "Проект «" + set.projectName + "» не найден", 4000); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         IV8ProjectManager projectManager =
@@ -1815,6 +1798,12 @@ public final class ObjectSetsView extends ViewPart
                 dragSourceSet = selectedSet;
                 setsSelectionAnchor = selectedSet;
                 event.doit = !selection.isEmpty() && isObjectSetItemsDrag(selection);
+                if (event.doit)
+                {
+                    Object first = selection.getFirstElement();
+                    NavigatorRevealDropHook.begin(first instanceof ObjectSets.Item item
+                        ? resolveItemToEObject(item) : null);
+                }
             }
 
             @Override
@@ -1826,6 +1815,7 @@ public final class ObjectSetsView extends ViewPart
             @Override
             public void dragFinished(DragSourceEvent event)
             {
+                NavigatorRevealDropHook.end();
                 dragSourceSet = null;
                 setsSelectionAnchor = null;
                 if (setsViewer != null && !setsViewer.getControl().isDisposed())
@@ -1843,7 +1833,7 @@ public final class ObjectSetsView extends ViewPart
             @Override
             public void dragOver(DropTargetEvent event)
             {
-                if (selectedSet == null || selectedSet.system)
+                if (selectedSet == null || !selectedSet.allowsAddedItems())
                 {
                     event.detail = DND.DROP_NONE;
                     return;
@@ -1902,7 +1892,7 @@ public final class ObjectSetsView extends ViewPart
             {
                 event.feedback &= ~DND.FEEDBACK_SELECT;
                 ObjectSets.SetDef set = setAt(event);
-                if (set == null || set.system)
+                if (set == null || !set.allowsAddedItems())
                 {
                     event.detail = DND.DROP_NONE;
                     return;

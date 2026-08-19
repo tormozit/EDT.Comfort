@@ -1,5 +1,6 @@
 package tormozit;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Set;
 import java.util.WeakHashMap;
@@ -29,7 +30,6 @@ import org.eclipse.swt.widgets.TreeItem;
 import org.eclipse.ui.IEditorReference;
 import org.eclipse.ui.IPartListener2;
 import org.eclipse.ui.IStartup;
-import org.eclipse.ui.IViewPart;
 import org.eclipse.ui.IViewReference;
 import org.eclipse.ui.IWindowListener;
 import org.eclipse.ui.IWorkbench;
@@ -45,23 +45,20 @@ import com._1c.g5.v8.dt.common.ui.controls.search.SearchBox;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
 
 /**
- * Универсальный DnD «навигатор → список»: если состав списка нельзя изменить перетаскиванием
- * (нет своего обработчика drop на добавление), сброс узла метаданных подставляет
- * иерархическое имя (для реквизита — {@code Реквизит.Бик}) в ближайшее поле
- * {@link SearchBox} и запускает поиск.
+ * DnD «навигатор → список», если состав списка нельзя менять перетаскиванием
+ * (на списке нет своего обработчика drop на добавление).
  *
- * <p>Дерево сравнения конфигураций сюда не входит: у него нет поля поиска рядом со списком,
- * а поиск строки — специализированный ({@code CompareConfigMenuHook.NavigatorDropSupport}).
- * Навигатор и панель {@link ObjectSetsView} пропускаются: у них свой обработчик drop.
+ * <p>Если список допускает дубли объектов метаданных (вкладка «Права», окно «Все роли») —
+ * имя подставляется в поле {@link SearchBox}, связанное с этим списком напрямую,
+ * и запускается поиск. 
  *
- * <p>Вкладка «Права» и окно «Все роли» — {@code ObjectsSection}: дерево без штатного
- * {@code DropTarget}, запрет рисует родитель (область редактора). Вешаем цель на само дерево.
+ * <p>Иначе выделяется строка перетаскиваемого объекта в том списке, куда сбросили.
+ *
+ * <p>Навигатор, наборы объектов и дерево сравнения сюда не входят: у них свой drop.
  */
 public final class NavigatorDropSearchHook implements IStartup
 {
-    private static final String LOG = "navigator-drop-search"; //$NON-NLS-1$
     private static final String INSTALLED_KEY = "tormozit.navigatorDropSearch"; //$NON-NLS-1$
-    private static final String OBJECT_SETS_VIEW_ID = "tormozit.ObjectSetsView"; //$NON-NLS-1$
     private static final int PARENT_WALK = 8;
     private static final int CHILD_WALK = 6;
 
@@ -198,7 +195,7 @@ public final class NavigatorDropSearchHook implements IStartup
         if (tree == null || tree.isDisposed() || searchBox.isDisposed())
             return;
         log("rights install tree=" + tree.hashCode() + " searchBox=" + searchBox.hashCode()); //$NON-NLS-1$ //$NON-NLS-2$
-        installPair(searchBox, tree);
+        installFilterPair(searchBox, tree);
     }
 
     private static void scanControl(Control root)
@@ -227,50 +224,56 @@ public final class NavigatorDropSearchHook implements IStartup
         if (Boolean.TRUE.equals(origin.getData(INSTALLED_KEY)))
             return;
 
-        SearchBox searchBox;
         Control list;
+        SearchBox searchBox;
         if (origin instanceof SearchBox box)
         {
             searchBox = box;
-            list = findAssociatedList(box);
+            list = findDirectList(box);
         }
-        else if (origin instanceof Tree || origin instanceof Table)
+        else if (isList(origin))
         {
             list = origin;
-            searchBox = findSearchBoxNear(origin);
+            searchBox = findDirectSearchBox(origin);
         }
         else
             return;
-        if (searchBox == null || searchBox.isDisposed() || list == null || list.isDisposed())
+        if (list == null || list.isDisposed() || isNavigatorList(list) || hasForeignDropTarget(list))
         {
             log("tryInstall skip origin=" + origin.getClass().getSimpleName() //$NON-NLS-1$
-                + " searchBox=" + (searchBox == null) + " list=" + typeName(list)); //$NON-NLS-1$ //$NON-NLS-2$
+                + " list=" + typeName(list)); //$NON-NLS-1$
             return;
         }
-        if (isNavigatorOrObjectSetsList(list))
+
+        if (allowsDuplicateMdObjects(list) && searchBox != null && !searchBox.isDisposed()
+                && findDirectSearchBox(list) == searchBox)
+        {
+            log("tryInstall filter origin=" + origin.getClass().getSimpleName()); //$NON-NLS-1$
+            installFilterPair(searchBox, list);
             return;
-        log("tryInstall ok origin=" + origin.getClass().getSimpleName() //$NON-NLS-1$
-            + " list=" + list.getClass().getSimpleName()); //$NON-NLS-1$
-        installPair(searchBox, list);
+        }
+        if (origin instanceof SearchBox)
+            return;
+        log("tryInstall select origin=" + origin.getClass().getSimpleName()); //$NON-NLS-1$
+        installOn(list, list);
     }
 
-    private static void installPair(SearchBox searchBox, Control list)
+    private static void installFilterPair(SearchBox searchBox, Control list)
     {
-        installOn(list, searchBox, list);
-        installOn(searchBox, searchBox, list);
+        installOn(list, list);
+        installOn(searchBox, list);
         Control text = searchTextControl(searchBox);
         if (text != null)
-            installOn(text, searchBox, list);
-        Control parent = list.getParent();
-        if (parent != null && !parent.isDisposed() && parent == searchBox.getParent())
-            installOn(parent, searchBox, list);
+            installOn(text, list);
     }
 
-    private static void installOn(Control control, SearchBox searchBox, Control list)
+    private static void installOn(Control control, Control list)
     {
         if (control == null || control.isDisposed())
             return;
         if (Boolean.TRUE.equals(control.getData(INSTALLED_KEY)))
+            return;
+        if (control == list && hasForeignDropTarget(list))
             return;
         DropTarget target = ensureDropTarget(control);
         if (target == null)
@@ -279,21 +282,19 @@ public final class NavigatorDropSearchHook implements IStartup
             return;
         }
         ensureLocalSelectionTransfer(target);
-        target.addDropListener(new SearchDropListener(searchBox, list));
+        target.addDropListener(new SearchDropListener(list));
         control.setData(INSTALLED_KEY, Boolean.TRUE);
         log("DropTarget on " + control.getClass().getSimpleName() + "#" + control.hashCode() //$NON-NLS-1$ //$NON-NLS-2$
-            + " existingListenersOk transfers=" + transfersOf(target)); //$NON-NLS-1$
+            + " transfers=" + transfersOf(target)); //$NON-NLS-1$
     }
 
     private static final class SearchDropListener extends DropTargetAdapter
     {
-        private final SearchBox searchBox;
         private final Control list;
-        private boolean acceptSearch;
+        private boolean acceptDrop;
 
-        SearchDropListener(SearchBox searchBox, Control list)
+        SearchDropListener(Control list)
         {
-            this.searchBox = searchBox;
             this.list = list;
         }
 
@@ -324,26 +325,34 @@ public final class NavigatorDropSearchHook implements IStartup
         @Override
         public void dragLeave(DropTargetEvent event)
         {
-            acceptSearch = false;
+            acceptDrop = false;
         }
 
         @Override
         public void drop(DropTargetEvent event)
         {
-            String text = resolveSearchText();
-            log("drop acceptSearch=" + acceptSearch + " text=" + text //$NON-NLS-1$ //$NON-NLS-2$
+            String fullName = resolveDraggedFullName();
+            log("drop accept=" + acceptDrop + " full=" + fullName //$NON-NLS-1$ //$NON-NLS-2$
                 + " detail=" + event.detail); //$NON-NLS-1$
-            if (!acceptSearch || text == null)
+            if (!acceptDrop || fullName == null)
                 return;
-            applySearch(searchBox, list, text);
+            SearchBox direct = findDirectSearchBox(list);
+            if (direct != null && allowsDuplicateMdObjects(list))
+            {
+                String search = hierarchicalSearchName(fullName);
+                if (search != null && !search.isBlank())
+                    applySearch(direct, list, search);
+                return;
+            }
+            selectMatchingRow(list, fullName);
         }
 
         private void updateDetail(DropTargetEvent event, String logKind)
         {
-            String text = resolveSearchText();
-            if (text == null)
+            String fullName = resolveDraggedFullName();
+            if (fullName == null)
             {
-                acceptSearch = false;
+                acceptDrop = false;
                 if (logKind != null)
                     log("drag " + logKind + " noText sel=" + describeSelection() //$NON-NLS-1$ //$NON-NLS-2$
                         + " detail=" + event.detail); //$NON-NLS-1$
@@ -352,13 +361,13 @@ public final class NavigatorDropSearchHook implements IStartup
             preferLocalSelectionDataType(event);
             event.detail = DND.DROP_MOVE;
             event.feedback = DND.FEEDBACK_NONE;
-            acceptSearch = true;
+            acceptDrop = true;
             if (logKind != null)
-                log("drag " + logKind + " MOVE text=" + text); //$NON-NLS-1$ //$NON-NLS-2$
+                log("drag " + logKind + " MOVE full=" + fullName); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 
-    private static String resolveSearchText()
+    private static String resolveDraggedFullName()
     {
         Object selObj = LocalSelectionTransfer.getTransfer().getSelection();
         if (!(selObj instanceof IStructuredSelection sel) || sel.isEmpty())
@@ -367,11 +376,7 @@ public final class NavigatorDropSearchHook implements IStartup
         if (element == null || NavigatorTreeElementLabels.isGroupNode(element))
             return null;
         String fullName = GetRef.fullNameFromNavigatorElement(element);
-        if (fullName == null || fullName.isBlank())
-            return null;
-        String name = hierarchicalSearchName(fullName);
-        log("resolveSearchText full=" + fullName + " search=" + name); //$NON-NLS-1$ //$NON-NLS-2$
-        return name == null || name.isBlank() ? null : name;
+        return fullName == null || fullName.isBlank() ? null : fullName;
     }
 
     /**
@@ -408,9 +413,9 @@ public final class NavigatorDropSearchHook implements IStartup
     {
         if (searchBox == null || searchBox.isDisposed())
             return;
-            log("applySearch " + text); //$NON-NLS-1$
-            RightsEditorFilterHook.applyExactReference(searchBox);
-            searchBox.setText(text);
+        log("applySearch " + text); //$NON-NLS-1$
+        RightsEditorFilterHook.applyExactReference(searchBox);
+        searchBox.setText(text);
         Global.invoke(searchBox, "performSearch"); //$NON-NLS-1$
         Display display = searchBox.getDisplay();
         if (display == null || display.isDisposed())
@@ -428,121 +433,282 @@ public final class NavigatorDropSearchHook implements IStartup
             list.setFocus();
     }
 
-    private static void selectFirstVisible(Control list)
+    private static void selectMatchingRow(Control list, String fullName)
     {
-        if (list == null || list.isDisposed())
+        if (list == null || list.isDisposed() || fullName == null || fullName.isBlank())
             return;
         if (list instanceof Table table)
         {
-            if (table.getItemCount() <= 0)
+            for (TableItem item : table.getItems())
+            {
+                if (matchesFullName(item.getData(), fullName))
+                {
+                    table.setSelection(item);
+                    table.showSelection();
+                    table.setFocus();
+                    return;
+                }
+            }
+            return;
+        }
+        if (!(list instanceof Tree tree) || tree.getItemCount() <= 0)
+            return;
+        TreeItem found = findTreeItem(tree.getItems(), fullName);
+        if (found == null)
+            return;
+        tree.setSelection(found);
+        tree.showItem(found);
+        tree.setFocus();
+    }
+
+    private static TreeItem findTreeItem(TreeItem[] items, String fullName)
+    {
+        for (TreeItem item : items)
+        {
+            if (item == null || item.isDisposed())
+                continue;
+            if (matchesFullName(item.getData(), fullName))
+                return item;
+            TreeItem nested = findTreeItem(item.getItems(), fullName);
+            if (nested != null)
+                return nested;
+        }
+        return null;
+    }
+
+    private static boolean matchesFullName(Object data, String fullName)
+    {
+        if (data == null)
+            return false;
+        String have = GetRef.fullNameFromNavigatorElement(data);
+        return fullName.equals(have);
+    }
+
+    private static void selectFirstVisible(Control list)
+    {
+        if (list instanceof Table table)
+        {
+            if (table.isDisposed() || table.getItemCount() <= 0)
                 return;
             table.setSelection(table.getItem(0));
             table.showSelection();
             return;
         }
-        if (list instanceof Tree tree)
-        {
-            if (tree.getItemCount() <= 0)
-                return;
-            TreeItem first = tree.getItem(0);
-            tree.setSelection(first);
-            tree.showItem(first);
-        }
+        if (!(list instanceof Tree tree) || tree.isDisposed() || tree.getItemCount() <= 0)
+            return;
+        TreeItem first = tree.getItem(0);
+        tree.setSelection(first);
+        tree.showItem(first);
     }
 
-    private static SearchBox findSearchBoxNear(Control list)
+    /**
+     * Поле фильтра, связанное со списком напрямую: пара {@code objectsSection.viewer/searchBox}
+     * либо SearchBox в той же секции, без общего предка с другим {@link Tree}/{@link Table}.
+     */
+    private static SearchBox findDirectSearchBox(Control list)
     {
-        SearchBox found = findAssociatedSearchBox(list);
-        if (found != null)
-            return found;
-        for (Control current = list; current != null; current = current.getParent())
-        {
-            Object value = Global.getField(current, "searchBox"); //$NON-NLS-1$
-            if (value instanceof SearchBox box && !box.isDisposed())
-                return box;
-        }
-        return null;
-    }
-
-    private static SearchBox findAssociatedSearchBox(Control list)
-    {
+        if (list == null || list.isDisposed())
+            return null;
+        SearchBox fromSection = searchBoxOfRightsList(list);
+        if (fromSection != null)
+            return fromSection;
         Composite parent = list.getParent();
         for (int depth = 0; depth < PARENT_WALK && parent != null && !parent.isDisposed(); depth++)
         {
-            SearchBox found = findSearchBoxIn(parent, list, 0);
-            if (found != null)
-                return found;
             if (parent instanceof CTabFolder || parent instanceof Shell)
                 break;
+            Control scope = countLists(parent) > 1 ? childContaining(parent, list) : parent;
+            SearchBox found = findSearchBoxExclusive(scope, list, 0);
+            if (found != null)
+                return found;
             parent = parent.getParent();
         }
         return null;
     }
 
-    private static Control findAssociatedList(SearchBox searchBox)
+    /**
+     * Список, для которого {@code searchBox} — прямой фильтр. Если в предке несколько
+     * списков и поле не лежит в секции ровно одного из них — {@code null}.
+     */
+    private static Control findDirectList(SearchBox searchBox)
     {
+        if (searchBox == null || searchBox.isDisposed())
+            return null;
         Composite parent = searchBox.getParent();
         for (int depth = 0; depth < PARENT_WALK && parent != null && !parent.isDisposed(); depth++)
         {
-            Control found = findListIn(parent, searchBox, 0);
-            if (found != null)
-                return found;
             if (parent instanceof CTabFolder || parent instanceof Shell)
                 break;
+            Control[] lists = collectLists(parent);
+            if (lists.length == 1)
+                return lists[0];
+            if (lists.length > 1)
+            {
+                Control pane = childContaining(parent, searchBox);
+                Control[] inPane = pane == null ? new Control[0] : collectLists(pane);
+                return inPane.length == 1 ? inPane[0] : null;
+            }
             parent = parent.getParent();
         }
         return null;
     }
 
-    private static SearchBox findSearchBoxIn(Composite root, Control skip, int depth)
+    private static SearchBox findSearchBoxExclusive(Control root, Control list, int depth)
     {
         if (root == null || root.isDisposed() || depth > CHILD_WALK)
             return null;
-        for (Control child : root.getChildren())
+        if (root instanceof SearchBox box)
+            return box;
+        if (!(root instanceof Composite composite))
+            return null;
+        for (Control child : composite.getChildren())
         {
-            if (child == skip || child.isDisposed())
+            if (child == null || child.isDisposed() || child == list)
                 continue;
-            if (child instanceof SearchBox box)
-                return box;
-            if (child instanceof Composite composite)
+            if (isList(child) || containsOtherList(child, list))
+                continue;
+            SearchBox found = findSearchBoxExclusive(child, list, depth + 1);
+            if (found != null)
+                return found;
+        }
+        return null;
+    }
+
+    private static boolean containsOtherList(Control root, Control list)
+    {
+        if (root == null || root.isDisposed())
+            return false;
+        if (isList(root))
+            return root != list;
+        if (!(root instanceof Composite composite))
+            return false;
+        for (Control child : composite.getChildren())
+        {
+            if (containsOtherList(child, list))
+                return true;
+        }
+        return false;
+    }
+
+    private static Control childContaining(Composite parent, Control descendant)
+    {
+        for (Control current = descendant; current != null; current = current.getParent())
+        {
+            if (current.getParent() == parent)
+                return current;
+        }
+        return null;
+    }
+
+    private static int countLists(Control root)
+    {
+        return collectLists(root).length;
+    }
+
+    private static Control[] collectLists(Control root)
+    {
+        ArrayList<Control> lists = new ArrayList<>();
+        collectListsInto(root, lists);
+        return lists.toArray(new Control[0]);
+    }
+
+    private static void collectListsInto(Control root, ArrayList<Control> lists)
+    {
+        if (root == null || root.isDisposed())
+            return;
+        if (isList(root))
+        {
+            lists.add(root);
+            return;
+        }
+        if (!(root instanceof Composite composite))
+            return;
+        for (Control child : composite.getChildren())
+            collectListsInto(child, lists);
+    }
+
+    private static boolean isList(Control control)
+    {
+        return control instanceof Tree || control instanceof Table;
+    }
+
+    private static boolean hasForeignDropTarget(Control list)
+    {
+        if (list == null || list.isDisposed())
+            return false;
+        if (Boolean.TRUE.equals(list.getData(INSTALLED_KEY)))
+            return false;
+        return list.getData(DND.DROP_TARGET_KEY) instanceof DropTarget;
+    }
+
+    private static boolean allowsDuplicateMdObjects(Control list)
+    {
+        return objectsSectionForList(list) != null;
+    }
+
+    private static SearchBox searchBoxOfRightsList(Control list)
+    {
+        Object section = objectsSectionForList(list);
+        if (section == null)
+            return null;
+        Object searchObj = Global.getField(section, "searchBox"); //$NON-NLS-1$
+        return searchObj instanceof SearchBox box && !box.isDisposed() ? box : null;
+    }
+
+    private static Object objectsSectionForList(Control list)
+    {
+        if (!(list instanceof Tree tree) || tree.isDisposed())
+            return null;
+        IWorkbench workbench = PlatformUI.getWorkbench();
+        if (workbench == null)
+            return null;
+        for (IWorkbenchWindow window : workbench.getWorkbenchWindows())
+        {
+            for (IWorkbenchPage page : window.getPages())
             {
-                SearchBox found = findSearchBoxIn(composite, skip, depth + 1);
-                if (found != null)
-                    return found;
+                for (IEditorReference ref : page.getEditorReferences())
+                {
+                    IWorkbenchPart part = ref.getPart(false);
+                    if (part == null)
+                        continue;
+                    Object section = sectionIfTree(part, tree);
+                    if (section != null)
+                        return section;
+                    if (part instanceof DtGranularEditor<?> editor)
+                    {
+                        section = sectionIfTree(Global.invoke(editor, "getActivePageInstance"), tree); //$NON-NLS-1$
+                        if (section != null)
+                            return section;
+                        section = sectionIfTree(editor.getSelectedPage(), tree);
+                        if (section != null)
+                            return section;
+                    }
+                }
             }
         }
         return null;
     }
 
-    private static Control findListIn(Composite root, Control skip, int depth)
+    private static Object sectionIfTree(Object owner, Tree tree)
     {
-        if (root == null || root.isDisposed() || depth > CHILD_WALK)
+        if (owner == null)
             return null;
-        for (Control child : root.getChildren())
-        {
-            if (child == skip || child.isDisposed())
-                continue;
-            if (child instanceof Tree || child instanceof Table)
-                return child;
-            if (child instanceof SearchBox)
-                continue;
-            if (child instanceof Composite composite)
-            {
-                Control found = findListIn(composite, skip, depth + 1);
-                if (found != null)
-                    return found;
-            }
-        }
-        return null;
+        Object section = Global.getField(owner, "objectsSection"); //$NON-NLS-1$
+        if (section == null)
+            return null;
+        Object viewerObj = Global.getField(section, "viewer"); //$NON-NLS-1$
+        if (!(viewerObj instanceof TreeViewer viewer))
+            return null;
+        Tree sectionTree = viewer.getTree();
+        return sectionTree == tree ? section : null;
     }
 
-    private static boolean isNavigatorOrObjectSetsList(Control list)
+    private static boolean isNavigatorList(Control list)
     {
         if (isNavigatorTree(list))
             return true;
         return isUnderView(list, Global.NAVIGATOR_VIEW_ID)
-            || isUnderView(list, "org.eclipse.ui.navigator.ProjectExplorer") //$NON-NLS-1$
-            || isUnderView(list, OBJECT_SETS_VIEW_ID);
+            || isUnderView(list, "org.eclipse.ui.navigator.ProjectExplorer"); //$NON-NLS-1$
     }
 
     private static boolean isNavigatorTree(Control list)
@@ -556,7 +722,7 @@ public final class NavigatorDropSearchHook implements IStartup
         {
             for (IWorkbenchPage page : window.getPages())
             {
-                IViewPart view = page.findView(Global.NAVIGATOR_VIEW_ID);
+                IWorkbenchPart view = page.findView(Global.NAVIGATOR_VIEW_ID);
                 if (view == null)
                     continue;
                 Object raw = Global.invoke(view, "getCommonViewer"); //$NON-NLS-1$
@@ -576,7 +742,7 @@ public final class NavigatorDropSearchHook implements IStartup
         {
             for (IWorkbenchPage page : window.getPages())
             {
-                IViewPart view = page.findView(viewId);
+                IWorkbenchPart view = page.findView(viewId);
                 if (view == null)
                     continue;
                 Object parent = Global.getField(view, "parent"); //$NON-NLS-1$

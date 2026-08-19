@@ -227,6 +227,7 @@ public final class RecentPlacesView extends ViewPart
         TableViewerColumn colIcon = new TableViewerColumn(listViewer, SWT.NONE);
         iconColumn = colIcon.getColumn();
         iconColumn.setText(""); //$NON-NLS-1$
+        iconColumn.setResizable(false);
         colIcon.setLabelProvider(new ColumnLabelProvider()
         {
             @Override
@@ -1215,12 +1216,24 @@ public final class RecentPlacesView extends ViewPart
                 IStructuredSelection selection = listViewer.getStructuredSelection();
                 LocalSelectionTransfer.getTransfer().setSelection(selection);
                 event.doit = !selection.isEmpty();
+                if (event.doit)
+                {
+                    Object first = selection.getFirstElement();
+                    NavigatorRevealDropHook.begin(first instanceof RecentPlaces.Entry entry
+                        ? RecentPlacesShowInNavigatorHandler.resolveEObject(entry) : null);
+                }
             }
 
             @Override
             public void dragSetData(DragSourceEvent event)
             {
                 LocalSelectionTransfer.getTransfer().setSelection(listViewer.getStructuredSelection());
+            }
+
+            @Override
+            public void dragFinished(DragSourceEvent event)
+            {
+                NavigatorRevealDropHook.end();
             }
         });
     }

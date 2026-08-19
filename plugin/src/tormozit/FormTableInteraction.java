@@ -560,6 +560,9 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
 
         ListSelectionThemeColors.markOptOut(table);
         INSTANCES.put(table, this);
+        // Win32 ListView: если тултип таблицы не задан (null), наведение на картинку ячейки
+        // показывает увеличенную копию иконки. Пустая строка (не null) отключает эту подсказку.
+        table.setToolTipText(""); //$NON-NLS-1$
 
         mouseDownListener = this::onMouseDown;
         table.addListener(SWT.MouseDown, mouseDownListener);

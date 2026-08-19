@@ -23,6 +23,8 @@ public final class NavigatorTreeElementLabels
 {
     private static final String VIRTUAL_ADAPTER =
             "com._1c.g5.v8.dt.navigator.adapters.VirtualNavigatorAdapterBase"; //$NON-NLS-1$
+    private static final String COLLECTION_ADAPTER =
+            "com._1c.g5.v8.dt.navigator.adapters.CollectionNavigatorAdapterBase"; //$NON-NLS-1$
     private static final String EXTERNAL_FOLDER_ADAPTER =
             "com._1c.g5.v8.dt.navigator.adapters.ExternalObjectFolderNavigatorAdapterBase"; //$NON-NLS-1$
 
@@ -142,6 +144,23 @@ public final class NavigatorTreeElementLabels
         if (hasRootMdObjectIdentity(element))
             return false;
         return isGroupNodeStructural(element) || isMetadataTypeCollectionFolderByClassName(element);
+    }
+
+    /**
+     * Папка коллекции внутри объекта МД («Формы», «Реквизиты», «Макеты», «Команды»…).
+     * {@link #isGroupNode} для них даёт {@code false}: адаптер резолвится в полное имя
+     * владельца (справочник, документ), и папка выглядит как сам объект.
+     */
+    public static boolean isInsideObjectCollectionFolder(Object element)
+    {
+        if (element == null || element instanceof CommonModuleGroupNode)
+            return false;
+        if (!isInstanceOf(element, COLLECTION_ADAPTER))
+            return false;
+        Object owner = Global.invoke(element, "getModel", Boolean.FALSE); //$NON-NLS-1$
+        if (!(owner instanceof EObject eObject))
+            return false;
+        return !MdClassPackage.Literals.CONFIGURATION.equals(eObject.eClass());
     }
 
     /**
