@@ -196,6 +196,7 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
     private Listener menuDetectListener;
     private Listener keyFilter;
     private Listener mouseDownListener;
+    private Listener imageTipListener;
     /** Programmatic {@code viewer.setSelection} часто не шлёт SWT.Selection — см. {@link #syncActiveCellFromSelection}. */
     private ISelectionChangedListener viewerSelectionListener;
     private TableColumn[] ownerDrawColumns = NO_OWNER_DRAW_COLUMNS;
@@ -560,12 +561,12 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
 
         ListSelectionThemeColors.markOptOut(table);
         INSTANCES.put(table, this);
-        // Win32 ListView: если тултип таблицы не задан (null), наведение на картинку ячейки
-        // показывает увеличенную копию иконки. Пустая строка (не null) отключает эту подсказку.
-        table.setToolTipText(""); //$NON-NLS-1$
 
         mouseDownListener = this::onMouseDown;
         table.addListener(SWT.MouseDown, mouseDownListener);
+        imageTipListener = this::onImageCellTooltip;
+        table.addListener(SWT.MouseMove, imageTipListener);
+        table.addListener(SWT.MouseExit, imageTipListener);
 
         eraseItemListener = this::onEraseItem;
         table.addListener(SWT.EraseItem, eraseItemListener);
@@ -723,6 +724,45 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
         redrawAffectedRows(previousSelection, table.getSelection(), previousActive);
         if (!useViewerForMultiSelect())
             syncSelection();
+    }
+
+    /**
+     * Win32 ListView: наведение на картинку ячейки без текста показывает увеличенную копию иконки.
+     * Пустой тултип таблицы это глушит; {@code null} возвращает штатные подсказки по обрезанному
+     * тексту ячеек. Глушим только над ячейкой «картинка без текста».
+     */
+    private void onImageCellTooltip(Event e)
+    {
+        if (table == null || table.isDisposed())
+            return;
+        boolean suppress = e.type != SWT.MouseExit && isImageOnlyCellAt(e.x, e.y);
+        String current = table.getToolTipText();
+        if (suppress)
+        {
+            if (!"".equals(current))
+                table.setToolTipText(""); //$NON-NLS-1$
+            return;
+        }
+        if ("".equals(current))
+            table.setToolTipText(null);
+    }
+
+    private boolean isImageOnlyCellAt(int x, int y)
+    {
+        TableItem item = table.getItem(new Point(x, y));
+        if (item == null || item.isDisposed())
+            return false;
+        int column = columnAt(x, y, item);
+        if (column < 0)
+            return false;
+        Rectangle bounds = item.getBounds(column);
+        if (bounds == null || !bounds.contains(x, y))
+            return false;
+        Image image = item.getImage(column);
+        if (image == null || image.isDisposed())
+            return false;
+        String text = item.getText(column);
+        return text == null || text.isEmpty();
     }
 
     private void onMouseDown(Event e)

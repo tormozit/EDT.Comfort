@@ -861,16 +861,18 @@ public class GoToDefinition extends AbstractHandler
 
     /**
      * Резолв {@link EObject} метаданных по полному имени без открытия редактора
-     * (для «Показать в навигаторе» и т.п.).
+     * (списки, DnD на навигатор, «Показать в навигаторе»). Без автоподключения ИР.
+     * Переход к определению из редактора модуля — {@link #openByFullName} / {@code jump}.
      */
     public static EObject resolveEObjectForFullName(String fullName, IWorkbenchPage page, IProject project)
     {
-        return resolveEObjectForFullName(fullName, page, project, true);
+        return resolveEObjectForFullName(fullName, page, project, false);
     }
 
     /**
-     * @param useIrLinkNormalizer {@code false} для LabelProvider на UI-потоке (иконки):
-     *     без синхронного COM/ИР; {@code true} — навигация с нормализацией форм/макетов через ИР
+     * @param useIrLinkNormalizer {@code false} — без COM/ИР (LabelProvider, списки, DnD).
+     *     {@code true} — нормализация форм/макетов через ИР; при «Авто ИР» может запустить
+     *     подключение. Для списков не передавать.
      */
     public static EObject resolveEObjectForFullName(
         String fullName, IWorkbenchPage page, IProject project, boolean useIrLinkNormalizer)

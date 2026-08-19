@@ -680,7 +680,7 @@ public final class ObjectSetsView extends ViewPart
     {
         Listener hover = e ->
         {
-            String tip = "";
+            String tip = null;
             if (e.type != SWT.MouseExit)
             {
                 Point p = new Point(e.x, e.y);
