@@ -19,8 +19,6 @@ import org.eclipse.core.runtime.IStatus;
 import org.eclipse.core.runtime.Status;
 import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.jface.dialogs.IDialogSettings;
-import org.eclipse.jface.action.Action;
-import org.eclipse.jface.action.IAction;
 import org.eclipse.jface.viewers.CellLabelProvider;
 import org.eclipse.jface.viewers.ColumnLabelProvider;
 import org.eclipse.jface.viewers.IBaseLabelProvider;
@@ -42,8 +40,6 @@ import org.eclipse.swt.dnd.TextTransfer;
 import org.eclipse.swt.dnd.Transfer;
 import org.eclipse.swt.events.ControlAdapter;
 import org.eclipse.swt.events.ControlEvent;
-import org.eclipse.swt.events.MouseAdapter;
-import org.eclipse.swt.events.MouseEvent;
 import org.eclipse.swt.graphics.Color;
 import org.eclipse.swt.graphics.Device;
 import org.eclipse.swt.graphics.Image;
@@ -52,7 +48,6 @@ import org.eclipse.swt.graphics.RGB;
 import org.eclipse.swt.graphics.Rectangle;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.widgets.Composite;
-import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Listener;
@@ -60,7 +55,6 @@ import org.eclipse.swt.widgets.Text;
 import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.TreeColumn;
 import org.eclipse.swt.widgets.TreeItem;
-import org.eclipse.ui.IActionBars;
 import org.eclipse.ui.IPartListener2;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.IViewPart;
@@ -72,7 +66,6 @@ import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchPartSite;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
-import org.eclipse.ui.actions.ActionFactory;
 
 /**
  * Многословный фильтр ({@link SmartMatcher}, AND по словам) в панели «Индексирование Git»
@@ -122,10 +115,11 @@ import org.eclipse.ui.actions.ActionFactory;
  * синхронизируются между {@code stagedViewer}/{@code unstagedViewer}
  * ({@link #saveColumnState}, {@link #syncWidthToPeer}/{@link #syncOrderToPeer}).
  *
- * <p>Выбор ячейки, подсветка активной ячейки/строки и копирование по Ctrl+C — {@link
- * #GitStagingTreeInteraction}, по образцу {@code DebugInspectorTreeEnhancement} (control остаётся
- * штатным {@code Tree}/{@code TreeViewer} — drag&drop stage/unstage, открытие сравнения по
- * двойному клику и автоподстановка commit message остаются штатными EGit, не переопределяются).
+ * <p>Выбор ячейки, подсветка активной ячейки/строки и копирование текста ячейки по Ctrl+C —
+ * {@link #GitStagingTreeInteraction} + {@link CopyCommandSupport#wireCopyOverride} (control остаётся
+ * штатным {@code Tree}/{@code TreeViewer} — мультивыделение Ctrl/Shift, drag&drop stage/unstage,
+ * открытие сравнения по двойному клику и автоподстановка commit message остаются штатными EGit,
+ * не переопределяются).
  * Штатное контекстное меню только дополняется группой пунктов отбора по значению ячейки (issue
  * #266, п.2–5: «Отобрать/Снять отбор», «Различные значения колонки», «Отключить все отборы»,
  * «Отобрано элементов: N») — {@link TreeColumnValueFilterSupport}, общий код с {@link
@@ -579,8 +573,6 @@ public final class GitStagingFilterHook implements IStartup
             Tree unstagedTree = unstaged != null ? unstaged.getTree() : null;
             if (unstagedTree != null && !unstagedTree.isDisposed())
                 FilterInputBoxListNavigation.installTreeNavigation(filterText, unstagedTree);
-
-            installCopyOverride(view);
 
             session.onModify();
 
@@ -1347,8 +1339,8 @@ public final class GitStagingFilterHook implements IStartup
     }
 
     // -----------------------------------------------------------------------
-    // Tree-взаимодействие: выбор ячейки, подсветка активной ячейки/строки, копирование
-    // (по образцу DebugInspectorTreeEnhancement — см. javadoc класса).
+    // Tree-взаимодействие: выбор ячейки, подсветка активной ячейки/строки,
+    // копирование Ctrl+C через CopyCommandSupport (см. javadoc класса).
     // -----------------------------------------------------------------------
 
     private static final class GitStagingTreeInteraction
@@ -1358,6 +1350,7 @@ public final class GitStagingFilterHook implements IStartup
         private TreeItem selectedItem;
         private int activeColumn;
         private Color ownedRowBg;
+        private Color ownedInactiveRowBg;
         private Color ownedActiveCellBg;
         private int sortLogical = -1;
         private boolean sortAscending = true;
@@ -1373,22 +1366,7 @@ public final class GitStagingFilterHook implements IStartup
             tree.setData(INTERACTION_KEY, this);
             ListSelectionThemeColors.markOptOut(tree);
 
-            tree.addMouseListener(new MouseAdapter()
-            {
-                @Override
-                public void mouseDown(MouseEvent e)
-                {
-                    if (e.button != 1)
-                        return;
-                    TreeItem item = itemAt(tree, e.x, e.y);
-                    if (item == null)
-                        return;
-                    int column = columnAt(tree, e.x, e.y, item);
-                    if (column < 0)
-                        column = 0;
-                    selectCell(item, column);
-                }
-            });
+            tree.addListener(SWT.MouseDown, this::onMouseDown);
 
             tree.addListener(SWT.EraseItem, this::onEraseItem);
             tree.addListener(SWT.PaintItem, this::onPaintItem);
@@ -1397,6 +1375,8 @@ public final class GitStagingFilterHook implements IStartup
             tree.addListener(SWT.Selection, e -> { syncFromSelection(); invalidateColors(); tree.redraw(); });
 
             tree.addDisposeListener(e -> invalidateColors());
+            // Win32: Ctrl+C не доходит до KeyDown (акселератор Edit→Copy) — только через команду.
+            CopyCommandSupport.wireCopyOverride(tree, this::copyActiveCellToClipboard);
         }
 
         // ---- сортировка по клику на заголовке колонки ----
@@ -1441,17 +1421,32 @@ public final class GitStagingFilterHook implements IStartup
             viewer.setSelection(new StructuredSelection(elements), true);
         }
 
-        private void selectCell(TreeItem item, int column)
+        private void onMouseDown(Event e)
         {
+            if (e.button != 1)
+                return;
+            TreeItem item = itemAt(tree, e.x, e.y);
+            if (item == null)
+                return;
+            int column = columnAt(tree, e.x, e.y, item);
+            if (column < 0)
+                column = 0;
+            // Только запоминаем активную ячейку. tree.setSelection(item) сбрасывает
+            // штатное SWT.MULTI (Ctrl/Shift и клик по уже выделенной строке для drag).
             selectedItem = item;
             activeColumn = column;
             invalidateColors();
-            tree.setSelection(item);
             tree.redraw();
         }
 
         private void syncFromSelection()
         {
+            if (selectedItem != null && !selectedItem.isDisposed() && isRowSelected(selectedItem))
+            {
+                if (activeColumn < 0 || activeColumn >= tree.getColumnCount())
+                    activeColumn = 0;
+                return;
+            }
             TreeItem[] sel = tree.getSelection();
             if (sel.length > 0)
                 selectedItem = sel[0];
@@ -1459,8 +1454,22 @@ public final class GitStagingFilterHook implements IStartup
                 activeColumn = 0;
         }
 
+        private boolean isRowSelected(TreeItem item)
+        {
+            if (item == null || item.isDisposed())
+                return false;
+            for (TreeItem s : tree.getSelection())
+            {
+                if (s == item)
+                    return true;
+            }
+            return false;
+        }
+
         private TreeItem currentSelectedRow()
         {
+            if (selectedItem != null && !selectedItem.isDisposed() && isRowSelected(selectedItem))
+                return selectedItem;
             TreeItem[] sel = tree.getSelection();
             if (sel.length > 0)
                 return sel[0];
@@ -1485,17 +1494,25 @@ public final class GitStagingFilterHook implements IStartup
 
         void copyActiveCellToClipboard()
         {
+            int column = activeColumnIndex();
             TreeItem[] sel = tree.getSelection();
-            if (sel.length > 0)
-                selectedItem = sel[0];
-            if (selectedItem == null || selectedItem.isDisposed())
-                return;
-            int column = activeColumn;
-            if (column < 0 || column >= tree.getColumnCount())
-                column = 0;
-            String text = selectedItem.getText(column);
-            if (text == null)
-                text = ""; //$NON-NLS-1$
+            if (sel.length == 0)
+            {
+                if (selectedItem == null || selectedItem.isDisposed())
+                    return;
+                sel = new TreeItem[] { selectedItem };
+            }
+            List<TreeItem> rows = sel.length == 1
+                ? List.of(sel[0])
+                : selectedItemsInDisplayOrder(sel);
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < rows.size(); i++)
+            {
+                if (i > 0)
+                    sb.append('\n');
+                sb.append(cellText(rows.get(i), column));
+            }
+            String text = sb.toString();
             Clipboard clipboard = new Clipboard(tree.getDisplay());
             try
             {
@@ -1507,25 +1524,65 @@ public final class GitStagingFilterHook implements IStartup
             }
         }
 
+        private String cellText(TreeItem item, int column)
+        {
+            String text = item.getText(column);
+            if (text == null || text.isEmpty())
+            {
+                Object element = item.getData();
+                text = element != null ? sortKey(element, logicalOfColumn(tree, column)) : ""; //$NON-NLS-1$
+            }
+            return text != null ? text : ""; //$NON-NLS-1$
+        }
+
+        private List<TreeItem> selectedItemsInDisplayOrder(TreeItem[] sel)
+        {
+            Set<TreeItem> wanted = Collections.newSetFromMap(new IdentityHashMap<>());
+            for (TreeItem item : sel)
+                wanted.add(item);
+            List<TreeItem> ordered = new ArrayList<>(sel.length);
+            collectSelectedInOrder(tree.getItems(), wanted, ordered);
+            return ordered.isEmpty() ? List.of(sel) : ordered;
+        }
+
+        private static void collectSelectedInOrder(TreeItem[] items, Set<TreeItem> wanted,
+            List<TreeItem> out)
+        {
+            for (TreeItem item : items)
+            {
+                if (wanted.contains(item))
+                    out.add(item);
+                if (item.getExpanded() && item.getItemCount() > 0)
+                    collectSelectedInOrder(item.getItems(), wanted, out);
+            }
+        }
+
         // ---- подсветка активной ячейки/строки (см. DebugInspectorTreeEnhancement) ----
 
         private void onEraseItem(Event e)
         {
             if (!(e.item instanceof TreeItem item))
                 return;
-            TreeItem row = currentSelectedRow();
-            if (row == null || item != row)
+            if (!isRowSelected(item) && item != selectedItem)
                 return;
-            Color rowBg = rowSelectionBackground();
-            Color bg = e.index == activeColumn ? activeCellBackground(rowBg) : rowBg;
+            boolean activeRow = item == selectedItem;
+            Color rowBg = activeRow ? rowSelectionBackground() : inactiveRowSelectionBackground();
+            Color bg = activeRow && e.index == activeColumnIndex()
+                ? activeCellBackground(rowBg) : rowBg;
             e.gc.setBackground(bg);
             e.gc.fillRectangle(e.x, e.y, e.width, e.height);
             e.detail &= ~SWT.BACKGROUND;
+            if (ListSelectionThemeColors.isDarkList(tree))
+            {
+                e.detail &= ~SWT.SELECTED;
+                e.detail &= ~SWT.HOT;
+            }
         }
 
         private void onPaintItem(Event e)
         {
-            if (!(e.item instanceof TreeItem item) || item != currentSelectedRow() || e.index != activeColumn)
+            if (!(e.item instanceof TreeItem item) || item != selectedItem
+                || e.index != activeColumnIndex())
                 return;
             Rectangle bounds = item.getBounds(e.index);
             if (bounds == null || bounds.isEmpty())
@@ -1536,7 +1593,8 @@ public final class GitStagingFilterHook implements IStartup
             try
             {
                 e.gc.setForeground(frame);
-                e.gc.drawRectangle(bounds.x, bounds.y, Math.max(0, bounds.width - 1), Math.max(0, bounds.height - 1));
+                e.gc.drawRectangle(bounds.x, bounds.y, Math.max(0, bounds.width - 1),
+                    Math.max(0, bounds.height - 1));
             }
             finally
             {
@@ -1561,6 +1619,26 @@ public final class GitStagingFilterHook implements IStartup
             double factor = tree.isFocusControl() ? 0.12 : 0.08;
             ownedRowBg = slightlyDarker(base, factor);
             return ownedRowBg;
+        }
+
+        /** Фон прочих выбранных строк при мультивыделении (слабее текущей). */
+        private Color inactiveRowSelectionBackground()
+        {
+            if (ownedInactiveRowBg != null && !ownedInactiveRowBg.isDisposed())
+                return ownedInactiveRowBg;
+            if (ListSelectionThemeColors.isDarkList(tree))
+            {
+                ownedInactiveRowBg = ListSelectionThemeColors.inactiveRowSelectionBackground(
+                    tree, tree.isFocusControl());
+                return ownedInactiveRowBg;
+            }
+            Display display = tree.getDisplay();
+            Color base = tree.getBackground();
+            if (base == null || base.isDisposed())
+                base = display.getSystemColor(SWT.COLOR_LIST_BACKGROUND);
+            double factor = tree.isFocusControl() ? 0.08 : 0.05;
+            ownedInactiveRowBg = slightlyDarker(base, factor);
+            return ownedInactiveRowBg;
         }
 
         private Color activeCellBackground(Color rowBg)
@@ -1595,9 +1673,12 @@ public final class GitStagingFilterHook implements IStartup
         {
             if (ownedRowBg != null && !ownedRowBg.isDisposed())
                 ownedRowBg.dispose();
+            if (ownedInactiveRowBg != null && !ownedInactiveRowBg.isDisposed())
+                ownedInactiveRowBg.dispose();
             if (ownedActiveCellBg != null && !ownedActiveCellBg.isDisposed())
                 ownedActiveCellBg.dispose();
             ownedRowBg = null;
+            ownedInactiveRowBg = null;
             ownedActiveCellBg = null;
         }
 
@@ -1644,42 +1725,6 @@ public final class GitStagingFilterHook implements IStartup
                     return i;
             }
             return 0;
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Тулбар: копирование активной ячейки (Ctrl+C / Edit>Copy)
-    // -----------------------------------------------------------------------
-
-    /** Заменяет глобальный обработчик Copy на активной ячейке того Tree, в котором сейчас фокус. */
-    private static void installCopyOverride(IViewPart view)
-    {
-        try
-        {
-            IActionBars bars = view.getViewSite().getActionBars();
-            if (bars == null)
-                return;
-            IAction copyAction = new Action()
-            {
-                @Override
-                public void run()
-                {
-                    Display display = Display.getCurrent();
-                    Control focus = display != null ? display.getFocusControl() : null;
-                    if (!(focus instanceof Tree tree))
-                        return;
-                    Object data = tree.getData(INTERACTION_KEY);
-                    if (data instanceof GitStagingTreeInteraction interaction)
-                        interaction.copyActiveCellToClipboard();
-                }
-            };
-            bars.setGlobalActionHandler(ActionFactory.COPY.getId(), copyAction);
-            bars.updateActionBars();
-            Debug.log("installCopyOverride OK"); //$NON-NLS-1$
-        }
-        catch (Exception e)
-        {
-            Debug.log("installCopyOverride EXCEPTION: " + e); //$NON-NLS-1$
         }
     }
 

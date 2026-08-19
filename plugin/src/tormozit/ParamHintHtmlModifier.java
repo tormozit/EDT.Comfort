@@ -224,6 +224,8 @@ public final class ParamHintHtmlModifier
                     if (!INVOCATION_PARAMETERS_HOVER_COMMAND.equals(commandId))
                         return;
                     boolean alreadyVisible = isParamHintAlreadyVisible();
+                    ContentAssistSessionReloader.logLinkedMode("cmd.post", "{\"visible\":" //$NON-NLS-1$ //$NON-NLS-2$
+                        + alreadyVisible + "}"); //$NON-NLS-1$
                     // Синхронно и только при реальном промахе — без asyncExec (иначе
                     // подмена comfort→EDT через ~50мс в основном режиме).
                     if (!alreadyVisible)
@@ -473,6 +475,8 @@ public final class ParamHintHtmlModifier
                 CallSiteInfo siteInfo = findCallSiteAt(resource, caret);
                 if (siteInfo == null)
                 {
+                    ContentAssistSessionReloader.logLinkedMode("miss.skip", //$NON-NLS-1$
+                        "{\"reason\":\"noCallSite\",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
                     return Boolean.FALSE;
                 }
                 EObjectAtOffsetHelper helper = new EObjectAtOffsetHelper();
@@ -480,6 +484,11 @@ public final class ParamHintHtmlModifier
                 Invocation invocation = findInvocationNear(resolved);
                 if (invocation == null || invocation.getMethodAccess() == null)
                 {
+                    String resolvedName = resolved != null && resolved.eClass() != null
+                        ? resolved.eClass().getName() : "null"; //$NON-NLS-1$
+                    ContentAssistSessionReloader.logLinkedMode("miss.skip", //$NON-NLS-1$
+                        "{\"reason\":\"noInvocation\",\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                            + ",\"resolved\":\"" + ContentAssistDebug.jsonEscapeForLog(resolvedName) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
                     return Boolean.FALSE;
                 }
                 FeatureAccess methodAccess = invocation.getMethodAccess();
@@ -644,9 +653,13 @@ public final class ParamHintHtmlModifier
                 }
                 return Boolean.valueOf(shown);
             });
+            ContentAssistSessionReloader.logLinkedMode("miss.open", "{\"opened\":" + opened //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         }
-        catch (Exception ignored)
+        catch (Exception ex)
         {
+            ContentAssistSessionReloader.logLinkedMode("miss.err", "{\"ex\":\"" //$NON-NLS-1$ //$NON-NLS-2$
+                + ContentAssistDebug.jsonEscapeForLog(String.valueOf(ex)) + "\"}"); //$NON-NLS-1$
         }
     }
 
@@ -1979,6 +1992,161 @@ public final class ParamHintHtmlModifier
             return null;
         text = text.trim();
         return text.isEmpty() ? null : text;
+    }
+
+    /**
+     * Текст подсказки параметра как при вводе в модуле, обычной строкой:
+     * {@code Вх.|Вых. - типы [=значение] - описание}.
+     */
+    static List<String> plainParamDescriptions(EObject method, List<String> paramNames)
+    {
+        int count = paramNames != null ? paramNames.size() : 0;
+        List<String> texts = new ArrayList<>(count);
+        if (method == null || count == 0)
+            return texts;
+        Object page = firstContentAssistPage(method);
+        Method mcore = method instanceof Method typed ? typed : null;
+        for (int i = 0; i < count; i++)
+            texts.add(paramHintTypeLine(mcore, method, page, i, paramNames.get(i)));
+        return texts;
+    }
+
+    private static String paramHintTypeLine(Method mcore, EObject method, Object page, int paramIndex,
+        String paramName)
+    {
+        Object paramContent = page != null
+            ? Global.invoke(page, "getParameter", Integer.valueOf(paramIndex)) //$NON-NLS-1$
+            : null;
+        String types = ""; //$NON-NLS-1$
+        String def = null;
+        String desc = null;
+        if (paramContent != null)
+        {
+            types = formatParamContentTypes(paramContent);
+            if (types == null)
+                types = ""; //$NON-NLS-1$
+            def = asString(Global.invoke(paramContent, "getDefaultDescription")); //$NON-NLS-1$
+            Object value = Global.invoke(paramContent, "getValue"); //$NON-NLS-1$
+            desc = resolveParamDescription(value, method, paramName);
+        }
+        if (desc == null)
+            desc = normalizeDescription(
+                BslDocCommentDescriptionFix.recoverParamDescription(method, paramName));
+        Boolean isOut = resolveIsOutForTooltip(mcore, paramIndex, paramName, paramContent);
+        StringBuilder sb = new StringBuilder();
+        if (isOut != null)
+            sb.append(isOut.booleanValue() ? "Вых." : "Вх."); //$NON-NLS-1$ //$NON-NLS-2$
+        if (!types.isBlank())
+        {
+            if (sb.length() > 0)
+                sb.append(" - "); //$NON-NLS-1$
+            sb.append(types);
+        }
+        if (def != null && !def.isBlank())
+        {
+            String formatted = formatDefaultValue(def);
+            if (formatted != null && !formatted.isBlank())
+            {
+                sb.append(" [="); //$NON-NLS-1$
+                sb.append(formatted);
+                sb.append(']');
+            }
+        }
+        if (desc != null && !desc.isBlank())
+        {
+            if (sb.length() > 0)
+                sb.append(" - "); //$NON-NLS-1$
+            sb.append(desc);
+        }
+        String line = sb.toString().trim();
+        return line.isEmpty() ? null : line;
+    }
+
+    private static Boolean resolveIsOutForTooltip(Method method, int paramIndex, String paramName,
+        Object paramContent)
+    {
+        if (method != null && paramName != null && !paramName.isBlank())
+        {
+            Parameter matched = findParameter(method, 0, paramIndex, paramName);
+            if (matched != null)
+                return Boolean.valueOf(matched.isOut());
+        }
+        return resolveIsOut(null, paramName, paramContent);
+    }
+
+    private static Object firstContentAssistPage(EObject method)
+    {
+        try
+        {
+            return firstContentAssistPageUnsafe(method);
+        }
+        catch (RuntimeException ex)
+        {
+            return null;
+        }
+    }
+
+    private static Object firstContentAssistPageUnsafe(EObject method)
+    {
+        if (!(method instanceof Method mcoreMethod))
+            return null;
+        Resource res = mcoreMethod.eResource();
+        if (res == null || res.getURI() == null)
+            return null;
+        IResourceServiceProvider rsp =
+            IResourceServiceProvider.Registry.INSTANCE.getResourceServiceProvider(res.getURI());
+        if (rsp == null)
+            return null;
+        Object provider = null;
+        try
+        {
+            Class<?> docClass = Class.forName(
+                "com._1c.g5.v8.dt.internal.bsl.ui.documentation.BslDocumentationProvider"); //$NON-NLS-1$
+            provider = rsp.get(docClass);
+        }
+        catch (Exception ignored)
+        {
+        }
+        if (provider == null)
+            return null;
+        String lang = "ru"; //$NON-NLS-1$
+        try
+        {
+            Class<?> langClass = Class.forName(
+                "com._1c.g5.v8.dt.internal.bsl.ui.syntaxassist.SyntaxAssistLanguageProvider"); //$NON-NLS-1$
+            Object languageProvider = rsp.get(langClass);
+            String fromProvider = asString(Global.invoke(languageProvider, "getLanguage")); //$NON-NLS-1$
+            if (fromProvider != null && !fromProvider.isBlank())
+                lang = fromProvider;
+        }
+        catch (Exception ignored)
+        {
+        }
+        List<Object> caPages = new ArrayList<>();
+        Object group = Global.invoke(provider, "getHoverDocumentationPages", mcoreMethod, lang); //$NON-NLS-1$
+        FindMissSupport.collectContentAssistPages(group, caPages);
+        if (caPages.isEmpty())
+            FindMissSupport.collectCaPagesFromMethodPlatformId(provider, mcoreMethod, lang, caPages);
+        if (caPages.isEmpty())
+            FindMissSupport.recoverCaPagesFromErrorGroup(provider, group, lang, caPages);
+        if (caPages.isEmpty())
+            FindMissSupport.collectCaFromViewDocumentation(provider, mcoreMethod, lang, caPages);
+        if (caPages.isEmpty())
+        {
+            EList<ParamSet> sets = mcoreMethod.getParamSet();
+            if (sets != null)
+            {
+                for (ParamSet set : sets)
+                {
+                    Object setGroup = Global.invoke(provider, "getHoverDocumentationPages", //$NON-NLS-1$
+                        set, lang);
+                    FindMissSupport.collectContentAssistPages(setGroup, caPages);
+                    if (!caPages.isEmpty())
+                        break;
+                }
+            }
+        }
+        return caPages.isEmpty() ? null : caPages.get(0);
     }
 
     /** Позиция атрибута {@code class="…className…"}, не вхождения в CSS. */

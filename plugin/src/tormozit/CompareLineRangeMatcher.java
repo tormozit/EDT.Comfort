@@ -3,6 +3,7 @@ package tormozit;
 import org.eclipse.compare.rangedifferencer.IRangeComparator;
 import org.eclipse.compare.rangedifferencer.RangeDifference;
 import org.eclipse.compare.rangedifferencer.RangeDifferencer;
+import org.eclipse.jface.text.ITextViewer;
 import org.eclipse.swt.custom.StyledText;
 
 /**
@@ -14,6 +15,8 @@ import org.eclipse.swt.custom.StyledText;
  */
 public final class CompareLineRangeMatcher
 {
+    private static boolean activating;
+
     private CompareLineRangeMatcher()
     {
     }
@@ -87,6 +90,56 @@ public final class CompareLineRangeMatcher
              */
             return -1;
         }
+    }
+
+    /**
+     * Ставит текущую строку {@code target} на {@code targetLine}, выравнивая её по вертикали
+     * с текущей строкой {@code source} (тот же отступ от верха видимой области). Каретку
+     * источника не трогает; фокус не забирает. Штатная синхронная прокрутка сравнения, если
+     * сдвинет источник, откатывается. Пока выполняется, {@link #isActivating()} — {@code true},
+     * чтобы слушатели каретки не зациклились.
+     */
+    static void revealMatchedLine(StyledText source, StyledText target, int targetLine)
+    {
+        if (activating || source == null || source.isDisposed() || target == null || target.isDisposed())
+            return;
+        if (targetLine < 0 || targetLine >= target.getLineCount())
+            return;
+        int sourceLine = lineAtCaret(source);
+        int sourceTop = source.getTopIndex();
+        int relative = sourceLine - sourceTop;
+        int desiredTop = Math.max(0, targetLine - Math.max(0, relative));
+        int currentLine = lineAtCaret(target);
+        if (currentLine == targetLine && target.getTopIndex() == desiredTop)
+            return;
+
+        activating = true;
+        try
+        {
+            if (currentLine != targetLine)
+            {
+                int offset = target.getOffsetAtLine(targetLine);
+                ITextViewer viewer = TextEditorOccurrencesSupport.viewerFor(target);
+                if (viewer != null)
+                    viewer.setSelectedRange(offset, 0);
+                else
+                    target.setSelectionRange(offset, 0);
+            }
+            if (target.getTopIndex() != desiredTop)
+                target.setTopIndex(desiredTop);
+            if (source.getTopIndex() != sourceTop)
+                source.setTopIndex(sourceTop);
+        }
+        finally
+        {
+            activating = false;
+        }
+    }
+
+    /** Идёт программная постановка текущей строки в соседнем поле — не повторять синхронизацию. */
+    static boolean isActivating()
+    {
+        return activating;
     }
 
     /** Разбивка {@link StyledText} на строки для {@link RangeDifferencer}. */

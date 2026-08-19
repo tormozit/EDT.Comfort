@@ -280,8 +280,7 @@ public final class CompareDialogCurrentLinesHook
         boolean mirrored = config != null && config.isMirrored();
         String visualLeft = mirrored ? rightLabel : leftLabel;
         String visualRight = mirrored ? leftLabel : rightLabel;
-        MergeViewerReflection.setLabelText(viewer, "fLeftLabel", visualLeft); //$NON-NLS-1$
-        MergeViewerReflection.setLabelText(viewer, "fRightLabel", visualRight); //$NON-NLS-1$
+        CompareMethodHeader.applyTwoWay(viewer, visualLeft, visualRight);
     }
 
     private static void scheduleHeaderLabelRefresh(CompareConfiguration config, TextMergeViewer viewer,

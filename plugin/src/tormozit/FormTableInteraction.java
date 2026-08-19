@@ -76,8 +76,14 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
     private static final String COLUMN_HEADER_KEY = "tormozit.formTableColHeader"; //$NON-NLS-1$
     private static final String HEADER_SORT_KEY = "tormozit.formTableHeaderSort"; //$NON-NLS-1$
     private static final String AUTO_HEADER_TOOLTIP_KEY = "tormozit.formTableColAutoHeaderTip"; //$NON-NLS-1$
+    /** Доп. текст подсказки шапки (например описание параметра). Совмещается с обрезанным именем. */
+    private static final String HEADER_TOOLTIP_EXTRA_KEY = "tormozit.formTableColHeaderTipExtra"; //$NON-NLS-1$
     /** Колонка скрыта хозяином таблицы через {@link #setColumnHidden} (не пользователем drag'ом до нуля). */
     private static final String COLUMN_HIDDEN_KEY = "tormozit.formTableColHidden"; //$NON-NLS-1$
+    /** Зафиксированная ширина non-resizable колонки (иконка и т.п.) — не перезаписывать trim'ом раскладки. */
+    private static final String FIXED_COLUMN_WIDTH_KEY = "tormozit.formTableFixedColWidth"; //$NON-NLS-1$
+    /** Ключ {@code ColumnLayoutData} у {@code AbstractColumnLayout}. */
+    private static final String JFACE_COLUMN_LAYOUT_DATA = "org.eclipse.jface.LAYOUT_DATA"; //$NON-NLS-1$
     private static final int HEADER_ACCENT_HEIGHT = 2;
     private static final int HEADER_SEPARATOR_HEIGHT = 1;
     /** Горизонтальный запас шапки Win32 (отступы без sort-иконки). */
@@ -386,6 +392,60 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
         viewer.setSelection(new StructuredSelection(elements));
     }
 
+    /**
+     * Прокручивает таблицу так, чтобы выделенные строки были видны.
+     * {@link Table#showItem} и {@code TableViewer.setSelection(..., true)} показывают
+     * только первую выделенную строку — остальные могут остаться за краем.
+     * Если диапазон выделения умещается в видимую область, в кадр попадают первая
+     * и последняя выделенные строки; иначе сверху оказывается первая.
+     */
+    void revealSelection()
+    {
+        revealSelection(table);
+    }
+
+    static void revealSelection(Table table)
+    {
+        if (table == null || table.isDisposed())
+            return;
+        int[] indices = table.getSelectionIndices();
+        if (indices == null || indices.length == 0)
+            return;
+        int min = indices[0];
+        int max = indices[0];
+        for (int index : indices)
+        {
+            if (index < min)
+                min = index;
+            if (index > max)
+                max = index;
+        }
+        int visible = visibleRowCount(table);
+        int top = table.getTopIndex();
+        int bottom = top + visible - 1;
+        if (min >= top && max <= bottom)
+            return;
+        int newTop;
+        if (max - min + 1 <= visible)
+            newTop = min < top ? min : Math.max(0, max - visible + 1);
+        else
+            newTop = min;
+        table.setTopIndex(newTop);
+    }
+
+    private static int visibleRowCount(Table table)
+    {
+        if (table == null || table.isDisposed())
+            return 1;
+        int itemHeight = table.getItemHeight();
+        if (itemHeight <= 0)
+            return 1;
+        int height = table.getClientArea().height;
+        if (height <= 0)
+            return 1;
+        return Math.max(1, height / itemHeight);
+    }
+
     void setCopyHook(Runnable copyHook)
     {
         this.copyHook = copyHook;
@@ -412,6 +472,38 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
         headerSortEnabled = true;
         for (TableColumn column : table.getColumns())
             installHeaderSortListener(column);
+    }
+
+    /**
+     * Дополнительный текст подсказки заголовка колонки (описание параметра и т.п.).
+     * Если заголовок обрезан, имя колонки показывается сверху, затем этот текст.
+     * Пустой {@code extra} снимает доп. текст — остаётся только авто-подсказка по обрезке имени.
+     */
+    void setHeaderTooltipExtra(TableColumn column, String extra)
+    {
+        if (column == null || column.isDisposed())
+            return;
+        String value = extra == null || extra.isBlank() ? null : extra.trim();
+        column.setData(HEADER_TOOLTIP_EXTRA_KEY, value);
+        scheduleHeaderOverlayUpdate();
+    }
+
+    /**
+     * Колонки добавлены или удалены после {@link #install()} — подхватить слушатели шапки,
+     * сортировку по заголовку и авто-заполнение.
+     */
+    void notifyColumnsChanged()
+    {
+        if (table == null || table.isDisposed())
+            return;
+        snapshotFixedColumnWidths();
+        if (headerSortEnabled)
+        {
+            for (TableColumn column : table.getColumns())
+                installHeaderSortListener(column);
+        }
+        scheduleHeaderOverlayUpdate();
+        scheduleAutoFill();
     }
 
     private void installHeaderSortListener(TableColumn column)
@@ -452,6 +544,12 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
         if (element == null || column == null || column.isDisposed())
             return ""; //$NON-NLS-1$
         int index = table.indexOf(column);
+        if (filterTextResolver != null)
+        {
+            String resolved = filterTextResolver.filterText(element, index);
+            if (resolved != null)
+                return resolved;
+        }
         String text = textFromColumnLabelProvider(multiSelectViewer, null, index, element);
         return text != null ? text : ""; //$NON-NLS-1$
     }
@@ -542,6 +640,25 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
         this.externalMenuPopulation = externalMenuPopulation;
     }
 
+    /**
+     * Колонка только с картинкой: фиксированная ширина {@link ColumnWidthFit#iconColumnWidth()},
+     * без ручного ресайза и без участия в авто-пересчёте.
+     */
+    static void applyIconColumn(TableColumn column, TableColumnLayout layout)
+    {
+        if (column == null || column.isDisposed())
+            return;
+        int width = ColumnWidthFit.iconColumnWidth();
+        column.setText(""); //$NON-NLS-1$
+        column.setResizable(false);
+        column.setMoveable(false);
+        column.setData(FIXED_COLUMN_WIDTH_KEY, Integer.valueOf(width));
+        if (layout != null)
+            layout.setColumnData(column, new ColumnPixelData(width, false, false));
+        else if (column.getWidth() != width)
+            column.setWidth(width);
+    }
+
     void install()
     {
         install(false);
@@ -561,6 +678,7 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
 
         ListSelectionThemeColors.markOptOut(table);
         INSTANCES.put(table, this);
+        snapshotFixedColumnWidths();
 
         mouseDownListener = this::onMouseDown;
         table.addListener(SWT.MouseDown, mouseDownListener);
@@ -2076,7 +2194,7 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
         {
             if (column.isDisposed() || column.getData(COLUMN_HEADER_KEY) != null)
                 continue;
-            if (columnReorderEnabled)
+            if (columnReorderEnabled && column.getResizable())
                 column.setMoveable(true);
             column.setData(COLUMN_HEADER_KEY, Boolean.TRUE);
             column.addControlListener(columnHeaderListener);
@@ -2108,6 +2226,11 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
     {
         if (selfAdjusting)
             return; // событие от нашего же commit — не переоткладывать накопление заново
+        if (col != null && !col.isDisposed() && !col.getResizable())
+        {
+            restoreFixedColumnWidth(col);
+            return;
+        }
         if (col == null || col.isDisposed() || !columnAutoResizeEnabled)
         {
             cancelPendingResizeCommit();
@@ -2205,8 +2328,8 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
     /** Подтянуть ширину колонки до {@link #minColumnWidth()}, если native drag увёл её ниже (в т.ч. до 0). */
     private void clampColumnMinWidth(TableColumn col)
     {
-        if (col == null || col.isDisposed() || isHiddenColumn(col))
-            return; // скрытую хозяином колонку (нулевая ширина по метке) до минимума не подтягиваем
+        if (col == null || col.isDisposed() || isHiddenColumn(col) || !col.getResizable())
+            return; // скрытую и non-resizable (иконка) до минимума по шрифту не подтягиваем
         int minWidth = minColumnWidth();
         if (col.getWidth() >= minWidth)
             return;
@@ -2387,6 +2510,7 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
         {
             columnsExactFillBefore = false; // переполнение уже было ДО этого — не наш случай, не трогаем
         }
+        restoreAllFixedColumnWidths();
     }
 
     private void growColumnsToFill(int total, int clientW, int cols)
@@ -2514,8 +2638,76 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
                 continue;
             // Скрытая нулевой шириной колонка (см. isHiddenColumn) остаётся нулевой — иначе layout
             // при следующей раскладке вернул бы ей 1 px и сделал видимой.
-            int width = isHiddenColumn(c) ? 0 : Math.max(1, c.getWidth());
-            layout.setColumnData(c, new ColumnPixelData(width, c.getResizable(), i < cols - 1));
+            // Non-resizable (колонка-иконка): без addTrim и без подхвата уже раздутой getWidth() —
+            // иначе каждый layout снова прибавляет COLUMN_TRIM (4 px на Win32).
+            if (isHiddenColumn(c))
+            {
+                layout.setColumnData(c, new ColumnPixelData(0, c.getResizable(), false));
+                continue;
+            }
+            if (!c.getResizable())
+            {
+                int fixed = Math.max(1, fixedColumnWidth(c));
+                layout.setColumnData(c, new ColumnPixelData(fixed, false, false));
+                if (c.getWidth() != fixed)
+                    c.setWidth(fixed);
+                continue;
+            }
+            int width = Math.max(1, c.getWidth());
+            layout.setColumnData(c, new ColumnPixelData(width, true, i < cols - 1));
+        }
+    }
+
+    private void snapshotFixedColumnWidths()
+    {
+        if (table == null || table.isDisposed())
+            return;
+        for (TableColumn column : table.getColumns())
+        {
+            if (!column.isDisposed() && !column.getResizable())
+                fixedColumnWidth(column);
+        }
+    }
+
+    private int fixedColumnWidth(TableColumn column)
+    {
+        Object stored = column.getData(FIXED_COLUMN_WIDTH_KEY);
+        if (stored instanceof Integer value && value.intValue() > 0)
+            return value.intValue();
+        int width = 0;
+        Object data = column.getData(JFACE_COLUMN_LAYOUT_DATA);
+        if (data instanceof ColumnPixelData pixel)
+            width = pixel.width;
+        if (width <= 0)
+            width = column.getWidth();
+        if (width > 0)
+            column.setData(FIXED_COLUMN_WIDTH_KEY, Integer.valueOf(width));
+        return width;
+    }
+
+    private void restoreAllFixedColumnWidths()
+    {
+        if (table == null || table.isDisposed())
+            return;
+        for (TableColumn column : table.getColumns())
+            restoreFixedColumnWidth(column);
+    }
+
+    private void restoreFixedColumnWidth(TableColumn column)
+    {
+        if (column == null || column.isDisposed() || column.getResizable() || isHiddenColumn(column))
+            return;
+        int expected = fixedColumnWidth(column);
+        if (expected <= 0 || column.getWidth() == expected)
+            return;
+        selfAdjusting = true;
+        try
+        {
+            column.setWidth(expected);
+        }
+        finally
+        {
+            selfAdjusting = false;
         }
     }
 
@@ -2542,6 +2734,17 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
             if (column.isDisposed())
                 continue;
             String header = column.getText();
+            String extra = headerTooltipExtra(column);
+            if (extra != null)
+            {
+                boolean showName = header != null && !header.isEmpty()
+                    && isHeaderTextTruncated(column, header);
+                String desired = showName ? header + "\n" + extra : extra; //$NON-NLS-1$
+                if (!Objects.equals(column.getToolTipText(), desired))
+                    column.setToolTipText(desired);
+                column.setData(AUTO_HEADER_TOOLTIP_KEY, Boolean.TRUE);
+                continue;
+            }
             if (header == null || header.isEmpty())
             {
                 clearAutoHeaderTooltip(column);
@@ -2549,7 +2752,7 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
             }
             String current = column.getToolTipText();
             boolean auto = Boolean.TRUE.equals(column.getData(AUTO_HEADER_TOOLTIP_KEY));
-            if (current != null && !current.isEmpty() && (!auto || !current.equals(header)))
+            if (current != null && !current.isEmpty() && !auto)
                 continue;
             String desired = isHeaderTextTruncated(column, header) ? header : null;
             if (!Objects.equals(current, desired))
@@ -2558,6 +2761,14 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
                 column.setData(AUTO_HEADER_TOOLTIP_KEY, desired != null ? Boolean.TRUE : null);
             }
         }
+    }
+
+    private static String headerTooltipExtra(TableColumn column)
+    {
+        Object extra = column.getData(HEADER_TOOLTIP_EXTRA_KEY);
+        if (!(extra instanceof String text) || text.isBlank())
+            return null;
+        return text;
     }
 
     private void clearAutoHeaderTooltip(TableColumn column)

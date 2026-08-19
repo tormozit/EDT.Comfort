@@ -32,6 +32,8 @@ final class ColumnWidthFit
     private static final int MIN_COLUMN_WIDTH_FLOOR_PX = 15;
     /** Минимальная ширина колонки в символах текущего шрифта контрола. */
     private static final int MIN_COLUMN_WIDTH_CHARS = 2;
+    /** Сторона штатной иконки объектов EDT (obj16). */
+    private static final int ICON_SIZE_PX = 16;
     /** Горизонтальные отступы текста в ячейке Win32 (слева+справа) — прибавляются к минимуму в символах. */
     private static final int CELL_TEXT_INSET_PX = 8;
 
@@ -63,6 +65,12 @@ final class ColumnWidthFit
         int[] visualOrder();
 
         Control control();
+    }
+
+    /** Ширина колонки только с картинкой: {@link #ICON_SIZE_PX} плюс горизонтальные отступы ячейки. */
+    static int iconColumnWidth()
+    {
+        return ICON_SIZE_PX + CELL_TEXT_INSET_PX;
     }
 
     /** Колонки {@link Table}. */

@@ -7,6 +7,7 @@ import java.util.function.Consumer;
 import org.eclipse.jface.viewers.ColumnLabelProvider;
 import org.eclipse.jface.viewers.ITreeContentProvider;
 import org.eclipse.jface.viewers.LabelProvider;
+import org.eclipse.jface.viewers.StructuredSelection;
 import org.eclipse.jface.viewers.StyledCellLabelProvider;
 import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.jface.viewers.Viewer;
@@ -56,16 +57,85 @@ final class CompareDialogStructurePanel
 {
     private final Composite control;
     private final Tree tree; // null, если показана область с текстом ошибки вместо дерева
+    private final TreeViewer viewer; // null вместе с tree
 
-    private CompareDialogStructurePanel(Composite control, Tree tree)
+    private CompareDialogStructurePanel(Composite control, Tree tree, TreeViewer viewer)
     {
         this.control = control;
         this.tree = tree;
+        this.viewer = viewer;
     }
 
     Composite getControl()
     {
         return control;
+    }
+
+    /**
+     * Выделяет в дереве узел метода {@code methodName}, если он есть среди различий
+     * и диапазон узла содержит каретку хотя бы с одной стороны. Не забирает фокус
+     * у полей текста. {@code false}, если дерева нет или подходящего узла нет.
+     */
+    boolean selectMethod(String methodName, int leftOffset, int rightOffset)
+    {
+        if (viewer == null || viewer.getTree().isDisposed())
+            return false;
+        Object input = viewer.getInput();
+        if (!(input instanceof DiffNode root))
+            return false;
+        if (methodName == null || methodName.isBlank())
+        {
+            if (!viewer.getStructuredSelection().isEmpty())
+                viewer.setSelection(StructuredSelection.EMPTY);
+            return false;
+        }
+        DiffNode node = findMethodNode(root, methodName, leftOffset, rightOffset);
+        if (node == null)
+        {
+            if (!viewer.getStructuredSelection().isEmpty())
+                viewer.setSelection(StructuredSelection.EMPTY);
+            return false;
+        }
+        Object current = viewer.getStructuredSelection().getFirstElement();
+        if (current == node)
+            return true;
+        viewer.setSelection(new StructuredSelection(node), true);
+        return true;
+    }
+
+    private static DiffNode findMethodNode(DiffNode root, String methodName, int leftOffset, int rightOffset)
+    {
+        DiffNode[] best = new DiffNode[1];
+        collectMethodNode(root, methodName, leftOffset, rightOffset, best);
+        return best[0];
+    }
+
+    private static void collectMethodNode(DiffNode node, String methodName, int leftOffset, int rightOffset,
+        DiffNode[] best)
+    {
+        for (DiffNode child : node.children)
+        {
+            if (methodName.equals(child.label) && containsCaret(child, leftOffset, rightOffset))
+                best[0] = child;
+            collectMethodNode(child, methodName, leftOffset, rightOffset, best);
+        }
+    }
+
+    private static boolean containsCaret(DiffNode node, int leftOffset, int rightOffset)
+    {
+        if (node.kind == Kind.SYNTAX_ERROR)
+            return false;
+        boolean left = node.hasLeft() && inRange(leftOffset, node.leftOffset, node.leftLength);
+        boolean right = node.hasRight() && inRange(rightOffset, node.rightOffset, node.rightLength);
+        return left || right;
+    }
+
+    private static boolean inRange(int offset, int start, int length)
+    {
+        if (offset < 0 || start < 0)
+            return false;
+        int end = start + Math.max(length, 0);
+        return offset >= start && offset <= end;
     }
 
     /**
@@ -97,18 +167,19 @@ final class CompareDialogStructurePanel
             if (result.root == null)
             {
                 return new CompareDialogStructurePanel(
-                    createErrorArea(parent, result, leftLabel, rightLabel), null);
+                    createErrorArea(parent, result, leftLabel, rightLabel), null, null);
             }
 
             Tree[] treeHolder = new Tree[1];
-            Composite container =
-                createTreeContainer(parent, result.root, leftLabel, rightLabel, onSelect, onDoubleClick, treeHolder);
-            return new CompareDialogStructurePanel(container, treeHolder[0]);
+            TreeViewer[] viewerHolder = new TreeViewer[1];
+            Composite container = createTreeContainer(parent, result.root, leftLabel, rightLabel, onSelect,
+                onDoubleClick, treeHolder, viewerHolder);
+            return new CompareDialogStructurePanel(container, treeHolder[0], viewerHolder[0]);
         }
         catch (RuntimeException e)
         {
             return new CompareDialogStructurePanel(createMessageArea(parent,
-                "Не удалось построить панель структуры: " + e), null); //$NON-NLS-1$
+                "Не удалось построить панель структуры: " + e), null, null); //$NON-NLS-1$
         }
     }
 
@@ -118,7 +189,8 @@ final class CompareDialogStructurePanel
      * кнопка рядом) + компактный фильтр по типу отличий, одной строкой] / [дерево].
      */
     private static Composite createTreeContainer(Composite parent, DiffNode root, String leftLabel,
-        String rightLabel, Consumer<DiffNode> onSelect, Consumer<DiffNode> onDoubleClick, Tree[] treeHolder)
+        String rightLabel, Consumer<DiffNode> onSelect, Consumer<DiffNode> onDoubleClick, Tree[] treeHolder,
+        TreeViewer[] viewerHolder)
     {
         Composite container = new Composite(parent, SWT.NONE);
         GridLayout containerLayout = new GridLayout(1, false);
@@ -140,6 +212,7 @@ final class CompareDialogStructurePanel
         treeHolder[0] = tree;
 
         TreeViewer viewer = new TreeViewer(tree);
+        viewerHolder[0] = viewer;
         viewer.setContentProvider(new DiffTreeContentProvider());
         DiffTreeLabelProvider labelProvider = new DiffTreeLabelProvider();
         viewer.setLabelProvider(labelProvider);

@@ -1386,12 +1386,36 @@ public final class IRApplication
     }
 
     /**
-     * Возвращает подключённую сессию ИР для проекта, не инициируя подключение.
-     * Аналог {@code getSession(dtProject, false)}.
+     * Возвращает подключённую сессию ИР для проекта.
+     * Аналог {@code getSession(dtProject, false)}: при включённом «Авто ИР»
+     * всё равно запускает подключение. Для чтения без запуска — {@link #peekConnectedSession}.
      */
     public static IRSession getConnectedSession(IDtProject dtProject)
     {
         return getSession(dtProject, false);
+    }
+
+    /**
+     * Уже подключённая живая сессия ИР без автоподключения и без запуска 1С.
+     * В отличие от {@link #getConnectedSession}, флажок «Авто ИР» не форсирует connect.
+     */
+    public static IRSession peekConnectedSession(IDtProject dtProject)
+    {
+        if (dtProject == null)
+            return null;
+        IProject wsProject = dtProject.getWorkspaceProject();
+        if (wsProject == null)
+            return null;
+        for (IRSession session : sessions.values())
+        {
+            if (session.project != wsProject)
+                continue;
+            if (session.state == State.CONNECTING)
+                return null;
+            if (session.state == State.CONNECTED && checkAlive(session))
+                return session;
+        }
+        return null;
     }
 
     /** Любая подключённая сессия ИР (fallback для transport-сообщений без ИД процесса). */

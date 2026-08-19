@@ -781,6 +781,7 @@ suppressDisplay.asyncExec(
                 try
                 {
                     logAssistInsertDocumentChanged(event);
+                    logParamHintDocumentChanged(event);
                 }
                 catch (Exception ignored)
                 {
@@ -955,17 +956,24 @@ suppressDisplay.asyncExec(
         pendingParamHintOnChar = false;
         int caret = pendingParamHintOnCharCaret;
         pendingParamHintOnCharCaret = -1;
-        if (caret < 0)
+        int modelCaret = modelCaretOffset();
+        boolean applyInProgress =
+            Boolean.TRUE.equals(SmartCompletionProposal.PROPOSAL_APPLY_IN_PROGRESS.get());
+        boolean hoverVisible = isParamHoverShellVisible() || isParamHoverInfoControlVisible();
+        if (caret < 0 || applyInProgress || suppressDocumentAutoOpenAfterSession || hoverVisible)
+        {
+            logLinkedMode("hint.onChar.skip", "{\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"modelCaret\":" + modelCaret //$NON-NLS-1$
+                + ",\"apply\":" + applyInProgress //$NON-NLS-1$
+                + ",\"suppress\":" + suppressDocumentAutoOpenAfterSession //$NON-NLS-1$
+                + ",\"hover\":" + hoverVisible + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
-        if (Boolean.TRUE.equals(SmartCompletionProposal.PROPOSAL_APPLY_IN_PROGRESS.get()))
-            return;
-        if (suppressDocumentAutoOpenAfterSession)
-            return;
-        if (isParamHoverShellVisible() || isParamHoverInfoControlVisible())
-            return;
+        }
         pendingShowParamHintAfterInsert = true;
         pendingParamHintDesiredCaret = caret;
-        logLinkedMode("hint.onChar", "{\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        logLinkedMode("hint.onChar", "{\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
+            + ",\"modelCaret\":" + modelCaret //$NON-NLS-1$
+            + ",\"around\":\"" + ContentAssistDebug.jsonEscapeForLog(clipAroundCaret(caret)) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
         maybeShowParamHintAfterInsert(caret);
     }
 
@@ -992,12 +1000,10 @@ suppressDisplay.asyncExec(
         }
         pendingShowParamHintAfterInsert = false;
         pendingParamHintDesiredCaret = -1;
-        if (desired < 0 || modelCaret != desired)
+        if (desired < 0)
         {
-            logLinkedMode("hint.skip", "{\"reason\":\"caretMismatch\",\"caret\":" + modelCaret //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"passed\":" + caret //$NON-NLS-1$
-                + ",\"desired\":" + desired //$NON-NLS-1$
-                + ",\"hasModel\":" + hasModel + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            logLinkedMode("hint.skip", "{\"reason\":\"noDesired\",\"caret\":" + modelCaret //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"passed\":" + caret + ",\"hasModel\":" + hasModel + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return;
         }
         StyledText widget = viewer != null ? viewer.getTextWidget() : null;
@@ -1011,6 +1017,8 @@ suppressDisplay.asyncExec(
         final int gen = paramHintPostGen.incrementAndGet();
         final long startedMs = System.currentTimeMillis();
         logLinkedMode("hint.poll", "{\"caret\":" + modelCaret //$NON-NLS-1$ //$NON-NLS-2$
+            + ",\"desired\":" + desiredCaret //$NON-NLS-1$
+            + ",\"mismatch\":" + (modelCaret != desiredCaret) //$NON-NLS-1$
             + ",\"gen\":" + gen //$NON-NLS-1$
             + ",\"hasModel\":" + hasModel + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         display.timerExec(0, () -> pollAstReadyThenShowParamHint(desiredCaret, gen, 0, startedMs));
@@ -1034,9 +1042,22 @@ suppressDisplay.asyncExec(
         if (display == null || display.isDisposed())
             return;
         int caret = modelCaretOffset();
+        long waitMs = System.currentTimeMillis() - startedMs;
         if (caret != desiredCaret)
         {
+            if (waitMs < PARAM_HINT_AST_TIMEOUT_MS)
+            {
+                if (attempt == 0)
+                {
+                    logLinkedMode("poll.waitCaret", "{\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                        + ",\"desired\":" + desiredCaret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+                display.timerExec(PARAM_HINT_AST_POLL_MS,
+                    () -> pollAstReadyThenShowParamHint(desiredCaret, gen, attempt + 1, startedMs));
+                return;
+            }
             logLinkedMode("poll.skip", "{\"reason\":\"caretMismatch\",\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"waitMs\":" + waitMs //$NON-NLS-1$
                 + ",\"caret\":" + caret + ",\"desired\":" + desiredCaret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return;
         }
@@ -1047,13 +1068,15 @@ suppressDisplay.asyncExec(
                 + ",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
-        boolean astReady = isInvocationAstReadyAt(desiredCaret);
-        long waitMs = System.currentTimeMillis() - startedMs;
+        String astAt = describeInvocationAt(desiredCaret);
+        boolean astReady = isAstDescriptionReady(astAt);
+        waitMs = System.currentTimeMillis() - startedMs;
         if (!astReady && waitMs < PARAM_HINT_AST_TIMEOUT_MS)
         {
             if (attempt == 0)
             {
                 logLinkedMode("poll.waitAst", "{\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"ast\":\"" + ContentAssistDebug.jsonEscapeForLog(astAt) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
                     + ",\"timeoutMs\":" + PARAM_HINT_AST_TIMEOUT_MS + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             }
             display.timerExec(PARAM_HINT_AST_POLL_MS,
@@ -1063,41 +1086,75 @@ suppressDisplay.asyncExec(
         logLinkedMode("poll.run", "{\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
             + ",\"waitMs\":" + waitMs //$NON-NLS-1$
             + ",\"astReady\":" + astReady //$NON-NLS-1$
+            + ",\"ast\":\"" + ContentAssistDebug.jsonEscapeForLog(astAt) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+            + ",\"around\":\"" + ContentAssistDebug.jsonEscapeForLog(clipAroundCaret(caret)) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
             + ",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         runInvocationParametersHoverCommand(desiredCaret, gen, attempt);
     }
 
-    /**
-     * Как {@code InvocationParametersHoverHandler}: у offset есть Invocation /
-     * OperatorStyleCreator (модель уже пересчитана после insert).
-     */
-    private boolean isInvocationAstReadyAt(int caret)
+    private static boolean isAstDescriptionReady(String ast)
+    {
+        if (ast == null || ast.isEmpty() || ast.startsWith("none") || ast.startsWith("err") //$NON-NLS-1$ //$NON-NLS-2$
+            || ast.startsWith("noXtext") || ast.startsWith("resourceNull")) //$NON-NLS-1$ //$NON-NLS-2$
+            return false;
+        return ast.indexOf("Invocation") >= 0 || ast.indexOf("OperatorStyleCreator") >= 0; //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /** Цепочка EObject от каретки. */
+    private String describeInvocationAt(int caret)
     {
         IDocument doc = viewer != null ? viewer.getDocument() : null;
         if (!(doc instanceof IXtextDocument xdoc))
-            return false;
+            return "noXtext"; //$NON-NLS-1$
         try
         {
-            Boolean ready = xdoc.readOnly(
-                (IUnitOfWork<Boolean, XtextResource>) resource -> {
+            String described = xdoc.readOnly(
+                (IUnitOfWork<String, XtextResource>) resource -> {
                     if (resource == null)
-                        return Boolean.FALSE;
+                        return "resourceNull"; //$NON-NLS-1$
                     EObjectAtOffsetHelper helper = new EObjectAtOffsetHelper();
                     EObject obj = helper.resolveContainedElementAt(resource, caret);
-                    for (EObject cur = obj; cur != null; cur = cur.eContainer())
+                    if (obj == null && caret > 0)
+                        obj = helper.resolveContainedElementAt(resource, caret - 1);
+                    if (obj == null)
+                        return "none"; //$NON-NLS-1$
+                    StringBuilder sb = new StringBuilder();
+                    boolean foundCall = false;
+                    int depth = 0;
+                    for (EObject cur = obj; cur != null && depth < 12; cur = cur.eContainer(), depth++)
                     {
-                        String name = cur.eClass() != null ? cur.eClass().getName() : ""; //$NON-NLS-1$
+                        String name = cur.eClass() != null ? cur.eClass().getName() : "?"; //$NON-NLS-1$
+                        if (sb.length() > 0)
+                            sb.append('>');
+                        sb.append(name);
                         if ("Invocation".equals(name) //$NON-NLS-1$
                             || "OperatorStyleCreator".equals(name)) //$NON-NLS-1$
-                            return Boolean.TRUE;
+                            foundCall = true;
                     }
-                    return Boolean.FALSE;
+                    return foundCall ? sb.toString() : "none:" + sb; //$NON-NLS-1$
                 });
-            return Boolean.TRUE.equals(ready);
+            return described != null ? described : "none"; //$NON-NLS-1$
         }
         catch (Exception ex)
         {
-return false;
+            return "err:" + String.valueOf(ex); //$NON-NLS-1$
+        }
+    }
+
+    private String clipAroundCaret(int caret)
+    {
+        IDocument doc = viewer != null ? viewer.getDocument() : null;
+        if (doc == null || caret < 0)
+            return ""; //$NON-NLS-1$
+        try
+        {
+            int from = Math.max(0, caret - 40);
+            int to = Math.min(doc.getLength(), caret + 20);
+            return doc.get(from, to - from);
+        }
+        catch (Exception ignored)
+        {
+            return ""; //$NON-NLS-1$
         }
     }
 
@@ -1526,6 +1583,7 @@ return false;
     {
         try
         {
+            Global.tempLog("param-hint", location + " " + (json == null || json.isEmpty() ? "{}" : json)); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         }
         catch (Exception ignored)
         {
@@ -2031,18 +2089,32 @@ return false;
     private void onVerifyKeyForCompletionAutoOpenImpl(VerifyEvent event)
     {
         pendingAutoOpen = false;
+        char insertedPeek = event.character == 0 ? 0 : (char)event.character;
+        boolean hintChar = insertedPeek == '(' || insertedPeek == ','
+            || event.keyCode == '(' || event.keyCode == ',';
         if (!ComfortSettings.isReplaceListFiltersEnabled())
         {
+            if (hintChar)
+                logLinkedMode("verify.skip", "{\"reason\":\"listsOff\",\"ch\":" //$NON-NLS-1$ //$NON-NLS-2$
+                    + (int)insertedPeek + ",\"key\":" + event.keyCode + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         ContentAssistSettings settings = ContentAssistSettings.getInstance();
         if (settings == null || !settings.isEnabled())
         {
+            if (hintChar)
+                logLinkedMode("verify.skip", "{\"reason\":\"autoOpenOff\",\"ch\":" //$NON-NLS-1$ //$NON-NLS-2$
+                    + (int)insertedPeek + ",\"key\":" + event.keyCode + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
-        char inserted = event.character == 0 ? 0 : (char)event.character;
+        char inserted = insertedPeek;
         if (inserted == 0)
+        {
+            if (hintChar)
+                logLinkedMode("verify.skip", "{\"reason\":\"char0\",\"key\":" + event.keyCode //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"mask\":" + event.stateMask + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
+        }
 //        int startOffset = event.start; // У клавиатурного слушателя тут 0 всегда
         int startOffset = toModelOffset(viewer.getTextWidget().getCaretOffset());
         int caretAfter = startOffset + 1;
@@ -2056,13 +2128,41 @@ return false;
         {
             String linePrefix = BslAssistSourceHeuristics.linePrefixToCaret(
                 doc, caretAfter, inserted, startOffset);
-            if (!BslAssistSourceHeuristics.isInsideLineComment(linePrefix)
-                && !BslAssistSourceHeuristics.isInsideStringLiteral(linePrefix))
+            boolean inComment = BslAssistSourceHeuristics.isInsideLineComment(linePrefix);
+            boolean inString = BslAssistSourceHeuristics.isInsideStringLiteral(linePrefix);
+            if (!inComment && !inString)
             {
                 pendingParamHintOnChar = true;
                 pendingParamHintOnCharCaret = caretAfter;
             }
+            logLinkedMode("verify.char", "{\"ch\":\"" + ContentAssistDebug.jsonEscapeForLog(String.valueOf(inserted)) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"start\":" + startOffset //$NON-NLS-1$
+                + ",\"caretAfter\":" + caretAfter //$NON-NLS-1$
+                + ",\"popup\":" + popupWasOpen //$NON-NLS-1$
+                + ",\"inComment\":" + inComment //$NON-NLS-1$
+                + ",\"inString\":" + inString //$NON-NLS-1$
+                + ",\"pending\":" + pendingParamHintOnChar //$NON-NLS-1$
+                + ",\"mask\":" + event.stateMask + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         }
+    }
+
+    private void logParamHintDocumentChanged(DocumentEvent event)
+    {
+        if (event == null || event.getText() == null)
+            return;
+        String text = event.getText();
+        if (!",".equals(text) && !"(".equals(text)) //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        StyledText st = viewer != null ? viewer.getTextWidget() : null;
+        int widgetCaret = st != null && !st.isDisposed() ? st.getCaretOffset() : -1;
+        int modelCaret = modelCaretOffset();
+        logLinkedMode("docChanged.char", "{\"text\":\"" + ContentAssistDebug.jsonEscapeForLog(text) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+            + ",\"offset\":" + event.getOffset() //$NON-NLS-1$
+            + ",\"widgetCaret\":" + widgetCaret //$NON-NLS-1$
+            + ",\"modelCaret\":" + modelCaret //$NON-NLS-1$
+            + ",\"pendingOnChar\":" + pendingParamHintOnChar //$NON-NLS-1$
+            + ",\"pendingCaret\":" + pendingParamHintOnCharCaret //$NON-NLS-1$
+            + ",\"around\":\"" + ContentAssistDebug.jsonEscapeForLog(clipAroundCaret(event.getOffset() + text.length())) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     /**

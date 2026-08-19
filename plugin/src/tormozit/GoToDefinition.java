@@ -266,7 +266,7 @@ public class GoToDefinition extends AbstractHandler
             }
         }
 
-        if (!jump(command, shell, page, project))
+        if (!jump(command, shell, page, project, !fromClipboard))
         {
             if (!consumeJumpCancelled())
             {
@@ -386,6 +386,16 @@ public class GoToDefinition extends AbstractHandler
 
     public static boolean jump(String raw, Shell shell, IWorkbenchPage page, IProject project)
     {
+        return jump(raw, shell, page, project, true);
+    }
+
+    /**
+     * @param allowIrAutoConnect {@code false} — не запускать ИР (кнопка «Перейти» из буфера).
+     *     Уже подключённая сессия используется для нормализации ссылок форм/макетов.
+     */
+    public static boolean jump(String raw, Shell shell, IWorkbenchPage page, IProject project,
+        boolean allowIrAutoConnect)
+    {
         jumpCancelled = false;
         if (raw == null)
             return false;
@@ -413,8 +423,8 @@ public class GoToDefinition extends AbstractHandler
             if (!names.isEmpty())
             {
                 if (names.size() == 1) 
-                    return openByFullName(names.get(0), shell, page, project);
-                return pickAndOpen(names, shell, page, project);
+                    return openByFullName(names.get(0), shell, page, project, allowIrAutoConnect);
+                return pickAndOpen(names, shell, page, project, allowIrAutoConnect);
             }
         }
 
@@ -427,13 +437,13 @@ public class GoToDefinition extends AbstractHandler
         {
             String firstSeg = dotRef.substring(0, firstDot);
             if (MdTypeMapping.isKnownMdRootType(firstSeg))
-                return openByFullName(mdRef, shell, page, project);
-            if (resolveConnectedIrSession(project) == null
+                return openByFullName(mdRef, shell, page, project, allowIrAutoConnect);
+            if (resolveConnectedIrSession(project, allowIrAutoConnect) == null
                 && tryOpenDirectModuleMethodOffline(dotRef, page, project))
                 return true;
         }
 
-        return openByFullName(mdRef, shell, page, project);
+        return openByFullName(mdRef, shell, page, project, allowIrAutoConnect);
     }
 
     /**
@@ -787,6 +797,12 @@ public class GoToDefinition extends AbstractHandler
 
     public static boolean openByFullName(String fullName, Shell shell, IWorkbenchPage page, IProject project)
     {
+        return openByFullName(fullName, shell, page, project, true);
+    }
+
+    private static boolean openByFullName(String fullName, Shell shell, IWorkbenchPage page, IProject project,
+        boolean allowIrAutoConnect)
+    {
         if (fullName == null || fullName.isBlank()) 
             return false;
         fullName = fullName.strip();
@@ -804,14 +820,15 @@ public class GoToDefinition extends AbstractHandler
             if (bslPath != null)
                 return openBslFileAt(bslPath, 0, page, shell, project);
         }
-        return openMdObjectByFullName(fullName, shell, page, project);
+        return openMdObjectByFullName(fullName, shell, page, project, allowIrAutoConnect);
     }
 
     // =======================================================================
     // EDT: ОТКРЫТИЕ ОБЪЕКТА МД
     // =======================================================================
 
-    private static boolean openMdObjectByFullName(String fullName, Shell shell, IWorkbenchPage page, IProject project)
+    private static boolean openMdObjectByFullName(String fullName, Shell shell, IWorkbenchPage page, IProject project,
+        boolean allowIrAutoConnect)
     {
         if (project == null)
             return false;
@@ -823,7 +840,7 @@ public class GoToDefinition extends AbstractHandler
             return false;
         }
 
-        IRSession irSession = resolveConnectedIrSession(project);
+        IRSession irSession = resolveConnectedIrSession(project, allowIrAutoConnect);
         MdLinkNormalizer.Result norm = MdLinkNormalizer.normalize(fullName, irSession);
         String normalizedRef = norm.normalizedRef();
 
@@ -904,10 +921,17 @@ public class GoToDefinition extends AbstractHandler
 
     private static IRSession resolveConnectedIrSession(IProject project)
     {
+        return resolveConnectedIrSession(project, true);
+    }
+
+    private static IRSession resolveConnectedIrSession(IProject project, boolean allowAutoConnect)
+    {
         IDtProject dtProject = Global.getDtProjectFromWorkspaceProject(project);
         if (dtProject == null)
             return null;
-        return IRApplication.getConnectedSession(dtProject);
+        if (allowAutoConnect)
+            return IRApplication.getConnectedSession(dtProject);
+        return IRApplication.peekConnectedSession(dtProject);
     }
 
     /**
@@ -1491,7 +1515,8 @@ public class GoToDefinition extends AbstractHandler
         return result;
     }
 
-    private static boolean pickAndOpen(List<String> names, Shell shell, IWorkbenchPage page, IProject project)
+    private static boolean pickAndOpen(List<String> names, Shell shell, IWorkbenchPage page, IProject project,
+        boolean allowIrAutoConnect)
     {
         MdObjectPickDialog dlg = MdObjectPickDialog.forMetadataNames(shell, names);
         if (dlg.open() != Window.OK)
@@ -1502,7 +1527,7 @@ public class GoToDefinition extends AbstractHandler
         String chosen = dlg.getSelectedFullName();
         if (chosen == null)
             return false;
-        return openByFullName(chosen, shell, page, project);
+        return openByFullName(chosen, shell, page, project, allowIrAutoConnect);
     }
 
     private static boolean isModuleSuffixPath(String name)

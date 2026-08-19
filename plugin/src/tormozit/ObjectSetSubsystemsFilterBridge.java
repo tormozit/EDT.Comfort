@@ -668,7 +668,8 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
         if (viewer == null)
             return null;
         CombinedSubsystemsFilter wrapper = findWrapperFilter(viewer);
-        if (wrapper != null && isNativeSubsystemsFilter(wrapper.nativeFilter))
+        if (wrapper != null && !wrapper.passThroughNative
+                && isNativeSubsystemsFilter(wrapper.nativeFilter))
             return wrapper.nativeFilter;
         return resolveNativeFilter(navigator, viewer);
     }
@@ -761,6 +762,9 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
     /**
      * Штатный {@code NavigatorSubsystemsFilter} после активации снова оказывается в
      * {@code viewer.getFilters()} рядом с обёрткой — убрать дубликат и подставить в wrapper.
+     * Если фильтр выключен — не трогать экземпляр из filter service: его {@code select(IProject)}
+     * вешает {@code IBmAsyncEventListener}, и любой BM-event делает полный {@code viewer.refresh}
+     * (зависание UI, в т.ч. во время Git Compare).
      */
     private static void rebindNativeIntoWrapper(
             IViewPart navigator, CommonViewer viewer, CombinedSubsystemsFilter wrapper)
@@ -773,29 +777,37 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
             viewer.removeFilter(filter);
             adopted = filter;
         }
-        if (adopted == null)
+        boolean active = isNativeSubsystemsFilterActive(navigator);
+        if (adopted == null && active)
         {
             ViewerFilter fromService = resolveNativeFromFilterService(navigator);
             if (fromService != null && fromService != wrapper.nativeFilter
                     && fromService != PASS_THROUGH_NATIVE)
                 adopted = fromService;
         }
-        if (adopted == null)
+        if (adopted != null)
+        {
+            wrapper.nativeFilter = adopted;
+            wrapper.passThroughNative = false;
             return;
-        wrapper.nativeFilter = adopted;
-        wrapper.passThroughNative = false;
+        }
+        if (active && isNativeSubsystemsFilter(wrapper.nativeFilter))
+            return;
+        passThroughNativeFilter(wrapper);
     }
 
     private static ViewerFilter resolveNativeFilter(IViewPart navigator, CommonViewer viewer)
     {
         for (ViewerFilter filter : viewer.getFilters())
         {
-            if (filter instanceof CombinedSubsystemsFilter combined)
-                return combined.nativeFilter == PASS_THROUGH_NATIVE ? null : combined.nativeFilter;
+            if (filter instanceof CombinedSubsystemsFilter)
+                continue;
             if (isNativeSubsystemsFilter(filter))
                 return filter;
         }
-        return resolveNativeFromFilterService(navigator);
+        if (isNativeSubsystemsFilterActive(navigator))
+            return resolveNativeFromFilterService(navigator);
+        return null;
     }
 
     private static ViewerFilter resolveNativeFromFilterService(IViewPart navigator)
@@ -825,6 +837,24 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
     private static boolean isNativeSubsystemsFilter(ViewerFilter filter)
     {
         return filter != null && NATIVE_FILTER_CLASS.equals(filter.getClass().getName());
+    }
+
+    private static boolean isNativeSubsystemsFilterActive(IViewPart navigator)
+    {
+        return Boolean.TRUE.equals(Global.invoke(navigator, "isSubsystemsFilterActive")); //$NON-NLS-1$
+    }
+
+    /**
+     * Снять BM-слушатель штатного фильтра. Иначе после обёртки он остаётся активным,
+     * хотя пользователь фильтр по подсистемам не включал.
+     */
+    private static void passThroughNativeFilter(CombinedSubsystemsFilter wrapper)
+    {
+        ViewerFilter nativeFilter = wrapper.nativeFilter;
+        wrapper.nativeFilter = PASS_THROUGH_NATIVE;
+        wrapper.passThroughNative = true;
+        if (isNativeSubsystemsFilter(nativeFilter))
+            Global.invoke(nativeFilter, "deactivate"); //$NON-NLS-1$
     }
 
     private static CommonViewer getCommonViewer(IViewPart navigator)

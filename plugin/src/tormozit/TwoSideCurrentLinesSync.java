@@ -11,6 +11,8 @@ import org.eclipse.swt.widgets.Display;
 /**
  * Синхронизация панели «Текущая строка» ({@link CompareCurrentLinesPanel}, две строки —
  * индексы {@code 0}=левая, {@code 1}=правая) с парой панелей двустороннего сравнения.
+ * Клик в поле текста ставит текущую строку соседнего поля на сопоставленную
+ * (см. {@link CompareLineRangeMatcher#revealMatchedLine}).
  *
  * <p>Общая логика для {@link PasteWithCompareActions} (свой диалог, панели —
  * {@code fLeft}/{@code fRight} штатного {@code TextMergeViewer}) и
@@ -41,7 +43,7 @@ public final class TwoSideCurrentLinesSync
 
         StyledText initialSource = leftText != null ? leftText : rightText;
         if (initialSource != null)
-            sync(initialSource, panel, leftText, rightText);
+            sync(initialSource, panel, leftText, rightText, false);
     }
 
     /**
@@ -56,6 +58,9 @@ public final class TwoSideCurrentLinesSync
     {
         hook(panel, leftText, rightText);
         hookMirroredLabelRefresh(panel, leftText, rightText, viewer, config, semanticLeft, semanticRight);
+        if (panel != null)
+            CompareMethodHeader.install(panel.getControl(), viewer, leftText, "fLeftLabel", //$NON-NLS-1$
+                rightText, "fRightLabel", null, null); //$NON-NLS-1$
     }
 
     /**
@@ -90,10 +95,7 @@ public final class TwoSideCurrentLinesSync
             panel.setLabelText(1, visualRight);
 
         if (viewer != null)
-        {
-            MergeViewerReflection.setLabelText(viewer, "fLeftLabel", visualLeft); //$NON-NLS-1$
-            MergeViewerReflection.setLabelText(viewer, "fRightLabel", visualRight); //$NON-NLS-1$
-        }
+            CompareMethodHeader.applyTwoWay(viewer, visualLeft, visualRight);
     }
 
     private static void hookMirroredLabelRefresh(CompareCurrentLinesPanel panel, StyledText leftText,
@@ -125,7 +127,7 @@ public final class TwoSideCurrentLinesSync
             StyledText source = leftText != null && !leftText.isDisposed() ? leftText
                 : rightText != null && !rightText.isDisposed() ? rightText : null;
             if (source != null)
-                sync(source, panel, leftText, rightText);
+                sync(source, panel, leftText, rightText, false);
         };
 
         /* Сразу — на случай, если MIRRORED уже из preference; плюс отложенно после refresh. */
@@ -183,8 +185,13 @@ public final class TwoSideCurrentLinesSync
             return;
         styledText.setData(HOOK_MARKER_KEY, Boolean.TRUE);
 
-        styledText.addCaretListener(e -> sync(styledText, panel, leftText, rightText));
-        styledText.addListener(SWT.Modify, e -> sync(styledText, panel, leftText, rightText));
+        styledText.addCaretListener(e -> sync(styledText, panel, leftText, rightText, false));
+        styledText.addListener(SWT.Modify, e -> sync(styledText, panel, leftText, rightText, false));
+        styledText.addListener(SWT.MouseUp, e ->
+        {
+            if (e.button == 1)
+                sync(styledText, panel, leftText, rightText, true);
+        });
     }
 
     /**
@@ -192,10 +199,15 @@ public final class TwoSideCurrentLinesSync
      * каретка ({@code source}), и сопоставленная ей строка другой стороны (через
      * {@link CompareLineRangeMatcher} по всему тексту); если строка не сопоставлена —
      * другая сторона показывает пустоту.
+     *
+     * @param revealOthers при клике — поставить ту же сопоставленную строку текущей
+     *                     в соседнем поле текста (каретка источника и фокус не меняются)
      */
     private static void sync(StyledText source, CompareCurrentLinesPanel panel,
-        StyledText leftText, StyledText rightText)
+        StyledText leftText, StyledText rightText, boolean revealOthers)
     {
+        if (CompareLineRangeMatcher.isActivating())
+            return;
         if (leftText == null || leftText.isDisposed() || rightText == null || rightText.isDisposed())
             return;
 
@@ -225,6 +237,8 @@ public final class TwoSideCurrentLinesSync
 
             CompareCurrentLineDiff.AlignedResult aligned = panel.renderPair(0, 1, leftLineText, rightLineText);
             panel.scrollToFirstDifference(panel.getRow(1), aligned.rightTypes);
+            if (revealOthers && matchedOtherLine >= 0)
+                CompareLineRangeMatcher.revealMatchedLine(source, otherText, matchedOtherLine);
         }
         catch (Exception e)
         {

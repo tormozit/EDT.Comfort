@@ -121,7 +121,6 @@ public final class ObjectSetsView extends ViewPart
     private static final int DEFAULT_ITEMS_PATH_COL_WIDTH = 440;
     private static final int MIN_ITEMS_NAME_COL_WIDTH     = 50;
     private static final int MIN_ITEMS_PATH_COL_WIDTH     = 80;
-    private static final int ITEMS_ICON_COL_WIDTH         = 24;
     private static final int DEFAULT_ITEMS_PANE_WIDTH     = 360;
     private static final int MIN_ITEMS_PANE_WIDTH         = 120;
     private static final int MAX_ITEMS_PANE_WIDTH         = 2000;
@@ -441,8 +440,7 @@ public final class ObjectSetsView extends ViewPart
         iconResolver = new ItemIconResolver();
 
         TableViewerColumn colIcon = new TableViewerColumn(itemsViewer, SWT.NONE);
-        colIcon.getColumn().setText(""); //$NON-NLS-1$
-        colIcon.getColumn().setResizable(false);
+        FormTableInteraction.applyIconColumn(colIcon.getColumn(), layout);
         colIcon.setLabelProvider(new ColumnLabelProvider()
         {
             @Override
@@ -458,7 +456,6 @@ public final class ObjectSetsView extends ViewPart
                     ? iconResolver.imageFor(item, getSite().getPage(), selectedSet) : null;
             }
         });
-        layout.setColumnData(colIcon.getColumn(), new ColumnPixelData(ITEMS_ICON_COL_WIDTH, false, false));
 
         TableViewerColumn colName = new TableViewerColumn(itemsViewer, SWT.NONE);
         nameColumn = colName.getColumn();
@@ -526,7 +523,7 @@ public final class ObjectSetsView extends ViewPart
             public void controlResized(ControlEvent e)
             {
                 org.eclipse.swt.graphics.Rectangle area = tableStack.getClientArea();
-                if (area.width < ITEMS_ICON_COL_WIDTH || area.height < 10)
+                if (area.width < ColumnWidthFit.iconColumnWidth() || area.height < 10)
                     return;
                 scheduleItemIconsRefresh();
             }
@@ -1723,7 +1720,10 @@ public final class ObjectSetsView extends ViewPart
         if (displayName == null || displayName.isEmpty())
             return ""; //$NON-NLS-1$
         String result;
-        if (ownName == null || ownName.isEmpty())
+        int methodSep = displayName.indexOf(": "); //$NON-NLS-1$
+        if (methodSep > 0)
+            result = displayName.substring(0, methodSep);
+        else if (ownName == null || ownName.isEmpty())
             result = displayName;
         else
         {
@@ -1737,8 +1737,13 @@ public final class ObjectSetsView extends ViewPart
     {
         if (value == null || value.isEmpty())
             return value != null ? value : ""; //$NON-NLS-1$
-        while (value.endsWith(".") || value.endsWith(":")) //$NON-NLS-1$ //$NON-NLS-2$
+        while (!value.isEmpty())
+        {
+            char last = value.charAt(value.length() - 1);
+            if (last != '.' && last != ':' && !Character.isWhitespace(last))
+                break;
             value = value.substring(0, value.length() - 1);
+        }
         return value;
     }
 

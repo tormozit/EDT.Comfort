@@ -16,7 +16,9 @@
     <startup class="tormozit.BslModulePositionMemoryHook"/>
     <startup class="tormozit.HorizontalScrollBarPositionFixHook"/>
     <startup class="tormozit.BslEditorRevealScrollFixHook"/>
+    <startup class="tormozit.CallHierarchyViewHook"/>
     <startup class="tormozit.BslOverviewRulerUnfoldHook"/>
+    <startup class="tormozit.QuickDiffHook"/>
     <startup class="tormozit.BslRevisionOccurrenceHighlightHook"/>
     <startup class="tormozit.BlameHyperlinkOpenFixHook"/>
     <startup class="tormozit.TextEditorRightClickCaretHook"/>

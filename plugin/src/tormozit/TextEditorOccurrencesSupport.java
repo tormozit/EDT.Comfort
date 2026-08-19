@@ -201,6 +201,14 @@ public final class TextEditorOccurrencesSupport
             knownViewers.put(text, viewer);
     }
 
+    /** Вьюер панели сравнения, зарегистрированный через {@link #registerViewer}; иначе {@code null}. */
+    static ISourceViewer viewerFor(StyledText text)
+    {
+        if (text == null || text.isDisposed())
+            return null;
+        return knownViewers.get(text);
+    }
+
     /**
      * Контекст поиска из диалога «Найти/Заменить»
      * ({@link FindReplaceLiveMatchCountHook}): пока выделение совпадает с искомой строкой,

@@ -359,7 +359,8 @@ public final class TextMergeEditorHook
 
         StyledText initialSource = leftText != null ? leftText : rightText != null ? rightText : resultText;
         if (initialSource != null)
-            syncThreeWayCurrentLines(initialSource, panel, provider, viewer, leftText, rightText, resultText, activePair);
+            syncThreeWayCurrentLines(initialSource, panel, provider, viewer, leftText, rightText, resultText,
+                activePair, false);
 
         /*
          * Переключатель варианта объединения («Объединение встроенного языка»/«с учётом
@@ -436,6 +437,8 @@ public final class TextMergeEditorHook
          * оборачиваем topLeft вместе со своим ToolBar в общий composite.
          */
         StructureToggleController.placeToggleButtonAtViewFormTopLeft(viewForm, controller);
+        CompareMethodHeader.install(contentWrapper, viewer, leftText, "leftLabel", //$NON-NLS-1$
+            rightText, "rightLabel", resultText, "resultLabel"); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     /**
@@ -1020,9 +1023,17 @@ public final class TextMergeEditorHook
         styledText.setData(HOOK_MARKER_KEY, Boolean.TRUE);
 
         styledText.addCaretListener(e ->
-            syncThreeWayCurrentLines(styledText, panel, dialog, viewer, leftText, rightText, resultText, activePair));
+            syncThreeWayCurrentLines(styledText, panel, dialog, viewer, leftText, rightText, resultText, activePair,
+                false));
         styledText.addListener(SWT.Modify, e ->
-            syncThreeWayCurrentLines(styledText, panel, dialog, viewer, leftText, rightText, resultText, activePair));
+            syncThreeWayCurrentLines(styledText, panel, dialog, viewer, leftText, rightText, resultText, activePair,
+                false));
+        styledText.addListener(SWT.MouseUp, e ->
+        {
+            if (e.button == 1)
+                syncThreeWayCurrentLines(styledText, panel, dialog, viewer, leftText, rightText, resultText,
+                    activePair, true);
+        });
     }
 
     /**
@@ -1030,11 +1041,15 @@ public final class TextMergeEditorHook
      * если каретка в итоговой панели); третья сторона — обычным текстом сопоставленной
      * строки, либо пусто, если строк не сопоставлена. Заодно запоминает эту пару в
      * {@code activePair} — источник для кнопки «Сравнить ИР» (полные тексты).
+     * При {@code revealOthers} (клик) ставит сопоставленные строки текущими в остальных
+     * полях текста — тем же сопоставлением, что и панель.
      */
     private static void syncThreeWayCurrentLines(StyledText source, CompareCurrentLinesPanel panel, Object dialog,
         ThreeSideTextMergeViewer viewer, StyledText leftText, StyledText rightText, StyledText resultText,
-        ActivePair activePair)
+        ActivePair activePair, boolean revealOthers)
     {
+        if (CompareLineRangeMatcher.isActivating())
+            return;
         if (leftText == null || leftText.isDisposed()
             || rightText == null || rightText.isDisposed()
             || resultText == null || resultText.isDisposed())
@@ -1116,6 +1131,7 @@ public final class TextMergeEditorHook
             panel.renderPlain(colorPartnerIdx, null);
             panel.renderPlain(plainIdx, plainLineText);
             panel.resetScroll();
+            revealMatchedInOthers(revealOthers, source, colorPartnerWidget, colorPartnerLine, plainWidget, plainLine);
             return;
         }
 
@@ -1150,6 +1166,18 @@ public final class TextMergeEditorHook
 
         // newIdx — это всегда RESULT (либо colorPartnerIdx=RESULT, либо primaryIdx=RESULT).
         panel.scrollToFirstDifference(panel.getRow(RESULT), aligned.rightTypes);
+        revealMatchedInOthers(revealOthers, source, colorPartnerWidget, colorPartnerLine, plainWidget, plainLine);
+    }
+
+    private static void revealMatchedInOthers(boolean reveal, StyledText source, StyledText first, int firstLine,
+        StyledText second, int secondLine)
+    {
+        if (!reveal)
+            return;
+        if (firstLine >= 0)
+            CompareLineRangeMatcher.revealMatchedLine(source, first, firstLine);
+        if (secondLine >= 0)
+            CompareLineRangeMatcher.revealMatchedLine(source, second, secondLine);
     }
 
     /**

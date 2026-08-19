@@ -109,7 +109,6 @@ public final class RecentPlacesView extends ViewPart
     private static final int MIN_NAME_COL_WIDTH        = 50;
     private static final int MIN_PROJECT_COL_WIDTH     = 40;
     private static final int MIN_DATE_COL_WIDTH        = 70;
-    private static final int ICON_COL_WIDTH            = 24;
 
     private static final int COLUMN_SAVE_DELAY_MS = 300;
 
@@ -226,8 +225,7 @@ public final class RecentPlacesView extends ViewPart
 
         TableViewerColumn colIcon = new TableViewerColumn(listViewer, SWT.NONE);
         iconColumn = colIcon.getColumn();
-        iconColumn.setText(""); //$NON-NLS-1$
-        iconColumn.setResizable(false);
+        FormTableInteraction.applyIconColumn(iconColumn, columnLayout);
         colIcon.setLabelProvider(new ColumnLabelProvider()
         {
             @Override
@@ -297,8 +295,6 @@ public final class RecentPlacesView extends ViewPart
             }
         });
 
-        columnLayout.setColumnData(iconColumn,
-            new ColumnPixelData(ICON_COL_WIDTH, false, false));
         columnLayout.setColumnData(nameColumn,
             new ColumnPixelData(nameWidth, true, true));
         columnLayout.setColumnData(placeColumn,
@@ -781,7 +777,10 @@ public final class RecentPlacesView extends ViewPart
         if (displayName == null || displayName.isEmpty())
             return ""; //$NON-NLS-1$
         String result;
-        if (ownName == null || ownName.isEmpty())
+        int methodSep = displayName.indexOf(": "); //$NON-NLS-1$
+        if (methodSep > 0)
+            result = displayName.substring(0, methodSep);
+        else if (ownName == null || ownName.isEmpty())
             result = displayName;
         else
         {
@@ -795,8 +794,13 @@ public final class RecentPlacesView extends ViewPart
     {
         if (value == null || value.isEmpty())
             return value != null ? value : ""; //$NON-NLS-1$
-        while (value.endsWith(".") || value.endsWith(":")) //$NON-NLS-1$ //$NON-NLS-2$
+        while (!value.isEmpty())
+        {
+            char last = value.charAt(value.length() - 1);
+            if (last != '.' && last != ':' && !Character.isWhitespace(last))
+                break;
             value = value.substring(0, value.length() - 1);
+        }
         return value;
     }
 

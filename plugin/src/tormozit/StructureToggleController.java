@@ -6,6 +6,7 @@ import org.eclipse.jface.action.IAction;
 import org.eclipse.jface.action.ToolBarManager;
 import org.eclipse.jface.text.source.SourceViewer;
 import org.eclipse.swt.SWT;
+import org.eclipse.swt.custom.CaretListener;
 import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.custom.ViewForm;
 import org.eclipse.swt.graphics.Point;
@@ -34,9 +35,10 @@ import org.eclipse.swt.widgets.ToolBar;
  * <p>Состояние (показана/скрыта) персистентно между сессиями EDT —
  * {@link ComfortSettings#isCompareStructureVisible()}, по умолчанию выключена. При выборе узла
  * дерева — скролл+подсветка диапазона в существующем документе (не подмена содержимого
- * вьюера); выбор корневого узла — штатное поведение, без подсветки. Разбор текста при включении
- * панели выполняется синхронно на UI-потоке — для очень больших модулей возможна заметная
- * задержка.
+ * вьюера); выбор корневого узла — штатное поведение, без подсветки. При раскрытии панели
+ * выделяется строка текущего метода (если он есть среди различий), позиция каретки и
+ * прокрутка полей текста не меняются. Разбор текста при включении панели выполняется
+ * синхронно на UI-потоке — для очень больших модулей возможна заметная задержка.
  */
 final class StructureToggleController
 {
@@ -59,6 +61,12 @@ final class StructureToggleController
     private Sash sash;
     private GridData panelLayoutData;
     private boolean lineHighlightPrimed;
+    /** Не вызывать навигацию по тексту при программном выборе строки дерева (раскрытие панели). */
+    private boolean suppressNodeNavigation;
+    /** Пользователь сам кликнул в дереве — автовыбор по каретке больше не перебивает. */
+    private boolean structureSelectionFromUser;
+    private boolean followCaretWired;
+    private final CaretListener followCaretListener = e -> selectCurrentMethodQuietlyIfAuto();
     /** Разовая активация {@code CursorLinePainter} и постановка каретки — см. {@link #setSourceViewers}. */
     private SourceViewer leftSourceViewer;
     private SourceViewer rightSourceViewer;
@@ -203,6 +211,10 @@ final class StructureToggleController
                 return;
             if (leftText == null || leftText.isDisposed() || rightText == null || rightText.isDisposed())
                 return;
+            CaretSnapshot leftSnap = CaretSnapshot.of(leftText);
+            CaretSnapshot rightSnap = CaretSnapshot.of(rightText);
+            CaretSnapshot resultSnap = CaretSnapshot.of(resultText);
+            Control focus = wrapper.getDisplay() != null ? wrapper.getDisplay().getFocusControl() : null;
             primeLineHighlightOnce();
             String leftContent = leftText.getText();
             String rightContent = rightText.getText();
@@ -219,9 +231,23 @@ final class StructureToggleController
             sash.moveAbove(viewerControl);
             sash.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
             sash.addListener(SWT.Selection, this::onSashDragged);
+
+            if (!wrapper.isDisposed())
+                wrapper.layout(true, true);
+            leftSnap.restore(leftSourceViewer);
+            rightSnap.restore(rightSourceViewer);
+            if (resultSnap != null)
+                resultSnap.restore(null);
+            if (focus != null && !focus.isDisposed())
+                focus.setFocus();
+            structureSelectionFromUser = false;
+            wireFollowCaret();
+            selectCurrentMethodQuietly();
+            return;
         }
         else if (panel != null)
         {
+            unwireFollowCaret();
             if (!panel.getControl().isDisposed())
                 panel.getControl().dispose();
             if (sash != null && !sash.isDisposed())
@@ -315,6 +341,9 @@ final class StructureToggleController
 
     private void onNodeSelected(BslModuleStructureDiff.DiffNode node)
     {
+        if (suppressNodeNavigation)
+            return;
+        structureSelectionFromUser = true;
         if (node == null)
             return; // корень — штатное поведение, без подсветки
         /*
@@ -482,5 +511,132 @@ final class StructureToggleController
     private static String labelOrDefault(String text, String fallback)
     {
         return text != null && !text.isBlank() ? text : fallback;
+    }
+
+    /**
+     * Выделяет в дереве текущий метод по каретке, не прокручивая поля текста.
+     * Нет метода / нет такого узла среди различий — ничего не выбирает.
+     */
+    private void selectCurrentMethodQuietly()
+    {
+        if (panel == null || panel.getControl().isDisposed())
+            return;
+        StyledText focused = focusedText();
+        String method = CompareMethodHeader.methodNameAt(focused);
+        if (method == null)
+            method = CompareMethodHeader.methodNameAt(leftText);
+        if (method == null)
+            method = CompareMethodHeader.methodNameAt(rightText);
+        if (method == null)
+            method = CompareMethodHeader.methodNameAt(resultText);
+        suppressNodeNavigation = true;
+        try
+        {
+            panel.selectMethod(method, caretOffset(leftText), caretOffset(rightText));
+        }
+        finally
+        {
+            suppressNodeNavigation = false;
+        }
+    }
+
+    private void wireFollowCaret()
+    {
+        if (followCaretWired)
+            return;
+        followCaretWired = true;
+        addFollowCaret(leftText);
+        addFollowCaret(rightText);
+        addFollowCaret(resultText);
+    }
+
+    private void unwireFollowCaret()
+    {
+        if (!followCaretWired)
+            return;
+        followCaretWired = false;
+        removeFollowCaret(leftText);
+        removeFollowCaret(rightText);
+        removeFollowCaret(resultText);
+    }
+
+    private void addFollowCaret(StyledText text)
+    {
+        if (text != null && !text.isDisposed())
+            text.addCaretListener(followCaretListener);
+    }
+
+    private void removeFollowCaret(StyledText text)
+    {
+        if (text != null && !text.isDisposed())
+            text.removeCaretListener(followCaretListener);
+    }
+
+    private void selectCurrentMethodQuietlyIfAuto()
+    {
+        if (structureSelectionFromUser || wrapper == null || wrapper.isDisposed())
+            return;
+        selectCurrentMethodQuietly();
+    }
+
+    private StyledText focusedText()
+    {
+        if (leftText != null && !leftText.isDisposed() && leftText.isFocusControl())
+            return leftText;
+        if (rightText != null && !rightText.isDisposed() && rightText.isFocusControl())
+            return rightText;
+        if (resultText != null && !resultText.isDisposed() && resultText.isFocusControl())
+            return resultText;
+        return null;
+    }
+
+    private static int caretOffset(StyledText text)
+    {
+        if (text == null || text.isDisposed())
+            return -1;
+        try
+        {
+            return text.getCaretOffset();
+        }
+        catch (Exception e)
+        {
+            return -1;
+        }
+    }
+
+    /** Каретка и верхняя видимая строка поля — чтобы layout панели структуры их не сдвинул. */
+    private static final class CaretSnapshot
+    {
+        private final StyledText text;
+        private final int caret;
+        private final int topIndex;
+
+        private CaretSnapshot(StyledText text, int caret, int topIndex)
+        {
+            this.text = text;
+            this.caret = caret;
+            this.topIndex = topIndex;
+        }
+
+        static CaretSnapshot of(StyledText text)
+        {
+            if (text == null || text.isDisposed())
+                return null;
+            return new CaretSnapshot(text, text.getCaretOffset(), text.getTopIndex());
+        }
+
+        void restore(SourceViewer sourceViewer)
+        {
+            if (text == null || text.isDisposed())
+                return;
+            int max = text.getCharCount();
+            int safeCaret = Math.max(0, Math.min(caret, max));
+            if (sourceViewer != null && sourceViewer.getTextWidget() == text)
+                sourceViewer.setSelectedRange(safeCaret, 0);
+            else
+                text.setSelectionRange(safeCaret, 0);
+            int lastLine = Math.max(0, text.getLineCount() - 1);
+            text.setTopIndex(Math.max(0, Math.min(topIndex, lastLine)));
+        }
     }
 }
