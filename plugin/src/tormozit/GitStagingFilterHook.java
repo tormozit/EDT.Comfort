@@ -19,6 +19,7 @@ import org.eclipse.core.runtime.IStatus;
 import org.eclipse.core.runtime.Status;
 import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.jface.dialogs.IDialogSettings;
+import org.eclipse.jface.util.LocalSelectionTransfer;
 import org.eclipse.jface.viewers.CellLabelProvider;
 import org.eclipse.jface.viewers.ColumnLabelProvider;
 import org.eclipse.jface.viewers.IBaseLabelProvider;
@@ -36,8 +37,14 @@ import org.eclipse.jface.viewers.ViewerComparator;
 import org.eclipse.jface.viewers.ViewerFilter;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.dnd.Clipboard;
+import org.eclipse.swt.dnd.DND;
+import org.eclipse.swt.dnd.DropTarget;
+import org.eclipse.swt.dnd.DropTargetAdapter;
+import org.eclipse.swt.dnd.DropTargetEvent;
+import org.eclipse.swt.dnd.DropTargetListener;
 import org.eclipse.swt.dnd.TextTransfer;
 import org.eclipse.swt.dnd.Transfer;
+import org.eclipse.swt.dnd.TransferData;
 import org.eclipse.swt.events.ControlAdapter;
 import org.eclipse.swt.events.ControlEvent;
 import org.eclipse.swt.graphics.Color;
@@ -119,13 +126,20 @@ import org.eclipse.ui.PlatformUI;
  * {@link #GitStagingTreeInteraction} + {@link CopyCommandSupport#wireCopyOverride} (control остаётся
  * штатным {@code Tree}/{@code TreeViewer} — мультивыделение Ctrl/Shift, drag&drop stage/unstage,
  * открытие сравнения по двойному клику и автоподстановка commit message остаются штатными EGit,
- * не переопределяются).
+ * не переопределяются). Сброс объекта метаданных из навигатора на дерево — отдельно:
+ * снимает выделение и выделяет файлы этого объекта без вложенных (форм, макетов, команд…);
+ * штатный drop EGit для такого жеста перехватывается, иначе он мог бы индексировать всю
+ * папку объекта.
  * Штатное контекстное меню только дополняется группой пунктов отбора по значению ячейки (issue
  * #266, п.2–5: «Отобрать/Снять отбор», «Различные значения колонки», «Отключить все отборы»,
  * «Отобрано элементов: N») — {@link TreeColumnValueFilterSupport}, общий код с {@link
  * FormTableInteraction} через {@link ColumnFilterMenuBuilder}. Группа идёт в КОРЕНЬ меню (не в
  * подменю «Комфорт»), обрамлённая разделителями. Текст ячейки для отбора — тот же {@link
  * #sortKey}, что и для сортировки колонок.
+ *
+ * <p>Колонки и фильтр файлов: Параметры → Комфорт → «Улучшать списки»
+ * ({@link ComfortSettings#PREF_REPLACE_LIST_FILTERS}). Проверяется при установке патча
+ * (открытие панели), а не только на старте EDT — как {@link GitHistoryHook}.
  *
  * <p>Логирование: Параметры → Комфорт → «Общее логирование».
  */
@@ -173,12 +187,11 @@ public final class GitStagingFilterHook implements IStartup
     private static final String COLUMN_LOGICAL_KEY = "tormozit.gitStagingColumnLogical"; //$NON-NLS-1$
     private static final String INTERACTION_KEY = "tormozit.gitStagingTreeInteraction"; //$NON-NLS-1$
     private static final String COLUMN_SETTINGS_SECTION = "GitStagingColumns"; //$NON-NLS-1$
+    private static final String NAVIGATOR_DROP_KEY = "tormozit.gitStagingNavigatorDrop"; //$NON-NLS-1$
 
     @Override
     public void earlyStartup()
     {
-        if (!ComfortSettings.isReplaceListFiltersEnabled())
-            return;
         Display.getDefault().asyncExec(() ->
         {
             IWorkbench wb = PlatformUI.getWorkbench();
@@ -490,12 +503,22 @@ public final class GitStagingFilterHook implements IStartup
      */
     private static void schedulePatch(IViewPart view, int attempt)
     {
+        if (!ComfortSettings.isReplaceListFiltersEnabled())
+        {
+            pendingRetries.remove(view);
+            return;
+        }
         if (attempt == 0 && !pendingRetries.add(view))
             return;
         Display display = Display.getDefault();
         int delay = attempt == 0 ? 0 : attempt < 30 ? 100 : 500;
         display.timerExec(delay, () ->
         {
+            if (!ComfortSettings.isReplaceListFiltersEnabled())
+            {
+                pendingRetries.remove(view);
+                return;
+            }
             if (isViewGone(view))
             {
                 pendingRetries.remove(view);
@@ -533,6 +556,10 @@ public final class GitStagingFilterHook implements IStartup
     {
         try
         {
+            boolean dropReady = installNavigatorDropOnView(view);
+            if (!ComfortSettings.isReplaceListFiltersEnabled())
+                return dropReady;
+
             Object filterTextObj = Global.getField(view, "filterText"); //$NON-NLS-1$
             if (!(filterTextObj instanceof Text filterText) || filterText.isDisposed())
             {
@@ -541,7 +568,7 @@ public final class GitStagingFilterHook implements IStartup
                 return false;
             }
             if (Boolean.TRUE.equals(filterText.getData(PATCHED_KEY)))
-                return true;
+                return dropReady;
 
             GitStagingSearchFilter stagedFilter = installViewer(view, "stagedViewer"); //$NON-NLS-1$
             GitStagingSearchFilter unstagedFilter = installViewer(view, "unstagedViewer"); //$NON-NLS-1$
@@ -663,6 +690,307 @@ public final class GitStagingFilterHook implements IStartup
 
         Debug.log("installColumnsAndInteraction " + viewerField + ": columns=" //$NON-NLS-1$ //$NON-NLS-2$
             + tree.getColumnCount());
+    }
+
+    /**
+     * Штатный DropTarget EGit уже есть (stage/unstage между списками). Общий
+     * {@link NavigatorDropSearchHook} такие списки пропускает. Вешаем свой слушатель
+     * поверх: для объекта из навигатора перехватываем drop, чтобы EGit не пробовал
+     * индексировать папку объекта целиком, и выделяем файлы объекта без вложенных.
+     */
+    private static boolean installNavigatorDropOnView(IViewPart view)
+    {
+        TreeViewer staged = treeViewerOf(view, "stagedViewer"); //$NON-NLS-1$
+        TreeViewer unstaged = treeViewerOf(view, "unstagedViewer"); //$NON-NLS-1$
+        if (staged == null || unstaged == null)
+            return false;
+        return installNavigatorDrop(staged) && installNavigatorDrop(unstaged);
+    }
+
+    private static boolean installNavigatorDrop(TreeViewer viewer)
+    {
+        if (viewer == null)
+            return false;
+        Tree tree = viewer.getTree();
+        if (tree == null || tree.isDisposed())
+            return false;
+        if (Boolean.TRUE.equals(tree.getData(NAVIGATOR_DROP_KEY)))
+            return true;
+        Object existing = tree.getData(DND.DROP_TARGET_KEY);
+        if (!(existing instanceof DropTarget target) || target.isDisposed())
+            return false;
+        ensureLocalSelectionTransfer(target);
+        DropTargetListener[] originals = target.getDropListeners();
+        if (originals == null)
+            originals = new DropTargetListener[0];
+        for (DropTargetListener listener : originals)
+            target.removeDropListener(listener);
+        target.addDropListener(new NavigatorSelectDropListener(viewer, originals));
+        tree.setData(NAVIGATOR_DROP_KEY, Boolean.TRUE);
+        Debug.log("installNavigatorDrop tree=" + tree.hashCode() //$NON-NLS-1$
+            + " wrapped=" + originals.length); //$NON-NLS-1$
+        return true;
+    }
+
+    private static void ensureLocalSelectionTransfer(DropTarget target)
+    {
+        Transfer local = LocalSelectionTransfer.getTransfer();
+        Transfer[] current = target.getTransfer();
+        if (current != null)
+        {
+            for (Transfer transfer : current)
+            {
+                if (transfer == local)
+                    return;
+            }
+            Transfer[] expanded = new Transfer[current.length + 1];
+            System.arraycopy(current, 0, expanded, 0, current.length);
+            expanded[current.length] = local;
+            target.setTransfer(expanded);
+        }
+        else
+            target.setTransfer(new Transfer[] { local });
+    }
+
+    private static void preferLocalSelectionDataType(DropTargetEvent event)
+    {
+        Transfer local = LocalSelectionTransfer.getTransfer();
+        if (event.currentDataType != null && local.isSupportedType(event.currentDataType))
+            return;
+        TransferData[] types = event.dataTypes;
+        if (types == null)
+            return;
+        for (TransferData type : types)
+        {
+            if (local.isSupportedType(type))
+            {
+                event.currentDataType = type;
+                return;
+            }
+        }
+    }
+
+    private static List<String> draggedObjectFullNames()
+    {
+        Object selObj = LocalSelectionTransfer.getTransfer().getSelection();
+        if (!(selObj instanceof IStructuredSelection sel) || sel.isEmpty())
+            return List.of();
+        if (isEgitStagingDrag(sel))
+            return List.of();
+        List<String> names = new ArrayList<>();
+        for (Object element : sel.toArray())
+        {
+            if (element == null)
+                continue;
+            if (isStagingModelElement(element))
+                return List.of();
+            if (NavigatorTreeElementLabels.isGroupNode(element))
+                continue;
+            String fullName = GetRef.fullNameFromNavigatorElement(element);
+            if (fullName != null && !fullName.isBlank())
+                names.add(fullName);
+        }
+        return names;
+    }
+
+    private static boolean isEgitStagingDrag(IStructuredSelection sel)
+    {
+        return sel.getClass().getName().contains("StagingDragSelection"); //$NON-NLS-1$
+    }
+
+    private static boolean isStagingModelElement(Object element)
+    {
+        String className = element.getClass().getName();
+        return className.contains("StagingEntry") //$NON-NLS-1$
+            || className.contains("StagingFolderEntry"); //$NON-NLS-1$
+    }
+
+    private static void selectOwnFiles(TreeViewer viewer, List<String> droppedNames)
+    {
+        Tree tree = viewer.getTree();
+        if (tree == null || tree.isDisposed())
+            return;
+        List<Object> matches = new ArrayList<>();
+        Object cpObj = viewer.getContentProvider();
+        if (cpObj instanceof ITreeContentProvider cp)
+        {
+            ViewerFilter[] filters = viewer.getFilters();
+            Object input = viewer.getInput();
+            Object[] roots = cp.getElements(input);
+            if (roots != null)
+            {
+                for (Object root : roots)
+                    collectOwnFiles(viewer, cp, filters, input, root, droppedNames, matches);
+            }
+        }
+        viewer.setSelection(new StructuredSelection(matches), false);
+        FormTableInteraction.revealSelection(tree);
+        tree.setFocus();
+        Debug.log("selectOwnFiles names=" + droppedNames + " matches=" + matches.size()); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    private static void collectOwnFiles(TreeViewer viewer, ITreeContentProvider cp,
+        ViewerFilter[] filters, Object parent, Object node, List<String> droppedNames,
+        List<Object> out)
+    {
+        if (node == null)
+            return;
+        if (filters != null)
+        {
+            for (ViewerFilter filter : filters)
+            {
+                if (!filter.select(viewer, parent, node))
+                    return;
+            }
+        }
+        String path = pathOf(node);
+        if (!path.isEmpty())
+        {
+            if (belongsToDroppedWithoutNested(fullNameOf(node), droppedNames))
+                out.add(node);
+            return;
+        }
+        Object[] children = cp.getChildren(node);
+        if (children == null)
+            return;
+        for (Object child : children)
+            collectOwnFiles(viewer, cp, filters, node, child, droppedNames, out);
+    }
+
+    /**
+     * Файл принадлежит сброшенному объекту, но не вложенному (форма, макет, команда…).
+     * {@code Справочник.Орг} матчит {@code Справочник.Орг} и {@code Справочник.Орг.МодульОбъекта},
+     * но не {@code Справочник.Орг.Форма.ФормаСписка}.
+     */
+    private static boolean belongsToDroppedWithoutNested(String fileFqn, List<String> droppedNames)
+    {
+        if (fileFqn == null || fileFqn.isEmpty())
+            return false;
+        for (String dropped : droppedNames)
+        {
+            if (dropped == null || dropped.isEmpty())
+                continue;
+            if (fileFqn.equals(dropped))
+                return true;
+            String prefix = dropped + "."; //$NON-NLS-1$
+            if (!fileFqn.startsWith(prefix))
+                continue;
+            String rest = fileFqn.substring(prefix.length());
+            int dot = rest.indexOf('.');
+            String first = dot < 0 ? rest : rest.substring(0, dot);
+            if (!isNestedChildType(first))
+                return true;
+        }
+        return false;
+    }
+
+    private static boolean isNestedChildType(String segment)
+    {
+        if (segment == null || segment.isEmpty())
+            return false;
+        if (MdTypeMapping.subObjectTypeToEmfFeature(segment) != null)
+            return true;
+        String ru = MdTypeMapping.anyToRu(segment);
+        if (ru == null)
+            ru = segment;
+        if (MdTypeMapping.isKnownMdRootType(ru))
+            return false;
+        return MdTypeMapping.ruSingularToGroupPlural(ru) != null;
+    }
+
+    private static final class NavigatorSelectDropListener extends DropTargetAdapter
+    {
+        private final TreeViewer viewer;
+        private final DropTargetListener[] originals;
+        private boolean acceptNavigator;
+
+        NavigatorSelectDropListener(TreeViewer viewer, DropTargetListener[] originals)
+        {
+            this.viewer = viewer;
+            this.originals = originals;
+        }
+
+        @Override
+        public void dragEnter(DropTargetEvent event)
+        {
+            if (updateNavigator(event))
+                return;
+            for (DropTargetListener listener : originals)
+                listener.dragEnter(event);
+        }
+
+        @Override
+        public void dragOperationChanged(DropTargetEvent event)
+        {
+            if (updateNavigator(event))
+                return;
+            for (DropTargetListener listener : originals)
+                listener.dragOperationChanged(event);
+        }
+
+        @Override
+        public void dragOver(DropTargetEvent event)
+        {
+            if (updateNavigator(event))
+                return;
+            for (DropTargetListener listener : originals)
+                listener.dragOver(event);
+        }
+
+        @Override
+        public void dropAccept(DropTargetEvent event)
+        {
+            if (updateNavigator(event))
+                return;
+            for (DropTargetListener listener : originals)
+                listener.dropAccept(event);
+        }
+
+        @Override
+        public void dragLeave(DropTargetEvent event)
+        {
+            boolean wasNavigator = acceptNavigator;
+            acceptNavigator = false;
+            if (wasNavigator)
+                return;
+            for (DropTargetListener listener : originals)
+                listener.dragLeave(event);
+        }
+
+        @Override
+        public void drop(DropTargetEvent event)
+        {
+            if (acceptNavigator)
+            {
+                List<String> names = draggedObjectFullNames();
+                if (!names.isEmpty())
+                    selectOwnFiles(viewer, names);
+                acceptNavigator = false;
+                return;
+            }
+            for (DropTargetListener listener : originals)
+                listener.drop(event);
+        }
+
+        private boolean updateNavigator(DropTargetEvent event)
+        {
+            List<String> names = draggedObjectFullNames();
+            if (names.isEmpty())
+            {
+                acceptNavigator = false;
+                return false;
+            }
+            preferLocalSelectionDataType(event);
+            if ((event.operations & DND.DROP_MOVE) != 0)
+                event.detail = DND.DROP_MOVE;
+            else if ((event.operations & DND.DROP_COPY) != 0)
+                event.detail = DND.DROP_COPY;
+            else
+                event.detail = DND.DROP_NONE;
+            event.feedback = DND.FEEDBACK_NONE;
+            acceptNavigator = event.detail != DND.DROP_NONE;
+            return true;
+        }
     }
 
     /**

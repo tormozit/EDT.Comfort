@@ -40,11 +40,33 @@ import org.eclipse.ui.IStartup;
  * выделено. Смещение считается как у менеджера ({@code getCursorLocation} + шаг назад
  * из левой половины глифа) — иначе на {@code (} между слитными фрагментами подчёркивается
  * соседний идентификатор.
+ *
+ * <p>Быстрый второй клик (двойной щелчок) приходит нативным сообщением раньше
+ * {@code asyncExec} первого: слово ещё не выделено, и хук снова снял бы Ctrl.
+ * Даже если Ctrl оставить, {@code StyledText.handleMouseDown} при {@code count ≥ 2}
+ * выделяет слово <em>до</em> {@code HyperlinkManager.mouseDown}, а менеджер при
+ * {@code isTextSelected()} делает {@code deactivate()} и на {@code mouseUp} уже не
+ * открывает ссылку. Поэтому второй клик не перехватывается, а {@code event.count}
+ * сбрасывается в {@code 1}: виджет ставит каретку без выделения, менеджер находит
+ * ссылку и открывает её.
  */
 public final class TextEditorCtrlClickSelectWordHook implements IStartup
 {
     /** Ключ SWT-данных: границы слова, которое надо выделить после {@link SWT#MouseUp}. */
     private static final String PENDING_WORD_KEY = "tormozit.ctrlClickPendingWord"; //$NON-NLS-1$
+
+    /**
+     * Ключ SWT-данных: тот же {@link Point}, что ушёл в {@code asyncExec} выделения.
+     * Сброс (другой объект или {@code null}) отменяет ещё не выполненный {@code asyncExec} —
+     * иначе после перехода по ссылке выделение вернулось бы на кликнутое слово.
+     */
+    private static final String PENDING_APPLY_KEY = "tormozit.ctrlClickPendingApply"; //$NON-NLS-1$
+
+    /**
+     * Ключ SWT-данных: слово второго клика. После {@code mouseUp} гиперссылки, если
+     * каретка всё ещё в этом слове (перехода не было), выделяем его как первый клик.
+     */
+    private static final String FOLLOW_WORD_KEY = "tormozit.ctrlClickFollowWord"; //$NON-NLS-1$
 
     @Override
     public void earlyStartup()
@@ -88,14 +110,27 @@ public final class TextEditorCtrlClickSelectWordHook implements IStartup
             return;
 
         text.setData(PENDING_WORD_KEY, null);
+        text.setData(FOLLOW_WORD_KEY, null);
 
         if (event.button != 1)
             return;
-        Point word = pendingWordFor(text, event);
-        if (word == null)
+
+        Point word = wordRangeAt(text, event.x, event.y);
+        if (isSecondClickToFollowLink(text, event, word))
+        {
+            text.setData(PENDING_APPLY_KEY, null);
+            text.setData(FOLLOW_WORD_KEY, word);
+            // count≥2: иначе StyledText выделит слово раньше HyperlinkManager.mouseDown
+            if (event.count >= 2)
+                event.count = 1;
+            return; // Ctrl остаётся — менеджер откроет ссылку на mouseUp
+        }
+
+        Point pending = pendingWordFor(text, event, word);
+        if (pending == null)
             return; // слово уже выделено (или его нет) — штатное поведение, переход по ссылке
 
-        text.setData(PENDING_WORD_KEY, word);
+        text.setData(PENDING_WORD_KEY, pending);
         suppressHyperlinkModifier(event);
     }
 
@@ -104,16 +139,68 @@ public final class TextEditorCtrlClickSelectWordHook implements IStartup
         if (!(event.widget instanceof StyledText text) || text.isDisposed())
             return;
 
+        Object follow = text.getData(FOLLOW_WORD_KEY);
+        text.setData(FOLLOW_WORD_KEY, null);
         Object pending = text.getData(PENDING_WORD_KEY);
         text.setData(PENDING_WORD_KEY, null);
-        if (event.button != 1 || !(pending instanceof Point word))
+        if (event.button != 1)
+            return;
+
+        if (follow instanceof Point followWord)
+        {
+            // HyperlinkManager.mouseUp ещё впереди (фильтр раньше слушателей).
+            // Если перехода не будет — выделить слово, как после первого клика.
+            scheduleSelectWord(text, followWord);
+            return;
+        }
+
+        if (!(pending instanceof Point word))
             return;
 
         // После штатной обработки клика: она сама двигает каретку и снимает выделение.
+        scheduleSelectWord(text, word);
+    }
+
+    /**
+     * Второй Ctrl+клик по тому же слову — всегда переход, даже если гиперссылка ещё
+     * не успела включиться: нативный двойной щелчок обрабатывается раньше {@code asyncExec}
+     * первого клика, и выделение ещё не стоит.
+     */
+    private static boolean isSecondClickToFollowLink(StyledText text, Event event, Point word)
+    {
+        if (word == null)
+            return false;
+        if (!isCtrlOnly(event.stateMask))
+            return false;
+        if (!ComfortSettings.isCtrlClickSelectWordEnabled())
+            return false;
+        if (text.getBlockSelection())
+            return false;
+        if (event.count >= 2)
+            return true;
+        Object apply = text.getData(PENDING_APPLY_KEY);
+        return apply instanceof Point pending
+            && pending.x == word.x && pending.y == word.y;
+    }
+
+    /**
+     * Выделить слово после текущего события. {@code asyncExec} отменяется, если за это
+     * время пришёл второй клик ({@link #PENDING_APPLY_KEY} сброшен или заменён).
+     */
+    private static void scheduleSelectWord(StyledText text, Point word)
+    {
+        text.setData(PENDING_APPLY_KEY, word);
         text.getDisplay().asyncExec(() ->
         {
             if (text.isDisposed())
                 return;
+            if (text.getData(PENDING_APPLY_KEY) != word)
+                return;
+            text.setData(PENDING_APPLY_KEY, null);
+            Point selection = text.getSelection();
+            int caret = selection.y;
+            if (caret < word.x || caret > word.y)
+                return; // каретка уже не в слове — был переход по ссылке
             text.setSelectionRange(word.x, word.y - word.x);
             text.showSelection();
             pokeHyperlinkManager(text);
@@ -192,17 +279,15 @@ public final class TextEditorCtrlClickSelectWordHook implements IStartup
      * @return {@code null}, если режим выключен, модификаторы не те, слова под указателем нет
      *         или оно уже выделено ровно по своим границам
      */
-    private static Point pendingWordFor(StyledText text, Event event)
+    private static Point pendingWordFor(StyledText text, Event event, Point word)
     {
+        if (word == null)
+            return null;
         if (!isCtrlOnly(event.stateMask))
             return null;
         if (!ComfortSettings.isCtrlClickSelectWordEnabled())
             return null;
         if (text.getBlockSelection())
-            return null;
-
-        Point word = wordRangeAt(text, event.x, event.y);
-        if (word == null)
             return null;
 
         Point selection = text.getSelection();

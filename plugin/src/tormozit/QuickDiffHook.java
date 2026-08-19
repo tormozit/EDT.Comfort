@@ -1,5 +1,9 @@
 package tormozit;
 
+import java.io.ByteArrayInputStream;
+import java.io.InputStream;
+import java.lang.reflect.Constructor;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Iterator;
@@ -7,13 +11,37 @@ import java.util.List;
 import java.util.Set;
 import java.util.WeakHashMap;
 
+import org.eclipse.compare.CompareConfiguration;
+import org.eclipse.compare.CompareEditorInput;
+import org.eclipse.compare.CompareUI;
+import org.eclipse.compare.IEncodedStreamContentAccessor;
+import org.eclipse.compare.IStreamContentAccessor;
+import org.eclipse.compare.ITypedElement;
+import org.eclipse.compare.structuremergeviewer.Differencer;
+import org.eclipse.compare.structuremergeviewer.DiffNode;
+import org.eclipse.core.resources.IFile;
+import org.eclipse.core.resources.IFileState;
+import org.eclipse.core.resources.IResource;
+import org.eclipse.core.runtime.IProgressMonitor;
+import org.eclipse.core.runtime.NullProgressMonitor;
+import org.eclipse.egit.core.project.RepositoryMapping;
+import org.eclipse.jface.action.Action;
+import org.eclipse.jface.action.ToolBarManager;
 import org.eclipse.jface.dialogs.IPageChangedListener;
 import org.eclipse.jface.dialogs.PageChangedEvent;
+import org.eclipse.jface.resource.ImageDescriptor;
 import org.eclipse.jface.text.BadLocationException;
+import org.eclipse.jface.text.DefaultInformationControl;
 import org.eclipse.jface.text.IDocument;
+import org.eclipse.jface.text.IInformationControl;
+import org.eclipse.jface.text.IInformationControlCreator;
 import org.eclipse.jface.text.Position;
+import org.eclipse.jface.text.information.IInformationProviderExtension2;
 import org.eclipse.jface.text.source.Annotation;
 import org.eclipse.jface.text.source.CompositeRuler;
+import org.eclipse.jface.text.source.IAnnotationHover;
+import org.eclipse.jface.text.source.IAnnotationHoverExtension;
+import org.eclipse.jface.text.source.IAnnotationHoverExtension2;
 import org.eclipse.jface.text.source.IAnnotationModel;
 import org.eclipse.jface.text.source.IAnnotationModelExtension;
 import org.eclipse.jface.text.source.IAnnotationModelListener;
@@ -22,18 +50,27 @@ import org.eclipse.jface.text.source.ILineDiffer;
 import org.eclipse.jface.text.source.ILineDifferExtension;
 import org.eclipse.jface.text.source.ILineDifferExtension2;
 import org.eclipse.jface.text.source.ILineDiffInfo;
+import org.eclipse.jface.text.source.ILineRange;
 import org.eclipse.jface.text.source.IOverviewRuler;
 import org.eclipse.jface.text.source.ISourceViewer;
 import org.eclipse.jface.text.source.IVerticalRuler;
+import org.eclipse.jface.text.source.IVerticalRulerInfoExtension;
+import org.eclipse.jface.text.source.LineChangeHover;
 import org.eclipse.jface.text.source.LineNumberChangeRulerColumn;
+import org.eclipse.jgit.lib.Repository;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.StyledText;
+import org.eclipse.swt.graphics.Image;
+import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
+import org.eclipse.swt.widgets.Shell;
+import org.eclipse.ui.IEditorInput;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IEditorReference;
 import org.eclipse.ui.IPartListener2;
+import org.eclipse.ui.ISharedImages;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.IWorkbenchPartReference;
@@ -41,20 +78,28 @@ import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.IWindowListener;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.forms.editor.IFormPage;
+import org.eclipse.ui.plugin.AbstractUIPlugin;
 import org.eclipse.ui.texteditor.ITextEditor;
 
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorXtextEditorPage;
 
 /**
- * Скрывает маркеры Quick Diff («Выделение изменений»), если в разнице только
- * непечатные символы: полоса номеров слева и линейка обзора справа.
+ * Quick Diff («Выделение изменений»): скрывает пробельные-only маркеры на полосе
+ * номеров и линейке обзора; тултип маркера — интерактивный, снизу кнопки
+ * «Сравнить» и «Откатить».
  *
  * <p>На полосе номеров {@code DiffPainter} получает обёртку {@link ILineDiffer}
  * и не рисует пробельные добавления/изменения/удаления. На линейке обзора
  * аннотации Quick Diff с той же пробельной разницей не отдаются в отрисовку
  * (на Windows линейка рисует через {@code new GC}, минуя {@code PaintListener}).
  * Содержательные маркеры не трогаем.
+ *
+ * <p>Тултип — обёртка штатного {@link LineChangeHover}: тот же исходный текст
+ * хунка, {@code canHandleMouseCursor}, кнопки в нижней панели
+ * ({@link DefaultInformationControl} с {@link ToolBarManager}), как у sticky-попапов
+ * аннотаций. «Сравнить» открывает двухпанельное сравнение с базой Quick Diff
+ * (Git HEAD или локальная история). «Откатить» — {@link ILineDiffer#revertBlock}.
  */
 public final class QuickDiffHook implements IStartup
 {
@@ -196,7 +241,7 @@ public final class QuickDiffHook implements IStartup
             }
             return;
         }
-        Session session = new Session(viewer, column, overview);
+        Session session = new Session(editor, viewer, findRulerColumnRaw(viewer), column, overview);
         if (lineReady)
         {
             lineControl.setData(LINE_NUMBER_KEY, session);
@@ -221,15 +266,26 @@ public final class QuickDiffHook implements IStartup
 
     private static LineNumberChangeRulerColumn findLineNumberColumn(ISourceViewer viewer)
     {
+        return asChangeColumn(findRulerColumnRaw(viewer));
+    }
+
+    /**
+     * Колонка в {@link CompositeRuler}: в EDT это часто оболочка
+     * {@code LineNumberColumn} с {@code fDelegate} =
+     * {@link LineNumberChangeRulerColumn}. Hover вешается на оба, чтобы
+     * {@code AnnotationBarHoverManager} видел обёртку.
+     */
+    private static Object findRulerColumnRaw(ISourceViewer viewer)
+    {
         IVerticalRuler ruler = verticalRulerOf(viewer);
         if (!(ruler instanceof CompositeRuler composite))
             return null;
         Iterator<?> columns = composite.getDecoratorIterator();
         while (columns.hasNext())
         {
-            LineNumberChangeRulerColumn found = asChangeColumn(columns.next());
-            if (found != null)
-                return found;
+            Object next = columns.next();
+            if (asChangeColumn(next) != null)
+                return next;
         }
         return null;
     }
@@ -420,15 +476,38 @@ public final class QuickDiffHook implements IStartup
         }
     }
 
+    private static IAnnotationHover hoverOf(Object target)
+    {
+        if (target instanceof IVerticalRulerInfoExtension ext)
+            return ext.getHover();
+        Object hover = Global.invoke(target, "getHover"); //$NON-NLS-1$
+        return hover instanceof IAnnotationHover annotationHover ? annotationHover : null;
+    }
+
+    private static void setHoverOn(Object target, IAnnotationHover hover)
+    {
+        if (target instanceof IChangeRulerColumn change)
+        {
+            change.setHover(hover);
+            return;
+        }
+        Global.invoke(target, "setHover", hover); //$NON-NLS-1$
+    }
+
     private static final class Session
     {
+        final ITextEditor editor;
         final ISourceViewer viewer;
+        final Object rulerColumn;
         final LineNumberChangeRulerColumn column;
         final IOverviewRuler overview;
 
-        Session(ISourceViewer viewer, LineNumberChangeRulerColumn column, IOverviewRuler overview)
+        Session(ITextEditor editor, ISourceViewer viewer, Object rulerColumn,
+            LineNumberChangeRulerColumn column, IOverviewRuler overview)
         {
+            this.editor = editor;
             this.viewer = viewer;
+            this.rulerColumn = rulerColumn;
             this.column = column;
             this.overview = overview;
         }
@@ -436,7 +515,39 @@ public final class QuickDiffHook implements IStartup
         void ensureWrapped()
         {
             wrapPainter();
+            ensureHoverWrapped();
             ensureOverviewFiltered();
+        }
+
+        void ensureHoverWrapped()
+        {
+            if (column != null && column.isShowingRevisionInformation())
+            {
+                restoreHover(column);
+                if (rulerColumn != null && rulerColumn != column)
+                    restoreHover(rulerColumn);
+                return;
+            }
+            wrapHover(column);
+            if (rulerColumn != null && rulerColumn != column)
+                wrapHover(rulerColumn);
+        }
+
+        void wrapHover(Object target)
+        {
+            if (target == null)
+                return;
+            IAnnotationHover current = hoverOf(target);
+            if (current instanceof ChangeHoverWrapper)
+                return;
+            setHoverOn(target, new ChangeHoverWrapper(editor, viewer, current));
+        }
+
+        void restoreHover(Object target)
+        {
+            if (!(hoverOf(target) instanceof ChangeHoverWrapper wrapper))
+                return;
+            setHoverOn(target, wrapper.delegate);
         }
 
         void wrapPainter()
@@ -729,6 +840,572 @@ public final class QuickDiffHook implements IStartup
         public String[] getOriginalText()
         {
             return inner.getOriginalText();
+        }
+    }
+
+    /**
+     * Интерактивный тултип Quick Diff: штатный текст хунка и кнопки в нижней
+     * панели ({@link DefaultInformationControl} с {@link ToolBarManager}).
+     */
+    private static final class ChangeHoverWrapper implements IAnnotationHover, IAnnotationHoverExtension,
+        IAnnotationHoverExtension2, IInformationProviderExtension2
+    {
+        private static final String COMPARE_ID = "tormozit.comfort.qdCompare"; //$NON-NLS-1$
+        private static final String REVERT_ID = "tormozit.comfort.qdRevert"; //$NON-NLS-1$
+
+        final IAnnotationHover delegate;
+        private final ITextEditor editor;
+        private final ISourceViewer viewer;
+        private final IAnnotationHoverExtension delegateExt;
+        private final LineChangeHover textHover;
+        private int hoverLine;
+        private IInformationControl currentControl;
+
+        ChangeHoverWrapper(ITextEditor editor, ISourceViewer viewer, IAnnotationHover delegate)
+        {
+            this.editor = editor;
+            this.viewer = viewer;
+            this.delegate = delegate;
+            this.delegateExt = delegate instanceof IAnnotationHoverExtension ext ? ext : null;
+            this.textHover = delegate instanceof LineChangeHover lineHover
+                ? lineHover
+                : new LineChangeHover();
+        }
+
+        @Override
+        public String getHoverInfo(ISourceViewer sourceViewer, int lineNumber)
+        {
+            rememberLine(lineNumber);
+            if (delegate != null && !(delegate instanceof LineChangeHover))
+            {
+                String info = delegate.getHoverInfo(sourceViewer, lineNumber);
+                if (info != null)
+                    return info;
+            }
+            return textHover.getHoverInfo(sourceViewer, lineNumber);
+        }
+
+        @Override
+        public Object getHoverInfo(ISourceViewer sourceViewer, ILineRange lineRange, int visibleNumberOfLines)
+        {
+            int line = lineRange != null ? lineRange.getStartLine() : 0;
+            rememberLine(line);
+            if (delegateExt != null && !(delegate instanceof LineChangeHover))
+            {
+                Object info = delegateExt.getHoverInfo(sourceViewer, lineRange, visibleNumberOfLines);
+                if (info != null)
+                    return info;
+            }
+            return textHover.getHoverInfo(sourceViewer, lineRange, visibleNumberOfLines);
+        }
+
+        @Override
+        public ILineRange getHoverLineRange(ISourceViewer sourceViewer, int lineNumber)
+        {
+            rememberLine(lineNumber);
+            if (delegateExt != null)
+                return delegateExt.getHoverLineRange(sourceViewer, lineNumber);
+            return textHover.getHoverLineRange(sourceViewer, lineNumber);
+        }
+
+        @Override
+        public boolean canHandleMouseCursor()
+        {
+            return true;
+        }
+
+        @Override
+        public boolean canHandleMouseWheel()
+        {
+            return true;
+        }
+
+        @Override
+        public IInformationControlCreator getHoverControlCreator()
+        {
+            return parent -> createControl(parent);
+        }
+
+        @Override
+        public IInformationControlCreator getInformationPresenterControlCreator()
+        {
+            return parent -> createControl(parent);
+        }
+
+        private IInformationControl createControl(Shell parent)
+        {
+            ToolBarManager manager = new ToolBarManager(SWT.FLAT);
+            try
+            {
+                if (canCompare())
+                    manager.add(new CompareAction());
+                if (canRevert())
+                    manager.add(new RevertAction());
+            }
+            catch (Exception e)
+            {
+                Global.log("QuickDiffHover.createControl: " + e); //$NON-NLS-1$
+            }
+            HoverControl control = new HoverControl(parent, manager);
+            currentControl = control;
+            return control;
+        }
+
+        /**
+         * Штатный {@link DefaultInformationControl} при переходе мыши на попап
+         * подменяет себя presenter'ом <b>без</b> {@link ToolBarManager}
+         * ({@code getInformationPresenterControlCreator} передаёт {@code null}).
+         * Повторяем создание с кнопками.
+         */
+        private final class HoverControl extends DefaultInformationControl
+        {
+            HoverControl(Shell parent, ToolBarManager manager)
+            {
+                super(parent, manager);
+            }
+
+            @Override
+            public IInformationControlCreator getInformationPresenterControlCreator()
+            {
+                return parent -> createControl(parent);
+            }
+
+            /**
+             * При {@code canHandleMouseCursor} менеджер ставит попап поверх
+             * полосы номеров ({@code subjectArea.x - 4}), чтобы мышь могла
+             * заехать. Сдвигаем к началу текста — как штатный тултип Quick Diff.
+             */
+            @Override
+            public void setLocation(Point location)
+            {
+                StyledText text = viewer.getTextWidget();
+                if (location != null && text != null && !text.isDisposed())
+                {
+                    int textLeft = text.toDisplay(0, 0).x;
+                    if (location.x < textLeft)
+                        location.x = textLeft;
+                }
+                super.setLocation(location);
+            }
+        }
+
+        private void rememberLine(int lineNumber)
+        {
+            hoverLine = Math.max(0, lineNumber);
+        }
+
+        private void closeHover()
+        {
+            IInformationControl control = currentControl;
+            currentControl = null;
+            if (control != null)
+                control.setVisible(false);
+        }
+
+        private boolean canRevert()
+        {
+            return editor != null && editor.isEditable() && lineDifferOf(viewer) != null;
+        }
+
+        private boolean canCompare()
+        {
+            IFile file = fileOf(editor);
+            if (file == null)
+                return referenceText() != null && currentText() != null;
+            return hasGitHead(file) || hasLocalHistory(file) || file.exists()
+                || referenceText() != null;
+        }
+
+        private void runCompare()
+        {
+            int line = hoverLine;
+            closeHover();
+            Display display = Display.getDefault();
+            if (display == null || display.isDisposed())
+                return;
+            display.asyncExec(() ->
+            {
+                try
+                {
+                    IFile file = fileOf(editor);
+                    IWorkbenchPage page = editor != null && editor.getSite() != null
+                        ? editor.getSite().getPage()
+                        : PlatformUI.getWorkbench().getActiveWorkbenchWindow().getActivePage();
+                    if (openGitCompare(file, page, line))
+                        return;
+                    if (openLocalHistoryCompare(file, page, line))
+                        return;
+                    if (openReferenceCompare(file, line))
+                        return;
+                    ToastNotification.show("Сравнить",
+                        "Нет исходной версии для сравнения", 4000); //$NON-NLS-1$
+                }
+                catch (Exception e)
+                {
+                    Global.log("QuickDiffHover.compare: " + e); //$NON-NLS-1$
+                    ToastNotification.show("Сравнить",
+                        "Не удалось открыть сравнение: " + e.getMessage(), 5000); //$NON-NLS-1$
+                }
+            });
+        }
+
+        private void runRevert()
+        {
+            int line = hoverLine;
+            closeHover();
+            ILineDiffer differ = lineDifferOf(viewer);
+            if (differ == null)
+                return;
+            try
+            {
+                differ.revertBlock(line);
+            }
+            catch (BadLocationException e)
+            {
+                Global.log("QuickDiffHover.revert: " + e); //$NON-NLS-1$
+                ToastNotification.show("Откатить",
+                    "Не удалось откатить изменение: " + e.getMessage(), 4000); //$NON-NLS-1$
+            }
+        }
+
+        private String currentText()
+        {
+            IDocument document = viewer != null ? viewer.getDocument() : null;
+            return document != null ? document.get() : null;
+        }
+
+        private String referenceText()
+        {
+            try
+            {
+                ILineDiffer differ = lineDifferOf(viewer);
+                if (differ == null)
+                    return null;
+                Object provider = Global.invoke(differ, "getReferenceProvider"); //$NON-NLS-1$
+                if (provider == null)
+                    return null;
+                Object ref = Global.invoke(provider, "getReference", new NullProgressMonitor()); //$NON-NLS-1$
+                return ref instanceof IDocument document ? document.get() : null;
+            }
+            catch (Exception e)
+            {
+                return null;
+            }
+        }
+
+        private boolean openReferenceCompare(IFile file, int line)
+        {
+            String current = currentText();
+            String reference = referenceText();
+            if (current == null || reference == null)
+                return false;
+            String name = file != null ? file.getName() : "module.bsl"; //$NON-NLS-1$
+            CompareEditorCurrentLinesHook.setPendingLineReveal(line, true);
+            CompareUI.openCompareEditor(
+                new ReferenceCompareInput(current, reference, name));
+            return true;
+        }
+
+        private final class CompareAction extends Action
+        {
+            CompareAction()
+            {
+                setId(COMPARE_ID);
+                ImageDescriptor icon = compareIcon();
+                if (icon != null)
+                    setImageDescriptor(icon);
+                else
+                    setText("Сравнить"); //$NON-NLS-1$
+                setToolTipText("Открыть сравнение с исходной версией" + Global.pluginSignForTooltip()); //$NON-NLS-1$
+            }
+
+            @Override
+            public void run()
+            {
+                runCompare();
+            }
+        }
+
+        private final class RevertAction extends Action
+        {
+            RevertAction()
+            {
+                setId(REVERT_ID);
+                ImageDescriptor icon = revertIcon();
+                if (icon != null)
+                    setImageDescriptor(icon);
+                else
+                    setText("Откатить"); //$NON-NLS-1$
+                setToolTipText("Откатить изменение к исходной версии" + Global.pluginSignForTooltip()); //$NON-NLS-1$
+            }
+
+            @Override
+            public void run()
+            {
+                runRevert();
+            }
+        }
+    }
+
+    private static ImageDescriptor compareIcon()
+    {
+        try
+        {
+            return AbstractUIPlugin.imageDescriptorFromPlugin("org.eclipse.egit.ui", //$NON-NLS-1$
+                "icons/elcl16/compare_view.png"); //$NON-NLS-1$
+        }
+        catch (RuntimeException e)
+        {
+            return null;
+        }
+    }
+
+    private static ImageDescriptor revertIcon()
+    {
+        try
+        {
+            return PlatformUI.getWorkbench().getSharedImages()
+                .getImageDescriptor(ISharedImages.IMG_TOOL_UNDO);
+        }
+        catch (RuntimeException e)
+        {
+            return null;
+        }
+    }
+
+    private static IFile fileOf(ITextEditor editor)
+    {
+        if (editor == null)
+            return null;
+        IEditorInput input = editor.getEditorInput();
+        if (input == null)
+            return null;
+        IFile file = input.getAdapter(IFile.class);
+        return file;
+    }
+
+    private static boolean hasGitHead(IFile file)
+    {
+        return gitHeadTypedElement(file) != null;
+    }
+
+    private static boolean hasLocalHistory(IFile file)
+    {
+        if (file == null || !file.exists())
+            return false;
+        try
+        {
+            IFileState[] states = file.getHistory(null);
+            return states != null && states.length > 0;
+        }
+        catch (Exception e)
+        {
+            return false;
+        }
+    }
+
+    private static Object gitHeadTypedElement(IFile file)
+    {
+        if (file == null)
+            return null;
+        try
+        {
+            RepositoryMapping mapping = RepositoryMapping.getMapping(file);
+            if (mapping == null)
+                return null;
+            Repository repository = mapping.getRepository();
+            String path = mapping.getRepoRelativePath(file);
+            if (repository == null || path == null || path.isBlank())
+                return null;
+            Class<?> utils = Class.forName("org.eclipse.egit.ui.internal.CompareUtils"); //$NON-NLS-1$
+            Object head = Global.invoke(utils, "getHeadTypedElement", repository, path); //$NON-NLS-1$
+            if (head == null)
+                return null;
+            String name = head.getClass().getName();
+            if (name.contains("EmptyTypedElement")) //$NON-NLS-1$
+                return null;
+            return head;
+        }
+        catch (Exception e)
+        {
+            return null;
+        }
+    }
+
+    private static boolean openGitCompare(IFile file, IWorkbenchPage page, int line)
+    {
+        Object head = gitHeadTypedElement(file);
+        if (head == null || file == null)
+            return false;
+        try
+        {
+            RepositoryMapping mapping = RepositoryMapping.getMapping(file);
+            if (mapping == null)
+                return false;
+            Repository repository = mapping.getRepository();
+            if (repository == null)
+                return false;
+            Class<?> wfr = Class.forName(
+                "org.eclipse.egit.core.internal.storage.WorkspaceFileRevision"); //$NON-NLS-1$
+            Object localRev = Global.invoke(wfr, "forFile", repository, file); //$NON-NLS-1$
+            Class<?> fileRevisionClass = Class.forName("org.eclipse.team.core.history.IFileRevision"); //$NON-NLS-1$
+            if (localRev == null || !fileRevisionClass.isInstance(localRev))
+                return false;
+            String encoding = file.getCharset();
+            Object left = construct(
+                "org.eclipse.egit.ui.internal.revision.FileRevisionTypedElement", //$NON-NLS-1$
+                new Class<?>[] { fileRevisionClass, String.class },
+                localRev, encoding);
+            Object input = construct(
+                "org.eclipse.egit.ui.internal.revision.GitCompareFileRevisionEditorInput", //$NON-NLS-1$
+                new Class<?>[] { ITypedElement.class, ITypedElement.class, IWorkbenchPage.class },
+                left, head, page);
+            if (!(input instanceof CompareEditorInput editorInput))
+                return false;
+            CompareEditorCurrentLinesHook.setPendingLineReveal(line, true);
+            CompareUI.openCompareEditor(editorInput);
+            return true;
+        }
+        catch (Exception e)
+        {
+            Global.log("QuickDiffHover.openGitCompare: " + e); //$NON-NLS-1$
+            return false;
+        }
+    }
+
+    private static boolean openLocalHistoryCompare(IFile file, IWorkbenchPage page, int line)
+    {
+        if (file == null || !file.exists())
+            return false;
+        try
+        {
+            IFileState[] states = file.getHistory(null);
+            if (states == null || states.length == 0)
+                return false;
+            Object left = construct(
+                "org.eclipse.team.internal.ui.synchronize.LocalResourceTypedElement", //$NON-NLS-1$
+                new Class<?>[] { IResource.class },
+                file);
+            Object revision = construct(
+                "org.eclipse.team.internal.core.history.LocalFileRevision", //$NON-NLS-1$
+                new Class<?>[] { IFileState.class },
+                states[0]);
+            Class<?> fileRevisionClass = Class.forName("org.eclipse.team.core.history.IFileRevision"); //$NON-NLS-1$
+            Object right = construct(
+                "org.eclipse.team.internal.ui.history.FileRevisionTypedElement", //$NON-NLS-1$
+                new Class<?>[] { fileRevisionClass },
+                revision);
+            Object input = construct(
+                "org.eclipse.team.internal.ui.history.CompareFileRevisionEditorInput", //$NON-NLS-1$
+                new Class<?>[] { ITypedElement.class, ITypedElement.class, IWorkbenchPage.class },
+                left, right, page);
+            if (!(input instanceof CompareEditorInput editorInput))
+                return false;
+            CompareEditorCurrentLinesHook.setPendingLineReveal(line, true);
+            CompareUI.openCompareEditor(editorInput);
+            return true;
+        }
+        catch (Exception e)
+        {
+            Global.log("QuickDiffHover.openLocalHistoryCompare: " + e); //$NON-NLS-1$
+            return false;
+        }
+    }
+
+    private static Object construct(String className, Class<?>[] types, Object... args) throws Exception
+    {
+        Constructor<?> ctor = Class.forName(className).getConstructor(types);
+        ctor.setAccessible(true);
+        return ctor.newInstance(args);
+    }
+
+    /**
+     * Запасное сравнение текущего документа с референсом Quick Diff
+     * (last saved / содержимое {@code IQuickDiffReferenceProvider}).
+     */
+    private static final class ReferenceCompareInput extends CompareEditorInput
+    {
+        private final StringCompareElement leftElement;
+        private final StringCompareElement rightElement;
+
+        ReferenceCompareInput(String currentText, String referenceText, String fileName)
+        {
+            super(createConfiguration());
+            String type = viewerType(fileName);
+            leftElement = new StringCompareElement(fileName, currentText, type);
+            rightElement = new StringCompareElement(fileName, referenceText, type);
+            setTitle(fileName);
+        }
+
+        private static CompareConfiguration createConfiguration()
+        {
+            CompareConfiguration config = new CompareConfiguration();
+            config.setLeftEditable(false);
+            config.setRightEditable(false);
+            config.setLeftLabel("Текущий"); //$NON-NLS-1$
+            config.setRightLabel("Исходный"); //$NON-NLS-1$
+            return config;
+        }
+
+        private static String viewerType(String fileName)
+        {
+            if (fileName == null)
+                return "txt"; //$NON-NLS-1$
+            int dot = fileName.lastIndexOf('.');
+            if (dot < 0 || dot == fileName.length() - 1)
+                return "txt"; //$NON-NLS-1$
+            return fileName.substring(dot + 1);
+        }
+
+        @Override
+        protected Object prepareInput(IProgressMonitor monitor)
+        {
+            return new DiffNode(null, Differencer.CHANGE, null, leftElement, rightElement);
+        }
+
+        private static final class StringCompareElement
+            implements ITypedElement, IStreamContentAccessor, IEncodedStreamContentAccessor
+        {
+            private final String name;
+            private final String content;
+            private final String type;
+
+            StringCompareElement(String name, String content, String type)
+            {
+                this.name = name != null ? name : ""; //$NON-NLS-1$
+                this.content = content != null ? content : ""; //$NON-NLS-1$
+                this.type = type != null ? type : "txt"; //$NON-NLS-1$
+            }
+
+            @Override
+            public String getName()
+            {
+                return name;
+            }
+
+            @Override
+            public Image getImage()
+            {
+                return null;
+            }
+
+            @Override
+            public String getType()
+            {
+                return type;
+            }
+
+            @Override
+            public InputStream getContents()
+            {
+                return new ByteArrayInputStream(content.getBytes(StandardCharsets.UTF_8));
+            }
+
+            @Override
+            public String getCharset()
+            {
+                return StandardCharsets.UTF_8.name();
+            }
         }
     }
 }

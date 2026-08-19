@@ -59,6 +59,8 @@ import java.nio.file.Path;
  *   работает без изменений: «Локальный: …» распознаётся как рабочая копия, а сравнение
  *   двух ревизий локальной истории — как сравнение без рабочей копии.</li>
  * </ul>
+ * и в запасном сравнении из тултипа маркера Quick Diff
+ * ({@code QuickDiffHook.ReferenceCompareInput} — текущий документ с референсом last saved).
  *
  * <p>Это не наш редактор — встраиваем панель в уже существующее дерево виджетов после
  * открытия, а не через переопределение {@code createContents} (как в
@@ -209,7 +211,8 @@ public final class CompareEditorCurrentLinesHook
             return false;
         String name = input.getClass().getName();
         return name.contains(INPUT_FILE_REVISION) || name.endsWith(INPUT_GIT_COMPARE_SUFFIX)
-            || name.endsWith(INPUT_LOCAL_HISTORY_SUFFIX);
+            || name.endsWith(INPUT_LOCAL_HISTORY_SUFFIX)
+            || name.endsWith("$ReferenceCompareInput"); //$NON-NLS-1$
     }
 
     /**

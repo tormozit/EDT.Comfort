@@ -264,8 +264,8 @@ public class ComfortPreferencePage
         addField(ctrlClickSelectWordField);
         setFieldTooltip(ctrlClickSelectWordField,
             "Ctrl+клик в текстовом поле выделяет слово под курсором — как двойной клик, —\n"
-            + "если это слово ещё не выделено. Если оно уже выделено, клик работает штатно:\n"
-            + "в редакторе модуля рисуется гиперссылка, указатель принимает форму руки.", //$NON-NLS-1$
+            + "если это слово ещё не выделено. Повторный клик (в том числе быстрый двойной\n"
+            + "щелчок) работает штатно: в редакторе модуля — переход по гиперссылке.", //$NON-NLS-1$
             codeEditorGroup);
 
         BooleanFieldEditor serverCallField = new BooleanFieldEditor(

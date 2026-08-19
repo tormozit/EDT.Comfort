@@ -2,11 +2,14 @@ package tormozit;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Comparator;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 import org.eclipse.jface.dialogs.Dialog;
@@ -65,6 +68,8 @@ import org.eclipse.swt.widgets.Table;
 import org.eclipse.swt.widgets.TableColumn;
 import org.eclipse.swt.widgets.TableItem;
 import org.eclipse.swt.widgets.Text;
+import org.eclipse.swt.widgets.Tree;
+import org.eclipse.swt.widgets.TreeItem;
 
 /**
  * Единое поведение таблиц в формах плагина: выбор ячейки, копирование,
@@ -420,7 +425,7 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
             if (index > max)
                 max = index;
         }
-        int visible = visibleRowCount(table);
+        int visible = visibleRowCount(table.getItemHeight(), table.getClientArea().height);
         int top = table.getTopIndex();
         int bottom = top + visible - 1;
         if (min >= top && max <= bottom)
@@ -433,17 +438,88 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
         table.setTopIndex(newTop);
     }
 
-    private static int visibleRowCount(Table table)
+    /**
+     * Прокручивает дерево так, чтобы выделенные строки были видны — тот же режим,
+     * что {@link #revealSelection(Table)}: не крутить, если выделение уже в кадре;
+     * если диапазон умещается — минимальный сдвиг, чтобы вошли первая и последняя;
+     * иначе сверху оказывается первая.
+     * {@link Tree#showItem} и {@code TreeViewer.setSelection(..., true)} показывают
+     * только первую строку и часто крутят сильнее, чем нужно.
+     */
+    static void revealSelection(Tree tree)
     {
-        if (table == null || table.isDisposed())
+        if (tree == null || tree.isDisposed())
+            return;
+        TreeItem[] selected = tree.getSelection();
+        if (selected == null || selected.length == 0)
+            return;
+        Set<TreeItem> wanted = Collections.newSetFromMap(new IdentityHashMap<>());
+        for (TreeItem item : selected)
+        {
+            if (item != null && !item.isDisposed())
+                wanted.add(item);
+        }
+        if (wanted.isEmpty())
+            return;
+        List<TreeItem> rows = new ArrayList<>();
+        collectExpandedItems(tree.getItems(), rows);
+        int min = -1;
+        int max = -1;
+        for (int i = 0; i < rows.size(); i++)
+        {
+            if (!wanted.contains(rows.get(i)))
+                continue;
+            if (min < 0)
+                min = i;
+            max = i;
+        }
+        if (min < 0)
+            return;
+        int visible = visibleRowCount(tree.getItemHeight(), tree.getClientArea().height);
+        TreeItem topItem = tree.getTopItem();
+        int top = 0;
+        if (topItem != null)
+        {
+            for (int i = 0; i < rows.size(); i++)
+            {
+                if (rows.get(i) == topItem)
+                {
+                    top = i;
+                    break;
+                }
+            }
+        }
+        int bottom = top + visible - 1;
+        if (min >= top && max <= bottom)
+            return;
+        int newTop;
+        if (max - min + 1 <= visible)
+            newTop = min < top ? min : Math.max(0, max - visible + 1);
+        else
+            newTop = min;
+        if (newTop >= 0 && newTop < rows.size())
+            tree.setTopItem(rows.get(newTop));
+    }
+
+    private static void collectExpandedItems(TreeItem[] items, List<TreeItem> out)
+    {
+        if (items == null)
+            return;
+        for (TreeItem item : items)
+        {
+            if (item == null || item.isDisposed())
+                continue;
+            out.add(item);
+            if (item.getExpanded() && item.getItemCount() > 0)
+                collectExpandedItems(item.getItems(), out);
+        }
+    }
+
+    private static int visibleRowCount(int itemHeight, int clientHeight)
+    {
+        if (itemHeight <= 0 || clientHeight <= 0)
             return 1;
-        int itemHeight = table.getItemHeight();
-        if (itemHeight <= 0)
-            return 1;
-        int height = table.getClientArea().height;
-        if (height <= 0)
-            return 1;
-        return Math.max(1, height / itemHeight);
+        return Math.max(1, clientHeight / itemHeight);
     }
 
     void setCopyHook(Runnable copyHook)
