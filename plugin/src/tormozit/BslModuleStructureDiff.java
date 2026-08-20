@@ -104,7 +104,7 @@ final class BslModuleStructureDiff
             root.addChild(new DiffNode(
                 "Неполная структура " + labelOrDefault(rightLabel, "справа") + ": " + right.syntaxErrorMessage, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 Kind.SYNTAX_ERROR, -1, -1, Math.max(0, right.syntaxErrorOffset), 1));
-        matchChildren(root, left.root.children, right.root.children, leftText, rightText);
+        matchChildren(root, left.root.children, right.root.children);
         return new Result(root, null, null);
     }
 
@@ -114,7 +114,7 @@ final class BslModuleStructureDiff
     }
 
     private static void matchChildren(DiffNode parent, List<SectionNode> leftChildren,
-        List<SectionNode> rightChildren, String leftText, String rightText)
+        List<SectionNode> rightChildren)
     {
         for (int[] pair : lcsAlign(leftChildren, rightChildren))
         {
@@ -125,9 +125,8 @@ final class BslModuleStructureDiff
                 SectionNode l = leftChildren.get(li);
                 SectionNode r = rightChildren.get(ri);
                 DiffNode node = new DiffNode(l.label, Kind.CHANGED, l.offset, l.length, r.offset, r.length);
-                matchChildren(node, l.children, r.children, leftText, rightText);
-                boolean textDiffers = !safeSubstring(leftText, l.offset, l.length)
-                    .equals(safeSubstring(rightText, r.offset, r.length));
+                matchChildren(node, l.children, r.children);
+                boolean textDiffers = !l.comparisonText.equals(r.comparisonText);
                 if (textDiffers || !node.children.isEmpty())
                     parent.addChild(node);
             }
@@ -142,13 +141,6 @@ final class BslModuleStructureDiff
                 parent.addChild(new DiffNode(r.label, Kind.ADDED, -1, -1, r.offset, r.length));
             }
         }
-    }
-
-    private static String safeSubstring(String text, int offset, int length)
-    {
-        if (text == null || offset < 0 || length < 0 || offset + length > text.length())
-            return ""; //$NON-NLS-1$
-        return text.substring(offset, offset + length);
     }
 
     /**

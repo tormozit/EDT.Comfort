@@ -24,9 +24,13 @@ import org.eclipse.core.runtime.IProgressMonitor;
  * Упрощённый читатель словарей Hunspell/MySpell (пара файлов {@code .aff}/{@code .dic}),
  * используемый {@link ComfortSpellingEngine} и Platform dictionary в {@link SpellCheckHook}.
  * Поддерживает основные директивы {@code SET},
- * {@code FLAG}, {@code PFX}/{@code SFX}, {@code FORBIDDENWORD}; правила суффиксов/приставок
- * применяются без учёта более редких директив (COMPOUND*, MAP, REP и т.п.) — это не полная
- * реализация спецификации Hunspell, а практичное приближение для подсветки и подсказок.
+ * {@code FLAG}, {@code PFX}/{@code SFX}, {@code FORBIDDENWORD}, {@code ICONV};
+ * правила суффиксов/приставок применяются без учёта более редких директив
+ * (COMPOUND*, MAP, REP, OCONV и т.п.) — это не полная реализация спецификации Hunspell,
+ * а практичное приближение для подсветки и подсказок.
+ *
+ * <p>{@code ICONV} нужен для русского AOT ({@code russian-aot-ieyo}): в {@code .dic}
+ * леммы без «ё», а {@code ICONV ё е} приводит ввод к словарной форме перед проверкой.
  */
 final class HunspellDictionary
 {
@@ -77,6 +81,8 @@ final class HunspellDictionary
     private final Set<String> crossProductSuffixFlags = new HashSet<>();
     private final Set<String> crossProductPrefixFlags = new HashSet<>();
     private final Map<String, Boolean> resultCache = new ConcurrentHashMap<>();
+    /** Пары {@code from → to} из {@code ICONV} (порядок как в {@code .aff}). */
+    private final List<String[]> iconvRules = new ArrayList<>();
     private final ScriptKind script;
     private String forbiddenFlag;
     private FlagMode flagMode = FlagMode.CHAR;
@@ -155,6 +161,13 @@ final class HunspellDictionary
             else if (line.startsWith("FORBIDDENWORD ")) //$NON-NLS-1$
             {
                 forbiddenFlag = line.substring("FORBIDDENWORD ".length()).trim(); //$NON-NLS-1$
+            }
+            else if (line.startsWith("ICONV ")) //$NON-NLS-1$
+            {
+                // «ICONV N» — счётчик; «ICONV from to» — замена ввода перед проверкой
+                String[] parts = line.trim().split("\\s+"); //$NON-NLS-1$
+                if (parts.length >= 3)
+                    iconvRules.add(new String[] { parts[1], parts[2] });
             }
             else if (line.startsWith("SFX ") || line.startsWith("PFX ")) //$NON-NLS-1$ //$NON-NLS-2$
             {
@@ -515,6 +528,7 @@ final class HunspellDictionary
 
     private boolean checkOneForm(String word)
     {
+        word = applyIconv(word);
         if (isValidRoot(word, null))
             return true;
         if (checkSuffix(word) != null)
@@ -522,6 +536,21 @@ final class HunspellDictionary
         if (checkPrefix(word) != null)
             return true;
         return checkPrefixAndSuffix(word);
+    }
+
+    /** Входные замены Hunspell ({@code ICONV}) — до поиска в {@code .dic} и аффиксах. */
+    private String applyIconv(String word)
+    {
+        if (word == null || word.isEmpty() || iconvRules.isEmpty())
+            return word;
+        String result = word;
+        for (String[] rule : iconvRules)
+        {
+            String from = rule[0];
+            if (!from.isEmpty() && result.contains(from))
+                result = result.replace(from, rule[1]);
+        }
+        return result;
     }
 
     /** @return true, если {@code root} есть в словаре, не помечено как запрещённое, и

@@ -55,13 +55,25 @@ final class BslModuleStructureParser
         final String label;
         final int offset;
         final int length;
+        /**
+         * Текст для сравнения секций: только фактические фрагменты {@code getRegions()},
+         * без промежутка между ними. Иначе у {@code #Область}…{@code #КонецОбласти} в диапазон
+         * попадают вложенные методы, и панель «Структура» подписывает отличие именем области.
+         */
+        final String comparisonText;
         final List<SectionNode> children = new ArrayList<>();
 
         SectionNode(String label, int offset, int length)
         {
+            this(label, offset, length, ""); //$NON-NLS-1$
+        }
+
+        SectionNode(String label, int offset, int length, String comparisonText)
+        {
             this.label = label;
             this.offset = offset;
             this.length = length;
+            this.comparisonText = comparisonText != null ? comparisonText : ""; //$NON-NLS-1$
         }
     }
 
@@ -163,7 +175,7 @@ final class BslModuleStructureParser
                 List<Object> descriptions = getSectionDescriptions(moduleClass, module, text);
                 if (descriptions != null)
                     for (Object description : descriptions)
-                        root.children.add(toSectionNode(description));
+                        root.children.add(toSectionNode(description, text));
             }
             catch (Exception | LinkageError e)
             {
@@ -316,21 +328,54 @@ final class BslModuleStructureParser
             IComparisonSession.class.getClassLoader(), new Class<?>[] { IComparisonSession.class }, handler);
     }
 
-    /** {@code BslModuleSectionDescription}: {@code getName()}, {@code getType()}, {@code getRegions()}, {@code getChildren()}. */
-    private static SectionNode toSectionNode(Object description)
+    /** {@code BslModuleSectionDescription}: {@code getName()}, {@code getType()}, {@code getRegions()}, {@code getChildDescriptions()}. */
+    private static SectionNode toSectionNode(Object description, String text)
     {
         Object nameObj = Global.call(description, "getName"); //$NON-NLS-1$
         Object typeObj = Global.call(description, "getType"); //$NON-NLS-1$
         String typeName = typeObj != null ? String.valueOf(Global.call(typeObj, "getName")) : null; //$NON-NLS-1$
 
-        int[] range = regionRange(Global.call(description, "getRegions")); //$NON-NLS-1$
-        String label = labelFor(typeName, nameObj instanceof String s ? s : null, range[2]);
-        SectionNode node = new SectionNode(label, range[0], range[1]);
+        List<int[]> fragments = collectFragments(Global.call(description, "getRegions")); //$NON-NLS-1$
+        String label = labelFor(typeName, nameObj instanceof String s ? s : null, fragments.size());
+        int offset;
+        int length;
+        String comparisonText;
+        if (fragments.isEmpty())
+        {
+            offset = 0;
+            length = 0;
+            comparisonText = ""; //$NON-NLS-1$
+        }
+        else if ("Main".equals(typeName)) //$NON-NLS-1$
+        {
+            /*
+             * «Main» — разрозненные куски вне методов: по решению пользователя офсет/длина
+             * охватывают диапазон от первого фрагмента до конца последнего, включая процедуры
+             * между ними. Сравнение тоже по этому сплошному диапазону.
+             */
+            int[] span = spanOf(fragments);
+            offset = span[0];
+            length = span[1];
+            comparisonText = slice(text, offset, length);
+        }
+        else
+        {
+            /*
+             * У области EDT два фрагмента — строка {@code #Область} и строка {@code #КонецОбласти}.
+             * Склеивать их в один диапазон нельзя: внутрь попадут методы, и отличие метода
+             * всплывёт в списке под именем области. Навигация — к первому фрагменту (заголовок
+             * области / метода); сравнение — конкатенация фактических фрагментов.
+             */
+            offset = fragments.get(0)[0];
+            length = fragments.get(0)[1];
+            comparisonText = joinFragments(text, fragments);
+        }
+        SectionNode node = new SectionNode(label, offset, length, comparisonText);
 
         Object childrenObj = Global.call(description, "getChildDescriptions"); //$NON-NLS-1$
         if (childrenObj instanceof Iterable<?> children)
             for (Object child : children)
-                node.children.add(toSectionNode(child));
+                node.children.add(toSectionNode(child, text));
         return node;
     }
 
@@ -339,7 +384,7 @@ final class BslModuleStructureParser
         /*
          * "Main" — внутреннее имя типа секции в модели 1C (операторы верхнего уровня вне
          * процедур/функций). Может состоять из НЕСКОЛЬКИХ разрозненных фрагментов текста
-         * в разных местах модуля (см. regionRange — офсет/длина сейчас охватывают диапазон от
+         * в разных местах модуля (см. spanOf — офсет/длина охватывают диапазон от
          * первого фрагмента до конца последнего целиком, включая процедуры между ними, по
          * решению пользователя это оставлено как есть) — название честно отражает это,
          * не выдавая себя за один непрерывный «метод».
@@ -369,35 +414,53 @@ final class BslModuleStructureParser
         return "мест"; //$NON-NLS-1$
     }
 
-    /**
-     * {@code List<TextRegion>} → [минимальный offset, суммарная длина от первого до конца
-     * последнего, число фрагментов]. По решению пользователя офсет/длина намеренно оставлены
-     * как один сплошной диапазон (первый…последний) даже когда фрагментов несколько и они
-     * разрозненны по модулю — только счётчик фрагментов используется отдельно, для честного
-     * названия узла «Main» (см. {@link #labelFor}), не для навигации/сравнения.
-     */
-    private static int[] regionRange(Object regionsObj)
+    /** {@code List<TextRegion>} → список пар {@code [offset, length]} в порядке EDT. */
+    private static List<int[]> collectFragments(Object regionsObj)
     {
+        List<int[]> result = new ArrayList<>();
         if (!(regionsObj instanceof Iterable<?> regions))
-            return new int[] { 0, 0, 0 };
-        int minOffset = -1;
-        int maxEnd = -1;
-        int count = 0;
+            return result;
         for (Object region : regions)
         {
             Object offsetObj = Global.call(region, "getOffset"); //$NON-NLS-1$
             Object lengthObj = Global.call(region, "getLength"); //$NON-NLS-1$
             if (!(offsetObj instanceof Integer offset) || !(lengthObj instanceof Integer length))
                 continue;
-            count++;
-            if (minOffset < 0 || offset < minOffset)
-                minOffset = offset;
-            int end = offset + length;
+            result.add(new int[] { offset, Math.max(0, length) });
+        }
+        return result;
+    }
+
+    /** Сплошной диапазон от первого фрагмента до конца последнего: {@code [offset, length]}. */
+    private static int[] spanOf(List<int[]> fragments)
+    {
+        int minOffset = -1;
+        int maxEnd = -1;
+        for (int[] fragment : fragments)
+        {
+            if (minOffset < 0 || fragment[0] < minOffset)
+                minOffset = fragment[0];
+            int end = fragment[0] + fragment[1];
             if (end > maxEnd)
                 maxEnd = end;
         }
         if (minOffset < 0)
-            return new int[] { 0, 0, 0 };
-        return new int[] { minOffset, Math.max(0, maxEnd - minOffset), count };
+            return new int[] { 0, 0 };
+        return new int[] { minOffset, Math.max(0, maxEnd - minOffset) };
+    }
+
+    private static String joinFragments(String text, List<int[]> fragments)
+    {
+        StringBuilder joined = new StringBuilder();
+        for (int[] fragment : fragments)
+            joined.append(slice(text, fragment[0], fragment[1]));
+        return joined.toString();
+    }
+
+    private static String slice(String text, int offset, int length)
+    {
+        if (text == null || offset < 0 || length < 0 || offset + length > text.length())
+            return ""; //$NON-NLS-1$
+        return text.substring(offset, offset + length);
     }
 }

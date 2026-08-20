@@ -29,8 +29,9 @@ import org.eclipse.jface.action.Action;
 import org.eclipse.jface.action.ToolBarManager;
 import org.eclipse.jface.dialogs.IPageChangedListener;
 import org.eclipse.jface.dialogs.PageChangedEvent;
+import org.eclipse.jface.preference.IPreferenceStore;
+import org.eclipse.jface.preference.PreferenceConverter;
 import org.eclipse.jface.resource.ImageDescriptor;
-import org.eclipse.jface.resource.JFaceResources;
 import org.eclipse.jface.text.BadLocationException;
 import org.eclipse.jface.text.DefaultInformationControl;
 import org.eclipse.jface.text.IDocument;
@@ -55,13 +56,14 @@ import org.eclipse.jface.text.source.ILineRange;
 import org.eclipse.jface.text.source.IOverviewRuler;
 import org.eclipse.jface.text.source.ISourceViewer;
 import org.eclipse.jface.text.source.IVerticalRuler;
-import org.eclipse.jface.text.source.IVerticalRulerInfoExtension;
 import org.eclipse.jface.text.source.LineChangeHover;
 import org.eclipse.jface.text.source.LineNumberChangeRulerColumn;
+import org.eclipse.jface.text.source.LineRange;
 import org.eclipse.jgit.lib.Repository;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.graphics.Color;
+import org.eclipse.swt.graphics.GC;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.graphics.RGB;
@@ -80,8 +82,10 @@ import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.IWindowListener;
 import org.eclipse.ui.PlatformUI;
+import org.eclipse.ui.editors.text.EditorsUI;
 import org.eclipse.ui.forms.editor.IFormPage;
 import org.eclipse.ui.plugin.AbstractUIPlugin;
+import org.eclipse.ui.texteditor.AnnotationPreference;
 import org.eclipse.ui.texteditor.ITextEditor;
 
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
@@ -92,20 +96,24 @@ import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorXtextEditorPage;
  * номеров и линейке обзора; тултип маркера — интерактивный, снизу кнопки
  * «Сравнить» и «Откатить».
  *
- * <p>На полосе номеров {@code DiffPainter} получает обёртку {@link ILineDiffer}
- * и не рисует пробельные добавления/изменения/удаления. На линейке обзора
- * аннотации Quick Diff с той же пробельной разницей не отдаются в отрисовку
- * (на Windows линейка рисует через {@code new GC}, минуя {@code PaintListener}).
- * Содержательные маркеры не трогаем.
+ * <p>На полосе номеров {@code DiffPainter} (и в режиме «Отображать информацию
+ * о ревизии» — {@code RevisionPainter} через те же хунки {@link ILineDiffer})
+ * получает обёртку и не рисует пробельные добавления/изменения/удаления. На
+ * линейке обзора аннотации Quick Diff с той же пробельной разницей не отдаются
+ * в отрисовку (на Windows линейка рисует через {@code new GC}, минуя
+ * {@code PaintListener}). Содержательные маркеры не трогаем.
  *
- * <p>Тултип — обёртка штатного {@link LineChangeHover}: исходный текст хунка
- * (добавленные — текущий текст, изменённые и удалённые — исходный;
- * фон только у удалённых, как {@code TextMergeViewer.ColorPalette.fill}:
- * {@code DELETION_COLOR} с {@code COLOR_LIST_BACKGROUND}, не с жёлтым фоном подсказки),
- * {@code canHandleMouseCursor}, кнопки в нижней панели
- * ({@link DefaultInformationControl} с {@link ToolBarManager}), как у sticky-попапов
- * аннотаций. «Сравнить» открывает двухпанельное сравнение с базой Quick Diff
- * (Git HEAD или локальная история). «Откатить» — {@link ILineDiffer#revertBlock}.
+ * <p>Тултип Quick Diff — обёртка {@code DiffPainter.fHover} ({@link LineChangeHover}):
+ * исходный текст хунка (добавленные — текущий текст, изменённые и удалённые —
+ * исходный; фон текста не красится; в начале строки — ячейка цветом маркера
+ * Quick Diff, удаление ослабляется), {@code canHandleMouseCursor}, кнопки в нижней
+ * панели ({@link DefaultInformationControl} с {@link ToolBarManager}).
+ * «Сравнить» открывает двухпанельное сравнение: в Git — как двойной клик
+ * в панели «Индексирование Git» (рабочая копия с индексом), иначе локальная
+ * история / референс Quick Diff. «Откатить» — {@link ILineDiffer#revertBlock}.
+ * В режиме «Отображать информацию о ревизии» штатный тултип ревизии
+ * ({@code RevisionPainter}) не подменяется: обёртка срабатывает только на
+ * изменённых строках, где ревизионной подсказки нет.
  */
 public final class QuickDiffHook implements IStartup
 {
@@ -247,7 +255,7 @@ public final class QuickDiffHook implements IStartup
             }
             return;
         }
-        Session session = new Session(editor, viewer, findRulerColumnRaw(viewer), column, overview);
+        Session session = new Session(editor, viewer, column, overview);
         if (lineReady)
         {
             lineControl.setData(LINE_NUMBER_KEY, session);
@@ -278,8 +286,7 @@ public final class QuickDiffHook implements IStartup
     /**
      * Колонка в {@link CompositeRuler}: в EDT это часто оболочка
      * {@code LineNumberColumn} с {@code fDelegate} =
-     * {@link LineNumberChangeRulerColumn}. Hover вешается на оба, чтобы
-     * {@code AnnotationBarHoverManager} видел обёртку.
+     * {@link LineNumberChangeRulerColumn}.
      */
     private static Object findRulerColumnRaw(ISourceViewer viewer)
     {
@@ -338,6 +345,19 @@ public final class QuickDiffHook implements IStartup
                 return unwrap(differ);
         }
         return model instanceof ILineDiffer differ ? unwrap(differ) : null;
+    }
+
+    /**
+     * Тот же фильтр пробелов, что у {@link DiffPainter} на полосе номеров. Штатный
+     * {@link LineChangeHover} берёт сырой differ из annotation model — без обёртки
+     * тултип раздувается по пробельным CHANGED, хотя маркеры уже скрыты.
+     */
+    static ILineDiffer filteredLineDifferOf(ISourceViewer viewer)
+    {
+        ILineDiffer raw = lineDifferOf(viewer);
+        if (raw == null)
+            return null;
+        return new DifferWrapper(raw, viewer);
     }
 
     static ILineDiffer unwrap(ILineDiffer differ)
@@ -482,38 +502,18 @@ public final class QuickDiffHook implements IStartup
         }
     }
 
-    private static IAnnotationHover hoverOf(Object target)
-    {
-        if (target instanceof IVerticalRulerInfoExtension ext)
-            return ext.getHover();
-        Object hover = Global.invoke(target, "getHover"); //$NON-NLS-1$
-        return hover instanceof IAnnotationHover annotationHover ? annotationHover : null;
-    }
-
-    private static void setHoverOn(Object target, IAnnotationHover hover)
-    {
-        if (target instanceof IChangeRulerColumn change)
-        {
-            change.setHover(hover);
-            return;
-        }
-        Global.invoke(target, "setHover", hover); //$NON-NLS-1$
-    }
-
     private static final class Session
     {
         final ITextEditor editor;
         final ISourceViewer viewer;
-        final Object rulerColumn;
         final LineNumberChangeRulerColumn column;
         final IOverviewRuler overview;
 
-        Session(ITextEditor editor, ISourceViewer viewer, Object rulerColumn,
-            LineNumberChangeRulerColumn column, IOverviewRuler overview)
+        Session(ITextEditor editor, ISourceViewer viewer, LineNumberChangeRulerColumn column,
+            IOverviewRuler overview)
         {
             this.editor = editor;
             this.viewer = viewer;
-            this.rulerColumn = rulerColumn;
             this.column = column;
             this.overview = overview;
         }
@@ -525,50 +525,55 @@ public final class QuickDiffHook implements IStartup
             ensureOverviewFiltered();
         }
 
+        /**
+         * Только {@code DiffPainter.fHover}. {@code column.getHover()} зависит
+         * от последней строки мыши и на ревизии отдаёт {@code RevisionHover} —
+         * его нельзя класть в delegate. Ревизионная подсказка не подменяется.
+         */
         void ensureHoverWrapped()
         {
-            if (column != null && column.isShowingRevisionInformation())
-            {
-                restoreHover(column);
-                if (rulerColumn != null && rulerColumn != column)
-                    restoreHover(rulerColumn);
-                return;
-            }
-            wrapHover(column);
-            if (rulerColumn != null && rulerColumn != column)
-                wrapHover(rulerColumn);
-        }
-
-        void wrapHover(Object target)
-        {
-            if (target == null)
-                return;
-            IAnnotationHover current = hoverOf(target);
-            if (current instanceof ChangeHoverWrapper)
-                return;
-            setHoverOn(target, new ChangeHoverWrapper(editor, viewer, current));
-        }
-
-        void restoreHover(Object target)
-        {
-            if (!(hoverOf(target) instanceof ChangeHoverWrapper wrapper))
-                return;
-            setHoverOn(target, wrapper.delegate);
-        }
-
-        void wrapPainter()
-        {
-            if (column == null || column.isShowingRevisionInformation())
+            if (column == null)
                 return;
             Object painter = Global.getField(column, "fDiffPainter"); //$NON-NLS-1$
             if (painter == null)
                 return;
+            Object current = Global.getField(painter, "fHover"); //$NON-NLS-1$
+            IAnnotationHover stock = null;
+            if (current instanceof ChangeHoverWrapper wrapper)
+            {
+                if (wrapper.delegate == null || wrapper.delegate instanceof LineChangeHover)
+                    return;
+                stock = null;
+            }
+            else if (current instanceof LineChangeHover lineChange)
+                stock = lineChange;
+            Global.setField(painter, "fHover", new ChangeHoverWrapper(editor, viewer, stock)); //$NON-NLS-1$
+        }
+
+        void wrapPainter()
+        {
+            if (column == null)
+                return;
+            wrapDifferOnPainter(Global.getField(column, "fDiffPainter")); //$NON-NLS-1$
+            Object revisionPainter = Global.getField(column, "fRevisionPainter"); //$NON-NLS-1$
+            if (wrapDifferOnPainter(revisionPainter) && column.isShowingRevisionInformation())
+                Global.invoke(revisionPainter, "clearRangeCache"); //$NON-NLS-1$
+        }
+
+        /**
+         * @return {@code true}, если поле {@code fLineDiffer} заменили обёрткой
+         */
+        private boolean wrapDifferOnPainter(Object painter)
+        {
+            if (painter == null)
+                return false;
             Object current = Global.getField(painter, "fLineDiffer"); //$NON-NLS-1$
             if (current instanceof DifferWrapper)
-                return;
+                return false;
             if (!(current instanceof ILineDiffer differ))
-                return;
+                return false;
             Global.setField(painter, "fLineDiffer", new DifferWrapper(differ, viewer)); //$NON-NLS-1$
+            return true;
         }
 
         void ensureOverviewFiltered()
@@ -859,11 +864,17 @@ public final class QuickDiffHook implements IStartup
         private static final String COMPARE_ID = "tormozit.comfort.qdCompare"; //$NON-NLS-1$
         private static final String REVERT_ID = "tormozit.comfort.qdRevert"; //$NON-NLS-1$
 
+        private static final double RULER_SHADE_SCALE = 0.6;
+        private static final double DELETION_FILL_SCALE = 0.75;
+        private static final int CELL_GAP = 4;
+
         final IAnnotationHover delegate;
         private final ITextEditor editor;
         private final ISourceViewer viewer;
         private final IAnnotationHoverExtension delegateExt;
         private final LineChangeHover textHover;
+        private final List<Integer> addedOffsets = new ArrayList<>();
+        private final List<Integer> changedOffsets = new ArrayList<>();
         private final List<Integer> deletedOffsets = new ArrayList<>();
         private int hoverLine;
         private IInformationControl currentControl;
@@ -874,13 +885,15 @@ public final class QuickDiffHook implements IStartup
             this.viewer = viewer;
             this.delegate = delegate;
             this.delegateExt = delegate instanceof IAnnotationHoverExtension ext ? ext : null;
-            this.textHover = new ComfortLineChangeHover(deletedOffsets);
+            this.textHover = new ComfortLineChangeHover(addedOffsets, changedOffsets, deletedOffsets);
         }
 
         @Override
         public String getHoverInfo(ISourceViewer sourceViewer, int lineNumber)
         {
             rememberLine(lineNumber);
+            addedOffsets.clear();
+            changedOffsets.clear();
             deletedOffsets.clear();
             if (delegate != null && !(delegate instanceof LineChangeHover))
             {
@@ -896,6 +909,8 @@ public final class QuickDiffHook implements IStartup
         {
             int line = lineRange != null ? lineRange.getStartLine() : 0;
             rememberLine(line);
+            addedOffsets.clear();
+            changedOffsets.clear();
             deletedOffsets.clear();
             if (delegateExt != null && !(delegate instanceof LineChangeHover))
             {
@@ -910,8 +925,8 @@ public final class QuickDiffHook implements IStartup
         public ILineRange getHoverLineRange(ISourceViewer sourceViewer, int lineNumber)
         {
             rememberLine(lineNumber);
-            if (delegateExt != null)
-                return delegateExt.getHoverLineRange(sourceViewer, lineNumber);
+            // Не delegate: штатный LineChangeHover смотрит сырой differ и раздувает
+            // диапазон по пробельным CHANGED, которые DifferWrapper на полосе скрыл.
             return textHover.getHoverLineRange(sourceViewer, lineNumber);
         }
 
@@ -967,6 +982,9 @@ public final class QuickDiffHook implements IStartup
         private final class HoverControl extends DefaultInformationControl
         {
             private Color deletionBg;
+            private Color changeBg;
+            private Color additionBg;
+            private boolean cellPaintInstalled;
 
             HoverControl(Shell parent, ToolBarManager manager)
             {
@@ -978,6 +996,10 @@ public final class QuickDiffHook implements IStartup
                 {
                     disposeColor(deletionBg);
                     deletionBg = null;
+                    disposeColor(changeBg);
+                    changeBg = null;
+                    disposeColor(additionBg);
+                    additionBg = null;
                 });
             }
 
@@ -1017,10 +1039,28 @@ public final class QuickDiffHook implements IStartup
                 Object widget = Global.getField(this, "fText"); //$NON-NLS-1$
                 if (!(widget instanceof StyledText text) || text.isDisposed())
                     return;
-                paintLineBackgrounds(text, deletedOffsets, deletionColor(text));
+                int cellW = Math.max(12, text.getLineHeight());
+                text.setLeftMargin(cellW + CELL_GAP);
+                if (!cellPaintInstalled)
+                {
+                    cellPaintInstalled = true;
+                    text.addPaintListener(e -> paintLineCells(text, e.gc, e.y, e.height));
+                }
+                text.redraw();
             }
 
-            private void paintLineBackgrounds(StyledText text, List<Integer> offsets, Color bg)
+            private void paintLineCells(StyledText text, GC gc, int clipY, int clipH)
+            {
+                int cellW = Math.max(0, text.getLeftMargin() - CELL_GAP);
+                if (cellW <= 0 || gc == null)
+                    return;
+                paintCells(text, gc, clipY, clipH, cellW, addedOffsets, additionColor(text));
+                paintCells(text, gc, clipY, clipH, cellW, changedOffsets, changeColor(text));
+                paintCells(text, gc, clipY, clipH, cellW, deletedOffsets, deletionColor(text));
+            }
+
+            private void paintCells(StyledText text, GC gc, int clipY, int clipH, int cellW,
+                List<Integer> offsets, Color bg)
             {
                 if (offsets.isEmpty() || bg == null)
                     return;
@@ -1028,14 +1068,20 @@ public final class QuickDiffHook implements IStartup
                 int lineCount = text.getLineCount();
                 if (charCount <= 0 || lineCount <= 0)
                     return;
+                gc.setBackground(bg);
                 for (Integer offset : offsets)
                 {
                     if (offset == null || offset < 0)
                         continue;
                     int at = offset >= charCount ? charCount - 1 : offset;
                     int line = text.getLineAtOffset(at);
-                    if (line >= 0 && line < lineCount)
-                        text.setLineBackground(line, 1, bg);
+                    if (line < 0 || line >= lineCount)
+                        continue;
+                    int y = text.getLinePixel(line);
+                    int h = text.getLineHeight(line);
+                    if (y + h < clipY || y > clipY + clipH)
+                        continue;
+                    gc.fillRectangle(0, y, cellW, h);
                 }
             }
 
@@ -1043,12 +1089,27 @@ public final class QuickDiffHook implements IStartup
             {
                 if (deletionBg != null && !deletionBg.isDisposed())
                     return deletionBg;
-                RGB selected = JFaceResources.getColorRegistry().getRGB("DELETION_COLOR"); //$NON-NLS-1$
-                if (selected == null)
-                    selected = new RGB(255, 0, 0);
-                RGB listBg = text.getDisplay().getSystemColor(SWT.COLOR_LIST_BACKGROUND).getRGB();
-                deletionBg = new Color(text.getDisplay(), interpolate(selected, listBg, 0.9));
+                deletionBg = new Color(text.getDisplay(), weakenMarker(text.getDisplay(),
+                    QD_DELETION, new RGB(0, 0, 0), DELETION_FILL_SCALE));
                 return deletionBg;
+            }
+
+            private Color changeColor(StyledText text)
+            {
+                if (changeBg != null && !changeBg.isDisposed())
+                    return changeBg;
+                changeBg = new Color(text.getDisplay(),
+                    shadeLikeRuler(text.getDisplay(), QD_CHANGE, new RGB(204, 163, 205)));
+                return changeBg;
+            }
+
+            private Color additionColor(StyledText text)
+            {
+                if (additionBg != null && !additionBg.isDisposed())
+                    return additionBg;
+                additionBg = new Color(text.getDisplay(),
+                    shadeLikeRuler(text.getDisplay(), QD_ADDITION, new RGB(188, 188, 222)));
+                return additionBg;
             }
 
             private static void disposeColor(Color color)
@@ -1060,20 +1121,80 @@ public final class QuickDiffHook implements IStartup
 
         /**
          * Хунк без префиксов «> »/«- »: добавленные строки — текущий текст,
-         * изменённые и удалённые — исходный. Фон только у удалённых.
+         * изменённые и удалённые — исходный. Слева ячейка цветом маркера.
          */
         private static final class ComfortLineChangeHover extends LineChangeHover
         {
+            private final List<Integer> addedOffsets;
+            private final List<Integer> changedOffsets;
             private final List<Integer> deletedOffsets;
 
-            ComfortLineChangeHover(List<Integer> deletedOffsets)
+            ComfortLineChangeHover(List<Integer> addedOffsets, List<Integer> changedOffsets,
+                List<Integer> deletedOffsets)
             {
+                this.addedOffsets = addedOffsets;
+                this.changedOffsets = changedOffsets;
                 this.deletedOffsets = deletedOffsets;
+            }
+
+            @Override
+            public ILineRange getHoverLineRange(ISourceViewer viewer, int lineNumber)
+            {
+                IDocument document = viewer.getDocument();
+                if (document == null)
+                    return null;
+                ILineDiffer differ = filteredLineDifferOf(viewer);
+                if (differ == null || !lineHasVisibleDiff(differ, lineNumber))
+                    return null;
+                Point range = computeLineRange(viewer, lineNumber, 0,
+                    Math.max(0, document.getNumberOfLines() - 1));
+                if (range.x < 0 || range.y < 0)
+                    return null;
+                return new LineRange(range.x, range.y - range.x + 1);
+            }
+
+            @Override
+            protected Point computeLineRange(ISourceViewer viewer, int line, int min, int max)
+            {
+                ILineDiffer differ = filteredLineDifferOf(viewer);
+                if (differ == null)
+                    return new Point(-1, -1);
+                int l = line;
+                ILineDiffInfo info = differ.getLineInfo(l);
+                while (l >= min && info != null
+                    && (info.getChangeType() == ILineDiffInfo.CHANGED
+                        || info.getChangeType() == ILineDiffInfo.ADDED))
+                    info = differ.getLineInfo(--l);
+                int first = Math.min(l + 1, line);
+                l = line;
+                info = differ.getLineInfo(l);
+                while (l <= max && info != null
+                    && (info.getChangeType() == ILineDiffInfo.CHANGED
+                        || info.getChangeType() == ILineDiffInfo.ADDED))
+                    info = differ.getLineInfo(++l);
+                int last = Math.max(l - 1, line);
+                return new Point(first, last);
+            }
+
+            private static boolean lineHasVisibleDiff(ILineDiffer differ, int lineNumber)
+            {
+                ILineDiffInfo info = differ.getLineInfo(lineNumber);
+                if (info != null && info.hasChanges())
+                    return true;
+                if (lineNumber > 0)
+                {
+                    ILineDiffInfo above = differ.getLineInfo(lineNumber - 1);
+                    if (above != null && above.getRemovedLinesBelow() > 0)
+                        return true;
+                }
+                return false;
             }
 
             @Override
             public Object getHoverInfo(ISourceViewer sourceViewer, ILineRange lineRange, int visibleLines)
             {
+                addedOffsets.clear();
+                changedOffsets.clear();
                 deletedOffsets.clear();
                 if (lineRange == null)
                     return null;
@@ -1086,7 +1207,7 @@ public final class QuickDiffHook implements IStartup
 
             private int adaptFirstLine(ISourceViewer viewer, int startLine)
             {
-                ILineDiffer differ = lineDifferOf(viewer);
+                ILineDiffer differ = filteredLineDifferOf(viewer);
                 if (differ != null && startLine > 0)
                 {
                     ILineDiffInfo info = differ.getLineInfo(startLine - 1);
@@ -1099,7 +1220,7 @@ public final class QuickDiffHook implements IStartup
 
             private int adaptLastLine(ISourceViewer viewer, int lastLine)
             {
-                ILineDiffer differ = lineDifferOf(viewer);
+                ILineDiffer differ = filteredLineDifferOf(viewer);
                 if (differ != null && lastLine > 0)
                 {
                     ILineDiffInfo info = differ.getLineInfo(lastLine);
@@ -1111,7 +1232,7 @@ public final class QuickDiffHook implements IStartup
 
             private String buildHover(ISourceViewer sourceViewer, int first, int last, int maxLines)
             {
-                ILineDiffer differ = lineDifferOf(sourceViewer);
+                ILineDiffer differ = filteredLineDifferOf(sourceViewer);
                 if (differ == null)
                     return null;
                 IDocument document = sourceViewer.getDocument();
@@ -1128,12 +1249,13 @@ public final class QuickDiffHook implements IStartup
                     int i = 0;
                     if (type == ILineDiffInfo.ADDED)
                     {
-                        appendLine(text, lineText(document, line));
+                        addedOffsets.add(appendLine(text, lineText(document, line)));
                         maxLines--;
                     }
                     else if (type == ILineDiffInfo.CHANGED)
                     {
-                        appendLine(text, original.length > 0 ? original[i++] : ""); //$NON-NLS-1$
+                        changedOffsets.add(appendLine(text,
+                            original.length > 0 ? original[i++] : "")); //$NON-NLS-1$
                         maxLines--;
                     }
                     else if (type == ILineDiffInfo.UNCHANGED)
@@ -1179,12 +1301,64 @@ public final class QuickDiffHook implements IStartup
                 while (end > 0 && Character.isWhitespace(raw.charAt(end - 1)))
                     end--;
                 String trimmed = raw.substring(0, end);
+                addedOffsets.removeIf(offset -> offset >= trimmed.length());
+                changedOffsets.removeIf(offset -> offset >= trimmed.length());
                 deletedOffsets.removeIf(offset -> offset >= trimmed.length());
                 return trimmed;
             }
         }
 
-        /** Как {@code TextMergeViewer.ColorPalette}: смешение с фоном списка, не с жёлтым тултипом. */
+        /** Как {@code DiffPainter.getShadedColor}: чуть слабее сырого маркера, как клетка на полосе номеров. */
+        private static RGB shadeLikeRuler(Display display, String annotationType, RGB fallback)
+        {
+            RGB marker = quickDiffMarkerColor(annotationType, fallback);
+            RGB widgetBg = display.getSystemColor(SWT.COLOR_LIST_BACKGROUND).getRGB();
+            RGB toward = widgetBg;
+            boolean lightMarker = greyLevel(marker) > 128;
+            boolean lightBg = greyLevel(widgetBg) > 128;
+            if (lightMarker && lightBg)
+                toward = new RGB(255, 255, 255);
+            else if (!lightMarker && !lightBg)
+                toward = new RGB(0, 0, 0);
+            return interpolate(marker, toward, RULER_SHADE_SCALE);
+        }
+
+        private static double greyLevel(RGB rgb)
+        {
+            if (rgb.red == rgb.green && rgb.green == rgb.blue)
+                return rgb.red;
+            return 0.299 * rgb.red + 0.587 * rgb.green + 0.114 * rgb.blue + 0.5;
+        }
+
+        /** Ослабленный цвет маркера Quick Diff: смешение с {@code COLOR_LIST_BACKGROUND}, не с жёлтым тултипом. */
+        private static RGB weakenMarker(Display display, String annotationType, RGB fallback, double scale)
+        {
+            RGB marker = quickDiffMarkerColor(annotationType, fallback);
+            RGB listBg = display.getSystemColor(SWT.COLOR_LIST_BACKGROUND).getRGB();
+            return interpolate(marker, listBg, scale);
+        }
+
+        private static RGB quickDiffMarkerColor(String annotationType, RGB fallback)
+        {
+            AnnotationPreference pref = EditorsUI.getAnnotationPreferenceLookup()
+                .getAnnotationPreference(annotationType);
+            if (pref == null)
+                return fallback;
+            IPreferenceStore store = EditorsUI.getPreferenceStore();
+            String key = pref.getColorPreferenceKey();
+            RGB rgb = null;
+            if (store != null && key != null && store.contains(key))
+            {
+                if (store.isDefault(key))
+                    rgb = pref.getColorPreferenceValue();
+                else
+                    rgb = PreferenceConverter.getColor(store, key);
+            }
+            if (rgb == null)
+                rgb = pref.getColorPreferenceValue();
+            return rgb != null ? rgb : fallback;
+        }
+
         private static RGB interpolate(RGB fg, RGB bg, double scale)
         {
             return new RGB(
@@ -1216,7 +1390,7 @@ public final class QuickDiffHook implements IStartup
             IFile file = fileOf(editor);
             if (file == null)
                 return referenceText() != null && currentText() != null;
-            return hasGitHead(file) || hasLocalHistory(file) || file.exists()
+            return hasGitMapping(file) || hasLocalHistory(file) || file.exists()
                 || referenceText() != null;
         }
 
@@ -1388,9 +1562,12 @@ public final class QuickDiffHook implements IStartup
         return file;
     }
 
-    private static boolean hasGitHead(IFile file)
+    private static boolean hasGitMapping(IFile file)
     {
-        return gitHeadTypedElement(file) != null;
+        if (file == null)
+            return false;
+        RepositoryMapping mapping = RepositoryMapping.getMapping(file);
+        return mapping != null && mapping.getRepository() != null;
     }
 
     private static boolean hasLocalHistory(IFile file)
@@ -1408,38 +1585,14 @@ public final class QuickDiffHook implements IStartup
         }
     }
 
-    private static Object gitHeadTypedElement(IFile file)
-    {
-        if (file == null)
-            return null;
-        try
-        {
-            RepositoryMapping mapping = RepositoryMapping.getMapping(file);
-            if (mapping == null)
-                return null;
-            Repository repository = mapping.getRepository();
-            String path = mapping.getRepoRelativePath(file);
-            if (repository == null || path == null || path.isBlank())
-                return null;
-            Class<?> utils = Class.forName("org.eclipse.egit.ui.internal.CompareUtils"); //$NON-NLS-1$
-            Object head = Global.invoke(utils, "getHeadTypedElement", repository, path); //$NON-NLS-1$
-            if (head == null)
-                return null;
-            String name = head.getClass().getName();
-            if (name.contains("EmptyTypedElement")) //$NON-NLS-1$
-                return null;
-            return head;
-        }
-        catch (Exception e)
-        {
-            return null;
-        }
-    }
-
+    /**
+     * Как двойной клик по неиндексированному файлу в {@code StagingView}:
+     * {@code CompareWithIndexActionHandler} → {@code CompareUtils.compareWorkspaceWithRef}
+     * (слева {@code SaveableCompareEditorInput.createFileElement}, справа индекс).
+     */
     private static boolean openGitCompare(IFile file, IWorkbenchPage page, int line)
     {
-        Object head = gitHeadTypedElement(file);
-        if (head == null || file == null)
+        if (file == null)
             return false;
         try
         {
@@ -1449,25 +1602,10 @@ public final class QuickDiffHook implements IStartup
             Repository repository = mapping.getRepository();
             if (repository == null)
                 return false;
-            Class<?> wfr = Class.forName(
-                "org.eclipse.egit.core.internal.storage.WorkspaceFileRevision"); //$NON-NLS-1$
-            Object localRev = Global.invoke(wfr, "forFile", repository, file); //$NON-NLS-1$
-            Class<?> fileRevisionClass = Class.forName("org.eclipse.team.core.history.IFileRevision"); //$NON-NLS-1$
-            if (localRev == null || !fileRevisionClass.isInstance(localRev))
-                return false;
-            String encoding = file.getCharset();
-            Object left = construct(
-                "org.eclipse.egit.ui.internal.revision.FileRevisionTypedElement", //$NON-NLS-1$
-                new Class<?>[] { fileRevisionClass, String.class },
-                localRev, encoding);
-            Object input = construct(
-                "org.eclipse.egit.ui.internal.revision.GitCompareFileRevisionEditorInput", //$NON-NLS-1$
-                new Class<?>[] { ITypedElement.class, ITypedElement.class, IWorkbenchPage.class },
-                left, head, page);
-            if (!(input instanceof CompareEditorInput editorInput))
-                return false;
+            Class<?> utils = Class.forName("org.eclipse.egit.ui.internal.CompareUtils"); //$NON-NLS-1$
             CompareEditorCurrentLinesHook.setPendingLineReveal(line, true);
-            CompareUI.openCompareEditor(editorInput);
+            Global.invoke(utils, "compareWorkspaceWithRef", //$NON-NLS-1$
+                repository, file, "Index", page); //$NON-NLS-1$
             return true;
         }
         catch (Exception e)

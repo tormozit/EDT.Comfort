@@ -11,12 +11,16 @@ import org.eclipse.jface.text.source.ISourceViewer;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.events.SelectionAdapter;
 import org.eclipse.swt.events.SelectionEvent;
+import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.internal.win32.OS;
+import org.eclipse.swt.widgets.Composite;
+import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Menu;
 import org.eclipse.swt.widgets.MenuItem;
+import org.eclipse.swt.widgets.Shell;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IEditorReference;
 import org.eclipse.ui.IWorkbenchPage;
@@ -46,6 +50,8 @@ import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorXtextEditorPage;
  * Состояние Ctrl отслеживается глобальным Display-фильтром. На {@code MouseMove}
  * нельзя полагаться на {@code event.stateMask}: {@code TextEditorCtrlClickSelectWordHook}
  * снимает бит Ctrl, чтобы не рисовать гиперссылку до выделения слова.
+ * Пока указатель на попапе инспектора, нажатие и отпускание Ctrl его не закрывают
+ * (и штатный closer редактора, и наш Ctrl-гейт) — независимо от тумблера.
  *
  * <p>В XML (WST) hover зарегистрирован на маску «без модификаторов», а не на
  * {@code DEFAULT_HOVER_STATE_MASK}: при зажатом Ctrl штатный lookup его не находит.
@@ -107,7 +113,8 @@ final class BslHoverHintState
 
     /**
      * Включить/выключить hover-менеджеры конкретного viewer согласно текущему
-     * состоянию (тумблер + Ctrl-гейт). При выключении закрывает открытую подсказку.
+     * состоянию (тумблер + Ctrl-гейт). При выключении закрывает открытую подсказку,
+     * если указатель не на попапе инспектора и не внутри этой подсказки.
      */
     static void applyToViewer(ISourceViewer viewer)
     {
@@ -115,6 +122,7 @@ final class BslHoverHintState
             return;
         ensureCtrlFilterInstalled();
         boolean enabled = isHoverHintsCurrentlyEnabled();
+        boolean keepInspector = isPointerOnInspectorPopup();
         for (String field : MANAGER_FIELDS)
         {
             Object mgr = Global.getField(viewer, field);
@@ -122,7 +130,7 @@ final class BslHoverHintState
                 continue;
             try
             {
-                if (!enabled)
+                if (!enabled && !keepInspector && !isPointerInsideInformationControl(aim))
                     aim.disposeInformationControl();
                 aim.setEnabled(enabled);
             }
@@ -131,6 +139,73 @@ final class BslHoverHintState
             }
         }
         syncCtrlStateMaskHovers(viewer);
+    }
+
+    /**
+     * Указатель уже в открытой подсказке этого менеджера (включая вложенные shell).
+     */
+    private static boolean isPointerInsideInformationControl(AbstractInformationControlManager aim)
+    {
+        Display display = Display.getCurrent();
+        if (display == null || display.isDisposed())
+            return false;
+        Point cursor = display.getCursorLocation();
+        Control under = display.getCursorControl();
+        if (isPointerInsideControl(Global.getField(aim, "fInformationControl"), cursor, under)) //$NON-NLS-1$
+            return true;
+        Object replacer = Global.getField(aim, "fInformationControlReplacer"); //$NON-NLS-1$
+        if (replacer == null)
+            return false;
+        return isPointerInsideControl(Global.getField(replacer, "fInformationControl"), cursor, under); //$NON-NLS-1$
+    }
+
+    private static boolean isPointerInsideControl(Object control, Point cursor, Control under)
+    {
+        Shell shell = informationControlShell(control);
+        if (shell == null || shell.isDisposed() || !shell.isVisible())
+            return false;
+        if (under != null && !under.isDisposed())
+        {
+            Shell underShell = under.getShell();
+            if (isSameOrNestedShell(underShell, shell))
+                return true;
+        }
+        return cursor != null && shell.getBounds().contains(cursor);
+    }
+
+    private static boolean isSameOrNestedShell(Shell candidate, Shell root)
+    {
+        for (Shell walk = candidate; walk != null && !walk.isDisposed(); walk = parentShellOf(walk))
+        {
+            if (walk == root)
+                return true;
+        }
+        return false;
+    }
+
+    private static Shell parentShellOf(Shell shell)
+    {
+        Composite parent = shell.getParent();
+        while (parent != null && !(parent instanceof Shell))
+            parent = parent.getParent();
+        return parent instanceof Shell s ? s : null;
+    }
+
+    private static Shell informationControlShell(Object control)
+    {
+        if (control == null)
+            return null;
+        try
+        {
+            Object shell = Global.invoke(control, "getShell"); //$NON-NLS-1$
+            if (shell instanceof Shell s)
+                return s;
+        }
+        catch (Exception ignored)
+        {
+        }
+        Object field = Global.getField(control, "fShell"); //$NON-NLS-1$
+        return field instanceof Shell s ? s : null;
     }
 
     static void applyToAllEditors()
@@ -252,10 +327,69 @@ final class BslHoverHintState
         if (display == null || display.isDisposed())
             return;
         filterInstalled = true;
-        Listener listener = (Event event) -> updateCtrlState(isCtrlHeld(event));
+        Listener listener = (Event event) ->
+        {
+            keepInspectorOpenOnCtrl(event);
+            updateCtrlState(isCtrlHeld(event));
+        };
         display.addFilter(SWT.KeyDown, listener);
         display.addFilter(SWT.KeyUp, listener);
         display.addFilter(SWT.MouseMove, listener);
+    }
+
+    /**
+     * Пока указатель на попапе инспектора, Ctrl не должен доходить до closer
+     * редактора ({@code keyPressed} закрывает hover на любую клавишу).
+     * Клавиши, уже идущие в сам инспектор (Ctrl+C и т.п.), не глотаем.
+     */
+    private static void keepInspectorOpenOnCtrl(Event event)
+    {
+        if (event.keyCode != SWT.CTRL)
+            return;
+        if (event.type != SWT.KeyDown && event.type != SWT.KeyUp)
+            return;
+        Display display = event.display != null ? event.display : Display.getCurrent();
+        if (display == null || display.isDisposed())
+            return;
+        Control under = display.getCursorControl();
+        if (under == null || under.isDisposed())
+            return;
+        Shell inspector = inspectorShellOf(under);
+        if (inspector == null)
+            return;
+        if (isWidgetOnShell(event.widget, inspector))
+            return;
+        event.doit = false;
+    }
+
+    private static boolean isPointerOnInspectorPopup()
+    {
+        Display display = Display.getCurrent();
+        if (display == null || display.isDisposed())
+            return false;
+        Control under = display.getCursorControl();
+        if (under == null || under.isDisposed())
+            return false;
+        return inspectorShellOf(under) != null;
+    }
+
+    private static Shell inspectorShellOf(Control control)
+    {
+        if (control == null || control.isDisposed())
+            return null;
+        for (Shell walk = control.getShell(); walk != null && !walk.isDisposed(); walk = parentShellOf(walk))
+        {
+            if (DebugInspectorHook.isInspectorShell(walk))
+                return walk;
+        }
+        return null;
+    }
+
+    private static boolean isWidgetOnShell(Object widget, Shell root)
+    {
+        if (!(widget instanceof Control control) || control.isDisposed() || root == null)
+            return false;
+        return isSameOrNestedShell(control.getShell(), root);
     }
 
     /**

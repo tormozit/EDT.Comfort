@@ -497,6 +497,10 @@ final class StructureToggleController
     private static boolean isHeaderLine(String line)
     {
         String trimmed = line.strip();
+        // {@code #Область Имя} — штатная форма заголовка области; без снятия {@code #}
+        // ключевое слово «Область» не совпадает, и активация уходит на первую процедуру внутри.
+        if (trimmed.startsWith("#")) //$NON-NLS-1$
+            trimmed = trimmed.substring(1).strip();
         for (String keyword : HEADER_KEYWORDS)
         {
             if (trimmed.length() < keyword.length() || !trimmed.regionMatches(true, 0, keyword, 0, keyword.length()))
