@@ -51,6 +51,7 @@ import org.eclipse.swt.widgets.TableColumn;
 import org.eclipse.swt.widgets.TableItem;
 import org.eclipse.swt.widgets.Tree;
 import org.eclipse.ui.IActionBars;
+import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IPartListener2;
 import org.eclipse.ui.ISharedImages;
 import org.eclipse.ui.IStartup;
@@ -66,6 +67,7 @@ import org.eclipse.xtext.EcoreUtil2;
 import org.eclipse.xtext.nodemodel.ICompositeNode;
 import org.eclipse.xtext.nodemodel.util.NodeModelUtils;
 import org.eclipse.xtext.resource.IReferenceDescription;
+import org.eclipse.xtext.ui.editor.XtextEditor;
 
 import com._1c.g5.v8.dt.bsl.model.DynamicFeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.Expression;
@@ -77,6 +79,7 @@ import com._1c.g5.v8.dt.bsl.model.Method;
 import com._1c.g5.v8.dt.bsl.model.Module;
 import com._1c.g5.v8.dt.bsl.model.OperatorStyleCreator;
 import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
+import com._1c.g5.v8.dt.bsl.ui.menu.BslHandlerUtil;
 
 /**
  * Доработки штатной панели «Иерархия вызовов»:
@@ -87,7 +90,8 @@ import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
  *       метода: видны все места текущего уровня; переключатель «Подчинение дереву»
  *       (по умолчанию выключен, состояние запоминается) возвращает штатный отбор
  *       по узлу дерева; без отбора таблица сортируется по модулю, методу и строке;</li>
- *   <li>правая таблица подключена к {@link FormTableInteraction};</li>
+ *   <li>двойной щелчок по ячейке колонки параметра выделяет этот фактический
+ *       аргумент в модуле;</li>
  *   <li>подсказка заголовка колонки параметра — обычный текст (направление,
  *       типы, значение по умолчанию, описание); если имя обрезано — сначала
  *       полное имя.</li>
@@ -103,6 +107,7 @@ public final class CallHierarchyViewHook implements IStartup
     private static final String INSTALLED_MARKER = "tormozit.callHierarchyViewHook"; //$NON-NLS-1$
     private static final String SESSION_KEY = "tormozit.callHierarchyViewHook.session"; //$NON-NLS-1$
     private static final String PARAM_COLUMN_KEY = "tormozit.callHierarchyParamColumn"; //$NON-NLS-1$
+    private static final String PARAM_INDEX_KEY = "tormozit.callHierarchyParamIndex"; //$NON-NLS-1$
     private static final String CALLER_COLUMN_KEY = "tormozit.callHierarchyCallerColumn"; //$NON-NLS-1$
     private static final String CALLER_KIND_MODULE = "module"; //$NON-NLS-1$
     private static final String CALLER_KIND_METHOD = "method"; //$NON-NLS-1$
@@ -127,6 +132,7 @@ public final class CallHierarchyViewHook implements IStartup
     private static final int DEFAULT_PARAM_WIDTH = 80;
     private static final int DEFAULT_CALLER_WIDTH = 70;
     private static final int CALL_MODE_CALLERS = 0;
+    private static final String EXTRA_PARAM_TOOLTIP = "Формальный параметр отсутствует"; //$NON-NLS-1$
 
     @Override
     public void earlyStartup()
@@ -222,6 +228,7 @@ public final class CallHierarchyViewHook implements IStartup
             session.installKeepInput();
             session.installFollowTreeAction();
             session.installTreeSort();
+            session.installOpenActualArg();
 
             // Штатный слушатель EDT на каждый клик в дереве пересобирает правую таблицу
             // (сужает до мест выбранного метода). Мы показываем весь уровень и только
@@ -808,6 +815,10 @@ public final class CallHierarchyViewHook implements IStartup
                 {
                     if (isPendingNode(e1) != isPendingNode(e2))
                         return isPendingNode(e1) ? 1 : -1;
+                    boolean leftCurrent = sameModuleAsParent(e1);
+                    boolean rightCurrent = sameModuleAsParent(e2);
+                    if (leftCurrent != rightCurrent)
+                        return leftCurrent ? -1 : 1;
                     String[] left = treeSortKeys(e1);
                     String[] right = treeSortKeys(e2);
                     int cmp = compareCallerText(left[0], right[0]);
@@ -843,6 +854,94 @@ public final class CallHierarchyViewHook implements IStartup
             }
             treeSortByNode.put(node, keys);
             return keys;
+        }
+
+        boolean sameModuleAsParent(Object node)
+        {
+            if (!isTreeNode(node))
+                return false;
+            Object parent = Global.invoke(node, "getParent"); //$NON-NLS-1$
+            if (!isTreeNode(parent))
+                return false;
+            String childModule = treeSortKeys(node)[0];
+            String parentModule = treeSortKeys(parent)[0];
+            return !childModule.isEmpty() && compareCallerText(childModule, parentModule) == 0;
+        }
+
+        void installOpenActualArg()
+        {
+            locationViewer.addOpenListener(event ->
+            {
+                Display display = locationViewer.getTable() != null
+                    ? locationViewer.getTable().getDisplay()
+                    : null;
+                if (display == null || display.isDisposed())
+                    return;
+                display.asyncExec(this::openActualArgFromActiveCell);
+            });
+        }
+
+        void openActualArgFromActiveCell()
+        {
+            Table table = locationViewer.getTable();
+            if (table == null || table.isDisposed() || interaction == null)
+                return;
+            int column = interaction.activeColumn();
+            if (column < 0 || column >= table.getColumnCount())
+                return;
+            TableColumn widget = table.getColumn(column);
+            if (widget == null || widget.isDisposed())
+                return;
+            Object rawIndex = widget.getData(PARAM_INDEX_KEY);
+            if (!(rawIndex instanceof Integer paramIndex))
+                return;
+            IStructuredSelection selection = locationViewer.getStructuredSelection();
+            IReferenceDescription description = asDescription(
+                selection != null ? selection.getFirstElement() : null);
+            Expression arg = actualArg(description, paramIndex.intValue());
+            if (arg == null)
+                return;
+            try
+            {
+                IEditorPart editor = openCallSite(description);
+                XtextEditor xtext = BslHandlerUtil.extractXtextEditor(editor);
+                ICompositeNode node = NodeModelUtils.findActualNodeFor(arg);
+                if (node == null)
+                    node = NodeModelUtils.getNode(arg);
+                if (xtext != null && node != null && node.getLength() > 0)
+                    xtext.selectAndReveal(node.getOffset(), node.getLength());
+                tempLog("open-arg param=" + paramIndex + " offset=" //$NON-NLS-1$ //$NON-NLS-2$
+                    + (node != null ? node.getOffset() : -1) + " len=" //$NON-NLS-1$
+                    + (node != null ? node.getLength() : 0)
+                    + " editor=" + (xtext != null)); //$NON-NLS-1$
+            }
+            catch (RuntimeException ex)
+            {
+                tempLog("open-arg: " + ex); //$NON-NLS-1$
+            }
+        }
+
+        IEditorPart openCallSite(IReferenceDescription description)
+        {
+            Object opener = Global.getField(view, "uriEditorOpener"); //$NON-NLS-1$
+            Object opened = Global.invoke(opener, "open", description.getSourceEObjectUri(), //$NON-NLS-1$
+                description.getEReference(), Integer.valueOf(description.getIndexInList()), Boolean.TRUE);
+            if (opened instanceof IEditorPart part)
+                return part;
+            if (view.getSite() != null && view.getSite().getPage() != null)
+                return view.getSite().getPage().getActiveEditor();
+            return null;
+        }
+
+        Expression actualArg(IReferenceDescription description, int index)
+        {
+            if (description == null || index < 0)
+                return null;
+            EObject source = resolveEObject(sourceUri(description));
+            EList<Expression> params = paramsOf(source);
+            if (params == null || index >= params.size())
+                return null;
+            return params.get(index);
         }
 
         static boolean readFollowTree()
@@ -1468,40 +1567,44 @@ public final class CallHierarchyViewHook implements IStartup
             if (table == null || table.isDisposed())
                 return;
             Method method = resolveCalledMethod(firstDescription(descriptions));
-            List<String> names = formalParamNames(method);
+            List<String> formals = formalParamNames(method);
+            List<String> headers = paramColumnHeaders(formals, maxActualArgCount(descriptions));
             URI methodUri = method != null ? EcoreUtil.getURI(method) : null;
             TableColumn[] columns = table.getColumns();
             int start = paramColumnStart();
             int extra = Math.max(0, columns.length - start);
-            boolean sameNames = extra == names.size();
-            if (sameNames)
+            boolean sameHeaders = extra == headers.size();
+            if (sameHeaders)
             {
-                for (int i = 0; i < names.size(); i++)
+                for (int i = 0; i < headers.size(); i++)
                 {
-                    if (!names.get(i).equals(columns[start + i].getText()))
+                    if (!headers.get(i).equals(columns[start + i].getText()))
                     {
-                        sameNames = false;
+                        sameHeaders = false;
                         break;
                     }
                 }
             }
-            if (sameNames && Objects.equals(methodUri, lastParamMethodUri))
+            if (sameHeaders && Objects.equals(methodUri, lastParamMethodUri))
+            {
+                applyExtraParamTooltips(columns, start, formals.size(), headers.size());
                 return;
+            }
             lastParamMethodUri = methodUri;
-            if (!sameNames)
+            if (!sameHeaders)
             {
                 int lineWidth = columns.length > 1 ? columns[1].getWidth() : 0;
                 int infoWidth = columns.length > 2 ? columns[2].getWidth() : 0;
-                while (extra > names.size())
+                while (extra > headers.size())
                 {
                     TableColumn last = table.getColumns()[table.getColumnCount() - 1];
-                    if (!Boolean.TRUE.equals(last.getData(PARAM_COLUMN_KEY)))
+                    if (last.getData(PARAM_COLUMN_KEY) == null)
                         break;
                     last.dispose();
                     extra--;
                 }
                 TableColumnLayout layout = columnLayoutOf(table);
-                while (extra < names.size())
+                while (extra < headers.size())
                 {
                     TableColumn column = new TableColumn(table, SWT.LEFT);
                     column.setData(PARAM_COLUMN_KEY, Boolean.TRUE);
@@ -1510,13 +1613,18 @@ public final class CallHierarchyViewHook implements IStartup
                 }
                 columns = table.getColumns();
                 start = paramColumnStart();
-                for (int i = 0; i < names.size(); i++)
+                for (int i = 0; i < headers.size(); i++)
                 {
                     TableColumn column = columns[start + i];
-                    column.setText(names.get(i));
+                    column.setText(headers.get(i));
+                    column.setData(PARAM_COLUMN_KEY, Boolean.TRUE);
+                    column.setData(PARAM_INDEX_KEY, Integer.valueOf(i));
                     column.setToolTipText(null);
                     column.setResizable(true);
+                    if (interaction != null && i < formals.size())
+                        interaction.setHeaderTooltipExtra(column, null);
                 }
+                applyExtraParamTooltips(columns, start, formals.size(), headers.size());
                 if (interaction != null)
                     interaction.notifyColumnsChanged();
                 Composite host = table.getParent();
@@ -1524,7 +1632,53 @@ public final class CallHierarchyViewHook implements IStartup
                     host.layout(true, true);
                 scheduleRestoreStaticWidths(table, lineWidth, infoWidth);
             }
-            scheduleParamHeaderTooltips(names, method);
+            else
+                applyExtraParamTooltips(columns, start, formals.size(), headers.size());
+            scheduleParamHeaderTooltips(formals, method);
+        }
+
+        int maxActualArgCount(List<IReferenceDescription> descriptions)
+        {
+            int max = 0;
+            if (descriptions == null)
+                return 0;
+            for (IReferenceDescription item : descriptions)
+            {
+                String[] args = argsOf(item);
+                if (args != null && args.length > max)
+                    max = args.length;
+            }
+            return max;
+        }
+
+        static List<String> paramColumnHeaders(List<String> formals, int maxActual)
+        {
+            int formalCount = formals != null ? formals.size() : 0;
+            int count = Math.max(formalCount, maxActual);
+            List<String> headers = new ArrayList<>(count);
+            if (formals != null)
+                headers.addAll(formals);
+            for (int i = formalCount; i < count; i++)
+                headers.add("<" + (i + 1) + ">"); //$NON-NLS-1$ //$NON-NLS-2$
+            return headers;
+        }
+
+        void applyExtraParamTooltips(TableColumn[] columns, int start, int formalCount, int headerCount)
+        {
+            if (columns == null || start < 0)
+                return;
+            for (int i = formalCount; i < headerCount; i++)
+            {
+                if (start + i >= columns.length)
+                    break;
+                TableColumn column = columns[start + i];
+                if (column == null || column.isDisposed())
+                    continue;
+                if (interaction != null)
+                    interaction.setHeaderTooltipExtra(column, EXTRA_PARAM_TOOLTIP);
+                else
+                    column.setToolTipText(EXTRA_PARAM_TOOLTIP);
+            }
         }
 
         void bindParamColumn(TableColumn column, TableColumnLayout layout)

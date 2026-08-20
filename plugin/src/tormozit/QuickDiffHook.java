@@ -30,6 +30,7 @@ import org.eclipse.jface.action.ToolBarManager;
 import org.eclipse.jface.dialogs.IPageChangedListener;
 import org.eclipse.jface.dialogs.PageChangedEvent;
 import org.eclipse.jface.resource.ImageDescriptor;
+import org.eclipse.jface.resource.JFaceResources;
 import org.eclipse.jface.text.BadLocationException;
 import org.eclipse.jface.text.DefaultInformationControl;
 import org.eclipse.jface.text.IDocument;
@@ -60,8 +61,10 @@ import org.eclipse.jface.text.source.LineNumberChangeRulerColumn;
 import org.eclipse.jgit.lib.Repository;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.StyledText;
+import org.eclipse.swt.graphics.Color;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
+import org.eclipse.swt.graphics.RGB;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
@@ -95,8 +98,11 @@ import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorXtextEditorPage;
  * (на Windows линейка рисует через {@code new GC}, минуя {@code PaintListener}).
  * Содержательные маркеры не трогаем.
  *
- * <p>Тултип — обёртка штатного {@link LineChangeHover}: тот же исходный текст
- * хунка, {@code canHandleMouseCursor}, кнопки в нижней панели
+ * <p>Тултип — обёртка штатного {@link LineChangeHover}: исходный текст хунка
+ * (добавленные — текущий текст, изменённые и удалённые — исходный;
+ * фон только у удалённых, как {@code TextMergeViewer.ColorPalette.fill}:
+ * {@code DELETION_COLOR} с {@code COLOR_LIST_BACKGROUND}, не с жёлтым фоном подсказки),
+ * {@code canHandleMouseCursor}, кнопки в нижней панели
  * ({@link DefaultInformationControl} с {@link ToolBarManager}), как у sticky-попапов
  * аннотаций. «Сравнить» открывает двухпанельное сравнение с базой Quick Diff
  * (Git HEAD или локальная история). «Откатить» — {@link ILineDiffer#revertBlock}.
@@ -858,6 +864,7 @@ public final class QuickDiffHook implements IStartup
         private final ISourceViewer viewer;
         private final IAnnotationHoverExtension delegateExt;
         private final LineChangeHover textHover;
+        private final List<Integer> deletedOffsets = new ArrayList<>();
         private int hoverLine;
         private IInformationControl currentControl;
 
@@ -867,15 +874,14 @@ public final class QuickDiffHook implements IStartup
             this.viewer = viewer;
             this.delegate = delegate;
             this.delegateExt = delegate instanceof IAnnotationHoverExtension ext ? ext : null;
-            this.textHover = delegate instanceof LineChangeHover lineHover
-                ? lineHover
-                : new LineChangeHover();
+            this.textHover = new ComfortLineChangeHover(deletedOffsets);
         }
 
         @Override
         public String getHoverInfo(ISourceViewer sourceViewer, int lineNumber)
         {
             rememberLine(lineNumber);
+            deletedOffsets.clear();
             if (delegate != null && !(delegate instanceof LineChangeHover))
             {
                 String info = delegate.getHoverInfo(sourceViewer, lineNumber);
@@ -890,6 +896,7 @@ public final class QuickDiffHook implements IStartup
         {
             int line = lineRange != null ? lineRange.getStartLine() : 0;
             rememberLine(line);
+            deletedOffsets.clear();
             if (delegateExt != null && !(delegate instanceof LineChangeHover))
             {
                 Object info = delegateExt.getHoverInfo(sourceViewer, lineRange, visibleNumberOfLines);
@@ -959,15 +966,32 @@ public final class QuickDiffHook implements IStartup
          */
         private final class HoverControl extends DefaultInformationControl
         {
+            private Color deletionBg;
+
             HoverControl(Shell parent, ToolBarManager manager)
             {
-                super(parent, manager);
+                // Без HTML-presenter: штатный LineChangeHover отдаёт обычный
+                // текст с переводами строк. Конструктор (parent, manager)
+                // подключает HTMLTextPresenter и склеивает строки в одну.
+                super(parent, manager, null);
+                getShell().addDisposeListener(e ->
+                {
+                    disposeColor(deletionBg);
+                    deletionBg = null;
+                });
             }
 
             @Override
             public IInformationControlCreator getInformationPresenterControlCreator()
             {
                 return parent -> createControl(parent);
+            }
+
+            @Override
+            public void setInformation(String content)
+            {
+                super.setInformation(content);
+                paintHoverHighlights();
             }
 
             /**
@@ -987,6 +1011,186 @@ public final class QuickDiffHook implements IStartup
                 }
                 super.setLocation(location);
             }
+
+            private void paintHoverHighlights()
+            {
+                Object widget = Global.getField(this, "fText"); //$NON-NLS-1$
+                if (!(widget instanceof StyledText text) || text.isDisposed())
+                    return;
+                paintLineBackgrounds(text, deletedOffsets, deletionColor(text));
+            }
+
+            private void paintLineBackgrounds(StyledText text, List<Integer> offsets, Color bg)
+            {
+                if (offsets.isEmpty() || bg == null)
+                    return;
+                int charCount = text.getCharCount();
+                int lineCount = text.getLineCount();
+                if (charCount <= 0 || lineCount <= 0)
+                    return;
+                for (Integer offset : offsets)
+                {
+                    if (offset == null || offset < 0)
+                        continue;
+                    int at = offset >= charCount ? charCount - 1 : offset;
+                    int line = text.getLineAtOffset(at);
+                    if (line >= 0 && line < lineCount)
+                        text.setLineBackground(line, 1, bg);
+                }
+            }
+
+            private Color deletionColor(StyledText text)
+            {
+                if (deletionBg != null && !deletionBg.isDisposed())
+                    return deletionBg;
+                RGB selected = JFaceResources.getColorRegistry().getRGB("DELETION_COLOR"); //$NON-NLS-1$
+                if (selected == null)
+                    selected = new RGB(255, 0, 0);
+                RGB listBg = text.getDisplay().getSystemColor(SWT.COLOR_LIST_BACKGROUND).getRGB();
+                deletionBg = new Color(text.getDisplay(), interpolate(selected, listBg, 0.9));
+                return deletionBg;
+            }
+
+            private static void disposeColor(Color color)
+            {
+                if (color != null && !color.isDisposed())
+                    color.dispose();
+            }
+        }
+
+        /**
+         * Хунк без префиксов «> »/«- »: добавленные строки — текущий текст,
+         * изменённые и удалённые — исходный. Фон только у удалённых.
+         */
+        private static final class ComfortLineChangeHover extends LineChangeHover
+        {
+            private final List<Integer> deletedOffsets;
+
+            ComfortLineChangeHover(List<Integer> deletedOffsets)
+            {
+                this.deletedOffsets = deletedOffsets;
+            }
+
+            @Override
+            public Object getHoverInfo(ISourceViewer sourceViewer, ILineRange lineRange, int visibleLines)
+            {
+                deletedOffsets.clear();
+                if (lineRange == null)
+                    return null;
+                int start = lineRange.getStartLine();
+                int first = adaptFirstLine(sourceViewer, start);
+                int last = adaptLastLine(sourceViewer, start + lineRange.getNumberOfLines() - 1);
+                String content = buildHover(sourceViewer, first, last, visibleLines);
+                return formatSource(content);
+            }
+
+            private int adaptFirstLine(ISourceViewer viewer, int startLine)
+            {
+                ILineDiffer differ = lineDifferOf(viewer);
+                if (differ != null && startLine > 0)
+                {
+                    ILineDiffInfo info = differ.getLineInfo(startLine - 1);
+                    if (info != null && info.getChangeType() == ILineDiffInfo.UNCHANGED
+                        && info.getRemovedLinesBelow() > 0)
+                        return startLine - 1;
+                }
+                return startLine;
+            }
+
+            private int adaptLastLine(ISourceViewer viewer, int lastLine)
+            {
+                ILineDiffer differ = lineDifferOf(viewer);
+                if (differ != null && lastLine > 0)
+                {
+                    ILineDiffInfo info = differ.getLineInfo(lastLine);
+                    if (info != null && info.getChangeType() == ILineDiffInfo.UNCHANGED)
+                        return lastLine - 1;
+                }
+                return lastLine;
+            }
+
+            private String buildHover(ISourceViewer sourceViewer, int first, int last, int maxLines)
+            {
+                ILineDiffer differ = lineDifferOf(sourceViewer);
+                if (differ == null)
+                    return null;
+                IDocument document = sourceViewer.getDocument();
+                StringBuilder text = new StringBuilder();
+                for (int line = first; line <= last; line++)
+                {
+                    ILineDiffInfo info = differ.getLineInfo(line);
+                    if (info == null)
+                        continue;
+                    String[] original = info.getOriginalText();
+                    if (original == null)
+                        original = new String[0];
+                    int type = info.getChangeType();
+                    int i = 0;
+                    if (type == ILineDiffInfo.ADDED)
+                    {
+                        appendLine(text, lineText(document, line));
+                        maxLines--;
+                    }
+                    else if (type == ILineDiffInfo.CHANGED)
+                    {
+                        appendLine(text, original.length > 0 ? original[i++] : ""); //$NON-NLS-1$
+                        maxLines--;
+                    }
+                    else if (type == ILineDiffInfo.UNCHANGED)
+                    {
+                        maxLines++;
+                    }
+                    if (maxLines == 0)
+                        return finish(text);
+                    for (; i < original.length; i++)
+                    {
+                        deletedOffsets.add(appendLine(text,
+                            original[i] != null ? original[i] : "")); //$NON-NLS-1$
+                        if (--maxLines == 0)
+                            return finish(text);
+                    }
+                }
+                return finish(text);
+            }
+
+            private static int appendLine(StringBuilder text, String line)
+            {
+                if (line == null)
+                    line = ""; //$NON-NLS-1$
+                if (text.length() > 0 && !endsWithBreak(text) && !line.isEmpty())
+                    text.append('\n');
+                int start = text.length();
+                text.append(line);
+                return start;
+            }
+
+            private static boolean endsWithBreak(StringBuilder text)
+            {
+                if (text.length() == 0)
+                    return false;
+                char last = text.charAt(text.length() - 1);
+                return last == '\n' || last == '\r';
+            }
+
+            private String finish(StringBuilder text)
+            {
+                String raw = text.toString();
+                int end = raw.length();
+                while (end > 0 && Character.isWhitespace(raw.charAt(end - 1)))
+                    end--;
+                String trimmed = raw.substring(0, end);
+                deletedOffsets.removeIf(offset -> offset >= trimmed.length());
+                return trimmed;
+            }
+        }
+
+        /** Как {@code TextMergeViewer.ColorPalette}: смешение с фоном списка, не с жёлтым тултипом. */
+        private static RGB interpolate(RGB fg, RGB bg, double scale)
+        {
+            return new RGB(
+                (int) ((1.0 - scale) * fg.red + scale * bg.red),
+                (int) ((1.0 - scale) * fg.green + scale * bg.green),
+                (int) ((1.0 - scale) * fg.blue + scale * bg.blue));
         }
 
         private void rememberLine(int lineNumber)

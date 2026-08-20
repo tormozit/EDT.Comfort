@@ -72,6 +72,10 @@ C:\VC\EDT.Comfort\.tmp\chat-snapshots\<chat-id>\
 
 Примеры: `shell.setText(Global.withPluginWindowTitle("Коллекция …"))`; `item.setToolTipText("…" + Global.pluginSignForTooltip())` вне окна; внутри — `setToolTipText("Видимость и порядок колонок")`.
 
+## Фон изменений в тексте
+
+В подсказке Quick Diff на полосе номеров — только фон удалённых строк, как `TextMergeViewer.ColorPalette.fill`: `DELETION_COLOR` смешивается с `SWT.COLOR_LIST_BACKGROUND` (0.9), **не** с жёлтым фоном подсказки. Не красить добавления и изменённые фрагменты. Не выдумывать RGB и не ставить цвет штриха Quick Diff фоном текста.
+
 ## Один потребитель — вложенный класс
 
 В `plugin/src/tormozit/` тип с **одним** потребителем (без `plugin.xml`) — `**private static` вложенный класс**, не отдельный `.java`. Импорты — во внешний класс. Цепочки: сначала «лист», потом родитель.

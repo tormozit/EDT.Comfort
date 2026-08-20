@@ -30,6 +30,8 @@ import org.eclipse.swt.SWT;
 import org.eclipse.swt.browser.Browser;
 import org.eclipse.swt.browser.ProgressEvent;
 import org.eclipse.swt.browser.ProgressListener;
+import org.eclipse.swt.custom.CaretEvent;
+import org.eclipse.swt.custom.CaretListener;
 import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.events.DisposeListener;
 import org.eclipse.swt.events.KeyAdapter;
@@ -119,6 +121,8 @@ public final class ParamHintHtmlModifier
     private static final String SIG_PICK_DONE_MARK = "tormozit.sigPickDone"; //$NON-NLS-1$
     /** Уже патчили HTML этого browser — не трогать до смены документа EDT. */
     private static final String HTML_PATCHED_MARK = "tormozit.paramHintHtmlPatched"; //$NON-NLS-1$
+    /** CaretListener на редакторе, пока открыт этот Browser подсказки. */
+    private static final String CURRENT_PARAM_CARET_MARK = "tormozit.paramHintCaretSync"; //$NON-NLS-1$
     private static final AtomicBoolean sigPickOnOpenPending = new AtomicBoolean(false);
     /** Реентрабельность tryModifyBrowserHtml (setText → Progress → снова modify). */
     private static final ThreadLocal<Boolean> MODIFY_IN_PROGRESS =
@@ -1269,9 +1273,12 @@ public final class ParamHintHtmlModifier
             if (html.indexOf(HEADING_CLASS) < 0)
                 return;
 
-            // Уже патчили этот browser / HTML — не резолвить ctx и не showPage (иначе цикл Progress).
-            if (Boolean.TRUE.equals(browser.getData(HTML_PATCHED_MARK))
-                || html.indexOf(COMFORT_META_MARKER) >= 0
+            ensureCurrentParamCaretSync(browser);
+
+            // Уже патчили этот HTML — не резолвить ctx и не showPage (иначе цикл Progress).
+            // Native HTML после смены текущего параметра в EDT — патчим снова
+            // (маркер на browser не блокирует: штатный setInput подменяет текст).
+            if (html.indexOf(COMFORT_META_MARKER) >= 0
                 || html.indexOf("data-comfort=\"1\"") >= 0 //$NON-NLS-1$
                 || isHeadingAlreadyRewritten(html))
                 return;
@@ -1395,6 +1402,73 @@ public final class ParamHintHtmlModifier
     }
 
     /**
+     * Пока подсказка открыта — обновлять жирность при движении каретки.
+     * Штатный EDT после последнего формального зажимает индекс и не вызывает
+     * {@code showPage}, поэтому HTML сам не пересобирается.
+     */
+    private static void ensureCurrentParamCaretSync(Browser browser)
+    {
+        if (browser == null || browser.isDisposed())
+            return;
+        if (Boolean.TRUE.equals(browser.getData(CURRENT_PARAM_CARET_MARK)))
+            return;
+        ActiveEditor active = resolveActiveBslEditor();
+        if (active == null || active.widget == null || active.widget.isDisposed())
+            return;
+        StyledText widget = active.widget;
+        browser.setData(CURRENT_PARAM_CARET_MARK, Boolean.TRUE);
+        CaretListener listener = new CaretListener()
+        {
+            @Override
+            public void caretMoved(CaretEvent event)
+            {
+                if (browser.isDisposed())
+                {
+                    if (!widget.isDisposed())
+                        widget.removeCaretListener(this);
+                    return;
+                }
+                Display display = widget.getDisplay();
+                if (display == null || display.isDisposed())
+                    return;
+                // После штатного CaretListener EDT (он зажимает paramIndex
+                // и часто не вызывает showPage при возврате на последний слот).
+                display.asyncExec(() -> updateHeadingCurrentParam(browser));
+            }
+        };
+        widget.addCaretListener(listener);
+        browser.addDisposeListener(e ->
+        {
+            if (!widget.isDisposed())
+                widget.removeCaretListener(listener);
+        });
+    }
+
+    private static void updateHeadingCurrentParam(Browser browser)
+    {
+        if (browser == null || browser.isDisposed())
+            return;
+        String html = browser.getText();
+        if (html == null || html.isBlank() || html.indexOf(HEADING_CLASS) < 0)
+            return;
+        HoverContext ctx = resolveHoverContext(browser);
+        String updated = rewriteHeadingOptionalParams(html, ctx);
+        if (updated == null || updated.equals(html))
+            return;
+        if (Boolean.TRUE.equals(MODIFY_IN_PROGRESS.get()))
+            return;
+        MODIFY_IN_PROGRESS.set(Boolean.TRUE);
+        try
+        {
+            browser.setText(updated);
+        }
+        finally
+        {
+            MODIFY_IN_PROGRESS.set(Boolean.FALSE);
+        }
+    }
+
+    /**
      * Патч заголовка + строки типа. {@code ctx} может быть {@code null}
      * (тогда только {@code <br>(} и разворот уже раскрытого описания).
      */
@@ -1478,6 +1552,7 @@ public final class ParamHintHtmlModifier
         Object paramsObj = Global.getField(page, "params"); //$NON-NLS-1$
         if (!(paramsObj instanceof List<?> params) || params.isEmpty())
             return null;
+        int highlight = currentParamHighlightIndex(ctx, params.size());
         StringBuilder list = new StringBuilder();
         for (int i = 0; i < params.size(); i++)
         {
@@ -1489,7 +1564,7 @@ public final class ParamHintHtmlModifier
                 continue;
             if (list.length() > 0)
                 list.append(", "); //$NON-NLS-1$
-            boolean current = i == ctx.paramIndex;
+            boolean current = i == highlight;
             if (current)
                 list.append("<b>"); //$NON-NLS-1$
             list.append(escapeHtml(name.trim()));
@@ -1501,6 +1576,51 @@ public final class ParamHintHtmlModifier
         if (list.length() == 0)
             return null;
         return html.substring(0, open + 1) + list + html.substring(close);
+    }
+
+    /**
+     * Индекс жирного параметра в сигнатуре. {@code -1} — ни один: каретка за
+     * последним формальным (штатный EDT зажимает {@code paramIndex} на нём).
+     */
+    private static int currentParamHighlightIndex(HoverContext ctx, int formalCount)
+    {
+        if (ctx == null || formalCount <= 0)
+            return -1;
+        if (ctx.currentArgIndex >= 0)
+        {
+            if (ctx.currentArgIndex >= formalCount)
+            {
+                if (signatureAllowsExtraArgs(ctx, formalCount))
+                    return formalCount - 1;
+                return -1;
+            }
+            return ctx.currentArgIndex;
+        }
+        return ctx.paramIndex;
+    }
+
+    private static boolean signatureAllowsExtraArgs(HoverContext ctx, int formalCount)
+    {
+        if (ctx == null || ctx.method == null)
+            return false;
+        EList<ParamSet> sets = ctx.method.getParamSet();
+        if (sets == null || sets.isEmpty())
+            return false;
+        ParamSet matched = null;
+        for (ParamSet set : sets)
+        {
+            if (set == null || set.getParams() == null)
+                continue;
+            if (set.getParams().size() != formalCount)
+                continue;
+            if (set.getMaxParams() < 0)
+                return true;
+            matched = set;
+        }
+        if (matched != null)
+            return matched.getMaxParams() < 0;
+        ParamSet first = sets.get(0);
+        return first != null && first.getMaxParams() < 0;
     }
 
     private static boolean isParamOptional(Object paramContent)
@@ -1857,14 +1977,16 @@ public final class ParamHintHtmlModifier
         Boolean isOut = null;
         String paramName = null;
         Object paramContent = null;
+        boolean currentParam = false;
 
         if (ctx != null && ctx.pages != null && !ctx.pages.isEmpty()
-            && ctx.pageIndex >= 0 && ctx.pageIndex < ctx.pages.size()
-            && ctx.paramIndex >= 0)
+            && ctx.pageIndex >= 0 && ctx.pageIndex < ctx.pages.size())
         {
             Object page = ctx.pages.get(ctx.pageIndex);
-            paramContent = Global.invoke(page, "getParameter", //$NON-NLS-1$
-                Integer.valueOf(ctx.paramIndex));
+            int highlight = currentParamHighlightIndex(ctx, countPageParams(page));
+            currentParam = highlight >= 0;
+            paramContent = currentParam ? Global.invoke(page, "getParameter", //$NON-NLS-1$
+                Integer.valueOf(highlight)) : null;
             if (paramContent != null)
             {
                 paramName = asString(Global.invoke(paramContent, "getName")); //$NON-NLS-1$
@@ -1888,7 +2010,7 @@ public final class ParamHintHtmlModifier
             isOut = resolveIsOut(ctx, paramName, paramContent);
         }
 
-        if (description == null || description.isEmpty())
+        if (currentParam && (description == null || description.isEmpty()))
             description = normalizeDescription(extractExpandedDescription(html));
 
         String directionPrefix = buildDirectionPrefix(isOut);
@@ -2794,7 +2916,7 @@ public final class ParamHintHtmlModifier
                 (IUnitOfWork<InvocationSnapshot, XtextResource>) resource -> {
                     if (resource == null)
                         return null;
-                    return resolveInvocationSnapshot(resource, active.caret, ctx.paramIndex);
+                    return resolveInvocationSnapshot(resource, xdoc, active.caret);
                 });
             if (snap == null)
                 return;
@@ -2803,6 +2925,7 @@ public final class ParamHintHtmlModifier
             ctx.actualArgTypeNames = snap.actualArgTypeNames;
             ctx.method = snap.method;
             ctx.directive = snap.directive;
+            ctx.currentArgIndex = snap.currentArgIndex;
         }
         catch (Exception ignored)
         {
@@ -2810,7 +2933,7 @@ public final class ParamHintHtmlModifier
     }
 
     private static InvocationSnapshot resolveInvocationSnapshot(XtextResource resource,
-        int caret, int paramIndex)
+        IDocument document, int caret)
     {
         EObject invocationLike = findInvocationLikeAt(resource, caret);
         if (invocationLike == null)
@@ -2829,6 +2952,7 @@ public final class ParamHintHtmlModifier
             params = ((OperatorStyleCreator) invocationLike).getParams();
         }
         snap.actualArgCount = params != null ? params.size() : 0;
+        snap.currentArgIndex = resolveCurrentArgIndex(document, invocationLike, caret);
         Set<String> typeNames = new LinkedHashSet<>();
         boolean multiSig = callSiteHasMultipleSignatures(resource, invocationLike);
         if (multiSig && params != null && !params.isEmpty())
@@ -2860,6 +2984,89 @@ public final class ParamHintHtmlModifier
             snap.actualArgTypes = Collections.emptyList();
         snap.actualArgTypeNames = typeNames;
         return snap;
+    }
+
+    /**
+     * Слот аргумента у каретки: число запятых верхнего уровня после {@code (}
+     * вызова до каретки. Запятая, на которой стоит каретка, ещё не начинает
+     * следующий слот — как {@code computeParameterNumber} EDT, без зажима.
+     */
+    private static int resolveCurrentArgIndex(IDocument document, EObject invocationLike,
+        int caret)
+    {
+        if (document == null || invocationLike == null || caret < 0)
+            return -1;
+        ICompositeNode invNode = NodeModelUtils.findActualNodeFor(invocationLike);
+        if (invNode == null)
+            return -1;
+        int start = invNode.getTotalOffset();
+        int end = invNode.getTotalEndOffset();
+        if (caret < start || caret > end)
+            return -1;
+        int length = end - start;
+        if (length <= 0)
+            return -1;
+        String text;
+        try
+        {
+            text = document.get(start, length);
+        }
+        catch (Exception ignored)
+        {
+            return -1;
+        }
+        if (text == null || text.isEmpty())
+            return -1;
+        int open = indexOfCallOpenParen(text);
+        if (open < 0)
+            return 0;
+        int relCaret = caret - start;
+        if (relCaret <= open)
+            return 0;
+        if (relCaret > text.length())
+            relCaret = text.length();
+        int depth = 0;
+        boolean inStr = false;
+        int commas = 0;
+        for (int i = open + 1; i < relCaret; i++)
+        {
+            char c = text.charAt(i);
+            if (c == '"')
+            {
+                inStr = !inStr;
+                continue;
+            }
+            if (inStr)
+                continue;
+            if (c == '(')
+                depth++;
+            else if (c == ')')
+            {
+                if (depth == 0)
+                    break;
+                depth--;
+            }
+            else if (c == ',' && depth == 0)
+                commas++;
+        }
+        return commas;
+    }
+
+    private static int indexOfCallOpenParen(String text)
+    {
+        boolean inStr = false;
+        for (int i = 0; i < text.length(); i++)
+        {
+            char c = text.charAt(i);
+            if (c == '"')
+            {
+                inStr = !inStr;
+                continue;
+            }
+            if (!inStr && c == '(')
+                return i;
+        }
+        return -1;
     }
 
     private static Method resolveMethod(FeatureAccess access)
@@ -3273,7 +3480,10 @@ public final class ParamHintHtmlModifier
             active.caret = -1;
             ITextViewer viewer = bslEditor.getInternalSourceViewer();
             if (viewer != null)
+            {
                 active.caret = SmartContentAssistProcessor.resolveWidgetCaret(viewer);
+                active.widget = viewer.getTextWidget();
+            }
             return active;
         }
         catch (Exception ignored)
@@ -3344,6 +3554,8 @@ public final class ParamHintHtmlModifier
         int pageIndex;
         int paramIndex;
         int actualArgCount;
+        /** Слот аргумента у каретки (число запятых до неё); {@code -1} если неизвестен. */
+        int currentArgIndex = -1;
         List<TypeItem> actualArgTypes = Collections.emptyList();
         Set<String> actualArgTypeNames = Collections.emptySet();
         Method method;
@@ -3353,6 +3565,7 @@ public final class ParamHintHtmlModifier
     private static final class InvocationSnapshot
     {
         int actualArgCount;
+        int currentArgIndex = -1;
         List<TypeItem> actualArgTypes = Collections.emptyList();
         Set<String> actualArgTypeNames = Collections.emptySet();
         Method method;
@@ -4142,5 +4355,6 @@ public final class ParamHintHtmlModifier
     {
         IDocument document;
         int caret;
+        StyledText widget;
     }
 }

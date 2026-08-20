@@ -819,23 +819,61 @@ public final class GitStagingFilterHook implements IStartup
         Tree tree = viewer.getTree();
         if (tree == null || tree.isDisposed())
             return;
-        List<Object> matches = new ArrayList<>();
-        Object cpObj = viewer.getContentProvider();
-        if (cpObj instanceof ITreeContentProvider cp)
+        GitStagingTreeInteraction interaction = interactionOf(tree);
+        if (interaction != null)
+            interaction.clearSelection();
+        else
         {
-            ViewerFilter[] filters = viewer.getFilters();
-            Object input = viewer.getInput();
-            Object[] roots = cp.getElements(input);
-            if (roots != null)
+            tree.deselectAll();
+            viewer.setSelection(StructuredSelection.EMPTY, false);
+        }
+
+        List<Object> matches = new ArrayList<>();
+        if (droppedNames != null && !droppedNames.isEmpty())
+        {
+            Object cpObj = viewer.getContentProvider();
+            if (cpObj instanceof ITreeContentProvider cp)
             {
-                for (Object root : roots)
-                    collectOwnFiles(viewer, cp, filters, input, root, droppedNames, matches);
+                ViewerFilter[] filters = viewer.getFilters();
+                Object input = viewer.getInput();
+                Object[] roots = cp.getElements(input);
+                if (roots != null)
+                {
+                    for (Object root : roots)
+                        collectOwnFiles(viewer, cp, filters, input, root, droppedNames, matches);
+                }
             }
         }
-        viewer.setSelection(new StructuredSelection(matches), false);
-        FormTableInteraction.revealSelection(tree);
+        Object[] toSelect = matches.toArray();
+        applyOwnFileSelection(viewer, tree, interaction, toSelect);
         tree.setFocus();
+        Display display = tree.getDisplay();
+        Runnable later = () -> applyOwnFileSelection(viewer, tree, interaction, toSelect);
+        display.asyncExec(later);
+        display.timerExec(1, later);
         Debug.log("selectOwnFiles names=" + droppedNames + " matches=" + matches.size()); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    private static GitStagingTreeInteraction interactionOf(Tree tree)
+    {
+        Object data = tree.getData(INTERACTION_KEY);
+        return data instanceof GitStagingTreeInteraction gi ? gi : null;
+    }
+
+    private static void applyOwnFileSelection(TreeViewer viewer, Tree tree,
+        GitStagingTreeInteraction interaction, Object[] elements)
+    {
+        if (tree == null || tree.isDisposed())
+            return;
+        if (interaction != null)
+            interaction.replaceSelection(elements);
+        else
+        {
+            tree.deselectAll();
+            viewer.setSelection(elements == null || elements.length == 0
+                ? StructuredSelection.EMPTY : new StructuredSelection(elements), false);
+        }
+        FormTableInteraction.revealSelection(tree);
     }
 
     private static void collectOwnFiles(TreeViewer viewer, ITreeContentProvider cp,
@@ -972,8 +1010,7 @@ public final class GitStagingFilterHook implements IStartup
             if (acceptNavigator)
             {
                 List<String> names = draggedObjectFullNames();
-                if (!names.isEmpty())
-                    selectOwnFiles(viewer, names);
+                selectOwnFiles(viewer, names);
                 acceptNavigator = false;
                 return;
             }
@@ -1749,6 +1786,35 @@ public final class GitStagingFilterHook implements IStartup
         {
             ISelection sel = viewer.getSelection();
             return sel instanceof IStructuredSelection ss ? ss.toArray() : new Object[0];
+        }
+
+        /** Снять нативное выделение и активную строку подсветки. */
+        void clearSelection()
+        {
+            selectedItem = null;
+            tree.deselectAll();
+            viewer.setSelection(StructuredSelection.EMPTY, false);
+            invalidateColors();
+            tree.redraw();
+        }
+
+        /**
+         * Сначала очищает выделение, затем ставит указанные элементы.
+         * {@code tree.select} не используем — он добавляет к текущему MULTI.
+         */
+        void replaceSelection(Object[] elements)
+        {
+            selectedItem = null;
+            tree.deselectAll();
+            viewer.setSelection(elements == null || elements.length == 0
+                ? StructuredSelection.EMPTY : new StructuredSelection(elements), false);
+            TreeItem[] sel = tree.getSelection();
+            if (sel.length > 0)
+                selectedItem = sel[0];
+            if (activeColumn < 0 || activeColumn >= tree.getColumnCount())
+                activeColumn = 0;
+            invalidateColors();
+            tree.redraw();
         }
 
         private void restoreSelection(Object[] elements)
