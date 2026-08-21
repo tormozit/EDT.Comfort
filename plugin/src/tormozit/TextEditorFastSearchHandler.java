@@ -1,5 +1,9 @@
 package tormozit;
 
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.function.Predicate;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -17,12 +21,15 @@ import org.eclipse.jface.text.ITextViewerExtension5;
 import org.eclipse.jface.text.Region;
 import org.eclipse.jface.text.source.ISourceViewer;
 import org.eclipse.swt.custom.StyledText;
+import org.eclipse.swt.events.ModifyListener;
 import org.eclipse.swt.graphics.Point;
+import org.eclipse.swt.widgets.Combo;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.handlers.HandlerUtil;
+import org.eclipse.ui.texteditor.FindReplaceAction;
 import org.eclipse.ui.texteditor.ITextEditor;
 import org.osgi.framework.Bundle;
 
@@ -43,6 +50,8 @@ public final class TextEditorFastSearchHandler extends AbstractHandler
     private static final String KEY_WRAP = "wrap"; //$NON-NLS-1$
     private static final String KEY_SELECTION = "selection"; //$NON-NLS-1$
     private static final String KEY_FIND_HISTORY = "findhistory"; //$NON-NLS-1$
+    /** Размер истории поиска — как {@code FindReplaceDialog.HISTORY_SIZE}. */
+    private static final int FIND_HISTORY_SIZE = 15;
 
     @Override
     public Object execute(ExecutionEvent event) throws ExecutionException
@@ -175,6 +184,12 @@ public final class TextEditorFastSearchHandler extends AbstractHandler
          * неподсвеченными.
          */
         TextEditorOccurrencesSupport.setSearchContext(searchString, caseSensitive, wholeWord, regex);
+        /*
+         * Быстрый поиск задаёт новую цель поиска — её же должны использовать штатные
+         * «Найти далее» (F3) и диалог «Найти/Заменить», иначе команды расходятся по цели.
+         */
+        if (!fromFindBuffer)
+            publishSearchTarget(searchString);
         int searchFrom = forward ? (fromFindBuffer ? offset : offset + 1) : offset - 1;
 
         if (Global.isLogEnabled())
@@ -293,6 +308,138 @@ public final class TextEditorFastSearchHandler extends AbstractHandler
         return null;
     }
 
+    /**
+     * Делает строку быстрого поиска общей целью поиска: пишет её в настройки диалога
+     * «Найти/Заменить» (оттуда её берут {@code FindNextAction} — F3/Shift+F3 — и сам диалог
+     * при открытии) и, если диалог уже открыт, подставляет в его поле «Найти».
+     */
+    private static void publishSearchTarget(String searchString)
+    {
+        if (searchString == null || searchString.isEmpty())
+            return;
+
+        IDialogSettings section = findReplaceSection(true);
+        if (section != null)
+        {
+            section.put(KEY_SELECTION, searchString);
+            section.put(KEY_FIND_HISTORY, mergeFindHistory(section.getArray(KEY_FIND_HISTORY), searchString));
+        }
+        updateOpenFindReplaceDialog(searchString);
+
+        if (Global.isLogEnabled())
+            Global.log(TAG, "publishSearchTarget: '" + searchString + "'"); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /** Новая строка — первой в истории, без дублей, с ограничением размера как у диалога. */
+    private static String[] mergeFindHistory(String[] history, String searchString)
+    {
+        List<String> merged = new ArrayList<>();
+        merged.add(searchString);
+        if (history != null)
+        {
+            for (String entry : history)
+            {
+                if (entry != null && !entry.isEmpty() && !entry.equals(searchString))
+                    merged.add(entry);
+            }
+        }
+        while (merged.size() > FIND_HISTORY_SIZE)
+            merged.remove(merged.size() - 1);
+        return merged.toArray(new String[0]);
+    }
+
+    /**
+     * Поле «Найти» открытого (немодального) диалога «Найти/Заменить». Диалог читает настройки
+     * только при открытии, поэтому уже открытому нужно подставить строку в поле — иначе
+     * «Найти далее» из диалога продолжит искать прежнее значение.
+     * <p>
+     * Диалог и его владелец — внутренние типы {@code org.eclipse.ui.workbench.texteditor}
+     * ({@code FindReplaceAction.fgFindReplaceDialogStub} → {@code FindReplaceDialog.fFindField}),
+     * публичного доступа к ним нет; поля сверены с кодом бандла 3.17.200.
+     */
+    private static void updateOpenFindReplaceDialog(String searchString)
+    {
+        try
+        {
+            for (Object dialog : resolveOpenFindReplaceDialogs())
+                applyToFindField(dialog, searchString);
+        }
+        catch (ReflectiveOperationException | RuntimeException e)
+        {
+            if (Global.isLogEnabled())
+                Global.log(TAG, "updateOpenFindReplaceDialog: " + e); //$NON-NLS-1$
+        }
+    }
+
+    /** Подстановка строки в поле «Найти» конкретного экземпляра диалога. */
+    private static void applyToFindField(Object dialog, String searchString)
+        throws ReflectiveOperationException
+    {
+        Field findFieldRef = dialog.getClass().getDeclaredField("fFindField"); //$NON-NLS-1$
+        findFieldRef.setAccessible(true);
+        if (!(findFieldRef.get(dialog) instanceof Combo findField)
+            || findField.isDisposed())
+            return;
+        if (searchString.equals(findField.getText()))
+            return;
+
+        /*
+         * Слушатель изменения поля при включённом инкрементальном поиске сам запускает
+         * поиск от «базовой» позиции и уводит каретку с найденного — на время подстановки
+         * снимаем его, как это делает сам диалог в updateFindHistory().
+         */
+        Field listenerRef = dialog.getClass().getDeclaredField("fFindModifyListener"); //$NON-NLS-1$
+        listenerRef.setAccessible(true);
+        ModifyListener listener =
+            listenerRef.get(dialog) instanceof ModifyListener ml ? ml : null;
+        if (listener != null)
+            findField.removeModifyListener(listener);
+        try
+        {
+            findField.setText(searchString);
+            findField.setSelection(new Point(0, searchString.length()));
+        }
+        finally
+        {
+            if (listener != null)
+                findField.addModifyListener(listener);
+        }
+
+        // Кнопки «Найти», «Заменить» разблокируются по непустому полю — состояние пересчитывает диалог.
+        Method updateButtonState = dialog.getClass().getDeclaredMethod("updateButtonState"); //$NON-NLS-1$
+        updateButtonState.setAccessible(true);
+        updateButtonState.invoke(dialog);
+    }
+
+    /** Экземпляры открытых {@code FindReplaceDialog} (на окно рабочей среды и на отдельный Shell). */
+    private static List<Object> resolveOpenFindReplaceDialogs() throws ReflectiveOperationException
+    {
+        List<Object> dialogs = new ArrayList<>();
+        Class<?> actionClass = FindReplaceAction.class;
+        for (String stubFieldName : new String[] {"fgFindReplaceDialogStub", "fgFindReplaceDialogStubShell"}) //$NON-NLS-1$ //$NON-NLS-2$
+        {
+            Field stubRef;
+            try
+            {
+                stubRef = actionClass.getDeclaredField(stubFieldName);
+            }
+            catch (NoSuchFieldException e)
+            {
+                continue;
+            }
+            stubRef.setAccessible(true);
+            Object stub = stubRef.get(null);
+            if (stub == null)
+                continue;
+            Method getDialog = stub.getClass().getDeclaredMethod("getDialog"); //$NON-NLS-1$
+            getDialog.setAccessible(true);
+            Object dialog = getDialog.invoke(stub);
+            if (dialog != null && !dialogs.contains(dialog))
+                dialogs.add(dialog);
+        }
+        return dialogs;
+    }
+
     private static boolean readFindReplaceFlag(String key)
     {
         IDialogSettings section = findReplaceSection();
@@ -300,6 +447,11 @@ public final class TextEditorFastSearchHandler extends AbstractHandler
     }
 
     private static IDialogSettings findReplaceSection()
+    {
+        return findReplaceSection(false);
+    }
+
+    private static IDialogSettings findReplaceSection(boolean createIfMissing)
     {
         try
         {
@@ -312,7 +464,10 @@ public final class TextEditorFastSearchHandler extends AbstractHandler
             IDialogSettings settings = provider.getDialogSettings();
             if (settings == null)
                 return null;
-            return settings.getSection(FIND_REPLACE_SECTION);
+            IDialogSettings section = settings.getSection(FIND_REPLACE_SECTION);
+            if (section == null && createIfMissing)
+                section = settings.addNewSection(FIND_REPLACE_SECTION);
+            return section;
         }
         catch (RuntimeException e)
         {

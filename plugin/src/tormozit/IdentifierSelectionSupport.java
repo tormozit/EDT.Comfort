@@ -3,7 +3,10 @@ package tormozit;
 import org.eclipse.swt.custom.MovementEvent;
 import org.eclipse.swt.custom.MovementListener;
 import org.eclipse.swt.custom.StyledText;
+import org.eclipse.swt.SWT;
 import org.eclipse.swt.graphics.Point;
+import org.eclipse.swt.widgets.Combo;
+import org.eclipse.swt.widgets.Text;
 
 /**
  * Границы «слова» для Ctrl+←/→ и Ctrl+Shift+←/→: непрерывная последовательность букв, цифр и {@code _}.
@@ -132,6 +135,65 @@ final class IdentifierSelectionSupport
         text.setSelection(newCaret, newCaret);
         text.showSelection();
         return true;
+    }
+
+    /**
+     * Ctrl+←/→ и Ctrl+Shift+←/→ в обычном поле ввода {@link Text} (диалоги, формы EDT).
+     *
+     * @return {@code true}, если каретка/выделение изменены
+     */
+    static boolean navigateField(Text field, boolean toLeft, boolean extend)
+    {
+        if (field == null || field.isDisposed())
+            return false;
+
+        return navigate(field.getText(), field.getCaretPosition(), field.getSelection(), toLeft, extend,
+            (start, end) -> field.setSelection(start, end));
+    }
+
+    /**
+     * Ctrl+←/→ и Ctrl+Shift+←/→ в поле ввода выпадающего списка {@link Combo}.
+     *
+     * @return {@code true}, если каретка/выделение изменены
+     */
+    static boolean navigateField(Combo field, boolean toLeft, boolean extend)
+    {
+        if (field == null || field.isDisposed() || (field.getStyle() & SWT.READ_ONLY) != 0)
+            return false;
+
+        return navigate(field.getText(), field.getCaretPosition(), field.getSelection(), toLeft, extend,
+            (start, end) -> field.setSelection(new Point(start, end)));
+    }
+
+    private static boolean navigate(String content, int caret, Point selection, boolean toLeft, boolean extend,
+        SelectionSetter setter)
+    {
+        if (content == null || selection == null)
+            return false;
+
+        int newCaret = toLeft
+            ? previousBoundary(content, caret)
+            : nextBoundary(content, caret);
+        // Без Shift снятие выделения — тоже изменение, даже если каретка осталась на месте.
+        if (newCaret == caret && (extend || selection.x == selection.y))
+            return false;
+
+        if (extend)
+        {
+            int anchor = caret == selection.x ? selection.y : selection.x;
+            setter.select(anchor, newCaret);
+        }
+        else
+        {
+            setter.select(newCaret, newCaret);
+        }
+        return true;
+    }
+
+    /** Установка выделения в поле ввода: {@code start} — якорь, {@code end} — каретка. */
+    private interface SelectionSetter
+    {
+        void select(int start, int end);
     }
 
     private static final class IdentifierMovementListener implements MovementListener

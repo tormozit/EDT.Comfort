@@ -8,6 +8,7 @@ import org.eclipse.jface.dialogs.IPageChangedListener;
 import org.eclipse.jface.preference.IPreferencePage;
 import org.eclipse.jface.preference.PreferenceDialog;
 import org.eclipse.jface.viewers.CellLabelProvider;
+import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.jface.viewers.ITreeContentProvider;
 import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.jface.viewers.TreeViewerColumn;
@@ -15,11 +16,14 @@ import org.eclipse.jface.viewers.Viewer;
 import org.eclipse.jface.viewers.ViewerFilter;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.BusyIndicator;
+import org.eclipse.swt.custom.StyledText;
+import org.eclipse.swt.widgets.Combo;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Shell;
+import org.eclipse.swt.widgets.Text;
 import org.eclipse.swt.widgets.Tree;
 import org.eclipse.ui.IStartup;
 
@@ -73,16 +77,24 @@ import com.e1c.g5.v8.dt.check.settings.INamedElement;
  * {@code searchBox.setHistory(...)} на неё не влияет (другой объект), поэтому
  * своя подсветка через {@link CellLabelHighlightWrapper} на колонке 0
  * {@code checksViewer} — отдельно от {@link ValidationSearchFilter}.
+ *
+ * <p>Ctrl+C на дереве проверок и полях страницы (идентификатор {@code StyledText},
+ * параметры проверки, …) — через {@link CopyCommandSupport}: в диалоге свойств
+ * Win32-акселератор Copy съедает клавишу до SWT. Поля параметров пересоздаются
+ * при смене строки — донастраиваем копирование лениво по {@code FocusIn}.
  */
 public final class ValidationChecksFilterHook implements IStartup
 {
     private static final String PAGE_CLASS_NAME =
         "com._1c.g5.v8.dt.internal.ui.validation.ValidationPreferencePage"; //$NON-NLS-1$
     private static final String PATCHED_KEY = "tormozit.validationChecksFilterPatched"; //$NON-NLS-1$
+    private static final String PAGE_COPY_ROOT_KEY = "tormozit.validationPageCopyRoot"; //$NON-NLS-1$
+    private static final String COPY_WIRED_KEY = "tormozit.validationCopyWired"; //$NON-NLS-1$
     private static final int MAX_ATTEMPTS = 30;
     private static final int RETRY_MS = 100;
 
     private static final WeakHashMap<Shell, Boolean> pendingWiring = new WeakHashMap<>();
+    private static boolean lazyCopyFilterInstalled;
 
     @Override
     public void earlyStartup()
@@ -201,6 +213,13 @@ public final class ValidationChecksFilterHook implements IStartup
             searchBox.setSearchListener((text, monitor) -> applySearch(treeViewer, filter, highlight, text));
             searchBox.setToolTipText(FilterInputBox.FLAT_FILTER_TOOLTIP);
 
+            if (pageControl != null)
+            {
+                pageControl.setData(PAGE_COPY_ROOT_KEY, Boolean.TRUE);
+                wirePageCopy(pageControl);
+                installLazyCopyFilter(treeViewer.getControl().getDisplay());
+            }
+
             treeViewer.getControl().setData(PATCHED_KEY, Boolean.TRUE);
             Debug.log("tryPatch PATCH OK"); //$NON-NLS-1$
             return true;
@@ -224,6 +243,13 @@ public final class ValidationChecksFilterHook implements IStartup
             if (treeViewer.getControl().isDisposed())
                 return;
             boolean wasFiltering = filter.isFiltering();
+            // При очистке фильтра refresh + restoreInitialExpanded теряют/прячут
+            // текущую строку — сохраняем выделение до refresh (как InfobasesViewHook /
+            // SmartOutlineHook) и восстанавливаем с reveal после свёртки.
+            IStructuredSelection savedSelection = null;
+            if (wasFiltering && treeViewer.getSelection() instanceof IStructuredSelection ss
+                && !ss.isEmpty())
+                savedSelection = ss;
             filter.setPattern(text);
             if (highlight != null)
                 highlight.setHighlightPattern(text);
@@ -234,13 +260,36 @@ public final class ValidationChecksFilterHook implements IStartup
                 if (filter.isFiltering())
                     treeViewer.expandAll();
                 else if (wasFiltering)
+                {
                     filter.restoreInitialExpanded(treeViewer);
+                    if (savedSelection != null)
+                    {
+                        // После свёртки виджеты потомков уничтожены — без
+                        // раскрытия предков setSelection не найдёт строку.
+                        expandAncestors(treeViewer, savedSelection.getFirstElement());
+                        treeViewer.setSelection(savedSelection, true);
+                    }
+                }
             }
             finally
             {
                 treeViewer.getControl().setRedraw(true);
             }
         });
+    }
+
+    /** Раскрывает цепочку родителей элемента через {@link ITreeContentProvider#getParent}. */
+    private static void expandAncestors(TreeViewer viewer, Object element)
+    {
+        if (element == null
+            || !(viewer.getContentProvider() instanceof ITreeContentProvider tcp))
+            return;
+        Object parent = tcp.getParent(element);
+        while (parent != null)
+        {
+            viewer.setExpandedState(parent, true);
+            parent = tcp.getParent(parent);
+        }
     }
 
     private static SearchBox findSearchBox(Control control)
@@ -255,6 +304,62 @@ public final class ValidationChecksFilterHook implements IStartup
                     return found;
             }
         return null;
+    }
+
+    /**
+     * Ctrl+C на дереве и текстовых полях страницы (см. javadoc класса).
+     * Обход {@code page.getControl()} покрывает дерево и постоянные поля
+     * ({@code idTxt} и т.п.); поля параметров проверки пересоздаются при смене
+     * строки — их донастраивает {@link #installLazyCopyFilter}.
+     */
+    private static void wirePageCopy(Control control)
+    {
+        if (control == null || control.isDisposed())
+            return;
+        if (isCopyableControl(control) && !Boolean.TRUE.equals(control.getData(COPY_WIRED_KEY)))
+        {
+            control.setData(COPY_WIRED_KEY, Boolean.TRUE);
+            CopyCommandSupport.wireCopyOverride(control);
+        }
+        if (control instanceof Composite composite)
+            for (Control child : composite.getChildren())
+                wirePageCopy(child);
+    }
+
+    private static void installLazyCopyFilter(Display display)
+    {
+        if (lazyCopyFilterInstalled || display == null || display.isDisposed())
+            return;
+        display.addFilter(SWT.FocusIn, event ->
+        {
+            if (!(event.widget instanceof Control focus) || focus.isDisposed())
+                return;
+            if (!isCopyableControl(focus) || Boolean.TRUE.equals(focus.getData(COPY_WIRED_KEY)))
+                return;
+            if (!isUnderValidationCopyRoot(focus))
+                return;
+            focus.setData(COPY_WIRED_KEY, Boolean.TRUE);
+            CopyCommandSupport.wireCopyOverride(focus);
+        });
+        lazyCopyFilterInstalled = true;
+    }
+
+    private static boolean isCopyableControl(Control control)
+    {
+        return control instanceof Tree
+            || control instanceof Text
+            || control instanceof StyledText
+            || control instanceof Combo;
+    }
+
+    private static boolean isUnderValidationCopyRoot(Control control)
+    {
+        for (Control c = control; c != null && !c.isDisposed(); c = c.getParent())
+        {
+            if (Boolean.TRUE.equals(c.getData(PAGE_COPY_ROOT_KEY)))
+                return true;
+        }
+        return false;
     }
 
     /** Оборачивает label provider колонки 0 {@code checksViewer} в {@link CellLabelHighlightWrapper} (если ещё не обёрнут). */

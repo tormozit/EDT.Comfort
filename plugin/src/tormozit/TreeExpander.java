@@ -1043,6 +1043,11 @@ public final class TreeExpander implements IStartup
         rememberLabel(labelsInChain, nodeLabel(viewer, element));
 
         Tree tree = resolveTree(viewer);
+        // В дереве сравнения конфигураций повтор надписи вдоль ветки — норма структуры
+        // («Свойства» → «Форма» → «Элементы» → «Шапка» → «Элементы» → …), а не признак
+        // зацикливания, поэтому охранник по надписи там только мешает разворачивать узлы
+        // с единственным видимым потомком. От бесконечности защищает счётчик safety.
+        boolean skipLabelCycle = isCompareConfigTree(tree);
         Object current = element;
         if (CompareConfigMenuHook.isAddedOrDeletedCompareNode(current))
             return;
@@ -1067,7 +1072,7 @@ public final class TreeExpander implements IStartup
             if (visibleCount != 1 || onlyChild == null)
                 break;
 
-            if (isLabelCycle(viewer, current, onlyChild, labelsInChain))
+            if (!skipLabelCycle && isLabelCycle(viewer, current, onlyChild, labelsInChain))
                 break;
 
             if (CompareConfigMenuHook.isAddedOrDeletedCompareNode(onlyChild))

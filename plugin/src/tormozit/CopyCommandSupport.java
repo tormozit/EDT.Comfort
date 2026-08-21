@@ -5,6 +5,7 @@ import java.util.Map;
 import java.util.WeakHashMap;
 import java.util.concurrent.ConcurrentHashMap;
 
+import org.eclipse.core.commands.AbstractHandler;
 import org.eclipse.core.commands.ExecutionEvent;
 import org.eclipse.core.commands.ExecutionException;
 import org.eclipse.core.commands.IExecutionListener;
@@ -16,14 +17,18 @@ import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.dnd.Clipboard;
 import org.eclipse.swt.dnd.TextTransfer;
 import org.eclipse.swt.dnd.Transfer;
+import org.eclipse.swt.widgets.Combo;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.List;
 import org.eclipse.swt.widgets.Listener;
+import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Table;
 import org.eclipse.swt.widgets.TableItem;
+import org.eclipse.swt.widgets.Text;
 import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.TreeItem;
+import org.eclipse.ui.ActiveShellExpression;
 import org.eclipse.ui.IActionBars;
 import org.eclipse.ui.IEditorSite;
 import org.eclipse.ui.IViewSite;
@@ -34,24 +39,30 @@ import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.actions.ActionFactory;
 import org.eclipse.ui.commands.ICommandService;
+import org.eclipse.ui.handlers.IHandlerActivation;
+import org.eclipse.ui.handlers.IHandlerService;
 
 /**
  * Общий перехват Ctrl+C для виджетов Комфорт. На Win32 {@code SWT.KeyDown} букву не видит:
  * акселератор Edit → Copy уходит в {@code WM_COMMAND} до SWT.
  *
- * <p>Два канала, оба нужны:
+ * <p>Три канала, все нужны:
  * <ul>
- * <li>диалоги без своего Copy — {@code ICommandService} {@code notHandled}/{@code postExecute*};</li>
+ * <li>диалоги без своего Copy — активный {@code IHandler} на {@code org.eclipse.ui.edit.copy}
+ * только пока фокус на нашем виджете (иначе Eclipse даёт {@code notHandled} и системный
+ * «дзынь»; эталон — {@code OpenMdObjectHook}/{@code SmartOutlineHook});</li>
+ * <li>запасной путь в тех же диалогах — слушатель {@code ICommandService}
+ * {@code notHandled}/{@code postExecute*};</li>
  * <li>редактор/View — штатный обработчик {@code IActionBars} Copy реально выполняется и
  * перезаписывает буфер (список вкладок МД, сравнение конфигураций). Слушатель команды
  * этого не отменяет: подменяем global Copy, и при фокусе на нашем виджете штатный код
  * не зовётся.</li>
  * </ul>
  *
- * <p>Подмена {@code IActionBars} живёт только пока фокус на нашем виджете. Иначе
- * всегда включённый Copy перехватывает Ctrl+C у остальных полей той же части
- * (AEF-поля редактора МД, модуль, «История Git») — Win32 тогда не отдаёт клавишу
- * штатному контролу.
+ * <p>Подмена {@code IActionBars} и активация dialog-{@code IHandler} живут только пока
+ * фокус на нашем виджете. Иначе всегда включённый Copy перехватывает Ctrl+C у остальных
+ * полей той же части (AEF-поля редактора МД, модуль, «История Git») — Win32 тогда не
+ * отдаёт клавишу штатному контролу.
  *
  * <p>Любой новый {@code Table}/{@code List}/{@code Tree} в {@code plugin/src} — сразу
  * {@link #wireCopyOverride(Control)} (или {@code FormTableInteraction.install()}, он уже
@@ -70,13 +81,18 @@ public final class CopyCommandSupport
 
     private static boolean focusFilterInstalled;
 
+    /** Активен только пока фокус на нашем виджете — снимает «дзынь» notHandled в диалогах. */
+    private static IHandlerActivation dialogCopyActivation;
+
+    private static Shell dialogCopyShell;
+
     private CopyCommandSupport()
     {
     }
 
     /**
-     * Копирует выделенный текст {@code Table}/{@code List}/{@code Tree}/{@code StyledText}
-     * при Ctrl+C.
+     * Копирует выделенный текст {@code Table}/{@code List}/{@code Tree}/{@code Text}/
+     * {@code StyledText}/{@code Combo} при Ctrl+C.
      */
     public static void wireCopyOverride(Control control)
     {
@@ -97,12 +113,82 @@ public final class CopyCommandSupport
         control.addDisposeListener(e ->
         {
             targets.remove(control);
-            restoreCopyWrapperIfUnused();
+            syncCopyOverridesForFocus();
         });
         installFocusTracker();
         installExecutionListener();
+        syncCopyOverridesForFocus();
+    }
+
+    private static void syncCopyOverridesForFocus()
+    {
         if (isOurTargetFocused())
+        {
             installActivePartCopyWrapper();
+            installDialogCopyHandler();
+        }
+        else
+        {
+            restoreCopyWrapperIfUnused();
+            deactivateDialogCopyHandler();
+        }
+    }
+
+    /**
+     * В диалогах (свойства проекта, параметры) штатный {@code WidgetMethodHandler}
+     * для Tree/{@code List} не находит метод {@code copy()} → {@code notHandled} и
+     * системный beep. Нужен свой {@code IHandler} с {@link ActiveShellExpression}
+     * (без выражения хэндлер в контексте диалога не побеждает; эталон —
+     * {@code OpenMdObjectHook}/{@code SmartOutlineHook}). Активен только пока фокус
+     * на нашем виджете ({@link AbstractHandler#isEnabled()}).
+     */
+    private static void installDialogCopyHandler()
+    {
+        if (PlatformUI.getWorkbench() == null)
+            return;
+        Display display = Display.getCurrent();
+        Control focus = display != null ? display.getFocusControl() : null;
+        Shell shell = focus != null && !focus.isDisposed() ? focus.getShell() : null;
+        if (shell == null || shell.isDisposed())
+            return;
+        if (dialogCopyActivation != null && shell.equals(dialogCopyShell))
+            return;
+        deactivateDialogCopyHandler();
+        IHandlerService handlerService = PlatformUI.getWorkbench().getService(IHandlerService.class);
+        if (handlerService == null)
+            return;
+        AbstractHandler handler = new AbstractHandler()
+        {
+            @Override
+            public boolean isEnabled()
+            {
+                return isOurTargetFocused();
+            }
+
+            @Override
+            public Object execute(ExecutionEvent event)
+            {
+                tryCopyFocused();
+                return null;
+            }
+        };
+        dialogCopyActivation = handlerService.activateHandler(EDIT_COPY_COMMAND_ID, handler,
+            new ActiveShellExpression(shell));
+        dialogCopyShell = shell;
+    }
+
+    private static void deactivateDialogCopyHandler()
+    {
+        if (dialogCopyActivation == null)
+            return;
+        if (PlatformUI.getWorkbench() != null)
+        {
+            IHandlerService handlerService = PlatformUI.getWorkbench().getService(IHandlerService.class);
+            if (handlerService != null)
+                handlerService.deactivateHandler(dialogCopyActivation);
+        }
+        dialogCopyActivation = null;
+        dialogCopyShell = null;
     }
 
     private static void installActivePartCopyWrapper()
@@ -142,13 +228,7 @@ public final class CopyCommandSupport
         Display display = Display.getDefault();
         if (display == null)
             return;
-        Listener listener = event ->
-        {
-            if (isOurTargetFocused())
-                installActivePartCopyWrapper();
-            else
-                restoreCopyWrapperIfUnused();
-        };
+        Listener listener = event -> syncCopyOverridesForFocus();
         display.addFilter(SWT.FocusIn, listener);
         focusFilterInstalled = true;
     }
@@ -332,6 +412,19 @@ public final class CopyCommandSupport
                 builder.append(line);
             }
             return builder.length() == 0 ? null : builder.toString();
+        }
+        if (control instanceof Text text && !text.isDisposed())
+        {
+            String selection = text.getSelectionText();
+            if (selection != null && !selection.isEmpty())
+                return selection;
+            String all = text.getText();
+            return all == null || all.isEmpty() ? null : all;
+        }
+        if (control instanceof Combo combo && !combo.isDisposed())
+        {
+            String all = combo.getText();
+            return all == null || all.isEmpty() ? null : all;
         }
         if (control instanceof StyledText styledText && !styledText.isDisposed())
         {

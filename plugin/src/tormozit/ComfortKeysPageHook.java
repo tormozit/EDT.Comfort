@@ -52,7 +52,10 @@ public final class ComfortKeysPageHook implements IStartup
                 return;
             PreferenceDialog dialog = findPreferenceDialog(shell);
             if (dialog != null)
+            {
+                ComfortKeysPreferences.trackPreferenceShellSize(dialog, shell);
                 attachPageChangedListener(dialog, display, shell);
+            }
             scheduleTryApplyOnce(display, shell);
         };
 

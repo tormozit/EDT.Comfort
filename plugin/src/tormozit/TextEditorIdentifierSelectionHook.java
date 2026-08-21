@@ -11,10 +11,12 @@ import org.eclipse.jface.preference.IPreferenceStore;
 import org.eclipse.jface.text.source.ISourceViewer;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.StyledText;
+import org.eclipse.swt.widgets.Combo;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Listener;
+import org.eclipse.swt.widgets.Text;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IEditorReference;
 import org.eclipse.ui.IPartListener2;
@@ -35,7 +37,8 @@ import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorXtextEditorPage;
 
 /**
- * В текстовых редакторах EDT Ctrl+←/→ и Ctrl+Shift+←/→ используют границу идентификатора
+ * В текстовых редакторах EDT, а также в любых полях ввода ({@link org.eclipse.swt.widgets.Text},
+ * {@link org.eclipse.swt.widgets.Combo}) Ctrl+←/→ и Ctrl+Shift+←/→ используют границу идентификатора
  * (буквы, цифры, {@code _}), а не sub-word в CamelCase.
  */
 public final class TextEditorIdentifierSelectionHook implements IStartup
@@ -371,7 +374,7 @@ public final class TextEditorIdentifierSelectionHook implements IStartup
             hookTextEditor(textEditor);
     }
 
-    /** Запасной путь, если клавиша дойдёт до Display-фильтра. */
+    /** Запасной путь, если клавиша дойдёт до Display-фильтра (а также все поля ввода). */
     private static void handleKeyDown(Event e)
     {
         if (e.keyCode != SWT.ARROW_LEFT && e.keyCode != SWT.ARROW_RIGHT)
@@ -381,15 +384,30 @@ public final class TextEditorIdentifierSelectionHook implements IStartup
             return;
         if ((e.stateMask & SWT.ALT) != 0)
             return;
-        if (!(e.widget instanceof StyledText text))
-            return;
-        if (text.isDisposed() || text.getBlockSelection())
-            return;
 
         boolean toLeft = e.keyCode == SWT.ARROW_LEFT;
-        boolean handled = (e.stateMask & SWT.SHIFT) != 0
-            ? IdentifierSelectionSupport.extendSelection(text, toLeft)
-            : IdentifierSelectionSupport.moveCaret(text, toLeft);
+        boolean extend = (e.stateMask & SWT.SHIFT) != 0;
+        boolean handled;
+        if (e.widget instanceof StyledText text)
+        {
+            if (text.isDisposed() || text.getBlockSelection())
+                return;
+            handled = extend
+                ? IdentifierSelectionSupport.extendSelection(text, toLeft)
+                : IdentifierSelectionSupport.moveCaret(text, toLeft);
+        }
+        else if (e.widget instanceof Text field)
+        {
+            handled = IdentifierSelectionSupport.navigateField(field, toLeft, extend);
+        }
+        else if (e.widget instanceof Combo combo)
+        {
+            handled = IdentifierSelectionSupport.navigateField(combo, toLeft, extend);
+        }
+        else
+        {
+            return;
+        }
         if (!handled)
             return;
 

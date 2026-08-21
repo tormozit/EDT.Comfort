@@ -5,12 +5,14 @@ import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.WeakHashMap;
 
 import org.eclipse.core.commands.Category;
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.IStatus;
 import org.eclipse.core.runtime.Status;
 import org.eclipse.core.runtime.jobs.Job;
+import org.eclipse.jface.preference.IPreferenceNode;
 import org.eclipse.jface.preference.IPreferencePage;
 import org.eclipse.jface.preference.IPreferencePageContainer;
 import org.eclipse.jface.preference.PreferenceDialog;
@@ -1141,17 +1143,137 @@ public final class ComfortKeysPreferences
     }
 
     /**
+     * До первой активации Keys запоминает размер окна и готовит блокировку
+     * авто-расширения Shell. После первой активации — no-op.
+     */
+    static void trackPreferenceShellSize(PreferenceDialog dialog, Shell shell)
+    {
+        KeysPageMinWidth.trackShellSize(dialog, shell);
+    }
+
+    /**
      * Горизонтальный скролл страницы Keys: {@code PreferenceDialog.showPage}
      * делает {@code scrolled.setMinSize(currentPage.computeSize())}, а
      * {@code PreferencePage.computeSize} кэширует {@code size}. Без widthHint
      * GridLayout берёт preferred дерева (колонки 240+130+130+130+50) и вкладок
      * конфликтов. Сжимаем preferred (hint=1 + grab), сбрасываем кэш, ставим minSize.
+     * Авто-расширение Shell и откат размера — только при первой активации Keys
+     * в этом диалоге; повторные заходы не трогаем.
      */
     private static final class KeysPageMinWidth
     {
         private static final String WIRED_KEY = "tormozit.comfort.keys.pageMinWidth"; //$NON-NLS-1$
 
+        private static final String TRACKER_KEY = "tormozit.comfort.keys.shellSizeTracker"; //$NON-NLS-1$
+
+        private static final String FIRST_SHELL_FIX_KEY = WIRED_KEY + ".firstShellFixDone"; //$NON-NLS-1$
+
         private static final int SHRINK_HINT = 1;
+
+        /** Размер Shell до первой активации Keys. */
+        private static final WeakHashMap<PreferenceDialog, Point> shellSizeBeforeKeys =
+                new WeakHashMap<>();
+
+        private static final WeakHashMap<PreferenceDialog, Boolean> treeGuardsAttached =
+                new WeakHashMap<>();
+
+        /** Диалоги, для которых первая активация Keys уже обработана. */
+        private static final WeakHashMap<PreferenceDialog, Boolean> firstActivationDone =
+                new WeakHashMap<>();
+
+        static void trackShellSize(PreferenceDialog dialog, Shell shell)
+        {
+            if (dialog == null || shell == null || shell.isDisposed())
+                return;
+            if (Boolean.TRUE.equals(firstActivationDone.get(dialog)))
+                return;
+            if (!Boolean.TRUE.equals(shell.getData(TRACKER_KEY)))
+            {
+                shell.setData(TRACKER_KEY, Boolean.TRUE);
+                rememberShellSizeIfNotKeys(dialog, shell);
+                shell.addListener(SWT.Resize, event -> {
+                    if (Boolean.TRUE.equals(firstActivationDone.get(dialog)))
+                        return;
+                    rememberShellSizeIfNotKeys(dialog, shell);
+                });
+            }
+            wireTreeExpandGuard(dialog);
+        }
+
+        /**
+         * SelectionChanged срабатывает до PostSelectionChanged (где showPage).
+         * Только при первой активации (контрол страницы ещё нет) сдвигаем
+         * {@code lastShellSize}, чтобы showPage не вызвал {@code setShellSize}.
+         */
+        private static void wireTreeExpandGuard(PreferenceDialog dialog)
+        {
+            if (dialog == null)
+                return;
+            synchronized (treeGuardsAttached)
+            {
+                if (Boolean.TRUE.equals(treeGuardsAttached.get(dialog)))
+                    return;
+                treeGuardsAttached.put(dialog, Boolean.TRUE);
+            }
+            TreeViewer viewer = dialog.getTreeViewer();
+            if (viewer == null)
+            {
+                synchronized (treeGuardsAttached)
+                {
+                    treeGuardsAttached.remove(dialog);
+                }
+                return;
+            }
+            viewer.addSelectionChangedListener(event -> {
+                if (Boolean.TRUE.equals(firstActivationDone.get(dialog)))
+                    return;
+                if (!(event.getSelection() instanceof IStructuredSelection selection))
+                    return;
+                Object element = selection.getFirstElement();
+                if (!(element instanceof IPreferenceNode node))
+                    return;
+                if (!isKeysPreferenceNode(node))
+                    return;
+                // Повторная активация: страница уже создана — не трогаем Shell
+                IPreferencePage existing = node.getPage();
+                if (existing != null)
+                {
+                    Control control = existing.getControl();
+                    if (control != null && !control.isDisposed())
+                        return;
+                }
+                Shell shell = dialog.getShell();
+                if (shell == null || shell.isDisposed())
+                    return;
+                rememberShellSizeIfNotKeys(dialog, shell);
+                Point size = shell.getSize();
+                setDialogField(dialog, "lastShellSize", new Point(size.x + 1, size.y)); //$NON-NLS-1$
+            });
+        }
+
+        private static boolean isKeysPreferenceNode(IPreferenceNode node)
+        {
+            if (node == null)
+                return false;
+            String id = node.getId();
+            if (KEYS_PREFERENCE_PAGE_ID.equals(id))
+                return true;
+            IPreferencePage page = node.getPage();
+            return page != null && isKeysPreferencePage(page);
+        }
+
+        private static void rememberShellSizeIfNotKeys(PreferenceDialog dialog, Shell shell)
+        {
+            if (dialog == null || shell == null || shell.isDisposed())
+                return;
+            if (Boolean.TRUE.equals(firstActivationDone.get(dialog)))
+                return;
+            Object selected = dialog.getSelectedPage();
+            if (selected instanceof IPreferencePage page && isKeysPreferencePage(page))
+                return;
+            Point size = shell.getSize();
+            shellSizeBeforeKeys.put(dialog, new Point(size.x, size.y));
+        }
 
         static void install(IPreferencePage page)
         {
@@ -1160,6 +1282,16 @@ public final class ComfortKeysPreferences
             Control root = page.getControl();
             if (root == null || root.isDisposed())
                 return;
+
+            Shell shell = root.getShell();
+            PreferenceDialog dialog = findPreferenceDialog(shell);
+            boolean firstShellFix = dialog == null
+                    || !Boolean.TRUE.equals(firstActivationDone.get(dialog));
+            if (firstShellFix && dialog != null && shell != null && !shell.isDisposed())
+                trackShellSize(dialog, shell);
+            Point sizeBeforeKeys = firstShellFix && dialog != null
+                    ? shellSizeBeforeKeys.get(dialog)
+                    : null;
 
             applyShrinkableHints(page);
             ComfortKeysPreferences.setPageField(page, "size", null); //$NON-NLS-1$
@@ -1172,6 +1304,9 @@ public final class ComfortKeysPreferences
 
             layoutUp(root);
 
+            if (firstShellFix)
+                finishFirstActivationShellFix(root, shell, dialog, sizeBeforeKeys);
+
             Display display = root.getDisplay();
             if (display != null && !display.isDisposed()
                     && !Boolean.TRUE.equals(root.getData(WIRED_KEY + ".timers"))) //$NON-NLS-1$
@@ -1179,6 +1314,83 @@ public final class ComfortKeysPreferences
                 root.setData(WIRED_KEY + ".timers", Boolean.TRUE); //$NON-NLS-1$
                 display.timerExec(0, () -> install(page));
                 display.timerExec(200, () -> install(page));
+            }
+        }
+
+        /** Однократно: откат авто-расширения и синхронизация lastShellSize. */
+        private static void finishFirstActivationShellFix(Control root, Shell shell,
+                PreferenceDialog dialog, Point sizeBeforeKeys)
+        {
+            if (root == null || root.isDisposed())
+                return;
+            if (Boolean.TRUE.equals(root.getData(FIRST_SHELL_FIX_KEY)))
+                return;
+            root.setData(FIRST_SHELL_FIX_KEY, Boolean.TRUE);
+            if (dialog != null)
+                firstActivationDone.put(dialog, Boolean.TRUE);
+
+            boolean restored = restoreShellIfExpanded(shell, dialog, sizeBeforeKeys);
+            if (!restored && dialog != null && shell != null && !shell.isDisposed())
+            {
+                Point now = shell.getSize();
+                setDialogField(dialog, "lastShellSize", new Point(now.x, now.y)); //$NON-NLS-1$
+            }
+            if (dialog != null)
+                shellSizeBeforeKeys.remove(dialog);
+        }
+
+        /** @return {@code true}, если размер Shell уменьшен после авто-расширения showPage */
+        private static boolean restoreShellIfExpanded(Shell shell, PreferenceDialog dialog,
+                Point sizeBeforeKeys)
+        {
+            if (shell == null || shell.isDisposed() || sizeBeforeKeys == null)
+                return false;
+            Point now = shell.getSize();
+            int width = Math.min(now.x, sizeBeforeKeys.x);
+            int height = Math.min(now.y, sizeBeforeKeys.y);
+            if (width >= now.x && height >= now.y)
+                return false;
+            shell.setSize(width, height);
+            if (dialog != null)
+                setDialogField(dialog, "lastShellSize", new Point(width, height)); //$NON-NLS-1$
+            return true;
+        }
+
+        private static PreferenceDialog findPreferenceDialog(Shell shell)
+        {
+            Shell current = shell;
+            while (current != null && !current.isDisposed())
+            {
+                Object data = current.getData();
+                if (data instanceof PreferenceDialog dialog)
+                    return dialog;
+                if (current.getParent() instanceof Shell parent)
+                    current = parent;
+                else
+                    break;
+            }
+            return null;
+        }
+
+        private static void setDialogField(PreferenceDialog dialog, String fieldName, Object value)
+        {
+            if (dialog == null)
+                return;
+            Class<?> type = dialog.getClass();
+            while (type != null)
+            {
+                try
+                {
+                    Field field = type.getDeclaredField(fieldName);
+                    field.setAccessible(true);
+                    field.set(dialog, value);
+                    return;
+                }
+                catch (Exception ignored)
+                {
+                    // поле в суперклассе или переименовано
+                }
+                type = type.getSuperclass();
             }
         }
 
