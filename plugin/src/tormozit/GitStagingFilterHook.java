@@ -48,10 +48,8 @@ import org.eclipse.swt.dnd.TransferData;
 import org.eclipse.swt.events.ControlAdapter;
 import org.eclipse.swt.events.ControlEvent;
 import org.eclipse.swt.graphics.Color;
-import org.eclipse.swt.graphics.Device;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
-import org.eclipse.swt.graphics.RGB;
 import org.eclipse.swt.graphics.Rectangle;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.widgets.Composite;
@@ -351,7 +349,7 @@ public final class GitStagingFilterHook implements IStartup
             });
         }
         tree.setHeaderVisible(true);
-        tree.setLinesVisible(true);
+        ThemeAwareColors.applyGridLines(tree);
     }
 
     /** Порядок + ширины — одним проходом (ключи общие, не per-viewer). */
@@ -1607,6 +1605,10 @@ public final class GitStagingFilterHook implements IStartup
 
         GitStagingLabelProvider(CellLabelProvider base, Tree tree)
         {
+            // COLORS_ON_SELECTION обязателен: без него StyledCellLabelProvider.useColors() возвращает
+            // false для выделенной строки и prepareStyleRange вырезает цвета StyleRange — подсветка
+            // вхождений фильтра пропадает именно на текущей строке.
+            super(COLORS_ON_SELECTION);
             this.base = base;
             this.tree = tree;
         }
@@ -1719,6 +1721,13 @@ public final class GitStagingFilterHook implements IStartup
 
     private static final class GitStagingTreeInteraction
     {
+        /**
+         * Оттенки подсветки — общие для всех списков плагина. Системная подсветка выделения в
+         * светлой теме сохраняется (см. {@link #onEraseItem}), поэтому режим тот же, что у таблиц.
+         */
+        private static final ListSelectionPalette.Mode PALETTE =
+            ListSelectionPalette.Mode.NATIVE_SELECTION;
+
         private final Tree tree;
         private final TreeViewer viewer;
         private TreeItem selectedItem;
@@ -1977,6 +1986,12 @@ public final class GitStagingFilterHook implements IStartup
             e.detail &= ~SWT.BACKGROUND;
             if (ListSelectionThemeColors.isDarkList(tree))
             {
+                // Тёмная тема: системная подсветка кладётся поверх нашей заливки единым цветом на
+                // всю строку и стирает различие «активная ячейка / прочие ячейки строки» — гасим её.
+                // В светлой теме она, наоборот, нужна: это привычный голубой оттенок текущей строки,
+                // как во всех штатных списках EDT. Цвета текста (в т.ч. подсветка вхождений фильтра)
+                // при этом не теряются: подписи рисует StyledCellLabelProvider с флагом
+                // COLORS_ON_SELECTION (см. GitStagingLabelProvider).
                 e.detail &= ~SWT.SELECTED;
                 e.detail &= ~SWT.HOT;
             }
@@ -1991,8 +2006,7 @@ public final class GitStagingFilterHook implements IStartup
             if (bounds == null || bounds.isEmpty())
                 return;
             Color rowBg = rowSelectionBackground();
-            Color base = activeCellBackground(rowBg);
-            Color frame = slightlyDarker(base, 0.12);
+            Color frame = ListSelectionPalette.activeCellFrame(activeCellBackground(rowBg));
             try
             {
                 e.gc.setForeground(frame);
@@ -2008,68 +2022,24 @@ public final class GitStagingFilterHook implements IStartup
 
         private Color rowSelectionBackground()
         {
-            if (ownedRowBg != null && !ownedRowBg.isDisposed())
-                return ownedRowBg;
-            if (ListSelectionThemeColors.isDarkList(tree))
-            {
-                ownedRowBg = ListSelectionThemeColors.listSelectionBackground(tree, tree.isFocusControl());
-                return ownedRowBg;
-            }
-            Display display = tree.getDisplay();
-            Color base = tree.getBackground();
-            if (base == null || base.isDisposed())
-                base = display.getSystemColor(SWT.COLOR_LIST_BACKGROUND);
-            double factor = tree.isFocusControl() ? 0.12 : 0.08;
-            ownedRowBg = slightlyDarker(base, factor);
+            if (ownedRowBg == null || ownedRowBg.isDisposed())
+                ownedRowBg = ListSelectionPalette.rowSelectionBackground(tree, PALETTE);
             return ownedRowBg;
         }
 
         /** Фон прочих выбранных строк при мультивыделении (слабее текущей). */
         private Color inactiveRowSelectionBackground()
         {
-            if (ownedInactiveRowBg != null && !ownedInactiveRowBg.isDisposed())
-                return ownedInactiveRowBg;
-            if (ListSelectionThemeColors.isDarkList(tree))
-            {
-                ownedInactiveRowBg = ListSelectionThemeColors.inactiveRowSelectionBackground(
-                    tree, tree.isFocusControl());
-                return ownedInactiveRowBg;
-            }
-            Display display = tree.getDisplay();
-            Color base = tree.getBackground();
-            if (base == null || base.isDisposed())
-                base = display.getSystemColor(SWT.COLOR_LIST_BACKGROUND);
-            double factor = tree.isFocusControl() ? 0.08 : 0.05;
-            ownedInactiveRowBg = slightlyDarker(base, factor);
+            if (ownedInactiveRowBg == null || ownedInactiveRowBg.isDisposed())
+                ownedInactiveRowBg = ListSelectionPalette.inactiveRowSelectionBackground(tree, PALETTE);
             return ownedInactiveRowBg;
         }
 
         private Color activeCellBackground(Color rowBg)
         {
-            if (ownedActiveCellBg != null && !ownedActiveCellBg.isDisposed())
-                return ownedActiveCellBg;
-            if (ListSelectionThemeColors.isDarkList(tree))
-            {
-                ownedActiveCellBg = ListSelectionThemeColors.activeCellBackground(tree, rowBg);
-                return ownedActiveCellBg;
-            }
-            ownedActiveCellBg = slightlyDarker(rowBg, tree.isFocusControl() ? 0.08 : 0.06);
+            if (ownedActiveCellBg == null || ownedActiveCellBg.isDisposed())
+                ownedActiveCellBg = ListSelectionPalette.activeCellBackground(tree, rowBg, PALETTE);
             return ownedActiveCellBg;
-        }
-
-        private static Color slightlyDarker(Color base, double factor)
-        {
-            Device device = base.getDevice();
-            RGB rgb = base.getRGB();
-            int r = clampChannel((int) (rgb.red * (1.0 - factor)));
-            int g = clampChannel((int) (rgb.green * (1.0 - factor)));
-            int b = clampChannel((int) (rgb.blue * (1.0 - factor)));
-            return new Color(device, r, g, b);
-        }
-
-        private static int clampChannel(int value)
-        {
-            return Math.max(0, Math.min(255, value));
         }
 
         private void invalidateColors()

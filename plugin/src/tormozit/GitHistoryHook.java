@@ -538,7 +538,7 @@ public final class GitHistoryHook implements IStartup
         statusCol.setData(COLUMN_LOGICAL_KEY, Integer.valueOf(COL_STATUS));
 
         table.setHeaderVisible(true);
-        table.setLinesVisible(true);
+        ThemeAwareColors.applyGridLines(table);
         return new TableColumn[] { fileCol, typeCol, pathCol, statusCol };
     }
 

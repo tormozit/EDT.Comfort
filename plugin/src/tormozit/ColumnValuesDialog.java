@@ -195,7 +195,7 @@ final class ColumnValuesDialog extends Dialog
         viewer = new TableViewer(tableHost, SWT.FULL_SELECTION | SWT.MULTI | SWT.BORDER);
         dialogTable = viewer.getTable();
         dialogTable.setHeaderVisible(true);
-        dialogTable.setLinesVisible(true);
+        ThemeAwareColors.applyGridLines(dialogTable);
 
         IDialogSettings settings = dialogSettings();
         boolean hasSavedColumnWidths = FormTableColumnState.hasSavedColumnWidths(

@@ -436,7 +436,7 @@ public final class ObjectSetsView extends ViewPart
             SWT.BORDER | SWT.MULTI | SWT.FULL_SELECTION | SWT.V_SCROLL);
         Table table = itemsViewer.getTable();
         table.setHeaderVisible(true);
-        table.setLinesVisible(true);
+        ThemeAwareColors.applyGridLines(table);
         iconResolver = new ItemIconResolver();
 
         TableViewerColumn colIcon = new TableViewerColumn(itemsViewer, SWT.NONE);
@@ -561,7 +561,7 @@ public final class ObjectSetsView extends ViewPart
             SWT.BORDER | SWT.SINGLE | SWT.FULL_SELECTION | SWT.V_SCROLL);
         Table table = setsViewer.getTable();
         table.setHeaderVisible(true);
-        table.setLinesVisible(true);
+        ThemeAwareColors.applyGridLines(table);
 
         TableViewerColumn colActive = new TableViewerColumn(setsViewer, SWT.NONE);
         activeColumn = colActive.getColumn();

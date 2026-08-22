@@ -390,8 +390,9 @@ public class GoToDefinition extends AbstractHandler
     }
 
     /**
-     * @param allowIrAutoConnect {@code false} — не запускать ИР (кнопка «Перейти» из буфера).
-     *     Уже подключённая сессия используется для нормализации ссылок форм/макетов.
+     * @param allowIrAutoConnect {@code false} — не запускать ИР (кнопка «Перейти»,
+     *     «Последние места»). Уже подключённая сессия используется для нормализации
+     *     ссылок форм/макетов.
      */
     public static boolean jump(String raw, Shell shell, IWorkbenchPage page, IProject project,
         boolean allowIrAutoConnect)
@@ -2717,7 +2718,7 @@ public class GoToDefinition extends AbstractHandler
                 SWT.BORDER | SWT.SINGLE | SWT.FULL_SELECTION | SWT.V_SCROLL);
             Table table = listViewer.getTable();
             table.setHeaderVisible(true);
-            table.setLinesVisible(true);
+            ThemeAwareColors.applyGridLines(table);
 
             TableViewerColumn colModule = new TableViewerColumn(listViewer, SWT.NONE);
             moduleColumn = colModule.getColumn();

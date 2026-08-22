@@ -41,6 +41,7 @@
 
 <!-- Сортировка по алфавиту (А–Я). При добавлении — вставлять строку на нужную позицию. -->
 - [Интеграция с ИР](obshchie-mekhanizmy.md#integraciya-s-ir)
+- [Оформление в списке условного оформления](obshchie-mekhanizmy.md#oformlenie-v-spiske-uslovnogo-oformleniya) — страница **Настройки → УсловноеОформление**
 - [Переход к определению](obshchie-mekhanizmy.md#perehod-k-opredeleniyu) — используется при возврате из ИР
 
 ## См. также

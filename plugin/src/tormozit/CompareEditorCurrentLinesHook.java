@@ -597,6 +597,7 @@ public final class CompareEditorCurrentLinesHook
             viewer, config, rawLeftLabel, leftLabel, rightLabel, structureController);
 
         TwoSideCurrentLinesSync.hook(panel, leftText, rightText, viewer, config, leftLabel, rightLabel);
+        CompareWhitespaceSupport.installTwoWay(viewer);
 
         /*
          * Переключатель варианта сравнения («Сравнение текста»/«с учётом семантики»/

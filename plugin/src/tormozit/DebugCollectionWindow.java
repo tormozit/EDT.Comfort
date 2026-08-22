@@ -2513,7 +2513,7 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
 
             Table indexTable = new Table(indexColumnHost, style);
             indexTable.setHeaderVisible(true);
-            indexTable.setLinesVisible(true);
+            ThemeAwareColors.applyGridLines(indexTable);
 
             Label indexBottomSpacer = new Label(indexPane, SWT.NONE);
             GridData spacerGd = new GridData(SWT.FILL, SWT.END, true, false);
@@ -2528,7 +2528,7 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
 
             Table dataTable = new Table(dataColumnHost, style);
             dataTable.setHeaderVisible(true);
-            dataTable.setLinesVisible(true);
+            ThemeAwareColors.applyGridLines(dataTable);
 
             DebugCollectionSplitTable split = new DebugCollectionSplitTable(panel, sash, indexPane,
                 indexBottomSpacer, indexTableStack, dataTableStack, indexTable, dataTable);
@@ -3634,7 +3634,7 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
             listGd.widthHint = 280;
             columnTable.setLayoutData(listGd);
             columnTable.setHeaderVisible(false);
-            columnTable.setLinesVisible(true);
+            ThemeAwareColors.applyGridLines(columnTable);
             refreshTableItems();
             applyPreselection();
             applyFocusSelection();

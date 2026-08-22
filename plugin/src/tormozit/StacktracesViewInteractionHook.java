@@ -2763,7 +2763,7 @@ public final class StacktracesViewInteractionHook implements IStartup
                 SWT.MULTI | SWT.FULL_SELECTION | SWT.BORDER | SWT.V_SCROLL | SWT.H_SCROLL);
             Table table = viewer.getTable();
             table.setHeaderVisible(true);
-            table.setLinesVisible(true);
+            ThemeAwareColors.applyGridLines(table);
 
             // Колонка 0 не должна быть StyledCell: у SWT/Win32 у первой колонки отступ под
             // иконку, owner-draw текст оставляет «обрезок» слева (эталон: RecentPlaces/ObjectSets —

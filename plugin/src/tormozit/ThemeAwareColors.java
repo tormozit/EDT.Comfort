@@ -7,7 +7,10 @@ import org.eclipse.core.runtime.Platform;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.graphics.Color;
 import org.eclipse.swt.graphics.RGB;
+import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
+import org.eclipse.swt.widgets.Table;
+import org.eclipse.swt.widgets.Tree;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.themes.ITheme;
 import org.osgi.framework.Bundle;
@@ -128,6 +131,27 @@ public final class ThemeAwareColors
     public static void clearColorCache()
     {
         disposeEffectiveSystemColors();
+    }
+
+    /**
+     * Сетка (разделительные линии) таблицы/дерева с учётом темы: в светлой — включена,
+     * в тёмной — выключена.
+     * <p>
+     * Нативную сетку SWT рисует системными цветами Windows ({@code DrawEdge}/{@code BDR_SUNKENINNER}),
+     * которые не зависят от тёмной темы Eclipse: на тёмном фоне линии слишком контрастны. К тому же
+     * под нашей owner-draw отрисовкой строк они всё равно исчезают после первого клика, то есть
+     * контрастными живут недолго. Вызывать вместо {@code setLinesVisible(true)} везде, где плагин
+     * сам подключает колонки.
+     */
+    public static void applyGridLines(Control control)
+    {
+        if (control == null || control.isDisposed())
+            return;
+        boolean show = !isDarkTheme();
+        if (control instanceof Table table)
+            table.setLinesVisible(show);
+        else if (control instanceof Tree tree)
+            tree.setLinesVisible(show);
     }
 
     public static boolean isDarkTheme()

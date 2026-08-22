@@ -3,17 +3,11 @@ package tormozit;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 
-import java.io.InputStreamReader;
-import java.net.URL;
-import java.nio.charset.StandardCharsets;
-
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Properties;
 import java.util.Set;
 
-import org.eclipse.core.runtime.Platform;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.EStructuralFeature;
 import org.eclipse.jface.viewers.StructuredSelection;
@@ -40,8 +34,6 @@ import com._1c.g5.v8.dt.md.naming.MdTypesTranslationIntoRussian;
 import com._1c.g5.v8.dt.md.resource.StandardAttributeUtil;
 import com._1c.g5.v8.dt.mcore.DuallyNamedElement;
 import com._1c.g5.v8.dt.mcore.Event;
-
-import org.osgi.framework.Bundle;
 
 /** SWT-обёртка для AEF/LWT-контролов ({@code LightLabel}, {@code SwtLightControl}). */
 final class PropertySheetControlInterop
@@ -2789,9 +2781,60 @@ PropertySheetDebug.feature("resolve via=scan g=" + groupIndex //$NON-NLS-1$
     }
 
     /**
-     * Имя для копирования: только английское EMF-имя ({@code codeLength}), не подпись.
+     * Английское EMF-имя признака ({@code codeLength}), не подпись палитры.
      */
     static String resolveCopyPropertyName(Object page, Object scene, Object lwtView, String displayName)
+    {
+        CopyNameContext ctx = resolveCopyNameContext(page, scene, lwtView, displayName);
+        return ctx.english != null ? ctx.english : ""; //$NON-NLS-1$
+    }
+
+    /**
+     * Имя для копирования во встроенный язык: только штатные источники
+     * ({@code getNameRu}, локализаторы символьных ссылок), без подписей палитры.
+     */
+    static String resolveRussianCopyPropertyName(Object page, Object scene, Object lwtView,
+            String displayName)
+    {
+        CopyNameContext ctx = resolveCopyNameContext(page, scene, lwtView, displayName);
+        String ru = resolveRussianPropertyName(ctx.english, ctx.symbolicPath, ctx.featurePath,
+                ctx.binding, displayName, page);
+        if (ru != null && !ru.isEmpty())
+            return ru;
+        if (ctx.english != null && !ctx.english.isEmpty())
+            return ctx.english;
+        return displayName != null ? displayName : ""; //$NON-NLS-1$
+    }
+
+    static final class CopyNameContext
+    {
+        final EmfBinding binding;
+        final String english;
+        final String symbolicPath;
+        final EStructuralFeature[] featurePath;
+
+        CopyNameContext(EmfBinding binding, String english, String symbolicPath,
+                EStructuralFeature[] featurePath)
+        {
+            this.binding = binding;
+            this.english = english;
+            this.symbolicPath = symbolicPath;
+            this.featurePath = featurePath;
+        }
+
+        EObject owner()
+        {
+            return binding != null ? binding.owner : null;
+        }
+
+        EStructuralFeature feature()
+        {
+            return binding != null ? binding.feature : null;
+        }
+    }
+
+    static CopyNameContext resolveCopyNameContext(Object page, Object scene, Object lwtView,
+            String displayName)
     {
         Object renderer = scene != null ? Global.invoke(scene, "getRenderer") : null; //$NON-NLS-1$
         Object field = null;
@@ -2817,7 +2860,45 @@ PropertySheetDebug.feature("resolve via=scan g=" + groupIndex //$NON-NLS-1$
             english = featureNameFromFieldComponent(field);
         if ((english == null || english.isEmpty()) && !viewResolved)
             english = featureNameFromPaletteDefinition(page, displayName);
-        return english != null ? english : ""; //$NON-NLS-1$
+
+        EStructuralFeature[] featurePath = featurePathFromField(field);
+        String symbolicPath = symbolicPathFromField(field);
+        if (!viewResolved)
+        {
+            if (featurePath == null)
+                featurePath = featuresFromPaletteDefinition(page, displayName);
+            if (symbolicPath == null)
+                symbolicPath = featureSymbolicPathFromPaletteDefinition(page, displayName);
+        }
+        return new CopyNameContext(binding, english, symbolicPath, featurePath);
+    }
+
+    private static EStructuralFeature[] featurePathFromField(Object fieldComponent)
+    {
+        Object def = fieldDefinitionFromField(fieldComponent);
+        if (def == null)
+            return null;
+        Object paths = Global.invoke(def, "getFeaturePaths"); //$NON-NLS-1$
+        return featuresFromFeaturePaths(paths);
+    }
+
+    private static String symbolicPathFromField(Object fieldComponent)
+    {
+        Object def = fieldDefinitionFromField(fieldComponent);
+        if (def == null)
+            return null;
+        Object paths = Global.invoke(def, "getFeaturePaths"); //$NON-NLS-1$
+        return symbolicPathFromFeaturePaths(paths);
+    }
+
+    private static Object fieldDefinitionFromField(Object fieldComponent)
+    {
+        if (fieldComponent == null)
+            return null;
+        Object def = Global.invoke(fieldComponent, "getFieldDefinition"); //$NON-NLS-1$
+        if (def == null)
+            def = Global.invoke(fieldComponent, "getDefinition"); //$NON-NLS-1$
+        return def;
     }
 
     /** Английское EMF-имя признака (внутреннее). */
@@ -2848,11 +2929,7 @@ PropertySheetDebug.feature("resolve via=scan g=" + groupIndex //$NON-NLS-1$
     /** EMF-имя из palette definition, привязанного к FieldComponent (без глобального поиска по подписи). */
     private static String featureNameFromFieldDefinition(Object fieldComponent)
     {
-        if (fieldComponent == null)
-            return null;
-        Object def = Global.invoke(fieldComponent, "getFieldDefinition"); //$NON-NLS-1$
-        if (def == null)
-            def = Global.invoke(fieldComponent, "getDefinition"); //$NON-NLS-1$
+        Object def = fieldDefinitionFromField(fieldComponent);
         if (def == null)
             return null;
         Object paths = Global.invoke(def, "getFeaturePaths"); //$NON-NLS-1$
@@ -2931,11 +3008,7 @@ PropertySheetDebug.feature("resolve via=scan g=" + groupIndex //$NON-NLS-1$
         if (feature == null && owner != null && symbolicPath != null && !symbolicPath.isEmpty())
             feature = resolveFeatureBySymbolicPath(owner, symbolicPath);
 
-        String ru = russianFromFeatureNames(owner, english, symbolicPath, featurePath, displayName);
-        if (isRussianCopyCandidate(ru, english, displayName))
-            return ru;
-
-        ru = resolveEventNameRu(selection != null ? selection : owner, displayName, english);
+        String ru = resolveEventNameRu(selection != null ? selection : owner, displayName, english);
         if (isRussianCopyCandidate(ru, english, displayName))
             return ru;
 
@@ -2997,132 +3070,6 @@ PropertySheetDebug.feature("resolve via=scan g=" + groupIndex //$NON-NLS-1$
             }
         }
         return null;
-    }
-
-    private static volatile Properties MD_FEATURE_NAMES_RU;
-    private static volatile Properties FORM_FEATURE_NAMES_RU;
-
-    private static Properties mdFeatureNamesRu()
-    {
-        if (MD_FEATURE_NAMES_RU == null)
-            MD_FEATURE_NAMES_RU = loadFeatureNamesBundle(
-                    "com._1c.g5.v8.dt.md.ui", "localization/FeatureNames_ru.properties"); //$NON-NLS-1$ //$NON-NLS-2$
-        return MD_FEATURE_NAMES_RU;
-    }
-
-    private static Properties formFeatureNamesRu()
-    {
-        if (FORM_FEATURE_NAMES_RU == null)
-            FORM_FEATURE_NAMES_RU = loadFeatureNamesBundle(
-                    "com._1c.g5.v8.dt.form.ui", "localization/FeatureNames_ru.properties"); //$NON-NLS-1$ //$NON-NLS-2$
-        return FORM_FEATURE_NAMES_RU;
-    }
-
-    private static Properties loadFeatureNamesBundle(String bundleId, String entryPath)
-    {
-        try
-        {
-            Bundle bundle = Platform.getBundle(bundleId);
-            if (bundle == null)
-                return null;
-            URL url = bundle.getEntry(entryPath);
-            if (url == null)
-                return null;
-            Properties props = new Properties();
-            try (InputStreamReader reader = new InputStreamReader(url.openStream(), StandardCharsets.UTF_8))
-            {
-                props.load(reader);
-            }
-            return props;
-        }
-        catch (Exception ignored)
-        {
-            return null;
-        }
-    }
-
-    /**
-     * Русский идентификатор из штатных FeatureNames_ru EDT
-     * ({@code Catalog|codeLength} → {@code ДлинаКода}, {@code StandardAttribute|name} → {@code Имя}).
-     */
-    private static String russianFromFeatureNames(EObject owner, String english, String symbolicPath,
-            EStructuralFeature[] featurePath, String displayName)
-    {
-        if (english == null || english.isEmpty())
-            return null;
-        Properties md = mdFeatureNamesRu();
-        Properties form = formFeatureNamesRu();
-        if (md == null && form == null)
-            return null;
-
-        Set<String> typePrefixes = new LinkedHashSet<>();
-        typePrefixes.add("StandardAttribute"); //$NON-NLS-1$
-        for (EObject cur = owner; cur != null; cur = cur.eContainer())
-        {
-            if (cur.eClass() != null)
-                typePrefixes.add(cur.eClass().getName());
-        }
-        if (featurePath != null)
-        {
-            for (EStructuralFeature part : featurePath)
-            {
-                if (part == null)
-                    continue;
-                if (part.getEContainingClass() != null)
-                    typePrefixes.add(part.getEContainingClass().getName());
-            }
-        }
-
-        String leaf = english;
-        if (symbolicPath != null && symbolicPath.contains(".")) //$NON-NLS-1$
-        {
-            int dot = symbolicPath.lastIndexOf('.');
-            if (dot >= 0 && dot + 1 < symbolicPath.length())
-                leaf = symbolicPath.substring(dot + 1);
-        }
-
-        for (String type : typePrefixes)
-        {
-            String ru = lookupFeatureNameRu(md, type, english, displayName);
-            if (ru != null)
-                return ru;
-            if (!leaf.equals(english))
-            {
-                ru = lookupFeatureNameRu(md, type, leaf, displayName);
-                if (ru != null)
-                    return ru;
-            }
-            ru = lookupFeatureNameRu(form, type, english, displayName);
-            if (ru != null)
-                return ru;
-            if (!leaf.equals(english))
-            {
-                ru = lookupFeatureNameRu(form, type, leaf, displayName);
-                if (ru != null)
-                    return ru;
-            }
-        }
-        return null;
-    }
-
-    private static String lookupFeatureNameRu(Properties props, String typePrefix, String featureName,
-            String displayName)
-    {
-        if (props == null || typePrefix == null || featureName == null || featureName.isEmpty())
-            return null;
-        String label = props.getProperty(typePrefix + '|' + featureName);
-        if (label == null || label.isEmpty())
-            return null;
-        return labelToRussianIdentifier(label, displayName);
-    }
-
-    /** Подпись из FeatureNames_ru → идентификатор без пробелов ({@code Длина кода} → {@code ДлинаКода}). */
-    private static String labelToRussianIdentifier(String label, String displayName)
-    {
-        if (label == null || label.isEmpty() || !containsCyrillic(label))
-            return null;
-        String compact = label.replace(" ", ""); //$NON-NLS-1$ //$NON-NLS-2$
-        return compact.isEmpty() ? null : compact;
     }
 
     private static String russianFromMdTranslationMaps(String english)
@@ -3548,6 +3495,11 @@ PropertySheetDebug.feature("resolve via=scan g=" + groupIndex //$NON-NLS-1$
             sb.append(feature.getName());
         }
         return sb.length() > 0 ? sb.toString() : null;
+    }
+
+    static EObject selectionEObjectForCopy(Object page)
+    {
+        return selectionEObject(page);
     }
 
     private static EObject selectionEObject(Object page)
@@ -3985,7 +3937,34 @@ PropertySheetDebug.feature("resolve via=scan g=" + groupIndex //$NON-NLS-1$
             if (feature instanceof org.eclipse.emf.ecore.EStructuralFeature)
                 return ((org.eclipse.emf.ecore.EStructuralFeature) feature).getName();
         }
+        if (cn.contains("EventHandlerModel")) //$NON-NLS-1$
+        {
+            Event event = eventFromModel(model);
+            if (event != null)
+                return event.getName();
+        }
         return null;
+    }
+
+    /** Платформенное событие из модели поля палитры ({@code EventHandlerModel}). */
+    static Event eventFromFieldModel(Object page, Object scene, Object lwtView)
+    {
+        Object renderer = scene != null ? Global.invoke(scene, "getRenderer") : null; //$NON-NLS-1$
+        Object field = null;
+        if (lwtView != null)
+            field = findFieldComponentForView(scene, renderer, lwtView);
+        if (field == null)
+            return null;
+        Object model = Global.invoke(field, "getModel"); //$NON-NLS-1$
+        return eventFromModel(model);
+    }
+
+    private static Event eventFromModel(Object model)
+    {
+        if (model == null || !model.getClass().getName().contains("EventHandlerModel")) //$NON-NLS-1$
+            return null;
+        Object eventObj = Global.invoke(model, "getEvent"); //$NON-NLS-1$
+        return eventObj instanceof Event event ? event : null;
     }
 
     /** Leaf DtLayoutComposite (~33px) для LWT view; null если не найден. */

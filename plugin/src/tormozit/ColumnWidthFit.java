@@ -59,6 +59,18 @@ final class ColumnWidthFit
          */
         boolean excluded(int index);
 
+        /**
+         * Колонка не участвует в АВТО-заполнении по ширине: свободное место и нехватка делятся
+         * между остальными. В отличие от {@link #excluded} колонка полноценно существует —
+         * пользователь тащит её границу как обычно, и при перетаскивании чужой границы она
+         * сужается наравне с прочими. Нужно узким колонкам с запомненной шириной (добавленные
+         * колонки дерева элементов формы), чтобы ресайз панели их не раздувал.
+         */
+        default boolean fixedWidth(int index)
+        {
+            return false;
+        }
+
         int clientWidth();
 
         /** Индексы колонок (в порядке создания) в ВИЗУАЛЬНОМ порядке — {@code getColumnOrder()} контрола. */
@@ -78,6 +90,7 @@ final class ColumnWidthFit
     {
         private final Table table;
         private final IntPredicate excluded;
+        private final IntPredicate fixedWidth;
 
         /**
          * @param excluded признак «колонка скрыта хозяином» (см. {@link Columns#excluded}); {@code null} —
@@ -85,8 +98,15 @@ final class ColumnWidthFit
          */
         TableColumns(Table table, IntPredicate excluded)
         {
+            this(table, excluded, null);
+        }
+
+        /** @param fixedWidth см. {@link Columns#fixedWidth}; {@code null} — таких колонок нет. */
+        TableColumns(Table table, IntPredicate excluded, IntPredicate fixedWidth)
+        {
             this.table = table;
             this.excluded = excluded;
+            this.fixedWidth = fixedWidth;
         }
 
         @Override
@@ -124,6 +144,12 @@ final class ColumnWidthFit
         }
 
         @Override
+        public boolean fixedWidth(int index)
+        {
+            return fixedWidth != null && fixedWidth.test(index);
+        }
+
+        @Override
         public int clientWidth()
         {
             return table.isDisposed() ? 0 : table.getClientArea().width;
@@ -147,12 +173,20 @@ final class ColumnWidthFit
     {
         private final Tree tree;
         private final IntPredicate excluded;
+        private final IntPredicate fixedWidth;
 
         /** @param excluded см. {@link TableColumns#TableColumns(Table, IntPredicate)}. */
         TreeColumns(Tree tree, IntPredicate excluded)
         {
+            this(tree, excluded, null);
+        }
+
+        /** @param fixedWidth см. {@link Columns#fixedWidth}; {@code null} — таких колонок нет. */
+        TreeColumns(Tree tree, IntPredicate excluded, IntPredicate fixedWidth)
+        {
             this.tree = tree;
             this.excluded = excluded;
+            this.fixedWidth = fixedWidth;
         }
 
         @Override
@@ -187,6 +221,12 @@ final class ColumnWidthFit
         public boolean excluded(int index)
         {
             return excluded != null && excluded.test(index);
+        }
+
+        @Override
+        public boolean fixedWidth(int index)
+        {
+            return fixedWidth != null && fixedWidth.test(index);
         }
 
         @Override
@@ -496,7 +536,7 @@ final class ColumnWidthFit
         int found = 0;
         for (int i = 0; i < count; i++)
         {
-            if (!columns.resizable(i) || columns.excluded(i))
+            if (!columns.resizable(i) || columns.excluded(i) || columns.fixedWidth(i))
                 continue;
             idx[found++] = i;
         }

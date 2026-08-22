@@ -27,6 +27,7 @@
     <startup class="tormozit.TextEditorIdentifierSelectionHook"/>
     <startup class="tormozit.TextEditorOccurrencesHook"/>
     <startup class="tormozit.OccurrencesToggleHook"/>
+    <startup class="tormozit.WhitespaceToggleHook"/>
     <startup class="tormozit.TextEditorMenuHook"/>
     <startup class="tormozit.XmlEditorShowInNavigatorHook"/>
     <startup class="tormozit.QueryTextEditDialogHook"/>
@@ -93,6 +94,7 @@
     <startup class="tormozit.PropertySheetHook"/>
     <startup class="tormozit.ChoiceParametersHook"/>
     <startup class="tormozit.PredefinedSelectionDialogHook"/>
+    <startup class="tormozit.ColorDialogHook"/>
     <startup class="tormozit.DebugViewsMenuHook"/>
     <startup class="tormozit.DebugViewsCollectionKeyHook"/>
     <startup class="tormozit.DebugValuesInspectHook"/>
@@ -106,6 +108,7 @@
     <startup class="tormozit.DebugAreasConfigureHook"/>
     <startup class="tormozit.BreakpointPropertiesHook"/>
     <startup class="tormozit.BreakpointListHook"/>
+    <startup class="tormozit.BookmarksViewHook"/>
     <startup class="tormozit.ExceptionSelectionDialogHook"/>
     <startup class="tormozit.ErrorDialogActivateHook"/>
     <startup class="tormozit.ErrorDialogLinksHook"/>
@@ -134,6 +137,7 @@
     <startup class="tormozit.FilteredListDialogFilterHook"/>
     <startup class="tormozit.NewAttributeNameIdentifierHook"/>
     <startup class="tormozit.PropertyNameIdentifierHook"/>
+    <startup class="tormozit.PropertySheetActivePropertyHook"/>
     <startup class="tormozit.BslServerCallHighlightingHook"/>
     <startup class="tormozit.BracketContentHintHook"/>
     <startup class="tormozit.GotoDefinitionFieldMenuHook"/>
@@ -1220,6 +1224,17 @@
         colorPreferenceKey="comfort.bslParseTruncationTail.color"
         colorPreferenceValue="205,150,215"
         contributesToHeader="false"/>
+  </extension>
+
+  <extension point="org.eclipse.ui.ide.markerSupport">
+    <markerField
+        id="tormozit.comfort.bookmarkModuleField"
+        class="tormozit.BookmarksViewHook$ModuleField"
+        name="Модуль"/>
+    <markerField
+        id="tormozit.comfort.bookmarkMethodField"
+        class="tormozit.BookmarksViewHook$MethodField"
+        name="Метод"/>
   </extension>
 
 </plugin>

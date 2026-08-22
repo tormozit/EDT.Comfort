@@ -141,7 +141,7 @@ public class CompareSearchResultPage implements ISearchResultPage
         table = new Table(tableStack,
             SWT.MULTI | SWT.FULL_SELECTION | SWT.H_SCROLL | SWT.V_SCROLL | SWT.BORDER);
         table.setHeaderVisible(true);
-        table.setLinesVisible(true);
+        ThemeAwareColors.applyGridLines(table);
         tableStack.addControlListener(new ControlAdapter()
         {
             @Override

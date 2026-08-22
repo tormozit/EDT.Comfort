@@ -791,7 +791,7 @@ public class ApplicationsViewHook implements IStartup
         }
 
         tree.setHeaderVisible(true);
-        tree.setLinesVisible(true);
+        ThemeAwareColors.applyGridLines(tree);
     }
 
     /** Добавить колонку = добавить case сюда. */

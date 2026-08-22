@@ -353,6 +353,7 @@ public final class TextMergeEditorHook
         hookStyledText(resultText, panel, provider, viewer, leftText, rightText, resultText, activePair);
 
         MergeResultEditorKeys.install(MergeViewerReflection.extractSourceViewer(viewer, "resultViewer")); //$NON-NLS-1$
+        CompareWhitespaceSupport.installThreeWay(viewer);
 
         if (structured)
             MethodLineRestore.install(provider, viewer, leftText, rightText, resultText);

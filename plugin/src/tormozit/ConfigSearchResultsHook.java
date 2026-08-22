@@ -458,7 +458,7 @@ public final class ConfigSearchResultsHook implements IStartup
             SWT.MULTI | SWT.FULL_SELECTION | SWT.V_SCROLL | SWT.H_SCROLL | SWT.BORDER);
         Table matchTable = matchViewer.getTable();
         matchTable.setHeaderVisible(true);
-        matchTable.setLinesVisible(true);
+        ThemeAwareColors.applyGridLines(matchTable);
         matchTableStack.addControlListener(new org.eclipse.swt.events.ControlAdapter()
         {
             @Override

@@ -45,7 +45,6 @@ import org.eclipse.swt.events.PaintListener;
 import org.eclipse.swt.events.SelectionAdapter;
 import org.eclipse.swt.events.SelectionEvent;
 import org.eclipse.swt.graphics.Color;
-import org.eclipse.swt.graphics.Device;
 import org.eclipse.swt.graphics.GC;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
@@ -173,6 +172,10 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
     private boolean headerSortEnabled;
     private TableColumn headerSortColumn;
     private boolean headerSortAscending = true;
+    /** Оттенки подсветки — общие для всех списков плагина. */
+    private static final ListSelectionPalette.Mode PALETTE =
+        ListSelectionPalette.Mode.NATIVE_SELECTION;
+
     private Color ownedRowBg;
     private Color ownedInactiveRowBg;
     private Color ownedActiveCellBg;
@@ -3368,16 +3371,7 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
     {
         if (ownedRowBg != null && !ownedRowBg.isDisposed())
             return ownedRowBg;
-        if (ListSelectionThemeColors.isDarkList(table))
-        {
-            ownedRowBg = ListSelectionThemeColors.listSelectionBackground(table, table.isFocusControl());
-            return ownedRowBg;
-        }
-        Color base = table.getBackground();
-        if (base == null || base.isDisposed())
-            base = table.getDisplay().getSystemColor(SWT.COLOR_LIST_BACKGROUND);
-        double factor = table.isFocusControl() ? 0.045 : 0.03;
-        ownedRowBg = slightlyDarker(base, factor);
+        ownedRowBg = ListSelectionPalette.rowSelectionBackground(table, PALETTE);
         return ownedRowBg;
     }
 
@@ -3388,17 +3382,7 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
             return rowSelectionBackground();
         if (ownedInactiveRowBg != null && !ownedInactiveRowBg.isDisposed())
             return ownedInactiveRowBg;
-        if (ListSelectionThemeColors.isDarkList(table))
-        {
-            ownedInactiveRowBg = ListSelectionThemeColors.inactiveRowSelectionBackground(
-                table, table.isFocusControl());
-            return ownedInactiveRowBg;
-        }
-        Color base = table.getBackground();
-        if (base == null || base.isDisposed())
-            base = table.getDisplay().getSystemColor(SWT.COLOR_LIST_BACKGROUND);
-        double factor = table.isFocusControl() ? 0.034 : 0.0225;
-        ownedInactiveRowBg = slightlyDarker(base, factor);
+        ownedInactiveRowBg = ListSelectionPalette.inactiveRowSelectionBackground(table, PALETTE);
         return ownedInactiveRowBg;
     }
 
@@ -3406,12 +3390,7 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
     {
         if (ownedActiveCellBg != null && !ownedActiveCellBg.isDisposed())
             return ownedActiveCellBg;
-        if (ListSelectionThemeColors.isDarkList(table))
-        {
-            ownedActiveCellBg = ListSelectionThemeColors.activeCellBackground(table, rowBg);
-            return ownedActiveCellBg;
-        }
-        ownedActiveCellBg = slightlyDarker(rowBg, table.isFocusControl() ? 0.034 : 0.0225);
+        ownedActiveCellBg = ListSelectionPalette.activeCellBackground(table, rowBg, PALETTE);
         return ownedActiveCellBg;
     }
 
@@ -3447,14 +3426,10 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
         return new Color(base.getDevice(), clampChannel(r), clampChannel(g), clampChannel(b));
     }
 
+    /** Оттенки — общие для всех списков плагина, см. {@link ListSelectionPalette}. */
     private static Color slightlyDarker(Color base, double factor)
     {
-        Device device = base.getDevice();
-        RGB rgb = base.getRGB();
-        int r = clampChannel((int) (rgb.red * (1.0 - factor)));
-        int g = clampChannel((int) (rgb.green * (1.0 - factor)));
-        int b = clampChannel((int) (rgb.blue * (1.0 - factor)));
-        return new Color(device, r, g, b);
+        return ListSelectionPalette.slightlyDarker(base, factor);
     }
 
     private static int clampChannel(int value)

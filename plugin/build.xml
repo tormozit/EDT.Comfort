@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Clean + full rebuild проекта plugin перед Launch Group → Eclipse Application.
+     Запускать только из PDE (задачи eclipse.*), в том же JRE, что workspace. -->
+<project name="plugin-clean-build" default="clean-build" basedir=".">
+	<target name="clean-build" description="Project → Clean… для plugin, затем полная сборка">
+		<eclipse.incrementalBuild project="plugin" kind="clean"/>
+		<eclipse.incrementalBuild project="plugin" kind="full"/>
+	</target>
+</project>

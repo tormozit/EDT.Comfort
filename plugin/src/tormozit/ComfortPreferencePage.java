@@ -230,6 +230,7 @@ public class ComfortPreferencePage
         GridLayout groupLayout = new GridLayout(2, false);
         groupLayout.marginWidth = 10;       // внутренние отступы по горизонтали
         groupLayout.marginHeight = 8;       // внутренние отступы по вертикали
+        groupLayout.marginTop = 6;          // чтобы заголовок группы не сливался с первым элементом
         groupLayout.horizontalSpacing = 8;  // расстояние между колонками
         groupLayout.verticalSpacing = 4;    // расстояние между строками
         codeEditorGroup.setLayout(groupLayout);
@@ -256,17 +257,6 @@ public class ComfortPreferencePage
         timeoutTextData.grabExcessHorizontalSpace = false;
         timeoutTextData.horizontalAlignment = SWT.LEFT;
         timeoutText.setLayoutData(timeoutTextData);
-
-        BooleanFieldEditor ctrlClickSelectWordField = new BooleanFieldEditor(
-            ComfortSettings.PREF_CTRL_CLICK_SELECT_WORD,
-            "Ctrl+клик выделяет слово", //$NON-NLS-1$
-            codeEditorGroup);
-        addField(ctrlClickSelectWordField);
-        setFieldTooltip(ctrlClickSelectWordField,
-            "Ctrl+клик в текстовом поле выделяет слово под курсором — как двойной клик, —\n"
-            + "если это слово ещё не выделено. Повторный клик (в том числе быстрый двойной\n"
-            + "щелчок) работает штатно: в редакторе модуля — переход по гиперссылке.", //$NON-NLS-1$
-            codeEditorGroup);
 
         BooleanFieldEditor serverCallField = new BooleanFieldEditor(
             ComfortSettings.PREF_SERVER_CALL_HIGHLIGHTING_ENABLED,
@@ -345,6 +335,8 @@ public class ComfortPreferencePage
         }
         else
             createInstallJdtSpellingLink(codeEditorGroup);
+
+        createTextEditorsGroup();
 
         createLoggingGroup();
 
@@ -642,6 +634,45 @@ public class ComfortPreferencePage
             + "• F2 — «Показать коллекцию».\n\n"
             + "При выключении горячие клавиши в этих окнах не перехватываются.\n"
             + "Пункты контекстного меню и окно «Коллекция» остаются доступны."; //$NON-NLS-1$
+
+    /**
+     * Группа «Текстовые редакторы» — поведение, общее для всех текстовых полей и
+     * редакторов, а не только для редактора модуля.
+     */
+    private void createTextEditorsGroup()
+    {
+        Group textEditorsGroup = new Group(getFieldEditorParent(), SWT.NONE);
+        textEditorsGroup.setText("Текстовые редакторы");
+        GridData groupData = new GridData(SWT.FILL, SWT.TOP, true, false);
+        groupData.horizontalSpan = 2;
+        groupData.verticalIndent = 8;
+        textEditorsGroup.setLayoutData(groupData);
+
+        GridLayout groupLayout = new GridLayout(2, false);
+        groupLayout.marginWidth = 10;
+        groupLayout.marginHeight = 8;
+        groupLayout.marginTop = 6;          // чтобы заголовок группы не сливался с первым элементом
+        groupLayout.horizontalSpacing = 8;
+        groupLayout.verticalSpacing = 4;
+        textEditorsGroup.setLayout(groupLayout);
+
+        // BooleanFieldEditor.createControl() подменяет layout родителя на GridLayout —
+        // отдельный host, иначе ломается сетка группы.
+        Composite ctrlClickHost = new Composite(textEditorsGroup, SWT.NONE);
+        GridData ctrlClickHostData = new GridData(SWT.FILL, SWT.CENTER, true, false);
+        ctrlClickHostData.horizontalSpan = 2;
+        ctrlClickHost.setLayoutData(ctrlClickHostData);
+        BooleanFieldEditor ctrlClickSelectWordField = new BooleanFieldEditor(
+            ComfortSettings.PREF_CTRL_CLICK_SELECT_WORD,
+            "Ctrl+клик выделяет слово", //$NON-NLS-1$
+            ctrlClickHost);
+        addField(ctrlClickSelectWordField);
+        setFieldTooltip(ctrlClickSelectWordField,
+            "Ctrl+клик в текстовом поле выделяет слово под курсором — как двойной клик, —\n"
+            + "если это слово ещё не выделено. Повторный клик (в том числе быстрый двойной\n"
+            + "щелчок) работает штатно: в редакторе модуля — переход по гиперссылке.", //$NON-NLS-1$
+            ctrlClickHost);
+    }
 
     private void createLoggingGroup()
     {

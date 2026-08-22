@@ -466,6 +466,11 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
         /**
          * Цвет гиперссылки, сдвинутый на 30% к цвету текста заголовка — ссылка остаётся
          * отличимой, но не спорит с шапкой.
+         * <p>
+         * JFace отдаёт тёмно-синий цвет ссылки в координатах светлой темы независимо от темы EDT,
+         * поэтому в тёмной теме он сливается с тёмной шапкой. Приводим его к текущей теме через
+         * {@link ThemeAwareColors#toEffectiveRgb(RGB)} (инверсия светлоты, тон сохраняется) и уже
+         * потом смешиваем с цветом текста заголовка.
          */
         private Color linkForeground()
         {
@@ -475,7 +480,8 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
                 return base;
             if (base == null || base.isDisposed())
                 return hyperlink;
-            RGB desired = blendTowards(hyperlink.getRGB(), base.getRGB(), 0.30);
+            RGB themed = ThemeAwareColors.toEffectiveRgb(hyperlink.getRGB());
+            RGB desired = blendTowards(themed, base.getRGB(), 0.30);
             if (linkColor != null && !linkColor.isDisposed() && linkColor.getRGB().equals(desired))
                 return linkColor;
             disposeLinkColor();

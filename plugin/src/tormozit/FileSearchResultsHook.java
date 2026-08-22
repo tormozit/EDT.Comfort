@@ -483,7 +483,7 @@ public final class FileSearchResultsHook implements IStartup
         Table table = new Table(tableStack,
             SWT.MULTI | SWT.FULL_SELECTION | SWT.V_SCROLL | SWT.H_SCROLL | SWT.BORDER);
         table.setHeaderVisible(true);
-        table.setLinesVisible(true);
+        ThemeAwareColors.applyGridLines(table);
         tableStack.addControlListener(new ControlAdapter()
         {
             @Override

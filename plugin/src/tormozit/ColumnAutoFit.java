@@ -1,5 +1,6 @@
 package tormozit;
 
+import java.util.function.IntPredicate;
 import java.util.function.ToIntFunction;
 
 import org.eclipse.swt.SWT;
@@ -74,10 +75,10 @@ final class ColumnAutoFit
     /** Последние известные ширины (визуальный порядок) — снимок до начала перетаскивания. */
     private int[] lastKnownVisualWidths;
 
-    private ColumnAutoFit(Tree tree, ToIntFunction<Tree> widthBudget)
+    private ColumnAutoFit(Tree tree, ToIntFunction<Tree> widthBudget, IntPredicate fixedWidth)
     {
         this.tree = tree;
-        this.columns = new ColumnWidthFit.TreeColumns(tree, null);
+        this.columns = new ColumnWidthFit.TreeColumns(tree, null, fixedWidth);
         this.widthBudget = widthBudget;
         this.resizeListener = e -> fit();
         this.columnResizeListener = e ->
@@ -101,7 +102,7 @@ final class ColumnAutoFit
     /** Подключить подгонку к дереву (идемпотентно). */
     static ColumnAutoFit install(Tree tree)
     {
-        return install(tree, null);
+        return install(tree, null, null);
     }
 
     /**
@@ -116,11 +117,23 @@ final class ColumnAutoFit
      */
     static ColumnAutoFit install(Tree tree, ToIntFunction<Tree> widthBudget)
     {
+        return install(tree, widthBudget, null);
+    }
+
+    /**
+     * @param fixedWidth колонки (индексы в порядке создания), которые авто-заполнение не трогает:
+     *            свободное место и нехватка делятся между остальными. Нужно там, где узкие колонки
+     *            должны сохранять заданную пользователем ширину, а весь остаток забирает основная
+     *            колонка (дерево элементов редактора формы); {@code null} — подгонять все.
+     *            Перетаскиванию границ признак не мешает: там колонки участвуют как обычно.
+     */
+    static ColumnAutoFit install(Tree tree, ToIntFunction<Tree> widthBudget, IntPredicate fixedWidth)
+    {
         if (tree == null || tree.isDisposed())
             return null;
         if (tree.getData(INSTALLED_KEY) instanceof ColumnAutoFit existing)
             return existing;
-        ColumnAutoFit autoFit = new ColumnAutoFit(tree, widthBudget);
+        ColumnAutoFit autoFit = new ColumnAutoFit(tree, widthBudget, fixedWidth);
         tree.setData(INSTALLED_KEY, autoFit);
         tree.addListener(SWT.Resize, autoFit.resizeListener);
         tree.addListener(SWT.Paint, autoFit.paintListener);

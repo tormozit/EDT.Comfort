@@ -72,6 +72,7 @@ public class RecentPlacesHandler extends AbstractHandler
 
     /**
      * Переход к записи «Последние места» через {@link GoToDefinition#jump}.
+     * Без автоподключения ИР (двойной щелчок, Enter, контекстное меню).
      */
     public static void jumpToEntry(RecentPlaces.Entry entry, Shell shell, IWorkbenchPage page)
     {
@@ -99,7 +100,7 @@ public class RecentPlacesHandler extends AbstractHandler
             return;
         }
 
-        if (!GoToDefinition.jump(entry.navRef, shell, page, project)
+        if (!GoToDefinition.jump(entry.navRef, shell, page, project, false)
                 && !GoToDefinition.consumeJumpCancelled())
         {
             ToastNotification.show("Последние места",

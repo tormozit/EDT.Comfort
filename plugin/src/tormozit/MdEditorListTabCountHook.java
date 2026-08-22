@@ -1833,11 +1833,8 @@ public final class MdEditorListTabCountHook implements IStartup
      */
     private static String modulePresenceMark(DtGranularEditor<?> editor, IFormPage page)
     {
-        EObject model = editor.getModel();
-        if (model == null || model.eIsProxy())
-            return null;
-        IContainer folder = mdFolder(model);
-        if (folder == null)
+        List<IContainer> folders = moduleFolders(editor, page);
+        if (folders.isEmpty())
             return null;
 
         List<String> fileNames = moduleBslFileNames(editor, page);
@@ -1845,12 +1842,57 @@ public final class MdEditorListTabCountHook implements IStartup
             return null;
         try
         {
-            for (String fileName : fileNames)
+            for (IContainer folder : folders)
             {
-                if (moduleFileHasContent(folder.getFile(new Path(fileName))))
-                    return "+"; //$NON-NLS-1$
+                for (String fileName : fileNames)
+                {
+                    if (moduleFileHasContent(folder.getFile(new Path(fileName))))
+                        return "+"; //$NON-NLS-1$
+                }
             }
             return "-"; //$NON-NLS-1$
+        }
+        catch (RuntimeException ignored)
+        {
+            return null;
+        }
+    }
+
+    /**
+     * Папки, где может лежать файл модуля этой вкладки.
+     *
+     * <p>Для редактора объекта метаданных это папка его {@code .mdo} — там же лежат
+     * {@code ObjectModule.bsl} и прочие модули объекта. Для редактора формы модель редактора —
+     * подчинённый объект {@code BasicForm}, который хранится не в своём файле, а внутри
+     * {@code .mdo} владельца (см. {@code <forms>} в {@code Справочник1.mdo}), поэтому его папка —
+     * папка справочника, а не формы, и {@code Module.bsl} там не найти. Реальная папка формы
+     * берётся от модели самой страницы ({@code form.model.Form} — файл {@code Form.form}).
+     */
+    private static List<IContainer> moduleFolders(DtGranularEditor<?> editor, IFormPage page)
+    {
+        List<IContainer> folders = new ArrayList<>();
+        addModuleFolder(folders, pageModel(page));
+        addModuleFolder(folders, editor.getModel());
+        return folders;
+    }
+
+    private static void addModuleFolder(List<IContainer> folders, EObject model)
+    {
+        if (model == null || model.eIsProxy())
+            return;
+        IContainer folder = mdFolder(model);
+        if (folder != null && !folders.contains(folder))
+            folders.add(folder);
+    }
+
+    private static EObject pageModel(IFormPage page)
+    {
+        if (page == null)
+            return null;
+        try
+        {
+            Object model = Global.invoke(page, "getModel"); //$NON-NLS-1$
+            return model instanceof EObject eObject ? eObject : null;
         }
         catch (RuntimeException ignored)
         {

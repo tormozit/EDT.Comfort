@@ -219,7 +219,7 @@ public final class RecentPlacesView extends ViewPart
             SWT.BORDER | SWT.MULTI | SWT.FULL_SELECTION | SWT.V_SCROLL);
         Table table = listViewer.getTable();
         table.setHeaderVisible(true);
-        table.setLinesVisible(true);
+        ThemeAwareColors.applyGridLines(table);
 
         entryIconResolver = new EntryIconResolver();
 

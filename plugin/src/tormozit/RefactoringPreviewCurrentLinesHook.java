@@ -313,6 +313,7 @@ public final class RefactoringPreviewCurrentLinesHook
         addToolbarActions(pane, panel, shell);
 
         TwoSideCurrentLinesSync.hook(panel, leftText, rightText, viewer, config, semanticLeft, semanticRight);
+        CompareWhitespaceSupport.installTwoWay(viewer);
 
         /*
          * Смена выбранного изменения в дереве «Вносимые изменения» переиспользует тот же вьюер

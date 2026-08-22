@@ -232,6 +232,7 @@ public final class CompareDialogCurrentLinesHook
         OccurrencesToggleHook.removeDialogItems(shell);
 
         TwoSideCurrentLinesSync.hook(panel, leftText, rightText, viewer, config, semanticLeft, semanticRight);
+        CompareWhitespaceSupport.installTwoWay(viewer);
 
         wrapper.addDisposeListener(e ->
         {

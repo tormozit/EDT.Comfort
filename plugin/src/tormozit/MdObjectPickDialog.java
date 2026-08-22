@@ -174,7 +174,7 @@ public class MdObjectPickDialog extends Dialog
             SWT.BORDER | SWT.SINGLE | SWT.FULL_SELECTION | SWT.V_SCROLL);
         Table table = listViewer.getTable();
         table.setHeaderVisible(true);
-        table.setLinesVisible(true);
+        ThemeAwareColors.applyGridLines(table);
 
         IDialogSettings settings = dialogSettings();
         boolean hasSavedColumnWidths = FormTableColumnState.hasSavedColumnWidths(

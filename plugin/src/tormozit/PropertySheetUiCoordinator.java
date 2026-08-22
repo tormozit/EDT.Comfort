@@ -866,20 +866,24 @@ session.rowSelection.selectRow(ctx, row);
 
         private static void fillRowContextMenu(Object page, Menu menu, PropertySheetPaletteRow row, Control widget)
         {
-            PropertySheetUiContext ctx = PropertySheetUiCoordinator.lastContext(page);
-            Object scene = ctx != null ? ctx.scene : null;
-            String resolved = PropertySheetControlInterop.resolveCopyPropertyName(page, scene,
-                    row.lwtView, row.propertyName);
-            final String copyText = resolved != null ? resolved : ""; //$NON-NLS-1$
-
             MenuItem copyItem = new MenuItem(menu, SWT.PUSH);
             copyItem.setText("Копировать имя\tCtrl+C"); //$NON-NLS-1$
             copyItem.setToolTipText("Копировать имя свойства в буфер обмена" + Global.pluginSignForTooltip()); //$NON-NLS-1$
-            if (copyText.isEmpty())
+            boolean canCopy = row.propertyName != null && !row.propertyName.isEmpty();
+            if (!canCopy)
                 copyItem.setEnabled(false);
             else
             {
                 copyItem.addListener(SWT.Selection, e -> widget.getDisplay().asyncExec(() -> {
+                    Object copyPage = page != null ? page : pageForRow(row);
+                    PropertySheetUiContext ctx = copyPage != null
+                            ? PropertySheetUiCoordinator.lastContext(copyPage)
+                            : contextForRow(row);
+                    Object scene = ctx != null ? ctx.scene : null;
+                    String copyText = PropertySheetActivePropertyHook.russianNameForCopy(copyPage,
+                            scene, row.lwtView, row.propertyName, row.modelPropertyName);
+                    if (copyText == null || copyText.isEmpty())
+                        return;
                     PropertySheetDebug.feature("contextMenu copy " + PropertySheetDebug.quote(copyText)); //$NON-NLS-1$
                     PropertySheetUiContext.copyToClipboard(widget, copyText);
                     ToastNotification.show("Скопировано", copyText, 2_500); //$NON-NLS-1$
@@ -895,7 +899,13 @@ session.rowSelection.selectRow(ctx, row);
             syntaxItem.addListener(SWT.Selection, e -> widget.getDisplay().syncExec(() -> {
                 PropertySheetDebug.feature("contextMenu syntaxHelp " //$NON-NLS-1$
                         + PropertySheetDebug.quote(row.propertyName));
-                PropertySheetSyntaxHelpSupport.openForProperty(page, row);
+                Object syntaxPage = page != null ? page : pageForRow(row);
+                PropertySheetUiContext ctx = syntaxPage != null
+                        ? PropertySheetUiCoordinator.lastContext(syntaxPage)
+                        : contextForRow(row);
+                Object scene = ctx != null ? ctx.scene : null;
+                PropertySheetActivePropertyHook.openSyntaxHelp(syntaxPage, scene, row.lwtView,
+                        row.propertyName);
             }));
         }
 
@@ -1181,6 +1191,39 @@ session.rowSelection.selectRow(ctx, row);
             Class<?> utilClass = Class.forName(SYNTAX_VIEW_UTIL);
             utilClass.getMethod("showSearch", String.class).invoke(null, propertyName); //$NON-NLS-1$
         }
+    }
+
+    static PropertySheetUiContext contextForRow(PropertySheetPaletteRow row)
+    {
+        Object page = pageForRow(row);
+        if (page != null)
+        {
+            PropertySheetUiContext ctx = lastContext(page);
+            if (ctx != null)
+                return ctx;
+        }
+        if (row == null)
+            return null;
+        synchronized (SESSIONS)
+        {
+            for (PageSession session : SESSIONS.values())
+            {
+                PropertySheetUiContext ctx = session.lastContext;
+                if (ctx == null)
+                    continue;
+                for (PropertySheetPaletteRow candidate : ctx.rows)
+                {
+                    if (!candidate.isAlive())
+                        continue;
+                    if (!row.propertyName.equals(candidate.propertyName))
+                        continue;
+                    if (row.lwtView != null && row.lwtView != candidate.lwtView)
+                        continue;
+                    return ctx;
+                }
+            }
+        }
+        return null;
     }
 
     static Object pageForRow(PropertySheetPaletteRow row)
