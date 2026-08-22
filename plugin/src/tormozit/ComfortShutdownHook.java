@@ -48,7 +48,6 @@ public final class ComfortShutdownHook implements IStartup
                 runStep("toasts", ToastNotification::closeAllActive); //$NON-NLS-1$
                 runStep("paramHint", ParamHintHtmlModifier::dismissAllVisible); //$NON-NLS-1$
                 runStep("contentAssist", ComfortShutdownHook::prepareContentAssist); //$NON-NLS-1$
-                runStep("propertySheet", PropertySheetUiCoordinator::cancelAll); //$NON-NLS-1$
                 runStep("collection", DebugCollectionWindowRegistry::disposeAll); //$NON-NLS-1$
                 runStep("collectionSize", DebugCollectionSizeResolver::cancelAll); //$NON-NLS-1$
                 runStep("designerPool", () -> DesignerSessionPoolAccessor.getInstance().stopPolling()); //$NON-NLS-1$

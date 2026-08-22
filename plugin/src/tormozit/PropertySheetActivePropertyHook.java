@@ -51,13 +51,11 @@ import org.osgi.framework.Bundle;
  * акцентным цветом, а при перезаполнении панели (очистка фильтра, повторный показ того же
  * объекта) строка этого свойства доводится до видимой области.
  *
- * <p>Независим от отключённой автором подсистемы {@link PropertySheetHook} —
- * та вычисляла геометрию строк и рисовала рамку оверлеем поверх LWT-канвы. Здесь ни
- * геометрии строк, ни своей отрисовки нет: подпись свойства — это {@code LightLabel}
- * (LWT-контрол), у которого есть штатные {@code setTextColor(Color)} и {@code invalidate()}.
- * Из старой подсистемы переиспользуются только два безобидных помощника —
- * {@code lightControlFromView} (view → LightLabel) и {@code liveLightDisplayBounds}
- * (display-координаты подписи для прокрутки).
+ * <p>Геометрию строк и оверлей по LWT-канве не использует: подпись свойства —
+ * {@code LightLabel} со штатными {@code setTextColor(Color)} и {@code invalidate()}.
+ * Координаты подписи для прокрутки — через
+ * {@link PropertySheetControlInterop#lightControlFromView} и
+ * {@link PropertySheetControlInterop#liveLightDisplayBounds}.
  *
  * <p>Строки палитры берутся из {@code renderer.viewModelToView} — это
  * {@link java.util.LinkedHashMap} с порядком вставки: подпись ({@code LabelViewModel}) и
@@ -80,30 +78,6 @@ public class PropertySheetActivePropertyHook implements IStartup
     private static final int SCROLL_MARGIN = 8;
     /** Глубина спуска по LWT-детям при поиске сфокусированного поля. */
     private static final int LIGHT_DEPTH = 4;
-
-    static String russianNameForCopy(Object page, Object scene, Object lwtView, String displayName)
-    {
-        return russianNameForCopy(page, scene, lwtView, displayName, null);
-    }
-
-    static String russianNameForCopy(Object page, Object scene, Object lwtView, String displayName,
-            String englishHint)
-    {
-        return PropertySheetPlatformPropertyResolver.russianNameForCopy(page, scene, lwtView,
-            displayName, englishHint);
-    }
-
-    /** Синтакс-помощник для строки палитры (свойство или событие). */
-    static void openSyntaxHelp(Object page, Object scene, Object lwtView, String displayName)
-    {
-        SyntaxHelp.open(page, scene, lwtView, displayName);
-    }
-
-    /** Описание для подсказки при наведении (свойство или событие). */
-    static String describeSyntaxHelp(Object page, Object scene, Object lwtView, String displayName)
-    {
-        return SyntaxHelp.describe(page, scene, lwtView, displayName);
-    }
 
     /** Панели «Свойства», за которыми уже следим. */
     private static final Set<IViewPart> HOOKED_VIEWS =

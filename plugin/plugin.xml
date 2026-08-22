@@ -91,7 +91,6 @@
     <startup class="tormozit.NavigatorRecomputeChecksMenuHook"/>
     <startup class="tormozit.NavigatorAttributePropertiesHook"/>
     <startup class="tormozit.NavigatorCopyTextAugmentHook"/>
-    <startup class="tormozit.PropertySheetHook"/>
     <startup class="tormozit.ChoiceParametersHook"/>
     <startup class="tormozit.PredefinedSelectionDialogHook"/>
     <startup class="tormozit.ColorDialogHook"/>

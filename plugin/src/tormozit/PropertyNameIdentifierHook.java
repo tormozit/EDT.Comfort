@@ -27,9 +27,8 @@ import com._1c.g5.v8.dt.core.platform.IDtProject;
  * преобразует введённое представление в валидный идентификатор — см.
  * {@link Global#identifierFromRepresentation}.
  *
- * <p>Независим от остальной инфраструктуры панели «Свойства» ({@link PropertySheetHook} и др.) —
- * та отключена автором ({@code if (true) return; // не осилил}) как чрезмерно сложная попытка
- * canvas-hit-test подсветки по клику мыши.
+ * <p>Независим от подсветки текущего свойства ({@link PropertySheetActivePropertyHook})
+ * и прочих доработок панели «Свойства».
  *
  * <p>Редактор строки «Имя» находится через {@code renderer.viewModelToView} —
  * это {@link java.util.LinkedHashMap}, сохраняющий порядок вставки строк палитры: подпись

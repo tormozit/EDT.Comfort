@@ -99,9 +99,8 @@ public final class GotoDefinitionFieldMenuHook implements IStartup
         }
 
         // Фолбэк — по белому списку, а не по чёрному: применяется только к LWT-хостящим
-        // canvas-виджетам (см. javadoc класса и PropertySheetControlInterop.isLightControl —
-        // тот же сигнал по имени пакета/класса), где отдельного текстового control в
-        // состоянии покоя не существует (напр. канвас панели «Свойства»,
+        // canvas-виджетам (см. {@link #isLwtHostedControl}), где отдельного текстового
+        // control в состоянии покоя не существует (напр. канвас панели «Свойства»,
         // com._1c.g5.lwt.interop.SwtLightComposite). Для любых нативных SWT-виджетов со своим
         // штатным меню (дерево реквизитов объекта метаданных, таблицы, вкладки workbench и
         // т.п.) фолбэк не сработает в принципе — вести список исключений не нужно.
@@ -169,10 +168,9 @@ public final class GotoDefinitionFieldMenuHook implements IStartup
 
     /**
      * LWT-виджет (напр. {@code com._1c.g5.lwt.interop.SwtLightComposite} — канвас панели
-     * «Свойства», см. {@code PropertySheetHook} про то, что именно этот класс получает
-     * MouseDown/MenuDetect вместо дочерних полей). Тот же сигнал, что и
-     * {@code PropertySheetControlInterop.isLightControl} — позитивно опознаёт «это поле ввода
-     * LWT-фреймворка», а не «всё, кроме известных структурных виджетов».
+     * «Свойства»: MouseDown/MenuDetect приходят на host, а не на дочерние поля).
+     * Позитивно опознаёт поле ввода LWT-фреймворка, а не «всё, кроме известных
+     * структурных виджетов».
      */
     private static boolean isLwtHostedControl(Control control)
     {

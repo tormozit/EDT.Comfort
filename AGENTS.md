@@ -142,7 +142,7 @@ powershell -NoProfile -File "C:\VC\EDT.Comfort\.cursor\scripts\repair-double-eol
 
 ### 1. Постоянные логи (для других РМ)
 
-Только журнал «Комфорт» (`Global.log` / `GlobalLog`) при `Global.isLogEnabled()` (Параметры → Комфорт → «Общее логирование»). В модулях — `*Debug` с `TAG`, проверка флажка; эталон: `PropertySheetDebug`, `DebugInspectorDebug`.
+Только журнал «Комфорт» (`Global.log` / `GlobalLog`) при `Global.isLogEnabled()` (Параметры → Комфорт → «Общее логирование»). В модулях — `*Debug` с `TAG`, проверка флажка; эталон: `DebugInspectorDebug`.
 
 Запрещено: `GlobalLog.append` в обход флажка; `System.out/err` без договорённости; JVM `-Dtormozit.*`; файлы/NDJSON/Eclipse Error Log как постоянный канал; логи «всегда».
 
