@@ -67,6 +67,16 @@ final class FilterInputBox
         + "• ищет по имени подсистемы; родители совпадений не скрываются"; //$NON-NLS-1$
 
     /**
+     * Панель «Синтакс-помощник», страница «Содержание»: плоский AND по словам,
+     * матч по видимой подписи узла дерева.
+     */
+    static final String SYNTAX_CONTENTS_FILTER_TOOLTIP =
+        "Многословный фильтр:\n" //$NON-NLS-1$
+        + "• пробел или точка между словами — И (все слова должны совпасть)\n" //$NON-NLS-1$
+        + "• \"текст в кавычках\" — точная фраза целиком; точки и пробелы внутри неё не разделяют\n" //$NON-NLS-1$
+        + "• ищет по имени узла дерева; родители совпадений не скрываются"; //$NON-NLS-1$
+
+    /**
      * Панель «Структура проекта»: иерархический фильтр, как в навигаторе;
      * русские названия папок из декоратора; суффикс {@code <объект>} в поиск не входит.
      */
@@ -150,7 +160,10 @@ final class FilterInputBox
             "comfort.eventHandlers.filter.history."), //$NON-NLS-1$
         FORM_ITEMS(
             "comfort.formItems.filter.history.count", //$NON-NLS-1$
-            "comfort.formItems.filter.history."); //$NON-NLS-1$
+            "comfort.formItems.filter.history."), //$NON-NLS-1$
+        SYNTAX_CONTENTS(
+            "comfort.syntaxAssistContents.filter.history.count", //$NON-NLS-1$
+            "comfort.syntaxAssistContents.filter.history."); //$NON-NLS-1$
 
         final String prefCountKey;
         final String prefItemPrefix;
@@ -453,6 +466,7 @@ final class FilterInputBox
             case COLUMN_VALUES -> forColumnValues(parent, onSearch);
             case PROJECT_STRUCTURE -> forProjectStructure(parent, onSearch);
             case EVENT_HANDLERS -> throw new IllegalStateException("EVENT_HANDLERS: use attachHistory(SearchBox, Scope.EVENT_HANDLERS)"); //$NON-NLS-1$
+            case SYNTAX_CONTENTS -> throw new IllegalStateException("SYNTAX_CONTENTS: use attachHistory(SearchBox, Scope.SYNTAX_CONTENTS)"); //$NON-NLS-1$
         };
     }
 

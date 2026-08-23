@@ -84,6 +84,8 @@ import com._1c.g5.v8.dt.dcs.ui.settings.Settings;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorEmbeddedEditorPage;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicFeature;
+import com._1c.g5.v8.dt.metadata.mdclass.BasicForm;
+import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
 import com._1c.g5.v8.dt.metadata.mdclass.ExchangePlan;
 import com._1c.g5.v8.dt.metadata.mdclass.ExchangePlanContentItem;
 import com._1c.g5.v8.dt.metadata.mdclass.MdClassPackage;
@@ -1091,6 +1093,9 @@ public final class ConfigSearchResultsHook implements IStartup
                 if (openNestedMdObjectMemberMatch(matchedObject, workbenchPage, match.getFeature(),
                     typeTargets))
                     return true;
+                if (openChildFormPropertyMatch(matchedObject, workbenchPage, match.getFeature(),
+                    typeTargets))
+                    return true;
                 // Штатная обработка EDT (handleOpen) сама корректно открывает форму и выделяет
                 // найденный элемент (реквизит/команду/элемент формы) — это уже подтверждено и трогать
                 // не нужно (попытка сделать выделение самим сломала штатную активацию, см. откат
@@ -1098,7 +1103,12 @@ public final class ConfigSearchResultsHook implements IStartup
                 // показывает панель «Свойства». Только показываем её (не трогая выделение/открытие)
                 // и отдаём управление штатному handleOpen (return false) — панель сама подхватит
                 // выделение, которое штатно выставит handleOpen, через ISelectionListener.
-                if (isInsideForm(matchedObject) || isInsideMdObjectMember(matchedObject))
+                // Сюда же попадают собственные свойства общей формы («Имя», «Синоним»): её
+                // владелец — конфигурация, отдельного перехода (openChildFormPropertyMatch) для
+                // неё нет, а поле панели у неё есть — см. PropertyFieldFocus.hasPanelOwner.
+                boolean panelTarget = isInsideForm(matchedObject) || isInsideMdObjectMember(matchedObject)
+                    || PropertyFieldFocus.hasPanelOwner(matchedObject);
+                if (panelTarget)
                 {
                     try
                     {
@@ -1111,7 +1121,7 @@ public final class ConfigSearchResultsHook implements IStartup
                 // Доводим до конкретного поля панели (см. PropertyFieldFocus) — и для реквизита
                 // МД-объекта, и для элемента формы: у элемента формы свой редактор есть, но
                 // свойство вроде «ПутьКДанным» правится всё равно только в панели «Свойства».
-                if (isInsideMdObjectMember(matchedObject) || isInsideForm(matchedObject))
+                if (panelTarget)
                     PropertyFieldFocus.schedule(workbenchPage, matchedObject, match.getFeature(),
                         typeTargets);
                 return false;
@@ -2121,6 +2131,265 @@ public final class ConfigSearchResultsHook implements IStartup
         scheduleContentReveal(editor,
             new ContentTarget(kind, feature, componentClass, target, selectionObject), 0);
         return true;
+    }
+
+    /**
+     * Собственные свойства формы объекта («Имя», «Синоним» у Обработка.Обработка1.Форма.Форма1)
+     * правятся не в редакторе самой формы, а в панели «Свойства» при выделенной форме в редакторе
+     * объекта-ВЛАДЕЛЬЦА: штатный {@code handleOpen} открывал бы редактор формы, где этих свойств
+     * нет. Поэтому открывается редактор владельца, в нём выделяется строка нужной формы (тем же
+     * способом, что и строка состава плана обмена, см. {@link #selectContentRow}), а поле свойства
+     * активирует обычный цикл {@link PropertyFieldFocus}.
+     *
+     * <p>Общей формы это не касается: её владелец — конфигурация, свои свойства она показывает в
+     * панели и без такого перехода.
+     *
+     * @return {@code true}, если открытие обработано здесь (штатный {@code handleOpen} не нужен)
+     */
+    private static boolean openChildFormPropertyMatch(EObject leaf, IWorkbenchPage workbenchPage,
+            EStructuralFeature matchFeature, List<String> typeDialogTargets)
+    {
+        BasicForm form = nearestBasicForm(leaf);
+        if (form == null || workbenchPage == null)
+            return false;
+        if (!(form.eContainer() instanceof MdObject owner) || owner instanceof Configuration)
+            return openOwnFormPropertyInNavigator(form, leaf, workbenchPage, matchFeature, typeDialogTargets);
+        EStructuralFeature formsFeature = form.eContainingFeature();
+        if (formsFeature == null)
+            return false;
+
+        IEditorPart editor;
+        try
+        {
+            editor = new OpenHelper(workbenchPage).openEditor(owner);
+        }
+        catch (RuntimeException e)
+        {
+            return false;
+        }
+        if (editor == null)
+            return false;
+
+        try
+        {
+            workbenchPage.showView(IPageLayout.ID_PROP_SHEET);
+        }
+        catch (Exception e)
+        {
+        }
+        // Порядок как у остальных переходов: цикл ожидания поля запускается ДО перехода — панель
+        // подхватывает выделение асинхронно, а цикл к этому моменту уже крутится.
+        PropertyFieldFocus.schedule(workbenchPage, leaf, matchFeature, typeDialogTargets);
+        scheduleFormReveal(editor, owner, form, formsFeature, 0);
+        return true;
+    }
+
+    /**
+     * Собственные свойства общей формы («Имя» у ОбщаяФорма.Форма1). Владельца-объекта у неё нет,
+     * а открыть редактор её объекта метаданных нечем: {@code OpenHelper.getFile} для
+     * {@code BasicForm} берёт файл по ссылке {@code BASIC_FORM__FORM} — то есть {@code .form}
+     * (декомпиляция), да и сам {@code .mdo} общей формы EDT открывает тем же редактором формы —
+     * в панели тогда видна МОДЕЛЬ формы ({@code form.model.Form}), а не объект метаданных
+     * (в логе: «палитра так и не показала CommonForm, в ней: Form»). Свойства объекта
+     * метаданных панель показывает по выделению в навигаторе — его и делаем.
+     *
+     * <p>Вхождения ВНУТРИ свойств формы («Синоним» приходит как {@code LocalStringMapEntry})
+     * сюда не попадают: для них штатный путь уже открывает нужный редактор — там
+     * {@code getFile} берёт {@code getPlatformResource} → {@code .mdo}.
+     *
+     * @return {@code true}, если открытие обработано здесь
+     */
+    private static boolean openOwnFormPropertyInNavigator(BasicForm form, EObject leaf,
+            IWorkbenchPage workbenchPage, EStructuralFeature matchFeature, List<String> typeDialogTargets)
+    {
+        if (leaf != form)
+            return false; // вложенное свойство — штатный путь открывает редактор объекта сам
+        try
+        {
+            workbenchPage.showView(IPageLayout.ID_PROP_SHEET);
+        }
+        catch (Exception e)
+        {
+        }
+        PropertyFieldFocus.schedule(workbenchPage, leaf, matchFeature, typeDialogTargets);
+        // Именно revealAndActivate: панель «Свойства» показывает выделение АКТИВНОЙ части, и пока
+        // активны результаты поиска, она остаётся пустой («палитра … в ней: empty» в логе).
+        NavigatorReveal.revealAndActivate(form);
+        return true;
+    }
+
+    /**
+     * Редактор владельца уже показал в панели «Свойства» сам объект-владелец — значит своё
+     * начальное выделение он выставил и наше выделение формы больше не перезапишет.
+     */
+    private static boolean ownerSelectionSettled(IEditorPart editor, MdObject owner)
+    {
+        IWorkbenchPage workbenchPage = editor.getSite() != null ? editor.getSite().getPage() : null;
+        IViewPart view = workbenchPage != null ? PropertyFieldFocus.findPropertySheetView(workbenchPage) : null;
+        Object page = view != null ? PropertyNameIdentifierHook.resolvePropertySheetPage(view) : null;
+        return page != null && PropertyFieldFocus.paletteShowsObject(page, owner);
+    }
+
+    /** Ближайшая форма объекта метаданных (сам {@code leaf} тоже подходит). */
+    private static BasicForm nearestBasicForm(EObject leaf)
+    {
+        for (EObject cur = leaf; cur != null; cur = cur.eContainer())
+            if (cur instanceof BasicForm form)
+                return form;
+        return null;
+    }
+
+    /**
+     * Ожидание готовности редактора владельца: страницы поднимаются заметно позже модели (та же
+     * механика, что у {@link #scheduleContentReveal}).
+     *
+     * <p>Дополнительно ждём, когда редактор выставит СВОЁ выделение — сам объект-владелец
+     * (в панели «Свойства» это видно как «палитра показывает Обработку»). Если выделить форму
+     * раньше, редактор перезапишет выделение своим, и панель останется на владельце.
+     */
+    private static void scheduleFormReveal(IEditorPart editor, MdObject owner, BasicForm form,
+            EStructuralFeature formsFeature, int attempt)
+    {
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed() || attempt >= EXCHANGE_PLAN_MAX_ATTEMPTS)
+            return;
+        display.timerExec(attempt == 0 ? 0 : 150, () -> {
+            // Форма из результатов поиска и форма в модели открытого редактора — разные экземпляры.
+            EObject formInEditor = findFormInEditor(editor, formsFeature, form);
+            if (formInEditor == null || !isRealFeaturePage(editor, formsFeature)
+                || !ownerSelectionSettled(editor, owner))
+            {
+                scheduleFormReveal(editor, owner, form, formsFeature, attempt + 1);
+                return;
+            }
+            ISelection selection = new StructuredSelection(formInEditor);
+            Global.invokeVoid(editor, "setActiveFeature", formsFeature); //$NON-NLS-1$
+            Global.invokeVoid(editor, "setActiveSelection", selection, //$NON-NLS-1$
+                DtEditorSelectionProcessingPolicy.Immediate);
+            Object model = Global.invoke(editor, "getModel"); //$NON-NLS-1$
+            if (model instanceof EObject modelObject)
+            {
+                Global.invokeVoid(editor, "showEditorInput", //$NON-NLS-1$
+                    DtEditorInputFactory.create(modelObject, formsFeature, selection));
+            }
+            scheduleFormRowSelect(editor, formInEditor, 0);
+        });
+    }
+
+    /** Форма с тем же именем в модели открытого редактора владельца. */
+    private static EObject findFormInEditor(IEditorPart editor, EStructuralFeature formsFeature,
+            BasicForm form)
+    {
+        Object model = Global.invoke(editor, "getModel"); //$NON-NLS-1$
+        if (!(model instanceof EObject modelObject) || modelObject.eClass() == null)
+            return null;
+        // Признак берётся у КЛАССА модели редактора: сам formsFeature пришёл из другого экземпляра.
+        EStructuralFeature feature = modelObject.eClass().getEStructuralFeature(formsFeature.getName());
+        if (feature == null)
+            return null;
+        Object forms = modelObject.eGet(feature);
+        if (!(forms instanceof Iterable<?> iterable))
+            return null;
+        for (Object candidate : iterable)
+        {
+            if (candidate instanceof BasicForm candidateForm
+                && candidateForm.getName() != null && candidateForm.getName().equals(form.getName()))
+            {
+                return candidateForm;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Выделение строки формы в списке форм страницы. Список наполняется после переключения
+     * страницы, поэтому попытки повторяются, а после успеха выделение подтверждается — страница
+     * может дозагрузить содержимое и сбросить его (та же механика, что у состава).
+     */
+    private static void scheduleFormRowSelect(IEditorPart editor, EObject formInEditor, int attempt)
+    {
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed() || attempt >= 40)
+            return;
+        display.timerExec(attempt == 0 ? 0 : 150, () -> {
+            if (selectFormRow(editor, formInEditor))
+            {
+                // Редактор дозагружается и возвращает своё выделение (панель снова показывает
+                // владельца) — поэтому выделение подтверждается, пока панель не покажет форму.
+                for (int delay : new int[] { 300, 800, 1500, 2500 })
+                {
+                    display.timerExec(delay, () -> {
+                        if (!panelShowsForm(editor, formInEditor))
+                            selectFormRow(editor, formInEditor);
+                    });
+                }
+                return;
+            }
+            scheduleFormRowSelect(editor, formInEditor, attempt + 1);
+        });
+    }
+
+    /** Панель «Свойства» показывает именно эту форму (а не владельца). */
+    private static boolean panelShowsForm(IEditorPart editor, EObject formInEditor)
+    {
+        IWorkbenchPage workbenchPage = editor.getSite() != null ? editor.getSite().getPage() : null;
+        IViewPart view = workbenchPage != null ? PropertyFieldFocus.findPropertySheetView(workbenchPage) : null;
+        Object page = view != null ? PropertyNameIdentifierHook.resolvePropertySheetPage(view) : null;
+        return page != null && PropertyFieldFocus.paletteShowsObject(page, formInEditor);
+    }
+
+    /**
+     * Строку выделяет сам компонент списка ({@code setSelection(Collection)}) — выделение, которое
+     * шлёт страница, до него не доходит (см. {@link #selectContentRow}). Класс компонента у разных
+     * владельцев свой, поэтому компонент ищется не по имени класса, а по тому, что среди его
+     * отображённых моделей есть наша форма.
+     */
+    private static boolean selectFormRow(IEditorPart editor, EObject formInEditor)
+    {
+        Object page = Global.invoke(editor, "getActivePageInstance"); //$NON-NLS-1$
+        Object root = page != null ? Global.getField(page, "pageComponent") : null; //$NON-NLS-1$
+        Object[] found = findComponentForModel(root, formInEditor, 0);
+        if (found == null || !Global.invokeVoid(found[0], "setSelection", List.of(found[1]))) //$NON-NLS-1$
+            return false;
+        TreeViewer viewer = findContentTreeViewer(page);
+        if (viewer != null && !viewer.getStructuredSelection().isEmpty())
+        {
+            Tree tree = viewer.getTree();
+            if (tree != null && !tree.isDisposed() && tree.getSelectionCount() > 0)
+                tree.showSelection();
+        }
+        return true;
+    }
+
+    /**
+     * Компонент, среди отображённых моделей которого есть {@code target}.
+     *
+     * @return пара «компонент, его модель для {@code setSelection}» либо {@code null}
+     */
+    private static Object[] findComponentForModel(Object component, EObject target, int depth)
+    {
+        if (component == null || target == null || depth > 20)
+            return null;
+        Object mapper = Global.invoke(component, "getMapper"); //$NON-NLS-1$
+        Object mappedModels = mapper != null ? Global.invoke(mapper, "getMappedModels") : null; //$NON-NLS-1$
+        if (mappedModels instanceof Iterable<?> iterable)
+        {
+            for (Object candidate : iterable)
+            {
+                if (candidate == target || (candidate instanceof EObject candidateObject
+                    && sameShownMdObject(candidateObject, target)))
+                {
+                    return new Object[] { component, candidate };
+                }
+            }
+        }
+        for (Object child : AefFieldFocus.childComponents(component))
+        {
+            Object[] found = findComponentForModel(child, target, depth + 1);
+            if (found != null)
+                return found;
+        }
+        return null;
     }
 
     /**
@@ -5532,9 +5801,29 @@ public final class ConfigSearchResultsHook implements IStartup
         private static EObject nearestMember(EObject leaf)
         {
             for (EObject cur = leaf; cur != null; cur = cur.eContainer())
-                if (isPanelMember(cur))
+                if (isPanelOwner(cur))
                     return cur;
             return null;
+        }
+
+        /**
+         * Объект, свойства которого показывает панель. Кроме реквизитов и элементов формы это и
+         * САМА форма — причём в двух видах: модель формы ({@code form.model.Form}, открытый
+         * редактор формы) и форма метаданных ({@code BasicForm} — {@code CommonForm},
+         * {@code DataProcessorForm} и т.п., как её отдаёт поиск). Её «Имя» и «Синоним» правятся
+         * в той же панели, но {@link #isPanelMember} про них не знает — он отвечает на другой
+         * вопрос, «открывать ли редактор владельца», — и такие переходы оставались без
+         * активации поля (в логе: «объект панели=null, цепочка=forms.synonym.value»).
+         */
+        private static boolean isPanelOwner(EObject obj)
+        {
+            return isPanelMember(obj) || obj instanceof Form || obj instanceof BasicForm;
+        }
+
+        /** Есть объект, свойства которого показывает панель, — значит поле имеет смысл ждать. */
+        static boolean hasPanelOwner(EObject obj)
+        {
+            return nearestMember(obj) != null;
         }
 
         /**
@@ -5548,7 +5837,7 @@ public final class ConfigSearchResultsHook implements IStartup
                 EStructuralFeature matchFeature)
         {
             List<EStructuralFeature> nested = new ArrayList<>();
-            for (EObject cur = leaf; cur != null && !isPanelMember(cur); cur = cur.eContainer())
+            for (EObject cur = leaf; cur != null && !isPanelOwner(cur); cur = cur.eContainer())
             {
                 EStructuralFeature containing = cur.eContainingFeature();
                 if (containing != null)
@@ -5589,7 +5878,17 @@ public final class ConfigSearchResultsHook implements IStartup
                 try
                 {
                     if (tryFocus(workbenchPage, member, chain, typeDialogTargets, attempt, token))
+                    {
+                        // Панель дозаполняется и после успешной активации, отбирая ввод в поле
+                        // «Имя» — поэтому активация ещё некоторое время повторяется. Для
+                        // составного типа удержания нет: повтор открыл бы диалог заново.
+                        if (typeDialogTargets == null)
+                        {
+                            AefFieldFocus.holdActivation(() -> token == activeToken
+                                && tryFocus(workbenchPage, member, chain, null, attempt, token));
+                        }
                         return;
+                    }
                 }
                 catch (Throwable t)
                 {
@@ -5768,7 +6067,7 @@ public final class ConfigSearchResultsHook implements IStartup
          * самого признака «это панель свойств» — общая с остальными хуками панели
          * ({@code PropertyNameIdentifierHook.isPropertySheetView}), чтобы id не расходились.
          */
-        private static IViewPart findPropertySheetView(IWorkbenchPage workbenchPage)
+        static IViewPart findPropertySheetView(IWorkbenchPage workbenchPage)
         {
             for (IViewReference ref : workbenchPage.getViewReferences())
             {
@@ -5784,7 +6083,7 @@ public final class ConfigSearchResultsHook implements IStartup
          * показываемые объекты; сравнение — {@link ConfigSearchResultsHook#sameBmObject} (BM-объект
          * из результатов поиска и из редактора — разные Java-инстансы с одним {@code bmGetId()}).
          */
-        private static boolean paletteShowsObject(Object page, EObject member)
+        static boolean paletteShowsObject(Object page, EObject member)
         {
             Object paletteModel = Global.invoke(page, "getPaletteModel"); //$NON-NLS-1$
             Object objects = paletteModel != null ? Global.invoke(paletteModel, "getObjects") : null; //$NON-NLS-1$

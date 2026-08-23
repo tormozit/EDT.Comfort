@@ -314,6 +314,43 @@ public class PropertyNameIdentifierHook implements IStartup
         return null;
     }
 
+    /**
+     * Строки событий палитры в порядке отображения: подпись → view поля ввода.
+     *
+     * <p>Событие отличается от обычного свойства редактором: у события это всегда
+     * {@code EditableComboViewModel} (поле имени процедуры с выпадающим списком), у свойств —
+     * {@code ActionBar}, {@code ComboSelect}, {@code Checkbox} и т.п. Искать события по подписи
+     * нельзя: панель подписывает их человекочитаемо («При изменении»), а в модели имя события
+     * пишется слитно («ПриИзменении»).
+     */
+    static java.util.List<java.util.Map.Entry<String, Object>> eventRows(Object scene)
+    {
+        java.util.List<java.util.Map.Entry<String, Object>> rows = new java.util.ArrayList<>();
+        Object renderer = Global.invoke(scene, "getRenderer"); //$NON-NLS-1$
+        Object mapObj = renderer != null ? Global.getField(renderer, "viewModelToView") : null; //$NON-NLS-1$
+        if (!(mapObj instanceof java.util.Map<?, ?> map))
+            return rows;
+        String label = null;
+        for (java.util.Map.Entry<?, ?> entry : map.entrySet())
+        {
+            Object key = entry.getKey();
+            String keyClass = key == null ? "" : key.getClass().getName(); //$NON-NLS-1$
+            if (keyClass.contains("LabelViewModel")) //$NON-NLS-1$
+            {
+                Object text = Global.invoke(key, "getText"); //$NON-NLS-1$
+                if (text == null)
+                    text = Global.getField(key, "text"); //$NON-NLS-1$
+                label = text instanceof String value && !value.isBlank() ? value : null;
+                continue;
+            }
+            if (label != null && keyClass.contains("EditableComboViewModel")) //$NON-NLS-1$
+                rows.add(new java.util.AbstractMap.SimpleEntry<>(label, entry.getValue()));
+            label = null;
+        }
+        return rows;
+    }
+
+
     private static void onNameFocusLost(Object nativeControl, Object typeModel, String initialName)
     {
         String identifier;

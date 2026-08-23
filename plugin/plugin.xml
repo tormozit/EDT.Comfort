@@ -118,7 +118,7 @@
     <startup class="tormozit.DeployConfigurationFixHook"/>
     <startup class="tormozit.DeployChangesColumnHook"/>
     <startup class="tormozit.LongOperationNotifyHook"/>
-    <startup class="tormozit.LaunchArgumentsHistoryHook"/>
+    <startup class="tormozit.LaunchConfigurationHook"/>
     <startup class="tormozit.ExportConfigurationXmlFixHook"/>
     <startup class="tormozit.FilterBySubsystemsDialogHook"/>
     <startup class="tormozit.GitChangedFileMenuHook"/>
@@ -135,6 +135,7 @@
     <startup class="tormozit.SetFilterDialogFilterHook"/>
     <startup class="tormozit.ModuleMergeStructureFilterHook"/>
     <startup class="tormozit.FilteredListDialogFilterHook"/>
+    <startup class="tormozit.SyntaxAssistContentsFilterHook"/>
     <startup class="tormozit.NewAttributeNameIdentifierHook"/>
     <startup class="tormozit.PropertyNameIdentifierHook"/>
     <startup class="tormozit.PropertySheetActivePropertyHook"/>
@@ -594,6 +595,21 @@
     <handler
         class="tormozit.IdentifierWordNavigationHandler"
         commandId="org.eclipse.ui.edit.text.goto.wordNext"/>
+    <!-- Перехват штатной команды EDT «Открыть синтакс-помощник» (Ctrl+F1) редактора модуля:
+         поиск — в верхнюю часть панели, статья рассчитанной роли слова — сразу в нижнюю.
+         activeWhen обязателен: у обработчика EDT условия нет, и без более узкого условия
+         активации два обработчика одной команды дают конфликт вместо замены. -->
+    <handler
+        class="tormozit.SyntaxAssistOpenElementHandler"
+        commandId="com._1c.g5.v8.dt.bsl.ui.syntaxassist.commands.openBslElementInSyntaxAssistView">
+      <activeWhen>
+        <with variable="activeContexts">
+          <iterate operator="or">
+            <equals value="com._1c.g5.v8.dt.bsl.ui.editor.BslEditorScope"/>
+          </iterate>
+        </with>
+      </activeWhen>
+    </handler>
     <handler
         class="tormozit.TextEditorFastSearchHandler"
         commandId="tormozit.TextEditorFastSearchForward"/>

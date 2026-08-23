@@ -52,6 +52,12 @@ public final class MergeViewerReflection
          * «виджет → вьюер» для маркеров вхождений (TextEditorOccurrencesSupport).
          */
         TextEditorOccurrencesSupport.registerViewer(sv);
+        /*
+         * И по той же причине — переключатель «Подсказки при наведении без Ctrl»
+         * в контекстном меню поля сравнения (панель — не редактор, обходом
+         * getEditorReferences её не найти).
+         */
+        BslHoverHintState.installOnCompareViewer(sv);
         return sv;
     }
 

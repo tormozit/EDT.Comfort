@@ -1,14 +1,22 @@
 package tormozit;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.Vector;
+import java.util.WeakHashMap;
 
 import org.eclipse.jface.text.AbstractInformationControlManager;
 import org.eclipse.jface.text.ITextHover;
 import org.eclipse.jface.text.ITextViewerExtension2;
 import org.eclipse.jface.text.source.ISourceViewer;
 import org.eclipse.swt.SWT;
+import org.eclipse.swt.custom.StyledText;
+import org.eclipse.swt.events.MenuAdapter;
+import org.eclipse.swt.events.MenuEvent;
 import org.eclipse.swt.events.SelectionAdapter;
 import org.eclipse.swt.events.SelectionEvent;
 import org.eclipse.swt.graphics.Point;
@@ -35,7 +43,8 @@ import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorXtextEditorPage;
 
 /**
  * Состояние глобального переключателя «Подсказки при наведении без Ctrl»
- * (пункт подменю «Комфорт» в контекстном меню BSL- и XML-редактора).
+ * (пункт подменю «Комфорт» в контекстном меню BSL- и XML-редактора, а также полей
+ * текста окон сравнения — см. {@link #installOnCompareViewer}).
  *
  * <p>Два режима:
  * <ul>
@@ -69,10 +78,29 @@ final class BslHoverHintState
     private static final String ITEM_TOOLTIP =
         "Включено — подсказки при наведении указателя. Выключено — требуется нажатый Ctrl"; //$NON-NLS-1$
 
+    /** Метка «в контекстное меню этого виджета пункт уже добавляется». */
+    private static final String MENU_HOOK_MARKER = "tormozit.hoverHintMenuHooked"; //$NON-NLS-1$
+
+    /** Метка «слушатель MenuDetect на этом виджете уже поставлен». */
+    private static final String MENU_DETECT_MARKER = "tormozit.hoverHintMenuDetect"; //$NON-NLS-1$
+
+    /** Меню поля сравнения создаётся не сразу — ограниченное число повторов, см. issue #130. */
+    private static final int MAX_MENU_ATTEMPTS = 40;
+
+    private static final int MENU_RETRY_DELAY_MS = 50;
+
     /** Кэш состояния Ctrl, обновляется глобальным Display-фильтром. */
     private static volatile boolean ctrlHeld;
 
     private static boolean filterInstalled;
+
+    /**
+     * Вьюеры вне редакторов (панели окон сравнения текстов) — их не найти обходом
+     * {@code getEditorReferences}, поэтому держим слабые ссылки и применяем к ним
+     * состояние вместе с редакторами.
+     */
+    private static final Set<ISourceViewer> extraViewers =
+        Collections.synchronizedSet(Collections.newSetFromMap(new WeakHashMap<>()));
 
     private BslHoverHintState() {}
 
@@ -81,7 +109,7 @@ final class BslHoverHintState
         return ComfortSettings.isHoverHintsEnabled();
     }
 
-    /** Сохранить настройку и применить ко всем открытым BSL- и XML-редакторам. */
+    /** Сохранить настройку и применить ко всем открытым редакторам и полям окон сравнения. */
     static void setEnabled(boolean enabled)
     {
         ComfortSettings.setHoverHintsEnabled(enabled);
@@ -103,6 +131,110 @@ final class BslHoverHintState
             }
         });
         return item;
+    }
+
+    /**
+     * Текстовое поле не редактора, а окна сравнения (панели merge-вьюера): применить
+     * текущее состояние и добавить пункт-переключатель в его контекстное меню.
+     * Вызывается из единственной точки, где панель сравнения отдаёт свой вьюер —
+     * {@link MergeViewerReflection#extractSourceViewer}. Повторные вызовы безопасны.
+     */
+    static void installOnCompareViewer(ISourceViewer viewer)
+    {
+        if (viewer == null)
+            return;
+        StyledText text = viewer.getTextWidget();
+        if (text == null || text.isDisposed())
+            return;
+        extraViewers.add(viewer);
+        Display display = text.getDisplay();
+        if (display.getThread() == Thread.currentThread())
+        {
+            applyToViewer(viewer);
+            hookContextMenu(text, 0);
+            /*
+             * Если меню создаётся только к первому правому клику (позже наших повторов) —
+             * подключаемся на MenuDetect: он приходит до показа меню, поэтому наш
+             * menuShown успевает сработать уже на этом же вызове.
+             */
+            if (!Boolean.TRUE.equals(text.getData(MENU_DETECT_MARKER)))
+            {
+                text.setData(MENU_DETECT_MARKER, Boolean.TRUE);
+                text.addListener(SWT.MenuDetect, e -> hookContextMenu(text, MAX_MENU_ATTEMPTS));
+            }
+        }
+        else
+        {
+            // timerExec/меню — только из потока UI (иначе SWTException и молчащий пункт)
+            display.asyncExec(() -> installOnCompareViewer(viewer));
+        }
+    }
+
+    /**
+     * Контекстное меню поля сравнения создаётся позже самого виджета (штатный
+     * {@code MenuManager} панели) — ждём его ограниченное число попыток.
+     */
+    private static void hookContextMenu(StyledText text, int attempt)
+    {
+        if (text.isDisposed())
+            return;
+
+        Menu menu = text.getMenu();
+        if (menu == null || menu.isDisposed())
+        {
+            if (attempt >= MAX_MENU_ATTEMPTS)
+                return;
+            text.getDisplay().timerExec(MENU_RETRY_DELAY_MS, () -> hookContextMenu(text, attempt + 1));
+            return;
+        }
+        // Помним само меню, а не факт подключения: панель может заменить меню целиком
+        if (text.getData(MENU_HOOK_MARKER) == menu)
+            return;
+
+        text.setData(MENU_HOOK_MARKER, menu);
+        /*
+         * Пункты и само подменю «Комфорт» создаются на каждый показ и снимаются при
+         * скрытии: штатный MenuManager панели перезаполняет меню перед каждым показом
+         * (removeAll), поэтому долгоживущие пункты всё равно не пережили бы показ.
+         */
+        MenuAdapter listener = new MenuAdapter()
+        {
+            private final List<MenuItem> addedItems = new ArrayList<>(1);
+
+            @Override
+            public void menuShown(MenuEvent e)
+            {
+                Menu shown = (Menu)e.widget;
+                if (shown == null || shown.isDisposed())
+                    return;
+                Menu comfortSub = ComfortSubmenuHelper.findOrCreateComfortSubmenu(shown, shown.getShell());
+                if (comfortSub == null)
+                    return;
+                addedItems.add(addMenuItem(comfortSub));
+            }
+
+            @Override
+            public void menuHidden(MenuEvent e)
+            {
+                Display display = ((Menu)e.widget).getDisplay();
+                List<MenuItem> toDispose = new ArrayList<>(addedItems);
+                addedItems.clear();
+                display.asyncExec(() ->
+                {
+                    for (MenuItem item : toDispose)
+                    {
+                        if (!item.isDisposed())
+                            item.dispose();
+                    }
+                });
+            }
+        };
+        menu.addMenuListener(listener);
+        text.addDisposeListener(e ->
+        {
+            if (!menu.isDisposed())
+                menu.removeMenuListener(listener);
+        });
     }
 
     /** Итоговая доступность hover: тумблер вкл → всегда; тумблер выкл → только при Ctrl. */
@@ -223,9 +355,28 @@ final class BslHoverHintState
                         applyToEditor(ref.getEditor(false));
                 }
             }
+            applyToCompareViewers();
         }
         catch (Exception ignored)
         {
+        }
+    }
+
+    /** Панели окон сравнения (см. {@link #installOnCompareViewer}); уничтоженные — забываем. */
+    private static void applyToCompareViewers()
+    {
+        List<ISourceViewer> snapshot;
+        synchronized (extraViewers)
+        {
+            snapshot = new ArrayList<>(extraViewers);
+        }
+        for (ISourceViewer viewer : snapshot)
+        {
+            StyledText text = viewer.getTextWidget();
+            if (text == null || text.isDisposed())
+                extraViewers.remove(viewer);
+            else
+                applyToViewer(viewer);
         }
     }
 

@@ -6,12 +6,15 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.function.ToIntFunction;
 import java.util.regex.Matcher;
@@ -66,6 +69,7 @@ import org.eclipse.swt.dnd.DropTargetEvent;
 import org.eclipse.swt.dnd.Transfer;
 import org.eclipse.swt.dnd.TransferData;
 import org.eclipse.swt.custom.CTabFolder;
+import org.eclipse.swt.custom.ScrolledComposite;
 import org.eclipse.swt.custom.CTabItem;
 import org.eclipse.swt.events.MenuAdapter;
 import org.eclipse.swt.events.MenuEvent;
@@ -114,9 +118,14 @@ import org.eclipse.ui.commands.ICommandService;
 
 import com._1c.g5.v8.bm.core.IBmObject;
 import com._1c.g5.v8.bm.core.IBmTransaction;
+import com._1c.g5.v8.bm.core.event.BmEvent;
 import com._1c.g5.v8.bm.integration.AbstractBmTask;
+import com._1c.g5.v8.bm.integration.BmCompoundTask;
 import com._1c.g5.v8.bm.integration.IBmEditingContext;
 import com._1c.g5.v8.bm.integration.IBmModel;
+import com._1c.g5.v8.bm.integration.IBmTask;
+import com._1c.g5.v8.bm.integration.event.BmEventFilter;
+import com._1c.g5.v8.bm.integration.event.IBmAsyncEventListener;
 import com._1c.g5.v8.dt.common.localization.EnumLiteralLocalizationProvider;
 import com._1c.g5.v8.dt.common.localization.FeatureNameLocalizationProvider;
 import com._1c.g5.v8.dt.core.naming.ITopObjectFqnGenerator;
@@ -128,6 +137,7 @@ import org.osgi.framework.Bundle;
 
 import com._1c.g5.v8.dt.dcs.model.core.DataCompositionField;
 import com._1c.g5.v8.dt.dcs.model.settings.DcsFactory;
+import com._1c.g5.v8.dt.dcs.model.settings.DcsPackage;
 import com._1c.g5.v8.dt.dcs.model.settings.DataCompositionAppearanceField;
 import com._1c.g5.v8.dt.dcs.model.settings.DataCompositionAppearanceFields;
 import com._1c.g5.v8.dt.dcs.model.settings.DataCompositionConditionalAppearance;
@@ -138,8 +148,11 @@ import com._1c.g5.v8.dt.dcs.ui.UiPlugin;
 import com._1c.g5.v8.dt.dcs.ui.settings.IDcsSettingsProvider;
 import com._1c.g5.v8.dt.dcs.ui.settings.conditional.ConditionalAppearance;
 import com._1c.g5.v8.dt.dcs.ui.util.DcsUiUtil;
+import com._1c.g5.v8.dt.common.StringUtils;
 import com._1c.g5.v8.dt.form.copypaste.FormElementTransfer;
 import com._1c.g5.v8.dt.form.mapping.model.Item;
+import com._1c.g5.v8.dt.form.mapping.model.ItemType;
+import com._1c.g5.v8.dt.form.mapping.model.ItemsHolder;
 import com._1c.g5.v8.dt.form.model.AbstractDataPath;
 import com._1c.g5.v8.dt.form.model.Addition;
 import com._1c.g5.v8.dt.form.model.AutoCommandBar;
@@ -152,7 +165,18 @@ import com._1c.g5.v8.dt.form.model.EventHandlerContainer;
 import com._1c.g5.v8.dt.form.model.Form;
 import com._1c.g5.v8.dt.form.model.FormGroup;
 import com._1c.g5.v8.dt.form.model.FormItem;
+import com._1c.g5.v8.dt.form.model.FormItemContainer;
+import com._1c.g5.v8.dt.form.model.FormVisualEntity;
+import com._1c.g5.v8.dt.form.model.FormField;
 import com._1c.g5.v8.dt.form.model.ManagedFormGroupType;
+import com._1c.g5.v8.dt.form.model.Table;
+import com._1c.g5.v8.dt.form.model.TableHolder;
+import com._1c.g5.v8.dt.form.service.item.FormNewItemDescriptor;
+import com._1c.g5.v8.dt.form.service.item.IFormItemManagementService;
+import com._1c.g5.v8.dt.form.service.item.IFormItemMovementService;
+import com._1c.g5.v8.dt.form.service.item.task.DeleteFormItemTask;
+import com._1c.g5.v8.dt.form.service.item.task.MoveFormItemTask;
+import com._1c.g5.v8.dt.form.service.naming.IFormItemNamingService;
 import com._1c.g5.v8.dt.form.model.FormPackage;
 import com._1c.g5.v8.dt.form.model.PropertyInfo;
 import com._1c.g5.v8.dt.form.model.RowActionsPanel;
@@ -181,6 +205,7 @@ import org.eclipse.xtext.EcoreUtil2;
 import org.eclipse.emf.ecore.EEnumLiteral;
 import org.eclipse.emf.ecore.EStructuralFeature;
 import org.eclipse.emf.ecore.util.EcoreUtil;
+import org.eclipse.emf.common.util.URI;
 import com._1c.g5.v8.dt.ui.commands.ShowPropertiesHandler;
 import com._1c.g5.v8.dt.ui.util.ContentUtil;
 
@@ -438,11 +463,7 @@ public class FormEditorHook implements IStartup
                 continue;
             for (IEditorReference ref : page.getEditorReferences())
             {
-                Object part = ref.getEditor(false);
-                // ВРЕМЕННОЕ: какие редакторы видит обход после старта и построены ли они.
-                Global.tempLog("форма-подключение", "обход: id=" + ref.getId() //$NON-NLS-1$ //$NON-NLS-2$
-                    + ", часть=" + (part == null ? "не построена" : part.getClass().getSimpleName())); //$NON-NLS-1$ //$NON-NLS-2$
-                if (part instanceof FormEditor formEditor)
+                if (ref.getEditor(false) instanceof FormEditor formEditor)
                     notifyFormEditor(formEditor);
             }
         }
@@ -473,13 +494,8 @@ public class FormEditorHook implements IStartup
 
             private void hookFromRef(IWorkbenchPartReference ref)
             {
-                if (!(ref instanceof IEditorReference editorRef))
-                    return;
-                Object part = editorRef.getPart(false);
-                // ВРЕМЕННОЕ: событие части по редактору — построен ли он к этому моменту.
-                Global.tempLog("форма-подключение", "событие части: id=" + editorRef.getId() //$NON-NLS-1$ //$NON-NLS-2$
-                    + ", часть=" + (part == null ? "не построена" : part.getClass().getSimpleName())); //$NON-NLS-1$ //$NON-NLS-2$
-                if (part instanceof FormEditor formEditor)
+                if (ref instanceof IEditorReference editorRef
+                        && editorRef.getPart(false) instanceof FormEditor formEditor)
                     notifyFormEditor(formEditor);
             }
         });
@@ -498,79 +514,6 @@ public class FormEditorHook implements IStartup
                 Global.logError("FormEditorHook", "notifyFormEditor", e); //$NON-NLS-1$ //$NON-NLS-2$
             }
         }
-    }
-
-    /** ВРЕМЕННОЕ: состояние вьюера страницы формы — есть ли объект, контрол, не удалён ли он. */
-    private static String viewerState(FormEditorPage page, String fieldName)
-    {
-        if (page == null)
-            return "страницы нет"; //$NON-NLS-1$
-        Object viewer = Global.getField(page, fieldName);
-        if (viewer == null)
-            return "поле пусто"; //$NON-NLS-1$
-        Object control = Global.call(viewer, "getControl"); //$NON-NLS-1$
-        if (!(control instanceof Control widget))
-            return "контрола нет"; //$NON-NLS-1$
-        return widget.isDisposed() ? "контрол удалён" : "контрол есть"; //$NON-NLS-1$ //$NON-NLS-2$
-    }
-
-    /** ВРЕМЕННОЕ: заголовок редактора — чтобы отличать редакторы друг от друга в логе. */
-    private static String editorTitle(FormEditor editor)
-    {
-        try
-        {
-            return editor == null ? "нет" : String.valueOf(editor.getTitle()); //$NON-NLS-1$
-        }
-        catch (RuntimeException e)
-        {
-            return "ошибка"; //$NON-NLS-1$
-        }
-    }
-
-    /** ВРЕМЕННОЕ: показан ли редактор пользователю и активен ли он. */
-    private static String editorVisibility(FormEditor editor)
-    {
-        IWorkbenchPartSite site = editor != null ? editor.getSite() : null;
-        IWorkbenchPage workbenchPage = site != null ? site.getPage() : null;
-        if (workbenchPage == null)
-            return "видимость=нет площадки"; //$NON-NLS-1$
-        return "видим=" + workbenchPage.isPartVisible(editor) //$NON-NLS-1$
-            + ", активный=" + (workbenchPage.getActiveEditor() == editor); //$NON-NLS-1$
-    }
-
-    /** ВРЕМЕННОЕ: страница формы, которую EDT считает активной, и состояние её вьюеров. */
-    private static String activeFormPageState()
-    {
-        FormEditorPage active;
-        try
-        {
-            active = FormEditor.getActiveFormEditorPage();
-        }
-        catch (RuntimeException | LinkageError e)
-        {
-            return "ошибка"; //$NON-NLS-1$
-        }
-        if (active == null)
-            return "нет"; //$NON-NLS-1$
-        return active.getClass().getSimpleName() + "@" + System.identityHashCode(active) //$NON-NLS-1$
-            + " реквизиты=" + viewerState(active, "attributesViewer") //$NON-NLS-1$ //$NON-NLS-2$
-            + " элементы=" + viewerState(active, "itemsViewer"); //$NON-NLS-1$ //$NON-NLS-2$
-    }
-
-    /** ВРЕМЕННОЕ: какие страницы вообще есть у редактора формы. */
-    private static String editorPageClasses(FormEditor editor)
-    {
-        Object pages = editor != null ? Global.getField(editor, "pages") : null; //$NON-NLS-1$
-        if (!(pages instanceof List<?> list))
-            return "нет поля pages"; //$NON-NLS-1$
-        StringBuilder text = new StringBuilder();
-        for (Object page : list)
-        {
-            if (text.length() > 0)
-                text.append('/');
-            text.append(page == null ? "null" : page.getClass().getSimpleName()); //$NON-NLS-1$
-        }
-        return text.toString();
     }
 
     /** Ключ EDT: композит вкладки редактора формы хранит свой {@link CTabItem} ({@code FormEditorPage}). */
@@ -1057,6 +1000,8 @@ public class FormEditorHook implements IStartup
                 return;
             }
             hookEventsOrderOnMenu(swtMenu);
+            if (tree.getData(ItemsTree.KEY_HOOKED) != null)
+                GroupItemsCommand.hookMenu(tree, swtMenu);
             return;
         }
 
@@ -2128,31 +2073,12 @@ public class FormEditorHook implements IStartup
 
                 if (folder == null || folder.isDisposed() || commandsTab == null || parametersTab == null)
                 {
-                    // ВРЕМЕННОЕ: на чём именно спотыкается подключение (первые попытки и далее
-                    // каждая 25-я — чтобы файл не разбухал).
-                    if (attempt < 3 || attempt % 25 == 0)
-                        Global.tempLog("форма-подключение", "ItemsTree: попытка " + attempt //$NON-NLS-1$ //$NON-NLS-2$
-                            + ", редактор=" + editorTitle(editor) //$NON-NLS-1$
-                            + ", " + editorVisibility(editor) //$NON-NLS-1$
-                            + ", страница=" + (page == null ? "нет" //$NON-NLS-1$ //$NON-NLS-2$
-                                : page.getClass().getSimpleName() + "@" + System.identityHashCode(page)) //$NON-NLS-1$
-                            + ", активная страница формы=" + activeFormPageState() //$NON-NLS-1$
-                            + ", страницы редактора=" + editorPageClasses(editor) //$NON-NLS-1$
-                            + ", реквизиты=" + viewerState(page, "attributesViewer") //$NON-NLS-1$ //$NON-NLS-2$
-                            + ", элементы=" + viewerState(page, "itemsViewer") //$NON-NLS-1$ //$NON-NLS-2$
-                            + ", командыФормы=" + viewerState(page, "formCommandsViewer") //$NON-NLS-1$ //$NON-NLS-2$
-                            + ", параметры=" + viewerState(page, "parametersViewer") //$NON-NLS-1$ //$NON-NLS-2$
-                            + ", вкладкаРеквизитов=" + (attributesTab == null ? "нет" : "есть") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                            + ", вкладкаКоманд=" + (commandsTab == null ? "нет" : "есть") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                            + ", вкладкаПараметров=" + (parametersTab == null ? "нет" : "есть")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                     scheduleRetry(editor, attempt);
                     return;
                 }
                 if (folder.getData(KEY_HOOKED) != null)
                     return;
                 folder.setData(KEY_HOOKED, Boolean.TRUE);
-                Global.tempLog("форма-подключение", "ItemsTree: подключено с попытки " + attempt //$NON-NLS-1$ //$NON-NLS-2$
-                    + ", редактор=" + editorTitle(editor)); //$NON-NLS-1$
 
                 Runnable refresh =
                         () -> refresh(page, attributesTab, commandsTab, parametersTab);
@@ -2228,6 +2154,893 @@ public class FormEditorHook implements IStartup
     }
 
     // -----------------------------------------------------------------------
+    // Команды «Сгруппировать» и «Разгруппировать» (GroupItemsCommand)
+    // -----------------------------------------------------------------------
+
+    /**
+     * Пункты «Сгруппировать» и «Разгруппировать» в контекстном меню дерева элементов формы.
+     *
+     * <p><b>Сгруппировать</b> — в текущую позицию дерева вставляется новая группа, а выделенные
+     * элементы переносятся в неё; ровно так, как если бы их туда перетащили.
+     *
+     * <p><b>Разгруппировать</b> — обратное: содержимое выделенной группы переносится на её место
+     * в родителе, а сама опустевшая группа удаляется.
+     *
+     * <p>Штатно таких команд в EDT нет: группу создают через «Добавить» (с диалогом выбора
+     * вида), а потом перетаскивают в неё элементы по одному.
+     *
+     * <p>Механика повторяет штатные пути EDT, свои правки модели не изобретаются:
+     *
+     * <ul>
+     *   <li>группа создаётся {@link IFormItemManagementService#addGroup} — тем же вызовом,
+     *       что и в {@code AddGroupTask} команды «Добавить» (идентификаторы, уникальное имя,
+     *       заголовок и проверка допустимости вида — на сервисе);
+     *   <li>элементы переносятся {@link IFormItemMovementService#move} — тем же вызовом,
+     *       что и в {@code MoveFormItemTask} при перетаскивании в дереве;
+     *   <li>вид группы выбирается по контейнеру теми же правилами, что и в
+     *       {@code FormItemTypeInformationService.getDefaultGroupType};
+     *   <li>опустевшая группа удаляется штатным {@code DeleteFormItemTask} — тем же, что и
+     *       команда «Удалить» (вместе с элементом чистятся блобы его картинок).
+     * </ul>
+     *
+     * <p>Создание и перенос идут одной BM-транзакцией — иначе отменять пришлось бы двумя
+     * шагами, а промежуточное состояние (пустая группа) попадало бы в историю.
+     */
+    private static final class GroupItemsCommand
+    {
+        private static final String MENU_TEXT = "Сгруппировать"; //$NON-NLS-1$
+
+        private static final String UNGROUP_MENU_TEXT = "Разгруппировать"; //$NON-NLS-1$
+
+        /** Подпись штатного пункта, после которого встаёт наш (FormActionFactory_Delete_text). */
+        private static final String DELETE_MENU_TEXT = "Удалить"; //$NON-NLS-1$
+
+        private static final String HOOK_MARKER = "tormozit.formItemsMenu.groupCommand"; //$NON-NLS-1$
+
+        /** Элементы, которые EDT не переносит перетаскиванием (NOT_MOVABLE дроп-делегата). */
+        private static final Set<ItemType> NOT_MOVABLE = Set.of(ItemType.CONTEXT_MENU,
+            ItemType.TOOLTIP, ItemType.SELECTED_ITEMS_ACTIONS_PANEL, ItemType.COMMAND_BAR,
+            ItemType.SEARCH_STRING_ADDITION, ItemType.SEARCH_CONTROL_ADDITION,
+            ItemType.VIEW_STATUS_ADDITION);
+
+        private static final int REVEAL_ATTEMPTS = 30;
+
+        private static final int REVEAL_DELAY_MS = 100;
+
+        /** ВРЕМЕННОЕ: тема временного лога (.tmp/temp-logs/сгруппировать.log). */
+        private static final String LOG = "сгруппировать"; //$NON-NLS-1$
+
+        /** Виды элементов дерева, которые можно разгруппировать. */
+        private static final Set<ItemType> GROUP_TYPES = Set.of(ItemType.GROUP_USUAL,
+            ItemType.GROUP_USUAL_NOT_VISUAL, ItemType.GROUP_BUTTON, ItemType.GROUP_COLUMN,
+            ItemType.GROUP_COMMAND_BAR, ItemType.GROUP_PAGE, ItemType.GROUP_PAGES,
+            ItemType.GROUP_POPUP);
+
+        /** Что и куда группируем — результат разбора выделения в дереве. */
+        private record Target(FormEditorPage page, Form form, FormItemContainer container,
+            int index, List<FormItem> items)
+        {
+        }
+
+        /** Что разгруппировываем — результат разбора выделения в дереве. */
+        private record Ungroup(FormEditorPage page, Form form, List<FormGroup> groups)
+        {
+        }
+
+        /**
+         * Пункт добавляется на показ меню и снимается на его скрытие: меню дерева элементов
+         * строит JFace заново при каждом показе — как и в {@link #hookAttributesMenu}.
+         */
+        static void hookMenu(Tree tree, Menu menu)
+        {
+            if (Boolean.TRUE.equals(menu.getData(HOOK_MARKER)))
+                return;
+            menu.setData(HOOK_MARKER, Boolean.TRUE);
+
+            MenuAdapter listener = new MenuAdapter()
+            {
+                private final List<MenuItem> added = new ArrayList<>(2);
+
+                @Override
+                public void menuShown(MenuEvent e)
+                {
+                    added.addAll(createItems(tree, (Menu)e.widget));
+                }
+
+                @Override
+                public void menuHidden(MenuEvent e)
+                {
+                    List<MenuItem> snapshot = new ArrayList<>(added);
+                    added.clear();
+                    ((Menu)e.widget).getDisplay().asyncExec(() -> {
+                        for (MenuItem item : snapshot)
+                        {
+                            if (!item.isDisposed())
+                                item.dispose();
+                        }
+                    });
+                }
+            };
+
+            menu.addMenuListener(listener);
+            tree.addDisposeListener(ev -> {
+                if (!menu.isDisposed())
+                    menu.removeMenuListener(listener);
+            });
+        }
+
+        private static List<MenuItem> createItems(Tree tree, Menu menu)
+        {
+            if (menu.isDisposed())
+                return List.of();
+            int at = insertIndex(menu);
+
+            MenuItem group = new MenuItem(menu, SWT.PUSH, at);
+            group.setText(MENU_TEXT);
+            group.setToolTipText(TooltipText.wrap(tree,
+                "Вставить новую группу в текущую позицию дерева и перенести в неё выделенные элементы" //$NON-NLS-1$
+                    + Global.pluginSignForTooltip()));
+            group.setEnabled(resolveTarget(tree) != null);
+            group.addListener(SWT.Selection, ev -> run(tree));
+
+            MenuItem ungroup = new MenuItem(menu, SWT.PUSH, at + 1);
+            ungroup.setText(UNGROUP_MENU_TEXT);
+            ungroup.setToolTipText(TooltipText.wrap(tree,
+                "Перенести содержимое выделенной группы на её место в родителе, а группу удалить" //$NON-NLS-1$
+                    + Global.pluginSignForTooltip()));
+            ungroup.setEnabled(resolveUngroup(tree) != null);
+            ungroup.addListener(SWT.Selection, ev -> runUngroup(tree));
+            return List.of(group, ungroup);
+        }
+
+        /**
+         * Место пункта — сразу после штатного «Удалить», в одной группе с «Добавить»
+         * и «Удалить». У подписи может быть хвост с клавишей ({@code "Удалить\tDelete"}),
+         * поэтому сверяется начало подписи, а не вся строка.
+         */
+        private static int insertIndex(Menu menu)
+        {
+            MenuItem[] items = menu.getItems();
+            for (int i = 0; i < items.length; i++)
+            {
+                String text = stripMnemonics(items[i].getText());
+                int tab = text.indexOf('\t');
+                if (DELETE_MENU_TEXT.equals(tab < 0 ? text : text.substring(0, tab)))
+                    return i + 1;
+            }
+            return items.length;
+        }
+
+        // -------------------------------------------------------------------
+        // Разбор выделения
+        // -------------------------------------------------------------------
+
+        /** {@code null} — группировать нечего (не то выделение, редактор только для просмотра). */
+        private static Target resolveTarget(Tree tree)
+        {
+            try
+            {
+                return resolveTargetUnsafe(tree);
+            }
+            catch (RuntimeException e)
+            {
+                Global.tempLogException(LOG, "resolveTarget: исключение", e); //$NON-NLS-1$
+                Global.logError("FormEditorHook.GroupItemsCommand", "resolveTarget", e); //$NON-NLS-1$ //$NON-NLS-2$
+                return null;
+            }
+        }
+
+        private static Target resolveTargetUnsafe(Tree tree)
+        {
+            FormEditorPage page = FormEditor.getActiveFormEditorPage();
+            if (page == null || page.isReadOnly() || tree == null || tree.isDisposed())
+                return null;
+            Form form = page.getModel();
+            if (form == null)
+                return null;
+            if (!(tree.getData(ItemsTree.KEY_VIEWER) instanceof TreeViewer viewer)
+                || viewer.getControl() != tree)
+                return null;
+            if (!(viewer.getSelection() instanceof IStructuredSelection selection)
+                || selection.isEmpty())
+                return null;
+
+            List<Item> selected = new ArrayList<>(selection.size());
+            ItemsHolder<?> holder = null;
+            for (Object element : selection.toList())
+            {
+                if (!(element instanceof Item mappingItem) || mappingItem.getType() == null
+                    || NOT_MOVABLE.contains(mappingItem.getType())
+                    || !(mappingItem.getDomain() instanceof FormItem domain) || domain.eIsProxy())
+                    return null;
+                if (!(mappingItem.eContainer() instanceof ItemsHolder<?> owner))
+                    return null;
+                if (holder == null)
+                    holder = owner;
+                else if (holder != owner)
+                    return null; // элементы из разных групп: куда вставлять группу — неоднозначно
+                selected.add(mappingItem);
+            }
+            if (holder == null || !(holder.getDomain() instanceof FormItemContainer container)
+                || !(container instanceof FormVisualEntity))
+                return null;
+
+            List<Item> order = holder.getItems();
+            selected.sort((left, right) -> Integer.compare(order.indexOf(left), order.indexOf(right)));
+            int first = order.indexOf(selected.get(0));
+            int fixed = holder.getFixedItemSize();
+            if (first < fixed)
+                return null; // автоэлемент (командная панель и т.п.) — его EDT не переносит
+
+            List<FormItem> items = new ArrayList<>(selected.size());
+            for (Item mappingItem : selected)
+                items.add((FormItem)mappingItem.getDomain());
+            return new Target(page, form, container, Math.max(first - fixed, -1), items);
+        }
+
+        /**
+         * Выделенные группы, которые можно разгруппировать; {@code null} — нельзя.
+         *
+         * <p>Нельзя, если выделена не группа, если группа автоматическая (командная панель,
+         * контекстное меню — они и не переносятся), если одна выделенная группа лежит внутри
+         * другой (порядок разбора стал бы неоднозначным) и если родитель — группа вида
+         * «Страницы»: её содержимым могут быть только страницы, и переносить туда содержимое
+         * страницы некуда.
+         */
+        private static Ungroup resolveUngroup(Tree tree)
+        {
+            try
+            {
+                return resolveUngroupUnsafe(tree);
+            }
+            catch (RuntimeException e)
+            {
+                Global.tempLogException(LOG, "resolveUngroup: исключение", e); //$NON-NLS-1$
+                Global.logError("FormEditorHook.GroupItemsCommand", "resolveUngroup", e); //$NON-NLS-1$ //$NON-NLS-2$
+                return null;
+            }
+        }
+
+        private static Ungroup resolveUngroupUnsafe(Tree tree)
+        {
+            FormEditorPage page = FormEditor.getActiveFormEditorPage();
+            if (page == null || page.isReadOnly() || tree == null || tree.isDisposed())
+                return null;
+            Form form = page.getModel();
+            if (form == null)
+                return null;
+            if (!(tree.getData(ItemsTree.KEY_VIEWER) instanceof TreeViewer viewer)
+                || viewer.getControl() != tree)
+                return null;
+            if (!(viewer.getSelection() instanceof IStructuredSelection selection)
+                || selection.isEmpty())
+                return null;
+
+            List<FormGroup> groups = new ArrayList<>(selection.size());
+            for (Object element : selection.toList())
+            {
+                if (!(element instanceof Item mappingItem) || mappingItem.getType() == null
+                    || !GROUP_TYPES.contains(mappingItem.getType())
+                    || !(mappingItem.getDomain() instanceof FormGroup group) || group.eIsProxy())
+                    return null;
+                if (!(mappingItem.eContainer() instanceof ItemsHolder<?> holder)
+                    || holder.getItems().indexOf(mappingItem) < holder.getFixedItemSize())
+                    return null; // автоматическая группа: её EDT не переносит и не удаляет
+                if (!(group.eContainer() instanceof FormItemContainer parent)
+                    || isGroupOfType(parent, ManagedFormGroupType.PAGES))
+                    return null;
+                groups.add(group);
+            }
+            for (FormGroup outer : groups)
+            {
+                for (FormGroup inner : groups)
+                {
+                    if (outer != inner && EcoreUtil.isAncestor(outer, inner))
+                        return null;
+                }
+            }
+            return new Ungroup(page, form, groups);
+        }
+
+        // -------------------------------------------------------------------
+        // Выполнение
+        // -------------------------------------------------------------------
+
+        private static void run(Tree tree)
+        {
+            // ВРЕМЕННОЕ: пошаговый разбор — команда молча ничего не делала.
+            Global.tempLog(LOG, "run: начало"); //$NON-NLS-1$
+            try
+            {
+                runUnsafe(tree);
+            }
+            catch (RuntimeException | LinkageError | AssertionError e)
+            {
+                Global.tempLogException(LOG, "run: исключение", e); //$NON-NLS-1$
+                Global.logError("FormEditorHook.GroupItemsCommand", "run", e); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+
+        private static void runUnsafe(Tree tree)
+        {
+            long started = System.currentTimeMillis();
+            Target target = resolveTarget(tree);
+            Global.tempLog(LOG, "цель: " + (target == null ? "нет" //$NON-NLS-1$ //$NON-NLS-2$
+                : "контейнер=" + target.container().getClass().getSimpleName() //$NON-NLS-1$
+                    + ", индекс=" + target.index() + ", элементов=" + target.items().size())); //$NON-NLS-1$ //$NON-NLS-2$
+            if (target == null)
+                return;
+            IFormItemManagementService management =
+                formService(IFormItemManagementService.class, target.page(), null);
+            IFormItemMovementService movement =
+                formService(IFormItemMovementService.class, target.page(), "movementService"); //$NON-NLS-1$
+            IFormItemNamingService naming =
+                formService(IFormItemNamingService.class, target.page(), "namingService"); //$NON-NLS-1$
+            Object contextObj = Global.invoke(target.page(), "getEditingContext"); //$NON-NLS-1$
+            Global.tempLog(LOG, "сервисы: управление=" + (management != null) //$NON-NLS-1$
+                + ", перенос=" + (movement != null) + ", имена=" + (naming != null) //$NON-NLS-1$ //$NON-NLS-2$
+                + ", контекст=" + (contextObj == null ? "null" : contextObj.getClass().getName())); //$NON-NLS-1$ //$NON-NLS-2$
+            if (management == null || movement == null || naming == null
+                || !(contextObj instanceof IBmEditingContext context))
+                return;
+
+            ManagedFormGroupType type = groupType(target.container());
+            String base = naming.getDefaultName(namingType(type), scriptVariant(target.page()));
+            Global.tempLog(LOG, "вид=" + type + ", основа имени=" + base); //$NON-NLS-1$ //$NON-NLS-2$
+            if (base == null || base.isEmpty())
+                return;
+            // Штатный счётчик имён внутри транзакции не видит существующие элементы:
+            // глобальная форма и её транзакционная копия — разные экземпляры, поэтому
+            // уникальное имя считаем заранее по глобальной форме («Группа», «Группа1», …).
+            String name = uniqueItemName(target.form(), base);
+            Global.tempLog(LOG, "имя новой группы=" + name); //$NON-NLS-1$
+            FormNewItemDescriptor descriptor =
+                new FormNewItemDescriptor(name, Collections.emptyMap(), false);
+            String language = editingLanguage(target.page());
+            String[] created = new String[1];
+            logNullSlots(target.form(), "до"); //$NON-NLS-1$
+
+            try
+            {
+                context.execute(new AbstractBmTask<Void>("Comfort: сгруппировать элементы формы") //$NON-NLS-1$
+                {
+                    @Override
+                    public Void execute(IBmTransaction transaction, IProgressMonitor monitor)
+                    {
+                        Form form = (Form)transaction.toTransactionObject(target.form());
+                        FormItemContainer container =
+                            (FormItemContainer)transaction.toTransactionObject(target.container());
+                        Global.tempLog(LOG, "транзакция: форма: " + bmState(transaction, target.form(), form)); //$NON-NLS-1$
+                        Global.tempLog(LOG, "транзакция: контейнер: " + bmState(transaction, target.container(), container)); //$NON-NLS-1$
+                        FormGroup group = target.index() < 0
+                            ? management.addGroup(container, type, form, descriptor)
+                            : management.addGroup(container, target.index(), type, form, descriptor);
+                        Global.tempLog(LOG, "группа создана: " + (group == null ? "null" //$NON-NLS-1$ //$NON-NLS-2$
+                            : group.getName() + ", вид=" + group.getType() //$NON-NLS-1$
+                                + ": " + bmState(transaction, group, null))); //$NON-NLS-1$
+                        if (group == null)
+                            return null;
+                        created[0] = group.getName();
+                        // Заголовок — как у штатного «Добавить»: имя элемента на языке
+                        // редактирования; окончательное имя известно только сейчас.
+                        if (language != null && group.getName() != null)
+                            group.getTitle().put(language, StringUtils.nameToText(group.getName()));
+                        return null;
+                    }
+                });
+                Global.tempLog(LOG, "транзакция создания группы выполнена, " //$NON-NLS-1$
+                    + (System.currentTimeMillis() - started) + " мс от начала"); //$NON-NLS-1$
+                // Перенос выбранных элементов — штатным сервисом, как при перетаскивании:
+                // он сам исполняет задачу переноса в BM, и дерево редактора получает ровно
+                // те же события, что и от штатных операций. Любые свои правки списков
+                // внутри чужой транзакции дерево не подхватывает до переоткрытия.
+                FormGroup createdGroup = findGroupByName(target.form(), created[0]);
+                Global.tempLog(LOG, "группа после коммита: " //$NON-NLS-1$
+                    + (createdGroup == null ? "не найдена" : createdGroup.getName())); //$NON-NLS-1$
+                if (createdGroup != null)
+                {
+                    // Перенос — тем же классом задачи, что и штатное перетаскивание
+                    // (MoveFormItemDropDelegate собирает BmCompoundTask из MoveFormItemTask):
+                    // задача сама исполняется в транзакции и дерево редактора получает
+                    // ровно те события, что и от штатных операций.
+                    List<IBmTask<?>> tasks = new ArrayList<>();
+                    int position = 0;
+                    for (FormItem item : target.items())
+                    {
+                        tasks.add(new MoveFormItemTask(movement, item, createdGroup, position++));
+                        Global.tempLog(LOG, "перенос в задачу: " + item.getName()); //$NON-NLS-1$
+                    }
+                    context.execute(new BmCompoundTask(tasks));
+                    Global.tempLog(LOG, "перенос выполнен, " //$NON-NLS-1$
+                        + (System.currentTimeMillis() - started) + " мс от начала"); //$NON-NLS-1$
+                }
+                logNullSlots(target.form(), "после"); //$NON-NLS-1$
+            }
+            catch (RuntimeException e)
+            {
+                Global.tempLogException(LOG, "транзакция: исключение", e); //$NON-NLS-1$
+                Global.logError("FormEditorHook.GroupItemsCommand", "run", e); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            }
+            if (created[0] != null)
+                revealItem(tree, created[0], 0);
+            measureUiRelease(tree, started, "сгруппировать"); //$NON-NLS-1$
+        }
+
+        /**
+         * ВРЕМЕННОЕ: состояние объекта в BM для разбора потери группы при коммите.
+         * {@code attached} — есть ли движок BM ({@code bmGetEngine()}); {@code tx} — тот же это
+         * экземпляр, что и глобальный, или отдельный транзакционный; для элемента формы — родитель.
+         */
+        private static String bmState(IBmTransaction transaction, EObject global, EObject txArg)
+        {
+            if (global == null && txArg == null)
+                return "null"; //$NON-NLS-1$
+            Object view = global != null ? global : txArg;
+            StringBuilder state = new StringBuilder(view.getClass().getSimpleName());
+            Object tx = txArg;
+            if (tx == null)
+            {
+                try
+                {
+                    tx = transaction.toTransactionObject(global);
+                }
+                catch (RuntimeException e)
+                {
+                    state.append(", toTransactionObject: ").append(e.getClass().getSimpleName()); //$NON-NLS-1$
+                }
+            }
+            if (view instanceof IBmObject o)
+            {
+                state.append(", attached=").append(o.bmGetEngine() != null); //$NON-NLS-1$
+                try
+                {
+                    state.append(", id=").append(o.bmGetId()); //$NON-NLS-1$
+                    if (!o.bmIsTop() && o.bmGetTopObject() != null)
+                        state.append(", top=").append(o.bmGetTopObject().bmGetId()); //$NON-NLS-1$
+                }
+                catch (RuntimeException e)
+                {
+                    state.append(", bm: ").append(e.getClass().getSimpleName()); //$NON-NLS-1$
+                }
+            }
+            if (tx != null)
+                state.append(view == tx ? ", tx=тот же" : ", tx=другой"); //$NON-NLS-1$ //$NON-NLS-2$
+            if (tx != null && tx != view && tx instanceof IBmObject t)
+                state.append(" (txAttached=").append(t.bmGetEngine() != null) //$NON-NLS-1$
+                    .append(", txId=").append(t.bmGetId()).append(')'); //$NON-NLS-1$
+            if (view instanceof FormItem item && item.eContainer() != null)
+                state.append(", родитель=").append(item.eContainer().getClass().getSimpleName()); //$NON-NLS-1$
+            return state.toString();
+        }
+
+        /**
+         * ВРЕМЕННОЕ: обход всех коллекций items формы (как FormItemIterator) с печатью размера
+         * каждой и поиском null-элементов — безусловный канал для разбора порчи модели.
+         */
+        private static void logNullSlots(Form form, String when)
+        {
+            List<FormItemContainer> queue = new ArrayList<>();
+            queue.add(form);
+            for (int head = 0; head < queue.size(); head++)
+            {
+                FormItemContainer container = queue.get(head);
+                String where = container instanceof FormItem item
+                    ? item.getName() : "Form"; //$NON-NLS-1$
+                List<FormItem> items = container.getItems();
+                for (int i = 0; i < items.size(); i++)
+                {
+                    FormItem item = items.get(i);
+                    if (item == null)
+                        Global.tempLog(LOG, when + ": NULL в items \"" + where + "\", индекс " + i); //$NON-NLS-1$ //$NON-NLS-2$
+                    else
+                    {
+                        if (item instanceof FormItemContainer nested)
+                            queue.add(nested);
+                        if (item instanceof FormField field
+                            && field.getExtInfo() instanceof TableHolder holder
+                            && holder.getAutoTable() != null)
+                            queue.add(holder.getAutoTable());
+                    }
+                }
+                Global.tempLog(LOG, when + ": items(" + items.size() + ") у \"" + where + "\""); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+
+        /**
+         * Свободное имя элемента формы в стиле штатного генератора: база, если не занята,
+         * иначе база с числом («Группа1», «Группа2», …). Штатный счётчик имён внутри
+         * BM-транзакции существующие элементы не видит (глобальная форма и её транзакционная
+         * копия — разные экземпляры), поэтому уникальность считаем сами по глобальной форме.
+         * Обход терпим к испорченным слотам: null просто пропускается.
+         */
+        private static String uniqueItemName(Form form, String base)
+        {
+            Set<String> taken = new HashSet<>();
+            collectItemNames(form.getItems(), taken);
+            if (!taken.contains(base))
+                return base;
+            for (int i = 1;; i++)
+            {
+                String candidate = base + i;
+                if (!taken.contains(candidate))
+                    return candidate;
+            }
+        }
+
+        private static void collectItemNames(List<FormItem> items, Set<String> names)
+        {
+            if (items == null)
+                return;
+            for (FormItem item : items)
+            {
+                if (item == null)
+                    continue;
+                String name = item.getName();
+                if (name != null && !name.isEmpty())
+                    names.add(name);
+                if (item instanceof FormItemContainer container)
+                    collectItemNames(container.getItems(), names);
+            }
+        }
+
+        /**
+         * Поиск группы по имени во всём дереве элементов формы. Имя новой группы
+         * уникально ({@link #uniqueItemName}), поэтому первое совпадение — она.
+         */
+        private static FormGroup findGroupByName(Form form, String name)
+        {
+            if (name == null)
+                return null;
+            List<FormItemContainer> queue = new ArrayList<>();
+            queue.add(form);
+            for (int head = 0; head < queue.size(); head++)
+            {
+                for (FormItem item : queue.get(head).getItems())
+                {
+                    if (item == null)
+                        continue;
+                    if (item instanceof FormGroup group && name.equals(group.getName()))
+                        return group;
+                    if (item instanceof FormItemContainer nested)
+                        queue.add(nested);
+                }
+            }
+            return null;
+        }
+
+        private static void runUngroup(Tree tree)
+        {
+            // ВРЕМЕННОЕ: пошаговый разбор — как и у «Сгруппировать».
+            Global.tempLog(LOG, "разгруппировать: начало"); //$NON-NLS-1$
+            try
+            {
+                runUngroupUnsafe(tree);
+            }
+            catch (RuntimeException | LinkageError | AssertionError e)
+            {
+                Global.tempLogException(LOG, "разгруппировать: исключение", e); //$NON-NLS-1$
+                Global.logError("FormEditorHook.GroupItemsCommand", "runUngroup", e); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+
+        private static void runUngroupUnsafe(Tree tree)
+        {
+            long started = System.currentTimeMillis();
+            Ungroup target = resolveUngroup(tree);
+            Global.tempLog(LOG, "разгруппировать: групп=" //$NON-NLS-1$
+                + (target == null ? "нет цели" : target.groups().size()) //$NON-NLS-1$
+                + ", разбор " + (System.currentTimeMillis() - started) + " мс"); //$NON-NLS-1$ //$NON-NLS-2$
+            if (target == null)
+                return;
+            IFormItemMovementService movement =
+                formService(IFormItemMovementService.class, target.page(), "movementService"); //$NON-NLS-1$
+            Object contextObj = Global.invoke(target.page(), "getEditingContext"); //$NON-NLS-1$
+            if (movement == null || !(contextObj instanceof IBmEditingContext context))
+            {
+                Global.tempLog(LOG, "разгруппировать: нет сервиса переноса или контекста"); //$NON-NLS-1$
+                return;
+            }
+            // Выделение после команды: прежнее снимается целиком, выделяются только
+            // элементы, реально вышедшие из удалённых групп. Выделять можно не раньше,
+            // чем дерево перестроится: пока строки удалённых групп не исчезли, элементы
+            // ещё «сидят» в группах — ждём исчезновения групп (см. revealItems).
+            List<String> ungrouped = new ArrayList<>();
+            List<String> removedGroups = new ArrayList<>();
+
+            context.execute(new AbstractBmTask<Void>("Comfort: разгруппировать элементы формы") //$NON-NLS-1$
+            {
+                @Override
+                public Void execute(IBmTransaction transaction, IProgressMonitor monitor)
+                {
+                    Form form = (Form)transaction.toTransactionObject(target.form());
+                    for (FormGroup modelGroup : target.groups())
+                        ungroupOne(transaction, monitor, form, target.form(), modelGroup, movement,
+                            ungrouped, removedGroups);
+                    return null;
+                }
+            });
+            Global.tempLog(LOG, "разгруппировать: транзакция выполнена, " //$NON-NLS-1$
+                + (System.currentTimeMillis() - started) + " мс от начала"); //$NON-NLS-1$
+            if (!ungrouped.isEmpty())
+                revealItems(tree, ungrouped, removedGroups, 0);
+            measureUiRelease(tree, started, "разгруппировать"); //$NON-NLS-1$
+        }
+
+        /**
+         * ВРЕМЕННОЕ: сколько всего держится поток UI. Обработчик команды возвращает управление
+         * быстро, а видимая задержка — это работа EDT на перестроении модели соответствия,
+         * эскиза и панели «Свойства»; она идёт в том же потоке и в те же события. Замер через
+         * {@code asyncExec} показывает, когда поток освободился.
+         */
+        private static void measureUiRelease(Tree tree, long started, String what)
+        {
+            if (tree.isDisposed())
+                return;
+            tree.getDisplay().asyncExec(() -> Global.tempLog(LOG,
+                what + ": UI освободился через " + (System.currentTimeMillis() - started) + " мс")); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        /**
+         * Одна группа: содержимое переносится на её место в родителе, затем группа удаляется.
+         *
+         * <p>Группа удаляется только если перенеслось <b>всё</b> её содержимое: {@code move}
+         * возвращает {@code false}, когда родитель такой элемент не принимает, и удалять группу
+         * с остатком внутри — значит потерять элементы.
+         */
+        private static void ungroupOne(IBmTransaction transaction, IProgressMonitor monitor,
+            Form form, Form modelForm, FormGroup modelGroup, IFormItemMovementService movement,
+            List<String> collected, List<String> removedGroups)
+        {
+            if (!(transaction.toTransactionObject(modelGroup) instanceof FormGroup group)
+                || !(group.eContainer() instanceof FormItemContainer parent))
+                return;
+            int position = parent.getItems().indexOf(group);
+            if (position < 0)
+                return;
+            boolean allMoved = true;
+            List<String> movedNames = new ArrayList<>();
+            for (FormItem child : new ArrayList<>(group.getItems()))
+            {
+                boolean done = movement.move(child, parent, position);
+                Global.tempLog(LOG, "перенос из группы " + group.getName() //$NON-NLS-1$
+                    + ": " + child.getName() + " -> " + done); //$NON-NLS-1$ //$NON-NLS-2$
+                allMoved &= done;
+                if (done)
+                {
+                    position++;
+                    movedNames.add(child.getName());
+                }
+            }
+            if (!allMoved)
+            {
+                Global.tempLog(LOG, "группа " + group.getName() //$NON-NLS-1$
+                    + " не удалена: перенеслось не всё содержимое"); //$NON-NLS-1$
+                return;
+            }
+            new DeleteFormItemTask(modelForm, modelGroup).execute(form, group, monitor);
+            Global.tempLog(LOG, "группа удалена"); //$NON-NLS-1$
+            removedGroups.add(group.getName());
+            for (String name : movedNames)
+            {
+                if (name != null && !name.isEmpty())
+                    collected.add(name);
+            }
+        }
+
+        /**
+         * Сервис формы: сначала — уже внедрённое поле штатной группы действий дерева элементов
+         * ({@code FormItemActionsGroup}), и только потом реестр OSGi.
+         *
+         * <p>Через {@link ServiceAccess} доступны не все: {@code FormPlugin.start} регистрирует
+         * {@link IFormItemMovementService} <b>дважды</b>, а {@code ServiceAccess.get} на несколько
+         * регистраций одного типа бросает {@code ServiceUnavailableException} («Multiple services
+         * were registered for …») вместо возврата сервиса. У штатной группы действий тот же самый
+         * экземпляр лежит готовым — его и берём, а реестр остаётся запасным путём.
+         *
+         * @param actionsField имя поля {@code FormItemActionsGroup} или {@code null},
+         *                     если у группы действий такого поля нет
+         */
+        private static <T> T formService(Class<T> type, FormEditorPage page, String actionsField)
+        {
+            if (actionsField != null)
+            {
+                Object actions = Global.getField(page, "itemsActionsGroup"); //$NON-NLS-1$
+                Object value = actions == null ? null : Global.getField(actions, actionsField);
+                if (type.isInstance(value))
+                    return type.cast(value);
+            }
+            try
+            {
+                return ServiceAccess.get(type);
+            }
+            catch (RuntimeException e)
+            {
+                Global.tempLogException(LOG, "сервис " + type.getSimpleName() + ": реестр отказал", e); //$NON-NLS-1$ //$NON-NLS-2$
+                return null;
+            }
+        }
+
+        /**
+         * Вид новой группы — по контейнеру, теми же правилами, что и у EDT
+         * ({@code FormItemTypeInformationService.getDefaultGroupType}) для случая, когда
+         * готовой группы ещё нет.
+         */
+        private static ManagedFormGroupType groupType(FormItemContainer container)
+        {
+            if (container instanceof AutoCommandBar || container instanceof ContextMenu
+                || isGroupOfType(container, ManagedFormGroupType.POPUP,
+                    ManagedFormGroupType.BUTTON_GROUP, ManagedFormGroupType.COMMAND_BAR))
+                return ManagedFormGroupType.POPUP;
+            if (isGroupOfType(container, ManagedFormGroupType.PAGES))
+                return ManagedFormGroupType.PAGE;
+            if (container instanceof Table
+                || isGroupOfType(container, ManagedFormGroupType.COLUMN_GROUP))
+                return ManagedFormGroupType.COLUMN_GROUP;
+            return ManagedFormGroupType.USUAL_GROUP;
+        }
+
+        private static boolean isGroupOfType(EObject object, ManagedFormGroupType... types)
+        {
+            if (!(object instanceof FormGroup group))
+                return false;
+            for (ManagedFormGroupType type : types)
+            {
+                if (group.getType() == type)
+                    return true;
+            }
+            return false;
+        }
+
+        /** Вид группы в терминах модели соответствия — его просит сервис имён. */
+        private static ItemType namingType(ManagedFormGroupType type)
+        {
+            return switch (type)
+            {
+                case PAGE -> ItemType.GROUP_PAGE;
+                case PAGES -> ItemType.GROUP_PAGES;
+                case POPUP -> ItemType.GROUP_POPUP;
+                case BUTTON_GROUP -> ItemType.GROUP_BUTTON;
+                case COLUMN_GROUP -> ItemType.GROUP_COLUMN;
+                case COMMAND_BAR -> ItemType.GROUP_COMMAND_BAR;
+                default -> ItemType.GROUP_USUAL;
+            };
+        }
+
+        private static String editingLanguage(FormEditorPage page)
+        {
+            Object languages = Global.getField(page, "languageManager"); //$NON-NLS-1$
+            IV8Project project = v8project(page);
+            return project != null && languages instanceof IEditingLanguageManager languageManager
+                ? languageManager.getEditingLanguageCode(project.getDtProject()) : null;
+        }
+
+        /** Вариант встроенного языка проекта — от него зависит имя группы по умолчанию. */
+        private static ScriptVariant scriptVariant(FormEditorPage page)
+        {
+            IV8Project project = v8project(page);
+            ScriptVariant variant = project == null ? null : project.getScriptVariant();
+            return variant == null ? ScriptVariant.RUSSIAN : variant;
+        }
+
+        private static IV8Project v8project(FormEditorPage page)
+        {
+            Object manager = Global.getField(page, "v8projectManager"); //$NON-NLS-1$
+            return manager instanceof IV8ProjectManager projectManager
+                ? projectManager.getProject(page.getModel()) : null;
+        }
+
+        // -------------------------------------------------------------------
+        // Выделение элемента после команды
+        // -------------------------------------------------------------------
+
+        /**
+         * Модель соответствия перестраивается после транзакции асинхронно, поэтому строку
+         * ищем с повтором — как {@link AttributesDrop} ищет строку перетащенного объекта.
+         * Ищем по имени: имена элементов формы уникальны в пределах формы.
+         */
+        private static void revealItem(Tree tree, String name, int attempt)
+        {
+            if (tree.isDisposed() || attempt > REVEAL_ATTEMPTS
+                || !(tree.getData(ItemsTree.KEY_VIEWER) instanceof TreeViewer viewer))
+                return;
+            TreeItem found = findItemRow(tree.getItems(), name);
+            if (found == null)
+            {
+                if (attempt == REVEAL_ATTEMPTS)
+                    Global.tempLog(LOG, "строка " + name + " в дереве не найдена"); //$NON-NLS-1$ //$NON-NLS-2$
+                tree.getDisplay().timerExec(REVEAL_DELAY_MS, () -> revealItem(tree, name, attempt + 1));
+                return;
+            }
+            Global.tempLog(LOG, "строка " + name + " найдена, попытка " + attempt); //$NON-NLS-1$ //$NON-NLS-2$
+            Object element = found.getData();
+            if (element == null)
+                return;
+            viewer.setExpandedState(element, true);
+            viewer.setSelection(new StructuredSelection(element), true);
+        }
+
+        /**
+         * Выделение нескольких строк — разгруппированных элементов: {@code setSelection}
+         * заменяет выделение целиком, поэтому прежнее выделение снимается. Строки элементов
+         * существуют в дереве и <b>до</b> перемещения (внутри групп), поэтому выделять можно
+         * только когда дерево уже перестроено. Признак перестроения — исчезновение строк
+         * удалённых групп; до этого ждём с повтором, как в {@link #revealItem(Tree, String, int)}.
+         */
+        private static void revealItems(Tree tree, List<String> select, List<String> vanished,
+            int attempt)
+        {
+            if (tree.isDisposed() || attempt > REVEAL_ATTEMPTS
+                || !(tree.getData(ItemsTree.KEY_VIEWER) instanceof TreeViewer viewer))
+                return;
+            List<Object> elements = new ArrayList<>();
+            List<String> missing = new ArrayList<>(select);
+            List<String> stale = new ArrayList<>();
+            collectItemRows(tree.getItems(), missing, elements, vanished, stale);
+            if (!missing.isEmpty() || !stale.isEmpty())
+            {
+                if (attempt == REVEAL_ATTEMPTS)
+                    Global.tempLog(LOG, "выделение не готово: не найдены " + missing //$NON-NLS-1$
+                        + ", старые строки ещё видны " + stale); //$NON-NLS-1$
+                tree.getDisplay().timerExec(REVEAL_DELAY_MS,
+                    () -> revealItems(tree, select, vanished, attempt + 1));
+                return;
+            }
+            Global.tempLog(LOG, "разгруппировано строк к выделению: " + elements.size()); //$NON-NLS-1$
+            viewer.setSelection(new StructuredSelection(elements), true);
+        }
+
+        /**
+         * Собирает строки дерева по именам элементов формы; найденные имена уходят из pending.
+         * Имена из vanished, которые ещё встречаются в дереве (группы до перестроения),
+         * записываются в stale.
+         */
+        private static void collectItemRows(TreeItem[] rows, List<String> pending, List<Object> out,
+            List<String> vanished, List<String> stale)
+        {
+            for (TreeItem row : rows)
+            {
+                if (row.isDisposed())
+                    continue;
+                String name = row.getData() instanceof Item mappingItem
+                    && mappingItem.getDomain() instanceof FormItem item ? item.getName() : null;
+                if (name != null)
+                {
+                    if (pending.contains(name))
+                    {
+                        out.add(row.getData());
+                        pending.remove(name);
+                    }
+                    else if (vanished.contains(name))
+                        stale.add(name);
+                }
+                collectItemRows(row.getItems(), pending, out, vanished, stale);
+            }
+        }
+
+        private static TreeItem findItemRow(TreeItem[] rows, String name)
+        {
+            for (TreeItem row : rows)
+            {
+                if (row.isDisposed())
+                    continue;
+                if (row.getData() instanceof Item mappingItem
+                    && mappingItem.getDomain() instanceof FormItem item
+                    && name.equals(item.getName()))
+                    return row;
+                TreeItem found = findItemRow(row.getItems(), name);
+                if (found != null)
+                    return found;
+            }
+            return null;
+        }
+
+        private GroupItemsCommand()
+        {
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Колонки дерева элементов формы (ItemsTree)
     // -----------------------------------------------------------------------
 
@@ -2289,6 +3102,10 @@ public class FormEditorHook implements IStartup
          * колонок для всех видимых строк, и на каждой отрисовке это заметно тормозило отклик на клик.
          */
         private static final int REFRESH_INTERVAL_MS = 1000;
+
+
+        /** Зазор от границы видимой области при прокрутке палитры «Свойства». */
+        private static final int SCROLL_MARGIN = 8;
 
         private static final int MAX_FOCUS_ATTEMPTS = 40;
 
@@ -2416,10 +3233,12 @@ public class FormEditorHook implements IStartup
                 tree.setData(KEY_HOOKED, Boolean.TRUE);
                 tree.setData(KEY_VIEWER, viewer);
                 createColumns(page, viewer, tree);
+                Global.tempLog(SelectionMemory.LOG, "attach: колонки созданы, попытка " + attempt); //$NON-NLS-1$
                 SelectionMemory.install(page, viewer, tree);
             }
             catch (Exception e)
             {
+                Global.tempLog(SelectionMemory.LOG, "attach: исключение " + e); //$NON-NLS-1$
                 Global.logError("FormEditorHook.ItemsTree", "attach", e); //$NON-NLS-1$ //$NON-NLS-2$
             }
         }
@@ -2453,8 +3272,7 @@ public class FormEditorHook implements IStartup
             nameColumn.setLabelProvider(new NameLabelProvider(base, tree));
 
             addColumn(viewer, TITLE_HANDLERS, ICON_HANDLERS, COLUMN_HANDLERS, SWT.RIGHT,
-                TITLE_HANDLERS + ": число непустых обработчиков событий элемента" //$NON-NLS-1$
-                    + " (в строке «Форма» — обработчики самой формы)." //$NON-NLS-1$
+                TITLE_HANDLERS + ": число непустых обработчиков событий элемента." //$NON-NLS-1$
                     + " Двойной клик активирует поле первого обработчика в панели «Свойства»." //$NON-NLS-1$
                     + Global.pluginSignForTooltip())
                         .setLabelProvider(new CountLabelProvider(element -> handlerCount(page, element)));
@@ -2462,8 +3280,7 @@ public class FormEditorHook implements IStartup
             addColumn(viewer, TITLE_APPEARANCE, ICON_APPEARANCE, COLUMN_APPEARANCE, SWT.RIGHT,
                 TITLE_APPEARANCE + ": число элементов условного оформления формы," //$NON-NLS-1$
                     + " у которых элемент указан в «Оформляемых полях»." //$NON-NLS-1$
-                    + " Совпадает с числом в заголовке страницы «Условное оформление»," //$NON-NLS-1$
-                    + " которую открывает двойной клик." //$NON-NLS-1$
+                    + " Двойной клик активирует их список на странице «Условное оформление»." //$NON-NLS-1$
                     + Global.pluginSignForTooltip())
                         .setLabelProvider(new CountLabelProvider(element -> appearanceCount(page, element)));
 
@@ -3383,21 +4200,38 @@ public class FormEditorHook implements IStartup
         {
             if (source == null || source == item)
                 return;
-            Object element = findRow(viewer, viewer.getInput(), source, 0);
+            Object element = findRow(viewer, candidate -> candidate == source);
             if (element != null)
                 viewer.setSelection(new StructuredSelection(element), true);
         }
 
-        private static Object findRow(TreeViewer viewer, Object node, FormItem domain, int depth)
+        /**
+         * Строка дерева, элемент формы которой удовлетворяет {@code match}, или {@code null}.
+         *
+         * <p>Обход начинается с {@code getElements(вход)}, а не с {@code getChildren(вход)}:
+         * вход дерева — {@code MappingController}, и {@code FormItemsContentProvider.getChildren}
+         * для него всегда возвращает пустой список (он умеет только {@code FormMapping} и
+         * {@code ItemContainer}). Корневая строка «Форма» достаётся именно через
+         * {@code getElements}, и без этого обход не находил ни одной строки.
+         */
+        private static Object findRow(TreeViewer viewer, Predicate<FormItem> match)
         {
-            if (node == null || depth > 32
-                || !(viewer.getContentProvider() instanceof ITreeContentProvider content))
+            if (!(viewer.getContentProvider() instanceof ITreeContentProvider content))
                 return null;
-            for (Object child : content.getChildren(node))
+            return findRow(content, content.getElements(viewer.getInput()), match, 0);
+        }
+
+        private static Object findRow(ITreeContentProvider content, Object[] rows,
+            Predicate<FormItem> match, int depth)
+        {
+            if (rows == null || depth > 32)
+                return null;
+            for (Object row : rows)
             {
-                if (domainItem(child) == domain)
-                    return child;
-                Object found = findRow(viewer, child, domain, depth + 1);
+                FormItem item = domainItem(row);
+                if (item != null && match.test(item))
+                    return row;
+                Object found = findRow(content, content.getChildren(row), match, depth + 1);
                 if (found != null)
                     return found;
             }
@@ -3405,20 +4239,23 @@ public class FormEditorHook implements IStartup
         }
 
         /**
-         * Активирует панель «Свойства» и ставит ввод в поле первого непустого обработчика.
-         * Поле ищется по подписи (имени события): у всех обработчиков признак модели один и тот
-         * же ({@code handlers}), и по нему поля событий друг от друга не отличить.
+         * Активирует панель «Свойства» и ставит ввод в поле первого назначенного обработчика, а
+         * если назначенных нет — в поле первого события элемента. Строки событий берутся из самой
+         * палитры: в модели формы есть только назначенные обработчики, а подпись панели
+         * («При изменении») не совпадает с именем события в модели («ПриИзменении») — см.
+         * {@link #tryFocusEventField}.
+         *
+         * <p>Заодно панель прокручивается так, чтобы вокруг активированного поля было видно как
+         * можно больше соседних событий (см. {@link #revealEventsBlock}).
          */
         private static void focusFirstHandlerField(FormEditorPage page, Object element)
         {
+            if (page == null || page.getSite() == null)
+                return;
             EventHandler handler = firstHandler(page, element);
-            if (handler == null || page == null || page.getSite() == null)
-                return;
-            List<String> labels = eventLabels(handler);
-            if (labels.isEmpty())
-                return;
+            List<String> names = handler != null ? eventLabels(handler) : Collections.emptyList();
             ShowPropertiesHandler.run(page.getSite());
-            schedulePropertyFocus(page.getSite().getPage(), labels, 0);
+            scheduleEventFocus(page.getSite().getPage(), names, 0);
         }
 
         /** Имя события в обоих вариантах написания — панель подписывает поле одним из них. */
@@ -3437,6 +4274,82 @@ public class FormEditorHook implements IStartup
             return labels;
         }
 
+        /**
+         * @param eventNames имя целевого события в написании модели ({@code ПриИзменении} /
+         *        {@code OnChange}); пустой список — назначенных обработчиков нет, активируется
+         *        первое событие элемента
+         */
+        private static void scheduleEventFocus(IWorkbenchPage workbenchPage, List<String> eventNames,
+            int attempt)
+        {
+            if (workbenchPage == null || attempt >= MAX_FOCUS_ATTEMPTS)
+            {
+                return;
+            }
+            Display display = Display.getDefault();
+            if (display == null || display.isDisposed())
+                return;
+            display.timerExec(FOCUS_RETRY_DELAY_MS, () -> {
+                if (tryFocusEventField(workbenchPage, eventNames))
+                {
+                    // Панель дозаполняется и после успешной активации, отбирая ввод в поле «Имя» —
+                    // поэтому активация ещё некоторое время повторяется (см. AefFieldFocus).
+                    AefFieldFocus.holdActivation(
+                        () -> tryFocusEventField(workbenchPage, eventNames));
+                }
+                else
+                {
+                    scheduleEventFocus(workbenchPage, eventNames, attempt + 1);
+                }
+            });
+        }
+
+        /**
+         * Ставит ввод в поле события панели «Свойства»: в поле обработчика {@code eventNames},
+         * а если он не назван — в поле первого события элемента. Строки событий берутся из самой
+         * палитры ({@link PropertyNameIdentifierHook#eventRows}): в модели формы есть только
+         * назначенные обработчики, а подпись панели («При изменении») не совпадает с именем
+         * события в модели («ПриИзменении») — отсюда сопоставление без пробелов и регистра.
+         */
+        private static boolean tryFocusEventField(IWorkbenchPage workbenchPage, List<String> eventNames)
+        {
+            IViewPart view = findPropertySheetView(workbenchPage);
+            Object sheetPage =
+                view != null ? PropertyNameIdentifierHook.resolvePropertySheetPage(view) : null;
+            Object scene = sheetPage != null ? Global.invoke(sheetPage, "getScene") : null; //$NON-NLS-1$
+            List<Map.Entry<String, Object>> rows =
+                scene != null ? PropertyNameIdentifierHook.eventRows(scene) : Collections.emptyList();
+            if (rows.isEmpty())
+                return false;
+            Map.Entry<String, Object> target = rows.get(0);
+            for (Map.Entry<String, Object> row : rows)
+                if (matchesEventName(row.getKey(), eventNames))
+                {
+                    target = row;
+                    break;
+                }
+            Object nativeControl = Global.invoke(target.getValue(), "getNativeControl"); //$NON-NLS-1$
+            boolean focused = nativeControl != null && AefFieldFocus.focusNativeControl(nativeControl);
+            if (focused)
+                revealEventsBlock(sheetPage, rows, target);
+            return focused;
+        }
+
+        /** Подпись панели («При изменении») против имени события модели («ПриИзменении»). */
+        private static boolean matchesEventName(String label, List<String> eventNames)
+        {
+            String normalized = normalizeEventName(label);
+            for (String name : eventNames)
+                if (normalized.equals(normalizeEventName(name)))
+                    return true;
+            return false;
+        }
+
+        private static String normalizeEventName(String text)
+        {
+            return text == null ? "" : text.replace(" ", "").replace("-", "").toLowerCase(); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
+        }
+
         private static void schedulePropertyFocus(IWorkbenchPage workbenchPage, List<String> labels,
             int attempt)
         {
@@ -3446,12 +4359,22 @@ public class FormEditorHook implements IStartup
             if (display == null || display.isDisposed())
                 return;
             display.timerExec(FOCUS_RETRY_DELAY_MS, () -> {
-                if (!tryFocusPropertyField(workbenchPage, labels))
+                if (tryFocusPropertyField(workbenchPage, labels, "attempt " + attempt)) //$NON-NLS-1$
+                {
+                    // Панель дозаполняется и после успешной активации, отбирая ввод в поле «Имя» —
+                    // поэтому активация ещё некоторое время повторяется (см. AefFieldFocus).
+                    AefFieldFocus.holdActivation(
+                        () -> tryFocusPropertyField(workbenchPage, labels, "hold")); //$NON-NLS-1$
+                }
+                else
+                {
                     schedulePropertyFocus(workbenchPage, labels, attempt + 1);
+                }
             });
         }
 
-        private static boolean tryFocusPropertyField(IWorkbenchPage workbenchPage, List<String> labels)
+        private static boolean tryFocusPropertyField(IWorkbenchPage workbenchPage, List<String> labels,
+            String phase)
         {
             IViewPart view = findPropertySheetView(workbenchPage);
             Object sheetPage =
@@ -3464,10 +4387,59 @@ public class FormEditorHook implements IStartup
                 Map.Entry<?, ?> entry = PropertyNameIdentifierHook.findValueViewAfterLabel(scene, label);
                 Object nativeControl = entry != null
                     ? Global.invoke(entry.getValue(), "getNativeControl") : null; //$NON-NLS-1$
-                if (nativeControl != null && AefFieldFocus.focusNativeControl(nativeControl))
+                boolean focused = nativeControl != null && AefFieldFocus.focusNativeControl(nativeControl);
+                if (focused)
                     return true;
             }
             return false;
+        }
+
+        /**
+         * Прокручивает палитру «Свойства» так, чтобы вокруг активированного поля события было
+         * видно как можно больше соседних событий.
+         *
+         * <p>Весь блок событий помещается в видимую область — показываем его целиком; не
+         * помещается — ставим активированное поле к верхней границе (за ним видны следующие
+         * события), а у конца блока прижимаем блок к нижней границе, чтобы не оставлять пустоту.
+         * Если и так всё видно — прокрутку не трогаем, иначе панель дёргалась бы.
+         */
+        private static void revealEventsBlock(Object sheetPage, List<Map.Entry<String, Object>> rows,
+            Map.Entry<String, Object> targetRow)
+        {
+            ScrolledComposite scrolled = PropertySheetUiContext.findPaletteScrolledComposite(sheetPage);
+            Rectangle target = PropertySheetControlInterop.liveLightDisplayBounds(targetRow.getValue());
+            if (scrolled == null || scrolled.isDisposed() || target == null)
+                return;
+            int blockTop = target.y;
+            int blockBottom = target.y + target.height;
+            for (Map.Entry<String, Object> row : rows)
+            {
+                Rectangle bounds = PropertySheetControlInterop.liveLightDisplayBounds(row.getValue());
+                if (bounds == null)
+                    continue;
+                blockTop = Math.min(blockTop, bounds.y);
+                blockBottom = Math.max(blockBottom, bounds.y + bounds.height);
+            }
+
+            int viewportTop = scrolled.toDisplay(0, 0).y;
+            int height = scrolled.getClientArea().height;
+            int top = blockTop - viewportTop;
+            int bottom = blockBottom - viewportTop;
+            int targetTop = target.y - viewportTop;
+            int targetBottom = target.y + target.height - viewportTop;
+            int delta;
+            if (bottom - top <= height)
+                delta = top < 0 ? top - SCROLL_MARGIN
+                    : (bottom > height ? bottom - height + SCROLL_MARGIN : 0);
+            else
+                delta = Math.min(targetTop - SCROLL_MARGIN, bottom - height + SCROLL_MARGIN);
+            if (targetTop - delta < 0 || targetBottom - delta > height)
+                delta = targetTop < 0 ? targetTop - SCROLL_MARGIN
+                    : (targetBottom > height ? targetBottom - height + SCROLL_MARGIN : 0);
+            Point origin = scrolled.getOrigin();
+            int y = Math.max(0, origin.y + delta);
+            if (delta != 0 && y != origin.y)
+                scrolled.setOrigin(origin.x, y);
         }
 
         private static IViewPart findPropertySheetView(IWorkbenchPage workbenchPage)
@@ -3604,17 +4576,21 @@ public class FormEditorHook implements IStartup
          *
          * <p>Попытки повторяются {@link #MAX_RESTORE_ATTEMPTS} раз: на момент подключения к дереву
          * вход просмотрщика ещё может быть не задан, а выделение корня EDT ставит сама и может
-         * сделать это позже нашей первой попытки.
+         * сделать это позже нашей первой попытки. Дерево активируется сразу, как только строка
+         * найдена; на эскиз формы выделение досылается отдельно — см. {@link #syncSketch}.
          */
         private static final class SelectionMemory
         {
-            /** Значение для корня «Форма»: его восстанавливать не нужно — он и так выбран. */
+            /** Тема временного лога (см. {@code .tmp/temp-logs/}) — снять после подтверждения фикса. */
+            static final String LOG = "form-selection"; //$NON-NLS-1$
+
+            /** Пустое значение (корень «Форма» от прежних сеансов): восстанавливать нечего. */
             private static final String ROOT = ""; //$NON-NLS-1$
 
             private static final EditorMemoryStore STORE =
                 new EditorMemoryStore("formItemsSelection.entries", 500); //$NON-NLS-1$
 
-            private static final int MAX_RESTORE_ATTEMPTS = 15;
+            private static final int MAX_RESTORE_ATTEMPTS = 40;
 
             private static final int RESTORE_DELAY_MS = 200;
 
@@ -3625,15 +4601,25 @@ public class FormEditorHook implements IStartup
             static void install(FormEditorPage page, TreeViewer viewer, Tree tree)
             {
                 String key = formKey(page);
+                Global.tempLog(LOG, "install: key=" + key); //$NON-NLS-1$
                 if (key == null)
                     return;
                 String remembered = STORE.load(key);
+                Global.tempLog(LOG, "install: remembered=" + remembered); //$NON-NLS-1$
                 if (remembered != null && !ROOT.equals(remembered))
-                    Display.getDefault().asyncExec(() -> restore(remembered, viewer, tree, 0));
+                    Display.getDefault().asyncExec(() -> restore(page, remembered, viewer, tree, 0));
 
                 viewer.addSelectionChangedListener(event -> remember(key, viewer));
-                tree.addListener(SWT.FocusOut, event -> STORE.flush());
-                tree.addListener(SWT.Dispose, event -> STORE.flush());
+                tree.addListener(SWT.FocusOut, event ->
+                {
+                    Global.tempLog(LOG, "flush: focusOut"); //$NON-NLS-1$
+                    STORE.flush();
+                });
+                tree.addListener(SWT.Dispose, event ->
+                {
+                    Global.tempLog(LOG, "flush: dispose"); //$NON-NLS-1$
+                    STORE.flush();
+                });
             }
 
             private static void remember(String key, TreeViewer viewer)
@@ -3642,25 +4628,152 @@ public class FormEditorHook implements IStartup
                 // такого «мигания» нельзя, поэтому пустое выделение просто игнорируется.
                 if (!(viewer.getSelection() instanceof IStructuredSelection structured)
                     || structured.isEmpty())
+                {
+                    Global.tempLog(LOG, "remember: пустое выделение — пропуск"); //$NON-NLS-1$
                     return;
+                }
                 FormItem item = domainItem(structured.getFirstElement());
                 String name = item != null ? item.getName() : null;
-                STORE.updateMemory(key, name != null && !name.isBlank() ? name : ROOT);
+                Global.tempLog(LOG, "remember: name=" + name //$NON-NLS-1$
+                    + " row=" + className(structured.getFirstElement()) + " key=" + key); //$NON-NLS-1$ //$NON-NLS-2$
+                // Корень «Форма» не запоминается: EDT сама выбирает его при открытии формы,
+                // и запись затирала бы запомненный элемент раньше, чем тот успеет восстановиться.
+                if (name == null || name.isBlank())
+                    return;
+                STORE.updateMemory(key, name);
             }
 
-            private static void restore(String name, TreeViewer viewer, Tree tree, int attempt)
+            private static void restore(FormEditorPage page, String name, TreeViewer viewer, Tree tree,
+                int attempt)
             {
-                if (tree.isDisposed() || !isRootSelected(viewer))
+                if (tree.isDisposed())
+                {
+                    Global.tempLog(LOG, "restore: дерево уничтожено, попытка " + attempt); //$NON-NLS-1$
                     return;
-                Object row = findRowByName(viewer, viewer.getInput(), name, 0);
+                }
+                if (!isRootSelected(viewer))
+                {
+                    Global.tempLog(LOG, "restore: выделение уже не корневое (" //$NON-NLS-1$
+                        + selectionText(viewer) + "), попытка " + attempt); //$NON-NLS-1$
+                    return;
+                }
+                Object row = findRow(viewer, item -> name.equals(item.getName()));
+                Global.tempLog(LOG, "restore: попытка " + attempt + " name=" + name //$NON-NLS-1$ //$NON-NLS-2$
+                    + " input=" + className(viewer.getInput()) //$NON-NLS-1$
+                    + " provider=" + className(viewer.getContentProvider()) //$NON-NLS-1$
+                    + " row=" + className(row)); //$NON-NLS-1$
                 if (row != null)
                 {
                     viewer.setSelection(new StructuredSelection(row), true);
+                    Global.tempLog(LOG, "restore: применено, выделение=" + selectionText(viewer)); //$NON-NLS-1$
+                    syncSketch(page, viewer, tree, row, 0);
                     return;
                 }
                 if (attempt < MAX_RESTORE_ATTEMPTS)
                     Display.getDefault().timerExec(RESTORE_DELAY_MS,
-                        () -> restore(name, viewer, tree, attempt + 1));
+                        () -> restore(page, name, viewer, tree, attempt + 1));
+            }
+
+            /**
+             * Досылает восстановленное выделение на эскиз формы, когда тот отрисуется.
+             *
+             * <p>Дерево активируется сразу, не дожидаясь эскиза, — иначе строка «оживает» с
+             * заметной задержкой. Но рамку элемента рисует нативный визуализатор, который
+             * поднимается позже дерева: событие выделения, случившееся до его готовности,
+             * пропадает впустую, и на макете рамки нет.
+             *
+             * <p>Признак готовности — сессия раскладки представления
+             * ({@code FormWysiwygRepresentation.hippoSession}): пока она не создана,
+             * {@code manageSelectionFromFormElement} выходит первой же строкой и выделение
+             * теряется молча. Проверять «элемент отрисован» через {@code getRelatedControl}
+             * бесполезно: в нативном режиме LWT-дерево эскиза пустое, и этот вызов не даёт
+             * контрол никогда (проверено — восстановление упиралось в него все 8 секунд).
+             *
+             * <p>В нативном режиме выделение доходит до эскиза как {@code SELECT_BY_ID}:
+             * представление кладёт идентификатор элемента в {@code ILayoutRenderService} и
+             * перестраивает макет. По этому же идентификатору проверяется, что выделение
+             * действительно принято ({@link #sketchSelectedId}).
+             *
+             * <p>Повторная установка того же выделения в дерево здесь не помогла бы:
+             * {@code FormMultiControlSelectionProvider} сверяет новое выделение с прежним
+             * ({@code isNewSelection}) и одинаковое в связанные представления не передаёт.
+             * Поэтому выделение кладётся прямо в эскиз — тем же вызовом
+             * ({@code setDomainSelection}), которым его передал бы сам провайдер синхронизации.
+             *
+             * <p>Ожидание ограничено {@link #MAX_RESTORE_ATTEMPTS} и прекращается, как только
+             * выделение в дереве сменилось — пользователь выбрал своё.
+             */
+            private static void syncSketch(FormEditorPage page, TreeViewer viewer, Tree tree, Object row,
+                int attempt)
+            {
+                if (tree.isDisposed() || !isSelected(viewer, row))
+                    return;
+                FormItem item = domainItem(row);
+                Object representation = WysiwygHeaderClick.getRepresentation(page);
+                Object session =
+                    representation == null ? null : Global.getField(representation, "hippoSession"); //$NON-NLS-1$
+                boolean applied = item != null && sketchSelectedId(representation) == item.getId();
+                if (session == null || !applied)
+                {
+                    if (session != null)
+                    {
+                        Object wysiwyg = Global.getField(page, "wysiwygViewer"); //$NON-NLS-1$
+                        Object domainSelection = Global.invoke(viewer, "getDomainSelection"); //$NON-NLS-1$
+                        boolean pushed = wysiwyg != null && domainSelection != null
+                            && Global.invokeVoid(wysiwyg, "setDomainSelection", domainSelection); //$NON-NLS-1$
+                        Global.tempLog(LOG, "syncSketch: попытка " + attempt + " передано=" + pushed //$NON-NLS-1$ //$NON-NLS-2$
+                            + " выделение=" + className(domainSelection) //$NON-NLS-1$
+                            + " id эскиза=" + sketchSelectedId(representation) //$NON-NLS-1$
+                            + " id элемента=" + (item != null ? item.getId() : -1)); //$NON-NLS-1$
+                    }
+                    else if (attempt % 5 == 0)
+                    {
+                        Global.tempLog(LOG, "syncSketch: попытка " + attempt + " эскиз не готов" //$NON-NLS-1$ //$NON-NLS-2$
+                            + " (представление=" + className(representation) + ")"); //$NON-NLS-1$ //$NON-NLS-2$
+                    }
+                    if (attempt < MAX_RESTORE_ATTEMPTS)
+                        Display.getDefault().timerExec(RESTORE_DELAY_MS,
+                            () -> syncSketch(page, viewer, tree, row, attempt + 1));
+                    else
+                        Global.tempLog(LOG, "syncSketch: эскиз так и не принял выделение"); //$NON-NLS-1$
+                    return;
+                }
+                Global.tempLog(LOG, "syncSketch: принято эскизом на попытке " + attempt //$NON-NLS-1$
+                    + ", id=" + item.getId()); //$NON-NLS-1$
+            }
+
+            /**
+             * Идентификатор элемента, выбранного сейчас на эскизе, или {@code -1}. В нативном
+             * режиме именно он — единственный достоверный признак: {@code getSelection}
+             * представления читает пустое в этом режиме LWT-дерево и всегда даёт пусто.
+             */
+            private static int sketchSelectedId(Object representation)
+            {
+                Object renderService =
+                    representation == null ? null : Global.getField(representation, "renderService"); //$NON-NLS-1$
+                Object id = renderService == null ? null : Global.invoke(renderService, "getSelectedId"); //$NON-NLS-1$
+                return id instanceof Integer value ? value : -1;
+            }
+
+            /** Выбрана ли в дереве именно строка {@code row}. */
+            private static boolean isSelected(TreeViewer viewer, Object row)
+            {
+                return viewer.getSelection() instanceof IStructuredSelection structured
+                    && structured.getFirstElement() == row;
+            }
+
+            private static String className(Object o)
+            {
+                return o == null ? "null" : o.getClass().getSimpleName(); //$NON-NLS-1$
+            }
+
+            private static String selectionText(TreeViewer viewer)
+            {
+                if (!(viewer.getSelection() instanceof IStructuredSelection structured)
+                    || structured.isEmpty())
+                    return "пусто"; //$NON-NLS-1$
+                FormItem item = domainItem(structured.getFirstElement());
+                return item != null ? item.getName() : "корень/" + className(structured.getFirstElement()); //$NON-NLS-1$
             }
 
             /** {@code true}, пока выбран корень «Форма» или не выбрано ничего. */
@@ -3672,37 +4785,32 @@ public class FormEditorHook implements IStartup
                 return domainItem(structured.getFirstElement()) == null;
             }
 
-            private static Object findRowByName(TreeViewer viewer, Object node, String name, int depth)
-            {
-                if (node == null || depth > 32
-                    || !(viewer.getContentProvider() instanceof ITreeContentProvider content))
-                    return null;
-                for (Object child : content.getChildren(node))
-                {
-                    FormItem item = domainItem(child);
-                    if (item != null && name.equals(item.getName()))
-                        return child;
-                    Object found = findRowByName(viewer, child, name, depth + 1);
-                    if (found != null)
-                        return found;
-                }
-                return null;
-            }
-
             /** Ключ формы в памяти — путь её файла в рабочей области (уникален и между проектами). */
             private static String formKey(FormEditorPage page)
             {
                 try
                 {
                     Object lookup = Global.getField(page, "resourceLookup"); //$NON-NLS-1$
-                    if (!(lookup instanceof IResourceLookup resourceLookup)
-                        || !(page.getModel() instanceof EObject model))
+                    Form model = page.getModel();
+                    Global.tempLog(LOG, "formKey: lookup=" + className(lookup) //$NON-NLS-1$
+                        + " model=" + className(model)); //$NON-NLS-1$
+                    if (model == null)
                         return null;
-                    IFile file = resourceLookup.getPlatformResource(model);
-                    return file != null ? file.getFullPath().toString() : null;
+                    if (lookup instanceof IResourceLookup resourceLookup)
+                    {
+                        IFile file = resourceLookup.getPlatformResource(model);
+                        if (file != null)
+                            return file.getFullPath().toString();
+                    }
+                    // Запасной ключ: URI ресурса формы. Он тоже уникален для формы и отличается
+                    // у разных проектов, просто менее нагляден в настройках.
+                    URI uri = EcoreUtil.getURI(model);
+                    Global.tempLog(LOG, "formKey: запасной ключ по URI=" + uri); //$NON-NLS-1$
+                    return uri != null ? uri.toString() : null;
                 }
                 catch (Exception e)
                 {
+                    Global.tempLog(LOG, "formKey: исключение " + e); //$NON-NLS-1$
                     return null;
                 }
             }
@@ -3807,6 +4915,9 @@ public class FormEditorHook implements IStartup
 
         private Adapter changeAdapter;
 
+        /** Слушатель асинхронных BM-событий рабочей копии — см. {@link #hookBmChanges()}. */
+        private IBmAsyncEventListener bmChangeListener;
+
         private IExecutionListener addCommandListener;
 
         /** Защита от двойного срабатывания (тулбар + ICommandService). */
@@ -3848,9 +4959,6 @@ public class FormEditorHook implements IStartup
                 CTabFolder folder = attributesTab != null ? attributesTab.getParent() : null;
                 if (folder == null || folder.isDisposed())
                 {
-                    // ВРЕМЕННОЕ: страница УО ждёт достройки редактора.
-                    Global.tempLog("форма-подключение", "AppearancePage: попытка " + attempt //$NON-NLS-1$ //$NON-NLS-2$
-                        + ", полоса вкладок=нет"); //$NON-NLS-1$
                     scheduleRetry(editor, attempt);
                     return;
                 }
@@ -3862,7 +4970,6 @@ public class FormEditorHook implements IStartup
                 AppearancePage instance = new AppearancePage(page, folder);
                 folder.setData(KEY_PAGE, instance);
                 instance.createTab();
-                Global.tempLog("форма-подключение", "AppearancePage: вкладка создана с попытки " + attempt); //$NON-NLS-1$ //$NON-NLS-2$
             }
             catch (Exception e)
             {
@@ -4182,6 +5289,7 @@ public class FormEditorHook implements IStartup
             hookDrop();
             hookWorkingCopyChanges();
             hookAddCommand();
+            hookBmChanges();
             installLinkToggle();
             installMarkHandlers();
         }
@@ -4395,6 +5503,7 @@ public class FormEditorHook implements IStartup
             commitNow();
             unhookAddCommand();
             unhookWorkingCopyChanges();
+            unhookBmChanges();
             disposeEditorWidget();
             editor = null;
             // discard() выполняет «Detach Form DataCompositionSettings» и закрывает контекст BM
@@ -4767,7 +5876,6 @@ public class FormEditorHook implements IStartup
                     super.notifyChanged(notification);
                     if (notification.isTouch())
                         return;
-                    // ВРЕМЕННОЕ: какие EMF-события вообще доходят при правках списка.
                     scheduleCommit();
                 }
             };
@@ -4780,6 +5888,54 @@ public class FormEditorHook implements IStartup
             if (appearance != null && changeAdapter != null)
                 appearance.eAdapters().remove(changeAdapter);
             changeAdapter = null;
+        }
+
+        /**
+         * Правки рабочей копии через BM-команды («Удалить», пометки, правки ячеек) не шлют
+         * EMF-уведомления адаптерам ({@link #hookWorkingCopyChanges}) — поэтому штатный виджет
+         * узнаёт о них через асинхронные BM-события. Подписываемся так же: фильтр по классам УО
+         * сужает поток до событий рабочей копии и модели формы.
+         */
+        private void hookBmChanges()
+        {
+            if (bmChangeListener != null)
+                return;
+            IBmModel model = page.getBmModel();
+            if (model == null)
+                return;
+            bmChangeListener = this::onPageBmChange;
+            model.addAsyncEventListener(bmChangeListener,
+                BmEventFilter.eClassChangeFilter(
+                    DcsPackage.Literals.DATA_COMPOSITION_CONDITIONAL_APPEARANCE),
+                BmEventFilter.eClassChangeFilter(
+                    DcsPackage.Literals.DATA_COMPOSITION_CONDITIONAL_APPEARANCE_ITEM));
+        }
+
+        private void unhookBmChanges()
+        {
+            IBmAsyncEventListener listener = bmChangeListener;
+            if (listener == null)
+                return;
+            bmChangeListener = null;
+            IBmModel model = page.getBmModel();
+            if (model != null)
+                model.removeAsyncEventListener(listener);
+        }
+
+        /**
+         * События BM приходят вне UI-потока — решение уводим в UI. Источник события здесь не
+         * разбираем: своим коммитом мы сами меняем модель формы (те же EClass), поэтому от
+         * повторного коммита защищает проверка равенства в {@link #commitNow()}.
+         */
+        private void onPageBmChange(BmEvent event)
+        {
+            Display.getDefault().asyncExec(() -> {
+                Global.tempLog("уо-bm", "событие BM, service=" + (service != null) //$NON-NLS-1$ //$NON-NLS-2$
+                    + ", host=" + (host != null && !host.isDisposed())); //$NON-NLS-1$
+                if (service == null || host == null || host.isDisposed())
+                    return;
+                scheduleCommit();
+            });
         }
 
         /**
@@ -5039,9 +6195,6 @@ public class FormEditorHook implements IStartup
             DropTarget target = existing instanceof DropTarget dropTarget ? dropTarget
                 : new DropTarget(control, DND.DROP_COPY | DND.DROP_MOVE);
             target.setTransfer(withFormElementTransfer(target.getTransfer()));
-            // ВРЕМЕННОЕ: на каком контроле и к какому DropTarget подключились.
-            Global.tempLog("уо-перетаскивание", "hookDrop: контрол=" + control.getClass().getSimpleName() //$NON-NLS-1$ //$NON-NLS-2$
-                + ", штатный DropTarget=" + (existing instanceof DropTarget)); //$NON-NLS-1$
             target.addDropListener(new DropTargetAdapter()
             {
                 @Override public void dragEnter(DropTargetEvent event)             { allow(event); }
@@ -5090,10 +6243,6 @@ public class FormEditorHook implements IStartup
             if (names.isEmpty())
                 return;
             Object element = elementAt(viewer, control.toControl(event.x, event.y));
-            // ВРЕМЕННОЕ: куда пришёл сброс и что перетаскивали.
-            Global.tempLog("уо-перетаскивание", "drop: элемент=" //$NON-NLS-1$ //$NON-NLS-2$
-                + (element == null ? "нет (пустая область)" : element.getClass().getSimpleName()) //$NON-NLS-1$
-                + ", имена=" + names); //$NON-NLS-1$
             if (!(element instanceof DataCompositionConditionalAppearanceItem entry))
             {
                 dropToNewItem(names);
@@ -5104,8 +6253,6 @@ public class FormEditorHook implements IStartup
             boolean added = false;
             for (String name : names)
                 added |= addAppearanceFieldInService(entry, name);
-            // ВРЕМЕННОЕ: дошли ли поля до строки.
-            Global.tempLog("уо-перетаскивание", "drop в строку: добавлено=" + added); //$NON-NLS-1$ //$NON-NLS-2$
             if (!added)
                 return;
             viewer.refresh();
@@ -5315,6 +6462,8 @@ public class FormEditorHook implements IStartup
                     return;
                 DataCompositionConditionalAppearance original = form.getConditionalAppearance();
                 boolean attach = original == null || original.eIsProxy();
+                if (!attach && appearanceMatches(original, changed))
+                    return;
                 editingContext.execute(new AbstractBmTask<Void>("Comfort: условное оформление формы") //$NON-NLS-1$
                 {
                     @Override
@@ -5334,6 +6483,31 @@ public class FormEditorHook implements IStartup
             {
                 Global.logError("FormEditorHook.AppearancePage", "commit", e); //$NON-NLS-1$ //$NON-NLS-2$
             }
+        }
+
+        /**
+         * Модель формы уже совпадает с рабочей копией — коммитить нечего. Без этой проверки
+         * коммит по BM-событию зацикливался бы: {@link #mergeAppearance} сам меняет модель
+         * формы (те же EClass), событие возвращается в {@link #onPageBmChange}, снова коммит.
+         */
+        private static boolean appearanceMatches(DataCompositionConditionalAppearance original,
+            DataCompositionConditionalAppearance changed)
+        {
+            if (!Objects.equals(original.getUserSettingID(), changed.getUserSettingID()))
+                return false;
+            if (!Objects.equals(original.getUserSettingPresentation(),
+                changed.getUserSettingPresentation()))
+                return false;
+            List<DataCompositionConditionalAppearanceItem> a = original.getItems();
+            List<DataCompositionConditionalAppearanceItem> b = changed.getItems();
+            if (a.size() != b.size())
+                return false;
+            for (int i = 0; i < a.size(); i++)
+            {
+                if (!EcoreUtil.equals(a.get(i), b.get(i)))
+                    return false;
+            }
+            return true;
         }
 
         /** Условного оформления у формы ещё не было — присоединяем как внешнее свойство. */

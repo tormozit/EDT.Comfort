@@ -134,6 +134,36 @@ final class PropertySheetPlatformPropertyResolver
 
     private PropertySheetPlatformPropertyResolver() {}
 
+    /**
+     * Свойства с типом перечисления из {@code metadata.common} (например
+     * {@code ChoiceDataGetModeOnInputByString}) есть в объектной модели метаданных, но
+     * страницы синтакс-помощника для них нет — запрос к {@code BslDocumentationProvider}
+     * в EDT падает с {@code ClassCastException} (enum → {@code Help}).
+     */
+    static boolean supportsBslSyntaxHelp(Resolved resolved, EStructuralFeature feature)
+    {
+        if (resolved == null || resolved.property == null)
+            return false;
+        return !isMetadataCommonEnumFeature(feature);
+    }
+
+    static boolean isMetadataCommonEnumFeature(EStructuralFeature feature)
+    {
+        if (feature == null)
+            return false;
+        EClassifier type = feature.getEType();
+        if (!(type instanceof EEnum))
+            return false;
+        String className = type.getInstanceClassName();
+        if (className != null && className.contains("metadata.common")) //$NON-NLS-1$
+            return true;
+        org.eclipse.emf.ecore.EPackage pkg = type.getEPackage();
+        if (pkg == null)
+            return false;
+        String nsUri = pkg.getNsURI();
+        return nsUri != null && nsUri.contains("metadata/common"); //$NON-NLS-1$
+    }
+
     static Resolved resolve(Object page, Object scene, Object lwtView, String displayName)
     {
         return resolve(page, scene, lwtView, displayName, null);
@@ -205,6 +235,30 @@ final class PropertySheetPlatformPropertyResolver
             MdObject mdOwner = mdObjectForPropertyLookup(owner);
             if (mdOwner != null)
             {
+                // Сначала тип непосредственного владельца из привязки поля (реквизит, вложенный
+                // объект), а не корень редактора — иначе свойство ищется не на том типе платформы.
+                if (owner instanceof MdObject mdDirect && mdDirect != mdOwner)
+                {
+                    Resolved direct = resolveMdProperty(mdDirect, feature, english);
+                    if (direct != null)
+                    {
+                        Global.tempLog(TEMP_TOPIC, "мд (прямой): " //$NON-NLS-1$
+                            + McoreUtil.getTypeName(direct.ownerType) + '.' + direct.englishName()
+                            + " → " + direct.russianName()); //$NON-NLS-1$
+                        return direct;
+                    }
+                }
+                if (owner != null && feature != null && featureBelongsTo(owner, feature))
+                {
+                    Resolved byClass = resolveByEClassType(owner, feature, english);
+                    if (byClass != null)
+                    {
+                        Global.tempLog(TEMP_TOPIC, "мд (класс " + owner.eClass().getName() + "): " //$NON-NLS-1$ //$NON-NLS-2$
+                            + McoreUtil.getTypeName(byClass.ownerType) + '.' + byClass.englishName()
+                            + " → " + byClass.russianName()); //$NON-NLS-1$
+                        return byClass;
+                    }
+                }
                 Resolved resolved = resolveMdProperty(mdOwner, feature, english);
                 if (resolved != null)
                 {
@@ -806,6 +860,8 @@ final class PropertySheetPlatformPropertyResolver
     private static Property findPropertyByFeatureType(Type ownerType, EStructuralFeature feature)
     {
         if (ownerType == null || feature == null)
+            return null;
+        if (isMetadataCommonEnumFeature(feature))
             return null;
         String platformTypeName = platformTypeNameForFeature(feature.getEType());
         if (platformTypeName == null || platformTypeName.isEmpty())

@@ -36,8 +36,12 @@ final class PropertySheetUiContext
             if (fromMethod != null && isPlausiblePaletteRoot(fromMethod))
                 return fromMethod;
         }
-        Object palette = Global.invoke(page, "getPaletteComponent"); //$NON-NLS-1$
-        Object scene = palette != null ? Global.invoke(palette, "getScene") : null; //$NON-NLS-1$
+        Object scene = Global.invoke(page, "getScene"); //$NON-NLS-1$
+        if (scene == null)
+        {
+            Object palette = Global.invoke(page, "getPaletteComponent"); //$NON-NLS-1$
+            scene = palette != null ? Global.invoke(palette, "getScene") : null; //$NON-NLS-1$
+        }
         if (scene != null)
         {
             Object renderer = Global.invoke(scene, "getRenderer"); //$NON-NLS-1$
@@ -88,7 +92,11 @@ final class PropertySheetUiContext
         if (page == null)
             return null;
         Object raw = Global.invoke(page, "getNewPaletteScrolledComposite"); //$NON-NLS-1$
-        return raw instanceof ScrolledComposite ? (ScrolledComposite) raw : null;
+        if (raw instanceof ScrolledComposite scrolled)
+            return scrolled;
+        Object managedForm = Global.invoke(page, "getManagedForm"); //$NON-NLS-1$
+        Object form = managedForm != null ? Global.invoke(managedForm, "getForm") : null; //$NON-NLS-1$
+        return form instanceof ScrolledComposite scrolled ? scrolled : null;
     }
 
     static boolean isPlausiblePaletteRoot(Composite composite)

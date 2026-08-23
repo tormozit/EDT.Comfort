@@ -3,9 +3,14 @@ package tormozit;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.function.BooleanSupplier;
 
+import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.widgets.Control;
+import org.eclipse.swt.widgets.Display;
+import org.eclipse.swt.widgets.Listener;
+import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Text;
 
 /**
@@ -32,7 +37,24 @@ import org.eclipse.swt.widgets.Text;
  */
 final class AefFieldFocus
 {
+    /**
+     * Задержки перепроверок после программной активации поля. EDT доводит наполнение панели
+     * «Свойства» асинхронно и при этом ставит ввод в первое поле («Имя»), отбирая его у
+     * активированного — поэтому фокус ещё некоторое время удерживается (см. {@link #holdFocus}).
+     */
+    private static final int[] FOCUS_HOLD_DELAYS = { 100, 250, 500, 1000 };
+
     private static volatile Object lwtKeyboardFocusSource;
+    private static volatile Class<?> swtLightCompositeClass;
+    /** Текущее удержание: новая активация обесценивает расписание прежней. */
+    private static Object holdToken;
+    /** Контрол, в который активация поставила ввод последним — по нему видно, отобрали ли его. */
+    private static Object lastFocusedControl;
+    /** Идёт повтор активации из удержания — своё же расписание обесценивать не надо. */
+    private static boolean replayingHold;
+    /** Время последнего ввода пользователя — после него фокус у него не отбирается. */
+    private static long lastUserInputTime;
+    private static boolean userInputListenerInstalled;
 
     private AefFieldFocus() {}
 
@@ -214,6 +236,154 @@ final class AefFieldFocus
 
     /** @return {@code true}, если контрол реально ЗАБРАЛ фокус (а не просто принял вызов) */
     static boolean focusNativeControl(Object nativeControl)
+    {
+        boolean focused = doFocusNativeControl(nativeControl);
+        if (focused)
+        {
+            // Активировали ДРУГОЕ поле — удержание прежнего немедленно обесценивается, иначе оно
+            // возвращает ввод в прежнее свойство уже после нового перехода (и мигает старое имя).
+            if (!replayingHold)
+                holdToken = null;
+            lastFocusedControl = nativeControl;
+            // Активация поля идёт через этот класс отовсюду, поэтому и панель «Свойства» узнаёт
+            // о ней здесь — сценариям перехода (поиск, дерево элементов формы) знать про
+            // подсветку имени свойства незачем.
+            PropertySheetActivePropertyHook.onFieldActivatedProgrammatically(nativeControl);
+        }
+        return focused;
+    }
+
+    /**
+     * Ввод сейчас в этом контроле. У LWT-контрола флаг {@code isFocused()} остаётся поднятым и
+     * после того, как ввод ушёл в соседний SWT-контрол (поле «Высота» — это {@code StyledText},
+     * отдельный виджет, а не light-контрол на том же канвасе), поэтому флаг признаётся, только
+     * если SWT-ввод и правда на канвасе этого light-контрола.
+     */
+    static boolean hasFocusNow(Object nativeControl)
+    {
+        if (nativeControl == null)
+            return false;
+        if (nativeControl instanceof Control control)
+            return !control.isDisposed() && control.isFocusControl();
+        return Boolean.TRUE.equals(Global.invoke(nativeControl, "isFocused")) //$NON-NLS-1$
+            && swtCanvasHasFocus(nativeControl);
+    }
+
+    /** SWT-ввод находится на канвасе ({@code SwtLightComposite}) этого light-контрола. */
+    private static boolean swtCanvasHasFocus(Object lightControl)
+    {
+        Class<?> hostClass = swtLightCompositeClass(lightControl);
+        Object host = hostClass != null
+            ? Global.invoke(hostClass, "getHostSwtLightComposite", lightControl) : null; //$NON-NLS-1$
+        Object swtComposite = host != null ? Global.invoke(host, "getSwtComposite") : null; //$NON-NLS-1$
+        if (!(swtComposite instanceof Control canvas) || canvas.isDisposed())
+            return false;
+        Display display = canvas.getDisplay();
+        Control focus = display != null && !display.isDisposed() ? display.getFocusControl() : null;
+        for (Control c = focus; c != null && !c.isDisposed(); c = c.getParent())
+        {
+            if (c == canvas)
+                return true;
+        }
+        return false;
+    }
+
+    private static Class<?> swtLightCompositeClass(Object lightControl)
+    {
+        Class<?> cached = swtLightCompositeClass;
+        if (cached != null)
+            return cached;
+        try
+        {
+            cached = Class.forName("com._1c.g5.lwt.interop.SwtLightComposite", false, //$NON-NLS-1$
+                lightControl.getClass().getClassLoader());
+            swtLightCompositeClass = cached;
+            return cached;
+        }
+        catch (ClassNotFoundException e)
+        {
+            return null;
+        }
+    }
+
+    /**
+     * Удержание активации свойства: EDT дозаполняет панель «Свойства» уже ПОСЛЕ того, как поле
+     * найдено и активировано, при этом пересоздаёт её контролы и ставит ввод в первое поле
+     * («Имя») — свойство, к которому переходил пользователь, оставалось неактивированным.
+     * Удерживать сам контрол бесполезно (после перезаполнения он уже не на сцене), поэтому
+     * повторяется вся активация: {@code activation} ищет поле в АКТУАЛЬНОЙ сцене заново.
+     * <p>
+     * Расписание обрывается, как только пользователь сам что-то нажал (отбирать у него ввод
+     * нельзя), сменилось активное окно или началась активация другого поля.
+     *
+     * @param activation ищет поле свойства и ставит в него ввод; {@code true} — получилось
+     */
+    static void holdActivation(BooleanSupplier activation)
+    {
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        installUserInputListener(display);
+        Object token = new Object();
+        holdToken = token;
+        holdActivation(activation, 0, token, display.getActiveShell(), System.currentTimeMillis());
+    }
+
+    private static void holdActivation(BooleanSupplier activation, int attempt, Object token,
+        Shell shell, long activatedAt)
+    {
+        if (attempt >= FOCUS_HOLD_DELAYS.length)
+        {
+            PropertySheetActivePropertyHook.onActivationSettled();
+            return;
+        }
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        display.timerExec(FOCUS_HOLD_DELAYS[attempt], () -> {
+            if (token != holdToken)
+            {
+                return; // начался другой переход — о его завершении сообщит он сам
+            }
+            if (lastUserInputTime > activatedAt || display.isDisposed()
+                || display.getActiveShell() != shell)
+            {
+                PropertySheetActivePropertyHook.onActivationSettled();
+                return;
+            }
+            // Ввод там же, где мы его оставили — панель ещё не вмешалась, повторять нечего.
+            boolean keptFocus = hasFocusNow(lastFocusedControl);
+            if (!keptFocus)
+            {
+                replayingHold = true;
+                boolean again;
+                try
+                {
+                    again = activation.getAsBoolean();
+                }
+                finally
+                {
+                    replayingHold = false;
+                }
+                Global.tempLog("свойства-активное", //$NON-NLS-1$
+                    "удержание: повтор активации #" + attempt + " → " + again); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            holdActivation(activation, attempt + 1, token, shell, activatedAt);
+        });
+    }
+
+    /** Ввод пользователя отменяет удержание: перехватывать у него фокус недопустимо. */
+    private static void installUserInputListener(Display display)
+    {
+        if (userInputListenerInstalled)
+            return;
+        userInputListenerInstalled = true;
+        Listener listener = event -> lastUserInputTime = System.currentTimeMillis();
+        display.addFilter(SWT.MouseDown, listener);
+        display.addFilter(SWT.KeyDown, listener);
+    }
+
+    private static boolean doFocusNativeControl(Object nativeControl)
     {
         if (nativeControl instanceof Control control)
             return !control.isDisposed() && control.setFocus() && control.isFocusControl();

@@ -219,8 +219,35 @@ final class PropertySheetControlInterop
         Object def = Global.invoke(fieldComponent, "getFieldDefinition"); //$NON-NLS-1$
         if (def == null)
             def = Global.invoke(fieldComponent, "getDefinition"); //$NON-NLS-1$
+        if (def == null)
+            def = definitionFromDrivenParent(fieldComponent);
         return def;
     }
+
+    /**
+     * Редактор объекта метаданных: у самого поля определения нет — {@code DefinitionDrivenComponent}
+     * держит карту {@code componentToDefinitionMap}, куда при сборке страницы попадают и подпись,
+     * и редактор значения (оба с одним и тем же {@code IFieldDefinition}).
+     */
+    private static Object definitionFromDrivenParent(Object component)
+    {
+        Object parent = Global.invoke(component, "getParent"); //$NON-NLS-1$
+        for (int level = 0; parent != null && level < PARENT_SCAN_DEPTH; level++)
+        {
+            Object mapObj = Global.getField(parent, "componentToDefinitionMap"); //$NON-NLS-1$
+            if (mapObj instanceof java.util.Map<?, ?> map && !map.isEmpty())
+            {
+                Object def = scanFieldComponent(component, 0, c -> map.get(c));
+                if (def != null)
+                    return def;
+            }
+            parent = Global.invoke(parent, "getParent"); //$NON-NLS-1$
+        }
+        return null;
+    }
+
+    /** Сколько уровней родителей просматривать в поисках {@code componentToDefinitionMap}. */
+    private static final int PARENT_SCAN_DEPTH = 8;
 
     /** Английское EMF-имя признака (внутреннее). */
     static String resolveModelPropertyName(Object page, Object scene, Object lwtView, String displayName)
@@ -271,42 +298,74 @@ final class PropertySheetControlInterop
         }
     }
 
-    private static EmfBinding emfBindingFromField(Object fieldComponent)
+    /**
+     * Глубина обхода потомков поля. В палитре «Свойства» подпись и модель лежат на самом
+     * {@code FieldComponent}, а в редакторе объекта метаданных он — контейнер: подпись
+     * держит дочерний {@code LabelComponent}, модель — дочерний редактор
+     * ({@code EnumComponent}, {@code CheckBoxComponent}, {@code MultilanguageComponent} и т.п.).
+     */
+    private static final int FIELD_SCAN_DEPTH = 3;
+
+    /** Первый непустой результат {@code visitor} на компоненте или его потомках. */
+    private static <T> T scanFieldComponent(Object component, int depth,
+            java.util.function.Function<Object, T> visitor)
     {
-        if (fieldComponent == null)
+        if (component == null || depth > FIELD_SCAN_DEPTH)
             return null;
-        Object model = Global.invoke(fieldComponent, "getModel"); //$NON-NLS-1$
-        return emfBindingFromModel(model);
+        T own = visitor.apply(component);
+        if (own != null)
+            return own;
+        java.util.Iterator<?> it = componentChildren(component);
+        while (it != null && it.hasNext())
+        {
+            T found = scanFieldComponent(it.next(), depth + 1, visitor);
+            if (found != null)
+                return found;
+        }
+        return null;
     }
 
+    private static EmfBinding emfBindingFromField(Object fieldComponent)
+    {
+        return scanFieldComponent(fieldComponent, 0,
+            component -> emfBindingFromModel(Global.invoke(component, "getModel"))); //$NON-NLS-1$
+    }
+
+    /**
+     * Привязка «модель AEF → EMF-признак». Опора не на имя класса модели, а на штатный
+     * контракт {@code IEmfAttribute}: {@code getObject()} возвращает {@code EObject},
+     * {@code getProperty()} — {@code EStructuralFeature} (базовые {@code EmfValue},
+     * {@code EmfMap}, {@code EmfList} бандла {@code com._1c.g5.aef2.emf}).
+     *
+     * <p>Модели полей редактора объекта метаданных ({@code EmfMultilanguageModel},
+     * {@code EmfCodeModel}, {@code EmfTypeDescriptionModel} и т.п.) наследуют этот контракт,
+     * но подстроки {@code EmfValue} в имени класса не содержат — по имени класса признак
+     * у них не определялся.
+     */
     private static EmfBinding emfBindingFromModel(Object model)
     {
         if (model == null)
             return null;
-        String cn = model.getClass().getName();
-        if (cn.contains("EmfValue")) //$NON-NLS-1$
-        {
-            Object ownerObj = Global.invoke(model, "getObject"); //$NON-NLS-1$
-            Object featureObj = Global.invoke(model, "getProperty"); //$NON-NLS-1$
-            EObject owner = ownerObj instanceof EObject ? (EObject) ownerObj : null;
-            EStructuralFeature feature = featureObj instanceof EStructuralFeature
-                    ? (EStructuralFeature) featureObj : null;
-            String name = feature != null ? feature.getName() : null;
-            return name != null ? new EmfBinding(owner, feature, name) : null;
-        }
-        if (cn.contains("EObjectFeature")) //$NON-NLS-1$
-        {
-            Object ownerObj = Global.invoke(model, "getObject"); //$NON-NLS-1$
-            Object featureObj = Global.invoke(model, "getTargetFeature"); //$NON-NLS-1$
-            if (featureObj == null)
-                featureObj = Global.invoke(model, "getFeature"); //$NON-NLS-1$
-            EObject owner = ownerObj instanceof EObject ? (EObject) ownerObj : null;
-            EStructuralFeature feature = featureObj instanceof EStructuralFeature
-                    ? (EStructuralFeature) featureObj : null;
-            String name = feature != null ? feature.getName() : null;
-            return name != null ? new EmfBinding(owner, feature, name) : null;
-        }
-        return null;
+        Object ownerObj = Global.invoke(model, "getObject"); //$NON-NLS-1$
+        EmfBinding attribute = emfBinding(ownerObj, Global.invoke(model, "getProperty")); //$NON-NLS-1$
+        if (attribute != null)
+            return attribute;
+        // Модель ссылки на другой объект: признак лежит отдельно от getProperty().
+        Object featureObj = Global.invoke(model, "getTargetFeature"); //$NON-NLS-1$
+        if (featureObj == null)
+            featureObj = Global.invoke(model, "getFeature"); //$NON-NLS-1$
+        return emfBinding(ownerObj, featureObj);
+    }
+
+    private static EmfBinding emfBinding(Object ownerObj, Object featureObj)
+    {
+        if (!(featureObj instanceof EStructuralFeature feature))
+            return null;
+        String name = feature.getName();
+        if (name == null || name.isEmpty())
+            return null;
+        EObject owner = ownerObj instanceof EObject eObject ? eObject : null;
+        return new EmfBinding(owner, feature, name);
     }
 
     private static String resolveRussianPropertyName(String english, String symbolicPath,
@@ -839,7 +898,10 @@ final class PropertySheetControlInterop
     {
         Object paletteModel = page != null ? Global.invoke(page, "getPaletteModel") : null; //$NON-NLS-1$
         if (paletteModel == null)
-            return null;
+        {
+            Object model = page != null ? Global.invoke(page, "getModel") : null; //$NON-NLS-1$
+            return model instanceof EObject eObject ? eObject : null;
+        }
         Object objects = Global.invoke(paletteModel, "getObjects"); //$NON-NLS-1$
         if (!(objects instanceof Iterable))
             return null;
@@ -977,7 +1039,7 @@ final class PropertySheetControlInterop
         if (scene == null || lwtView == null)
             return null;
         Object matchedVm = viewModelForLwtView(renderer, lwtView);
-        Object root = Global.invoke(scene, "getComponent"); //$NON-NLS-1$
+        Object root = sceneRootComponent(scene);
         Object found = findFieldComponentInTree(root, renderer, lwtView, matchedVm);
         if (found != null)
             return found;
@@ -988,6 +1050,145 @@ final class PropertySheetControlInterop
                 found = findFieldComponentInTree(defComp, renderer, lwtView, matchedVm);
         }
         return found;
+    }
+
+    /** Корень AEF-сцены: у страницы редактора МД {@code getComponent()} иногда ещё пуст. */
+    private static Object sceneRootComponent(Object scene)
+    {
+        if (scene == null)
+            return null;
+        Object root = Global.invoke(scene, "getComponent"); //$NON-NLS-1$
+        if (root != null)
+            return root;
+        return Global.invoke(scene, "getManagingComponent"); //$NON-NLS-1$
+    }
+
+    /**
+     * Подпись AEF-поля. Палитра «Свойства» держит её в поле {@code label} самого
+     * {@code FieldComponent}, редактор объекта метаданных — в дочернем {@code LabelComponent}.
+     */
+    static String displayNameForFieldComponent(Object fieldComponent)
+    {
+        if (fieldComponent == null)
+            return null;
+        Object label = Global.getField(fieldComponent, "label"); //$NON-NLS-1$
+        if (label != null)
+        {
+            Object labelVm = Global.invoke(label, "getLabel"); //$NON-NLS-1$
+            if (labelVm == null)
+                labelVm = Global.getField(label, "viewModel"); //$NON-NLS-1$
+            String text = labelTextOfViewModel(labelVm);
+            if (text != null && !text.isEmpty())
+                return text;
+        }
+        return scanFieldComponent(fieldComponent, 0,
+            PropertySheetControlInterop::labelTextOfComponentViewModels);
+    }
+
+    /** Текст {@code LabelViewModel} среди моделей представления самого компонента. */
+    private static String labelTextOfComponentViewModels(Object component)
+    {
+        Object viewModels = Global.invoke(component, "getViewModels"); //$NON-NLS-1$
+        if (!(viewModels instanceof Iterable))
+            return null;
+        for (Object vm : (Iterable<?>) viewModels)
+        {
+            if (vm == null || !vm.getClass().getName().contains("LabelViewModel")) //$NON-NLS-1$
+                continue;
+            String text = labelTextOfViewModel(vm);
+            if (text != null && !text.isEmpty())
+                return text;
+        }
+        return null;
+    }
+
+    /**
+     * Имя свойства с фокусом ввода — через {@code FieldComponent}, не порядок
+     * {@code viewModelToView} (важно для двухколоночной палитры редактора МД).
+     */
+    static String displayNameForFocusedField(Object page)
+    {
+        Object scene = page != null ? Global.invoke(page, "getScene") : null; //$NON-NLS-1$
+        if (scene == null)
+            return null;
+        Object renderer = Global.invoke(scene, "getRenderer"); //$NON-NLS-1$
+        Object mapObj = renderer != null ? Global.getField(renderer, "viewModelToView") : null; //$NON-NLS-1$
+        if (!(mapObj instanceof java.util.Map<?, ?> map))
+            return null;
+        for (java.util.Map.Entry<?, ?> entry : map.entrySet())
+        {
+            Object key = entry.getKey();
+            if (key == null)
+                continue;
+            String keyClass = key.getClass().getName();
+            if (keyClass.contains("LabelViewModel") || keyClass.contains("SectionViewModel")) //$NON-NLS-1$ //$NON-NLS-2$
+                continue;
+            Object lwtView = entry.getValue();
+            Object nativeControl = Global.invoke(lwtView, "getNativeControl"); //$NON-NLS-1$
+            if (!PropertySheetActivePropertyHook.isFocusedDeep(nativeControl, 0))
+                continue;
+            Object field = findFieldComponentForView(scene, renderer, lwtView);
+            String name = displayNameForFieldComponent(field);
+            if (name != null && !name.isEmpty())
+                return name;
+        }
+        return null;
+    }
+
+    /** Ввод в одном из редакторов палитры (не в подписи). */
+    static boolean hasFocusedEditorView(Object page)
+    {
+        Object scene = page != null ? Global.invoke(page, "getScene") : null; //$NON-NLS-1$
+        if (scene == null)
+            return false;
+        Object renderer = Global.invoke(scene, "getRenderer"); //$NON-NLS-1$
+        Object mapObj = renderer != null ? Global.getField(renderer, "viewModelToView") : null; //$NON-NLS-1$
+        if (!(mapObj instanceof java.util.Map<?, ?> map))
+            return false;
+        for (java.util.Map.Entry<?, ?> entry : map.entrySet())
+        {
+            Object key = entry.getKey();
+            if (key == null)
+                continue;
+            String keyClass = key.getClass().getName();
+            if (keyClass.contains("LabelViewModel") || keyClass.contains("SectionViewModel")) //$NON-NLS-1$ //$NON-NLS-2$
+                continue;
+            Object nativeControl = Global.invoke(entry.getValue(), "getNativeControl"); //$NON-NLS-1$
+            if (PropertySheetActivePropertyHook.isFocusedDeep(nativeControl, 0))
+                return true;
+        }
+        return false;
+    }
+
+    /** Подпись поля по LWT-контролу под курсором (клик по редактору значения). */
+    static String displayNameForLwtHit(Object page, Object hitLightControl)
+    {
+        if (page == null || hitLightControl == null)
+            return null;
+        Object scene = Global.invoke(page, "getScene"); //$NON-NLS-1$
+        if (scene == null)
+            return null;
+        Object renderer = Global.invoke(scene, "getRenderer"); //$NON-NLS-1$
+        Object lwtView = lwtViewForLightControl(renderer, hitLightControl);
+        if (lwtView == null)
+            return null;
+        Object field = findFieldComponentForView(scene, renderer, lwtView);
+        return displayNameForFieldComponent(field);
+    }
+
+    private static Object lwtViewForLightControl(Object renderer, Object hitLightControl)
+    {
+        if (renderer == null || hitLightControl == null)
+            return null;
+        Object mapObj = Global.getField(renderer, "viewModelToView"); //$NON-NLS-1$
+        if (!(mapObj instanceof java.util.Map<?, ?> map))
+            return null;
+        for (java.util.Map.Entry<?, ?> entry : map.entrySet())
+        {
+            if (lightControlFromView(entry.getValue()) == hitLightControl)
+                return entry.getValue();
+        }
+        return null;
     }
 
     private static String featureNameFromPaletteDefinition(Object page, String displayLabel)
@@ -1081,7 +1282,7 @@ final class PropertySheetControlInterop
     {
         if (scene == null || displayName == null || displayName.isEmpty())
             return null;
-        Object root = Global.invoke(scene, "getComponent"); //$NON-NLS-1$
+        Object root = sceneRootComponent(scene);
         Object found = findFieldComponentByDisplayNameInTree(root, displayName);
         if (found != null)
             return found;
@@ -1114,15 +1315,9 @@ final class PropertySheetControlInterop
     {
         if (component == null)
             return null;
-        if (component.getClass().getName().contains("FieldComponent")) //$NON-NLS-1$
-        {
-            if (fieldComponentOwnsView(component, renderer, lwtView, matchedVm))
-                return component;
-        }
+        // Сначала потомки: у вложенных полей точнее самое внутреннее, а не объемлющее.
         java.util.Iterator<?> it = componentChildren(component);
-        if (it == null)
-            return null;
-        while (it.hasNext())
+        while (it != null && it.hasNext())
         {
             Object child = it.next();
             if (child != null)
@@ -1132,6 +1327,9 @@ final class PropertySheetControlInterop
                     return found;
             }
         }
+        if (component.getClass().getName().contains("FieldComponent") //$NON-NLS-1$
+            && fieldComponentOwnsView(component, renderer, lwtView, matchedVm))
+            return component;
         return null;
     }
 
@@ -1141,16 +1339,9 @@ final class PropertySheetControlInterop
             return null;
         if (component.getClass().getName().contains("FieldComponent")) //$NON-NLS-1$
         {
-            Object label = Global.getField(component, "label"); //$NON-NLS-1$
-            if (label != null)
-            {
-                Object labelVm = Global.invoke(label, "getLabel"); //$NON-NLS-1$
-                if (labelVm == null)
-                    labelVm = Global.getField(label, "viewModel"); //$NON-NLS-1$
-                String text = labelTextOfViewModel(labelVm);
-                if (displayName.equals(text))
-                    return component;
-            }
+            String text = displayNameForFieldComponent(component);
+            if (PropertySheetActivePropertyHook.propertyNamesMatch(displayName, text))
+                return component;
         }
         java.util.Iterator<?> it = componentChildren(component);
         if (it == null)
@@ -1182,16 +1373,24 @@ final class PropertySheetControlInterop
             if (viewForViewModel(renderer, labelVm) == lwtView)
                 return true;
         }
-        Object viewModels = Global.invoke(field, "getViewModels"); //$NON-NLS-1$
-        if (viewModels instanceof Iterable)
+        // Поле-контейнер: подпись и редактор — отдельные дочерние компоненты.
+        return scanFieldComponent(field, 0,
+            component -> ownsViewDirectly(component, renderer, lwtView, matchedVm) ? Boolean.TRUE : null) != null;
+    }
+
+    /** Модель представления самого компонента (без потомков) соответствует искомому view. */
+    private static boolean ownsViewDirectly(Object component, Object renderer, Object lwtView,
+            Object matchedVm)
+    {
+        Object viewModels = Global.invoke(component, "getViewModels"); //$NON-NLS-1$
+        if (!(viewModels instanceof Iterable))
+            return false;
+        for (Object vm : (Iterable<?>) viewModels)
         {
-            for (Object vm : (Iterable<?>) viewModels)
-            {
-                if (matchedVm != null && matchedVm == vm)
-                    return true;
-                if (viewForViewModel(renderer, vm) == lwtView)
-                    return true;
-            }
+            if (matchedVm != null && matchedVm == vm)
+                return true;
+            if (viewForViewModel(renderer, vm) == lwtView)
+                return true;
         }
         return false;
     }
@@ -1228,10 +1427,8 @@ final class PropertySheetControlInterop
 
     private static String featureNameFromFieldComponent(Object fieldComponent)
     {
-        if (fieldComponent == null)
-            return null;
-        Object model = Global.invoke(fieldComponent, "getModel"); //$NON-NLS-1$
-        return featureNameFromModel(model);
+        return scanFieldComponent(fieldComponent, 0,
+            component -> featureNameFromModel(Global.invoke(component, "getModel"))); //$NON-NLS-1$
     }
 
     private static String featureNameFromModel(Object model)

@@ -11,10 +11,7 @@ import java.util.WeakHashMap;
 
 import com._1c.g5.v8.dt.mcore.Property;
 import com._1c.g5.v8.dt.mcore.util.McoreUtil;
-import com.google.inject.Injector;
 
-import org.eclipse.core.runtime.Platform;
-import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.viewers.StructuredSelection;
 import org.eclipse.swt.SWT;
@@ -32,6 +29,8 @@ import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Menu;
 import org.eclipse.swt.widgets.MenuItem;
+import org.eclipse.ui.IEditorPart;
+import org.eclipse.ui.IEditorReference;
 import org.eclipse.ui.IPartListener2;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.IViewPart;
@@ -42,14 +41,17 @@ import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.IWorkbenchPart;
 import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
+import org.eclipse.ui.forms.editor.IFormPage;
 import org.eclipse.ui.PlatformUI;
-import org.eclipse.xtext.resource.IResourceServiceProvider;
-import org.osgi.framework.Bundle;
+
+import com._1c.g5.v8.dt.md.ui.editor.aef.AbstractDtGranularEditorAefPage;
+import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
 
 /**
- * Текущее (последнее активное) свойство в панели «Свойства»: имя свойства окрашивается
- * акцентным цветом, а при перезаполнении панели (очистка фильтра, повторный показ того же
- * объекта) строка этого свойства доводится до видимой области.
+ * Текущее (последнее активное) свойство в AEF-палитре свойств: панель «Свойства» и
+ * страницы свойств редактора объекта метаданных (вкладки «Основные» и др.). Имя
+ * свойства окрашивается акцентным цветом, а при перезаполнении палитры строка
+ * доводится до видимой области.
  *
  * <p>Геометрию строк и оверлей по LWT-канве не использует: подпись свойства —
  * {@code LightLabel} со штатными {@code setTextColor(Color)} и {@code invalidate()}.
@@ -78,9 +80,26 @@ public class PropertySheetActivePropertyHook implements IStartup
     private static final int SCROLL_MARGIN = 8;
     /** Глубина спуска по LWT-детям при поиске сфокусированного поля. */
     private static final int LIGHT_DEPTH = 6;
+    /** Длительность одного состояния мигания жирностью. */
+    private static final int BLINK_STEP_MS = 500;
+    /** Сколько раз включается жирный при мигании (2 цикла «обычный → жирный»). */
+    private static final int BLINK_CYCLES = 2;
+    /**
+     * Шаг мигания одним и тем же объектом: {@code Display#timerExec(-1, …)} отменяет задание
+     * по совпадению ссылки, а ссылка на метод каждый раз давала бы новый объект — старый тик
+     * продолжал бы срабатывать и после остановки.
+     */
+    private static final Runnable BLINK_TICK = PropertySheetActivePropertyHook::blinkTick;
+    /** Сколько ждать завершения перехода, если о нём не сообщили (активация без удержания). */
+    private static final int ACTIVATION_FREEZE_MS = 1500;
+    private static final Runnable ACTIVATION_SETTLED =
+        PropertySheetActivePropertyHook::onActivationSettled;
 
     /** Панели «Свойства», за которыми уже следим. */
     private static final Set<IViewPart> HOOKED_VIEWS =
+        Collections.newSetFromMap(new WeakHashMap<>());
+    /** Редакторы объектов метаданных с AEF-страницами свойств. */
+    private static final Set<DtGranularEditor<?>> HOOKED_EDITORS =
         Collections.newSetFromMap(new WeakHashMap<>());
     /** Контролы палитры, на которых уже висит слушатель перерисовки. */
     private static final Set<Control> WATCHED_CONTROLS =
@@ -90,6 +109,13 @@ public class PropertySheetActivePropertyHook implements IStartup
     private static String activePropertyName;
     /** Окрашенная сейчас подпись ({@code LightLabel}). */
     private static Object highlightedLabel;
+    /**
+     * Страница, которой принадлежит окрашенная подпись. Жирность зависит от того, стоит ли
+     * ввод в поле ЭТОГО свойства, а проверять это надо по своей странице: кэш палитры
+     * ({@link #palettePage}) может указывать уже на другую (панель «Свойства» вместо
+     * редактора объекта метаданных), и тогда решение о жирности принималось бы по чужой сцене.
+     */
+    private static Object highlightedPage;
     /** Исходный цвет окрашенной подписи ({@code null} — цвет по умолчанию). */
     private static Color originalTextColor;
     /** Исходный шрифт окрашенной подписи ({@code null} — шрифт SWT-хоста). */
@@ -102,10 +128,23 @@ public class PropertySheetActivePropertyHook implements IStartup
     private static boolean boldApplied;
     /** Полужирный шрифт подписи (создаётся один раз на палитру). */
     private static Font boldFont;
+    /** Идёт мигание жирностью (свойство стало текущим без участия пользователя). */
+    private static boolean blinkActive;
+    /** Номер шага мигания: 0 — включить жирный, 1 — снять, 2 — включить, 3 — конец. */
+    private static int blinkStep;
+    /** Контрол программно активированного поля — мигнёт свойство именно его строки. */
+    private static Object blinkControl;
+    /** Идёт программный переход к свойству: жирность заморожена до его завершения. */
+    private static boolean activationInProgress;
+    /** Свойство, к которому идёт программный переход — только оно подсвечивается во время него. */
+    private static String targetPropertyName;
+    /** Идёт обработка ввода пользователя в панели: активация поля отсюда — не повод мигать. */
+    private static boolean handlingPaletteInput;
     /** Дебаунс: пересинхронизация уже запланирована. */
     private static boolean syncScheduled;
     /** Кэш контролов палитры — {@link #onUserInput} не должен обходить сцену на каждую клавишу. */
     private static IViewPart paletteView;
+    private static DtGranularEditor<?> paletteEditor;
     private static Object palettePage;
     private static Composite paletteRoot;
     /** Контрол всей страницы панели (палитра + область фильтра) — для проверки «событие в панели». */
@@ -173,6 +212,12 @@ public class PropertySheetActivePropertyHook implements IStartup
                 if (PropertyNameIdentifierHook.isPropertySheetView(view))
                     hookView(view);
             }
+            for (IEditorReference ref : page.getEditorReferences())
+            {
+                IEditorPart editor = ref.getEditor(false);
+                if (editor instanceof DtGranularEditor<?> granular)
+                    hookEditor(granular);
+            }
         }
         window.getPartService().addPartListener(new IPartListener2()
         {
@@ -190,8 +235,22 @@ public class PropertySheetActivePropertyHook implements IStartup
                 IWorkbenchPart part = ref != null ? ref.getPart(false) : null;
                 if (PropertyNameIdentifierHook.isPropertySheetView(part))
                     hookView((IViewPart)part);
+                else if (part instanceof DtGranularEditor<?> granular)
+                    hookEditor(granular);
             }
         });
+    }
+
+    private static void hookEditor(DtGranularEditor<?> editor)
+    {
+        if (editor == null || !HOOKED_EDITORS.add(editor))
+            return;
+        editor.addPageChangedListener(event -> {
+            resolveAttempts = 0;
+            scheduleSync();
+        });
+        resolveAttempts = 0;
+        scheduleSync();
     }
 
     private static void hookView(IViewPart view)
@@ -217,25 +276,115 @@ public class PropertySheetActivePropertyHook implements IStartup
     {
         if (!(event.widget instanceof Control control) || control.isDisposed())
             return;
-        if (!isInsidePanel(control))
+        Object page = resolvePageFromControl(control);
+        if (page == null)
             return;
+        // Клик или клавиша в самой панели: пользователь уже здесь, привлекать внимание не нужно.
+        boolean paletteInput = event.type == SWT.MouseDown || event.type == SWT.KeyDown;
+        if (paletteInput)
+        {
+            blinkControl = null;
+            onActivationSettled(); // пользователь вмешался — переход закончен, жирность разморожена
+            stopBlink();
+        }
+        bindPalette(page);
         // Ввод в области фильтра тоже относится к панели: очистка фильтра перезаполняет
         // палитру, а значит подпись текущего свойства придётся красить заново.
         scheduleSync();
-        IViewPart view = paletteView;
         // Клик мог попасть в саму подпись — там фокусируемого контрола нет, и по фокусу
         // свойство не определить; точку клика запоминаем в display-координатах (сам контрол
         // к моменту asyncExec может уже быть пересоздан).
         Point clickDisplay = event.type == SWT.MouseDown ? control.toDisplay(event.x, event.y) : null;
-        Display.getDefault().asyncExec(() -> updateActiveProperty(view, control, clickDisplay));
+        Display.getDefault().asyncExec(() -> {
+            handlingPaletteInput = paletteInput;
+            try
+            {
+                updateActiveProperty(page, control, clickDisplay);
+            }
+            finally
+            {
+                handlingPaletteInput = false;
+            }
+        });
     }
 
-    /** Только сравнение ссылок по цепочке родителей — вызывается на каждую клавишу в EDT. */
-    private static boolean isInsidePanel(Control control)
+    /** Привязывает кэш палитры к странице, в которой произошло событие. */
+    private static void bindPalette(Object page)
     {
-        Composite root = palettePageControl != null && !palettePageControl.isDisposed()
+        if (page == null)
+            return;
+        palettePage = page;
+        paletteView = null;
+        paletteEditor = null;
+        for (IViewPart view : HOOKED_VIEWS)
+        {
+            Object sheetPage = PropertyNameIdentifierHook.resolvePropertySheetPage(view);
+            if (sheetPage == page)
+            {
+                paletteView = view;
+                break;
+            }
+        }
+        if (paletteView == null)
+        {
+            for (DtGranularEditor<?> editor : HOOKED_EDITORS)
+            {
+                if (editor.getActivePageInstance() == page)
+                {
+                    paletteEditor = editor;
+                    break;
+                }
+            }
+        }
+    }
+
+    /** Страница AEF-палитры, содержащая {@code control}; {@code null} — вне палитры. */
+    private static Object resolvePageFromControl(Control control)
+    {
+        if (control == null || control.isDisposed())
+            return null;
+        Composite cachedRoot = palettePageControl != null && !palettePageControl.isDisposed()
             ? palettePageControl : paletteRoot;
-        if (root == null || root.isDisposed() || paletteView == null)
+        if (cachedRoot != null && isUnder(control, cachedRoot) && palettePage != null)
+            return palettePage;
+        for (IViewPart view : HOOKED_VIEWS)
+        {
+            Object page = PropertyNameIdentifierHook.resolvePropertySheetPage(view);
+            Composite host = pageControlFor(page);
+            if (host != null && isUnder(control, host))
+                return page;
+        }
+        for (DtGranularEditor<?> editor : HOOKED_EDITORS)
+        {
+            IFormPage page = editor.getActivePageInstance();
+            if (!isAefPropertyPage(page))
+                continue;
+            Composite host = pageControlFor(page);
+            if (host != null && isUnder(control, host))
+                return page;
+        }
+        return null;
+    }
+
+    private static boolean isAefPropertyPage(IFormPage page)
+    {
+        return page instanceof AbstractDtGranularEditorAefPage<?>;
+    }
+
+    private static Composite pageControlFor(Object page)
+    {
+        if (page == null)
+            return null;
+        Object pageControl = Global.invoke(page, "getControl"); //$NON-NLS-1$
+        if (pageControl instanceof Composite composite && !composite.isDisposed())
+            return composite;
+        pageControl = Global.invoke(page, "getPartControl"); //$NON-NLS-1$
+        return pageControl instanceof Composite composite && !composite.isDisposed() ? composite : null;
+    }
+
+    private static boolean isUnder(Control control, Composite root)
+    {
+        if (root == null || root.isDisposed())
             return false;
         for (Control c = control; c != null && !c.isDisposed(); c = c.getParent())
         {
@@ -249,18 +398,18 @@ public class PropertySheetActivePropertyHook implements IStartup
      * Делает текущим свойство, по которому кликнули (если клик пришёлся в подпись), иначе —
      * свойство, чей редактор сейчас в фокусе.
      */
-    private static void updateActiveProperty(IViewPart view, Control clicked, Point clickDisplay)
+    private static void updateActiveProperty(Object page, Control clicked, Point clickDisplay)
     {
-        Map<?, ?> map = viewModelToView(view);
+        Map<?, ?> map = viewModelToView(page);
         if (map == null)
             return;
         if (clickDisplay != null && !clicked.isDisposed()
-            && activateByLabelClick(view, map, clicked, clickDisplay))
+            && activateByLabelClick(page, map, clicked, clickDisplay))
             return;
-        String focused = focusedPropertyName(view);
+        String focused = focusedPropertyName(page);
         if (focused != null)
         {
-            setActiveProperty(view, focused);
+            setActiveProperty(page, focused);
             return;
         }
         if (clickDisplay == null || clicked.isDisposed())
@@ -269,27 +418,31 @@ public class PropertySheetActivePropertyHook implements IStartup
         // такое поле по карте сцены не опознать ни по самому контролу, ни по его потомкам.
         // Тогда свойство определяется по СТРОКЕ кликнутого LWT-контрола: подпись и редактор
         // одной строки лежат на одном хосте и совпадают по вертикали.
-        String byRow = propertyNameForClickedRow(view, clicked, clickDisplay);
+        String byRow = propertyNameForClickedRow(page, clicked, clickDisplay);
         if (byRow != null)
         {
-            setActiveProperty(view, byRow);
+            setActiveProperty(page, byRow);
             return;
         }
+        if (clickDisplay != null && !clicked.isDisposed())
+        {
+            Object hit = lightControlAt(clicked, clickDisplay);
+            String fromField = PropertySheetControlInterop.displayNameForLwtHit(page, hit);
+            if (fromField != null && !fromField.isEmpty())
+            {
+                setActiveProperty(page, fromField);
+                return;
+            }
+        }
         Control focusControl = Display.getDefault().getFocusControl();
-        Global.tempLog(TEMP_TOPIC, "клик в панели: поле свойства не определено, ввод в " //$NON-NLS-1$
+        Global.tempLog(TEMP_TOPIC, "клик в палитре: поле свойства не определено, ввод в " //$NON-NLS-1$
             + (focusControl == null ? "<null>" : focusControl.getClass().getName())); //$NON-NLS-1$
     }
 
-    /**
-     * Подпись строки, в которую пришёлся клик. Геометрия минимальная и локальная: берём
-     * LWT-контрол под точкой (штатный хиттест {@code controlFromPoint}) и ищем подпись того же
-     * хоста, чья полоса по вертикали пересекается с ним; из нескольких берётся ближайшая по
-     * центру. Никаких display-координат и обхода SWT-дерева — только координаты одного хоста.
-     */
-    private static String propertyNameForClickedRow(IViewPart view, Control clicked, Point click)
+    private static String propertyNameForClickedRow(Object page, Control clicked, Point click)
     {
         Object hit = lightControlAt(clicked, click);
-        Map<?, ?> map = hit != null ? viewModelToView(view) : null;
+        Map<?, ?> map = hit != null ? viewModelToView(page) : null;
         Object hitHost = hit != null ? lightHost(hit) : null;
         Rectangle hitBounds = hitHost != null ? boundsInHost(hitHost, hit) : null;
         if (map == null || hitBounds == null)
@@ -345,9 +498,20 @@ public class PropertySheetActivePropertyHook implements IStartup
     }
 
     /** Подпись свойства, чей редактор сейчас держит ввод; {@code null} — такого поля нет. */
-    private static String focusedPropertyName(IViewPart view)
+    private static String focusedPropertyName(Object page)
     {
-        Map<?, ?> map = viewModelToView(view);
+        String fromField = PropertySheetControlInterop.displayNameForFocusedField(page);
+        if (fromField != null && !fromField.isEmpty())
+            return fromField;
+
+        // Двухколоночная палитра: порядок viewModelToView не совпадает с парами «подпись→редактор».
+        // Если ввод уже в редакторе, не угадывать свойство по карте — это давало чужую подпись
+        // из левой колонки и мигание подсветки.
+        if (PropertySheetControlInterop.hasFocusedEditorView(page))
+            return null;
+
+        // Запасной путь для одноколоночной палитры «Свойства» (LabelViewModel сразу перед редактором).
+        Map<?, ?> map = viewModelToView(page);
         if (map == null)
             return null;
         String labelText = null;
@@ -382,7 +546,7 @@ public class PropertySheetActivePropertyHook implements IStartup
      *
      * @return {@code true}, если клик пришёлся в подпись (определение по фокусу уже не нужно)
      */
-    private static boolean activateByLabelClick(IViewPart view, Map<?, ?> map, Control clicked, Point click)
+    private static boolean activateByLabelClick(Object page, Map<?, ?> map, Control clicked, Point click)
     {
         Object hit = lightControlAt(clicked, click);
         if (hit == null)
@@ -429,7 +593,7 @@ public class PropertySheetActivePropertyHook implements IStartup
             return false;
         }
 
-        setActiveProperty(view, hitLabel);
+        setActiveProperty(page, hitLabel);
         editors.addAll(actionBars);
         for (Object editor : editors)
         {
@@ -499,7 +663,7 @@ public class PropertySheetActivePropertyHook implements IStartup
     /** Любая подпись палитры — нужна только как источник classloader'а бандла LWT. */
     private static Object anyLabelView()
     {
-        Map<?, ?> map = paletteView != null ? viewModelToView(paletteView) : null;
+        Map<?, ?> map = palettePage != null ? viewModelToView(palettePage) : null;
         if (map == null)
             return null;
         for (Map.Entry<?, ?> entry : map.entrySet())
@@ -511,20 +675,150 @@ public class PropertySheetActivePropertyHook implements IStartup
         return null;
     }
 
-    private static void setActiveProperty(IViewPart view, String labelText)
+    private static void setActiveProperty(Object page, String labelText)
     {
-        if (labelText.equals(activePropertyName))
+        // Во время перехода принимается только целевое свойство: панель по дороге ставит ввод
+        // в первое поле («Имя»), и подсветка прыгала бы по чужим строкам.
+        if (activationInProgress && targetPropertyName != null
+            && !propertyNamesMatch(labelText, targetPropertyName))
+        {
             return;
+        }
+        if (propertyNamesMatch(labelText, activePropertyName))
+        {
+            consumeBlinkRequest(page, labelText);
+            return;
+        }
         Global.tempLog(TEMP_TOPIC, "текущее свойство: " + labelText); //$NON-NLS-1$
-        activePropertyName = labelText;
+        activePropertyName = normalizePropertyDisplayName(labelText);
         clearHighlight();
-        applyHighlight(view, false);
+        applyHighlight(page, false);
+        consumeBlinkRequest(page, labelText);
     }
 
-    /** Карта {@code viewModel → view} рендерера сцены панели (порядок вставки — порядок строк). */
-    private static Map<?, ?> viewModelToView(IViewPart view)
+    /**
+     * Поле панели «Свойства» активировано программно — командой плагина, а не руками
+     * пользователя: переход к найденному свойству из результатов поиска, двойной клик по
+     * колонке дерева элементов формы и т.п. Взгляд в такой момент не на панели, поэтому имя
+     * свойства мигнёт жирностью, когда подсветка на него встанет (если она уже там — сразу).
+     * <p>
+     * Вызывать из единственного места, где фокус реально ставится ({@link AefFieldFocus} и
+     * наш оверлей поля «Тип»), а не из каждого сценария перехода: активацию свойства делают
+     * все через них, и знать про мигание им не нужно.
+     */
+    static void onFieldActivatedProgrammatically(Object nativeControl)
     {
-        Object page = PropertyNameIdentifierHook.resolvePropertySheetPage(view);
+        if (handlingPaletteInput || nativeControl == null)
+            return; // фокус в поле поставил клик по имени свойства в самой панели
+        blinkControl = nativeControl;
+        activationInProgress = true;
+        targetPropertyName = resolveTargetProperty(nativeControl);
+        // Пока идёт борьба за фокус, подсвечено либо целевое свойство, либо никакое: прежнее
+        // свойство уже не то, к которому переходит пользователь, а промежуточные (панель по
+        // дороге ставит ввод в «Имя») только мельтешили бы.
+        clearHighlight();
+        activePropertyName = null;
+        // Страховка на случай, если о завершении перехода никто не сообщит (активация без
+        // удержания): жирность не должна остаться замороженной навсегда.
+        Display.getDefault().timerExec(ACTIVATION_FREEZE_MS, ACTIVATION_SETTLED);
+    }
+
+    /**
+     * Переход к свойству завершён (удержание отработало или прервано). Пока он идёт, жирность
+     * подписи не меняется: EDT в это время несколько раз отбирает и отдаёт ввод, и подпись ЕЩЁ
+     * ТЕКУЩЕГО (старого) свойства дёргалась жирностью на каждый перехват — со стороны это
+     * выглядело как мигание не того свойства.
+     */
+    static void onActivationSettled()
+    {
+        if (!activationInProgress)
+            return;
+        activationInProgress = false;
+        targetPropertyName = null;
+        Display.getDefault().timerExec(-1, ACTIVATION_SETTLED);
+        // Борьба закончилась, а целевое свойство так и не стало текущим (панель оставила ввод
+        // где-то ещё) — подсвечиваем то свойство, в поле которого ввод оказался.
+        if (activePropertyName == null)
+        {
+            String focused = focusedPropertyName(palettePage);
+            if (focused != null)
+                setActiveProperty(palettePage, focused);
+        }
+        syncBoldWithFocus();
+    }
+
+    /** Подпись свойства активируемого поля — определяется, пока его контрол ещё на сцене. */
+    private static String resolveTargetProperty(Object nativeControl)
+    {
+        String name = propertyNameForControl(palettePage, nativeControl);
+        if (name != null)
+            return name;
+        for (IViewPart view : HOOKED_VIEWS)
+        {
+            name = propertyNameForControl(
+                PropertyNameIdentifierHook.resolvePropertySheetPage(view), nativeControl);
+            if (name != null)
+                return name;
+        }
+        for (DtGranularEditor<?> editor : HOOKED_EDITORS)
+        {
+            IFormPage page = editor.getActivePageInstance();
+            name = isAefPropertyPage(page) ? propertyNameForControl(page, nativeControl) : null;
+            if (name != null)
+                return name;
+        }
+        return null;
+    }
+
+    /**
+     * Запускает отложенное мигание, если подсветка встала на свойство ИМЕННО активированного
+     * поля. Сверка идёт по контролу, а не по прежнему имени: в момент активации панель ещё
+     * считает сфокусированным старое свойство, и по имени мигало бы оно.
+     */
+    private static void consumeBlinkRequest(Object page, String labelText)
+    {
+        if (blinkControl == null
+            || !propertyNamesMatch(labelText, propertyNameForControl(page, blinkControl)))
+        {
+            return;
+        }
+        blinkControl = null;
+        startBlink();
+    }
+
+    /** Подпись свойства, чьей строке принадлежит контрол поля ({@code null} — не найдено). */
+    private static String propertyNameForControl(Object page, Object nativeControl)
+    {
+        Map<?, ?> map = viewModelToView(page);
+        if (map == null)
+            return null;
+        String labelText = null;
+        for (Map.Entry<?, ?> entry : map.entrySet())
+        {
+            Object key = entry.getKey();
+            String keyClass = key == null ? "" : key.getClass().getName(); //$NON-NLS-1$
+            if (keyClass.contains(LABEL_VIEW_MODEL))
+            {
+                labelText = labelText(key);
+                continue;
+            }
+            if (keyClass.contains(SECTION_VIEW_MODEL))
+            {
+                labelText = null;
+                continue;
+            }
+            if (labelText != null && !labelText.isEmpty()
+                && Global.invoke(entry.getValue(), "getNativeControl") == nativeControl) //$NON-NLS-1$
+            {
+                return labelText;
+            }
+        }
+        return null;
+    }
+
+    /** Карта {@code viewModel → view} рендерера сцены палитры (порядок вставки — порядок строк). */
+    private static Map<?, ?> viewModelToView(Object page)
+    {
         Object scene = page != null ? Global.invoke(page, "getScene") : null; //$NON-NLS-1$
         Object renderer = scene != null ? Global.invoke(scene, "getRenderer") : null; //$NON-NLS-1$
         Object map = renderer != null ? Global.getField(renderer, "viewModelToView") : null; //$NON-NLS-1$
@@ -545,7 +839,7 @@ public class PropertySheetActivePropertyHook implements IStartup
      * а фокус держит вложенный {@code LightText}, поэтому спускаемся по LWT-детям
      * (тот же обход, что в {@link AefFieldFocus}).
      */
-    private static boolean isFocusedDeep(Object nativeControl, int depth)
+    static boolean isFocusedDeep(Object nativeControl, int depth)
     {
         if (nativeControl == null || depth > LIGHT_DEPTH)
             return false;
@@ -556,7 +850,8 @@ public class PropertySheetActivePropertyHook implements IStartup
             // самого контейнера такое поле не определялось, и свойство не становилось текущим.
             return containsFocus(control);
         }
-        if (Boolean.TRUE.equals(Global.invoke(nativeControl, "isFocused"))) //$NON-NLS-1$
+        // Флагу isFocused() light-контрола верить нельзя без проверки канваса — см. AefFieldFocus.
+        if (AefFieldFocus.hasFocusNow(nativeControl))
             return true;
         // LightText в режиме ввода держит выделение и фокус в SWT-оверлее (StyledText).
         if (containsFocus(Global.getField(nativeControl, "overlay") instanceof Control overlay //$NON-NLS-1$
@@ -604,12 +899,11 @@ public class PropertySheetActivePropertyHook implements IStartup
      * @param afterRebuild панель перезаполнена (подпись пересоздана) — строку нужно ещё и
      *        довести до видимой области
      */
-    private static void applyHighlight(IViewPart view, boolean afterRebuild)
+    private static void applyHighlight(Object page, boolean afterRebuild)
     {
         if (activePropertyName == null)
             return;
-        Object page = PropertyNameIdentifierHook.resolvePropertySheetPage(view);
-        Map<?, ?> map = viewModelToView(view);
+        Map<?, ?> map = viewModelToView(page);
         if (page == null || map == null)
             return;
 
@@ -619,7 +913,7 @@ public class PropertySheetActivePropertyHook implements IStartup
             Object key = entry.getKey();
             if (key == null || !key.getClass().getName().contains(LABEL_VIEW_MODEL))
                 continue;
-            if (activePropertyName.equals(labelText(key)))
+            if (propertyNamesMatch(activePropertyName, labelText(key)))
             {
                 labelView = entry.getValue();
                 break;
@@ -648,8 +942,12 @@ public class PropertySheetActivePropertyHook implements IStartup
         originalExtent = null;
         boldApplied = false;
         highlightedLabel = label;
+        highlightedPage = page;
         // setTextColor/setFont сами вызывают invalidate() — отдельная перерисовка не нужна.
-        if (!activeFieldFocused())
+        boolean focusedNow = activeFieldFocused(page);
+        // Во время мигания жирность держит blinkTick — иначе перезаполнение палитры сбивало бы фазу.
+        // Во время программного перехода жирность заморожена (см. onActivationSettled).
+        if (!focusedNow && !blinkActive && !activationInProgress)
             applyBold(label);
         Global.invokeVoid(label, "setTextColor", accentColor()); //$NON-NLS-1$
         Global.tempLog(TEMP_TOPIC, "окрашено «" + activePropertyName + "»" //$NON-NLS-1$ //$NON-NLS-2$
@@ -663,6 +961,10 @@ public class PropertySheetActivePropertyHook implements IStartup
     {
         Object label = highlightedLabel;
         highlightedLabel = null;
+        highlightedPage = null;
+        // Подсветки больше нет — мигать нечему (новую подпись мигание запросит само).
+        blinkActive = false;
+        Display.getDefault().timerExec(-1, BLINK_TICK);
         Color original = originalTextColor;
         originalTextColor = null;
         removeBold(label);
@@ -707,7 +1009,77 @@ public class PropertySheetActivePropertyHook implements IStartup
         Object label = highlightedLabel;
         if (label == null || Boolean.TRUE.equals(Global.invoke(label, "isDisposed"))) //$NON-NLS-1$
             return;
-        boolean bold = !activeFieldFocused();
+        // Подписи палитры переиспользуются: после перезаполнения тот же LightLabel показывает
+        // уже другое свойство. Менять на нём жирность нельзя — этим займётся applyHighlight,
+        // когда подсветка переедет на подпись текущего свойства.
+        if (!labelDisplayTextMatches(activePropertyName, label))
+            return;
+        boolean bold = !activeFieldFocused(highlightedPage);
+        // Пока идёт мигание, жирностью распоряжается только оно: фокус в этот момент панель
+        // часто ставит сама (после перезаполнения), и по нему мигание гасить нельзя — гасит
+        // его именно ввод пользователя (см. onUserInput). Во время программного перехода
+        // жирность тоже не трогаем — EDT там несколько раз перехватывает ввод туда-обратно.
+        if (blinkActive || activationInProgress)
+            return;
+        if (bold == boldApplied)
+            return;
+        setBold(label, bold);
+    }
+
+    /**
+     * Свойство стало текущим без участия пользователя — он на панель не смотрит, поэтому имя
+     * мигает жирностью: {@link #BLINK_CYCLES} циклов «обычный {@link #BLINK_STEP_MS} мс →
+     * жирный {@link #BLINK_STEP_MS} мс». После мигания жирность возвращается к обычному
+     * правилу (см. {@link #syncBoldWithFocus}). Любой клик или ввод в панели мигание гасит.
+     */
+    private static void startBlink()
+    {
+        Object label = highlightedLabel;
+        if (label == null || Boolean.TRUE.equals(Global.invoke(label, "isDisposed"))) //$NON-NLS-1$
+            return;
+        Display.getDefault().timerExec(-1, BLINK_TICK); // прежнее мигание
+        blinkActive = true;
+        blinkStep = 0;
+        setBold(label, false); // мигание начинается с обычного шрифта
+        Display.getDefault().timerExec(BLINK_STEP_MS, BLINK_TICK);
+    }
+
+    /** Один шаг мигания: чётные шаги включают жирный, нечётные снимают. */
+    private static void blinkTick()
+    {
+        if (!blinkActive)
+            return;
+        Object label = highlightedLabel;
+        if (label == null || Boolean.TRUE.equals(Global.invoke(label, "isDisposed")) //$NON-NLS-1$
+            || !labelDisplayTextMatches(activePropertyName, label))
+        {
+            blinkActive = false;
+            return;
+        }
+        if (blinkStep >= BLINK_CYCLES * 2 - 1)
+        {
+            stopBlink();
+            return;
+        }
+        setBold(label, blinkStep % 2 == 0);
+        blinkStep++;
+        Display.getDefault().timerExec(BLINK_STEP_MS, BLINK_TICK);
+    }
+
+    /** Гасит мигание и возвращает жирность к обычному правилу (по фокусу). */
+    private static void stopBlink()
+    {
+        if (!blinkActive)
+            return;
+        blinkActive = false;
+        blinkStep = 0;
+        Display.getDefault().timerExec(-1, BLINK_TICK);
+        syncBoldWithFocus();
+    }
+
+    /** Включает или снимает жирность подписи, если она ещё не в нужном состоянии. */
+    private static void setBold(Object label, boolean bold)
+    {
         if (bold == boldApplied)
             return;
         if (bold)
@@ -721,13 +1093,25 @@ public class PropertySheetActivePropertyHook implements IStartup
         }
     }
 
-    /** Ввод сейчас в поле текущего свойства (а не в другом поле панели и не вне её). */
-    private static boolean activeFieldFocused()
+    /**
+     * Ввод сейчас в поле текущего свойства (а не в другом поле палитры и не вне её).
+     * <p>
+     * Флажок ({@code LightCheckbox}) фокус по клику удерживает недолго: EDT перезаполняет
+     * палитру, LWT-контролы пересоздаются, и {@link #focusedPropertyName} перестаёт видеть
+     * сфокусированное поле, хотя ввод из панели никуда не уходил. Раньше это читалось как
+     * «ввод ушёл» и подпись становилась жирной прямо под курсором. Поэтому: если ни одно поле
+     * палитры не опознано как сфокусированное, но SWT-фокус остался внутри самой панели —
+     * считаем, что ввод по-прежнему в поле текущего свойства. Жирность вернётся, когда фокус
+     * реально уйдёт из панели или встанет в поле другого свойства (там имя определяется).
+     */
+    private static boolean activeFieldFocused(Object page)
     {
-        IViewPart view = paletteView;
-        if (view == null || activePropertyName == null)
+        if (page == null || activePropertyName == null)
             return false;
-        return activePropertyName.equals(focusedPropertyName(view));
+        String focused = focusedPropertyName(page);
+        if (focused != null)
+            return propertyNamesMatch(activePropertyName, focused);
+        return containsFocus(pageControlFor(page));
     }
 
     /**
@@ -922,8 +1306,8 @@ public class PropertySheetActivePropertyHook implements IStartup
         if (root == null || root.isDisposed())
             return;
         paletteRoot = root;
-        Object pageControl = Global.invoke(page, "getControl"); //$NON-NLS-1$
-        palettePageControl = pageControl instanceof Composite c && !c.isDisposed() ? c : root;
+        Composite host = pageControlFor(page);
+        palettePageControl = host != null ? host : root;
         watch(root);
         watch(PropertySheetUiContext.findPaletteScrolledComposite(page));
         watch(PropertySheetUiContext.findPaletteContent(page));
@@ -960,7 +1344,7 @@ public class PropertySheetActivePropertyHook implements IStartup
     private static void sync()
     {
         resolvePalette();
-        IViewPart view = paletteView;
+        Object page = palettePage;
         if (paletteRoot == null || paletteRoot.isDisposed())
         {
             // Палитра ещё не построена: своих событий, чтобы дождаться, у нас пока нет
@@ -970,7 +1354,7 @@ public class PropertySheetActivePropertyHook implements IStartup
             return;
         }
         resolveAttempts = 0;
-        if (view == null || activePropertyName == null)
+        if (page == null || activePropertyName == null)
             return;
         if (isHighlightAlive())
             return;
@@ -982,7 +1366,7 @@ public class PropertySheetActivePropertyHook implements IStartup
         originalBounds = null;
         originalExtent = null;
         boldApplied = false;
-        applyHighlight(view, true);
+        applyHighlight(page, true);
     }
 
     /** Окрашенная подпись жива И всё ещё принадлежит текущему свойству. */
@@ -993,11 +1377,43 @@ public class PropertySheetActivePropertyHook implements IStartup
             return false;
         // LWT-контролы палитры могут переиспользоваться: тот же LightLabel после
         // перезаполнения показывает уже другое свойство — тогда цвет надо вернуть на место.
-        Object text = Global.invoke(label, "getText"); //$NON-NLS-1$
-        if (activePropertyName.equals(text))
+        if (labelDisplayTextMatches(activePropertyName, label))
             return true;
         clearHighlight();
         return false;
+    }
+
+    /** Сверка подписи палитры с {@code LabelViewModel}: у {@code LightLabel} может быть «:» в конце. */
+    private static boolean labelDisplayTextMatches(String propertyName, Object label)
+    {
+        if (propertyName == null || label == null)
+            return false;
+        Object text = Global.invoke(label, "getText"); //$NON-NLS-1$
+        if (!(text instanceof String shown) || shown.isEmpty())
+            return false;
+        return propertyNamesMatch(propertyName, shown);
+    }
+
+    /** Имя свойства без суффикса «:» / «: », как в {@code LabelViewModel.getText()}. */
+    static String normalizePropertyDisplayName(String name)
+    {
+        if (name == null || name.isEmpty())
+            return name;
+        if (name.endsWith(": ")) //$NON-NLS-1$
+            return name.substring(0, name.length() - 2);
+        if (name.endsWith(":")) //$NON-NLS-1$
+            return name.substring(0, name.length() - 1);
+        return name;
+    }
+
+    /** Сравнение имён свойства: {@code LabelViewModel}, {@code FieldComponent}, {@code LightLabel}. */
+    static boolean propertyNamesMatch(String a, String b)
+    {
+        if (a == null || b == null)
+            return false;
+        String na = normalizePropertyDisplayName(a);
+        String nb = normalizePropertyDisplayName(b);
+        return !na.isEmpty() && na.equals(nb);
     }
 
     // =========================================================================
@@ -1005,15 +1421,28 @@ public class PropertySheetActivePropertyHook implements IStartup
     // =========================================================================
 
     /** Свойство под точкой: отображаемое имя + view его подписи. */
+    /**
+     * Свойство под указателем ВМЕСТЕ со страницей, в которой оно найдено. Страница нужна
+     * именно снимком: пункт меню срабатывает много позже показа меню, и к этому моменту
+     * кэш палитры может указывать уже на другую страницу (панель «Свойства» вместо
+     * редактора объекта метаданных) — тогда разбор шёл бы по чужой сцене.
+     */
     private static final class HitProperty
     {
         final String name;
         final Object labelView;
+        final Object page;
 
-        HitProperty(String name, Object labelView)
+        HitProperty(String name, Object labelView, Object page)
         {
             this.name = name;
             this.labelView = labelView;
+            this.page = page;
+        }
+
+        Object scene()
+        {
+            return page != null ? Global.invoke(page, "getScene") : null; //$NON-NLS-1$
         }
     }
 
@@ -1031,10 +1460,17 @@ public class PropertySheetActivePropertyHook implements IStartup
      */
     static String valuePropertyNameAt(Control control, Point display)
     {
-        if (control == null || control.isDisposed() || !isInsidePanel(control))
+        if (control == null || control.isDisposed())
             return null;
+        Object page = resolvePageFromControl(control);
+        if (page == null)
+            return null;
+        bindPalette(page);
         Object hit = lightControlAt(control, display);
-        Map<?, ?> map = hit != null && paletteView != null ? viewModelToView(paletteView) : null;
+        String fromField = PropertySheetControlInterop.displayNameForLwtHit(page, hit);
+        if (fromField != null && !fromField.isEmpty())
+            return fromField;
+        Map<?, ?> map = hit != null && palettePage != null ? viewModelToView(palettePage) : null;
         if (map == null)
             return null;
         String label = null;
@@ -1057,10 +1493,10 @@ public class PropertySheetActivePropertyHook implements IStartup
     }
 
     /** Свойство, чья подпись находится под точкой (штатный LWT-хиттест, своей геометрии нет). */
-    private static HitProperty propertyAt(Control control, Point display)
+    private static HitProperty propertyAt(Object page, Control control, Point display)
     {
         Object hit = lightControlAt(control, display);
-        Map<?, ?> map = hit != null && paletteView != null ? viewModelToView(paletteView) : null;
+        Map<?, ?> map = hit != null && page != null ? viewModelToView(page) : null;
         if (map == null)
             return null;
         for (Map.Entry<?, ?> entry : map.entrySet())
@@ -1071,7 +1507,7 @@ public class PropertySheetActivePropertyHook implements IStartup
             if (PropertySheetControlInterop.lightControlFromView(entry.getValue()) != hit)
                 continue;
             String name = labelText(key);
-            return name.isEmpty() ? null : new HitProperty(name, entry.getValue());
+            return name.isEmpty() ? null : new HitProperty(name, entry.getValue(), page);
         }
         return null;
     }
@@ -1082,11 +1518,14 @@ public class PropertySheetActivePropertyHook implements IStartup
      */
     private static void onMenuDetect(Event event)
     {
-        if (!(event.widget instanceof Control control) || control.isDisposed()
-            || !isInsidePanel(control))
+        if (!(event.widget instanceof Control control) || control.isDisposed())
             return;
+        Object page = resolvePageFromControl(control);
+        if (page == null)
+            return;
+        bindPalette(page);
         Point display = new Point(event.x, event.y);
-        HitProperty hit = propertyAt(control, display);
+        HitProperty hit = propertyAt(page, control, display);
         if (hit == null)
             return;
         event.doit = false;
@@ -1107,7 +1546,7 @@ public class PropertySheetActivePropertyHook implements IStartup
         // у свойств, которых нет в объектной модели платформы, открывать нечего, и пункт,
         // ведущий в пустоту, из меню убираем (разбор кэшируется, повторные вызовы дешёвые).
         SyntaxHelp.PropertyDoc doc =
-            SyntaxHelp.resolve(currentPage(), sceneForCopy(), hit.labelView, hit.name);
+            SyntaxHelp.resolve(hit.page, hit.scene(), hit.labelView, hit.name);
         if (doc != null && doc.viewPage != null)
         {
             new MenuItem(menu, SWT.SEPARATOR);
@@ -1117,7 +1556,7 @@ public class PropertySheetActivePropertyHook implements IStartup
             syntaxItem.setToolTipText("Открыть справку по свойству в синтакс-помощнике" //$NON-NLS-1$
                 + Global.pluginSignForTooltip());
             syntaxItem.addListener(SWT.Selection,
-                e -> SyntaxHelp.open(currentPage(), sceneForCopy(), hit.labelView, hit.name));
+                e -> SyntaxHelp.open(hit.page, hit.scene(), hit.labelView, hit.name));
         }
 
         menu.addListener(SWT.Hide, e -> control.getDisplay().asyncExec(() ->
@@ -1129,33 +1568,11 @@ public class PropertySheetActivePropertyHook implements IStartup
         menu.setVisible(true);
     }
 
-    /**
-     * Страница панели на СЕЙЧАС, а не из кэша: кэш обновляется по перерисовке палитры, и на
-     * момент клика он может отставать — тогда разбор свойства пойдёт по сцене прежнего объекта.
-     */
-    private static Object currentPage()
-    {
-        Object page = paletteView != null
-            ? PropertyNameIdentifierHook.resolvePropertySheetPage(paletteView) : null;
-        if (page != null && page != palettePage)
-        {
-            Global.tempLog(TEMP_TOPIC, "страница панели обновлена на месте (кэш отставал)"); //$NON-NLS-1$
-            palettePage = page;
-        }
-        return page != null ? page : palettePage;
-    }
-
-    private static Object sceneForCopy()
-    {
-        Object page = currentPage();
-        return page != null ? Global.invoke(page, "getScene") : null; //$NON-NLS-1$
-    }
-
     /** Английское имя признака модели ({@code conditionalAppearance}) для строки палитры. */
     private static String englishFeature(HitProperty hit)
     {
-        String resolved = PropertySheetControlInterop.resolveCopyPropertyName(currentPage(),
-            sceneForCopy(), hit.labelView, hit.name);
+        String resolved = PropertySheetControlInterop.resolveCopyPropertyName(hit.page,
+            hit.scene(), hit.labelView, hit.name);
         return resolved != null ? resolved : ""; //$NON-NLS-1$
     }
 
@@ -1169,15 +1586,15 @@ public class PropertySheetActivePropertyHook implements IStartup
      */
     private static void copyPropertyName(Control control, HitProperty hit)
     {
-        String english = PropertySheetControlInterop.resolveModelPropertyName(currentPage(),
-            sceneForCopy(), hit.labelView, hit.name);
+        String english = PropertySheetControlInterop.resolveModelPropertyName(hit.page,
+            hit.scene(), hit.labelView, hit.name);
         if (english == null || english.isEmpty())
             english = englishFeature(hit);
         String text;
         try
         {
-            text = PropertySheetPlatformPropertyResolver.russianNameForCopy(currentPage(),
-                sceneForCopy(), hit.labelView, hit.name, english);
+            text = PropertySheetPlatformPropertyResolver.russianNameForCopy(hit.page,
+                hit.scene(), hit.labelView, hit.name, english);
         }
         catch (Exception e)
         {
@@ -1198,15 +1615,27 @@ public class PropertySheetActivePropertyHook implements IStartup
      */
     private static void onMouseHover(Event event)
     {
-        if (!(event.widget instanceof Control control) || control.isDisposed()
-            || !isInsidePanel(control))
+        if (!(event.widget instanceof Control control) || control.isDisposed())
             return;
-        HitProperty hit = propertyAt(control, control.toDisplay(event.x, event.y));
+        Object page = resolvePageFromControl(control);
+        if (page == null)
+            return;
+        bindPalette(page);
+        HitProperty hit = propertyAt(page, control, control.toDisplay(event.x, event.y));
         if (hit == null)
             return;
         if (control == tooltipControl && hit.name.equals(tooltipProperty))
             return;
-        String text = SyntaxHelp.describe(currentPage(), sceneForCopy(), hit.labelView, hit.name);
+        String text;
+        try
+        {
+            text = SyntaxHelp.describe(hit.page, hit.scene(), hit.labelView, hit.name);
+        }
+        catch (RuntimeException e)
+        {
+            Global.tempLogException(TEMP_TOPIC, "подсказка «" + hit.name + "»", e); //$NON-NLS-1$ //$NON-NLS-2$
+            text = null;
+        }
         if (text == null || text.isEmpty())
         {
             // Часть свойств палитры существует только в метаданных: описания у них нет и быть
@@ -1248,12 +1677,37 @@ public class PropertySheetActivePropertyHook implements IStartup
      */
     private static void resolvePalette()
     {
+        if (palettePage != null)
+        {
+            Composite root = PropertySheetUiContext.findPaletteRoot(palettePage);
+            if (root != null && !root.isDisposed())
+            {
+                if (paletteRoot == null || paletteRoot.isDisposed() || paletteRoot != root)
+                    ensureRebuildWatch(palettePage);
+                return;
+            }
+        }
         for (IViewPart view : HOOKED_VIEWS)
         {
             Object page = PropertyNameIdentifierHook.resolvePropertySheetPage(view);
             if (page == null)
                 continue;
             paletteView = view;
+            paletteEditor = null;
+            if (page != palettePage || paletteRoot == null || paletteRoot.isDisposed())
+            {
+                palettePage = page;
+                ensureRebuildWatch(page);
+            }
+            return;
+        }
+        for (DtGranularEditor<?> editor : HOOKED_EDITORS)
+        {
+            IFormPage page = editor.getActivePageInstance();
+            if (!isAefPropertyPage(page))
+                continue;
+            paletteView = null;
+            paletteEditor = editor;
             if (page != palettePage || paletteRoot == null || paletteRoot.isDisposed())
             {
                 palettePage = page;
@@ -1267,12 +1721,10 @@ public class PropertySheetActivePropertyHook implements IStartup
      * Документация платформы по свойству палитры: русское имя свойства, страница для панели
      * «Синтакс-помощник» и текст описания для подсказки при наведении.
      *
-     * <p><b>Почему не через {@code Class.forName}.</b> Все нужные классы лежат во внутренних
-     * пакетах бандлов {@code com._1c.g5.v8.dt.bsl.ui} и {@code com._1c.g5.v8.dt.platform.doc};
-     * эти пакеты наружу не экспортируются, и {@code Class.forName} из НАШЕГО бандла падает с
-     * {@code ClassNotFoundException} (подтверждено логом). Классы грузятся загрузчиком самого
-     * бандла — {@code Platform.getBundle(...).loadClass(...)}, он ограничения экспорта не
-     * проверяет. По той же причине не работал июньский вариант, перенесённый сюда ранее.
+     * <p><b>Доступ к внутренним классам EDT.</b> Резолв {@code BslDocumentationProvider}, показ
+     * панели, поиск и открытие готовой страницы вынесены в {@link BslSyntaxAssist} — тем же
+     * пользуется команда «Открыть синтакс-помощник» редактора модуля. Там же объяснено, почему
+     * классы грузятся загрузчиком бандла, а не через {@code Class.forName}.
      *
      * <p><b>Как ищется свойство.</b> Подпись палитры («Условное оформление») именем свойства не
      * является, поэтому идём от модели платформы, а не от текстов документации: сначала
@@ -1285,18 +1737,6 @@ public class PropertySheetActivePropertyHook implements IStartup
      */
     private static final class SyntaxHelp
     {
-        private static final String BSL_UI_BUNDLE = "com._1c.g5.v8.dt.bsl.ui"; //$NON-NLS-1$
-        private static final String BSL_ACTIVATOR =
-            "com._1c.g5.v8.dt.bsl.ui.internal.BslActivator"; //$NON-NLS-1$
-        private static final String DOC_PROVIDER =
-            "com._1c.g5.v8.dt.internal.bsl.ui.documentation.BslDocumentationProvider"; //$NON-NLS-1$
-        private static final String VIEW_PAGE =
-            "com._1c.g5.v8.dt.internal.bsl.ui.documentation.page.IBslDocumentationViewPage"; //$NON-NLS-1$
-        private static final String PAGE_DESCRIPTOR =
-            "com._1c.g5.v8.dt.internal.bsl.ui.syntaxassist.description.DocumentationPageDescriptor"; //$NON-NLS-1$
-        private static final String SYNTAX_VIEW_UTIL =
-            "com._1c.g5.v8.dt.internal.bsl.ui.syntaxassist.SyntaxAssistViewUtil"; //$NON-NLS-1$
-        private static final String SYNTAX_VIEW_ID = "com._1c.g5.v8.dt.bsl.ui.view.BslInfoView"; //$NON-NLS-1$
         /** Подсказка — не статья: длинное описание обрезается. */
         private static final int MAX_TOOLTIP_CHARS = 1200;
         /** Сколько кандидатов выписывать в лог при неоднозначности/промахе. */
@@ -1324,8 +1764,6 @@ public class PropertySheetActivePropertyHook implements IStartup
         private static final Map<String, PropertyDoc> RESOLVED = new HashMap<>();
         private static final Map<String, String> DESCRIPTIONS = new HashMap<>();
         private static final PropertyDoc NOTHING = new PropertyDoc(null, null, ""); //$NON-NLS-1$
-        /** {@code BslDocumentationProvider} — Guice-синглтон, ищется один раз. */
-        private static Object docProviderCache;
 
         private SyntaxHelp() {}
 
@@ -1333,12 +1771,17 @@ public class PropertySheetActivePropertyHook implements IStartup
         {
             String englishHint = PropertySheetControlInterop.resolveModelPropertyName(page, scene,
                 lwtView, displayName);
+            PropertySheetControlInterop.CopyNameContext ctx = PropertySheetControlInterop
+                .resolveCopyNameContext(page, scene, lwtView, displayName);
+            org.eclipse.emf.ecore.EStructuralFeature feature = ctx.feature();
+            if (feature == null && ctx.featurePath != null && ctx.featurePath.length > 0)
+                feature = ctx.featurePath[ctx.featurePath.length - 1];
 
             PropertySheetPlatformPropertyResolver.Resolved propertyResolved =
                 PropertySheetPlatformPropertyResolver.resolve(page, scene, lwtView, displayName,
                     englishHint);
             if (propertyResolved != null && propertyResolved.property != null)
-                return resolvePropertyDoc(propertyResolved);
+                return resolvePropertyDoc(propertyResolved, feature);
 
             PropertySheetPlatformPropertyResolver.ResolvedEvent eventResolved =
                 PropertySheetPlatformPropertyResolver.resolveEvent(page, scene, lwtView,
@@ -1350,7 +1793,8 @@ public class PropertySheetActivePropertyHook implements IStartup
         }
 
         private static PropertyDoc resolvePropertyDoc(
-                PropertySheetPlatformPropertyResolver.Resolved resolved)
+                PropertySheetPlatformPropertyResolver.Resolved resolved,
+                org.eclipse.emf.ecore.EStructuralFeature feature)
         {
             String english = resolved.englishName();
             if (english == null || english.isEmpty())
@@ -1366,8 +1810,21 @@ public class PropertySheetActivePropertyHook implements IStartup
             long started = System.currentTimeMillis();
             try
             {
-                Object viewPage = propertyPage(resolved.property);
-                found = new PropertyDoc(resolved.russianName(), viewPage, key);
+                if (PropertySheetPlatformPropertyResolver.supportsBslSyntaxHelp(resolved, feature))
+                {
+                    Object viewPage = propertyPage(resolved.property);
+                    found = new PropertyDoc(resolved.russianName(), viewPage, key);
+                }
+                else
+                {
+                    found = new PropertyDoc(resolved.russianName(), null, key);
+                    Global.tempLog(TEMP_TOPIC, "документация «" + key //$NON-NLS-1$
+                        + "»: свойство метаданных-перечисления, синтакс-помощник пропущен"); //$NON-NLS-1$
+                }
+            }
+            catch (RuntimeException e)
+            {
+                Global.tempLogException(TEMP_TOPIC, "документация: " + key, e); //$NON-NLS-1$
             }
             catch (Exception e)
             {
@@ -1449,14 +1906,8 @@ public class PropertySheetActivePropertyHook implements IStartup
         {
             try
             {
-                IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
-                IWorkbenchPage wbPage = window != null ? window.getActivePage() : null;
-                if (wbPage != null)
-                    wbPage.showView(SYNTAX_VIEW_ID);
-                Class<?> utilClass = bslUiClass(SYNTAX_VIEW_UTIL);
-                if (utilClass == null)
+                if (BslSyntaxAssist.showView() == null)
                     return;
-                utilClass.getMethod("showOrGetShowedView").invoke(null); //$NON-NLS-1$
 
                 PropertyDoc doc = resolve(page, scene, lwtView, displayName);
                 if (doc != null && doc.viewPage != null && openInSyntaxAssist(doc.viewPage))
@@ -1478,7 +1929,7 @@ public class PropertySheetActivePropertyHook implements IStartup
                     : propertyResolved != null && propertyResolved.syntaxHelpSearchQuery() != null
                         ? propertyResolved.syntaxHelpSearchQuery()
                         : doc != null && doc.russianName != null ? doc.russianName : displayName;
-                utilClass.getMethod("showSearch", String.class).invoke(null, search); //$NON-NLS-1$
+                BslSyntaxAssist.showSearch(search);
                 Global.tempLog(TEMP_TOPIC, "синтакс-помощник: страницы нет, поиск по «" //$NON-NLS-1$
                     + search + "»"); //$NON-NLS-1$
             }
@@ -1491,112 +1942,40 @@ public class PropertySheetActivePropertyHook implements IStartup
         /** Описание свойства простым текстом (для подсказки при наведении). */
         static String describe(Object page, Object scene, Object lwtView, String displayName)
         {
-            PropertyDoc doc = resolve(page, scene, lwtView, displayName);
-            if (doc == null || doc.viewPage == null)
-                return null;
-            String key = doc.cacheKey != null ? doc.cacheKey : ""; //$NON-NLS-1$
-            String cached = DESCRIPTIONS.get(key);
-            if (cached != null)
-                return cached.isEmpty() ? null : cached;
-            String text = extractDescriptionSection(
-                    htmlToText(string(doc.viewPage, "getViewHtml"))); //$NON-NLS-1$
-            if (text.length() > MAX_TOOLTIP_CHARS)
-                text = text.substring(0, MAX_TOOLTIP_CHARS) + "…"; //$NON-NLS-1$
-            DESCRIPTIONS.put(key, text);
-            Global.tempLog(TEMP_TOPIC, "описание «" + key + "»: " //$NON-NLS-1$ //$NON-NLS-2$
-                + (text.isEmpty() ? "нет" : text.length() + " симв.")); //$NON-NLS-1$ //$NON-NLS-2$
-            return text.isEmpty() ? null : text;
-        }
-
-        private static boolean openInSyntaxAssist(Object viewPage) throws Exception
-        {
-            Object docProvider = documentationProvider();
-            Class<?> utilClass = bslUiClass(SYNTAX_VIEW_UTIL);
-            if (docProvider == null || utilClass == null)
-                return false;
-            Object view = utilClass.getMethod("showOrGetShowedView").invoke(null); //$NON-NLS-1$
-            Object panel = Global.invoke(view, "getDescriptionPanel"); //$NON-NLS-1$
-            Object browser = Global.invoke(panel, "getBrowser"); //$NON-NLS-1$
-            if (browser == null)
-                return false;
-            Object descriptor = bslUiClass(PAGE_DESCRIPTOR)
-                .getConstructor(bslUiClass(VIEW_PAGE), bslUiClass(DOC_PROVIDER))
-                .newInstance(viewPage, docProvider);
-            return Global.invokeVoid(browser, "openPage", descriptor); //$NON-NLS-1$
-        }
-
-        /**
-         * {@code BslDocumentationProvider} из Guice-инжектора языка BSL — того же, из которого
-         * его берёт сама панель «Синтакс-помощник». У {@code BslActivator.getInjector} есть
-         * параметр языка (безаргументного {@code getInjector()} в этой версии EDT нет).
-         *
-         * <p>Сам инжектор приводится к {@link Injector} (пакет {@code com.google.inject} нашему
-         * бандлу доступен), а не вызывается рефлексией: {@code InjectorImpl} лежит во внутреннем
-         * пакете Guice, и рефлексивный вызов по нему может молча не пройти. Если инжектор языка
-         * почему-либо недоступен, тот же экземпляр берётся из Xtext-реестра сервисов по любому
-         * BSL-URI — путь, уже используемый в {@code ParamHintHtmlModifier}.
-         *
-         * <p>Каждый шаг логируется: провайдер возвращался {@code null} без единого исключения,
-         * и без пошагового следа не видно, какое именно звено обрывается.
-         */
-        private static Object documentationProvider() throws Exception
-        {
-            Object cached = docProviderCache;
-            if (cached != null)
-                return cached;
-            Class<?> providerClass = bslUiClass(DOC_PROVIDER);
-            Class<?> activatorClass = bslUiClass(BSL_ACTIVATOR);
-            if (providerClass == null || activatorClass == null)
-            {
-                Global.tempLog(TEMP_TOPIC, "провайдер: классы bsl.ui недоступны (провайдер=" //$NON-NLS-1$
-                    + providerClass + ", активатор=" + activatorClass + ")"); //$NON-NLS-1$ //$NON-NLS-2$
-                return null;
-            }
-            Object activator = activatorClass.getMethod("getInstance").invoke(null); //$NON-NLS-1$
-            Object language = activatorClass.getField("COM__1C_G5_V8_DT_BSL_BSL").get(null); //$NON-NLS-1$
-            Object injector = activator != null
-                ? activatorClass.getMethod("getInjector", String.class).invoke(activator, language) : null; //$NON-NLS-1$
-            Object provider = injector instanceof Injector guice ? guice.getInstance(providerClass) : null;
-            Global.tempLog(TEMP_TOPIC, "провайдер: активатор=" + (activator != null) //$NON-NLS-1$
-                + ", язык=" + language //$NON-NLS-1$
-                + ", инжектор=" + (injector == null ? "null" : injector.getClass().getName()) //$NON-NLS-1$ //$NON-NLS-2$
-                + ", провайдер=" + (provider == null ? "null" : provider.getClass().getName())); //$NON-NLS-1$ //$NON-NLS-2$
-            if (provider == null)
-                provider = providerFromXtextRegistry(providerClass);
-            docProviderCache = provider;
-            return provider;
-        }
-
-        /** Запасной путь: тот же Guice-экземпляр через реестр сервисов Xtext по BSL-URI. */
-        private static Object providerFromXtextRegistry(Class<?> providerClass)
-        {
-            IResourceServiceProvider rsp = IResourceServiceProvider.Registry.INSTANCE
-                .getResourceServiceProvider(URI.createURI("comfort.bsl")); //$NON-NLS-1$
-            Object provider = rsp != null ? rsp.get(providerClass) : null;
-            Global.tempLog(TEMP_TOPIC, "провайдер через реестр Xtext: rsp=" //$NON-NLS-1$
-                + (rsp == null ? "null" : rsp.getClass().getName()) //$NON-NLS-1$
-                + ", провайдер=" + (provider == null ? "null" : provider.getClass().getName())); //$NON-NLS-1$ //$NON-NLS-2$
-            return provider;
-        }
-
-        private static Class<?> bslUiClass(String name)
-        {
-            return bundleClass(BSL_UI_BUNDLE, name);
-        }
-
-        /** Класс из внутреннего пакета чужого бандла — только его же загрузчиком. */
-        private static Class<?> bundleClass(String bundleId, String name)
-        {
             try
             {
-                Bundle bundle = Platform.getBundle(bundleId);
-                return bundle != null ? bundle.loadClass(name) : null;
+                PropertyDoc doc = resolve(page, scene, lwtView, displayName);
+                if (doc == null || doc.viewPage == null)
+                    return null;
+                String key = doc.cacheKey != null ? doc.cacheKey : ""; //$NON-NLS-1$
+                String cached = DESCRIPTIONS.get(key);
+                if (cached != null)
+                    return cached.isEmpty() ? null : cached;
+                String text = extractDescriptionSection(
+                        htmlToText(string(doc.viewPage, "getViewHtml"))); //$NON-NLS-1$
+                if (text.length() > MAX_TOOLTIP_CHARS)
+                    text = text.substring(0, MAX_TOOLTIP_CHARS) + "…"; //$NON-NLS-1$
+                DESCRIPTIONS.put(key, text);
+                Global.tempLog(TEMP_TOPIC, "описание «" + key + "»: " //$NON-NLS-1$ //$NON-NLS-2$
+                    + (text.isEmpty() ? "нет" : text.length() + " симв.")); //$NON-NLS-1$ //$NON-NLS-2$
+                return text.isEmpty() ? null : text;
             }
-            catch (ClassNotFoundException e)
+            catch (RuntimeException e)
             {
-                Global.tempLog(TEMP_TOPIC, "класс не найден в " + bundleId + ": " + name); //$NON-NLS-1$ //$NON-NLS-2$
+                Global.tempLogException(TEMP_TOPIC, "описание «" + displayName + "»", e); //$NON-NLS-1$ //$NON-NLS-2$
                 return null;
             }
+        }
+
+        private static boolean openInSyntaxAssist(Object viewPage)
+        {
+            return BslSyntaxAssist.openViewPage(viewPage);
+        }
+
+        /** {@code BslDocumentationProvider} — общий с панелью экземпляр, см. {@link BslSyntaxAssist}. */
+        private static Object documentationProvider()
+        {
+            return BslSyntaxAssist.documentationProvider();
         }
 
         /** Объект, свойства которого показывает панель. */

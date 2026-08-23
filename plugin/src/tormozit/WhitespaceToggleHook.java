@@ -16,6 +16,7 @@ import org.eclipse.jface.action.IContributionItem;
 import org.eclipse.jface.action.IToolBarManager;
 import org.eclipse.jface.action.ToolBarManager;
 import org.eclipse.jface.dialogs.Dialog;
+import org.eclipse.jface.dialogs.IPageChangeProvider;
 import org.eclipse.jface.preference.IPreferenceStore;
 import org.eclipse.jface.resource.ImageDescriptor;
 import org.eclipse.swt.SWT;
@@ -39,6 +40,7 @@ import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.editors.text.EditorsUI;
 import org.eclipse.ui.forms.editor.IFormPage;
+import org.eclipse.ui.texteditor.ITextEditor;
 import org.eclipse.ui.texteditor.ITextEditorActionConstants;
 import org.osgi.framework.Bundle;
 
@@ -48,12 +50,14 @@ import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorXtextEditorPage;
 
 /**
  * Кнопка «Показывать непечатаемые символы» (¶) в панели инструментов редактора
- * модуля BSL.
+ * модуля BSL и редактора XML.
  *
  * <p>Штатный {@code ShowWhitespaceCharactersActionContributor} Xtext в конфигурации
  * BSL не подключён — команда в меню «Правка» есть, но переключателя на панели,
  * как в окне сравнения, нет. Здесь добавляем в тулбар ту же
  * {@link org.eclipse.ui.texteditor.ShowWhitespaceCharactersAction} редактора.
+ * В редакторе XML (страница «Source» многостраничного редактора WST) кнопки тоже
+ * нет — добавляем её тем же способом.
  *
  * <p>Правый клик по кнопке — «Параметры...» открывает штатный диалог
  * «Показывать непечатаемые символы» (гиперссылка «настройки видимости» на странице
@@ -81,10 +85,14 @@ public final class WhitespaceToggleHook implements IStartup
     private static ImageDescriptor disabledIconDescriptor;
 
     /** Редакторы, для которых кнопка уже добавлена в тулбар. */
-    private static final Set<BslXtextEditor> attachedEditors =
+    private static final Set<ITextEditor> attachedEditors =
         Collections.newSetFromMap(new WeakHashMap<>());
 
     private static final Set<DtGranularEditor<?>> hookedGranularEditors =
+        Collections.newSetFromMap(new WeakHashMap<>());
+
+    /** Многостраничные редакторы XML, у которых отслеживается смена страницы. */
+    private static final Set<IEditorPart> hookedXmlEditors =
         Collections.newSetFromMap(new WeakHashMap<>());
 
     private static final class ToggleBinding
@@ -99,7 +107,7 @@ public final class WhitespaceToggleHook implements IStartup
         }
     }
 
-    private static final Map<BslXtextEditor, ToggleBinding> managedToggles =
+    private static final Map<ITextEditor, ToggleBinding> managedToggles =
         Collections.synchronizedMap(new WeakHashMap<>());
 
     @Override
@@ -187,6 +195,32 @@ public final class WhitespaceToggleHook implements IStartup
             scheduleAttach(bsl, 0);
         else if (editor instanceof DtGranularEditor<?> granular)
             hookGranularEditor(granular);
+        else if (XmlEditorShowInNavigatorHandler.isXmlEditor(editor))
+            hookXmlEditor(editor);
+    }
+
+    /**
+     * Редактор XML: кнопка нужна на странице «Source», а текстовый редактор там —
+     * вложенный, поэтому берём его через {@link TextEditor#resolveTextEditor} и
+     * переподключаемся при смене страницы.
+     */
+    private static void hookXmlEditor(IEditorPart editor)
+    {
+        ITextEditor textEditor = TextEditor.resolveTextEditor(editor);
+        if (textEditor != null)
+            scheduleAttach(textEditor, 0);
+
+        if (!(editor instanceof IPageChangeProvider provider))
+            return;
+        if (!hookedXmlEditors.add(editor))
+            return;
+        provider.addPageChangedListener(event ->
+        {
+            ITextEditor nested = TextEditor.resolveTextEditor(editor);
+            if (nested != null)
+                scheduleAttach(nested, 0);
+            Display.getDefault().asyncExec(WhitespaceToggleHook::updateToggleVisibility);
+        });
     }
 
     private static void hookGranularEditor(DtGranularEditor<?> editor)
@@ -217,14 +251,14 @@ public final class WhitespaceToggleHook implements IStartup
             scheduleAttach(bsl, 0);
     }
 
-    private static void scheduleAttach(BslXtextEditor editor, int attempt)
+    private static void scheduleAttach(ITextEditor editor, int attempt)
     {
         if (editor == null || attachedEditors.contains(editor))
             return;
         Display.getDefault().asyncExec(() -> tryAttach(editor, attempt));
     }
 
-    private static void tryAttach(BslXtextEditor editor, int attempt)
+    private static void tryAttach(ITextEditor editor, int attempt)
     {
         if (editor == null || attachedEditors.contains(editor))
             return;
@@ -474,7 +508,7 @@ public final class WhitespaceToggleHook implements IStartup
             action.setToolTipText(base + suffix);
     }
 
-    private static void retryLater(BslXtextEditor editor, int attempt)
+    private static void retryLater(ITextEditor editor, int attempt)
     {
         if (attempt >= MAX_ATTACH_ATTEMPTS)
             return;
@@ -485,21 +519,21 @@ public final class WhitespaceToggleHook implements IStartup
     }
 
     /**
-     * Показывает кнопку у активного редактора модуля и прячет у остальных — та же
+     * Показывает кнопку у активного текстового редактора и прячет у остальных — та же
      * проблема общей командной панели окна, что и у {@link OccurrencesToggleHook}.
      */
     private static void updateToggleVisibility()
     {
-        BslXtextEditor active = activeBslEditor();
+        ITextEditor active = activeTextEditor();
         if (active == null)
             return;
         ToggleBinding activeBinding = managedToggles.get(active);
-        List<Map.Entry<BslXtextEditor, ToggleBinding>> entries;
+        List<Map.Entry<ITextEditor, ToggleBinding>> entries;
         synchronized (managedToggles)
         {
             entries = new ArrayList<>(managedToggles.entrySet());
         }
-        for (Map.Entry<BslXtextEditor, ToggleBinding> entry : entries)
+        for (Map.Entry<ITextEditor, ToggleBinding> entry : entries)
         {
             ToggleBinding binding = entry.getValue();
             boolean visible = activeBinding != null && binding.item == activeBinding.item;
@@ -523,7 +557,7 @@ public final class WhitespaceToggleHook implements IStartup
         }
     }
 
-    private static BslXtextEditor activeBslEditor()
+    private static ITextEditor activeTextEditor()
     {
         if (!PlatformUI.isWorkbenchRunning() || PlatformUI.getWorkbench().isClosing())
             return null;
@@ -532,9 +566,14 @@ public final class WhitespaceToggleHook implements IStartup
         IEditorPart editor = page != null ? page.getActiveEditor() : null;
         if (editor == null)
             return null;
-        if (editor instanceof BslXtextEditor bsl)
+        if (editor instanceof BslXtextEditor active)
+            return active;
+        BslXtextEditor bsl = GetRef.getActiveBslEditor(editor);
+        if (bsl != null)
             return bsl;
-        return GetRef.getActiveBslEditor(editor);
+        return XmlEditorShowInNavigatorHandler.isXmlEditor(editor)
+            ? TextEditor.resolveTextEditor(editor)
+            : null;
     }
 
     private static ImageDescriptor standardIcon()

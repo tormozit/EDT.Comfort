@@ -80,6 +80,42 @@ public final class NavigatorReveal
     }
 
     /**
+     * Выделяет объект в навигаторе и ДЕЛАЕТ навигатор активной частью — даже если он и так виден.
+     * Нужно там, где выделение само по себе бесполезно: панель «Свойства» показывает выделение
+     * АКТИВНОЙ части, и пока активны, например, результаты поиска, она остаётся пустой
+     * (в логе перехода к свойству общей формы это видно как «палитра … в ней: empty»).
+     * Для команды «Показать в навигаторе» это поведение НЕ годится — там фокус не отбирается,
+     * см. {@link #revealAndActivateIfHidden}.
+     */
+    public static void revealAndActivate(EObject eObject)
+    {
+        if (eObject == null)
+            return;
+
+        Display.getDefault().asyncExec(() -> {
+            IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+            IWorkbenchPage page = window != null ? window.getActivePage() : null;
+            if (page == null)
+                return;
+            IViewPart view;
+            try
+            {
+                view = page.showView(Global.NAVIGATOR_VIEW_ID); // делает видимым и активным
+            }
+            catch (Exception ex)
+            {
+                Global.log("NavigatorReveal revealAndActivate showView error: " + ex); //$NON-NLS-1$
+                return;
+            }
+            if (view instanceof CommonNavigator navigator)
+            {
+                navigator.selectReveal(new StructuredSelection(eObject));
+                ObjectSetSubsystemsFilterBridge.scheduleSyncVisibleChevrons();
+            }
+        });
+    }
+
+    /**
      * Вернуть фокус на вкладку редактора (без смены выделения Property Sheet).
      */
     public static void reactivateEditorPart(IEditorPart editorPart)

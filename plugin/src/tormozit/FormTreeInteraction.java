@@ -50,6 +50,12 @@ final class FormTreeInteraction
 
     private TreeItem selectedItem;
 
+    /**
+     * Строка последнего клика, пока выделение дерева ещё не переехало на неё. Живёт до конца
+     * текущего цикла событий (см. {@link #clearPendingRowLater()}) и только для отрисовки.
+     */
+    private TreeItem pendingRow;
+
     private int activeColumn;
 
     private Color ownedRowBg;
@@ -144,6 +150,12 @@ final class FormTreeInteraction
      */
     TreeItem activeRow()
     {
+        // Строка, по которой только что кликнули, но выделение в дереве ещё не переехало: своё
+        // мы ставим отложенно (см. onMouseDown), нативное — тоже не всегда до нашей отрисовки.
+        // Без этого первый кадр после клика рисовался по СТАРОМУ выделению, а колонка была уже
+        // новой: активная ячейка вспыхивала в прежней строке и лишь потом переезжала в целевую.
+        if (pendingRow != null && !pendingRow.isDisposed())
+            return pendingRow;
         if (selectedItem != null && !selectedItem.isDisposed() && isRowSelected(selectedItem))
             return selectedItem;
         TreeItem[] selection = selection();
@@ -173,6 +185,11 @@ final class FormTreeInteraction
         TreeItem previous = selectedItem;
         selectedItem = item;
         activeColumn = column < 0 ? 0 : column;
+        // Клик почти наверняка меняет выделение, а снимок живёт SELECTION_SNAPSHOT_MS — иначе
+        // отрисовка ниже спросила бы выделение у устаревшего кэша.
+        invalidateSelection();
+        // До конца текущего цикла событий рисуем по строке клика, а не по выделению дерева.
+        pendingRow = multiSelect ? null : item;
 
         // Подсветка рисуется ПЕРВОЙ и немедленно: redraw() лишь помечает область грязной, а
         // фактическая отрисовка ждёт свободного цикла событий — а его занимает смена выделения
@@ -186,13 +203,18 @@ final class FormTreeInteraction
         boolean selectHere = (rightClick || !nativeHit) && !multiSelect && viewer != null
             && !viewer.getControl().isDisposed() && item.getData() != null && !isRowSelected(item);
         if (!selectHere)
+        {
+            // Выделение ставит само дерево — держим строку клика до конца обработки события.
+            clearPendingRowLater();
             return;
+        }
         Object element = item.getData();
         if (rightClick)
         {
             // Правый клик: строка должна стать текущей ДО построения контекстного меню
             // (SWT шлёт MouseDown раньше MenuDetect), поэтому здесь без откладывания.
             viewer.setSelection(new StructuredSelection(element), false);
+            pendingRow = null;
             return;
         }
         // Левый клик: тяжёлую перестройку эскиза и панели «Свойства» запускаем после отрисовки.
@@ -200,6 +222,7 @@ final class FormTreeInteraction
             if (!tree.isDisposed() && !viewer.getControl().isDisposed())
                 viewer.setSelection(new StructuredSelection(element), false);
         });
+        clearPendingRowLater();
     }
 
     /** Перерисовать одну строку: полный {@code redraw()} дерева на клик избыточен. */
@@ -213,8 +236,31 @@ final class FormTreeInteraction
         tree.redraw(0, bounds.y, tree.getClientArea().width, bounds.height, false);
     }
 
+    /**
+     * Снять «строку клика» после того, как обработка клика завершится: к этому моменту выделение
+     * (наше отложенное или нативное) уже переехало, и рисовать можно снова по нему. Ставится в
+     * очередь ПОСЛЕ отложенного {@code setSelection} — {@code asyncExec} выполняется по порядку.
+     */
+    private void clearPendingRowLater()
+    {
+        tree.getDisplay().asyncExec(() -> {
+            if (tree.isDisposed())
+                return;
+            TreeItem row = pendingRow;
+            pendingRow = null;
+            invalidateSelection();
+            if (row != null && activeRow() != row)
+            {
+                invalidateColors();
+                redrawRow(row);
+                redrawRow(activeRow());
+            }
+        });
+    }
+
     private void syncFromSelection()
     {
+        pendingRow = null;
         invalidateSelection();
         if (selectedItem != null && !selectedItem.isDisposed() && isRowSelected(selectedItem))
             return;

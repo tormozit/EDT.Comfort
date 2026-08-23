@@ -588,7 +588,15 @@ public class TypeComboOverlayHook implements IStartup
         OverlayState state = PROPERTY_OVERLAYS.get(view);
         if (state == null || state.text == null || state.text.isDisposed())
             return false;
-        return state.text.setFocus();
+        boolean focused = state.text.setFocus();
+        if (focused)
+        {
+            // Поле «Тип» активируется мимо AefFieldFocus (видимый ввод — наш оверлей), поэтому
+            // панель «Свойства» узнаёт об активации отсюда; свойство определяется по контролу
+            // палитры, который оверлей накрывает.
+            PropertySheetActivePropertyHook.onFieldActivatedProgrammatically(state.nativeControl);
+        }
+        return focused;
     }
 
     /**
