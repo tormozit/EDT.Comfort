@@ -4,26 +4,46 @@ import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
+import java.util.Locale;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import org.eclipse.core.runtime.Status;
 import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.swt.SWT;
+import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.layout.GridLayout;
 import org.eclipse.swt.widgets.Button;
 import org.eclipse.swt.widgets.Composite;
+import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
+import org.eclipse.swt.widgets.Label;
 import org.eclipse.swt.widgets.Shell;
+import org.eclipse.swt.widgets.Table;
 import org.eclipse.ui.IStartup;
 
 public class ConfigSearchDialogHook implements IStartup
 {
     private static final String SETTINGS_SECTION = "TormozitConfigurationSearchSettings";
     private static final String KEY_WHOLE_WORD = "wholeWord";
+    private static final String KEY_SHELL_WIDTH = "shell.width";
+    private static final String KEY_SHELL_HEIGHT = "shell.height";
+    private static final String KEY_PROJECTS_TABLE_WIDTH = "projectsTable.width";
+    private static final String KEY_PROJECTS_TABLE_HEIGHT = "projectsTable.height";
+    private static final String KEY_OBJECT_TYPES_TABLE_WIDTH = "objectTypesTable.width";
+    private static final String KEY_OBJECT_TYPES_TABLE_HEIGHT = "objectTypesTable.height";
     private static final String SEARCH_DIALOG_CLASS = "org.eclipse.search.internal.ui.SearchDialog";
     private static final String PAGE_CLASS = "com._1c.g5.v8.dt.internal.search.ui.dialog.ConfigurationSearchDialogPage";
     private static final String HOOKED_KEY = "tormozit.configSearchHooked";
     private static final String LISTENER_KEY = "tormozit.configSearchListener";
+    private static final String SIZE_MEMORY_KEY = "tormozit.configSearchSizeMemory";
+    private static final String OBJECT_TYPES_COUNT_KEY = "tormozit.configSearchObjectTypesCount";
+    private static final String OBJECT_TYPES_TITLE_RU = "среди типов объектов";
+    private static final String OBJECT_TYPES_TITLE_EN = "within object types";
+    private static final String PROJECTS_TITLE_RU = "среди проектов";
+    private static final String PROJECTS_TITLE_EN = "within projects";
+    private static final Pattern TITLE_COUNT_SUFFIX = Pattern.compile(" \\(\\d+\\)$");
 
     @Override
     public void earlyStartup()
@@ -37,6 +57,8 @@ public class ConfigSearchDialogHook implements IStartup
                 Object dialog = findSearchDialog(shell);
                 if (dialog == null)
                     return;
+
+                installShellSizeMemory(shell);
 
                 if (shell.getData(LISTENER_KEY) == null)
                 {
@@ -71,6 +93,7 @@ public class ConfigSearchDialogHook implements IStartup
                 new Class[] { listenerClass },
                 (proxy, method, args) -> {
                     schedulePatch(shell, dialog, 0);
+                    scheduleRestoreShellSize(shell);
                     return null;
                 });
             dialog.getClass().getMethod("addPageChangedListener", listenerClass)
@@ -149,7 +172,6 @@ public class ConfigSearchDialogHook implements IStartup
 
         if (btnCase != null)
         {
-            // Create vertical group to hold both checkboxes
             Composite vGroup = new Composite(parent, SWT.NONE);
             GridLayout vLayout = new GridLayout(1, false);
             vLayout.marginWidth = 0;
@@ -157,7 +179,6 @@ public class ConfigSearchDialogHook implements IStartup
             vLayout.verticalSpacing = 0;
             vGroup.setLayout(vLayout);
 
-            // Copy case button's GridData to the vertical group
             GridData caseGd = (GridData) btnCase.getLayoutData();
             GridData vGd;
             if (caseGd != null)
@@ -177,14 +198,11 @@ public class ConfigSearchDialogHook implements IStartup
             }
             vGroup.setLayoutData(vGd);
 
-            // Position vGroup right after case button in the parent grid
             vGroup.moveBelow(btnCase);
 
-            // Reparent case button into the vertical group
             btnCase.setParent(vGroup);
             btnCase.setLayoutData(new GridData(SWT.BEGINNING, SWT.CENTER, false, false));
 
-            // Create whole word checkbox in the vertical group
             Button cbWholeWord = new Button(vGroup, SWT.CHECK);
             cbWholeWord.setText("Слово целиком");
             cbWholeWord.setToolTipText("Искать только целые слова, а не подстроки"
@@ -207,7 +225,9 @@ public class ConfigSearchDialogHook implements IStartup
                 e -> settings.put(KEY_WHOLE_WORD, cbWholeWord.getSelection()));
         }
         parent.layout(true, true);
-        shell.pack();
+        restoreScopeTableSizes(page);
+        installObjectTypesCountLabel(page);
+        scheduleRestoreShellSize(shell);
 
         patchExecutor(page);
     }
@@ -222,6 +242,295 @@ public class ConfigSearchDialogHook implements IStartup
             return text != null
                 && (text.contains("регистр") || text.toLowerCase().contains("case"));
         });
+    }
+
+    /** Запоминание размеров окна «Поиск» между открытиями и после смены вкладки. */
+    private static void installShellSizeMemory(Shell shell)
+    {
+        if (Boolean.TRUE.equals(shell.getData(SIZE_MEMORY_KEY)))
+            return;
+        shell.setData(SIZE_MEMORY_KEY, Boolean.TRUE);
+
+        Point[] lastSize = { null };
+        shell.addListener(SWT.Resize, e ->
+        {
+            if (shell.getMaximized() || shell.getMinimized())
+                return;
+            Point size = shell.getSize();
+            if (size.x > 0 && size.y > 0)
+                lastSize[0] = size;
+        });
+        shell.addDisposeListener(e -> {
+            saveShellSize(lastSize[0]);
+            saveScopeTableSizes(shell);
+        });
+
+        restoreShellSize(shell);
+        scheduleRestoreShellSize(shell);
+    }
+
+    private static void scheduleRestoreShellSize(Shell shell)
+    {
+        if (shell == null || shell.isDisposed())
+            return;
+        Display display = shell.getDisplay();
+        if (display == null || display.isDisposed())
+            return;
+        display.asyncExec(() -> restoreShellSize(shell));
+        display.timerExec(50, () -> restoreShellSize(shell));
+    }
+
+    private static void restoreShellSize(Shell shell)
+    {
+        if (shell == null || shell.isDisposed() || shell.getMaximized())
+            return;
+        IDialogSettings settings = getDialogSettings();
+        if (settings.get(KEY_SHELL_WIDTH) == null || settings.get(KEY_SHELL_HEIGHT) == null)
+            return;
+
+        int width;
+        int height;
+        try
+        {
+            width = settings.getInt(KEY_SHELL_WIDTH);
+            height = settings.getInt(KEY_SHELL_HEIGHT);
+        }
+        catch (NumberFormatException e)
+        {
+            return;
+        }
+        if (width <= 0 || height <= 0)
+            return;
+
+        Point current = shell.getSize();
+        if (current.x == width && current.y == height)
+            return;
+        // Только размер — x/y не трогаем. Пересчёт «центра» сдвигал окно при смене вкладки.
+        shell.setSize(width, height);
+    }
+
+    private static void saveShellSize(Point size)
+    {
+        if (size == null || size.x <= 0 || size.y <= 0)
+            return;
+        IDialogSettings settings = getDialogSettings();
+        settings.put(KEY_SHELL_WIDTH, size.x);
+        settings.put(KEY_SHELL_HEIGHT, size.y);
+    }
+
+    private static void restoreScopeTableSizes(Object page)
+    {
+        Control pageControl = (Control) Global.invoke(page, "getControl");
+        if (!(pageControl instanceof Composite root) || root.isDisposed())
+            return;
+
+        applyStoredTableSize(findScopeTable(root, PROJECTS_TITLE_RU, PROJECTS_TITLE_EN),
+            KEY_PROJECTS_TABLE_WIDTH, KEY_PROJECTS_TABLE_HEIGHT);
+        applyStoredTableSize(findScopeTable(root, OBJECT_TYPES_TITLE_RU, OBJECT_TYPES_TITLE_EN),
+            KEY_OBJECT_TYPES_TABLE_WIDTH, KEY_OBJECT_TYPES_TABLE_HEIGHT);
+        root.layout(true, true);
+    }
+
+    private static void saveScopeTableSizes(Shell shell)
+    {
+        Object dialog = findSearchDialog(shell);
+        if (dialog == null)
+            return;
+        Object page = getSelectedPage(dialog);
+        if (page == null || !PAGE_CLASS.equals(page.getClass().getName()))
+            page = findConfigurationSearchPage(shell);
+        if (page == null)
+            return;
+
+        Control pageControl = (Control) Global.invoke(page, "getControl");
+        if (!(pageControl instanceof Composite root))
+            return;
+
+        saveTableSize(findScopeTable(root, PROJECTS_TITLE_RU, PROJECTS_TITLE_EN),
+            KEY_PROJECTS_TABLE_WIDTH, KEY_PROJECTS_TABLE_HEIGHT);
+        saveTableSize(findScopeTable(root, OBJECT_TYPES_TITLE_RU, OBJECT_TYPES_TITLE_EN),
+            KEY_OBJECT_TYPES_TABLE_WIDTH, KEY_OBJECT_TYPES_TABLE_HEIGHT);
+    }
+
+    private static Object findConfigurationSearchPage(Shell shell)
+    {
+        Object dialog = findSearchDialog(shell);
+        if (dialog == null)
+            return null;
+        try
+        {
+            Object descriptors = Global.getField(dialog, "fDescriptors");
+            if (!(descriptors instanceof List<?> list))
+                return null;
+            for (Object descriptor : list)
+            {
+                Object pg = Global.invoke(descriptor, "getPage");
+                if (pg != null && PAGE_CLASS.equals(pg.getClass().getName()))
+                    return pg;
+            }
+        }
+        catch (Exception ignored)
+        {
+        }
+        return null;
+    }
+
+    private static Table findScopeTable(Composite root, String ruTitle, String enTitle)
+    {
+        Label label = Global.findControl(root, Label.class,
+            lbl -> isScopeListTitle(lbl.getText(), ruTitle, enTitle));
+        if (label == null || label.isDisposed())
+            return null;
+        Composite parent = label.getParent();
+        if (parent == null || parent.isDisposed())
+            return null;
+        for (Control child : parent.getChildren())
+        {
+            if (child instanceof Table table && !table.isDisposed()
+                    && (table.getStyle() & SWT.CHECK) != 0)
+                return table;
+        }
+        return null;
+    }
+
+    private static boolean isScopeListTitle(String text, String ruTitle, String enTitle)
+    {
+        if (text == null)
+            return false;
+        String base = stripCountSuffix(text).trim();
+        return ruTitle.equalsIgnoreCase(base) || enTitle.equalsIgnoreCase(base);
+    }
+
+    private static String stripCountSuffix(String text)
+    {
+        if (text == null)
+            return "";
+        Matcher matcher = TITLE_COUNT_SUFFIX.matcher(text);
+        return matcher.find() ? text.substring(0, matcher.start()) : text;
+    }
+
+    private static void applyStoredTableSize(Table table, String widthKey, String heightKey)
+    {
+        if (table == null || table.isDisposed())
+            return;
+        IDialogSettings settings = getDialogSettings();
+        if (settings.get(widthKey) == null || settings.get(heightKey) == null)
+            return;
+
+        int width;
+        int height;
+        try
+        {
+            width = settings.getInt(widthKey);
+            height = settings.getInt(heightKey);
+        }
+        catch (NumberFormatException e)
+        {
+            return;
+        }
+        if (width <= 0 || height <= 0)
+            return;
+
+        Object layoutData = table.getLayoutData();
+        if (!(layoutData instanceof GridData gd))
+            return;
+        gd.widthHint = width;
+        gd.heightHint = height;
+    }
+
+    private static void saveTableSize(Table table, String widthKey, String heightKey)
+    {
+        if (table == null || table.isDisposed())
+            return;
+        Point size = table.getSize();
+        if (size.x <= 0 || size.y <= 0)
+            return;
+        IDialogSettings settings = getDialogSettings();
+        settings.put(widthKey, size.x);
+        settings.put(heightKey, size.y);
+    }
+
+    /** Счётчик помеченных типов объектов в заголовке списка «среди типов объектов». */
+    private static void installObjectTypesCountLabel(Object page)
+    {
+        Control pageControl = (Control) Global.invoke(page, "getControl");
+        if (!(pageControl instanceof Composite root) || root.isDisposed())
+            return;
+        if (Boolean.TRUE.equals(root.getData(OBJECT_TYPES_COUNT_KEY)))
+            return;
+
+        Label titleLabel = Global.findControl(root, Label.class,
+            lbl -> isScopeListTitle(lbl.getText(), OBJECT_TYPES_TITLE_RU, OBJECT_TYPES_TITLE_EN));
+        Table typesTable = findScopeTable(root, OBJECT_TYPES_TITLE_RU, OBJECT_TYPES_TITLE_EN);
+        if (titleLabel == null || typesTable == null)
+            return;
+
+        String strippedTitle = stripCountSuffix(titleLabel.getText()).trim();
+        final String baseTitle = strippedTitle.isEmpty() ? OBJECT_TYPES_TITLE_RU : strippedTitle;
+
+        Runnable refresh = () -> {
+            if (titleLabel.isDisposed() || typesTable.isDisposed())
+                return;
+            int checked = typesTable.getItemCount() > 0 ? countCheckedItems(typesTable) : 0;
+            titleLabel.setText(baseTitle + " (" + checked + ")");
+        };
+
+        typesTable.addListener(SWT.Selection, e -> refresh.run());
+        Composite section = titleLabel.getParent();
+        if (section != null && !section.isDisposed())
+        {
+            for (Control child : section.getChildren())
+            {
+                if (child instanceof org.eclipse.swt.widgets.ToolBar toolbar)
+                {
+                    for (org.eclipse.swt.widgets.ToolItem item : toolbar.getItems())
+                        item.addListener(SWT.Selection, e -> section.getDisplay().asyncExec(refresh));
+                }
+            }
+        }
+        addSearchTypeScopeListener(page, typesTable, refresh);
+        root.setData(OBJECT_TYPES_COUNT_KEY, Boolean.TRUE);
+        refresh.run();
+        root.getDisplay().timerExec(100, refresh);
+    }
+
+    private static void addSearchTypeScopeListener(Object page, Table typesTable, Runnable refresh)
+    {
+        Object searchData = Global.getField(page, "searchData");
+        if (searchData == null)
+            return;
+        Object typeScope = Global.invoke(searchData, "getSearchTypeScope");
+        if (typeScope == null)
+            return;
+        try
+        {
+            Class<?> listenerClass = Class.forName(
+                "org.eclipse.core.databinding.observable.set.ISetChangeListener");
+            Object listener = Proxy.newProxyInstance(
+                ConfigSearchDialogHook.class.getClassLoader(),
+                new Class[] { listenerClass },
+                (proxy, method, args) -> {
+                    if ("handleSetChange".equals(method.getName()) && typesTable != null
+                            && !typesTable.isDisposed())
+                        typesTable.getDisplay().asyncExec(refresh);
+                    return null;
+                });
+            typeScope.getClass().getMethod("addSetChangeListener", listenerClass)
+                .invoke(typeScope, listener);
+        }
+        catch (Exception e)
+        {
+            log("addSearchTypeScopeListener error: " + e);
+        }
+    }
+
+    private static int countCheckedItems(Table table)
+    {
+        int count = 0;
+        for (int i = 0; i < table.getItemCount(); i++)
+            if (table.getItem(i).getChecked())
+                count++;
+        return count;
     }
 
     private static void patchExecutor(Object page)
@@ -358,8 +667,8 @@ public class ConfigSearchDialogHook implements IStartup
         String matched = fullText.substring(offset, offset + length);
         if (!caseSensitive)
         {
-            matched = matched.toLowerCase(java.util.Locale.ROOT);
-            searchWord = searchWord.toLowerCase(java.util.Locale.ROOT);
+            matched = matched.toLowerCase(Locale.ROOT);
+            searchWord = searchWord.toLowerCase(Locale.ROOT);
         }
         if (!matched.equals(searchWord))
             return false;

@@ -51,6 +51,7 @@
     <startup class="tormozit.MdEditorListTabCountHook"/>
     <startup class="tormozit.MdEditorAttributeMenuHook"/>
     <startup class="tormozit.MdEditorFunctionalOptionsCountHook"/>
+    <startup class="tormozit.PredefinedDataSortHook"/>
     <startup class="tormozit.MdEditorSubsystemsExpandHook"/>
     <startup class="tormozit.MdEditorMarkerMessageHook"/>
     <startup class="tormozit.EventHandlersFilterHook"/>
