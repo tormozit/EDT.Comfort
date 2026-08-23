@@ -147,7 +147,10 @@ final class FilterInputBox
             "comfort.projectStructure.filter.history."), //$NON-NLS-1$
         EVENT_HANDLERS(
             "comfort.eventHandlers.filter.history.count", //$NON-NLS-1$
-            "comfort.eventHandlers.filter.history."); //$NON-NLS-1$
+            "comfort.eventHandlers.filter.history."), //$NON-NLS-1$
+        FORM_ITEMS(
+            "comfort.formItems.filter.history.count", //$NON-NLS-1$
+            "comfort.formItems.filter.history."); //$NON-NLS-1$
 
         final String prefCountKey;
         final String prefItemPrefix;
@@ -228,6 +231,17 @@ final class FilterInputBox
         opts.layoutData = objectSetsLayoutData();
         opts.message = "Фильтр..."; //$NON-NLS-1$
         opts.tooltip = FLAT_FILTER_TOOLTIP; //$NON-NLS-1$
+        return create(parent, opts, onSearch);
+    }
+
+    /** Дерево элементов формы (редактор формы). */
+    static FilterInputBox forFormItems(Composite parent, Runnable onSearch)
+    {
+        Options opts = new Options();
+        opts.scope = Scope.FORM_ITEMS;
+        opts.layoutData = compactLayoutData();
+        opts.message = "Фильтр..."; //$NON-NLS-1$
+        opts.tooltip = FLAT_FILTER_TOOLTIP;
         return create(parent, opts, onSearch);
     }
 
@@ -426,6 +440,7 @@ final class FilterInputBox
             case PICTURE_DIALOG -> forPictureDialog(parent, onSearch);
             case GIT_HISTORY -> forGitHistory(parent, onSearch);
             case FILTERED_LIST_DIALOG -> forFilteredListDialog(parent, onSearch);
+            case FORM_ITEMS -> forFormItems(parent, onSearch);
             case RIGHTS_DIALOG -> throw new IllegalStateException("RIGHTS_DIALOG: use attachHistory(SearchBox, Scope.RIGHTS_DIALOG)"); //$NON-NLS-1$
             case RIGHTS_EDITOR -> throw new IllegalStateException("RIGHTS_EDITOR: use attachHistory(SearchBox, Scope.RIGHTS_EDITOR)"); //$NON-NLS-1$
             case RIGHTS_EDITOR_LEAVES -> throw new IllegalStateException("RIGHTS_EDITOR_LEAVES: use attachHistory(SearchBox, Scope.RIGHTS_EDITOR_LEAVES)"); //$NON-NLS-1$

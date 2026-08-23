@@ -107,7 +107,7 @@
     <startup class="tormozit.DebugAreasConfigureHook"/>
     <startup class="tormozit.BreakpointPropertiesHook"/>
     <startup class="tormozit.BreakpointListHook"/>
-    <startup class="tormozit.BookmarksViewHook"/>
+    <startup class="tormozit.MarkersListViewsHook"/>
     <startup class="tormozit.ExceptionSelectionDialogHook"/>
     <startup class="tormozit.ErrorDialogActivateHook"/>
     <startup class="tormozit.ErrorDialogLinksHook"/>
@@ -1228,11 +1228,11 @@
   <extension point="org.eclipse.ui.ide.markerSupport">
     <markerField
         id="tormozit.comfort.bookmarkModuleField"
-        class="tormozit.BookmarksViewHook$ModuleField"
+        class="tormozit.MarkersListViewsHook$ModuleField"
         name="Модуль"/>
     <markerField
         id="tormozit.comfort.bookmarkMethodField"
-        class="tormozit.BookmarksViewHook$MethodField"
+        class="tormozit.MarkersListViewsHook$MethodField"
         name="Метод"/>
   </extension>
 

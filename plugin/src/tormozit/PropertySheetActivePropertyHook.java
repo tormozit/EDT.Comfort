@@ -77,7 +77,7 @@ public class PropertySheetActivePropertyHook implements IStartup
     /** Отступ от края видимой области при доводке строки до видимости. */
     private static final int SCROLL_MARGIN = 8;
     /** Глубина спуска по LWT-детям при поиске сфокусированного поля. */
-    private static final int LIGHT_DEPTH = 4;
+    private static final int LIGHT_DEPTH = 6;
 
     /** Панели «Свойства», за которыми уже следим. */
     private static final Set<IViewPart> HOOKED_VIEWS =
@@ -137,6 +137,12 @@ public class PropertySheetActivePropertyHook implements IStartup
         display.addFilter(SWT.MouseDown, inputListener);
         display.addFilter(SWT.KeyDown, inputListener);
         display.addFilter(SWT.FocusIn, inputListener);
+        // Жирность зависит от того, где ввод. Проверка отложена в asyncExec: на FocusOut
+        // новый владелец фокуса ещё не назначен, и getFocusControl() дал бы прежний контрол.
+        Listener focusListener = event -> display.asyncExec(
+            PropertySheetActivePropertyHook::syncBoldWithFocus);
+        display.addFilter(SWT.FocusIn, focusListener);
+        display.addFilter(SWT.FocusOut, focusListener);
         display.addFilter(SWT.MenuDetect, PropertySheetActivePropertyHook::onMenuDetect);
         display.addFilter(SWT.MouseHover, PropertySheetActivePropertyHook::onMouseHover);
         display.addFilter(SWT.MouseMove, PropertySheetActivePropertyHook::onMouseMove);
@@ -251,6 +257,99 @@ public class PropertySheetActivePropertyHook implements IStartup
         if (clickDisplay != null && !clicked.isDisposed()
             && activateByLabelClick(view, map, clicked, clickDisplay))
             return;
+        String focused = focusedPropertyName(view);
+        if (focused != null)
+        {
+            setActiveProperty(view, focused);
+            return;
+        }
+        if (clickDisplay == null || clicked.isDisposed())
+            return;
+        // Ввод ушёл не в контрол поля, а в контейнер разметки (по логу — DtLayoutComposite):
+        // такое поле по карте сцены не опознать ни по самому контролу, ни по его потомкам.
+        // Тогда свойство определяется по СТРОКЕ кликнутого LWT-контрола: подпись и редактор
+        // одной строки лежат на одном хосте и совпадают по вертикали.
+        String byRow = propertyNameForClickedRow(view, clicked, clickDisplay);
+        if (byRow != null)
+        {
+            setActiveProperty(view, byRow);
+            return;
+        }
+        Control focusControl = Display.getDefault().getFocusControl();
+        Global.tempLog(TEMP_TOPIC, "клик в панели: поле свойства не определено, ввод в " //$NON-NLS-1$
+            + (focusControl == null ? "<null>" : focusControl.getClass().getName())); //$NON-NLS-1$
+    }
+
+    /**
+     * Подпись строки, в которую пришёлся клик. Геометрия минимальная и локальная: берём
+     * LWT-контрол под точкой (штатный хиттест {@code controlFromPoint}) и ищем подпись того же
+     * хоста, чья полоса по вертикали пересекается с ним; из нескольких берётся ближайшая по
+     * центру. Никаких display-координат и обхода SWT-дерева — только координаты одного хоста.
+     */
+    private static String propertyNameForClickedRow(IViewPart view, Control clicked, Point click)
+    {
+        Object hit = lightControlAt(clicked, click);
+        Map<?, ?> map = hit != null ? viewModelToView(view) : null;
+        Object hitHost = hit != null ? lightHost(hit) : null;
+        Rectangle hitBounds = hitHost != null ? boundsInHost(hitHost, hit) : null;
+        if (map == null || hitBounds == null)
+            return null;
+
+        String best = null;
+        int bestDistance = Integer.MAX_VALUE;
+        int hitCenter = hitBounds.y + hitBounds.height / 2;
+        for (Map.Entry<?, ?> entry : map.entrySet())
+        {
+            Object key = entry.getKey();
+            if (key == null || !key.getClass().getName().contains(LABEL_VIEW_MODEL))
+                continue;
+            Object label = PropertySheetControlInterop.lightControlFromView(entry.getValue());
+            if (label == null || lightHost(label) != hitHost)
+                continue;
+            Rectangle bounds = boundsInHost(hitHost, label);
+            if (bounds == null || bounds.y + bounds.height <= hitBounds.y
+                || bounds.y >= hitBounds.y + hitBounds.height)
+                continue; // другая строка
+            int distance = Math.abs(bounds.y + bounds.height / 2 - hitCenter);
+            if (distance < bestDistance)
+            {
+                bestDistance = distance;
+                best = labelText(key);
+            }
+        }
+        if (best != null && !best.isEmpty())
+        {
+            Global.tempLog(TEMP_TOPIC, "свойство определено по строке клика: " + best); //$NON-NLS-1$
+            return best;
+        }
+        return null;
+    }
+
+    /** {@code SwtLightComposite}, на котором рисуется light-контрол. */
+    private static Object lightHost(Object lightControl)
+    {
+        Class<?> hostClass = swtLightCompositeClass();
+        return hostClass != null
+            ? Global.invoke(hostClass, "getHostSwtLightComposite", lightControl) : null; //$NON-NLS-1$
+    }
+
+    /** Границы light-контрола в координатах его хоста. */
+    private static Rectangle boundsInHost(Object host, Object lightControl)
+    {
+        Object bounds = Global.invoke(lightControl, "getBounds"); //$NON-NLS-1$
+        if (!(bounds instanceof Rectangle))
+            return null;
+        Object translated = Global.invoke(host, "translateRectangleFromControl", //$NON-NLS-1$
+            lightControl, bounds);
+        return translated instanceof Rectangle r ? r : (Rectangle)bounds;
+    }
+
+    /** Подпись свойства, чей редактор сейчас держит ввод; {@code null} — такого поля нет. */
+    private static String focusedPropertyName(IViewPart view)
+    {
+        Map<?, ?> map = viewModelToView(view);
+        if (map == null)
+            return null;
         String labelText = null;
         for (Map.Entry<?, ?> entry : map.entrySet())
         {
@@ -269,11 +368,10 @@ public class PropertySheetActivePropertyHook implements IStartup
             if (labelText == null || labelText.isEmpty())
                 continue;
             Object nativeControl = Global.invoke(entry.getValue(), "getNativeControl"); //$NON-NLS-1$
-            if (!isFocusedDeep(nativeControl, 0))
-                continue;
-            setActiveProperty(view, labelText);
-            return;
+            if (isFocusedDeep(nativeControl, 0))
+                return labelText;
         }
+        return null;
     }
 
     /**
@@ -452,8 +550,17 @@ public class PropertySheetActivePropertyHook implements IStartup
         if (nativeControl == null || depth > LIGHT_DEPTH)
             return false;
         if (nativeControl instanceof Control control)
-            return !control.isDisposed() && control.isFocusControl();
+        {
+            // Не только сам контрол: у части полей панели (например «Сочетание клавиш») рендерер
+            // отдаёт контейнер, а ввод держит SWT-контрол внутри него — по isFocusControl()
+            // самого контейнера такое поле не определялось, и свойство не становилось текущим.
+            return containsFocus(control);
+        }
         if (Boolean.TRUE.equals(Global.invoke(nativeControl, "isFocused"))) //$NON-NLS-1$
+            return true;
+        // LightText в режиме ввода держит выделение и фокус в SWT-оверлее (StyledText).
+        if (containsFocus(Global.getField(nativeControl, "overlay") instanceof Control overlay //$NON-NLS-1$
+            ? overlay : null))
             return true;
         Object children = Global.invoke(nativeControl, "getChildren"); //$NON-NLS-1$
         if (children instanceof Iterable<?> iterable)
@@ -467,6 +574,21 @@ public class PropertySheetActivePropertyHook implements IStartup
         for (String getter : new String[] { "getContent", "getLeftSide", "getRightSide" }) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         {
             if (isFocusedDeep(Global.invoke(nativeControl, getter), depth + 1))
+                return true;
+        }
+        return false;
+    }
+
+    /** Контрол сам держит ввод или ввод в одном из его потомков. */
+    private static boolean containsFocus(Control control)
+    {
+        if (control == null || control.isDisposed())
+            return false;
+        Display display = control.getDisplay();
+        Control focus = display != null && !display.isDisposed() ? display.getFocusControl() : null;
+        for (Control c = focus; c != null && !c.isDisposed(); c = c.getParent())
+        {
+            if (c == control)
                 return true;
         }
         return false;
@@ -527,7 +649,8 @@ public class PropertySheetActivePropertyHook implements IStartup
         boldApplied = false;
         highlightedLabel = label;
         // setTextColor/setFont сами вызывают invalidate() — отдельная перерисовка не нужна.
-        applyBold(label);
+        if (!activeFieldFocused())
+            applyBold(label);
         Global.invokeVoid(label, "setTextColor", accentColor()); //$NON-NLS-1$
         Global.tempLog(TEMP_TOPIC, "окрашено «" + activePropertyName + "»" //$NON-NLS-1$ //$NON-NLS-2$
             + (afterRebuild ? " (после перезаполнения)" : "")); //$NON-NLS-1$ //$NON-NLS-2$
@@ -541,31 +664,70 @@ public class PropertySheetActivePropertyHook implements IStartup
         Object label = highlightedLabel;
         highlightedLabel = null;
         Color original = originalTextColor;
+        originalTextColor = null;
+        removeBold(label);
+        if (label == null || Boolean.TRUE.equals(Global.invoke(label, "isDisposed"))) //$NON-NLS-1$
+            return;
+        // null допустим: LightLabel.paint при пустом textColor берёт цвет из SWT-хоста.
+        Global.invokeVoid(label, "setTextColor", original); //$NON-NLS-1$
+    }
+
+    /** Возвращает подписи исходный шрифт (и ширину, если под жирный её расширяли). */
+    private static void removeBold(Object label)
+    {
         Font font = originalFont;
         Rectangle bounds = originalBounds;
         Object extent = originalExtent;
         boolean bold = boldApplied;
-        originalTextColor = null;
         originalFont = null;
         originalBounds = null;
         originalExtent = null;
         boldApplied = false;
+        if (!bold || label == null || Boolean.TRUE.equals(Global.invoke(label, "isDisposed"))) //$NON-NLS-1$
+            return;
+        // Порядок важен: setFont сбрасывает cachedExtent, поэтому сохранённый замер
+        // возвращается ПОСЛЕ смены шрифта. Без него подпись остаётся обрезанной:
+        // при пустом cachedExtent LightLabel меряет текст заново, шрифтом GC на момент
+        // отрисовки, и результат может не совпасть с шириной, посчитанной при разметке.
+        Global.invokeVoid(label, "setFont", font); //$NON-NLS-1$
+        if (bounds != null)
+            Global.invokeVoid(label, "setBounds", bounds); //$NON-NLS-1$
+        Global.setField(label, "cachedExtent", extent); //$NON-NLS-1$
+        Global.invokeVoid(label, "invalidate"); //$NON-NLS-1$
+    }
+
+    /**
+     * Жирность имени снимается, пока ввод находится в поле ЭТОГО свойства, и возвращается,
+     * когда ввод ушёл. Пока свойство редактируют, его и так видно по каретке, а жирный шрифт
+     * шире обычного и на длинных именах приводит к обрезке; после ухода из поля именно
+     * заметность и нужна — свойство остаётся текущим, но ничем другим уже не выделено.
+     */
+    private static void syncBoldWithFocus()
+    {
+        Object label = highlightedLabel;
         if (label == null || Boolean.TRUE.equals(Global.invoke(label, "isDisposed"))) //$NON-NLS-1$
+            return;
+        boolean bold = !activeFieldFocused();
+        if (bold == boldApplied)
             return;
         if (bold)
         {
-            // Порядок важен: setFont сбрасывает cachedExtent, поэтому сохранённый замер
-            // возвращается ПОСЛЕ смены шрифта. Без него подпись остаётся обрезанной:
-            // при пустом cachedExtent LightLabel меряет текст заново, шрифтом GC на момент
-            // отрисовки, и результат может не совпасть с шириной, посчитанной при разметке.
-            Global.invokeVoid(label, "setFont", font); //$NON-NLS-1$
-            if (bounds != null)
-                Global.invokeVoid(label, "setBounds", bounds); //$NON-NLS-1$
-            Global.setField(label, "cachedExtent", extent); //$NON-NLS-1$
-            Global.invokeVoid(label, "invalidate"); //$NON-NLS-1$
+            originalFont = fontField(label);
+            applyBold(label);
         }
-        // null допустим: LightLabel.paint при пустом textColor берёт цвет из SWT-хоста.
-        Global.invokeVoid(label, "setTextColor", original); //$NON-NLS-1$
+        else
+        {
+            removeBold(label);
+        }
+    }
+
+    /** Ввод сейчас в поле текущего свойства (а не в другом поле панели и не вне её). */
+    private static boolean activeFieldFocused()
+    {
+        IViewPart view = paletteView;
+        if (view == null || activePropertyName == null)
+            return false;
+        return activePropertyName.equals(focusedPropertyName(view));
     }
 
     /**
@@ -945,7 +1107,7 @@ public class PropertySheetActivePropertyHook implements IStartup
         // у свойств, которых нет в объектной модели платформы, открывать нечего, и пункт,
         // ведущий в пустоту, из меню убираем (разбор кэшируется, повторные вызовы дешёвые).
         SyntaxHelp.PropertyDoc doc =
-            SyntaxHelp.resolve(palettePage, sceneForCopy(), hit.labelView, hit.name);
+            SyntaxHelp.resolve(currentPage(), sceneForCopy(), hit.labelView, hit.name);
         if (doc != null && doc.viewPage != null)
         {
             new MenuItem(menu, SWT.SEPARATOR);
@@ -955,7 +1117,7 @@ public class PropertySheetActivePropertyHook implements IStartup
             syntaxItem.setToolTipText("Открыть справку по свойству в синтакс-помощнике" //$NON-NLS-1$
                 + Global.pluginSignForTooltip());
             syntaxItem.addListener(SWT.Selection,
-                e -> SyntaxHelp.open(palettePage, sceneForCopy(), hit.labelView, hit.name));
+                e -> SyntaxHelp.open(currentPage(), sceneForCopy(), hit.labelView, hit.name));
         }
 
         menu.addListener(SWT.Hide, e -> control.getDisplay().asyncExec(() ->
@@ -967,15 +1129,32 @@ public class PropertySheetActivePropertyHook implements IStartup
         menu.setVisible(true);
     }
 
+    /**
+     * Страница панели на СЕЙЧАС, а не из кэша: кэш обновляется по перерисовке палитры, и на
+     * момент клика он может отставать — тогда разбор свойства пойдёт по сцене прежнего объекта.
+     */
+    private static Object currentPage()
+    {
+        Object page = paletteView != null
+            ? PropertyNameIdentifierHook.resolvePropertySheetPage(paletteView) : null;
+        if (page != null && page != palettePage)
+        {
+            Global.tempLog(TEMP_TOPIC, "страница панели обновлена на месте (кэш отставал)"); //$NON-NLS-1$
+            palettePage = page;
+        }
+        return page != null ? page : palettePage;
+    }
+
     private static Object sceneForCopy()
     {
-        return palettePage != null ? Global.invoke(palettePage, "getScene") : null; //$NON-NLS-1$
+        Object page = currentPage();
+        return page != null ? Global.invoke(page, "getScene") : null; //$NON-NLS-1$
     }
 
     /** Английское имя признака модели ({@code conditionalAppearance}) для строки палитры. */
     private static String englishFeature(HitProperty hit)
     {
-        String resolved = PropertySheetControlInterop.resolveCopyPropertyName(palettePage,
+        String resolved = PropertySheetControlInterop.resolveCopyPropertyName(currentPage(),
             sceneForCopy(), hit.labelView, hit.name);
         return resolved != null ? resolved : ""; //$NON-NLS-1$
     }
@@ -990,14 +1169,14 @@ public class PropertySheetActivePropertyHook implements IStartup
      */
     private static void copyPropertyName(Control control, HitProperty hit)
     {
-        String english = PropertySheetControlInterop.resolveModelPropertyName(palettePage,
+        String english = PropertySheetControlInterop.resolveModelPropertyName(currentPage(),
             sceneForCopy(), hit.labelView, hit.name);
         if (english == null || english.isEmpty())
             english = englishFeature(hit);
         String text;
         try
         {
-            text = PropertySheetPlatformPropertyResolver.russianNameForCopy(palettePage,
+            text = PropertySheetPlatformPropertyResolver.russianNameForCopy(currentPage(),
                 sceneForCopy(), hit.labelView, hit.name, english);
         }
         catch (Exception e)
@@ -1027,7 +1206,7 @@ public class PropertySheetActivePropertyHook implements IStartup
             return;
         if (control == tooltipControl && hit.name.equals(tooltipProperty))
             return;
-        String text = SyntaxHelp.describe(palettePage, sceneForCopy(), hit.labelView, hit.name);
+        String text = SyntaxHelp.describe(currentPage(), sceneForCopy(), hit.labelView, hit.name);
         if (text == null || text.isEmpty())
         {
             // Часть свойств палитры существует только в метаданных: описания у них нет и быть

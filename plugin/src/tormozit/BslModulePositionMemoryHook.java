@@ -1,12 +1,9 @@
 package tormozit;
 
 import java.util.HashSet;
-import java.util.LinkedHashMap;
-import java.util.Map;
 import java.util.Set;
 
 import org.eclipse.core.resources.IFile;
-import org.eclipse.core.runtime.preferences.InstanceScope;
 import org.eclipse.jface.text.BadLocationException;
 import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.IRegion;
@@ -27,8 +24,6 @@ import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.forms.editor.IFormPage;
-import org.eclipse.ui.preferences.ScopedPreferenceStore;
-import org.osgi.framework.FrameworkUtil;
 
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
@@ -382,110 +377,48 @@ public class BslModulePositionMemoryHook implements IStartup
     }
 
     // =========================================================================
-    // Персистентное хранилище позиций (единственный потребитель — этот хук)
+    // Персистентное хранилище позиций (кодирование позиции поверх EditorMemoryStore)
     // =========================================================================
 
     private static final class ModulePositionStore
     {
-        private static final String PREF_KEY = "bslModulePosition.entries"; //$NON-NLS-1$
-        private static final char   SEP      = '\t';
-        private static final int    MAX_SIZE = 500;
+        private static final char SEP = '\t';
 
-        private static ScopedPreferenceStore prefs;
-        private static Map<String, int[]> cache;
+        private static final EditorMemoryStore STORE =
+            new EditorMemoryStore("bslModulePosition.entries", 500); //$NON-NLS-1$
 
         private ModulePositionStore() {}
 
-        static synchronized int[] load(String key)
+        static int[] load(String key)
         {
-            ensureLoaded();
-            return cache.get(key);
-        }
-
-        /** Обновляет позицию в памяти без записи на диск (дёшево, для вызова на каждое изменение выделения). */
-        static synchronized void updateMemory(String key, int line, int column, int topIndex)
-        {
-            ensureLoaded();
-            cache.remove(key);
-            cache.put(key, new int[] { line, column, topIndex });
-            while (cache.size() > MAX_SIZE)
-            {
-                String oldest = cache.keySet().iterator().next();
-                cache.remove(oldest);
-            }
-        }
-
-        /** Сбрасывает текущее состояние памяти на диск (вызывается при уходе с редактора). */
-        static synchronized void flush()
-        {
-            ensureLoaded();
-            persist();
-        }
-
-        private static void ensureLoaded()
-        {
-            if (cache != null)
-                return;
-            cache = new LinkedHashMap<>();
-            ScopedPreferenceStore store = prefs();
-            if (store == null)
-                return;
-            String raw = store.getString(PREF_KEY);
-            if (raw == null || raw.isBlank())
-                return;
-            for (String line : raw.split("\n")) //$NON-NLS-1$
-            {
-                String[] parts = line.split(String.valueOf(SEP), -1);
-                if (parts.length != 4)
-                    continue;
-                try
-                {
-                    cache.put(parts[0], new int[] {
-                        Integer.parseInt(parts[1]), Integer.parseInt(parts[2]), Integer.parseInt(parts[3]) });
-                }
-                catch (NumberFormatException ignored) {}
-            }
-        }
-
-        private static void persist()
-        {
-            ScopedPreferenceStore store = prefs();
-            if (store == null)
-                return;
-            StringBuilder sb = new StringBuilder();
-            for (Map.Entry<String, int[]> e : cache.entrySet())
-            {
-                if (sb.length() > 0)
-                    sb.append('\n');
-                int[] v = e.getValue();
-                sb.append(e.getKey()).append(SEP).append(v[0]).append(SEP).append(v[1]).append(SEP)
-                    .append(v.length > 2 ? v[2] : 0);
-            }
-            store.setValue(PREF_KEY, sb.toString());
+            String raw = STORE.load(key);
+            if (raw == null)
+                return null;
+            String[] parts = raw.split(String.valueOf(SEP), -1);
+            if (parts.length != 3)
+                return null;
             try
             {
-                store.save();
+                return new int[] { Integer.parseInt(parts[0]), Integer.parseInt(parts[1]),
+                    Integer.parseInt(parts[2]) };
             }
-            catch (Exception ignored)
-            {
-                // prefs опциональны
-            }
-        }
-
-        private static ScopedPreferenceStore prefs()
-        {
-            if (prefs != null)
-                return prefs;
-            try
-            {
-                String pluginId = FrameworkUtil.getBundle(ModulePositionStore.class).getSymbolicName();
-                prefs = new ScopedPreferenceStore(InstanceScope.INSTANCE, pluginId);
-            }
-            catch (Exception ignored)
+            catch (NumberFormatException ignored)
             {
                 return null;
             }
-            return prefs;
         }
+
+        /** Обновляет позицию в памяти без записи на диск (дёшево, для вызова на каждое изменение выделения). */
+        static void updateMemory(String key, int line, int column, int topIndex)
+        {
+            STORE.updateMemory(key, "" + line + SEP + column + SEP + topIndex); //$NON-NLS-1$
+        }
+
+        /** Сбрасывает текущее состояние памяти на диск (вызывается при уходе с редактора). */
+        static void flush()
+        {
+            STORE.flush();
+        }
+
     }
 }

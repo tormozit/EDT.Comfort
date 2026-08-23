@@ -51,48 +51,51 @@ import org.eclipse.ui.views.markers.MarkerField;
 import org.eclipse.ui.views.markers.MarkerItem;
 
 /**
- * Панель «Закладки» ({@link IPageLayout#ID_BOOKMARKS}): колонки «Модуль» / «Метод» и выбор
- * ячейки ({@link FormTreeInteraction}) — issue
+ * Панели маркеров «Закладки» ({@link IPageLayout#ID_BOOKMARKS}) и «Задачи»
+ * ({@link IPageLayout#ID_TASK_LIST}): колонки «Модуль» / «Метод», выбор ячейки
+ * ({@link FormTreeInteraction}), раскладка колонок — issue
  * <a href="https://github.com/tormozit/EDT.Comfort/issues/372">#372</a>.
  *
- * <p>Штатная панель построена на {@link Tree}, не на {@link org.eclipse.swt.widgets.Table},
+ * <p>Штатные панели построены на {@link Tree}, не на {@link org.eclipse.swt.widgets.Table},
  * поэтому подключается {@link FormTreeInteraction} (аналог {@link FormTableInteraction} для
  * дерева).
  *
  * <p>Колонка «Модуль» — полное имя модуля BSL ({@link GetRef#pathToModuleRef}, например
  * {@code Справочник.Валюты.МодульМенеджера}). Колонка «Метод» — имя процедуры/функции по строке
- * закладки ({@link GetRef#findEnclosingMethodName}). Поля регистрируются как {@code markerField};
- * при старте дописываются в дескриптор генератора закладок (в Eclipse 2023
+ * маркера ({@link GetRef#findEnclosingMethodName}). Поля регистрируются как {@code markerField};
+ * при старте дописываются в дескрипторы генераторов закладок и задач (в Eclipse 2023
  * {@code markerContentGeneratorExtension} ещё не подмешивает поля — платформенный #2193). При
  * открытии панели колонки дополнительно гарантируются в дереве (в т.ч. при memento без них).
  * Порядок и ширины колонок запоминаются в {@link IDialogSettings} при закрытии панели
- * (как у остальных списков Комфорт).
+ * (отдельно для «Закладок» и «Задач»).
  */
-public final class BookmarksViewHook implements IStartup
+public final class MarkersListViewsHook implements IStartup
 {
     static final String MODULE_FIELD_ID = "tormozit.comfort.bookmarkModuleField"; //$NON-NLS-1$
     static final String METHOD_FIELD_ID = "tormozit.comfort.bookmarkMethodField"; //$NON-NLS-1$
 
     private static final String MODULE_COLUMN_TITLE = "Модуль"; //$NON-NLS-1$
     private static final String METHOD_COLUMN_TITLE = "Метод"; //$NON-NLS-1$
-    private static final String INSTALLED_KEY = "tormozit.bookmarksViewHook"; //$NON-NLS-1$
-    private static final String MODULE_COLUMN_KEY = "tormozit.bookmarksModuleColumn"; //$NON-NLS-1$
-    private static final String METHOD_COLUMN_KEY = "tormozit.bookmarksMethodColumn"; //$NON-NLS-1$
+    private static final String INSTALLED_KEY = "tormozit.markersListViewsHook"; //$NON-NLS-1$
+    private static final String MODULE_COLUMN_KEY = "tormozit.markersModuleColumn"; //$NON-NLS-1$
+    private static final String METHOD_COLUMN_KEY = "tormozit.markersMethodColumn"; //$NON-NLS-1$
     private static final int MODULE_COLUMN_WIDTH = 280;
     private static final int METHOD_COLUMN_WIDTH = 140;
     private static final int MIN_COLUMN_WIDTH = 20;
-    private static final String SETTINGS_SECTION = "BookmarksView"; //$NON-NLS-1$
+    private static final String SETTINGS_SECTION_BOOKMARKS = "BookmarksView"; //$NON-NLS-1$
+    private static final String SETTINGS_SECTION_TASKS = "TasksView"; //$NON-NLS-1$
     private static final String KEY_COL_ORDER = "columnOrder"; //$NON-NLS-1$
     private static final String WIDTH_KEY_PREFIX = "colWidth."; //$NON-NLS-1$
     /** Ключ {@code TreeColumn.setData} в ExtendedMarkersView — {@link MarkerField}. */
     private static final String MARKER_FIELD_DATA = "MARKER_FIELD"; //$NON-NLS-1$
-    private static final String HEADER_SORT_WIRED_KEY = "tormozit.bookmarksHeaderSort"; //$NON-NLS-1$
-    private static final String HEADER_SORT_TEXT_KEY = "tormozit.bookmarksHeaderSortText"; //$NON-NLS-1$
-    private static final String TREE_SORT_COLUMN_KEY = "tormozit.bookmarksSortColumn"; //$NON-NLS-1$
-    private static final String TREE_SORT_ASC_KEY = "tormozit.bookmarksSortAsc"; //$NON-NLS-1$
+    private static final String HEADER_SORT_WIRED_KEY = "tormozit.markersHeaderSort"; //$NON-NLS-1$
+    private static final String HEADER_SORT_TEXT_KEY = "tormozit.markersHeaderSortText"; //$NON-NLS-1$
+    private static final String TREE_SORT_COLUMN_KEY = "tormozit.markersSortColumn"; //$NON-NLS-1$
+    private static final String TREE_SORT_ASC_KEY = "tormozit.markersSortAsc"; //$NON-NLS-1$
     private static final String MARKER_SUPPORT_REGISTRY =
         "org.eclipse.ui.views.markers.internal.MarkerSupportRegistry"; //$NON-NLS-1$
     private static final String BOOKMARKS_GENERATOR = "org.eclipse.ui.ide.bookmarksGenerator"; //$NON-NLS-1$
+    private static final String TASKS_GENERATOR = "org.eclipse.ui.ide.tasksGenerator"; //$NON-NLS-1$
 
     private static volatile boolean windowsHooked;
 
@@ -104,17 +107,17 @@ public final class BookmarksViewHook implements IStartup
             return;
         display.asyncExec(() ->
         {
-            patchBookmarksGenerator();
+            patchGenerators();
             hookWorkbench();
         });
     }
 
     /**
      * Дописывает {@link ModuleField}/{@link MethodField} в {@code allFields}/{@code initialVisible}
-     * генератора закладок. Реестр и дескриптор — internal API Eclipse, доступ только через
+     * генераторов закладок и задач. Реестр и дескриптор — internal API Eclipse, доступ только через
      * reflection.
      */
-    private static void patchBookmarksGenerator()
+    private static void patchGenerators()
     {
         try
         {
@@ -123,18 +126,36 @@ public final class BookmarksViewHook implements IStartup
             Object registry = getInstance.invoke(null);
             if (registry == null)
                 return;
-            Object descriptor = Global.invoke(registry, "getContentGenDescriptor", //$NON-NLS-1$
-                BOOKMARKS_GENERATOR);
-            if (descriptor == null)
-                return;
             // Сначала «Модуль», затем «Метод» — так колонки идут в initialVisible на чистой раскладке.
-            appendRegisteredField(registry, descriptor, MODULE_FIELD_ID);
-            appendRegisteredField(registry, descriptor, METHOD_FIELD_ID);
+            patchGenerator(registry, BOOKMARKS_GENERATOR);
+            patchGenerator(registry, TASKS_GENERATOR);
         }
         catch (ReflectiveOperationException | RuntimeException ex)
         {
             // Колонки всё равно появятся через ensureComfortColumns.
         }
+    }
+
+    private static void patchGenerator(Object registry, String generatorId)
+    {
+        Object descriptor = Global.invoke(registry, "getContentGenDescriptor", generatorId); //$NON-NLS-1$
+        if (descriptor == null)
+            return;
+        appendRegisteredField(registry, descriptor, MODULE_FIELD_ID);
+        appendRegisteredField(registry, descriptor, METHOD_FIELD_ID);
+    }
+
+
+    private static boolean isTargetViewId(String viewId)
+    {
+        return IPageLayout.ID_BOOKMARKS.equals(viewId) || IPageLayout.ID_TASK_LIST.equals(viewId);
+    }
+
+    private static String settingsSectionFor(String viewId)
+    {
+        if (IPageLayout.ID_TASK_LIST.equals(viewId))
+            return SETTINGS_SECTION_TASKS;
+        return SETTINGS_SECTION_BOOKMARKS;
     }
 
     private static void appendRegisteredField(Object registry, Object descriptor, String fieldId)
@@ -164,6 +185,7 @@ public final class BookmarksViewHook implements IStartup
         next[fields.length] = field;
         Global.setField(descriptor, arrayField, next);
     }
+
     private static String configId(MarkerField field)
     {
         try
@@ -215,7 +237,7 @@ public final class BookmarksViewHook implements IStartup
             @Override
             public boolean preShutdown(IWorkbench wb, boolean forced)
             {
-                repairBookmarkMarkerFields();
+                repairMarkerFields();
                 return true;
             }
 
@@ -232,7 +254,7 @@ public final class BookmarksViewHook implements IStartup
      * Перед persist: у колонок «Модуль»/«Метод» должен быть {@code MARKER_FIELD}, иначе
      * {@code ExtendedMarkersView.saveState} → NPE ({@code markerField == null}).
      */
-    private static void repairBookmarkMarkerFields()
+    private static void repairMarkerFields()
     {
         IWorkbench workbench = PlatformUI.getWorkbench();
         if (workbench == null)
@@ -249,7 +271,7 @@ public final class BookmarksViewHook implements IStartup
                     continue;
                 for (IViewReference ref : page.getViewReferences())
                 {
-                    if (ref == null || !IPageLayout.ID_BOOKMARKS.equals(ref.getId()))
+                    if (ref == null || !isTargetViewId(ref.getId()))
                         continue;
                     IWorkbenchPart part = ref.getPart(false);
                     if (!(part instanceof IViewPart view))
@@ -314,8 +336,8 @@ public final class BookmarksViewHook implements IStartup
                 // persist/saveState при уходе с вида — до него колонки уже должны иметь MARKER_FIELD.
                 // tryInstall может не сработать (выкл. настройка) — repair безусловный.
                 tryInstall(ref);
-                if (ref != null && IPageLayout.ID_BOOKMARKS.equals(ref.getId()))
-                    repairBookmarkMarkerFields();
+                if (ref != null && isTargetViewId(ref.getId()))
+                    repairMarkerFields();
             }
         });
         for (IWorkbenchPage page : window.getPages())
@@ -329,7 +351,7 @@ public final class BookmarksViewHook implements IStartup
 
     private static void tryInstall(IWorkbenchPartReference ref)
     {
-        if (ref == null || !IPageLayout.ID_BOOKMARKS.equals(ref.getId()))
+        if (ref == null || !isTargetViewId(ref.getId()))
             return;
         IWorkbenchPart part = ref.getPart(false);
         if (!(part instanceof IViewPart view))
@@ -341,13 +363,16 @@ public final class BookmarksViewHook implements IStartup
     {
         if (!ComfortSettings.isReplaceListFiltersEnabled())
             return;
+        String viewId = view.getViewSite() != null ? view.getViewSite().getId() : null;
+        if (!isTargetViewId(viewId))
+            return;
         TreeViewer viewer = resolveViewer(view);
         if (viewer == null)
             return;
         Control control = viewer.getControl();
         if (!(control instanceof Tree tree) || tree.isDisposed())
             return;
-        boolean columnsAdded = ensureComfortColumns(view, viewer, tree);
+        boolean columnsAdded = ensureComfortColumns(view, viewer, tree, viewId);
         if (Boolean.TRUE.equals(tree.getData(INSTALLED_KEY)))
         {
             // Колонки могли появиться уже после первой отрисовки — дорисовать ячейки.
@@ -356,15 +381,16 @@ public final class BookmarksViewHook implements IStartup
             return;
         }
         tree.setData(INSTALLED_KEY, Boolean.TRUE);
-        loadColumnLayout(tree);
+        loadColumnLayout(tree, viewId);
         FormTreeInteraction.install(tree, viewer);
-        tree.addDisposeListener(e -> saveColumnLayout(tree));
+        final String layoutViewId = viewId;
+        tree.addDisposeListener(e -> saveColumnLayout(tree, layoutViewId));
         // TreeViewerColumn после setInput сам ячейки не заполняет.
         if (columnsAdded)
             viewer.refresh();
     }
 
-    /** Viewer панели закладок — {@code ExtendedMarkersView.getViewer()} (package API). */
+    /** Viewer панели маркеров — {@code ExtendedMarkersView.getViewer()} (package API). */
     private static TreeViewer resolveViewer(IViewPart view)
     {
         Object viewer = Global.invoke(view, "getViewer"); //$NON-NLS-1$
@@ -376,13 +402,13 @@ public final class BookmarksViewHook implements IStartup
      * Идемпотентно по ключу колонки и заголовку.
      */
     /** @return {@code true}, если хотя бы одна колонка создана сейчас */
-    private static boolean ensureComfortColumns(IViewPart view, TreeViewer viewer, Tree tree)
+    private static boolean ensureComfortColumns(IViewPart view, TreeViewer viewer, Tree tree, String viewId)
     {
         boolean added = false;
-        added |= ensureColumn(view, viewer, tree, MODULE_COLUMN_KEY, MODULE_COLUMN_TITLE, MODULE_COLUMN_WIDTH,
-            MODULE_FIELD_ID, BookmarksViewHook::moduleText);
-        added |= ensureColumn(view, viewer, tree, METHOD_COLUMN_KEY, METHOD_COLUMN_TITLE, METHOD_COLUMN_WIDTH,
-            METHOD_FIELD_ID, BookmarksViewHook::methodText);
+        added |= ensureColumn(view, viewer, tree, viewId, MODULE_COLUMN_KEY, MODULE_COLUMN_TITLE, MODULE_COLUMN_WIDTH,
+            MODULE_FIELD_ID, MarkersListViewsHook::moduleText);
+        added |= ensureColumn(view, viewer, tree, viewId, METHOD_COLUMN_KEY, METHOD_COLUMN_TITLE, METHOD_COLUMN_WIDTH,
+            METHOD_FIELD_ID, MarkersListViewsHook::methodText);
         return added;
     }
 
@@ -393,8 +419,8 @@ public final class BookmarksViewHook implements IStartup
     }
 
     /** @return {@code true}, если колонка создана сейчас */
-    private static boolean ensureColumn(IViewPart view, TreeViewer viewer, Tree tree, String columnKey,
-        String title, int width, String fieldId, ColumnText text)
+    private static boolean ensureColumn(IViewPart view, TreeViewer viewer, Tree tree, String viewId,
+        String columnKey, String title, int width, String fieldId, ColumnText text)
     {
         // ExtendedMarkersView.saveState для каждой колонки читает MARKER_FIELD и зовёт
         // getFieldWidth → field.equals(...). Колонка без MarkerField → NPE при закрытии EDT.
@@ -408,7 +434,7 @@ public final class BookmarksViewHook implements IStartup
         }
         if (field == null)
             return false;
-        int restored = FormTableColumnState.readWidth(dialogSettings(), widthKey(fieldId), width,
+        int restored = FormTableColumnState.readWidth(dialogSettings(viewId), widthKey(fieldId), width,
             MIN_COLUMN_WIDTH);
         TreeViewerColumn column = new TreeViewerColumn(viewer, SWT.LEFT);
         column.getColumn().setText(title);
@@ -537,12 +563,13 @@ public final class BookmarksViewHook implements IStartup
         return null;
     }
 
-    private static IDialogSettings dialogSettings()
+    private static IDialogSettings dialogSettings(String viewId)
     {
         IDialogSettings top = Activator.getDefault().getDialogSettings();
-        IDialogSettings section = top.getSection(SETTINGS_SECTION);
+        String sectionName = settingsSectionFor(viewId);
+        IDialogSettings section = top.getSection(sectionName);
         if (section == null)
-            section = top.addNewSection(SETTINGS_SECTION);
+            section = top.addNewSection(sectionName);
         return section;
     }
 
@@ -580,11 +607,11 @@ public final class BookmarksViewHook implements IStartup
         return "title:" + title; //$NON-NLS-1$
     }
 
-    private static void loadColumnLayout(Tree tree)
+    private static void loadColumnLayout(Tree tree, String viewId)
     {
         if (tree == null || tree.isDisposed())
             return;
-        IDialogSettings settings = dialogSettings();
+        IDialogSettings settings = dialogSettings(viewId);
         for (TreeColumn column : tree.getColumns())
         {
             if (column == null || column.isDisposed())
@@ -639,11 +666,11 @@ public final class BookmarksViewHook implements IStartup
         tree.setColumnOrder(physical);
     }
 
-    private static void saveColumnLayout(Tree tree)
+    private static void saveColumnLayout(Tree tree, String viewId)
     {
         if (tree == null || tree.isDisposed() || tree.getColumnCount() <= 0)
             return;
-        IDialogSettings settings = dialogSettings();
+        IDialogSettings settings = dialogSettings(viewId);
         int[] visual = tree.getColumnOrder();
         StringBuilder order = new StringBuilder();
         for (int i = 0; i < visual.length; i++)
@@ -689,12 +716,12 @@ public final class BookmarksViewHook implements IStartup
     }
 
     /**
-     * Колонка «Модуль» для генератора закладок ({@code markerField} в {@code plugin.xml}).
-     * Полное имя модуля кэшируется по пути файла и штампу.
+     * Колонка «Модуль» для генераторов закладок/задач ({@code markerField} в {@code plugin.xml}).
+     * Полное имя модуля кэшируется по пути файла и штампу (включая пустой результат).
      */
     public static final class ModuleField extends MarkerField
     {
-        private static final int CACHE_LIMIT = 512;
+        private static final int CACHE_LIMIT = 4096;
         private static final Map<String, String> CACHE = new ConcurrentHashMap<>();
 
         @Override
@@ -730,13 +757,7 @@ public final class BookmarksViewHook implements IStartup
                 return cached;
 
             String resolved = resolveModuleName(file);
-            // Пустой результат не кэшируем: при первом открытии путь/ресурс иногда ещё не
-            // готовы — иначе колонка останется пустой до смены штампа файла.
-            if (resolved.isEmpty())
-                return resolved;
-            if (CACHE.size() >= CACHE_LIMIT)
-                CACHE.clear();
-            CACHE.put(key, resolved);
+            putBounded(CACHE, key, resolved, CACHE_LIMIT);
             return resolved;
         }
 
@@ -751,13 +772,16 @@ public final class BookmarksViewHook implements IStartup
     }
 
     /**
-     * Колонка «Метод» для генератора закладок ({@code markerField} в {@code plugin.xml}).
-     * Имя метода кэшируется по пути файла, штампу и номеру строки.
+     * Колонка «Метод» для генераторов закладок/задач ({@code markerField} в {@code plugin.xml}).
+     * Имя метода кэшируется по пути файла, штампу и строке; текст файла — отдельно по пути/штампу,
+     * чтобы несколько задач в одном модуле не читали диск повторно.
      */
     public static final class MethodField extends MarkerField
     {
-        private static final int CACHE_LIMIT = 512;
+        private static final int CACHE_LIMIT = 8192;
+        private static final int FILE_TEXT_CACHE_LIMIT = 64;
         private static final Map<String, String> CACHE = new ConcurrentHashMap<>();
+        private static final Map<String, String> FILE_TEXT_CACHE = new ConcurrentHashMap<>();
 
         @Override
         public String getValue(MarkerItem item)
@@ -792,23 +816,38 @@ public final class BookmarksViewHook implements IStartup
             if (cached != null)
                 return cached;
 
-            String resolved = resolveFromFile(file, line);
-            if (resolved.isEmpty())
-                return resolved;
-            if (CACHE.size() >= CACHE_LIMIT)
-                CACHE.clear();
-            CACHE.put(key, resolved);
+            String resolved = resolveFromFile(file, stamp, line);
+            // null = не удалось прочитать файл — не кэшируем, повторим позже.
+            if (resolved == null)
+                return ""; //$NON-NLS-1$
+            putBounded(CACHE, key, resolved, CACHE_LIMIT);
             return resolved;
         }
 
-        private static String resolveFromFile(IFile file, int line1Based)
+        /** @return имя метода (возможно пустое) или {@code null}, если файл не прочитан */
+        private static String resolveFromFile(IFile file, long stamp, int line1Based)
         {
-            String text = readFileText(file);
-            if (text == null || text.isEmpty())
+            String text = readFileTextCached(file, stamp);
+            if (text == null)
+                return null;
+            if (text.isEmpty())
                 return ""; //$NON-NLS-1$
             IDocument document = new Document(text);
             String method = GetRef.findEnclosingMethodName(document, line1Based);
             return method != null ? method : ""; //$NON-NLS-1$
+        }
+
+        private static String readFileTextCached(IFile file, long stamp)
+        {
+            String key = file.getFullPath() + "#" + stamp; //$NON-NLS-1$
+            String cached = FILE_TEXT_CACHE.get(key);
+            if (cached != null)
+                return cached;
+            String text = readFileText(file);
+            if (text == null)
+                return null;
+            putBounded(FILE_TEXT_CACHE, key, text, FILE_TEXT_CACHE_LIMIT);
+            return text;
         }
 
         private static String readFileText(IFile file)
@@ -839,5 +878,13 @@ public final class BookmarksViewHook implements IStartup
                 return null;
             }
         }
+    }
+
+    /** Кладёт значение в кэш; при переполнении сбрасывает целиком (проще LRU на ConcurrentHashMap). */
+    private static void putBounded(Map<String, String> cache, String key, String value, int limit)
+    {
+        if (cache.size() >= limit)
+            cache.clear();
+        cache.put(key, value);
     }
 }

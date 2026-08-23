@@ -16,6 +16,7 @@ import org.eclipse.core.runtime.Platform;
 import org.eclipse.xtext.resource.IEObjectDescription;
 import org.osgi.framework.Bundle;
 
+import com._1c.g5.v8.dt.form.model.Form;
 import com._1c.g5.v8.dt.form.model.FormItem;
 import com._1c.g5.v8.dt.form.model.FormVisualEntity;
 import com._1c.g5.v8.dt.form.model.ExtInfo;
@@ -147,8 +148,12 @@ final class PropertySheetPlatformPropertyResolver
                     .resolveCopyNameContext(page, scene, lwtView, displayName);
             String english = preferredEnglish(ctx.english, englishHint);
             EObject owner = ctx.owner();
+            boolean fromBinding = owner != null;
             if (owner == null)
                 owner = PropertySheetControlInterop.selectionEObjectForCopy(page);
+            Global.tempLog(TEMP_TOPIC, "контекст «" + displayName + "»: признак=" + english //$NON-NLS-1$ //$NON-NLS-2$
+                    + ", владелец=" + (owner == null ? "<null>" : owner.eClass().getName()) //$NON-NLS-1$ //$NON-NLS-2$
+                    + (fromBinding ? " (из привязки)" : " (из выделения панели)")); //$NON-NLS-1$ //$NON-NLS-2$
 
             if (english == null || english.isEmpty())
             {
@@ -160,6 +165,28 @@ final class PropertySheetPlatformPropertyResolver
             }
 
             EStructuralFeature feature = featureFromContext(ctx);
+
+            // Невизуальные объекты формы (команда формы, реквизит формы) не проходят через
+            // FormItemInformationService — он знает только FormVisualEntity. Подъём по
+            // контейнерам приводил к форме, и свойство искалось у ClientApplicationForm: для
+            // «Сочетания клавиш» это промах, а для «Отображения» — ложное срабатывание на
+            // ОтображениеОбсуждений. У таких объектов имя класса модели совпадает с именем
+            // типа платформы ({@code FormCommand} → «КомандаФормы»), и тип берётся напрямую.
+            if (isNonVisualFormEntity(owner))
+            {
+                Resolved resolved = resolveByEClassType(owner, feature, english);
+                if (resolved != null)
+                {
+                    Global.tempLog(TEMP_TOPIC, "форма (по классу объекта): " //$NON-NLS-1$
+                            + McoreUtil.getTypeName(resolved.ownerType) + '.' + resolved.englishName()
+                            + " → " + resolved.russianName()); //$NON-NLS-1$
+                    return resolved;
+                }
+                // К типу формы намеренно НЕ откатываемся: чужой тип даёт ложные совпадения.
+                Global.tempLog(TEMP_TOPIC, "форма: у типа " + owner.eClass().getName() //$NON-NLS-1$
+                        + " нет свойства " + english + " (подпись «" + displayName + "»)"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                return null;
+            }
 
             if (formVisualEntityForLookup(owner, page) != null)
             {
@@ -368,7 +395,7 @@ final class PropertySheetPlatformPropertyResolver
                 return new Resolved(type, property);
             }
         }
-        logSimilarProperties(types, english);
+        logSimilarProperties(formItem, types, english);
         return null;
     }
 
@@ -376,13 +403,17 @@ final class PropertySheetPlatformPropertyResolver
      * Что вообще есть у типа-владельца рядом по имени — чтобы промах было видно по логу, а не
      * гадать: свойство названо иначе или его во встроенном языке нет вовсе.
      */
-    private static void logSimilarProperties(List<Type> types, String english)
+    private static void logSimilarProperties(FormVisualEntity formItem, List<Type> types, String english)
     {
         String needle = english.toLowerCase(Locale.ROOT);
         StringBuilder similar = new StringBuilder();
+        StringBuilder typeNames = new StringBuilder();
         int total = 0;
         for (Type type : types)
         {
+            if (typeNames.length() > 0)
+                typeNames.append('+');
+            typeNames.append(McoreUtil.getTypeName(type));
             ContextDef contextDef = type != null ? type.getContextDef() : null;
             if (contextDef == null)
                 continue;
@@ -400,7 +431,9 @@ final class PropertySheetPlatformPropertyResolver
                 similar.append(McoreUtil.getTypeName(type)).append('.').append(name);
             }
         }
-        Global.tempLog(TEMP_TOPIC, "форма: похожих на " + english + " среди " + total //$NON-NLS-1$ //$NON-NLS-2$
+        Global.tempLog(TEMP_TOPIC, "форма: объект " //$NON-NLS-1$
+                + (formItem != null ? formItem.eClass().getName() : "<null>") //$NON-NLS-1$
+                + ", тип " + typeNames + "; похожих на " + english + " среди " + total //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 + " свойств: " + (similar.length() > 0 ? similar.toString() : "нет")); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
@@ -414,6 +447,40 @@ final class PropertySheetPlatformPropertyResolver
                 return true;
         }
         return false;
+    }
+
+    /** Объект формы, который не является её визуальным элементом: команда, реквизит, параметр. */
+    private static boolean isNonVisualFormEntity(EObject owner)
+    {
+        if (owner == null || owner instanceof FormVisualEntity)
+            return false;
+        for (EObject cur = owner; cur != null; cur = cur.eContainer())
+        {
+            if (cur instanceof Form)
+                return cur != owner;
+        }
+        return false;
+    }
+
+    /**
+     * Тип платформы по имени класса модели: у объектов формы они совпадают
+     * ({@code FormCommand}, {@code FormAttribute}).
+     */
+    private static Resolved resolveByEClassType(EObject owner, EStructuralFeature feature, String english)
+    {
+        String typeName = owner.eClass().getName();
+        Type type = loadResolvedPlatformType(owner, typeName, McorePackage.Literals.TYPE);
+        if (type == null)
+            type = loadResolvedPlatformType(owner, typeName, McorePackage.Literals.TYPE_ITEM);
+        if (type == null)
+        {
+            Global.tempLog(TEMP_TOPIC, "тип платформы не загружен: " + typeName); //$NON-NLS-1$
+            return null;
+        }
+        Property property = findProperty(type, english);
+        if (property == null)
+            property = findFormPlatformPropertyFallback(type, feature, english);
+        return property != null ? new Resolved(type, property) : null;
     }
 
     private static FormVisualEntity formVisualEntityForLookup(EObject owner, Object page)
@@ -588,7 +655,7 @@ final class PropertySheetPlatformPropertyResolver
         return null;
     }
 
-    private static Type loadResolvedPlatformType(MdObject mdOwner, String typeName, EClass providerClass)
+    private static Type loadResolvedPlatformType(EObject mdOwner, String typeName, EClass providerClass)
     {
         Version version = platformVersion(mdOwner);
         if (version == null)

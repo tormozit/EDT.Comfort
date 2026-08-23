@@ -58,6 +58,22 @@ final class FormTreeInteraction
 
     private Color ownedActiveCellBg;
 
+    private Color ownedFrame;
+
+    /**
+     * Снимок выделения: {@link Tree#getSelection()} — нативный вызов, создающий массив, а
+     * отрисовка спрашивает выделение на КАЖДУЮ ячейку (и не по разу). На прокрутке это давало
+     * сотни таких вызовов в секунду и было главной статьёй расхода времени в обработчиках
+     * отрисовки. Снимок живёт {@link #SELECTION_SNAPSHOT_MS} — заведомо дольше одной перерисовки
+     * и заведомо незаметно для глаза, даже если выделение сменили программно (без событий).
+     */
+    private TreeItem[] selectionSnapshot;
+
+    private long selectionSnapshotAt;
+
+    /** Срок жизни снимка выделения, мс. */
+    private static final long SELECTION_SNAPSHOT_MS = 20;
+
     private FormTreeInteraction(Tree tree, TreeViewer viewer)
     {
         this.tree = tree;
@@ -89,9 +105,23 @@ final class FormTreeInteraction
         tree.addListener(SWT.MouseDown, this::onMouseDown);
         tree.addListener(SWT.EraseItem, this::onEraseItem);
         tree.addListener(SWT.PaintItem, this::onPaintItem);
-        tree.addListener(SWT.FocusIn, event -> { invalidateColors(); tree.redraw(); });
-        tree.addListener(SWT.FocusOut, event -> { invalidateColors(); tree.redraw(); });
-        tree.addListener(SWT.Selection, event -> { syncFromSelection(); invalidateColors(); tree.redraw(); });
+        tree.addListener(SWT.FocusIn, event -> {
+            invalidateColors();
+            redrawRow(activeRow());
+        });
+        tree.addListener(SWT.FocusOut, event -> {
+            invalidateColors();
+            redrawRow(activeRow());
+        });
+        // Полный tree.redraw() на Selection в больших списках (Задачи) блокирует UI:
+        // перерисовываем только прежнюю и новую строки — как в FormTableInteraction.
+        tree.addListener(SWT.Selection, event -> {
+            TreeItem previous = selectedItem;
+            syncFromSelection();
+            invalidateColors();
+            redrawRow(previous);
+            redrawRow(selectedItem);
+        });
         tree.addListener(SWT.Dispose, event -> invalidateColors());
     }
 
@@ -116,7 +146,7 @@ final class FormTreeInteraction
     {
         if (selectedItem != null && !selectedItem.isDisposed() && isRowSelected(selectedItem))
             return selectedItem;
-        TreeItem[] selection = tree.getSelection();
+        TreeItem[] selection = selection();
         if (selection.length > 0)
             return selection[0];
         return selectedItem != null && !selectedItem.isDisposed() ? selectedItem : null;
@@ -185,18 +215,35 @@ final class FormTreeInteraction
 
     private void syncFromSelection()
     {
+        invalidateSelection();
         if (selectedItem != null && !selectedItem.isDisposed() && isRowSelected(selectedItem))
             return;
-        TreeItem[] selection = tree.getSelection();
+        TreeItem[] selection = selection();
         if (selection.length > 0)
             selectedItem = selection[0];
+    }
+
+    private TreeItem[] selection()
+    {
+        long now = System.currentTimeMillis();
+        if (selectionSnapshot == null || now - selectionSnapshotAt > SELECTION_SNAPSHOT_MS)
+        {
+            selectionSnapshot = tree.getSelection();
+            selectionSnapshotAt = now;
+        }
+        return selectionSnapshot;
+    }
+
+    private void invalidateSelection()
+    {
+        selectionSnapshot = null;
     }
 
     private boolean isRowSelected(TreeItem item)
     {
         if (item == null || item.isDisposed())
             return false;
-        for (TreeItem selected : tree.getSelection())
+        for (TreeItem selected : selection())
         {
             if (selected == item)
                 return true;
@@ -239,18 +286,14 @@ final class FormTreeInteraction
         Rectangle bounds = item.getBounds(e.index);
         if (bounds == null || bounds.isEmpty())
             return;
-        Color frame = ListSelectionPalette.activeCellFrame(activeCellBackground(rowSelectionBackground()));
-        try
-        {
-            e.gc.setForeground(frame);
-            e.gc.drawRectangle(bounds.x, bounds.y, Math.max(0, bounds.width - 1),
-                Math.max(0, bounds.height - 1));
-        }
-        finally
-        {
-            if (!frame.isDisposed())
-                frame.dispose();
-        }
+        // Цвет рамки кэшируется наравне с остальными: создание и освобождение нативного Color
+        // на каждую отрисовку ячейки было вторым по стоимости местом при прокрутке.
+        if (ownedFrame == null || ownedFrame.isDisposed())
+            ownedFrame = ListSelectionPalette.activeCellFrame(
+                activeCellBackground(rowSelectionBackground()));
+        e.gc.setForeground(ownedFrame);
+        e.gc.drawRectangle(bounds.x, bounds.y, Math.max(0, bounds.width - 1),
+            Math.max(0, bounds.height - 1));
     }
 
     private Color rowSelectionBackground()
@@ -280,6 +323,7 @@ final class FormTreeInteraction
         ownedRowBg = disposed(ownedRowBg);
         ownedInactiveRowBg = disposed(ownedInactiveRowBg);
         ownedActiveCellBg = disposed(ownedActiveCellBg);
+        ownedFrame = disposed(ownedFrame);
     }
 
     private static Color disposed(Color color)
@@ -308,23 +352,36 @@ final class FormTreeInteraction
         TreeItem item = tree.getItem(new Point(x, y));
         if (item != null)
             return item;
-        return rowAtY(tree, tree.getItems(), y, 0);
+        // Обход только видимых строк — от верхней вниз. Полный обход дерева здесь стоил
+        // на больших формах десятки миллисекунд на каждый клик.
+        int height = Math.max(tree.getItemHeight(), 1);
+        int limit = tree.getClientArea().height / height + 2;
+        int seen = 0;
+        for (TreeItem row = tree.getTopItem(); row != null && seen < limit; row = nextVisibleRow(row))
+        {
+            seen++;
+            if (row.isDisposed())
+                continue;
+            Rectangle bounds = rowBounds(tree, row);
+            if (bounds != null && y >= bounds.y && y < bounds.y + bounds.height)
+                return row;
+        }
+        return null;
     }
 
-    private static TreeItem rowAtY(Tree tree, TreeItem[] items, int y, int depth)
+    /** Следующая строка в порядке показа: первый развёрнутый потомок, иначе следующий сосед. */
+    private static TreeItem nextVisibleRow(TreeItem row)
     {
-        if (items == null || depth > 32)
-            return null;
-        for (TreeItem item : items)
+        if (row.getExpanded() && row.getItemCount() > 0)
+            return row.getItem(0);
+        for (TreeItem current = row; current != null; current = current.getParentItem())
         {
-            Rectangle bounds = rowBounds(tree, item);
-            if (bounds != null && y >= bounds.y && y < bounds.y + bounds.height)
-                return item;
-            if (item.getExpanded() && item.getItemCount() > 0)
+            TreeItem parent = current.getParentItem();
+            TreeItem[] siblings = parent != null ? parent.getItems() : current.getParent().getItems();
+            for (int i = 0; i < siblings.length - 1; i++)
             {
-                TreeItem found = rowAtY(tree, item.getItems(), y, depth + 1);
-                if (found != null)
-                    return found;
+                if (siblings[i] == current)
+                    return siblings[i + 1];
             }
         }
         return null;
