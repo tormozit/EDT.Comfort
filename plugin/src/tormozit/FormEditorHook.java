@@ -839,12 +839,60 @@ public class FormEditorHook implements IStartup
     {
         if (e.button != 3)
             return;
-        if (!(e.widget instanceof Composite))
+        if (!(e.widget instanceof Composite composite))
             return;
-        if (!WYSIWYG_CLASS.equals(e.widget.getClass().getSimpleName()))
+        if (!WYSIWYG_CLASS.equals(composite.getClass().getSimpleName()))
             return;
 
-        simulateLeftClick((Composite) e.widget, e.x, e.y);
+        FormEditorPage page = FormEditor.getActiveFormEditorPage();
+        prepareWysiwygForSimulateLeftClick(page);
+        simulateLeftClick(composite, e.x, e.y);
+    }
+
+    /**
+     * EDT 2026.1.2 (#2304): синтетический ЛКМ по уже выделенному в эскизе элементу сбрасывает
+     * выделение на «Форма». {@code rebuild(false)} снимает выделение только с эскиза (дерево не
+     * трогается — см. {@link WysiwygHeaderClick}), после чего {@link #simulateLeftClick} снова
+     * выбирает элемент под курсором для контекстного меню.
+     */
+    private static void prepareWysiwygForSimulateLeftClick(FormEditorPage page)
+    {
+        if (page == null || !isEdt2026OrLater() || selectedFormItem(page) == null)
+            return;
+        Object representation = wysiwygRepresentation(page);
+        if (representation != null)
+            Global.invokeVoid(representation, "rebuild", false); //$NON-NLS-1$
+    }
+
+    /** {@code true}, если бандл form.ui EDT 2026 (major {@code >= 23}). */
+    private static boolean isEdt2026OrLater()
+    {
+        Bundle formUi = Platform.getBundle("com._1c.g5.v8.dt.form.ui"); //$NON-NLS-1$
+        org.osgi.framework.Version version = formUi != null ? formUi.getVersion() : null;
+        return version != null && version.getMajor() >= 23;
+    }
+
+    /** Текущий элемент формы в дереве элементов; {@code null} — корень «Форма» или пусто. */
+    private static FormItem selectedFormItem(FormEditorPage page)
+    {
+        if (page == null)
+            return null;
+        Object viewerObj = Global.getField(page, "itemsViewer"); //$NON-NLS-1$
+        if (!(viewerObj instanceof TreeViewer viewer))
+            return null;
+        ISelection selection = viewer.getSelection();
+        if (!(selection instanceof IStructuredSelection structured) || structured.isEmpty())
+            return null;
+        return ItemsTree.domainItem(structured.getFirstElement());
+    }
+
+    /** Представление WYSIWYG страницы редактора формы. */
+    private static Object wysiwygRepresentation(FormEditorPage page)
+    {
+        if (page == null)
+            return null;
+        Object viewer = Global.getField(page, "wysiwygViewer"); //$NON-NLS-1$
+        return viewer == null ? null : Global.getField(viewer, "wysiwygRepresentation"); //$NON-NLS-1$
     }
 
     /**
