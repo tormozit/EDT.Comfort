@@ -368,8 +368,8 @@ public final class LongOperationNotifyHook implements IStartup
         String workspace = resolveWorkspaceName();
         String toastTitle = workspace.isEmpty() ? "EDT" : "EDT: " + workspace; //$NON-NLS-1$ //$NON-NLS-2$
         evictJobToastsBeyondLimit();
-        Shell toast = ToastNotification.showStickyUntilToastHover(toastTitle,
-            DECISION_PREFIX + jobName, () -> activateDecisionShell(decisionShell), ACTIVATE_LINK);
+        Shell toast = ToastNotification.show(toastTitle, DECISION_PREFIX + jobName, 0,
+            () -> activateDecisionShell(decisionShell), ACTIVATE_LINK);
         registerJobToast(toast);
         // Решение принято — окно закрылось, тост больше не нужен.
         if (toast != null && !toast.isDisposed())
@@ -784,13 +784,8 @@ public final class LongOperationNotifyHook implements IStartup
         Shell toast;
         if (hasLogErrors)
         {
-            toast = ToastNotification.showStickyUntilToastHover(toastTitle, message.toString(),
+            toast = ToastNotification.show(toastTitle, message.toString(), 0,
                 () -> openErrorLog(firstError), ERROR_LOG_LINK);
-        }
-        else if (jobFailed)
-        {
-            toast = ToastNotification.showStickyUntilToastHover(toastTitle, message.toString(),
-                LongOperationNotifyHook::activateEdtWindow, ACTIVATE_LINK);
         }
         else
         {

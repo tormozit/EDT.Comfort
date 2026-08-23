@@ -35,8 +35,6 @@ public final class ToastNotification
     private static final int SLIDE_IN_DURATION_MS = 500;
     private static final int FADE_OUT_DURATION_MS = 2000;
     private static final int ANIMATION_STEP_MS    = 30;
-    /** Интервал опроса курсора для липкого тоста без наведения (∞ → отсчёт). */
-    private static final int CURSOR_POLL_MS       = 500;
     /** Стандартное время показа до начала затухания. */
     private static final int DEFAULT_DURATION_MS  = 4000;
 
@@ -71,11 +69,9 @@ public final class ToastNotification
         final int durationMs;
         final Runnable action;
         final String actionLabel;
-        /** Липкий тост (∞): автоскрытие только после наведения на сам тост. */
-        final boolean stickyUntilToastHover;
 
         ToastEntry(Shell s, int y, int h, String title, String message, int durationMs,
-            Runnable action, String actionLabel, boolean stickyUntilToastHover)
+            Runnable action, String actionLabel)
         {
             shell = s;
             this.y = y;
@@ -85,7 +81,6 @@ public final class ToastNotification
             this.durationMs = durationMs;
             this.action = action;
             this.actionLabel = actionLabel;
-            this.stickyUntilToastHover = stickyUntilToastHover;
         }
     }
 
@@ -121,27 +116,16 @@ public final class ToastNotification
      * @param title       заголовок (null = не отображать)
      * @param message     основной текст
      * @param durationMs  время показа в мс до начала затухания;
-     *                    {@code <= 0} — «липкий» тост (∞ слева от крестика): автоскрытие
-     *                    после первого движения указателя (или наведения на тост для
-     *                    {@link #showStickyUntilToastHover}); при старте отсчёта — стандартное
-     *                    время; наведение на тост сбрасывает таймер; после ухода — затухание
+     *                    {@code <= 0} — без автоскрытия, пока указатель не наведён
+     *                    на тост (∞ слева от крестика); при наведении — стандартное
+     *                    время, отсчёт секунд; после ухода указателя начинается затухание
      * @param actionLabel текст гиперссылки «Выполнить» (null = не отображать)
      * @param action      действие при клике на гиперссылку; произвольные параметры
      *                    передаются через замыкание лямбды (null = не отображать)
      */
     public static Shell show(String title, String message, int durationMs, Runnable action, String actionLabel)
     {
-        return show(title, message, durationMs, action, actionLabel, null, false, false);
-    }
-
-    /**
-     * Липкий тост ({@code durationMs <= 0}): автоскрытие только после наведения
-     * указателя на само уведомление (для сообщений об ошибках).
-     */
-    public static Shell showStickyUntilToastHover(String title, String message, Runnable action,
-        String actionLabel)
-    {
-        return show(title, message, 0, action, actionLabel, null, false, true);
+        return show(title, message, durationMs, action, actionLabel, null);
     }
 
     /**
@@ -152,19 +136,11 @@ public final class ToastNotification
     public static Shell show(String title, String message, int durationMs, Runnable action,
         String actionLabel, Shell inputParentShell)
     {
-        return show(title, message, durationMs, action, actionLabel, inputParentShell, false, false);
+        return show(title, message, durationMs, action, actionLabel, inputParentShell, false);
     }
 
     private static Shell show(String title, String message, int durationMs, Runnable action,
         String actionLabel, Shell inputParentShell, boolean skipSlide)
-    {
-        return show(title, message, durationMs, action, actionLabel, inputParentShell, skipSlide,
-            false);
-    }
-
-    private static Shell show(String title, String message, int durationMs, Runnable action,
-        String actionLabel, Shell inputParentShell, boolean skipSlide,
-        boolean stickyUntilToastHover)
     {
         Display display = Display.getDefault();
         if (display == null || display.isDisposed()) return null;
@@ -322,7 +298,7 @@ public final class ToastNotification
 
             // Регистрируем ДО показа, чтобы следующие тосты учитывали нашу позицию
             ToastEntry entry = new ToastEntry(shell, targetY, finalSize.y,
-                title, message, durationMs, action, actionLabel, stickyUntilToastHover);
+                title, message, durationMs, action, actionLabel);
             activeToasts.add(entry);
             shell.addDisposeListener(e -> activeToasts.remove(entry));
 
@@ -354,8 +330,7 @@ public final class ToastNotification
                 }
             }
             WinWindowActivator.ensureToastClickable(shell);
-            installAutoHide(display, shell, durationMs, skipSlide, countdownLbl,
-                stickyUntilToastHover);
+            installAutoHide(display, shell, durationMs, skipSlide, countdownLbl);
         });
 
         return holder[0];
@@ -391,16 +366,14 @@ public final class ToastNotification
 
     /**
      * Автоскрытие: при {@code durationMs > 0} — сразу; при {@code <= 0} — после
-     * первого движения указателя (или наведения на тост, если
-     * {@code stickyUntilToastHover}) знак ∞ сменяется секундами; наведение на тост
-     * сбрасывает таймер; после ухода указателя с тоста — затухание.
+     * наведения указателя на тост знак ∞ сменяется секундами, после ухода
+     * указателя идёт стандартное время до затухания.
      */
     private static void installAutoHide(Display display, Shell shell, int durationMs,
-        boolean skipSlide, Label countdownLbl, boolean stickyUntilToastHover)
+        boolean skipSlide, Label countdownLbl)
     {
         final int hideDurationMs = durationMs > 0 ? durationMs : DEFAULT_DURATION_MS;
         final boolean[] stickyUntilHover = { durationMs <= 0 };
-        final boolean dismissOnAnyMouseMove = durationMs <= 0 && !stickyUntilToastHover;
         final boolean[] armed = { false };
         final boolean[] everHovered = { false };
         final boolean[] isHovered = { false };
@@ -469,21 +442,6 @@ public final class ToastNotification
             }
         };
 
-        final boolean[] cursorPollEnabled = { false };
-        Runnable stopCursorPoll = () -> cursorPollEnabled[0] = false;
-        shell.addDisposeListener(e -> stopCursorPoll.run());
-
-        Runnable startTimedHide = () ->
-        {
-            if (shell.isDisposed() || loopStarted[0])
-                return;
-            stopCursorPoll.run();
-            everHovered[0] = true;
-            switchStickyToTimed.run();
-            loopStarted[0] = true;
-            display.timerExec(100, loop[0]);
-        };
-
         Listener hoverListener = e ->
         {
             if (shell.isDisposed())
@@ -491,9 +449,15 @@ public final class ToastNotification
             if (e.type == SWT.MouseEnter)
             {
                 isHovered[0] = true;
-                if (stickyUntilToastHover && !armed[0])
+                if (!armed[0])
                     return;
-                startTimedHide.run();
+                everHovered[0] = true;
+                switchStickyToTimed.run();
+                if (!loopStarted[0])
+                {
+                    loopStarted[0] = true;
+                    display.timerExec(100, loop[0]);
+                }
             }
             else if (e.type == SWT.MouseExit
                 && !shell.getBounds().contains(display.getCursorLocation()))
@@ -510,33 +474,6 @@ public final class ToastNotification
             display.timerExec(startDelay, loop[0]);
             return;
         }
-        if (dismissOnAnyMouseMove)
-        {
-            // Display.addFilter(MouseMove) не видит движения, когда EDT без фокуса ОС
-            // (типичный случай «липкого» тоста). Сверяем экранные координаты курсора.
-            display.timerExec(startDelay, () ->
-            {
-                if (shell.isDisposed())
-                    return;
-                final Point[] lastCursor = { display.getCursorLocation() };
-                Runnable[] pollCursor = new Runnable[1];
-                pollCursor[0] = () ->
-                {
-                    if (!cursorPollEnabled[0] || shell.isDisposed() || loopStarted[0])
-                        return;
-                    Point cur = display.getCursorLocation();
-                    if (cur.x != lastCursor[0].x || cur.y != lastCursor[0].y)
-                    {
-                        startTimedHide.run();
-                        return;
-                    }
-                    display.timerExec(CURSOR_POLL_MS, pollCursor[0]);
-                };
-                cursorPollEnabled[0] = true;
-                display.timerExec(CURSOR_POLL_MS, pollCursor[0]);
-            });
-            return;
-        }
         display.timerExec(startDelay, () ->
         {
             if (shell.isDisposed())
@@ -546,8 +483,14 @@ public final class ToastNotification
                 || shell.getBounds().contains(display.getCursorLocation());
             if (!inside)
                 return;
+            everHovered[0] = true;
             isHovered[0] = true;
-            startTimedHide.run();
+            switchStickyToTimed.run();
+            if (!loopStarted[0])
+            {
+                loopStarted[0] = true;
+                display.timerExec(100, loop[0]);
+            }
         });
     }
 
@@ -657,7 +600,7 @@ public final class ToastNotification
             for (ToastEntry entry : recipes)
             {
                 show(entry.title, entry.message, entry.durationMs, entry.action,
-                    entry.actionLabel, modal, true, entry.stickyUntilToastHover);
+                    entry.actionLabel, modal, true);
             }
         }
         finally
