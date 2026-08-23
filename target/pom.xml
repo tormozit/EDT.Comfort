@@ -7,10 +7,10 @@
   <parent>
     <groupId>tormozit</groupId>
     <artifactId>comfort.parent</artifactId>
-    <version>1.0.0.30-SNAPSHOT</version>
+    <version>1.0.0.31-SNAPSHOT</version>
     <relativePath>../pom.xml</relativePath>
   </parent>
   <artifactId>tp</artifactId>
-  <version>1.0.0.30</version>
+  <version>1.0.0.31</version>
   <packaging>eclipse-target-definition</packaging>
 </project>
