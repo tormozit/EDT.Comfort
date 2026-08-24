@@ -213,6 +213,24 @@ final class PropertySheetPlatformPropertyResolver
                     return resolved;
                 }
                 // К типу формы намеренно НЕ откатываемся: чужой тип даёт ложные совпадения.
+                // Но объект расширения поля (ExtInfo и т.п.) физически вложен в элемент формы —
+                // общие свойства элемента (ПолеФормы.Ширина и т.п.) показаны в той же палитре,
+                // а их признак объявлен не на классе расширения, а выше. Ищем по содержащему
+                // визуальному элементу, только если он найден по цепочке контейнеров (не по
+                // выделению панели — иначе для команды/реквизита получили бы ту же ложную
+                // подмену, которой избегает комментарий выше).
+                FormVisualEntity containingItem = containingFormVisualEntity(owner);
+                if (containingItem != null)
+                {
+                    Resolved viaItem = resolveFormProperty(containingItem, page, feature, english);
+                    if (viaItem != null)
+                    {
+                        Global.tempLog(TEMP_TOPIC, "форма (расширение поля, по элементу): " //$NON-NLS-1$
+                                + McoreUtil.getTypeName(viaItem.ownerType) + '.' + viaItem.englishName()
+                                + " → " + viaItem.russianName()); //$NON-NLS-1$
+                        return viaItem;
+                    }
+                }
                 Global.tempLog(TEMP_TOPIC, "форма: у типа " + owner.eClass().getName() //$NON-NLS-1$
                         + " нет свойства " + english + " (подпись «" + displayName + "»)"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 return null;
@@ -535,6 +553,25 @@ final class PropertySheetPlatformPropertyResolver
         if (property == null)
             property = findFormPlatformPropertyFallback(type, feature, english);
         return property != null ? new Resolved(type, property) : null;
+    }
+
+    /**
+     * Ближайший визуальный элемент формы по цепочке контейнеров, БЕЗ обращения к выделению
+     * панели. В отличие от {@link #formVisualEntityForLookup}, для объектов, которые в форме
+     * лежат не внутри элемента (команда, реквизит), возвращает {@code null}, а не подменяет
+     * элемент случайным выделением — здесь это используется как признак «объект физически
+     * вложен в элемент формы» (расширение поля и т.п.), а не только для поиска.
+     */
+    private static FormVisualEntity containingFormVisualEntity(EObject owner)
+    {
+        for (EObject cur = owner != null ? owner.eContainer() : null; cur != null; cur = cur.eContainer())
+        {
+            if (cur instanceof FormVisualEntity entity)
+                return entity;
+            if (cur instanceof Form)
+                break;
+        }
+        return null;
     }
 
     private static FormVisualEntity formVisualEntityForLookup(EObject owner, Object page)

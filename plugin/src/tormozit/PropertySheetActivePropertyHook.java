@@ -1643,11 +1643,45 @@ public class PropertySheetActivePropertyHook implements IStartup
             // говорим прямо.
             text = NO_PLATFORM_PROPERTY_TOOLTIP;
         }
+        String caption = truncatedCaption(control, hit.labelView, hit.name);
+        if (caption != null)
+            text = caption + ".\n" + text; //$NON-NLS-1$
         text = TooltipText.wrap(control, text);
         tooltipControl = control;
         tooltipProperty = hit.name;
         tooltipText = text;
         control.setToolTipText(text);
+    }
+
+    /**
+     * Полный заголовок свойства, если он сейчас обрезан по ширине палитры (иначе {@code null}).
+     * {@code LightLabel} сам штатного тултипа для этого не ставит — при отрисовке лишь сравнивает
+     * {@code computeSize(gc, -1, -1, true).x} (полный размер без обрезки, из {@code cachedExtent})
+     * с {@code getBounds().width} и, если не влезает, укорачивает текст многоточием только для
+     * рисования. Тот же расчёт, отдельным {@code GC} на контроле палитры.
+     */
+    private static String truncatedCaption(Control control, Object labelView, String fullCaption)
+    {
+        if (labelView == null || fullCaption == null || fullCaption.isEmpty())
+            return null;
+        // hit.labelView — обёртка AEF-«вида», не сам LightLabel: bounds/computeSize есть только
+        // у света под ней (см. PropertySheetControlInterop.liveLightDisplayBounds).
+        Object light = PropertySheetControlInterop.lightControlFromView(labelView);
+        if (light == null)
+            return null;
+        Object boundsObj = Global.invoke(light, "getBounds"); //$NON-NLS-1$
+        if (!(boundsObj instanceof Rectangle bounds) || bounds.width <= 0)
+            return null;
+        GC gc = new GC(control);
+        try
+        {
+            Object sizeObj = Global.invoke(light, "computeSize", gc, -1, -1, true); //$NON-NLS-1$
+            return sizeObj instanceof Point size && size.x > bounds.width ? fullCaption : null;
+        }
+        finally
+        {
+            gc.dispose();
+        }
     }
 
     /**
