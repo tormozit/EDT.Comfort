@@ -282,6 +282,52 @@ public final class PropertySheetNonDefaultHighlightHook implements IStartup
         }
     }
 
+    /**
+     * Комбо в фокусе на странице палитры; {@code null} — фокус не в комбо палитры.
+     * {@code [0]} — {@code ComboViewModel}, {@code [1]} — светлый контрол ({@code LightCombo}
+     * / {@code LightImageCombo}). Используется {@link PropertySheetEventHandlerClearHook}
+     * (Shift+F4 переключает «не Авто» значение на «Авто»).
+     */
+    static Object[] focusedCombo(Object page)
+    {
+        Map<?, ?> map = viewModelToView(page);
+        if (map == null)
+            return null;
+        for (Map.Entry<?, ?> entry : map.entrySet())
+        {
+            Object vm = entry.getKey();
+            if (!isComboViewModel(vm))
+                continue;
+            Object light = comboControlFromView(entry.getValue());
+            if (!isComboControl(light) || isDisposed(light))
+                continue;
+            if (PropertySheetActivePropertyHook.isFocusedDeep(light, 0))
+                return new Object[] { vm, light };
+        }
+        return null;
+    }
+
+    /**
+     * Индекс пункта «Авто» в списке комбо, если сейчас выбрано другое значение и «Авто» в
+     * списке есть; иначе {@code null} (менять не на что или менять не нужно).
+     */
+    static Integer autoItemIndexToSwitchTo(Object viewModel)
+    {
+        if (!shouldMark(viewModel))
+            return null;
+        Object items = Global.invoke(viewModel, "getItems"); //$NON-NLS-1$
+        if (!(items instanceof Iterable<?> list))
+            return null;
+        int i = 0;
+        for (Object item : list)
+        {
+            if (isAutoText(itemText(item)))
+                return i;
+            i++;
+        }
+        return null;
+    }
+
     private static boolean shouldMark(Object viewModel)
     {
         if (!hasAutoChoice(viewModel))

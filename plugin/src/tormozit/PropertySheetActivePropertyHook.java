@@ -338,8 +338,11 @@ public class PropertySheetActivePropertyHook implements IStartup
         }
     }
 
-    /** Страница AEF-палитры, содержащая {@code control}; {@code null} — вне палитры. */
-    private static Object resolvePageFromControl(Control control)
+    /**
+     * Страница AEF-палитры, содержащая {@code control}; {@code null} — вне палитры.
+     * Package-private: переиспользуется {@link PropertySheetEventHandlerClearHook}.
+     */
+    static Object resolvePageFromControl(Control control)
     {
         if (control == null || control.isDisposed())
             return null;

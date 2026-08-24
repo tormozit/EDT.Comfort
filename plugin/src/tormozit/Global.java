@@ -206,21 +206,26 @@ public final class Global
         {
             for (java.lang.reflect.Method m : c.getDeclaredMethods())
             {
-                if (m.getName().equals(methodName) && m.getParameterCount() == argc)
+                if (!m.getName().equals(methodName) || m.getParameterCount() != argc)
+                    continue;
+                try
                 {
-                    try
-                    {
-                        m.setAccessible(true);
-                        return m.invoke(targetInstance, args);
-                    }
-                    catch (java.lang.reflect.InvocationTargetException e)
-                    {
-                        Throwable cause = e.getCause();
-                        if (cause instanceof RuntimeException) throw (RuntimeException) cause;
-                        throw new RuntimeException(cause);
-                    }
-                    catch (Exception ignored) { return null; }
+                    m.setAccessible(true);
+                    return m.invoke(targetInstance, args);
                 }
+                catch (java.lang.reflect.InvocationTargetException e)
+                {
+                    Throwable cause = e.getCause();
+                    if (cause instanceof RuntimeException) throw (RuntimeException) cause;
+                    throw new RuntimeException(cause);
+                }
+                catch (IllegalArgumentException typeMismatch)
+                {
+                    // Другая перегрузка с тем же именем/числом параметров, но другими типами
+                    // (напр. LightCombo.selectItem(int) и приватный selectItem(Item)) — пробуем
+                    // следующего кандидата, а не сдаёмся на первом несовпадении.
+                }
+                catch (Exception ignored) { return null; }
             }
         }
         return null;
@@ -235,22 +240,25 @@ public final class Global
         {
             for (java.lang.reflect.Method m : c.getDeclaredMethods())
             {
-                if (m.getName().equals(methodName) && m.getParameterCount() == argc)
+                if (!m.getName().equals(methodName) || m.getParameterCount() != argc)
+                    continue;
+                try
                 {
-                    try
-                    {
-                        m.setAccessible(true);
-                        m.invoke(obj, args);
-                        return true;
-                    }
-                    catch (java.lang.reflect.InvocationTargetException e)
-                    {
-                        Throwable cause = e.getCause();
-                        if (cause instanceof RuntimeException) throw (RuntimeException) cause;
-                        throw new RuntimeException(cause);
-                    }
-                    catch (Exception ignored) { return false; }
+                    m.setAccessible(true);
+                    m.invoke(obj, args);
+                    return true;
                 }
+                catch (java.lang.reflect.InvocationTargetException e)
+                {
+                    Throwable cause = e.getCause();
+                    if (cause instanceof RuntimeException) throw (RuntimeException) cause;
+                    throw new RuntimeException(cause);
+                }
+                catch (IllegalArgumentException typeMismatch)
+                {
+                    // См. комментарий в invoke() — другая перегрузка, пробуем дальше.
+                }
+                catch (Exception ignored) { return false; }
             }
         }
         return false;

@@ -1,0 +1,10 @@
+﻿{
+  "VerbalInfo": "DpiPerMonitor Support: True\r\n\r\nCurrent DPI from Registry, scale: 96, 1\r\nCurrent DPI from Registry (Windows 11): 96, 1\r\n\r\nDevice: \\\\.\\DISPLAY1\r\nReal Resolution: 2560x1440\r\nVirtual Resolution: 2560x1440\r\nDevice: \\\\.\\DISPLAY1, dpi=1\r\n\r\n",
+  "Displays": [
+    {
+      "DisplayName": "\\\\.\\DISPLAY1",
+      "Scale": 1.0,
+      "Primary": true
+    }
+  ]
+}

@@ -1135,6 +1135,43 @@ final class PropertySheetControlInterop
         return null;
     }
 
+    /**
+     * Модель AEF-поля, чей редактор сейчас в фокусе ({@code null} — фокус не в редакторе
+     * палитры). Тот же обход {@code viewModelToView}, что и в {@link #displayNameForFocusedField},
+     * но возвращает саму модель поля ({@code FieldComponent.getModel()}), а не подпись —
+     * нужна для {@link PropertySheetEventHandlerClearHook} (Shift+F4 очищает обработчик события).
+     */
+    static Object modelForFocusedField(Object page)
+    {
+        Object scene = page != null ? Global.invoke(page, "getScene") : null; //$NON-NLS-1$
+        if (scene == null)
+            return null;
+        Object renderer = Global.invoke(scene, "getRenderer"); //$NON-NLS-1$
+        Object mapObj = renderer != null ? Global.getField(renderer, "viewModelToView") : null; //$NON-NLS-1$
+        if (!(mapObj instanceof java.util.Map<?, ?> map))
+            return null;
+        for (java.util.Map.Entry<?, ?> entry : map.entrySet())
+        {
+            Object key = entry.getKey();
+            if (key == null)
+                continue;
+            String keyClass = key.getClass().getName();
+            if (keyClass.contains("LabelViewModel") || keyClass.contains("SectionViewModel")) //$NON-NLS-1$ //$NON-NLS-2$
+                continue;
+            Object lwtView = entry.getValue();
+            Object nativeControl = Global.invoke(lwtView, "getNativeControl"); //$NON-NLS-1$
+            if (!PropertySheetActivePropertyHook.isFocusedDeep(nativeControl, 0))
+                continue;
+            Object field = findFieldComponentForView(scene, renderer, lwtView);
+            if (field == null)
+                continue;
+            Object model = Global.invoke(field, "getModel"); //$NON-NLS-1$
+            if (model != null)
+                return model;
+        }
+        return null;
+    }
+
     /** Ввод в одном из редакторов палитры (не в подписи). */
     static boolean hasFocusedEditorView(Object page)
     {
@@ -1327,17 +1364,30 @@ final class PropertySheetControlInterop
                     return found;
             }
         }
-        if (component.getClass().getName().contains("FieldComponent") //$NON-NLS-1$
+        if (isFieldLikeComponent(component)
             && fieldComponentOwnsView(component, renderer, lwtView, matchedVm))
             return component;
         return null;
+    }
+
+    /**
+     * Признак «это компонент отдельного поля палитры, не контейнер». Обычно — подстрока
+     * {@code FieldComponent} в имени класса; отдельно — {@code HandlerSelectionComponent}
+     * (поле обработчика события формы, показывается как редактируемое комбо с автодополнением
+     * по существующим процедурам, а не как {@code FieldComponent}, декомпилировано:
+     * {@code .tmp/bundles/aef2-standard-swt}).
+     */
+    private static boolean isFieldLikeComponent(Object component)
+    {
+        String cn = component.getClass().getName();
+        return cn.contains("FieldComponent") || cn.contains("HandlerSelectionComponent"); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private static Object findFieldComponentByDisplayNameInTree(Object component, String displayName)
     {
         if (component == null)
             return null;
-        if (component.getClass().getName().contains("FieldComponent")) //$NON-NLS-1$
+        if (isFieldLikeComponent(component))
         {
             String text = displayNameForFieldComponent(component);
             if (PropertySheetActivePropertyHook.propertyNamesMatch(displayName, text))
