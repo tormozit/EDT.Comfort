@@ -454,12 +454,12 @@ public final class CompareEditorCurrentLinesHook
     private static final int PENDING_LINE_REVEAL_MAX_ATTEMPTS = 40;
     private static final int PENDING_LINE_REVEAL_RETRY_DELAY_MS = 50;
 
-    private static void applyPendingLineRevealIfAny(StyledText leftText, StyledText rightText)
+    private static void applyPendingLineRevealIfAny(StyledText leftText, StyledText rightText, boolean mirrored)
     {
         if (pendingLineReveal == null || leftText == null || leftText.isDisposed()
             || rightText == null || rightText.isDisposed())
             return;
-        scheduleApplyPendingLineReveal(leftText, rightText, 0);
+        scheduleApplyPendingLineReveal(leftText, rightText, mirrored, 0);
     }
 
     /**
@@ -468,26 +468,34 @@ public final class CompareEditorCurrentLinesHook
      * не быть загружен") — ждём, пока в известной стороне реально появится строка с нужным
      * номером, иначе {@link #activateLine} молча обрежет её до последней имеющейся (строка 0 при
      * ещё пустом тексте).
+     * <p>
+     * {@code leftText}/{@code rightText} — физические виджеты (fLeft/fRight), а {@link PendingLineReveal}
+     * хранит МОДЕЛЬНУЮ сторону. При {@code mirrored} (см. {@code MirroredMergeViewerContentProvider} в
+     * {@link #applyHeaderLabels}) fLeft показывает модельно-правое содержимое и наоборот — без поправки
+     * переход попадал не в рабочую копию, а в противоположную сторону.
      */
-    private static void scheduleApplyPendingLineReveal(StyledText leftText, StyledText rightText, int attempt)
+    private static void scheduleApplyPendingLineReveal(StyledText leftText, StyledText rightText, boolean mirrored,
+        int attempt)
     {
         if (leftText.isDisposed() || rightText.isDisposed())
             return;
         PendingLineReveal reveal = pendingLineReveal;
         if (reveal == null)
             return;
-        StyledText knownText = reveal.oldSide() ? leftText : rightText;
+        StyledText modelLeftText = mirrored ? rightText : leftText;
+        StyledText modelRightText = mirrored ? leftText : rightText;
+        StyledText knownText = reveal.oldSide() ? modelLeftText : modelRightText;
         if (knownText.getLineCount() <= reveal.lineNo() && attempt < PENDING_LINE_REVEAL_MAX_ATTEMPTS)
         {
             Display display = knownText.getDisplay();
             if (display == null || display.isDisposed())
                 return;
             display.timerExec(PENDING_LINE_REVEAL_RETRY_DELAY_MS,
-                () -> scheduleApplyPendingLineReveal(leftText, rightText, attempt + 1));
+                () -> scheduleApplyPendingLineReveal(leftText, rightText, mirrored, attempt + 1));
             return;
         }
         takePendingLineReveal();
-        StyledText otherText = reveal.oldSide() ? rightText : leftText;
+        StyledText otherText = reveal.oldSide() ? modelRightText : modelLeftText;
         int knownLine = Math.max(0, Math.min(reveal.lineNo(), Math.max(0, knownText.getLineCount() - 1)));
         activateLine(knownText, knownLine);
         int matchedLine = CompareLineRangeMatcher.findMatchedLine(knownText, knownLine, otherText);
@@ -559,7 +567,7 @@ public final class CompareEditorCurrentLinesHook
 
         StyledText leftText = MergeViewerReflection.extractStyledText(viewer, "fLeft"); //$NON-NLS-1$
         StyledText rightText = MergeViewerReflection.extractStyledText(viewer, "fRight"); //$NON-NLS-1$
-        applyPendingLineRevealIfAny(leftText, rightText);
+        applyPendingLineRevealIfAny(leftText, rightText, config != null && config.isMirrored());
 
         String irSyntaxVariant = IrCompareValuesHandler.syntaxVariantFor(resolveCompareType(editorInput));
         final String semLeft = leftLabel;

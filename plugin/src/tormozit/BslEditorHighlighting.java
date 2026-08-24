@@ -2,6 +2,7 @@ package tormozit;
 
 import java.util.List;
 
+import org.eclipse.emf.common.util.EList;
 import org.eclipse.emf.common.util.TreeIterator;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.xtext.ide.editor.syntaxcoloring.IHighlightedPositionAcceptor;
@@ -12,26 +13,35 @@ import org.eclipse.xtext.resource.XtextResource;
 import org.eclipse.xtext.util.CancelIndicator;
 
 import com._1c.g5.v8.dt.bsl.common.Symbols;
+import com._1c.g5.v8.dt.bsl.model.Block;
 import com._1c.g5.v8.dt.bsl.model.BslPackage;
 import com._1c.g5.v8.dt.bsl.model.DynamicFeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.Expression;
 import com._1c.g5.v8.dt.bsl.model.FeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.FeatureEntry;
+import com._1c.g5.v8.dt.bsl.model.ImplicitVariable;
 import com._1c.g5.v8.dt.bsl.model.Invocation;
 import com._1c.g5.v8.dt.bsl.model.Method;
+import com._1c.g5.v8.dt.bsl.model.Module;
 import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.util.BslUtil;
 
 /**
- * Подсвечивает серверные вызовы в BSL-редакторе. Оборачивается вокруг
- * штатного калькулятора реконсилера через {@link BslServerCallHighlightingHook}
- * (делегирование к оригинальному калькулятору делает сам хук), поэтому здесь
- * считается только дополнительный стиль для {@link Invocation} с
- * {@code isIsServerCall() == true} — {@link BslServerCallHighlightingConfiguration#SERVER_CALL_CONTEXT_ID}
- * для вызовов "с контекстом" (&НаСервере) и {@link BslServerCallHighlightingConfiguration#SERVER_CALL_ID}
- * для вызовов "без контекста" (&НаСервереБезКонтекста) либо когда метод не резолвится.
+ * Дополнительная семантическая подсветка BSL-редактора. Оборачивается вокруг
+ * штатного калькулятора реконсилера через {@link BslEditorHighlightingHook}
+ * (делегирование к оригинальному калькулятору делает сам хук).
+ * <ul>
+ * <li>серверные вызовы: {@link Invocation} с {@code isIsServerCall() == true} —
+ * {@link BslServerCallHighlightingConfiguration#SERVER_CALL_CONTEXT_ID} для
+ * вызовов «с контекстом» (&НаСервере) и
+ * {@link BslServerCallHighlightingConfiguration#SERVER_CALL_ID} для вызовов
+ * «без контекста» (&НаСервереБезКонтекста) либо когда метод не резолвится;</li>
+ * <li>создаваемые переменные: имя
+ * {@link StaticFeatureAccess} с непустым {@code getImplicitVariable()} —
+ * {@link BslServerCallHighlightingConfiguration#IMPLICIT_VARIABLE_ID}.</li>
+ * </ul>
  */
-public final class BslServerCallHighlightingCalculator
+public final class BslEditorHighlighting
     implements ISemanticHighlightingCalculator
 {
     @Override
@@ -41,13 +51,24 @@ public final class BslServerCallHighlightingCalculator
         if (resource == null || acceptor == null || isCanceled(cancelIndicator) || resource.getParseResult() == null)
             return;
 
-        if (!ComfortSettings.isServerCallHighlightingEnabled())
+        boolean serverCalls = ComfortSettings.isServerCallHighlightingEnabled();
+        boolean implicitVars = ComfortSettings.isImplicitVariableHighlightingEnabled();
+        if (!serverCalls && !implicitVars)
             return;
 
         EObject root = resource.getParseResult().getRootASTElement();
         if (root == null)
             return;
 
+        if (serverCalls)
+            highlightServerCalls(root, acceptor, cancelIndicator);
+        if (implicitVars && !isCanceled(cancelIndicator))
+            highlightImplicitVariableCreations(root, acceptor, cancelIndicator);
+    }
+
+    private void highlightServerCalls(EObject root, IHighlightedPositionAcceptor acceptor,
+        CancelIndicator cancelIndicator)
+    {
         TreeIterator<EObject> iterator = root.eAllContents();
         while (iterator.hasNext())
         {
@@ -57,6 +78,72 @@ public final class BslServerCallHighlightingCalculator
             EObject element = iterator.next();
             if (element instanceof Invocation inv && inv.isIsServerCall())
                 highlightInvocation(inv, acceptor);
+        }
+    }
+
+    /**
+     * Красит имя в месте создания неявной переменной: левая часть первого
+     * присваивания и переменная цикла {@code Для}/{@code Для Каждого}.
+     * Берёт готовый список {@link Block#getImplicitVariables()}, без линковки.
+     */
+    private void highlightImplicitVariableCreations(EObject root,
+        IHighlightedPositionAcceptor acceptor, CancelIndicator cancelIndicator)
+    {
+        if (root instanceof Module module)
+        {
+            highlightImplicitVariablesInBlock(module, acceptor, cancelIndicator);
+            for (Method method : module.allMethods())
+            {
+                if (isCanceled(cancelIndicator))
+                    return;
+                highlightImplicitVariablesInBlock(method, acceptor, cancelIndicator);
+            }
+            return;
+        }
+        highlightImplicitVariablesByTree(root, acceptor, cancelIndicator);
+    }
+
+    private void highlightImplicitVariablesInBlock(Block block, IHighlightedPositionAcceptor acceptor,
+        CancelIndicator cancelIndicator)
+    {
+        if (block == null)
+            return;
+        EList<ImplicitVariable> variables = block.getImplicitVariables();
+        if (variables.isEmpty())
+            return;
+        ImplicitVariable first = variables.get(0);
+        if (first == null || !(first.eContainer() instanceof StaticFeatureAccess))
+        {
+            highlightImplicitVariablesByTree(block, acceptor, cancelIndicator);
+            return;
+        }
+        for (ImplicitVariable variable : variables)
+        {
+            if (isCanceled(cancelIndicator))
+                return;
+            if (variable == null)
+                continue;
+            EObject container = variable.eContainer();
+            if (container instanceof StaticFeatureAccess access)
+                highlightFeatureName(access, acceptor,
+                    BslServerCallHighlightingConfiguration.IMPLICIT_VARIABLE_ID);
+        }
+    }
+
+    private void highlightImplicitVariablesByTree(EObject root, IHighlightedPositionAcceptor acceptor,
+        CancelIndicator cancelIndicator)
+    {
+        TreeIterator<EObject> iterator = root.eAllContents();
+        while (iterator.hasNext())
+        {
+            if (isCanceled(cancelIndicator))
+                return;
+            EObject element = iterator.next();
+            if (element instanceof StaticFeatureAccess access && access.getImplicitVariable() != null)
+            {
+                highlightFeatureName(access, acceptor,
+                    BslServerCallHighlightingConfiguration.IMPLICIT_VARIABLE_ID);
+            }
         }
     }
 

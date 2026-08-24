@@ -1,5 +1,6 @@
 package tormozit;
 
+import java.lang.reflect.Proxy;
 import java.util.ArrayDeque;
 import java.util.Collections;
 import java.util.Deque;
@@ -18,6 +19,7 @@ import org.eclipse.jface.viewers.ITreeContentProvider;
 import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.jface.viewers.Viewer;
 import org.eclipse.jface.viewers.ViewerFilter;
+import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Tree;
 import org.eclipse.ui.IPartListener2;
@@ -34,9 +36,11 @@ import org.eclipse.ui.PlatformUI;
 import com._1c.g5.v8.dt.common.ui.controls.search.SearchBox;
 
 /**
- * Многословный фильтр ({@link SmartMatcher}, плоское И по словам) с раскраской совпадений
- * на странице «Содержание» панели «Синтакс-помощник» ({@code SyntaxAssistView} бандла
+ * Доработки панели «Синтакс-помощник» ({@code SyntaxAssistView} бандла
  * {@code com._1c.g5.v8.dt.bsl.ui}).
+ *
+ * <p><b>1. Фильтр «Содержание».</b> Многословный фильтр ({@link SmartMatcher}, плоское И по
+ * словам) с раскраской совпадений.
  *
  * <p>Штатное поведение (декомпиляция {@code SyntaxAssistContentsPanel}): поле поиска — уже
  * {@link SearchBox} ({@code ContextSearchBox}), но матчинг делает
@@ -45,7 +49,7 @@ import com._1c.g5.v8.dt.common.ui.controls.search.SearchBox;
  * 2 символов. Штатный фильтр ищет подстроку ещё и в тексте справки узла — наш фильтр,
  * как во всех остальных местах плагина, матчит по видимой подписи узла.
  *
- * <p>Что делает хук. Штатный {@code ContentsViewerFilter} НЕ трогается — он всегда висит на
+ * <p>Что делает эта часть. Штатный {@code ContentsViewerFilter} НЕ трогается — он всегда висит на
  * дереве, но без {@code setSearchString} остаётся в состоянии «any» и всё пропускает; вместо
  * него добавляется свой {@link ViewerFilter}. Тяжёлый обход дерева (дерево справки большое)
  * выполняется ВНЕ UI-потока: фоновый {@link Job} идёт от корня по
@@ -69,10 +73,18 @@ import com._1c.g5.v8.dt.common.ui.controls.search.SearchBox;
  * поля пробрасываются в дерево ({@link FilterInputBoxListNavigation#installTreeNavigation}:
  * стрелки/PageUp/PageDown двигают выделение дерева, Enter открывает страницу как двойной
  * щелчок, Ctrl+↓ — история).
+ *
+ * <p><b>2. Стиль ссылок страницы «Поиск» ({@link LinkStyle}).</b> Подчёркивание
+ * ссылок-результатов — только при наведении, как у заголовков страниц самого EDT
+ * ({@code a.title-link} в {@code css/view.css}).
+ *
+ * <p><b>3. История поиска страницы «Поиск» ({@link SearchHistory}).</b> Поле
+ * полнотекстового поиска получает персистентную историю вместо штатной
+ * {@code InMemorySearchHistory} — переживает закрытие панели и перезапуск EDT.
  */
-public final class SyntaxAssistContentsFilterHook implements IStartup
+public final class SyntaxAssistHook implements IStartup
 {
-    private static final String TAG = "SyntaxAssistContentsFilter"; //$NON-NLS-1$
+    private static final String TAG = "SyntaxAssistHook"; //$NON-NLS-1$
 
     private static final String VIEW_ID = "com._1c.g5.v8.dt.bsl.ui.view.BslInfoView"; //$NON-NLS-1$
 
@@ -159,7 +171,13 @@ public final class SyntaxAssistContentsFilterHook implements IStartup
         Runnable task = () ->
         {
             if (tryPatch(view))
+            {
+                // Панель описания/поиска и их браузер/поле создаются в том же
+                // createPartControl, но не зависят от дерева содержания — свои retry-циклы.
+                LinkStyle.scheduleInstall(view, 0);
+                SearchHistory.scheduleInstall(view, 0);
                 return;
+            }
             scheduleTryPatch(view, attempt + 1);
         };
         if (attempt == 0)
@@ -503,6 +521,269 @@ public final class SyntaxAssistContentsFilterHook implements IStartup
             if (currentVisible == null)
                 return true;
             return currentVisible.contains(element);
+        }
+    }
+
+    /**
+     * Подчёркивание ссылок панели «Синтакс-помощник» — только при наведении, единообразно
+     * во всех браузерах панели (описание страниц и результаты поиска).
+     *
+     * <p><b>Почему.</b> Страницы — HTML во встроенном браузере (JavaFX WebView): ссылки
+     * строятся как обычные {@code <a href>} без класса, а в {@code view.css} для {@code a}
+     * заданы только цвета — подчёркивание остаётся браузерным умолчанием. В настройках EDT
+     * управляется только цвет ссылок, не {@code text-decoration}. Подчёркивания подряд идущих
+     * ссылок в тексте (особенно в результатах поиска) сливаются в сплошную линию.
+     *
+     * <p><b>Механика.</b> У панели «Синтакс-помощник» ДВА независимых экземпляра
+     * {@code SyntaxAssistBrowser} (декомпиляция bsl.ui): {@code SyntaxAssistDescriptionPanel
+     * .getBrowser()} — страницы описаний, и {@code SyntaxAssistSearchPanel
+     * .getSearchResultsBrowser()} — только {@code SearchResultsPageDescriptor} (своя фабрика,
+     * свой список слушателей). Хук ставится на оба, независимо. После успешной загрузки
+     * страницы (SUCCEEDED штатного load worker'а, FX-поток) браузер обновляет
+     * {@code showedHistoryNode} и оповещает слушателей {@code addShowedPageChangedListener}.
+     * Наш слушатель (Proxy по внутреннему интерфейсу {@code ISyntaxAssistBrowserListener} —
+     * пакеты не экспортируются, поэтому только так) на каждый показ страницы, независимо от
+     * типа дескриптора, вставляет в документ {@code <style>} c
+     * {@code a:not(.title-link) { text-decoration: none }} (и подчёркиванием при
+     * {@code :hover}/{@code :active}) — единый стиль что для описаний, что для результатов
+     * поиска. Вставка идемпотентна (проверка по id элемента), повторные загрузки страницы
+     * (обновление, история) безопасны. Скрипт исполняется package-private
+     * {@code executeScript} — через {@link Global#invoke}.
+     *
+     * <p><b>Границы.</b> Заголовки страниц ({@code .title-link}) не трогаются — их правило
+     * подчёркивания-при-наведении уже задано штатным {@code view.css}.
+     */
+    private static final class LinkStyle
+    {
+        private static final String LISTENER_CLASS =
+            "com._1c.g5.v8.dt.internal.bsl.ui.syntaxassist.browser.ISyntaxAssistBrowserListener"; //$NON-NLS-1$
+
+        /** id вставляемого элемента {@code <style>} — идемпотентность повторных загрузок. */
+        private static final String STYLE_ID = "comfort-syntax-assist-links"; //$NON-NLS-1$
+
+        /**
+         * Подчёркивание ссылок результатов поиска — только при наведении/нажатии; состояние
+         * покоя — без подчёркивания. Симметрично правилам {@code a.title-link} из EDT.
+         */
+        private static final String STYLE_SCRIPT = "(function(){" //$NON-NLS-1$
+            + "var d=document;"
+            + "if(!d.head)return 'no-head';"
+            + "if(d.getElementById('" + STYLE_ID + "'))return 'already';"
+            + "var s=d.createElement('style');"
+            + "s.id='" + STYLE_ID + "';"
+            + "s.appendChild(d.createTextNode("
+            + "'a:not(.title-link):link,a:not(.title-link):visited{text-decoration:none}'"
+            + "+'a:not(.title-link):hover,a:not(.title-link):active{text-decoration:underline}'));"
+            + "d.head.appendChild(s);"
+            + "return 'ok';})()"; //$NON-NLS-1$
+
+        private static final Set<Object> HOOKED_BROWSERS = Collections.newSetFromMap(new IdentityHashMap<>());
+
+        private LinkStyle() {}
+
+        /**
+         * Своё подключение с retry — оба браузера панели создаются в том же
+         * {@code createPartControl}, но не зависят от дерева содержания.
+         */
+        static void scheduleInstall(IViewPart view, int attempt)
+        {
+            if (view == null || attempt >= MAX_ATTEMPTS)
+            {
+                if (view != null && attempt >= MAX_ATTEMPTS)
+                    Global.tempLog(TAG, "link-style: не удалось подключить после " //$NON-NLS-1$
+                        + MAX_ATTEMPTS + " попыток"); //$NON-NLS-1$
+                return;
+            }
+            Display display = Display.getDefault();
+            if (display == null || display.isDisposed())
+                return;
+            Runnable task = () ->
+            {
+                if (!tryInstall(view))
+                    scheduleInstall(view, attempt + 1);
+            };
+            if (attempt == 0)
+                display.asyncExec(task);
+            else
+                display.timerExec(RETRY_MS, task);
+        }
+
+        /** @return {@code true}, если делать больше нечего (оба браузера подключены/недоступны). */
+        private static boolean tryInstall(IViewPart view)
+        {
+            Class<?> listenerClass = BslSyntaxAssist.bslUiClass(LISTENER_CLASS);
+            if (listenerClass == null)
+                return true;
+
+            Object descriptionPanel = Global.invoke(view, "getDescriptionPanel"); //$NON-NLS-1$
+            Object descriptionBrowser = descriptionPanel != null
+                ? Global.invoke(descriptionPanel, "getBrowser") : null; //$NON-NLS-1$
+
+            Object navigationPanel = Global.invoke(view, "getNavigationPanel"); //$NON-NLS-1$
+            Object searchPanel = navigationPanel != null
+                ? Global.invoke(navigationPanel, "getSearchPanel") : null; //$NON-NLS-1$
+            Object searchBrowser = searchPanel != null
+                ? Global.invoke(searchPanel, "getSearchResultsBrowser") : null; //$NON-NLS-1$
+
+            boolean descriptionReady = descriptionBrowser == null || hookBrowser(descriptionBrowser, listenerClass);
+            boolean searchReady = searchBrowser == null || hookBrowser(searchBrowser, listenerClass);
+            // Оба браузера появляются в одном createPartControl — если хотя бы один ещё
+            // не создан, повторяем позже, чтобы не подключить только один и забыть про второй.
+            return descriptionBrowser != null && searchBrowser != null && descriptionReady && searchReady;
+        }
+
+        /** @return {@code true}, если браузер подключён (сейчас или ранее) либо подключение невозможно. */
+        private static boolean hookBrowser(Object browser, Class<?> listenerClass)
+        {
+            if (!HOOKED_BROWSERS.add(browser))
+                return true;
+            try
+            {
+                Object listener = listenerProxy(browser, listenerClass);
+                if (listener == null)
+                {
+                    HOOKED_BROWSERS.remove(browser);
+                    return true;
+                }
+                Global.invokeVoid(browser, "addShowedPageChangedListener", listener); //$NON-NLS-1$
+
+                Control control = (Control)Global.invoke(browser, "getControl"); //$NON-NLS-1$
+                if (control != null)
+                {
+                    control.addDisposeListener(e ->
+                    {
+                        HOOKED_BROWSERS.remove(browser);
+                        Global.invokeVoid(browser, "removeShowedPageChangedListener", listener); //$NON-NLS-1$
+                    });
+                }
+                return true;
+            }
+            catch (RuntimeException e)
+            {
+                HOOKED_BROWSERS.remove(browser);
+                Global.logError(TAG, "link-style: установка", e); //$NON-NLS-1$
+                return true;
+            }
+        }
+
+        /** Proxy внутреннего интерфейса {@code ISyntaxAssistBrowserListener} (один метод). */
+        private static Object listenerProxy(Object browser, Class<?> listenerClass)
+        {
+            ClassLoader loader = listenerClass.getClassLoader();
+            if (loader == null)
+                return null;
+            return Proxy.newProxyInstance(loader, new Class<?>[] { listenerClass },
+                (proxy, method, args) ->
+                {
+                    try
+                    {
+                        String name = method.getName();
+                        if ("notifyListener".equals(name)) //$NON-NLS-1$
+                        {
+                            onShowedPage(browser);
+                            return null;
+                        }
+                        if ("hashCode".equals(name) && (args == null || args.length == 0)) //$NON-NLS-1$
+                            return Integer.valueOf(System.identityHashCode(proxy));
+                        if ("equals".equals(name) && args != null && args.length == 1) //$NON-NLS-1$
+                            return Boolean.valueOf(proxy == args[0]);
+                        if ("toString".equals(name) && (args == null || args.length == 0)) //$NON-NLS-1$
+                            return "SyntaxAssistHook.LinkStyle listener"; //$NON-NLS-1$
+                        return null;
+                    }
+                    catch (RuntimeException e)
+                    {
+                        Global.logError(TAG, "link-style: слушатель", e); //$NON-NLS-1$
+                        return null;
+                    }
+                });
+        }
+
+        /**
+         * Вызов в FX-потоке после показа ЛЮБОЙ страницы этого браузера: {@code showedHistoryNode}
+         * уже обновлён штатным слушателем (он добавлен раньше нашего), {@code executeScript}
+         * из FX-потока легален.
+         */
+        private static void onShowedPage(Object browser)
+        {
+            try
+            {
+                Global.invoke(browser, "executeScript", STYLE_SCRIPT); //$NON-NLS-1$
+            }
+            catch (RuntimeException e)
+            {
+                // Ошибки JS (JSException) и пр. — не ломаем страницу, просто фиксируем.
+                Global.logError(TAG, "link-style: скрипт", e); //$NON-NLS-1$
+            }
+        }
+    }
+
+    /**
+     * Персистентная история поля полнотекстового поиска страницы «Поиск»
+     * ({@code SyntaxAssistSearchPanel.fullTextSearchBox}).
+     *
+     * <p>Штатно поле получает {@code new InMemorySearchHistory()} (декомпиляция
+     * конструктора {@code SyntaxAssistSearchPanel}) — история живёт только пока жив
+     * экземпляр панели (закрытие/переоткрытие view, перезапуск EDT — история пустая).
+     * Поле создаётся штатно с {@code GridDataFactory.fillDefaults().grab(true, false)}
+     * (на всю ширину строки с кнопкой «Открыть поиск») — используется
+     * {@link FilterInputBox#attachHistoryKeepLayout}, компакт-ширина не навязывается
+     * (как для страницы «Валидация», см. {@link FilterInputBox.Scope#VALIDATION_CHECKS}).
+     * Слушатель поиска штатный, не подменяется — меняется только источник истории.
+     */
+    private static final class SearchHistory
+    {
+        private static final Set<Object> HOOKED_BOXES = Collections.newSetFromMap(new IdentityHashMap<>());
+
+        private SearchHistory() {}
+
+        static void scheduleInstall(IViewPart view, int attempt)
+        {
+            if (view == null || attempt >= MAX_ATTEMPTS)
+            {
+                if (view != null && attempt >= MAX_ATTEMPTS)
+                    Global.tempLog(TAG, "search-history: не удалось подключить после " //$NON-NLS-1$
+                        + MAX_ATTEMPTS + " попыток"); //$NON-NLS-1$
+                return;
+            }
+            Display display = Display.getDefault();
+            if (display == null || display.isDisposed())
+                return;
+            Runnable task = () ->
+            {
+                if (!tryInstall(view))
+                    scheduleInstall(view, attempt + 1);
+            };
+            if (attempt == 0)
+                display.asyncExec(task);
+            else
+                display.timerExec(RETRY_MS, task);
+        }
+
+        /** @return {@code true}, если делать больше нечего (подключено или среда не подходит). */
+        private static boolean tryInstall(IViewPart view)
+        {
+            try
+            {
+                Object navigationPanel = Global.invoke(view, "getNavigationPanel"); //$NON-NLS-1$
+                Object searchPanel = navigationPanel != null
+                    ? Global.invoke(navigationPanel, "getSearchPanel") : null; //$NON-NLS-1$
+                Object searchBoxObj = searchPanel != null
+                    ? Global.getField(searchPanel, "fullTextSearchBox") : null; //$NON-NLS-1$
+                if (!(searchBoxObj instanceof SearchBox searchBox) || searchBox.isDisposed())
+                    return false;
+                if (!HOOKED_BOXES.add(searchBox))
+                    return true;
+
+                FilterInputBox.attachHistoryKeepLayout(searchBox, FilterInputBox.Scope.SYNTAX_SEARCH);
+                searchBox.addDisposeListener(e -> HOOKED_BOXES.remove(searchBox));
+                return true;
+            }
+            catch (RuntimeException e)
+            {
+                Global.logError(TAG, "search-history: установка", e); //$NON-NLS-1$
+                return true;
+            }
         }
     }
 

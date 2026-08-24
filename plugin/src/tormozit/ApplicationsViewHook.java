@@ -45,6 +45,7 @@ import org.eclipse.swt.events.MouseEvent;
 import org.eclipse.swt.events.MouseMoveListener;
 import org.eclipse.swt.events.SelectionAdapter;
 import org.eclipse.swt.events.SelectionEvent;
+import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.graphics.Rectangle;
 import org.eclipse.swt.widgets.Event;
@@ -1272,6 +1273,9 @@ public class ApplicationsViewHook implements IStartup
                     ? new ToolItem(bar, SWT.DROP_DOWN, index)
                     : new ToolItem(bar, SWT.DROP_DOWN);
                 item.setText("Комфорт"); //$NON-NLS-1$
+                Image comfortIcon = Global.comfortIcon();
+                if (comfortIcon != null)
+                    item.setImage(comfortIcon);
                 item.setToolTipText("Управление подключениями инфобаз" + Global.pluginSignForTooltip()); //$NON-NLS-1$
                 item.setEnabled(false);
                 item.addSelectionListener(new SelectionAdapter()

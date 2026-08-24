@@ -46,7 +46,7 @@ import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorXtextEditorPage;
  * её закрывающим ключевым словом, когда конструкция занимает много строк —
  * см. issue #1513. Устанавливает {@link PaintListener}/{@link CaretListener}
  * напрямую на {@link StyledText} каждого открытого BSL-редактора, без Guice
- * (по аналогии с {@link BslServerCallHighlightingHook}, но без рефлексии —
+ * (по аналогии с {@link BslEditorHighlightingHook}, но без рефлексии —
  * {@code getInternalSourceViewer()}/{@code getXtextDocument()} публичны).
  */
 public final class BracketContentHintHook implements IStartup

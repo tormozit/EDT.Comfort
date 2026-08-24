@@ -121,7 +121,6 @@ import com._1c.g5.v8.dt.compare.core.IComparisonTreeFilter;
 import com._1c.g5.v8.dt.compare.datasource.IActiveComparisonDataSource;
 import com._1c.g5.v8.dt.compare.datasource.IComparisonDataSource;
 import com._1c.g5.v8.dt.compare.merge.ExternalPropertyUtils;
-import com._1c.g5.v8.dt.compare.model.ComparisonFlags;
 import com._1c.g5.v8.dt.compare.model.ComparisonNode;
 import com._1c.g5.v8.dt.compare.model.ComparisonSide;
 import com._1c.g5.v8.dt.compare.model.ExternalPropertyComparisonNode;
@@ -879,6 +878,7 @@ public class CompareConfigMenuHook implements IStartup
 
             CompareConfigMultiMarkSupport support = new CompareConfigMultiMarkSupport(tree);
             tree.setData(DATA_KEY, support);
+            ThemeAwareColors.hideGridLinesInDarkTheme(tree);
             tree.addListener(SWT.MouseDown, support::onMouseDown);
             tree.addListener(SWT.MouseUp, support::onMouseUp);
             tree.addListener(SWT.Selection, support::onNativeSelection);
@@ -5422,12 +5422,15 @@ public class CompareConfigMenuHook implements IStartup
                     boolean hasOther = otherId != null && otherId != -1L;
                     return hasMain != hasOther;
                 }
-                if (cn == null)
-                    return false;
-                ComparisonFlags flags = cn.getComparisonFlags();
-                return flags != null
-                        && (flags.isOnOneSide(ComparisonSide.MAIN, ComparisonSide.OTHER)
-                                || flags.isOnOneSide(ComparisonSide.OTHER, ComparisonSide.MAIN));
+                // Остальные типы узлов (в т.ч. ContainmentCollectionImplComparisonNodeImpl —
+                // feature/collection-контейнеры) сюда не попадают: их ComparisonFlags.isOnOneSide
+                // отражает набор типов различий (Created/Updated/Position) по парам сторон
+                // трёхстороннего сравнения внутри всей вложенной коллекции, а не то, что узел
+                // целиком существует только на одной стороне — даже одно истинное направление тут
+                // не редкость для обычного двустороннего изменения, надёжного критерия «на одной
+                // стороне» для таких узлов нет. Надёжно это определяется только выше — для
+                // TopComparisonNode и MatchedObjectsComparisonNode (целый объект).
+                return false;
             }
             catch (RuntimeException e)
             {

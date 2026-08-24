@@ -14,6 +14,7 @@ import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
+import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.IWorkbenchWindow;
@@ -22,14 +23,23 @@ import org.eclipse.ui.PlatformUI;
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 
 /**
- * Двойной щелчок по маркеру на линейке обзора BSL-редактора (справа от текста)
- * разворачивает сворачиваемые группы, скрывающие строки этого маркера.
+ * Клик по маркеру на линейке обзора BSL-редактора (справа от текста) — прыжок в истории
+ * навигации EDT («Назад/Вперёд по истории»), и двойной щелчок дополнительно разворачивает
+ * сворачиваемые группы, скрывающие строки этого маркера.
  *
  * <p>Штатный {@code OverviewRuler} на {@code mouseDown} вызывает только
- * {@code ITextViewer.revealRange}. У {@code TextViewer} скрытый свёрткой диапазон
- * проецируется в заголовок группы ({@code modelRange2ClosestWidgetRange}) — переход
- * есть, разворота нет. {@code ITextViewerExtension5.exposeModelRange} как в
- * {@link TextEditorFastSearchHandler} раскрывает все пересекающиеся свёртки.
+ * {@code ITextViewer.revealRange}, минуя {@code AbstractTextEditor.selectAndReveal} — а
+ * отметку в истории платформа ставит именно там (см. {@link BslBracketJumpHistoryHook}).
+ * Одиночный клик — не команда, {@code IExecutionListener} тут неприменим: отметку «до»
+ * ставим в {@code SWT.MouseDown}-фильтре (фильтры вызываются раньше типизированных
+ * слушателей канвы, поэтому каретка ещё старая), отметку «после» — через
+ * {@code asyncExec} из того же фильтра, когда штатный {@code revealRange} уже отработал.
+ *
+ * <p>У {@code TextViewer} скрытый свёрткой диапазон проецируется в заголовок группы
+ * ({@code modelRange2ClosestWidgetRange}) — переход есть, разворота нет.
+ * {@code ITextViewerExtension5.exposeModelRange} как в {@link TextEditorFastSearchHandler}
+ * раскрывает все пересекающиеся свёртки; итоговая позиция после разворота отмечается в
+ * истории отдельно, синхронно (без {@code asyncExec} — каретку переставили сами).
  */
 public final class BslOverviewRulerUnfoldHook implements IStartup
 {
@@ -43,29 +53,57 @@ public final class BslOverviewRulerUnfoldHook implements IStartup
     {
         if (display == null || display.isDisposed())
             return;
+        display.addFilter(SWT.MouseDown, BslOverviewRulerUnfoldHook::handleMouseDown);
         display.addFilter(SWT.MouseDoubleClick, BslOverviewRulerUnfoldHook::handleMouseDoubleClick);
+    }
+
+    private static void handleMouseDown(Event e)
+    {
+        RulerHit hit = rulerHit(e);
+        if (hit == null)
+            return;
+
+        IEditorPart editor = hit.editor;
+        Global.markNavigationLocation(editor);
+        Display display = ((Canvas) e.widget).getDisplay();
+        display.asyncExec(() -> Global.markNavigationLocation(editor));
     }
 
     private static void handleMouseDoubleClick(Event e)
     {
+        RulerHit hit = rulerHit(e);
+        if (hit == null)
+            return;
+
+        Global.markNavigationLocation(hit.editor);
+        unfoldMarkerLine(hit.viewer, hit.ruler, e.y);
+        Global.markNavigationLocation(hit.editor);
+    }
+
+    private static RulerHit rulerHit(Event e)
+    {
         if (e.button != 1 || !(e.widget instanceof Canvas canvas) || canvas.isDisposed())
-            return;
+            return null;
         if (!isSiblingOfStyledText(canvas))
-            return;
+            return null;
 
         BslXtextEditor editor = activeBslEditor();
         if (editor == null)
-            return;
+            return null;
         ISourceViewer viewer = editor.getInternalSourceViewer();
         if (viewer == null)
-            return;
+            return null;
         IOverviewRuler ruler = overviewRulerOf(viewer);
         if (ruler == null || ruler.getControl() != canvas)
-            return;
+            return null;
         if (!ruler.hasAnnotation(e.y))
-            return;
+            return null;
 
-        unfoldMarkerLine(viewer, ruler, e.y);
+        return new RulerHit(editor, viewer, ruler);
+    }
+
+    private record RulerHit(BslXtextEditor editor, ISourceViewer viewer, IOverviewRuler ruler)
+    {
     }
 
     private static void unfoldMarkerLine(ISourceViewer viewer, IOverviewRuler ruler, int y)

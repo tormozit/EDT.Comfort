@@ -26,6 +26,7 @@ import org.eclipse.debug.ui.ILaunchConfigurationDialog;
 import org.eclipse.debug.ui.ILaunchConfigurationTab;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.events.SelectionListener;
+import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.layout.GridLayout;
 import org.eclipse.swt.widgets.Combo;
@@ -317,7 +318,9 @@ public final class LaunchConfigurationHook implements IStartup
      *
      * <p>Само поле «Разделение данных» лежит в двухколоночном {@code GridLayout} рядом со
      * своей подписью, но {@link Text} к этому моменту уже перенесён в свой ряд
-     * {@link #wireHistory}, поэтому подпись ищется подъёмом по родителям.
+     * {@link #wireHistory}, поэтому подпись ищется подъёмом по родителям. После вставки
+     * релейаут идёт по всей вкладке — иначе заголовок остаётся высотой на две строки
+     * и сжимает «Разделение данных».
      *
      * <p>Штатная вкладка про наш атрибут не знает, поэтому значение пишется прямо в
      * рабочую копию диалога ({@code LaunchConfigurationTabGroupViewer.getWorkingCopy}) —
@@ -367,7 +370,34 @@ public final class LaunchConfigurationHook implements IStartup
 
         label.moveAbove(anchor);
         combo.moveAbove(anchor);
-        parent.layout(true, true);
+        // Сам заголовок уже получил высоту под две строки; layout только его
+        // сожмёт новую строку внутри старых границ — релейаут вкладки.
+        relayoutTab(tab);
+    }
+
+    /**
+     * Пересчитывает раскладку вкладки после вставки строки, чтобы заголовок
+     * получил свою новую высоту. Если содержимое больше видимой области —
+     * диалог чуть увеличивается, иначе «Разделение данных» снова сжимается.
+     */
+    private static void relayoutTab(ILaunchConfigurationTab tab)
+    {
+        Control control = tab.getControl();
+        if (!(control instanceof Composite tabComposite) || tabComposite.isDisposed())
+            return;
+        tabComposite.layout(true, true);
+        Point have = tabComposite.getSize();
+        if (have.x <= 0 || have.y <= 0)
+            return;
+        int extra = tabComposite.computeSize(have.x, SWT.DEFAULT, true).y - have.y;
+        if (extra <= 0)
+            return;
+        Shell shell = tabComposite.getShell();
+        if (shell == null || shell.isDisposed() || shell.getMaximized())
+            return;
+        Point shellSize = shell.getSize();
+        shell.setSize(shellSize.x, shellSize.y + extra);
+        shell.layout(true, true);
     }
 
     /** Связка {@link Combo} с рабочей копией конфигурации запуска, открытой в диалоге. */

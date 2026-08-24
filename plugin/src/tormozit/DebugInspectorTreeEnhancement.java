@@ -330,6 +330,8 @@ final class DebugInspectorTreeEnhancement
         };
         tree.addMouseListener(mouseListener);
 
+        ThemeAwareColors.hideGridLinesInDarkTheme(tree);
+
         eraseItemListener = this::onEraseItem;
         tree.addListener(SWT.EraseItem, eraseItemListener);
 

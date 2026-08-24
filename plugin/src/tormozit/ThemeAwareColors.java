@@ -145,9 +145,27 @@ public final class ThemeAwareColors
      */
     public static void applyGridLines(Control control)
     {
+        setGridLines(control, !isDarkTheme());
+    }
+
+    /**
+     * Гасит сетку в тёмной теме, в светлой не трогает ничего — для ЧУЖИХ (штатных) таблиц и деревьев
+     * EDT, которые плагин только дополняет своей отрисовкой строки/ячейки.
+     * <p>
+     * Там сетку включает сама EDT, и в тёмной теме её линии всё равно живут лишь до первой
+     * перерисовки нашим owner-draw (после первой смены фокуса они исчезают) — этот вызов делает
+     * исчезновение сразу и одинаковым во всех списках, которые плагин берёт на себя.
+     */
+    public static void hideGridLinesInDarkTheme(Control control)
+    {
+        if (isDarkTheme())
+            setGridLines(control, false);
+    }
+
+    private static void setGridLines(Control control, boolean show)
+    {
         if (control == null || control.isDisposed())
             return;
-        boolean show = !isDarkTheme();
         if (control instanceof Table table)
             table.setLinesVisible(show);
         else if (control instanceof Tree tree)

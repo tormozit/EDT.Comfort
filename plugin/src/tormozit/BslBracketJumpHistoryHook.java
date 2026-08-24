@@ -8,9 +8,7 @@ import org.eclipse.core.commands.IExecutionListener;
 import org.eclipse.core.commands.NotHandledException;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.ui.IEditorPart;
-import org.eclipse.ui.INavigationHistory;
 import org.eclipse.ui.IStartup;
-import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.IWorkbenchPart;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.commands.ICommandService;
@@ -70,7 +68,7 @@ public final class BslBracketJumpHistoryHook implements IStartup
                 if (!JUMP_COMMAND_IDS.contains(commandId))
                     return;
                 pendingEditor = resolveTextEditor(event);
-                markLocation(pendingEditor);
+                Global.markNavigationLocation(pendingEditor);
             }
 
             @Override
@@ -86,7 +84,7 @@ public final class BslBracketJumpHistoryHook implements IStartup
                  * Если перехода не было (парная скобка не найдена), новая запись совпадёт с
                  * текущей и платформа отбросит её сама (NavigationHistoryEntry.mergeInto).
                  */
-                markLocation(editor);
+                Global.markNavigationLocation(editor);
             }
 
             @Override
@@ -120,17 +118,5 @@ public final class BslBracketJumpHistoryHook implements IStartup
         if (xtextEditor != null)
             return xtextEditor;
         return part instanceof IEditorPart editor ? editor : null;
-    }
-
-    private static void markLocation(IEditorPart editor)
-    {
-        if (editor == null || editor.getSite() == null)
-            return;
-        IWorkbenchPage page = editor.getSite().getPage();
-        if (page == null)
-            return;
-        INavigationHistory history = page.getNavigationHistory();
-        if (history != null)
-            history.markLocation(editor);
     }
 }

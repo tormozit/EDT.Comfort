@@ -7,6 +7,7 @@ import java.io.StringWriter;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Proxy;
+import java.net.URL;
 import java.nio.file.Files;
 import java.util.Locale;
 import java.util.function.Consumer;
@@ -20,10 +21,12 @@ import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.IStatus;
 import org.eclipse.core.runtime.Status;
 import org.eclipse.core.runtime.jobs.Job;
+import org.eclipse.jface.resource.ImageDescriptor;
 import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.jface.viewers.TreeSelection;
 import org.eclipse.ui.IEditorInput;
 import org.eclipse.ui.IEditorPart;
+import org.eclipse.ui.INavigationHistory;
 import org.eclipse.ui.IWorkbenchPart;
 import org.eclipse.ui.IViewPart;
 import org.eclipse.ui.IViewReference;
@@ -37,6 +40,7 @@ import org.osgi.framework.Bundle;
 import org.osgi.framework.BundleContext;
 import org.osgi.framework.FrameworkUtil;
 import org.eclipse.swt.SWT;
+import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.widgets.*;
 
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
@@ -65,7 +69,34 @@ public final class Global
     /** ID собственной панели истории EGit (в EDT панель «История гит» открывается именно с ним). */
     static final String EGIT_HISTORY_VIEW_ID = "org.eclipse.egit.ui.HistoryView"; //$NON-NLS-1$
 
+    /** Путь к фирменной иконке плагина (кресло) внутри бандла. */
+    private static final String COMFORT_ICON_PATH = "icons/etool16/comfort.png"; //$NON-NLS-1$
+
+    /** Кэш фирменной иконки плагина; живёт столько же, сколько бандл. */
+    private static Image comfortIcon;
+
     private Global() {}
+
+    /**
+     * Фирменная иконка плагина «Комфорт» (кресло 16×16): подменю «Комфорт», кнопка тулбара,
+     * страница параметров. Образ создаётся один раз по требованию и живёт до остановки
+     * плагина — освобождать его вызывающим не нужно.
+     *
+     * @return кэшированная иконка или {@code null}, если бандл ещё не запущен либо файла нет
+     */
+    public static Image comfortIcon()
+    {
+        if (comfortIcon != null && !comfortIcon.isDisposed())
+            return comfortIcon;
+        Bundle bundle = FrameworkUtil.getBundle(Global.class);
+        if (bundle == null)
+            return null;
+        URL url = bundle.getEntry(COMFORT_ICON_PATH);
+        if (url == null)
+            return null;
+        comfortIcon = ImageDescriptor.createFromURL(url).createImage();
+        return comfortIcon;
+    }
 
     /**
      * Читает значение поля {@code fieldName} из объекта {@code obj},
@@ -643,6 +674,25 @@ public final class Global
             }
         }
         return getActiveProject(page, showMessage);
+    }
+
+    /**
+     * Отметить текущую позицию редактора в истории навигации EDT («Назад/Вперёд по истории»).
+     * Общий хелпер для мест, где прыжок по модулю выполняется не через штатный
+     * {@code AbstractTextEditor.selectAndReveal} (который отмечает историю сам), а напрямую
+     * через {@code ITextViewer} — тогда платформа о прыжке не узнаёт. Эталон применения:
+     * {@link BslBracketJumpHistoryHook}.
+     */
+    public static void markNavigationLocation(IEditorPart editor)
+    {
+        if (editor == null || editor.getSite() == null)
+            return;
+        IWorkbenchPage page = editor.getSite().getPage();
+        if (page == null)
+            return;
+        INavigationHistory history = page.getNavigationHistory();
+        if (history != null)
+            history.markLocation(editor);
     }
 
     /** Навигатор EDT или Project Explorer. */

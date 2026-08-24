@@ -756,6 +756,7 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
             return;
 
         ListSelectionThemeColors.markOptOut(table);
+        ThemeAwareColors.hideGridLinesInDarkTheme(table);
         INSTANCES.put(table, this);
         snapshotFixedColumnWidths();
 

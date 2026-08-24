@@ -46,11 +46,12 @@ import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorXtextEditorPage;
 
 /**
- * Подключает подсветку серверных вызовов к BSL-редакторам: оборачивает
+ * Подключает подсветку серверных вызовов и создаваемых
+ * переменных к BSL-редакторам: оборачивает
  * {@code newCalculator} реконсилера и применяет полный цикл Xtext-highlighting
  * (включая {@code updatePresentation}) после открытия/активации.
  */
-public final class BslServerCallHighlightingHook implements IStartup
+public final class BslEditorHighlightingHook implements IStartup
 {
     private static final String TAG = "ServerCallHL"; //$NON-NLS-1$
     private static final AtomicBoolean installed = new AtomicBoolean();
@@ -78,6 +79,8 @@ public final class BslServerCallHighlightingHook implements IStartup
                 if (ComfortSettings.PREF_SERVER_CALL_HIGHLIGHTING_ENABLED.equals(prop)
                     || ComfortSettings.PREF_SERVER_CALL_HIGHLIGHTING_COLOR.equals(prop)
                     || ComfortSettings.PREF_SERVER_CALL_CONTEXT_HIGHLIGHTING_COLOR.equals(prop)
+                    || ComfortSettings.PREF_IMPLICIT_VARIABLE_HIGHLIGHTING_ENABLED.equals(prop)
+                    || ComfortSettings.PREF_IMPLICIT_VARIABLE_HIGHLIGHTING_COLOR.equals(prop)
                     || ComfortSettings.PREF_FILTER_MATCH_COLOR.equals(prop))
                 {
                     PlatformUI.getWorkbench().getDisplay().asyncExec(() -> {
@@ -459,6 +462,9 @@ public final class BslServerCallHighlightingHook implements IStartup
             putServerCallStyle(attributes, BslServerCallHighlightingConfiguration.SERVER_CALL_CONTEXT_ID,
                 ComfortSettings.getServerCallContextHighlightingColor(),
                 ComfortSettings.DEFAULT_SERVER_CALL_CONTEXT_HIGHLIGHTING_COLOR);
+            putServerCallStyle(attributes, BslServerCallHighlightingConfiguration.IMPLICIT_VARIABLE_ID,
+                ComfortSettings.getImplicitVariableHighlightingColor(),
+                ComfortSettings.DEFAULT_IMPLICIT_VARIABLE_HIGHLIGHTING_COLOR);
         }
         catch (Exception e)
         {
@@ -622,7 +628,7 @@ public final class BslServerCallHighlightingHook implements IStartup
                     .provideHighlightingFor(resource, acceptor, cancelIndicator);
             }
 
-            new BslServerCallHighlightingCalculator()
+            new BslEditorHighlighting()
                 .provideHighlightingFor(resource, acceptor, cancelIndicator);
         }
     }

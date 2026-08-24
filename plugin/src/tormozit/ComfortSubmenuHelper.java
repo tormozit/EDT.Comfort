@@ -12,6 +12,7 @@ import org.eclipse.jface.bindings.Binding;
 import org.eclipse.jface.bindings.TriggerSequence;
 import org.eclipse.jface.bindings.keys.KeySequence;
 import org.eclipse.swt.SWT;
+import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.widgets.Menu;
 import org.eclipse.swt.widgets.MenuItem;
 import org.eclipse.jface.viewers.ISelection;
@@ -411,6 +412,9 @@ final class ComfortSubmenuHelper
             ? new MenuItem(parentMenu, SWT.CASCADE, index)
             : new MenuItem(parentMenu, SWT.CASCADE);
         comfortRoot.setText(SUBMENU_TEXT);
+        Image comfortIcon = Global.comfortIcon();
+        if (comfortIcon != null)
+            comfortRoot.setImage(comfortIcon);
         comfortRoot.setData(SUBMENU_MARKER, Boolean.TRUE);
         Menu comfortSub = new Menu(shell != null && !shell.isDisposed() ? shell : parentMenu.getShell(), SWT.DROP_DOWN);
         comfortRoot.setMenu(comfortSub);

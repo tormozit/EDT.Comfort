@@ -73,6 +73,12 @@ public class Activator extends AbstractUIPlugin
             ComfortSettings.PREF_SERVER_CALL_CONTEXT_HIGHLIGHTING_COLOR,
             ComfortSettings.DEFAULT_SERVER_CALL_CONTEXT_HIGHLIGHTING_COLOR);
         settings.getPreferenceStore().setDefault(
+            ComfortSettings.PREF_IMPLICIT_VARIABLE_HIGHLIGHTING_ENABLED,
+            ComfortSettings.DEFAULT_IMPLICIT_VARIABLE_HIGHLIGHTING_ENABLED);
+        settings.getPreferenceStore().setDefault(
+            ComfortSettings.PREF_IMPLICIT_VARIABLE_HIGHLIGHTING_COLOR,
+            ComfortSettings.DEFAULT_IMPLICIT_VARIABLE_HIGHLIGHTING_COLOR);
+        settings.getPreferenceStore().setDefault(
             ComfortSettings.PREF_BRACKET_CONTENT_HINT_ENABLED,
             ComfortSettings.DEFAULT_BRACKET_CONTENT_HINT_ENABLED);
         settings.getPreferenceStore().setDefault(

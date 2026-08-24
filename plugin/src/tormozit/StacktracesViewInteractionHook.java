@@ -175,7 +175,8 @@ public final class StacktracesViewInteractionHook implements IStartup
     /**
      * Аудит memento save/load в {@code .tmp/stacktraces-memento-audit.log} — только при включённом
      * «Общее логирование» ({@link Global#isLogEnabled()}); файл не чистится при старте плагина
-     * (в отличие от temp-logs).
+     * (в отличие от temp-logs). Обычный save/load — одна строка с счётчиками; полный инвентарь
+     * и детали — только при DEDUP и ALERT.
      */
     private static final java.nio.file.Path MEMENTO_AUDIT_PATH =
             java.nio.file.Path.of("C:\\VC\\EDT.Comfort\\.tmp\\stacktraces-memento-audit.log"); //$NON-NLS-1$
@@ -927,17 +928,12 @@ public final class StacktracesViewInteractionHook implements IStartup
                     Object allObj = liveRepo != null ? Global.invoke(liveRepo, "getStacktraces") : null; //$NON-NLS-1$
                     List<?> all = allObj instanceof List<?> list ? list : List.of();
                     List<Object> unique = uniqueStacktracesForPersist(all);
-                    mementoAudit("memento.save BEGIN beforeKids=" + beforeKids //$NON-NLS-1$
-                            + " repo=" + all.size() //$NON-NLS-1$
-                            + " unique=" + unique.size() //$NON-NLS-1$
-                            + " " + shortStack()); //$NON-NLS-1$
-                    auditRepositoryInventory("memento.save.repo", liveRepo); //$NON-NLS-1$
-                    for (int i = 0; i < unique.size(); i++)
-                        mementoAudit("memento.save.unique " + stacktraceAuditLine(unique.get(i), i)); //$NON-NLS-1$
-                    if (unique.isEmpty() && !all.isEmpty())
+                    boolean uniqueEmptyKeepFull = unique.isEmpty() && !all.isEmpty();
+                    if (uniqueEmptyKeepFull)
                     {
                         mementoAudit("memento.save ALERT uniqueEmptyKeepFull repo=" + all.size()); //$NON-NLS-1$
                         unique = new ArrayList<>(all);
+                        auditRepositoryInventory("memento.save.repo", liveRepo); //$NON-NLS-1$
                     }
                     else if (unique.size() < all.size())
                     {
@@ -963,8 +959,6 @@ public final class StacktracesViewInteractionHook implements IStartup
                                     + " key='" + auditShort(key) + "'"); //$NON-NLS-1$ //$NON-NLS-2$
                         }
                     }
-                    else
-                        mementoAudit("memento.save DEDUP none repo=" + all.size()); //$NON-NLS-1$
                     int cleared = clearMementoStacktraceChildren(memento);
                     Object filterRepo = filteringRepositoryProxy(liveRepo, unique, repoIface, cl);
                     Global.setFieldForce(real, "repository", filterRepo); //$NON-NLS-1$
@@ -972,12 +966,17 @@ public final class StacktracesViewInteractionHook implements IStartup
                     {
                         Object result = method.invoke(real, args);
                         int afterKids = countMementoStacktraces(memento);
-                        mementoAudit("memento.save END clearedKids=" + cleared //$NON-NLS-1$
-                                + " afterKids=" + afterKids //$NON-NLS-1$
-                                + " repo=" + all.size() //$NON-NLS-1$
-                                + " unique=" + unique.size()); //$NON-NLS-1$
                         if (afterKids == 0 && !all.isEmpty())
-                            mementoAudit("memento.save ALERT emptyMementoWhileRepoHad=" + all.size()); //$NON-NLS-1$
+                        {
+                            mementoAudit("memento.save ALERT emptyMementoWhileRepoHad=" + all.size() //$NON-NLS-1$
+                                    + " beforeKids=" + beforeKids //$NON-NLS-1$
+                                    + " clearedKids=" + cleared); //$NON-NLS-1$
+                            auditRepositoryInventory("memento.save.repo", liveRepo); //$NON-NLS-1$
+                        }
+                        else
+                            mementoAudit("memento.save repo=" + all.size() //$NON-NLS-1$
+                                    + " unique=" + unique.size() //$NON-NLS-1$
+                                    + " afterKids=" + afterKids); //$NON-NLS-1$
                         return result;
                     }
                     finally
@@ -993,22 +992,19 @@ public final class StacktracesViewInteractionHook implements IStartup
                     int repoBefore = repoSizeOf(liveRepo);
                     if (repoBefore > 0)
                     {
-                        mementoAudit("memento.load SKIP kids=" + kids //$NON-NLS-1$
-                                + " repo=" + repoBefore //$NON-NLS-1$
-                                + " " + shortStack()); //$NON-NLS-1$
-                        auditRepositoryInventory("memento.load.skip", liveRepo); //$NON-NLS-1$
+                        mementoAudit("memento.load SKIP kids=" + kids + " repo=" + repoBefore); //$NON-NLS-1$ //$NON-NLS-2$
                         recreatePagesFromRepository(view, liveRepo);
                         return null;
                     }
-                    mementoAudit("memento.load BEGIN kids=" + kids //$NON-NLS-1$
-                            + " repoBefore=" + repoBefore //$NON-NLS-1$
-                            + " " + shortStack()); //$NON-NLS-1$
                     Object result = method.invoke(real, args);
                     int repoAfter = repoSizeOf(liveRepo);
-                    mementoAudit("memento.load END afterRepo=" + repoAfter); //$NON-NLS-1$
-                    auditRepositoryInventory("memento.load", liveRepo); //$NON-NLS-1$
                     if (kids > 0 && repoAfter == 0)
+                    {
                         mementoAudit("memento.load ALERT mementoHadKidsButRepoEmpty kids=" + kids); //$NON-NLS-1$
+                        auditRepositoryInventory("memento.load", liveRepo); //$NON-NLS-1$
+                    }
+                    else
+                        mementoAudit("memento.load kids=" + kids + " afterRepo=" + repoAfter); //$NON-NLS-1$ //$NON-NLS-2$
                     return result;
                 }
                 return method.invoke(real, args);

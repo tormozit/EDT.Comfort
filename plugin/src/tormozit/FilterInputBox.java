@@ -163,7 +163,10 @@ final class FilterInputBox
             "comfort.formItems.filter.history."), //$NON-NLS-1$
         SYNTAX_CONTENTS(
             "comfort.syntaxAssistContents.filter.history.count", //$NON-NLS-1$
-            "comfort.syntaxAssistContents.filter.history."); //$NON-NLS-1$
+            "comfort.syntaxAssistContents.filter.history."), //$NON-NLS-1$
+        SYNTAX_SEARCH(
+            "comfort.syntaxAssistSearch.filter.history.count", //$NON-NLS-1$
+            "comfort.syntaxAssistSearch.filter.history."); //$NON-NLS-1$
 
         final String prefCountKey;
         final String prefItemPrefix;
@@ -467,6 +470,7 @@ final class FilterInputBox
             case PROJECT_STRUCTURE -> forProjectStructure(parent, onSearch);
             case EVENT_HANDLERS -> throw new IllegalStateException("EVENT_HANDLERS: use attachHistory(SearchBox, Scope.EVENT_HANDLERS)"); //$NON-NLS-1$
             case SYNTAX_CONTENTS -> throw new IllegalStateException("SYNTAX_CONTENTS: use attachHistory(SearchBox, Scope.SYNTAX_CONTENTS)"); //$NON-NLS-1$
+            case SYNTAX_SEARCH -> throw new IllegalStateException("SYNTAX_SEARCH: use attachHistoryKeepLayout(SearchBox, Scope.SYNTAX_SEARCH)"); //$NON-NLS-1$
         };
     }
 

@@ -135,11 +135,11 @@
     <startup class="tormozit.SetFilterDialogFilterHook"/>
     <startup class="tormozit.ModuleMergeStructureFilterHook"/>
     <startup class="tormozit.FilteredListDialogFilterHook"/>
-    <startup class="tormozit.SyntaxAssistContentsFilterHook"/>
+    <startup class="tormozit.SyntaxAssistHook"/>
     <startup class="tormozit.NewAttributeNameIdentifierHook"/>
     <startup class="tormozit.PropertyNameIdentifierHook"/>
     <startup class="tormozit.PropertySheetActivePropertyHook"/>
-    <startup class="tormozit.BslServerCallHighlightingHook"/>
+    <startup class="tormozit.BslEditorHighlightingHook"/>
     <startup class="tormozit.BracketContentHintHook"/>
     <startup class="tormozit.GotoDefinitionFieldMenuHook"/>
     <startup class="tormozit.TypeComboOverlayHook"/>

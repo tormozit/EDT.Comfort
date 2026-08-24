@@ -108,6 +108,7 @@ final class FormTreeInteraction
     private void hook()
     {
         ListSelectionThemeColors.markOptOut(tree);
+        ThemeAwareColors.hideGridLinesInDarkTheme(tree);
         tree.addListener(SWT.MouseDown, this::onMouseDown);
         tree.addListener(SWT.EraseItem, this::onEraseItem);
         tree.addListener(SWT.PaintItem, this::onPaintItem);

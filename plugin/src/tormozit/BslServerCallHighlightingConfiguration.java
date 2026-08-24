@@ -9,7 +9,7 @@ import org.osgi.framework.Bundle;
 import org.eclipse.core.runtime.Platform;
 
 /**
- * Регистрирует стиль подсветки серверных вызовов в BSL-редакторе.
+ * Регистрирует стили подсветки Комфорт в BSL-редакторе.
  * Делегирует нативную BSL-конфигурацию через рефлексию, чтобы
  * сохранить стандартные стили EDT.
  */
@@ -19,6 +19,8 @@ public final class BslServerCallHighlightingConfiguration
     public static final String SERVER_CALL_ID = Activator.PLUGIN_ID + ".serverCall"; //$NON-NLS-1$
     /** Серверный вызов "с контекстом" (&НаСервере) — в отличие от &НаСервереБезКонтекста. */
     public static final String SERVER_CALL_CONTEXT_ID = Activator.PLUGIN_ID + ".serverCallContext"; //$NON-NLS-1$
+    /** Имя переменной в месте создания. */
+    public static final String IMPLICIT_VARIABLE_ID = Activator.PLUGIN_ID + ".implicitVariable"; //$NON-NLS-1$
 
     private static final String BSL_UI_BUNDLE = "com._1c.g5.v8.dt.bsl.ui"; //$NON-NLS-1$
     private static final String BSL_HIGHLIGHTING_CONFIGURATION =
@@ -27,6 +29,8 @@ public final class BslServerCallHighlightingConfiguration
         "Серверные вызовы из клиентского кода"; //$NON-NLS-1$
     private static final String SERVER_CALL_CONTEXT_LABEL =
         "Серверные вызовы из клиентского кода (с контекстом)"; //$NON-NLS-1$
+    private static final String IMPLICIT_VARIABLE_LABEL =
+        "Создаваемые переменные"; //$NON-NLS-1$
 
     private final IHighlightingConfiguration delegate = createNativeDelegate();
 
@@ -38,6 +42,8 @@ public final class BslServerCallHighlightingConfiguration
 
         acceptor.acceptDefaultHighlighting(SERVER_CALL_ID, SERVER_CALL_LABEL, serverCallTextStyle());
         acceptor.acceptDefaultHighlighting(SERVER_CALL_CONTEXT_ID, SERVER_CALL_CONTEXT_LABEL, serverCallContextTextStyle());
+        acceptor.acceptDefaultHighlighting(IMPLICIT_VARIABLE_ID, IMPLICIT_VARIABLE_LABEL,
+            implicitVariableTextStyle());
     }
 
     /** Стиль всегда обычный — только цвет, без модификации шрифта (жирный/курсив). */
@@ -54,6 +60,14 @@ public final class BslServerCallHighlightingConfiguration
         TextStyle textStyle = new TextStyle();
         textStyle.setColor(effectiveServerCallColor(ComfortSettings.getServerCallContextHighlightingColor(),
             ComfortSettings.DEFAULT_SERVER_CALL_CONTEXT_HIGHLIGHTING_COLOR));
+        return textStyle;
+    }
+
+    private TextStyle implicitVariableTextStyle()
+    {
+        TextStyle textStyle = new TextStyle();
+        textStyle.setColor(effectiveServerCallColor(ComfortSettings.getImplicitVariableHighlightingColor(),
+            ComfortSettings.DEFAULT_IMPLICIT_VARIABLE_HIGHLIGHTING_COLOR));
         return textStyle;
     }
 

@@ -242,6 +242,27 @@ EDT 2026.1 (бандлы `23.0.1`, API местами несовместим): J
 
 Фильтр коллекции: `DebugCollectionFilterEraseSupport` (`filterSkipItem`).
 
+## Сетка (разделительные линии) — только через `ThemeAwareColors`
+
+`setLinesVisible(true)` напрямую **не вызывать**. Нативные линии SWT рисует системными цветами Windows (`DrawEdge`/`BDR_SUNKENINNER`), от темы Eclipse они не зависят: в тёмной теме получается слишком контрастная сетка, которая к тому же исчезает после первой перерисовки нашим owner-draw — то есть живёт недолго и непредсказуемо.
+
+
+| Виджет | Вызов |
+| --- | --- |
+| Таблица/дерево, которое создаёт сам плагин | `ThemeAwareColors.applyGridLines(control)` — в светлой теме включает сетку, в тёмной выключает |
+| Штатный список EDT, который плагин только дополняет | `ThemeAwareColors.hideGridLinesInDarkTheme(control)` — гасит в тёмной, светлую не трогает |
+
+
+Исключение: виджет намеренно повторяет вид соседнего штатного (`ComfortKeysPreferences.createLocalConflictViewer` — `referenceTable.getLinesVisible()`).
+
+## Нативное выделение поверх нашей отрисовки строки
+
+Если в `SWT.EraseItem` мы сами заливаем фон текущей строки/активной ячейки, а в списке есть подсветка вхождений фильтра — там же снимать `SWT.SELECTED` и `SWT.HOT` **в обеих темах**, не только в тёмной. С оставшимся `SELECTED` Windows дорисовывает своё выделение поверх (в колонке с текстом — инверсия фон/шрифт), а `StyledCellLabelProvider.useColors()` считает ячейку выделенной и вырезает цвета `StyleRange` — подсветка пропадает именно на текущей строке. Провайдер с подсветкой при этом всё равно создавать с `COLORS_ON_SELECTION` (см. раздел про `SelectionAwareStyledCellLabelProvider`).
+
+Эталон: `GitStagingFilterHook.GitStagingTreeInteraction.onEraseItem` + `GitStagingLabelProvider`.
+
+Где подсветки нет, `SELECTED` исторически снимается только в тёмной теме — в светлой нативное выделение даёт привычный голубой оттенок строки (`FormTreeInteraction`, `FormTableInteraction`). Менять это — отдельная задача, не побочно.
+
 ## Подключение фильтра (SearchBox/FilterInputBox) — история обязательна и персистентна
 
 При любом подключении многословного фильтра ({@link SmartMatcher}) к штатному или новому `SearchBox` — история поиска **обязательна** и должна **переживать закрытие окна/диалога** (`ScopedPreferenceStore`, не память процесса). Голый `new InMemorySearchHistory()` — история живёт только пока открыт текущий диалог, теряется при закрытии.

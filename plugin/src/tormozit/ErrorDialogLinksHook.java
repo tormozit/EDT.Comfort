@@ -4,6 +4,8 @@ import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.IStatus;
@@ -429,7 +431,36 @@ public final class ErrorDialogLinksHook implements IStartup
                     names.add(fullName);
             }
         }
+        collectDottedFullNames(text, names);
         return new ArrayList<>(names);
+    }
+
+    /**
+     * Сообщения платформы 1С ({@code RuntimeCoreException} и т.п.) дают полные имена
+     * объектов сразу в виде {@code Тип.Имя.Тип.Имя} (без пути файла) — например
+     * «Справочник.УчетныеЗаписиSCAP.Команда.АктивироватьНовыйКлюч». Ищем такие цепочки
+     * прямо в тексте: точечная цепочка должна начинаться с известного корневого типа МД,
+     * дальше наращиваем её парами (подтип, имя), пока подтип распознаётся.
+     */
+    private static final Pattern DOTTED_CHAIN = Pattern.compile("[\\p{L}0-9_]+(?:\\.[\\p{L}0-9_]+)+"); //$NON-NLS-1$
+
+    private static void collectDottedFullNames(String text, LinkedHashSet<String> names)
+    {
+        Matcher m = DOTTED_CHAIN.matcher(text);
+        while (m.find())
+        {
+            String[] parts = m.group().split("\\."); //$NON-NLS-1$
+            for (int start = 0; start < parts.length - 1; start++)
+            {
+                if (!MdTypeMapping.isKnownMdRootType(parts[start]))
+                    continue;
+                int end = start + 2;
+                while (end + 1 < parts.length && MdTypeMapping.anyToRu(parts[end]) != null)
+                    end += 2;
+                names.add(String.join(".", java.util.Arrays.asList(parts).subList(start, end))); //$NON-NLS-1$
+                break;
+            }
+        }
     }
 
     private static String extractObjectPath(String normalized, int folderStart, String folder)

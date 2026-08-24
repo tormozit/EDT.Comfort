@@ -29,6 +29,7 @@ import org.eclipse.jface.preference.StringFieldEditor;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.events.ControlAdapter;
 import org.eclipse.swt.events.ControlEvent;
+import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.graphics.RGB;
 import org.eclipse.swt.layout.GridData;
@@ -102,6 +103,13 @@ public class ComfortPreferencePage
             "Цвет подсветки серверных вызовов с контекстом (&НаСервере).\n"
             + THEME_AWARE_COLOR_TOOLTIP;
 
+    private static final String IMPLICIT_VARIABLE_COLOR_TOOLTIP =
+            "Цвет имени переменной в месте создания: первое присваивание и переменная цикла Для / Для Каждого.\n"
+            + THEME_AWARE_COLOR_TOOLTIP;
+
+    private static final String WORKSPACE_DESCRIPTION =
+            "Настройки плагина Комфорт (Tormozit)."; //$NON-NLS-1$
+
     public ComfortPreferencePage()
     {
         super(GRID);
@@ -113,8 +121,6 @@ public class ComfortPreferencePage
         ensurePreferenceStore();
         if (isProjectPreferencePage())
             setDescription("Настройки Комфорт для проекта."); //$NON-NLS-1$
-        else
-            setDescription("Настройки плагина Комфорт (Tormozit).");
     }
 
     @Override
@@ -197,6 +203,7 @@ public class ComfortPreferencePage
         if (isProjectPreferencePage())
             return;
 
+        createHeader();
         createVersionSection();
         createKeysLink();
 
@@ -281,6 +288,22 @@ public class ComfortPreferencePage
         addField(serverCallContextColorField);
         setFieldTooltip(serverCallContextColorField, SERVER_CALL_CONTEXT_COLOR_TOOLTIP, codeEditorGroup);
 
+        BooleanFieldEditor implicitVariableField = new BooleanFieldEditor(
+            ComfortSettings.PREF_IMPLICIT_VARIABLE_HIGHLIGHTING_ENABLED,
+            "Подсвечивать создаваемые переменные", //$NON-NLS-1$
+            codeEditorGroup);
+        addField(implicitVariableField);
+        setFieldTooltip(implicitVariableField,
+            "Подсвечивать особым цветом имя переменной в месте создания: первое присваивание и переменная цикла Для / Для Каждого", //$NON-NLS-1$
+            codeEditorGroup);
+
+        ThemeAwareColorFieldEditor implicitVariableColorField = new ThemeAwareColorFieldEditor(
+            ComfortSettings.PREF_IMPLICIT_VARIABLE_HIGHLIGHTING_COLOR,
+            "Цвет создаваемых переменных:", //$NON-NLS-1$
+            codeEditorGroup);
+        addField(implicitVariableColorField);
+        setFieldTooltip(implicitVariableColorField, IMPLICIT_VARIABLE_COLOR_TOOLTIP, codeEditorGroup);
+
         BooleanFieldEditor bracketHintField = new BooleanFieldEditor(
             ComfortSettings.PREF_BRACKET_CONTENT_HINT_ENABLED,
             "Отображать начало конструкции в её конце", //$NON-NLS-1$
@@ -336,12 +359,48 @@ public class ComfortPreferencePage
         else
             createInstallJdtSpellingLink(codeEditorGroup);
 
+        // FieldEditor в конструкторе обнуляет margin* группы — вернуть отступ
+        // под заголовком «Редактор кода», иначе первое поле слипается с рамкой.
+        restoreGroupContentInsets(codeEditorGroup);
+
         createTextEditorsGroup();
 
         createLoggingGroup();
 
         // Поле «Символы» намеренно не добавляется:
         // значение задано константой ContentAssistSettings.CHARSET_VALUE
+    }
+
+    /**
+     * Шапка страницы: фирменная иконка слева от надписи «Настройки плагина…».
+     * Описание не отдаётся в {@code setDescription} — иначе фреймворк нарисует
+     * тот же текст вторым, отдельной строкой над содержимым.
+     */
+    private void createHeader()
+    {
+        Composite parent = getFieldEditorParent();
+
+        Composite row = new Composite(parent, SWT.NONE);
+        GridData rowGd = new GridData(SWT.LEFT, SWT.CENTER, false, false);
+        rowGd.horizontalSpan = 2;
+        row.setLayoutData(rowGd);
+        RowLayout rowLayout = new RowLayout(SWT.HORIZONTAL);
+        rowLayout.spacing = 8;
+        rowLayout.marginWidth = 0;
+        rowLayout.marginHeight = 0;
+        rowLayout.marginLeft = 0;
+        rowLayout.marginTop = 0;
+        rowLayout.marginRight = 0;
+        rowLayout.marginBottom = 0;
+        rowLayout.center = true;
+        row.setLayout(rowLayout);
+
+        Image comfortIcon = Global.comfortIcon();
+        if (comfortIcon != null)
+            new Label(row, SWT.NONE).setImage(comfortIcon);
+
+        Label descriptionLabel = new Label(row, SWT.NONE);
+        descriptionLabel.setText(WORKSPACE_DESCRIPTION);
     }
 
     /** Ссылка установки Eclipse JDT — без него орфография Comfort недоступна. */
@@ -948,38 +1007,52 @@ public class ComfortPreferencePage
     }
 
     /**
-     * Устанавливает tooltip на управляющий элемент {@link FieldEditor}.
-     * Для {@link BooleanFieldEditor} — на флажок (подпись на самой кнопке).
-     * {@code parent} — подсказка, где искали контрол; если он уже создан на другом
-     * родителе (группа «Редактор кода»), берётся существующий виджет, без
-     * {@code checkParent}.
+     * {@link FieldEditor} в конструкторе ставит родителю {@link GridLayout} с нулевыми
+     * {@code margin*} — заголовок {@link Group} слипается с первым полем. Вызывать
+     * после всех {@code new *FieldEditor(..., group)}.
+     */
+    private static void restoreGroupContentInsets(Group group)
+    {
+        GridLayout layout = new GridLayout(2, false);
+        layout.marginWidth = 10;
+        layout.marginHeight = 8;
+        layout.marginTop = 6;
+        layout.horizontalSpacing = 8;
+        layout.verticalSpacing = 4;
+        group.setLayout(layout);
+    }
+
+    /**
+     * Устанавливает tooltip на уже созданные виджеты {@link FieldEditor}.
+     * Для {@link BooleanFieldEditor} в DEFAULT-стиле — только на флажок (подпись
+     * на самой кнопке, отдельного {@link Label} нет).
+     *
+     * <p>Нельзя вызывать {@code getLabelControl(parent)} / {@code getChangeControl(parent)}:
+     * если Label ещё нет, {@code getLabelControl} его создаёт — «призрачные» надписи
+     * без флажка, которые проявляются при растягивании окна «Параметры».
      */
     private void setFieldTooltip(FieldEditor field, String tooltip)
     {
-        setFieldTooltip(field, tooltip, getFieldEditorParent());
+        applyFieldTooltip(field, tooltip);
     }
 
     private void setFieldTooltip(FieldEditor field, String tooltip, Composite parent)
     {
-        if (parent == null || parent.isDisposed())
+        if (parent != null && parent.isDisposed())
             return;
-        parent.getDisplay().asyncExec(() -> applyFieldTooltip(field, tooltip, parent));
+        applyFieldTooltip(field, tooltip);
     }
 
-    private void applyFieldTooltip(FieldEditor field, String tooltip, Composite parent)
+    private void applyFieldTooltip(FieldEditor field, String tooltip)
     {
-        if (parent.isDisposed() || field == null)
+        if (field == null || tooltip == null)
             return;
         Control change = existingChangeControl(field);
-        if (change == null)
-            change = invokeControlGetter(field, "getChangeControl", parent); //$NON-NLS-1$
         if (change != null && !change.isDisposed())
-            change.setToolTipText(tooltip);
+            change.setToolTipText(TooltipText.wrap(change, tooltip));
         Control label = existingLabelControl(field);
-        if (label == null)
-            label = invokeControlGetter(field, "getLabelControl", parent); //$NON-NLS-1$
         if (label != null && !label.isDisposed())
-            label.setToolTipText(tooltip);
+            label.setToolTipText(TooltipText.wrap(label, tooltip));
     }
 
     /** Уже созданная кнопка/поле, без {@code getXxxControl(parent)} — тот бросает при чужом parent. */
@@ -988,6 +1061,9 @@ public class ComfortPreferencePage
         Control button = readControlField(field, "changeControl"); //$NON-NLS-1$
         if (button != null)
             return button;
+        Control checkBox = readControlField(field, "checkBox"); //$NON-NLS-1$
+        if (checkBox != null)
+            return checkBox;
         Control text = readControlField(field, "textField"); //$NON-NLS-1$
         if (text != null)
             return text;
@@ -1010,42 +1086,6 @@ public class ComfortPreferencePage
     private static Control existingLabelControl(FieldEditor field)
     {
         return readControlField(field, "label"); //$NON-NLS-1$
-    }
-
-    private static Control invokeControlGetter(FieldEditor field, String methodName, Composite parent)
-    {
-        java.lang.reflect.Method method = findDeclaredMethod(field.getClass(), methodName, Composite.class);
-        if (method == null)
-            return null;
-        try
-        {
-            Object result = method.invoke(field, parent);
-            if (result instanceof Control control && !control.isDisposed())
-                return control;
-        }
-        catch (Exception ignored)
-        {
-            // checkParent / метод недоступен
-        }
-        return null;
-    }
-
-    private static java.lang.reflect.Method findDeclaredMethod(Class<?> type, String name, Class<?>... params)
-    {
-        for (Class<?> c = type; c != null; c = c.getSuperclass())
-        {
-            try
-            {
-                java.lang.reflect.Method method = c.getDeclaredMethod(name, params);
-                method.setAccessible(true);
-                return method;
-            }
-            catch (NoSuchMethodException ignored)
-            {
-                // ищем выше
-            }
-        }
-        return null;
     }
 
     private static Control readControlField(Object target, String fieldName)
@@ -1085,7 +1125,7 @@ public class ComfortPreferencePage
         if (result)
         {
             SmartMatchHighlight.clearColorCache();
-            BslServerCallHighlightingHook.refreshAllEditors();
+            BslEditorHighlightingHook.refreshAllEditors();
             BracketContentHintHook.refreshAllEditors();
             NavigatorFilterHook.refreshAllNavigators();
         }
@@ -1465,6 +1505,8 @@ public class ComfortPreferencePage
                 ComfortSettings.isCtrlClickSelectWordEnabled());
             appendFlag(sb, "Подсвечивать серверные вызовы", //$NON-NLS-1$
                 ComfortSettings.isServerCallHighlightingEnabled());
+            appendFlag(sb, "Подсвечивать создаваемые переменные", //$NON-NLS-1$
+                ComfortSettings.isImplicitVariableHighlightingEnabled());
             appendFlag(sb, "Отображать начало конструкции в её конце", //$NON-NLS-1$
                 ComfortSettings.isBracketContentHintEnabled());
             appendFlag(sb, "Проверять орфографию в идентификаторах в видимой области", //$NON-NLS-1$

@@ -2,6 +2,7 @@
 package tormozit;
 
 import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
@@ -33,7 +34,17 @@ import org.eclipse.jface.text.IRegion;
 import org.eclipse.jface.text.ITextHoverExtension;
 import org.eclipse.jface.text.ITextHoverExtension2;
 import org.eclipse.jface.text.ITextViewer;
+import org.eclipse.emf.ecore.EObject;
+import org.eclipse.xtext.nodemodel.INode;
+import org.eclipse.xtext.nodemodel.util.NodeModelUtils;
+import org.eclipse.xtext.resource.EObjectAtOffsetHelper;
+import org.eclipse.xtext.resource.XtextResource;
 import org.eclipse.xtext.ui.editor.hover.html.IXtextBrowserInformationControl;
+import org.eclipse.xtext.ui.editor.model.IXtextDocument;
+import org.eclipse.xtext.util.concurrent.IUnitOfWork;
+import com._1c.g5.v8.dt.bsl.model.BslPackage;
+import com._1c.g5.v8.dt.bsl.model.ImplicitVariable;
+import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
 
 /**
  * Дополняет doc-hover BSL описанием из ИР при подключённой сессии.
@@ -233,6 +244,7 @@ public final class IrBslEditorHoverHook implements IStartup
         private volatile String lastIrHtml;
         private volatile String lastBaseHtml;
         private volatile String lastDirective;
+        private volatile boolean lastCreationSite;
         private volatile HtmlIntegrityWatcher activeWatcher;
 
         IrBslTextHoverWrapper(ITextHover delegate, BslXtextEditor editor)
@@ -279,19 +291,13 @@ public final class IrBslEditorHoverHook implements IStartup
             final int offset = hoverRegion.getOffset();
             String directive = resolveHoverDirective(offset);
             lastDirective = (directive != null && !directive.isBlank()) ? directive : null;
+            lastCreationSite = isImplicitVariableCreationAt(hoverRegion);
             IRSession session = IrBslExpressionHtmlSupport.resolveConnectedSession(editor);
             if (session == null)
             {
                 cancelIrEnrichment();
                 IrBslHoverDebug.step("skip", "no session"); //$NON-NLS-1$ //$NON-NLS-2$
-                if (lastDirective != null)
-                {
-                    String html = IrBslHoverHtml.readHtml(info);
-                    String modified = IrBslHoverHtml.injectDirectiveIntoHtml(html, lastDirective);
-                    if (!modified.equals(html))
-                        return modified;
-                }
-                return info;
+                return maybeDecorateHoverInfo(info);
             }
             IRSession.cancelActiveEvaluation(session);
             final int gen = cancelIrEnrichment();
@@ -301,25 +307,30 @@ public final class IrBslEditorHoverHook implements IStartup
             if (payload == null)
             {
                 scheduleNativeInputSync(baseInput, offset, gen);
-                if (lastDirective != null)
-                {
-                    String html = IrBslHoverHtml.readHtml(info);
-                    String modified = IrBslHoverHtml.injectDirectiveIntoHtml(html, lastDirective);
-                    if (!modified.equals(html))
-                        return modified;
-                }
-                return info;
+                return maybeDecorateHoverInfo(info);
             }
             scheduleNativeInputSync(baseInput, offset, gen);
             session.executor.submit(() -> scheduleIrEnrichment(session, baseInput, payload, offset, gen));
-            if (lastDirective != null)
-            {
-                String html = IrBslHoverHtml.readHtml(info);
-                String modified = IrBslHoverHtml.injectDirectiveIntoHtml(html, lastDirective);
-                if (!modified.equals(html))
-                    return modified;
-            }
-            return info;
+            return maybeDecorateHoverInfo(info);
+        }
+
+        private Object maybeDecorateHoverInfo(Object info)
+        {
+            String html = IrBslHoverHtml.readHtml(info);
+            String modified = applyHoverDecorations(html);
+            return modified.equals(html) ? info : modified;
+        }
+
+        private String applyHoverDecorations(String html)
+        {
+            if (html == null)
+                return html;
+            String result = html;
+            if (lastDirective != null && !lastDirective.isBlank())
+                result = IrBslHoverHtml.injectDirectiveIntoHtml(result, lastDirective);
+            if (lastCreationSite)
+                result = IrBslHoverHtml.injectNewVariablePrefix(result);
+            return result;
         }
 
         /** Сбрасывает delayed input на штатный base, чтобы родный HTML обновлялся при смене слова. */
@@ -334,18 +345,14 @@ public final class IrBslEditorHoverHook implements IStartup
                 IXtextBrowserInformationControl control = IrBslHoverControlAccess.resolve(editor);
                 if (control == null)
                     return;
-                String dir = lastDirective;
-                if (dir != null && !dir.isBlank())
+                String html = IrBslHoverHtml.readHtml(baseInput);
+                String modified = applyHoverDecorations(html);
+                if (!modified.equals(html))
                 {
-                    String html = IrBslHoverHtml.readHtml(baseInput);
-                    String modified = IrBslHoverHtml.injectDirectiveIntoHtml(html, dir);
-                    if (!modified.equals(html))
-                    {
-                        IrBslHoverHtml.applyHtmlToControl(control, modified);
-                        if (control.hasDelayedInputChangeListener())
-                            control.notifyDelayedInputChange(modified);
-                        return;
-                    }
+                    IrBslHoverHtml.applyHtmlToControl(control, modified);
+                    if (control.hasDelayedInputChangeListener())
+                        control.notifyDelayedInputChange(modified);
+                    return;
                 }
                 if (control.hasDelayedInputChangeListener())
                     control.notifyDelayedInputChange(baseInput);
@@ -375,6 +382,68 @@ public final class IrBslEditorHoverHook implements IStartup
             {
                 return null;
             }
+        }
+
+        /**
+         * {@code true}, если регион наведения пересекает имя {@link StaticFeatureAccess} с
+         * непустым {@code getImplicitVariable()} — место создания неявной переменной.
+         */
+        private boolean isImplicitVariableCreationAt(IRegion hoverRegion)
+        {
+            if (editor == null || hoverRegion == null)
+                return false;
+            org.eclipse.jface.text.IDocument document = editor.getDocument();
+            if (!(document instanceof IXtextDocument xtextDoc))
+                return false;
+            try
+            {
+                Boolean found = xtextDoc.readOnly((IUnitOfWork<Boolean, XtextResource>) resource -> {
+                    if (resource == null)
+                        return Boolean.FALSE;
+                    return Boolean.valueOf(isImplicitVariableCreationAt(resource, hoverRegion));
+                });
+                return Boolean.TRUE.equals(found);
+            }
+            catch (Exception e)
+            {
+                return false;
+            }
+        }
+
+        private static boolean isImplicitVariableCreationAt(XtextResource resource, IRegion hoverRegion)
+        {
+            int hoverStart = hoverRegion.getOffset();
+            int hoverEnd = hoverStart + hoverRegion.getLength();
+            EObjectAtOffsetHelper helper = new EObjectAtOffsetHelper();
+            EObject obj = helper.resolveContainedElementAt(resource, hoverStart);
+            for (EObject cur = obj; cur != null; cur = cur.eContainer())
+            {
+                StaticFeatureAccess access = asCreatingAccess(cur);
+                if (access == null)
+                    continue;
+                List<INode> nodes = NodeModelUtils.findNodesForFeature(access,
+                    BslPackage.Literals.FEATURE_ACCESS__NAME);
+                for (INode node : nodes)
+                {
+                    int start = node.getOffset();
+                    int end = start + node.getLength();
+                    if (node.getLength() > 0 && hoverStart < end && hoverEnd > start)
+                        return true;
+                }
+                return false;
+            }
+            return false;
+        }
+
+        private static StaticFeatureAccess asCreatingAccess(EObject element)
+        {
+            if (element instanceof StaticFeatureAccess access && access.getImplicitVariable() != null)
+                return access;
+            if (element instanceof ImplicitVariable variable
+                && variable.eContainer() instanceof StaticFeatureAccess access
+                && access.getImplicitVariable() == variable)
+                return access;
+            return null;
         }
 
         private static org.eclipse.emf.ecore.EObject findInvocationLikeAt(
@@ -435,10 +504,7 @@ public final class IrBslEditorHoverHook implements IStartup
             lastIrHtml = irHtml;
             String baseHtml = IrBslHoverHtml.readHtml(baseInput);
             lastBaseHtml = baseHtml;
-            String merged = IrBslHoverHtml.mergeHtml(baseHtml, irHtml);
-            String dir = lastDirective;
-            if (dir != null && !dir.isBlank())
-                merged = IrBslHoverHtml.injectDirectiveIntoHtml(merged, dir);
+            String merged = applyHoverDecorations(IrBslHoverHtml.mergeHtml(baseHtml, irHtml));
 
             if (tryApplyToCurrentControl(merged))
             {
@@ -666,7 +732,7 @@ public final class IrBslEditorHoverHook implements IStartup
                     && irHtml != null && !irHtml.isEmpty()
                     && !hasMarker)
                 {
-                    String merged = IrBslHoverHtml.mergeHtml(baseHtml, irHtml);
+                    String merged = applyHoverDecorations(IrBslHoverHtml.mergeHtml(baseHtml, irHtml));
                     boolean baseReset = IrBslHoverHtml.looksLikeBaseHtmlReset(currentText, baseHtml, merged);
                     boolean backEnabled = browser.isBackEnabled();
                     if (backEnabled && !baseReset)

@@ -152,6 +152,25 @@ public final class ComfortSettings
     /** Цвет серверных вызовов "с контекстом" по умолчанию — красный RGB(200,0,0). */
     public static final String DEFAULT_SERVER_CALL_CONTEXT_HIGHLIGHTING_COLOR = "200,0,0"; //$NON-NLS-1$
 
+    // ---- Implicit variable highlighting ----
+
+    /** Ключ: включена ли подсветка создаваемых переменных. */
+    public static final String PREF_IMPLICIT_VARIABLE_HIGHLIGHTING_ENABLED =
+        "comfort.implicitVariableHighlighting.enabled"; //$NON-NLS-1$
+
+    /**
+     * Ключ: цвет подсветки создаваемых переменных (RGB светлой темы, строка "R,G,B").
+     * В тёмной теме при отображении — {@link ThemeAwareColors#toEffectiveRgb}.
+     */
+    public static final String PREF_IMPLICIT_VARIABLE_HIGHLIGHTING_COLOR =
+        "comfort.implicitVariableHighlighting.color"; //$NON-NLS-1$
+
+    /** Подсветка создаваемых переменных включена по умолчанию. */
+    public static final boolean DEFAULT_IMPLICIT_VARIABLE_HIGHLIGHTING_ENABLED = true;
+
+    /** Цвет создаваемых переменных по умолчанию — RGB(0,100,100). */
+    public static final String DEFAULT_IMPLICIT_VARIABLE_HIGHLIGHTING_COLOR = "0,100,100"; //$NON-NLS-1$
+
     // ---- Bracket content hint ----
 
     /** Ключ: включён ли показ содержимого открывающей конструкции у закрывающей. */
@@ -774,6 +793,26 @@ public final class ComfortSettings
         if (settings == null)
             return DEFAULT_SERVER_CALL_CONTEXT_HIGHLIGHTING_COLOR;
         return settings.preferenceStore.getString(PREF_SERVER_CALL_CONTEXT_HIGHLIGHTING_COLOR);
+    }
+
+    // ---- Implicit variable highlighting accessors ----
+
+    /** Подсветка создаваемых переменных включена. */
+    public static boolean isImplicitVariableHighlightingEnabled()
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return DEFAULT_IMPLICIT_VARIABLE_HIGHLIGHTING_ENABLED;
+        return settings.preferenceStore.getBoolean(PREF_IMPLICIT_VARIABLE_HIGHLIGHTING_ENABLED);
+    }
+
+    /** Цвет подсветки создаваемых переменных (строка "R,G,B"). */
+    public static String getImplicitVariableHighlightingColor()
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return DEFAULT_IMPLICIT_VARIABLE_HIGHLIGHTING_COLOR;
+        return settings.preferenceStore.getString(PREF_IMPLICIT_VARIABLE_HIGHLIGHTING_COLOR);
     }
 
     // ---- Bracket content hint accessors ----

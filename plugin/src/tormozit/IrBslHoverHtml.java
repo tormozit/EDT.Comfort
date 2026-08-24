@@ -109,6 +109,48 @@ public final class IrBslHoverHtml
     }
 
     /**
+     * Вставляет «Новая» в начало заголовка штатной подсказки при наведении
+     * ({@code infocontrol-heading}). Идемпотентно: повторный вызов не дублирует префикс.
+     *
+     * @return HTML с префиксом или исходный {@code html}, если заголовок не найден
+     */
+    public static String injectNewVariablePrefix(String html)
+    {
+        if (html == null || html.isEmpty())
+            return html;
+        String marker = "comfort-new-variable"; //$NON-NLS-1$
+        if (html.contains(marker))
+            return html;
+        int insertAt = findHeadingTextInsertOffset(html);
+        if (insertAt < 0)
+            return html;
+        String prefix = "<span class=\"" + marker + "\">Новая</span> "; //$NON-NLS-1$ //$NON-NLS-2$
+        return html.substring(0, insertAt) + prefix + html.substring(insertAt);
+    }
+
+    private static int findHeadingTextInsertOffset(String html)
+    {
+        int classPos = html.indexOf("infocontrol-heading"); //$NON-NLS-1$
+        if (classPos < 0)
+            classPos = html.indexOf("contentassist-heading-content"); //$NON-NLS-1$
+        if (classPos < 0)
+            return -1;
+        int openEnd = html.indexOf('>', classPos);
+        if (openEnd < 0)
+            return -1;
+        int insertAt = openEnd + 1;
+        int headingClose = html.indexOf("</div>", insertAt); //$NON-NLS-1$
+        int counterClass = html.indexOf("infocontrol-counter", insertAt); //$NON-NLS-1$
+        if (counterClass >= 0 && (headingClose < 0 || counterClass < headingClose))
+        {
+            int counterEnd = html.indexOf("</span>", counterClass); //$NON-NLS-1$
+            if (counterEnd >= 0 && (headingClose < 0 || counterEnd < headingClose))
+                insertAt = counterEnd + "</span>".length(); //$NON-NLS-1$
+        }
+        return insertAt;
+    }
+
+    /**
      * Находит виджет {@link Browser} внутри information control, обходя дерево SWT-виджетов.
      * Аналог внутреннего {@code BslInfoBrowserUtils.getInfoBrowser()} из EDT.
      */
