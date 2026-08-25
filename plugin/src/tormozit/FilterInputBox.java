@@ -166,7 +166,10 @@ final class FilterInputBox
             "comfort.syntaxAssistContents.filter.history."), //$NON-NLS-1$
         SYNTAX_SEARCH(
             "comfort.syntaxAssistSearch.filter.history.count", //$NON-NLS-1$
-            "comfort.syntaxAssistSearch.filter.history."); //$NON-NLS-1$
+            "comfort.syntaxAssistSearch.filter.history."), //$NON-NLS-1$
+        LIST_ITEM_SELECTION_DIALOG(
+            "comfort.listItemSelectionDialog.filter.history.count", //$NON-NLS-1$
+            "comfort.listItemSelectionDialog.filter.history."); //$NON-NLS-1$
 
         final String prefCountKey;
         final String prefItemPrefix;
@@ -376,30 +379,67 @@ final class FilterInputBox
     }
 
     /**
-     * Заменяет штатное {@link Text} поле паттерна в диалоге EDT на {@link SearchBox} с историей.
+     * Замена штатного поля в диалоге {@code ListItemSelectionDialog} («Выбор объекта», например
+     * функциональные опции) — см. {@code ListItemSelectionDialogFilterHook}. На всю ширину, как
+     * было у штатного поля: {@code dialogArea} — однoколоночный {@code GridLayout}, узкое поле
+     * оставляет пустую полосу в своей же строке справа (не растягивает саму строку по высоте —
+     * просто теряется свободное место, визуально «дыра»).
      */
-    static FilterInputBox replacePatternText(Text oldText, Scope scope, Runnable onSearch)
+    static FilterInputBox forListItemSelectionDialog(Composite parent, Runnable onSearch)
     {
-        if (oldText == null || oldText.isDisposed())
+        Options opts = new Options();
+        opts.scope = Scope.LIST_ITEM_SELECTION_DIALOG;
+        opts.layoutData = new GridData(SWT.FILL, SWT.CENTER, true, false);
+        opts.message = "Фильтр..."; //$NON-NLS-1$
+        opts.tooltip = FLAT_FILTER_TOOLTIP;
+        return create(parent, opts, onSearch);
+    }
+
+    /**
+     * Заменяет штатное поле паттерна в диалоге EDT на {@link SearchBox} с историей. Принимает
+     * любой {@link Control} с текстом ({@link Text} или {@link StyledText}, в т.ч. потомки вроде
+     * {@code SearchTextWithClearButton}) — исходный текст читается через {@link #controlText}.
+     */
+    static FilterInputBox replacePatternText(Control oldControl, Scope scope, Runnable onSearch)
+    {
+        if (oldControl == null || oldControl.isDisposed())
             return null;
-        Composite parent = oldText.getParent();
+        Composite parent = oldControl.getParent();
         if (parent == null || parent.isDisposed())
             return null;
-        Object layoutData = oldText.getLayoutData();
-        String initial = oldText.getText();
-        Control siblingBelow = siblingBelow(oldText);
-        oldText.dispose();
+        Object layoutData = oldControl.getLayoutData();
+        String initial = controlText(oldControl);
+        Control siblingBelow = siblingBelow(oldControl);
+        oldControl.dispose();
         FilterInputBox result = createForScope(parent, scope, onSearch);
         if (result == null)
             return null;
-        if (layoutData != null)
-            result.widget().setLayoutData(layoutData);
-        applyCompactLayout(result.widget());
+        // Если scope сам решил тянуться на всю строку (grab=true — FILTERED_LIST_DIALOG,
+        // LIST_ITEM_SELECTION_DIALOG и т.п.), не сжимать обратно в compact: старое поле в
+        // однoколоночном GridLayout занимало всю ширину, узкая замена оставляла бы пустую
+        // полосу в той же строке справа от поля (визуально «дыра»).
+        boolean scopeWantsFill = result.widget().getLayoutData() instanceof GridData scopeGd
+            && scopeGd.grabExcessHorizontalSpace;
+        if (!scopeWantsFill)
+        {
+            if (layoutData != null)
+                result.widget().setLayoutData(layoutData);
+            applyCompactLayout(result.widget());
+        }
         if (siblingBelow != null && !siblingBelow.isDisposed())
             result.widget().moveAbove(siblingBelow);
         result.setText(initial != null ? initial : ""); //$NON-NLS-1$
         parent.layout(true, true);
         return result;
+    }
+
+    private static String controlText(Control control)
+    {
+        if (control instanceof Text t)
+            return t.getText();
+        if (control instanceof StyledText st)
+            return st.getText();
+        return ""; //$NON-NLS-1$
     }
 
     /** Найти SearchBox в иерархии родителей control. */
@@ -456,6 +496,7 @@ final class FilterInputBox
             case PICTURE_DIALOG -> forPictureDialog(parent, onSearch);
             case GIT_HISTORY -> forGitHistory(parent, onSearch);
             case FILTERED_LIST_DIALOG -> forFilteredListDialog(parent, onSearch);
+            case LIST_ITEM_SELECTION_DIALOG -> forListItemSelectionDialog(parent, onSearch);
             case FORM_ITEMS -> forFormItems(parent, onSearch);
             case RIGHTS_DIALOG -> throw new IllegalStateException("RIGHTS_DIALOG: use attachHistory(SearchBox, Scope.RIGHTS_DIALOG)"); //$NON-NLS-1$
             case RIGHTS_EDITOR -> throw new IllegalStateException("RIGHTS_EDITOR: use attachHistory(SearchBox, Scope.RIGHTS_EDITOR)"); //$NON-NLS-1$

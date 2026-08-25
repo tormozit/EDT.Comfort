@@ -138,22 +138,33 @@ public final class ComfortUpdateChecker
 
     private static void performCheck()
     {
+        Global.log("[UpdateCheck] start"); //$NON-NLS-1$
         try
         {
             if (!isInternetAvailable())
+            {
+                Global.log("[UpdateCheck] internet unavailable, skip"); //$NON-NLS-1$
                 return;
+            }
 
             ComfortVersionInfo latest = fetchLatestVersion();
-            if (latest != null)
+            if (latest == null)
             {
-                cacheLatestVersion(latest);
-                maybeShowUpdateToast(latest);
+                Global.log("[UpdateCheck] no version info from site"); //$NON-NLS-1$
+                return;
             }
+
+            cacheLatestVersion(latest);
+            ComfortVersionInfo installed = getInstalledVersion();
+            boolean newer = ComfortVersionInfo.compare(installed, latest) < 0;
+            Global.log("[UpdateCheck] installed=" + installed.getDisplayVersion() //$NON-NLS-1$
+                + ", latest=" + latest.getDisplayVersion() + ", update=" + newer); //$NON-NLS-1$
+            maybeShowUpdateToast(latest);
             markCheckCompleted();
         }
         catch (Exception e)
         {
-            Global.log("Проверка обновления EDT Comfort: " + e.getMessage()); //$NON-NLS-1$
+            Global.log("[UpdateCheck] error: " + e.getMessage()); //$NON-NLS-1$
         }
     }
 

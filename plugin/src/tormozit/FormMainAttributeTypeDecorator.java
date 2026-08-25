@@ -7,9 +7,7 @@ import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.util.EcoreUtil;
 import org.eclipse.jface.preference.IPreferenceStore;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider.IStyledLabelProvider;
-import org.eclipse.jface.viewers.IBaseLabelProvider;
 import org.eclipse.jface.viewers.IDecoration;
-import org.eclipse.jface.viewers.ILabelProvider;
 import org.eclipse.jface.viewers.ILightweightLabelDecorator;
 import org.eclipse.jface.viewers.LabelProvider;
 import org.eclipse.jface.viewers.StyledString;
@@ -46,6 +44,7 @@ public final class FormMainAttributeTypeDecorator extends LabelProvider implemen
     private static final String DECORATOR_ID = "tormozit.formMainAttributeTypeDecorator"; //$NON-NLS-1$
     private static final String PREF_AUTO_ENABLED = "tormozit.formMainAttributeTypeDecorator.autoEnabled"; //$NON-NLS-1$
     private static final String DIALOG_PATCHED_KEY = "tormozit.formMainAttributeTypeDialogPatched"; //$NON-NLS-1$
+    private static final String SUFFIX_PATCHED_DATA = "tormozit.formMainAttributeTypeSuffixPatched"; //$NON-NLS-1$
     private static final String WINDOW_KEY = "org.eclipse.jface.window.Window"; //$NON-NLS-1$
     private static final String NONE = ""; //$NON-NLS-1$
 
@@ -144,27 +143,31 @@ public final class FormMainAttributeTypeDecorator extends LabelProvider implemen
                 || viewer.getControl().isDisposed())
             return false;
 
-        IBaseLabelProvider current = viewer.getLabelProvider();
-        if (current instanceof SuffixLabelProvider
-                || current instanceof SelectionAwareStyledCellLabelProvider)
+        if (Boolean.TRUE.equals(viewer.getControl().getData(SUFFIX_PATCHED_DATA)))
         {
             shell.setData(DIALOG_PATCHED_KEY, Boolean.TRUE);
             return true;
         }
-        if (!(current instanceof ILabelProvider base))
+
+        // unwrapOrAdapt достаёт стиль текущего провайдера независимо от того, кто патчил viewer
+        // раньше (например ListItemSelectionDialogFilterHook уже обернул его для подсветки
+        // совпадений фильтра) — суффикс типа надстраивается поверх, не теряя чужую обёртку.
+        IStyledLabelProvider base = SelectionAwareStyledCellLabelProvider.unwrapOrAdapt(viewer.getLabelProvider());
+        if (base == null)
             return false;
 
         SuffixLabelProvider wrapped = new SuffixLabelProvider(base);
         // TableViewer.setLabelProvider(ILabelProvider) рисует через getText() — цвет StyleRange
         // не доходит. SelectionAwareStyledCellLabelProvider вызывает getStyledText и ставит
         // COLORS_ON_SELECTION (штатный DelegatingStyledCellLabelProvider цвет на выделенной
-        // строке отбрасывает). Фильтр остаётся на ILabelProvider — CellLabelProvider им не является.
+        // строке отбрасывает).
         viewer.setLabelProvider(new SelectionAwareStyledCellLabelProvider(wrapped));
         for (ViewerFilter filter : viewer.getFilters())
         {
             if (filter != null && filter.getClass().getName().contains("TextListViewerFilter")) //$NON-NLS-1$
                 Global.setField(filter, "labelProvider", wrapped); //$NON-NLS-1$
         }
+        viewer.getControl().setData(SUFFIX_PATCHED_DATA, Boolean.TRUE);
         shell.setData(DIALOG_PATCHED_KEY, Boolean.TRUE);
         return true;
     }
@@ -349,19 +352,17 @@ public final class FormMainAttributeTypeDecorator extends LabelProvider implemen
      */
     private static final class SuffixLabelProvider extends LabelProvider implements IStyledLabelProvider
     {
-        private final ILabelProvider base;
-        private final IStyledLabelProvider baseStyled;
+        private final IStyledLabelProvider base;
 
-        SuffixLabelProvider(ILabelProvider base)
+        SuffixLabelProvider(IStyledLabelProvider base)
         {
             this.base = base;
-            this.baseStyled = base instanceof IStyledLabelProvider styled ? styled : null;
         }
 
         @Override
         public String getText(Object element)
         {
-            return withSuffix(base != null ? base.getText(element) : super.getText(element), element);
+            return withSuffix(getStyledText(element).getString(), element);
         }
 
         @Override
@@ -373,31 +374,20 @@ public final class FormMainAttributeTypeDecorator extends LabelProvider implemen
         @Override
         public StyledString getStyledText(Object element)
         {
-            String name;
-            if (baseStyled != null)
-            {
-                StyledString fromBase = baseStyled.getStyledText(element);
-                name = fromBase != null
-                    ? fromBase.getString()
-                    : nullToEmpty(base != null ? base.getText(element) : null);
-            }
-            else
-            {
-                name = nullToEmpty(base != null ? base.getText(element) : null);
-            }
+            // Сохраняем StyleRange базового провайдера (например подсветку совпадений фильтра из
+            // ListItemSelectionDialogFilterHook), а не только текст — иначе при патче в порядке
+            // «подсветка → суффикс» цвет совпадений терялся бы при перестроении строки заново.
+            StyledString styled = base != null ? base.getStyledText(element) : null;
+            if (styled == null)
+                styled = new StyledString();
+
             String suffix = suffixForElement(element);
             String add = suffix != null ? " (" + suffix + ")" : null;
-            if (add != null && name.endsWith(add))
-                name = name.substring(0, name.length() - add.length());
-            StyledString styled = new StyledString(name);
+            if (add != null && styled.getString().endsWith(add))
+                return styled; // суффикс уже есть в базовом тексте — не дублировать
             if (add != null)
                 styled.append(add, StyledString.DECORATIONS_STYLER);
             return styled;
-        }
-
-        private static String nullToEmpty(String text)
-        {
-            return text == null ? "" : text; //$NON-NLS-1$
         }
     }
 }

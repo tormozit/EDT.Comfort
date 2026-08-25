@@ -92,6 +92,7 @@ import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.ToolBar;
 import org.eclipse.swt.widgets.ToolItem;
 import org.eclipse.swt.widgets.Tree;
+import org.eclipse.swt.widgets.TreeColumn;
 import org.eclipse.swt.widgets.TreeItem;
 import org.eclipse.swt.widgets.Widget;
 import org.eclipse.ui.IEditorPart;
@@ -149,6 +150,7 @@ import com._1c.g5.v8.dt.dcs.ui.settings.IDcsSettingsProvider;
 import com._1c.g5.v8.dt.dcs.ui.settings.conditional.ConditionalAppearance;
 import com._1c.g5.v8.dt.dcs.ui.util.DcsUiUtil;
 import com._1c.g5.v8.dt.common.StringUtils;
+import com._1c.g5.v8.dt.common.ui.CommonUI;
 import com._1c.g5.v8.dt.form.copypaste.FormElementTransfer;
 import com._1c.g5.v8.dt.form.mapping.model.Item;
 import com._1c.g5.v8.dt.form.mapping.model.ItemType;
@@ -162,7 +164,9 @@ import com._1c.g5.v8.dt.form.model.ContextMenu;
 import com._1c.g5.v8.dt.form.model.DataPathReferredObject;
 import com._1c.g5.v8.dt.form.model.EventHandler;
 import com._1c.g5.v8.dt.form.model.EventHandlerContainer;
+import com._1c.g5.v8.dt.form.model.DynamicListExtInfo;
 import com._1c.g5.v8.dt.form.model.Form;
+import com._1c.g5.v8.dt.form.model.FormAttribute;
 import com._1c.g5.v8.dt.form.model.FormGroup;
 import com._1c.g5.v8.dt.form.model.FormItem;
 import com._1c.g5.v8.dt.form.model.FormItemContainer;
@@ -375,6 +379,8 @@ public class FormEditorHook implements IStartup
         WysiwygHeaderClick.install(display);
         TabCounts.install();
         AttributesDrop.install();
+        AttributeHeaderTooltips.install();
+        AttributesExtraColumns.install();
         ItemsTree.install();
         AppearancePage.install();
         ConditionalAppearanceCellStyle.install(display);
@@ -2011,6 +2017,430 @@ public class FormEditorHook implements IStartup
                 tree.showItem(item);
             }
             tree.setFocus();
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Подсказки заголовков таблицы реквизитов формы (AttributeHeaderTooltips)
+    // -----------------------------------------------------------------------
+
+    /**
+     * Подсказки для заголовков штатной таблицы «Реквизиты» редактора формы
+     * ({@code attributesViewer}) — только там, где заголовок сам по себе не объясняет
+     * поведение колонки: «Использование» (текста в заголовке нет вовсе, только значок),
+     * «Использовать всегда» и «Сохранение». У «Реквизит» и «Тип» подсказки нет вовсе.
+     *
+     * <p>Название колонки первой строкой подсказки добавляется, только если заголовок реально
+     * обрезан текущей шириной колонки (измеряется шрифтом дерева) — если он и так виден
+     * полностью, дублировать его текстом подсказки незачем. Колонка «Использование» — исключение:
+     * текста в заголовке нет вовсе, поэтому название показывается всегда.
+     *
+     * <p>Колонка «Сохранение» штатно то добавляется, то удаляется ({@code createSaveColumn} /
+     * {@code removeSaveColumn} — в зависимости от настроек сохранения данных формы), а ширину
+     * любой колонки может потянуть пользователь, поэтому подсказки не кешируются, а пересчитываются
+     * на {@link SWT#Paint}, как {@link ItemsTree} досогласует значения своих колонок.
+     */
+    private static final class AttributeHeaderTooltips
+    {
+        private static final String KEY_HOOKED = "tormozit.formAttributeHeaderTooltips.hooked"; //$NON-NLS-1$
+
+        private static final int RETRY_DELAY_MS = 200;
+
+        private static final int MAX_ATTEMPTS = 100;
+
+        private static final String TITLE_USAGE = "Использование"; //$NON-NLS-1$
+
+        private static final String TITLE_USE_ALWAYS = "Использовать всегда"; //$NON-NLS-1$
+
+        private static final String TITLE_SAVE = "Сохранение"; //$NON-NLS-1$
+
+        static void install()
+        {
+            trackFormEditors(editor -> attach(editor, 0));
+        }
+
+        private static void attach(FormEditor editor, int attempt)
+        {
+            try
+            {
+                FormEditorPage page = findFormPage(editor);
+                Tree tree = getAttributesTree(page);
+                if (tree == null || tree.isDisposed())
+                {
+                    if (attempt < MAX_ATTEMPTS && editor.getSite() != null)
+                        Display.getDefault().timerExec(RETRY_DELAY_MS, () -> attach(editor, attempt + 1));
+                    return;
+                }
+                if (Boolean.TRUE.equals(tree.getData(KEY_HOOKED)))
+                    return;
+                tree.setData(KEY_HOOKED, Boolean.TRUE);
+                applyTooltips(tree);
+                tree.addListener(SWT.Paint, event -> applyTooltips(tree));
+            }
+            catch (Exception e)
+            {
+                Global.logError("FormEditorHook.AttributeHeaderTooltips", "attach", e); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+
+        /**
+         * Колонки не только меняются составом («Сохранение» появляется/исчезает), но и шириной —
+         * пользователь тащит границу, и заголовок то обрезается, то умещается целиком. Поэтому
+         * подсказка не кешируется «навсегда» флагом на колонке, а пересчитывается на каждой Paint;
+         * {@code setToolTipText} вызывается, только когда текст действительно изменился.
+         */
+        private static void applyTooltips(Tree tree)
+        {
+            for (TreeColumn column : tree.getColumns())
+            {
+                if (column.isDisposed())
+                    continue;
+                String tooltip = tooltipFor(column);
+                String wrapped = tooltip != null ? TooltipText.wrap(tree, tooltip) : null;
+                if (!Objects.equals(wrapped, column.getToolTipText()))
+                    column.setToolTipText(wrapped);
+            }
+        }
+
+        /**
+         * {@code null} — колонка не нуждается в подсказке: заголовок и так виден полностью
+         * (значок «Использование» без текста в заголовке — всегда нуждается).
+         */
+        private static String tooltipFor(TreeColumn column)
+        {
+            String text = column.getText();
+            if (text.isEmpty())
+                return TITLE_USAGE + ".\n" //$NON-NLS-1$
+                    + "Значок показывается, если реквизит используется хотя бы" //$NON-NLS-1$
+                    + " одним элементом формы (указан у него как данные)." //$NON-NLS-1$
+                    + Global.pluginSignForTooltip();
+            if (TITLE_USE_ALWAYS.equals(text))
+                return withTitleIfTruncated(column,
+                    "Данные реквизита будут получены с сервера и сохранены в форме" //$NON-NLS-1$
+                        + " независимо от того, есть ли на форме элемент, который их отображает." //$NON-NLS-1$
+                        + " Без этого флажка реквизит, не связанный ни с одним элементом формы," //$NON-NLS-1$
+                        + " не получает данные."); //$NON-NLS-1$
+            if (TITLE_SAVE.equals(text))
+                return withTitleIfTruncated(column,
+                    "Значение реквизита сохраняется в настройках формы —" //$NON-NLS-1$
+                        + " персонально для пользователя, между сеансами, как и положение окна" //$NON-NLS-1$
+                        + " или ширина колонок. Колонка видна, только если для формы включено" //$NON-NLS-1$
+                        + " сохранение данных в настройках."); //$NON-NLS-1$
+            if (AttributesExtraColumns.TITLE_FUNCTIONAL_OPTIONS.equals(text))
+                return withTitleIfTruncated(column,
+                    "Число функциональных опций, в состав которых включён реквизит." //$NON-NLS-1$
+                        + " Двойной клик активирует список опций в панели «Свойства»."); //$NON-NLS-1$
+            if (AttributesExtraColumns.TITLE_SAVED_DATA.equals(text))
+                return withTitleIfTruncated(column,
+                    "Свойство «РеквизитФормы.СохраняемыеДанные» (не путать с колонкой" //$NON-NLS-1$
+                        + " «Сохранение»). Истина — реквизит считается модифицированным и" //$NON-NLS-1$
+                        + " блокируется при записи формы. Пусто у стандартных реквизитов," //$NON-NLS-1$
+                        + " колонок таблиц и реквизитов типа «ДинамическийСписок»."); //$NON-NLS-1$
+            return null;
+        }
+
+        /** Заголовок первой строкой — только если он реально обрезан текущей шириной колонки. */
+        private static String withTitleIfTruncated(TreeColumn column, String description)
+        {
+            String body = description + Global.pluginSignForTooltip();
+            return isHeaderTruncated(column) ? column.getText() + ".\n" + body : body; //$NON-NLS-1$
+        }
+
+        /** Запас на внутренние отступы заголовка колонки (Windows-тема), px. */
+        private static final int HEADER_PADDING_PX = 16;
+
+        private static boolean isHeaderTruncated(TreeColumn column)
+        {
+            Tree tree = column.getParent();
+            if (tree == null || tree.isDisposed())
+                return false;
+            GC gc = new GC(tree);
+            try
+            {
+                gc.setFont(tree.getFont());
+                int textWidth = gc.textExtent(column.getText()).x;
+                return textWidth + HEADER_PADDING_PX > column.getWidth();
+            }
+            finally
+            {
+                gc.dispose();
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Добавленные узкие колонки таблицы реквизитов формы (AttributesExtraColumns)
+    // -----------------------------------------------------------------------
+
+    /**
+     * Добавляет в штатную таблицу «Реквизиты» редактора формы два узких столбца, которых там нет:
+     *
+     * <ol>
+     *   <li><b>«Функциональные опции»</b> — число функциональных опций, в состав которых включён
+     *       реквизит ({@code AbstractFormAttribute.functionalOptions}). Двойной клик активирует
+     *       это свойство в панели «Свойства» — как {@link ItemsTree} делает для «Обработчиков».
+     *
+     *   <li><b>«Сохраняемые данные»</b> — отдельный признак реквизита ({@code FormAttribute.savedData}),
+     *       не путать со штатной колонкой «Сохранение» (та пишет в другое поле модели,
+     *       {@code settingsSavedData}/{@code notDefaultUseAlwaysAttributes} через
+     *       {@code ISaveDataAttributeService}). «Сохраняемые данные» в самой EDT показывается
+     *       только в палитре «Свойства» — эта колонка делает его видимым сразу в списке.
+     * </ol>
+     *
+     * <p>Колонки добавляются один раз, после всех штатных — их заголовки обслуживает тот же код,
+     * что и штатные ({@link AttributeHeaderTooltips#tooltipFor}). Штатная колонка «Сохранение»
+     * вставляется/удаляется по фиксированному индексу и сдвигает всё, что правее, включая наши —
+     * это делает сам SWT, отдельно поддерживать не нужно.
+     */
+    private static final class AttributesExtraColumns
+    {
+        private static final String KEY_HOOKED = "tormozit.formAttributesExtraColumns.hooked"; //$NON-NLS-1$
+
+        private static final int RETRY_DELAY_MS = 200;
+
+        private static final int MAX_ATTEMPTS = 100;
+
+        static final String TITLE_FUNCTIONAL_OPTIONS = "Функциональные опции"; //$NON-NLS-1$
+
+        static final String TITLE_SAVED_DATA = "Сохраняемые данные"; //$NON-NLS-1$
+
+        private static final int WIDTH_FUNCTIONAL_OPTIONS = 40;
+
+        private static final int WIDTH_SAVED_DATA = 28;
+
+        private static final String FUNCTIONAL_OPTIONS_FEATURE = "functionalOptions"; //$NON-NLS-1$
+
+        static void install()
+        {
+            trackFormEditors(editor -> attach(editor, 0));
+        }
+
+        private static void attach(FormEditor editor, int attempt)
+        {
+            try
+            {
+                FormEditorPage page = findFormPage(editor);
+                Tree tree = getAttributesTree(page);
+                Object viewerObj = page != null ? Global.getField(page, "attributesViewer") : null; //$NON-NLS-1$
+                if (tree == null || tree.isDisposed() || !(viewerObj instanceof TreeViewer viewer))
+                {
+                    if (attempt < MAX_ATTEMPTS && editor.getSite() != null)
+                        Display.getDefault().timerExec(RETRY_DELAY_MS, () -> attach(editor, attempt + 1));
+                    return;
+                }
+                if (Boolean.TRUE.equals(tree.getData(KEY_HOOKED)))
+                    return;
+                tree.setData(KEY_HOOKED, Boolean.TRUE);
+                addColumns(page, viewer, tree);
+            }
+            catch (Exception e)
+            {
+                Global.logError("FormEditorHook.AttributesExtraColumns", "attach", e); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+
+        private static void addColumns(FormEditorPage page, TreeViewer viewer, Tree tree)
+        {
+            TreeViewerColumn functionalOptionsColumn = new TreeViewerColumn(viewer, SWT.RIGHT);
+            functionalOptionsColumn.getColumn().setText(TITLE_FUNCTIONAL_OPTIONS);
+            functionalOptionsColumn.getColumn().setWidth(WIDTH_FUNCTIONAL_OPTIONS);
+            functionalOptionsColumn.getColumn().setMoveable(false);
+            functionalOptionsColumn.setLabelProvider(new FunctionalOptionsLabelProvider());
+
+            TreeViewerColumn savedDataColumn = new TreeViewerColumn(viewer, SWT.CENTER);
+            savedDataColumn.getColumn().setText(TITLE_SAVED_DATA);
+            savedDataColumn.getColumn().setWidth(WIDTH_SAVED_DATA);
+            savedDataColumn.getColumn().setMoveable(false);
+            savedDataColumn.setLabelProvider(new SavedDataLabelProvider());
+            TreeColumn savedDataSwtColumn = savedDataColumn.getColumn();
+            tree.addListener(SWT.PaintItem, event -> paintSavedData(event, savedDataSwtColumn));
+
+            TreeColumn funcOptionsSwtColumn = functionalOptionsColumn.getColumn();
+            tree.addListener(SWT.MouseDoubleClick,
+                event -> onDoubleClick(page, tree, event, funcOptionsSwtColumn));
+
+            Object editingContextObj = Global.invoke(page, "getEditingContext"); //$NON-NLS-1$
+            if (editingContextObj instanceof IBmEditingContext editingContext)
+                tree.addListener(SWT.MouseDown,
+                    event -> onSavedDataClick(viewer, tree, event, savedDataSwtColumn, editingContext));
+        }
+
+        /**
+         * Настоящий значок флажка ({@link CommonUI#getCheckedStateImage}) — тот же, что у штатных
+         * колонок «Использовать всегда»/«Сохранение», а не текстовый символ. Своя отрисовка нужна,
+         * чтобы значок был центрирован в ячейке так же, как у них (штатные тоже рисуют его сами —
+         * см. {@code CheckboxCellLabelProvider.paint}), а не прижат к левому краю, как обычная
+         * картинка колонки.
+         *
+         * <p>Индекс колонки не кешируется: штатная «Сохранение» вставляется/удаляется по
+         * фиксированному индексу и сдвигает всё правее, включая эту колонку — поэтому индекс
+         * берётся заново каждый раз ({@code event.index} уже актуален на момент отрисовки).
+         */
+        private static void paintSavedData(Event event, TreeColumn savedDataColumn)
+        {
+            if (savedDataColumn.isDisposed() || !(event.widget instanceof Tree tree)
+                || event.index != tree.indexOf(savedDataColumn) || !(event.item instanceof TreeItem item))
+                return;
+            FormAttribute attribute = attributeOf(item.getData());
+            if (attribute == null)
+                return;
+            Image image = CommonUI.getCheckedStateImage(Boolean.valueOf(attribute.isSavedData()));
+            if (image == null)
+                return;
+            Rectangle imageBounds = checkboxImageBounds(item, event.index, image);
+            event.gc.drawImage(image, imageBounds.x, imageBounds.y);
+        }
+
+        /** Прямоугольник значка внутри ячейки — центрирован, как у штатных колонок-флажков. */
+        private static Rectangle checkboxImageBounds(TreeItem item, int columnIndex, Image image)
+        {
+            Rectangle cellBounds = item.getBounds(columnIndex);
+            Rectangle imageBounds = image.getBounds();
+            int x = cellBounds.x + (cellBounds.width - imageBounds.width) / 2;
+            int y = cellBounds.y + (cellBounds.height - imageBounds.height) / 2;
+            return new Rectangle(x, y, imageBounds.width, imageBounds.height);
+        }
+
+        /**
+         * Переключает «Сохраняемые данные» только по клику на самом значке, а не по любому клику
+         * в ячейке колонки — иначе случайный клик рядом со значком менял бы флажок.
+         */
+        private static void onSavedDataClick(TreeViewer viewer, Tree tree, Event event,
+            TreeColumn savedDataColumn, IBmEditingContext editingContext)
+        {
+            if (event.button != 1 || tree.isDisposed() || savedDataColumn.isDisposed())
+                return;
+            int columnIndex = tree.indexOf(savedDataColumn);
+            TreeItem row = FormTreeInteraction.rowAt(tree, event.x, event.y);
+            if (row == null || row.isDisposed() || FormTreeInteraction.columnAtX(tree, event.x) != columnIndex)
+                return;
+            FormAttribute attribute = attributeOf(row.getData());
+            if (attribute == null)
+                return;
+            Image image = CommonUI.getCheckedStateImage(Boolean.valueOf(attribute.isSavedData()));
+            if (image == null || !checkboxImageBounds(row, columnIndex, image).contains(event.x, event.y))
+                return;
+            boolean checked = !attribute.isSavedData();
+            editingContext.execute(new AbstractBmTask<Void>("Comfort: сохраняемые данные реквизита") //$NON-NLS-1$
+            {
+                @Override
+                public Void execute(IBmTransaction transaction, IProgressMonitor monitor)
+                {
+                    EObject tx = transaction.toTransactionObject(attribute);
+                    if (tx instanceof FormAttribute txAttribute)
+                        txAttribute.setSavedData(checked);
+                    return null;
+                }
+            });
+            viewer.update(row.getData(), null);
+        }
+
+        private static void onDoubleClick(FormEditorPage page, Tree tree, Event event,
+            TreeColumn funcOptionsColumn)
+        {
+            if (event.button != 1 || tree.isDisposed() || funcOptionsColumn.isDisposed())
+                return;
+            TreeItem row = FormTreeInteraction.rowAt(tree, event.x, event.y);
+            if (row == null || row.isDisposed())
+                return;
+            int index = FormTreeInteraction.columnAtX(tree, event.x);
+            if (index < 0 || index >= tree.getColumnCount() || tree.getColumn(index) != funcOptionsColumn)
+                return;
+            focusFunctionalOptions(page, row.getData());
+        }
+
+        private static void focusFunctionalOptions(FormEditorPage page, Object data)
+        {
+            if (page == null || page.getSite() == null)
+                return;
+            if (!(data instanceof PropertyInfo info)
+                || !(info.getSource() instanceof AbstractFormAttribute source))
+                return;
+            List<String> labels = featureLabels(source);
+            if (labels.isEmpty())
+                return;
+            ShowPropertiesHandler.run(page.getSite());
+            scheduleFocus(page.getSite().getPage(), labels, 0);
+        }
+
+        /** Подпись поля палитры для «функциональных опций» — из локализации EDT, запасная — своя. */
+        private static List<String> featureLabels(AbstractFormAttribute source)
+        {
+            List<String> labels = new ArrayList<>(2);
+            EStructuralFeature feature =
+                source.eClass().getEStructuralFeature(FUNCTIONAL_OPTIONS_FEATURE);
+            String localized = feature != null ? ItemsTree.FEATURE_NAMES.getString(feature) : null;
+            if (localized != null && !localized.isBlank())
+                labels.add(localized);
+            if (!labels.contains(TITLE_FUNCTIONAL_OPTIONS))
+                labels.add(TITLE_FUNCTIONAL_OPTIONS);
+            return labels;
+        }
+
+        private static void scheduleFocus(IWorkbenchPage workbenchPage, List<String> labels, int attempt)
+        {
+            if (workbenchPage == null || attempt >= MAX_ATTEMPTS)
+                return;
+            Display display = Display.getDefault();
+            if (display == null || display.isDisposed())
+                return;
+            display.timerExec(RETRY_DELAY_MS, () -> {
+                if (ItemsTree.tryFocusPropertyField(workbenchPage, labels, "attempt " + attempt)) //$NON-NLS-1$
+                    AefFieldFocus.holdActivation(
+                        () -> ItemsTree.tryFocusPropertyField(workbenchPage, labels, "hold")); //$NON-NLS-1$
+                else
+                    scheduleFocus(workbenchPage, labels, attempt + 1);
+            });
+        }
+
+        /** Число; ноль (или реквизит без функциональных опций) — колонка остаётся пустой. */
+        private static final class FunctionalOptionsLabelProvider extends ColumnLabelProvider
+        {
+            @Override
+            public String getText(Object element)
+            {
+                if (element instanceof PropertyInfo info
+                    && info.getSource() instanceof AbstractFormAttribute source)
+                {
+                    int count = source.getFunctionalOptions().size();
+                    return count > 0 ? String.valueOf(count) : ""; //$NON-NLS-1$
+                }
+                return ""; //$NON-NLS-1$
+            }
+        }
+
+        /**
+         * Собственный признак реквизита {@code FormAttribute.savedData} — тот же, что палитра
+         * «Свойства» подписывает «Сохраняемые данные». Не путать со штатной колонкой
+         * «Сохранение»: та управляет другим полем модели ({@code settingsSavedData}) через
+         * {@code ISaveDataAttributeService}. Есть только у пользовательских реквизитов
+         * ({@link FormAttribute}) — у стандартных и у колонок таблиц его нет.
+         *
+         * <p>Текст и штатную картинку колонки не отдаёт совсем — значок рисует {@link #paintSavedData}
+         * своей отрисовкой (центрированной, как у штатных колонок-флажков); label provider здесь
+         * только чтобы у колонки не было текста по умолчанию.
+         */
+        private static final class SavedDataLabelProvider extends ColumnLabelProvider
+        {
+            @Override
+            public String getText(Object element)
+            {
+                return ""; //$NON-NLS-1$
+            }
+        }
+
+        /**
+         * {@code FormAttribute} реквизита, только если у него в принципе есть «Сохраняемые
+         * данные» — как {@code FormAttributeDescriptor.FormAttributeRule} в самой EDT: свойство
+         * скрыто в палитре для реквизитов типа «ДинамическийСписок» ({@code DynamicListExtInfo}).
+         * Иначе флажок в этой колонке показывал бы значение для реквизита, у которого в панели
+         * «Свойства» такого поля вообще нет.
+         */
+        private static FormAttribute attributeOf(Object element)
+        {
+            if (!(element instanceof PropertyInfo info) || !(info.getSource() instanceof FormAttribute attribute))
+                return null;
+            return attribute.getExtInfo() instanceof DynamicListExtInfo ? null : attribute;
         }
     }
 
