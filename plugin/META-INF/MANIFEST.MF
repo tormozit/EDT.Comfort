@@ -94,7 +94,11 @@ Require-Bundle: org.eclipse.ui;bundle-version="[3.201.0,4.0.0)",
  com._1c.g5.v8.dt.qw.ui,
   com.e1c.g5.v8.dt.check;bundle-version="[0.0.0,100.0.0)",
   com._1c.g5.v8.derived;bundle-version="[0.0.0,100.0.0)",
-  com._1c.g5.v8.dt.ui.validation;bundle-version="[0.0.0,100.0.0)"
+  com._1c.g5.v8.dt.ui.validation;bundle-version="[0.0.0,100.0.0)",
+ com.e1c.edt.ai;resolution:=optional,
+ com.e1c.edt.ai.context;resolution:=optional,
+ com.e1c.edt.ai.ui;resolution:=optional,
+ com.e1c.edt.ai.ui.common;resolution:=optional
 Import-Package: org.osgi.framework;version="[1.8.0,2.0.0)",
  org.osgi.framework.hooks.weaving;version="[1.1.0,2.0.0)",
  com.google.inject;resolution:=optional,

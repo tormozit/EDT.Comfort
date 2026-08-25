@@ -331,7 +331,7 @@ final class DebugCollectionSizeResolver
                 return new ResolveOutcome("na", -1); //$NON-NLS-1$
             }
             if (!value.isEvaluated())
-                value.evaluate();
+                BslValueEvaluate.ensureEvaluated(value);
             if (value.isPending())
             {
                 for (int poll = 0; poll < EVALUATE_POLL_MAX; poll++)

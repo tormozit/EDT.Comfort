@@ -254,7 +254,7 @@ final class DebugStringValueFormat
         try
         {
             if (!value.isEvaluated() && !value.isPending())
-                value.evaluate();
+                BslValueEvaluate.ensureEvaluated(value);
         }
         catch (Exception ignored)
         {

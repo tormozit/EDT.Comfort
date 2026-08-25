@@ -73,7 +73,10 @@ import org.eclipse.ui.commands.ICommandService;
 import org.osgi.framework.BundleContext;
 import org.osgi.framework.ServiceReference;
 
+import com._1c.g5.v8.dt.platform.services.core.infobases.InfobaseAccessType;
 import com._1c.g5.v8.dt.platform.services.core.runtimes.environments.IResolvableRuntimeInstallation;
+import com._1c.g5.v8.dt.platform.services.core.runtimes.environments.IResolvableRuntimeInstallationManager;
+import com._1c.g5.v8.dt.platform.services.model.AppArch;
 import com._1c.g5.v8.dt.platform.services.model.InfobaseReference;
 import com._1c.g5.v8.dt.platform.services.model.RuntimeInstallation;
 import com.e1c.g5.dt.applications.IApplicationEvent;
@@ -967,34 +970,243 @@ public class ApplicationsViewHook implements IStartup
 
     static RuntimeInstallation getRuntimeInstallation(IProject project, InfobaseReference infobase)
     {
-        IRConnectDebug.logRuntimeInstallationLookupStart(project, infobase);
-        if (project == null || infobase == null) 
-        {    
+        return getRuntimeInstallation(project, infobase, false);
+    }
+
+    /**
+     * @param debug {@code true} только при реальном подключении ИР.
+     *              Колонка «Платформа» вызывает без debug — иначе журнал
+     *              забивается на каждый refresh (issue #88).
+     */
+    private static final String RUNTIME_TYPE_ENTERPRISE =
+        "com._1c.g5.v8.dt.platform.services.core.runtimeType.EnterprisePlatform"; //$NON-NLS-1$
+    private static final String COMPONENT_THICK_CLIENT =
+        "com._1c.g5.v8.dt.platform.services.core.componentTypes.ThickClient"; //$NON-NLS-1$
+    private static final String COMPONENT_STANDALONE_SERVER =
+        "com._1c.g5.v8.dt.platform.services.core.componentTypes.StandaloneServer"; //$NON-NLS-1$
+
+    static RuntimeInstallation getRuntimeInstallation(IProject project, InfobaseReference infobase, boolean debug)
+    {
+        if (debug)
+            IRConnectDebug.logRuntimeInstallationLookupStart(project, infobase);
+        if (project == null || infobase == null)
             return null;
-        }
+
+        RuntimeInstallation fromSync = resolveViaSynchronizationManager(project, infobase, debug);
+        if (fromSync != null)
+            return fromSync;
+
+        if (debug)
+            IRConnectDebug.logRuntimeInstallationNull(project, infobase);
+
+        return resolveViaResolvableManager(project, infobase, debug);
+    }
+
+    private static RuntimeInstallation resolveViaSynchronizationManager(
+        IProject project, InfobaseReference infobase, boolean debug)
+    {
         BundleContext ctx = Global.ourContext();
+        if (ctx == null)
+            return null;
         ServiceReference<?> ref = ctx.getServiceReference(
             "com._1c.g5.v8.dt.platform.services.core.infobases.sync.IInfobaseSynchronizationManager"); //$NON-NLS-1$
-        IRConnectDebug.logServiceReference(ref);
+        if (debug)
+            IRConnectDebug.logServiceReference(ref);
+        if (ref == null)
+            return null;
         Object syncMgr = ctx.getService(ref);
-        IRConnectDebug.logSyncMgr(syncMgr);
+        if (debug)
+            IRConnectDebug.logSyncMgr(syncMgr);
+        if (syncMgr == null)
+            return null;
         IResolvableRuntimeInstallation resolvable =
             (IResolvableRuntimeInstallation) Global.invoke(
                 syncMgr, "getInstallation", project, infobase); //$NON-NLS-1$
-        IRConnectDebug.logResolvable(syncMgr, resolvable);
+        if (debug)
+            IRConnectDebug.logResolvable(syncMgr, resolvable);
+        if (resolvable == null)
+            return null;
         try
         {
+            if (debug)
+                IRConnectDebug.logResolveArch(infobase.getAppArch());
             RuntimeInstallation result = resolvable.resolve(
-                List.of("com._1c.g5.v8.dt.platform.services.core.componentTypes.ThickClient"), //$NON-NLS-1$
-                infobase.getAppArch());
-            IRConnectDebug.logResolveResult(result);
+                List.of(COMPONENT_THICK_CLIENT), infobase.getAppArch());
+            if (debug)
+                IRConnectDebug.logResolveResult(result);
+            if (result != null && debug)
+                IRConnectDebug.logRuntimeSource("IInfobaseSynchronizationManager/ThickClient", result); //$NON-NLS-1$
             return result;
         }
         catch (Exception e)
         {
-            IRConnectDebug.logResolveException(e, project, infobase);
+            if (debug)
+                IRConnectDebug.logResolveException(e, project, infobase);
             return null;
         }
+    }
+
+    /**
+     * Для приложения «Автономный сервер» {@code getInstallation} не отдаёт толстый клиент:
+     * синхронизация идёт через ibsrv. Ищем ту же установку платформы через
+     * {@link InfobaseAccessType#CLIENT_LAUNCH} и компонент StandaloneServer,
+     * затем по маске {@code infobase.getVersion()}.
+     */
+    private static RuntimeInstallation resolveViaResolvableManager(
+        IProject project, InfobaseReference infobase, boolean debug)
+    {
+        BundleContext ctx = Global.ourContext();
+        if (ctx == null)
+            return null;
+        ServiceReference<IResolvableRuntimeInstallationManager> ref =
+            ctx.getServiceReference(IResolvableRuntimeInstallationManager.class);
+        if (debug)
+            IRConnectDebug.log("IResolvableRuntimeInstallationManager ref=" + ref); //$NON-NLS-1$
+        if (ref == null)
+            return null;
+        IResolvableRuntimeInstallationManager mgr = ctx.getService(ref);
+        try
+        {
+            if (mgr == null)
+            {
+                if (debug)
+                    IRConnectDebug.problem("getService(IResolvableRuntimeInstallationManager) == null"); //$NON-NLS-1$
+                return null;
+            }
+            InfobaseAccessType[] accesses = {
+                InfobaseAccessType.CLIENT_LAUNCH, InfobaseAccessType.UPDATE };
+            String[] components = { COMPONENT_THICK_CLIENT, COMPONENT_STANDALONE_SERVER };
+            for (InfobaseAccessType access : accesses)
+            {
+                IResolvableRuntimeInstallation resolvable = resolveByProject(mgr, project, infobase, access, debug);
+                RuntimeInstallation result = resolveComponents(resolvable, infobase, components, debug,
+                    "resolveByProjectAndInfobase/" + access); //$NON-NLS-1$
+                if (result != null)
+                    return result;
+            }
+            String version = firstNonBlank(infobase.getVersion(), infobase.getDefaultVersion());
+            if (version == null)
+                return null;
+            IResolvableRuntimeInstallation byVersion = resolveByVersionMask(mgr, version, debug);
+            return resolveComponents(byVersion, infobase, components, debug,
+                "resolveByVersionOrMask/" + version); //$NON-NLS-1$
+        }
+        finally
+        {
+            ctx.ungetService(ref);
+        }
+    }
+
+    private static IResolvableRuntimeInstallation resolveByProject(
+        IResolvableRuntimeInstallationManager mgr,
+        IProject project,
+        InfobaseReference infobase,
+        InfobaseAccessType access,
+        boolean debug)
+    {
+        try
+        {
+            IResolvableRuntimeInstallation resolvable = mgr.resolveByProjectAndInfobase(
+                RUNTIME_TYPE_ENTERPRISE, project, infobase, access);
+            if (debug)
+                IRConnectDebug.log("resolvable access=" + access //$NON-NLS-1$
+                    + " → " + (resolvable != null ? resolvable.getClass().getSimpleName() : "null")); //$NON-NLS-1$ //$NON-NLS-2$
+            return resolvable;
+        }
+        catch (Exception e)
+        {
+            if (debug)
+                IRConnectDebug.logFallbackFailed("resolveByProjectAndInfobase/" + access, e); //$NON-NLS-1$
+            return null;
+        }
+    }
+
+    private static IResolvableRuntimeInstallation resolveByVersionMask(
+        IResolvableRuntimeInstallationManager mgr, String version, boolean debug)
+    {
+        try
+        {
+            IResolvableRuntimeInstallation resolvable =
+                mgr.resolveByVersionOrMask(RUNTIME_TYPE_ENTERPRISE, version);
+            if (debug)
+                IRConnectDebug.log("resolvable versionMask=" + version //$NON-NLS-1$
+                    + " → " + (resolvable != null ? resolvable.getClass().getSimpleName() : "null")); //$NON-NLS-1$ //$NON-NLS-2$
+            return resolvable;
+        }
+        catch (Exception e)
+        {
+            if (debug)
+                IRConnectDebug.logFallbackFailed("resolveByVersionOrMask/" + version, e); //$NON-NLS-1$
+            return null;
+        }
+    }
+
+    private static RuntimeInstallation resolveComponents(
+        IResolvableRuntimeInstallation resolvable,
+        InfobaseReference infobase,
+        String[] components,
+        boolean debug,
+        String source)
+    {
+        if (resolvable == null)
+            return null;
+        for (String component : components)
+        {
+            RuntimeInstallation result = resolveComponent(resolvable, infobase, component, debug, source);
+            if (result != null)
+                return result;
+        }
+        return null;
+    }
+
+    private static RuntimeInstallation resolveComponent(
+        IResolvableRuntimeInstallation resolvable,
+        InfobaseReference infobase,
+        String component,
+        boolean debug,
+        String source)
+    {
+        AppArch preferred = infobase != null ? infobase.getAppArch() : null;
+        AppArch[] arches = preferred == AppArch.X86
+            ? new AppArch[] { AppArch.X86, AppArch.X86_64 }
+            : new AppArch[] { preferred != null ? preferred : AppArch.X86_64, AppArch.X86_64, AppArch.X86 };
+        List<String> types = List.of(component);
+        for (AppArch arch : arches)
+        {
+            if (arch == null)
+                continue;
+            try
+            {
+                RuntimeInstallation result = resolvable.resolve(types, arch);
+                if (result != null)
+                {
+                    if (debug)
+                        IRConnectDebug.logRuntimeSource(source + "/" + shortComponent(component) + "/" + arch, result); //$NON-NLS-1$ //$NON-NLS-2$
+                    return result;
+                }
+            }
+            catch (Exception e)
+            {
+                if (debug)
+                    IRConnectDebug.logFallbackResolve(shortComponent(component) + "/" + arch, null, e); //$NON-NLS-1$
+            }
+        }
+        return null;
+    }
+
+    private static String shortComponent(String componentId)
+    {
+        int dot = componentId.lastIndexOf('.');
+        return dot >= 0 ? componentId.substring(dot + 1) : componentId;
+    }
+
+    private static String firstNonBlank(String a, String b)
+    {
+        if (a != null && !a.isEmpty())
+            return a;
+        if (b != null && !b.isEmpty())
+            return b;
+        return null;
     }
 
     // =======================================================================

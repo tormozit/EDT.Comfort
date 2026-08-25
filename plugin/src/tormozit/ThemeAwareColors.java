@@ -17,10 +17,16 @@ import org.osgi.framework.Bundle;
 
 /**
  * Универсальные цветовые операции с учётом темы: store всегда в координатах
- * светлой темы, в тёмной — эффективный RGB через инверсию светлоты HSL.
+ * светлой темы, в тёмной — эффективный RGB через {@link #invertLightness(RGB)}.
  */
 public final class ThemeAwareColors
 {
+    /**
+     * Сжатие насыщенности: тёмные насыщенные цвета в тёмной теме не становятся неоном.
+     * Множитель exp(k·(L−L')) обратим вместе с инверсией светлоты.
+     */
+    private static final float SATURATION_K = 2f;
+
     /** Кэш осветлённых системных FG для тёмной темы: SWT color id → owned Color. */
     private static final Map<Integer, Color> cachedEffectiveSystemColors = new HashMap<>();
     private static Boolean cachedEffectiveSystemDark;
@@ -29,7 +35,7 @@ public final class ThemeAwareColors
 
     /**
      * Эффективный цвет для текущей темы. Store всегда в координатах светлой темы;
-     * в тёмной — {@link #invertLightness(RGB)} (HSL L' = 1−L, обратимо).
+     * в тёмной — {@link #invertLightness(RGB)} (обратимо).
      */
     public static RGB toEffectiveRgb(RGB lightStored)
     {
@@ -95,36 +101,23 @@ public final class ThemeAwareColors
     }
 
     /**
-     * Инверсия светлоты в HSL (H и S без изменений). Involutive: повтор даёт исходный RGB.
-     * Универсальная схема light↔dark для цветов шрифта.
+     * Пересчёт цвета шрифта light↔dark в HSL. Тон сохраняется; светлота инвертируется
+     * со сжатием к середине, насыщенность тёмных насыщенных цветов приглушается.
+     * Involutive: повтор даёт исходный RGB.
      */
     public static RGB invertLightness(RGB rgb)
     {
-        float r = rgb.red / 255f;
-        float g = rgb.green / 255f;
-        float b = rgb.blue / 255f;
-        float max = Math.max(r, Math.max(g, b));
-        float min = Math.min(r, Math.min(g, b));
-        float h;
-        float s;
-        float l = (max + min) / 2f;
-        if (max == min)
-        {
-            h = 0f;
-            s = 0f;
-        }
-        else
-        {
-            float d = max - min;
-            s = l > 0.5f ? d / (2f - max - min) : d / (max + min);
-            if (max == r)
-                h = ((g - b) / d + (g < b ? 6f : 0f)) / 6f;
-            else if (max == g)
-                h = ((b - r) / d + 2f) / 6f;
-            else
-                h = ((r - g) / d + 4f) / 6f;
-        }
-        return hslToRgb(h, s, 1f - l);
+        float[] hsl = rgbToHsl(rgb);
+        float h = hsl[0];
+        float s = hsl[1];
+        float l = hsl[2];
+        float l2 = invertLightnessValue(l);
+        float s2 = s * (float) Math.exp(SATURATION_K * (l - l2));
+        if (s2 < 0f)
+            s2 = 0f;
+        else if (s2 > 1f)
+            s2 = 1f;
+        return hslToRgb(h, s2, l2);
     }
 
     /** Сброс кэша эффективных системных цветов (смена темы). */
@@ -198,14 +191,50 @@ public final class ThemeAwareColors
         return false;
     }
 
-    private static float hslLightness(RGB rgb)
+    private static float[] rgbToHsl(RGB rgb)
     {
         float r = rgb.red / 255f;
         float g = rgb.green / 255f;
         float b = rgb.blue / 255f;
         float max = Math.max(r, Math.max(g, b));
         float min = Math.min(r, Math.min(g, b));
-        return (max + min) / 2f;
+        float h;
+        float s;
+        float l = (max + min) / 2f;
+        if (max == min)
+        {
+            h = 0f;
+            s = 0f;
+        }
+        else
+        {
+            float d = max - min;
+            s = l > 0.5f ? d / (2f - max - min) : d / (max + min);
+            if (max == r)
+                h = ((g - b) / d + (g < b ? 6f : 0f)) / 6f;
+            else if (max == g)
+                h = ((b - r) / d + 2f) / 6f;
+            else
+                h = ((r - g) / d + 4f) / 6f;
+        }
+        return new float[] { h, s, l };
+    }
+
+    /**
+     * Инверсия светлоты со сжатием: p=½, L≤0.5 → 1−½√(2L), иначе 2(1−L)².
+     * Середина (0.5) на месте; чёрный → белый; RGB(0,80,80) ≈ светлота основного шрифта тёмной темы.
+     */
+    private static float invertLightnessValue(float l)
+    {
+        if (l <= 0.5f)
+            return 1f - 0.5f * (float) Math.sqrt(2f * l);
+        float t = 1f - l;
+        return 2f * t * t;
+    }
+
+    private static float hslLightness(RGB rgb)
+    {
+        return rgbToHsl(rgb)[2];
     }
 
     private static RGB hslToRgb(float h, float s, float l)

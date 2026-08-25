@@ -89,7 +89,7 @@ public class ComfortPreferencePage
 
     private static final String THEME_AWARE_COLOR_TOOLTIP =
             "В поле — цвет текущей темы. В хранилище — всегда вариант для светлой темы.\n"
-            + "При сохранении в тёмной теме цвет из поля обратно пересчитывается (HSL: инверсия светлоты)."; //$NON-NLS-1$
+            + "При сохранении в тёмной теме цвет из поля обратно пересчитывается в вариант для светлой."; //$NON-NLS-1$
 
     private static final String FILTER_MATCH_COLOR_TOOLTIP =
             "Цвет подсветки найденных фрагментов в списках с улучшенным фильтром.\n"

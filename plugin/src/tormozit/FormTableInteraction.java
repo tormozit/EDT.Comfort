@@ -582,6 +582,7 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
                 installHeaderSortListener(column);
         }
         scheduleHeaderOverlayUpdate();
+        lastAutoFillClientWidth = -1;
         scheduleAutoFill();
     }
 
@@ -2584,13 +2585,36 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
         }
         else if (columnsFitBefore)
         {
-            shrinkColumnsToFit(total, clientW, cols);
+            int minW = minColumnWidth();
+            if (minFilledWidth(minW) >= clientW)
+            {
+                // В окно не влезут — сужение до минимума на десятках колонок встаёт колом
+                // и даёт нечитаемые столбцы. Оставляем горизонтальную прокрутку.
+                columnsFitBefore = false;
+                columnsExactFillBefore = false;
+            }
+            else
+                shrinkColumnsToFit(total, clientW, cols);
         }
         else
         {
             columnsExactFillBefore = false; // переполнение уже было ДО этого — не наш случай, не трогаем
         }
         restoreAllFixedColumnWidths();
+    }
+
+    private int minFilledWidth(int minWidth)
+    {
+        int total = 0;
+        int cols = table.getColumnCount();
+        for (int i = 0; i < cols; i++)
+        {
+            TableColumn column = table.getColumn(i);
+            if (column == null || column.isDisposed() || isHiddenColumn(column))
+                continue;
+            total += column.getResizable() ? minWidth : column.getWidth();
+        }
+        return total;
     }
 
     private void growColumnsToFill(int total, int clientW, int cols)

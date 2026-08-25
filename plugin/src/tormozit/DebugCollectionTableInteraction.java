@@ -100,6 +100,12 @@ final class DebugCollectionTableInteraction
         interaction.setColumnAutoResizeEnabled(enabled);
     }
 
+    /** См. {@link FormTableInteraction#notifyColumnsChanged()}. */
+    void notifyColumnsChanged()
+    {
+        interaction.notifyColumnsChanged();
+    }
+
     void install()
     {
         interaction.install();

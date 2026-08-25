@@ -76,6 +76,10 @@ final class DebugCollectionTableModel
     private volatile java.util.function.IntConsumer dirtyRowHandler;
 
     private final ConcurrentHashMap<Integer, IBslVariable> rowVariables = new ConcurrentHashMap<>();
+    /** Полный список строк, если {@code getVariables(from, count)} игнорирует диапазон (EDT 2026 naming-коллекции). */
+    private volatile IBslVariable[] rangeIgnoredRows;
+    private final java.util.concurrent.atomic.AtomicBoolean loggedRangeIgnore =
+        new java.util.concurrent.atomic.AtomicBoolean();
     private final Map<Integer, IBslVariable[]> rowChildrenCache =
         new LinkedHashMap<>(128, 0.75f, true)
         {
@@ -175,6 +179,8 @@ final class DebugCollectionTableModel
     {
         rowVariables.clear();
         rowChildrenCache.clear();
+        rangeIgnoredRows = null;
+        loggedRangeIgnore.set(false);
         loadedRowCount = 0;
     }
 
@@ -589,7 +595,26 @@ final class DebugCollectionTableModel
         return indexedValue != null && indexedValue.isPending();
     }
 
-    /** Как {@code IndexedValuesViewDelegate}: строка из core, без локального bulk-map. */
+    /**
+     * Строка по индексу. В EDT 2026 {@code IBslIndexedValue.getVariable(i)} — default
+     * {@code getVariables(i, 1)[0]}. У naming-коллекций ({@code ВсеЭлементыФормы}, {@code КомандыФормы})
+     * диапазон игнорируется, массив всегда с начала → {@code [0]} — первый элемент для любой строки.
+     */
+    static IBslVariable itemAt(IBslIndexedValue indexed, int index) throws DebugException
+    {
+        if (indexed == null || index < 0)
+            return null;
+        IBslVariable[] page = indexed.getVariables(index, 1);
+        if (page == null || page.length == 0)
+        {
+            IBslVariable[] all = indexed.getVariables();
+            return all != null && index < all.length ? all[index] : null;
+        }
+        if (page.length == 1)
+            return page[0];
+        return index < page.length ? page[index] : null;
+    }
+
     private IBslVariable rowVariable(int logicalRow) throws DebugException
     {
         IBslVariable imported = rowVariables.get(logicalRow);
@@ -598,14 +623,35 @@ final class DebugCollectionTableModel
         if (indexedValue == null)
             return null;
 
-        IBslVariable rowVar = indexedValue.getVariable(logicalRow);
-        if (rowVar != null)
-            return rowVar;
+        IBslVariable[] snapshot = rangeIgnoredRows;
+        if (snapshot != null)
+            return logicalRow >= 0 && logicalRow < snapshot.length ? snapshot[logicalRow] : null;
 
         IBslVariable[] page = indexedValue.getVariables(logicalRow, 1);
-        if (page != null && page.length > 0 && page[0] != null)
+        if (page == null || page.length == 0)
+        {
+            IBslVariable[] all = indexedValue.getVariables();
+            return all != null && logicalRow >= 0 && logicalRow < all.length ? all[logicalRow] : null;
+        }
+        if (page.length == 1)
             return page[0];
-        return null;
+
+        IBslVariable[] all = indexedValue.getVariables();
+        if (all != null && all.length > 0)
+            page = all;
+        rangeIgnoredRows = page;
+        if (loggedRangeIgnore.compareAndSet(false, true))
+        {
+            String typeName = indexedValue.getValueTypeName();
+            Global.tempLog(DebugCollectionLoadScheduler.COLUMNS_TEMP_LOG,
+                "rowAt rangeIgnored got=" + page.length //$NON-NLS-1$
+                    + " index=" + logicalRow //$NON-NLS-1$
+                    + " type=" + typeName //$NON-NLS-1$
+                    + " first=" + (page[0] != null ? page[0].getName() : "null") //$NON-NLS-1$ //$NON-NLS-2$
+                    + " atIndex=" + (logicalRow < page.length && page[logicalRow] != null //$NON-NLS-1$
+                        ? page[logicalRow].getName() : "null")); //$NON-NLS-1$
+        }
+        return logicalRow >= 0 && logicalRow < page.length ? page[logicalRow] : null;
     }
 
     private IBslValue resolvePropertyValue(int logicalRow, IBslVariable rowVar, String propertyName)
@@ -636,7 +682,7 @@ final class DebugCollectionTableModel
         if (value.isUnreadable())
             return UnreadablePresentation(); //$NON-NLS-1$
         if (!value.isEvaluated())
-            value.evaluate();
+            BslValueEvaluate.ensureEvaluated(value);
         if (value.isPending())
             return EVALUATING_ROW_TEXT;
         String text = value.getValueString();
@@ -699,7 +745,7 @@ final class DebugCollectionTableModel
         // Kickstart EDT evaluation now (UI thread during SetData),
         // so SizeResolver сразу получит реальный getSize() без 5s задержки.
         if (!indexed.isEvaluated())
-            indexed.evaluate();
+            BslValueEvaluate.ensureEvaluated(indexed);
         return "(.) " + typeName;
     }
 

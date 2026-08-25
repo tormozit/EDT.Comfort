@@ -448,6 +448,11 @@
         categoryId="tormozit.commands.global"
         description="Показать файл или папку выбранного элемента навигатора в Project Explorer (Комфорт)"/>
     <command
+        id="tormozit.navigator.compareMergeSingle"
+        name="Сравнить/объединить"
+        categoryId="tormozit.commands.global"
+        description="Сравнить выделенный объект с одноимённым в другом проекте (Комфорт)"/>
+    <command
         id="tormozit.PasteWithCompare"
         name="Вставить со сравнением"
         categoryId="tormozit.commands.global"
@@ -723,6 +728,10 @@
       </activeWhen>
     </handler>
     <handler
+        class="tormozit.ExecutableExtensionFactory:tormozit.NavigatorCompareMergeSingleHandler"
+        commandId="tormozit.navigator.compareMergeSingle">
+    </handler>
+    <handler
         class="tormozit.ExecutableExtensionFactory:tormozit.PasteWithCompareHandler"
         commandId="tormozit.PasteWithCompare">
     </handler>
@@ -892,6 +901,16 @@
     </handler>
   </extension>
 
+  <extension point="org.eclipse.core.expressions.propertyTesters">
+    <propertyTester
+        class="tormozit.NavigatorCompareMergeSingleHandler$HasPeerInOtherProjectTester"
+        id="tormozit.comfort.hasPeerInOtherProject"
+        namespace="tormozit.comfort"
+        properties="hasPeerInOtherProject"
+        type="com._1c.g5.v8.dt.metadata.mdclass.MdObject"
+        forcePluginActivation="true"/>
+  </extension>
+
   <extension point="org.eclipse.ui.menus">
       <menuContribution locationURI="toolbar:org.eclipse.ui.main.toolbar?after=additions">
          <toolbar id="tormozit.toolbar.mainGroup">
@@ -924,6 +943,27 @@
             label="Фильтр по набору"
             style="toggle"
             tooltip="Показать только объекты активного набора; вытесняет фильтр подсистем (Комфорт)"/>
+      </menuContribution>
+      <menuContribution locationURI="popup:com._1c.g5.v8.dt.navigator.ui.navigator.popup?after=additions">
+        <command
+            commandId="tormozit.navigator.compareMergeSingle"
+            label="Сравнить/объединить"
+            style="push"
+            tooltip="Сравнить выделенный объект с одноимённым в другом проекте (Комфорт)">
+          <visibleWhen checkEnabled="false">
+            <with variable="selection">
+              <and>
+                <count value="1"/>
+                <iterate ifEmpty="false">
+                  <and>
+                    <instanceof value="com._1c.g5.v8.dt.metadata.mdclass.MdObject"/>
+                    <test property="tormozit.comfort.hasPeerInOtherProject"/>
+                  </and>
+                </iterate>
+              </and>
+            </with>
+          </visibleWhen>
+        </command>
       </menuContribution>
       <menuContribution locationURI="popup:com._1c.g5.v8.dt.ui.problemView?after=additions">
         <command

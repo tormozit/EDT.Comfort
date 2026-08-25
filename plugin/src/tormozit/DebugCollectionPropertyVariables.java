@@ -76,7 +76,7 @@ final class DebugCollectionPropertyVariables
             if (value == null)
                 return null;
             if (!value.isEvaluated())
-                value.evaluate();
+                BslValueEvaluate.ensureEvaluated(value);
             if (value.isPending())
                 return null;
             IBslVariable[] props = null;
@@ -99,7 +99,7 @@ final class DebugCollectionPropertyVariables
             if (nameValue == null)
                 return null;
             if (!nameValue.isEvaluated())
-                nameValue.evaluate();
+                BslValueEvaluate.ensureEvaluated(nameValue);
             if (nameValue.isPending())
                 return null;
             String text = nameValue.getValueString();
@@ -110,7 +110,11 @@ final class DebugCollectionPropertyVariables
                 text = text.substring(1, text.length() - 1);
             return text.isBlank() ? null : text;
         }
-        catch (DebugException e)
+        catch (Exception e)
+        {
+            return null;
+        }
+        catch (NoSuchMethodError e)
         {
             return null;
         }
@@ -139,6 +143,7 @@ final class DebugCollectionPropertyVariables
     {
         if (context == null || context.length == 0)
             return false;
+        boolean any = false;
         for (IBslVariable variable : context)
         {
             if (variable == null)
@@ -148,8 +153,9 @@ final class DebugCollectionPropertyVariables
                 return false;
             if (!ROW_METADATA_NAMES.contains(name.trim().toLowerCase(Locale.ROOT)))
                 return false;
+            any = true;
         }
-        return true;
+        return any;
     }
 
     static boolean isAcceptableColumnContext(IBslVariable[] context)
@@ -191,7 +197,7 @@ final class DebugCollectionPropertyVariables
         if (value == null || value.isPending())
             return null;
         if (!value.isEvaluated())
-            value.evaluate();
+            BslValueEvaluate.ensureEvaluated(value);
         if (value.isPending())
             return null;
 
@@ -212,32 +218,33 @@ final class DebugCollectionPropertyVariables
 
     /**
      * Context-свойства элемента строки ({@code getContextVariables()} или {@code getVariables()}).
+     * Без {@code ensureEvaluated}: kick оценки — у вызывающего, и только для одной строки.
      * {@code null} — value/context ещё не готов.
      */
     static IBslVariable[] propertySource(IBslValue value) throws DebugException
     {
         if (value == null || value.isPending())
             return null;
-        if (!value.isEvaluated())
-            value.evaluate();
-        if (value.isPending())
-            return null;
 
         if (value instanceof IBslIndexedValue indexed)
         {
             IBslVariable[] ctx = indexed.getContextVariables();
-            IBslVariable[] vars = indexed.getVariables();
-            if (ctx != null && ctx.length > 0 && !isRowMetadataContext(ctx)
-                && !isIndexedPlaceholderContext(ctx))
+            if (isUsableColumnProperties(ctx))
                 return ctx;
-            if (vars != null && vars.length > 0 && !isIndexedPlaceholderContext(vars))
+            IBslVariable[] vars = indexed.getVariables();
+            if (isUsableColumnProperties(vars))
                 return vars;
             return null;
         }
 
         IBslVariable[] vars = value.getVariables();
-        if (vars != null && vars.length > 0 && !isIndexedPlaceholderContext(vars))
-            return vars;
-        return null;
+        return isUsableColumnProperties(vars) ? vars : null;
+    }
+
+    static boolean isUsableColumnProperties(IBslVariable[] props)
+    {
+        return props != null && props.length > 0
+            && !isRowMetadataContext(props)
+            && !isIndexedPlaceholderContext(props);
     }
 }

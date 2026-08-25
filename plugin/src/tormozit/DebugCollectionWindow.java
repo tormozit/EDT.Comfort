@@ -172,6 +172,8 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
         indexInteraction.install();
         dataInteraction = new DebugCollectionTableInteraction(splitTable.dataTable(), this);
         dataInteraction.enableColumnValueFilter();
+        // Автоширина data-таблицы — только после полной схемы колонок (см. armDataColumnAutoWidth).
+        dataInteraction.setColumnAutoResizeEnabled(false);
         dataInteraction.install();
         scheduler = new DebugCollectionLoadScheduler(model, display, this, this::onContextColumnsReady);
         scheduler.bindTable(splitTable.dataTable());
@@ -273,6 +275,7 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
     {
         applyClonePresentationState();
         syncSplitTableColumns();
+        armDataColumnAutoWidth();
         updateColumnSettingsButton();
         int total = model.totalSize >= 0 ? model.totalSize : 0;
         updateTableItemCount(total);
@@ -315,6 +318,7 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
     private void startCloneLoadAfterOpen()
     {
         syncSplitTableColumns();
+        armDataColumnAutoWidth();
         applyCloneUiState();
         int top = cloneSnapshot.topIndex();
         int last = top + visibleRowCountEstimate();
@@ -795,9 +799,13 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
             // itemCount часто уже = totalSize — без «сброса» виртуальные строки не запрашивают SetData,
             // пока пользователь не дернет границу колонки (layout/redraw).
             refreshRowsAfterSchemaChange();
+            armDataColumnAutoWidth();
         }
         else if (model.totalSize >= 0)
+        {
             updateTableItemCount(model.totalSize);
+            armDataColumnAutoWidth();
+        }
         if (scheduler != null)
         {
             Table data = dataTable();
@@ -859,8 +867,16 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
         if (data != null && !data.isDisposed())
         {
             Composite host = data.getParent();
-            if (host != null && !host.isDisposed())
-                host.layout(true, true);
+            data.setRedraw(false);
+            try
+            {
+                if (host != null && !host.isDisposed())
+                    host.layout(true, true);
+            }
+            finally
+            {
+                data.setRedraw(true);
+            }
             data.redraw();
         }
         // После layout — принудительно запросить SetData видимых строк (особенно index-таблица).
@@ -1189,9 +1205,28 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
     {
         if (splitTable == null || model == null)
             return;
+        if (dataInteraction != null)
+            dataInteraction.setColumnAutoResizeEnabled(false);
         model.columns.syncSplitTables(splitTable.indexTable(), splitTable.dataTable());
         splitTable.syncIndexColumnLayout();
         splitTable.installIndexColumnSizing();
+    }
+
+    /**
+     * Автозаполнение ширин data-таблицы — один раз, когда набор колонок уже полный. Пока колонки
+     * создаются, {@link FormTableInteraction} и JFace {@code TableColumnLayout} на каждый
+     * {@code setWidth} пересчитывают все уже существующие столбцы: UI встаёт колом.
+     */
+    private void armDataColumnAutoWidth()
+    {
+        if (dataInteraction == null)
+            return;
+        Table data = dataTable();
+        int cols = data == null || data.isDisposed() ? 0 : data.getColumnCount();
+        if (cols <= 0)
+            return;
+        dataInteraction.setColumnAutoResizeEnabled(true);
+        dataInteraction.notifyColumnsChanged();
     }
 
     private void hookShellEvents()
@@ -2195,6 +2230,7 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
         DebugCollectionColumnVisibilityStore.save(model.pathKey(), visibility, order, presentation);
         model.clearCellCache();
         syncSplitTableColumns();
+        armDataColumnAutoWidth();
         if (splitTable != null)
             splitTable.clearAll();
         if (scheduler != null)
@@ -2267,6 +2303,7 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
 
         model.remapCellCacheForVisibleLayout(oldVisible);
         syncSplitTableColumns();
+        armDataColumnAutoWidth();
         refreshVisibleTableRows();
         updateFilterByPresentationCheckbox();
         if (needsVisibilityUpdate)

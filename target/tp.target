@@ -39,6 +39,7 @@
 <unit id="com._1c.g5.v8.dt.feature.feature.group" version="0.0.0"/>
 <unit id="com._1c.g5.v8.dt.thirdparty.feature.group" version="0.0.0"/>
 <unit id="com._1c.g5.v8.dt.product.feature.feature.group" version="0.0.0"/>
+<unit id="com.e1c.edt.ai.feature.feature.group" version="0.0.0"/>
 </location>
 
 <!-- LIBS -->

@@ -2,9 +2,15 @@ package tormozit;
 
 import java.util.function.IntPredicate;
 
+import org.eclipse.jface.layout.TableColumnLayout;
+import org.eclipse.jface.layout.TreeColumnLayout;
+import org.eclipse.jface.viewers.ColumnPixelData;
+import org.eclipse.swt.SWT;
 import org.eclipse.swt.graphics.GC;
 import org.eclipse.swt.internal.win32.OS;
+import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
+import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Table;
 import org.eclipse.swt.widgets.TableColumn;
 import org.eclipse.swt.widgets.Tree;
@@ -77,6 +83,64 @@ final class ColumnWidthFit
         int[] visualOrder();
 
         Control control();
+
+        /**
+         * Накопить {@link #setWidth} без нативного применения. Нужно, чтобы JFace
+         * {@code TableColumnLayout}/{@code TreeColumnLayout} не делали {@code layout()+update()} на
+         * каждый {@code setWidth} (на десятках колонок это секунды UI-потока).
+         */
+        default void beginBatch()
+        {
+        }
+
+        /** Применить накопленные ширины одним layout (или пачкой setWidth, если layout не JFace). */
+        default void endBatch()
+        {
+        }
+    }
+
+    /**
+     * Снимок ширин на время {@link Columns#beginBatch()}: {@link #width}/{@link #setWidth} идут в
+     * массив, нативный виджет не трогаем, пока {@link #end()} не вернёт итог.
+     */
+    private static final class WidthBatch
+    {
+        private int[] pending;
+        private int depth;
+
+        int width(int index, int nativeWidth)
+        {
+            return pending != null ? pending[index] : nativeWidth;
+        }
+
+        boolean setWidth(int index, int width)
+        {
+            if (pending == null)
+                return false;
+            pending[index] = width;
+            return true;
+        }
+
+        void begin(int count, java.util.function.IntUnaryOperator nativeWidth)
+        {
+            if (depth++ > 0)
+                return;
+            pending = new int[count];
+            for (int i = 0; i < count; i++)
+                pending[i] = nativeWidth.applyAsInt(i);
+        }
+
+        /** {@code null} — вложенный end, применять ещё рано. */
+        int[] end()
+        {
+            if (depth == 0)
+                return null;
+            if (--depth > 0)
+                return null;
+            int[] out = pending;
+            pending = null;
+            return out;
+        }
     }
 
     /** Ширина колонки только с картинкой: {@link #ICON_SIZE_PX} плюс горизонтальные отступы ячейки. */
@@ -91,6 +155,7 @@ final class ColumnWidthFit
         private final Table table;
         private final IntPredicate excluded;
         private final IntPredicate fixedWidth;
+        private final WidthBatch batch = new WidthBatch();
 
         /**
          * @param excluded признак «колонка скрыта хозяином» (см. {@link Columns#excluded}); {@code null} —
@@ -119,15 +184,38 @@ final class ColumnWidthFit
         public int width(int index)
         {
             TableColumn column = table.getColumn(index);
-            return column == null || column.isDisposed() ? 0 : column.getWidth();
+            int nativeWidth = column == null || column.isDisposed() ? 0 : column.getWidth();
+            return batch.width(index, nativeWidth);
         }
 
         @Override
         public void setWidth(int index, int width)
         {
+            if (batch.setWidth(index, width))
+                return;
             TableColumn column = table.getColumn(index);
             if (column != null && !column.isDisposed())
                 column.setWidth(width);
+        }
+
+        @Override
+        public void beginBatch()
+        {
+            batch.begin(count(), this::nativeWidth);
+        }
+
+        @Override
+        public void endBatch()
+        {
+            int[] widths = batch.end();
+            if (widths != null)
+                applyTableWidths(table, widths);
+        }
+
+        private int nativeWidth(int index)
+        {
+            TableColumn column = table.getColumn(index);
+            return column == null || column.isDisposed() ? 0 : column.getWidth();
         }
 
         @Override
@@ -174,6 +262,7 @@ final class ColumnWidthFit
         private final Tree tree;
         private final IntPredicate excluded;
         private final IntPredicate fixedWidth;
+        private final WidthBatch batch = new WidthBatch();
 
         /** @param excluded см. {@link TableColumns#TableColumns(Table, IntPredicate)}. */
         TreeColumns(Tree tree, IntPredicate excluded)
@@ -199,15 +288,38 @@ final class ColumnWidthFit
         public int width(int index)
         {
             TreeColumn column = tree.getColumn(index);
-            return column == null || column.isDisposed() ? 0 : column.getWidth();
+            int nativeWidth = column == null || column.isDisposed() ? 0 : column.getWidth();
+            return batch.width(index, nativeWidth);
         }
 
         @Override
         public void setWidth(int index, int width)
         {
+            if (batch.setWidth(index, width))
+                return;
             TreeColumn column = tree.getColumn(index);
             if (column != null && !column.isDisposed())
                 column.setWidth(width);
+        }
+
+        @Override
+        public void beginBatch()
+        {
+            batch.begin(count(), this::nativeWidth);
+        }
+
+        @Override
+        public void endBatch()
+        {
+            int[] widths = batch.end();
+            if (widths != null)
+                applyTreeWidths(tree, widths);
+        }
+
+        private int nativeWidth(int index)
+        {
+            TreeColumn column = tree.getColumn(index);
+            return column == null || column.isDisposed() ? 0 : column.getWidth();
         }
 
         @Override
@@ -302,30 +414,38 @@ final class ColumnWidthFit
         int count = idx.length;
         if (count == 0)
             return 0;
-        int extra = clientWidth - total;
-        int stretchSum = 0;
-        for (int index : idx)
-            stretchSum += columns.width(index);
-        int assigned = 0;
-        for (int s = 0; s < count; s++)
+        columns.beginBatch();
+        try
         {
-            int index = idx[s];
-            int share = stretchSum > 0
-                ? (int)((long)extra * columns.width(index) / stretchSum)
-                : extra / count;
-            if (share < 0)
-                share = 0;
-            columns.setWidth(index, columns.width(index) + share);
-            assigned += share;
+            int extra = clientWidth - total;
+            int stretchSum = 0;
+            for (int index : idx)
+                stretchSum += columns.width(index);
+            int assigned = 0;
+            for (int s = 0; s < count; s++)
+            {
+                int index = idx[s];
+                int share = stretchSum > 0
+                    ? (int)((long)extra * columns.width(index) / stretchSum)
+                    : extra / count;
+                if (share < 0)
+                    share = 0;
+                columns.setWidth(index, columns.width(index) + share);
+                assigned += share;
+            }
+            int remainder = extra - assigned;
+            if (remainder != 0)
+            {
+                int last = idx[count - 1];
+                columns.setWidth(last, Math.max(minWidth, columns.width(last) + remainder));
+            }
+            clampTotalToClientWidth(columns, minWidth);
+            return count;
         }
-        int remainder = extra - assigned;
-        if (remainder != 0)
+        finally
         {
-            int last = idx[count - 1];
-            columns.setWidth(last, Math.max(minWidth, columns.width(last) + remainder));
+            columns.endBatch();
         }
-        clampTotalToClientWidth(columns, minWidth);
-        return count;
     }
 
     /**
@@ -341,31 +461,39 @@ final class ColumnWidthFit
         int count = idx.length;
         if (count == 0)
             return 0;
-        int deficit = total - clientWidth;
-        int shrinkSum = 0;
-        for (int index : idx)
-            shrinkSum += columns.width(index);
-        int assigned = 0;
-        for (int s = 0; s < count; s++)
+        columns.beginBatch();
+        try
         {
-            int index = idx[s];
-            int cut = shrinkSum > 0
-                ? (int)((long)deficit * columns.width(index) / shrinkSum)
-                : deficit / count;
-            if (cut < 0)
-                cut = 0;
-            int newWidth = Math.max(minWidth, columns.width(index) - cut);
-            assigned += columns.width(index) - newWidth;
-            columns.setWidth(index, newWidth);
+            int deficit = total - clientWidth;
+            int shrinkSum = 0;
+            for (int index : idx)
+                shrinkSum += columns.width(index);
+            int assigned = 0;
+            for (int s = 0; s < count; s++)
+            {
+                int index = idx[s];
+                int cut = shrinkSum > 0
+                    ? (int)((long)deficit * columns.width(index) / shrinkSum)
+                    : deficit / count;
+                if (cut < 0)
+                    cut = 0;
+                int newWidth = Math.max(minWidth, columns.width(index) - cut);
+                assigned += columns.width(index) - newWidth;
+                columns.setWidth(index, newWidth);
+            }
+            int remainder = deficit - assigned;
+            if (remainder > 0)
+            {
+                int last = idx[count - 1];
+                columns.setWidth(last, Math.max(minWidth, columns.width(last) - remainder));
+            }
+            clampTotalToClientWidth(columns, minWidth);
+            return count;
         }
-        int remainder = deficit - assigned;
-        if (remainder > 0)
+        finally
         {
-            int last = idx[count - 1];
-            columns.setWidth(last, Math.max(minWidth, columns.width(last) - remainder));
+            columns.endBatch();
         }
-        clampTotalToClientWidth(columns, minWidth);
-        return count;
     }
 
     /**
@@ -497,9 +625,17 @@ final class ColumnWidthFit
         }
         if (!anyChange)
             return false;
-        for (int s = 0; s < rc; s++)
-            columns.setWidth(order[rcVisual[s]], shares[s]);
-        clampTotalToClientWidth(columns, minWidth);
+        columns.beginBatch();
+        try
+        {
+            for (int s = 0; s < rc; s++)
+                columns.setWidth(order[rcVisual[s]], shares[s]);
+            clampTotalToClientWidth(columns, minWidth);
+        }
+        finally
+        {
+            columns.endBatch();
+        }
         return true;
     }
 
@@ -515,16 +651,189 @@ final class ColumnWidthFit
         int overshoot = totalWidth(columns) - columns.clientWidth();
         if (overshoot <= 0)
             return;
-        for (int i = count - 1; i >= 0 && overshoot > 0; i--)
+        columns.beginBatch();
+        try
         {
-            if (!columns.resizable(i))
+            for (int i = count - 1; i >= 0 && overshoot > 0; i--)
+            {
+                if (!columns.resizable(i))
+                    continue;
+                int reducible = columns.width(i) - minWidth;
+                if (reducible <= 0)
+                    continue;
+                int cut = Math.min(reducible, overshoot);
+                columns.setWidth(i, columns.width(i) - cut);
+                overshoot -= cut;
+            }
+        }
+        finally
+        {
+            columns.endBatch();
+        }
+    }
+
+    /**
+     * Нативные {@code setWidth} при выключенной перерисовке и без JFace {@code layout()+update()}.
+     * {@code TableColumnLayout.layout()} на каждую колонку вызывает {@code table.update()} — для
+     * виртуальной таблицы на десятки колонок это секунды UI-потока.
+     */
+    private static void applyTableWidths(Table table, int[] widths)
+    {
+        if (table == null || table.isDisposed() || widths == null)
+            return;
+        Composite host = table.getParent();
+        TableColumnLayout columnLayout = null;
+        if (host != null && !host.isDisposed() && host.getLayout() instanceof TableColumnLayout layout)
+            columnLayout = layout;
+        int n = Math.min(widths.length, table.getColumnCount());
+        Listener[][] saved = muteColumnResizeListeners(table, n);
+        try
+        {
+            if (columnLayout != null)
+            {
+                for (int i = 0; i < n; i++)
+                {
+                    TableColumn column = table.getColumn(i);
+                    if (column == null || column.isDisposed())
+                        continue;
+                    int width = Math.max(0, widths[i]);
+                    columnLayout.setColumnData(column,
+                        new ColumnPixelData(width, column.getResizable(), false));
+                }
+            }
+            table.setRedraw(false);
+            try
+            {
+                for (int i = 0; i < n; i++)
+                {
+                    TableColumn column = table.getColumn(i);
+                    if (column == null || column.isDisposed())
+                        continue;
+                    if (column.getWidth() != widths[i])
+                        column.setWidth(widths[i]);
+                }
+            }
+            finally
+            {
+                table.setRedraw(true);
+            }
+        }
+        finally
+        {
+            restoreColumnResizeListeners(table, saved);
+        }
+    }
+
+    private static void applyTreeWidths(Tree tree, int[] widths)
+    {
+        if (tree == null || tree.isDisposed() || widths == null)
+            return;
+        Composite host = tree.getParent();
+        TreeColumnLayout columnLayout = null;
+        if (host != null && !host.isDisposed() && host.getLayout() instanceof TreeColumnLayout layout)
+            columnLayout = layout;
+        int n = Math.min(widths.length, tree.getColumnCount());
+        Listener[][] saved = muteTreeColumnResizeListeners(tree, n);
+        try
+        {
+            if (columnLayout != null)
+            {
+                for (int i = 0; i < n; i++)
+                {
+                    TreeColumn column = tree.getColumn(i);
+                    if (column == null || column.isDisposed())
+                        continue;
+                    int width = Math.max(0, widths[i]);
+                    columnLayout.setColumnData(column,
+                        new ColumnPixelData(width, column.getResizable(), false));
+                }
+            }
+            tree.setRedraw(false);
+            try
+            {
+                for (int i = 0; i < n; i++)
+                {
+                    TreeColumn column = tree.getColumn(i);
+                    if (column == null || column.isDisposed())
+                        continue;
+                    if (column.getWidth() != widths[i])
+                        column.setWidth(widths[i]);
+                }
+            }
+            finally
+            {
+                tree.setRedraw(true);
+            }
+        }
+        finally
+        {
+            restoreTreeColumnResizeListeners(tree, saved);
+        }
+    }
+
+    private static Listener[][] muteColumnResizeListeners(Table table, int n)
+    {
+        Listener[][] saved = new Listener[n][];
+        for (int i = 0; i < n; i++)
+        {
+            TableColumn column = table.getColumn(i);
+            if (column == null || column.isDisposed())
                 continue;
-            int reducible = columns.width(i) - minWidth;
-            if (reducible <= 0)
+            Listener[] listeners = column.getListeners(SWT.Resize);
+            saved[i] = listeners;
+            for (Listener listener : listeners)
+                column.removeListener(SWT.Resize, listener);
+        }
+        return saved;
+    }
+
+    private static void restoreColumnResizeListeners(Table table, Listener[][] saved)
+    {
+        if (saved == null || table.isDisposed())
+            return;
+        int n = Math.min(saved.length, table.getColumnCount());
+        for (int i = 0; i < n; i++)
+        {
+            if (saved[i] == null)
                 continue;
-            int cut = Math.min(reducible, overshoot);
-            columns.setWidth(i, columns.width(i) - cut);
-            overshoot -= cut;
+            TableColumn column = table.getColumn(i);
+            if (column == null || column.isDisposed())
+                continue;
+            for (Listener listener : saved[i])
+                column.addListener(SWT.Resize, listener);
+        }
+    }
+
+    private static Listener[][] muteTreeColumnResizeListeners(Tree tree, int n)
+    {
+        Listener[][] saved = new Listener[n][];
+        for (int i = 0; i < n; i++)
+        {
+            TreeColumn column = tree.getColumn(i);
+            if (column == null || column.isDisposed())
+                continue;
+            Listener[] listeners = column.getListeners(SWT.Resize);
+            saved[i] = listeners;
+            for (Listener listener : listeners)
+                column.removeListener(SWT.Resize, listener);
+        }
+        return saved;
+    }
+
+    private static void restoreTreeColumnResizeListeners(Tree tree, Listener[][] saved)
+    {
+        if (saved == null || tree.isDisposed())
+            return;
+        int n = Math.min(saved.length, tree.getColumnCount());
+        for (int i = 0; i < n; i++)
+        {
+            if (saved[i] == null)
+                continue;
+            TreeColumn column = tree.getColumn(i);
+            if (column == null || column.isDisposed())
+                continue;
+            for (Listener listener : saved[i])
+                column.addListener(SWT.Resize, listener);
         }
     }
 

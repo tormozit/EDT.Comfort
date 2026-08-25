@@ -168,8 +168,8 @@ public final class ComfortSettings
     /** Подсветка создаваемых переменных включена по умолчанию. */
     public static final boolean DEFAULT_IMPLICIT_VARIABLE_HIGHLIGHTING_ENABLED = true;
 
-    /** Цвет создаваемых переменных по умолчанию — RGB(0,100,100). */
-    public static final String DEFAULT_IMPLICIT_VARIABLE_HIGHLIGHTING_COLOR = "0,100,100"; //$NON-NLS-1$
+    /** Цвет создаваемых переменных по умолчанию — RGB(0,80,80). */
+    public static final String DEFAULT_IMPLICIT_VARIABLE_HIGHLIGHTING_COLOR = "0,80,80"; //$NON-NLS-1$
 
     // ---- Bracket content hint ----
 

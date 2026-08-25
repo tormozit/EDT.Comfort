@@ -438,6 +438,10 @@ com.company1c.link.agent.publicator.win32,4.0.2,file:/C:/VC/EDT-plugin-WS/.metad
 com.company1c.link.agent.tunnel,4.0.2,file:/C:/VC/EDT-plugin-WS/.metadata/.plugins/org.eclipse.pde.core/.bundle_pool/plugins/com.company1c.link.agent.tunnel_4.0.2.jar,4,false
 com.company1c.link.ide.edt,4.0.3,file:/C:/VC/EDT-plugin-WS/.metadata/.plugins/org.eclipse.pde.core/.bundle_pool/plugins/com.company1c.link.ide.edt_4.0.3/,4,false
 com.company1c.link.ide.edt.lanweb,4.0.3,file:/C:/VC/EDT-plugin-WS/.metadata/.plugins/org.eclipse.pde.core/.bundle_pool/plugins/com.company1c.link.ide.edt.lanweb_4.0.3/,4,false
+com.e1c.edt.ai,1.0.2.v202603301159,file:/C:/VC/EDT-plugin-WS/.metadata/.plugins/org.eclipse.pde.core/.bundle_pool/plugins/com.e1c.edt.ai_1.0.2.v202603301159.jar,4,false
+com.e1c.edt.ai.context,1.0.2.v202603301159,file:/C:/VC/EDT-plugin-WS/.metadata/.plugins/org.eclipse.pde.core/.bundle_pool/plugins/com.e1c.edt.ai.context_1.0.2.v202603301159.jar,4,false
+com.e1c.edt.ai.ui,1.0.2.v202603301159,file:/C:/VC/EDT-plugin-WS/.metadata/.plugins/org.eclipse.pde.core/.bundle_pool/plugins/com.e1c.edt.ai.ui_1.0.2.v202603301159.jar,4,false
+com.e1c.edt.ai.ui.common,1.0.2.v202603301159,file:/C:/VC/EDT-plugin-WS/.metadata/.plugins/org.eclipse.pde.core/.bundle_pool/plugins/com.e1c.edt.ai.ui.common_1.0.2.v202603301159.jar,4,false
 com.e1c.g5.dt.applications,6.0.0.v202605050943,file:/C:/VC/EDT-plugin-WS/.metadata/.plugins/org.eclipse.pde.core/.bundle_pool/plugins/com.e1c.g5.dt.applications_6.0.0.v202605050943.jar,4,false
 com.e1c.g5.dt.applications.infobases,2.0.500.v202605050943,file:/C:/VC/EDT-plugin-WS/.metadata/.plugins/org.eclipse.pde.core/.bundle_pool/plugins/com.e1c.g5.dt.applications.infobases_2.0.500.v202605050943.jar,4,false
 com.e1c.g5.dt.applications.infobases.ui,1.0.1000.v202605050943,file:/C:/VC/EDT-plugin-WS/.metadata/.plugins/org.eclipse.pde.core/.bundle_pool/plugins/com.e1c.g5.dt.applications.infobases.ui_1.0.1000.v202605050943.jar,4,false

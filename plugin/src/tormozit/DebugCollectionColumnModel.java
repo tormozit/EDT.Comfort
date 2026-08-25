@@ -683,28 +683,36 @@ final class DebugCollectionColumnModel
         if (host != null && !host.isDisposed() && host.getLayout() instanceof TableColumnLayout layout)
             columnLayout = layout;
         for (int i = existing.length; i < dataCols; i++)
-        {
-            TableColumn column = new TableColumn(table, org.eclipse.swt.SWT.NONE);
-            if (columnLayout != null)
-                bindTableColumnLayout(columnLayout, column, 1, false);
-        }
+            new TableColumn(table, org.eclipse.swt.SWT.NONE);
         for (int dataCol = 0; dataCol < dataCols; dataCol++)
         {
             Column col = columnAt(fixed + dataCol);
             TableColumn tc = table.getColumn(dataCol);
             tc.setText(col != null ? col.header : ""); //$NON-NLS-1$
-            int width = defaultWidth(col);
             tc.setResizable(true);
             tc.setMoveable(true);
-            if (columnLayout != null)
-                bindTableColumnLayout(columnLayout, tc, width, dataCol >= dataCols - 1);
-            else
-                tc.setWidth(width);
         }
         for (int i = dataCols; i < existing.length; i++)
             existing[i].dispose();
-        if (columnLayout != null && host != null && !host.isDisposed())
-            host.layout(true);
+        if (columnLayout != null)
+        {
+            for (int dataCol = 0; dataCol < dataCols; dataCol++)
+            {
+                Column col = columnAt(fixed + dataCol);
+                bindTableColumnLayout(columnLayout, table.getColumn(dataCol),
+                    defaultWidth(col), dataCol >= dataCols - 1);
+            }
+            if (host != null && !host.isDisposed())
+                host.layout(true);
+        }
+        else
+        {
+            for (int dataCol = 0; dataCol < dataCols; dataCol++)
+            {
+                Column col = columnAt(fixed + dataCol);
+                table.getColumn(dataCol).setWidth(defaultWidth(col));
+            }
+        }
     }
 
     private static int fixedColumnWidth(Column col)

@@ -47,6 +47,23 @@ final class DebugCollectionLoadScheduler
     private static final int CONTEXT_RESOLVE_MAX_ATTEMPTS = 10;
     /** Пауза между попытками; 10×200 мс ≈ 2 с максимум ожидания схемы. */
     private static final long CONTEXT_RESOLVE_RETRY_DELAY_MS = 200L;
+    /** Временный лог EDT 2026: схема колонок не приходит. */
+    static final String COLUMNS_TEMP_LOG = "collection-columns"; //$NON-NLS-1$
+
+    static String describeContextVars(IBslVariable[] vars)
+    {
+        return DebugCollectionContextColumnsResolver.describeVars(vars);
+    }
+
+    static void logColumns(String text)
+    {
+        Global.tempLog(COLUMNS_TEMP_LOG, text);
+    }
+
+    static void logColumnsException(String context, Throwable t)
+    {
+        Global.tempLogException(COLUMNS_TEMP_LOG, context, t);
+    }
 
     interface ProgressListener
     {
@@ -710,6 +727,7 @@ final class DebugCollectionLoadScheduler
                 {
                     model.noteCollectionKicked(0);
                     fireProgress(0, 0, "rows"); //$NON-NLS-1$
+                    logColumns( "variablesJob size=0 skip context reason=" + reason); //$NON-NLS-1$
                     return org.eclipse.core.runtime.Status.OK_STATUS;
                 }
                 if ("initial".equals(reason)) //$NON-NLS-1$
@@ -727,13 +745,25 @@ final class DebugCollectionLoadScheduler
                 initialLoadSettled.set(true);
                 DebugCollectionDebug.step("load", reason + " rows=" + size); //$NON-NLS-1$ //$NON-NLS-2$
                 if (scheduleContextAfter)
-                    scheduleContextJob();
+                {
+                    logColumns("variablesJob scheduleContext reason=" + reason //$NON-NLS-1$
+                        + " size=" + size); //$NON-NLS-1$
+                    try
+                    {
+                        scheduleContextJob();
+                    }
+                    catch (Throwable t)
+                    {
+                        logColumnsException("variablesJob scheduleContext Throwable", t); //$NON-NLS-1$
+                    }
+                }
                 requestViewportPriority(viewportFirst.get(), viewportLast.get());
                 repaintBoundTable();
             }
             catch (DebugException e)
             {
                 DebugCollectionDebug.problem("getVariables: " + e.getMessage()); //$NON-NLS-1$
+                logColumnsException( "variablesJob DebugException reason=" + reason, e); //$NON-NLS-1$
             }
             return org.eclipse.core.runtime.Status.OK_STATUS;
         });
@@ -748,19 +778,11 @@ final class DebugCollectionLoadScheduler
         {
             if (model.totalSize > 0 && row >= model.totalSize)
                 continue;
-            try
-            {
-                IBslVariable variable = model.indexedValue != null
-                    ? model.indexedValue.getVariable(row) : null;
-                String name = variable != null ? variable.getName() : "null"; //$NON-NLS-1$
-                if (sb.length() > 0)
-                    sb.append(','); //$NON-NLS-1$
-                sb.append(" i=").append(row).append(" name=").append(name); //$NON-NLS-1$ //$NON-NLS-2$
-            }
-            catch (DebugException e)
-            {
-                DebugCollectionDebug.problem("rowSample: " + e.getMessage()); //$NON-NLS-1$
-            }
+            IBslVariable variable = model.getRowVariable(row);
+            String name = variable != null ? variable.getName() : "null"; //$NON-NLS-1$
+            if (sb.length() > 0)
+                sb.append(','); //$NON-NLS-1$
+            sb.append(" i=").append(row).append(" name=").append(name); //$NON-NLS-1$ //$NON-NLS-2$
         }
         if (sb.length() > 0)
             DebugCollectionDebug.step("load.rows", "rowSample" + sb); //$NON-NLS-1$ //$NON-NLS-2$
@@ -1138,8 +1160,6 @@ final class DebugCollectionLoadScheduler
             {
                 IBslVariable rowVar = model.getRowVariable(row);
                 if (rowVar == null)
-                    rowVar = indexed.getVariable(row);
-                if (rowVar == null)
                     continue;
                 if (source == rowVar || rowVar.equals(source))
                     return row;
@@ -1271,33 +1291,65 @@ final class DebugCollectionLoadScheduler
 
     private void scheduleContextJob()
     {
-        if (disposed.get() || contextColumnsListener == null)
-            return;
-        cancelJob(contextJob);
-        contextResolveAttempts.set(0);
-        contextResolveStartedAtMs.set(System.currentTimeMillis());
-        provisionalColumnsDelivered.set(false);
-        scheduleContextJobInternal();
+        logColumns("scheduleContext enter disposed=" + disposed.get() //$NON-NLS-1$
+            + " listener=" + (contextColumnsListener != null) //$NON-NLS-1$
+            + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
+        try
+        {
+            if (disposed.get() || contextColumnsListener == null)
+            {
+                logColumns("scheduleContext skip"); //$NON-NLS-1$
+                return;
+            }
+            cancelJob(contextJob);
+            contextResolveAttempts.set(0);
+            contextResolveStartedAtMs.set(System.currentTimeMillis());
+            provisionalColumnsDelivered.set(false);
+            logColumns("scheduleContext beforeInternal size=" + model.totalSize); //$NON-NLS-1$
+            scheduleContextJobInternal();
+            logColumns("scheduleContext afterInternal"); //$NON-NLS-1$
+        }
+        catch (Throwable t)
+        {
+            logColumnsException("scheduleContext Throwable", t); //$NON-NLS-1$
+        }
     }
 
     private void scheduleContextJobInternal()
     {
         contextJob = Job.create("Комфорт: колонки коллекции", monitor -> { //$NON-NLS-1$
+            logColumns("job.run enter attempt=" + contextResolveAttempts.get() //$NON-NLS-1$
+                + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
+            IBslVariable[] result = new IBslVariable[0];
+            try
+            {
             long startedAt = contextResolveStartedAtMs.get();
             long elapsedMs = startedAt > 0 ? System.currentTimeMillis() - startedAt : 0L;
+            int attempt = contextResolveAttempts.get();
             IBslVariable[] context = null;
             try
             {
+                logColumns("job.resolve before"); //$NON-NLS-1$
                 context = DebugCollectionContextColumnsResolver.resolve(model.indexedValue);
+                logColumns("job.resolve after n=" + (context == null ? -1 : context.length)); //$NON-NLS-1$
             }
             catch (DebugException e)
             {
                 DebugCollectionDebug.problem("contextVariables: " + e.getMessage()); //$NON-NLS-1$
+                logColumnsException("job.resolve DebugException", e); //$NON-NLS-1$
             }
-            final IBslVariable[] result = context != null ? context : new IBslVariable[0];
+            catch (RuntimeException e)
+            {
+                logColumnsException("job.resolve RuntimeException", e); //$NON-NLS-1$
+            }
+            result = context != null ? context : new IBslVariable[0];
+            logColumns("job.beforeClassify n=" + result.length); //$NON-NLS-1$
             boolean metadataOnly = DebugCollectionPropertyVariables.isRowMetadataContext(result);
             boolean indexedPlaceholders = DebugCollectionPropertyVariables.isIndexedPlaceholderContext(result);
-            boolean labelsReady = DebugCollectionPropertyVariables.hasResolvedColumnLabels(result);
+            logColumns("job.beforeLabels meta=" + metadataOnly + " ph=" + indexedPlaceholders); //$NON-NLS-1$ //$NON-NLS-2$
+            boolean labelsReady = indexedPlaceholders
+                && DebugCollectionPropertyVariables.hasResolvedColumnLabels(result);
+            logColumns("job.afterLabels " + labelsReady); //$NON-NLS-1$
             boolean tabular = DebugCollectionContextColumnsResolver.isTabularCollectionType(model.indexedValue);
             boolean provisional = indexedPlaceholders && !labelsReady && tabular && result.length > 0;
             boolean acceptable = result.length > 0 && !metadataOnly
@@ -1308,15 +1360,31 @@ final class DebugCollectionLoadScheduler
                 && elapsedMs < 2000L
                 && contextResolveAttempts.get() < CONTEXT_RESOLVE_MAX_ATTEMPTS;
 
+            logColumns("job.flags attempt=" + attempt //$NON-NLS-1$
+                + " elapsedMs=" + elapsedMs //$NON-NLS-1$
+                + " n=" + result.length //$NON-NLS-1$
+                + " meta=" + metadataOnly //$NON-NLS-1$
+                + " ph=" + indexedPlaceholders //$NON-NLS-1$
+                + " labels=" + labelsReady //$NON-NLS-1$
+                + " tabular=" + tabular //$NON-NLS-1$
+                + " provisional=" + provisional //$NON-NLS-1$
+                + " acceptable=" + acceptable //$NON-NLS-1$
+                + " canRetry=" + canRetry //$NON-NLS-1$
+                + " deliveredProv=" + provisionalColumnsDelivered.get()); //$NON-NLS-1$
+            logColumns("job.flags vars " + DebugCollectionContextColumnsResolver.describeVars(result)); //$NON-NLS-1$
+
             if (acceptable)
             {
                 contextResolveAttempts.set(0);
+                logColumns( "job.decision deliver-acceptable n=" + result.length); //$NON-NLS-1$
                 deliverContextColumns(result);
                 return org.eclipse.core.runtime.Status.OK_STATUS;
             }
 
             if (provisional && provisionalColumnsDelivered.compareAndSet(false, true))
             {
+                logColumns( "job.decision deliver-provisional n=" + result.length //$NON-NLS-1$
+                    + " retry=" + canRetry); //$NON-NLS-1$
                 deliverContextColumns(result);
                 if (canRetry)
                 {
@@ -1328,7 +1396,9 @@ final class DebugCollectionLoadScheduler
 
             if ((result.length == 0 || metadataOnly || indexedPlaceholders) && canRetry)
             {
-                contextResolveAttempts.incrementAndGet();
+                int next = contextResolveAttempts.incrementAndGet();
+                logColumns( "job.decision retry next=" + next //$NON-NLS-1$
+                    + " n=" + result.length); //$NON-NLS-1$
                 scheduleContextRefineRetry();
                 return org.eclipse.core.runtime.Status.OK_STATUS;
             }
@@ -1337,12 +1407,29 @@ final class DebugCollectionLoadScheduler
             {
                 final IBslVariable[] deliver = metadataOnly || indexedPlaceholders
                     ? new IBslVariable[0] : result;
+                logColumns( "job.decision deliver-final n=" + deliver.length //$NON-NLS-1$
+                    + " stripped=" + (deliver.length != result.length)); //$NON-NLS-1$
                 deliverContextColumns(deliver);
             }
+            else
+                logColumns("job.decision keep-provisional n=" + result.length); //$NON-NLS-1$
             return org.eclipse.core.runtime.Status.OK_STATUS;
+            }
+            catch (Throwable t)
+            {
+                logColumnsException("job.run Throwable", t); //$NON-NLS-1$
+                if (result.length > 0)
+                {
+                    logColumns("job.run deliver-after-error n=" + result.length); //$NON-NLS-1$
+                    deliverContextColumns(result);
+                }
+                return org.eclipse.core.runtime.Status.OK_STATUS;
+            }
         });
         contextJob.setSystem(true);
+        logColumns("job.schedule before state=" + contextJob.getState()); //$NON-NLS-1$
         contextJob.schedule();
+        logColumns("job.schedule after state=" + contextJob.getState()); //$NON-NLS-1$
     }
 
     private void scheduleContextRefineRetry()
@@ -1357,14 +1444,21 @@ final class DebugCollectionLoadScheduler
 
     private void deliverContextColumns(IBslVariable[] deliver)
     {
+        final IBslVariable[] payload = deliver != null ? deliver : new IBslVariable[0];
+        logColumns("deliver n=" + payload.length //$NON-NLS-1$
+            + " displayDisposed=" + (display == null || display.isDisposed())); //$NON-NLS-1$
+        logColumns("deliver vars " + DebugCollectionContextColumnsResolver.describeVars(payload)); //$NON-NLS-1$
         if (display != null && !display.isDisposed())
         {
-            final IBslVariable[] payload = deliver != null ? deliver : new IBslVariable[0];
             display.asyncExec(() -> {
                 if (!disposed.get())
                     contextColumnsListener.accept(payload);
+                else
+                    logColumns( "deliver skipped disposed"); //$NON-NLS-1$
             });
         }
+        else
+            logColumns( "deliver skipped no display"); //$NON-NLS-1$
     }
 
     private void runFilterScan(DebugCollectionRowFilter filter, org.eclipse.core.runtime.IProgressMonitor monitor, Runnable onDone)
@@ -1511,91 +1605,128 @@ final class DebugCollectionLoadScheduler
 
         static IBslVariable[] resolve(IBslIndexedValue indexed) throws DebugException
         {
+            log("resolve.enter cls=" + (indexed == null ? "null" : indexed.getClass().getName())); //$NON-NLS-1$ //$NON-NLS-2$
             if (indexed == null)
+            {
+                log("resolve.end empty indexed=null"); //$NON-NLS-1$
                 return new IBslVariable[0];
+            }
 
+            log("resolve.beforeTypeName"); //$NON-NLS-1$
             boolean tabular = isTabularCollectionType(indexed);
+            log("resolve.tabular=" + tabular); //$NON-NLS-1$
+            log("resolve.beforeSnapshot"); //$NON-NLS-1$
+            logCollectionSnapshot(indexed);
+            log("resolve.beforeFirstRows"); //$NON-NLS-1$
+            logFirstRows(indexed);
 
-            IBslVariable[] mutual = resolveMutualFromIndexed(indexed);
+            if (tabular)
+            {
+                IBslVariable[] tableSchema = resolveValueTableSchemaColumns(indexed);
+                log("resolve.tableSchema " + classify(tableSchema) + " " + describeVars(tableSchema)); //$NON-NLS-1$ //$NON-NLS-2$
+                if (tableSchema != null && tableSchema.length > 0
+                    && !DebugCollectionPropertyVariables.isRowMetadataContext(tableSchema))
+                {
+                    IBslVariable[] chosen = capColumns(tableSchema);
+                    DebugCollectionDebug.step("columns.ctx", "tableSchema=" + tableSchema.length //$NON-NLS-1$ //$NON-NLS-2$
+                        + (DebugCollectionPropertyVariables.isIndexedPlaceholderContext(tableSchema)
+                            ? " provisional" : "")); //$NON-NLS-1$ //$NON-NLS-2$
+                    log("resolve.choose tableSchema n=" + chosen.length //$NON-NLS-1$
+                        + (DebugCollectionPropertyVariables.isIndexedPlaceholderContext(tableSchema)
+                            ? " provisional" : "")); //$NON-NLS-1$ //$NON-NLS-2$
+                    return chosen;
+                }
+                log("resolve.tableSchema rejected"); //$NON-NLS-1$
+            }
+
+            IBslVariable[] mutual = resolveMutualFromIndexed(indexed, tabular);
+            log("resolve.mutual " + classify(mutual) + " " + describeVars(mutual)); //$NON-NLS-1$ //$NON-NLS-2$
             if (DebugCollectionPropertyVariables.isAcceptableColumnContext(mutual))
             {
                 IBslVariable[] chosen = capColumns(mutual);
                 DebugCollectionDebug.step("columns.ctx", "mutual=" + mutual.length); //$NON-NLS-1$ //$NON-NLS-2$
+                log("resolve.choose mutual n=" + chosen.length); //$NON-NLS-1$
                 return chosen;
             }
 
             IBslVariable[] direct = indexed.getContextVariables();
             if (direct == null)
                 direct = new IBslVariable[0];
+            boolean itemsAsColumns = looksLikeCollectionItems(indexed, direct);
+            log("resolve.direct " + classify(direct) + " " + describeVars(direct) //$NON-NLS-1$ //$NON-NLS-2$
+                + " itemsAsColumns=" + itemsAsColumns); //$NON-NLS-1$
 
-            if (DebugCollectionPropertyVariables.isAcceptableColumnContext(direct)
+            if (!itemsAsColumns
+                && DebugCollectionPropertyVariables.isAcceptableColumnContext(direct)
                 && direct.length > 0 && direct.length <= MAX_DIRECT_CONTEXT_COLS)
             {
                 DebugCollectionDebug.step("columns.ctx", "direct=" + direct.length); //$NON-NLS-1$ //$NON-NLS-2$
+                log("resolve.choose direct n=" + direct.length); //$NON-NLS-1$
                 return direct;
             }
-
-            if (direct.length > MAX_DIRECT_CONTEXT_COLS)
-            {
-                IBslVariable[] union = capColumns(direct);
-                DebugCollectionDebug.step("columns.ctx", //$NON-NLS-1$
-                    "direct=" + direct.length + " wide→union=" + union.length); //$NON-NLS-1$ //$NON-NLS-2$
-                return union;
-            }
+            if (itemsAsColumns)
+                log("resolve.skip direct collection-items n=" + direct.length); //$NON-NLS-1$
+            else if (direct.length > MAX_DIRECT_CONTEXT_COLS)
+                log("resolve.skip directWide n=" + direct.length); //$NON-NLS-1$
 
             IBslVariable[] rowUnion = resolveRowSampleUnion(indexed);
+            log("resolve.rowUnion " + classify(rowUnion) + " " + describeVars(rowUnion)); //$NON-NLS-1$ //$NON-NLS-2$
             if (DebugCollectionPropertyVariables.isAcceptableColumnContext(rowUnion))
             {
                 IBslVariable[] chosen = capColumns(rowUnion);
                 DebugCollectionDebug.step("columns.ctx", "rowUnion=" + rowUnion.length); //$NON-NLS-1$ //$NON-NLS-2$
+                log("resolve.choose rowUnion n=" + chosen.length); //$NON-NLS-1$
                 return chosen;
             }
 
-            if (tabular)
-            {
-                IBslVariable[] tableSchema = resolveValueTableSchemaColumns(indexed);
-                if (tableSchema != null && tableSchema.length > 0
-                    && !DebugCollectionPropertyVariables.isRowMetadataContext(tableSchema))
-                {
-                    // Acceptable names или provisional [0]…[N] — колонки сразу, заголовки уточним позже.
-                    IBslVariable[] chosen = capColumns(tableSchema);
-                    DebugCollectionDebug.step("columns.ctx", "tableSchema=" + tableSchema.length //$NON-NLS-1$ //$NON-NLS-2$
-                        + (DebugCollectionPropertyVariables.isIndexedPlaceholderContext(tableSchema)
-                            ? " provisional" : "")); //$NON-NLS-1$ //$NON-NLS-2$
-                    return chosen;
-                }
-            }
-
-            if (direct.length > 0 && DebugCollectionPropertyVariables.isAcceptableColumnContext(direct))
+            if (!itemsAsColumns && direct.length > 0
+                && DebugCollectionPropertyVariables.isAcceptableColumnContext(direct))
             {
                 DebugCollectionDebug.step("columns.ctx", "directFallback=" + direct.length); //$NON-NLS-1$ //$NON-NLS-2$
+                log("resolve.choose directFallback n=" + direct.length); //$NON-NLS-1$
                 return capColumns(direct);
             }
+            log("resolve.end empty"); //$NON-NLS-1$
             return new IBslVariable[0];
         }
 
         /** Как EDT {@code getMutualProperties}: union имён property по строкам sample. */
-        private static IBslVariable[] resolveMutualFromIndexed(IBslIndexedValue indexed) throws DebugException
+        private static IBslVariable[] resolveMutualFromIndexed(IBslIndexedValue indexed, boolean tabular)
+            throws DebugException
         {
             int size = indexed.getSize();
             if (size <= 0)
+            {
+                log("mutual skip size=" + size); //$NON-NLS-1$
                 return new IBslVariable[0];
+            }
 
             int count = Math.min(size, SAMPLE_ROWS);
-            IBslVariable[] rows = indexed.getVariables(0, count);
+            IBslVariable[] rows = sampleRows(indexed, count);
+            log("mutual.sample size=" + size + " count=" + count //$NON-NLS-1$ //$NON-NLS-2$
+                + " rows=" + (rows == null ? "null" : Integer.toString(rows.length))); //$NON-NLS-1$ //$NON-NLS-2$
             if (rows == null || rows.length == 0)
                 return new IBslVariable[0];
 
             Set<String> union = new LinkedHashSet<>();
             Map<String, IBslVariable> templates = new LinkedHashMap<>();
-            for (IBslVariable row : rows)
+            for (int i = 0; i < rows.length; i++)
             {
+                IBslVariable row = rows[i];
                 if (row == null)
+                {
+                    log("mutual.row[" + i + "] null"); //$NON-NLS-1$ //$NON-NLS-2$
                     continue;
+                }
                 Set<String> rowNames = new LinkedHashSet<>();
                 collectPropertyNames(row, rowNames, templates);
+                log("mutual.row[" + i + "] name=" + row.getName() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " props=" + rowNames); //$NON-NLS-1$
                 union.addAll(rowNames);
             }
+            if (union.isEmpty() && !tabular)
+                kickFirstRowProperties(rows, union, templates);
+            log("mutual.union n=" + union.size() + " names=" + union); //$NON-NLS-1$ //$NON-NLS-2$
             if (union.isEmpty())
                 return new IBslVariable[0];
 
@@ -1609,26 +1740,90 @@ final class DebugCollectionLoadScheduler
             return result.toArray(new IBslVariable[0]);
         }
 
+        private static void kickFirstRowProperties(
+            IBslVariable[] rows,
+            Set<String> union,
+            Map<String, IBslVariable> templates) throws DebugException
+        {
+            for (int i = 0; i < rows.length; i++)
+            {
+                IBslVariable row = rows[i];
+                if (row == null)
+                    continue;
+                IBslValue value = row.getValue();
+                if (value == null || value.isPending())
+                    continue;
+                if (!value.isEvaluated())
+                {
+                    BslValueEvaluate.ensureEvaluated(value);
+                    log("mutual.kick[" + i + "] name=" + row.getName() //$NON-NLS-1$ //$NON-NLS-2$
+                        + " ev=" + value.isEvaluated() + " pend=" + value.isPending()); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+                Set<String> rowNames = new LinkedHashSet<>();
+                collectPropertyNames(row, rowNames, templates);
+                log("mutual.kick[" + i + "] props=" + rowNames); //$NON-NLS-1$ //$NON-NLS-2$
+                union.addAll(rowNames);
+                return;
+            }
+        }
+
+        private static IBslVariable[] sampleRows(IBslIndexedValue indexed, int count) throws DebugException
+        {
+            IBslVariable[] rows = indexed.getVariables(0, count);
+            if (rows == null || rows.length <= count)
+                return rows;
+            log("sample.trunc requested=" + count + " got=" + rows.length); //$NON-NLS-1$ //$NON-NLS-2$
+            return Arrays.copyOf(rows, count);
+        }
+
+        /** Context коллекции совпадает с её элементами — это не схема колонок. */
+        private static boolean looksLikeCollectionItems(IBslIndexedValue indexed, IBslVariable[] context)
+        {
+            if (context == null || context.length == 0)
+                return false;
+            if (DebugCollectionPropertyVariables.isRowMetadataContext(context))
+                return false;
+            try
+            {
+                int size = indexed.getSize();
+                return size > 0 && context.length == size;
+            }
+            catch (DebugException e)
+            {
+                return false;
+            }
+        }
+
         private static IBslVariable[] resolveRowSampleUnion(IBslIndexedValue indexed) throws DebugException
         {
             int size = indexed.getSize();
             if (size <= 0)
+            {
+                log("rowUnion skip size=" + size); //$NON-NLS-1$
                 return new IBslVariable[0];
+            }
 
             int count = Math.min(size, SAMPLE_ROWS);
-            IBslVariable[] rows = indexed.getVariables(0, count);
+            IBslVariable[] rows = sampleRows(indexed, count);
+            log("rowUnion.sample size=" + size + " count=" + count //$NON-NLS-1$ //$NON-NLS-2$
+                + " rows=" + (rows == null ? "null" : Integer.toString(rows.length))); //$NON-NLS-1$ //$NON-NLS-2$
             if (rows == null || rows.length == 0)
                 return new IBslVariable[0];
 
             Map<String, IBslVariable> templates = new LinkedHashMap<>();
-            for (IBslVariable row : rows)
+            for (int i = 0; i < rows.length; i++)
             {
+                IBslVariable row = rows[i];
                 if (row == null)
                     continue;
                 IBslValue value = row.getValue();
                 if (value == null)
+                {
+                    log("rowUnion.row[" + i + "] value=null"); //$NON-NLS-1$ //$NON-NLS-2$
                     continue;
+                }
                 IBslVariable[] props = DebugCollectionPropertyVariables.propertySource(value);
+                log("rowUnion.row[" + i + "] " + classify(props) + " " + describeVars(props)); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 if (props == null)
                     continue;
                 for (IBslVariable prop : props)
@@ -1641,36 +1836,96 @@ final class DebugCollectionLoadScheduler
                     templates.putIfAbsent(name, prop);
                 }
             }
+            log("rowUnion.templates n=" + templates.size() + " names=" + templates.keySet()); //$NON-NLS-1$ //$NON-NLS-2$
             return templates.values().toArray(new IBslVariable[0]);
         }
 
         private static IBslVariable[] resolveValueTableSchemaColumns(IBslIndexedValue indexed) throws DebugException
         {
+            log("schema.start " + describeIndexed(indexed)); //$NON-NLS-1$
             if (!isTabularCollectionType(indexed))
+            {
+                log("schema.skip not tabular"); //$NON-NLS-1$
                 return new IBslVariable[0];
+            }
 
             IBslVariable[] ctxVars = indexed.getContextVariables();
-            IBslVariable columnsVar = findNamedVariable(ctxVars, "Колонки"); //$NON-NLS-1$
+            log("schema.ctx " + describeVars(ctxVars)); //$NON-NLS-1$
+            IBslVariable columnsRu = findNamedVariable(ctxVars, "Колонки"); //$NON-NLS-1$
+            IBslVariable columnsEn = findNamedVariable(ctxVars, "Columns"); //$NON-NLS-1$
+            IBslVariable columnsVar = columnsRu;
+            String foundIn = columnsRu != null ? "ctx.Колонки" : null; //$NON-NLS-1$
+            IBslVariable[] allVars = null;
             if (columnsVar == null)
             {
-                IBslVariable[] allVars = indexed.getVariables();
-                columnsVar = findNamedVariable(allVars, "Колонки"); //$NON-NLS-1$
+                allVars = indexed.getVariables();
+                log("schema.allVars " + describeVars(allVars)); //$NON-NLS-1$
+                columnsRu = findNamedVariable(allVars, "Колонки"); //$NON-NLS-1$
+                columnsEn = findNamedVariable(allVars, "Columns"); //$NON-NLS-1$
+                columnsVar = columnsRu;
+                if (columnsRu != null)
+                    foundIn = "all.Колонки"; //$NON-NLS-1$
             }
+            log("schema.lookup ru=" + (columnsRu != null) + " en=" + (columnsEn != null) //$NON-NLS-1$ //$NON-NLS-2$
+                + " foundIn=" + foundIn); //$NON-NLS-1$
             if (columnsVar == null)
+            {
+                log("schema.no Колонки (enPresent=" + (columnsEn != null) + ")"); //$NON-NLS-1$ //$NON-NLS-2$
                 return new IBslVariable[0];
+            }
 
             IBslValue columnsValue = columnsVar.getValue();
+            log("schema.value " + describeValue(columnsValue)); //$NON-NLS-1$
             if (columnsValue == null)
+            {
+                log("schema.value null"); //$NON-NLS-1$
                 return new IBslVariable[0];
+            }
 
             if (columnsValue instanceof IBslIndexedValue columnsIndexed)
             {
                 int colSize = columnsIndexed.getSize();
+                log("schema.indexed " + describeIndexed(columnsIndexed)); //$NON-NLS-1$
                 if (colSize <= 0)
+                {
+                    log("schema.indexed empty size=" + colSize); //$NON-NLS-1$
                     return new IBslVariable[0];
+                }
                 IBslVariable[] defs = columnsIndexed.getVariables();
+                log("schema.defs " + describeVars(defs)); //$NON-NLS-1$
+                if (allNullOrEmpty(defs) && colSize > 0)
+                {
+                    int range = Math.min(colSize, MAX_COLUMN_COUNT);
+                    defs = columnsIndexed.getVariables(0, range);
+                    log("schema.defs.range 0.." + range + " " + describeVars(defs)); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+                if (allNullOrEmpty(defs) && colSize > 0)
+                {
+                    int range = Math.min(colSize, MAX_COLUMN_COUNT);
+                    IBslVariable[] byIndex = new IBslVariable[range];
+                    int got = 0;
+                    for (int i = 0; i < range; i++)
+                    {
+                        try
+                        {
+                            byIndex[i] = DebugCollectionTableModel.itemAt(columnsIndexed, i);
+                            if (byIndex[i] != null)
+                                got++;
+                        }
+                        catch (Throwable t)
+                        {
+                            log("schema.getVariable[" + i + "] " + safe(t)); //$NON-NLS-1$ //$NON-NLS-2$
+                        }
+                    }
+                    log("schema.defs.byIndex got=" + got + " " + describeVars(byIndex)); //$NON-NLS-1$ //$NON-NLS-2$
+                    if (got > 0)
+                        defs = byIndex;
+                }
                 if (defs == null || defs.length == 0)
+                {
+                    log("schema.defs empty"); //$NON-NLS-1$
                     return new IBslVariable[0];
+                }
                 if (defs.length > MAX_COLUMN_COUNT)
                     defs = Arrays.copyOf(defs, MAX_COLUMN_COUNT);
                 Map<String, IBslVariable> templates = new LinkedHashMap<>();
@@ -1678,17 +1933,26 @@ final class DebugCollectionLoadScheduler
                 {
                     if (def == null)
                         continue;
-                    String name = def.getName();
+                    String name = DebugCollectionPropertyVariables.columnLabel(def);
                     if (name == null || name.isBlank())
+                    {
+                        log("schema.def skip blank"); //$NON-NLS-1$
                         continue;
+                    }
                     templates.putIfAbsent(name, def);
                 }
+                log("schema.templates n=" + templates.size() + " names=" + templates.keySet()); //$NON-NLS-1$ //$NON-NLS-2$
                 return templates.values().toArray(new IBslVariable[0]);
             }
 
+            log("schema.notIndexed cls=" + columnsValue.getClass().getName()); //$NON-NLS-1$
             IBslVariable[] defs = columnsValue.getVariables();
+            log("schema.plainDefs " + describeVars(defs)); //$NON-NLS-1$
             if (defs == null || defs.length == 0)
+            {
+                log("schema.plainDefs empty"); //$NON-NLS-1$
                 return new IBslVariable[0];
+            }
             Map<String, IBslVariable> templates = new LinkedHashMap<>();
             for (IBslVariable def : defs)
             {
@@ -1699,6 +1963,7 @@ final class DebugCollectionLoadScheduler
                     continue;
                 templates.putIfAbsent(name, def);
             }
+            log("schema.plainTemplates n=" + templates.size() + " names=" + templates.keySet()); //$NON-NLS-1$ //$NON-NLS-2$
             return templates.values().toArray(new IBslVariable[0]);
         }
 
@@ -1706,7 +1971,9 @@ final class DebugCollectionLoadScheduler
         {
             if (indexed == null)
                 return false;
+            log("isTabular before getValueTypeName"); //$NON-NLS-1$
             String typeName = indexed.getValueTypeName();
+            log("isTabular typeName=" + typeName); //$NON-NLS-1$
             if (typeName == null || typeName.isBlank())
                 return false;
             String lower = typeName.toLowerCase(java.util.Locale.ROOT);
@@ -1714,6 +1981,18 @@ final class DebugCollectionLoadScheduler
                 || lower.contains("valuetable") //$NON-NLS-1$
                 || lower.contains("деревозначений") //$NON-NLS-1$
                 || lower.contains("valuetree"); //$NON-NLS-1$
+        }
+
+        private static boolean allNullOrEmpty(IBslVariable[] variables)
+        {
+            if (variables == null || variables.length == 0)
+                return true;
+            for (IBslVariable variable : variables)
+            {
+                if (variable != null)
+                    return false;
+            }
+            return true;
         }
 
         private static IBslVariable findNamedVariable(IBslVariable[] variables, String name)
@@ -1764,6 +2043,258 @@ final class DebugCollectionLoadScheduler
                 if (names.add(name))
                     templates.putIfAbsent(name, prop);
             }
+        }
+
+        private static void log(String text)
+        {
+            logColumns( text);
+        }
+
+        private static void logCollectionSnapshot(IBslIndexedValue indexed)
+        {
+            try
+            {
+                IBslVariable[] ctx = indexed.getContextVariables();
+                log("resolve.collection.ctx " + classify(ctx) + " " + describeVars(ctx)); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            catch (Throwable t)
+            {
+                logColumnsException( "resolve.collection.ctx", t); //$NON-NLS-1$
+            }
+            try
+            {
+                IBslVariable[] vars = indexed.getVariables();
+                log("resolve.collection.vars " + classify(vars) + " " + describeVars(vars)); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            catch (Throwable t)
+            {
+                logColumnsException( "resolve.collection.vars", t); //$NON-NLS-1$
+            }
+        }
+
+        private static void logFirstRows(IBslIndexedValue indexed)
+        {
+            try
+            {
+                int size = indexed.getSize();
+                int n = Math.min(size, 2);
+                if (n <= 0)
+                {
+                    log("resolve.rows none size=" + size); //$NON-NLS-1$
+                    return;
+                }
+                IBslVariable[] rows = indexed.getVariables(0, n);
+                log("resolve.rows requested=" + n //$NON-NLS-1$
+                    + " got=" + (rows == null ? "null" : Integer.toString(rows.length))); //$NON-NLS-1$ //$NON-NLS-2$
+                if (rows == null)
+                    return;
+                int limit = Math.min(n, rows.length);
+                for (int i = 0; i < limit; i++)
+                    log("resolve.row[" + i + "] " + describeRow(rows[i])); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            catch (Throwable t)
+            {
+                logColumnsException( "resolve.rows", t); //$NON-NLS-1$
+            }
+        }
+
+        private static String describeRow(IBslVariable row)
+        {
+            if (row == null)
+                return "null"; //$NON-NLS-1$
+            StringBuilder sb = new StringBuilder();
+            sb.append("name=").append(row.getName()); //$NON-NLS-1$
+            try
+            {
+                IBslValue value = row.getValue();
+                sb.append(' ').append(describeValue(value));
+                if (value instanceof IBslIndexedValue indexed)
+                {
+                    try
+                    {
+                        IBslVariable[] ctx = indexed.getContextVariables();
+                        sb.append(" ctx=").append(classify(ctx)).append(' ').append(describeVars(ctx)); //$NON-NLS-1$
+                    }
+                    catch (Throwable t)
+                    {
+                        sb.append(" ctxErr=").append(safe(t)); //$NON-NLS-1$
+                    }
+                }
+                try
+                {
+                    IBslVariable[] src = DebugCollectionPropertyVariables.propertySource(value);
+                    sb.append(" propertySource=").append(classify(src)).append(' ').append(describeVars(src)); //$NON-NLS-1$
+                }
+                catch (Throwable t)
+                {
+                    sb.append(" srcErr=").append(safe(t)); //$NON-NLS-1$
+                }
+            }
+            catch (Throwable t)
+            {
+                sb.append(" err=").append(safe(t)); //$NON-NLS-1$
+            }
+            return sb.toString();
+        }
+
+        static String describeVars(IBslVariable[] vars)
+        {
+            if (vars == null)
+                return "vars=null"; //$NON-NLS-1$
+            StringBuilder names = new StringBuilder();
+            int shown = Math.min(vars.length, 24);
+            for (int i = 0; i < shown; i++)
+            {
+                if (i > 0)
+                    names.append(',');
+                IBslVariable variable = vars[i];
+                if (variable == null)
+                {
+                    names.append("null"); //$NON-NLS-1$
+                    continue;
+                }
+                String name = variable.getName();
+                names.append(name != null ? name : ""); //$NON-NLS-1$
+                try
+                {
+                    IBslValue value = variable.getValue();
+                    if (value == null)
+                        names.append("{val=null}"); //$NON-NLS-1$
+                    else
+                    {
+                        names.append("{ev=").append(value.isEvaluated()) //$NON-NLS-1$
+                            .append(" pend=").append(value.isPending()) //$NON-NLS-1$
+                            .append(" type=").append(value.getValueTypeName()) //$NON-NLS-1$
+                            .append(" cls=").append(value.getClass().getSimpleName()); //$NON-NLS-1$
+                        if (value instanceof IBslIndexedValue indexed)
+                        {
+                            try
+                            {
+                                names.append(" size=").append(indexed.getSize()); //$NON-NLS-1$
+                            }
+                            catch (Throwable ignored)
+                            {
+                            }
+                        }
+                        names.append('}');
+                    }
+                }
+                catch (Throwable t)
+                {
+                    names.append("{err=").append(safe(t)).append('}'); //$NON-NLS-1$
+                }
+            }
+            if (vars.length > shown)
+                names.append(",…+").append(vars.length - shown); //$NON-NLS-1$
+            return "n=" + vars.length + " [" + names + "]"; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        private static String describeIndexed(IBslIndexedValue indexed)
+        {
+            if (indexed == null)
+                return "null"; //$NON-NLS-1$
+            StringBuilder sb = new StringBuilder();
+            sb.append("cls=").append(indexed.getClass().getName()); //$NON-NLS-1$
+            try
+            {
+                sb.append(" type=").append(indexed.getValueTypeName()); //$NON-NLS-1$
+            }
+            catch (Throwable t)
+            {
+                sb.append(" typeErr=").append(safe(t)); //$NON-NLS-1$
+            }
+            try
+            {
+                sb.append(" size=").append(indexed.getSize()); //$NON-NLS-1$
+            }
+            catch (Throwable t)
+            {
+                sb.append(" sizeErr=").append(safe(t)); //$NON-NLS-1$
+            }
+            try
+            {
+                sb.append(" ev=").append(indexed.isEvaluated()); //$NON-NLS-1$
+            }
+            catch (Throwable t)
+            {
+                sb.append(" evErr=").append(safe(t)); //$NON-NLS-1$
+            }
+            try
+            {
+                sb.append(" pend=").append(indexed.isPending()); //$NON-NLS-1$
+            }
+            catch (Throwable t)
+            {
+                sb.append(" pendErr=").append(safe(t)); //$NON-NLS-1$
+            }
+            return sb.toString();
+        }
+
+        private static String describeValue(IBslValue value)
+        {
+            if (value == null)
+                return "val=null"; //$NON-NLS-1$
+            StringBuilder sb = new StringBuilder();
+            sb.append("valCls=").append(value.getClass().getName()); //$NON-NLS-1$
+            try
+            {
+                sb.append(" type=").append(value.getValueTypeName()); //$NON-NLS-1$
+            }
+            catch (Throwable t)
+            {
+                sb.append(" typeErr=").append(safe(t)); //$NON-NLS-1$
+            }
+            try
+            {
+                sb.append(" ev=").append(value.isEvaluated()); //$NON-NLS-1$
+            }
+            catch (Throwable t)
+            {
+                sb.append(" evErr=").append(safe(t)); //$NON-NLS-1$
+            }
+            try
+            {
+                sb.append(" pend=").append(value.isPending()); //$NON-NLS-1$
+            }
+            catch (Throwable t)
+            {
+                sb.append(" pendErr=").append(safe(t)); //$NON-NLS-1$
+            }
+            if (value instanceof IBslIndexedValue indexed)
+            {
+                try
+                {
+                    sb.append(" size=").append(indexed.getSize()); //$NON-NLS-1$
+                }
+                catch (Throwable t)
+                {
+                    sb.append(" sizeErr=").append(safe(t)); //$NON-NLS-1$
+                }
+            }
+            return sb.toString();
+        }
+
+        private static String classify(IBslVariable[] context)
+        {
+            if (context == null)
+                return "null"; //$NON-NLS-1$
+            if (context.length == 0)
+                return "empty"; //$NON-NLS-1$
+            boolean meta = DebugCollectionPropertyVariables.isRowMetadataContext(context);
+            boolean placeholder = DebugCollectionPropertyVariables.isIndexedPlaceholderContext(context);
+            boolean acceptable = DebugCollectionPropertyVariables.isAcceptableColumnContext(context);
+            return "n=" + context.length //$NON-NLS-1$
+                + " meta=" + meta //$NON-NLS-1$
+                + " ph=" + placeholder //$NON-NLS-1$
+                + " acc=" + acceptable; //$NON-NLS-1$
+        }
+
+        private static String safe(Throwable t)
+        {
+            if (t == null)
+                return "null"; //$NON-NLS-1$
+            String message = t.getMessage();
+            return t.getClass().getSimpleName() + ":" + (message != null ? message : ""); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 }

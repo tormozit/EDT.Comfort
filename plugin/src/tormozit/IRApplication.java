@@ -33,12 +33,10 @@ import org.osgi.framework.ServiceReference;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
 import com._1c.g5.v8.dt.platform.services.core.infobases.IInfobaseAccessManager;
 import com._1c.g5.v8.dt.platform.services.core.infobases.IInfobaseAccessSettings;
-import com._1c.g5.v8.dt.platform.services.model.AppArch;
 import com._1c.g5.v8.dt.platform.services.model.Arch;
 import com._1c.g5.v8.dt.platform.services.model.IConnectionString;
 import com._1c.g5.v8.dt.platform.services.model.InfobaseReference;
 import com._1c.g5.v8.dt.platform.services.model.RuntimeInstallation;
-import com._1c.g5.v8.dt.platform.services.core.runtimes.environments.IResolvableRuntimeInstallation;
 import com._1c.g5.wiring.ServiceAccess;
 import com._1c.g5.wiring.ServiceSupplier;
 import com.e1c.g5.dt.applications.IApplication;
@@ -401,15 +399,9 @@ public final class IRApplication
         }       
         String key = sessionKey(infobase);
         String connectionString = buildConnectionString(infobase, true);
-        RuntimeInstallation runtimeInstallation = ApplicationsViewHook.getRuntimeInstallation(project, infobase);
-        if (runtimeInstallation == null)
-        {
-            IRConnectDebug.logRuntimeInstallationNull(project, infobase);
-            // Fallback: тот же путь, что EDT для «Запустить конфигуратор»
-            IRSession currentSession = sessions.get(key);
-            IInfobaseApplication application = currentSession != null ? currentSession.application : null;
-            runtimeInstallation = resolveRuntimeViaApplication(project, application);
-        }
+        RuntimeInstallation runtimeInstallation = ApplicationsViewHook.getRuntimeInstallation(project, infobase, true);
+        String runtimeSource = runtimeInstallation != null
+            ? "getRuntimeInstallation" : "none"; //$NON-NLS-1$ //$NON-NLS-2$
         String platformVersion;
         boolean configBitness64;
         if (runtimeInstallation != null)
@@ -419,11 +411,31 @@ public final class IRApplication
         }
         else
         {
-            IRConnectDebug.log("RuntimeInstallation не определён ни одним путём — дефолтные значения"); //$NON-NLS-1$
-            platformVersion = "8.3"; //$NON-NLS-1$
             configBitness64 = true;
+            String ibVer = infobase != null ? infobase.getVersion() : null;
+            String ibDefault = infobase != null ? infobase.getDefaultVersion() : null;
+            if (ibVer != null && !ibVer.isEmpty())
+            {
+                platformVersion = ibVer;
+                runtimeSource = "infobase.getVersion()"; //$NON-NLS-1$
+                IRConnectDebug.logInfobaseVersionFallback("getVersion()", ibVer); //$NON-NLS-1$
+            }
+            else if (ibDefault != null && !ibDefault.isEmpty())
+            {
+                platformVersion = ibDefault;
+                runtimeSource = "infobase.getDefaultVersion()"; //$NON-NLS-1$
+                IRConnectDebug.logInfobaseVersionFallback("getDefaultVersion()", ibDefault); //$NON-NLS-1$
+            }
+            else
+            {
+                platformVersion = "8.3"; //$NON-NLS-1$
+                IRConnectDebug.logDefaultPlatformVersion();
+            }
         }
         String className = buildComClassName(platformVersion);
+        IRConnectDebug.logComSelection(infobase, runtimeInstallation, runtimeSource,
+            platformVersion, configBitness64, className);
+        IRConnectDebug.logComRegistry(className);
         String connectionStringNoPass = removePassword(connectionString);
         Object comDispatch = null;
         Object processObj = null;
@@ -440,20 +452,24 @@ public final class IRApplication
             {
                 // ПолучитьПроцессОСЛкс(Неопределено, startMs, 2, "-Embedding")
                 long timeMillis = System.currentTimeMillis();
+                IRConnectDebug.log("попытка " + attempt + " createComObject(" + className + ")"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 comDispatch = ComBridge.createComObject(className);
                 processObj = WmiProcessHelper.findProcess(timeMillis, 2, "-Embedding");
                 pid = WmiProcessHelper.getPid(processObj);
+                IRConnectDebug.logLaunchedProcess(processObj);
                 boolean connected = ComBridge.connect(comDispatch, connectionString);
                 if (connected) { 
                     success = true; 
                     break; 
                 }
                 descriptionOnError = "Connect() вернул false"; //$NON-NLS-1$
+                IRConnectDebug.problem("попытка " + attempt + " " + className + ": " + descriptionOnError); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 comDispatch = null; processObj = null; pid = 0;
             }
             catch (Exception e)
             {
                 descriptionOnError = e.getMessage() != null ? e.getMessage() : e.toString();
+                IRConnectDebug.problem("попытка " + attempt + " " + className + ": " + descriptionOnError); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 comDispatch = null; processObj = null; pid = 0;
 
                 String low = descriptionOnError.toLowerCase();
@@ -480,8 +496,12 @@ public final class IRApplication
                 Global.log("Попытка " + attempt + " неудача. Повтор..."); //$NON-NLS-1$ //$NON-NLS-2$
                 if (runtimeInstallation != null)
                 {
-                    registerComClass(className, runtimeInstallation.getLocation().getPath() + "1cv8.exe", attempt, configBitness64);
+                    String exe = runtimeInstallation.getLocation().getPath() + "1cv8.exe"; //$NON-NLS-1$
+                    IRConnectDebug.logReregister(className, exe, attempt);
+                    registerComClass(className, exe, attempt, configBitness64);
                 }
+                else
+                    IRConnectDebug.problem("перерегистрация COM пропущена: RuntimeInstallation == null"); //$NON-NLS-1$
             }
         }
 
@@ -1032,56 +1052,6 @@ public final class IRApplication
             notifyListeners();
     }
 
-    // =======================================================================
-    // Резолв RuntimeInstallation через LaunchRuntimeInstallationProvider
-    // (тот же путь, что EDT использует для «Запустить конфигуратор»)
-    // =======================================================================
-
-    private static RuntimeInstallation resolveRuntimeViaApplication(IProject project, IInfobaseApplication application)
-    {
-        if (project == null || application == null)
-            return null;
-        try
-        {
-            Object provider = Class.forName(
-                "com._1c.g5.v8.dt.debug.core.LaunchRuntimeInstallationProvider") //$NON-NLS-1$
-                .getDeclaredConstructor().newInstance();
-            @SuppressWarnings("unchecked")
-            Optional<IResolvableRuntimeInstallation> opt =
-                (Optional<IResolvableRuntimeInstallation>) Global.invoke(
-                    provider, "getInstallation", project, application); //$NON-NLS-1$
-            if (opt == null || !opt.isPresent())
-            {
-                IRConnectDebug.log("LaunchRuntimeInstallationProvider.getInstallation вернул empty"); //$NON-NLS-1$
-                return null;
-            }
-            IResolvableRuntimeInstallation resolvable = opt.get();
-            IRConnectDebug.log("resolvable из LaunchRuntimeInstallationProvider: " + resolvable.getClass().getName()); //$NON-NLS-1$
-            try
-            {
-                RuntimeInstallation result = resolvable.resolve(
-                    List.of("com._1c.g5.v8.dt.platform.services.core.componentTypes.ThickClient"), //$NON-NLS-1$
-                    AppArch.X86_64);
-                if (result != null)
-                    return result;
-            }
-            catch (Exception ignored) {}
-            try
-            {
-                return resolvable.resolve(
-                    List.of("com._1c.g5.v8.dt.platform.services.core.componentTypes.ThickClient"), //$NON-NLS-1$
-                    AppArch.X86);
-            }
-            catch (Exception ignored) {}
-            return null;
-        }
-        catch (Exception e)
-        {
-            IRConnectDebug.log("resolveRuntimeViaApplication: " + e.getMessage()); //$NON-NLS-1$
-            return null;
-        }
-    }
-
     public static String buildConnectionString(InfobaseReference infobase, boolean withUser)
     {
         IConnectionString connectionString = infobase.getConnectionString();
@@ -1222,7 +1192,7 @@ public final class IRApplication
      * Читает значение по умолчанию (Default) ключа реестра через {@code reg.exe query}.
      * Результат парсится по маркеру {@code REG_SZ} — не зависит от локали ОС.
      */
-    private static String registryReadDefault(String hive, String keyPath)
+    static String registryReadDefault(String hive, String keyPath)
     {
         return registryReadValue(hive, keyPath, null);
     }
