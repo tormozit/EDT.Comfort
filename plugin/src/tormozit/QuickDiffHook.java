@@ -40,7 +40,6 @@ import org.eclipse.jface.text.IInformationControl;
 import org.eclipse.jface.text.IInformationControlCreator;
 import org.eclipse.jface.text.ITextListener;
 import org.eclipse.jface.text.IViewportListener;
-import org.eclipse.jface.text.JFaceTextUtil;
 import org.eclipse.jface.text.TextEvent;
 import org.eclipse.jface.text.Position;
 import org.eclipse.jface.text.information.IInformationProviderExtension2;
@@ -61,6 +60,9 @@ import org.eclipse.jface.text.source.ILineRange;
 import org.eclipse.jface.text.source.IOverviewRuler;
 import org.eclipse.jface.text.source.ISourceViewer;
 import org.eclipse.jface.text.source.IVerticalRuler;
+import org.eclipse.jface.text.source.IVerticalRulerColumn;
+import org.eclipse.jface.text.source.IVerticalRulerInfoExtension;
+import org.eclipse.jface.text.source.IVerticalRulerListener;
 import org.eclipse.jface.text.source.LineChangeHover;
 import org.eclipse.jface.text.source.LineNumberChangeRulerColumn;
 import org.eclipse.jface.text.source.LineRange;
@@ -68,6 +70,7 @@ import org.eclipse.jgit.lib.Repository;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.graphics.Color;
+import org.eclipse.swt.graphics.Font;
 import org.eclipse.swt.graphics.GC;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
@@ -265,7 +268,9 @@ public final class QuickDiffHook implements IStartup
         if (lineReady)
         {
             lineControl.setData(LINE_NUMBER_KEY, session);
+            suppressBackgroundErase(lineControl);
             session.ensureWrapped();
+            session.installQuietRedraw();
         }
         if (overviewReady)
             session.ensureOverviewFiltered();
@@ -276,12 +281,45 @@ public final class QuickDiffHook implements IStartup
         }
     }
 
+    /**
+     * Гасит закраску фона канвы номеров строк.
+     *
+     * <p>Причина мигания — не сама линейка. Декоратор EDT рассылает {@code labelProviderChanged}
+     * ~5 раз в секунду, {@code DtGranularEditor} на это зовёт {@code firePropertyChange}, EDT
+     * переписывает заголовок формы тем же текстом, а {@code TitleRegion.setText} безусловно делает
+     * {@code layout()} и {@code redraw()} — перерисовывается вся область части, линейка в том числе
+     * как сосед по composite. Источник — в EDT, отсюда не гасится.
+     *
+     * <p>Здесь снимается видимость: {@code LineNumberRulerColumn} создаёт канву как
+     * {@code new Canvas(parent, SWT.NO_FOCUS)}, без {@code SWT.NO_BACKGROUND}, поэтому Windows на
+     * каждую перерисовку сначала закрашивает полосу фоном, а готовый кадр выкладывается из
+     * {@code fBuffer} только после. Промежуток между ними и виден как вспышка. Закраска не нужна:
+     * {@code doubleBufferPaint} накрывает клиентскую область целиком. Стиль после создания штатно
+     * не меняется, но SWT/Win32 читает {@code NO_BACKGROUND} не при создании окна, а в
+     * {@code Composite.WM_ERASEBKGND}, поэтому бит достаточно выставить в поле {@code style}.
+     */
+    private static void suppressBackgroundErase(Control control)
+    {
+        if (control == null || control.isDisposed())
+            return;
+        Object current = Global.getField(control, "style"); //$NON-NLS-1$
+        if (!(current instanceof Integer style))
+            return;
+        if ((style.intValue() & SWT.NO_BACKGROUND) != 0)
+            return;
+        Global.setField(control, "style", //$NON-NLS-1$
+            Integer.valueOf(style.intValue() | SWT.NO_BACKGROUND));
+    }
+
     private static void beforeLineNumberPaint(Event e)
     {
         if (!(e.widget instanceof Control control) || control.isDisposed())
             return;
         if (control.getData(LINE_NUMBER_KEY) instanceof Session session)
+        {
             session.ensureWrapped();
+            session.installQuietRedraw();
+        }
     }
 
     private static LineNumberChangeRulerColumn findLineNumberColumn(ISourceViewer viewer)
@@ -514,6 +552,7 @@ public final class QuickDiffHook implements IStartup
         final ISourceViewer viewer;
         final LineNumberChangeRulerColumn column;
         final IOverviewRuler overview;
+        private boolean differRedrawQuieted;
 
         Session(ITextEditor editor, ISourceViewer viewer, LineNumberChangeRulerColumn column,
             IOverviewRuler overview)
@@ -529,6 +568,32 @@ public final class QuickDiffHook implements IStartup
             wrapPainter();
             ensureHoverWrapped();
             ensureOverviewFiltered();
+        }
+
+        /**
+         * Подменяет колонку номеров в {@code CompositeRuler.fDecorators},
+         * чтобы {@code update()} после аннотаций не вызывал второй {@code redraw()} линейки.
+         */
+        void installQuietRedraw()
+        {
+            IVerticalRuler ruler = verticalRulerOf(viewer);
+            if (!(ruler instanceof CompositeRuler composite))
+                return;
+            Object listObj = Global.getField(composite, "fDecorators"); //$NON-NLS-1$
+            if (!(listObj instanceof List<?> list))
+                return;
+            for (int i = 0; i < list.size(); i++)
+            {
+                Object next = list.get(i);
+                if (next instanceof QuietLineNumberColumn)
+                    return;
+                if (asChangeColumn(next) != column || !(next instanceof IVerticalRulerColumn inner))
+                    continue;
+                @SuppressWarnings("unchecked")
+                List<Object> raw = (List<Object>) list;
+                raw.set(i, new QuietLineNumberColumn(inner));
+                return;
+            }
         }
 
         /**
@@ -560,10 +625,38 @@ public final class QuickDiffHook implements IStartup
         {
             if (column == null)
                 return;
-            wrapDifferOnPainter(Global.getField(column, "fDiffPainter"), "diff"); //$NON-NLS-1$ //$NON-NLS-2$
+            Object diffPainter = Global.getField(column, "fDiffPainter"); //$NON-NLS-1$
+            wrapDifferOnPainter(diffPainter, "diff"); //$NON-NLS-1$
+            quietDifferCanvasRedraw(diffPainter);
             Object revisionPainter = Global.getField(column, "fRevisionPainter"); //$NON-NLS-1$
             if (wrapDifferOnPainter(revisionPainter, "rev") && column.isShowingRevisionInformation()) //$NON-NLS-1$
                 Global.invoke(revisionPainter, "clearRangeCache"); //$NON-NLS-1$
+            quietDifferCanvasRedraw(revisionPainter);
+        }
+
+        /**
+         * {@code DiffPainter} после пересчёта Quick Diff зовёт {@code fColumn.redraw()}
+         * — это вторая полная отрисовка линейки ~500 мс после правки, в обход
+         * {@link QuietLineNumberColumn}. Клетки Quick Diff рисуются в штатном
+         * {@code doPaint} вместе с номерами.
+         */
+        private void quietDifferCanvasRedraw(Object painter)
+        {
+            if (painter == null)
+                return;
+            Object listener = Global.getField(painter, "fAnnotationListener"); //$NON-NLS-1$
+            Object differ = Global.getField(painter, "fLineDiffer"); //$NON-NLS-1$
+            if (!(listener instanceof IAnnotationModelListener modelListener))
+                return;
+            IAnnotationModel model = differ instanceof IAnnotationModel annotationModel
+                ? annotationModel : null;
+            if (model == null)
+                return;
+            model.removeAnnotationModelListener(modelListener);
+            if (differRedrawQuieted)
+                return;
+            differRedrawQuieted = true;
+            NaparnikManualModeHook.logFlickerCause("quickDiff.quietDifferRedraw"); //$NON-NLS-1$
         }
 
         /**
@@ -592,6 +685,121 @@ public final class QuickDiffHook implements IStartup
             if (!(current instanceof IAnnotationModel real))
                 return;
             Global.setField(overview, "fModel", new OverviewFilterModel(real, viewer)); //$NON-NLS-1$
+        }
+    }
+
+    /**
+     * Глушит {@code CompositeRuler.immediateUpdate()}: после смены аннотаций
+     * (валидация, орфография, вхождения) линейка зовёт {@code redraw()} у всех
+     * колонок. Номера строк уже рисует {@code LineNumberRulerColumn.postRedraw}
+     * вместе с текстом. Второй проход — видимая вспышка; без плагина её нет
+     * даже при добавлении/удалении строки. Пересчёт Quick Diff больше не зовёт
+     * отдельный {@code redraw()} колонки — клетки рисуются в том же {@code doPaint}.
+     */
+    private static final class QuietLineNumberColumn implements IChangeRulerColumn
+    {
+        private final IVerticalRulerColumn inner;
+
+        QuietLineNumberColumn(IVerticalRulerColumn inner)
+        {
+            this.inner = inner;
+        }
+
+        @Override
+        public void redraw()
+        {
+            // См. javadoc класса: не вызывать inner.redraw() из CompositeRuler.update().
+        }
+
+        @Override
+        public Control createControl(CompositeRuler parentRuler, Composite parentControl)
+        {
+            return inner.createControl(parentRuler, parentControl);
+        }
+
+        @Override
+        public Control getControl()
+        {
+            return inner.getControl();
+        }
+
+        @Override
+        public int getWidth()
+        {
+            return inner.getWidth();
+        }
+
+        @Override
+        public void setModel(IAnnotationModel model)
+        {
+            inner.setModel(model);
+        }
+
+        @Override
+        public void setFont(Font font)
+        {
+            inner.setFont(font);
+        }
+
+        @Override
+        public IAnnotationModel getModel()
+        {
+            return inner instanceof IVerticalRulerInfoExtension ext ? ext.getModel() : null;
+        }
+
+        @Override
+        public void addVerticalRulerListener(IVerticalRulerListener listener)
+        {
+            if (inner instanceof IVerticalRulerInfoExtension ext)
+                ext.addVerticalRulerListener(listener);
+        }
+
+        @Override
+        public void removeVerticalRulerListener(IVerticalRulerListener listener)
+        {
+            if (inner instanceof IVerticalRulerInfoExtension ext)
+                ext.removeVerticalRulerListener(listener);
+        }
+
+        @Override
+        public void setHover(IAnnotationHover hover)
+        {
+            if (inner instanceof IChangeRulerColumn change)
+                change.setHover(hover);
+        }
+
+        @Override
+        public IAnnotationHover getHover()
+        {
+            return inner instanceof IVerticalRulerInfoExtension ext ? ext.getHover() : null;
+        }
+
+        @Override
+        public void setBackground(Color background)
+        {
+            if (inner instanceof IChangeRulerColumn change)
+                change.setBackground(background);
+        }
+
+        @Override
+        public void setAddedColor(Color color)
+        {
+            if (inner instanceof IChangeRulerColumn change)
+                change.setAddedColor(color);
+        }
+
+        @Override
+        public void setChangedColor(Color color)
+        {
+            if (inner instanceof IChangeRulerColumn change)
+                change.setChangedColor(color);
+        }
+
+        @Override
+        public void setDeletedColor(Color color)
+        {
+            if (inner instanceof IChangeRulerColumn change)
+                change.setDeletedColor(color);
         }
     }
 
@@ -686,6 +894,14 @@ public final class QuickDiffHook implements IStartup
             return delegate instanceof IAnnotationModel annotationModel ? annotationModel : null;
         }
 
+        private static boolean isColumnRedrawListener(IAnnotationModelListener listener)
+        {
+            if (listener == null)
+                return false;
+            String name = listener.getClass().getName();
+            return name.contains("DiffPainter") || name.contains("RevisionPainter"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
         @Override
         public ILineDiffInfo getLineInfo(int line)
         {
@@ -748,6 +964,8 @@ public final class QuickDiffHook implements IStartup
         @Override
         public void addAnnotationModelListener(IAnnotationModelListener listener)
         {
+            if (isColumnRedrawListener(listener))
+                return;
             IAnnotationModel model = model();
             if (model != null)
                 model.addAnnotationModelListener(listener);

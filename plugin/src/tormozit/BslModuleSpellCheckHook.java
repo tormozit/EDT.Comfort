@@ -790,27 +790,10 @@ public final class BslModuleSpellCheckHook implements IStartup
             IAnnotationModel model = viewer.getAnnotationModel();
             if (model == null)
                 return;
-            List<Annotation> toRemove = new ArrayList<>();
-            Iterator<?> it = model.getAnnotationIterator();
-            while (it.hasNext())
-            {
-                Object next = it.next();
-                if (next instanceof SpellingAnnotation sa
-                    && sa.getSpellingProblem() instanceof ModuleProblem)
-                    toRemove.add(sa);
-            }
+            List<Annotation> toRemove = collectComfortAnnotations(model);
             if (toRemove.isEmpty())
                 return;
-            if (model instanceof IAnnotationModelExtension ext)
-            {
-                Annotation[] arr = toRemove.toArray(new Annotation[0]);
-                ext.replaceAnnotations(arr, Map.of());
-            }
-            else
-            {
-                for (Annotation a : toRemove)
-                    model.removeAnnotation(a);
-            }
+            replaceComfortAnnotations(model, toRemove, Map.of());
         }
 
         void applyAnnotations(List<ModuleProblem> problems)
@@ -818,43 +801,83 @@ public final class BslModuleSpellCheckHook implements IStartup
             IAnnotationModel model = viewer.getAnnotationModel();
             if (model == null)
                 return;
-            // replaceAnnotations сносит открытый hover (setInput/dispose) — запомним позицию
+            List<Annotation> existing = collectComfortAnnotations(model);
+            List<ModuleProblem> toApply = problems != null ? problems : List.of();
+            if (sameComfortProblems(existing, toApply, model))
+                return;
             final int hoverOffset = peekVisibleHoverOffset(viewer);
             final String hoverWord = peekVisibleHoverWord(viewer);
-            removeComfortAnnotations();
-            if (problems == null || problems.isEmpty())
-            {
-                return;
-            }
+            Map<Annotation, Position> batch = new java.util.LinkedHashMap<>();
             ModuleProblem hoverMatch = null;
+            for (ModuleProblem p : toApply)
+            {
+                SpellingAnnotation ann = new SpellingAnnotation(p);
+                Position pos = new Position(p.getOffset(), p.getLength());
+                p.attachPresentation(ann, pos, viewer, editor);
+                batch.put(ann, pos);
+                if (hoverMatch == null && matchesHover(p, hoverOffset, hoverWord))
+                    hoverMatch = p;
+            }
+            replaceComfortAnnotations(model, existing, batch);
+            if (hoverMatch != null)
+                restoreHoverProposals(hoverMatch);
+        }
+
+        private static List<Annotation> collectComfortAnnotations(IAnnotationModel model)
+        {
+            List<Annotation> found = new ArrayList<>();
+            Iterator<?> it = model.getAnnotationIterator();
+            while (it.hasNext())
+            {
+                Object next = it.next();
+                if (next instanceof SpellingAnnotation sa
+                    && sa.getSpellingProblem() instanceof ModuleProblem)
+                    found.add(sa);
+            }
+            return found;
+        }
+
+        private static boolean sameComfortProblems(List<Annotation> existing, List<ModuleProblem> problems,
+            IAnnotationModel model)
+        {
+            if (existing.size() != problems.size())
+                return false;
+            List<String> have = new ArrayList<>(existing.size());
+            for (Annotation annotation : existing)
+            {
+                Position position = model.getPosition(annotation);
+                String word = ""; //$NON-NLS-1$
+                if (annotation instanceof SpellingAnnotation sa
+                    && sa.getSpellingProblem() instanceof ModuleProblem mp)
+                    word = mp.word != null ? mp.word : ""; //$NON-NLS-1$
+                have.add((position == null ? -1 : position.offset) + ":" //$NON-NLS-1$
+                    + (position == null ? -1 : position.length) + ":" + word); //$NON-NLS-1$
+            }
+            List<String> want = new ArrayList<>(problems.size());
+            for (ModuleProblem problem : problems)
+                want.add(problem.getOffset() + ":" + problem.getLength() + ":" //$NON-NLS-1$ //$NON-NLS-2$
+                    + (problem.word != null ? problem.word : "")); //$NON-NLS-1$
+            Collections.sort(have);
+            Collections.sort(want);
+            return have.equals(want);
+        }
+
+        private static void replaceComfortAnnotations(IAnnotationModel model, List<Annotation> remove,
+            Map<Annotation, Position> add)
+        {
+            if (remove.isEmpty() && add.isEmpty())
+                return;
             if (model instanceof IAnnotationModelExtension ext)
             {
-                Map<Annotation, Position> batch = new java.util.LinkedHashMap<>();
-                for (ModuleProblem p : problems)
-                {
-                    SpellingAnnotation ann = new SpellingAnnotation(p);
-                    Position pos = new Position(p.getOffset(), p.getLength());
-                    p.attachPresentation(ann, pos, viewer, editor);
-                    batch.put(ann, pos);
-                    if (hoverMatch == null && matchesHover(p, hoverOffset, hoverWord))
-                        hoverMatch = p;
-                }
-                ext.replaceAnnotations(new Annotation[0], batch);
+                Annotation[] arr = remove.toArray(new Annotation[0]);
+                ext.replaceAnnotations(arr, add);
             }
             else
             {
-                for (ModuleProblem p : problems)
-                {
-                    SpellingAnnotation ann = new SpellingAnnotation(p);
-                    Position pos = new Position(p.getOffset(), p.getLength());
-                    p.attachPresentation(ann, pos, viewer, editor);
-                    model.addAnnotation(ann, pos);
-                    if (hoverMatch == null && matchesHover(p, hoverOffset, hoverWord))
-                        hoverMatch = p;
-                }
+                for (Annotation annotation : remove)
+                    model.removeAnnotation(annotation);
+                add.forEach(model::addAnnotation);
             }
-            if (hoverMatch != null)
-                restoreHoverProposals(hoverMatch);
         }
     }
 

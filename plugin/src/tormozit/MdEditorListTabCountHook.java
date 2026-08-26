@@ -661,6 +661,7 @@ public final class MdEditorListTabCountHook implements IStartup
 
             if (!isTabFolderReady(editor, folder))
                 return;
+            NaparnikManualModeHook.logFlickerCause("tabCount.refreshEditor"); //$NON-NLS-1$
             folder.setRedraw(false);
             try
             {
@@ -890,6 +891,7 @@ public final class MdEditorListTabCountHook implements IStartup
     {
         if (folder == null || folder.isDisposed())
             return;
+        boolean wrote = false;
         for (CTabItem item : folder.getItems())
         {
             if (item == null || item.isDisposed())
@@ -899,6 +901,11 @@ public final class MdEditorListTabCountHook implements IStartup
             Image comfort = dataImage(item, KEY_COMFORT_IMAGE);
             if (comfort == null)
                 continue;
+            if (!wrote)
+            {
+                NaparnikManualModeHook.logFlickerCause("tabCount.restoreImageField"); //$NON-NLS-1$
+                wrote = true;
+            }
             Global.setField(item, "image", comfort); //$NON-NLS-1$
         }
     }
@@ -1573,6 +1580,7 @@ public final class MdEditorListTabCountHook implements IStartup
         String desired = countToken == null ? baseTitle : baseTitle + " " + countToken; //$NON-NLS-1$
         if (desired.equals(item.getText()))
             return;
+        NaparnikManualModeHook.logFlickerCause("tabCount.setText '" + desired + "'"); //$NON-NLS-1$ //$NON-NLS-2$
         CTabFolder folder = item.getParent();
         item.setText(desired);
         Table nav = leftNavOf(folder);
@@ -1594,6 +1602,7 @@ public final class MdEditorListTabCountHook implements IStartup
             return;
         if (!tabImagesNeedApply(editor, folder))
             return;
+        NaparnikManualModeHook.logFlickerCause("tabCount.applyTabImages"); //$NON-NLS-1$
         folder.setRedraw(false);
         try
         {

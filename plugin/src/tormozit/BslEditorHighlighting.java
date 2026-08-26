@@ -19,10 +19,12 @@ import com._1c.g5.v8.dt.bsl.model.DynamicFeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.Expression;
 import com._1c.g5.v8.dt.bsl.model.FeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.FeatureEntry;
+import com._1c.g5.v8.dt.bsl.model.ForStatement;
 import com._1c.g5.v8.dt.bsl.model.ImplicitVariable;
 import com._1c.g5.v8.dt.bsl.model.Invocation;
 import com._1c.g5.v8.dt.bsl.model.Method;
 import com._1c.g5.v8.dt.bsl.model.Module;
+import com._1c.g5.v8.dt.bsl.model.SimpleStatement;
 import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.util.BslUtil;
 
@@ -37,7 +39,9 @@ import com._1c.g5.v8.dt.bsl.model.util.BslUtil;
  * {@link BslServerCallHighlightingConfiguration#SERVER_CALL_ID} для вызовов
  * «без контекста» (&НаСервереБезКонтекста) либо когда метод не резолвится;</li>
  * <li>создаваемые переменные: имя
- * {@link StaticFeatureAccess} с непустым {@code getImplicitVariable()} —
+ * {@link StaticFeatureAccess} в левой части присваивания с непустой правой
+ * частью либо переменная цикла, и только если
+ * {@code getImplicitVariable() != null} —
  * {@link BslServerCallHighlightingConfiguration#IMPLICIT_VARIABLE_ID}.</li>
  * </ul>
  */
@@ -124,7 +128,8 @@ public final class BslEditorHighlighting
             if (variable == null)
                 continue;
             EObject container = variable.eContainer();
-            if (container instanceof StaticFeatureAccess access)
+            if (container instanceof StaticFeatureAccess access
+                && isImplicitVariableCreationSite(access))
                 highlightFeatureName(access, acceptor,
                     BslServerCallHighlightingConfiguration.IMPLICIT_VARIABLE_ID);
         }
@@ -139,12 +144,31 @@ public final class BslEditorHighlighting
             if (isCanceled(cancelIndicator))
                 return;
             EObject element = iterator.next();
-            if (element instanceof StaticFeatureAccess access && access.getImplicitVariable() != null)
+            if (element instanceof StaticFeatureAccess access && isImplicitVariableCreationSite(access))
             {
                 highlightFeatureName(access, acceptor,
                     BslServerCallHighlightingConfiguration.IMPLICIT_VARIABLE_ID);
             }
         }
+    }
+
+    /**
+     * Место создания неявной переменной: левая часть {@link SimpleStatement} с
+     * непустой правой (есть присваивание, а не одиночный идентификатор) либо
+     * переменная {@link ForStatement}. EDT вешает {@code ImplicitVariable} и на
+     * {@code SimpleStatement} без {@code =} (вызов процедуры без скобок / набор
+     * текста) — такие узлы не считаются созданием.
+     */
+    static boolean isImplicitVariableCreationSite(StaticFeatureAccess access)
+    {
+        if (access == null || access.getImplicitVariable() == null)
+            return false;
+        EObject parent = access.eContainer();
+        if (parent instanceof SimpleStatement statement)
+            return statement.getLeft() == access && statement.getRight() != null;
+        if (parent instanceof ForStatement loop)
+            return loop.getVariableAccess() == access;
+        return false;
     }
 
     private void highlightInvocation(Invocation invocation, IHighlightedPositionAcceptor acceptor)

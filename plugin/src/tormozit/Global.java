@@ -104,21 +104,59 @@ public final class Global
      *
      * @return значение поля, или {@code null} при любой ошибке / отсутствии поля
      */
-    public static Object getField(Object obj, String fieldName)
+    /** Кэш {@link #findField}: ключ — {@code класс#поле}, значение — {@link Field} или {@link #FIELD_ABSENT}. */
+    private static final java.util.Map<String, Object> fieldCache =
+        new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** Метка «поля с таким именем в иерархии нет» — чтобы не искать его повторно. */
+    private static final Object FIELD_ABSENT = new Object();
+
+    /**
+     * Ищет поле по иерархии суперклассов и запоминает результат.
+     *
+     * <p>Без кэша каждое обращение делало {@code getDeclaredField} плюс {@code setAccessible}
+     * заново. В плагине больше тысячи мест, и часть из них — на горячих путях (перерисовка
+     * линейки номеров идёт по десятку обращений на кадр, причём между закраской фона и выкладкой
+     * буфера, то есть напрямую превращается в видимое мигание). Класс и имя поля в этих местах
+     * постоянные, поэтому результат поиска кэшируется навсегда.
+     */
+    private static Field findField(Class<?> type, String fieldName)
     {
-        if (obj == null || fieldName == null) return null;
-        for (Class<?> c = obj.getClass(); c != null; c = c.getSuperclass())
+        String key = type.getName() + '#' + fieldName;
+        Object cached = fieldCache.get(key);
+        if (cached instanceof Field field)
+            return field;
+        if (cached == FIELD_ABSENT)
+            return null;
+        for (Class<?> c = type; c != null; c = c.getSuperclass())
         {
             try
             {
                 Field f = c.getDeclaredField(fieldName);
                 f.setAccessible(true);
-                return f.get(obj);
+                fieldCache.put(key, f);
+                return f;
             }
             catch (NoSuchFieldException ignored) {}
-            catch (Exception ignored)            { return null; }
+            catch (Exception ignored)            { break; }
         }
+        fieldCache.put(key, FIELD_ABSENT);
         return null;
+    }
+
+    public static Object getField(Object obj, String fieldName)
+    {
+        if (obj == null || fieldName == null) return null;
+        Field f = findField(obj.getClass(), fieldName);
+        if (f == null) return null;
+        try
+        {
+            return f.get(obj);
+        }
+        catch (Exception ignored)
+        {
+            return null;
+        }
     }
     
     /**
@@ -139,30 +177,26 @@ public final class Global
     {
         if (obj == null || fieldName == null)
             return false;
-        for (Class<?> c = obj.getClass(); c != null; c = c.getSuperclass())
+        Field f = findField(obj.getClass(), fieldName);
+        if (f == null)
+            return false;
+        try
         {
             try
             {
-                Field f = c.getDeclaredField(fieldName);
-                f.setAccessible(true);
-                try
-                {
-                    f.set(obj, value);
-                }
-                catch (IllegalArgumentException typeMismatch)
-                {
-                    if (!setFieldViaUnsafe(obj, f, value))
-                        return false;
-                }
-                return f.get(obj) == value;
+                f.set(obj, value);
             }
-            catch (NoSuchFieldException ignored) {}
-            catch (Exception ignored)
+            catch (IllegalArgumentException typeMismatch)
             {
-                return false;
+                if (!setFieldViaUnsafe(obj, f, value))
+                    return false;
             }
+            return f.get(obj) == value;
         }
-        return false;
+        catch (Exception ignored)
+        {
+            return false;
+        }
     }
 
     private static boolean setFieldViaUnsafe(Object obj, Field f, Object value)
@@ -974,7 +1008,6 @@ public final class Global
         }
     }
 
-    /** Сбрасывает накопленный буфер временных логов на диск (по одному append на тему). */
     /** {@link #tempLog}, но текст — {@code context} плюс полный стектрейс {@code t}. */
     public static void tempLogException(String topic, String context, Throwable t)
     {
@@ -984,6 +1017,23 @@ public final class Global
         tempLog(topic, (context != null ? context : "") + System.lineSeparator() + sw); //$NON-NLS-1$
     }
 
+    /**
+     * Сбрасывает накопленный буфер временных логов на диск (по одному append на тему).
+     *
+     * <p><b>Вызывать напрямую разрешается только в исключительных случаях.</b> Автоматической
+     * частоты вызова достаточно для большинства сценариев: фоновый таймер сбрасывает буфер раз
+     * в {@link #TEMP_LOG_FLUSH_INTERVAL_MS} мс, а {@link #stopTempLogFlusher()} — при остановке
+     * плагина, так что строки не теряются и без ручного вызова. Сам метод — синхронный файловый
+     * I/O ({@code mkdirs} плюс открытие, запись и закрытие файла на каждую тему), поэтому прямой
+     * вызов из UI-потока тормозит его на время записи. Особенно опасен вызов из обработчиков
+     * отрисовки ({@code SWT.Paint} и подобных): запись попадает в промежуток между стиранием фона
+     * и рисованием содержимого, и этот промежуток становится видимым — то есть диагностика сама
+     * порождает мигание, которое ею же измеряют.
+     *
+     * <p>Оправданный случай — потеря последних строк критична и таймер до неё не успеет: перед
+     * заведомым падением, перед принудительным завершением процесса, перед чтением файла лога тем
+     * же сценарием.
+     */
     public static void flushTempLogs()
     {
         java.util.Map<String, StringBuilder> toFlush;

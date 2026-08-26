@@ -51,7 +51,8 @@ public final class EditorTabIconDiagHook implements IStartup
     private static final String KEY_WATCHED = "tormozit.editorTabIconDiag.watched"; //$NON-NLS-1$
     private static final String KEY_SNAP = "tormozit.editorTabIconDiag.snap"; //$NON-NLS-1$
     private static final String OVERRIDE_ICON_KEY = "e4_override_icon_image_key"; //$NON-NLS-1$
-    private static final int SCAN_MS = 250;
+    /** Однократная проверка соседей после закрытия вкладки: dispose titleImage идёт после partClosed. */
+    private static final int CLOSE_SCAN_MS = 100;
 
     private static final Map<IWorkbenchPart, IPropertyListener> TITLE_LISTENERS = new IdentityHashMap<>();
     private static final List<CTabFolder> WATCHED = new ArrayList<>();
@@ -80,7 +81,6 @@ public final class EditorTabIconDiagHook implements IStartup
             @Override public void windowClosed(IWorkbenchWindow w) {}
         });
         scanAll("install"); //$NON-NLS-1$
-        scheduleScan(display);
     }
 
     private static void hookWindow(IWorkbenchWindow window)
@@ -132,6 +132,15 @@ public final class EditorTabIconDiagHook implements IStartup
             {
                 IWorkbenchPart part = ref != null ? ref.getPart(false) : null;
                 unhookPart(part);
+                Display display = Display.getCurrent();
+                if (display == null || display.isDisposed())
+                    return;
+                scanAll("closed"); //$NON-NLS-1$
+                display.timerExec(CLOSE_SCAN_MS, () ->
+                {
+                    if (!display.isDisposed())
+                        scanAll("closed-delayed"); //$NON-NLS-1$
+                });
             }
 
             @Override public void partDeactivated(IWorkbenchPartReference ref) {}
@@ -193,24 +202,6 @@ public final class EditorTabIconDiagHook implements IStartup
             {
             }
         }
-    }
-
-    private static void scheduleScan(Display display)
-    {
-        display.timerExec(SCAN_MS, () ->
-        {
-            if (display.isDisposed())
-                return;
-            try
-            {
-                scanAll("timer"); //$NON-NLS-1$
-            }
-            catch (RuntimeException ex)
-            {
-                log("timer fail " + ex); //$NON-NLS-1$
-            }
-            scheduleScan(display);
-        });
     }
 
     private static void scanAll(String reason)
@@ -290,6 +281,8 @@ public final class EditorTabIconDiagHook implements IStartup
                 continue;
             String now = itemState(item);
             String prev = (String) item.getData(KEY_SNAP);
+            if (prev != null && prev.equals(now))
+                continue;
             item.setData(KEY_SNAP, now);
             boolean nowOk = "ok".equals(now); //$NON-NLS-1$
             if (prev == null)
@@ -360,6 +353,7 @@ public final class EditorTabIconDiagHook implements IStartup
             return false;
         try
         {
+            NaparnikManualModeHook.logFlickerCause("tabIcon.setImage"); //$NON-NLS-1$
             item.setImage(live);
         }
         catch (RuntimeException ex)

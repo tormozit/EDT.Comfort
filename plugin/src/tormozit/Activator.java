@@ -46,6 +46,13 @@ public class Activator extends AbstractUIPlugin
 
         super.start(context);
         instance = this;
+        try
+        {
+            NaparnikManualModeHook.bootFromActivator();
+        }
+        catch (Throwable ignored)
+        {
+        }
 
         // Только инициализация синглтонов — никакого UI и обращений к Workbench.
         // manager.start() будет вызван из earlyStartup() после запуска Workbench.

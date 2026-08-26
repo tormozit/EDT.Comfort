@@ -437,11 +437,12 @@ public final class IrBslEditorHoverHook implements IStartup
 
         private static StaticFeatureAccess asCreatingAccess(EObject element)
         {
-            if (element instanceof StaticFeatureAccess access && access.getImplicitVariable() != null)
+            if (element instanceof StaticFeatureAccess access
+                && BslEditorHighlighting.isImplicitVariableCreationSite(access))
                 return access;
             if (element instanceof ImplicitVariable variable
                 && variable.eContainer() instanceof StaticFeatureAccess access
-                && access.getImplicitVariable() == variable)
+                && BslEditorHighlighting.isImplicitVariableCreationSite(access))
                 return access;
             return null;
         }

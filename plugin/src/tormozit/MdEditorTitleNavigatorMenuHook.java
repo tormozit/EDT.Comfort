@@ -25,8 +25,11 @@ import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.StyleRange;
 import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.graphics.Color;
+import org.eclipse.swt.graphics.GC;
+import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.graphics.RGB;
+import org.eclipse.swt.graphics.Rectangle;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
@@ -101,6 +104,8 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
 
     /** Ключ пометки шапки формы: ссылка уже встроена. */
     private static final String KEY_INSTALLED = "tormozit.mdTitleNavigatorMenu"; //$NON-NLS-1$
+
+    private static final String KEY_BUSY_QUIET = "tormozit.mdTitleBusyQuiet"; //$NON-NLS-1$
 
     private static final String TITLE_REGION_CLASS = "TitleRegion"; //$NON-NLS-1$
 
@@ -248,10 +253,13 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
         if (form == null || form.isDisposed())
             return;
         Composite head = form.getHead();
-        if (head == null || head.isDisposed() || head.getData(KEY_INSTALLED) != null)
+        if (head == null || head.isDisposed())
             return;
         Control titleRegion = findTitleRegion(head);
         if (titleRegion == null)
+            return;
+        quietFormBusySpinner(titleRegion);
+        if (head.getData(KEY_INSTALLED) != null)
             return;
 
         // Стиль части текста поддерживает только StyledText-вариант заголовка
@@ -335,6 +343,115 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
         return null;
     }
 
+    /**
+     * Штатный {@code BusyIndicator} шапки каждые 180 мс делает {@code redraw()+update()}.
+     * На Win32 у {@code TitleRegion}/{@code Form} с {@code NO_BACKGROUND} это даёт
+     * {@code WM_PAINT} всей формы, включая линейку номеров модуля.
+     * Рисуем кадр спиннера локально, без инвалидации предков.
+     */
+    private static void quietFormBusySpinner(Control titleRegion)
+    {
+        if (!(titleRegion instanceof Composite region) || region.isDisposed())
+            return;
+        wrapBusyIndicators(region);
+        if (region.getData(KEY_BUSY_QUIET) != null)
+            return;
+        region.setData(KEY_BUSY_QUIET, Boolean.TRUE);
+        region.addListener(SWT.Paint, event -> wrapBusyIndicators(region));
+    }
+
+    private static void wrapBusyIndicators(Composite region)
+    {
+        wrapBusyTree(region, 0);
+    }
+
+    /**
+     * Спиннер модуля не даёт свой {@code Paint}: рисуется шапка, линейка вспыхивает
+     * из‑за {@code NO_BACKGROUND}. При {@code Paint} шапки обходим детей.
+     */
+    static void wrapBusySpinner(Control control)
+    {
+        if (control == null || control.isDisposed())
+            return;
+        if ("BusyIndicator".equals(control.getClass().getSimpleName())) //$NON-NLS-1$
+        {
+            wrapOneBusy(control);
+            return;
+        }
+        String simple = control.getClass().getSimpleName();
+        if (!"FormHeading".equals(simple) && !"TitleRegion".equals(simple) //$NON-NLS-1$ //$NON-NLS-2$
+            && !"Form".equals(simple)) //$NON-NLS-1$
+            return;
+        if (control instanceof Composite composite)
+            wrapBusyTree(composite, 0);
+    }
+
+    private static void wrapBusyTree(Composite region, int depth)
+    {
+        if (depth > 8 || region.isDisposed())
+            return;
+        for (Control child : region.getChildren())
+        {
+            if (child.isDisposed())
+                continue;
+            if ("BusyIndicator".equals(child.getClass().getSimpleName())) //$NON-NLS-1$
+                wrapOneBusy(child);
+            else if (child instanceof Composite nested)
+                wrapBusyTree(nested, depth + 1);
+        }
+    }
+
+    private static void wrapOneBusy(Control control)
+    {
+        if (control == null || control.isDisposed())
+            return;
+        if (!(control instanceof Composite spinner))
+            return;
+        Object current = Global.getField(spinner, "timer"); //$NON-NLS-1$
+        if (current instanceof QuietBusyTimer)
+            return;
+        Display display = spinner.getDisplay();
+        if (current instanceof Runnable old && display != null && !display.isDisposed())
+            display.timerExec(-1, old);
+        QuietBusyTimer timer = new QuietBusyTimer(spinner);
+        Global.setField(spinner, "timer", timer); //$NON-NLS-1$
+        if (Boolean.TRUE.equals(Global.invoke(spinner, "isBusy")) //$NON-NLS-1$
+            && display != null && !display.isDisposed())
+            display.timerExec(0, timer);
+        NaparnikManualModeHook.logFlickerCause("title.quietBusy"); //$NON-NLS-1$
+    }
+
+    private static final class QuietBusyTimer implements Runnable
+    {
+        private static final int DELAY_MS = 180;
+        private final Composite busy;
+
+        QuietBusyTimer(Composite busy)
+        {
+            this.busy = busy;
+        }
+
+        @Override
+        public void run()
+        {
+            if (busy.isDisposed())
+                return;
+            boolean spinning = Boolean.TRUE.equals(Global.invoke(busy, "isBusy")); //$NON-NLS-1$
+            Object idxObj = Global.getField(busy, "imageIndex"); //$NON-NLS-1$
+            int index = idxObj instanceof Integer value ? value.intValue() : 0;
+            if (spinning)
+            {
+                index = (index + 1) % 8;
+                Global.setField(busy, "imageIndex", Integer.valueOf(index)); //$NON-NLS-1$
+            }
+            if (!spinning)
+                return;
+            Display display = busy.getDisplay();
+            if (display != null && !display.isDisposed())
+                display.timerExec(DELAY_MS, this);
+        }
+    }
+
     /** Выделяемый вариант текста заголовка внутри области заголовка. */
     private static StyledText findTitleText(Control titleRegion)
     {
@@ -376,6 +493,9 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
 
         /** Идёт запись отформатированного заголовка — не входить в {@link #applyLinkStyle} рекурсивно. */
         private boolean applyingTitle;
+
+        /** Штатный заголовок, который мы уже пробовали отформатировать, а EDT вернул обратно. */
+        private String lastRevertedTitle;
 
         TitleObjectLink(Form form, StyledText titleText, MdObject mdObject, IEditorPart editor)
         {
@@ -432,8 +552,16 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
 
             String text = titleText.getText();
             String formatted = formatPageTitle(text);
+            // Размыкатель петли: EDT переписывает заголовок из модели по firePropertyChange,
+            // мы форматируем его обратно, наша запись снова доходит до EDT — и так без конца.
+            // Каждый оборот — layout()+redraw() всей формы, то есть паразитная перерисовка
+            // линейки номеров ~5 раз в секунду. Пробуем один раз на каждый отличающийся
+            // штатный заголовок: вернул EDT тот же текст — не спорим.
+            if (formatted != null && !formatted.equals(text) && text.equals(lastRevertedTitle))
+                formatted = null;
             if (formatted != null && !formatted.equals(text))
             {
+                lastRevertedTitle = text;
                 applyingTitle = true;
                 try
                 {
