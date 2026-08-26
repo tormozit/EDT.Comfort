@@ -713,6 +713,8 @@ final class PropertySheetPlatformPropertyResolver
 
     private static MdObject mdObjectForPropertyLookup(EObject owner)
     {
+        if (owner == null)
+            return null;
         if (owner instanceof MdObject mdObject)
             return mdObject;
         return GoToDefinition.findContainingMdObject(owner);
@@ -722,28 +724,72 @@ final class PropertySheetPlatformPropertyResolver
     {
         if (mdOwner == null || mdOwner.eClass() == null)
             return null;
-        String typeName = METADATA_OBJECT_TYPE_PREFIX + mdOwner.eClass().getName();
+        String className = mdOwner.eClass().getName();
         try
         {
-            Type type = loadResolvedPlatformType(mdOwner, typeName, McorePackage.Literals.TYPE);
-            if (type == null)
-                type = loadResolvedPlatformType(mdOwner, typeName, McorePackage.Literals.TYPE_ITEM);
-            if (type == null)
+            Type type = loadMdPlatformType(mdOwner, className);
+            if (type != null)
+                return type;
+            // CatalogAttribute как тип платформы не существует: в синтакс-помощнике
+            // реквизит любого объекта — MetadataObjectAttribute. Род берём из коллекции
+            // родителя (attributes/dimensions/…), не из имени класса.
+            String kind = kindFromContainingFeature(mdOwner);
+            if (kind != null && !kind.equals(className))
             {
-                Global.tempLog(TEMP_TOPIC, "мд-тип: не загружен " + typeName); //$NON-NLS-1$
-                return null;
+                type = loadMdPlatformType(mdOwner, kind);
+                if (type != null)
+                    return type;
             }
-            ContextDef contextDef = type.getContextDef();
-            int propCount = contextDef != null ? contextDef.allProperties().size() : 0;
-            Global.tempLog(TEMP_TOPIC, "мд-тип: " + typeName + ", свойств=" + propCount //$NON-NLS-1$ //$NON-NLS-2$
-                    + ", proxy=" + type.eIsProxy()); //$NON-NLS-1$
-            return propCount > 0 ? type : null;
+            Global.tempLog(TEMP_TOPIC, "мд-тип: не загружен " + METADATA_OBJECT_TYPE_PREFIX + className); //$NON-NLS-1$
         }
         catch (Exception e)
         {
-            Global.tempLogException(TEMP_TOPIC, "metadataObjectPlatformType " + typeName, e); //$NON-NLS-1$
+            Global.tempLogException(TEMP_TOPIC, "metadataObjectPlatformType " + className, e); //$NON-NLS-1$
         }
         return null;
+    }
+
+    private static Type loadMdPlatformType(MdObject mdOwner, String kind)
+    {
+        String typeName = METADATA_OBJECT_TYPE_PREFIX + kind;
+        Type type = loadPlatformTypeNamed(mdOwner, typeName);
+        if (type == null)
+            return null;
+        ContextDef contextDef = type.getContextDef();
+        int propCount = contextDef != null ? contextDef.allProperties().size() : 0;
+        Global.tempLog(TEMP_TOPIC, "мд-тип: " + typeName + ", свойств=" + propCount //$NON-NLS-1$ //$NON-NLS-2$
+                + ", proxy=" + type.eIsProxy()); //$NON-NLS-1$
+        return propCount > 0 ? type : null;
+    }
+
+    /**
+     * Род дочернего объекта МД по EMF-коллекции, в которой он лежит.
+     * Реквизит справочника — в {@code attributes} → платформенный тип {@code MetadataObjectAttribute}.
+     */
+    private static String kindFromContainingFeature(MdObject mdOwner)
+    {
+        EStructuralFeature containing = mdOwner.eContainingFeature();
+        if (containing == null)
+            return null;
+        String featureName = containing.getName();
+        if (featureName == null)
+            return null;
+        return switch (featureName)
+        {
+            case "attributes" -> "Attribute"; //$NON-NLS-1$ //$NON-NLS-2$
+            case "dimensions" -> "Dimension"; //$NON-NLS-1$ //$NON-NLS-2$
+            case "resources" -> "Resource"; //$NON-NLS-1$ //$NON-NLS-2$
+            case "tabularSections" -> "TabularSection"; //$NON-NLS-1$ //$NON-NLS-2$
+            default -> null;
+        };
+    }
+
+    private static Type loadPlatformTypeNamed(EObject context, String typeName)
+    {
+        Type type = loadResolvedPlatformType(context, typeName, McorePackage.Literals.TYPE);
+        if (type == null)
+            type = loadResolvedPlatformType(context, typeName, McorePackage.Literals.TYPE_ITEM);
+        return type;
     }
 
     private static Type loadResolvedPlatformType(EObject mdOwner, String typeName, EClass providerClass)
@@ -760,9 +806,12 @@ final class PropertySheetPlatformPropertyResolver
         EObject object = description.getEObjectOrProxy();
         if (object == null)
             return null;
-        org.eclipse.emf.ecore.resource.Resource resource = mdOwner.eResource();
-        if (resource != null)
-            object = EcoreUtil.resolve(object, resource);
+        if (mdOwner != null)
+        {
+            org.eclipse.emf.ecore.resource.Resource resource = mdOwner.eResource();
+            if (resource != null)
+                object = EcoreUtil.resolve(object, resource);
+        }
         return object instanceof Type type ? type : null;
     }
 

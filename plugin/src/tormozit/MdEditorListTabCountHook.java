@@ -377,13 +377,16 @@ public final class MdEditorListTabCountHook implements IStartup
             if (folder.isDisposed())
                 return;
             int n = folder.getItemCount();
-            if (n != lastCount[0])
+            boolean countChanged = n != lastCount[0];
+            boolean needContent = folder.getData(KEY_CONTENT_APPLIED) == null
+                && isTabFolderReady(editor, folder);
+            if (countChanged)
             {
                 lastCount[0] = n;
                 scheduleRefreshEditor(editor);
                 return;
             }
-            if (folder.getData(KEY_CONTENT_APPLIED) == null && isTabFolderReady(editor, folder))
+            if (needContent)
                 scheduleRefreshEditor(editor);
         });
     }

@@ -15,11 +15,10 @@ import org.eclipse.ui.IViewPart;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.navigator.CommonViewer;
 
-import com._1c.g5.v8.dt.ui.commands.ShowPropertiesHandler;
-
 /**
- * Двойной клик по реквизиту в навигаторе: штатный {@code OpenHelper} (редактор объекта МД)
- * + активация панели «Свойства» последней ({@link ShowPropertiesHandler}).
+ * Двойной клик по реквизиту в навигаторе: штатный {@code OpenHelper} открывает редактор
+ * объекта МД; панель «Свойства» активирует {@link OpenHelperAttributePropertiesHook}.
+ * Этот хук — запасной путь, если {@code OpenAction} не дошёл до {@code OpenHelper}.
  */
 public final class NavigatorAttributePropertiesHook implements IStartup
 {
@@ -105,18 +104,7 @@ public final class NavigatorAttributePropertiesHook implements IStartup
         if (navigator == null || display == null || display.isDisposed())
             return;
         NavigatorAttributePropertiesDebug.trace(source + " -> schedule ShowProperties"); //$NON-NLS-1$
-        display.asyncExec(() -> activateProperties(navigator));
-    }
-
-    private static void activateProperties(IViewPart navigator)
-    {
-        if (navigator == null || navigator.getSite() == null)
-        {
-            NavigatorAttributePropertiesDebug.trace("activateProperties SKIP site=null"); //$NON-NLS-1$
-            return;
-        }
-        NavigatorAttributePropertiesDebug.trace("activateProperties ShowPropertiesHandler.run"); //$NON-NLS-1$
-        ShowPropertiesHandler.run(navigator.getViewSite());
+        OpenHelperAttributePropertiesHook.scheduleActivateProperties();
     }
 
     private static Object resolveDoubleClickElement(CommonViewer viewer, Tree tree, Event e)

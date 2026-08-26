@@ -116,6 +116,15 @@ public final class TextMergeEditorHook
         MergeResultEditorKeys.installFocusFilter(display);
     }
 
+    /**
+     * Tab / Shift+Tab и «Переключить комментарий» в редактируемом поле сравнения —
+     * тот же механизм, что в поле результата объединения модулей.
+     */
+    static void installEditorKeys(StyledText text, SourceViewer viewer)
+    {
+        MergeResultEditorKeys.install(text, viewer);
+    }
+
     private static void handleShow(Event event)
     {
         if (!(event.widget instanceof Shell shell) || shell.isDisposed())

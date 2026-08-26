@@ -12,6 +12,9 @@
     <startup class="tormozit.DataCompositionSchemaEditorHook"/> 
     <startup class="tormozit.MoxelEditorHook"/>
     <startup class="tormozit.BSLEditorMenuHook"/>
+    <startup class="tormozit.BslHandlerBlankLineHook"/>
+    <startup class="tormozit.NaparnikManualModeHook"/>
+    <startup class="tormozit.NaparnikPasteCompareHook"/>
     <startup class="tormozit.BslParseTruncationMarkHook"/>
     <startup class="tormozit.BslModulePositionMemoryHook"/>
     <startup class="tormozit.BslBracketJumpHistoryHook"/>
@@ -49,6 +52,8 @@
     <startup class="tormozit.MdEventHandlersPageHook"/>
     <startup class="tormozit.MdEditorTitleNavigatorMenuHook"/>
     <startup class="tormozit.MdEditorListTabCountHook"/>
+    <!-- Обход issue 400: пропажа иконок вкладок панели редакторов -->
+    <startup class="tormozit.EditorTabIconDiagHook"/>
     <startup class="tormozit.MdEditorAttributeMenuHook"/>
     <startup class="tormozit.MdEditorFunctionalOptionsCountHook"/>
     <startup class="tormozit.PredefinedDataSortHook"/>
@@ -90,11 +95,13 @@
     <startup class="tormozit.NavigatorRevealDropHook"/>
     <startup class="tormozit.NavigatorCopyProjectMenuHook"/>
     <startup class="tormozit.NavigatorRecomputeChecksMenuHook"/>
+    <startup class="tormozit.OpenHelperAttributePropertiesHook"/>
     <startup class="tormozit.NavigatorAttributePropertiesHook"/>
     <startup class="tormozit.NavigatorCopyTextAugmentHook"/>
     <startup class="tormozit.ChoiceParametersHook"/>
     <startup class="tormozit.PredefinedSelectionDialogHook"/>
     <startup class="tormozit.ColorDialogHook"/>
+    <startup class="tormozit.NaparnikFixDialogHook"/>
     <startup class="tormozit.DebugViewsMenuHook"/>
     <startup class="tormozit.DebugViewsCollectionKeyHook"/>
     <startup class="tormozit.DebugValuesInspectHook"/>

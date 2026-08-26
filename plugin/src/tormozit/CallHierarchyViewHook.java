@@ -204,19 +204,13 @@ public final class CallHierarchyViewHook implements IStartup
         TableViewer locationViewer = locationViewerOf(view);
         Table table = locationViewer != null ? locationViewer.getTable() : null;
         if (table == null || table.isDisposed())
-        {
-            tempLog("skip: no table view=" + className(view)); //$NON-NLS-1$
             return;
-        }
         if (Boolean.TRUE.equals(table.getData(INSTALLED_MARKER)))
             return;
 
         Object treeRaw = Global.invoke(view, "getTreeViewer"); //$NON-NLS-1$
         if (!(treeRaw instanceof TreeViewer treeViewer))
-        {
-            tempLog("skip: no treeViewer view=" + className(view)); //$NON-NLS-1$
             return;
-        }
 
         try
         {
@@ -268,13 +262,10 @@ public final class CallHierarchyViewHook implements IStartup
 
             table.setData(INSTALLED_MARKER, Boolean.TRUE);
             table.setData(SESSION_KEY, session);
-            tempLog("installed fti=" + (session.interaction != null) //$NON-NLS-1$
-                + " parent=" + className(table.getParent())); //$NON-NLS-1$
             Debug.log("installed"); //$NON-NLS-1$
         }
-        catch (RuntimeException ex)
+        catch (RuntimeException ignored)
         {
-            tempLog("install failed: " + ex); //$NON-NLS-1$
         }
     }
 
@@ -290,10 +281,7 @@ public final class CallHierarchyViewHook implements IStartup
         if (table == null || table.isDisposed())
             return null;
         if (!(table.getParent() instanceof SashForm sash))
-        {
-            tempLog("fti skip: parent=" + className(table.getParent())); //$NON-NLS-1$
             return null;
-        }
 
         Composite tableStack = new Composite(sash, SWT.NONE);
         tableStack.setLayout(null);
@@ -303,7 +291,6 @@ public final class CallHierarchyViewHook implements IStartup
         if (!table.setParent(columnHost))
         {
             tableStack.dispose();
-            tempLog("fti skip: setParent=false"); //$NON-NLS-1$
             return null;
         }
         table.setLayout(null);
@@ -418,7 +405,6 @@ public final class CallHierarchyViewHook implements IStartup
             else if (CALLER_KIND_METHOD.equals(kind))
                 settings.put(KEY_COL_METHOD_WIDTH, Integer.toString(column.getWidth()));
         }
-        tempLog("save cols line=" + lineColumn.getWidth() + " info=" + infoColumn.getWidth()); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private static void enhanceSplitter(SashForm sash, Composite tableStack)
@@ -456,7 +442,6 @@ public final class CallHierarchyViewHook implements IStartup
         int left = FormTableColumnState.readWidth(settings, KEY_SASH_LEFT, 50, 1);
         int right = FormTableColumnState.readWidth(settings, KEY_SASH_RIGHT, 50, 1);
         sash.setWeights(new int[] { left, right });
-        tempLog("restore sash left=" + left + " right=" + right); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private static void saveSashWeights(SashForm sash)
@@ -469,7 +454,6 @@ public final class CallHierarchyViewHook implements IStartup
         IDialogSettings settings = dialogSettings();
         settings.put(KEY_SASH_LEFT, weights[0]);
         settings.put(KEY_SASH_RIGHT, weights[1]);
-        tempLog("save sash left=" + weights[0] + " right=" + weights[1]); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private static void applyPixelWidth(TableColumn column, TableColumnLayout layout, int width)
@@ -535,16 +519,6 @@ public final class CallHierarchyViewHook implements IStartup
         return Integer.valueOf(CALL_MODE_CALLERS).equals(mode);
     }
 
-    private static String className(Object object)
-    {
-        return object == null ? "null" : object.getClass().getName(); //$NON-NLS-1$
-    }
-
-    private static void tempLog(String text)
-    {
-        Global.tempLog("call-hierarchy", text); //$NON-NLS-1$
-    }
-
     private static final class Session
     {
         private final IViewPart view;
@@ -578,7 +552,6 @@ public final class CallHierarchyViewHook implements IStartup
             this.treeViewer = treeViewer;
             this.locationViewer = locationViewer;
             this.followTree = readFollowTree();
-            tempLog("follow-tree restore=" + followTree); //$NON-NLS-1$
         }
 
         void onResultChanged(Object event)
@@ -587,8 +560,6 @@ public final class CallHierarchyViewHook implements IStartup
             Display display = workbench != null ? workbench.getDisplay() : null;
             if (display == null || display.isDisposed())
                 return;
-            String kind = event == null ? "null" : event.getClass().getSimpleName(); //$NON-NLS-1$
-            tempLog("result-event " + kind); //$NON-NLS-1$
             if (isResultEvent(event, "Reset")) //$NON-NLS-1$
             {
                 searchFinished = false;
@@ -631,7 +602,6 @@ public final class CallHierarchyViewHook implements IStartup
                 lastFillAllowEmpty = false;
                 locationViewer.setInput(Collections.emptyList());
                 locationViewer.setSelection(StructuredSelection.EMPTY, false);
-                tempLog("clear table for new search"); //$NON-NLS-1$
             }
             finally
             {
@@ -703,9 +673,8 @@ public final class CallHierarchyViewHook implements IStartup
             {
                 listenerClass = loader.loadClass(LISTENER_CLASS);
             }
-            catch (ClassNotFoundException ex)
+            catch (ClassNotFoundException ignored)
             {
-                tempLog("listener class missing: " + ex); //$NON-NLS-1$
                 return null;
             }
             return Proxy.newProxyInstance(loader, new Class<?>[] { listenerClass },
@@ -727,9 +696,8 @@ public final class CallHierarchyViewHook implements IStartup
                             return "CallHierarchyViewHook.Session"; //$NON-NLS-1$
                         return null;
                     }
-                    catch (RuntimeException ex)
+                    catch (RuntimeException ignored)
                     {
-                        tempLog("listener: " + ex); //$NON-NLS-1$
                         return null;
                     }
                 });
@@ -786,7 +754,6 @@ public final class CallHierarchyViewHook implements IStartup
                 {
                     followTree = isChecked();
                     saveFollowTree();
-                    tempLog("follow-tree=" + followTree); //$NON-NLS-1$
                     applyFromTree(true);
                 }
             };
@@ -910,14 +877,9 @@ public final class CallHierarchyViewHook implements IStartup
                     node = NodeModelUtils.getNode(arg);
                 if (xtext != null && node != null && node.getLength() > 0)
                     xtext.selectAndReveal(node.getOffset(), node.getLength());
-                tempLog("open-arg param=" + paramIndex + " offset=" //$NON-NLS-1$ //$NON-NLS-2$
-                    + (node != null ? node.getOffset() : -1) + " len=" //$NON-NLS-1$
-                    + (node != null ? node.getLength() : 0)
-                    + " editor=" + (xtext != null)); //$NON-NLS-1$
             }
-            catch (RuntimeException ex)
+            catch (RuntimeException ignored)
             {
-                tempLog("open-arg: " + ex); //$NON-NLS-1$
             }
         }
 
@@ -1227,19 +1189,13 @@ public final class CallHierarchyViewHook implements IStartup
             {
                 Object inferred = firstRootNode();
                 if (isTreeNode(inferred))
-                {
-                    tempLog("apply no-selection infer=" + className(inferred)); //$NON-NLS-1$
                     first = inferred;
-                }
             }
             if (!isTreeNode(first) || !treeCurrent)
             {
                 List<IReferenceDescription> matching = matchingReferences();
-                tempLog("apply no-selection matching=" + matching.size() //$NON-NLS-1$
-                    + " finished=" + searchFinished //$NON-NLS-1$
-                    + " treeCurrent=" + treeCurrent); //$NON-NLS-1$
                 if (!withoutMethodDefinition(matching, Collections.emptyList()).isEmpty())
-                    fillTable(matching, Collections.emptyList(), true, "matching", fromUser); //$NON-NLS-1$
+                    fillTable(matching, Collections.emptyList(), true, fromUser);
                 return;
             }
 
@@ -1261,11 +1217,11 @@ public final class CallHierarchyViewHook implements IStartup
                 if (all.isEmpty())
                     all = matchingReferences();
             }
-            fillTable(all, mine, root, first.getClass().getSimpleName(), fromUser);
+            fillTable(all, mine, root, fromUser);
         }
 
         void fillTable(List<IReferenceDescription> all, List<IReferenceDescription> mine, boolean root,
-            String nodeName, boolean fromUser)
+            boolean fromUser)
         {
             if (all == null)
                 all = Collections.emptyList();
@@ -1273,13 +1229,7 @@ public final class CallHierarchyViewHook implements IStartup
                 all = withoutMethodDefinition(all, mine);
             lastFillAllowEmpty = searchFinished && all.isEmpty();
             if (all.isEmpty())
-            {
-                tempLog("apply empty mine=" + (mine != null ? mine.size() : 0) //$NON-NLS-1$
-                    + " callers=" + isCallersMode(view) + " root=" + root //$NON-NLS-1$ //$NON-NLS-2$
-                    + " node=" + nodeName + " follow=" + followTreeEffective() //$NON-NLS-1$ //$NON-NLS-2$
-                    + " finished=" + searchFinished); //$NON-NLS-1$
                 return;
-            }
             Table table = locationViewer.getTable();
             if (!fromUser && !forceEmpty && table.getItemCount() > 0
                 && sameDescriptions(locationViewer.getInput(), all))
@@ -1307,17 +1257,10 @@ public final class CallHierarchyViewHook implements IStartup
                 selectTableRows(shown, mine);
                 if (interaction != null)
                     interaction.resyncSelectionTheme();
-                tempLog("apply rows=" + shown.size() + " mine=" + mine.size() //$NON-NLS-1$ //$NON-NLS-2$
-                    + " items=" + table.getItemCount() //$NON-NLS-1$
-                    + " root=" + root //$NON-NLS-1$
-                    + " node=" + nodeName //$NON-NLS-1$
-                    + " follow=" + followTreeEffective() //$NON-NLS-1$
-                    + " selected=" + locationViewer.getStructuredSelection().size()); //$NON-NLS-1$
                 scheduleRefillIfCleared(shown);
             }
-            catch (RuntimeException ex)
+            catch (RuntimeException ignored)
             {
-                tempLog("apply: " + ex); //$NON-NLS-1$
             }
             finally
             {
@@ -1350,7 +1293,6 @@ public final class CallHierarchyViewHook implements IStartup
                         return;
                     if (table.getItemCount() > 0)
                         return;
-                    tempLog("refill after edt-clear delay=" + captured + " rows=" + shown.size()); //$NON-NLS-1$ //$NON-NLS-2$
                     keptInput = shown;
                     locationViewer.setInput(shown);
                 });
@@ -1381,10 +1323,7 @@ public final class CallHierarchyViewHook implements IStartup
                         attachResult(result);
                     boolean empty = table.getItemCount() == 0;
                     if (empty && keptInput != null && !keptInput.isEmpty() && !forceEmpty)
-                    {
-                        tempLog("watch refill kept=" + keptInput.size()); //$NON-NLS-1$
                         locationViewer.setInput(keptInput);
-                    }
                     else if (empty || !searchFinished)
                         applyFromTree(false);
                     int delay = empty || !searchFinished ? 200 : 500;
@@ -1733,9 +1672,8 @@ public final class CallHierarchyViewHook implements IStartup
                 {
                     docs = ParamHintHtmlModifier.plainParamDescriptions(method, names);
                 }
-                catch (RuntimeException ex)
+                catch (RuntimeException ignored)
                 {
-                    tempLog("header-tips compute: " + ex); //$NON-NLS-1$
                     docs = Collections.emptyList();
                 }
                 if (monitor.isCanceled() || gen != tipsGeneration)
@@ -1762,7 +1700,6 @@ public final class CallHierarchyViewHook implements IStartup
             if (columns == null || names == null || names.isEmpty())
                 return;
             int start = paramColumnStart();
-            int withDoc = 0;
             int size = docs != null ? docs.size() : 0;
             for (int i = 0; i < names.size(); i++)
             {
@@ -1770,14 +1707,11 @@ public final class CallHierarchyViewHook implements IStartup
                     break;
                 TableColumn column = columns[start + i];
                 String extra = i < size ? docs.get(i) : null;
-                if (extra != null && !extra.isBlank())
-                    withDoc++;
                 if (interaction != null)
                     interaction.setHeaderTooltipExtra(column, extra);
                 else if (extra != null && !extra.isBlank())
                     column.setToolTipText(extra);
             }
-            tempLog("header-tips params=" + names.size() + " withDoc=" + withDoc); //$NON-NLS-1$ //$NON-NLS-2$
         }
 
         String[] argsOf(Object element)

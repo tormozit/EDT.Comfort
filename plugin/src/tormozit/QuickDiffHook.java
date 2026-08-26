@@ -8,6 +8,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
 
@@ -37,6 +38,10 @@ import org.eclipse.jface.text.DefaultInformationControl;
 import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.IInformationControl;
 import org.eclipse.jface.text.IInformationControlCreator;
+import org.eclipse.jface.text.ITextListener;
+import org.eclipse.jface.text.IViewportListener;
+import org.eclipse.jface.text.JFaceTextUtil;
+import org.eclipse.jface.text.TextEvent;
 import org.eclipse.jface.text.Position;
 import org.eclipse.jface.text.information.IInformationProviderExtension2;
 import org.eclipse.jface.text.source.Annotation;
@@ -67,6 +72,7 @@ import org.eclipse.swt.graphics.GC;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.graphics.RGB;
+import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
@@ -554,16 +560,16 @@ public final class QuickDiffHook implements IStartup
         {
             if (column == null)
                 return;
-            wrapDifferOnPainter(Global.getField(column, "fDiffPainter")); //$NON-NLS-1$
+            wrapDifferOnPainter(Global.getField(column, "fDiffPainter"), "diff"); //$NON-NLS-1$ //$NON-NLS-2$
             Object revisionPainter = Global.getField(column, "fRevisionPainter"); //$NON-NLS-1$
-            if (wrapDifferOnPainter(revisionPainter) && column.isShowingRevisionInformation())
+            if (wrapDifferOnPainter(revisionPainter, "rev") && column.isShowingRevisionInformation()) //$NON-NLS-1$
                 Global.invoke(revisionPainter, "clearRangeCache"); //$NON-NLS-1$
         }
 
         /**
          * @return {@code true}, если поле {@code fLineDiffer} заменили обёрткой
          */
-        private boolean wrapDifferOnPainter(Object painter)
+        private boolean wrapDifferOnPainter(Object painter, String tag)
         {
             if (painter == null)
                 return false;

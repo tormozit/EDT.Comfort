@@ -40,7 +40,6 @@ import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
  */
 public final class PropertySheetNonDefaultHighlightHook implements IStartup
 {
-    private static final String TEMP_TOPIC = "свойства-неавто"; //$NON-NLS-1$
     private static final String DECORATION_KEY = "DecorationSupport.LwtControlDecoration"; //$NON-NLS-1$
     private static final String CHANGED_LISTENER = "com._1c.g5.lwt.controls.IChangedListener"; //$NON-NLS-1$
     private static final String DECORATION_TOOLTIP = "Значение не Авто"; //$NON-NLS-1$
@@ -89,7 +88,6 @@ public final class PropertySheetNonDefaultHighlightHook implements IStartup
             @Override public void windowDeactivated(IWorkbenchWindow w) {}
             @Override public void windowClosed(IWorkbenchWindow w) {}
         });
-        Global.tempLog(TEMP_TOPIC, "установлен"); //$NON-NLS-1$
         scheduleSync();
     }
 
@@ -171,8 +169,6 @@ public final class PropertySheetNonDefaultHighlightHook implements IStartup
     {
         pruneDead();
         Set<Object> live = Collections.newSetFromMap(new IdentityHashMap<>());
-        Global.tempLog(TEMP_TOPIC, "sync views=" + HOOKED_VIEWS.size() //$NON-NLS-1$
-            + " editors=" + HOOKED_EDITORS.size()); //$NON-NLS-1$
         for (IViewPart view : HOOKED_VIEWS)
         {
             Object page = PropertyNameIdentifierHook.resolvePropertySheetPage(view);
@@ -190,60 +186,28 @@ public final class PropertySheetNonDefaultHighlightHook implements IStartup
     private static void applyPage(Object page, Set<Object> live)
     {
         if (page == null)
-        {
-            Global.tempLog(TEMP_TOPIC, "applyPage page=null"); //$NON-NLS-1$
             return;
-        }
         watchPage(page);
         Map<?, ?> map = viewModelToView(page);
         if (map == null)
-        {
-            Global.tempLog(TEMP_TOPIC, "applyPage " + simpleName(page) + " map=null"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
-        }
-        int combos = 0;
-        int marked = 0;
-        StringBuilder keys = new StringBuilder();
         for (Map.Entry<?, ?> entry : map.entrySet())
         {
             Object vm = entry.getKey();
-            if (keys.length() < 400)
-            {
-                if (keys.length() > 0)
-                    keys.append(',');
-                keys.append(simpleName(vm));
-            }
             if (!isComboViewModel(vm))
                 continue;
             Object light = comboControlFromView(entry.getValue());
-            combos++;
             if (!isComboControl(light) || isDisposed(light))
-            {
-                Global.tempLog(TEMP_TOPIC, "skip light vm=" + simpleName(vm) //$NON-NLS-1$
-                    + " view=" + simpleName(entry.getValue()) //$NON-NLS-1$
-                    + " light=" + className(light)); //$NON-NLS-1$
                 continue;
-            }
             live.add(light);
             wireCombo(light);
-            if (applyCombo(vm, light))
-                marked++;
+            applyCombo(vm, light);
         }
-        Global.tempLog(TEMP_TOPIC, "applyPage " + simpleName(page) //$NON-NLS-1$
-            + " map=" + map.size() + " combos=" + combos + " marked=" + marked //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " keys=" + keys); //$NON-NLS-1$
     }
 
-    private static boolean applyCombo(Object viewModel, Object light)
+    private static void applyCombo(Object viewModel, Object light)
     {
-        boolean mark = shouldMark(viewModel);
-        Global.tempLog(TEMP_TOPIC, (mark ? "MARK " : "skip ") + simpleName(viewModel) //$NON-NLS-1$ //$NON-NLS-2$
-            + " light=" + simpleName(light) //$NON-NLS-1$
-            + " selected=" + itemText(Global.invoke(viewModel, "getSelectedItem")) //$NON-NLS-1$ //$NON-NLS-2$
-            + " items=" + itemsDump(viewModel) //$NON-NLS-1$
-            + " statusOk=" + statusOk(viewModel) //$NON-NLS-1$
-            + " deco=" + (Global.invoke(light, "getData", DECORATION_KEY) != null)); //$NON-NLS-1$ //$NON-NLS-2$
-        if (mark)
+        if (shouldMark(viewModel))
         {
             if (!ORIGINAL_FOREGROUND.containsKey(light))
                 ORIGINAL_FOREGROUND.put(light, readForeground(light));
@@ -251,10 +215,9 @@ public final class PropertySheetNonDefaultHighlightHook implements IStartup
             if (!sameRgb(readForeground(light), accent))
                 writeForeground(light, accent);
             showDecorationIfNoError(viewModel, light);
-            return true;
+            return;
         }
         restoreCombo(light, viewModel);
-        return false;
     }
 
     private static void restoreCombo(Object light, Object viewModel)
@@ -527,43 +490,6 @@ public final class PropertySheetNonDefaultHighlightHook implements IStartup
         else
             Global.setField(light, "textColor", color); //$NON-NLS-1$
         Global.invokeVoid(light, "invalidate"); //$NON-NLS-1$
-    }
-
-    private static String itemsDump(Object viewModel)
-    {
-        Object items = Global.invoke(viewModel, "getItems"); //$NON-NLS-1$
-        if (!(items instanceof Iterable<?> list))
-            return items == null ? "<null>" : simpleName(items); //$NON-NLS-1$
-        StringBuilder sb = new StringBuilder("["); //$NON-NLS-1$
-        int n = 0;
-        for (Object item : list)
-        {
-            if (n > 0)
-                sb.append('|');
-            sb.append(itemText(item));
-            n++;
-            if (n >= 8)
-            {
-                sb.append("|…"); //$NON-NLS-1$
-                break;
-            }
-        }
-        sb.append(']').append(n);
-        return sb.toString();
-    }
-
-    private static String simpleName(Object o)
-    {
-        if (o == null)
-            return "<null>"; //$NON-NLS-1$
-        String cn = o.getClass().getName();
-        int dot = cn.lastIndexOf('.');
-        return dot < 0 ? cn : cn.substring(dot + 1);
-    }
-
-    private static String className(Object o)
-    {
-        return o == null ? "<null>" : o.getClass().getName(); //$NON-NLS-1$
     }
 
     private static boolean isDisposed(Object light)

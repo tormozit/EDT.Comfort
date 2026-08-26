@@ -3004,7 +3004,8 @@ public final class BslOutlineEventsSupport
                     procedureParameters.addSuffix(procedureParameters.getSuffix(isRussian));
                 String content = invokeCreateInsertContentLikeEdt(document, eventsLookup, mcoreEvent, paramSet,
                         procedureParameters, insertOffset, isRussian);
-                content = ensureSeparatingBlankLineBeforeHandler(document, insertOffset, content);
+                content = BslHandlerBlankLineHook.ensureSeparatingBlankLineBeforeHandler(
+                        document, insertOffset, content);
                 return new HandlerProposal(content, insertOffset, 0);
             }
             ProcedureParameters procedureParameters;
@@ -3024,7 +3025,8 @@ public final class BslOutlineEventsSupport
             content = stripInvalidEventDirectivePlaceholder(content);
             if (regionsProvider == null)
             {
-                content = ensureSeparatingBlankLineBeforeHandler(document, insertOffset, content);
+                content = BslHandlerBlankLineHook.ensureSeparatingBlankLineBeforeHandler(
+                        document, insertOffset, content);
                 return new HandlerProposal(content, insertOffset, 0);
             }
             BslModuleEventData eventData = new BslModuleEventData(root);
@@ -3033,7 +3035,8 @@ public final class BslOutlineEventsSupport
             content = regionsProvider.wrap(textInsertInfo, content);
             content = stripInvalidEventDirectivePlaceholder(content);
             int applyOffset = textInsertInfo.getPosition();
-            content = ensureSeparatingBlankLineBeforeHandler(document, applyOffset, content);
+            content = BslHandlerBlankLineHook.ensureSeparatingBlankLineBeforeHandler(
+                    document, applyOffset, content);
             return new HandlerProposal(content, applyOffset, textInsertInfo.getClearLength());
         });
     }
@@ -3056,107 +3059,6 @@ public final class BslOutlineEventsSupport
             out.append(line);
         }
         return out.toString();
-    }
-
-    /** Пустая строка-разделитель перед новым обработчиком, как в конфигураторе. */
-    private static String ensureSeparatingBlankLineBeforeHandler(IXtextDocument document, int offset, String content)
-            throws BadLocationException
-    {
-        if (content == null || content.isEmpty() || offset <= 0)
-            return content;
-        int safeOffset = Math.min(offset, Math.max(0, document.getLength() - 1));
-        String ld = document.getLineDelimiter(document.getLineOfOffset(safeOffset));
-        if (ld == null || ld.isEmpty())
-            ld = "\r\n"; //$NON-NLS-1$
-
-        if (hasBlankLineBefore(document, offset))
-        {
-            return stripLeadingLineDelimiters(content);
-        }
-
-        if (countLeadingLineDelimiters(content) >= 2)
-        {
-            return content;
-        }
-
-        String body = stripLeadingLineDelimiters(content);
-        StringBuilder prefix = new StringBuilder();
-        char charBefore = document.getChar(offset - 1);
-        if (charBefore != '\n' && charBefore != '\r')
-            prefix.append(ld);
-        prefix.append(ld);
-        return prefix.toString() + body;
-    }
-
-    private static boolean hasBlankLineBefore(IXtextDocument document, int offset) throws BadLocationException
-    {
-        if (offset <= 0)
-            return true;
-        int length = document.getLength();
-        if (length <= 0)
-            return true;
-        int line = document.getLineOfOffset(Math.min(offset, length - 1));
-        int lineStart = document.getLineOffset(line);
-        if (offset == lineStart && document.getLineLength(line) == 0)
-            return true;
-        if (offset == lineStart && document.get(lineStart, document.getLineLength(line)).trim().isEmpty())
-            return true;
-        if (line > 0)
-        {
-            int prevStart = document.getLineOffset(line - 1);
-            if (document.get(prevStart, document.getLineLength(line - 1)).trim().isEmpty())
-                return true;
-        }
-        return false;
-    }
-
-    private static String stripLeadingLineDelimiters(String text)
-    {
-        if (text == null || text.isEmpty())
-            return text;
-        int i = 0;
-        while (i < text.length())
-        {
-            char c = text.charAt(i);
-            if (c == '\r')
-            {
-                i++;
-                if (i < text.length() && text.charAt(i) == '\n')
-                    i++;
-            }
-            else if (c == '\n')
-                i++;
-            else
-                break;
-        }
-        return text.substring(i);
-    }
-
-    private static int countLeadingLineDelimiters(String text)
-    {
-        if (text == null || text.isEmpty())
-            return 0;
-        int count = 0;
-        int i = 0;
-        while (i < text.length())
-        {
-            char c = text.charAt(i);
-            if (c == '\r')
-            {
-                i++;
-                if (i < text.length() && text.charAt(i) == '\n')
-                    i++;
-                count++;
-            }
-            else if (c == '\n')
-            {
-                i++;
-                count++;
-            }
-            else
-                break;
-        }
-        return count;
     }
 
     /**

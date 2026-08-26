@@ -84,25 +84,41 @@ public final class PasteWithCompareActions
             return;
         }
 
+        runWithNewText(shell, ctx, clipboardText);
+    }
+
+    /**
+     * Модальное сравнение выделения с заданным новым текстом (не с буфером обмена).
+     *
+     * @return {@code true}, если сравнение показано (вставка или отмена), {@code false} если
+     *         контекст непригоден или диалог не открылся
+     */
+    public static boolean runWithNewText(Shell shell, TextEditor.Context ctx, String newText)
+    {
+        if (ctx == null || !ctx.editable)
+            return false;
+
         try
         {
             StringFragmentCompareInput input = new StringFragmentCompareInput(
                 ctx.selectedText,
-                clipboardText,
+                newText != null ? newText : "", //$NON-NLS-1$
                 ctx.compareViewerType,
                 ctx);
 
-            String newText = input.openDialog();
-            if (newText == null)
-                return;
+            String result = input.openDialog();
+            if (result == null)
+                return true;
 
-            TextEditor.replaceSelectionAndSelect(ctx, newText);
+            TextEditor.replaceSelectionAndSelect(ctx, result);
+            return true;
         }
         catch (Exception e)
         {
-            Global.log("PasteWithCompareActions.run: " + e); //$NON-NLS-1$
+            Global.log("PasteWithCompareActions.runWithNewText: " + e); //$NON-NLS-1$
             ToastNotification.show(MENU_LABEL,
                 "Не удалось открыть сравнение: " + e.getMessage(), 5000);
+            return false;
         }
     }
 
@@ -252,6 +268,8 @@ public final class PasteWithCompareActions
             TwoSideCurrentLinesSync.hook(currentLinesPanel, leftEditorText, rightEditorText,
                 mergeViewer, config, semanticLeft, semanticRight);
             addCompareInIrToolbarActionOnce();
+            if (rightEditorText != null && rightEditorText.getEditable())
+                TextMergeEditorHook.installEditorKeys(rightEditorText, rightSourceViewer);
         }
 
         /**
