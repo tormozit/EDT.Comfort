@@ -16,10 +16,12 @@ import org.eclipse.jface.action.IMenuManager;
 import org.eclipse.jface.action.MenuManager;
 import org.eclipse.jface.resource.ImageDescriptor;
 import org.eclipse.jface.resource.JFaceColors;
+import org.eclipse.jface.viewers.ILabelProviderListener;
 import org.eclipse.jface.viewers.ISelection;
 import org.eclipse.jface.viewers.ISelectionChangedListener;
 import org.eclipse.jface.viewers.ISelectionProvider;
 import org.eclipse.jface.viewers.IStructuredSelection;
+import org.eclipse.jface.viewers.LabelProviderChangedEvent;
 import org.eclipse.jface.viewers.StructuredSelection;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.StyleRange;
@@ -35,6 +37,7 @@ import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Menu;
+import org.eclipse.ui.IDecoratorManager;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IEditorReference;
 import org.eclipse.ui.IPartListener2;
@@ -108,6 +111,10 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
     private static final String KEY_BUSY_QUIET = "tormozit.mdTitleBusyQuiet"; //$NON-NLS-1$
 
     private static final String TITLE_REGION_CLASS = "TitleRegion"; //$NON-NLS-1$
+
+    /** Внутренние классы {@code DtGranularEditor} — среди них слушатель декоратора ({@code $5}). */
+    private static final String GRANULAR_EDITOR_CLASS =
+        "com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor$"; //$NON-NLS-1$
 
     /** Меню навигатора EDT — расположение вкладов {@code org.eclipse.ui.menus}. */
     private static final String NAVIGATOR_POPUP_ID = "com._1c.g5.v8.dt.navigator.ui.navigator.popup"; //$NON-NLS-1$
@@ -211,6 +218,7 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
                 // Страницы создаются лениво — встраиваемся в каждую при её первом показе
                 editor.addPageChangedListener(event -> installOnActivePage(editor));
             }
+            throttleDecoratorTitleRefire();
             installOnActivePage(editor);
         }
         catch (Exception e)
@@ -330,6 +338,75 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
                 formatted.append(segment);
         }
         return formatted.length() == 0 ? title : formatted.toString();
+    }
+
+    /**
+     * Гасит перевыпуск {@code PROP_TITLE} по каждому событию декоратора.
+     *
+     * <p>Декоратор EDT рассылает {@code labelProviderChanged} около пяти раз в секунду.
+     * Слушатель {@code DtGranularEditor$5} на каждое такое событие зовёт
+     * {@code firePropertyChange(PROP_TITLE)}, EDT переписывает заголовок формы **тем же текстом**,
+     * а {@code TitleRegion.setText} безусловно делает {@code layout()} и {@code redraw()} — то есть
+     * перерисовывается вся область части, включая линейку номеров (issue про мигание линейки).
+     *
+     * <p>Здесь слушатель редактора подменяется обёрткой, которая пропускает событие дальше, только
+     * если заголовок или подсказка вкладки действительно изменились. Перевыпуск при неизменном
+     * заголовке — чистая потеря, штатное обновление при переименовании или смене маркеров работает
+     * как прежде.
+     */
+    private static void throttleDecoratorTitleRefire()
+    {
+        try
+        {
+            IDecoratorManager manager = PlatformUI.getWorkbench().getDecoratorManager();
+            Object listeners = Global.getField(manager, "listeners"); //$NON-NLS-1$
+            Object array = Global.invoke(listeners, "getListeners"); //$NON-NLS-1$
+            if (!(array instanceof Object[] all))
+                return;
+            for (Object candidate : all)
+            {
+                if (!(candidate instanceof ILabelProviderListener listener)
+                    || candidate instanceof TitleRefireThrottle)
+                    continue;
+                if (!candidate.getClass().getName().startsWith(GRANULAR_EDITOR_CLASS))
+                    continue;
+                Object owner = Global.getField(candidate, "this$0"); //$NON-NLS-1$
+                if (!(owner instanceof IEditorPart editor))
+                    continue;
+                manager.removeListener(listener);
+                manager.addListener(new TitleRefireThrottle(listener, editor));
+            }
+        }
+        catch (Exception e)
+        {
+            // молча: без подавления останется прежнее поведение, ничего не ломается
+        }
+    }
+
+    /** См. {@link #throttleDecoratorTitleRefire()}. */
+    private static final class TitleRefireThrottle implements ILabelProviderListener
+    {
+        private final ILabelProviderListener delegate;
+
+        private final IEditorPart editor;
+
+        private String lastTitle;
+
+        TitleRefireThrottle(ILabelProviderListener delegate, IEditorPart editor)
+        {
+            this.delegate = delegate;
+            this.editor = editor;
+        }
+
+        @Override
+        public void labelProviderChanged(LabelProviderChangedEvent event)
+        {
+            String now = editor.getTitle() + ' ' + editor.getTitleToolTip();
+            if (now.equals(lastTitle))
+                return;
+            lastTitle = now;
+            delegate.labelProviderChanged(event);
+        }
     }
 
     /** Область заголовка формы — {@code org.eclipse.ui.internal.forms.widgets.TitleRegion}. */
