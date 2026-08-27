@@ -11,12 +11,14 @@ import org.eclipse.jface.preference.IPreferenceStore;
 import org.eclipse.jface.text.source.ISourceViewer;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.StyledText;
+import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.widgets.Combo;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Text;
+import org.eclipse.swt.widgets.Widget;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IEditorReference;
 import org.eclipse.ui.IPartListener2;
@@ -39,7 +41,9 @@ import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorXtextEditorPage;
 /**
  * В текстовых редакторах EDT, а также в любых полях ввода ({@link org.eclipse.swt.widgets.Text},
  * {@link org.eclipse.swt.widgets.Combo}) Ctrl+←/→ и Ctrl+Shift+←/→ используют границу идентификатора
- * (буквы, цифры, {@code _}), а не sub-word в CamelCase.
+ * (буквы, цифры, {@code _}), а не sub-word в CamelCase. Там же, в полях ввода, Ctrl+клик и двойной
+ * клик выделяют слово по границам идентификатора. В редакторах Ctrl+клик и двойной клик не трогаем:
+ * там свои механизмы (гиперссылки, {@link TextEditorCtrlClickSelectWordHook}).
  */
 public final class TextEditorIdentifierSelectionHook implements IStartup
 {
@@ -47,6 +51,9 @@ public final class TextEditorIdentifierSelectionHook implements IStartup
     private static final String SUB_WORD_NAVIGATION = "subWordNavigation"; //$NON-NLS-1$
     private static final String KEY_INTERCEPTOR_KEY = "tormozit.identifierWordKeyInterceptor"; //$NON-NLS-1$
     private static final String EDITOR_ACTIONS_KEY = "tormozit.identifierWordEditorActions"; //$NON-NLS-1$
+
+    /** Ключ SWT-данных: слово для выделения после отпускания кнопки (Ctrl+клик). */
+    private static final String PENDING_WORD_KEY = "tormozit.identifierWordPending"; //$NON-NLS-1$
 
     private final Set<DtGranularEditor<?>> hookedGranularEditors =
         Collections.newSetFromMap(new WeakHashMap<>());
@@ -68,6 +75,9 @@ public final class TextEditorIdentifierSelectionHook implements IStartup
             return;
         display.addFilter(SWT.FocusIn, TextEditorIdentifierSelectionHook::handleFocusIn);
         display.addFilter(SWT.KeyDown, TextEditorIdentifierSelectionHook::handleKeyDown);
+        display.addFilter(SWT.MouseDown, TextEditorIdentifierSelectionHook::handleMouseDown);
+        display.addFilter(SWT.MouseUp, TextEditorIdentifierSelectionHook::handleMouseUp);
+        display.addFilter(SWT.MouseDoubleClick, TextEditorIdentifierSelectionHook::handleMouseDoubleClick);
     }
 
     /** При получении фокуса любым {@link StyledText} устанавливаем идентификаторную навигацию. */
@@ -412,5 +422,82 @@ public final class TextEditorIdentifierSelectionHook implements IStartup
             return;
 
         e.doit = false;
+    }
+
+    /**
+     * Ctrl+клик в поле ввода ({@link Text}, {@link Combo}): выделяет слово-идентификатор
+     * под курсором. Слово запоминается на нажатии, а выделение ставится после отпускания
+     * кнопки: штатная обработка нажатой кнопки (каретка, протяжка выделения) успевает
+     * закончиться и больше не перекрывает наше выделение (иначе микродвижение указателя
+     * при зажатой кнопке подтягивало конец выделения к указателю — «левая часть слова»).
+     * В редакторах ({@link StyledText}) Ctrl+клик занят гиперссылками — там этим
+     * занимается {@link TextEditorCtrlClickSelectWordHook}.
+     */
+    private static void handleMouseDown(Event e)
+    {
+        Control field = asInputField(e.widget);
+        if (field == null || field.isDisposed())
+            return;
+
+        field.setData(PENDING_WORD_KEY, null);
+
+        if (e.button != 1 || !isCtrlOnly(e.stateMask))
+            return;
+        if (!ComfortSettings.isCtrlClickSelectWordEnabled())
+            return;
+
+        Point word = IdentifierSelectionSupport.wordAtCursor(field);
+        if (word != null)
+            field.setData(PENDING_WORD_KEY, word);
+    }
+
+    /** Применяет слово, запомненное при Ctrl+нажатии, — после штатной обработки отпускания. */
+    private static void handleMouseUp(Event e)
+    {
+        if (e.button != 1)
+            return;
+        Control field = asInputField(e.widget);
+        if (field == null || field.isDisposed())
+            return;
+        if (!(field.getData(PENDING_WORD_KEY) instanceof Point word))
+            return;
+
+        field.setData(PENDING_WORD_KEY, null);
+        if (field instanceof Text text)
+            IdentifierSelectionSupport.applyWordSelection(text, word);
+        else if (field instanceof Combo combo)
+            IdentifierSelectionSupport.applyWordSelection(combo, word);
+    }
+
+    /** Поле ввода ({@link Text} или {@link Combo}), получившее событие, либо {@code null}. */
+    private static Control asInputField(Widget widget)
+    {
+        if (widget instanceof Text text && !text.isDisposed())
+            return text;
+        if (widget instanceof Combo combo && !combo.isDisposed())
+            return combo;
+        return null;
+    }
+
+    /**
+     * Двойной клик в поле ввода: выделяет слово-идентификатор в точке клика, заменяя
+     * штатный результат двойного клика (нативное слово, «выделить всё» EDT). Третий
+     * и последующие клики ({@code count > 2}, выделение строки) не трогаем.
+     */
+    private static void handleMouseDoubleClick(Event e)
+    {
+        if (e.button != 1 || e.count != 2)
+            return;
+
+        if (e.widget instanceof Text field)
+            IdentifierSelectionSupport.selectWordAtDoubleClick(field);
+        else if (e.widget instanceof Combo combo)
+            IdentifierSelectionSupport.selectWordAtDoubleClick(combo);
+    }
+
+    /** Ctrl без Shift и Alt — как у {@link TextEditorCtrlClickSelectWordHook}. */
+    private static boolean isCtrlOnly(int stateMask)
+    {
+        return (stateMask & SWT.MOD1) != 0 && (stateMask & (SWT.SHIFT | SWT.ALT)) == 0;
     }
 }

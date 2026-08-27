@@ -38,7 +38,6 @@ import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Listener;
-import org.eclipse.swt.widgets.Widget;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IEditorReference;
 import org.eclipse.ui.IPartListener2;
@@ -104,13 +103,6 @@ public final class NaparnikManualModeHook implements IStartup
 
     private static final int MAX_ATTACH_ATTEMPTS = 100;
     private static final int[] SUPPRESS_DELAYS_MS = { 0, 50, 150, 400, 1000, 2500 };
-    private static final String FLICKER = "flicker-click"; //$NON-NLS-1$
-    private static final String LINE_NUMBER_KEY = "tormozit.quickDiffWs.lineNumber"; //$NON-NLS-1$
-    private static final int FLASH_GAP_MS = 80;
-    private static long lastLineMs;
-    private static long lastTitleMs;
-    private static int flashCount;
-    private static int titleCount;
     private static volatile boolean paintLogInstalled;
 
     private static final AtomicBoolean booted = new AtomicBoolean();
@@ -171,7 +163,6 @@ public final class NaparnikManualModeHook implements IStartup
             // Фильтр SWT.Paint снят: он срабатывает раньше слушателя виджета, то есть его
             // работа идёт, пока канва уже закрашена фоном, а буфер ещё не выложен. Для линейки
             // номеров это и есть видимая вспышка. Диагностику отрисовки в фильтр не возвращать.
-            flicker("session paint-log on (paint filter off)"); //$NON-NLS-1$
         }
 
         for (IWorkbenchWindow window : PlatformUI.getWorkbench().getWorkbenchWindows())
@@ -677,7 +668,6 @@ public final class NaparnikManualModeHook implements IStartup
             if (event == null || reverting.get())
                 return;
             String inserted = event.getText() != null ? event.getText() : ""; //$NON-NLS-1$
-            flicker("MARK doc rm=" + event.getLength() + " add=" + inserted.length()); //$NON-NLS-1$ //$NON-NLS-2$
             boolean naparnik = stackHasNaparnik();
             if (pasteActive.get() > 0 || (naparnik && inserted.length() > 1))
                 scheduleSuppress(event.getDocument());
@@ -1098,90 +1088,5 @@ public final class NaparnikManualModeHook implements IStartup
                 return true;
         }
         return false;
-    }
-
-    static void logFlickerCause(String tag)
-    {
-        flicker("CAUSE " + tag + shortStack()); //$NON-NLS-1$
-    }
-
-    private static void flicker(String text)
-    {
-        Global.tempLog(FLICKER, text);
-    }
-
-    private static void onFlickerPaint(Event event)
-    {
-        if (event == null || event.widget == null)
-            return;
-        if (event.widget instanceof Control control)
-            MdEditorTitleNavigatorMenuHook.wrapBusySpinner(control);
-        String kind = flickerWidgetKind(event.widget);
-        if (kind == null)
-            return;
-        long now = System.currentTimeMillis();
-        if (kind.startsWith("lineNumber")) //$NON-NLS-1$
-        {
-            long gap = lastLineMs == 0 ? 0 : now - lastLineMs;
-            lastLineMs = now;
-            if (gap > 0 && gap < FLASH_GAP_MS)
-                return;
-            flashCount++;
-            flicker("FLASH #" + flashCount + " gap=" + gap + "ms " + kind //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " " + event.width + "x" + event.height + shortStack()); //$NON-NLS-1$ //$NON-NLS-2$
-            return;
-        }
-        long gap = lastTitleMs == 0 ? 0 : now - lastTitleMs;
-        lastTitleMs = now;
-        if (gap > 0 && gap < FLASH_GAP_MS)
-            return;
-        titleCount++;
-        flicker("TITLE #" + titleCount + " gap=" + gap + "ms " + kind); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-    }
-
-    private static String flickerWidgetKind(Widget widget)
-    {
-        if (!(widget instanceof Control control) || control.isDisposed())
-            return null;
-        String simple = control.getClass().getSimpleName();
-        String parent = control.getParent() != null
-            ? control.getParent().getClass().getSimpleName() : ""; //$NON-NLS-1$
-        Control walk = control;
-        for (int i = 0; i < 8 && walk != null && !walk.isDisposed(); i++)
-        {
-            if (walk.getData(LINE_NUMBER_KEY) != null)
-                return "lineNumber widget=" + simple + " parent=" + parent; //$NON-NLS-1$ //$NON-NLS-2$
-            String wn = walk.getClass().getSimpleName();
-            if (wn.contains("LineNumber")) //$NON-NLS-1$
-                return "lineNumber class=" + wn + " widget=" + simple + " parent=" + parent; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            walk = walk.getParent();
-        }
-        if (simple.contains("TitleRegion") || parent.contains("TitleRegion") //$NON-NLS-1$ //$NON-NLS-2$
-            || "BusyIndicator".equals(simple) || "FormHeading".equals(parent) //$NON-NLS-1$ //$NON-NLS-2$
-            || "FormHeading".equals(simple)) //$NON-NLS-1$
-            return simple + " parent=" + parent; //$NON-NLS-1$
-        return null;
-    }
-
-    private static String shortStack()
-    {
-        StringBuilder sb = new StringBuilder();
-        int n = 0;
-        for (StackTraceElement frame : Thread.currentThread().getStackTrace())
-        {
-            String cn = frame.getClassName();
-            if (cn.startsWith("java.") || cn.startsWith("jdk.") || cn.startsWith("sun.") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                || cn.startsWith("org.eclipse.swt.")) //$NON-NLS-1$
-                continue;
-            if (!cn.contains("tormozit") && !cn.contains("e1c") && !cn.contains("_1c") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                && !cn.contains("jface") && !cn.contains("xtext") && !cn.contains("jobs") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                && !cn.contains("workbench") && !cn.contains("forms")) //$NON-NLS-1$ //$NON-NLS-2$
-                continue;
-            sb.append(" | ").append(cn).append('.').append(frame.getMethodName()) //$NON-NLS-1$
-                .append(':').append(frame.getLineNumber());
-            if (++n >= 16)
-                break;
-        }
-        return sb.length() == 0 ? "" : sb.toString(); //$NON-NLS-1$
     }
 }

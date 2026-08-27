@@ -1376,12 +1376,7 @@ public class ComfortPreferencePage
                     if (registry == null)
                         return lines;
 
-                    String profileId = (String) registryClass
-                        .getMethod("getDefaultProfileId") //$NON-NLS-1$
-                        .invoke(registry);
-                    Object profile = registryClass
-                        .getMethod("getProfile", String.class) //$NON-NLS-1$
-                        .invoke(registry, profileId);
+                    Object profile = selfProfile(registryClass, registry);
                     if (profile == null)
                         return lines;
 
@@ -1394,9 +1389,10 @@ public class ComfortPreferencePage
                     Class<?> monitorClass = Platform.getBundle("org.eclipse.core.runtime") //$NON-NLS-1$
                         .loadClass("org.eclipse.core.runtime.IProgressMonitor"); //$NON-NLS-1$
 
-                    Object query = queryUtil
-                        .getMethod("createIUPropertyQuery", String.class, String.class) //$NON-NLS-1$
-                        .invoke(null, PROP_PROFILE_ROOT_IU, Boolean.TRUE.toString());
+                    Object query = p2Engine
+                        .loadClass("org.eclipse.equinox.p2.engine.query.UserVisibleRootQuery") //$NON-NLS-1$
+                        .getConstructor()
+                        .newInstance();
                     Object result = profile.getClass()
                         .getMethod("query", queryClass, monitorClass) //$NON-NLS-1$
                         .invoke(profile, query, new NullProgressMonitor());
@@ -1421,6 +1417,24 @@ public class ComfortPreferencePage
                 return lines;
             }
             return lines;
+        }
+
+        /**
+         * Профиль текущего экземпляра: {@code IProfileRegistry.SELF} ("_SELF_"),
+         * иначе единственный существующий профиль.
+         */
+        private static Object selfProfile(Class<?> registryClass, Object registry)
+            throws ReflectiveOperationException
+        {
+            Object profile = registryClass
+                .getMethod("getProfile", String.class) //$NON-NLS-1$
+                .invoke(registry, "_SELF_"); //$NON-NLS-1$
+            if (profile != null)
+                return profile;
+            Object[] all = (Object[]) registryClass.getMethod("getProfiles").invoke(registry); //$NON-NLS-1$
+            if (all != null && all.length == 1)
+                return all[0];
+            return null;
         }
 
         private static void collectExtraIus(

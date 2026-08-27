@@ -3,7 +3,6 @@
 <plugin>
   <extension point="org.eclipse.ui.startup">
     <startup class="tormozit.ComfortShutdownHook"/>
-    <startup class="tormozit.StatusLineFreezeDebug"/>
     <startup class="tormozit.EditorStatusFieldsFixHook"/>
     <startup class="tormozit.LwtComboPopupFixHook"/>
     <startup class="tormozit.ActiveProjectTracker"/>

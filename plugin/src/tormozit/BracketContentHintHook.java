@@ -14,6 +14,9 @@ import org.eclipse.core.runtime.Status;
 import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.jface.action.IAction;
 import org.eclipse.jface.dialogs.IPageChangedListener;
+import org.eclipse.jface.text.BadLocationException;
+import org.eclipse.jface.text.DocumentEvent;
+import org.eclipse.jface.text.IDocumentListener;
 import org.eclipse.jface.text.ITextViewerExtension5;
 import org.eclipse.jface.text.source.ISourceViewer;
 import org.eclipse.swt.custom.CaretListener;
@@ -204,6 +207,7 @@ public final class BracketContentHintHook implements IStartup
             widget.addPaintListener(state.paintListener);
             widget.addCaretListener(state.caretListener);
             document.addModelListener(state.modelListener);
+            document.addDocumentListener(state.docListener);
             widget.addDisposeListener(e -> unpatch(widget));
 
             // ВАЖНО: здесь, в самом patchEditor (вызывается прямо из обработчика
@@ -236,6 +240,7 @@ public final class BracketContentHintHook implements IStartup
                 widget.removeCaretListener(state.caretListener);
             }
             state.document.removeModelListener(state.modelListener);
+            state.document.removeDocumentListener(state.docListener);
             state.rebuildJob.cancel();
         }
         catch (Exception ignored)
@@ -259,6 +264,19 @@ public final class BracketContentHintHook implements IStartup
         state.rebuildJob.schedule(REBUILD_DEBOUNCE_MS);
     }
 
+    private static int countLineDelimiters(String text)
+    {
+        if (text == null || text.isEmpty())
+            return 0;
+        int count = 0;
+        for (int i = 0; i < text.length(); i++)
+        {
+            if (text.charAt(i) == '\n')
+                count++;
+        }
+        return count;
+    }
+
     private static final class PatchState
     {
         final StyledText widget;
@@ -268,8 +286,12 @@ public final class BracketContentHintHook implements IStartup
         final PaintListener paintListener;
         final CaretListener caretListener;
         final IXtextModelListener modelListener;
+        final IDocumentListener docListener;
         final Job rebuildJob;
         volatile List<BracketContentHintIndex.Entry> index = Collections.emptyList();
+        volatile int pendingOldDelims;
+        /** Последнее множество подсказок, отражённое на экране (обновляется в onPaint). Только UI-поток. */
+        private List<BracketContentHintPresenter.VisibleHint> lastPainted = Collections.emptyList();
 
         PatchState(StyledText widget, IXtextDocument document, ITextViewerExtension5 lineMapper, ITextEditor editor)
         {
@@ -278,9 +300,20 @@ public final class BracketContentHintHook implements IStartup
             this.lineMapper = lineMapper;
             this.editor = editor;
             this.paintListener = this::onPaint;
+            // Перерисовка от каретки — только если фактически изменилось множество
+            // видимых подсказок (каретка вошла в строку подсказки / вышла), а не на
+            // каждое движение: во время rebuild свёрток EDT сама двигает каретку,
+            // и безусловный полный redraw только продлевал вспышку. При выключенной
+            // фече множество всегда пусто — перерисовка от каретки не выполняется вовсе.
             this.caretListener = e -> {
-                if (!widget.isDisposed())
-                    widget.redraw();
+                if (!widget.isDisposed() && ComfortSettings.isBracketContentHintEnabled())
+                {
+                    List<BracketContentHintPresenter.VisibleHint> current =
+                        BracketContentHintPresenter.computeVisibleHints(widget, lineMapper, index,
+                            ComfortSettings.getBracketContentHintMinLines());
+                    if (hintsDiffer(current, lastPainted))
+                        widget.redraw();
+                }
             };
             this.modelListener = resource -> {
                 // Не тратим время на пересчёт (даже фоновый), пока фича выключена
@@ -288,6 +321,30 @@ public final class BracketContentHintHook implements IStartup
                 // пользователей плагина.
                 if (ComfortSettings.isBracketContentHintEnabled())
                     scheduleRebuild(this);
+            };
+            this.docListener = new IDocumentListener()
+            {
+                @Override
+                public void documentAboutToBeChanged(DocumentEvent event)
+                {
+                    try
+                    {
+                        pendingOldDelims = countLineDelimiters(document.get(event.getOffset(), event.getLength()));
+                    }
+                    catch (Exception e)
+                    {
+                        pendingOldDelims = -1;
+                    }
+                }
+
+                @Override
+                public void documentChanged(DocumentEvent event)
+                {
+                    String inserted = event.getText();
+                    int oldDelims = pendingOldDelims;
+                    if (oldDelims >= 0)
+                        applyIndexShift(event.getOffset(), event.getLength(), inserted, oldDelims);
+                }
             };
             this.rebuildJob = new Job("Comfort: индекс подсказок BSL-конструкций") //$NON-NLS-1$
             {
@@ -327,14 +384,134 @@ public final class BracketContentHintHook implements IStartup
             this.rebuildJob.setPriority(Job.DECORATE);
         }
 
+        /**
+         * Мгновенно (до репарса и debounce-пересчёта) сдвигает записи индекса
+         * на дельту правки, чтобы подсказки сразу рисовались на правильных
+         * строках: без этого между правкой документа и {@code rebuild done}
+         * (~0.8 c: репарс + debounce) подсказки рисовались по устаревшим
+         * номерам строк документа и на секунду «съезжали» на соседние строки.
+         *
+         * <p>Гасятся ({@link #mapEntry} → {@code null}) только записи, у которых
+         * правка задела само закрывающее слово или стёрла строку начала —
+         * их геометрию надёжно пересчитать нельзя, их вернёт пересчёт.
+         */
+        private void applyIndexShift(int editOffset, int editOldLength, String inserted, int oldDelims)
+        {
+            int lineShift = countLineDelimiters(inserted) - oldDelims;
+            int insLen = inserted == null ? 0 : inserted.length();
+            int charShift = insLen - editOldLength;
+            if (lineShift == 0 && charShift == 0)
+                return;
+
+            // documentChanged приходит после применения правки, но префикс
+            // [0, editOffset) не изменился — номер строки начала правки в
+            // старых координатах равен номеру этой же позиции сейчас.
+            int editStartLine = safeGetLineOfOffset(editOffset);
+            if (editStartLine < 0)
+                return; // координаты не определились — оставляем до пересчёта
+            int editOldEndLine = editOldLength > 0 ? editStartLine + oldDelims : editStartLine;
+
+            List<BracketContentHintIndex.Entry> current = index;
+            List<BracketContentHintIndex.Entry> shifted = new ArrayList<>(current.size());
+            for (BracketContentHintIndex.Entry entry : current)
+            {
+                BracketContentHintIndex.Entry mapped =
+                    mapEntry(entry, editOffset, editOldLength, editStartLine, editOldEndLine, lineShift, charShift);
+                if (mapped != null)
+                    shifted.add(mapped);
+            }
+            index = shifted;
+        }
+
+        /**
+         * Переносит запись индекса через правку. Координаты записи и правки —
+         * СТАРЫЕ (на момент постройки индекса); полоса строк правки —
+         * [editStartLine, editOldEndLine]. Документ уже содержит правку,
+         * поэтому новую строку конца берём из него точно.
+         *
+         * <ul>
+         * <li>правка целиком ниже конструкции → запись без изменений;
+         * <li>целиком выше → сдвиг строк и офсетов на дельту;
+         * <li>правка после закрывающего слова (в т.ч. ENTER в конце его
+         * строки) → конструкция не сдвинулась, запись без изменений;
+         * <li>правка задела само закрывающее слово или строку начала →
+         * {@code null} до пересчёта;
+         * <li>иначе (правка выше закрывающего слова: тело, вставка/удаление
+         * строк) → офсет сдвигается на дельту, строка конца — точно из
+         * документа, строка начала не меняется.
+         * </ul>
+         */
+        private BracketContentHintIndex.Entry mapEntry(BracketContentHintIndex.Entry entry, int editOffset,
+            int editOldLength, int editStartLine, int editOldEndLine, int lineShift, int charShift)
+        {
+            if (editStartLine > entry.endLine)
+                return entry; // правка целиком ниже конструкции
+            if (editOldEndLine < entry.startLine)
+                return new BracketContentHintIndex.Entry(entry.startLine + lineShift, entry.endLine + lineShift,
+                    entry.endOffset + charShift, entry.hintText);
+
+            // правка задела полосу строк конструкции — точный разбор по офсетам
+            int closingChar = entry.endOffset - 1; // последний символ закрывающего слова
+            if (editOffset > closingChar)
+                return entry; // правка после закрывающего слова — конструкция не сдвинулась
+            if (editOffset + editOldLength > closingChar)
+                return null; // правка задела само закрывающее слово — ждём пересчёта
+            if (editStartLine < entry.startLine)
+                return null; // правка переписала строку начала конструкции
+
+            int newEndOffset = entry.endOffset + charShift;
+            int newEndLine;
+            try
+            {
+                newEndLine = document.getLineOfOffset(newEndOffset - 1);
+            }
+            catch (BadLocationException e)
+            {
+                return null;
+            }
+            return new BracketContentHintIndex.Entry(entry.startLine, newEndLine, newEndOffset, entry.hintText);
+        }
+
+        private int safeGetLineOfOffset(int offset)
+        {
+            try
+            {
+                return document.getLineOfOffset(offset);
+            }
+            catch (BadLocationException e)
+            {
+                return -1;
+            }
+        }
+
         private void onPaint(PaintEvent e)
         {
             if (!ComfortSettings.isBracketContentHintEnabled())
+            {
+                lastPainted = Collections.emptyList();
                 return;
+            }
 
             List<BracketContentHintPresenter.VisibleHint> visible = BracketContentHintPresenter.computeVisibleHints(
                 widget, lineMapper, index, ComfortSettings.getBracketContentHintMinLines());
+            lastPainted = visible;
             BracketContentHintPresenter.paint(e, widget, lineMapper, visible, isWhitespaceCharactersShown());
+        }
+
+        private static boolean hintsDiffer(List<BracketContentHintPresenter.VisibleHint> a,
+            List<BracketContentHintPresenter.VisibleHint> b)
+        {
+            if (a.size() != b.size())
+                return true;
+            for (int i = 0; i < a.size(); i++)
+            {
+                BracketContentHintPresenter.VisibleHint x = a.get(i);
+                BracketContentHintPresenter.VisibleHint y = b.get(i);
+                if (x.widgetLine != y.widgetLine || x.widgetColorOffset != y.widgetColorOffset
+                    || !x.text.equals(y.text))
+                    return true;
+            }
+            return false;
         }
 
         /**

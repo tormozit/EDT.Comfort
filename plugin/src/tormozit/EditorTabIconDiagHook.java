@@ -353,7 +353,6 @@ public final class EditorTabIconDiagHook implements IStartup
             return false;
         try
         {
-            NaparnikManualModeHook.logFlickerCause("tabIcon.setImage"); //$NON-NLS-1$
             item.setImage(live);
         }
         catch (RuntimeException ex)
