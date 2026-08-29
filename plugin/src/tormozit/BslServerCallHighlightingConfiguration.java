@@ -21,6 +21,8 @@ public final class BslServerCallHighlightingConfiguration
     public static final String SERVER_CALL_CONTEXT_ID = Activator.PLUGIN_ID + ".serverCallContext"; //$NON-NLS-1$
     /** Имя переменной в месте создания. */
     public static final String IMPLICIT_VARIABLE_ID = Activator.PLUGIN_ID + ".implicitVariable"; //$NON-NLS-1$
+    /** Слово-ключ в роли имени члена ({@code Запрос.Выполнить()}) — обычный текст, не ключевое слово. */
+    public static final String KEYWORD_MEMBER_NAME_ID = Activator.PLUGIN_ID + ".keywordMemberName"; //$NON-NLS-1$
 
     private static final String BSL_UI_BUNDLE = "com._1c.g5.v8.dt.bsl.ui"; //$NON-NLS-1$
     private static final String BSL_HIGHLIGHTING_CONFIGURATION =
@@ -31,6 +33,8 @@ public final class BslServerCallHighlightingConfiguration
         "Серверные вызовы из клиентского кода (с контекстом)"; //$NON-NLS-1$
     private static final String IMPLICIT_VARIABLE_LABEL =
         "Создаваемые переменные"; //$NON-NLS-1$
+    private static final String KEYWORD_MEMBER_NAME_LABEL =
+        "Ключевые слова в роли имён членов"; //$NON-NLS-1$
 
     private final IHighlightingConfiguration delegate = createNativeDelegate();
 
@@ -44,6 +48,9 @@ public final class BslServerCallHighlightingConfiguration
         acceptor.acceptDefaultHighlighting(SERVER_CALL_CONTEXT_ID, SERVER_CALL_CONTEXT_LABEL, serverCallContextTextStyle());
         acceptor.acceptDefaultHighlighting(IMPLICIT_VARIABLE_ID, IMPLICIT_VARIABLE_LABEL,
             implicitVariableTextStyle());
+        // без цвета — обычный текст редактора, null-foreground в StyleRange сбрасывает ключевую окраску
+        acceptor.acceptDefaultHighlighting(KEYWORD_MEMBER_NAME_ID, KEYWORD_MEMBER_NAME_LABEL,
+            new TextStyle());
     }
 
     /** Стиль всегда обычный — только цвет, без модификации шрифта (жирный/курсив). */

@@ -1,8 +1,14 @@
 package tormozit;
 
+import java.util.ArrayList;
+import java.util.List;
+
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.CLabel;
+import org.eclipse.swt.graphics.Image;
+import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.layout.GridData;
+import org.eclipse.swt.layout.GridLayout;
 import org.eclipse.swt.widgets.Button;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
@@ -13,6 +19,8 @@ import org.eclipse.ui.IStartup;
 
 import com._1c.g5.v8.dt.common.localization.LocalizedEnumProvider;
 import com._1c.g5.v8.dt.ui.V8UiSharedImages;
+import com._1c.g5.v8.dt.validation.marker.MarkerSeverity;
+import com.e1c.g5.v8.dt.check.settings.IssueSeverity;
 import com.e1c.g5.v8.dt.check.settings.IssueType;
 
 /**
@@ -50,6 +58,10 @@ public final class ProblemFiltersDialogHook implements IStartup
     private static final String SHOW_WARNINGS_LABEL = "Показывать предупреждения:"; //$NON-NLS-1$
     /** Треугольник с восклицательным знаком — общий знак предупреждения. */
     private static final String WARNING_ICON_PATH = "/icons/markers16/warning.gif"; //$NON-NLS-1$
+    /** Зазор между значком критичности, значком аннотации и подписью флажка. */
+    private static final int ICON_SPACING = 2;
+    /** Прокручиваемая форма, внутри которой лежат секции отбора. */
+    private static final String FORM_CLASS_NAME = "org.eclipse.ui.forms.widgets.ScrolledForm"; //$NON-NLS-1$
 
     @Override
     public void earlyStartup()
@@ -96,8 +108,12 @@ public final class ProblemFiltersDialogHook implements IStartup
             configErrors.moveBelow(replacement);
 
         renameWarningType(shell);
+        Composite severityHost = applyModuleSeverityIcons(shell);
 
         shell.layout(true, true);
+        // Раскладка секций внутри прокручиваемой формы к этому моменту ещё не
+        // выполнена (её ширина — ноль), поэтому недостачу считаем после показа.
+        shell.getDisplay().asyncExec(() -> grantMissingWidth(shell, severityHost));
         Debug.log("patch: header=" + (header != null) + " configErrors=" + (configErrors != null)); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
@@ -134,6 +150,192 @@ public final class ProblemFiltersDialogHook implements IStartup
         copy.horizontalIndent = original.horizontalIndent;
         copy.verticalIndent = original.verticalIndent;
         return copy;
+    }
+
+    /**
+     * Рядом со значком критичности показывается значок того же уровня в
+     * редакторе модуля (issue 423).
+     *
+     * <p>В модуле проблема показывается не значком критичности, а значком
+     * серьёзности, и по названию критичности не видно, чем именно она обернётся:
+     * «Значительная» и выше — ошибкой, «Незначительная» — предупреждением,
+     * «Тривиальная» — информацией.
+     *
+     * <p>Значки живут отдельными подписями, а не одной картинкой на флажке: у
+     * каждого своя подсказка — про критичность и про аннотацию. Значки и флажок
+     * складываются в одну ячейку, поэтому сама секция остаётся о двух столбцах,
+     * как штатно. Левый столбец не трогается вовсе: критичности там все до одной
+     * дают в модуле ошибку, и три одинаковых значка подряд ничего не добавляют.
+     */
+    private static Composite applyModuleSeverityIcons(Control root)
+    {
+        Composite host = findSeverityHost(root);
+        if (host == null)
+        {
+            Debug.log("applyModuleSeverityIcons: severity checkboxes not found"); //$NON-NLS-1$
+            return null;
+        }
+        List<Button> checkboxes = severityCheckboxes(host);
+        if (checkboxes.size() < 2)
+            return null;
+        for (int i = 1; i < checkboxes.size(); i += 2)
+            splitIcons(host, checkboxes.get(i));
+        return host;
+    }
+
+    /**
+     * Значок критичности и значок аннотации — отдельными подписями перед флажком,
+     * все трое в общей ячейке на месте флажка.
+     */
+    private static void splitIcons(Composite host, Button button)
+    {
+        MarkerSeverity marker = severityByTitle(button.getText());
+        IssueSeverity severity = ValidationChecksFilterHook.issueSeverityOf(marker);
+        Image own = button.getImage();
+        Image module = severity != null ? ValidationChecksFilterHook.moduleSeverityImage(severity) : null;
+        if (own == null || module == null)
+            return;
+
+        // Ширину флажка запоминаем до снятия значка: после setImage(null) SWT
+        // пересчитывает её без картинки, а нативный флажок место под неё не
+        // освобождает — подпись начинает резаться многоточием.
+        int width = button.computeSize(SWT.DEFAULT, SWT.DEFAULT).x;
+
+        Composite cell = new Composite(host, SWT.NONE);
+        cell.setLayoutData(button.getLayoutData());
+        cell.moveAbove(button);
+        GridLayout cellLayout = new GridLayout(3, false);
+        cellLayout.marginWidth = 0;
+        cellLayout.marginHeight = 0;
+        cellLayout.horizontalSpacing = ICON_SPACING;
+        cell.setLayout(cellLayout);
+
+        iconLabel(cell, own, "Критичность: " + button.getText()); //$NON-NLS-1$
+        Label moduleIcon = iconLabel(cell, module, ValidationChecksFilterHook.moduleSeverityTooltip(severity));
+        ValidationChecksFilterHook.setModuleSeverityIcon(moduleIcon, severity);
+        ValidationChecksFilterHook.wireModuleAnnotationSettings(moduleIcon);
+        if (!button.setParent(cell))
+        {
+            cell.dispose();
+            Debug.log("splitIcons: setParent failed"); //$NON-NLS-1$
+            return;
+        }
+        button.setImage(null);
+        GridData buttonData = new GridData(SWT.BEGINNING, SWT.CENTER, false, false);
+        buttonData.widthHint = width;
+        button.setLayoutData(buttonData);
+    }
+
+    private static Label iconLabel(Composite host, Image image, String tooltip)
+    {
+        Label label = new Label(host, SWT.NONE);
+        label.setImage(image);
+        label.setLayoutData(new GridData(SWT.CENTER, SWT.CENTER, false, false));
+        label.setToolTipText(TooltipText.wrap(label, tooltip));
+        return label;
+    }
+
+    /**
+     * Значки заняли место, которого в окне не было, — окну его и добавляем.
+     *
+     * <p>Считаем по самой секции критичности, а не по оболочке: секция лежит в
+     * прокручиваемой форме, и та о нуждах своего содержимого оболочке не
+     * сообщает — {@code shell.computeSize} остался бы прежним, а подпись
+     * критичности так и осталась бы обрезанной. Форму заодно просим пересчитать
+     * себя ({@code reflow}) — иначе новая ширина содержимого ей неизвестна.
+     */
+    private static void grantMissingWidth(Shell shell, Composite host)
+    {
+        if (host == null || host.isDisposed() || shell.isDisposed())
+            return;
+        reflowForm(host);
+        int actual = host.getSize().x;
+        if (actual <= 0)
+        {
+            // Ширины ещё нет — сравнивать не с чем, и «недостача» вышла бы равной
+            // всей требуемой ширине: окно раздулось бы, а обрезка осталась.
+            Debug.log("grantMissingWidth: severity host is not laid out yet"); //$NON-NLS-1$
+            return;
+        }
+        int missing = host.computeSize(SWT.DEFAULT, SWT.DEFAULT).x - actual;
+        if (missing > 0)
+        {
+            Point size = shell.getSize();
+            shell.setSize(size.x + missing, size.y);
+            shell.layout(true, true);
+            reflowForm(host);
+        }
+        Debug.log("grantMissingWidth: missing=" + missing); //$NON-NLS-1$
+    }
+
+    /** Прокручиваемая форма пересчитывает размеры своего содержимого только по {@code reflow}. */
+    private static void reflowForm(Control control)
+    {
+        Composite form = findForm(control);
+        if (form != null)
+            Global.invoke(form, "reflow", Boolean.TRUE); //$NON-NLS-1$
+    }
+
+    private static Composite findForm(Control control)
+    {
+        for (Composite parent = control.getParent(); parent != null; parent = parent.getParent())
+        {
+            if (FORM_CLASS_NAME.equals(parent.getClass().getName()))
+                return parent;
+        }
+        return null;
+    }
+
+    /** @return композит, в котором лежат флажки критичности, или {@code null} */
+    private static Composite findSeverityHost(Control control)
+    {
+        if (!(control instanceof Composite composite))
+            return null;
+        if (severityCheckboxes(composite).size() >= 2)
+            return composite;
+        for (Control child : composite.getChildren())
+        {
+            Composite found = findSeverityHost(child);
+            if (found != null)
+                return found;
+        }
+        return null;
+    }
+
+    private static List<Button> severityCheckboxes(Composite host)
+    {
+        List<Button> checkboxes = new ArrayList<>();
+        for (Control child : host.getChildren())
+        {
+            if (child instanceof Button button && (button.getStyle() & SWT.CHECK) != 0
+                && severityByTitle(button.getText()) != null)
+            {
+                checkboxes.add(button);
+            }
+        }
+        return checkboxes;
+    }
+
+    /**
+     * @return критичность по подписи флажка. Подписи типов проблем отвергаются:
+     * названия там и там могут совпасть, а значок серьёзности в модуле относится
+     * только к критичности
+     */
+    private static MarkerSeverity severityByTitle(String title)
+    {
+        if (title == null || title.isBlank())
+            return null;
+        for (IssueType type : IssueType.values())
+        {
+            if (title.equals(LocalizedEnumProvider.getLocalizedString(type)))
+                return null;
+        }
+        for (MarkerSeverity marker : MarkerSeverity.values())
+        {
+            if (title.equals(LocalizedEnumProvider.getLocalizedString(marker)))
+                return marker;
+        }
+        return null;
     }
 
     /** Флажок типа «Предупреждение» → «Прочее предупреждение» с нейтральным значком. */

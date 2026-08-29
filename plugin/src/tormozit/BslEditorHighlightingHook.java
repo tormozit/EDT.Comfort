@@ -465,6 +465,10 @@ public final class BslEditorHighlightingHook implements IStartup
             putServerCallStyle(attributes, BslServerCallHighlightingConfiguration.IMPLICIT_VARIABLE_ID,
                 ComfortSettings.getImplicitVariableHighlightingColor(),
                 ComfortSettings.DEFAULT_IMPLICIT_VARIABLE_HIGHLIGHTING_COLOR);
+            // статический стиль: без цвета — обычный текст, null-foreground сбрасывает ключевую окраску
+            putTextAttribute(attributes,
+                BslServerCallHighlightingConfiguration.KEYWORD_MEMBER_NAME_ID,
+                new TextAttribute(null, null, org.eclipse.swt.SWT.NONE, null));
         }
         catch (Exception e)
         {
@@ -478,6 +482,12 @@ public final class BslEditorHighlightingHook implements IStartup
         TextAttribute attr = createServerCallTextAttribute(colorStr, fallback);
         if (attr == null)
             return;
+        putTextAttribute(attributes, id, attr);
+    }
+
+    /** Кладёт стиль и сбрасывает кэш merged-стилей с этим id. */
+    private static void putTextAttribute(HashMap<String, TextAttribute> attributes, String id, TextAttribute attr)
+    {
         attributes.put(id, attr);
 
         // TextAttributeProvider кэширует merged-стили под ключом "$$$Merged:...$$$";

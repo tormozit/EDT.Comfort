@@ -47,6 +47,7 @@ import org.eclipse.xtext.ui.editor.hover.html.IXtextBrowserInformationControl;
 import org.eclipse.xtext.ui.editor.model.IXtextDocument;
 import org.eclipse.xtext.util.concurrent.IUnitOfWork;
 import com._1c.g5.v8.dt.bsl.model.BslPackage;
+import com._1c.g5.v8.dt.bsl.model.FeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.ImplicitVariable;
 import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
 
@@ -303,6 +304,11 @@ public final class BslEditorHoverHook implements IStartup
                     return null;
                 }
             }
+            else
+            {
+                Global.tempLog(TEMP_LOG_TOPIC, "keyboard offset=" //$NON-NLS-1$
+                    + (hoverRegion == null ? -1 : hoverRegion.getOffset()));
+            }
             Object info = delegateExt2 != null
                 ? delegateExt2.getHoverInfo2(textViewer, hoverRegion)
                 : delegate.getHoverInfo(textViewer, hoverRegion);
@@ -336,6 +342,16 @@ public final class BslEditorHoverHook implements IStartup
             return maybeDecorateHoverInfo(info);
         }
 
+        /** Временная безусловная диагностика подавления (#417); убрать после проверки. */
+        private static final String TEMP_LOG_TOPIC = "hover-suppress"; //$NON-NLS-1$
+
+        /**
+         * Слово, чаще употребляемое как имя метода ({@code Запрос.Выполнить()}),
+         * чем как оператор {@code Выполнить <строка кода>}: попап на нём не подавляем.
+         */
+        private static final Set<String> KEYWORD_HOVER_WHITELIST =
+            Set.of("Выполнить", "Execute"); //$NON-NLS-1$ //$NON-NLS-2$
+
         /**
          * Причина подавления подсказки при обычном наведении (без Ctrl) или {@code null}:
          * на ключевом слове языка EDT показывает синтаксическую справку всей
@@ -345,49 +361,95 @@ public final class BslEditorHoverHook implements IStartup
         private String hoverSuppressionReason(IRegion hoverRegion)
         {
             if (hoverRegion == null)
+            {
+                Global.tempLog(TEMP_LOG_TOPIC, "pointer region=null -> allowed"); //$NON-NLS-1$
                 return null;
-            if ((OS.GetKeyState(OS.VK_CONTROL) & 0x8000) != 0)
-                return null;
+            }
             int offset = hoverRegion.getOffset();
-            if (editor == null || offset < 0)
+            if ((OS.GetKeyState(OS.VK_CONTROL) & 0x8000) != 0)
+            {
+                Global.tempLog(TEMP_LOG_TOPIC, "pointer offset=" + offset + " ctrl=held -> allowed"); //$NON-NLS-1$
                 return null;
+            }
+            if (editor == null || offset < 0)
+            {
+                Global.tempLog(TEMP_LOG_TOPIC, "pointer offset=" + offset + " noEditor -> allowed"); //$NON-NLS-1$
+                return null;
+            }
             org.eclipse.jface.text.IDocument document = editor.getDocument();
             if (!(document instanceof IXtextDocument xtextDoc))
+            {
+                Global.tempLog(TEMP_LOG_TOPIC, "pointer offset=" + offset + " noXtextDoc -> allowed"); //$NON-NLS-1$
                 return null;
+            }
             try
             {
                 return xtextDoc.readOnly(
                     (IUnitOfWork<String, XtextResource>) resource -> {
-                        if (resource == null)
-                            return null;
-                        IParseResult parseResult = resource.getParseResult();
+                        IParseResult parseResult = resource != null ? resource.getParseResult() : null;
                         if (parseResult == null)
+                        {
+                            Global.tempLog(TEMP_LOG_TOPIC,
+                                "pointer offset=" + offset + " noParse -> allowed"); //$NON-NLS-1$
                             return null;
+                        }
                         ILeafNode leaf = NodeModelUtils.findLeafNodeAtOffset(parseResult.getRootNode(), offset);
                         if (leaf == null)
-                            return null;
-                        if (leaf.isHidden())
                         {
-                            // пустое место (не комментарий): EDT показывает подсказку соседнего слова
-                            String text = leaf.getText();
-                            return text != null && text.isBlank() ? "blank" : null; //$NON-NLS-1$
+                            Global.tempLog(TEMP_LOG_TOPIC,
+                                "pointer offset=" + offset + " leaf=null -> allowed"); //$NON-NLS-1$
+                            return null;
                         }
-                        return isLanguageKeyword(leaf) ? "keyword" : null; //$NON-NLS-1$
+                        String token = leaf.getText();
+                        String keywordValue = leaf.getGrammarElement() instanceof Keyword grammarKeyword
+                            ? grammarKeyword.getValue() : null;
+                        boolean whitelisted = keywordValue != null
+                            && KEYWORD_HOVER_WHITELIST.contains(keywordValue);
+                        boolean member = isMemberAccessName(resource, offset);
+                        String reason;
+                        if (leaf.isHidden() && token != null && token.isBlank())
+                            reason = "blank"; //$NON-NLS-1$
+                        else if (!leaf.isHidden() && keywordValue != null && !keywordValue.isEmpty()
+                            && Character.isLetter(keywordValue.charAt(0)) && !whitelisted)
+                            reason = "keyword"; //$NON-NLS-1$
+                        else
+                            reason = null;
+                        String grammar = leaf.getGrammarElement() == null
+                            ? "null" : leaf.getGrammarElement().eClass().getName(); //$NON-NLS-1$
+                        Global.tempLog(TEMP_LOG_TOPIC, "pointer offset=" + offset + " token=[" + token //$NON-NLS-1$
+                            + "] hidden=" + leaf.isHidden() + " grammar=" + grammar //$NON-NLS-1$
+                            + " keyword=[" + keywordValue + "] whitelist=" + whitelisted //$NON-NLS-1$
+                            + " member=" + member + " -> " //$NON-NLS-1$
+                            + (reason == null ? "allowed" : "SUPPRESSED:" + reason)); //$NON-NLS-1$
+                        return reason;
                     });
             }
             catch (Exception e)
             {
+                Global.tempLogException(TEMP_LOG_TOPIC, "pointer offset=" + offset, e); //$NON-NLS-1$
                 return null;
             }
         }
 
-        /** Видимый токен — ключевое слово языка (не пунктуация, не литерал). */
-        private static boolean isLanguageKeyword(ILeafNode leaf)
+        /**
+         * Смещение — имя метода/свойства (ключевое слово в роли имени члена,
+         * {@code Запрос.Выполнить()}); вычисляется только для временного лога.
+         */
+        private static boolean isMemberAccessName(XtextResource resource, int offset)
         {
-            if (!(leaf.getGrammarElement() instanceof Keyword grammarKeyword))
-                return false;
-            String value = grammarKeyword.getValue();
-            return value != null && !value.isEmpty() && Character.isLetter(value.charAt(0));
+            try
+            {
+                EObject obj = new EObjectAtOffsetHelper().resolveContainedElementAt(resource, offset);
+                for (EObject cur = obj; cur != null; cur = cur.eContainer())
+                {
+                    if (cur instanceof FeatureAccess)
+                        return true;
+                }
+            }
+            catch (Exception ignored)
+            {
+            }
+            return false;
         }
 
         private Object maybeDecorateHoverInfo(Object info)

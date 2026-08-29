@@ -2,6 +2,7 @@ package tormozit;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.EnumMap;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
@@ -34,6 +35,7 @@ import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.jface.viewers.TreeViewerColumn;
 import org.eclipse.jface.viewers.Viewer;
 import org.eclipse.jface.viewers.ViewerFilter;
+import org.eclipse.emf.common.util.Diagnostic;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.BusyIndicator;
 import org.eclipse.swt.custom.SashForm;
@@ -66,6 +68,9 @@ import org.eclipse.swt.widgets.ToolItem;
 import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.Widget;
 import org.eclipse.ui.IStartup;
+import org.eclipse.ui.dialogs.PreferencesUtil;
+import org.eclipse.ui.editors.text.EditorsUI;
+import org.eclipse.ui.texteditor.AnnotationPreference;
 
 import com._1c.g5.v8.dt.common.localization.LocalizedEnumProvider;
 import com._1c.g5.v8.dt.common.ui.controls.search.SearchBox;
@@ -75,6 +80,7 @@ import com._1c.g5.v8.dt.validation.marker.MarkerSeverity;
 import com._1c.g5.v8.dt.ui.validation.ChecksViewerControl;
 import com._1c.g5.v8.dt.ui.validation.ChecksViewerProvider;
 import com._1c.g5.v8.dt.ui.validation.IChecksTreeNode;
+import com.e1c.g5.v8.dt.check.settings.ICheckRepository;
 import com.e1c.g5.v8.dt.check.settings.ICheckSettings;
 import com.e1c.g5.v8.dt.check.settings.INamedElement;
 import com.e1c.g5.v8.dt.check.settings.IssueSeverity;
@@ -156,6 +162,17 @@ public final class ValidationChecksFilterHook implements IStartup
     private static final int NARROW_FIELD_WIDTH = 60;
     /** Предпочтительная ширина области «список проверок + панель настроек» (см. {@link #relaxBodyMinimumWidth}). */
     private static final int BODY_WIDTH_HINT = 300;
+    /** Страница «Аннотации» окна «Параметры» — та же, что открывает линейка обзора. */
+    private static final String ANNOTATIONS_PAGE_ID = "org.eclipse.ui.editors.preferencePages.Annotations"; //$NON-NLS-1$
+    /** Критичность, показанная значком аннотации, — по ней открываются её настройки. */
+    private static final String MODULE_SEVERITY_KEY = "tormozit.moduleSeverity"; //$NON-NLS-1$
+    /** Служба, знающая соответствие критичности и вида аннотации (см. {@link #moduleAnnotation}). */
+    private static final String CHECK_EXECUTOR_CLASS = "com.e1c.g5.v8.dt.internal.check.ICheckExecutor"; //$NON-NLS-1$
+
+    private static final Map<IssueSeverity, ModuleAnnotation> MODULE_ANNOTATIONS =
+        new EnumMap<>(IssueSeverity.class);
+    private static Object checkExecutorService;
+    private static boolean checkExecutorResolved;
     private static final String EXCLUDED_NAMES_FRAGMENT = "исключаемых имен объектов"; //$NON-NLS-1$
     private static final String EXCLUDED_NAMES_SHORT = "исключаемых объектов"; //$NON-NLS-1$
     /** Название типа {@code IssueType.WARNING} в местах, которые перехватывает плагин (issue 401). */
@@ -416,6 +433,7 @@ public final class ValidationChecksFilterHook implements IStartup
         Combo severityCombo = null;
         Control resetButton = null;
         Label typeLabel = null;
+        Label severityLabel = null;
         int comboCount = 0;
         int buttonCount = 0;
         for (Control child : row.getChildren())
@@ -430,22 +448,37 @@ public final class ValidationChecksFilterHook implements IStartup
                 resetButton = button;
                 buttonCount++;
             }
-            else if (child instanceof Label label && typeLabel == null)
+            else if (child instanceof Label label)
             {
-                // Первый Label строки — иконка типа (второй — критичность).
-                typeLabel = label;
+                // Первый Label строки — иконка типа, второй — критичности.
+                if (typeLabel == null)
+                    typeLabel = label;
+                else if (severityLabel == null)
+                    severityLabel = label;
             }
         }
-        if (severityCombo == null || resetButton == null || comboCount != 1 || buttonCount != 1)
+        if (severityCombo == null || resetButton == null || severityLabel == null || comboCount != 1
+            || buttonCount != 1)
         {
             Debug.temp("compactSettingsRow: unexpected controls combo=" + comboCount + " button=" + buttonCount); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
 
+        // Строка 1: значок типа | код | сброс. Строка 2: значок критичности |
+        // значок этой же критичности в редакторе модуля | список критичности.
         layout.numColumns = 4;
-        severityCombo.moveBelow(resetButton);
+        idTxt.moveBelow(typeLabel);
+        resetButton.moveBelow(idTxt);
+        severityLabel.moveBelow(resetButton);
+        Label moduleSeverityLabel = new Label(row, SWT.NONE);
+        moduleSeverityLabel.moveBelow(severityLabel);
+        severityCombo.moveBelow(moduleSeverityLabel);
+
+        if (idTxt.getLayoutData() instanceof GridData idData)
+            idData.horizontalSpan = 2;
+        moduleSeverityLabel.setLayoutData(new GridData(SWT.CENTER, SWT.CENTER, false, false));
         GridData comboData = new GridData(SWT.FILL, SWT.CENTER, true, false);
-        comboData.horizontalSpan = 4;
+        comboData.horizontalSpan = 2;
         comboData.widthHint = NARROW_FIELD_WIDTH;
         severityCombo.setLayoutData(comboData);
 
@@ -454,6 +487,8 @@ public final class ValidationChecksFilterHook implements IStartup
         // это и держало правую панель широкой. Растягиваться оно по-прежнему
         // растягивается, но больше не диктует минимальную ширину.
         applyNarrowWidth(idTxt);
+
+        installModuleSeverityIcon(moduleSeverityLabel, severityCombo);
 
         row.setData(COMPACT_ROW_KEY, Boolean.TRUE);
         row.layout(true, true);
@@ -492,6 +527,222 @@ public final class ValidationChecksFilterHook implements IStartup
         optionsGroup.layout(true, true);
     }
 
+    /**
+     * Значок «как эта критичность выглядит в редакторе модуля» рядом со списком
+     * критичности (issue 423).
+     *
+     * <p>В модуле проблема показывается не значком критичности, а значком
+     * серьёзности: «Значительная» и выше — ошибкой, «Незначительная» —
+     * предупреждением, «Тривиальная» — информацией (см.
+     * {@link #moduleSeverityImage}). По списку критичности этого не видно, и
+     * связь между настройкой и тем, что потом появится в модуле, приходится
+     * держать в голове.
+     *
+     * <p>Значок следует и за выбором другой проверки, и за сменой значения в
+     * самом списке: критичность читаем из списка, а не из настроек проверки, —
+     * тогда не важно, успел ли штатный обработчик записать новое значение.
+     */
+    private static void installModuleSeverityIcon(Label moduleSeverityLabel, Combo severityCombo)
+    {
+        Listener update = event -> applyModuleSeverity(moduleSeverityLabel, severityCombo);
+        severityCombo.addListener(SWT.Selection, update);
+        severityCombo.addListener(SWT.Modify, update);
+        wireModuleAnnotationSettings(moduleSeverityLabel);
+        applyModuleSeverity(moduleSeverityLabel, severityCombo);
+    }
+
+    private static void applyModuleSeverity(Label moduleSeverityLabel, Combo severityCombo)
+    {
+        if (moduleSeverityLabel.isDisposed() || severityCombo.isDisposed())
+            return;
+        setModuleSeverityIcon(moduleSeverityLabel, severityByTitle(severityCombo.getText()));
+    }
+
+    /**
+     * Значок аннотации: картинка, подсказка и критичность, по которой открываются
+     * настройки аннотации ({@link #wireModuleAnnotationSettings}).
+     */
+    static void setModuleSeverityIcon(Label icon, IssueSeverity severity)
+    {
+        icon.setData(MODULE_SEVERITY_KEY, severity);
+        icon.setImage(severity != null ? moduleSeverityImage(severity) : null);
+        icon.setToolTipText(severity == null ? null : TooltipText.wrap(icon, moduleSeverityTooltip(severity)));
+    }
+
+    /**
+     * Щелчок по значку открывает настройку этой аннотации — так же, как команда
+     * «Параметры...» контекстного меню линейки обзора в редакторе модуля.
+     */
+    static void wireModuleAnnotationSettings(Label icon)
+    {
+        icon.setCursor(icon.getDisplay().getSystemCursor(SWT.CURSOR_HAND));
+        icon.addListener(SWT.MouseUp, event ->
+        {
+            if (event.button != 1 || icon.isDisposed())
+                return;
+            if (icon.getData(MODULE_SEVERITY_KEY) instanceof IssueSeverity severity)
+                openModuleAnnotationSettings(icon.getShell(), severity);
+        });
+    }
+
+    /**
+     * Открывает страницу «Аннотации» на строке этой аннотации.
+     *
+     * <p>Так же, как {@code AbstractDecoratedTextEditor.overviewRulerContextMenu‑
+     * AboutToShow}: страница получает параметром метку аннотации
+     * ({@code AnnotationPreference.getPreferenceLabel()}), и штатный
+     * {@code applyData} выбирает по ней строку списка.
+     *
+     * <p>Тип аннотации — штатный: маркеры проблем BSL наследуют
+     * {@code org.eclipse.core.resources.problemmarker}, а тому в
+     * {@code org.eclipse.ui.editors} сопоставлены
+     * {@code org.eclipse.ui.workbench.texteditor.error/warning/info}.
+     */
+    private static void openModuleAnnotationSettings(Shell shell, IssueSeverity severity)
+    {
+        String annotationType = switch (moduleAnnotation(severity))
+        {
+            case ERROR -> "org.eclipse.ui.workbench.texteditor.error"; //$NON-NLS-1$
+            case WARNING -> "org.eclipse.ui.workbench.texteditor.warning"; //$NON-NLS-1$
+            case INFO -> "org.eclipse.ui.workbench.texteditor.info"; //$NON-NLS-1$
+        };
+        AnnotationPreference preference =
+            EditorsUI.getAnnotationPreferenceLookup().getAnnotationPreference(annotationType);
+        if (preference == null)
+        {
+            Debug.log("openModuleAnnotationSettings: no preference for " + annotationType); //$NON-NLS-1$
+            return;
+        }
+        PreferencesUtil
+            .createPreferenceDialogOn(shell, ANNOTATIONS_PAGE_ID, new String[] { ANNOTATIONS_PAGE_ID },
+                preference.getPreferenceLabel())
+            .open();
+    }
+
+    private static IssueSeverity severityByTitle(String title)
+    {
+        if (title == null || title.isBlank())
+            return null;
+        for (IssueSeverity severity : IssueSeverity.values())
+        {
+            if (title.equals(localizedSeverity(severity)))
+                return severity;
+        }
+        return null;
+    }
+
+    /** Вид проблемы в редакторе модуля — то, во что превращается критичность проверки. */
+    enum ModuleAnnotation
+    {
+        ERROR, WARNING, INFO
+    }
+
+    /**
+     * Соответствие критичности проверки и вида аннотации в редакторе модуля.
+     *
+     * <p>Спрашиваем сам EDT — {@code CheckExecutor.toDiagnosticSeverity}, тот же
+     * метод, по которому проблема и попадает в модуль. Если в EDT соответствие
+     * изменят, здесь оно изменится вместе с ним. Метод приватный, поэтому
+     * вызывается рефлексией на службе {@code ICheckExecutor}; результат
+     * кэшируется — за сеанс он не меняется.
+     *
+     * <p>{@link #fallbackAnnotation} — на случай, когда службу получить не
+     * удалось: значок должен остаться осмысленным, а не пропасть.
+     */
+    static ModuleAnnotation moduleAnnotation(IssueSeverity severity)
+    {
+        ModuleAnnotation cached = MODULE_ANNOTATIONS.get(severity);
+        if (cached != null)
+            return cached;
+        Object executor = checkExecutor();
+        Object diagnostic = executor != null ? Global.invoke(executor, "toDiagnosticSeverity", severity) : null; //$NON-NLS-1$
+        ModuleAnnotation annotation;
+        if (diagnostic instanceof Integer value)
+        {
+            annotation = value.intValue() >= Diagnostic.ERROR ? ModuleAnnotation.ERROR
+                : value.intValue() >= Diagnostic.WARNING ? ModuleAnnotation.WARNING : ModuleAnnotation.INFO;
+        }
+        else
+        {
+            annotation = fallbackAnnotation(severity);
+            Debug.log("moduleAnnotation: fallback for " + severity); //$NON-NLS-1$
+        }
+        MODULE_ANNOTATIONS.put(severity, annotation);
+        return annotation;
+    }
+
+    /** Соответствие на момент EDT 2025.2 — если штатный метод недоступен. */
+    private static ModuleAnnotation fallbackAnnotation(IssueSeverity severity)
+    {
+        return switch (severity)
+        {
+            case BLOCKER, CRITICAL, MAJOR -> ModuleAnnotation.ERROR;
+            case MINOR -> ModuleAnnotation.WARNING;
+            case TRIVIAL -> ModuleAnnotation.INFO;
+        };
+    }
+
+    private static Object checkExecutor()
+    {
+        if (checkExecutorResolved)
+            return checkExecutorService;
+        checkExecutorResolved = true;
+        try
+        {
+            // Пакет службы наружу не экспортирован, поэтому класс грузим
+            // загрузчиком её же бандла — через доступный из него ICheckRepository.
+            Class<?> serviceType = ICheckRepository.class.getClassLoader().loadClass(CHECK_EXECUTOR_CLASS);
+            checkExecutorService = Global.getOsgiService(serviceType);
+        }
+        catch (Exception e)
+        {
+            Debug.log("checkExecutor: " + e); //$NON-NLS-1$
+        }
+        return checkExecutorService;
+    }
+
+    /** Значок проблемы в редакторе модуля — см. {@link #moduleAnnotation}. */
+    static Image moduleSeverityImage(IssueSeverity severity)
+    {
+        String path = switch (moduleAnnotation(severity))
+        {
+            case ERROR -> "/icons/markers16/error.png"; //$NON-NLS-1$
+            case WARNING -> "/icons/markers16/warning.gif"; //$NON-NLS-1$
+            case INFO -> "/icons/markers16/info.gif"; //$NON-NLS-1$
+        };
+        return V8UiSharedImages.getImage(path);
+    }
+
+    /**
+     * @return критичность проверки, соответствующая критичности маркера, или
+     * {@code null} для {@code ERRORS}/{@code NONE} — у них нет своей проверки, а
+     * значит и вида в редакторе модуля
+     */
+    static IssueSeverity issueSeverityOf(MarkerSeverity marker)
+    {
+        if (marker == null)
+            return null;
+        for (IssueSeverity severity : IssueSeverity.values())
+        {
+            if (toMarkerSeverity(severity) == marker)
+                return severity;
+        }
+        return null;
+    }
+
+    /** Подсказка значка: чем эта критичность обернётся в редакторе модуля. */
+    static String moduleSeverityTooltip(IssueSeverity severity)
+    {
+        String annotation = switch (moduleAnnotation(severity))
+        {
+            case ERROR -> "Ошибка"; //$NON-NLS-1$
+            case WARNING -> "Предупреждение"; //$NON-NLS-1$
+            case INFO -> "Информация"; //$NON-NLS-1$
+        };
+        return "Аннотация в редакторе модуля: " + annotation //$NON-NLS-1$
+            + ".\nЩелчок открывает её настройку в окне «Параметры»."; //$NON-NLS-1$
+    }
+
     /** Минимальная ширина поля: растягиваться не мешает, но и не требует места под весь текст. */
     private static void applyNarrowWidth(Control control)
     {
@@ -520,12 +771,30 @@ public final class ValidationChecksFilterHook implements IStartup
         }
         observable.addChangeListener(event ->
         {
-//            applyTypeLabel(typeLabel, observable.getValue());
+            applyTypeLabel(typeLabel, observable.getValue());
             // Параметры пересозданы под новую проверку — сужаем их заново.
             compactOptions(optionsGroup);
         });
-//        applyTypeLabel(typeLabel, observable.getValue());
+        applyTypeLabel(typeLabel, observable.getValue());
         compactOptions(optionsGroup);
+    }
+
+    private static void applyTypeLabel(Label typeLabel, Object selected)
+    {
+        if (typeLabel == null || typeLabel.isDisposed() || !(selected instanceof IChecksTreeNode node))
+            return;
+        IssueType single = null;
+        for (ICheckSettings settings : node.getVisibleChecks())
+        {
+            IssueType type = settings.getType();
+            if (single != null && single != type)
+                return;
+            single = type;
+        }
+        if (single != IssueType.WARNING)
+            return;
+        typeLabel.setImage(typeImage(typeLabel.getDisplay(), IssueType.WARNING));
+        typeLabel.setToolTipText(TooltipText.wrap(typeLabel, "Тип: " + OTHER_WARNING_TYPE_TITLE)); //$NON-NLS-1$
     }
 
     /**
@@ -1206,6 +1475,8 @@ public final class ValidationChecksFilterHook implements IStartup
     {
         private static final String SETTINGS_SECTION = "tormozit.validationChecksTable"; //$NON-NLS-1$
         private static final String KEY_COL_ORDER = "columnOrder"; //$NON-NLS-1$
+        /** Положение разделителя «список проверок | настройки текущей проверки». */
+        private static final String KEY_SASH_WEIGHTS = "sashWeights"; //$NON-NLS-1$
 
         private static final String KEY_COL_TITLE_WIDTH = "titleWidth"; //$NON-NLS-1$
         private static final String KEY_COL_CATEGORY_WIDTH = "categoryWidth"; //$NON-NLS-1$
@@ -1268,7 +1539,9 @@ public final class ValidationChecksFilterHook implements IStartup
                 }
             }
 
-            int[] weights = body.getWeights();
+            int[] weights = savedSashWeights();
+            if (weights == null)
+                weights = body.getWeights();
             Composite stack = new Composite(body, SWT.NONE);
             TopControlStack stackLayout = new TopControlStack();
             stack.setLayout(stackLayout);
@@ -1308,6 +1581,7 @@ public final class ValidationChecksFilterHook implements IStartup
             if (weights != null && weights.length == body.getWeights().length)
                 body.setWeights(weights);
             body.layout(true, true);
+            body.addDisposeListener(event -> saveSashWeights(body));
 
             pane.wireListeners();
             pane.installToggle(pageControl);
@@ -1635,6 +1909,55 @@ public final class ValidationChecksFilterHook implements IStartup
                 case 3 -> row.category != null ? row.category : ""; //$NON-NLS-1$
                 default -> ""; //$NON-NLS-1$
             };
+        }
+
+        /**
+         * Положение разделителя между списком проверок и панелью настроек
+         * текущей проверки — между открытиями окна «Параметры» и между запусками
+         * EDT (issue 401). Штатно оно каждый раз возвращается к исходному, хотя
+         * удобная ширина панели настроек у каждого своя.
+         *
+         * @return {@code null}, если сохранённого положения нет или оно испорчено —
+         * тогда остаётся штатное
+         */
+        private static int[] savedSashWeights()
+        {
+            String value = dialogSettings().get(KEY_SASH_WEIGHTS);
+            if (value == null || value.isBlank())
+                return null;
+            String[] parts = value.split(","); //$NON-NLS-1$
+            int[] weights = new int[parts.length];
+            for (int i = 0; i < parts.length; i++)
+            {
+                try
+                {
+                    weights[i] = Integer.parseInt(parts[i].trim());
+                }
+                catch (NumberFormatException e)
+                {
+                    return null;
+                }
+                if (weights[i] <= 0)
+                    return null;
+            }
+            return weights;
+        }
+
+        private static void saveSashWeights(SashForm body)
+        {
+            if (body.isDisposed())
+                return;
+            int[] weights = body.getWeights();
+            if (weights == null || weights.length == 0)
+                return;
+            StringBuilder value = new StringBuilder();
+            for (int i = 0; i < weights.length; i++)
+            {
+                if (i > 0)
+                    value.append(',');
+                value.append(weights[i]);
+            }
+            dialogSettings().put(KEY_SASH_WEIGHTS, value.toString());
         }
 
         private static IDialogSettings dialogSettings()

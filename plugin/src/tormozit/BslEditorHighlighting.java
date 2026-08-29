@@ -5,8 +5,11 @@ import java.util.List;
 import org.eclipse.emf.common.util.EList;
 import org.eclipse.emf.common.util.TreeIterator;
 import org.eclipse.emf.ecore.EObject;
+import org.eclipse.xtext.Keyword;
 import org.eclipse.xtext.ide.editor.syntaxcoloring.IHighlightedPositionAcceptor;
 import org.eclipse.xtext.ide.editor.syntaxcoloring.ISemanticHighlightingCalculator;
+import org.eclipse.xtext.nodemodel.ICompositeNode;
+import org.eclipse.xtext.nodemodel.ILeafNode;
 import org.eclipse.xtext.nodemodel.INode;
 import org.eclipse.xtext.nodemodel.util.NodeModelUtils;
 import org.eclipse.xtext.resource.XtextResource;
@@ -43,6 +46,10 @@ import com._1c.g5.v8.dt.bsl.model.util.BslUtil;
  * частью либо переменная цикла, и только если
  * {@code getImplicitVariable() != null} —
  * {@link BslServerCallHighlightingConfiguration#IMPLICIT_VARIABLE_ID}.</li>
+ * <li>слова-ключи в роли имён членов после точки ({@code Запрос.Выполнить()}):
+ * лексер красит их как ключевые слова всегда — перекрашиваются обычным текстом
+ * {@link BslServerCallHighlightingConfiguration#KEYWORD_MEMBER_NAME_ID};
+ * места, раскрашенные как серверные вызовы, не затрагиваются.</li>
  * </ul>
  */
 public final class BslEditorHighlighting
@@ -55,19 +62,100 @@ public final class BslEditorHighlighting
         if (resource == null || acceptor == null || isCanceled(cancelIndicator) || resource.getParseResult() == null)
             return;
 
-        boolean serverCalls = ComfortSettings.isServerCallHighlightingEnabled();
-        boolean implicitVars = ComfortSettings.isImplicitVariableHighlightingEnabled();
-        if (!serverCalls && !implicitVars)
-            return;
-
         EObject root = resource.getParseResult().getRootASTElement();
         if (root == null)
             return;
 
+        highlightKeywordMemberNames(root, acceptor, cancelIndicator);
+
+        boolean serverCalls = ComfortSettings.isServerCallHighlightingEnabled();
+        boolean implicitVars = ComfortSettings.isImplicitVariableHighlightingEnabled();
         if (serverCalls)
             highlightServerCalls(root, acceptor, cancelIndicator);
         if (implicitVars && !isCanceled(cancelIndicator))
             highlightImplicitVariableCreations(root, acceptor, cancelIndicator);
+    }
+
+    /**
+     * Снимает ключевую окраску со слов-ключей в роли имён членов после точки
+     * ({@code Запрос.Выполнить()}). Стиль без цвета — обычный текст; места
+     * серверных вызовов пропускаются: их окраска важнее.
+     */
+    private void highlightKeywordMemberNames(EObject root, IHighlightedPositionAcceptor acceptor,
+        CancelIndicator cancelIndicator)
+    {
+        boolean serverCalls = ComfortSettings.isServerCallHighlightingEnabled();
+        TreeIterator<EObject> iterator = root.eAllContents();
+        while (iterator.hasNext())
+        {
+            if (isCanceled(cancelIndicator))
+                return;
+
+            EObject element = iterator.next();
+            if (!(element instanceof DynamicFeatureAccess access))
+                continue;
+            List<INode> nodes = NodeModelUtils.findNodesForFeature(access,
+                BslPackage.Literals.FEATURE_ACCESS__NAME);
+            if (!hasKeywordName(nodes))
+                continue;
+            if (serverCalls && isServerCallPainted(access))
+                continue;
+            for (INode node : nodes)
+            {
+                if (node.getLength() > 0)
+                    acceptor.addPosition(node.getOffset(), node.getLength(),
+                        BslServerCallHighlightingConfiguration.KEYWORD_MEMBER_NAME_ID);
+            }
+        }
+    }
+
+    /** Имя члена задано токеном-ключевым словом языка (Выполнить/Execute и т.п.). */
+    private static boolean hasKeywordName(List<INode> nodes)
+    {
+        for (INode node : nodes)
+        {
+            if (isKeywordNode(node))
+                return true;
+        }
+        return false;
+    }
+
+    /**
+     * Узел имени члена — композит с {@code RuleCall}; ключевым слово делает
+     * видимый лист-токен внутри узла.
+     */
+    private static boolean isKeywordNode(INode node)
+    {
+        if (node instanceof ICompositeNode composite)
+        {
+            for (ILeafNode leaf : composite.getLeafNodes())
+            {
+                if (!leaf.isHidden() && leaf.getGrammarElement() instanceof Keyword)
+                    return true;
+            }
+            return false;
+        }
+        return node.getGrammarElement() instanceof Keyword;
+    }
+
+    /**
+     * Имя принадлежит цепочке вызова, раскрашиваемой как серверный вызов,
+     * см. {@link #highlightInvocation}: сам methodAccess или источник в его цепочке.
+     */
+    private static boolean isServerCallPainted(FeatureAccess access)
+    {
+        EObject cur = access;
+        while (cur instanceof DynamicFeatureAccess)
+        {
+            EObject parent = cur.eContainer();
+            if (parent instanceof Invocation invocation
+                && invocation.getMethodAccess() == cur && invocation.isIsServerCall())
+            {
+                return true;
+            }
+            cur = parent;
+        }
+        return false;
     }
 
     private void highlightServerCalls(EObject root, IHighlightedPositionAcceptor acceptor,
