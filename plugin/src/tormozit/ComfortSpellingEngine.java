@@ -1512,7 +1512,6 @@ public final class ComfortSpellingEngine
                 return false;
             }
             List<String> entries = readUserMorphEntries(file);
-            String stemKey = stem.toLowerCase(Locale.ROOT);
             List<String> kept = new ArrayList<>(entries.size());
             boolean same = false;
             for (String existing : entries)
@@ -1520,7 +1519,7 @@ public final class ComfortSpellingEngine
                 MorphLineParsed parsed = parseMorphLine(existing);
                 if (parsed == null)
                     continue;
-                if (parsed.lemma.toLowerCase(Locale.ROOT).equals(stemKey))
+                if (HunspellDictionary.wordMatchesRoot(stem, parsed.lemma))
                 {
                     if (flagsEqual(parsed.flag, flag))
                         same = true;
@@ -1554,7 +1553,7 @@ public final class ComfortSpellingEngine
     {
         if (lemma == null || lemma.isBlank())
             return false;
-        String stemKey = lemma.trim().toLowerCase(Locale.ROOT);
+        String stem = lemma.trim();
         String flag = normalizeMorphFlag(flagOrNull);
         synchronized (USER_MORPH_LOCK)
         {
@@ -1568,7 +1567,7 @@ public final class ComfortSpellingEngine
             {
                 MorphLineParsed parsed = parseMorphLine(existing);
                 if (parsed != null
-                    && parsed.lemma.toLowerCase(Locale.ROOT).equals(stemKey)
+                    && HunspellDictionary.wordMatchesRoot(stem, parsed.lemma)
                     && flagsEqual(parsed.flag, flag))
                 {
                     removed = true;
@@ -1588,19 +1587,20 @@ public final class ComfortSpellingEngine
     }
 
     /**
-     * Существующая запись с той же леммой (без учёта регистра), или {@code null}.
+     * Существующая запись с той же леммой (совпадение как при проверке слова —
+     * {@link HunspellDictionary#wordMatchesRoot(String, String)}), или {@code null}.
      */
     private static MorphLineParsed findUserMorphEntry(String lemma, boolean projectScoped)
     {
         if (lemma == null || lemma.isBlank())
             return null;
-        String stemKey = lemma.trim().toLowerCase(Locale.ROOT);
+        String stem = lemma.trim();
         synchronized (USER_MORPH_LOCK)
         {
             for (String existing : readUserMorphEntries(morphDictionaryFile(projectScoped)))
             {
                 MorphLineParsed parsed = parseMorphLine(existing);
-                if (parsed != null && parsed.lemma.toLowerCase(Locale.ROOT).equals(stemKey))
+                if (parsed != null && HunspellDictionary.wordMatchesRoot(stem, parsed.lemma))
                     return parsed;
             }
         }

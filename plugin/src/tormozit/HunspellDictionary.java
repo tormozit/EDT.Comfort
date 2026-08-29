@@ -526,6 +526,24 @@ final class HunspellDictionary
         return false;
     }
 
+    /**
+     * Совпадение слова с леммой как при проверке орфографии ({@link #checkForm(String)}):
+     * точное или — для слова с заглавной первой буквой — совпадение после приведения
+     * её к строчной. Используется и для поиска существующей записи morph-словаря
+     * Comfort при добавлении/удалении слова (без учёта аффиксов).
+     */
+    static boolean wordMatchesRoot(String word, String root)
+    {
+        if (word == null || root == null)
+            return false;
+        if (word.equals(root))
+            return true;
+        if (word.isEmpty() || !Character.isUpperCase(word.charAt(0)))
+            return false;
+        String lower = word.substring(0, 1).toLowerCase() + word.substring(1);
+        return lower.equals(root);
+    }
+
     private boolean checkOneForm(String word)
     {
         word = applyIconv(word);

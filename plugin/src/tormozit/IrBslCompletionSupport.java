@@ -414,9 +414,6 @@ public final class IrBslCompletionSupport
         IrCompletionDebug.timing("Расчет типов контекста", started); //$NON-NLS-1$
 
         started = System.currentTimeMillis();
-//        Функция ЗаполнитьТаблицуСлов(ТаблицаТиповКонтекста = Неопределено, Знач ПрименитьОжидаемыйТип = Истина, выхЕстьЛучшееСлово = Неопределено, Знач РазрешитьОткрытиеОкон = Истина,
-//            Знач Сортировать = Истина, Знач ДобавлятьНизкоВероятные = Ложь, Знач ОтделятьБольшиеНаборыСлов = Ложь, Знач СловоФильтр = Неопределено, Знач ЗапретГлобальногоКонтекста = Ложь,
-//            Знач ТипСловаФильтр = Неопределено, ИнлайнРежимДоступен = Ложь) Экспорт
         boolean autoOpenSuggested =
             session.fillWordsTable(typesTable, true, false, !autoInvoke, true, true);
         IrCompletionDebug.timing("Заполнение слов контекста", started); //$NON-NLS-1$

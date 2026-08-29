@@ -452,6 +452,9 @@ public final class IRSession
         boolean fillWordsTable(Object typesTable, boolean applyExpectedType, boolean sort,
             boolean addLowProbable, boolean separateBigWordSets, boolean quiet)
         {
+//          Функция ЗаполнитьТаблицуСлов(ТаблицаТиповКонтекста = Неопределено, Знач ПрименитьОжидаемыйТип = Истина, выхЕстьЛучшееСлово = Неопределено, Знач РазрешитьОткрытиеОкон = Истина,
+//          Знач Сортировать = Истина, Знач ДобавлятьНизкоВероятные = Ложь, Знач ОтделятьБольшиеНаборыСлов = Ложь, Знач СловоФильтр = Неопределено, Знач ЗапретГлобальногоКонтекста = Ложь,
+//          Знач ТипСловаФильтр = Неопределено, ИнлайнРежимДоступен = Ложь) Экспорт
             Object[] args = {typesTable, applyExpectedType, false, false, sort, addLowProbable,
                 separateBigWordSets};
             Object result = quiet

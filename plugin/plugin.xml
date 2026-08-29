@@ -158,6 +158,7 @@
     <startup class="tormozit.BslModuleSpellCheckStartup"/>
     <startup class="tormozit.CommitMessageSpellCheckHook"/>
     <startup class="tormozit.FindReplaceLiveMatchCountHook"/>
+    <startup class="tormozit.AnnotationsPreferenceHook"/>
   </extension>
 
   <extension point="org.eclipse.ui.contexts">
