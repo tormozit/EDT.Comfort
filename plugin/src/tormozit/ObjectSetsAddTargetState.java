@@ -50,6 +50,45 @@ public final class ObjectSetsAddTargetState
         listeners.remove(listener);
     }
 
+    /** Имена проектов, у которых задан активный (add-target) набор. */
+    public synchronized List<String> projectsWithAddTarget()
+    {
+        return new java.util.ArrayList<>(addTargetByProject.keySet());
+    }
+
+    /**
+     * Активные <b>не основные</b> наборы открытых проектов — «ИмяПроекта: ИмяНабора», по строке
+     * на проект, отсортировано по имени проекта. Проекты с активным набором «&lt;Основной&gt;»
+     * пропускаются. Пусто, если таких наборов нет.
+     */
+    public synchronized String activeSetsPerProjectText()
+    {
+        List<String> lines = new java.util.ArrayList<>();
+        for (Map.Entry<String, String> e : addTargetByProject.entrySet())
+        {
+            if (e.getKey() == null || !ObjectSets.isProjectOpen(e.getKey()))
+                continue;
+            ObjectSets.SetDef set = ObjectSets.getInstance().getSetById(e.getValue());
+            if (set != null && !set.isDefaultSet())
+                lines.add(e.getKey() + ": " + set.name); //$NON-NLS-1$
+        }
+        lines.sort(String.CASE_INSENSITIVE_ORDER);
+        return String.join("\n", lines); //$NON-NLS-1$
+    }
+
+    /**
+     * Дописывает к {@code text} блок «Активные не основные наборы:» с перечнем по проектам
+     * (см. {@link #activeSetsPerProjectText()}). Если таких наборов нет — «: отсутствуют» на той
+     * же строке. Общий вид подсказок «Активные наборы» / кнопки-звезды навигатора.
+     */
+    public String withActiveSetsLines(String text)
+    {
+        String list = activeSetsPerProjectText();
+        String header = "Активные не основные наборы:"; //$NON-NLS-1$
+        return text + "\n" + header //$NON-NLS-1$
+            + (list.isEmpty() ? " отсутствуют" : "\n" + list); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
     public synchronized ObjectSets.SetDef getAddTargetSet(String projectName)
     {
 

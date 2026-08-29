@@ -30,6 +30,14 @@ final class ColumnFilterMenuBuilder
     /** Команда «Различные значения колонки» (см. {@code plugin.xml}); сочетание — Alt+F по умолчанию. */
     static final String COLUMN_VALUES_COMMAND_ID = "tormozit.formTable.columnValues"; //$NON-NLS-1$
 
+    /**
+     * Контекст, в котором обе команды привязаны в {@code plugin.xml}. В модальном
+     * диалоге он не активен, и {@code getActiveBindingsFor} пуст — без явного
+     * контекста пункты меню остались бы без сочетания клавиш, хотя сами клавиши
+     * там работают (см. {@code FormTableInteraction.handleFilterCommandKeys}).
+     */
+    static final String WINDOW_CONTEXT_ID = "org.eclipse.ui.contexts.window"; //$NON-NLS-1$
+
     private static final int GLYPH_SIZE = 12;
     /** По одной картинке на {@code Display} — MenuItem.setImage не копирует, живёт, пока жив Display. */
     private static final Map<Display, Image> GLYPH_CACHE = new WeakHashMap<>();
@@ -158,7 +166,7 @@ final class ColumnFilterMenuBuilder
         MenuItem filterItem = new MenuItem(menu, SWT.PUSH);
         filterItem.setText(ComfortSubmenuHelper.menuItemTextWithKeyBinding(
             activeCellFiltered ? "Снять отбор по значению ячейки" : "Отобрать по значению ячейки", //$NON-NLS-1$ //$NON-NLS-2$
-            FILTER_COMMAND_ID));
+            FILTER_COMMAND_ID, WINDOW_CONTEXT_ID));
         filterItem.setEnabled(activeCellFiltered || canFilter);
         // Снять отбор — та же иконка «×», что у «Отключить все отборы» (антикоманда).
         Image filterIcon = activeCellFiltered ? owner.clearAllIcon() : filterByValueIcon(menu.getDisplay());
@@ -170,7 +178,7 @@ final class ColumnFilterMenuBuilder
         boolean canBrowse = owner.canBrowseColumnValues();
         MenuItem valuesItem = new MenuItem(menu, SWT.PUSH);
         valuesItem.setText(ComfortSubmenuHelper.menuItemTextWithKeyBinding(
-            "Различные значения колонки", COLUMN_VALUES_COMMAND_ID)); //$NON-NLS-1$
+            "Различные значения колонки", COLUMN_VALUES_COMMAND_ID, WINDOW_CONTEXT_ID)); //$NON-NLS-1$
         valuesItem.setEnabled(canBrowse);
         valuesItem.addListener(SWT.Selection, ev -> owner.openColumnValuesDialog());
         trackedItems.add(valuesItem);

@@ -240,6 +240,12 @@ public final class ComfortSettings
     /** Панель «Структура» выключена по умолчанию. */
     public static final boolean DEFAULT_COMPARE_STRUCTURE_VISIBLE = false;
 
+    /** Ключ: табличный режим списка проверок на странице «Проверки» ({@link ValidationChecksFilterHook}). */
+    public static final String PREF_VALIDATION_CHECKS_TABLE_MODE = "comfort.validationChecks.tableMode"; //$NON-NLS-1$
+
+    /** По умолчанию проверки показываются деревом, как в EDT. */
+    public static final boolean DEFAULT_VALIDATION_CHECKS_TABLE_MODE = false;
+
     // ---- Spell checking ----
 
     /**
@@ -597,6 +603,32 @@ public final class ComfortSettings
         catch (Exception ex)
         {
             Global.log("ComfortSettings save error (compareStructureVisible): " + ex); //$NON-NLS-1$
+        }
+    }
+
+    /** Показывать ли проверки таблицей вместо дерева на странице «Проверки» — запоминается между запусками EDT. */
+    public static boolean isValidationChecksTableMode()
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return DEFAULT_VALIDATION_CHECKS_TABLE_MODE;
+        return settings.preferenceStore.getBoolean(PREF_VALIDATION_CHECKS_TABLE_MODE);
+    }
+
+    /** Сохранить состояние кнопки табличного режима на странице «Проверки». */
+    public static void setValidationChecksTableMode(boolean tableMode)
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return;
+        settings.preferenceStore.setValue(PREF_VALIDATION_CHECKS_TABLE_MODE, tableMode);
+        try
+        {
+            settings.preferenceStore.save();
+        }
+        catch (Exception ex)
+        {
+            Global.log("ComfortSettings save error (validationChecksTableMode): " + ex); //$NON-NLS-1$
         }
     }
 

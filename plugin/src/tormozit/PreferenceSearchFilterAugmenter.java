@@ -55,6 +55,11 @@ final class PreferenceSearchFilterAugmenter
     private static final String[] FILTERED_TREE_FIELD_CANDIDATES =
             {"filteredTree", "fFilteredTree", "tree"}; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
 
+    /** Страница проверок конфигурации: в свойствах проекта и в общих параметрах (см. {@link #labelOf}). */
+    private static final List<String> VALIDATION_PAGE_IDS = List.of(
+            "com.e1c.g5.v8.dt.checks.properties", //$NON-NLS-1$
+            "com.e1c.g5.v8.dt.checks.preferences"); //$NON-NLS-1$
+
     private PreferenceSearchFilterAugmenter()
     {
     }
@@ -687,7 +692,7 @@ final class PreferenceSearchFilterAugmenter
         @Override
         public StyledString getStyledText(Object element)
         {
-            String label = element instanceof IPreferenceNode node ? node.getLabelText() : String.valueOf(element);
+            String label = element instanceof IPreferenceNode node ? labelOf(node) : String.valueOf(element);
             StyledString styled = new StyledString(label == null ? "" : label); //$NON-NLS-1$
             if (filterControl.isDisposed())
                 return styled;
@@ -719,6 +724,22 @@ final class PreferenceSearchFilterAugmenter
         {
             return element instanceof IPreferenceNode node ? node.getLabelImage() : null;
         }
+    }
+
+    /**
+     * Заголовок узла дерева страниц с учётом переименований плагина.
+     *
+     * <p>issue 401: страница проверок конфигурации называется в EDT «Валидация»,
+     * что не согласовано с остальной терминологией («проверки», «проблемы») —
+     * показываем её как «Проверки». Заголовок над самой страницей меняет
+     * {@link ValidationChecksFilterHook}.
+     */
+    static String labelOf(IPreferenceNode node)
+    {
+        String id = node.getId();
+        if (VALIDATION_PAGE_IDS.contains(id))
+            return ValidationChecksFilterHook.PAGE_TITLE;
+        return node.getLabelText();
     }
 
     /**
@@ -786,7 +807,7 @@ final class PreferenceSearchFilterAugmenter
         if (selection.length == 0)
             return;
         Object data = selection[0].getData();
-        String text = data instanceof IPreferenceNode node ? node.getLabelText() : selection[0].getText();
+        String text = data instanceof IPreferenceNode node ? labelOf(node) : selection[0].getText();
         if (text == null || text.isBlank())
             return;
         Clipboard clipboard = new Clipboard(tree.getDisplay());

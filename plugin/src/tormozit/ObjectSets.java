@@ -118,6 +118,12 @@ public final class ObjectSets
             return system || DEFAULT_SET_NAME.equals(name);
         }
 
+        /** Набор «<Основной>» (не путать с динамическими «<Измененные …>»). */
+        public boolean isDefaultSet()
+        {
+            return DEFAULT_SET_NAME.equals(name);
+        }
+
         /**
          * Набор можно удалить: «<Измененные Git>» по git создаётся автоматически и удалению не
          * подлежит, набор по изменениям базы — подлежит (пересоздаётся кликом в «Приложениях»).

@@ -460,6 +460,45 @@ final class ObjectSetsItems
     }
 
     /**
+     * Полные имена владеющих объектов МД активного (add-target) набора проекта — тот же состав,
+     * что использует фильтр навигатора ({@link AddTargetTreeCache}). Для динамических наборов
+     * (git / база) состав вычисляется на месте.
+     *
+     * @param projectName имя проекта
+     * @return список ссылок владеющих объектов; {@code null} — у проекта нет активного набора
+     *         (пустой список — набор есть, но пуст)
+     */
+    static List<String> addTargetOwnerRefs(String projectName)
+    {
+        if (projectName == null || projectName.isBlank())
+            return null;
+        ObjectSets.SetDef set = ObjectSetsAddTargetState.getInstance().getAddTargetSet(projectName);
+        if (set == null)
+            return null;
+        return AddTargetTreeCache.collectRefs(projectName);
+    }
+
+    /**
+     * Полное имя МД {@code fullName} относится к одному из объектов набора {@code ownerRefs}:
+     * это сам объект набора или его подобъект (модуль, форма, реквизит и т.п.). В отличие от
+     * {@code relatesToAnyRef} обратное направление (набор — потомок объекта) не учитывается:
+     * для плоского списка результатов поиска родительские узлы не нужны.
+     */
+    static boolean isUnderAnyOwnerRef(List<String> ownerRefs, String fullName)
+    {
+        if (ownerRefs == null || ownerRefs.isEmpty() || fullName == null || fullName.isBlank())
+            return false;
+        for (String ref : ownerRefs)
+        {
+            if (ref == null || ref.isBlank())
+                continue;
+            if (fullName.equals(ref) || fullName.startsWith(ref + ".")) //$NON-NLS-1$
+                return true;
+        }
+        return false;
+    }
+
+    /**
      * При включённом фильтре и непустом add-target наборе — добавить новый крупный объект МД в набор.
      * @return {@code true} если объект добавлен
      */

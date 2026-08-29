@@ -12,6 +12,10 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
+import org.eclipse.jface.bindings.TriggerSequence;
+import org.eclipse.jface.bindings.keys.KeySequence;
+import org.eclipse.jface.bindings.keys.KeyStroke;
+import org.eclipse.jface.bindings.keys.SWTKeySupport;
 import org.eclipse.jface.dialogs.Dialog;
 import org.eclipse.jface.dialogs.IDialogConstants;
 import org.eclipse.jface.dialogs.IDialogSettings;
@@ -69,6 +73,8 @@ import org.eclipse.swt.widgets.TableItem;
 import org.eclipse.swt.widgets.Text;
 import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.TreeItem;
+import org.eclipse.ui.IWorkbenchWindow;
+import org.eclipse.ui.PlatformUI;
 
 /**
  * Единое поведение таблиц в формах плагина: выбор ячейки, копирование,
@@ -726,9 +732,19 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
      */
     static void applyIconColumn(TableColumn column, TableColumnLayout layout)
     {
+        applyIconColumn(column, layout, 0);
+    }
+
+    /**
+     * @param extraWidthPx запас к ширине значка — нужен первой колонке таблицы со
+     * стилем {@code SWT.CHECK}: там рядом со значком система рисует ещё и пометку
+     * строки (см. таблицу проверок в {@code ValidationChecksFilterHook}).
+     */
+    static void applyIconColumn(TableColumn column, TableColumnLayout layout, int extraWidthPx)
+    {
         if (column == null || column.isDisposed())
             return;
-        int width = ColumnWidthFit.iconColumnWidth();
+        int width = ColumnWidthFit.iconColumnWidth() + Math.max(0, extraWidthPx);
         column.setText(""); //$NON-NLS-1$
         column.setResizable(false);
         column.setMoveable(false);
@@ -1290,7 +1306,76 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
         {
             copyActiveCell();
             e.doit = false;
+            return;
         }
+        handleFilterCommandKeys(e);
+    }
+
+    /**
+     * Сочетания «Отобрать по значению ячейки» и «Различные значения колонки»
+     * выполняются глобальными командами ({@code plugin.xml}), но их обработчик
+     * привязок живёт в окне рабочей области: в отдельном {@link Shell} — модальные
+     * «Параметры» (страница «Проверки»), собственные окна плагина — нажатие до
+     * команды не доходит, как и Ctrl+C. Там выполняем действие сами, сверяя
+     * нажатие с текущими привязками (пользователь мог их переназначить), а не с
+     * зашитыми Alt+W/Alt+F.
+     */
+    private void handleFilterCommandKeys(Event e)
+    {
+        if (isInsideWorkbenchWindow())
+            return;
+        if (matchesCommandBinding(e, ColumnFilterMenuBuilder.FILTER_COMMAND_ID))
+        {
+            toggleActiveCellFilter();
+            e.doit = false;
+        }
+        else if (matchesCommandBinding(e, ColumnFilterMenuBuilder.COLUMN_VALUES_COMMAND_ID))
+        {
+            openColumnValuesDialog();
+            e.doit = false;
+        }
+    }
+
+    /** В окне рабочей области привязки отрабатывают штатно — второй раз выполнять команду нельзя. */
+    private boolean isInsideWorkbenchWindow()
+    {
+        if (!PlatformUI.isWorkbenchRunning())
+            return false;
+        IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+        Shell workbenchShell = window != null ? window.getShell() : null;
+        return workbenchShell != null && workbenchShell == table.getShell();
+    }
+
+    private static boolean matchesCommandBinding(Event e, String commandId)
+    {
+        KeySequence pressed = pressedSequence(e);
+        if (pressed == null)
+            return false;
+        for (TriggerSequence candidate : bindingsOf(commandId))
+        {
+            if (pressed.equals(candidate))
+                return true;
+        }
+        return false;
+    }
+
+    private static KeySequence pressedSequence(Event e)
+    {
+        KeyStroke stroke =
+            SWTKeySupport.convertAcceleratorToKeyStroke(SWTKeySupport.convertEventToUnmodifiedAccelerator(e));
+        return stroke != null ? KeySequence.getInstance(stroke) : null;
+    }
+
+    /**
+     * Обе команды привязаны в контексте {@code org.eclipse.ui.contexts.window},
+     * который в модальном диалоге не активен — {@code getActiveBindingsFor} там
+     * пуст. Поэтому спрашиваем привязки с указанием контекста: у
+     * {@link ComfortSubmenuHelper#resolveKeySequences} для этого есть разбор
+     * настроенных (а не только активных) привязок.
+     */
+    private static TriggerSequence[] bindingsOf(String commandId)
+    {
+        return ComfortSubmenuHelper.resolveKeySequences(commandId, ColumnFilterMenuBuilder.WINDOW_CONTEXT_ID);
     }
 
     private void onMenuDetect(Event e)

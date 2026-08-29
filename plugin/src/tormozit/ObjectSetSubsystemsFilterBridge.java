@@ -11,7 +11,11 @@ import org.eclipse.jface.viewers.TreePath;
 import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.jface.viewers.Viewer;
 import org.eclipse.jface.viewers.ViewerFilter;
+import org.eclipse.swt.widgets.Composite;
+import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
+import org.eclipse.swt.widgets.ToolBar;
+import org.eclipse.swt.widgets.ToolItem;
 import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.TreeItem;
 import org.eclipse.swt.events.TreeAdapter;
@@ -37,7 +41,11 @@ import org.eclipse.ui.navigator.INavigatorContentService;
 import org.eclipse.ui.navigator.INavigatorFilterService;
 import org.eclipse.ui.navigator.ICommonFilterDescriptor;
 
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -115,7 +123,98 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
                 @Override public void windowDeactivated(IWorkbenchWindow w) {}
                 @Override public void windowClosed(IWorkbenchWindow w) {}
             });
+            ObjectSets.getInstance().addChangeListener(
+                ObjectSetSubsystemsFilterBridge::updateAllStarButtonTooltips);
+            ObjectSetsAddTargetState.getInstance().addListener(
+                ObjectSetSubsystemsFilterBridge::updateAllStarButtonTooltips);
+            updateAllStarButtonTooltips();
         });
+    }
+
+    private static final String STAR_TOOLTIP_BASE =
+        "Показать только объекты активного набора; вытесняет фильтр подсистем"; //$NON-NLS-1$
+    private static final String STAR_TOOLTIP_PREFIX = "Показать только объекты активного набора"; //$NON-NLS-1$
+
+    static void updateAllStarButtonTooltips()
+    {
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        display.asyncExec(() -> {
+            if (!PlatformUI.isWorkbenchRunning())
+                return;
+            for (IWorkbenchWindow window : PlatformUI.getWorkbench().getWorkbenchWindows())
+            {
+                for (IWorkbenchPage page : window.getPages())
+                {
+                    IViewPart view = page.findView(Global.NAVIGATOR_VIEW_ID);
+                    if (view != null)
+                        updateStarButtonTooltip(view);
+                }
+            }
+        });
+    }
+
+    /** Дописать к подсказке кнопки-звезды навигатора список активных наборов по проектам. */
+    static void updateStarButtonTooltip(IViewPart navigator)
+    {
+        if (navigator == null || navigator.getViewSite() == null)
+            return;
+        String tip = ObjectSetsAddTargetState.getInstance().withActiveSetsLines(
+            STAR_TOOLTIP_BASE + Global.pluginSignForTooltip());
+
+        // Панель инструментов представления живёт вне composite содержимого view.
+        ToolItem item = null;
+        org.eclipse.jface.action.IContributionManager tbm =
+            navigator.getViewSite().getActionBars().getToolBarManager();
+        if (tbm instanceof org.eclipse.jface.action.ToolBarManager toolBarManager)
+        {
+            ToolBar bar = toolBarManager.getControl();
+            item = findStarToolItem(bar);
+        }
+        if (item == null)
+        {
+            Object parent = Global.getField(navigator, "parent"); //$NON-NLS-1$
+            if (parent instanceof Composite root && !root.isDisposed())
+                item = findStarToolItemDeep(root);
+        }
+        if (item != null && !item.isDisposed())
+            item.setToolTipText(TooltipText.wrap(item.getParent(), tip));
+    }
+
+    private static ToolItem findStarToolItem(ToolBar bar)
+    {
+        if (bar == null || bar.isDisposed())
+            return null;
+        for (ToolItem item : bar.getItems())
+        {
+            String existing = item.getToolTipText();
+            if (existing != null && existing.startsWith(STAR_TOOLTIP_PREFIX))
+                return item;
+        }
+        return null;
+    }
+
+    private static ToolItem findStarToolItemDeep(Composite root)
+    {
+        if (root == null || root.isDisposed())
+            return null;
+        for (Control child : root.getChildren())
+        {
+            if (child instanceof ToolBar toolBar)
+            {
+                ToolItem found = findStarToolItem(toolBar);
+                if (found != null)
+                    return found;
+            }
+            else if (child instanceof Composite nested)
+            {
+                ToolItem found = findStarToolItemDeep(nested);
+                if (found != null)
+                    return found;
+            }
+        }
+        return null;
     }
 
     private static void installMdObjectCreateListener()
@@ -151,6 +250,13 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
                 if (FOCUS_NAVIGATOR_COMMAND_ID.equals(commandId)
                     || commandId != null && commandId.contains("showInNavigator")) //$NON-NLS-1$
                     scheduleSyncVisibleChevrons();
+                if (ObjectSetsNavigatorFilterSupport.COMMAND_ID.equals(commandId))
+                {
+                    // HandledContributionItem после смены toggle сбрасывает подсказку на штатную.
+                    Display display = Display.getDefault();
+                    if (display != null && !display.isDisposed())
+                        display.timerExec(50, ObjectSetSubsystemsFilterBridge::updateAllStarButtonTooltips);
+                }
                 if (!SUBSYSTEMS_FILTER_COMMAND_ID.equals(commandId))
                     return;
                 Display display = Display.getDefault();
@@ -441,6 +547,9 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
         scheduleSubsystemsMementoReapply(navigator);
         if (!alreadyHooked && ObjectSetsNavigatorFilterSupport.isActive())
             scheduleFilterRefresh(navigator, 0, "tryHook"); //$NON-NLS-1$
+        Display display = Display.getDefault();
+        if (display != null && !display.isDisposed())
+            display.timerExec(400, () -> updateStarButtonTooltip(navigator));
     }
 
     /**
@@ -1121,6 +1230,96 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
                 return wrapper;
         }
         return null;
+    }
+
+    /**
+     * Владеющие ссылки объектов МД, видимых сейчас в навигаторе с учётом активного отбора
+     * (фильтр по подсистемам или по набору «звезда»). Обход модели навигатора, а не дерева —
+     * работает при модальном окне поиска. Ключ {@code ""} — объединение по всем проектам.
+     * {@code null} — никакой отбор не активен (в навигаторе видно всё). Issue #420.
+     */
+    static Map<String, List<String>> visibleOwnerRefsByProject()
+    {
+        if (!PlatformUI.isWorkbenchRunning())
+            return null;
+        IViewPart navigator = null;
+        for (IWorkbenchWindow window : PlatformUI.getWorkbench().getWorkbenchWindows())
+        {
+            for (IWorkbenchPage page : window.getPages())
+            {
+                IViewPart candidate = page.findView(Global.NAVIGATOR_VIEW_ID);
+                if (candidate != null)
+                {
+                    navigator = candidate;
+                    break;
+                }
+            }
+            if (navigator != null)
+                break;
+        }
+        if (navigator == null)
+            return null;
+
+        boolean setFilter = ObjectSetsNavigatorFilterSupport.isActive();
+        boolean subsystemsFilter = Boolean.TRUE.equals(
+            Global.invoke(navigator, "isSubsystemsFilterActive")); //$NON-NLS-1$
+        if (!setFilter && !subsystemsFilter)
+            return null;
+
+        CommonViewer viewer = getCommonViewer(navigator);
+        CombinedSubsystemsFilter wrapper = viewer != null ? findWrapperFilter(viewer) : null;
+        Object input = viewer != null ? viewer.getInput() : null;
+        if (wrapper == null || input == null
+            || !(viewer.getContentProvider() instanceof ITreeContentProvider content))
+            return null;
+
+        Map<String, LinkedHashSet<String>> acc = new HashMap<>();
+        for (Object projectNode : content.getElements(input))
+        {
+            org.eclipse.core.resources.IResource resource =
+                NavigatorResourceResolver.resolve(projectNode);
+            String projectName = resource != null && resource.getProject() != null
+                ? resource.getProject().getName()
+                : projectNode instanceof IProject p ? p.getName() : null;
+            collectVisibleRefs(viewer, wrapper, content, projectNode, projectName, acc, 0);
+        }
+        Map<String, List<String>> result = new HashMap<>();
+        for (Map.Entry<String, LinkedHashSet<String>> entry : acc.entrySet())
+            result.put(entry.getKey(), new ArrayList<>(entry.getValue()));
+        return result;
+    }
+
+    private static void collectVisibleRefs(
+        Viewer viewer, CombinedSubsystemsFilter wrapper, ITreeContentProvider content,
+        Object parent, String projectName, Map<String, LinkedHashSet<String>> acc, int depth)
+    {
+        if (parent == null || depth > 12)
+            return;
+        Object[] children;
+        try
+        {
+            children = content.hasChildren(parent) ? content.getChildren(parent) : null;
+        }
+        catch (RuntimeException e)
+        {
+            return;
+        }
+        if (children == null || children.length == 0)
+            return;
+        for (Object child : filterVisibleChildren(viewer, wrapper, parent, children))
+        {
+            String fqn = GetRef.fullNameFromNavigatorElement(child);
+            if (fqn != null && !fqn.isBlank())
+            {
+                String owner = MdTypeMapping.toOwnerMdObjectRef(fqn);
+                String ref = owner != null && !owner.isBlank() ? owner : fqn;
+                if (projectName != null && !projectName.isBlank())
+                    acc.computeIfAbsent(projectName, k -> new LinkedHashSet<>()).add(ref);
+                acc.computeIfAbsent("", k -> new LinkedHashSet<>()).add(ref); //$NON-NLS-1$
+                continue;
+            }
+            collectVisibleRefs(viewer, wrapper, content, child, projectName, acc, depth + 1);
+        }
     }
 
     static final class CombinedSubsystemsFilter extends ViewerFilter

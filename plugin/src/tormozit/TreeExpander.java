@@ -87,7 +87,8 @@ public final class TreeExpander implements IStartup
             Target.SEARCH_FILES,
             Target.FORM_ITEMS,
             Target.CONFIG_ERRORS,
-            Target.RIGHTS_EDITOR);
+            Target.RIGHTS_EDITOR,
+            Target.VALIDATION_CHECKS);
 
     private static final ThreadLocal<Boolean> SUPPRESSED = ThreadLocal.withInitial(() -> Boolean.FALSE);
     private static final ThreadLocal<Boolean> IN_AUTO_EXPAND = ThreadLocal.withInitial(() -> Boolean.FALSE);
@@ -106,7 +107,9 @@ public final class TreeExpander implements IStartup
         /** Панель «Ошибки конфигурации». */
         CONFIG_ERRORS,
         /** Дерево прав (вкладка «Права» редактора объекта / роли). */
-        RIGHTS_EDITOR
+        RIGHTS_EDITOR,
+        /** Дерево проверок конфигурации (страница «Проверки» окна «Параметры»). */
+        VALIDATION_CHECKS
     }
 
     @FunctionalInterface
