@@ -1,4 +1,4 @@
-// IrBslEditorHoverHook.java
+// BslEditorHoverHook.java
 package tormozit;
 
 import java.util.Collections;
@@ -35,10 +35,14 @@ import org.eclipse.jface.text.ITextHoverExtension;
 import org.eclipse.jface.text.ITextHoverExtension2;
 import org.eclipse.jface.text.ITextViewer;
 import org.eclipse.emf.ecore.EObject;
+import org.eclipse.xtext.Keyword;
+import org.eclipse.xtext.nodemodel.ILeafNode;
 import org.eclipse.xtext.nodemodel.INode;
 import org.eclipse.xtext.nodemodel.util.NodeModelUtils;
+import org.eclipse.xtext.parser.IParseResult;
 import org.eclipse.xtext.resource.EObjectAtOffsetHelper;
 import org.eclipse.xtext.resource.XtextResource;
+import org.eclipse.swt.internal.win32.OS;
 import org.eclipse.xtext.ui.editor.hover.html.IXtextBrowserInformationControl;
 import org.eclipse.xtext.ui.editor.model.IXtextDocument;
 import org.eclipse.xtext.util.concurrent.IUnitOfWork;
@@ -48,8 +52,9 @@ import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
 
 /**
  * Дополняет doc-hover BSL описанием из ИР при подключённой сессии.
+ * Подавляет подсказку при наведении без Ctrl на ключевых словах языка и пустом месте.
  */
-public final class IrBslEditorHoverHook implements IStartup
+public final class BslEditorHoverHook implements IStartup
 {
     private static final String HOOK_MARKER = "tormozit.irHoverWrapped"; //$NON-NLS-1$
 
@@ -180,7 +185,7 @@ public final class IrBslEditorHoverHook implements IStartup
         boolean wrapped = false;
         for (Map.Entry<Object, ITextHover> entry : hovers.entrySet())
         {
-            IrBslTextHoverWrapper wrapper = wrapHoverDelegate(entry.getValue(), editor);
+            IrBslTextHoverWrapper wrapper = wrapHoverDelegate(entry.getValue(), editor, true);
             if (wrapper != null)
             {
                 entry.setValue(wrapper);
@@ -202,20 +207,21 @@ public final class IrBslEditorHoverHook implements IStartup
         Object hover = Global.getField(provider, "hover"); //$NON-NLS-1$
         if (!(hover instanceof ITextHover textHover) || textHover instanceof IrBslTextHoverWrapper)
             return false;
-        IrBslTextHoverWrapper wrapper = wrapHoverDelegate(textHover, editor);
+        IrBslTextHoverWrapper wrapper = wrapHoverDelegate(textHover, editor, false);
         if (wrapper == null)
             return false;
         Global.setField(provider, "hover", wrapper); //$NON-NLS-1$
         return true;
     }
 
-    private static IrBslTextHoverWrapper wrapHoverDelegate(ITextHover hover, BslXtextEditor editor)
+    private static IrBslTextHoverWrapper wrapHoverDelegate(
+        ITextHover hover, BslXtextEditor editor, boolean suppressPointerHover)
     {
         if (hover instanceof IrBslTextHoverWrapper existing)
             return existing;
         if (!isWrappableBslHover(hover))
             return null;
-        return new IrBslTextHoverWrapper(hover, editor);
+        return new IrBslTextHoverWrapper(hover, editor, suppressPointerHover);
     }
 
     private static boolean isWrappableBslHover(ITextHover hover)
@@ -232,6 +238,10 @@ public final class IrBslEditorHoverHook implements IStartup
 
     /**
      * Обёртка штатного {@link ITextHover}: асинхронно дополняет HTML описанием из ИР.
+     * Вариант для наведения мышью ({@code suppressPointerHover}) подавляет подсказку
+     * на ключевых словах языка (EDT показывает по ним синтаксическую справку всей
+     * конструкции) и на пустом месте (подсказка соседнего слова); Ctrl+наведение
+     * и Ctrl+F2 (осознанный вызов) не подавляются.
      */
     private static final class IrBslTextHoverWrapper implements ITextHover, ITextHoverExtension, ITextHoverExtension2
     {
@@ -239,6 +249,7 @@ public final class IrBslEditorHoverHook implements IStartup
         private final ITextHoverExtension delegateExt;
         private final ITextHoverExtension2 delegateExt2;
         private final BslXtextEditor editor;
+        private final boolean suppressPointerHover;
         private final AtomicInteger fetchGeneration = new AtomicInteger();
         private volatile int lastScheduledOffset = -1;
         private volatile String lastIrHtml;
@@ -247,12 +258,13 @@ public final class IrBslEditorHoverHook implements IStartup
         private volatile boolean lastCreationSite;
         private volatile HtmlIntegrityWatcher activeWatcher;
 
-        IrBslTextHoverWrapper(ITextHover delegate, BslXtextEditor editor)
+        IrBslTextHoverWrapper(ITextHover delegate, BslXtextEditor editor, boolean suppressPointerHover)
         {
             this.delegate = delegate;
             this.delegateExt = delegate instanceof ITextHoverExtension ext ? ext : null;
             this.delegateExt2 = delegate instanceof ITextHoverExtension2 ext2 ? ext2 : null;
             this.editor = editor;
+            this.suppressPointerHover = suppressPointerHover;
         }
 
         @Override
@@ -281,6 +293,16 @@ public final class IrBslEditorHoverHook implements IStartup
         @Override
         public Object getHoverInfo2(ITextViewer textViewer, IRegion hoverRegion)
         {
+            if (suppressPointerHover)
+            {
+                String reason = hoverSuppressionReason(hoverRegion);
+                if (reason != null)
+                {
+                    IrBslHoverDebug.step("hover", "suppressed reason=" + reason //$NON-NLS-1$ //$NON-NLS-2$
+                        + " offset=" + (hoverRegion == null ? -1 : hoverRegion.getOffset())); //$NON-NLS-1$
+                    return null;
+                }
+            }
             Object info = delegateExt2 != null
                 ? delegateExt2.getHoverInfo2(textViewer, hoverRegion)
                 : delegate.getHoverInfo(textViewer, hoverRegion);
@@ -312,6 +334,60 @@ public final class IrBslEditorHoverHook implements IStartup
             scheduleNativeInputSync(baseInput, offset, gen);
             session.executor.submit(() -> scheduleIrEnrichment(session, baseInput, payload, offset, gen));
             return maybeDecorateHoverInfo(info);
+        }
+
+        /**
+         * Причина подавления подсказки при обычном наведении (без Ctrl) или {@code null}:
+         * на ключевом слове языка EDT показывает синтаксическую справку всей
+         * конструкции, а на пустом месте — подсказку соседнего слова. Зажатый Ctrl —
+         * осознанный вызов, подсказка остаётся (как и у Ctrl+F2).
+         */
+        private String hoverSuppressionReason(IRegion hoverRegion)
+        {
+            if (hoverRegion == null)
+                return null;
+            if ((OS.GetKeyState(OS.VK_CONTROL) & 0x8000) != 0)
+                return null;
+            int offset = hoverRegion.getOffset();
+            if (editor == null || offset < 0)
+                return null;
+            org.eclipse.jface.text.IDocument document = editor.getDocument();
+            if (!(document instanceof IXtextDocument xtextDoc))
+                return null;
+            try
+            {
+                return xtextDoc.readOnly(
+                    (IUnitOfWork<String, XtextResource>) resource -> {
+                        if (resource == null)
+                            return null;
+                        IParseResult parseResult = resource.getParseResult();
+                        if (parseResult == null)
+                            return null;
+                        ILeafNode leaf = NodeModelUtils.findLeafNodeAtOffset(parseResult.getRootNode(), offset);
+                        if (leaf == null)
+                            return null;
+                        if (leaf.isHidden())
+                        {
+                            // пустое место (не комментарий): EDT показывает подсказку соседнего слова
+                            String text = leaf.getText();
+                            return text != null && text.isBlank() ? "blank" : null; //$NON-NLS-1$
+                        }
+                        return isLanguageKeyword(leaf) ? "keyword" : null; //$NON-NLS-1$
+                    });
+            }
+            catch (Exception e)
+            {
+                return null;
+            }
+        }
+
+        /** Видимый токен — ключевое слово языка (не пунктуация, не литерал). */
+        private static boolean isLanguageKeyword(ILeafNode leaf)
+        {
+            if (!(leaf.getGrammarElement() instanceof Keyword grammarKeyword))
+                return false;
+            String value = grammarKeyword.getValue();
+            return value != null && !value.isEmpty() && Character.isLetter(value.charAt(0));
         }
 
         private Object maybeDecorateHoverInfo(Object info)

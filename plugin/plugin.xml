@@ -40,7 +40,7 @@
     <startup class="tormozit.TreeExpander"/>
     <startup class="tormozit.ProblemViewPropertyFocusHook"/>
     <startup class="tormozit.IrKeyBindingHook"/>
-    <startup class="tormozit.IrBslEditorHoverHook"/>
+    <startup class="tormozit.BslEditorHoverHook"/>
     <startup class="tormozit.PriorityGlobalKeyBindingHook"/>
     <startup class="tormozit.ComfortKeysPageHook"/>
     <startup class="tormozit.PreferenceSearchIndexHook"/>
