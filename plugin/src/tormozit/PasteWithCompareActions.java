@@ -143,8 +143,6 @@ public final class PasteWithCompareActions
         /** id из {@code plugin.xml} бандла {@code com._1c.g5.v8.dt.bsl.ui}. */
         private static final String BSL_XTEXT_VIEWER_ID =
             "com._1c.g5.v8.dt.bsl.Bsl.compare.contentMergeViewers"; //$NON-NLS-1$
-        /** id из {@code fragment.xml} бандла {@code com._1c.g5.v8.dt.bsl.gumtree.ui}. */
-        private static final String BSL_SEMANTIC_VIEWER_ID = "BslMergeViewerCreator"; //$NON-NLS-1$
 
         private final String compareViewerType;
         private final EditableStringCompareElement leftElement;
@@ -164,6 +162,20 @@ public final class PasteWithCompareActions
         private org.eclipse.jface.text.source.SourceViewer rightSourceViewer;
         /** Пункт «Сравнить ИР» в тулбаре добавляется один раз (см. {@link #addCompareInIrToolbarActionOnce}). */
         private boolean toolbarActionAdded;
+        /**
+         * Последний вьюер, для которого навешены наши кнопки и панель «Текущая строка». Смена
+         * режима сравнения в выпадающем списке пересоздаёт вьюер вместе с тулбаром (наши кнопки
+         * при этом пропадают) — при новом экземпляре навешиваем всё заново.
+         */
+        private Viewer lastHookedViewer;
+        /**
+         * Предпочтительный просмотрщик BSL применяется только при первом создании вьюера.
+         * Иначе {@link #applyPreferredBslViewerDescriptor} на каждый {@code findContentViewer}
+         * перетирал бы выбор пользователя из выпадающего списка режимов сравнения (и
+         * {@code CompareContentViewerSwitchingPane} возвращал бы тот же экземпляр вьюера
+         * без пересчёта различий — issue 406).
+         */
+        private boolean preferredBslDescriptorApplied;
 
         StringFragmentCompareInput(String leftText, String rightText, String compareViewerType,
             TextEditor.Context ctx)
@@ -234,8 +246,28 @@ public final class PasteWithCompareActions
         {
             applyPreferredBslViewerDescriptor(oldViewer, input);
             Viewer viewer = super.findContentViewer(oldViewer, input, parent);
+            localizeBslViewerTitle(viewer);
             hookCurrentLineTracking(viewer);
             return viewer;
+        }
+
+        /**
+         * Xtext-просмотрщик BSL кладёт в {@code CompareUI.COMPARE_VIEWER_TITLE} своего control'а
+         * нелокализованный заголовок «Bsl Compare» (имя грамматики + «Compare»), и
+         * {@code CompareViewerSwitchingPane} показывает его в шапке режима сравнения, хотя пункт
+         * того же режима в выпадающем списке — уже русский. Подменяем на русскую подпись
+         * (та же, что у descriptor'а в {@code plugin_ru.properties} бандла {@code com._1c.g5.v8.dt.bsl.ui}).
+         */
+        private static void localizeBslViewerTitle(Viewer viewer)
+        {
+            if (viewer == null)
+                return;
+            Control control = viewer.getControl();
+            if (control == null || control.isDisposed())
+                return;
+            Object title = control.getData(CompareUI.COMPARE_VIEWER_TITLE);
+            if (title instanceof String s && (s.equals("Bsl Compare") || s.equals("Xtext Compare"))) //$NON-NLS-1$ //$NON-NLS-2$
+                control.setData(CompareUI.COMPARE_VIEWER_TITLE, "Сравнение встроенного языка"); //$NON-NLS-1$
         }
 
         /**
@@ -256,6 +288,16 @@ public final class PasteWithCompareActions
                 currentLinesPanel.renderPlain(0, ""); //$NON-NLS-1$
                 currentLinesPanel.renderPlain(1, ""); //$NON-NLS-1$
                 return;
+            }
+
+            /*
+             * Новый экземпляр вьюера (первое открытие или смена режима сравнения) — тулбар
+             * пересобран штатным механизмом, наши кнопки и «Структуру» навешиваем заново.
+             */
+            if (viewer != lastHookedViewer)
+            {
+                lastHookedViewer = viewer;
+                toolbarActionAdded = false;
             }
 
             leftEditorText = MergeViewerReflection.extractStyledText(mergeViewer, "fLeft"); //$NON-NLS-1$
@@ -362,6 +404,8 @@ public final class PasteWithCompareActions
             return true;
         }
 
+        private static final String STRUCTURE_WRAPPED_KEY = "comfort.pasteStructureWrapped"; //$NON-NLS-1$
+
         /**
          * Панель «Структура» — ПОСЛЕ того, как фреймворк закончит создавать вьюер, а не внутри
          * {@code findContentViewer}. Причина конкретная: репарентинг control'а вьюера
@@ -389,6 +433,14 @@ public final class PasteWithCompareActions
                 // ViewForm.setContent требует, чтобы control был ПРЯМЫМ ребёнком самого pane.
                 if (content == null || content.isDisposed() || content.getParent() != pane)
                     return;
+                /*
+                 * Идемпотентность: при смене режима сравнения приходит новый control (маркера нет —
+                 * оборачиваем), при повторном срабатывании для того же — пропуск, чтобы не
+                 * наслаивать обёртки и не плодить StructureToggleController.
+                 */
+                if (Boolean.TRUE.equals(content.getData(STRUCTURE_WRAPPED_KEY)))
+                    return;
+                content.setData(STRUCTURE_WRAPPED_KEY, Boolean.TRUE);
 
                 Composite wrapper = new Composite(pane, SWT.NONE);
                 GridLayout wrapperLayout = new GridLayout(1, false);
@@ -488,11 +540,15 @@ public final class PasteWithCompareActions
         }
 
         /**
-         * Для BSL: GumTree («С учётом семантики»), иначе Xtext («Сравнение встроенного языка»).
+         * Для BSL при первом открытии — Xtext («Сравнение встроенного языка»): построчное
+         * сравнение с подсветкой синтаксиса. Семантический GumTree-просмотрщик для этой
+         * команды не годится — он выравнивает по AST и на слегка разошедшихся текстах
+         * помечает изменённым почти весь метод (issue 406). Пользователь при желании
+         * переключит режим сам — поэтому применяем ровно один раз.
          */
         private void applyPreferredBslViewerDescriptor(Viewer oldViewer, Object input)
         {
-            if (!"bsl".equals(compareViewerType)) //$NON-NLS-1$
+            if (!"bsl".equals(compareViewerType) || preferredBslDescriptorApplied) //$NON-NLS-1$
                 return;
             try
             {
@@ -504,10 +560,8 @@ public final class PasteWithCompareActions
                     oldViewer, input, config);
                 if (descriptors == null || descriptors.length == 0)
                     return;
-                ViewerDescriptor preferred = findViewerDescriptorById(
-                    descriptors, BSL_SEMANTIC_VIEWER_ID);
-                if (preferred == null)
-                    preferred = findViewerDescriptorById(descriptors, BSL_XTEXT_VIEWER_ID);
+                preferredBslDescriptorApplied = true;
+                ViewerDescriptor preferred = findViewerDescriptorById(descriptors, BSL_XTEXT_VIEWER_ID);
                 if (preferred != null)
                     setContentViewerDescriptor(preferred);
             }
