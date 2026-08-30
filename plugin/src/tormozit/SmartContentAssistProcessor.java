@@ -123,9 +123,6 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
      * членов кэш никогда не считался бы «полным»).
      */
     private boolean memberStockFullListComplete;
-    /** Фоновый расчёт полного списка членов (UI-поток не блокируется). */
-    private Job memberStockJob;
-    private int memberStockJobGen;
     /**
      * Поколение отмены {@link #scheduleMemberStockCapture}.
      * Инкремент в {@link #cancelDeferredDelegateComputes} — иначе отложенный
@@ -4028,92 +4025,92 @@ return best;
     }
 
     /**
-     * Полный список членов у точки — <b>только</b> в фоновом {@link Job} (как
-     * {@link #scheduleAsyncDelegateLoad}). На UI-потоке {@code delegate} не считается никогда:
-     * один такой расчёт занимает ~100 мс и на каждую букву даёт заметную задержку ввода.
+     * Отложенная догрузка полного списка членов — {@code asyncExec}, то есть <b>на UI-потоке</b>.
      *
-     * <p>Фоновый путь работоспособен именно из-за selection-прокси
-     * ({@link #computeMemberStockViaSelectionProxy}): у настоящего viewer
-     * {@code getSelection()} читает {@code StyledText}, и из Job это «Invalid thread access».
+     * <p>Выносить этот расчёт в {@link Job} нельзя: {@code delegate.computeCompletionProposals}
+     * делает {@code BslDocumentListener.reset} → чистит {@code DataEvent}. Отмена
+     * ({@code cancelDeferredDelegateComputes} → инкремент {@link #memberStockCaptureGen})
+     * выполняется на UI-потоке, и только пока расчёт тоже на UI-потоке, отмена строго
+     * упорядочена с ним и всегда успевает раньше. С фонового потока уже начатый расчёт
+     * не остановить ничем — он затирает {@code DataEvent} параллельно вставке proposal,
+     * и каретка не встаёт между скобок {@code Метод()} (сломанный LinkedMode).
      */
     private void scheduleMemberStockCapture(ITextViewer viewer, int dotContextKey)
     {
         if (viewer == null || dotContextKey < 0)
             return;
+        // «.» в строковом литерале — не member-access; readOnly здесь держит UI ~2 с.
+        int caretProbe = resolveWidgetCaret(viewer);
+        if (caretProbe >= 0 && isStringLiteralAssistContext(viewer, caretProbe))
+            return;
         if (hasMemberStock(dotContextKey))
             return;
-        IDocument doc = viewer.getDocument();
-        if (!(doc instanceof IXtextDocument))
-            return;
-        // ---- захват UI-состояния на EDT (в Job виджет трогать нельзя) ----
-        int caret = resolveWidgetCaret(viewer);
-        if (caret >= 0 && isStringLiteralAssistContext(viewer, caret))
-            return;
-        if (fullListContextKey != dotContextKey)
-            return;
-        if (!memberAccessReceiver(doc, caret).equals(fullListContextReceiver))
-            return;
-        if (ReceiverTypeLabel.findMemberAccessDot(doc, caret) != dotContextKey)
-            return;
-        final int ctxKey = fullListContextKey;
-        final int captureGen = memberStockCaptureGen;
-        final int jobGen = ++memberStockJobGen;
-        final int probeOffset = dotContextKey + 1;
-        // ------------------------------------------------------------------
-        if (memberStockJob != null)
-            memberStockJob.cancel();
-        memberStockJob = new Job("SCAP member stock async") { //$NON-NLS-1$
-            @Override
-            protected IStatus run(IProgressMonitor monitor)
-            {
-                if (monitor.isCanceled() || jobGen != memberStockJobGen
-                    || captureGen != memberStockCaptureGen || ctxKey != fullListContextKey)
-                    return Status.CANCEL_STATUS;
-                ICompletionProposal[] raw;
-                try
-                {
-                    raw = requestMemberStockAtOffset(viewer, probeOffset, dotContextKey);
-                }
-                catch (Throwable t)
-                {
-                    Global.tempLog("member-stock", "фоновый расчёт УПАЛ: " + t); //$NON-NLS-1$ //$NON-NLS-2$
-                    return Status.CANCEL_STATUS;
-                }
-                if (raw == null || raw.length == 0)
-                {
-                    Global.tempLog("member-stock", "фоновый расчёт dot=" + dotContextKey //$NON-NLS-1$ //$NON-NLS-2$
-                        + " вернул 0"); //$NON-NLS-1$
-                    return Status.CANCEL_STATUS;
-                }
-                final ICompletionProposal[] result = raw;
-                org.eclipse.swt.widgets.Display.getDefault().asyncExec(
-                    () -> publishMemberStock(viewer, result, dotContextKey, ctxKey, jobGen,
-                        captureGen));
-                return Status.OK_STATUS;
-            }
-        };
-        memberStockJob.setSystem(true);
-        memberStockJob.schedule();
+        try
+        {
+            if (viewer.getTextWidget() == null || viewer.getTextWidget().isDisposed())
+                return;
+            org.eclipse.swt.widgets.Display display = viewer.getTextWidget().getDisplay();
+            final int captureGen = memberStockCaptureGen;
+            display.asyncExec(() -> runMemberStockCapture(viewer, dotContextKey, 0, captureGen));
+        }
+        catch (Exception ignored) {}
     }
 
-    /** Результат фонового расчёта — в кэш, на UI-потоке. */
-    private void publishMemberStock(ITextViewer viewer, ICompletionProposal[] raw, int dot,
-                                    int ctxKey, int jobGen, int captureGen)
+    private void runMemberStockCapture(ITextViewer viewer, int dotContextKey, int attempt,
+                                       int captureGen)
     {
-        if (jobGen != memberStockJobGen || captureGen != memberStockCaptureGen
-            || ctxKey != fullListContextKey)
-            return;
-        int prev = memberStockFullListDot == dot ? memberStockFullList.length : 0;
-        captureMemberStockFullList(raw, dot);
-        if (memberStockFullListDot == dot && memberStockFullList.length > 0)
-            memberStockFullListComplete = true;
-        Global.tempLog("member-stock", "фоновый расчёт dot=" + dot + " -> " + raw.length //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " членов, кэш " + prev + " -> " + memberStockFullList.length); //$NON-NLS-1$ //$NON-NLS-2$
-        if (memberStockFullList.length > prev)
+        try
         {
-            if (viewer instanceof SourceViewer)
-                ContentAssistPopupUi.updateContextTypeLabel((SourceViewer) viewer);
-            ContentAssistSessionReloader.refreshPopupIfOpen();
+            if (captureGen != memberStockCaptureGen)
+                return;
+            IDocument doc = viewer.getDocument();
+            int caret = resolveWidgetCaret(viewer);
+            if (fullListContextKey != dotContextKey)
+                return;
+            if (!memberAccessReceiver(doc, caret).equals(fullListContextReceiver))
+                return;
+            if (isStringLiteralAssistContext(doc, caret))
+                return;
+            if (ReceiverTypeLabel.findMemberAccessDot(doc, caret) != dotContextKey)
+                return;
+            // Пока окно автодополнения открыто — не считать delegate: это и задержка ввода,
+            // и риск затереть DataEvent во время вставки proposal. Ждём закрытия окна.
+            if (isPopupVisible() && attempt < 8)
+            {
+                org.eclipse.swt.widgets.Display display = viewer.getTextWidget().getDisplay();
+                if (display != null && !display.isDisposed())
+                    display.timerExec(25, () -> runMemberStockCapture(viewer, dotContextKey,
+                        attempt + 1, captureGen));
+                return;
+            }
+            if (captureGen != memberStockCaptureGen)
+                return;
+            int prev = memberStockFullListDot == dotContextKey ? memberStockFullList.length : 0;
+            captureMemberStockNow(viewer, dotContextKey);
+            if (captureGen != memberStockCaptureGen)
+                return;
+            if (memberStockFullList.length > prev)
+            {
+                if (viewer instanceof SourceViewer)
+                    ContentAssistPopupUi.updateContextTypeLabel((SourceViewer) viewer);
+                ContentAssistSessionReloader.refreshPopupIfOpen();
+            }
+        }
+        catch (Exception ignored) {}
+    }
+
+    private static String safeDisplay(ICompletionProposal proposal)
+    {
+        if (proposal == null)
+            return "null"; //$NON-NLS-1$
+        try
+        {
+            String s = proposal.getDisplayString();
+            return s == null ? "null" : (s.length() > 60 ? s.substring(0, 60) : s); //$NON-NLS-1$
+        }
+        catch (Exception ex)
+        {
+            return "?"; //$NON-NLS-1$
         }
     }
 
@@ -4124,6 +4121,8 @@ return best;
             return EMPTY;
         if (hasMemberStock(dot))
         {
+            Global.tempLog("member-stock", "список member-access dot=" + dot + " ветка=кэш (" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + memberStockFullList.length + ")"); //$NON-NLS-1$
 return finalizeListForIrAssistDisplay(buildDelegateOrderedList(memberStockFullList));
         }
 
@@ -4131,6 +4130,9 @@ return finalizeListForIrAssistDisplay(buildDelegateOrderedList(memberStockFullLi
         IDocument doc = viewer != null ? viewer.getDocument() : null;
         int[] offsets = memberAccessProbeOffsets(caret, dot, assistant, doc);
         ICompletionProposal[] probed = probeDelegateAtOffsets(viewer, offsets, dot);
+        Global.tempLog("member-stock", "список member-access dot=" + dot + " caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " кэш пуст, probe вернул " + probed.length //$NON-NLS-1$
+            + (probed.length > 0 ? " первый='" + safeDisplay(probed[0]) + "'" : "")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         if (probed.length >= MIN_STABLE_MEMBER_CACHE)
         {
             captureMemberStockFullList(probed, dot);
@@ -4167,9 +4169,33 @@ return finalizeListForIrAssistDisplay(buildDelegateOrderedList(memberStockFullLi
             return EMPTY;
         if (hasMemberStock(dot))
             return memberStockFullList;
-        // Никакого delegate на UI-потоке: только заказ фонового расчёта.
-        scheduleMemberStockCapture(viewer, dot);
-        return memberStockFullListDot == dot ? memberStockFullList : EMPTY;
+        // Окно открыто — идёт ввод/возможна вставка proposal: расчёт откладываем
+        // (иначе задержка ввода и затирание DataEvent).
+        if (isPopupVisible())
+        {
+            scheduleMemberStockCapture(viewer, dot);
+            return memberStockFullListDot == dot ? memberStockFullList : EMPTY;
+        }
+        return captureMemberStockNow(viewer, dot);
+    }
+
+    /** Синхронный расчёт полного списка членов. Только когда окно автодополнения закрыто. */
+    private ICompletionProposal[] captureMemberStockNow(ITextViewer viewer, int dot)
+    {
+        if (viewer == null || dot < 0 || hasMemberStock(dot))
+            return memberStockFullListDot == dot ? memberStockFullList : EMPTY;
+        ICompletionProposal[] raw = requestMemberStockAtOffset(viewer, dot + 1, dot);
+        if (raw.length > 0)
+        {
+            captureMemberStockFullList(raw, dot);
+            if (memberStockFullListDot == dot)
+                memberStockFullListComplete = true;
+        }
+        Global.tempLog("member-stock", "расчёт dot=" + dot + " -> " + raw.length //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " членов, кэш теперь " //$NON-NLS-1$
+            + (memberStockFullListDot == dot ? memberStockFullList.length : 0)
+            + ", complete=" + (memberStockFullListDot == dot && memberStockFullListComplete)); //$NON-NLS-1$
+        return memberStockFullListDot == dot ? memberStockFullList : raw;
     }
 
     /**
@@ -4244,8 +4270,7 @@ return finalizeListForIrAssistDisplay(buildDelegateOrderedList(memberStockFullLi
         Global.tempLog("popup-life", "proxy compute off=" + probeOffset //$NON-NLS-1$ //$NON-NLS-2$
             + " -> " + (r == null ? -1 : r.length) //$NON-NLS-1$
             + " за " + (System.nanoTime() - t0) / 1_000_000 + "мс" //$NON-NLS-1$ //$NON-NLS-2$
-            + " поток=" + (org.eclipse.swt.widgets.Display.getCurrent() != null //$NON-NLS-1$
-                ? "UI(ПЛОХО)" : "фоновый")); //$NON-NLS-1$ //$NON-NLS-2$
+            + " попапОткрыт=" + isPopupVisible()); //$NON-NLS-1$
         return unwrapProposals(r != null ? r : EMPTY);
     }
 
