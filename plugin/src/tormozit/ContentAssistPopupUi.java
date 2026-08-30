@@ -84,17 +84,90 @@ public final class ContentAssistPopupUi
         String text = resolveContextTypeLabel(viewer);
         if (text == null)
             text = ""; //$NON-NLS-1$
-        contextLabel.setText(text);
-        contextLabel.setToolTipText(text);
-        if (text.equals(old))
-            return;
         Composite bar = contextLabel.getParent();
+
+        String shown = text;
+        if (bar != null && !bar.isDisposed())
+            shown = truncateToPopupWidth(contextLabel, bar, text);
+
+        contextLabel.setText(shown);
+        if (shown.equals(text))
+            contextLabel.setToolTipText(null);
+        else
+            contextLabel.setToolTipText(TooltipText.wrap(contextLabel, text));
+
+        if (shown.equals(old))
+            return;
         if (bar == null || bar.isDisposed())
             return;
         bar.layout(true, true);
         Shell shell = bar.getShell();
         if (shell != null && !shell.isDisposed())
             shell.layout(true, true);
+    }
+
+    private static void copyContextTypeLabel(SourceViewer viewer)
+    {
+        String text = resolveContextTypeLabel(viewer);
+        if (text == null || text.isBlank())
+            return;
+        org.eclipse.swt.dnd.Clipboard clipboard =
+            new org.eclipse.swt.dnd.Clipboard(viewer.getTextWidget().getDisplay());
+        try
+        {
+            clipboard.setContents(new Object[] { text },
+                new org.eclipse.swt.dnd.Transfer[] { org.eclipse.swt.dnd.TextTransfer.getInstance() });
+        }
+        finally
+        {
+            clipboard.dispose();
+        }
+        ToastNotification.show("Скопировано в буфер обмена", text, 3_000); //$NON-NLS-1$
+    }
+
+    /**
+     * Обрезает подпись «Родитель: …» так, чтобы она вписалась в ширину popup;
+     * отброшенный хвост (список типов составного типа) остаётся в подсказке при наведении.
+     */
+    private static String truncateToPopupWidth(Label contextLabel, Composite bar, String text)
+    {
+        if (text.isEmpty())
+            return text;
+        Shell shell = bar.getShell();
+        if (shell == null || shell.isDisposed())
+            return text;
+        int budget = shell.getClientArea().width - 12;
+        for (org.eclipse.swt.widgets.Control c : bar.getChildren())
+        {
+            if (c == contextLabel || c.isDisposed())
+                continue;
+            budget -= c.computeSize(SWT.DEFAULT, SWT.DEFAULT).x + 10;
+        }
+        if (budget <= 0)
+            return text;
+        org.eclipse.swt.graphics.GC gc = new org.eclipse.swt.graphics.GC(contextLabel);
+        try
+        {
+            gc.setFont(contextLabel.getFont());
+            if (gc.textExtent(text).x <= budget)
+                return text;
+            String ellipsis = "…"; //$NON-NLS-1$
+            int lo = 0;
+            int hi = text.length();
+            while (lo < hi)
+            {
+                int mid = (lo + hi + 1) >>> 1;
+                if (gc.textExtent(text.substring(0, mid) + ellipsis).x <= budget)
+                    lo = mid;
+                else
+                    hi = mid - 1;
+            }
+            return lo <= 0 ? ellipsis : text.substring(0, lo) + ellipsis;
+        }
+        finally
+        {
+            gc.dispose();
+        }
     }
 
     public static void updateContextTypeLabel(SourceViewer viewer)
@@ -318,6 +391,7 @@ public final class ContentAssistPopupUi
 
         Label contextLabel = new Label(bar, SWT.NONE);
         applyContextTypeLabel(contextLabel, viewer);
+        contextLabel.addListener(SWT.MouseDoubleClick, e -> copyContextTypeLabel(viewer));
 
         bar.setData(TOGGLE_DATA_KEY, toggle);
         bar.setData(CONTEXT_LABEL_DATA_KEY, contextLabel);

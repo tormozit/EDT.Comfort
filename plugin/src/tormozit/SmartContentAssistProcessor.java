@@ -250,10 +250,10 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             return ""; //$NON-NLS-1$
         }
 
-        String result = types.size() == 1
-            ? types.iterator().next()
-            : "(" + types.size() + ") " + types.iterator().next(); //$NON-NLS-1$ //$NON-NLS-2$
-        return result;
+        if (types.size() == 1)
+            return types.iterator().next();
+
+        return "(" + types.size() + ") " + String.join(", ", types); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
     }
 
     private static java.util.LinkedHashSet<String> collectParentTypesFromProposals(
@@ -268,8 +268,22 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             if (display == null)
                 continue;
             String parentType = extractParentType(display);
-            if (parentType != null && !parentType.isEmpty())
-                types.add(parentType);
+            if (parentType == null || parentType.isEmpty())
+                continue;
+            // Составной тип родителя приходит как "<А, Б>" / "А, Б" — разложить на отдельные
+            // имена и убрать дубли между элементами списка.
+            String unwrapped = parentType;
+            if (unwrapped.length() >= 2 && unwrapped.charAt(0) == '<'
+                && unwrapped.charAt(unwrapped.length() - 1) == '>')
+            {
+                unwrapped = unwrapped.substring(1, unwrapped.length() - 1);
+            }
+            for (String part : unwrapped.split(",")) //$NON-NLS-1$
+            {
+                String name = part.trim();
+                if (!name.isEmpty())
+                    types.add(name);
+            }
         }
         return types;
     }

@@ -3746,10 +3746,16 @@ runPendingAfterWordsTable();
         }
         else
         {
-            irCompletionSnapshot = snapshot;
-            IDocument doc = viewer != null ? viewer.getDocument() : null;
-            processor.rememberIrSnapshotCache(irCompletionSnapshot, doc);
-            IrCompletionDebug.log("assist snapshot caret=" + caret + " ir=0"); //$NON-NLS-1$ //$NON-NLS-2$
+            // raw == null: ИР вернула autoOpenSuggested=false — это мягкий отказ строгого
+            // гейта автооткрытия, а НЕ «в этом контексте у ИР нет слов». Такой результат
+            // нельзя кэшировать как разрешённый контекст: следующий ручной Ctrl+Space
+            // увидел бы cache hit с 0 слов и открыл пустой список вместо полного набора ИР.
+            // Сбрасываем готовность таблицы слов — любой следующий вызов перезапросит ИР.
+            wordsTableReady = false;
+            wordsTableCaret = -1;
+            irWordsResolvedForCaret = -1;
+            irCompletionSnapshot = null;
+            IrCompletionDebug.log("assist snapshot caret=" + caret + " ir=0 (не кэшируем)"); //$NON-NLS-1$ //$NON-NLS-2$
         }
         BslSideHintDebug.log("wordsTable ready caret=" + caret); //$NON-NLS-1$
         boolean popupVisible = ContentAssistPopupSync.isPopupVisible(assistant);
