@@ -3185,6 +3185,13 @@ ensureFilterPending(popup);
         {
             if (popup == null)
                 return;
+            StringBuilder st = new StringBuilder();
+            for (StackTraceElement e : new Throwable().getStackTrace())
+            {
+                if (e.getClassName().startsWith("tormozit.")) //$NON-NLS-1$
+                    st.append(e.getMethodName()).append(':').append(e.getLineNumber()).append(" <- "); //$NON-NLS-1$
+            }
+            tormozit.Global.tempLog("popup-life", "hideProposalPopup <- " + st); //$NON-NLS-1$ //$NON-NLS-2$
             initPopupReflection(popup);
             if (hidePopupMethod != null)
                 hidePopupMethod.invoke(popup);

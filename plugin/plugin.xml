@@ -992,6 +992,12 @@
       </menuContribution>
       <menuContribution locationURI="popup:com._1c.g5.v8.dt.ui.problemView?after=additions">
         <command
+            commandId="tormozit.problemView.openCheckSettings"
+            icon="platform:/plugin/com._1c.g5.v8.dt.ui/icons/etool16/show_properties.png"
+            label="Открыть настройку проверки"
+            style="push"
+            tooltip="Открыть настройку этой проверки на странице «Проверки» параметров проекта (Комфорт)"/>
+        <command
             commandId="tormozit.problemView.openInTextEditor"
             label="Открыть в текстовом редакторе"
             style="push"
@@ -1001,25 +1007,6 @@
             label="Проверить"
             style="push"
             tooltip="Перепроверить объекты по текущему отбору панели (Комфорт)"/>
-      </menuContribution>
-      <menuContribution locationURI="popup:com._1c.g5.v8.dt.ui.problemView?after=com._1c.g5.v8.dt.ui.command.openCheck">
-        <command
-            commandId="tormozit.problemView.openCheckSettings"
-            icon="platform:/plugin/com._1c.g5.v8.dt.ui/icons/etool16/show_properties.png"
-            label="Открыть настройку проверки"
-            style="push"
-            tooltip="Открыть настройку этой проверки на странице «Проверки» параметров проекта (Комфорт)">
-          <visibleWhen checkEnabled="false">
-            <with variable="selection">
-              <count value="1"/>
-              <iterate ifEmpty="false">
-                <adapt type="com._1c.g5.v8.dt.validation.marker.Marker">
-                  <test property="com._1c.g5.v8.dt.ui.validation.isCustom" value="true"/>
-                </adapt>
-              </iterate>
-            </with>
-          </visibleWhen>
-        </command>
       </menuContribution>
       <menuContribution locationURI="toolbar:com._1c.g5.v8.dt.ui.problemView?after=com._1c.g5.v8.dt.ui.command.openCheck">
         <command

@@ -116,6 +116,17 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     /** Позиция {@code '.'} для {@link #memberStockFullList}. */
     private int memberStockFullListDot = -1;
     /**
+     * {@link #memberStockFullList} для {@link #memberStockFullListDot} уже добыт полностью:
+     * {@link #delegate} в позиции {@code dot + 1} вернул непустой список членов (тип получателя
+     * разрешён). Пока флаг стоит и позиция точки не менялась — список не перезапрашивается
+     * на каждую введённую букву имени члена (иначе для типов с < {@link #MIN_STABLE_MEMBER_CACHE}
+     * членов кэш никогда не считался бы «полным»).
+     */
+    private boolean memberStockFullListComplete;
+    /** Фоновый расчёт полного списка членов (UI-поток не блокируется). */
+    private Job memberStockJob;
+    private int memberStockJobGen;
+    /**
      * Поколение отмены {@link #scheduleMemberStockCapture}.
      * Инкремент в {@link #cancelDeferredDelegateComputes} — иначе отложенный
      * {@code createProposals} сбрасывает DataEvent после in-place collapse.
@@ -1824,6 +1835,7 @@ return;
         {
 return delegate.computeCompletionProposals(viewer, offset);
         }
+        Global.tempLog("popup-life", "computeCompletionProposals off=" + offset); //$NON-NLS-1$ //$NON-NLS-2$
 
         int literalCaret = resolveInvocationCaret(viewer, offset);
         boolean inLiteral = isStringLiteralAssistContext(viewer, literalCaret);
@@ -3260,10 +3272,7 @@ int probe = -1;
                 raw = memberStockFullList;
             else if (raw.length < MIN_STABLE_MEMBER_CACHE)
             {
-                boolean allowShift = canShiftCaretForMemberCapture(viewer);
-                captureMemberStockAtDot(viewer, dot, allowShift);
-                if (!allowShift)
-                    scheduleMemberStockCapture(viewer, dot);
+                captureMemberStockAtDot(viewer, dot);
                 if (memberStockFullListDot == dot && memberStockFullList.length > raw.length)
                     raw = memberStockFullList;
             }
@@ -3623,8 +3632,8 @@ if (!SmartAssistFilterState.isSmartFilterEnabled())
                     return;
                 if (viewer != null)
                 {
-                    if (allowSyncMemberCapture && canShiftCaretForMemberCapture(viewer))
-                        captureMemberStockAtDot(viewer, dot, true);
+                    if (allowSyncMemberCapture)
+                        captureMemberStockAtDot(viewer, dot);
                     else
                         scheduleMemberStockCapture(viewer, dot);
                 }
@@ -3976,6 +3985,7 @@ return best;
     {
         memberStockFullList = EMPTY;
         memberStockFullListDot = -1;
+        memberStockFullListComplete = false;
     }
 
     private void captureMemberStockFullList(ICompletionProposal[] raw, int dot)
@@ -3987,9 +3997,18 @@ return best;
         {
             memberStockFullListDot = dot;
             memberStockFullList = EMPTY;
+            memberStockFullListComplete = false;
         }
         if (unwrapped.length > memberStockFullList.length)
             memberStockFullList = unwrapped;
+    }
+
+    /** Полный список членов для {@code dot} уже в кэше (полон или заведомо большой). */
+    private boolean hasMemberStock(int dot)
+    {
+        return memberStockFullListDot == dot
+            && (memberStockFullListComplete
+                || memberStockFullList.length >= MIN_STABLE_MEMBER_CACHE);
     }
 
     private ICompletionProposal[] preferMemberFullList(ITextViewer viewer, int dot,
@@ -4002,86 +4021,100 @@ return best;
             return memberStockFullList;
         if (best.length >= MIN_STABLE_MEMBER_CACHE)
             return best;
-        boolean allowShift = canShiftCaretForMemberCapture(viewer);
-        captureMemberStockAtDot(viewer, dot, allowShift);
-        if (!allowShift && memberStockFullListDot != dot)
-            scheduleMemberStockCapture(viewer, dot);
+        captureMemberStockAtDot(viewer, dot);
         if (memberStockFullListDot == dot && memberStockFullList.length > best.length)
             return memberStockFullList;
         return best;
     }
 
-    /** Фоновая догрузка member-stock — не в hot path {@code computeCompletionProposals}. */
+    /**
+     * Полный список членов у точки — <b>только</b> в фоновом {@link Job} (как
+     * {@link #scheduleAsyncDelegateLoad}). На UI-потоке {@code delegate} не считается никогда:
+     * один такой расчёт занимает ~100 мс и на каждую букву даёт заметную задержку ввода.
+     *
+     * <p>Фоновый путь работоспособен именно из-за selection-прокси
+     * ({@link #computeMemberStockViaSelectionProxy}): у настоящего viewer
+     * {@code getSelection()} читает {@code StyledText}, и из Job это «Invalid thread access».
+     */
     private void scheduleMemberStockCapture(ITextViewer viewer, int dotContextKey)
     {
         if (viewer == null || dotContextKey < 0)
             return;
-        // «.» в строковом литерале — не member-access; readOnly здесь держит UI ~2 с.
-        int caretProbe = resolveWidgetCaret(viewer);
-        if (caretProbe >= 0 && isStringLiteralAssistContext(viewer, caretProbe))
+        if (hasMemberStock(dotContextKey))
             return;
-        if (memberStockFullListDot == dotContextKey
-            && memberStockFullList.length >= MIN_STABLE_MEMBER_CACHE)
+        IDocument doc = viewer.getDocument();
+        if (!(doc instanceof IXtextDocument))
             return;
-        try
-        {
-            if (viewer.getTextWidget() == null || viewer.getTextWidget().isDisposed())
-                return;
-            org.eclipse.swt.widgets.Display display = viewer.getTextWidget().getDisplay();
-            final int captureGen = memberStockCaptureGen;
-            display.asyncExec(() -> runMemberStockCapture(viewer, dotContextKey, 0, captureGen));
-        }
-        catch (Exception ignored) {}
+        // ---- захват UI-состояния на EDT (в Job виджет трогать нельзя) ----
+        int caret = resolveWidgetCaret(viewer);
+        if (caret >= 0 && isStringLiteralAssistContext(viewer, caret))
+            return;
+        if (fullListContextKey != dotContextKey)
+            return;
+        if (!memberAccessReceiver(doc, caret).equals(fullListContextReceiver))
+            return;
+        if (ReceiverTypeLabel.findMemberAccessDot(doc, caret) != dotContextKey)
+            return;
+        final int ctxKey = fullListContextKey;
+        final int captureGen = memberStockCaptureGen;
+        final int jobGen = ++memberStockJobGen;
+        final int probeOffset = dotContextKey + 1;
+        // ------------------------------------------------------------------
+        if (memberStockJob != null)
+            memberStockJob.cancel();
+        memberStockJob = new Job("SCAP member stock async") { //$NON-NLS-1$
+            @Override
+            protected IStatus run(IProgressMonitor monitor)
+            {
+                if (monitor.isCanceled() || jobGen != memberStockJobGen
+                    || captureGen != memberStockCaptureGen || ctxKey != fullListContextKey)
+                    return Status.CANCEL_STATUS;
+                ICompletionProposal[] raw;
+                try
+                {
+                    raw = requestMemberStockAtOffset(viewer, probeOffset, dotContextKey);
+                }
+                catch (Throwable t)
+                {
+                    Global.tempLog("member-stock", "фоновый расчёт УПАЛ: " + t); //$NON-NLS-1$ //$NON-NLS-2$
+                    return Status.CANCEL_STATUS;
+                }
+                if (raw == null || raw.length == 0)
+                {
+                    Global.tempLog("member-stock", "фоновый расчёт dot=" + dotContextKey //$NON-NLS-1$ //$NON-NLS-2$
+                        + " вернул 0"); //$NON-NLS-1$
+                    return Status.CANCEL_STATUS;
+                }
+                final ICompletionProposal[] result = raw;
+                org.eclipse.swt.widgets.Display.getDefault().asyncExec(
+                    () -> publishMemberStock(viewer, result, dotContextKey, ctxKey, jobGen,
+                        captureGen));
+                return Status.OK_STATUS;
+            }
+        };
+        memberStockJob.setSystem(true);
+        memberStockJob.schedule();
     }
 
-    private void runMemberStockCapture(ITextViewer viewer, int dotContextKey, int attempt,
-                                       int captureGen)
+    /** Результат фонового расчёта — в кэш, на UI-потоке. */
+    private void publishMemberStock(ITextViewer viewer, ICompletionProposal[] raw, int dot,
+                                    int ctxKey, int jobGen, int captureGen)
     {
-        try
+        if (jobGen != memberStockJobGen || captureGen != memberStockCaptureGen
+            || ctxKey != fullListContextKey)
+            return;
+        int prev = memberStockFullListDot == dot ? memberStockFullList.length : 0;
+        captureMemberStockFullList(raw, dot);
+        if (memberStockFullListDot == dot && memberStockFullList.length > 0)
+            memberStockFullListComplete = true;
+        Global.tempLog("member-stock", "фоновый расчёт dot=" + dot + " -> " + raw.length //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " членов, кэш " + prev + " -> " + memberStockFullList.length); //$NON-NLS-1$ //$NON-NLS-2$
+        if (memberStockFullList.length > prev)
         {
-            if (captureGen != memberStockCaptureGen)
-                return;
-            IDocument doc = viewer.getDocument();
-            int caret = resolveWidgetCaret(viewer);
-            if (fullListContextKey != dotContextKey)
-                return;
-            if (!memberAccessReceiver(doc, caret).equals(fullListContextReceiver))
-                return;
-            if (isStringLiteralAssistContext(doc, caret))
-                return;
-            if (ReceiverTypeLabel.findMemberAccessDot(doc, caret) != dotContextKey)
-                return;
-            boolean allowShift = canShiftCaretForMemberCapture(viewer);
-            if (!allowShift && attempt < 8)
-            {
-                org.eclipse.swt.widgets.Display display = viewer.getTextWidget().getDisplay();
-                if (display != null && !display.isDisposed())
-                    display.timerExec(25, () -> runMemberStockCapture(viewer, dotContextKey,
-                        attempt + 1, captureGen));
-                return;
-            }
-            if (captureGen != memberStockCaptureGen)
-                return;
-            int prev = memberStockFullListDot == dotContextKey ? memberStockFullList.length : 0;
-            captureMemberStockAtDot(viewer, dotContextKey, allowShift);
-            if (captureGen != memberStockCaptureGen)
-                return;
-            if (memberStockFullList.length > prev)
-            {
-                if (viewer instanceof SourceViewer)
-                    ContentAssistPopupUi.updateContextTypeLabel((SourceViewer) viewer);
-                ContentAssistSessionReloader.refreshPopupIfOpen();
-            }
+            if (viewer instanceof SourceViewer)
+                ContentAssistPopupUi.updateContextTypeLabel((SourceViewer) viewer);
+            ContentAssistSessionReloader.refreshPopupIfOpen();
         }
-        catch (Exception ignored) {}
-    }
-
-    private static boolean canShiftCaretForMemberCapture(ITextViewer viewer)
-    {
-        ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
-        if (assistant == null)
-            return true;
-        return !ContentAssistPopupSync.isPopupVisible(assistant);
     }
 
     private ICompletionProposal[] resolveMemberAccessOrderedList(ITextViewer viewer, int offset,
@@ -4089,7 +4122,7 @@ return best;
     {
         if (terminalEmptyMemberAccess && cachedNonObjectDot == dot)
             return EMPTY;
-        if (memberStockFullListDot == dot && memberStockFullList.length >= MIN_STABLE_MEMBER_CACHE)
+        if (hasMemberStock(dot))
         {
 return finalizeListForIrAssistDisplay(buildDelegateOrderedList(memberStockFullList));
         }
@@ -4106,19 +4139,13 @@ return finalizeListForIrAssistDisplay(buildDelegateOrderedList(memberStockFullLi
             return finalizeListForIrAssistDisplay(built);
         }
 
-        if (canShiftCaretForMemberCapture(viewer))
+        captureMemberStockAtDot(viewer, dot);
+        if (memberStockFullListDot == dot && memberStockFullList.length > probed.length)
         {
-            captureMemberStockAtDot(viewer, dot, true);
-            if (memberStockFullListDot == dot
-                && memberStockFullList.length >= MIN_STABLE_MEMBER_CACHE)
-            {
-                ICompletionProposal[] built = buildDelegateOrderedList(memberStockFullList);
-                lastStableDelegateList = built;
-                return finalizeListForIrAssistDisplay(built);
-            }
+            ICompletionProposal[] built = buildDelegateOrderedList(memberStockFullList);
+            lastStableDelegateList = built;
+            return finalizeListForIrAssistDisplay(built);
         }
-        else
-            scheduleMemberStockCapture(viewer, dot);
 
         if (probed.length > 0)
         {
@@ -4130,83 +4157,96 @@ return finalizeListForIrAssistDisplay(buildDelegateOrderedList(memberStockFullLi
     }
 
     /**
-     * Кэш полного member-access: live probe при {@code ф.}, иначе краткий {@code setCaretOffset}
-     * только в async-пути ({@code allowCaretShift=true}).
+     * Полный (неотфильтрованный) список членов типа получателя в позиции {@code dot + 1}.
+     * Один раз на позицию точки: при {@link #memberStockFullListComplete} — сразу из кэша,
+     * без обращения к {@link #delegate} (иначе перезапрос на каждую букву имени члена).
      */
-    private ICompletionProposal[] captureMemberStockAtDot(ITextViewer viewer, int dot,
-                                                          boolean allowCaretShift)
+    private ICompletionProposal[] captureMemberStockAtDot(ITextViewer viewer, int dot)
     {
         if (viewer == null || dot < 0)
             return EMPTY;
-        if (memberStockFullListDot == dot && memberStockFullList.length >= MIN_STABLE_MEMBER_CACHE)
+        if (hasMemberStock(dot))
             return memberStockFullList;
-
-        final int probeOffset = dot + 1;
-        ICompletionProposal[] raw = requestMemberStockAtOffset(viewer, probeOffset, dot, false);
-        if (raw.length >= MIN_STABLE_MEMBER_CACHE)
-        {
-            captureMemberStockFullList(raw, dot);
-            return memberStockFullList;
-        }
-        if (allowCaretShift)
-        {
-            ICompletionProposal[] shifted = requestMemberStockAtOffset(viewer, probeOffset, dot,
-                true);
-            if (shifted.length > raw.length)
-                raw = shifted;
-            if (raw.length > 0)
-                captureMemberStockFullList(raw, dot);
-        }
-        else if (raw.length > 0)
-            captureMemberStockFullList(raw, dot);
-        return memberStockFullListDot == dot ? memberStockFullList : raw;
+        // Никакого delegate на UI-потоке: только заказ фонового расчёта.
+        scheduleMemberStockCapture(viewer, dot);
+        return memberStockFullListDot == dot ? memberStockFullList : EMPTY;
     }
 
+    /**
+     * {@link #delegate} строит member-access-контекст только когда offset выделения в редакторе
+     * совпадает с offset запроса. Физически двигать каретку виджета нельзя — это видимое
+     * мерцание и гонка с обновлением selection-provider на BSL-viewer со свёртками
+     * (см. правило «Каретка редактора: виджет ≠ модель»). Поэтому {@link #delegate}
+     * вызывается через обёртку {@link ITextViewer}, у которой
+     * {@code getSelectionProvider().getSelection()} возвращает
+     * {@link org.eclipse.jface.text.TextSelection} в {@code probeOffset} (длина 0).
+     * Каретка не трогается.
+     */
     private ICompletionProposal[] requestMemberStockAtOffset(ITextViewer viewer, int probeOffset,
-                                                             int dot, boolean shiftCaret)
+                                                             int dot)
     {
         IDocument doc = viewer.getDocument();
-        org.eclipse.swt.custom.StyledText widget = viewer.getTextWidget();
-        int savedCaret = -1;
         try
         {
-            if (shiftCaret && widget != null && !widget.isDisposed())
-            {
-                int widgetProbe = modelToWidgetOffset(viewer, probeOffset);
-                if (widgetProbe >= 0)
-                {
-                    savedCaret = widget.getCaretOffset();
-                    widget.setCaretOffset(widgetProbe);
-                }
-            }
-            ICompletionProposal[] raw;
             if (doc instanceof IXtextDocument)
             {
-                raw = ((IXtextDocument) doc).readOnly(
-                    new IUnitOfWork<ICompletionProposal[], XtextResource>()
-                    {
-                        @Override
-                        public ICompletionProposal[] exec(XtextResource state) throws Exception
-                        {
-                            return delegate.computeCompletionProposals(viewer, probeOffset);
-                        }
-                    });
+                return ((IXtextDocument) doc).readOnly(
+                    (IUnitOfWork<ICompletionProposal[], XtextResource>) state ->
+                        computeMemberStockViaSelectionProxy(viewer, probeOffset));
             }
-            else
-                raw = delegate.computeCompletionProposals(viewer, probeOffset);
-            raw = unwrapProposals(raw != null ? raw : EMPTY);
-            return raw;
+            return computeMemberStockViaSelectionProxy(viewer, probeOffset);
         }
         catch (Exception e)
         {
             ContentAssistDebug.log("captureMemberStockAtDot ERROR: " + e.getMessage()); //$NON-NLS-1$
             return EMPTY;
         }
-        finally
+    }
+
+    private ICompletionProposal[] computeMemberStockViaSelectionProxy(ITextViewer real,
+                                                                      int probeOffset)
+    {
+        final IDocument rdoc = real.getDocument();
+        org.eclipse.jface.viewers.ISelectionProvider fakeSel =
+            new org.eclipse.jface.viewers.ISelectionProvider()
         {
-            if (savedCaret >= 0 && widget != null && !widget.isDisposed())
-                widget.setCaretOffset(savedCaret);
-        }
+            @Override public org.eclipse.jface.viewers.ISelection getSelection()
+            {
+                return new org.eclipse.jface.text.TextSelection(rdoc, probeOffset, 0);
+            }
+            @Override public void setSelection(org.eclipse.jface.viewers.ISelection s) {}
+            @Override public void addSelectionChangedListener(
+                org.eclipse.jface.viewers.ISelectionChangedListener l) {}
+            @Override public void removeSelectionChangedListener(
+                org.eclipse.jface.viewers.ISelectionChangedListener l) {}
+        };
+        java.util.LinkedHashSet<Class<?>> ifaces = new java.util.LinkedHashSet<>();
+        ifaces.add(ITextViewer.class);
+        for (Class<?> c = real.getClass(); c != null && c != Object.class; c = c.getSuperclass())
+            java.util.Collections.addAll(ifaces, c.getInterfaces());
+        java.lang.reflect.InvocationHandler h = (p, m, args) ->
+        {
+            if ("getSelectionProvider".equals(m.getName()) && m.getParameterCount() == 0) //$NON-NLS-1$
+                return fakeSel;
+            try
+            {
+                return m.invoke(real, args);
+            }
+            catch (java.lang.reflect.InvocationTargetException ite)
+            {
+                throw ite.getCause();
+            }
+        };
+        ITextViewer proxy = (ITextViewer) java.lang.reflect.Proxy.newProxyInstance(
+            real.getClass().getClassLoader(), ifaces.toArray(new Class<?>[0]), h);
+        long t0 = System.nanoTime();
+        ICompletionProposal[] r = delegate.computeCompletionProposals(proxy, probeOffset);
+        Global.tempLog("popup-life", "proxy compute off=" + probeOffset //$NON-NLS-1$ //$NON-NLS-2$
+            + " -> " + (r == null ? -1 : r.length) //$NON-NLS-1$
+            + " за " + (System.nanoTime() - t0) / 1_000_000 + "мс" //$NON-NLS-1$ //$NON-NLS-2$
+            + " поток=" + (org.eclipse.swt.widgets.Display.getCurrent() != null //$NON-NLS-1$
+                ? "UI(ПЛОХО)" : "фоновый")); //$NON-NLS-1$ //$NON-NLS-2$
+        return unwrapProposals(r != null ? r : EMPTY);
     }
 
     /** Повторная догрузка member-access только при маленьком кэше, без readOnly на UI. */
@@ -4262,10 +4302,7 @@ return finalizeListForIrAssistDisplay(buildDelegateOrderedList(memberStockFullLi
             ICompletionProposal[] raw;
             if (!SmartAssistFilterState.isSmartFilterEnabled())
             {
-                boolean allowShift = canShiftCaretForMemberCapture(viewer);
-                captureMemberStockAtDot(viewer, dotContextKey, allowShift);
-                if (!allowShift)
-                    scheduleMemberStockCapture(viewer, dotContextKey);
+                captureMemberStockAtDot(viewer, dotContextKey);
                 raw = memberStockFullListDot == dotContextKey ? memberStockFullList : EMPTY;
             }
             else
@@ -4335,20 +4372,6 @@ return finalizeListForIrAssistDisplay(buildDelegateOrderedList(memberStockFullLi
                 return mapped;
         }
         return widgetOffset;
-    }
-
-    static int modelToWidgetOffset(ITextViewer viewer, int modelOffset)
-    {
-        if (modelOffset < 0 || viewer == null)
-            return modelOffset;
-        if (viewer instanceof ITextViewerExtension5 ext5)
-        {
-            int mapped = ext5.modelOffset2WidgetOffset(modelOffset);
-            if (mapped >= 0)
-                return mapped;
-            return -1;
-        }
-        return modelOffset;
     }
 
     static int resolveSessionCaret(ContentAssistant assistant, ITextViewer viewer)

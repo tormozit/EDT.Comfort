@@ -293,6 +293,8 @@ this.completionListener = new CompletionListenerAdapter() {
 
             private void assistSessionStartedImpl(ContentAssistEvent event)
             {
+                Global.tempLog("popup-life", "assistSessionStarted auto=" + event.isAutoActivated //$NON-NLS-1$ //$NON-NLS-2$
+                    + " caret=" + ContentAssistPopupSync.syncSessionOffsets(assistant, viewer)); //$NON-NLS-1$
                 ContentAssistDebug.resetValidateStats();
                 SmartAssistFilterState.reset();
                 int caret = ContentAssistPopupSync.syncSessionOffsets(assistant, viewer);
@@ -426,6 +428,9 @@ if (Boolean.TRUE.equals(LITERAL_REPEAT_FROM_COMMAND.get()))
 
             private void assistSessionEndedImpl(ContentAssistEvent event)
             {
+                Global.tempLog("popup-life", "assistSessionEnded caret=" //$NON-NLS-1$ //$NON-NLS-2$
+                    + ContentAssistPopupSync.syncSessionOffsets(assistant, viewer)
+                    + " popupVisible=" + ContentAssistPopupSync.isPopupVisible(assistant)); //$NON-NLS-1$
                 boolean manualAwait = isManualIrAssistAwaitingWords();
                 boolean preserveOnEnd = manualAwait || isCompletionAutoOpenAwaitingIr();
                 boolean popupVisible = ContentAssistPopupSync.isPopupVisible(assistant);
@@ -626,9 +631,22 @@ suppressDisplay.asyncExec(
         if (docStamp >= 0)
             lastCaretDocumentStamp = docStamp;
         SmartContentAssistProcessor.primeFilterTrackerOnly(viewer, caret);
-        if (!ContentAssistPopupSync.isPopupVisible(assistant))
+        boolean popupVisible = ContentAssistPopupSync.isPopupVisible(assistant);
+        boolean wouldClose = ContentAssistPopupSync.shouldClosePopupAtCaret(viewer, caret);
+        int modelCaret = SmartContentAssistProcessor.widgetToModelOffset(viewer, caret);
+        Global.tempLog("popup-life", "caretMoved widget=" + caret + " model=" + modelCaret //$NON-NLS-1$ //$NON-NLS-2$
+            + " charAtWidget=" + describeCharAt(doc, caret) //$NON-NLS-1$
+            + " charAtModel=" + describeCharAt(doc, modelCaret) //$NON-NLS-1$
+            + " typing=" + typingMovedCaret //$NON-NLS-1$
+            + " popupVisible=" + popupVisible //$NON-NLS-1$
+            + " wouldClose=" + wouldClose); //$NON-NLS-1$
+        if (!popupVisible)
             return;
-        if (ContentAssistPopupSync.shouldClosePopupAtCaret(viewer, caret))
+        // Закрытие «каретка встала перед (» — только для навигации (Ctrl+←/→, клик),
+        // ради чего проверку и добавляли (issue 75). При наборе имени метода перед уже
+        // существующей скобкой — «запрос.Выпо|(1);» — условие истинно на каждой букве
+        // и гасило окно автодополнения.
+        if (wouldClose && !typingMovedCaret)
         {
             ContentAssistPopupSync.hideProposalPopup(assistant);
             return;
@@ -637,6 +655,20 @@ suppressDisplay.asyncExec(
         if (typingMovedCaret)
             return;
         ContentAssistPopupSync.scheduleRecomputeOnCaretChange(assistant, viewer, processor);
+    }
+
+    private static String describeCharAt(IDocument doc, int offset)
+    {
+        if (doc == null || offset < 0 || offset >= doc.getLength())
+            return "<нет>"; //$NON-NLS-1$
+        try
+        {
+            return "'" + doc.getChar(offset) + "'"; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        catch (Exception ex)
+        {
+            return "<ошибка>"; //$NON-NLS-1$
+        }
     }
 
     private void scheduleWordsTablePreparationDebounced(int caret)
