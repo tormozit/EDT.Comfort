@@ -107,6 +107,17 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     private int fullListContextKey = Integer.MIN_VALUE;
     /** Выражение слева от точки; смена при том же offset (имена одной длины) — новый контекст. */
     private String fullListContextReceiver = ""; //$NON-NLS-1$
+    /**
+     * Префикс идентификатора, под которым посеян {@link #fullListCache}; {@code ""} — база
+     * честно полная (посчитана без префикса или догружена целиком).
+     *
+     * <p>Делегат Xtext сужает выдачу префиксом на каретке, поэтому список, посеянный из
+     * {@code cacheSeed} в {@link #resolveProposalList}, полным не является: он годится только
+     * для префиксов, <b>продолжающих</b> записанный. При удалении символов (Backspace)
+     * корректный список — надмножество базы, и вырасти она не может; показывать её дальше
+     * значит показывать урезанный список. См. {@link #isPopupListStaleForPrefix}.
+     */
+    private String fullListCachePrefix = ""; //$NON-NLS-1$
     /** Отмена устаревших {@link #scheduleMemberAccessReload}. */
     private int memberAccessReloadSeq = 0;
     /** Уже запланирована догрузка для текущего {@link #memberAccessReloadSeq}. */
@@ -123,6 +134,9 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
      * членов кэш никогда не считался бы «полным»).
      */
     private boolean memberStockFullListComplete;
+    /** Сколько раз ждать закрытия окна автодополнения перед расчётом member-stock. */
+    private static final int MEMBER_STOCK_WAIT_ATTEMPTS = 8;
+    private static final int MEMBER_STOCK_WAIT_STEP_MS = 25;
     /**
      * Поколение отмены {@link #scheduleMemberStockCapture}.
      * Инкремент в {@link #cancelDeferredDelegateComputes} — иначе отложенный
@@ -1454,7 +1468,7 @@ return result;
     {
         assignFullListCache(EMPTY);
         fullListReady = true;
-        fullListComplete = true;
+        markFullListComplete("terminalEmptyMemberAccess"); //$NON-NLS-1$
         terminalEmptyMemberAccess = true;
         if (dot >= 0)
             cachedNonObjectDot = dot;
@@ -1741,8 +1755,14 @@ return resolveProposalList(viewer, probeOffset, caret, filter, smart);
         lastStableDelegateList = EMPTY;
         fullListReady = false;
         fullListComplete = false;
+        // Базу сбрасываем: она посеяна из результата делегата под префиксом и потому урезана.
         assignFullListCache(EMPTY);
-        resetMemberStockFullList();
+        // А запас членов — нет. Он привязан к точке и посчитан без префикса (зонд в dot+1),
+        // так что удаление префикса его не обесценивает. Сброс при той же точке означал бы
+        // потерю единственного источника: пересчитать его при открытом окне нельзя
+        // (блокировка ввода + сброс DataEvent → LinkedMode), и база оставалась бы пустой.
+        if (memberStockFullListDot != dot)
+            resetMemberStockFullList();
         memberAccessReloadSeq++;
         memberAccessReloadScheduledSeq = -1;
         clearDelegateSyncProbe();
@@ -2217,10 +2237,16 @@ if (isIrWordsResolvedForContext() && irN > 0)
 
         if (!smartEnabled)
         {
-return resolveAlphabeticalList(viewer, offset, caret);
+            ICompletionProposal[] alpha = resolveAlphabeticalList(viewer, offset, caret);
+            debugResolveExit(doc, caret, filter, 0, false, "alphabetical", alpha); //$NON-NLS-1$
+            return alpha;
         }
         if (filter.isEmpty())
-            return resolveDelegateOrderedList(viewer, offset, caret);
+        {
+            ICompletionProposal[] ordered = resolveDelegateOrderedList(viewer, offset, caret);
+            debugResolveExit(doc, caret, filter, 0, false, "delegateOrdered", ordered); //$NON-NLS-1$
+            return ordered;
+        }
 
         scheduleEagerFullListLoad(viewer);
         if (isCacheValidForCaret(doc, caret)
@@ -2363,12 +2389,70 @@ return resolveAlphabeticalList(viewer, offset, caret);
         if (unwrapped.length > fullListCache.length)
         {
             assignFullListCache(unwrapped);
+            // Метим базу префиксом, которым делегат её сузил (assignFullListCache сбросил тег).
+            fullListCachePrefix = computeIdentifierFilter(doc, caret);
             fullListReady = true;
+            if (!fullListCachePrefix.isEmpty())
+                Global.tempLog("member-stock", "база помечена префиксом '" //$NON-NLS-1$ //$NON-NLS-2$
+                    + fullListCachePrefix + "', размер=" + fullListCache.length); //$NON-NLS-1$
         }
+    }
+
+    /**
+     * База popup посчитана под более длинным префиксом, чем текущий: показывать её дальше
+     * нельзя — корректный список был бы её надмножеством. Вызывающий закрывает окно.
+     */
+    boolean isPopupListStaleForPrefix(IDocument doc, int caret)
+    {
+        String now = computeIdentifierFilter(doc, caret);
+        boolean cacheValid = isCacheValidForCaret(doc, caret);
+        boolean covered = fullListCachePrefix.isEmpty()
+            || now.regionMatches(true, 0, fullListCachePrefix, 0, fullListCachePrefix.length());
+        boolean stale = !fullListComplete && cacheValid && !covered;
+        Global.tempLog("member-stock", "проверка базы caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
+            + " тег='" + fullListCachePrefix + "' префикс='" + now //$NON-NLS-1$ //$NON-NLS-2$
+            + "' complete=" + fullListComplete + " кэшВалиден=" + cacheValid //$NON-NLS-1$ //$NON-NLS-2$
+            + " размерБазы=" + fullListCache.length //$NON-NLS-1$
+            + " покрыт=" + covered + " -> устарела=" + stale); //$NON-NLS-1$ //$NON-NLS-2$
+        return stale;
+    }
+
+    /**
+     * Заменяет урезанную базу префикс-свободным запасом членов той же точки.
+     *
+     * <p>Вызывается перед закрытием окна: закрытие — выход «показать нечего», а если запас
+     * членов есть, показать есть что. Запас посчитан зондом в {@code dot+1} и от префикса не
+     * зависит, поэтому годится для любого префикса этой точки. Обращения к делегату здесь
+     * нет — инвариант «при открытом окне делегата не трогаем» не нарушается.
+     *
+     * @return {@code true} — база отремонтирована, окно закрывать не нужно
+     */
+    boolean repairPopupListFromMemberStock(IDocument doc, int caret)
+    {
+        int dot = ReceiverTypeLabel.findMemberAccessDot(doc, caret);
+        if (dot < 0 || memberStockFullListDot != dot
+            || memberStockFullList.length <= fullListCache.length)
+            return false;
+        int was = fullListCache.length;
+        assignFullListCache(memberStockFullList);
+        fullListReady = true;
+        Global.tempLog("member-stock", "база отремонтирована из запаса членов: " //$NON-NLS-1$ //$NON-NLS-2$
+            + was + " -> " + fullListCache.length + ", точка=" + dot); //$NON-NLS-1$ //$NON-NLS-2$
+        return true;
+    }
+
+    /** Временно: кто и с каким содержимым объявляет кэш полным. */
+    private void markFullListComplete(String site)
+    {
+        fullListComplete = true;
+        Global.tempLog("member-stock", "кэш объявлен полным (" + site //$NON-NLS-1$ //$NON-NLS-2$
+            + "), размер=" + fullListCache.length + " контекст=" + fullListContextKey //$NON-NLS-1$ //$NON-NLS-2$
+            + " первый=" + (fullListCache.length > 0 ? safeDisplay(fullListCache[0]) : "-")); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private void assignFullListCache(ICompletionProposal[] cache)
     {
+        fullListCachePrefix = ""; //$NON-NLS-1$
         ICompletionProposal[] stock = stripIrProposals(cache != null ? cache : EMPTY);
         if (irProposals.length > 0 && irSnapshotContextKey == fullListContextKey)
             stock = stripEmptyPlaceholderProposals(stock);
@@ -3073,6 +3157,16 @@ return stripEmptyPlaceholderProposals(result);
     private void debugResolveExit(IDocument doc, int caret, String filter, int interimN,
         boolean cacheValid, String exit, ICompletionProposal[] result)
     {
+        int dot = ReceiverTypeLabel.findMemberAccessDot(doc, caret);
+        Global.tempLog("member-stock", "resolveProposalList ветка=" + exit //$NON-NLS-1$ //$NON-NLS-2$
+            + " caret=" + caret + " dot=" + dot //$NON-NLS-1$ //$NON-NLS-2$
+            + " фильтр='" + filter + "'" //$NON-NLS-1$ //$NON-NLS-2$
+            + " кэшВалиден=" + cacheValid //$NON-NLS-1$
+            + " memberStock=" + (memberStockFullListDot == dot ? memberStockFullList.length : -1) //$NON-NLS-1$
+            + " fullListCache=" + fullListCache.length //$NON-NLS-1$
+            + " -> " + (result == null ? 0 : result.length) //$NON-NLS-1$
+            + (result != null && result.length > 0
+                ? " первый='" + safeDisplay(result[0]) + "'" : "")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
     }
 
     /**
@@ -3388,7 +3482,7 @@ if (!isIrAssistOrderingEnabled())
                 assignFullListCache(unwrapProposals(member));
                 fullListReady = true;
                 if (member.length >= MIN_STABLE_MEMBER_CACHE)
-                    fullListComplete = true;
+                    markFullListComplete("memberProbeStable"); //$NON-NLS-1$
                 return member;
             }
         }
@@ -3399,7 +3493,7 @@ if (!isIrAssistOrderingEnabled())
         {
             assignFullListCache(raw);
             fullListReady = true;
-            fullListComplete = true;
+            markFullListComplete("nativeDelegateList"); //$NON-NLS-1$
         }
         return raw;
     }
@@ -3714,7 +3808,7 @@ if (!SmartAssistFilterState.isSmartFilterEnabled())
             return;
         assignFullListCache(unwrapProposals(raw));
         fullListReady = true;
-        fullListComplete = true;
+        markFullListComplete("loadFullList"); //$NON-NLS-1$
         ContentAssistDebug.log("loadFullList count=" + fullListCache.length //$NON-NLS-1$
             + " dot=" + dot + " caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
             + (forceDelegateReadOnly ? " readOnly" : "") + " complete"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
@@ -3914,7 +4008,7 @@ return best;
             return;
         assignFullListCache(unwrapProposals(proposals));
         fullListReady = true;
-        fullListComplete = true;
+        markFullListComplete("asyncDelegateLoad"); //$NON-NLS-1$
         ContentAssistSessionReloader.refreshPopupIfOpen();
     }
 
@@ -4073,14 +4167,22 @@ return best;
                 return;
             if (ReceiverTypeLabel.findMemberAccessDot(doc, caret) != dotContextKey)
                 return;
-            // Пока окно автодополнения открыто — не считать delegate: это и задержка ввода,
-            // и риск затереть DataEvent во время вставки proposal. Ждём закрытия окна.
-            if (isPopupVisible() && attempt < 8)
+            // Пока окно автодополнения открыто — delegate не считать ни при каких условиях:
+            // это и задержка ввода, и риск затереть DataEvent во время вставки proposal
+            // (сломанный LinkedMode). Ждём закрытия окна, а если не дождались — сдаёмся.
+            // Считать «всё равно, раз попытки кончились» нельзя: инвариант важнее полноты кэша.
+            if (isPopupVisible())
             {
+                if (attempt >= MEMBER_STOCK_WAIT_ATTEMPTS)
+                {
+                    Global.tempLog("member-stock", "ожидание закрытия окна исчерпано dot=" //$NON-NLS-1$ //$NON-NLS-2$
+                        + dotContextKey + ", расчёт пропущен"); //$NON-NLS-1$
+                    return;
+                }
                 org.eclipse.swt.widgets.Display display = viewer.getTextWidget().getDisplay();
                 if (display != null && !display.isDisposed())
-                    display.timerExec(25, () -> runMemberStockCapture(viewer, dotContextKey,
-                        attempt + 1, captureGen));
+                    display.timerExec(MEMBER_STOCK_WAIT_STEP_MS,
+                        () -> runMemberStockCapture(viewer, dotContextKey, attempt + 1, captureGen));
                 return;
             }
             if (captureGen != memberStockCaptureGen)
@@ -4322,16 +4424,17 @@ return finalizeListForIrAssistDisplay(buildDelegateOrderedList(memberStockFullLi
             if (ReceiverTypeLabel.findMemberAccessDot(doc, caret) != dotContextKey)
                 return;
             int prev = fullListCache.length;
-            ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
-            int[] offsets = memberAccessProbeOffsets(caret, dotContextKey, assistant, doc);
-            ICompletionProposal[] raw;
-            if (!SmartAssistFilterState.isSmartFilterEnabled())
-            {
-                captureMemberStockAtDot(viewer, dotContextKey);
-                raw = memberStockFullListDot == dotContextKey ? memberStockFullList : EMPTY;
-            }
-            else
-                raw = probeDelegateAtOffsets(viewer, offsets, dotContextKey);
+            // Только зонд в dot+1 через selection-прокси. probeDelegateAtOffsets здесь
+            // непригоден: он выбирает результат по размеру, не проверяя, что список вообще
+            // member-access. Среди его offset есть getFilterOffset(assistant), который после
+            // Backspace указывает на позицию до удаления — там делегат отдаёт корневой
+            // контекст (замер: 1822 предложения против 11 членов «Запрос»), и «больше значит
+            // лучше» выбирает именно его. У типов с < MIN_STABLE_MEMBER_CACHE членов ретрай
+            // запускается всегда (условие выше), поэтому подмена была не случайной, а
+            // систематической.
+            captureMemberStockAtDot(viewer, dotContextKey);
+            ICompletionProposal[] raw =
+                memberStockFullListDot == dotContextKey ? memberStockFullList : EMPTY;
             if (raw == null || raw.length <= prev)
                 return;
             captureMemberStockFullList(raw, dotContextKey);
@@ -4341,7 +4444,7 @@ return finalizeListForIrAssistDisplay(buildDelegateOrderedList(memberStockFullLi
             fullListReady = true;
             if (fullListCache.length >= MIN_STABLE_MEMBER_CACHE)
             {
-                fullListComplete = true;
+                markFullListComplete("loadFullListRetry"); //$NON-NLS-1$
                 memberAccessReloadScheduledSeq = memberAccessReloadSeq;
             }
             ContentAssistSessionReloader.refreshPopupIfOpen();
