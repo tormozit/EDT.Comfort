@@ -2516,9 +2516,6 @@ return creatorResolved && creatorPatched;
                 // повторный validate() по 1000+ proposals на UI-потоке бессмысленен.
                 String currentFilter = SmartFilterTracker.getCurrentFilter();
                 boolean memberAccess = isMemberAccessAtCaret(doc, caret);
-                tormozit.Global.tempLog("popup-life", "debounce caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
-                    + " фильтр='" + currentFilter + "' memberAccess=" + memberAccess //$NON-NLS-1$ //$NON-NLS-2$
-                    + " ассистент=" + (assistant != null) + " процессор=" + (processor != null)); //$NON-NLS-1$ //$NON-NLS-2$
                 // Member-access: не stock+recompute (сброс DataEvent / LinkedMode).
                 if (memberAccess && assistant != null && processor != null)
                 {
@@ -2608,27 +2605,20 @@ return creatorResolved && creatorPatched;
                                                 SmartContentAssistProcessor processor, int caret,
                                                 String filter)
     {
-        tormozit.Global.tempLog("popup-life", "syncMemberAccess вход caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
-            + " фильтр='" + filter + "' окноВидно=" //$NON-NLS-1$ //$NON-NLS-2$
-            + (assistant != null && isPopupVisible(assistant)));
         if (assistant == null || !isPopupVisible(assistant))
             return false;
         // База popup посчитана делегатом под префиксом на каретке. При удалении символов
-        // корректный список — её надмножество, дорастить базу нечем (пересчёт делегата при
-        // открытом окне запрещён: блокировка ввода + сброс DataEvent → LinkedMode). Поэтому
-        // закрываем окно, как штатный JFace при Backspace за offset вызова.
+        // корректный список — её надмножество, а дорастить базу пересчётом нельзя: при
+        // открытом окне делегат трогать запрещено (блокировка ввода + сброс DataEvent →
+        // LinkedMode). Поэтому сначала подменяем базу префикс-свободным запасом членов, и
+        // только если запаса нет — закрываем окно, как штатный JFace при Backspace за
+        // offset вызова.
         if (processor != null && viewer != null
-            && processor.isPopupListStaleForPrefix(viewer.getDocument(), caret))
+            && processor.isPopupListStaleForPrefix(viewer.getDocument(), caret)
+            && !processor.repairPopupListFromMemberStock(viewer.getDocument(), caret))
         {
-            // Сначала пробуем показать полный список членов точки — закрытие только тогда,
-            // когда показать действительно нечего.
-            if (!processor.repairPopupListFromMemberStock(viewer.getDocument(), caret))
-            {
-                tormozit.Global.tempLog("popup-life", //$NON-NLS-1$
-                    "закрытие: префикс вышел за базу списка, caret=" + caret); //$NON-NLS-1$
-                hideProposalPopup(assistant);
-                return true;
-            }
+            hideProposalPopup(assistant);
+            return true;
         }
         try
         {
@@ -3208,13 +3198,6 @@ ensureFilterPending(popup);
         {
             if (popup == null)
                 return;
-            StringBuilder st = new StringBuilder();
-            for (StackTraceElement e : new Throwable().getStackTrace())
-            {
-                if (e.getClassName().startsWith("tormozit.")) //$NON-NLS-1$
-                    st.append(e.getMethodName()).append(':').append(e.getLineNumber()).append(" <- "); //$NON-NLS-1$
-            }
-            tormozit.Global.tempLog("popup-life", "hideProposalPopup <- " + st); //$NON-NLS-1$ //$NON-NLS-2$
             initPopupReflection(popup);
             if (hidePopupMethod != null)
                 hidePopupMethod.invoke(popup);

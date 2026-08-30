@@ -1482,7 +1482,7 @@ return result;
     {
         assignFullListCache(EMPTY);
         fullListReady = true;
-        markFullListComplete("terminalEmptyMemberAccess"); //$NON-NLS-1$
+        fullListComplete = true;
         terminalEmptyMemberAccess = true;
         if (dot >= 0)
             cachedNonObjectDot = dot;
@@ -1866,8 +1866,6 @@ return;
         {
 return delegate.computeCompletionProposals(viewer, offset);
         }
-        Global.tempLog("popup-life", "computeCompletionProposals off=" + offset); //$NON-NLS-1$ //$NON-NLS-2$
-
         int literalCaret = resolveInvocationCaret(viewer, offset);
         boolean inLiteral = isStringLiteralAssistContext(viewer, literalCaret);
         String delegateName = delegate != null ? delegate.getClass().getSimpleName() : "null"; //$NON-NLS-1$
@@ -2406,29 +2404,22 @@ if (isIrWordsResolvedForContext() && irN > 0)
             // Метим базу префиксом, которым делегат её сузил (assignFullListCache сбросил тег).
             fullListCachePrefix = computeIdentifierFilter(doc, caret);
             fullListReady = true;
-            if (!fullListCachePrefix.isEmpty())
-                Global.tempLog("member-stock", "база помечена префиксом '" //$NON-NLS-1$ //$NON-NLS-2$
-                    + fullListCachePrefix + "', размер=" + fullListCache.length); //$NON-NLS-1$
         }
     }
 
     /**
      * База popup посчитана под более длинным префиксом, чем текущий: показывать её дальше
-     * нельзя — корректный список был бы её надмножеством. Вызывающий закрывает окно.
+     * нельзя — корректный список был бы её надмножеством. Вызывающий сначала пробует
+     * {@link #repairPopupListFromMemberStock}, и только затем закрывает окно.
      */
     boolean isPopupListStaleForPrefix(IDocument doc, int caret)
     {
+        if (fullListComplete || fullListCachePrefix.isEmpty())
+            return false;
+        if (!isCacheValidForCaret(doc, caret))
+            return false;
         String now = computeIdentifierFilter(doc, caret);
-        boolean cacheValid = isCacheValidForCaret(doc, caret);
-        boolean covered = fullListCachePrefix.isEmpty()
-            || now.regionMatches(true, 0, fullListCachePrefix, 0, fullListCachePrefix.length());
-        boolean stale = !fullListComplete && cacheValid && !covered;
-        Global.tempLog("member-stock", "проверка базы caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
-            + " тег='" + fullListCachePrefix + "' префикс='" + now //$NON-NLS-1$ //$NON-NLS-2$
-            + "' complete=" + fullListComplete + " кэшВалиден=" + cacheValid //$NON-NLS-1$ //$NON-NLS-2$
-            + " размерБазы=" + fullListCache.length //$NON-NLS-1$
-            + " покрыт=" + covered + " -> устарела=" + stale); //$NON-NLS-1$ //$NON-NLS-2$
-        return stale;
+        return !now.regionMatches(true, 0, fullListCachePrefix, 0, fullListCachePrefix.length());
     }
 
     /**
@@ -2447,21 +2438,9 @@ if (isIrWordsResolvedForContext() && irN > 0)
         if (dot < 0 || memberStockFullListDot != dot
             || memberStockFullList.length <= fullListCache.length)
             return false;
-        int was = fullListCache.length;
         assignFullListCache(memberStockFullList);
         fullListReady = true;
-        Global.tempLog("member-stock", "база отремонтирована из запаса членов: " //$NON-NLS-1$ //$NON-NLS-2$
-            + was + " -> " + fullListCache.length + ", точка=" + dot); //$NON-NLS-1$ //$NON-NLS-2$
         return true;
-    }
-
-    /** Временно: кто и с каким содержимым объявляет кэш полным. */
-    private void markFullListComplete(String site)
-    {
-        fullListComplete = true;
-        Global.tempLog("member-stock", "кэш объявлен полным (" + site //$NON-NLS-1$ //$NON-NLS-2$
-            + "), размер=" + fullListCache.length + " контекст=" + fullListContextKey //$NON-NLS-1$ //$NON-NLS-2$
-            + " первый=" + (fullListCache.length > 0 ? safeDisplay(fullListCache[0]) : "-")); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private void assignFullListCache(ICompletionProposal[] cache)
@@ -3171,16 +3150,6 @@ return stripEmptyPlaceholderProposals(result);
     private void debugResolveExit(IDocument doc, int caret, String filter, int interimN,
         boolean cacheValid, String exit, ICompletionProposal[] result)
     {
-        int dot = ReceiverTypeLabel.findMemberAccessDot(doc, caret);
-        Global.tempLog("member-stock", "resolveProposalList ветка=" + exit //$NON-NLS-1$ //$NON-NLS-2$
-            + " caret=" + caret + " dot=" + dot //$NON-NLS-1$ //$NON-NLS-2$
-            + " фильтр='" + filter + "'" //$NON-NLS-1$ //$NON-NLS-2$
-            + " кэшВалиден=" + cacheValid //$NON-NLS-1$
-            + " memberStock=" + (memberStockFullListDot == dot ? memberStockFullList.length : -1) //$NON-NLS-1$
-            + " fullListCache=" + fullListCache.length //$NON-NLS-1$
-            + " -> " + (result == null ? 0 : result.length) //$NON-NLS-1$
-            + (result != null && result.length > 0
-                ? " первый='" + safeDisplay(result[0]) + "'" : "")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
     }
 
     /**
@@ -3496,7 +3465,7 @@ if (!isIrAssistOrderingEnabled())
                 assignFullListCache(unwrapProposals(member));
                 fullListReady = true;
                 if (member.length >= MIN_STABLE_MEMBER_CACHE)
-                    markFullListComplete("memberProbeStable"); //$NON-NLS-1$
+                    fullListComplete = true;
                 return member;
             }
         }
@@ -3507,7 +3476,7 @@ if (!isIrAssistOrderingEnabled())
         {
             assignFullListCache(raw);
             fullListReady = true;
-            markFullListComplete("nativeDelegateList"); //$NON-NLS-1$
+            fullListComplete = true;
         }
         return raw;
     }
@@ -3822,7 +3791,7 @@ if (!SmartAssistFilterState.isSmartFilterEnabled())
             return;
         assignFullListCache(unwrapProposals(raw));
         fullListReady = true;
-        markFullListComplete("loadFullList"); //$NON-NLS-1$
+        fullListComplete = true;
         ContentAssistDebug.log("loadFullList count=" + fullListCache.length //$NON-NLS-1$
             + " dot=" + dot + " caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
             + (forceDelegateReadOnly ? " readOnly" : "") + " complete"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
@@ -4022,7 +3991,7 @@ return best;
             return;
         assignFullListCache(unwrapProposals(proposals));
         fullListReady = true;
-        markFullListComplete("asyncDelegateLoad"); //$NON-NLS-1$
+        fullListComplete = true;
         ContentAssistSessionReloader.refreshPopupIfOpen();
     }
 
@@ -4188,11 +4157,7 @@ return best;
             if (isPopupVisible())
             {
                 if (attempt >= MEMBER_STOCK_WAIT_ATTEMPTS)
-                {
-                    Global.tempLog("member-stock", "ожидание закрытия окна исчерпано dot=" //$NON-NLS-1$ //$NON-NLS-2$
-                        + dotContextKey + ", расчёт пропущен"); //$NON-NLS-1$
                     return;
-                }
                 org.eclipse.swt.widgets.Display display = viewer.getTextWidget().getDisplay();
                 if (display != null && !display.isDisposed())
                     display.timerExec(MEMBER_STOCK_WAIT_STEP_MS,
@@ -4215,40 +4180,18 @@ return best;
         catch (Exception ignored) {}
     }
 
-    private static String safeDisplay(ICompletionProposal proposal)
-    {
-        if (proposal == null)
-            return "null"; //$NON-NLS-1$
-        try
-        {
-            String s = proposal.getDisplayString();
-            return s == null ? "null" : (s.length() > 60 ? s.substring(0, 60) : s); //$NON-NLS-1$
-        }
-        catch (Exception ex)
-        {
-            return "?"; //$NON-NLS-1$
-        }
-    }
-
     private ICompletionProposal[] resolveMemberAccessOrderedList(ITextViewer viewer, int offset,
                                                                  int caret, int dot)
     {
         if (terminalEmptyMemberAccess && cachedNonObjectDot == dot)
             return EMPTY;
         if (hasMemberStock(dot))
-        {
-            Global.tempLog("member-stock", "список member-access dot=" + dot + " ветка=кэш (" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + memberStockFullList.length + ")"); //$NON-NLS-1$
-return finalizeListForIrAssistDisplay(buildDelegateOrderedList(memberStockFullList));
-        }
+            return finalizeListForIrAssistDisplay(buildDelegateOrderedList(memberStockFullList));
 
         ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
         IDocument doc = viewer != null ? viewer.getDocument() : null;
         int[] offsets = memberAccessProbeOffsets(caret, dot, assistant, doc);
         ICompletionProposal[] probed = probeDelegateAtOffsets(viewer, offsets, dot);
-        Global.tempLog("member-stock", "список member-access dot=" + dot + " caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " кэш пуст, probe вернул " + probed.length //$NON-NLS-1$
-            + (probed.length > 0 ? " первый='" + safeDisplay(probed[0]) + "'" : "")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         if (probed.length >= MIN_STABLE_MEMBER_CACHE)
         {
             captureMemberStockFullList(probed, dot);
@@ -4307,10 +4250,6 @@ return finalizeListForIrAssistDisplay(buildDelegateOrderedList(memberStockFullLi
             if (memberStockFullListDot == dot)
                 memberStockFullListComplete = true;
         }
-        Global.tempLog("member-stock", "расчёт dot=" + dot + " -> " + raw.length //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " членов, кэш теперь " //$NON-NLS-1$
-            + (memberStockFullListDot == dot ? memberStockFullList.length : 0)
-            + ", complete=" + (memberStockFullListDot == dot && memberStockFullListComplete)); //$NON-NLS-1$
         return memberStockFullListDot == dot ? memberStockFullList : raw;
     }
 
@@ -4381,12 +4320,7 @@ return finalizeListForIrAssistDisplay(buildDelegateOrderedList(memberStockFullLi
         };
         ITextViewer proxy = (ITextViewer) java.lang.reflect.Proxy.newProxyInstance(
             real.getClass().getClassLoader(), ifaces.toArray(new Class<?>[0]), h);
-        long t0 = System.nanoTime();
         ICompletionProposal[] r = delegate.computeCompletionProposals(proxy, probeOffset);
-        Global.tempLog("popup-life", "proxy compute off=" + probeOffset //$NON-NLS-1$ //$NON-NLS-2$
-            + " -> " + (r == null ? -1 : r.length) //$NON-NLS-1$
-            + " за " + (System.nanoTime() - t0) / 1_000_000 + "мс" //$NON-NLS-1$ //$NON-NLS-2$
-            + " попапОткрыт=" + isPopupVisible()); //$NON-NLS-1$
         return unwrapProposals(r != null ? r : EMPTY);
     }
 
@@ -4458,7 +4392,7 @@ return finalizeListForIrAssistDisplay(buildDelegateOrderedList(memberStockFullLi
             fullListReady = true;
             if (fullListCache.length >= MIN_STABLE_MEMBER_CACHE)
             {
-                markFullListComplete("loadFullListRetry"); //$NON-NLS-1$
+                fullListComplete = true;
                 memberAccessReloadScheduledSeq = memberAccessReloadSeq;
             }
             ContentAssistSessionReloader.refreshPopupIfOpen();
