@@ -5,6 +5,7 @@
     <startup class="tormozit.ComfortShutdownHook"/>
     <startup class="tormozit.EditorStatusFieldsFixHook"/>
     <startup class="tormozit.LwtComboPopupFixHook"/>
+    <startup class="tormozit.FormWysiwygScrollHook"/>
     <startup class="tormozit.ActiveProjectTracker"/>
     <startup class="tormozit.CompareConfigMenuHook"/>
     <startup class="tormozit.NavigatorDropSearchHook"/>

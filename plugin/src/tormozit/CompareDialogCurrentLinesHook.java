@@ -153,6 +153,8 @@ public final class CompareDialogCurrentLinesHook
         if (Boolean.TRUE.equals(pane.getData(PANEL_ATTACHED_KEY)))
             return;
         pane.setData(PANEL_ATTACHED_KEY, Boolean.TRUE);
+        /* Нелокализованная шапка «Bsl Compare» — см. CompareViewerTitle. */
+        CompareViewerTitle.localizePaneTitle(pane, viewerControl);
         attachImpl(pane, viewerControl, editorInput, viewer, shell);
     }
 
@@ -204,6 +206,7 @@ public final class CompareDialogCurrentLinesHook
 
         StyledText leftText = MergeViewerReflection.extractStyledText(viewer, "fLeft"); //$NON-NLS-1$
         StyledText rightText = MergeViewerReflection.extractStyledText(viewer, "fRight"); //$NON-NLS-1$
+        registerModuleLineRefSides(editorInput, leftText, rightText);
 
         String irSyntaxVariant = IrCompareValuesHandler.syntaxVariantFor(resolveCompareType(editorInput));
         final String semLeft = semanticLeft;
@@ -383,6 +386,24 @@ public final class CompareDialogCurrentLinesHook
             CompareTabularDocumentsInIr.resolveWorkspaceFile(right));
         CompareTabularDocumentsInIr.runCompareTwoSide(dtProject, pathLeft, pathRight,
             leftLabel, rightLabel, uiLeftIsNewer, true);
+    }
+
+    /**
+     * Регистрирует панели сравнения в {@link CompareModuleLineRef} — чтобы глобальная команда
+     * «Копировать ссылку» из панели давала ссылку на строку модуля, а не на модуль целиком.
+     */
+    private static void registerModuleLineRefSides(CompareEditorInput editorInput, StyledText leftText,
+        StyledText rightText)
+    {
+        org.eclipse.core.resources.IFile leftFile =
+            CompareTabularDocumentsInIr.resolveWorkspaceFile(resolveLeft(editorInput));
+        org.eclipse.core.resources.IFile rightFile =
+            CompareTabularDocumentsInIr.resolveWorkspaceFile(resolveRight(editorInput));
+        org.eclipse.core.resources.IFile anyFile = leftFile != null ? leftFile : rightFile;
+        if (anyFile == null)
+            return;
+        CompareModuleLineRef.registerSide(leftText, leftFile != null ? leftFile : anyFile);
+        CompareModuleLineRef.registerSide(rightText, rightFile != null ? rightFile : anyFile);
     }
 
     private static ITypedElement resolveLeft(CompareEditorInput editorInput)

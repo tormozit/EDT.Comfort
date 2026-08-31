@@ -523,6 +523,14 @@ public final class CompareEditorCurrentLinesHook
         pane.setData(PANEL_ATTACHED_KEY, Boolean.TRUE);
 
         /*
+         * Шапка режима сравнения: у Xtext-просмотрщика BSL заголовок нелокализован
+         * («Bsl Compare»). Здесь мы приходим уже после setInput панели, поэтому правка через
+         * CompareViewerTitle.localizePaneTitle (не только данные control'а). Вызов попадает
+         * и на смену варианта пользователем — attach() переигрывается по dispose wrapper'а.
+         */
+        CompareViewerTitle.localizePaneTitle(pane, viewerControl);
+
+        /*
          * fContentInputPane (ViewForm) держит control вьюера напрямую в своей content-области
          * (setContent(fViewer.getControl())). Оборачиваем: переносим control вьюера в свой
          * composite вместе с панелью «Текущая строка» и подставляем этот composite как
@@ -568,6 +576,7 @@ public final class CompareEditorCurrentLinesHook
         StyledText leftText = MergeViewerReflection.extractStyledText(viewer, "fLeft"); //$NON-NLS-1$
         StyledText rightText = MergeViewerReflection.extractStyledText(viewer, "fRight"); //$NON-NLS-1$
         applyPendingLineRevealIfAny(leftText, rightText, config != null && config.isMirrored());
+        registerModuleLineRefSides(editorInput, leftText, rightText);
 
         String irSyntaxVariant = IrCompareValuesHandler.syntaxVariantFor(resolveCompareType(editorInput));
         final String semLeft = leftLabel;
@@ -902,6 +911,25 @@ public final class CompareEditorCurrentLinesHook
         IDtProject dtProject = IrCompareValuesHandler.resolveDtProjectForCompare(fileLeft, fileRight);
         CompareTabularDocumentsInIr.runCompareTwoSide(dtProject, pathLeft, pathRight,
             leftLabel, rightLabel, uiLeftIsNewer, true);
+    }
+
+    /**
+     * Регистрирует панели сравнения в {@link CompareModuleLineRef}, чтобы глобальная команда
+     * «Копировать ссылку» из панели давала ссылку на строку модуля, а не на модуль целиком.
+     * Обе стороны — один и тот же модуль; если файл одной стороны не резолвится, берём файл
+     * другой. Для не-модульного сравнения путь не резолвится в {@code ModuleRef} — команда
+     * тогда просто отработает штатно.
+     */
+    private static void registerModuleLineRefSides(CompareEditorInput editorInput, StyledText leftText,
+        StyledText rightText)
+    {
+        IFile leftFile = resolveTypedElementFile(editorInput, true);
+        IFile rightFile = resolveTypedElementFile(editorInput, false);
+        IFile anyFile = leftFile != null ? leftFile : rightFile;
+        if (anyFile == null)
+            return;
+        CompareModuleLineRef.registerSide(leftText, leftFile != null ? leftFile : anyFile);
+        CompareModuleLineRef.registerSide(rightText, rightFile != null ? rightFile : anyFile);
     }
 
     private static ITypedElement resolveTypedElement(CompareEditorInput editorInput, boolean left)

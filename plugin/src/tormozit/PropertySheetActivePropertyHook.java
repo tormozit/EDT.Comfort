@@ -15,7 +15,7 @@ import com._1c.g5.v8.dt.mcore.util.McoreUtil;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.viewers.StructuredSelection;
 import org.eclipse.swt.SWT;
-import org.eclipse.swt.custom.ScrolledComposite;
+import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.graphics.Color;
 import org.eclipse.swt.graphics.Font;
 import org.eclipse.swt.graphics.FontData;
@@ -29,6 +29,7 @@ import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Menu;
 import org.eclipse.swt.widgets.MenuItem;
+import org.eclipse.swt.widgets.Text;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IEditorReference;
 import org.eclipse.ui.IPartListener2;
@@ -76,8 +77,11 @@ public class PropertySheetActivePropertyHook implements IStartup
     private static final String SECTION_VIEW_MODEL = "SectionViewModel"; //$NON-NLS-1$
     /** Пауза дебаунса пересинхронизации после перерисовки палитры. */
     private static final int SYNC_DELAY_MS = 100;
-    /** Отступ от края видимой области при доводке строки до видимости. */
-    private static final int SCROLL_MARGIN = 8;
+    /** Число попыток вернуть ввод в поле свойства после перезаполнения палитры. */
+    private static final int REVEAL_RETRIES = 20;
+
+    /** Пауза между попытками вернуть ввод в поле свойства. */
+    private static final int REVEAL_RETRY_MS = 50;
     /** Глубина спуска по LWT-детям при поиске сфокусированного поля. */
     private static final int LIGHT_DEPTH = 6;
     /** Длительность одного состояния мигания жирностью. */
@@ -116,6 +120,7 @@ public class PropertySheetActivePropertyHook implements IStartup
      * редактора объекта метаданных), и тогда решение о жирности принималось бы по чужой сцене.
      */
     private static Object highlightedPage;
+
     /** Исходный цвет окрашенной подписи ({@code null} — цвет по умолчанию). */
     private static Color originalTextColor;
     /** Исходный шрифт окрашенной подписи ({@code null} — шрифт SWT-хоста). */
@@ -140,6 +145,12 @@ public class PropertySheetActivePropertyHook implements IStartup
     private static String targetPropertyName;
     /** Идёт обработка ввода пользователя в панели: активация поля отсюда — не повод мигать. */
     private static boolean handlingPaletteInput;
+    /**
+     * Идёт наш возврат ввода в поле ТЕКУЩЕГО свойства после перезаполнения палитры. Это не
+     * переход к другому свойству, поэтому подсветку сбрасывать нельзя (см.
+     * {@link #onFieldActivatedProgrammatically}).
+     */
+    private static boolean restoringActiveProperty;
     /** Дебаунс: пересинхронизация уже запланирована. */
     private static boolean syncScheduled;
     /** Кэш контролов палитры — {@link #onUserInput} не должен обходить сцену на каждую клавишу. */
@@ -711,8 +722,8 @@ public class PropertySheetActivePropertyHook implements IStartup
      */
     static void onFieldActivatedProgrammatically(Object nativeControl)
     {
-        if (handlingPaletteInput || nativeControl == null)
-            return; // фокус в поле поставил клик по имени свойства в самой панели
+        if (handlingPaletteInput || restoringActiveProperty || nativeControl == null)
+            return; // клик по имени свойства в самой панели либо наш же возврат к текущему свойству
         blinkControl = nativeControl;
         activationInProgress = true;
         targetPropertyName = resolveTargetProperty(nativeControl);
@@ -860,6 +871,10 @@ public class PropertySheetActivePropertyHook implements IStartup
         if (containsFocus(Global.getField(nativeControl, "overlay") instanceof Control overlay //$NON-NLS-1$
             ? overlay : null))
             return true;
+        // Поле «Тип» плагин подменяет собственным SWT-оверлеем поверх штатного LightCombo —
+        // сам light-контрол при этом фокуса не имеет и о нашем виджете не знает.
+        if (TypeComboOverlayHook.overlayHasFocus(nativeControl))
+            return true;
         Object children = Global.invoke(nativeControl, "getChildren"); //$NON-NLS-1$
         if (children instanceof Iterable<?> iterable)
         {
@@ -935,7 +950,7 @@ public class PropertySheetActivePropertyHook implements IStartup
         if (label == highlightedLabel)
         {
             if (afterRebuild)
-                revealLabel(page, labelView);
+                revealLabel(page, 0);
             return;
         }
 
@@ -956,7 +971,7 @@ public class PropertySheetActivePropertyHook implements IStartup
         Global.tempLog(TEMP_TOPIC, "окрашено «" + activePropertyName + "»" //$NON-NLS-1$ //$NON-NLS-2$
             + (afterRebuild ? " (после перезаполнения)" : "")); //$NON-NLS-1$ //$NON-NLS-2$
         if (afterRebuild)
-            revealLabel(page, labelView);
+            revealLabel(page, 0);
     }
 
     /** Снимает подсветку с прежней подписи (возвращает исходные цвет, шрифт и границы). */
@@ -1118,36 +1133,115 @@ public class PropertySheetActivePropertyHook implements IStartup
     }
 
     /**
-     * Доводит строку свойства до видимой области прокручиваемой палитры. Если строка и так
-     * видна целиком — прокрутка не трогается (иначе панель дёргалась бы при каждом
-     * перезаполнении).
+     * Доводит строку текущего свойства до видимой области тем же путём, что и переход к свойству
+     * из дерева элементов формы (двойной клик по ячейке «Ширина»): ввод ставится в поле свойства
+     * ({@link AefFieldFocus}), а прокрутку к полю с вводом панель делает сама. Своей геометрии не
+     * считаем — палитра прокручивается собственным LWT-контейнером, а не SWT-контейнером страницы.
+     *
+     * @param attempt номер попытки: после перезаполнения (очистка фильтра, смена объекта) панель
+     *        дозаполняется, и поле свойства появляется в сцене не сразу
      */
-    private static void revealLabel(Object page, Object labelView)
+    private static void revealLabel(Object page, int attempt)
     {
-        ScrolledComposite scrolled = PropertySheetUiContext.findPaletteScrolledComposite(page);
-        if (scrolled == null || scrolled.isDisposed())
+        if (page == null || activePropertyName == null || attempt >= REVEAL_RETRIES)
             return;
-        Rectangle labelBounds = PropertySheetControlInterop.liveLightDisplayBounds(labelView);
-        if (labelBounds == null)
+        // Палитра перезаполняется на КАЖДУЮ букву фильтра, и ввод в это время принадлежит полю
+        // фильтра — отбирать его нельзя. Доводка нужна, когда фильтр снят и список вернулся
+        // к полному виду.
+        String filter = paletteFilterText(page);
+        if (filter != null && !filter.isBlank())
             return;
+        Object scene = Global.invoke(page, "getScene"); //$NON-NLS-1$
+        Map.Entry<?, ?> row = scene != null
+            ? PropertyNameIdentifierHook.findValueViewAfterLabel(scene, activePropertyName) : null;
+        Object nativeControl = row != null ? Global.invoke(row.getValue(), "getNativeControl") : null; //$NON-NLS-1$
+        boolean focused = false;
+        if (nativeControl != null)
+        {
+            // Возврат к ТЕКУЩЕМУ свойству, а не переход к другому: без этого флага активация
+            // сбрасывала подсветку и само текущее свойство (onFieldActivatedProgrammatically).
+            restoringActiveProperty = true;
+            try
+            {
+                focused = AefFieldFocus.focusNativeControl(nativeControl);
+            }
+            finally
+            {
+                restoringActiveProperty = false;
+            }
+        }
+        if (focused)
+            return;
+        Display display = Display.getDefault();
+        if (display != null && !display.isDisposed())
+            display.timerExec(REVEAL_RETRY_MS, () -> revealLabel(page, attempt + 1));
+    }
 
-        Point scrolledOrigin = scrolled.toDisplay(0, 0);
-        Rectangle client = scrolled.getClientArea();
-        int top = labelBounds.y - scrolledOrigin.y;
-        int bottom = top + labelBounds.height;
-        int delta = 0;
-        if (top < 0)
-            delta = top - SCROLL_MARGIN;
-        else if (bottom > client.height)
-            delta = bottom - client.height + SCROLL_MARGIN;
-        if (delta == 0)
-            return;
+    /**
+     * Текст поля фильтра панели ({@code SearchBox} над списком свойств); {@code null} — поля
+     * фильтра в панели нет.
+     */
+    private static String paletteFilterText(Object page)
+    {
+        Composite scope = pageControlFor(page);
+        for (int up = 0; scope != null && !scope.isDisposed() && up < 3; up++, scope = scope.getParent())
+        {
+            Object searchBox = findSearchBox(scope, 0);
+            if (searchBox != null)
+                return searchBoxText(searchBox);
+        }
+        return null;
+    }
 
-        Point origin = scrolled.getOrigin();
-        int y = Math.max(0, origin.y + delta);
-        scrolled.setOrigin(origin.x, y);
-        Global.tempLog(TEMP_TOPIC, "прокрутка к «" + activePropertyName //$NON-NLS-1$
-            + "»: origin.y " + origin.y + " → " + y); //$NON-NLS-1$ //$NON-NLS-2$
+    private static Object findSearchBox(Composite parent, int depth)
+    {
+        if (parent == null || parent.isDisposed() || depth > LIGHT_DEPTH)
+            return null;
+        for (Control child : parent.getChildren())
+        {
+            if (child.isDisposed())
+                continue;
+            if (child.getClass().getName().contains("SearchBox")) //$NON-NLS-1$
+                return child;
+            if (child instanceof Composite composite)
+            {
+                Object found = findSearchBox(composite, depth + 1);
+                if (found != null)
+                    return found;
+            }
+        }
+        return null;
+    }
+
+    /** Текст {@code SearchBox}: сам он текст не отдаёт — читаем поле ввода внутри него. */
+    private static String searchBoxText(Object searchBox)
+    {
+        Object text = Global.invoke(searchBox, "getText"); //$NON-NLS-1$
+        if (text instanceof String s)
+            return s;
+        return searchBox instanceof Composite composite ? textFieldValue(composite, 0) : null;
+    }
+
+    private static String textFieldValue(Composite parent, int depth)
+    {
+        if (parent == null || parent.isDisposed() || depth > LIGHT_DEPTH)
+            return null;
+        for (Control child : parent.getChildren())
+        {
+            if (child.isDisposed())
+                continue;
+            if (child instanceof Text field)
+                return field.getText();
+            if (child instanceof StyledText styled)
+                return styled.getText();
+            if (child instanceof Composite composite)
+            {
+                String nested = textFieldValue(composite, depth + 1);
+                if (nested != null)
+                    return nested;
+            }
+        }
+        return null;
     }
 
     /**

@@ -266,6 +266,48 @@ public class TypeComboOverlayHook implements IStartup
     private static final Map<IViewPart, OverlayState> PROPERTY_OVERLAYS = new HashMap<>();
 
     /**
+     * Ввод стоит в нашем оверлее, наложенном поверх штатного LWT-контрола {@code nativeControl}
+     * (или в его выпадающем списке).
+     *
+     * <p>Нужен определению текущего свойства в {@link PropertySheetActivePropertyHook}: там фокус
+     * ищется по самому LWT-контролу поля ({@code isFocused()} light-контрола, его SWT-{@code
+     * overlay} от {@code LightText}, дети). Поле «Тип» единственное, у которого ввод держит
+     * ЧУЖОЙ для LWT виджет — наш {@code container} лежит рядом, поверх канвы, и штатный
+     * {@code LightCombo} про него ничего не знает. Без этой проверки «Тип» никогда не
+     * определялся как свойство в фокусе, и его подпись не подсвечивалась.
+     *
+     * @param nativeControl штатный LWT-контрол строки свойства
+     * @return {@code true}, если фокус в оверлее этого контрола
+     */
+    static boolean overlayHasFocus(Object nativeControl)
+    {
+        if (nativeControl == null)
+            return false;
+        for (OverlayState state : PROPERTY_OVERLAYS.values())
+        {
+            if (state == null || state.nativeControl != nativeControl)
+                continue;
+            return controlHasFocus(state.container) || controlHasFocus(state.popup);
+        }
+        return false;
+    }
+
+    /** Контрол сам держит ввод или ввод в одном из его потомков. */
+    private static boolean controlHasFocus(Control control)
+    {
+        if (control == null || control.isDisposed())
+            return false;
+        Display display = control.getDisplay();
+        Control focus = display != null && !display.isDisposed() ? display.getFocusControl() : null;
+        for (Control c = focus; c != null && !c.isDisposed(); c = c.getParent())
+        {
+            if (c == control)
+                return true;
+        }
+        return false;
+    }
+
+    /**
      * Окно после загрузки панелью «Свойства» значений для нового объекта, в течение которого наш
      * оверлей НЕ забирает фокус себе.
      *

@@ -54,7 +54,8 @@ import com._1c.g5.v8.dt.ui.util.OpenHelper;
  * <ul>
  *   <li>контекстное меню дерева реквизитов — переход на «Функц. опции», «Права»
  *       и открытие редактора «Все роли»;</li>
- *   <li>двойной клик в «Общие реквизиты» — {@code bringToTop} панели «Свойства».
+ *   <li>двойной клик в «Общие реквизиты» и в «Значения» редактора перечисления —
+ *       {@code bringToTop} панели «Свойства».
  *       Дерево «Стандартные реквизиты» не перехватывать: Grok 4.6 (2026-08-16) за ~40 попыток не смог правильно загрузить реквизит в панель «Свойства».</li>
  * </ul>
  */
@@ -137,7 +138,7 @@ public final class MdEditorAttributeMenuHook implements IStartup
     }
 
     /**
-     * «Общие реквизиты»: {@code bringToTop}.
+     * «Общие реквизиты» и «Значения» перечисления: {@code bringToTop}.
      * Деревья вкладки не перехватываем. В «Стандартные реквизиты» не лезть:
      * Grok 4.6 (2026-08-16) за ~40 попыток не смог правильно загрузить реквизит в панель «Свойства».
      */
@@ -153,7 +154,7 @@ public final class MdEditorAttributeMenuHook implements IStartup
             && sameItemDowns >= 2
             && Objects.equals(item, lastDownItem);
         DtGranularEditor<?> editor = editorOf(table);
-        if (selectedCommonAttribute(table) == null)
+        if (selectedCommonAttribute(table) == null && selectedEnumValue(table) == null)
             return;
         if (!genuine || item == null || editor == null || editor.getSite() == null)
             return;
@@ -244,6 +245,34 @@ public final class MdEditorAttributeMenuHook implements IStartup
         if (typeName == null || !typeName.contains("CommonAttributesDataItemViewModel")) //$NON-NLS-1$
             return null;
         return mapViewModelToEObject(table, data);
+    }
+
+    /**
+     * Значение перечисления в таблице «Значения» вкладки «Данные» редактора перечисления.
+     * Штатный двойной клик там ничего не делает: таблица построена как
+     * {@code navigatorTable(ENUM__ENUM_VALUES, …)} без {@code openFeature}, и
+     * {@code NavigatorTableComponent.processDoubleClickEvent} выходит по {@code null}.
+     */
+    private static EObject selectedEnumValue(Table table)
+    {
+        if (table == null || table.isDisposed())
+            return null;
+        TableItem[] selection = table.getSelection();
+        if (selection == null || selection.length == 0)
+            return null;
+        Object data = selection[0].getData();
+        if (data == null)
+            return null;
+        EObject direct = NavigatorElementModels.resolveEObject(data);
+        if (isEnumValue(direct))
+            return direct;
+        EObject mapped = mapViewModelToEObject(table, data);
+        return isEnumValue(mapped) ? mapped : null;
+    }
+
+    private static boolean isEnumValue(EObject object)
+    {
+        return object != null && "EnumValue".equals(object.eClass().getName()); //$NON-NLS-1$
     }
 
     private static void handleMenuDetect(Event event)

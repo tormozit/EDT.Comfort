@@ -3342,14 +3342,16 @@ int probe = -1;
 }
         if (dot >= 0)
         {
+            // Штатный (неотфильтрованный) список. Делегат на живой каретке отдаёт результат,
+            // уже суженный префиксом, — показывать его нельзя. Запас членов считается без
+            // префикса, поэтому при его отсутствии считаем принудительно, не откладывая:
+            // снятие флажка «Фильтр» — редкое явное действие пользователя, а не набор символов.
+            // Порог MIN_STABLE_MEMBER_CACHE здесь не годился: у типа с 11 членами он не давал
+            // отличить полный список от урезанного.
+            if (memberStockFullListDot != dot || memberStockFullList.length == 0)
+                captureMemberStockAtDot(viewer, dot, true);
             if (memberStockFullListDot == dot && memberStockFullList.length > raw.length)
                 raw = memberStockFullList;
-            else if (raw.length < MIN_STABLE_MEMBER_CACHE)
-            {
-                captureMemberStockAtDot(viewer, dot);
-                if (memberStockFullListDot == dot && memberStockFullList.length > raw.length)
-                    raw = memberStockFullList;
-            }
         }
         else if (isCacheValidForCaret(doc, caret) && fullListCache.length > raw.length)
             raw = fullListCache;
@@ -4224,13 +4226,25 @@ return best;
      */
     private ICompletionProposal[] captureMemberStockAtDot(ITextViewer viewer, int dot)
     {
+        return captureMemberStockAtDot(viewer, dot, false);
+    }
+
+    /**
+     * @param force считать немедленно даже при открытом окне. Только для редких явных действий
+     *     пользователя (снятие флажка «Фильтр»), где показать урезанный список нельзя. При
+     *     наборе символов — всегда {@code false}: там расчёт на каждую букву блокирует ввод и
+     *     затирает {@code DataEvent} (ломается LinkedMode).
+     */
+    private ICompletionProposal[] captureMemberStockAtDot(ITextViewer viewer, int dot,
+                                                          boolean force)
+    {
         if (viewer == null || dot < 0)
             return EMPTY;
         if (hasMemberStock(dot))
             return memberStockFullList;
         // Окно открыто — идёт ввод/возможна вставка proposal: расчёт откладываем
         // (иначе задержка ввода и затирание DataEvent).
-        if (isPopupVisible())
+        if (!force && isPopupVisible())
         {
             scheduleMemberStockCapture(viewer, dot);
             return memberStockFullListDot == dot ? memberStockFullList : EMPTY;
@@ -4238,7 +4252,11 @@ return best;
         return captureMemberStockNow(viewer, dot);
     }
 
-    /** Синхронный расчёт полного списка членов. Только когда окно автодополнения закрыто. */
+    /**
+     * Синхронный расчёт полного списка членов. При наборе символов — только когда окно
+     * автодополнения закрыто; при явном действии пользователя допустим и с открытым окном
+     * (см. {@code force} в {@link #captureMemberStockAtDot(ITextViewer, int, boolean)}).
+     */
     private ICompletionProposal[] captureMemberStockNow(ITextViewer viewer, int dot)
     {
         if (viewer == null || dot < 0 || hasMemberStock(dot))

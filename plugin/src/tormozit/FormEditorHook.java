@@ -1221,6 +1221,75 @@ public class FormEditorHook implements IStartup
     }
 
     /**
+     * Выделяет реквизит формы с именем {@code attributeName} в дереве реквизитов активного
+     * редактора форм и переводит на него фокус (issue #428: после «ОК» в окне настроек
+     * динамического списка активировать реквизит-владелец в редакторе формы).
+     *
+     * @return {@code true}, если реквизит найден и выделен
+     */
+    public static boolean selectAttributeInActiveForm(String attributeName)
+    {
+        if (attributeName == null || attributeName.isBlank())
+            return false;
+
+        FormEditorPage page = FormEditor.getActiveFormEditorPage();
+        if (page == null)
+            return false;
+
+        Object viewerObj = Global.getField(page, "attributesViewer"); //$NON-NLS-1$
+        Tree tree = getAttributesTree(page);
+        if (!(viewerObj instanceof TreeViewer viewer) || tree == null || tree.isDisposed())
+            return false;
+
+        // Уже выделен нужный реквизит — идемпотентно, повторно фокус не перехватываем
+        // (метод вызывается несколько раз: коммит формы после закрытия окна пересобирает дерево).
+        Object current = Global.call(viewer, "getStructuredSelection"); //$NON-NLS-1$
+        if (current instanceof IStructuredSelection sel && sel.size() == 1
+            && sel.getFirstElement() instanceof PropertyInfo curInfo
+            && curInfo.getSource() instanceof FormAttribute curAttr
+            && attributeName.equals(curAttr.getName()))
+            return true;
+
+        for (TreeItem item : tree.getItems())
+        {
+            if (item.isDisposed() || !(item.getData() instanceof PropertyInfo info)
+                || !(info.getSource() instanceof FormAttribute attribute))
+                continue;
+            if (!attributeName.equals(attribute.getName()))
+                continue;
+
+            viewer.setSelection(new StructuredSelection(info), true);
+            if (tree.getSelectionCount() == 0)
+            {
+                tree.setSelection(item);
+                tree.showItem(item);
+            }
+            tree.setFocus();
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Выделенный в активном редакторе форм реквизит-динамический-список
+     * ({@code FormAttribute} с {@link DynamicListExtInfo}), либо {@code null}
+     * (issue #428: не открывать второе окно настроек того же списка).
+     */
+    public static EObject selectedDynamicListAttribute()
+    {
+        FormEditorPage page = FormEditor.getActiveFormEditorPage();
+        Tree tree = page != null ? getAttributesTree(page) : null;
+        PropertyInfo selected = tree != null ? getSelectedPropertyInfo(tree) : null;
+        for (PropertyInfo cur = selected; cur != null; cur = parentPropertyInfo(cur))
+        {
+            if (cur.getSource() instanceof FormAttribute attr
+                && attr.getExtInfo() instanceof DynamicListExtInfo)
+                return attr;
+        }
+        return null;
+    }
+
+    /**
      * Перехват Ctrl+T в контексте реквизитов: блокирует штатный focusNavigator формы,
      * даже если выбран пользовательский реквизит (тогда execute — no-op).
      */
@@ -4421,12 +4490,21 @@ public class FormEditorHook implements IStartup
          * в его {@code extInfo} (так у полей и декораций — {@code LabelFieldExtInfo},
          * {@code InputFieldExtInfo} и прочие, см. {@code Form.xcore}). Одного класса-владельца у
          * этих свойств нет, поэтому обобщённый поиск, а не приведение к типу.
+         *
+         * <p>У корневой строки «Форма» доменный объект — не {@code FormItem}, а сама {@code Form};
+         * её «Ширина» / «Высота» ({@code Form.xcore}: {@code int width}, {@code int height}) берутся
+         * тем же {@link #featureInt} по имени признака.
          */
         private static int sizeValue(Object element, String featureName)
         {
             FormItem item = domainItem(element);
+            if (item == null)
+            {
+                Object domain = element != null ? Global.invoke(element, "getDomain") : null; //$NON-NLS-1$
+                return domain instanceof Form form ? featureInt(form, featureName) : 0;
+            }
             int own = featureInt(item, featureName);
-            if (own != 0 || item == null)
+            if (own != 0)
                 return own;
             Object extInfo = Global.invoke(item, "getExtInfo"); //$NON-NLS-1$
             return extInfo instanceof EObject info ? featureInt(info, featureName) : 0;
@@ -4525,8 +4603,10 @@ public class FormEditorHook implements IStartup
                 return;
             FormItem item = domainItem(row.getData());
             int column = FormTreeInteraction.columnAtX(tree, event.x);
+            boolean formRoot = isFormRoot(row.getData());
             if (item == null && column != COLUMN_APPEARANCE && column != COLUMN_HANDLERS
-                && column != COLUMN_NAME)
+                && column != COLUMN_NAME
+                && !(formRoot && (column == COLUMN_HEIGHT || column == COLUMN_WIDTH)))
                 return;
             switch (column)
             {

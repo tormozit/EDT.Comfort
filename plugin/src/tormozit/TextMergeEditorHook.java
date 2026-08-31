@@ -340,6 +340,8 @@ public final class TextMergeEditorHook
             log("attach: не удалось извлечь один из StyledText (left=" + (leftText != null) //$NON-NLS-1$
                 + " right=" + (rightText != null) + " result=" + (resultText != null) + ")"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
 
+        registerModuleLineRefSides(provider, viewer, leftText, rightText, resultText);
+
         ActivePair activePair = new ActivePair();
         panel.setCompareInIrSupplier(() -> supplyFullTextsForIr(panel, activePair));
         /*
@@ -734,6 +736,25 @@ public final class TextMergeEditorHook
      * чей конкретный класс (внутренний {@code BslModuleTypedElement}) хранит приватные
      * {@code path}/{@code dataSource} без геттеров — только через рефлексию.
      */
+    /**
+     * Регистрирует панели объединения в {@link CompareModuleLineRef} — чтобы глобальная
+     * команда «Копировать ссылку» из панели давала ссылку на строку модуля, а не на модуль
+     * целиком. Левая → MAIN, правая → OTHER, итоговая → модуль стороны MAIN (у неё своего
+     * файла нет — тот же выбор, что у кнопки «Показать в модуле»).
+     */
+    private static void registerModuleLineRefSides(IThreeSideTextMergeViewerProvider provider,
+        ThreeSideTextMergeViewer viewer, StyledText leftText, StyledText rightText, StyledText resultText)
+    {
+        IFile mainFile = resolveModuleFile(provider, viewer, ComparisonSide.MAIN);
+        IFile otherFile = resolveModuleFile(provider, viewer, ComparisonSide.OTHER);
+        IFile anyFile = mainFile != null ? mainFile : otherFile;
+        if (anyFile == null)
+            return;
+        CompareModuleLineRef.registerSide(leftText, mainFile != null ? mainFile : anyFile);
+        CompareModuleLineRef.registerSide(rightText, otherFile != null ? otherFile : anyFile);
+        CompareModuleLineRef.registerSide(resultText, mainFile != null ? mainFile : anyFile);
+    }
+
     private static IFile resolveModuleFile(IThreeSideTextMergeViewerProvider provider,
         ThreeSideTextMergeViewer viewer, ComparisonSide side)
     {

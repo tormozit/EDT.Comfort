@@ -20,6 +20,7 @@ import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.resource.Resource;
 import org.eclipse.jface.text.BadLocationException;
+import org.eclipse.jface.text.Document;
 import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.IRegion;
 import org.eclipse.jface.text.ITextSelection;
@@ -96,10 +97,12 @@ public class GetRef extends AbstractHandler implements IElementUpdater
         IWorkbenchPart part = HandlerUtil.getActivePart(event);
         Shell          shell = HandlerUtil.getActiveShell(event);
         BslXtextEditor bslEditor = getActiveBslEditor(part);
-        if (bslEditor != null) { 
+        if (bslEditor != null) {
             showModuleLineRefs(bslEditor, shell);
-            return null; 
+            return null;
         }
+        if (CompareModuleLineRef.tryCopyLineRefForFocusedSide(shell))
+            return null;
         if (shell != null)
         {
             String dialogRef = OpenMdObjectHook.getRefFromDialog(shell);
@@ -198,6 +201,66 @@ public class GetRef extends AbstractHandler implements IElementUpdater
             final String docRefCopy = docRef;
             ToastNotification.show("Имя метода", docRef, 4_000,
                 () -> copyToClipboard(docRefCopy), "Копировать"); //$NON-NLS-1$
+        }
+    }
+
+    /**
+     * Режим 1 для панелей текста в окнах сравнения/объединения модулей (панель — не
+     * BSL-редактор): ссылка на строку модуля под кареткой панели, а не на модуль целиком.
+     * Файл — сторона сравнения, текст и позиция каретки — из виджета панели.
+     * Вызывается из {@link CompareModuleLineRef}.
+     *
+     * @return {@code true}, если ссылка построена и скопирована
+     */
+    public static boolean copyModuleLineRefFromCompare(IFile file, String moduleText, int caretLine0,
+        int caretColumn, Shell shell)
+    {
+        ModuleLineContext ctx = computeModuleLineContext(file, moduleText, caretLine0, caretColumn);
+        if (ctx == null)
+            return false;
+
+        String ref1 = ctx.buildRef1(true);
+        String docRef = ctx.getModuleDocRef();
+
+        Global.log("GetRef (compare line ref): " + ref1); //$NON-NLS-1$
+        setClipboardText(ref1, shell);
+        ToastNotification.show("Скопировано", ref1);
+
+        if (docRef != null)
+        {
+            final String docRefCopy = docRef;
+            ToastNotification.show("Имя метода", docRef, 4_000,
+                () -> copyToClipboard(docRefCopy), "Копировать"); //$NON-NLS-1$
+        }
+        return true;
+    }
+
+    private static ModuleLineContext computeModuleLineContext(IFile file, String moduleText,
+        int caretLine0, int caretColumn)
+    {
+        if (file == null || moduleText == null || caretLine0 < 0)
+            return null;
+
+        ModuleRef moduleRef = pathToModuleRef(file.getProjectRelativePath().toString());
+        if (moduleRef == null)
+            return null;
+
+        IDocument doc = new Document(moduleText);
+        try
+        {
+            if (caretLine0 >= doc.getNumberOfLines())
+                return null;
+            int lineNumber = caretLine0 + 1;
+            IRegion li = doc.getLineInformation(caretLine0);
+            String markedLine = doc.get(li.getOffset(), li.getLength()).stripTrailing();
+            markedLine = markedLine.substring(0, Math.min(100, markedLine.length()));
+            MethodInfo method = findEnclosingMethod(doc, caretLine0);
+            return new ModuleLineContext(moduleRef, lineNumber, Math.max(0, caretColumn), markedLine, method);
+        }
+        catch (BadLocationException e)
+        {
+            Global.log("GetRef.computeModuleLineContext(compare): " + e); //$NON-NLS-1$
+            return null;
         }
     }
 

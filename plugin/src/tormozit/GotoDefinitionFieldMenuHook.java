@@ -290,7 +290,11 @@ public final class GotoDefinitionFieldMenuHook implements IStartup
             ToastNotification.show("Перейти к определению", "Отсутствует активный проект"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
-        if (!GoToDefinition.jump(fullText, shell, page, project) && !GoToDefinition.consumeJumpCancelled())
+        // allowIrAutoConnect=false: пункт контекстного меню поля ввода не должен запускать
+        // подключение ИР. Уже подключённая сессия при этом по-прежнему используется для
+        // нормализации ссылок форм/макетов.
+        if (!GoToDefinition.jump(fullText, shell, page, project, false)
+            && !GoToDefinition.consumeJumpCancelled())
         {
             ToastNotification.show("Перейти к определению", //$NON-NLS-1$
                     "В проекте " + project.getName() + " не найдена ссылка:\n" + fullText, 5000); //$NON-NLS-1$ //$NON-NLS-2$

@@ -246,28 +246,9 @@ public final class PasteWithCompareActions
         {
             applyPreferredBslViewerDescriptor(oldViewer, input);
             Viewer viewer = super.findContentViewer(oldViewer, input, parent);
-            localizeBslViewerTitle(viewer);
+            CompareViewerTitle.localizeViewerData(viewer);
             hookCurrentLineTracking(viewer);
             return viewer;
-        }
-
-        /**
-         * Xtext-просмотрщик BSL кладёт в {@code CompareUI.COMPARE_VIEWER_TITLE} своего control'а
-         * нелокализованный заголовок «Bsl Compare» (имя грамматики + «Compare»), и
-         * {@code CompareViewerSwitchingPane} показывает его в шапке режима сравнения, хотя пункт
-         * того же режима в выпадающем списке — уже русский. Подменяем на русскую подпись
-         * (та же, что у descriptor'а в {@code plugin_ru.properties} бандла {@code com._1c.g5.v8.dt.bsl.ui}).
-         */
-        private static void localizeBslViewerTitle(Viewer viewer)
-        {
-            if (viewer == null)
-                return;
-            Control control = viewer.getControl();
-            if (control == null || control.isDisposed())
-                return;
-            Object title = control.getData(CompareUI.COMPARE_VIEWER_TITLE);
-            if (title instanceof String s && (s.equals("Bsl Compare") || s.equals("Xtext Compare"))) //$NON-NLS-1$ //$NON-NLS-2$
-                control.setData(CompareUI.COMPARE_VIEWER_TITLE, "Сравнение встроенного языка"); //$NON-NLS-1$
         }
 
         /**
