@@ -4,6 +4,9 @@ import java.util.ArrayList;
 import java.util.List;
 
 public class SmartMatcher {
+    /** Союзы, пропуск которых между совпавшими словами не штрафуется премией фильтра (#429). */
+    static final java.util.Set<String> UNPENALIZED_GAP_WORDS = java.util.Set.of("и", "или");
+
     private final String[] fragments;
     private final List<List<String>> sections;
     public final String fullPattern;
@@ -351,7 +354,7 @@ public class SmartMatcher {
         List<Integer> wordBoundaries = new ArrayList<>();
         wordBoundaries.add(0);
         for (int i = 1; i < partText.length(); i++) {
-            if (isWordBoundary(partText, i)) {
+            if (isWordBoundary(partText, i) || isConjunctionITail(partText, i)) {
                 wordBoundaries.add(i);
             }
         }
@@ -386,9 +389,19 @@ public class SmartMatcher {
                 if (idx > maxWordIdx) maxWordIdx = idx;
             }
 
-            // БазоваяПремия: определяем по минимальному индексу совпавшего слова
-            int wordsDiff = maxWordIdx - minWordIdx + 1;
-            boolean noGaps = (wordsDiff == fragments.length);
+            // БазоваяПремия: определяем по минимальному индексу совпавшего слова.
+            // Промежуточные несовпавшие слова — «пропуск» (штраф), кроме союзов «и»/«или» (#429).
+            java.util.Set<Integer> matchedSet = new java.util.HashSet<>();
+            for (int idx : matchedWordIdxs) matchedSet.add(idx);
+            boolean noGaps = true;
+            for (int w = minWordIdx + 1; w < maxWordIdx; w++) {
+                if (matchedSet.contains(w))
+                    continue;
+                if (!UNPENALIZED_GAP_WORDS.contains(wordAt(partText, wordBoundaries, w))) {
+                    noGaps = false;
+                    break;
+                }
+            }
             int basePremium;
             if (minWordIdx == 0) {
                 basePremium = noGaps ? 3 : 2;
@@ -514,6 +527,32 @@ public class SmartMatcher {
                 idx = lowerSegment.indexOf(frag, idx + frag.length());
             }
         }
+    }
+
+    /** Текст слова (буквы/цифры, в нижнем регистре) по индексу его границы в {@code wordBoundaries}. */
+    private static String wordAt(String text, List<Integer> boundaries, int wordIdx) {
+        int start = boundaries.get(wordIdx);
+        int end = wordIdx + 1 < boundaries.size() ? boundaries.get(wordIdx + 1) : text.length();
+        StringBuilder sb = new StringBuilder();
+        for (int i = start; i < end; i++) {
+            char c = text.charAt(i);
+            if (Character.isLetterOrDigit(c))
+                sb.append(Character.toLowerCase(c));
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Позиция сразу за одиночным союзом «И», склеенным с началом следующего слова
+     * ({@code ...дИР...} в {@code ПриходИРасход}) — естественной границы слова тут нет
+     * (заглавная за заглавной), но «И» нужно считать отдельным словом (#429).
+     */
+    static boolean isConjunctionITail(String text, int index) {
+        if (index < 2 || index >= text.length())
+            return false;
+        return text.charAt(index - 1) == 'И'
+            && Character.isUpperCase(text.charAt(index))
+            && Character.isLowerCase(text.charAt(index - 2));
     }
 
     public boolean isWordBoundary(String originalText, int index) {

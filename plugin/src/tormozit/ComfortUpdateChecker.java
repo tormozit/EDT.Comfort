@@ -13,6 +13,10 @@ import java.util.zip.ZipInputStream;
 
 import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.swt.widgets.Display;
+import org.eclipse.swt.widgets.Shell;
+import org.eclipse.ui.IWorkbench;
+import org.eclipse.ui.IWorkbenchWindow;
+import org.eclipse.ui.PlatformUI;
 
 /**
  * Проверка наличия новой версии плагина на p2-сайте
@@ -217,16 +221,71 @@ public final class ComfortUpdateChecker
         if (latestKey.equals(notified))
             return;
 
-        store.setValue(ComfortSettings.PREF_LAST_NOTIFIED_VERSION, latestKey);
-        savePreferenceStore(store);
-
         String message = "Обнаружена новая версия " + latestKey; //$NON-NLS-1$
-        runOnDisplayThread(() -> ToastNotification.show(
-            "EDT Comfort", //$NON-NLS-1$
-            message,
-            8_000,
-            ComfortPreferences::openComfortPreferencePage,
-            "Открыть")); //$NON-NLS-1$
+        // Показ откладывается до появления окна workbench: планировщик стартует из
+        // Activator.start() задолго до готовности UI, и ранний тост просто теряется
+        // (Display ещё не готов или идёт splash). Флаг PREF_LAST_NOTIFIED_VERSION
+        // пишется только после фактического показа — иначе сорванный показ навсегда
+        // «отравляет» флаг и уведомление по этой версии больше не появится.
+        runWhenWorkbenchWindowReady(() ->
+        {
+            Shell shell = ToastNotification.showStickyUntilToastHover(
+                "EDT Comfort", //$NON-NLS-1$
+                message,
+                ComfortPreferences::openComfortPreferencePage,
+                "Открыть"); //$NON-NLS-1$
+            if (shell == null)
+                return;
+            store.setValue(ComfortSettings.PREF_LAST_NOTIFIED_VERSION, latestKey);
+            savePreferenceStore(store);
+        });
+    }
+
+    /**
+     * Выполняет {@code action} в UI-потоке, когда открыто и видимо окно workbench.
+     * Пока окна нет — переопрашивает раз в 500 мс, максимум ~5 минут, затем сдаётся
+     * (без бесконечного самопланирования asyncExec).
+     */
+    private static void runWhenWorkbenchWindowReady(Runnable action)
+    {
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        display.asyncExec(new Runnable()
+        {
+            private int attempts;
+
+            @Override
+            public void run()
+            {
+                if (display.isDisposed())
+                    return;
+                if (isWorkbenchWindowReady())
+                {
+                    action.run();
+                    return;
+                }
+                if (++attempts > 600)
+                    return;
+                display.timerExec(500, this);
+            }
+        });
+    }
+
+    private static boolean isWorkbenchWindowReady()
+    {
+        if (!PlatformUI.isWorkbenchRunning())
+            return false;
+        IWorkbench workbench = PlatformUI.getWorkbench();
+        IWorkbenchWindow window = workbench.getActiveWorkbenchWindow();
+        if (window == null)
+        {
+            IWorkbenchWindow[] windows = workbench.getWorkbenchWindows();
+            if (windows.length > 0)
+                window = windows[0];
+        }
+        return window != null && window.getShell() != null
+            && !window.getShell().isDisposed() && window.getShell().isVisible();
     }
 
     private static boolean isUpdateAvailableFor(ComfortVersionInfo latest)

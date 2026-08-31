@@ -35,6 +35,7 @@
     <startup class="tormozit.TextEditorMenuHook"/>
     <startup class="tormozit.XmlEditorShowInNavigatorHook"/>
     <startup class="tormozit.QueryTextEditDialogHook"/>
+    <startup class="tormozit.DynamicListSettingsDialogHook"/>
     <startup class="tormozit.QueryConstructorFilterHook"/>
     <startup class="tormozit.FormEditorHook"/>
     <startup class="tormozit.TreeExpander"/>

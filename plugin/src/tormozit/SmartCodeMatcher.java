@@ -87,7 +87,7 @@ public class SmartCodeMatcher extends SmartMatcher {
         int idx = lower.indexOf(fullPattern);
         if (idx >= 0) {
             if (idx == 0) return 40;
-            if (isWordBoundary(partText, idx)) return 30;
+            if (isWordBoundary(partText, idx) || isConjunctionITail(partText, idx)) return 30;
             boolean crosses = false;
             for (int i = idx + 1; i < idx + fullPattern.length(); i++) {
                 if (isWordBoundary(partText, i)) { crosses = true; break; }
@@ -101,12 +101,26 @@ public class SmartCodeMatcher extends SmartMatcher {
     }
 
     private static int scoreAdaptiveMatch(AdaptiveWordMatch match) {
-        int gap = match.lastWord - match.firstWord + 1;
-        boolean consecutive = (gap == match.matchedWords);
         if (match.firstWord == 0) {
-            return consecutive ? 35 : 20;
+            return match.consecutive ? 35 : 20;
         }
-        return consecutive ? 18 : 8;
+        return match.consecutive ? 18 : 8;
+    }
+
+    /**
+     * Слова между первым и последним совпавшим идут подряд, если пропущены только
+     * союзы «и»/«или» — их пропуск не штрафуется премией (#429).
+     */
+    private static boolean isConsecutiveIgnoringConjunctions(AdaptiveWordMatch match, List<String> words) {
+        if (match.firstWord < 0)
+            return false;
+        int span = match.lastWord - match.firstWord + 1;
+        int conj = 0;
+        for (int i = match.firstWord; i <= match.lastWord && i < words.size(); i++) {
+            if (UNPENALIZED_GAP_WORDS.contains(words.get(i).toLowerCase()))
+                conj++;
+        }
+        return span - conj == match.matchedWords;
     }
 
     /** Результат посимвольного сопоставления фильтра по словам CamelCase. */
@@ -115,6 +129,7 @@ public class SmartCodeMatcher extends SmartMatcher {
         int firstWord = -1;
         int lastWord = -1;
         int matchedWords;
+        boolean consecutive;
         final List<HighlightRange> ranges = new ArrayList<>();
     }
 
@@ -180,6 +195,7 @@ public class SmartCodeMatcher extends SmartMatcher {
         int bestScore = -1;
         for (MatchState state : active) {
             AdaptiveWordMatch candidate = state.toResult();
+            candidate.consecutive = isConsecutiveIgnoringConjunctions(candidate, words);
             int score = scoreAdaptiveMatch(candidate);
             if (score > bestScore) {
                 bestScore = score;
@@ -274,7 +290,8 @@ public class SmartCodeMatcher extends SmartMatcher {
         if (text == null || text.isEmpty()) return words;
         int start = 0;
         for (int i = 1; i <= text.length(); i++) {
-            if (i == text.length() || isDelimiter(text.charAt(i)) || isWordBoundary(text, i)) {
+            if (i == text.length() || isDelimiter(text.charAt(i)) || isWordBoundary(text, i)
+                || isConjunctionITail(text, i)) {
                 if (i > start) words.add(text.substring(start, i));
                 start = i + (i < text.length() && isDelimiter(text.charAt(i)) ? 1 : 0);
             }
