@@ -43,11 +43,29 @@ import com._1c.g5.v8.dt.bsl.model.Module;
  * <p>Признаки обрыва (любого достаточно):
  * <ul>
  * <li>AST нет вовсе;</li>
- * <li>объявлений методов в тексте больше, чем методов в AST, — часть модуля не разобрана;</li>
- * <li>объявление метода попало внутрь узла синтаксической ошибки — этот метод потерян.</li>
+ * <li>лексем {@code Процедура}/{@code Функция} в потоке разбора больше, чем методов в AST
+ * ({@link #countMethodKeywordLeaves}) — часть методов при восстановлении не создана;</li>
+ * <li>объявление метода целиком внутри узла синтаксической ошибки;</li>
+ * <li>узел синтаксической ошибки занимает больше одной строки — {@code recover()} свалил в
+ * него целую область.</li>
  * </ul>
- * Оба счётных признака считаются по тексту узловой модели того же разбора, без обращения к
- * исходному файлу: решение принимается внутри подмены ресурса, где файла уже не видно.
+ *
+ * <p>Счёт лексем — по <b>листьям узловой модели</b> и их грамматическому элементу
+ * ({@link #countMethodKeywordLeaves}), не посимвольным сканом текста. Скан всего текста
+ * расходился с {@code module.allMethods()} из-за слова «Функция» в комментарии/строке или
+ * из-за {@code Обработчик.Процедура} — имя свойства теми же ключевыми словами. По листу это
+ * отличимо: объявление — {@code Keyword} правила {@code Procedure}/{@code Function}, имя
+ * свойства — правила {@code ExtName}, потерянный при обрыве метод — лист с {@code null}.
+ *
+ * <p>Почему одного признака «многострочный узел ошибки» мало: при {@code #Если} на месте
+ * выражения ANTLR ставит несколько <b>однострочных</b> узлов ошибок в точках синхронизации,
+ * а методы между ними и за ними в AST просто не появляются — большого узла, поглотившего
+ * хвост, может и не быть. Ловит только сверка числа лексем с числом методов.
+ *
+ * <p>Восстановление ANTLR двух видов. <b>Вставка одной лексемы:</b> EDT требует {@code ;}
+ * перед {@code КонецФункции} (1С — нет), синтезирует недостающую и продолжает — дерево целое,
+ * лексем ровно столько же, сколько методов. <b>Выход из правил:</b> методы теряются — лексем
+ * больше.
  */
 public final class BslAstCompleteness
 {
@@ -74,23 +92,20 @@ public final class BslAstCompleteness
                 return true;
             /*
              * Дешёвая отсечка обычного случая: без синтаксических ошибок обрыва не бывает.
-             * Ниже идёт разбор текста узловой модели (на модуле в 30 000 строк это около
-             * мегабайта на строку и её посимвольный обход), и делать это на каждый пересчёт
-             * в модуле без ошибок незачем.
+             * Ниже идёт обход узлов синтаксических ошибок (их единицы) с разбором их текста —
+             * незачем делать это на каждый пересчёт в модуле без ошибок.
              */
             if (!parseResult.hasSyntaxErrors())
                 return false;
             EObject root = parseResult.getRootASTElement();
-            if (!(root instanceof Module module))
+            if (!(root instanceof Module))
                 return true;
 
-            ICompositeNode rootNode = parseResult.getRootNode();
-            String text = rootNode != null ? rootNode.getText() : null;
-            int declarations = countDeclarations(text);
-            int methods = module.allMethods().size();
-            boolean lostInError = declarationInsideErrorNode(parseResult);
-
-            return declarations > methods || lostInError;
+            int keywordLeaves = countMethodKeywordLeaves(parseResult.getRootNode());
+            int methods = ((Module)root).allMethods().size();
+            return keywordLeaves > methods
+                || multiLineErrorNode(parseResult) != null
+                || errorNodeSwallowingDeclaration(parseResult) != null;
         }
         catch (Exception | LinkageError e)
         {
@@ -98,10 +113,91 @@ public final class BslAstCompleteness
         }
     }
 
-    /** Хотя бы одно объявление метода целиком внутри узла синтаксической ошибки. */
-    private static boolean declarationInsideErrorNode(IParseResult parseResult)
+    /**
+     * Сколько объявлений метода в потоке разбора: листья {@code Процедура}/{@code Функция}
+     * (и англ. синонимы) по <b>грамматическому элементу</b>, а не по тексту.
+     *
+     * <p>Лексер даёт лист с текстом «Функция» и там, где это имя свойства
+     * ({@code Обработчик.Процедура = …}) — {@code Функция}/{@code Процедура} в BSL не полностью
+     * зарезервированы. Грамматический элемент такого листа — тоже {@link org.eclipse.xtext.Keyword}
+     * (правило {@code ExtName} перечисляет ключевые слова как допустимые имена свойств), поэтому
+     * различаем по <b>объемлющему правилу</b>: {@code Procedure}/{@code Function} — объявление,
+     * {@code ExtName} и прочее — нет.
+     *
+     * <p>В зоне обрыва, где метод не разобрался, парсер грамматический элемент листу не
+     * проставляет — {@code getGrammarElement() == null}. Такой лист тоже считаем объявлением
+     * (текст ровно «Функция»/«Процедура», не имя свойства): именно эти листья и дают
+     * {@code count > module.allMethods()}.
+     */
+    private static int countMethodKeywordLeaves(ICompositeNode rootNode)
     {
-        return errorNodeSwallowingDeclaration(parseResult) != null;
+        if (rootNode == null)
+            return 0;
+        int count = 0;
+        for (org.eclipse.xtext.nodemodel.ILeafNode leaf : rootNode.getLeafNodes())
+            if (isMethodDeclarationLeaf(leaf))
+                count++;
+        return count;
+    }
+
+    /**
+     * Лист узловой модели — начало объявления метода: текст ровно {@code Процедура}/
+     * {@code Функция} (регистр не важен) и грамматический элемент — {@code Keyword} правила
+     * {@code Procedure}/{@code Function}, либо {@code null} (зона обрыва). Доступ к свойству
+     * {@code Обработчик.Процедура} сюда не попадает: там {@code Keyword} правила {@code ExtName}.
+     */
+    private static boolean isMethodDeclarationLeaf(org.eclipse.xtext.nodemodel.ILeafNode leaf)
+    {
+        if (leaf == null || leaf.isHidden())
+            return false;
+
+        EObject ge = leaf.getGrammarElement();
+        if (ge instanceof org.eclipse.xtext.Keyword keyword)
+        {
+            /*
+             * Быстрый путь без getText(): значение лексемы берём прямо из грамматики. «Процедура»/
+             * «Функция» — это Keyword и в объявлении метода (правила Procedure/Function), и в имени
+             * свойства (Обработчик.Процедура — правило ExtName перечисляет ключевые слова как имена).
+             * Отличаем по объемлющему правилу.
+             */
+            if (!isMethodKeyword(keyword.getValue()))
+                return false;
+            org.eclipse.xtext.AbstractRule rule = org.eclipse.xtext.GrammarUtil.containingRule(keyword);
+            String ruleName = rule != null ? rule.getName() : null;
+            return "Procedure".equals(ruleName) || "Function".equals(ruleName); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        if (ge != null)
+            return false;
+        /*
+         * Грамматический элемент не проставлен — зона обрыва, где метод не разобрался. Здесь
+         * getText() неизбежен, но такие листья единичны (только внутри оборванного участка).
+         */
+        String text = leaf.getText();
+        return text != null && isMethodKeyword(text.trim());
+    }
+
+    private static boolean isMethodKeyword(String value)
+    {
+        for (String keyword : METHOD_KEYWORDS)
+            if (keyword.equalsIgnoreCase(value))
+                return true;
+        return false;
+    }
+
+    /**
+     * Узел синтаксической ошибки, занимающий больше одной строки: парсер вышел из вложенных
+     * правил через {@code recover()}, свалив в узел целую область. {@code null}, если все
+     * ошибки локальные (вставка одной лексемы).
+     */
+    private static INode multiLineErrorNode(IParseResult parseResult)
+    {
+        Iterable<INode> errors = parseResult != null ? parseResult.getSyntaxErrors() : null;
+        if (errors == null)
+            return null;
+        for (INode error : errors)
+            if (error != null && error.getEndLine() > error.getStartLine())
+                return error;
+        return null;
     }
 
     private static INode errorNodeSwallowingDeclaration(IParseResult parseResult)
@@ -183,6 +279,10 @@ public final class BslAstCompleteness
      * синонимы) в начале слова, вне строк и однострочных комментариев. Внутри
      * {@code КонецПроцедуры}/{@code КонецФункции} не считается — перед словом обязателен
      * не-буквенный символ.
+     *
+     * <p>Применяется только к тексту узла синтаксической ошибки (см.
+     * {@link #errorNodeSwallowingDeclaration}), а не ко всему модулю: там объём мал и цена
+     * ложного совпадения — не «весь модуль как текст», а всего лишь непоказанная пометка.
      */
     private static int countDeclarations(String text)
     {

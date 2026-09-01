@@ -8,8 +8,11 @@ import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
+import java.util.WeakHashMap;
 
 import org.eclipse.core.resources.IProject;
+import org.eclipse.core.runtime.ICoreRunnable;
+import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.e4.ui.model.application.ui.basic.MPart;
 import org.eclipse.jface.preference.IPreferencePage;
@@ -43,7 +46,13 @@ import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.dialogs.PreferencesUtil;
 
+import com._1c.g5.v8.dt.validation.marker.IMarkerInfo;
+import com._1c.g5.v8.dt.validation.marker.IMarkerUpdateListener;
 import com._1c.g5.v8.dt.validation.marker.Marker;
+import com._1c.g5.v8.dt.validation.marker.MarkerFilter;
+import com._1c.g5.v8.dt.validation.marker.MarkersChangedEvent;
+import com._1c.g5.v8.dt.validation.marker.v2.IMarkerManagerV2;
+import com._1c.g5.v8.dt.validation.marker.v2.IMarkerReader;
 import com.e1c.g5.v8.dt.check.settings.CheckUid;
 import com.e1c.g5.v8.dt.check.settings.ICheckRepository;
 
@@ -83,6 +92,9 @@ public final class ProblemViewHook implements IStartup
     /** Отделяет дописанный отбор от штатных итогов — он же признак «уже дописано». */
     private static final String SCOPE_SEPARATOR = "   │   "; //$NON-NLS-1$
     private static final int SCOPE_REFRESH_MS = 300;
+
+    /** Заслонки обновления по панелям — см. {@link #installResultChangeGate(IViewPart)}. */
+    private static final Map<IViewPart, ResultChangeGate> gates = new WeakHashMap<>();
     private static final String MESSAGES_CLASS = "com._1c.g5.v8.dt.internal.ui.validation.Messages"; //$NON-NLS-1$
     private static final String PLUGIN_CLASS =
         "com._1c.g5.v8.dt.internal.ui.validation.V8UiValidationPlugin"; //$NON-NLS-1$
@@ -192,8 +204,171 @@ public final class ProblemViewHook implements IStartup
             model.setLabel(VIEW_TITLE);
             Debug.log("applyTitle: renamed"); //$NON-NLS-1$
         }
+        installResultChangeGate(view);
         installScopeLabel(view);
         installOpenOverride(view);
+    }
+
+    /**
+     * Панель обновляется, только когда изменился её собственный результат.
+     *
+     * <p>Штатно панель слушает изменения маркеров <b>всего проекта</b>
+     * ({@code LazyProblemView.updateListener} у {@code IMarkerManagerV2}) и на каждое такое
+     * событие перестраивает дерево и переписывает надпись с итогами. Пока по конфигурации идёт
+     * проверка, коммиттер маркеров рассылает событие примерно раз в полторы секунды, и панель
+     * моргает целиком, даже если под текущим отбором ничего не поменялось: дерево перерисовывается,
+     * а надпись на миг теряет дописанное «Область: …».
+     *
+     * <p>Штатный слушатель подменяется обёрткой: на каждое событие считается отпечаток результата
+     * под текущим отбором панели (количество и сумма хэшей маркеров) и событие пропускается дальше,
+     * только если отпечаток изменился. Отбор берётся из {@code getMarkerFilter()} — публичного
+     * метода панели, но требующего UI-потока, поэтому он снимается заранее и кэшируется.
+     * Сомнение всегда трактуется в пользу обновления: нет кэша отбора, слишком много маркеров,
+     * любая ошибка — событие проходит, то есть остаётся штатное поведение.
+     */
+    private static void installResultChangeGate(IViewPart view)
+    {
+        try
+        {
+            if (gates.containsKey(view))
+                return;
+            Object manager = Global.getField(view, "markerManager"); //$NON-NLS-1$
+            Object listener = Global.getField(view, "updateListener"); //$NON-NLS-1$
+            if (!(manager instanceof IMarkerManagerV2 markerManager)
+                || !(listener instanceof IMarkerUpdateListener stock))
+            {
+                Debug.log("installResultChangeGate: fields not found"); //$NON-NLS-1$
+                return;
+            }
+            ResultChangeGate gate = new ResultChangeGate(view, markerManager, stock);
+            gates.put(view, gate);
+            markerManager.removeListener(stock);
+            markerManager.addListener(gate);
+            gate.refreshFilterSnapshot();
+            Debug.log("installResultChangeGate: installed"); //$NON-NLS-1$
+        }
+        catch (RuntimeException e)
+        {
+            Debug.log("installResultChangeGate: " + e); //$NON-NLS-1$
+        }
+    }
+
+    /** См. {@link #installResultChangeGate(IViewPart)}. */
+    private static final class ResultChangeGate implements IMarkerUpdateListener
+    {
+        /** Столько маркеров под отбором ещё считаем: выше — обновляем панель без сверки. */
+        private static final int DIGEST_LIMIT = 5000;
+
+        /** Пауза перед сверкой: события коммиттера идут пачками, считать на каждое незачем. */
+        private static final int EVALUATE_DELAY_MS = 100;
+
+        private final IViewPart view;
+
+        private final IMarkerManagerV2 markerManager;
+
+        private final IMarkerUpdateListener stock;
+
+        /** Отбор панели, снятый в UI-потоке: в потоке события его строить нельзя. */
+        private volatile MarkerFilter filterSnapshot;
+
+        private volatile String lastDigest;
+
+        /** Последнее событие, ожидающее сверки. */
+        private volatile MarkersChangedEvent pending;
+
+        /** Сверка идёт в своей задаче: событие приходит в потоке коммиттера маркеров. */
+        private final Job evaluateJob;
+
+        ResultChangeGate(IViewPart view, IMarkerManagerV2 markerManager, IMarkerUpdateListener stock)
+        {
+            this.view = view;
+            this.markerManager = markerManager;
+            this.stock = stock;
+            // Приведение обязательно: Job.create перегружен под ICoreRunnable и IJobFunction,
+            // а лямбда без результата подходит обеим
+            this.evaluateJob = Job.create("Комфорт: сверка результата панели проблем", //$NON-NLS-1$
+                (ICoreRunnable)monitor -> evaluate());
+            this.evaluateJob.setSystem(true);
+        }
+
+        @Override
+        public void handleMarkersChanged(MarkersChangedEvent event)
+        {
+            // Считать отпечаток прямо здесь нельзя: это поток коммиттера маркеров, он в этот
+            // момент держит хранилище — читать его отсюда и задерживать коммит одинаково плохо
+            pending = event;
+            evaluateJob.cancel();
+            evaluateJob.schedule(EVALUATE_DELAY_MS);
+        }
+
+        private void evaluate()
+        {
+            MarkersChangedEvent event = pending;
+            if (event == null)
+                return;
+            String digest = digest(event);
+            if (digest != null && digest.equals(lastDigest))
+                return;
+            lastDigest = digest;
+            stock.handleMarkersChanged(event);
+            // Отбор мог измениться вместе с результатом (например, сменился текущий объект)
+            refreshFilterSnapshot();
+        }
+
+        /**
+         * Отпечаток результата под текущим отбором: количество маркеров и сумма их хэшей.
+         * Сумма не зависит от порядка выдачи, а {@code Marker} переопределяет {@code hashCode}.
+         *
+         * @return {@code null}, если отпечаток посчитать нельзя — тогда событие проходит дальше
+         */
+        private String digest(MarkersChangedEvent event)
+        {
+            MarkerFilter filter = filterSnapshot;
+            if (filter == null || event == null)
+                return null;
+            try
+            {
+                IMarkerReader reader = markerManager.createReader(projects(event));
+                IMarkerInfo info = reader.getMarkerInfo(filter);
+                int total = info == null ? -1 : info.getTotalCount();
+                if (total < 0 || total > DIGEST_LIMIT)
+                    return null;
+                long sum = reader.markers(filter).mapToLong(Marker::hashCode).sum();
+                return total + ":" + sum; //$NON-NLS-1$
+            }
+            catch (RuntimeException e)
+            {
+                Debug.log("resultChangeGate: отпечаток не посчитан: " + e); //$NON-NLS-1$
+                return null;
+            }
+        }
+
+        private Collection<IProject> projects(MarkersChangedEvent event)
+        {
+            Collection<IProject> changed = event.getChangedProjects();
+            return changed == null ? Set.of() : changed;
+        }
+
+        /** Снимает текущий отбор панели в UI-потоке — там его строить безопасно. */
+        void refreshFilterSnapshot()
+        {
+            Display.getDefault().asyncExec(() ->
+            {
+                try
+                {
+                    if (view.getSite() == null)
+                        return;
+                    Object filter = Global.invoke(view, "getMarkerFilter"); //$NON-NLS-1$
+                    if (filter instanceof MarkerFilter markerFilter)
+                        filterSnapshot = markerFilter;
+                }
+                catch (RuntimeException e)
+                {
+                    Debug.log("resultChangeGate: отбор не снят: " + e); //$NON-NLS-1$
+                    filterSnapshot = null;
+                }
+            });
+        }
     }
 
     /**
@@ -336,8 +511,14 @@ public final class ProblemViewHook implements IStartup
         String text = status.getText();
         int appended = text.indexOf(SCOPE_SEPARATOR);
         String wanted = (appended >= 0 ? text.substring(0, appended) : text) + suffix;
-        if (!wanted.equals(text))
-            status.setText(wanted);
+        if (wanted.equals(text))
+            return;
+        status.setText(wanted);
+        // Смена подписи означает и смену отбора (например, выбрали другой объект):
+        // отпечаток результата надо считать уже по новому отбору
+        ResultChangeGate gate = gates.get(view);
+        if (gate != null)
+            gate.refreshFilterSnapshot();
     }
 
     private static String scopeSuffix(IViewPart view, Object filters, ClassLoader loader)

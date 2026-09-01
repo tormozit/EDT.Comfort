@@ -54,6 +54,12 @@ public final class MdEditorMarkerMessageHook implements IStartup
     /** Поле {@code MessageManager} с признаком автообновления. */
     private static final String FIELD_AUTO_UPDATE = "autoUpdate"; //$NON-NLS-1$
 
+    /**
+     * Сколько раз EDT зовёт {@code setAutoUpdate} за один цикл перестроения сводки: выключение
+     * перед добавлением сообщений и восстановление в конце.
+     */
+    private static final int AUTO_UPDATE_CALLS_PER_CYCLE = 2;
+
     private final Set<DtGranularEditor<?>> hookedEditors =
         Collections.newSetFromMap(new WeakHashMap<>());
 
@@ -172,9 +178,12 @@ public final class MdEditorMarkerMessageHook implements IStartup
                 return;
             Global.setField(form, FIELD_MESSAGE_MANAGER, new IdleAwareMessageManager(form));
         }
-        catch (RuntimeException e)
+        catch (Throwable e)
         {
-            Global.logError(TAG, "install idle rebuild guard", e); //$NON-NLS-1$
+            // Throwable намеренно: подмена наследует внутренний класс Eclipse, отказ загрузки
+            // класса пришёл бы как Error и молча убил бы подключение хука целиком
+            Global.logError(TAG, "install idle rebuild guard", //$NON-NLS-1$
+                e instanceof Exception cause ? cause : new IllegalStateException(e));
         }
     }
 
@@ -186,8 +195,15 @@ public final class MdEditorMarkerMessageHook implements IStartup
         /** Идёт цикл перестроения: сообщения сняты, новые ещё добавляются. */
         private boolean rebuilding;
 
-        /** Автообновление выключено нами на время цикла. */
-        private boolean suppressed;
+        /** Каким автообновление было до цикла — его и вернём в конце. */
+        private boolean autoUpdateBeforeCycle;
+
+        /**
+         * Сколько раз за цикл вызвали {@code setAutoUpdate}. EDT делает это дважды: выключает перед
+         * добавлением сообщений и в конце возвращает запомненное значение. Второй вызов и есть конец
+         * цикла — на нём подводим итог, до того как EDT прочитает {@code getChildrenMessages()}.
+         */
+        private int autoUpdateCalls;
 
         /** Набор сообщений до начала цикла — с ним сравниваем результат. */
         private Set<String> before = Set.of();
@@ -205,64 +221,56 @@ public final class MdEditorMarkerMessageHook implements IStartup
             {
                 before = currentKeys();
                 rebuilding = true;
-                if (super.isAutoUpdate())
-                {
-                    super.setAutoUpdate(false);
-                    suppressed = true;
-                }
+                autoUpdateCalls = 0;
+                autoUpdateBeforeCycle = isAutoUpdate();
+                // Выключаем честно: штатный removeAllMessages ниже сам спрашивает isAutoUpdate()
+                // и при «включено» тут же обновит форму — то самое мигание
+                super.setAutoUpdate(false);
                 scheduleFinish();
             }
             super.removeAllMessages();
         }
 
         /**
-         * Для внешнего кода менеджер по-прежнему «с автообновлением»: EDT запоминает это значение
-         * до своего {@code setAutoUpdate(false)} и в конце восстанавливает запомненное. Соври мы
-         * здесь {@code false} — сводка перестала бы обновляться совсем.
+         * Никакого вранья: {@code isAutoUpdate()} читает не только вызывающий код, но и сам штатный
+         * {@code MessageManager} — {@code removeAllMessages}/{@code addMessage} решают по нему,
+         * обновлять ли форму немедленно. Значение, которое EDT запоминает перед своим
+         * {@code setAutoUpdate(false)}, нам не нужно: конец цикла мы ловим сами и возвращаем
+         * {@link #autoUpdateBeforeCycle}.
          */
-        @Override
-        public boolean isAutoUpdate()
-        {
-            return suppressed || super.isAutoUpdate();
-        }
-
         @Override
         public void setAutoUpdate(boolean value)
         {
-            if (!value)
-            {
-                super.setAutoUpdate(false);
-                return;
-            }
             if (!rebuilding)
             {
-                suppressed = false;
-                super.setAutoUpdate(true);
+                super.setAutoUpdate(value);
                 return;
             }
-            finishRebuild();
+            // Внутри цикла значение вызывающего игнорируем — оно уже искажено нашим выключением
+            if (++autoUpdateCalls >= AUTO_UPDATE_CALLS_PER_CYCLE)
+                finishRebuild();
         }
 
         /** Конец цикла: либо тихо возвращаем автообновление, либо отдаём штатное обновление. */
         private void finishRebuild()
         {
             rebuilding = false;
-            suppressed = false;
             if (currentKeys().equals(before) && enableAutoUpdateSilently())
                 return;
-            super.setAutoUpdate(true);
+            super.setAutoUpdate(autoUpdateBeforeCycle);
         }
 
         /**
-         * Включает автообновление, не вызывая {@code update()}: штатный {@code setAutoUpdate(true)}
-         * на переходе {@code false → true} всегда обновляет форму, а нам нужно именно её не трогать.
+         * Возвращает автообновление в состояние до цикла, не вызывая {@code update()}: штатный
+         * {@code setAutoUpdate(true)} на переходе {@code false → true} всегда обновляет форму,
+         * а нам нужно именно её не трогать.
          *
          * @return {@code false}, если записать поле не удалось — тогда вызывающий делает штатное
          *         обновление, то есть поведение остаётся прежним
          */
         private boolean enableAutoUpdateSilently()
         {
-            return Global.setFieldForce(this, FIELD_AUTO_UPDATE, Boolean.TRUE);
+            return Global.setFieldForce(this, FIELD_AUTO_UPDATE, Boolean.valueOf(autoUpdateBeforeCycle));
         }
 
         /** Сообщения, накопленные менеджером (в форму они попадают только при обновлении). */
