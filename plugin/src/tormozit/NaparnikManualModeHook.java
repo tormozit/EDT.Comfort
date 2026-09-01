@@ -20,6 +20,8 @@ import org.eclipse.core.commands.NotHandledException;
 import org.eclipse.core.runtime.ListenerList;
 import org.eclipse.core.runtime.Platform;
 import org.eclipse.core.runtime.jobs.Job;
+import org.eclipse.core.runtime.preferences.IEclipsePreferences;
+import org.eclipse.core.runtime.preferences.IEclipsePreferences.IPreferenceChangeListener;
 import org.eclipse.core.runtime.preferences.InstanceScope;
 import org.eclipse.jface.dialogs.IPageChangedListener;
 import org.eclipse.jface.dialogs.PageChangedEvent;
@@ -76,6 +78,16 @@ import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorXtextEditorPage;
  */
 public final class NaparnikManualModeHook implements IStartup
 {
+    /** Временная диагностика issue 378 — снять после подтверждения фикса. */
+    private static final String LOG = "naparnik-378"; //$NON-NLS-1$
+
+    /**
+     * Временный выключатель влияния на Напарника (issue 378). При {@code false} хук ничего не
+     * запрещает и ничего не откатывает — остаётся только логирование, в том числе строки о том,
+     * что патч сделал бы. Вернуть {@code true} после проверки поведения без патча.
+     */
+    private static final boolean PATCH_ENABLED = true;
+
     static final String PROP_REPLACE = "tormozit.naparnik.replace"; //$NON-NLS-1$
     static final String PROP_HINT = "tormozit.naparnik.hint"; //$NON-NLS-1$
 
@@ -101,9 +113,22 @@ public final class NaparnikManualModeHook implements IStartup
     private static final String CMD_ACCEPT_PART = "com.e1c.edt.ai.ui.commands.acceptpart.ai"; //$NON-NLS-1$
     private static final String CMD_ACCEPT_LINE = "com.e1c.edt.ai.ui.commands.acceptline.ai"; //$NON-NLS-1$
 
+    private static final String NAPARNIK_PACKAGE = "com.e1c.edt.ai"; //$NON-NLS-1$
+    private static final StackWalker STACK_WALKER = StackWalker.getInstance();
+
     private static final int MAX_ATTACH_ATTEMPTS = 100;
     private static final int[] SUPPRESS_DELAYS_MS = { 0, 50, 150, 400, 1000, 2500 };
     private static volatile boolean paintLogInstalled;
+
+    /** Узлы настроек, где может лежать политика; порядок — от самого вероятного. */
+    private static final String[] POLICY_NODES =
+        { PREF_NODE, "com.e1c.edt.ai", "com.e1c.edt.ai.ui.common" }; //$NON-NLS-1$ //$NON-NLS-2$
+
+    /** Момент последней вставки в редактор — чтобы отличить показ подсказки при вставке. */
+    private static volatile long lastPasteNanos;
+
+    private static volatile String cachedPolicy;
+    private static volatile boolean policyListenerInstalled;
 
     private static final AtomicBoolean booted = new AtomicBoolean();
     private static final AtomicInteger allowApply = new AtomicInteger();
@@ -368,12 +393,28 @@ public final class NaparnikManualModeHook implements IStartup
 
     static boolean allowReplace(Object text)
     {
-        return !isRestrictedPolicy() || allowApply.get() > 0;
+        boolean allow = !isRestrictedPolicy() || allowApply.get() > 0;
+        return !PATCH_ENABLED || allow;
     }
 
     static boolean allowHint(Object text)
     {
-        return !isRestrictedPolicy() || allowSuggest.get() > 0 || allowApply.get() > 0;
+        boolean allow = !isRestrictedPolicy() || allowSuggest.get() > 0 || allowApply.get() > 0;
+        boolean result = !PATCH_ENABLED || allow;
+        if (text instanceof String hintText && !hintText.isEmpty() && isRestrictedPolicy())
+            Global.tempLog(LOG, "ПОКАЗ ПОДСКАЗКИ: пропущен=" + result + " политика=" + readPolicy() //$NON-NLS-1$ //$NON-NLS-2$
+                + " послеВставки=" + sinceLastPaste() + " allowSuggest=" + allowSuggest.get() //$NON-NLS-1$ //$NON-NLS-2$
+                + " allowApply=" + allowApply.get() + " длина=" + hintText.length()); //$NON-NLS-1$ //$NON-NLS-2$
+        return result;
+    }
+
+    /** Сколько прошло с последней вставки, для строки о показе подсказки. */
+    private static String sinceLastPaste()
+    {
+        long paste = lastPasteNanos;
+        if (paste == 0)
+            return "вставок не было"; //$NON-NLS-1$
+        return (System.nanoTime() - paste) / 1_000_000L + "мс"; //$NON-NLS-1$
     }
 
     /**
@@ -383,16 +424,22 @@ public final class NaparnikManualModeHook implements IStartup
      */
     private static void onDisplayVerify(Event event)
     {
-        if (event == null || !isHookedEditorStyledText(event.widget))
+        if (event == null)
             return;
-        if (isAcceptHotkey(event))
+        boolean accept = isAcceptHotkey(event);
+        boolean suggest = isSuggestHotkey(event);
+        if (!accept && !suggest)
+            return;
+        if (!isHookedEditorStyledText(event.widget))
+            return;
+        if (accept)
         {
             allowApply.incrementAndGet();
             Display display = event.display != null ? event.display : Display.getCurrent();
             if (display != null)
                 display.timerExec(800, () -> allowApply.updateAndGet(v -> Math.max(0, v - 1)));
         }
-        if (isSuggestHotkey(event))
+        if (suggest)
             allowSuggest.incrementAndGet();
     }
 
@@ -407,7 +454,14 @@ public final class NaparnikManualModeHook implements IStartup
             {
                 Display display = Display.getCurrent();
                 Control focus = display != null ? display.getFocusControl() : null;
-                if (isHookedEditorStyledText(focus))
+                boolean ours = isHookedEditorStyledText(focus);
+                if (ours)
+                {
+                    lastPasteNanos = System.nanoTime();
+                    if (isRestrictedPolicy())
+                        Global.tempLog(LOG, "вставка из буфера"); //$NON-NLS-1$
+                }
+                if (ours)
                 {
                     pasteActive.incrementAndGet();
                     allowSuggest.set(0);
@@ -457,6 +511,8 @@ public final class NaparnikManualModeHook implements IStartup
 
     private static void scheduleSuppress(IDocument document)
     {
+        if (!isRestrictedPolicy())
+            return;
         Display display = Display.getDefault();
         if (display == null || display.isDisposed())
             return;
@@ -488,6 +544,8 @@ public final class NaparnikManualModeHook implements IStartup
 
     private static void suppressViewModel(IDocument document)
     {
+        if (!isRestrictedPolicy())
+            return;
         List<Object> found = new ArrayList<>();
         if (document != null)
             collectViewModels(listDocumentListeners(document), found);
@@ -509,10 +567,15 @@ public final class NaparnikManualModeHook implements IStartup
         }
         for (Object vm : found)
         {
+            if (!PATCH_ENABLED)
+                continue;
             Object balanced = Global.invoke(vm, "isBalanced"); //$NON-NLS-1$
-            cancelJob(vm, "lastJob"); //$NON-NLS-1$
-            cancelJob(vm, "commitJob"); //$NON-NLS-1$
+            String lastJob = cancelJob(vm, "lastJob"); //$NON-NLS-1$
+            String commitJob = cancelJob(vm, "commitJob"); //$NON-NLS-1$
             cancelJob(vm, "lastUpdateMethodJob"); //$NON-NLS-1$
+            if (!"нет".equals(lastJob) || !"нет".equals(commitJob)) //$NON-NLS-1$ //$NON-NLS-2$
+                Global.tempLog(LOG, "оборвано задание Напарника: lastJob=" + lastJob //$NON-NLS-1$
+                    + " commitJob=" + commitJob + " послеВставки=" + sinceLastPaste()); //$NON-NLS-1$ //$NON-NLS-2$
             if (Boolean.TRUE.equals(balanced))
                 continue;
             Global.invokeVoid(vm, "reset"); //$NON-NLS-1$
@@ -547,11 +610,28 @@ public final class NaparnikManualModeHook implements IStartup
             found.add(actual);
     }
 
-    private static void cancelJob(Object vm, String field)
+    /**
+     * Отменяет задание Напарника и возвращает описание того, что реально было отменено:
+     * без этого по логу не отличить «Напарник не собирался показывать подсказку» от «мы
+     * оборвали его раньше, чем он дошёл до setHintAt» (issue 378).
+     *
+     * @return состояние задания до отмены: {@code нет} — поля не было либо оно пустое,
+     *         {@code спит} / {@code ждёт} / {@code работает} — задание было живым
+     */
+    private static String cancelJob(Object vm, String field)
     {
         Object job = Global.getField(vm, field);
-        if (job instanceof Job j)
-            j.cancel();
+        if (!(job instanceof Job j))
+            return "нет"; //$NON-NLS-1$
+        String state = switch (j.getState())
+        {
+            case Job.SLEEPING -> "спит"; //$NON-NLS-1$
+            case Job.WAITING -> "ждёт"; //$NON-NLS-1$
+            case Job.RUNNING -> "работает"; //$NON-NLS-1$
+            default -> "простаивает"; //$NON-NLS-1$
+        };
+        j.cancel();
+        return state;
     }
 
     private static boolean isHookedEditorStyledText(Object widget)
@@ -671,7 +751,9 @@ public final class NaparnikManualModeHook implements IStartup
             boolean naparnik = stackHasNaparnik();
             if (pasteActive.get() > 0 || (naparnik && inserted.length() > 1))
                 scheduleSuppress(event.getDocument());
-            if (!isRestrictedPolicy() || !naparnik || allowApply.get() > 0 || pasteActive.get() > 0)
+            boolean revert = PATCH_ENABLED
+                && isRestrictedPolicy() && naparnik && allowApply.get() == 0 && pasteActive.get() == 0;
+            if (!revert)
                 return;
             IDocument document = event.getDocument();
             String oldText = pendingOld;
@@ -726,13 +808,63 @@ public final class NaparnikManualModeHook implements IStartup
         return "manual".equalsIgnoreCase(policy) || "off".equalsIgnoreCase(policy); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
+    /**
+     * Политика Напарника с кэшем: чтение стоит рефлексии ({@code BaseActivator.getDefault()} →
+     * {@code getPreferenceStore().getString(...)}), а спрашивают её на каждое решение хука.
+     *
+     * <p>Кэш заполняется только если удалось подписаться на изменение настройки: без подписки
+     * устаревшее значение пережило бы переключение режима, поэтому там читаем как раньше.
+     */
     private static String readPolicy()
+    {
+        String cached = cachedPolicy;
+        if (cached != null)
+            return cached;
+        String value = readPolicyUncached();
+        if (installPolicyListener())
+            cachedPolicy = value;
+        return value;
+    }
+
+    /**
+     * Подписка на изменение настройки политики — один раз за сеанс.
+     *
+     * @return {@code true}, если подписка стоит и кэшу можно доверять
+     */
+    private static synchronized boolean installPolicyListener()
+    {
+        if (policyListenerInstalled)
+            return true;
+        IPreferenceChangeListener listener = event ->
+        {
+            if (PREF_KEY.equals(event.getKey()))
+                cachedPolicy = null;
+        };
+        boolean any = false;
+        for (String node : POLICY_NODES)
+        {
+            try
+            {
+                IEclipsePreferences preferences = InstanceScope.INSTANCE.getNode(node);
+                if (preferences == null)
+                    continue;
+                preferences.addPreferenceChangeListener(listener);
+                any = true;
+            }
+            catch (Exception ignored)
+            {
+            }
+        }
+        policyListenerInstalled = any;
+        return any;
+    }
+
+    private static String readPolicyUncached()
     {
         String fromStore = readPolicyFromNaparnikStore();
         if (fromStore != null)
             return fromStore;
-        String[] nodes = { PREF_NODE, "com.e1c.edt.ai", "com.e1c.edt.ai.ui.common" }; //$NON-NLS-1$ //$NON-NLS-2$
-        for (String node : nodes)
+        for (String node : POLICY_NODES)
         {
             try
             {
@@ -776,11 +908,15 @@ public final class NaparnikManualModeHook implements IStartup
             Bundle bundle = FrameworkUtil.getBundle(NaparnikManualModeHook.class);
             BundleContext context = bundle != null ? bundle.getBundleContext() : null;
             if (context == null)
+            {
+                Global.tempLog(LOG, "[!] плетение: нет BundleContext"); //$NON-NLS-1$
                 return;
+            }
             context.registerService(WeavingHook.class, new ManualWeavingHook(), null);
         }
-        catch (Throwable ignored)
+        catch (Throwable t)
         {
+            Global.tempLogException(LOG, "[!] плетение: ошибка", t); //$NON-NLS-1$
         }
     }
 
@@ -822,13 +958,18 @@ public final class NaparnikManualModeHook implements IStartup
 
     static byte[] transformClass(String internal, byte[] classfileBuffer)
     {
+        byte[] result;
         if (VM_INTERNAL.equals(internal))
-            return transformViewModel(classfileBuffer);
-        if (CTX_INTERNAL.equals(internal))
-            return transformReplace(classfileBuffer);
-        if (PAINTER_INTERNAL.equals(internal))
-            return transformHint(classfileBuffer);
-        return null;
+            result = transformViewModel(classfileBuffer);
+        else if (CTX_INTERNAL.equals(internal))
+            result = transformReplace(classfileBuffer);
+        else if (PAINTER_INTERNAL.equals(internal))
+            result = transformHint(classfileBuffer);
+        else
+            return null;
+        if (result == null)
+            Global.tempLog(LOG, "[!] класс не пропатчен: " + internal); //$NON-NLS-1$
+        return result;
     }
 
     static byte[] transformViewModel(byte[] classfileBuffer)
@@ -1067,26 +1208,32 @@ public final class NaparnikManualModeHook implements IStartup
             if (!VM.equals(name) && !CTX.equals(name) && !PAINTER.equals(name))
                 return;
             if (wovenClass.getState() != WovenClass.TRANSFORMING)
+            {
                 return;
+            }
             try
             {
                 byte[] transformed = transformClass(name.replace('.', '/'), wovenClass.getBytes());
                 if (transformed != null)
                     wovenClass.setBytes(transformed);
             }
-            catch (Throwable ignored)
+            catch (Throwable t)
             {
+                Global.tempLogException(LOG, "[!] плетение: ошибка " + name, t); //$NON-NLS-1$
             }
         }
     }
 
+    /**
+     * Есть ли в текущем стеке кадр Напарника.
+     *
+     * <p>Вызывается на каждое изменение документа, поэтому {@code Thread.getStackTrace()} здесь
+     * не годится: он материализует весь стек целиком, а в Xtext-редакторе стеки глубокие.
+     * {@link StackWalker} обходит кадры лениво и останавливается на первом подходящем.
+     */
     private static boolean stackHasNaparnik()
     {
-        for (StackTraceElement frame : Thread.currentThread().getStackTrace())
-        {
-            if (frame.getClassName().startsWith("com.e1c.edt.ai")) //$NON-NLS-1$
-                return true;
-        }
-        return false;
+        return STACK_WALKER.walk(
+            frames -> frames.anyMatch(frame -> frame.getClassName().startsWith(NAPARNIK_PACKAGE)));
     }
 }

@@ -124,12 +124,6 @@ public final class QuickDiffHook implements IStartup
 {
     private static final String LINE_NUMBER_KEY = "tormozit.quickDiffWs.lineNumber"; //$NON-NLS-1$
 
-    /** Временная диагностика: пометка канвы номеров, счётчик перерисовок уже стоит. */
-    private static final String PAINT_COUNTER_KEY = "tormozit.quickDiffWs.paintCounter"; //$NON-NLS-1$
-
-    /** Временная диагностика: {@code .tmp/temp-logs/ruler-paint.log}. */
-    private static final String PAINT_LOG_TOPIC = "ruler-paint"; //$NON-NLS-1$
-
     private static final int MAX_ATTACH_ATTEMPTS = 100;
     private static final String QD_DELETION = "org.eclipse.ui.workbench.texteditor.quickdiffDeletion"; //$NON-NLS-1$
     private static final String QD_CHANGE = "org.eclipse.ui.workbench.texteditor.quickdiffChange"; //$NON-NLS-1$
@@ -272,7 +266,6 @@ public final class QuickDiffHook implements IStartup
         {
             lineControl.setData(LINE_NUMBER_KEY, session);
             suppressBackgroundErase(lineControl);
-            installRulerPaintCounter(lineControl);
             session.ensureWrapped();
         }
         if (overviewReady)
@@ -312,32 +305,6 @@ public final class QuickDiffHook implements IStartup
             return;
         Global.setField(control, "style", //$NON-NLS-1$
             Integer.valueOf(style.intValue() | SWT.NO_BACKGROUND));
-    }
-
-    /**
-     * Временная диагностика: считает перерисовки полосы номеров строк.
-     *
-     * <p>Пишет безусловно каждое {@code SWT.Paint} канвы номеров в
-     * {@code .tmp/temp-logs/ruler-paint.log}: порядковый номер, миллисекунды от предыдущей
-     * перерисовки и высоту испорченной области. Мигание — это поток таких событий в покое
-     * (без правки текста и без прокрутки): в логе он виден как ряд строк с шагом ~200 мс
-     * при нулевой активности пользователя. Снять после проверки.
-     */
-    private static void installRulerPaintCounter(Control control)
-    {
-        if (control == null || control.isDisposed() || control.getData(PAINT_COUNTER_KEY) != null)
-            return;
-        long[] state = new long[] {0, 0}; // 0 — счётчик, 1 — время прошлой перерисовки
-        control.setData(PAINT_COUNTER_KEY, state);
-        control.addListener(SWT.Paint, event ->
-        {
-            long now = System.currentTimeMillis();
-            long gap = state[1] == 0 ? -1 : now - state[1];
-            state[1] = now;
-            state[0]++;
-            Global.tempLog(PAINT_LOG_TOPIC, "paint #" + state[0] + " gapMs=" + gap //$NON-NLS-1$ //$NON-NLS-2$
-                + " y=" + event.y + " h=" + event.height); //$NON-NLS-1$ //$NON-NLS-2$
-        });
     }
 
     private static void beforeLineNumberPaint(Event e)
