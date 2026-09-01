@@ -1,10 +1,6 @@
 package tormozit;
 
-import java.io.BufferedReader;
-import java.io.InputStreamReader;
 import java.lang.reflect.Method;
-import java.nio.charset.Charset;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -18,9 +14,6 @@ import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IMarker;
 import org.eclipse.core.resources.IResource;
-import org.eclipse.core.runtime.CoreException;
-import org.eclipse.jface.text.Document;
-import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.viewers.CellLabelProvider;
 import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.jface.viewers.TreeViewerColumn;
@@ -773,16 +766,10 @@ public final class MarkersListViewsHook implements IStartup
 
     /**
      * Колонка «Метод» для генераторов закладок/задач ({@code markerField} в {@code plugin.xml}).
-     * Имя метода кэшируется по пути файла, штампу и строке; текст файла — отдельно по пути/штампу,
-     * чтобы несколько задач в одном модуле не читали диск повторно.
+     * Разбор и кэши — в разделяемом {@link BslModuleMethodResolver}.
      */
     public static final class MethodField extends MarkerField
     {
-        private static final int CACHE_LIMIT = 8192;
-        private static final int FILE_TEXT_CACHE_LIMIT = 64;
-        private static final Map<String, String> CACHE = new ConcurrentHashMap<>();
-        private static final Map<String, String> FILE_TEXT_CACHE = new ConcurrentHashMap<>();
-
         @Override
         public String getValue(MarkerItem item)
         {
@@ -804,79 +791,11 @@ public final class MarkersListViewsHook implements IStartup
         {
             IResource resource = marker.getResource();
             int line = marker.getAttribute(IMarker.LINE_NUMBER, -1);
-            if (line < 1 || !(resource instanceof IFile file) || !file.exists())
+            if (line < 1 || !(resource instanceof IFile file))
                 return ""; //$NON-NLS-1$
-            String name = file.getName();
-            if (name == null || !name.regionMatches(true, name.length() - 4, ".bsl", 0, 4)) //$NON-NLS-1$
-                return ""; //$NON-NLS-1$
-
-            long stamp = file.getModificationStamp();
-            String key = file.getFullPath() + "#" + stamp + "#" + line; //$NON-NLS-1$ //$NON-NLS-2$
-            String cached = CACHE.get(key);
-            if (cached != null)
-                return cached;
-
-            String resolved = resolveFromFile(file, stamp, line);
-            // null = не удалось прочитать файл — не кэшируем, повторим позже.
-            if (resolved == null)
-                return ""; //$NON-NLS-1$
-            putBounded(CACHE, key, resolved, CACHE_LIMIT);
-            return resolved;
-        }
-
-        /** @return имя метода (возможно пустое) или {@code null}, если файл не прочитан */
-        private static String resolveFromFile(IFile file, long stamp, int line1Based)
-        {
-            String text = readFileTextCached(file, stamp);
-            if (text == null)
-                return null;
-            if (text.isEmpty())
-                return ""; //$NON-NLS-1$
-            IDocument document = new Document(text);
-            String method = GetRef.findEnclosingMethodName(document, line1Based);
+            // null = файл не прочитан — повторим позже (резолвер сам не кэширует этот случай).
+            String method = BslModuleMethodResolver.methodAtLine(file, line);
             return method != null ? method : ""; //$NON-NLS-1$
-        }
-
-        private static String readFileTextCached(IFile file, long stamp)
-        {
-            String key = file.getFullPath() + "#" + stamp; //$NON-NLS-1$
-            String cached = FILE_TEXT_CACHE.get(key);
-            if (cached != null)
-                return cached;
-            String text = readFileText(file);
-            if (text == null)
-                return null;
-            putBounded(FILE_TEXT_CACHE, key, text, FILE_TEXT_CACHE_LIMIT);
-            return text;
-        }
-
-        private static String readFileText(IFile file)
-        {
-            Charset charset = StandardCharsets.UTF_8;
-            try
-            {
-                String charsetName = file.getCharset(true);
-                if (charsetName != null && !charsetName.isBlank())
-                    charset = Charset.forName(charsetName);
-            }
-            catch (CoreException | IllegalArgumentException ignored)
-            {
-                // UTF-8
-            }
-            try (BufferedReader reader = new BufferedReader(
-                new InputStreamReader(file.getContents(true), charset)))
-            {
-                StringBuilder sb = new StringBuilder(4096);
-                char[] buf = new char[4096];
-                int n;
-                while ((n = reader.read(buf)) >= 0)
-                    sb.append(buf, 0, n);
-                return sb.toString();
-            }
-            catch (Exception ex)
-            {
-                return null;
-            }
         }
     }
 

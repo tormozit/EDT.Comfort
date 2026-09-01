@@ -975,11 +975,15 @@ public final class MdEditorListTabCountHook implements IStartup
             Integer uiRows = countEventHandlerSubscriptions(page);
             if (uiRows != null)
             {
+                MdEditorListTabCountDebug.count(baseTitle, page, created, attempt, "eventHandlers", //$NON-NLS-1$
+                    Integer.toString(uiRows.intValue()), null);
                 applyTitle(item, baseTitle, Integer.toString(uiRows.intValue()));
                 if (created)
                     watchList(editor, item, page, partControl);
                 return;
             }
+            MdEditorListTabCountDebug.count(baseTitle, page, created, attempt, "eventHandlers", "?", //$NON-NLS-1$ //$NON-NLS-2$
+                "reason=count-null"); //$NON-NLS-1$
             applyTitle(item, baseTitle, "?"); //$NON-NLS-1$
             return;
         }
@@ -1003,6 +1007,8 @@ public final class MdEditorListTabCountHook implements IStartup
             Integer marked = created ? countMarkedSubsystems(editor) : null;
             if (marked != null)
             {
+                MdEditorListTabCountDebug.count(baseTitle, page, created, attempt, "subsystems", //$NON-NLS-1$
+                    Integer.toString(marked.intValue()), null);
                 applyTitle(item, baseTitle, Integer.toString(marked.intValue()));
                 watchList(editor, item, page, partControl);
                 return;
@@ -1018,6 +1024,8 @@ public final class MdEditorListTabCountHook implements IStartup
             Integer topRows = created ? countRightsTopRows(page) : null;
             if (topRows != null && (topRows.intValue() > 0 || attempt >= RIGHTS_COUNT_MAX_ATTEMPTS))
             {
+                MdEditorListTabCountDebug.count(baseTitle, page, created, attempt, "rights", //$NON-NLS-1$
+                    Integer.toString(topRows.intValue()), "treeItemCount"); //$NON-NLS-1$
                 applyTitle(item, baseTitle, Integer.toString(topRows.intValue()));
                 watchRightsTree(editor, item, page);
                 return;
@@ -1033,6 +1041,8 @@ public final class MdEditorListTabCountHook implements IStartup
         Integer modelRows = countFromModel(editor, page, created);
         if (modelRows != null)
         {
+            MdEditorListTabCountDebug.count(baseTitle, page, created, attempt, "model", //$NON-NLS-1$
+                Integer.toString(modelRows.intValue()), null);
             applyTitle(item, baseTitle, Integer.toString(modelRows.intValue()));
             if (created)
                 watchList(editor, item, page, partControl);
@@ -1053,6 +1063,8 @@ public final class MdEditorListTabCountHook implements IStartup
         Integer uiRows = created ? countRows(partControl, page) : null;
         if (uiRows != null)
         {
+            MdEditorListTabCountDebug.count(baseTitle, page, created, attempt, "uiRows", //$NON-NLS-1$
+                Integer.toString(uiRows.intValue()), null);
             applyTitle(item, baseTitle, Integer.toString(uiRows.intValue()));
             watchList(editor, item, page, partControl);
             return;
@@ -1095,18 +1107,29 @@ public final class MdEditorListTabCountHook implements IStartup
         String partial = Integer.toString(basedOn) + "?"; //$NON-NLS-1$
         if (!created)
         {
+            MdEditorListTabCountDebug.count(baseTitle, page, false, attempt, "generation", partial, //$NON-NLS-1$
+                "basedOn=" + basedOn); //$NON-NLS-1$
             applyTitle(item, baseTitle, partial);
             return;
         }
         Integer total = countGenerationTrees(partControl, Integer.valueOf(basedOn));
+        boolean relaxed = false;
         if (total == null && attempt >= COUNT_MAX_ATTEMPTS)
+        {
             total = countGenerationTrees(partControl, null);
+            relaxed = true;
+        }
         if (total != null)
         {
+            MdEditorListTabCountDebug.count(baseTitle, page, true, attempt, "generation", //$NON-NLS-1$
+                Integer.toString(total.intValue()),
+                "basedOn=" + basedOn + " relaxedLeftReady=" + relaxed); //$NON-NLS-1$ //$NON-NLS-2$
             applyTitle(item, baseTitle, Integer.toString(total.intValue()));
             watchGenerationTrees(editor, item, page, partControl);
             return;
         }
+        MdEditorListTabCountDebug.count(baseTitle, page, true, attempt, "generation", partial, //$NON-NLS-1$
+            "basedOn=" + basedOn + " leftNotReady"); //$NON-NLS-1$ //$NON-NLS-2$
         applyTitle(item, baseTitle, partial);
         if (attempt < COUNT_MAX_ATTEMPTS)
             scheduleCountRetry(editor, item, page, attempt);
@@ -1161,6 +1184,9 @@ public final class MdEditorListTabCountHook implements IStartup
                 leftReady = true;
             sum += n;
         }
+        if (MdEditorListTabCountDebug.isEnabled())
+            Global.log("MdEditorListTabCount", "generation trees: leaves=" + leafCounts //$NON-NLS-1$ //$NON-NLS-2$
+                + " requiredLeft=" + requiredLeft + " leftReady=" + leftReady + " sum=" + sum); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         return leftReady ? Integer.valueOf(sum) : null;
     }
 
@@ -1187,9 +1213,14 @@ public final class MdEditorListTabCountHook implements IStartup
         Tree tree = viewer.getTree();
         if (tree == null || tree.isDisposed())
             return null;
+        int rawItems = countVisibleEventSubscriptions(tree.getItems());
         Object provider = viewer.getContentProvider();
         if (!(provider instanceof ITreeContentProvider content))
-            return Integer.valueOf(countVisibleEventSubscriptions(tree.getItems()));
+        {
+            MdEditorListTabCountDebug.problem("eventHandlers: no ITreeContentProvider, rawTreeItems=" //$NON-NLS-1$
+                + rawItems);
+            return Integer.valueOf(rawItems);
+        }
         Object[] roots;
         try
         {
@@ -1197,11 +1228,20 @@ public final class MdEditorListTabCountHook implements IStartup
         }
         catch (RuntimeException e)
         {
-            return Integer.valueOf(countVisibleEventSubscriptions(tree.getItems()));
+            MdEditorListTabCountDebug.problem("eventHandlers: getElements failed (" + e //$NON-NLS-1$
+                + "), rawTreeItems=" + rawItems); //$NON-NLS-1$
+            return Integer.valueOf(rawItems);
         }
+        ViewerFilter[] filters = viewer.getFilters();
         int[] count = { 0 };
-        walkFilteredEventSubscriptions(viewer, content, viewer.getFilters(), viewer.getInput(), roots,
-            count);
+        walkFilteredEventSubscriptions(viewer, content, filters, viewer.getInput(), roots, count);
+        if (MdEditorListTabCountDebug.isEnabled())
+        {
+            Global.log("MdEditorListTabCount", "eventHandlers walk: filters=" //$NON-NLS-1$ //$NON-NLS-2$
+                + MdEditorListTabCountDebug.filtersRef(filters) + " roots=" //$NON-NLS-1$
+                + (roots == null ? "null" : Integer.toString(roots.length)) //$NON-NLS-1$
+                + " filtered=" + count[0] + " rawTreeItems=" + rawItems); //$NON-NLS-1$ //$NON-NLS-2$
+        }
         return Integer.valueOf(count[0]);
     }
 

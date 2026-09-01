@@ -5,6 +5,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.IdentityHashMap;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.LinkedList;
 import java.util.List;
@@ -363,9 +364,20 @@ public final class ConfigSearchResultsHook implements IStartup
         final IFile file;
         /** Исходный элемент таблицы (IMatchItem) — нужен для открытия через {@code handleOpen}. */
         final Object tableItem;
+        /**
+         * Последний сегмент полного имени модуля («МодульОбъекта», «МодульМенеджера», имя общего
+         * модуля/формы) — префикс значения в колонке «Свойство» для вхождений в BSL-модулях.
+         */
+        final String moduleKindSegment;
+        /**
+         * Значение колонки «Свойство» для вхождения в BSL-модуле: «МодульОбъекта.ПриЗаписи» либо
+         * «&lt;вне метода&gt;». {@code null} — ещё не вычислено (см. {@link #scheduleMatchMethodResolution}),
+         * до вычисления показывается штатное {@link #property}. {@code volatile} — заполняется фоновым Job.
+         */
+        volatile String methodProperty;
 
         MatchRow(String path, String property, long lineNumber, StyledString styledText, IFile file,
-                Object tableItem)
+                Object tableItem, String moduleKindSegment)
         {
             this.path = path;
             this.property = property;
@@ -374,6 +386,7 @@ public final class ConfigSearchResultsHook implements IStartup
             this.text = styledText != null ? styledText.getString() : ""; //$NON-NLS-1$
             this.file = file;
             this.tableItem = tableItem;
+            this.moduleKindSegment = moduleKindSegment;
         }
     }
 
@@ -511,9 +524,7 @@ public final class ConfigSearchResultsHook implements IStartup
             @Override
             public String getText(Object element)
             {
-                if (element instanceof MatchRow row)
-                    return row.property != null ? row.property : ""; //$NON-NLS-1$
-                return ""; //$NON-NLS-1$
+                return element instanceof MatchRow row ? matchPropertyDisplayText(row) : ""; //$NON-NLS-1$
             }
         });
 
@@ -573,7 +584,7 @@ public final class ConfigSearchResultsHook implements IStartup
                     return 0;
                 int cmp = compareStrings(r1.path, r2.path);
                 if (cmp != 0) return cmp;
-                cmp = compareStrings(r1.property, r2.property);
+                cmp = compareStrings(matchPropertyDisplayText(r1), matchPropertyDisplayText(r2));
                 if (cmp != 0) return cmp;
                 return Long.compare(r1.lineNumber, r2.lineNumber);
             }
@@ -623,6 +634,7 @@ public final class ConfigSearchResultsHook implements IStartup
         matchTable.addDisposeListener(e -> {
             if (cachedMatchTableViewer == matchViewer)
             {
+                cancelMatchMethodResolution();
                 cachedMatchTableViewer = null;
                 cachedMatchTextColumn = null;
                 cachedMatchPathColumn = null;
@@ -685,9 +697,10 @@ public final class ConfigSearchResultsHook implements IStartup
             }
             String path = formatPathForTableItem(tableItem, null);
             rows.add(new MatchRow(path, extractPropertyText(tableItem), lineNumber,
-                extractMatchStyledText(tableItem), file, tableItem));
+                extractMatchStyledText(tableItem), file, tableItem, moduleKindSegment(tableItem)));
         }
         matchViewer.setInput(rows);
+        scheduleMatchMethodResolution(matchViewer, rows);
 
         // При терминальном узле путь у всех строк одинаковый (сам узел и есть этот путь) — как и
         // у штатной таблицы (см. hidePathColumn/showPathColumn), колонку тогда прячем.
@@ -926,6 +939,192 @@ public final class ConfigSearchResultsHook implements IStartup
         row.styledText = styled;
         row.text = styled != null ? styled.getString() : ""; //$NON-NLS-1$
         matchViewer.update(row, null);
+    }
+
+    // =====================================================================================
+    // Колонка «Свойство»: имя метода для вхождений в BSL-модулях («МодульОбъекта.ПриЗаписи»)
+    // =====================================================================================
+    //
+    // Разбор — лёгкий лексический скан ({@link BslModuleMethodResolver}, без Xtext/EMF), поэтому,
+    // в отличие от отложенного {@code calculate()} выше, вычисляем НЕ только видимые строки, а все
+    // (модули, попавшие в видимую область, — первыми), чтобы по колонке можно было уверенно
+    // сортировать и отбирать. Стоимость определяется числом различных модулей: текст каждого
+    // читается и разбирается один раз, результат по строке кэшируется в резолвере.
+
+    private static final String OUTSIDE_METHOD_LABEL = "<вне метода>"; //$NON-NLS-1$
+    private static final Object METHOD_RESOLVE_LOCK = new Object();
+    private static Job methodResolveJob;
+    /** Поколение: {@link #refreshMatchTable} перестраивает строки — результаты старого Job отбрасываем. */
+    private static long methodResolveGeneration;
+
+    /** Отображаемое значение колонки «Свойство» (метод модуля, если вычислен; иначе штатное). */
+    private static String matchPropertyDisplayText(MatchRow row)
+    {
+        if (row == null)
+            return ""; //$NON-NLS-1$
+        if (row.file != null && row.lineNumber > 0 && BslModuleMethodResolver.isBslModule(row.file))
+        {
+            String method = row.methodProperty;
+            if (method != null)
+                return method;
+        }
+        return row.property != null ? row.property : ""; //$NON-NLS-1$
+    }
+
+    /** Последний сегмент полного имени модуля вхождения («МодульОбъекта», имя общего модуля/формы). */
+    private static String moduleKindSegment(Object tableItem)
+    {
+        String modulePath = modulePathFromTableItem(tableItem);
+        if (modulePath == null || modulePath.isEmpty())
+            return null;
+        int dot = modulePath.lastIndexOf('.');
+        return dot >= 0 && dot < modulePath.length() - 1 ? modulePath.substring(dot + 1) : modulePath;
+    }
+
+    private static boolean isCurrentMethodResolveGeneration(long generation)
+    {
+        synchronized (METHOD_RESOLVE_LOCK)
+        {
+            return generation == methodResolveGeneration;
+        }
+    }
+
+    static void cancelMatchMethodResolution()
+    {
+        synchronized (METHOD_RESOLVE_LOCK)
+        {
+            methodResolveGeneration++;
+            if (methodResolveJob != null)
+            {
+                methodResolveJob.cancel();
+                methodResolveJob = null;
+            }
+        }
+    }
+
+    private static void scheduleMatchMethodResolution(TableViewer matchViewer, List<MatchRow> rows)
+    {
+        LinkedHashMap<IFile, List<MatchRow>> byFile = new LinkedHashMap<>();
+        for (MatchRow row : rows)
+        {
+            if (row.methodProperty != null || row.file == null || row.lineNumber <= 0)
+                continue;
+            if (!BslModuleMethodResolver.isBslModule(row.file))
+                continue;
+            byFile.computeIfAbsent(row.file, f -> new ArrayList<>()).add(row);
+        }
+        if (byFile.isEmpty())
+        {
+            cancelMatchMethodResolution();
+            return;
+        }
+
+        List<IFile> ordered = orderModulesVisibleFirst(matchViewer, byFile.keySet());
+        synchronized (METHOD_RESOLVE_LOCK)
+        {
+            methodResolveGeneration++;
+            long generation = methodResolveGeneration;
+            if (methodResolveJob != null)
+                methodResolveJob.cancel();
+            methodResolveJob = startMatchMethodResolveJob(matchViewer, byFile, ordered, generation);
+        }
+    }
+
+    /** Файлы с ещё не разрешёнными строками, видимые в таблице — первыми (UI-поток). */
+    private static List<IFile> orderModulesVisibleFirst(TableViewer matchViewer, Set<IFile> files)
+    {
+        LinkedHashSet<IFile> ordered = new LinkedHashSet<>();
+        Table table = matchViewer.getTable();
+        if (table != null && !table.isDisposed())
+        {
+            int itemHeight = table.getItemHeight();
+            int itemCount = table.getItemCount();
+            if (itemHeight > 0 && itemCount > 0)
+            {
+                int top = table.getTopIndex();
+                int last = Math.min(itemCount - 1, top + table.getClientArea().height / itemHeight + 2);
+                for (int i = top; i <= last; i++)
+                {
+                    Object data = table.getItem(i).getData();
+                    if (data instanceof MatchRow row && row.file != null && files.contains(row.file))
+                        ordered.add(row.file);
+                }
+            }
+        }
+        ordered.addAll(files);
+        return new ArrayList<>(ordered);
+    }
+
+    private static Job startMatchMethodResolveJob(TableViewer matchViewer,
+            Map<IFile, List<MatchRow>> byFile, List<IFile> ordered, long generation)
+    {
+        Job job = new Job("Комфорт: имена методов для колонки «Свойство»") //$NON-NLS-1$
+        {
+            @Override
+            protected IStatus run(IProgressMonitor monitor)
+            {
+                for (IFile file : ordered)
+                {
+                    if (monitor.isCanceled() || !isCurrentMethodResolveGeneration(generation))
+                        return Status.CANCEL_STATUS;
+                    List<MatchRow> fileRows = byFile.get(file);
+                    if (fileRows == null || fileRows.isEmpty())
+                        continue;
+                    LinkedHashSet<Integer> lines = new LinkedHashSet<>();
+                    for (MatchRow row : fileRows)
+                        lines.add((int) row.lineNumber);
+                    Map<Integer, String> perLine;
+                    try
+                    {
+                        perLine = BslModuleMethodResolver.methodsAtLines(file, lines);
+                    }
+                    catch (Exception e)
+                    {
+                        log("scheduleMatchMethodResolution: " + e); //$NON-NLS-1$
+                        continue;
+                    }
+                    if (perLine == null)
+                        continue; // файл не прочитан — оставляем плейсхолдер, повторим при следующем поиске
+                    for (MatchRow row : fileRows)
+                    {
+                        String name = perLine.get((int) row.lineNumber);
+                        row.methodProperty = name == null || name.isEmpty()
+                            ? OUTSIDE_METHOD_LABEL
+                            : (row.moduleKindSegment != null && !row.moduleKindSegment.isEmpty()
+                                ? row.moduleKindSegment + "." + name : name); //$NON-NLS-1$
+                    }
+                    List<MatchRow> updated = new ArrayList<>(fileRows);
+                    runOnUi(() -> applyMethodResolveBatch(matchViewer, updated, generation, false));
+                }
+                runOnUi(() -> applyMethodResolveBatch(matchViewer, Collections.emptyList(), generation, true));
+                return Status.OK_STATUS;
+            }
+        };
+        job.setSystem(true);
+        job.schedule();
+        return job;
+    }
+
+    private static void runOnUi(Runnable runnable)
+    {
+        Display display = Display.getDefault();
+        if (display != null && !display.isDisposed())
+            display.asyncExec(runnable);
+    }
+
+    private static void applyMethodResolveBatch(TableViewer matchViewer, List<MatchRow> updated,
+            long generation, boolean finalPass)
+    {
+        if (!isCurrentMethodResolveGeneration(generation))
+            return;
+        Table table = matchViewer.getTable();
+        if (table == null || table.isDisposed())
+            return;
+        if (!updated.isEmpty())
+            matchViewer.update(updated.toArray(), null);
+        if (finalPass && cachedMatchPropertyColumn != null && !cachedMatchPropertyColumn.isDisposed()
+            && table.getSortColumn() == cachedMatchPropertyColumn)
+            matchViewer.refresh();
     }
 
     /**
