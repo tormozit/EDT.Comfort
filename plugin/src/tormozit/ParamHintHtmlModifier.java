@@ -6,6 +6,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -36,6 +37,7 @@ import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.events.DisposeListener;
 import org.eclipse.swt.events.KeyAdapter;
 import org.eclipse.swt.events.KeyEvent;
+import org.eclipse.swt.graphics.Color;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Listener;
@@ -50,6 +52,7 @@ import org.eclipse.ui.commands.ICommandService;
 import org.osgi.framework.Bundle;
 import org.eclipse.xtext.EcoreUtil2;
 import org.eclipse.xtext.nodemodel.ICompositeNode;
+import org.eclipse.xtext.nodemodel.ILeafNode;
 import org.eclipse.xtext.nodemodel.INode;
 import org.eclipse.xtext.nodemodel.util.NodeModelUtils;
 import org.eclipse.xtext.resource.EObjectAtOffsetHelper;
@@ -94,6 +97,10 @@ import com._1c.g5.v8.dt.mcore.util.Environments;
 public final class ParamHintHtmlModifier
 {
     private static final String HEADING_CLASS = "contentassist-heading-content"; //$NON-NLS-1$
+    /** Маркер окрашенной части заголовка до списка параметров. */
+    private static final String HEADING_PREFIX_CLASS = "comfort-heading-prefix"; //$NON-NLS-1$
+    /** Доля цвета текста в приглушённом цвете заголовка (остальное — фон). */
+    private static final double HEADING_PREFIX_TEXT_WEIGHT = 0.55;
     /** Макс. число типов возврата в заголовке (через запятую); дальше — "...". */
     private static final int MAX_HEADING_RETURN_TYPE_ELEMENTS = 10;
     private static final String TYPE_CLASS = "contentassist-type"; //$NON-NLS-1$
@@ -283,6 +290,21 @@ public final class ParamHintHtmlModifier
      */
     private static EObject findInvocationLikeAt(XtextResource resource, int caret)
     {
+        return findInvocationLikeAt(resource, caret, null);
+    }
+
+    /**
+     * То же, но с именем метода показанной подсказки: берётся ближайший к каретке
+     * вызов именно этого метода.
+     * <p>
+     * Вложенный в аргумент вызов у каретки — не обязательно тот, о котором
+     * подсказка: {@code ?(…)} в модели тоже {@link Invocation} (метод
+     * {@code "?"}), и штатная EDT её пропускает, показывая внешний вызов. Если
+     * ни один вызов в цепочке не совпал с подсказкой — {@code null}: тогда
+     * номер параметра остаётся штатным, а не считается по чужому вызову.
+     */
+    private static EObject findInvocationLikeAt(XtextResource resource, int caret, String hintName)
+    {
         EObjectAtOffsetHelper helper = new EObjectAtOffsetHelper();
         EObject obj = helper.resolveContainedElementAt(resource, caret);
         EObject innermost = null;
@@ -291,12 +313,57 @@ public final class ParamHintHtmlModifier
         {
             if (!(cur instanceof Invocation || cur instanceof OperatorStyleCreator))
                 continue;
+            if (hintName != null)
+            {
+                if (matchesHintMethod(cur, hintName))
+                    return cur;
+                continue;
+            }
             if (innermost == null)
                 innermost = cur;
             if (callSiteHasMultipleSignatures(resource, cur))
                 outermostMulti = cur;
         }
+        if (hintName != null)
+            return null;
         return outermostMulti != null ? outermostMulti : innermost;
+    }
+
+    /** Имя метода (или типа конструктора) из показанной подсказки. */
+    private static String hintMethodName(HoverContext ctx)
+    {
+        Object viewPage = resolveViewPage(ctx);
+        String name = viewPage != null
+            ? asString(Global.invoke(viewPage, "getFirstName")) : null; //$NON-NLS-1$
+        if ((name == null || name.isBlank()) && ctx != null && ctx.pages != null
+            && ctx.pageIndex >= 0 && ctx.pageIndex < ctx.pages.size())
+            name = asString(Global.invoke(ctx.pages.get(ctx.pageIndex), "getName")); //$NON-NLS-1$
+        return name != null && !name.isBlank() ? name.trim() : null;
+    }
+
+    /** Вызов относится к методу/типу подсказки: сверяем имя в коде и рус./англ. имена. */
+    private static boolean matchesHintMethod(EObject invocationLike, String hintName)
+    {
+        if (hintName == null)
+            return true;
+        if (invocationLike instanceof Invocation invocation)
+        {
+            FeatureAccess access = invocation.getMethodAccess();
+            if (access != null && hintName.equalsIgnoreCase(access.getName()))
+                return true;
+            return matchesDuallyNamed(resolveMethod(access), hintName);
+        }
+        if (invocationLike instanceof OperatorStyleCreator ctor)
+            return matchesDuallyNamed(ctor.getType(), hintName);
+        return false;
+    }
+
+    private static boolean matchesDuallyNamed(DuallyNamedElement element, String hintName)
+    {
+        if (element == null)
+            return false;
+        return hintName.equalsIgnoreCase(element.getName())
+            || hintName.equalsIgnoreCase(element.getNameRu());
     }
 
     private static EList<Expression> paramsOfInvocationLike(EObject invocationLike)
@@ -624,16 +691,21 @@ public final class ParamHintHtmlModifier
                 java.lang.reflect.Constructor<?> ctor = infoClass.getDeclaredConstructor();
                 ctor.setAccessible(true);
                 Object info = ctor.newInstance();
-                int paramNumber = estimateParamNumberLikeEdt(siteInfo, caret);
+                int paramNumber = paramNumberLikeEdt(siteInfo, caret);
                 if (paramNumber < 0)
                     paramNumber = 0;
+                if (paramSize > 0 && paramNumber >= paramSize)
+                    paramNumber = paramSize - 1;
                 Global.setFieldForce(info, "pages", caPages); //$NON-NLS-1$
                 Global.setFieldForce(info, "paramNumber", Integer.valueOf(paramNumber)); //$NON-NLS-1$
                 Global.setFieldForce(info, "paramSize", Integer.valueOf(paramSize)); //$NON-NLS-1$
                 Global.setFieldForce(info, "maxParam", Integer.valueOf(maxParam)); //$NON-NLS-1$
-                Global.setFieldForce(info, "commaPosition", new ArrayList<Integer>()); //$NON-NLS-1$
+                // commaPosition == null → штатный CustomCaretListener закрывает подсказку;
+                // пустой список → он же всегда считает первый параметр (issue 437).
+                Global.setFieldForce(info, "commaPosition", //$NON-NLS-1$
+                    new ArrayList<>(siteInfo.separatorOffsets));
                 Global.setFieldForce(info, "initialOffset", //$NON-NLS-1$
-                    Integer.valueOf(siteInfo.methodAccessEnd));
+                    Integer.valueOf(siteInfo.methodAccessEnd - 1));
                 Global.setFieldForce(info, "firstAvailablePosition", //$NON-NLS-1$
                     Integer.valueOf(siteInfo.methodAccessEnd));
                 Global.setFieldForce(info, "lastAvailablePosition", //$NON-NLS-1$
@@ -984,11 +1056,15 @@ public final class ParamHintHtmlModifier
         return null;
     }
 
-    private static int estimateParamNumberLikeEdt(CallSiteInfo site, int caret)
+    /**
+     * Номер параметра у каретки для synthetic {@code ParameterInfo}: как EDT,
+     * но по разделителям аргументов из узловой модели ({@link #argSeparatorOffsets}).
+     */
+    private static int paramNumberLikeEdt(CallSiteInfo site, int caret)
     {
         if (site == null || caret < site.methodAccessEnd || caret >= site.callEnd)
             return -1;
-        return 0;
+        return paramNumberAt(site.separatorOffsets, caret);
     }
 
     private static CallSiteInfo findCallSiteAt(XtextResource resource, int caret)
@@ -1067,7 +1143,7 @@ public final class ParamHintHtmlModifier
         if (invNode == null)
             return null;
         return new CallSiteInfo(methodNodes.get(0).getTotalEndOffset(),
-            invNode.getTotalEndOffset());
+            invNode.getTotalEndOffset(), argSeparatorOffsets(invocation));
     }
 
     private static CallSiteInfo callSiteForOperatorCtor(OperatorStyleCreator ctor)
@@ -1082,18 +1158,22 @@ public final class ParamHintHtmlModifier
         if (ctorNode == null)
             return null;
         return new CallSiteInfo(typeNodes.get(0).getTotalEndOffset(),
-            ctorNode.getTotalEndOffset());
+            ctorNode.getTotalEndOffset(), argSeparatorOffsets(ctor));
     }
 
     private static final class CallSiteInfo
     {
         final int methodAccessEnd;
         final int callEnd;
+        /** Смещения запятых самого вызова (узловая модель), для {@code commaPosition}. */
+        final List<Integer> separatorOffsets;
 
-        CallSiteInfo(int methodAccessEnd, int callEnd)
+        CallSiteInfo(int methodAccessEnd, int callEnd, List<Integer> separatorOffsets)
         {
             this.methodAccessEnd = methodAccessEnd;
             this.callEnd = callEnd;
+            this.separatorOffsets = separatorOffsets != null
+                ? separatorOffsets : Collections.emptyList();
         }
 
         boolean contains(int offset)
@@ -1521,14 +1601,46 @@ public final class ParamHintHtmlModifier
 
         String before = html.substring(contentStart, firstParen);
         String rebuilt = rebuildHeadingPrefix(before, ctx);
-        String withParen;
-        if (rebuilt == null)
-            withParen = html.substring(0, firstParen) + "<br>(" + html.substring(firstParen + 1); //$NON-NLS-1$
-        else
-            withParen = html.substring(0, contentStart) + rebuilt + "<br>(" //$NON-NLS-1$
-                + html.substring(firstParen + 1);
+        String prefix = colorizeHeadingPrefix(rebuilt != null ? rebuilt : before);
+        String withParen = html.substring(0, contentStart) + prefix + "<br>(" //$NON-NLS-1$
+            + html.substring(firstParen + 1);
         String withOptional = rewriteHeadingOptionalParams(withParen, ctx);
         return withOptional != null ? withOptional : withParen;
+    }
+
+    /**
+     * Часть заголовка до списка параметров ({@code Владелец : Метод : Типы}) —
+     * приглушённым цветом: так сразу видно, где начинаются параметры.
+     */
+    private static String colorizeHeadingPrefix(String prefixHtml)
+    {
+        if (prefixHtml == null || prefixHtml.isBlank()
+            || prefixHtml.contains(HEADING_PREFIX_CLASS))
+            return prefixHtml;
+        return "<span class=\"" + HEADING_PREFIX_CLASS + "\" style=\"color:" //$NON-NLS-1$ //$NON-NLS-2$
+            + headingPrefixColorHex() + "\">" + prefixHtml + "</span>"; //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /**
+     * Цвет приглушённого текста: смесь цвета текста и фона списка текущей темы —
+     * тише основного текста и читаем и в светлой, и в тёмной теме.
+     */
+    private static String headingPrefixColorHex()
+    {
+        Display display = Display.getCurrent() != null ? Display.getCurrent() : Display.getDefault();
+        Color foreground = display.getSystemColor(SWT.COLOR_LIST_FOREGROUND);
+        Color background = display.getSystemColor(SWT.COLOR_LIST_BACKGROUND);
+        return String.format(Locale.ROOT, "#%02X%02X%02X", //$NON-NLS-1$
+            Integer.valueOf(mixChannel(foreground.getRed(), background.getRed())),
+            Integer.valueOf(mixChannel(foreground.getGreen(), background.getGreen())),
+            Integer.valueOf(mixChannel(foreground.getBlue(), background.getBlue())));
+    }
+
+    private static int mixChannel(int foreground, int background)
+    {
+        double mixed = foreground * HEADING_PREFIX_TEXT_WEIGHT
+            + background * (1 - HEADING_PREFIX_TEXT_WEIGHT);
+        return Math.max(0, Math.min(255, (int)Math.round(mixed)));
     }
 
     /**
@@ -2912,11 +3024,12 @@ public final class ParamHintHtmlModifier
             return;
         try
         {
+            String hintName = hintMethodName(ctx);
             InvocationSnapshot snap = xdoc.readOnly(
                 (IUnitOfWork<InvocationSnapshot, XtextResource>) resource -> {
                     if (resource == null)
                         return null;
-                    return resolveInvocationSnapshot(resource, xdoc, active.caret);
+                    return resolveInvocationSnapshot(resource, active.caret, hintName);
                 });
             if (snap == null)
                 return;
@@ -2932,10 +3045,10 @@ public final class ParamHintHtmlModifier
         }
     }
 
-    private static InvocationSnapshot resolveInvocationSnapshot(XtextResource resource,
-        IDocument document, int caret)
+    private static InvocationSnapshot resolveInvocationSnapshot(XtextResource resource, int caret,
+        String hintName)
     {
-        EObject invocationLike = findInvocationLikeAt(resource, caret);
+        EObject invocationLike = findInvocationLikeAt(resource, caret, hintName);
         if (invocationLike == null)
             return null;
 
@@ -2952,7 +3065,7 @@ public final class ParamHintHtmlModifier
             params = ((OperatorStyleCreator) invocationLike).getParams();
         }
         snap.actualArgCount = params != null ? params.size() : 0;
-        snap.currentArgIndex = resolveCurrentArgIndex(document, invocationLike, caret);
+        snap.currentArgIndex = resolveCurrentArgIndex(invocationLike, caret);
         Set<String> typeNames = new LinkedHashSet<>();
         boolean multiSig = callSiteHasMultipleSignatures(resource, invocationLike);
         if (multiSig && params != null && !params.isEmpty())
@@ -2987,86 +3100,104 @@ public final class ParamHintHtmlModifier
     }
 
     /**
-     * Слот аргумента у каретки: число запятых верхнего уровня после {@code (}
-     * вызова до каретки. Запятая, на которой стоит каретка, ещё не начинает
-     * следующий слот — как {@code computeParameterNumber} EDT, без зажима.
+     * Слот аргумента у каретки по узловой модели Xtext: число разделителей
+     * аргументов этого вызова до каретки. Запятая, на которой стоит каретка,
+     * ещё не начинает следующий слот — как {@code computeParameterNumber} EDT,
+     * без зажима по числу формальных параметров.
      */
-    private static int resolveCurrentArgIndex(IDocument document, EObject invocationLike,
-        int caret)
+    private static int resolveCurrentArgIndex(EObject invocationLike, int caret)
     {
-        if (document == null || invocationLike == null || caret < 0)
+        if (invocationLike == null || caret < 0)
             return -1;
         ICompositeNode invNode = NodeModelUtils.findActualNodeFor(invocationLike);
         if (invNode == null)
             return -1;
-        int start = invNode.getTotalOffset();
-        int end = invNode.getTotalEndOffset();
-        if (caret < start || caret > end)
+        if (caret < invNode.getTotalOffset() || caret > invNode.getTotalEndOffset())
             return -1;
-        int length = end - start;
-        if (length <= 0)
-            return -1;
-        String text;
-        try
-        {
-            text = document.get(start, length);
-        }
-        catch (Exception ignored)
-        {
-            return -1;
-        }
-        if (text == null || text.isEmpty())
-            return -1;
-        int open = indexOfCallOpenParen(text);
-        if (open < 0)
-            return 0;
-        int relCaret = caret - start;
-        if (relCaret <= open)
-            return 0;
-        if (relCaret > text.length())
-            relCaret = text.length();
-        int depth = 0;
-        boolean inStr = false;
-        int commas = 0;
-        for (int i = open + 1; i < relCaret; i++)
-        {
-            char c = text.charAt(i);
-            if (c == '"')
-            {
-                inStr = !inStr;
-                continue;
-            }
-            if (inStr)
-                continue;
-            if (c == '(')
-                depth++;
-            else if (c == ')')
-            {
-                if (depth == 0)
-                    break;
-                depth--;
-            }
-            else if (c == ',' && depth == 0)
-                commas++;
-        }
-        return commas;
+        return paramNumberAt(argSeparatorOffsets(invocationLike), caret);
     }
 
-    private static int indexOfCallOpenParen(String text)
+    /**
+     * Смещения разделителей аргументов вызова — только собственные запятые
+     * {@code invocationLike}, по узловой модели.
+     * <p>
+     * Разбор идёт по листовым узлам, а не по тексту: строки, комментарии,
+     * вложенные вызовы, {@code ?(…)}, индексы {@code […]} и незакрытые кавычки
+     * уже разделены грамматикой. Своя запятая — та, что не попала внутрь узла
+     * ни одного аргумента и узла обращения к методу; вложенные запятые лежат
+     * внутри узла соответствующего аргумента.
+     */
+    private static List<Integer> argSeparatorOffsets(EObject invocationLike)
     {
-        boolean inStr = false;
-        for (int i = 0; i < text.length(); i++)
+        ICompositeNode invNode = invocationLike != null
+            ? NodeModelUtils.findActualNodeFor(invocationLike) : null;
+        if (invNode == null)
+            return Collections.emptyList();
+        List<INode> partNodes = callPartNodes(invocationLike);
+        List<Integer> offsets = new ArrayList<>();
+        for (ILeafNode leaf : invNode.getLeafNodes())
         {
-            char c = text.charAt(i);
-            if (c == '"')
-            {
-                inStr = !inStr;
+            if (leaf == null || leaf.isHidden())
                 continue;
-            }
-            if (!inStr && c == '(')
+            if (!",".equals(leaf.getText())) //$NON-NLS-1$
+                continue;
+            if (isInsideAnyNode(leaf.getOffset(), partNodes))
+                continue;
+            offsets.add(Integer.valueOf(leaf.getOffset()));
+        }
+        return offsets;
+    }
+
+    /** Узлы частей вызова, чьи запятые — не разделители аргументов. */
+    private static List<INode> callPartNodes(EObject invocationLike)
+    {
+        List<INode> nodes = new ArrayList<>();
+        EList<Expression> params = paramsOfInvocationLike(invocationLike);
+        if (invocationLike instanceof Invocation invocation)
+            addNodeFor(nodes, invocation.getMethodAccess());
+        if (params != null)
+        {
+            for (Expression param : params)
+                addNodeFor(nodes, param);
+        }
+        return nodes;
+    }
+
+    private static void addNodeFor(List<INode> nodes, EObject object)
+    {
+        if (object == null)
+            return;
+        ICompositeNode node = NodeModelUtils.findActualNodeFor(object);
+        if (node != null)
+            nodes.add(node);
+    }
+
+    private static boolean isInsideAnyNode(int offset, List<INode> nodes)
+    {
+        for (INode node : nodes)
+        {
+            if (offset >= node.getOffset() && offset < node.getEndOffset())
+                return true;
+        }
+        return false;
+    }
+
+    /**
+     * Номер параметра по смещениям запятых — семантика
+     * {@code InvocationParametersHoverHandler.computeParameterNumber} EDT:
+     * первый слот, чья запятая ещё не пройдена кареткой.
+     */
+    private static int paramNumberAt(List<Integer> separatorOffsets, int caret)
+    {
+        if (separatorOffsets == null)
+            return 0;
+        for (int i = 0; i < separatorOffsets.size(); i++)
+        {
+            Integer offset = separatorOffsets.get(i);
+            if (offset != null && caret <= offset.intValue())
                 return i;
         }
-        return -1;
+        return separatorOffsets.size();
     }
 
     private static Method resolveMethod(FeatureAccess access)

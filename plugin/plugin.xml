@@ -41,6 +41,7 @@
     <startup class="tormozit.FormEditorHook"/>
     <startup class="tormozit.TreeExpander"/>
     <startup class="tormozit.ProblemViewPropertyFocusHook"/>
+    <startup class="tormozit.MdEditorTreeHook"/>
     <startup class="tormozit.IrKeyBindingHook"/>
     <startup class="tormozit.BslEditorHoverHook"/>
     <startup class="tormozit.PriorityGlobalKeyBindingHook"/>
@@ -161,7 +162,8 @@
     <startup class="tormozit.PropertySheetSpellCheckHook"/>
     <startup class="tormozit.BslModuleSpellCheckStartup"/>
     <startup class="tormozit.CommitMessageSpellCheckHook"/>
-    <startup class="tormozit.FindReplaceLiveMatchCountHook"/>
+    <startup class="tormozit.LocalStringDialogSpellCheckHook"/>
+    <startup class="tormozit.FindReplaceDialogHook"/>
     <startup class="tormozit.AnnotationsPreferenceHook"/>
   </extension>
 

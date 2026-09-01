@@ -12,6 +12,8 @@ import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.ITextViewer;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.events.SelectionListener;
+import org.eclipse.swt.events.ShellAdapter;
+import org.eclipse.swt.events.ShellEvent;
 import org.eclipse.swt.widgets.Button;
 import org.eclipse.swt.widgets.Combo;
 import org.eclipse.swt.widgets.Display;
@@ -26,7 +28,10 @@ import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.texteditor.ITextEditor;
 
 /**
- * Живой счётчик совпадений в стандартном диалоге «Найти/Заменить» ({@code org.eclipse.ui.texteditor.FindReplaceDialog},
+ * Доработки стандартного диалога «Найти/Заменить»: живой счётчик совпадений, переименование
+ * кнопки «Выбрать всё» и работающее Ctrl+C в полях ввода (см. {@code wireCopy}).
+ *
+ * <p>Живой счётчик совпадений в стандартном диалоге «Найти/Заменить» ({@code org.eclipse.ui.texteditor.FindReplaceDialog},
  * пакетный класс, поэтому доступ только через {@link Global#getField}) — подсчёт идёт в фоне
  * ({@link Job}), не блокируя ввод; во время подсчёта в статусной строке диалога показывается
  * «Поиск…». Также переименовывает кнопку «Выбрать всё» в «Выделить все».
@@ -40,9 +45,20 @@ import org.eclipse.ui.texteditor.ITextEditor;
  * <p>Прокрутка/выделение первого совпадения по мере ввода намеренно не реализованы — это уже
  * делает штатный флажок «Инкрементный» диалога.
  *
+ * <p>Флажок «Слово целиком» — штатно отключается, если строка поиска содержит хоть один символ
+ * не-идентификатора ({@code FindReplaceDialog.isWord}: {@code Character.isJavaIdentifierPart}
+ * для каждого символа), например точку. При этом {@code isWholeWordSearch()} штатного диалога
+ * учитывает не только отметку флажка, но и его {@code isEnabled()} — отключённый флажок штатный
+ * поиск молча трактует как выключенный, даже если он визуально остаётся отмеченным. С учётом
+ * {@link IdentifierSelectionSupport#isWholeWordMatch} (граница слова корректна и для строк,
+ * кончающихся не на идентификатор) это ограничение больше не нужно — флажок принудительно
+ * держится доступным (кроме режима «Регулярное выражение», где «целое слово» не имеет смысла),
+ * см. {@link Session#applyWholeWordAlwaysEnabled()}.
+ *
  * https://github.com/1C-Company/1c-edt-issues/issues/1500
+ * https://github.com/tormozit/EDT.Comfort/issues/444
  */
-public final class FindReplaceLiveMatchCountHook implements IStartup
+public final class FindReplaceDialogHook implements IStartup
 {
     private static final String TAG = "FindReplaceLiveCount"; //$NON-NLS-1$
 
@@ -57,7 +73,7 @@ public final class FindReplaceLiveMatchCountHook implements IStartup
     @Override
     public void earlyStartup()
     {
-        Display.getDefault().asyncExec(FindReplaceLiveMatchCountHook::install);
+        Display.getDefault().asyncExec(FindReplaceDialogHook::install);
     }
 
     private static void install()
@@ -65,7 +81,7 @@ public final class FindReplaceLiveMatchCountHook implements IStartup
         Display display = Display.getDefault();
         if (display == null || display.isDisposed())
             return;
-        display.addFilter(SWT.Show, FindReplaceLiveMatchCountHook::handleShow);
+        display.addFilter(SWT.Show, FindReplaceDialogHook::handleShow);
     }
 
     /**
@@ -106,6 +122,10 @@ public final class FindReplaceLiveMatchCountHook implements IStartup
         private Button caseCheckBox;
         private Button wholeWordCheckBox;
         private Button regExCheckBox;
+        private Button findNextButton;
+        private Button replaceFindButton;
+        private Button replaceSelectionButton;
+        private Button replaceAllButton;
 
         private ITextViewer viewer;
 
@@ -126,6 +146,10 @@ public final class FindReplaceLiveMatchCountHook implements IStartup
             caseCheckBox = (Button)Global.getField(dialog, "fCaseCheckBox"); //$NON-NLS-1$
             wholeWordCheckBox = (Button)Global.getField(dialog, "fWholeWordCheckBox"); //$NON-NLS-1$
             regExCheckBox = (Button)Global.getField(dialog, "fIsRegExCheckBox"); //$NON-NLS-1$
+            findNextButton = (Button)Global.getField(dialog, "fFindNextButton"); //$NON-NLS-1$
+            replaceFindButton = (Button)Global.getField(dialog, "fReplaceFindButton"); //$NON-NLS-1$
+            replaceSelectionButton = (Button)Global.getField(dialog, "fReplaceSelectionButton"); //$NON-NLS-1$
+            replaceAllButton = (Button)Global.getField(dialog, "fReplaceAllButton"); //$NON-NLS-1$
 
             if (findField == null || findField.isDisposed()
                 || statusLabel == null || statusLabel.isDisposed())
@@ -137,6 +161,9 @@ public final class FindReplaceLiveMatchCountHook implements IStartup
             if (selectAllButton != null && !selectAllButton.isDisposed())
                 selectAllButton.setText(SELECT_ALL_LABEL);
 
+            wireCopy(findField);
+            wireCopy((Combo)Global.getField(dialog, "fReplaceField")); //$NON-NLS-1$
+
             resolveViewer();
 
             findField.addModifyListener(e -> onModify());
@@ -145,9 +172,66 @@ public final class FindReplaceLiveMatchCountHook implements IStartup
             addSettingsListener(regExCheckBox);
             shell.addDisposeListener(e -> cancelJob());
 
+            /*
+             * Штатный updateButtonState() (см. класс-javadoc) отключает fWholeWordCheckBox по
+             * содержимому строки поиска — переустанавливаем доступность после каждого места,
+             * где штатный код мог её сбросить: активация окна диалога (обычная штатная
+             * ActivationListener.shellActivated) и клики по кнопкам поиска/замены (их
+             * собственные обработчики сами вызывают updateButtonState() в конце). Слушатели
+             * добавляются позже штатных — выполняются после них.
+             */
+            shell.addShellListener(new ShellAdapter()
+            {
+                @Override
+                public void shellActivated(ShellEvent e)
+                {
+                    applyWholeWordAlwaysEnabled();
+                }
+            });
+            addReenableListener(findNextButton);
+            addReenableListener(selectAllButton);
+            addReenableListener(replaceFindButton);
+            addReenableListener(replaceSelectionButton);
+            addReenableListener(replaceAllButton);
+
             FindReplaceLiveCountDebug.log("attach OK"); //$NON-NLS-1$
             onModify();
             return true;
+        }
+
+        private void addReenableListener(Button button)
+        {
+            if (button == null || button.isDisposed())
+                return;
+            button.addSelectionListener(
+                SelectionListener.widgetSelectedAdapter(e -> applyWholeWordAlwaysEnabled()));
+        }
+
+        /**
+         * «Слово целиком» доступен всегда, кроме режима «Регулярное выражение» (там он
+         * теряет смысл — границы задаются самим regex, через {@code \b}). См. класс-javadoc.
+         */
+        private void applyWholeWordAlwaysEnabled()
+        {
+            if (wholeWordCheckBox == null || wholeWordCheckBox.isDisposed())
+                return;
+            boolean regEx = regExCheckBox != null && !regExCheckBox.isDisposed()
+                && regExCheckBox.getSelection();
+            wholeWordCheckBox.setEnabled(!regEx);
+        }
+
+        /**
+         * Ctrl+C в полях «Найти»/«Заменить на» не работает: сочетание совпадает с акселератором
+         * Edit → Copy активной части, Windows уводит его в {@code WM_COMMAND} до SWT, и штатный
+         * обработчик редактора перезаписывает буфер содержимым редактора. Перехват — через
+         * {@code CopyCommandSupport.wireCopyOverride} (копирует выделение {@link Combo},
+         * при пустом выделении — весь текст поля).
+         */
+        private static void wireCopy(Combo combo)
+        {
+            if (combo == null || combo.isDisposed())
+                return;
+            CopyCommandSupport.wireCopyOverride(combo);
         }
 
         /** Диалог показан повторно (переиспользованный экземпляр) — обновить ссылку на редактор/документ. */
@@ -215,6 +299,7 @@ public final class FindReplaceLiveMatchCountHook implements IStartup
         private void onModify()
         {
             cancelJob();
+            applyWholeWordAlwaysEnabled();
 
             String findString = findField.getText();
             publishSearchContext(findString);
@@ -384,19 +469,11 @@ public final class FindReplaceLiveMatchCountHook implements IStartup
             for (int i = Math.max(from, 0); i <= end; i++)
             {
                 if (text.regionMatches(!caseSensitive, i, search, 0, search.length())
-                    && (!wholeWord || isWordBoundary(text, i, i + search.length())))
+                    && (!wholeWord
+                        || IdentifierSelectionSupport.isWholeWordMatch(text, i, i + search.length())))
                     return i;
             }
             return -1;
-        }
-
-        private static boolean isWordBoundary(String text, int matchStart, int matchEnd)
-        {
-            if (matchStart > 0 && IdentifierSelectionSupport.isIdentifierChar(text.charAt(matchStart - 1)))
-                return false;
-            if (matchEnd < text.length() && IdentifierSelectionSupport.isIdentifierChar(text.charAt(matchEnd)))
-                return false;
-            return true;
         }
     }
 

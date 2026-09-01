@@ -17,6 +17,7 @@ import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.dnd.Clipboard;
 import org.eclipse.swt.dnd.TextTransfer;
 import org.eclipse.swt.dnd.Transfer;
+import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.widgets.Combo;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
@@ -424,7 +425,12 @@ public final class CopyCommandSupport
         if (control instanceof Combo combo && !combo.isDisposed())
         {
             String all = combo.getText();
-            return all == null || all.isEmpty() ? null : all;
+            if (all == null || all.isEmpty())
+                return null;
+            Point range = combo.getSelection();
+            if (range != null && range.y > range.x && range.y <= all.length())
+                return all.substring(range.x, range.y);
+            return all;
         }
         if (control instanceof StyledText styledText && !styledText.isDisposed())
         {

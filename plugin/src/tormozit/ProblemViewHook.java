@@ -3,17 +3,27 @@ package tormozit;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Proxy;
+import java.util.Collection;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.Map;
+import java.util.Set;
 
 import org.eclipse.core.resources.IProject;
+import org.eclipse.emf.ecore.EObject;
 import org.eclipse.e4.ui.model.application.ui.basic.MPart;
+import org.eclipse.jface.preference.IPreferencePage;
+import org.eclipse.jface.preference.PreferenceDialog;
 import org.eclipse.jface.viewers.ISelection;
 import org.eclipse.jface.viewers.IOpenListener;
 import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.swt.SWT;
+import org.eclipse.swt.browser.Browser;
+import org.eclipse.swt.browser.ProgressListener;
 import org.eclipse.swt.graphics.Point;
+import org.eclipse.swt.widgets.Composite;
+import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Label;
 import org.eclipse.swt.widgets.Shell;
@@ -78,8 +88,16 @@ public final class ProblemViewHook implements IStartup
         "com._1c.g5.v8.dt.internal.ui.validation.V8UiValidationPlugin"; //$NON-NLS-1$
     private static final String CHANGE_LISTENER_CLASS =
         "com._1c.g5.v8.dt.internal.ui.validation.AbstractSetting$ChangeListener"; //$NON-NLS-1$
-    /** {@code Messages.Scope} — «Область возникновения». */
-    private static final String SCOPE_TITLE_FIELD = "Scope"; //$NON-NLS-1$
+    /**
+     * Своё короткое название вместо штатного {@code Messages.Scope} («Область
+     * возникновения»): к значению режима дописывается ещё и полное имя объекта,
+     * и длинный штатный заголовок в одной строке с итогами уже мешает.
+     */
+    private static final String SCOPE_TITLE = "Область"; //$NON-NLS-1$
+    /** Режимы {@code ProblemFilters.Scope}, у которых есть конкретный источник отбора. */
+    private static final String SCOPE_CURRENT_OBJECT = "CURRENT_OBJECT"; //$NON-NLS-1$
+    private static final String SCOPE_CURRENT_ELEMENT = "CURRENT_ELEMENT"; //$NON-NLS-1$
+    private static final String SCOPE_CURRENT_PROJECT = "CURRENT_PROJECT"; //$NON-NLS-1$
 
     private static volatile boolean installed;
 
@@ -179,8 +197,10 @@ public final class ProblemViewHook implements IStartup
     }
 
     /**
-     * Подпись «Область возникновения: …» в строке над деревом, сразу за итогами
-     * по видам проблем (issue 401).
+     * Подпись «Область: …» в строке над деревом, сразу за итогами по видам
+     * проблем (issue 401). Для режимов «Текущий проект», «Текущий объект» и
+     * «Текущий элемент» дописывается ещё и сам источник отбора (имя проекта,
+     * полное имя объекта или элемента) — иначе непонятно, чей это список.
      *
      * <p>Область возникновения — самый «дорогой» отбор панели: он один способен
      * убрать из списка почти всё. Штатно он виден только внутри окна «Настройки
@@ -206,9 +226,9 @@ public final class ProblemViewHook implements IStartup
 
         ClassLoader loader = view.getClass().getClassLoader();
         Object filters = problemFilters(loader);
-        appendScope(status, filters, loader);
-        listenScopeChanges(status, filters, loader);
-        keepScopeAppended(status, filters, loader);
+        appendScope(view, status, filters, loader);
+        listenScopeChanges(view, status, filters, loader);
+        keepScopeAppended(view, status, filters, loader);
         Debug.log("installScopeLabel: installed"); //$NON-NLS-1$
     }
 
@@ -306,11 +326,11 @@ public final class ProblemViewHook implements IStartup
     }
 
     /** Дописывает отбор к штатным итогам, заменяя ранее дописанное. */
-    private static void appendScope(Label status, Object filters, ClassLoader loader)
+    private static void appendScope(IViewPart view, Label status, Object filters, ClassLoader loader)
     {
         if (status.isDisposed())
             return;
-        String suffix = scopeSuffix(filters, loader);
+        String suffix = scopeSuffix(view, filters, loader);
         if (suffix == null)
             return;
         String text = status.getText();
@@ -320,20 +340,120 @@ public final class ProblemViewHook implements IStartup
             status.setText(wanted);
     }
 
-    private static String scopeSuffix(Object filters, ClassLoader loader)
+    private static String scopeSuffix(IViewPart view, Object filters, ClassLoader loader)
     {
         Object scope = Global.invoke(filters, "getScope"); //$NON-NLS-1$
-        String title = message(loader, SCOPE_TITLE_FIELD);
-        String value = scope instanceof Enum<?> constant ? message(loader, scopeField(constant.name())) : null;
-        if (title == null || value == null)
+        if (!(scope instanceof Enum<?> constant))
+            return null;
+        String value = message(loader, scopeField(constant.name()));
+        if (value == null)
         {
             Debug.log("scopeSuffix: no message for " + scope); //$NON-NLS-1$
             return null;
         }
-        return SCOPE_SEPARATOR + title + ": " + value; //$NON-NLS-1$
+        String detail = scopeDetail(view, constant.name());
+        return SCOPE_SEPARATOR + SCOPE_TITLE + ": " + value //$NON-NLS-1$
+            + (detail != null ? ": " + detail : ""); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
-    private static void keepScopeAppended(Label status, Object filters, ClassLoader loader)
+    /**
+     * Источник отбора для режимов «Текущий проект» / «Текущий объект» /
+     * «Текущий элемент»: панель строит его из своих {@code scopeSelection} +
+     * {@code scopeSelectionManager} ({@code LazyProblemView.getCurrentSelectedObjectIds}),
+     * оттуда же берём и подпись.
+     *
+     * <ul>
+     * <li>«Текущий проект» — имена выделенных проектов;</li>
+     * <li>«Текущий объект» — выделенный элемент поднят до объекта МД верхнего
+     * уровня (как в самом отборе);</li>
+     * <li>«Текущий элемент» — сам выделенный элемент, без подъёма.</li>
+     * </ul>
+     *
+     * @return имена через запятую или {@code null}, если источник не определён
+     */
+    private static String scopeDetail(IViewPart view, String scopeName)
+    {
+        Object selection = Global.getField(view, "scopeSelection"); //$NON-NLS-1$
+        if (selection == null)
+            return null;
+        if (SCOPE_CURRENT_PROJECT.equals(scopeName))
+            return join(projectNames(selection));
+        if (!SCOPE_CURRENT_OBJECT.equals(scopeName) && !SCOPE_CURRENT_ELEMENT.equals(scopeName))
+            return null;
+
+        Object manager = Global.getField(view, "scopeSelectionManager"); //$NON-NLS-1$
+        boolean liftToTopObject = SCOPE_CURRENT_OBJECT.equals(scopeName);
+        Object objects = Global.invoke(selection, "getSelectedObjects"); //$NON-NLS-1$
+        if (!(objects instanceof Map<?, ?> byProject))
+            return null;
+
+        Set<String> names = new LinkedHashSet<>();
+        for (Object perProject : byProject.values())
+        {
+            if (!(perProject instanceof Collection<?> items))
+                continue;
+            for (Object item : items)
+                add(names, fullNameOfScopeObject(manager, item, liftToTopObject));
+        }
+        return join(names);
+    }
+
+    /**
+     * Проекты отбора: как в штатном {@code ScopeSelectionManager.getCurrentProject} —
+     * и явно выделенные проекты, и проекты выделенных объектов (при выделении
+     * объекта список проектов пуст, а отбор всё равно работает).
+     */
+    private static Set<String> projectNames(Object selection)
+    {
+        Set<String> names = new LinkedHashSet<>();
+        addProjectNames(names, Global.invoke(selection, "getSelectedProjects")); //$NON-NLS-1$
+        if (Global.invoke(selection, "getSelectedObjects") instanceof Map<?, ?> byProject) //$NON-NLS-1$
+            addProjectNames(names, byProject.keySet());
+        return names;
+    }
+
+    private static void addProjectNames(Set<String> names, Object projects)
+    {
+        if (!(projects instanceof Collection<?> items))
+            return;
+        for (Object project : items)
+        {
+            if (project instanceof IProject resource)
+                add(names, resource.getName());
+        }
+    }
+
+    private static String fullNameOfScopeObject(Object manager, Object item, boolean liftToTopObject)
+    {
+        if (!(item instanceof EObject object))
+            return null;
+        // Подпись обновляется по таймеру: исключение из чужого резолва оборвало бы цепочку тиков.
+        try
+        {
+            Object top = liftToTopObject && manager != null
+                ? Global.invoke(manager, "getTopMdObject", object) //$NON-NLS-1$
+                : null;
+            return GetRef.eObjectToFullName(top instanceof EObject topObject ? topObject : object);
+        }
+        catch (Exception e)
+        {
+            Debug.log("fullNameOfScopeObject: " + e); //$NON-NLS-1$
+            return null;
+        }
+    }
+
+    private static void add(Set<String> names, String name)
+    {
+        if (name != null && !name.isBlank())
+            names.add(name);
+    }
+
+    private static String join(Set<String> names)
+    {
+        return names.isEmpty() ? null : String.join(", ", names); //$NON-NLS-1$
+    }
+
+    private static void keepScopeAppended(IViewPart view, Label status, Object filters, ClassLoader loader)
     {
         Display display = status.getDisplay();
         Runnable[] tick = new Runnable[1];
@@ -341,7 +461,7 @@ public final class ProblemViewHook implements IStartup
         {
             if (status.isDisposed())
                 return;
-            appendScope(status, filters, loader);
+            appendScope(view, status, filters, loader);
             display.timerExec(SCOPE_REFRESH_MS, tick[0]);
         };
         display.timerExec(SCOPE_REFRESH_MS, tick[0]);
@@ -363,7 +483,7 @@ public final class ProblemViewHook implements IStartup
      * {@code internal} наружу не экспортирован, так что слушателя подставляем
      * динамическим прокси (см. правило про неэкспортированные супертипы).
      */
-    private static void listenScopeChanges(Label status, Object filters, ClassLoader loader)
+    private static void listenScopeChanges(IViewPart view, Label status, Object filters, ClassLoader loader)
     {
         if (filters == null)
             return;
@@ -374,7 +494,7 @@ public final class ProblemViewHook implements IStartup
             InvocationHandler handler = (proxy, method, args) ->
             {
                 if ("accept".equals(method.getName())) //$NON-NLS-1$
-                    display.asyncExec(() -> appendScope(status, filters, loader));
+                    display.asyncExec(() -> appendScope(view, status, filters, loader));
                 return defaultProxyResult(method, args, proxy);
             };
             Object listener = Proxy.newProxyInstance(loader, new Class<?>[] { listenerType }, handler);
@@ -457,7 +577,69 @@ public final class ProblemViewHook implements IStartup
         data.put(CHECK_ID_DATA_KEY, shortUid);
         Debug.log("openCheckSettings: " + shortUid); //$NON-NLS-1$
         Shell target = shell != null ? shell : Display.getDefault().getActiveShell();
-        PreferencesUtil.createPropertyDialogOn(target, project, CHECKS_PAGE_ID, null, data).open();
+        PreferenceDialog dialog =
+            PreferencesUtil.createPropertyDialogOn(target, project, CHECKS_PAGE_ID, null, data);
+        if (dialog == null)
+            return;
+        CheckDescriptionRefresh.install(dialog);
+        dialog.open();
+    }
+
+    /**
+     * Описание проверки (HTML) на странице «Проверки» параметров проекта рисуется
+     * через {@code Browser.execute("document.body.innerHTML = …")}. При открытии
+     * страницы с уже выбранной проверкой ({@code applyData}) описание пустое: EDT
+     * вызывает {@code execute} сразу после {@code setText} начального документа, а
+     * до окончания его загрузки {@code execute} молча ничего не делает. Повторяем
+     * отрисовку по событию загрузки документа — состояние {@code CheckViewer}
+     * (проект и настройка проверки) к этому моменту уже проставлено.
+     *
+     * <p>Диалог сюда приходит уже созданным: {@code PropertyDialog.createDialogOn}
+     * внутри {@link PreferencesUtil#createPropertyDialogOn} сам вызывает
+     * {@code create()}. Повторный {@code create()} создаёт второй shell и теряет
+     * выбранную страницу вместе с отбором по проекту — вызывать его нельзя.
+     * Поэтому, кроме слушателя, планируем и разовую перерисовку в очереди UI:
+     * документ мог загрузиться ещё до установки слушателя.
+     */
+    private static final class CheckDescriptionRefresh
+    {
+        private CheckDescriptionRefresh() {}
+
+        static void install(PreferenceDialog dialog)
+        {
+            Object page = dialog.getSelectedPage();
+            if (!(page instanceof IPreferencePage preferencePage))
+                return;
+            Browser browser = findBrowser(preferencePage.getControl());
+            if (browser == null)
+            {
+                Debug.log("CheckDescriptionRefresh: no browser on checks page"); //$NON-NLS-1$
+                return;
+            }
+            Composite checkViewer = browser.getParent();
+            Runnable refresh = () -> {
+                if (!browser.isDisposed())
+                    Global.invokeVoid(checkViewer, "updateHtmlContent"); //$NON-NLS-1$
+            };
+            browser.addProgressListener(ProgressListener.completedAdapter(e -> refresh.run()));
+            browser.getDisplay().asyncExec(refresh);
+        }
+
+        private static Browser findBrowser(Control control)
+        {
+            if (control instanceof Browser browser)
+                return browser;
+            if (control instanceof Composite composite)
+            {
+                for (Control child : composite.getChildren())
+                {
+                    Browser found = findBrowser(child);
+                    if (found != null)
+                        return found;
+                }
+            }
+            return null;
+        }
     }
 
     private static Marker markerOf(Object element)

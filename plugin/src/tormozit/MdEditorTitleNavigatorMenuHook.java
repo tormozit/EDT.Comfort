@@ -1,8 +1,12 @@
 package tormozit;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
 
@@ -69,6 +73,9 @@ import com._1c.g5.v8.dt.metadata.mdclass.BasicForm;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicTemplate;
 import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
+import com._1c.g5.v8.dt.validation.marker.Marker;
+import com._1c.g5.v8.dt.validation.marker.MarkerFilter;
+import com._1c.g5.v8.dt.validation.marker.v2.IMarkerManagerV2;
 
 /**
  * Имя объекта метаданных в заголовке страницы редактора ({@link DtGranularEditor})
@@ -164,6 +171,8 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
 
             for (IWorkbenchWindow w : workbench.getWorkbenchWindows())
                 hookWindow(w);
+
+            MarkerUpdateDebug.install();
         });
     }
 
@@ -187,12 +196,12 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
         window.getPartService().addPartListener(new IPartListener2()
         {
             @Override public void partOpened(IWorkbenchPartReference ref)      { hookFromRef(ref); }
-            @Override public void partActivated(IWorkbenchPartReference ref)   { hookFromRef(ref); }
-            @Override public void partBroughtToTop(IWorkbenchPartReference r)  { hookFromRef(r); }
+            @Override public void partActivated(IWorkbenchPartReference ref)   { hookFromRef(ref); MarkerUpdateDebug.logPart("partActivated", ref); } //$NON-NLS-1$
+            @Override public void partBroughtToTop(IWorkbenchPartReference r)  { hookFromRef(r); MarkerUpdateDebug.logPart("partBroughtToTop", r); } //$NON-NLS-1$
             @Override public void partClosed(IWorkbenchPartReference r)        {}
             @Override public void partDeactivated(IWorkbenchPartReference r)   {}
-            @Override public void partHidden(IWorkbenchPartReference r)        {}
-            @Override public void partVisible(IWorkbenchPartReference r)       {}
+            @Override public void partHidden(IWorkbenchPartReference r)        { MarkerUpdateDebug.logPart("partHidden", r); } //$NON-NLS-1$
+            @Override public void partVisible(IWorkbenchPartReference r)       { MarkerUpdateDebug.logPart("partVisible", r); } //$NON-NLS-1$
             @Override public void partInputChanged(IWorkbenchPartReference r)  {}
 
             private void hookFromRef(IWorkbenchPartReference ref)
@@ -277,6 +286,311 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
         // Win32: Ctrl+C забирает global Copy редактора (дерево вкладки), не StyledText.
         CopyCommandSupport.wireCopyOverride(titleText);
         new TitleObjectLink(form, titleText, mdObject, editor);
+        TitleFlickerDebug.install(form, titleText);
+    }
+
+    /**
+     * ВРЕМЕННО (issue 440): почему шапка пересчитывается каждые ~1,5 с при неизменных маркерах.
+     *
+     * <p>{@code DtGranularEditorMarkerSupport.scheduleMarkerUpdate(1000)} зовётся ровно из двух
+     * мест: {@code handleMarkerChanged} (пришло событие маркеров по проекту редактора) и
+     * {@code startMarkerListening}, который EDT дёргает из {@code DtGranularEditor.onEditorVisible}.
+     * Задержка 1000 мс совпадает с наблюдаемым периодом мигания, значит кто-то из двоих частит.
+     *
+     * <p>Здесь пишем оба канала: свой слушатель маркеров (со стеком — видно, кто коммитит
+     * изменения) и события видимости/активации частей-редакторов. Лог безусловный,
+     * приёмник — {@code .tmp/temp-logs/marker-update.log}, время сопоставимо с
+     * {@code title-flicker.log}.
+     */
+    private static final class MarkerUpdateDebug
+    {
+        private static final String TOPIC = "marker-update"; //$NON-NLS-1$
+
+        /** Больше маркеров в снимок не берём — диагностика не должна тормозить UI-поток. */
+        private static final int MARKER_DIFF_LIMIT = 5000;
+
+        /** Сколько отличий выписывать в строку лога. */
+        private static final int MARKER_SAMPLE_LIMIT = 5;
+
+        private static final Map<String, Set<String>> previousMarkers = new HashMap<>();
+
+        private static boolean installed;
+
+        private static long lastNanos;
+
+        static void install()
+        {
+            if (installed)
+                return;
+            installed = true;
+            try
+            {
+                IMarkerManagerV2 manager = Global.getOsgiService(IMarkerManagerV2.class);
+                if (manager == null)
+                {
+                    Global.tempLog(TOPIC, "сервис IMarkerManagerV2 не получен"); //$NON-NLS-1$
+                    return;
+                }
+                manager.addListener(event ->
+                {
+                    log("markersChanged projects=" + projectNames(event.getChangedProjects()), true); //$NON-NLS-1$
+                    Collection<IProject> changed = event.getChangedProjects();
+                    if (changed != null)
+                        Display.getDefault().asyncExec(() -> diffMarkers(manager, changed));
+                });
+                Global.tempLog(TOPIC, "слушатель маркеров подключён"); //$NON-NLS-1$
+            }
+            catch (Exception e)
+            {
+                Global.tempLog(TOPIC, "install fail: " + e); //$NON-NLS-1$
+            }
+        }
+
+        static void logPart(String what, IWorkbenchPartReference ref)
+        {
+            if (!installed || ref == null)
+                return;
+            try
+            {
+                IWorkbenchPart part = ref.getPart(false);
+                if (!(part instanceof DtGranularEditor<?>))
+                    return;
+                log(what + " part='" + ref.getPartName() + '\'', false); //$NON-NLS-1$
+            }
+            catch (Exception e)
+            {
+                Global.tempLog(TOPIC, "logPart fail: " + e); //$NON-NLS-1$
+            }
+        }
+
+        private static void log(String text, boolean withStack)
+        {
+            try
+            {
+                long now = System.nanoTime();
+                long deltaMs = lastNanos == 0 ? -1 : (now - lastNanos) / 1_000_000L;
+                lastNanos = now;
+
+                StringBuilder line = new StringBuilder();
+                line.append(text);
+                line.append(" dt=").append(deltaMs).append("ms"); //$NON-NLS-1$ //$NON-NLS-2$
+                line.append(" поток='").append(Thread.currentThread().getName()).append('\''); //$NON-NLS-1$
+                if (withStack)
+                    line.append(" | ").append(TitleFlickerDebug.callers()); //$NON-NLS-1$
+                Global.tempLog(TOPIC, line.toString());
+            }
+            catch (Exception e)
+            {
+                Global.tempLog(TOPIC, "log fail: " + e); //$NON-NLS-1$
+            }
+        }
+
+        /**
+         * Что именно поменялось в маркерах проекта. Коммиттер шлёт событие только когда в очереди
+         * есть записи, но записи могли переписать те же самые маркеры — тогда наборы совпадут,
+         * и виноват производитель, который перезаписывает неизменившееся.
+         */
+        private static void diffMarkers(IMarkerManagerV2 manager, Collection<IProject> projects)
+        {
+            for (IProject project : projects)
+            {
+                try
+                {
+                    Set<String> now = new LinkedHashSet<>();
+                    manager.createReader(project)
+                        .markers(MarkerFilter.createProjectFilter(project))
+                        .limit(MARKER_DIFF_LIMIT)
+                        .forEach(marker -> now.add(markerKey(marker)));
+
+                    Set<String> before = previousMarkers.put(project.getName(), now);
+                    if (before == null)
+                    {
+                        log("маркеры проекта " + project.getName() + ": первый снимок, всего " //$NON-NLS-1$ //$NON-NLS-2$
+                            + now.size(), false);
+                        continue;
+                    }
+
+                    Set<String> added = new LinkedHashSet<>(now);
+                    added.removeAll(before);
+                    Set<String> removed = new LinkedHashSet<>(before);
+                    removed.removeAll(now);
+
+                    StringBuilder line = new StringBuilder("маркеры проекта "); //$NON-NLS-1$
+                    line.append(project.getName()).append(": всего ").append(now.size()); //$NON-NLS-1$
+                    line.append(", добавлено ").append(added.size()); //$NON-NLS-1$
+                    line.append(", убрано ").append(removed.size()); //$NON-NLS-1$
+                    if (added.isEmpty() && removed.isEmpty())
+                        line.append(" — набор НЕ ИЗМЕНИЛСЯ"); //$NON-NLS-1$
+                    else
+                    {
+                        appendSample(line, " +", added); //$NON-NLS-1$
+                        appendSample(line, " -", removed); //$NON-NLS-1$
+                    }
+                    log(line.toString(), false);
+                }
+                catch (Exception e)
+                {
+                    Global.tempLog(TOPIC, "diff fail: " + e); //$NON-NLS-1$
+                }
+            }
+        }
+
+        private static void appendSample(StringBuilder line, String prefix, Set<String> keys)
+        {
+            int shown = 0;
+            for (String key : keys)
+            {
+                line.append(prefix).append('[').append(key).append(']');
+                if (++shown >= MARKER_SAMPLE_LIMIT)
+                {
+                    if (keys.size() > shown)
+                        line.append(prefix).append("…ещё ").append(keys.size() - shown); //$NON-NLS-1$
+                    return;
+                }
+            }
+        }
+
+        private static String markerKey(Marker marker)
+        {
+            return marker.getCheckId() + '|' + marker.getMarkerId() + '|' + marker.getSeverity() + '|'
+                + marker.getMessage();
+        }
+
+        private static String projectNames(Collection<IProject> projects)
+        {
+            if (projects == null || projects.isEmpty())
+                return "[]"; //$NON-NLS-1$
+            StringBuilder result = new StringBuilder("["); //$NON-NLS-1$
+            for (IProject project : projects)
+            {
+                if (result.length() > 1)
+                    result.append(", "); //$NON-NLS-1$
+                result.append(project == null ? "null" : project.getName()); //$NON-NLS-1$
+            }
+            return result.append(']').toString();
+        }
+    }
+
+    /**
+     * ВРЕМЕННО (issue 440): мигание шапки редактора объекта.
+     *
+     * <p>Симптом: шапка несколько кадров рисуется без значка сообщения формы («Обнаружено N
+     * предупреждений»), из-за чего текст заголовка съезжает влево и обратно.
+     *
+     * <p>По логу причина установлена: {@code updatePageTitleWithMarkers} зовёт
+     * {@code MessageManager.removeAllMessages()} ещё при включённом автообновлении, и только
+     * потом {@code setAutoUpdate(false)} + {@code addMessage(...)} + {@code setAutoUpdate(true)}.
+     * Первый вызов немедленно даёт {@code Form.setMessage(null)} → {@code layout()} +
+     * {@code redraw()} — 25–57 мс шапка без значка.
+     *
+     * <p>Лог безусловный, без флажков и порогов, приёмник — {@code .tmp/temp-logs/title-flicker.log}.
+     * Пишем не в путь отрисовки (это уже давало регрессии, см. правила), а по факту сдвига:
+     * {@code SWT.Move}/{@code SWT.Resize} заголовка приходят синхронно внутри {@code layout()},
+     * который зовёт сам {@code setMessage}, поэтому в стеке события виден настоящий инициатор.
+     */
+    private static final class TitleFlickerDebug
+    {
+        private static final String TOPIC = "title-flicker"; //$NON-NLS-1$
+
+        private final Form form;
+
+        private final StyledText titleText;
+
+        private long lastNanos;
+
+        private int lastX = Integer.MIN_VALUE;
+
+        private String lastMessage = "<нет>"; //$NON-NLS-1$
+
+        static void install(Form form, StyledText titleText)
+        {
+            try
+            {
+                new TitleFlickerDebug(form, titleText);
+            }
+            catch (Exception e)
+            {
+                Global.tempLog(TOPIC, "install fail: " + e); //$NON-NLS-1$
+            }
+        }
+
+        private TitleFlickerDebug(Form form, StyledText titleText)
+        {
+            this.form = form;
+            this.titleText = titleText;
+
+            Listener listener = event -> log(event.type == SWT.Move ? "move" : "resize"); //$NON-NLS-1$ //$NON-NLS-2$
+            titleText.addListener(SWT.Move, listener);
+            titleText.addListener(SWT.Resize, listener);
+
+            log("install"); //$NON-NLS-1$
+        }
+
+        private void log(String what)
+        {
+            try
+            {
+                if (titleText.isDisposed() || form.isDisposed())
+                    return;
+
+                long now = System.nanoTime();
+                long deltaMs = lastNanos == 0 ? -1 : (now - lastNanos) / 1_000_000L;
+                lastNanos = now;
+
+                Point location = titleText.getLocation();
+                Point size = titleText.getSize();
+                String message = form.getMessage() == null ? "<нет>" : form.getMessage(); //$NON-NLS-1$
+
+                StringBuilder line = new StringBuilder();
+                line.append(what);
+                line.append(" dt=").append(deltaMs).append("ms"); //$NON-NLS-1$ //$NON-NLS-2$
+                line.append(" x=").append(location.x); //$NON-NLS-1$
+                if (lastX != Integer.MIN_VALUE && lastX != location.x)
+                    line.append(" (было ").append(lastX).append(", сдвиг ") //$NON-NLS-1$ //$NON-NLS-2$
+                        .append(location.x - lastX).append(')');
+                line.append(" w=").append(size.x); //$NON-NLS-1$
+                line.append(" msgType=").append(form.getMessageType()); //$NON-NLS-1$
+                line.append(" msg='").append(message).append('\''); //$NON-NLS-1$
+                if (!message.equals(lastMessage))
+                    line.append(" [сообщение изменилось: было '").append(lastMessage).append("']"); //$NON-NLS-1$ //$NON-NLS-2$
+                line.append(" | ").append(callers()); //$NON-NLS-1$
+
+                lastX = location.x;
+                lastMessage = message;
+                Global.tempLog(TOPIC, line.toString());
+            }
+            catch (Exception e)
+            {
+                Global.tempLog(TOPIC, "log fail: " + e); //$NON-NLS-1$
+            }
+        }
+
+        /** Инициатор сдвига: кадры SWT и самого хука — шум, интересны формы Eclipse и EDT. */
+        private static String callers()
+        {
+            StringBuilder result = new StringBuilder();
+            int shown = 0;
+            for (StackTraceElement frame : new Throwable().getStackTrace())
+            {
+                String className = frame.getClassName();
+                if (className.startsWith("tormozit.") //$NON-NLS-1$
+                    || className.startsWith("org.eclipse.swt.")) //$NON-NLS-1$
+                    continue;
+                if (result.length() > 0)
+                    result.append(" <- "); //$NON-NLS-1$
+                result.append(shortName(className)).append('.').append(frame.getMethodName())
+                    .append(':').append(frame.getLineNumber());
+                if (++shown >= 10)
+                    break;
+            }
+            return result.length() == 0 ? "<стек без интересных кадров>" : result.toString(); //$NON-NLS-1$
+        }
+
+        private static String shortName(String className)
+        {
+            int dot = className.lastIndexOf('.');
+            return dot < 0 ? className : className.substring(dot + 1);
+        }
     }
 
     /**

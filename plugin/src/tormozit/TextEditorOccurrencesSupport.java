@@ -211,7 +211,7 @@ public final class TextEditorOccurrencesSupport
 
     /**
      * Контекст поиска из диалога «Найти/Заменить»
-     * ({@link FindReplaceLiveMatchCountHook}): пока выделение совпадает с искомой строкой,
+     * ({@link FindReplaceDialogHook}): пока выделение совпадает с искомой строкой,
      * включается подсветка — без требования «слово выделено целиком»: поиск может найти и
      * часть идентификатора. Сам поиск вхождений при этом обычный, как и при выделении
      * слова целиком.
@@ -797,20 +797,12 @@ public final class TextEditorOccurrencesSupport
             index = haystack.indexOf(needle, index);
             if (index < 0)
                 break;
-            if (!wholeWord || isWordBoundary(text, index, index + needle.length()))
+            if (!wholeWord
+                || IdentifierSelectionSupport.isWholeWordMatch(text, index, index + needle.length()))
                 ranges.add(new int[] { index, needle.length() });
             index += needle.length();
         }
         return ranges;
-    }
-
-    private static boolean isWordBoundary(String text, int matchStart, int matchEnd)
-    {
-        if (matchStart > 0 && IdentifierSelectionSupport.isIdentifierChar(text.charAt(matchStart - 1)))
-            return false;
-        if (matchEnd < text.length() && IdentifierSelectionSupport.isIdentifierChar(text.charAt(matchEnd)))
-            return false;
-        return true;
     }
 
     // ========= Аннотации на линейке обзора =========

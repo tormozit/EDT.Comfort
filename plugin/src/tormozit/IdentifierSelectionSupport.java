@@ -33,6 +33,28 @@ final class IdentifierSelectionSupport
     }
 
     /**
+     * Граница слова в позиции {@code pos} (между символами {@code pos - 1} и {@code pos}):
+     * символы разных категорий (идентификатор / не идентификатор) по разные стороны, начало и
+     * конец текста — как отсутствующий (не идентификатор) символ снаружи. Семантика как у
+     * {@code \b} в regex, а не «оба соседних символа не идентификатор» — иначе поиск «целое
+     * слово» для фрагмента, кончающегося на неидентификатор (например {@code "Найти."}), не
+     * находит вообще ни одного вхождения, если сразу после точки идёт идентификатор
+     * ({@code "Найти.Метод"}): справа от границы стоит идентификатор, а не отсутствие символа.
+     */
+    static boolean isWordBoundaryAt(String text, int pos)
+    {
+        boolean before = pos > 0 && isIdentifierChar(text.charAt(pos - 1));
+        boolean after = pos < text.length() && isIdentifierChar(text.charAt(pos));
+        return before != after;
+    }
+
+    /** Совпадение {@code [matchStart, matchEnd)} — целое слово: граница с обеих сторон. */
+    static boolean isWholeWordMatch(String text, int matchStart, int matchEnd)
+    {
+        return isWordBoundaryAt(text, matchStart) && isWordBoundaryAt(text, matchEnd);
+    }
+
+    /**
      * Смещение соседней границы идентификатора слева от {@code offset} (для расширения выделения влево).
      */
     static int previousBoundary(String text, int offset)

@@ -584,7 +584,8 @@ public final class TextEditorFastSearchHandler extends AbstractHandler
         for (int i = Math.max(from, 0); i <= end; i++)
         {
             if (text.regionMatches(!caseSensitive, i, search, 0, search.length())
-                && (!wholeWord || isWordBoundary(text, i, i + search.length())))
+                && (!wholeWord
+                    || IdentifierSelectionSupport.isWholeWordMatch(text, i, i + search.length())))
                 return i;
         }
         return -1;
@@ -599,26 +600,10 @@ public final class TextEditorFastSearchHandler extends AbstractHandler
         for (int i = start; i >= 0; i--)
         {
             if (text.regionMatches(!caseSensitive, i, search, 0, search.length())
-                && (!wholeWord || isWordBoundary(text, i, i + search.length())))
+                && (!wholeWord
+                    || IdentifierSelectionSupport.isWholeWordMatch(text, i, i + search.length())))
                 return i;
         }
         return -1;
-    }
-
-    private static boolean isWordBoundary(String text, int matchStart, int matchEnd)
-    {
-        if (matchStart > 0)
-        {
-            char prev = text.charAt(matchStart - 1);
-            if (IdentifierSelectionSupport.isIdentifierChar(prev))
-                return false;
-        }
-        if (matchEnd < text.length())
-        {
-            char next = text.charAt(matchEnd);
-            if (IdentifierSelectionSupport.isIdentifierChar(next))
-                return false;
-        }
-        return true;
     }
 }
