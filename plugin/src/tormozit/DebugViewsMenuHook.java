@@ -6,6 +6,7 @@ import java.util.List;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.debug.core.model.IWatchExpression;
 import org.eclipse.debug.ui.AbstractDebugView;
+import org.eclipse.debug.ui.IDebugUIConstants;
 import org.eclipse.jface.viewers.ISelection;
 import org.eclipse.jface.viewers.ISelectionProvider;
 import org.eclipse.jface.viewers.IStructuredSelection;
@@ -29,14 +30,15 @@ import com._1c.g5.v8.dt.debug.core.model.IBslStackFrame;
 import com._1c.g5.v8.dt.debug.core.model.IBslVariable;
 
 /**
- * «Отладить объект ИР» в контекстном меню панелей «Переменные» и «Выражения».
+ * «Отладить объект ИР» в контекстном меню панелей «Переменные», «Выражения» и
+ * «Выражения встроенного языка».
  * Только {@link SWT#MenuDetect} при правом клике — без partListener и без getViewer() на активации view.
  */
 public final class DebugViewsMenuHook implements IStartup
 {
     private static final String HOOK_MARKER_PREFIX = "tormozit.debugViewsMenuHooked."; //$NON-NLS-1$
     private static final String VARIABLE_VIEW_ID = "org.eclipse.debug.ui.VariableView"; //$NON-NLS-1$
-    private static final String EXPRESSIONS_VIEW_ID =
+    private static final String BSL_EXPRESSIONS_VIEW_ID =
         "com._1c.g5.v8.dt.debug.ui.variables.BslExpressionsView"; //$NON-NLS-1$
     private static final String ITEM_TEXT = "Отладить объект ИР"; //$NON-NLS-1$
     private static final String ITEM_TOOLTIP =
@@ -212,7 +214,7 @@ public final class DebugViewsMenuHook implements IStartup
         String id = part.getSite().getId();
         if (VARIABLE_VIEW_ID.equals(id))
             return ViewKind.VARIABLES;
-        if (EXPRESSIONS_VIEW_ID.equals(id))
+        if (BSL_EXPRESSIONS_VIEW_ID.equals(id) || IDebugUIConstants.ID_EXPRESSION_VIEW.equals(id))
             return ViewKind.EXPRESSIONS;
         return null;
     }

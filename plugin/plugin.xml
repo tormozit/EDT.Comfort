@@ -581,6 +581,28 @@
 
   <extension point="org.eclipse.ui.handlers">
     <handler
+        commandId="com._1c.g5.v8.dt.debug.ui.commands.Inspect"
+        class="tormozit.DebugInspectHandler">
+      <!-- Победитель конфликта обработчиков определяется приоритетом источников выражения
+           (HandlerActivation.compareTo по sourcePriority). У штатного обработчика набора
+           действий это ACTIVE_ACTION_SETS = 256, поэтому одного activeContexts (ACTIVE_CONTEXT
+           = 64) мало — проверено логом: выигрывал ActionDelegateHandlerProxy из debug.ui.
+           Условие по activePart даёт ACTIVE_PART = 1048576 и заодно осмысленно: команда нужна
+           только в редакторе. -->
+      <activeWhen>
+        <and>
+          <with variable="activeContexts">
+            <iterate operator="or">
+              <equals value="com._1c.g5.v8.dt.bsl.ui.editor.BslEditorScope"/>
+            </iterate>
+          </with>
+          <with variable="activePart">
+            <instanceof value="org.eclipse.ui.IEditorPart"/>
+          </with>
+        </and>
+      </activeWhen>
+    </handler>
+    <handler
         commandId="com._1c.g5.v8.dt.ui.aef.commands.dt.select.clear"
         class="tormozit.PropertySheetShiftF4ClearHook">
       <activeWhen>

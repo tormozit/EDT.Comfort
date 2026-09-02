@@ -3,8 +3,10 @@ package tormozit;
 import org.eclipse.core.commands.Command;
 import org.eclipse.core.commands.ExecutionEvent;
 import org.eclipse.core.commands.ExecutionException;
-import org.eclipse.core.commands.IExecutionListener;
+import org.eclipse.core.commands.IExecutionListenerWithChecks;
+import org.eclipse.core.commands.NotEnabledException;
 import org.eclipse.core.commands.NotHandledException;
+import org.eclipse.core.commands.common.NotDefinedException;
 import org.eclipse.jface.bindings.keys.KeyStroke;
 import org.eclipse.jface.bindings.keys.SWTKeySupport;
 import org.eclipse.jface.preference.IPreferenceStore;
@@ -22,6 +24,13 @@ import org.eclipse.ui.keys.IBindingService;
  * гиперссылкой «Настроить команду» — открывает страницу «Клавиши» с выделенной привязкой
  * сработавшей команды.
  *
+ * <p>Тост показывается <b>по исходу</b> выполнения: «Выполнена команда» либо «Команда не
+ * выполнена» с причиной (запрещена, нет обработчика, ошибка). Само «вызвана» пользователю
+ * ничего не даёт — команда, чей обработчик в текущем контексте запрещён, завершается тихо, и
+ * нажатие выглядит как бездействие. Исход виден только через
+ * {@link org.eclipse.core.commands.IExecutionListenerWithChecks} — у обычного
+ * {@code IExecutionListener} нет колбэка {@code notEnabled}.
+ *
  * <p>Определение «сработало с клавиатуры» — тем же приёмом, что и штатный
  * {@code org.eclipse.ui.internal.keys.show.ShowKeysListener}: НЕ через {@code Display.KeyDown}-
  * фильтр (он не видит команды, чьё сочетание идёт через нативную трансляцию акселератора меню
@@ -38,8 +47,20 @@ public final class KeyBindingToastHook implements IStartup
     /** Не показывать повторный тост чаще этого интервала (защита от дребезга/повторов). */
     private static final long TOAST_MIN_INTERVAL_MS = 1500;
 
+    /**
+     * Сколько ждём исход выполнения, прежде чем показать тост без него. Команда, открывшая
+     * модальный диалог, «завершится» только после его закрытия — молчать всё это время нельзя,
+     * а показывать «Выполнена» задним числом тем более.
+     */
+    private static final int OUTCOME_WAIT_MS = 500;
+
     private static volatile long lastToastAt;
     private static boolean executionListenerInstalled;
+
+    /** Вызов, по которому ждём исход (всё — в потоке UI, синхронизация не нужна). */
+    private static String pendingCommandId;
+    private static String pendingMessage;
+    private static Runnable pendingTimeout;
 
     @Override
     public void earlyStartup()
@@ -62,18 +83,18 @@ public final class KeyBindingToastHook implements IStartup
         executionListenerInstalled = true;
     }
 
-    private static final IExecutionListener executionListener = new IExecutionListener()
+    private static final IExecutionListenerWithChecks executionListener =
+            new IExecutionListenerWithChecks()
     {
         @Override
         public void preExecute(String commandId, ExecutionEvent event)
         {
-            // Как и штатный ShowKeysListener — показываем ДО выполнения команды, а не после
-            // (postExecuteSuccess): если команда открывает модальный диалог, она не «завершится»
-            // до его закрытия — тост ждал бы всё это время вместо мгновенного показа.
+            // Только запоминаем вызов: тост покажем по исходу (см. notePendingToast).
             try
             {
                 Object trigger = event != null ? event.getTrigger() : null;
-                maybeShowToast(commandId, trigger instanceof Event triggerEvent ? triggerEvent : null);
+                Event triggerEvent = trigger instanceof Event e ? e : null;
+                notePendingToast(commandId, triggerEvent);
             }
             catch (Exception e)
             {
@@ -83,23 +104,46 @@ public final class KeyBindingToastHook implements IStartup
         @Override
         public void postExecuteSuccess(String commandId, Object returnValue)
         {
-            // показ уже произошёл в preExecute
+            showOutcomeToast(commandId, "Выполнена команда", null); //$NON-NLS-1$
         }
 
         @Override
         public void notHandled(String commandId, NotHandledException exception)
         {
-            // ничего — тост уже мог показаться в preExecute, это ожидаемо (как у ShowKeysListener)
+            showOutcomeToast(commandId, "Команда не выполнена", //$NON-NLS-1$
+                    "нет обработчика в текущем контексте"); //$NON-NLS-1$
         }
 
         @Override
         public void postExecuteFailure(String commandId, ExecutionException exception)
         {
-            // ничего — тост уже мог показаться в preExecute, это ожидаемо (как у ShowKeysListener)
+            showOutcomeToast(commandId, "Команда не выполнена", //$NON-NLS-1$
+                    describeFailureReason(exception));
+        }
+
+        @Override
+        public void notEnabled(String commandId, NotEnabledException exception)
+        {
+            showOutcomeToast(commandId, "Команда не выполнена", //$NON-NLS-1$
+                    "недоступна в текущем контексте"); //$NON-NLS-1$
+        }
+
+        @Override
+        public void notDefined(String commandId, NotDefinedException exception)
+        {
+            showOutcomeToast(commandId, "Команда не выполнена", //$NON-NLS-1$
+                    "команда не объявлена"); //$NON-NLS-1$
         }
     };
 
-    private static void maybeShowToast(String commandId, Event trigger)
+    /**
+     * Вызов только запоминается: тост показывается по исходу выполнения. «Вызвана» само по себе
+     * пользователю ничего не говорит — команда может оказаться запрещённой или без обработчика
+     * в текущем контексте, и тогда нажатие выглядит как молчаливое бездействие. Показ идёт из
+     * {@link #showOutcomeToast}, а если исход не пришёл за {@link #OUTCOME_WAIT_MS} (команда
+     * открыла диалог и не завершается до его закрытия) — из таймера, уже без строки исхода.
+     */
+    private static void notePendingToast(String commandId, Event trigger)
     {
         if (commandId == null || commandId.isBlank())
             return;
@@ -130,14 +174,93 @@ public final class KeyBindingToastHook implements IStartup
             return;
         }
 
-        lastToastAt = now;
-        String finalCommandId = commandId;
+        cancelPendingTimeout();
+        pendingCommandId = commandId;
+        pendingMessage = message;
+        schedulePendingTimeout();
+    }
+
+    /** Исход пришёл — показываем единственный тост по нему. */
+    private static void showOutcomeToast(String commandId, String title, String reason)
+    {
+        try
+        {
+            if (commandId == null || !commandId.equals(pendingCommandId))
+                return;
+            String message = pendingMessage;
+            clearPending();
+
+            StringBuilder sb = new StringBuilder(message);
+            if (reason != null && !reason.isBlank())
+                sb.append('\n').append(reason);
+
+            showToast(title, sb.toString(), commandId);
+        }
+        catch (Exception e)
+        {
+        }
+    }
+
+    /**
+     * Команда не завершилась за отведённое время (типично — открыла модальный диалог, а тот
+     * крутит свой цикл событий, поэтому таймер срабатывает). Показываем тост без исхода:
+     * ждать закрытия диалога и сообщать «выполнена» задним числом бессмысленно.
+     */
+    private static void schedulePendingTimeout()
+    {
+        Display display = Display.getCurrent();
+        if (display == null || display.isDisposed())
+            return;
+        String commandId = pendingCommandId;
+        pendingTimeout = () ->
+        {
+            if (commandId == null || !commandId.equals(pendingCommandId))
+                return;
+            String message = pendingMessage;
+            clearPending();
+            showToast("Вызвана команда", message, commandId); //$NON-NLS-1$
+        };
+        display.timerExec(OUTCOME_WAIT_MS, pendingTimeout);
+    }
+
+    private static void cancelPendingTimeout()
+    {
+        if (pendingTimeout == null)
+            return;
+        Display display = Display.getCurrent();
+        if (display != null && !display.isDisposed())
+            display.timerExec(-1, pendingTimeout);
+        pendingTimeout = null;
+    }
+
+    private static void clearPending()
+    {
+        cancelPendingTimeout();
+        pendingCommandId = null;
+        pendingMessage = null;
+    }
+
+    private static void showToast(String title, String message, String commandId)
+    {
+        lastToastAt = System.currentTimeMillis();
         ToastNotification.show(
-                "Вызвана команда", //$NON-NLS-1$
+                title,
                 message,
                 4000,
-                () -> ComfortKeysPreferences.openKeysPageForCommand(finalCommandId),
+                () -> ComfortKeysPreferences.openKeysPageForCommand(commandId),
                 "Настроить команду"); //$NON-NLS-1$
+    }
+
+    private static String describeFailureReason(ExecutionException exception)
+    {
+        Throwable cause = exception == null ? null : exception.getCause();
+        Throwable reported = cause != null ? cause : exception;
+        if (reported == null)
+            return "ошибка выполнения"; //$NON-NLS-1$
+        String message = reported.getMessage();
+        return message == null || message.isBlank()
+                ? "ошибка выполнения: " + reported.getClass().getSimpleName() //$NON-NLS-1$
+                : "ошибка выполнения: " + message; //$NON-NLS-1$
     }
 
     /**
