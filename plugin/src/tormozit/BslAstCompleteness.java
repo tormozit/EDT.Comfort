@@ -45,9 +45,7 @@ import com._1c.g5.v8.dt.bsl.model.Module;
  * <li>AST нет вовсе;</li>
  * <li>лексем {@code Процедура}/{@code Функция} в потоке разбора больше, чем методов в AST
  * ({@link #countMethodKeywordLeaves}) — часть методов при восстановлении не создана;</li>
- * <li>объявление метода целиком внутри узла синтаксической ошибки;</li>
- * <li>узел синтаксической ошибки занимает больше одной строки — {@code recover()} свалил в
- * него целую область.</li>
+ * <li>объявление метода целиком внутри узла синтаксической ошибки.</li>
  * </ul>
  *
  * <p>Счёт лексем — по <b>листьям узловой модели</b> и их грамматическому элементу
@@ -57,10 +55,13 @@ import com._1c.g5.v8.dt.bsl.model.Module;
  * отличимо: объявление — {@code Keyword} правила {@code Procedure}/{@code Function}, имя
  * свойства — правила {@code ExtName}, потерянный при обрыве метод — лист с {@code null}.
  *
- * <p>Почему одного признака «многострочный узел ошибки» мало: при {@code #Если} на месте
- * выражения ANTLR ставит несколько <b>однострочных</b> узлов ошибок в точках синхронизации,
- * а методы между ними и за ними в AST просто не появляются — большого узла, поглотившего
- * хвост, может и не быть. Ловит только сверка числа лексем с числом методов.
+ * <p>ANTLR лексирует поток целиком независимо от восстановления, поэтому потерянный метод
+ * <b>всегда</b> оставляет свой лист {@code Функция}/{@code Процедура} — сверка числа лексем с
+ * числом методов ловит и обрыв на {@code #Если} в условии (там ANTLR ставит несколько
+ * <b>однострочных</b> узлов ошибок, большого поглощающего узла нет). Признак «многострочный
+ * узел ошибки» из-за этого лишний и был убран: реальный обрыв он не ловил (ловит счёт
+ * лексем), зато давал ложное срабатывание на однострочной ошибке «Неверный ввод ";"», чей
+ * узел ANTLR растянул на пустую строку ниже — дерево при этом целое.
  *
  * <p>Восстановление ANTLR двух видов. <b>Вставка одной лексемы:</b> EDT требует {@code ;}
  * перед {@code КонецФункции} (1С — нет), синтезирует недостающую и продолжает — дерево целое,
@@ -104,7 +105,6 @@ public final class BslAstCompleteness
             int keywordLeaves = countMethodKeywordLeaves(parseResult.getRootNode());
             int methods = ((Module)root).allMethods().size();
             return keywordLeaves > methods
-                || multiLineErrorNode(parseResult) != null
                 || errorNodeSwallowingDeclaration(parseResult) != null;
         }
         catch (Exception | LinkageError e)
@@ -182,22 +182,6 @@ public final class BslAstCompleteness
             if (keyword.equalsIgnoreCase(value))
                 return true;
         return false;
-    }
-
-    /**
-     * Узел синтаксической ошибки, занимающий больше одной строки: парсер вышел из вложенных
-     * правил через {@code recover()}, свалив в узел целую область. {@code null}, если все
-     * ошибки локальные (вставка одной лексемы).
-     */
-    private static INode multiLineErrorNode(IParseResult parseResult)
-    {
-        Iterable<INode> errors = parseResult != null ? parseResult.getSyntaxErrors() : null;
-        if (errors == null)
-            return null;
-        for (INode error : errors)
-            if (error != null && error.getEndLine() > error.getStartLine())
-                return error;
-        return null;
     }
 
     private static INode errorNodeSwallowingDeclaration(IParseResult parseResult)

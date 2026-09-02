@@ -87,6 +87,9 @@ public class SmartOutlineHook implements IStartup {
     private static final String PENDING_CLEAR_SELECTION_KEY = "tormozit.outlinePendingClearSelection"; //$NON-NLS-1$
     private static final String OUTLINE_RECENT_ON_OPEN_KEY = "tormozit.outlineRecentOnOpen"; //$NON-NLS-1$
     private static final String TYPE_MARKED_CHECKBOX_KEY = "tormozit.typeMarkedCheckbox"; //$NON-NLS-1$
+
+    /** Число пометок, показанное в подписи флажка «Только помеченные (N)» (данные самого флажка). */
+    private static final String MARKED_COUNT_KEY = "tormozit.markedCount"; //$NON-NLS-1$
     private static final String OBJECT_PICKER_HOOK_KEY = "tormozit.objectPickerDialogHook"; //$NON-NLS-1$
     /** Заголовок {@code SelectTypeDialog_title} / {@code TypeDescriptionDialogComponent_DialogTitle}. */
     private static final String SELECT_TYPE_DIALOG_TITLE =
@@ -575,7 +578,6 @@ public class SmartOutlineHook implements IStartup {
                     if (btnObj instanceof Button btn && btn.getSelection()) {
                         btn.setSelection(false);
                         smartFilter.setMarkedOnly(false);
-                        ComfortSettings.setSelectTypeOnlyMarked(false);
                     }
                 }
 
@@ -1763,36 +1765,14 @@ public class SmartOutlineHook implements IStartup {
 
         Button onlyMarkedBtn = new Button(buttonParent, SWT.CHECK);
         onlyMarkedBtn.setText("Только помеченные"); //$NON-NLS-1$
-        onlyMarkedBtn.setToolTipText("Показать только элементы с установленным флажком" + Global.pluginSignForTooltip()); //$NON-NLS-1$
         onlyMarkedBtn.setLayoutData(new GridData(SWT.BEGINNING, SWT.CENTER, false, false));
 
         patchedShell.setData(TYPE_MARKED_CHECKBOX_KEY, onlyMarkedBtn);
 
-        Object multiItems = resolveMultiItems(patchedShell);
-        updateOnlyMarkedButtonText(onlyMarkedBtn, multiItems, buttonParent, viewer);
-        if (multiItems != null)
-        {
-            Global.addGenericListener(multiItems, "addListListener", //$NON-NLS-1$
-                "com._1c.g5.aef2.models.list.IListListener", //$NON-NLS-1$
-                () -> onlyMarkedBtn.getDisplay().asyncExec(
-                    () -> updateOnlyMarkedButtonText(onlyMarkedBtn, multiItems, buttonParent, viewer)));
-        }
-        else
-            installObjectPickerExtras(patchedShell, viewer, onlyMarkedBtn, buttonParent);
-
-        boolean stored = ComfortSettings.isSelectTypeOnlyMarked();
-        if (!stored)
-            stored = isCompositeTypeEnabled(patchedShell);
-        onlyMarkedBtn.setSelection(stored);
-        smartFilter.setMarkedOnly(stored);
-        // Фильтр применяется при открытии диалога (setComparator → refresh) уже после того,
-        // как строка выбрана — без этого выбранная строка уезжает за пределы видимой области.
-        keepSelectionVisible(viewer);
-
-        onlyMarkedBtn.addListener(SWT.Selection, e -> {
-            boolean enabled = onlyMarkedBtn.getSelection();
-            ComfortSettings.setSelectTypeOnlyMarked(enabled);
-            smartFilter.setMarkedOnly(enabled);
+        // Применение состояния флажка к дереву: общее для ручного переключения и для
+        // принудительного снятия, когда пометок не осталось.
+        Runnable applyMarkedOnly = () -> {
+            smartFilter.setMarkedOnly(onlyMarkedBtn.getSelection());
 
             Control control = viewer.getControl();
             if (control != null && !control.isDisposed()) {
@@ -1809,6 +1789,47 @@ public class SmartOutlineHook implements IStartup {
                 }
                 keepSelectionVisible(viewer);
             }
+        };
+
+        Object multiItems = resolveMultiItems(patchedShell);
+        updateOnlyMarkedButtonText(onlyMarkedBtn, multiItems, buttonParent, viewer, applyMarkedOnly);
+        if (multiItems != null)
+        {
+            Global.addGenericListener(multiItems, "addListListener", //$NON-NLS-1$
+                "com._1c.g5.aef2.models.list.IListListener", //$NON-NLS-1$
+                () -> onlyMarkedBtn.getDisplay().asyncExec(
+                    () -> updateOnlyMarkedButtonText(onlyMarkedBtn, multiItems, buttonParent, viewer,
+                        applyMarkedOnly)));
+        }
+        else
+            installObjectPickerExtras(patchedShell, viewer, onlyMarkedBtn, buttonParent, applyMarkedOnly);
+
+        // Состояние флажка не запоминается между открытиями: при открытии он включён, только если
+        // помеченных несколько — их и показываем. При одной пометке (частый случай простого типа)
+        // и тем более при пустом списке отбор скрыл бы всё остальное без пользы.
+        boolean initial = markedCount(onlyMarkedBtn) > 1;
+        onlyMarkedBtn.setSelection(initial);
+        smartFilter.setMarkedOnly(initial);
+        // Фильтр применяется при открытии диалога (setComparator → refresh) уже после того,
+        // как строка выбрана — без этого выбранная строка уезжает за пределы видимой области.
+        keepSelectionVisible(viewer);
+
+        final boolean[] userTouched = { false };
+        onlyMarkedBtn.addListener(SWT.Selection, e -> {
+            userTouched[0] = true;
+            applyMarkedOnly.run();
+        });
+
+        // Дерево пикера объектов заполняется отложенно, и на этом шаге пометок ещё может не быть
+        // видно. Пересчитываем после отрисовки, пока пользователь сам не тронул флажок.
+        onlyMarkedBtn.getDisplay().asyncExec(() -> {
+            if (onlyMarkedBtn.isDisposed() || userTouched[0])
+                return;
+            boolean several = markedCount(onlyMarkedBtn) > 1;
+            if (several == onlyMarkedBtn.getSelection())
+                return;
+            onlyMarkedBtn.setSelection(several);
+            applyMarkedOnly.run();
         });
 
         buttonParent.layout(true, true);
@@ -1854,18 +1875,6 @@ public class SmartOutlineHook implements IStartup {
     }
 
     /**
-     * Проверить, включён ли флажок «Составной тип данных» — обычный чекбокс, привязанный к
-     * {@code ITypeDescriptionDialogModel.getCompositeType()} ({@code IValue<Boolean>}).
-     */
-    private static boolean isCompositeTypeEnabled(Shell shell)
-    {
-        Object model = resolveTypeDescriptionModel(shell);
-        Object compositeType = model != null ? Global.invoke(model, "getCompositeType") : null; //$NON-NLS-1$
-        Object value = compositeType != null ? Global.invoke(compositeType, "get") : null; //$NON-NLS-1$
-        return Boolean.TRUE.equals(value);
-    }
-
-    /**
      * Список помеченных типов ({@code ITypeDescriptionDialogModel.getMultiItems()}, реализует
      * {@code java.util.List}) — источник числа в тексте флажка «Только помеченные (N)».
      */
@@ -1875,19 +1884,49 @@ public class SmartOutlineHook implements IStartup {
         return model != null ? Global.invoke(model, "getMultiItems") : null; //$NON-NLS-1$
     }
 
+    /** Последнее посчитанное число пометок для флажка «Только помеченные (N)». */
+    private static int markedCount(Button button)
+    {
+        Object count = button != null && !button.isDisposed() ? button.getData(MARKED_COUNT_KEY) : null;
+        return count instanceof Integer ? ((Integer)count).intValue() : 0;
+    }
+
     private static int multiItemsSize(Object multiItems)
     {
         Object size = multiItems != null ? Global.invoke(multiItems, "size") : null; //$NON-NLS-1$
         return size instanceof Integer ? (Integer) size : 0;
     }
 
+    /**
+     * Обновляет подпись флажка «Только помеченные (N)» и его доступность: при пустом наборе
+     * пометок фильтровать нечем — флажок недоступен (причина — в подсказке), а уже включённый
+     * снимается вместе с фильтром, иначе дерево осталось бы пустым без объяснения.
+     *
+     * @param applyMarkedOnly применение состояния флажка к дереву; может быть {@code null},
+     *            если перерисовка на этом шаге не нужна.
+     */
     private static void updateOnlyMarkedButtonText(Button button, Object multiItems, Composite buttonParent,
-            TreeViewer viewer)
+            TreeViewer viewer, Runnable applyMarkedOnly)
     {
         if (button == null || button.isDisposed())
             return;
         int count = multiItems != null ? multiItemsSize(multiItems) : countCheckedInTree(viewer);
         button.setText("Только помеченные (" + count + ")"); //$NON-NLS-1$ //$NON-NLS-2$
+        button.setData(MARKED_COUNT_KEY, Integer.valueOf(count));
+
+        boolean hasMarked = count > 0;
+        button.setEnabled(hasMarked);
+        button.setToolTipText(TooltipText.wrap(button,
+            (hasMarked ? "Показать только элементы с установленным флажком" //$NON-NLS-1$
+                : "Недоступно: ни один элемент не помечен") //$NON-NLS-1$
+                + Global.pluginSignForTooltip()));
+        if (!hasMarked && button.getSelection())
+        {
+            button.setSelection(false);
+            if (applyMarkedOnly != null)
+                applyMarkedOnly.run();
+        }
+
         if (buttonParent != null && !buttonParent.isDisposed())
             buttonParent.layout(true, true);
     }
@@ -1897,7 +1936,7 @@ public class SmartOutlineHook implements IStartup {
      * клик при пустом наборе пометок — пометить текущую строку и закрыть по OK.
      */
     private static void installObjectPickerExtras(Shell shell, TreeViewer viewer, Button onlyMarkedBtn,
-            Composite buttonParent)
+            Composite buttonParent, Runnable applyMarkedOnly)
     {
         Tree tree = viewer != null ? viewer.getTree() : null;
         if (shell == null || shell.isDisposed() || tree == null || tree.isDisposed())
@@ -1910,7 +1949,7 @@ public class SmartOutlineHook implements IStartup {
         {
             if (onlyMarkedBtn == null || onlyMarkedBtn.isDisposed())
                 return;
-            updateOnlyMarkedButtonText(onlyMarkedBtn, null, buttonParent, viewer);
+            updateOnlyMarkedButtonText(onlyMarkedBtn, null, buttonParent, viewer, applyMarkedOnly);
         };
         Listener recount = event ->
         {
@@ -1922,6 +1961,10 @@ public class SmartOutlineHook implements IStartup {
         tree.addListener(SWT.MouseUp, recount);
         tree.addListener(SWT.KeyUp, recount);
         refreshCount.run();
+        // Дерево пикера заполняется отложенно: на момент установки флажка строк ещё может не быть,
+        // и первый подсчёт даёт 0. Повторяем после отрисовки, иначе подпись и доступность флажка
+        // остались бы «нет помеченных» до первого клика по дереву.
+        tree.getDisplay().asyncExec(refreshCount);
 
         tree.addListener(SWT.MouseDoubleClick, event ->
         {

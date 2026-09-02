@@ -10,6 +10,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.eclipse.jface.text.DocumentEvent;
+import org.eclipse.jface.text.BadLocationException;
 import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.IInformationControl;
 import org.eclipse.jface.text.IInformationControlExtension5;
@@ -18,6 +19,7 @@ import org.eclipse.jface.text.IInformationControlCreator;
 import org.eclipse.jface.text.contentassist.ICompletionProposal;
 import org.eclipse.jface.text.contentassist.ICompletionProposalExtension2;
 import org.eclipse.jface.text.contentassist.ICompletionProposalExtension3;
+import org.eclipse.xtext.ui.editor.contentassist.ConfigurableCompletionProposal;
 import org.eclipse.xtext.ui.editor.hover.html.IXtextBrowserInformationControl;
 import org.eclipse.jface.text.source.SourceViewer;
 import org.eclipse.swt.SWT;
@@ -3592,6 +3594,92 @@ ensureFilterPending(popup);
                 events.clear();
         }
         catch (Exception ignored) {}
+    }
+
+    /**
+     * Пробел (табуляция), набранный при открытом списке, не должен исчезать при вставке.
+     * <p>
+     * Список у нас переживает пробел (smart-фильтр многословный), а начало замены у
+     * предложений осталось на позиции автооткрытия — например сразу после {@code =}.
+     * Штатный {@code ConfigurableCompletionProposal.apply(viewer,…)} считает длину замены
+     * как «каретка − replacementOffset», то есть заменяет собой набранный пробел:
+     * {@code Если ТекЭл = } + ENTER давало {@code Если ТекЭл =Неопределено}.
+     * <p>
+     * Правим начало замены у самих предложений popup, а не в нашей обёртке
+     * {@link SmartCompletionProposal}: popup нередко держит штатные (необёрнутые)
+     * предложения EDT и зовёт их {@code apply} напрямую (подтверждено стеком
+     * {@code CompletionProposalPopup.insertProposal} без наших кадров).
+     * Между началом замены и кареткой только пробелы — заменять нечего: сдвигаем начало
+     * к каретке. Штатный префиксный отбор от этого только выигрывает: префикс становится
+     * пустым, каким он после пробела и является.
+     */
+    public static void keepWhitespaceBeforeCaret(ContentAssistant assistant, IDocument document,
+                                                 int caret)
+    {
+        try
+        {
+            Object popup = getPopup(assistant);
+            if (popup == null || document == null || caret < 0)
+                return;
+            initPopupReflection(popup);
+            if (fFilteredProposalsField != null)
+            {
+                @SuppressWarnings("unchecked")
+                List<ICompletionProposal> filtered =
+                    (List<ICompletionProposal>) fFilteredProposalsField.get(popup);
+                shiftWhitespaceReplacementStart(filtered, document, caret);
+            }
+            if (fComputedProposalsField != null)
+            {
+                @SuppressWarnings("unchecked")
+                List<ICompletionProposal> computed =
+                    (List<ICompletionProposal>) fComputedProposalsField.get(popup);
+                shiftWhitespaceReplacementStart(computed, document, caret);
+            }
+        }
+        catch (Exception ignored)
+        {
+        }
+    }
+
+    private static void shiftWhitespaceReplacementStart(List<ICompletionProposal> list,
+                                                        IDocument document, int caret)
+    {
+        if (list == null || list.isEmpty() || caret > document.getLength())
+            return;
+        for (ICompletionProposal proposal : list)
+        {
+            ICompletionProposal raw = SmartContentAssistProcessor.unwrapProposal(proposal);
+            if (!(raw instanceof ConfigurableCompletionProposal cp))
+                continue;
+            int start = cp.getReplacementOffset();
+            if (start < 0 || caret <= start)
+                continue;
+            try
+            {
+                if (!isSpacesOnly(document.get(start, caret - start)))
+                    continue;
+            }
+            catch (BadLocationException e)
+            {
+                continue;
+            }
+            cp.setReplacementOffset(caret);
+            cp.setReplacementLength(0);
+        }
+    }
+
+    private static boolean isSpacesOnly(String text)
+    {
+        if (text == null || text.isEmpty())
+            return false;
+        for (int i = 0; i < text.length(); i++)
+        {
+            char c = text.charAt(i);
+            if (c != ' ' && c != '\t')
+                return false;
+        }
+        return true;
     }
 
     public static int syncSessionOffsets(ContentAssistant assistant, SourceViewer viewer)

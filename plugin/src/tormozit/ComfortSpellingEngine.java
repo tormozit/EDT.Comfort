@@ -2735,17 +2735,49 @@ public final class ComfortSpellingEngine
             MorphDeclension prefer)
         {
             List<MorphDeclension> list = declensionsFor(pos, number, gender);
+            MorphDeclension wanted = prefer != null ? prefer : declensionForCurrentLemma(list);
             declensionCombo.removeAll();
             int select = 0;
             for (int i = 0; i < list.size(); i++)
             {
                 MorphDeclension d = list.get(i);
                 declensionCombo.add(d.label);
-                if (prefer != null && prefer == d)
+                if (wanted != null && wanted == d)
                     select = i;
             }
             if (!list.isEmpty())
                 declensionCombo.select(select);
+        }
+
+        /**
+         * Склонение из {@code list}, чьё словарное окончание совпадает с текущей леммой.
+         * Нужен при смене рода/числа/части речи: там явного предпочтения нет, а брать
+         * первый элемент списка нельзя — для жен./ед. первым идёт «на -ка», и лемма
+         * вроде «Инфа» сразу оказывается несоответствующей типу.
+         *
+         * @return подходящее склонение; если ни одно не подходит — склонение без
+         *         требований к окончанию, иначе {@code null} (останется первый элемент)
+         */
+        private MorphDeclension declensionForCurrentLemma(List<MorphDeclension> list)
+        {
+            if (list == null || list.isEmpty() || lemmaText == null || lemmaText.isDisposed())
+                return null;
+            String lemma = lemmaText.getText() != null ? lemmaText.getText().trim() : ""; //$NON-NLS-1$
+            if (lemma.isEmpty())
+                return null;
+            MorphDeclension free = null;
+            for (MorphDeclension d : list)
+            {
+                if (declensionRequiredEndingLabel(d) == null)
+                {
+                    if (free == null)
+                        free = d;
+                    continue;
+                }
+                if (lemmaMatchesDeclension(lemma, d))
+                    return d;
+            }
+            return free;
         }
 
         private MorphDeclension selectedDeclension()
@@ -2896,6 +2928,7 @@ public final class ComfortSpellingEngine
                 typeHintLabel.setVisible(!text.isEmpty());
                 if (dialogArea != null && !dialogArea.isDisposed())
                     dialogArea.layout(true, true);
+                growShellToFitContent();
             }
             Button add = getButton(IDialogConstants.OK_ID);
             if (add != null && !add.isDisposed())
@@ -2930,6 +2963,27 @@ public final class ComfortSpellingEngine
             warnGd.exclude = text.isEmpty();
             replaceWarningLabel.setVisible(!text.isEmpty());
             replaceWarningLabel.getParent().layout(true, true);
+            growShellToFitContent();
+        }
+
+        /**
+         * Увеличивает высоту окна, если появившаяся подсказка (несоответствие типа,
+         * предупреждение о замещении) в текущий размер не влезает. Размер окна считается
+         * один раз при открытии, а метки появляются позже — без этого текст просто
+         * обрезается, и пользователь видит недоступную кнопку без объяснения причины.
+         * Уменьшение не делаем: подобранную пользователем высоту не трогаем.
+         */
+        private void growShellToFitContent()
+        {
+            Shell shell = getShell();
+            if (shell == null || shell.isDisposed())
+                return;
+            Point size = shell.getSize();
+            if (size.x <= 0 || size.y <= 0)
+                return;
+            Point required = shell.computeSize(size.x, SWT.DEFAULT, true);
+            if (required.y > size.y)
+                shell.setSize(size.x, required.y);
         }
 
         @Override

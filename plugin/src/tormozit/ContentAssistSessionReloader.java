@@ -782,6 +782,7 @@ suppressDisplay.asyncExec(
             @Override
             public void documentChanged(DocumentEvent event)
             {
+                keepWhitespaceBeforeCaretOnTypedSpace(event);
                 try
                 {
                     logAssistInsertDocumentChanged(event);
@@ -2087,6 +2088,36 @@ suppressDisplay.asyncExec(
     private void onVerifyKeyForCompletionAutoOpen(VerifyEvent event)
     {
         onVerifyKeyForCompletionAutoOpenImpl(event);
+    }
+
+    /**
+     * Набран пробел (табуляция) при открытом списке — сдвинуть начало замены у предложений
+     * popup к каретке, иначе вставка съест этот пробел
+     * ({@link ContentAssistPopupSync#keepWhitespaceBeforeCaret}).
+     */
+    private void keepWhitespaceBeforeCaretOnTypedSpace(DocumentEvent event)
+    {
+        try
+        {
+            if (event == null || event.getLength() != 0)
+                return;
+            String text = event.getText();
+            if (text == null || text.isEmpty())
+                return;
+            for (int i = 0; i < text.length(); i++)
+            {
+                char c = text.charAt(i);
+                if (c != ' ' && c != '\t')
+                    return;
+            }
+            if (!ContentAssistPopupSync.isPopupVisible(assistant))
+                return;
+            ContentAssistPopupSync.keepWhitespaceBeforeCaret(assistant,
+                viewer != null ? viewer.getDocument() : null, event.getOffset() + text.length());
+        }
+        catch (Exception ignored)
+        {
+        }
     }
 
     private void onVerifyKeyForCompletionAutoOpenImpl(VerifyEvent event)

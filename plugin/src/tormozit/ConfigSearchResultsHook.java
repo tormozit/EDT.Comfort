@@ -696,8 +696,18 @@ public final class ConfigSearchResultsHook implements IStartup
                 lineNumber = fm.getLineNumber();
             }
             String path = formatPathForTableItem(tableItem, null);
-            rows.add(new MatchRow(path, extractPropertyText(tableItem), lineNumber,
-                extractMatchStyledText(tableItem), file, tableItem, moduleKindSegment(tableItem)));
+            String segment = moduleKindSegment(tableItem);
+            MatchRow row = new MatchRow(path, extractPropertyText(tableItem), lineNumber,
+                extractMatchStyledText(tableItem), file, tableItem, segment);
+            // Значение из кэша резолвера — сразу, без чтения файла: при потоковом обновлении списка
+            // во время поиска строки пересоздаются постоянно, без этого ячейка мигала бы «пусто → имя».
+            if (file != null && lineNumber > 0)
+            {
+                String cached = BslModuleMethodResolver.cachedMethodAtLine(file, (int) lineNumber);
+                if (cached != null)
+                    row.methodProperty = formatMethodProperty(cached, segment);
+            }
+            rows.add(row);
         }
         matchViewer.setInput(rows);
         scheduleMatchMethodResolution(matchViewer, rows);
@@ -971,14 +981,30 @@ public final class ConfigSearchResultsHook implements IStartup
         return row.property != null ? row.property : ""; //$NON-NLS-1$
     }
 
-    /** Последний сегмент полного имени модуля вхождения («МодульОбъекта», имя общего модуля/формы). */
+    /**
+     * Последний сегмент полного имени модуля вхождения («МодульОбъекта», «МодульМенеджера», имя
+     * общего модуля). Для модуля формы полное имя оканчивается на {@code .Форма} — приводим к
+     * {@code .Форма.Модуль} ({@link GetRef#toSetTextModuleName}), т.е. сегмент «Модуль», а не «Форма».
+     */
     private static String moduleKindSegment(Object tableItem)
     {
         String modulePath = modulePathFromTableItem(tableItem);
         if (modulePath == null || modulePath.isEmpty())
             return null;
+        modulePath = GetRef.toSetTextModuleName(modulePath);
         int dot = modulePath.lastIndexOf('.');
         return dot >= 0 && dot < modulePath.length() - 1 ? modulePath.substring(dot + 1) : modulePath;
+    }
+
+    /**
+     * «МодульОбъекта.ПриЗаписи» из имени метода и сегмента модуля; для пустого имени —
+     * «МодульОбъекта.&lt;вне метода&gt;» (тот же префикс модуля, что и у обычных строк).
+     */
+    private static String formatMethodProperty(String bareMethodName, String moduleKindSegment)
+    {
+        String tail = bareMethodName == null || bareMethodName.isEmpty() ? OUTSIDE_METHOD_LABEL : bareMethodName;
+        return moduleKindSegment != null && !moduleKindSegment.isEmpty()
+            ? moduleKindSegment + "." + tail : tail; //$NON-NLS-1$
     }
 
     private static boolean isCurrentMethodResolveGeneration(long generation)
@@ -1086,17 +1112,11 @@ public final class ConfigSearchResultsHook implements IStartup
                     if (perLine == null)
                         continue; // файл не прочитан — оставляем плейсхолдер, повторим при следующем поиске
                     for (MatchRow row : fileRows)
-                    {
-                        String name = perLine.get((int) row.lineNumber);
-                        row.methodProperty = name == null || name.isEmpty()
-                            ? OUTSIDE_METHOD_LABEL
-                            : (row.moduleKindSegment != null && !row.moduleKindSegment.isEmpty()
-                                ? row.moduleKindSegment + "." + name : name); //$NON-NLS-1$
-                    }
+                        row.methodProperty = formatMethodProperty(perLine.get((int) row.lineNumber),
+                            row.moduleKindSegment);
                     List<MatchRow> updated = new ArrayList<>(fileRows);
-                    runOnUi(() -> applyMethodResolveBatch(matchViewer, updated, generation, false));
+                    runOnUi(() -> applyMethodResolveBatch(matchViewer, updated, generation));
                 }
-                runOnUi(() -> applyMethodResolveBatch(matchViewer, Collections.emptyList(), generation, true));
                 return Status.OK_STATUS;
             }
         };
@@ -1112,19 +1132,21 @@ public final class ConfigSearchResultsHook implements IStartup
             display.asyncExec(runnable);
     }
 
-    private static void applyMethodResolveBatch(TableViewer matchViewer, List<MatchRow> updated,
-            long generation, boolean finalPass)
+    private static void applyMethodResolveBatch(TableViewer matchViewer, List<MatchRow> updated, long generation)
     {
-        if (!isCurrentMethodResolveGeneration(generation))
+        if (!isCurrentMethodResolveGeneration(generation) || updated.isEmpty())
             return;
         Table table = matchViewer.getTable();
         if (table == null || table.isDisposed())
             return;
-        if (!updated.isEmpty())
-            matchViewer.update(updated.toArray(), null);
-        if (finalPass && cachedMatchPropertyColumn != null && !cachedMatchPropertyColumn.isDisposed()
-            && table.getSortColumn() == cachedMatchPropertyColumn)
-            matchViewer.refresh();
+        // Во время потокового поиска список и так пересобирается каждые ~100 мс (syncMatchTableToTree),
+        // и заново созданные строки берут уже готовое имя метода из кэша резолвера — точечный update()
+        // здесь только добавил бы мигание/перескок строк при активной сортировке по этой колонке.
+        if (searchQueryRunning)
+            return;
+        // update(null-properties) перерисовывает ячейки и, если сортировка идёт по этой колонке,
+        // переставляет только затронутые строки — без полного refresh() таблицы.
+        matchViewer.update(updated.toArray(), null);
     }
 
     /**

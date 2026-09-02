@@ -14,6 +14,8 @@ import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.ICoreRunnable;
 import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.emf.ecore.EObject;
+import org.eclipse.e4.ui.model.application.MApplication;
+import org.eclipse.e4.ui.model.application.descriptor.basic.MPartDescriptor;
 import org.eclipse.e4.ui.model.application.ui.basic.MPart;
 import org.eclipse.jface.preference.IPreferencePage;
 import org.eclipse.jface.preference.PreferenceDialog;
@@ -110,6 +112,8 @@ public final class ProblemViewHook implements IStartup
     private static final String SCOPE_CURRENT_OBJECT = "CURRENT_OBJECT"; //$NON-NLS-1$
     private static final String SCOPE_CURRENT_ELEMENT = "CURRENT_ELEMENT"; //$NON-NLS-1$
     private static final String SCOPE_CURRENT_PROJECT = "CURRENT_PROJECT"; //$NON-NLS-1$
+    /** Режим без отбора по области — им же подписывается включённое «Показывать все». */
+    private static final String SCOPE_ALL = "ALL"; //$NON-NLS-1$
 
     private static volatile boolean installed;
 
@@ -129,6 +133,7 @@ public final class ProblemViewHook implements IStartup
         installed = true;
 
         IWorkbench workbench = PlatformUI.getWorkbench();
+        applyDescriptorTitle(workbench);
         for (IWorkbenchWindow window : workbench.getWorkbenchWindows())
             hookWindow(window);
         workbench.addWindowListener(new IWindowListener()
@@ -187,6 +192,34 @@ public final class ProblemViewHook implements IStartup
     private static IWorkbenchPart partOf(IWorkbenchPartReference ref)
     {
         return ref != null ? ref.getPart(false) : null;
+    }
+
+    /**
+     * То же имя — в списке окна «Показать панель» (и в быстром доступе).
+     *
+     * <p>Вкладка открытой панели берёт имя из {@code MPart} (см. {@link #applyTitle}), а список
+     * представлений строится не по открытым панелям, а по дескрипторам модели e4
+     * ({@code MApplication.getDescriptors()}, {@code ShowViewDialog}). Пока переименован только
+     * {@code MPart}, в списке остаётся штатное «Ошибки конфигурации» — одна и та же панель
+     * называется по-разному в двух местах интерфейса.
+     *
+     * <p>Дескрипторы собираются из реестра расширений при каждом запуске, поэтому подпись
+     * ставится заново на старте и никуда не сохраняется.
+     */
+    private static void applyDescriptorTitle(IWorkbench workbench)
+    {
+        MApplication application = workbench.getService(MApplication.class);
+        if (application == null)
+            return;
+        for (MPartDescriptor descriptor : application.getDescriptors())
+        {
+            if (ProblemViewMarkers.PROBLEM_VIEW_ID.equals(descriptor.getElementId())
+                && !VIEW_TITLE.equals(descriptor.getLabel()))
+            {
+                descriptor.setLabel(VIEW_TITLE);
+                Debug.log("applyDescriptorTitle: renamed"); //$NON-NLS-1$
+            }
+        }
     }
 
     /**
@@ -377,6 +410,9 @@ public final class ProblemViewHook implements IStartup
      * «Текущий элемент» дописывается ещё и сам источник отбора (имя проекта,
      * полное имя объекта или элемента) — иначе непонятно, чей это список.
      *
+     * <p>При включённом «Показывать все» отбор по области не применяется вовсе,
+     * поэтому подпись показывает «Все проекты», а не выбранный в настройках режим.
+     *
      * <p>Область возникновения — самый «дорогой» отбор панели: он один способен
      * убрать из списка почти всё. Штатно он виден только внутри окна «Настройки
      * отбора», поэтому пустой список легко принять за отсутствие проблем.
@@ -523,16 +559,20 @@ public final class ProblemViewHook implements IStartup
 
     private static String scopeSuffix(IViewPart view, Object filters, ClassLoader loader)
     {
-        Object scope = Global.invoke(filters, "getScope"); //$NON-NLS-1$
-        if (!(scope instanceof Enum<?> constant))
+        // При «Показывать все» панель полностью пропускает отбор по области
+        // (LazyProblemView: isShowAll() -> область не применяется), поэтому
+        // выбранный в настройках режим показывать нельзя — он ничего не отбирает.
+        boolean showAll = Boolean.TRUE.equals(Global.invoke(filters, "isShowAll")); //$NON-NLS-1$
+        String scopeName = showAll ? SCOPE_ALL : scopeName(Global.invoke(filters, "getScope")); //$NON-NLS-1$
+        if (scopeName == null)
             return null;
-        String value = message(loader, scopeField(constant.name()));
+        String value = message(loader, scopeField(scopeName));
         if (value == null)
         {
-            Debug.log("scopeSuffix: no message for " + scope); //$NON-NLS-1$
+            Debug.log("scopeSuffix: no message for " + scopeName); //$NON-NLS-1$
             return null;
         }
-        String detail = scopeDetail(view, constant.name());
+        String detail = scopeDetail(view, scopeName);
         return SCOPE_SEPARATOR + SCOPE_TITLE + ": " + value //$NON-NLS-1$
             + (detail != null ? ": " + detail : ""); //$NON-NLS-1$ //$NON-NLS-2$
     }
@@ -646,6 +686,11 @@ public final class ProblemViewHook implements IStartup
             display.timerExec(SCOPE_REFRESH_MS, tick[0]);
         };
         display.timerExec(SCOPE_REFRESH_MS, tick[0]);
+    }
+
+    private static String scopeName(Object scope)
+    {
+        return scope instanceof Enum<?> constant ? constant.name() : null;
     }
 
     /** Имя поля {@code Messages} с названием режима: {@code CURRENT_PROJECT} → {@code Scope_current_project}. */

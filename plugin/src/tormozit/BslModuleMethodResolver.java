@@ -62,6 +62,18 @@ public final class BslModuleMethodResolver
     }
 
     /**
+     * Уже вычисленное имя метода из кэша, без чтения файла: {@code ""} — вне метода,
+     * {@code null} — ещё не вычислялось (или файл не BSL). Для мгновенного восстановления значения
+     * при перестроении списка (иначе ячейка мигает «пусто → имя» на каждое обновление).
+     */
+    static String cachedMethodAtLine(IFile file, int line1Based)
+    {
+        if (!isBslModule(file) || line1Based < 1)
+            return null;
+        return RESULT_CACHE.get(resultKey(file, file.getModificationStamp(), line1Based));
+    }
+
+    /**
      * Пакетный вариант: текст модуля читается и разбирается один раз для всех запрошенных строк.
      *
      * @return отображение {@code строка(1) → имя метода} ({@code ""} — вне метода) для всех строк

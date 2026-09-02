@@ -518,20 +518,68 @@ public class GetRef extends AbstractHandler implements IElementUpdater
 
     private static MethodInfo findEnclosingMethod(IDocument doc, int cursorLine0)
     {
+        // Комментарии ({@code //}) и директивы компиляции ({@code &...}), размещённые вплотную перед
+        // объявлением метода (без пустых строк между ними и заголовком), считаем принадлежащими
+        // этому методу — иначе клик/вхождение в doc-комментарий давал бы «вне метода».
+        MethodInfo attached = methodBelowAttachedComments(doc, cursorLine0);
+        if (attached != null)
+            return attached;
+
         for (int line = cursorLine0; line >= 0; line--)
         {
-            String text;
-            try
-            {
-                IRegion info = doc.getLineInformation(line);
-                text = doc.get(info.getOffset(), info.getLength());
-            }
-            catch (BadLocationException e) { break; }
+            String text = lineTextOrNull(doc, line);
+            if (text == null) break;
             if (line < cursorLine0 && METHOD_END.matcher(text).find()) return null;
             Matcher m = METHOD_START.matcher(text);
             if (m.find()) return new MethodInfo(m.group(1), line + 1);
         }
         return null;
+    }
+
+    /**
+     * Если {@code cursorLine0} лежит в непрерывном блоке строк-комментариев ({@code //}) и/или
+     * директив компиляции ({@code &...}), сразу за которым — без пустых строк и без другого кода —
+     * идёт объявление процедуры/функции, возвращает этот метод; иначе {@code null}.
+     */
+    private static MethodInfo methodBelowAttachedComments(IDocument doc, int cursorLine0)
+    {
+        String cursorText = lineTextOrNull(doc, cursorLine0);
+        if (cursorText == null || !isCommentOrDirectiveLine(cursorText))
+            return null;
+        int total = doc.getNumberOfLines();
+        for (int line = cursorLine0; line < total; line++)
+        {
+            String text = lineTextOrNull(doc, line);
+            if (text == null)
+                return null;
+            Matcher m = METHOD_START.matcher(text);
+            if (m.find())
+                return new MethodInfo(m.group(1), line + 1);
+            if (!isCommentOrDirectiveLine(text))
+                return null; // пустая строка или обычный код — блок не примыкает к методу
+        }
+        return null;
+    }
+
+    private static boolean isCommentOrDirectiveLine(String lineText)
+    {
+        String trimmed = lineText.strip();
+        return trimmed.startsWith("//") || trimmed.startsWith("&"); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    private static String lineTextOrNull(IDocument doc, int line)
+    {
+        if (line < 0)
+            return null;
+        try
+        {
+            IRegion info = doc.getLineInformation(line);
+            return doc.get(info.getOffset(), info.getLength());
+        }
+        catch (BadLocationException e)
+        {
+            return null;
+        }
     }
 
     // =========================================================================

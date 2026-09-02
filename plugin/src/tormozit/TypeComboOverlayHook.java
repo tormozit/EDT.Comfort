@@ -198,17 +198,25 @@ public class TypeComboOverlayHook implements IStartup
         return false;
     }
 
-    private static void patchTypeCombo(IWizardPage page, IWizard wizard, boolean focusAfterCreate)
+    /**
+     * Ищет строку «Тип» в {@code renderer.viewModelToView} и накладывает оверлей.
+     *
+     * @return {@code true}, если оверлей создан (иначе строку «Тип» ещё/уже не удалось привязать —
+     *     см. {@link #patchTypeComboWithRetry})
+     */
+    private static boolean patchTypeCombo(IWizardPage page, IWizard wizard, boolean focusAfterCreate)
     {
         Object scene = Global.getField(page, "scene"); //$NON-NLS-1$
         Object renderer = scene != null ? Global.getField(scene, "renderer") : null; //$NON-NLS-1$
         Object viewModelToViewObj = renderer != null ? Global.getField(renderer, "viewModelToView") : null; //$NON-NLS-1$
         if (!(viewModelToViewObj instanceof Map<?, ?> viewModelToView))
-            return;
+            return false;
 
         Object typeModel = Global.getField(wizard, "model"); //$NON-NLS-1$
         if (typeModel == null)
-            return;
+            return false;
+
+        boolean created = false;
 
         for (Map.Entry<?, ?> entry : viewModelToView.entrySet())
         {
@@ -244,10 +252,58 @@ public class TypeComboOverlayHook implements IStartup
             // rediscover — общий с панелью «Свойства» механизм пересоздания оверлея (см.
             // rediscoverOverlay/createOverlay): для мастера это просто повторный вызов самого
             // patchTypeCombo с теми же page/wizard.
-            Runnable rediscover = () -> patchTypeCombo(page, wizard, true);
+            Runnable rediscover = () -> patchTypeComboWithRetry(page, wizard, true, REBIND_MAX_ATTEMPTS);
             if (createOverlay(nativeControl, typeModel, viewModel, rediscover, focusAfterCreate) != null)
+            {
                 ATTACHED.add(nativeControl);
+                created = true;
+            }
         }
+        return created;
+    }
+
+    /** Интервал повторной попытки привязки, если строка «Тип» ещё не пересобрана AEF. */
+    private static final int REBIND_RETRY_MS = 200;
+    /** Сколько раз пробуем привязаться заново (200 мс × 15 ≈ 3 с) — потом сдаёмся, без вечного цикла. */
+    private static final int REBIND_MAX_ATTEMPTS = 15;
+
+    /**
+     * Пересборка оверлея после смены типа: AEF перекладывает строку «Тип» не мгновенно, и первая
+     * попытка (сразу из {@code commitSelection}) может ещё видеть в {@code viewModelToView} СТАРЫЙ
+     * {@code LightCombo} — тот, который AEF вот-вот выбросит. Привязка к нему внешне удаётся
+     * (bounds ещё читаются), но через несколько миллисекунд контрол оказывается оторван от
+     * LWT-дерева, и {@code translateRectangleFromControl} начинает возвращать {@code null} —
+     * оверлей навсегда застревает в старой позиции (подтверждено логом: сотни подряд
+     * «translateRectangleFromControl вернул null» после выбора типа клавишей ENTER).
+     *
+     * <p>Поэтому: отрыв обнаруживается в {@link #repositionOverlay}, а привязка повторяется здесь,
+     * пока строка «Тип» не найдётся заново — с ограничением числа попыток.
+     */
+    private static void patchTypeComboWithRetry(IWizardPage page, IWizard wizard, boolean focusAfterCreate,
+        int attemptsLeft)
+    {
+        Control pageControl = page.getControl();
+        if (pageControl == null || pageControl.isDisposed())
+            return;
+        boolean created;
+        try
+        {
+            created = patchTypeCombo(page, wizard, focusAfterCreate);
+        }
+        catch (Exception e)
+        {
+            diag("patchTypeComboWithRetry: исключение " + e); //$NON-NLS-1$
+            Global.logError(LOG_TAG, "patchTypeComboWithRetry", e); //$NON-NLS-1$
+            created = false;
+        }
+        if (created || attemptsLeft <= 0)
+        {
+            if (!created)
+                diag("patchTypeComboWithRetry: попытки исчерпаны, оверлей не привязан"); //$NON-NLS-1$
+            return;
+        }
+        pageControl.getDisplay().timerExec(REBIND_RETRY_MS,
+            () -> patchTypeComboWithRetry(page, wizard, focusAfterCreate, attemptsLeft - 1));
     }
 
     // === Панель «Свойства»: то же поле «Тип», другое обнаружение/жизненный цикл ===
@@ -796,7 +852,12 @@ public class TypeComboOverlayHook implements IStartup
         Rectangle realBounds = rectangleOf(Global.invoke(hostComposite, "translateRectangleFromControl", //$NON-NLS-1$
             nativeControl, localRect));
         if (realBounds == null)
+        {
+            // Контрол уже оторван от LWT-дерева — привязываться к нему нельзя (см.
+            // handleDetachedControl/patchTypeComboWithRetry).
+            diag("createOverlay: translateRectangleFromControl вернул null — привязка пропущена"); //$NON-NLS-1$
             return null;
+        }
         if (realBounds.width < 40)
         {
             diag("createOverlay: контрол слишком узкий (" + realBounds //$NON-NLS-1$
@@ -876,24 +937,10 @@ public class TypeComboOverlayHook implements IStartup
         diag("createOverlay: viewModel.buttons=" + describeList(vmButtons) //$NON-NLS-1$
             + " nativeControl.buttons=" + describeList(ncButtons)); //$NON-NLS-1$
 
-        // Сравнение по ссылке (==) с элементами entries не годится: getSingleTypeItem().get() и
-        // getTypes(false) — отдельные вызовы EMF-геттеров, не гарантирующие идентичность объекта
-        // для логически того же типа (проверено на практике — поле оставалось пустым). Сравниваем
-        // по имени.
         Object currentTypeItem = Global.invoke(Global.invoke(typeModel, "getSingleTypeItem"), "get"); //$NON-NLS-1$ //$NON-NLS-2$
-        String initialText = currentTypeItem != null ? displayLabel(currentTypeItem) : null;
-        Image initialIcon = null;
-        if (initialText != null)
-        {
-            for (TypeEntry e : entries)
-            {
-                if (initialText.equals(e.label))
-                {
-                    initialIcon = e.icon;
-                    break;
-                }
-            }
-        }
+        TypeEntry currentEntry = currentEntry(entries, currentTypeItem);
+        String initialText = currentEntry != null ? currentEntry.label : null;
+        Image initialIcon = currentEntry != null ? currentEntry.icon : null;
         text.setText(initialText != null ? initialText : ""); //$NON-NLS-1$
         iconLabel.setImage(initialIcon);
         diag("createOverlay: currentTypeItem=" + currentTypeItem + " initialText=" + initialText //$NON-NLS-1$ //$NON-NLS-2$
@@ -1166,7 +1213,8 @@ public class TypeComboOverlayHook implements IStartup
             scheduleRediscoverOverlay(state);
             return;
         }
-        String currentText = currentTypeItem != null ? displayLabel(currentTypeItem) : null;
+        TypeEntry currentEntry = currentEntry(state.entries, currentTypeItem);
+        String currentText = currentEntry != null ? currentEntry.label : null;
         if (java.util.Objects.equals(currentText, state.lastCommittedText))
             return;
         diag("checkExternalChange: значение изменено извне (было=" + state.lastCommittedText //$NON-NLS-1$
@@ -1193,6 +1241,42 @@ public class TypeComboOverlayHook implements IStartup
         display.asyncExec(() -> rediscoverOverlay(state));
     }
 
+
+    /**
+     * Сколько подряд тиков поллера {@code translateRectangleFromControl} должен вернуть
+     * {@code null}, прежде чем считать привязку оторванной. Один тик пропускаем: ровно один
+     * «нулевой» пересчёт бывает и в норме — в промежуточном состоянии relayout.
+     */
+    private static final int DETACHED_TICKS_BEFORE_REBIND = 2;
+    /** Предохранитель от вечного цикла пересборок, если привязаться так и не удаётся. */
+    private static final int MAX_DETACH_REBINDS = 10;
+    /** Счётчик подряд идущих пересборок по отрыву; обнуляется первой же удачной привязкой. */
+    private static int detachRebindCount;
+
+    /**
+     * {@code translateRectangleFromControl} вернул {@code null} — наш {@code nativeControl} больше
+     * не в LWT-дереве хоста: AEF выбросил его при перестройке строки «Тип» (типично при переходе
+     * простой тип → ссылочный/составной, когда меняется набор соседних полей). Позицию по такому
+     * контролу считать не по чему, поэтому переприязываемся к текущей строке «Тип» заново —
+     * иначе оверлей навсегда остаётся там, где поле было ДО перестройки (issue: положение не
+     * обновляется после выбора типа клавишей ENTER).
+     */
+    private static void handleDetachedControl(OverlayState state)
+    {
+        state.detachedTicks++;
+        if (state.detachedTicks < DETACHED_TICKS_BEFORE_REBIND)
+            return;
+        state.detachedTicks = 0;
+        if (detachRebindCount >= MAX_DETACH_REBINDS)
+        {
+            diag("handleDetachedControl: пересборки исчерпаны (" + detachRebindCount //$NON-NLS-1$
+                + ") — оставляем оверлей как есть"); //$NON-NLS-1$
+            return;
+        }
+        detachRebindCount++;
+        diag("handleDetachedControl: контрол оторван от LWT-дерева — пересборка #" + detachRebindCount); //$NON-NLS-1$
+        scheduleRediscoverOverlay(state);
+    }
 
     // Ниже какой ширины нативного контрола не доверяем текущим bounds при пересчёте размера
     // оверлея — это переходное состояние (см. repositionOverlay), а не «поле стало узким».
@@ -1226,7 +1310,13 @@ public class TypeComboOverlayHook implements IStartup
         Rectangle realBounds = rectangleOf(Global.invoke(state.hostComposite, "translateRectangleFromControl", //$NON-NLS-1$
             nativeControl, localRect));
         if (realBounds == null)
+        {
+            handleDetachedControl(state);
             return;
+        }
+        // Привязка жива — сбрасываем оба счётчика отрыва.
+        state.detachedTicks = 0;
+        detachRebindCount = 0;
         realBounds = new Rectangle(realBounds.x, realBounds.y,
             Math.max(20, realBounds.width - RIGHT_RESERVED_WIDTH), realBounds.height);
         if (realBounds.equals(container.getBounds()))
@@ -1240,12 +1330,15 @@ public class TypeComboOverlayHook implements IStartup
     private static final class TypeEntry
     {
         final Object typeItem;
+        /** Английское имя типа ({@code TypeItem.getName()}) — по нему опознаётся «Произвольный». */
+        final String name;
         final String label;
         final Image icon;
 
-        TypeEntry(Object typeItem, String label, Image icon)
+        TypeEntry(Object typeItem, String name, String label, Image icon)
         {
             this.typeItem = typeItem;
+            this.name = name;
             this.label = label;
             this.icon = icon;
         }
@@ -1281,6 +1374,8 @@ public class TypeComboOverlayHook implements IStartup
         SmartMatcher currentMatcher;
         String lastCommittedText;
         Runnable pendingFilter;
+        // Сколько подряд тиков поллера не удалось пересчитать позицию (см. handleDetachedControl).
+        int detachedTicks;
         boolean repositionThrottled;
         boolean repositionPending;
         boolean programmaticChange;
@@ -2071,6 +2166,8 @@ public class TypeComboOverlayHook implements IStartup
         for (int i = 0; i < typeList.size(); i++)
         {
             Object typeItem = typeList.get(i);
+            Object nameObj = Global.invoke(typeItem, "getName"); //$NON-NLS-1$
+            String name = nameObj instanceof String s ? s : null;
             String label = displayLabel(typeItem);
             Image icon = null;
             if (sameSize)
@@ -2079,11 +2176,58 @@ public class TypeComboOverlayHook implements IStartup
                 if (iconObj instanceof Image img)
                     icon = img;
             }
-            result.add(new TypeEntry(typeItem, label, icon));
+            result.add(new TypeEntry(typeItem, name, label, icon));
         }
         long withIcon = result.stream().filter(e -> e.icon != null).count();
         diag("loadTypeEntries: всего=" + result.size() + " с иконкой=" + withIcon); //$NON-NLS-1$ //$NON-NLS-2$
         return result;
+    }
+
+    /** Имя типа-заглушки «Произвольный» в модели EDT ({@code TypeItem.getName()}). */
+    private static final String ARBITRARY_TYPE_NAME = "Arbitrary"; //$NON-NLS-1$
+
+    /**
+     * Строка списка, соответствующая текущему значению модели ({@code getSingleTypeItem().get()}).
+     *
+     * <p>{@code null} в модели — это НЕ «значения нет»: штатный {@code AbstractTypeDescriptionModel
+     * .buildTypeDescriptionValue} намеренно НЕ кладёт «Произвольный» в собираемый
+     * {@code TypeDescription} (сравнение {@code "Arbitrary".equals(typeItem.getName())}), поэтому
+     * после выбора этого типа описание остаётся пустым, и {@code init(TypeDescription)} ставит в
+     * {@code singleTypeItem} именно {@code null} (значение ставится только когда типов ровно один).
+     * Штатный комбобокс всё равно показывает «Произвольный»: его маппер
+     * {@code TypeItemModelMapper.mapModelToView} для {@code null} берёт из своего кэша строку по
+     * ключу {@code "Arbitrary"} — то есть ту же строку списка. Мы делаем то же самое; без этого
+     * поле после выбора «Произвольный» оставалось пустым (issue 449).
+     *
+     * @return строка списка или {@code null}, если текущее значение не удалось сопоставить
+     */
+    private static TypeEntry currentEntry(List<TypeEntry> entries, Object currentTypeItem)
+    {
+        if (entries == null)
+            return null;
+        if (currentTypeItem == null)
+        {
+            for (TypeEntry entry : entries)
+            {
+                if (ARBITRARY_TYPE_NAME.equals(entry.name))
+                    return entry;
+            }
+            return null;
+        }
+        // Сравнение по ссылке (==) с элементами entries не годится: getSingleTypeItem().get() и
+        // getTypes(false) — отдельные вызовы EMF-геттеров, не гарантирующие идентичность объекта
+        // для логически того же типа (проверено на практике — поле оставалось пустым). Сравниваем
+        // по имени.
+        String label = displayLabel(currentTypeItem);
+        if (label == null)
+            return null;
+        for (TypeEntry entry : entries)
+        {
+            if (label.equals(entry.label))
+                return entry;
+        }
+        // Тип есть, но в списке его нет (отфильтрован параметризацией) — показываем хотя бы текст.
+        return new TypeEntry(currentTypeItem, null, label, null);
     }
 
     private static String displayLabel(Object typeItem)
