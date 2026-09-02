@@ -1,6 +1,8 @@
 // BslEditorHoverHook.java
 package tormozit;
 
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -12,6 +14,13 @@ import org.eclipse.jface.dialogs.PageChangedEvent;
 import org.eclipse.jface.text.AbstractInformationControlManager;
 import org.eclipse.jface.text.IInformationControl;
 import org.eclipse.jface.text.ITextHover;
+import org.eclipse.jface.text.Position;
+import org.eclipse.jface.text.information.IInformationProvider;
+import org.eclipse.jface.text.information.IInformationProviderExtension;
+import org.eclipse.jface.text.information.IInformationProviderExtension2;
+import org.eclipse.jface.text.information.InformationPresenter;
+import org.eclipse.jface.text.source.Annotation;
+import org.eclipse.jface.text.source.IAnnotationModel;
 import org.eclipse.jface.text.source.ISourceViewer;
 import org.eclipse.jface.text.source.SourceViewer;
 import org.eclipse.swt.browser.Browser;
@@ -43,17 +52,23 @@ import org.eclipse.xtext.parser.IParseResult;
 import org.eclipse.xtext.resource.EObjectAtOffsetHelper;
 import org.eclipse.xtext.resource.XtextResource;
 import org.eclipse.swt.internal.win32.OS;
+import org.eclipse.xtext.ui.editor.hover.AbstractCompositeHover;
+import org.eclipse.xtext.ui.editor.hover.AbstractProblemHover;
+import org.eclipse.xtext.ui.editor.hover.AnnotationWithQuickFixesHover;
 import org.eclipse.xtext.ui.editor.hover.html.IXtextBrowserInformationControl;
 import org.eclipse.xtext.ui.editor.model.IXtextDocument;
 import org.eclipse.xtext.util.concurrent.IUnitOfWork;
 import com._1c.g5.v8.dt.bsl.model.BslPackage;
-import com._1c.g5.v8.dt.bsl.model.FeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.ImplicitVariable;
 import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
 
 /**
  * Дополняет doc-hover BSL описанием из ИР при подключённой сессии.
- * Подавляет подсказку при наведении без Ctrl на ключевых словах языка и пустом месте.
+ * Подавляет подсказку при наведении без Ctrl на ключевых словах языка, строковых
+ * литералах, в комментариях и на пустом месте; аннотация проблемы в позиции
+ * подавление отменяет. Вызов от каретки (Ctrl+F2) приравнен к наведению мышью:
+ * сначала аннотация, потом описание, но справка по ключевому слову и литералу
+ * при нём показывается.
  */
 public final class BslEditorHoverHook implements IStartup
 {
@@ -164,6 +179,9 @@ public final class BslEditorHoverHook implements IStartup
         // Глобальный тумблер «Подсказки при наведении» применяется и к новым,
         // и к уже обёрнутым редакторам (повторные вызовы при активации/смене страницы).
         BslHoverHintState.applyToViewer(sourceViewer);
+        // Презентер создаётся позже обёртки hover-ов, поэтому прокси ставим при каждом
+        // проходе (сам по себе повторно не навешивается).
+        installAnnotationAwareInformationProvider(sourceViewer);
         if (Boolean.TRUE.equals(sourceViewer.getData(HOOK_MARKER)))
             return;
         boolean wrappedText = wrapTextHovers(sourceViewer, editor);
@@ -194,6 +212,300 @@ public final class BslEditorHoverHook implements IStartup
             }
         }
         return wrapped;
+    }
+
+    /**
+     * Ctrl+F2 от каретки должен вести себя как наведение мышью: сначала аннотация
+     * (орфография, ошибка, предупреждение) с исправлениями, и только потом описание
+     * объекта. Штатный {@code XtextInformationProvider.getInformation2} зовёт лишь
+     * {@code IEObjectHover}, про аннотации не знает вовсе, а нужный контрол попапа
+     * выбирает {@code getInformationPresenterControlCreator} — поэтому подменяем
+     * провайдер целиком, а не поле {@code hover} внутри него.
+     */
+    private static void installAnnotationAwareInformationProvider(SourceViewer sourceViewer)
+    {
+        Object presenter = Global.getField(sourceViewer, "fInformationPresenter"); //$NON-NLS-1$
+        if (!(presenter instanceof InformationPresenter informationPresenter))
+            return;
+        @SuppressWarnings("unchecked")
+        Map<String, IInformationProvider> providers =
+            (Map<String, IInformationProvider>)Global.getField(informationPresenter, "fProviders"); //$NON-NLS-1$
+        if (providers == null || providers.isEmpty())
+            return;
+        for (Map.Entry<String, IInformationProvider> entry : new ArrayList<>(providers.entrySet()))
+        {
+            IInformationProvider stock = entry.getValue();
+            if (stock == null || stock instanceof AnnotationAwareInformationProvider)
+                continue;
+            informationPresenter.setInformationProvider(
+                new AnnotationAwareInformationProvider(stock, sourceViewer), entry.getKey());
+        }
+    }
+
+    /**
+     * Идёт вызов подсказки от каретки (Ctrl+F2). Подавление наведения мышью на
+     * ключевых словах и комментариях при этом не применяется — вызов осознанный.
+     */
+    private static final ThreadLocal<Boolean> caretInvocation = new ThreadLocal<>();
+
+    /**
+     * Прокси штатного {@code XtextInformationProvider}: при наличии аннотации в позиции
+     * отдаёт её подсказку (с исправлениями), иначе — штатное описание объекта.
+     * Контрол попапа берётся у того же источника, что и содержимое, иначе информация
+     * аннотации попала бы в браузерный контрол описания.
+     */
+    private static final class AnnotationAwareInformationProvider
+        implements IInformationProvider, IInformationProviderExtension, IInformationProviderExtension2
+    {
+        private final IInformationProvider delegate;
+        private final SourceViewer sourceViewer;
+        private volatile ITextHover lastAnnotationHover;
+
+        AnnotationAwareInformationProvider(IInformationProvider delegate, SourceViewer sourceViewer)
+        {
+            this.delegate = delegate;
+            this.sourceViewer = sourceViewer;
+        }
+
+        @Override
+        public IRegion getSubject(ITextViewer textViewer, int offset)
+        {
+            return delegate.getSubject(textViewer, offset);
+        }
+
+        @Override
+        @Deprecated
+        public String getInformation(ITextViewer textViewer, IRegion subject)
+        {
+            Object info = getInformation2(textViewer, subject);
+            return info == null ? null : info.toString();
+        }
+
+        @Override
+        public Object getInformation2(ITextViewer textViewer, IRegion subject)
+        {
+            lastAnnotationHover = null;
+            // Содержимое берём у того же hover-а, что работает под мышью: он уже
+            // содержит и композит (аннотация раньше описания), и наш фильтр
+            // предложений орфографии. Своя обёртка пропускается — её подавление
+            // на ключевых словах и комментариях к осознанному Ctrl+F2 не относится.
+            ITextHover pointerHover = resolvePointerHover();
+            if (pointerHover instanceof ITextHoverExtension2 pointerExt)
+            {
+                Object info;
+                // Флаг говорит нашей обёртке внутри цепочки, что это вызов от каретки:
+                // зажатый Ctrl не считать «Ctrl+наведением», всё остальное — как у мыши.
+                caretInvocation.set(Boolean.TRUE);
+                try
+                {
+                    // BestMatchEObjectTextHover выбирает currentHover именно в
+                    // getHoverRegion, а getHoverInfo2 лишь делегирует выбранному.
+                    // Без этого вызова достаётся hover от прошлого наведения мышью.
+                    IRegion region = pointerHover.getHoverRegion(textViewer, subject.getOffset());
+                    info = region == null ? null : pointerExt.getHoverInfo2(textViewer, region);
+                }
+                finally
+                {
+                    caretInvocation.remove();
+                }
+                ITextHover annotationHover = info instanceof AnnotationWithQuickFixesHover.AnnotationInfo
+                    ? resolveAnnotationHover() : null;
+                // Информацию аннотации отдаём только вместе с её контролом, иначе
+                // она попадёт в браузерный контрол описания и не отрисуется.
+                if (annotationHover != null)
+                {
+                    lastAnnotationHover = annotationHover;
+                    return info;
+                }
+                // Пусто — значит подсказка подавлена (комментарий, ключевое слово):
+                // при наведении мышью здесь тоже ничего не показывается.
+                if (info == null)
+                    return null;
+            }
+            return delegate instanceof IInformationProviderExtension ext
+                ? ext.getInformation2(textViewer, subject)
+                : delegate.getInformation(textViewer, subject);
+        }
+
+        @Override
+        public org.eclipse.jface.text.IInformationControlCreator getInformationPresenterControlCreator()
+        {
+            ITextHover annotationHover = lastAnnotationHover;
+            if (annotationHover != null)
+            {
+                Object creator = Global.invoke(annotationHover, "getInformationPresenterControlCreator"); //$NON-NLS-1$
+                if (creator instanceof org.eclipse.jface.text.IInformationControlCreator controlCreator)
+                    return HoverAffordanceText.wrapCreator(controlCreator);
+            }
+            return delegate instanceof IInformationProviderExtension2 ext
+                ? HoverAffordanceText.wrapCreator(ext.getInformationPresenterControlCreator()) : null;
+        }
+
+        /** Hover наведения мышью того же редактора, без нашей внешней обёртки. */
+        private ITextHover resolvePointerHover()
+        {
+            for (ITextHover hover : pointerHovers())
+                return hover instanceof IrBslTextHoverWrapper wrapper ? wrapper.delegate : hover;
+            return null;
+        }
+
+        /**
+         * Hover аннотаций: он спрятан в цепочке обёрток ({@code IrBslTextHoverWrapper},
+         * {@code AnnotationHoverProposalFilter}) поверх композита, поэтому цепочку
+         * разворачиваем, а не смотрим один слой.
+         */
+        private ITextHover resolveAnnotationHover()
+        {
+            for (ITextHover hover : pointerHovers())
+            {
+                ITextHover found = findAnnotationHover(unwrapHover(hover));
+                if (found != null)
+                    return found;
+            }
+            return null;
+        }
+
+        private Collection<ITextHover> pointerHovers()
+        {
+            @SuppressWarnings("unchecked")
+            Map<Object, ITextHover> hovers =
+                (Map<Object, ITextHover>)Global.getField(sourceViewer, "fTextHovers"); //$NON-NLS-1$
+            return hovers == null ? List.of() : hovers.values();
+        }
+
+        /** Разворот цепочки обёрток до композита или hover-а аннотаций. */
+        private static Object unwrapHover(Object hover)
+        {
+            Object current = hover;
+            for (int depth = 0; depth < 8 && current != null; depth++)
+            {
+                if (current instanceof AbstractProblemHover || current instanceof AbstractCompositeHover)
+                    return current;
+                Object next = Global.getField(current, "delegate"); //$NON-NLS-1$
+                if (next == null)
+                    next = Global.getField(current, "annotationHover"); //$NON-NLS-1$
+                if (next == null || next == current)
+                    return current;
+                current = next;
+            }
+            return current;
+        }
+
+        /**
+         * Композиты бывают двух видов: {@link AbstractCompositeHover} у Xtext и
+         * {@code BestMatchEObjectTextHover} у EDT со своими {@code hovers} /
+         * {@code currentHover}. Последний уже отработавший hover ({@code currentHover})
+         * и есть источник только что полученной информации.
+         */
+        private static ITextHover findAnnotationHover(Object candidate)
+        {
+            if (candidate instanceof AbstractProblemHover problemHover)
+                return problemHover;
+            if (candidate == null)
+                return null;
+            if (candidate instanceof AbstractCompositeHover composite)
+                return firstProblemHover(composite.getHovers());
+            if (Global.getField(candidate, "currentHover") instanceof AbstractProblemHover current) //$NON-NLS-1$
+                return current;
+            if (Global.getField(candidate, "annotationHover") instanceof AbstractProblemHover annotation) //$NON-NLS-1$
+                return annotation;
+            return Global.getField(candidate, "hovers") instanceof Iterable<?> nested //$NON-NLS-1$
+                ? firstProblemHover(nested) : null;
+        }
+
+        private static ITextHover firstProblemHover(Iterable<?> hovers)
+        {
+            for (Object nested : hovers)
+            {
+                if (nested instanceof AbstractProblemHover problemHover)
+                    return problemHover;
+            }
+            return null;
+        }
+    }
+
+    /**
+     * Строка внизу попапа. Штатная («Нажмите CTRL+F2 для фокусировки») вводит в
+     * заблуждение: фокусировка недостижима, потому что {@code Closer.keyPressed} в
+     * JFace закрывает попап на любое нажатие клавиши, включая одиночный Ctrl. По
+     * этому сочетанию подсказка открывается от каретки — так и пишем.
+     */
+    private static final class HoverAffordanceText
+    {
+        private static final String SHOW_INFORMATION_COMMAND = "org.eclipse.ui.edit.text.showInformation"; //$NON-NLS-1$
+
+        static org.eclipse.jface.text.IInformationControlCreator wrapCreator(
+            org.eclipse.jface.text.IInformationControlCreator creator)
+        {
+            if (creator == null || creator instanceof AffordanceCreator)
+                return creator;
+            return new AffordanceCreator(creator);
+        }
+
+        static String text()
+        {
+            String binding = binding();
+            return binding == null ? null : "Нажмите " + binding + " для открытия от каретки"; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        private static String binding()
+        {
+            try
+            {
+                org.eclipse.ui.keys.IBindingService service =
+                    PlatformUI.getWorkbench().getService(org.eclipse.ui.keys.IBindingService.class);
+                String formatted = service == null ? null
+                    : service.getBestActiveBindingFormattedFor(SHOW_INFORMATION_COMMAND);
+                return formatted == null || formatted.isBlank() ? null : formatted;
+            }
+            catch (Exception e)
+            {
+                return null;
+            }
+        }
+
+        private static final class AffordanceCreator
+            implements org.eclipse.jface.text.IInformationControlCreator,
+            org.eclipse.jface.text.IInformationControlCreatorExtension
+        {
+            private final org.eclipse.jface.text.IInformationControlCreator delegate;
+
+            AffordanceCreator(org.eclipse.jface.text.IInformationControlCreator delegate)
+            {
+                this.delegate = delegate;
+            }
+
+            @Override
+            public IInformationControl createInformationControl(org.eclipse.swt.widgets.Shell parent)
+            {
+                IInformationControl control = delegate.createInformationControl(parent);
+                String text = text();
+                if (text != null && control instanceof org.eclipse.jface.text.IInformationControlExtension4 ext)
+                    ext.setStatusText(text);
+                return control;
+            }
+
+            @Override
+            public boolean canReuse(IInformationControl control)
+            {
+                boolean reuse = delegate instanceof org.eclipse.jface.text.IInformationControlCreatorExtension ext
+                    && ext.canReuse(control);
+                String text = text();
+                if (reuse && text != null
+                    && control instanceof org.eclipse.jface.text.IInformationControlExtension4 ext4)
+                    ext4.setStatusText(text);
+                return reuse;
+            }
+
+            @Override
+            public boolean canReplace(org.eclipse.jface.text.IInformationControlCreator creator)
+            {
+                org.eclipse.jface.text.IInformationControlCreator other =
+                    creator instanceof AffordanceCreator affordance ? affordance.delegate : creator;
+                return delegate instanceof org.eclipse.jface.text.IInformationControlCreatorExtension ext
+                    && ext.canReplace(other);
+            }
+        }
     }
 
     /** Ctrl+F2 (INFORMATION_PROPOSAL) — {@code XtextInformationProvider.hover}, не из {@code fTextHovers}. */
@@ -288,7 +600,8 @@ public final class BslEditorHoverHook implements IStartup
         @Override
         public org.eclipse.jface.text.IInformationControlCreator getHoverControlCreator()
         {
-            return delegateExt != null ? delegateExt.getHoverControlCreator() : null;
+            return delegateExt == null ? null
+                : HoverAffordanceText.wrapCreator(delegateExt.getHoverControlCreator());
         }
 
         @Override
@@ -296,7 +609,7 @@ public final class BslEditorHoverHook implements IStartup
         {
             if (suppressPointerHover)
             {
-                String reason = hoverSuppressionReason(hoverRegion);
+                String reason = hoverSuppressionReason(textViewer, hoverRegion);
                 if (reason != null)
                 {
                     IrBslHoverDebug.step("hover", "suppressed reason=" + reason //$NON-NLS-1$ //$NON-NLS-2$
@@ -306,8 +619,6 @@ public final class BslEditorHoverHook implements IStartup
             }
             else
             {
-                Global.tempLog(TEMP_LOG_TOPIC, "keyboard offset=" //$NON-NLS-1$
-                    + (hoverRegion == null ? -1 : hoverRegion.getOffset()));
             }
             Object info = delegateExt2 != null
                 ? delegateExt2.getHoverInfo2(textViewer, hoverRegion)
@@ -342,9 +653,6 @@ public final class BslEditorHoverHook implements IStartup
             return maybeDecorateHoverInfo(info);
         }
 
-        /** Временная безусловная диагностика подавления (#417); убрать после проверки. */
-        private static final String TEMP_LOG_TOPIC = "hover-suppress"; //$NON-NLS-1$
-
         /**
          * Слово, чаще употребляемое как имя метода ({@code Запрос.Выполнить()}),
          * чем как оператор {@code Выполнить <строка кода>}: попап на нём не подавляем.
@@ -355,101 +663,145 @@ public final class BslEditorHoverHook implements IStartup
         /**
          * Причина подавления подсказки при обычном наведении (без Ctrl) или {@code null}:
          * на ключевом слове языка EDT показывает синтаксическую справку всей
-         * конструкции, а на пустом месте — подсказку соседнего слова. Зажатый Ctrl —
-         * осознанный вызов, подсказка остаётся (как и у Ctrl+F2).
+         * конструкции, на строковом литерале — справку по строковому литералу,
+         * а на скрытом узле (пустое место, комментарий) — подсказку
+         * ближайшего семантического элемента, то есть чужого слова. Зажатый Ctrl —
+         * осознанный вызов, подсказка остаётся (как и у Ctrl+F2). Если в позиции есть
+         * аннотация с текстом (маркер проблемы, орфография), подсказка не подавляется
+         * никогда: подчёркивание обещает пояснение, и прятать его нельзя.
          */
-        private String hoverSuppressionReason(IRegion hoverRegion)
+        private String hoverSuppressionReason(ITextViewer textViewer, IRegion hoverRegion)
         {
             if (hoverRegion == null)
-            {
-                Global.tempLog(TEMP_LOG_TOPIC, "pointer region=null -> allowed"); //$NON-NLS-1$
                 return null;
-            }
             int offset = hoverRegion.getOffset();
-            if ((OS.GetKeyState(OS.VK_CONTROL) & 0x8000) != 0)
-            {
-                Global.tempLog(TEMP_LOG_TOPIC, "pointer offset=" + offset + " ctrl=held -> allowed"); //$NON-NLS-1$
+            // При Ctrl+F2 от каретки Ctrl зажат физически, но это не «Ctrl+наведение».
+            // Подавления при таком вызове действуют не все: на ключевом слове EDT даёт
+            // осмысленную справку по конструкции, и осознанный вызов её показывает,
+            // а на комментарии и пустом месте подсказка соседнего слова бесполезна
+            // в любом режиме.
+            boolean caret = Boolean.TRUE.equals(caretInvocation.get());
+            if (!caret && (OS.GetKeyState(OS.VK_CONTROL) & 0x8000) != 0)
                 return null;
-            }
+            String annotation = annotationTextAt(textViewer, hoverRegion);
+            if (annotation != null)
+                return null;
             if (editor == null || offset < 0)
-            {
-                Global.tempLog(TEMP_LOG_TOPIC, "pointer offset=" + offset + " noEditor -> allowed"); //$NON-NLS-1$
                 return null;
-            }
             org.eclipse.jface.text.IDocument document = editor.getDocument();
             if (!(document instanceof IXtextDocument xtextDoc))
-            {
-                Global.tempLog(TEMP_LOG_TOPIC, "pointer offset=" + offset + " noXtextDoc -> allowed"); //$NON-NLS-1$
                 return null;
-            }
             try
             {
                 return xtextDoc.readOnly(
                     (IUnitOfWork<String, XtextResource>) resource -> {
                         IParseResult parseResult = resource != null ? resource.getParseResult() : null;
                         if (parseResult == null)
-                        {
-                            Global.tempLog(TEMP_LOG_TOPIC,
-                                "pointer offset=" + offset + " noParse -> allowed"); //$NON-NLS-1$
                             return null;
-                        }
                         ILeafNode leaf = NodeModelUtils.findLeafNodeAtOffset(parseResult.getRootNode(), offset);
                         if (leaf == null)
-                        {
-                            Global.tempLog(TEMP_LOG_TOPIC,
-                                "pointer offset=" + offset + " leaf=null -> allowed"); //$NON-NLS-1$
                             return null;
-                        }
                         String token = leaf.getText();
                         String keywordValue = leaf.getGrammarElement() instanceof Keyword grammarKeyword
                             ? grammarKeyword.getValue() : null;
                         boolean whitelisted = keywordValue != null
                             && KEYWORD_HOVER_WHITELIST.contains(keywordValue);
-                        boolean member = isMemberAccessName(resource, offset);
+                        String ruleName = grammarRuleName(leaf);
+                        boolean stringLiteral = ruleName != null
+                            && ruleName.toUpperCase(java.util.Locale.ROOT).contains("STRING"); //$NON-NLS-1$
                         String reason;
-                        if (leaf.isHidden() && token != null && token.isBlank())
-                            reason = "blank"; //$NON-NLS-1$
-                        else if (!leaf.isHidden() && keywordValue != null && !keywordValue.isEmpty()
+                        if (leaf.isHidden())
+                            reason = token != null && token.isBlank() ? "blank" : "hidden"; //$NON-NLS-1$ //$NON-NLS-2$
+                        else if (!caret && keywordValue != null && !keywordValue.isEmpty()
                             && Character.isLetter(keywordValue.charAt(0)) && !whitelisted)
                             reason = "keyword"; //$NON-NLS-1$
+                        else if (!caret && stringLiteral)
+                            reason = "string"; //$NON-NLS-1$
                         else
                             reason = null;
-                        String grammar = leaf.getGrammarElement() == null
-                            ? "null" : leaf.getGrammarElement().eClass().getName(); //$NON-NLS-1$
-                        Global.tempLog(TEMP_LOG_TOPIC, "pointer offset=" + offset + " token=[" + token //$NON-NLS-1$
-                            + "] hidden=" + leaf.isHidden() + " grammar=" + grammar //$NON-NLS-1$
-                            + " keyword=[" + keywordValue + "] whitelist=" + whitelisted //$NON-NLS-1$
-                            + " member=" + member + " -> " //$NON-NLS-1$
-                            + (reason == null ? "allowed" : "SUPPRESSED:" + reason)); //$NON-NLS-1$
                         return reason;
                     });
             }
-            catch (Exception e)
+            catch (Exception ignored)
             {
-                Global.tempLogException(TEMP_LOG_TOPIC, "pointer offset=" + offset, e); //$NON-NLS-1$
                 return null;
             }
         }
 
         /**
-         * Смещение — имя метода/свойства (ключевое слово в роли имени члена,
-         * {@code Запрос.Выполнить()}); вычисляется только для временного лога.
+         * Текст первой аннотации с сообщением, перекрывающей область подсказки,
+         * или {@code null}. Именно её показывает штатный hover, поэтому при её
+         * наличии подавлять подсказку нельзя.
          */
-        private static boolean isMemberAccessName(XtextResource resource, int offset)
+        private String annotationTextAt(ITextViewer textViewer, IRegion hoverRegion)
         {
+            IAnnotationModel model = resolveAnnotationModel(textViewer);
+            if (model == null)
+                return null;
+            int start = hoverRegion.getOffset();
+            int end = start + Math.max(hoverRegion.getLength(), 0);
             try
             {
-                EObject obj = new EObjectAtOffsetHelper().resolveContainedElementAt(resource, offset);
-                for (EObject cur = obj; cur != null; cur = cur.eContainer())
+                for (java.util.Iterator<?> it = model.getAnnotationIterator(); it.hasNext();)
                 {
-                    if (cur instanceof FeatureAccess)
-                        return true;
+                    if (!(it.next() instanceof Annotation annotation) || annotation.isMarkedDeleted())
+                        continue;
+                    String text = annotation.getText();
+                    if (text == null || text.isBlank() || !isProblemAnnotationType(annotation.getType()))
+                        continue;
+                    Position position = model.getPosition(annotation);
+                    if (position == null || position.isDeleted())
+                        continue;
+                    int posStart = position.getOffset();
+                    int posEnd = posStart + Math.max(position.getLength(), 1);
+                    if (posEnd > start && posStart < Math.max(end, start + 1))
+                        return text;
                 }
             }
             catch (Exception ignored)
             {
+                // модель аннотаций могла измениться во время обхода
             }
-            return false;
+            return null;
+        }
+
+        /**
+         * Тип аннотации, для которой штатный hover показывает сообщение
+         * (как {@code AbstractProblemHover.isHandled}): ошибка, предупреждение,
+         * информация, орфография. Аннотации Quick Diff («изменено: N строк»),
+         * свёртки, вхождений и т.п. сюда не попадают — они подсказку не дают.
+         */
+        private static boolean isProblemAnnotationType(String type)
+        {
+            if (type == null)
+                return false;
+            return type.contains("error") || type.contains("warning") //$NON-NLS-1$ //$NON-NLS-2$
+                || type.contains("info") || type.contains("spelling"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        private IAnnotationModel resolveAnnotationModel(ITextViewer textViewer)
+        {
+            if (textViewer instanceof ISourceViewer sourceViewer)
+            {
+                IAnnotationModel model = sourceViewer.getAnnotationModel();
+                if (model != null)
+                    return model;
+            }
+            if (editor == null)
+                return null;
+            org.eclipse.ui.texteditor.IDocumentProvider provider = editor.getDocumentProvider();
+            return provider == null ? null : provider.getAnnotationModel(editor.getEditorInput());
+        }
+
+        /** Имя правила грамматики листа ({@code STRING} и т.п.) или {@code null}. */
+        private static String grammarRuleName(ILeafNode leaf)
+        {
+            Object grammarElement = leaf.getGrammarElement();
+            if (grammarElement instanceof org.eclipse.xtext.RuleCall ruleCall && ruleCall.getRule() != null)
+                return ruleCall.getRule().getName();
+            if (grammarElement instanceof org.eclipse.xtext.AbstractRule rule)
+                return rule.getName();
+            return null;
         }
 
         private Object maybeDecorateHoverInfo(Object info)
