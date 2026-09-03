@@ -2455,6 +2455,19 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
         boolean beforeValid = before != null && before.length == table.getColumnCount();
         if (beforeValid && !ColumnWidthFit.isCtrlPressed())
             applyProportionalShrink(col, before);
+        // Ширины изменил пользователь — layout-данные обязаны догнать их в ЛЮБОМ случае, а не только
+        // когда сработал пропорциональный пересчёт (он не срабатывает, если в таблице был запас
+        // свободного места). Иначе ближайшая раскладка хоста — в том числе от изменения одной лишь
+        // ВЫСОТЫ (движение разделителя SashForm) — вернёт колонкам ширины из старых ColumnPixelData.
+        selfAdjusting = true;
+        try
+        {
+            rebindColumnLayoutData();
+        }
+        finally
+        {
+            selfAdjusting = false;
+        }
         rememberVisualWidths();
         updateFitState(); // для последующего сужения ТАБЛИЦЫ — знать, было ли переполнение уже до него
     }
@@ -2843,7 +2856,10 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
                 continue;
             }
             int width = Math.max(1, c.getWidth());
-            layout.setColumnData(c, new ColumnPixelData(width, true, i < cols - 1));
+            // addTrim=false: width — уже ФАКТИЧЕСКАЯ ширина колонки. С addTrim раскладка прибавляла бы
+            // к ней COLUMN_TRIM (AbstractColumnLayout.layoutTableTree), а следующий rebind подхватывал
+            // раздутое значение — колонки росли бы на несколько px при каждой раскладке хоста.
+            layout.setColumnData(c, new ColumnPixelData(width, true, false));
         }
     }
 

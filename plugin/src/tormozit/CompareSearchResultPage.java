@@ -277,6 +277,7 @@ public class CompareSearchResultPage implements ISearchResultPage
                 }
             };
             setMarks.setEnabled(hasCheckable);
+            setMarks.setImageDescriptor(MarkSelectionCommands.setIconDescriptor());
             setMarks.setToolTipText(
                     "Установить пометки для выделенных строк" + Global.pluginSignForTooltip());
 
@@ -289,6 +290,7 @@ public class CompareSearchResultPage implements ISearchResultPage
                 }
             };
             clearMarks.setEnabled(hasCheckable);
+            clearMarks.setImageDescriptor(MarkSelectionCommands.clearIconDescriptor());
             clearMarks.setToolTipText(
                     "Снять пометки с выделенных строк" + Global.pluginSignForTooltip());
 

@@ -403,9 +403,20 @@ public final class GitHistoryHook implements IStartup
         }
     }
 
+    /**
+     * {@code true} для штатной EGit-страницы истории и её наследников. 1С:EDT показывает
+     * для ресурсов, открытых через {@code IDtEditorInput} (вкладка «Форма» редактора формы
+     * и т.п.), свой подкласс {@code com._1c.g5.v8.dt.team.ui.history.HistoryPageSource$1
+     * extends GitHistoryPage} — тонкую обёртку с тем же полем {@code fileViewer}. Точное
+     * сравнение класса такую страницу пропускало, и патч к таблице файлов не подключался
+     * (подтверждено декомпиляцией бандла {@code com._1c.g5.v8.dt.team.ui}).
+     */
     private static boolean isGitHistoryPage(Object page)
     {
-        return page != null && GIT_HISTORY_PAGE_CLASS.equals(page.getClass().getName());
+        for (Class<?> c = page != null ? page.getClass() : null; c != null; c = c.getSuperclass())
+            if (GIT_HISTORY_PAGE_CLASS.equals(c.getName()))
+                return true;
+        return false;
     }
 
     private static Object gitHistoryPageSource()

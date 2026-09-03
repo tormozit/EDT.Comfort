@@ -244,8 +244,8 @@ public final class ComfortSettings
      */
     public static final String PREF_REFACTORING_PREVIEW_TABLE_MODE = "comfort.refactoringPreview.tableMode"; //$NON-NLS-1$
 
-    /** По умолчанию изменения показываются деревом, как в EDT. */
-    public static final boolean DEFAULT_REFACTORING_PREVIEW_TABLE_MODE = false;
+    /** По умолчанию изменения показываются таблицей: в дереве вхождения приходится раскрывать по одному. */
+    public static final boolean DEFAULT_REFACTORING_PREVIEW_TABLE_MODE = true;
 
     // ---- Spell checking ----
 
@@ -615,6 +615,10 @@ public final class ComfortSettings
     {
         ComfortSettings settings = instance;
         if (settings == null)
+            return DEFAULT_REFACTORING_PREVIEW_TABLE_MODE;
+        // Пока пользователь не переключал режим сам, значения в хранилище нет, а getBoolean вернул бы
+        // false — поэтому отсутствие ключа отдаём как значение по умолчанию.
+        if (!settings.preferenceStore.contains(PREF_REFACTORING_PREVIEW_TABLE_MODE))
             return DEFAULT_REFACTORING_PREVIEW_TABLE_MODE;
         return settings.preferenceStore.getBoolean(PREF_REFACTORING_PREVIEW_TABLE_MODE);
     }

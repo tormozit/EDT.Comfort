@@ -71,8 +71,6 @@ public final class BslOccurrenceContextResolver
     private static final String THIS_OBJECT_RU = "ЭтотОбъект"; //$NON-NLS-1$
     private static final String THIS_OBJECT_EN = "ThisObject"; //$NON-NLS-1$
 
-    private static final String TEMP_LOG_TOPIC = "refactoring-preview-table"; //$NON-NLS-1$
-
     private static final int TYPE_CACHE_LIMIT = 8192;
     /** {@code путь#штамп#смещение} → тип родителя ({@code ""} — вычислить не удалось). */
     private static final Map<String, String> TYPE_CACHE = new ConcurrentHashMap<>();
@@ -161,7 +159,7 @@ public final class BslOccurrenceContextResolver
         }
         catch (Exception | LinkageError e)
         {
-            Global.tempLogException(TEMP_LOG_TOPIC, "parentType " + file.getFullPath() + "@" + offset, e); //$NON-NLS-1$ //$NON-NLS-2$
+            // Разбор модуля моделью BSL — не гарантированная операция: в колонке остаётся «?».
             resolved = ""; //$NON-NLS-1$
         }
         putBounded(TYPE_CACHE, key, resolved);
@@ -177,29 +175,17 @@ public final class BslOccurrenceContextResolver
 
     private static String resolveTypeFromModel(IFile file, String content, int dotOffset, int offset)
     {
-        String where = file.getName() + "@" + offset + " dot=" + dotOffset //$NON-NLS-1$ //$NON-NLS-2$
-            + " [" + snippet(content, offset) + "]"; //$NON-NLS-1$ //$NON-NLS-2$
         URI uri = URI.createPlatformResourceURI(file.getFullPath().toString(), true);
         IResourceServiceProvider provider =
             IResourceServiceProvider.Registry.INSTANCE.getResourceServiceProvider(uri);
         if (provider == null)
-        {
-            Global.tempLog(TEMP_LOG_TOPIC, "parentType " + where + ": no provider"); //$NON-NLS-1$ //$NON-NLS-2$
             return ""; //$NON-NLS-1$
-        }
         ResourceSet resourceSet = resourceSet(provider, file.getProject());
         if (resourceSet == null)
-        {
-            Global.tempLog(TEMP_LOG_TOPIC, "parentType " + where + ": no resourceSet"); //$NON-NLS-1$ //$NON-NLS-2$
             return ""; //$NON-NLS-1$
-        }
         Resource resource = resourceSet.getResource(uri, true);
         if (!(resource instanceof XtextResource xtextResource))
-        {
-            Global.tempLog(TEMP_LOG_TOPIC, "parentType " + where + ": resource=" //$NON-NLS-1$ //$NON-NLS-2$
-                + (resource == null ? "null" : resource.getClass().getName())); //$NON-NLS-1$
             return ""; //$NON-NLS-1$
-        }
         // Конвейер редактора/сборщика, без которого TypesComputer даёт пустоту: пакетное
         // связывание и производное состояние ресурса (окружения операторов, контекст модуля
         // его объектом-владельцем, установки обращений) — BslDerivedStateComputer.
@@ -213,76 +199,18 @@ public final class BslOccurrenceContextResolver
         // Точки перед вхождением нет: родителем может быть сам объект модуля — так выглядит прямое
         // обращение к его реквизиту (ДатаОтгрузки = 123 в модуле объекта).
         if (dotOffset < 0)
-        {
-            String own = contextTypeOfOwnProperty(xtextResource, offset);
-            Global.tempLog(TEMP_LOG_TOPIC, "parentType " + where + ": ownProperty '" + own + "'" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + resourceState(xtextResource));
-            return own;
-        }
+            return contextTypeOfOwnProperty(xtextResource, offset);
 
         Expression receiver = SmartContentAssistProcessor.ReceiverTypeLabel.receiverInResource(xtextResource,
             dotOffset, offset);
         if (receiver == null)
-        {
-            Global.tempLog(TEMP_LOG_TOPIC, "parentType " + where + ": receiver=null" //$NON-NLS-1$ //$NON-NLS-2$
-                + resourceState(xtextResource));
             return ""; //$NON-NLS-1$
-        }
-        String before = SmartContentAssistProcessor.ReceiverTypeLabel.formatTypes(receiver);
+        String types = SmartContentAssistProcessor.ReceiverTypeLabel.formatTypes(receiver);
+        if (!types.isEmpty())
+            return types;
         // У загруженного нами ресурса типы в самом выражении пустые (их проставляет конвейер
         // редактора), поэтому берём результат вычислителя, а не состояние модели.
-        List<TypeItem> computed = computeTypes(provider, receiver);
-        String after = !before.isEmpty() ? before
-            : SmartContentAssistProcessor.ReceiverTypeLabel.formatTypeItems(computed);
-        Environmental envOwner = EcoreUtil2.getContainerOfType(receiver, Environmental.class);
-        Environments environments = envOwner != null ? envOwner.environments() : null;
-        Module module = moduleOf(xtextResource);
-        int ctxProps = module != null && module.getContextDef() != null
-            ? module.getContextDef().allProperties().size() : -1;
-        Global.tempLog(TEMP_LOG_TOPIC, "parentType " + where + ": receiver=" //$NON-NLS-1$ //$NON-NLS-2$
-            + receiver.eClass().getName() + " before='" + before + "' after='" + after //$NON-NLS-1$ //$NON-NLS-2$
-            + "' computed=" + (computed == null ? "null" : computed.size()) //$NON-NLS-1$ //$NON-NLS-2$
-            + " env=" + environments + " ctxDef=" + ctxProps + resourceState(xtextResource)); //$NON-NLS-1$ //$NON-NLS-2$
-        return after;
-    }
-
-    /** Состояние ресурса для диагностики: владелец модуля (прокси?) и тексты ошибок разбора. */
-    private static String resourceState(XtextResource resource)
-    {
-        Module module = moduleOf(resource);
-        Object owner = module != null ? Global.invoke(module, "getOwner") : null; //$NON-NLS-1$
-        StringBuilder sb = new StringBuilder(" owner="); //$NON-NLS-1$
-        if (owner == null)
-            sb.append("null"); //$NON-NLS-1$
-        else if (((EObject)owner).eIsProxy())
-            sb.append("PROXY"); //$NON-NLS-1$
-        else
-            sb.append(((EObject)owner).eClass().getName());
-        sb.append(" errors="); //$NON-NLS-1$
-        boolean first = true;
-        for (org.eclipse.emf.ecore.resource.Resource.Diagnostic diagnostic : resource.getErrors())
-        {
-            if (!first)
-                sb.append(" | "); //$NON-NLS-1$
-            sb.append(diagnostic.getMessage());
-            first = false;
-            if (sb.length() > 400)
-                break;
-        }
-        return sb.toString();
-    }
-
-    /** Фрагмент текста модуля перед вхождением (пробелы и переводы строк схлопнуты). */
-    private static String snippet(String content, int offset)
-    {
-        int start = Math.max(0, offset - 48);
-        StringBuilder sb = new StringBuilder();
-        for (int i = start; i < offset && i < content.length(); i++)
-        {
-            char c = content.charAt(i);
-            sb.append(c == '\n' || c == '\r' || c == '\t' ? ' ' : c);
-        }
-        return sb.toString();
+        return SmartContentAssistProcessor.ReceiverTypeLabel.formatTypeItems(computeTypes(provider, receiver));
     }
 
     /**

@@ -738,33 +738,10 @@ public class CompareConfigMenuHook implements IStartup
                 {
                     addedItems.add(new MenuItem(menu, SWT.SEPARATOR));
 
-                    MenuItem itemMark = new MenuItem(menu, SWT.PUSH);
-                    itemMark.setText(ITEM_TEXT_setMarks);
-                    itemMark.addSelectionListener(new SelectionAdapter()
-                    {
-                        @Override
-                        public void widgetSelected(SelectionEvent ev)
-                        {
-                            AbstractTreeViewer viewer = getTreeViewerFromEditor(editor);
-                            if (viewer instanceof CheckboxTreeViewer ctv)
-                                multiMark.applyMark(ctv, true);
-                        }
-                    });
-                    addedItems.add(itemMark);
-
-                    MenuItem itemUnmark = new MenuItem(menu, SWT.PUSH);
-                    itemUnmark.setText(ITEM_TEXT_clearMarks);
-                    itemUnmark.addSelectionListener(new SelectionAdapter()
-                    {
-                        @Override
-                        public void widgetSelected(SelectionEvent ev)
-                        {
-                            AbstractTreeViewer viewer = getTreeViewerFromEditor(editor);
-                            if (viewer instanceof CheckboxTreeViewer ctv)
-                                multiMark.applyMark(ctv, false);
-                        }
-                    });
-                    addedItems.add(itemUnmark);
+                    addedItems.add(MarkSelectionCommands.addSetItem(menu, ITEM_TEXT_setMarks,
+                        () -> applyMarkFromMenu(editor, multiMark, true)));
+                    addedItems.add(MarkSelectionCommands.addClearItem(menu, ITEM_TEXT_clearMarks,
+                        () -> applyMarkFromMenu(editor, multiMark, false)));
                 }
             }
 
@@ -788,6 +765,15 @@ public class CompareConfigMenuHook implements IStartup
         {
             if (!menu.isDisposed()) menu.removeMenuListener(listener);
         });
+    }
+
+    /** Действие пунктов «Установить/Снять пометки» контекстного меню дерева сравнения. */
+    private static void applyMarkFromMenu(IEditorPart editor, CompareConfigMultiMarkSupport multiMark,
+        boolean mark)
+    {
+        AbstractTreeViewer viewer = getTreeViewerFromEditor(editor);
+        if (viewer instanceof CheckboxTreeViewer ctv)
+            multiMark.applyMark(ctv, mark);
     }
 
     // ---- Получение Tree из редактора ----

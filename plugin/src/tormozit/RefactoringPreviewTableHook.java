@@ -15,9 +15,8 @@ import org.eclipse.core.runtime.jobs.IJobFunction;
 import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.action.Action;
-import org.eclipse.jface.action.IAction;
-import org.eclipse.jface.action.IContributionItem;
 import org.eclipse.jface.action.ActionContributionItem;
+import org.eclipse.jface.action.IAction;
 import org.eclipse.jface.action.ToolBarManager;
 import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.jface.layout.TableColumnLayout;
@@ -60,6 +59,7 @@ import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Table;
 import org.eclipse.swt.widgets.TableColumn;
 import org.eclipse.swt.widgets.TableItem;
+import org.eclipse.swt.widgets.ToolBar;
 import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.Widget;
 import org.eclipse.text.edits.MultiTextEdit;
@@ -98,8 +98,6 @@ import com._1c.g5.v8.dt.core.platform.IResourceLookup;
  */
 public final class RefactoringPreviewTableHook
 {
-    private static final String TEMP_LOG_TOPIC = "refactoring-preview-table"; //$NON-NLS-1$
-
     /** Диалог мастера рефакторинга — проверка та же, что в двух соседних хуках этого окна. */
     private static final String DIALOG_NAME_PART_REFACTORING = "Refactoring"; //$NON-NLS-1$
     private static final String DIALOG_NAME_PART_DIALOG = "Dialog"; //$NON-NLS-1$
@@ -187,7 +185,7 @@ public final class RefactoringPreviewTableHook
         }
         catch (RuntimeException e)
         {
-            Global.tempLogException(TEMP_LOG_TOPIC, "install", e); //$NON-NLS-1$
+            // Вёрстка страницы могла измениться в новой версии EDT — она остаётся штатной.
         }
         return true;
     }
@@ -287,6 +285,9 @@ public final class RefactoringPreviewTableHook
         private static final int[] DEFAULT_WIDTHS = {320, 200, 90, 260, 180, 180, 220, 140};
         private static final int MIN_COLUMN_WIDTH = 40;
 
+        /** Пометка на меню таблицы: свои пункты дописаны, второй раз не создавать. */
+        private static final String MARK_MENU_KEY = "tormozit.refactoringPreviewMarkMenu"; //$NON-NLS-1$
+
         private static final String UNKNOWN_TYPE = "?"; //$NON-NLS-1$
         private static final String PARENT_TYPE_TITLE = "Тип родителя"; //$NON-NLS-1$
 
@@ -303,6 +304,8 @@ public final class RefactoringPreviewTableHook
         private final Table table;
         private final CheckboxTableViewer viewer;
         private final List<PreviewRow> rows = new ArrayList<>();
+        /** Свои пункты контекстного меню — их доступность зависит от выделения (см. prepareMarkMenu). */
+        private final List<MenuItem> markMenuItems = new ArrayList<>();
 
         private FormTableInteraction interaction;
         private TableColumn parentTypeColumn;
@@ -333,11 +336,7 @@ public final class RefactoringPreviewTableHook
         {
             Tree tree = treeViewer.getTree();
             if (!(tree.getParent() instanceof ViewForm pane))
-            {
-                Global.tempLog(TEMP_LOG_TOPIC, "tree parent is not ViewForm: " //$NON-NLS-1$
-                    + tree.getParent().getClass().getName());
                 return null;
-            }
 
             Composite stack = new Composite(pane, SWT.NONE);
             TopControlStack stackLayout = new TopControlStack();
@@ -345,7 +344,6 @@ public final class RefactoringPreviewTableHook
             if (!tree.setParent(stack))
             {
                 stack.dispose();
-                Global.tempLog(TEMP_LOG_TOPIC, "setParent(tree) failed"); //$NON-NLS-1$
                 return null;
             }
 
@@ -377,7 +375,6 @@ public final class RefactoringPreviewTableHook
             result.wireListeners();
             result.installToggle(pane);
             result.setTableMode(ComfortSettings.isRefactoringPreviewTableMode());
-            Global.tempLog(TEMP_LOG_TOPIC, "installed"); //$NON-NLS-1$
             return result;
         }
 
@@ -470,7 +467,9 @@ public final class RefactoringPreviewTableHook
         {
             int width = FormTableColumnState.readWidth(settings, WIDTH_KEYS[index], DEFAULT_WIDTHS[index],
                 MIN_COLUMN_WIDTH);
-            columnLayout.setColumnData(column, new ColumnPixelData(width, true, true));
+            // addTrim=false — ширина сохранённая (уже фактическая), иначе раскладка прибавляла бы к ней
+            // COLUMN_TRIM, и колонки росли бы от открытия к открытию.
+            columnLayout.setColumnData(column, new ColumnPixelData(width, true, false));
         }
 
         private ILabelProvider treeLabelProvider()
@@ -504,25 +503,38 @@ public final class RefactoringPreviewTableHook
                 cancelContextResolution();
                 BslOccurrenceContextResolver.clearCaches();
                 saveColumnLayout();
+                // Режим — как он оставлен на момент закрытия окна: следующее открытие начнётся с него.
+                ComfortSettings.setRefactoringPreviewTableMode(tableMode);
             });
         }
 
         /** Пункты пометки в контекстном меню таблицы (меню создаёт {@link FormTableInteraction}). */
         private void installMarkMenu()
         {
+            // Меню таблицы FormTableInteraction создаёт лениво, в своём слушателе SWT.MenuDetect
+            // (ensureCopyMenu) — на момент install() его ещё нет. Наш слушатель добавлен позже, значит
+            // и вызывается позже: к этому моменту меню уже создано, дописываем в него свои пункты.
+            table.addListener(SWT.MenuDetect, event -> prepareMarkMenu());
+        }
+
+        private void prepareMarkMenu()
+        {
             Menu menu = table.getMenu();
             if (menu == null || menu.isDisposed())
                 return;
-            addMenuItem(menu, "Пометить\tПробел", () -> setChecked(selectedRows(), true)); //$NON-NLS-1$
-            addMenuItem(menu, "Снять пометку", () -> setChecked(selectedRows(), false)); //$NON-NLS-1$
-            addMenuItem(menu, "Инвертировать пометки", this::invertChecked); //$NON-NLS-1$
-        }
-
-        private static void addMenuItem(Menu menu, String text, Runnable action)
-        {
-            MenuItem item = new MenuItem(menu, SWT.PUSH);
-            item.setText(text);
-            item.addListener(SWT.Selection, event -> action.run());
+            if (menu.getData(MARK_MENU_KEY) == null)
+            {
+                menu.setData(MARK_MENU_KEY, Boolean.TRUE);
+                new MenuItem(menu, SWT.SEPARATOR);
+                markMenuItems.add(MarkSelectionCommands.addSetItem(menu, () -> setChecked(selectedRows(), true)));
+                markMenuItems.add(MarkSelectionCommands.addClearItem(menu, () -> setChecked(selectedRows(), false)));
+            }
+            boolean hasSelection = !selectedRows().isEmpty();
+            for (MenuItem item : markMenuItems)
+            {
+                if (!item.isDisposed())
+                    item.setEnabled(hasSelection);
+            }
         }
 
         /**
@@ -534,11 +546,7 @@ public final class RefactoringPreviewTableHook
         private void installToggle(ViewForm pane)
         {
             if (!(Global.invoke(pane, "getToolBarManager") instanceof ToolBarManager manager)) //$NON-NLS-1$
-            {
-                Global.tempLog(TEMP_LOG_TOPIC, "toggle: toolbar manager not found, topCenter=" //$NON-NLS-1$
-                    + (pane.getTopCenter() == null ? "null" : pane.getTopCenter().getClass().getName()));
                 return;
-            }
             toolBarManager = manager;
             Action toggle = new Action("", IAction.AS_CHECK_BOX) //$NON-NLS-1$
             {
@@ -557,77 +565,25 @@ public final class RefactoringPreviewTableHook
             toggle.setChecked(ComfortSettings.isRefactoringPreviewTableMode());
             manager.add(toggle);
             toggleAction = toggle;
-            int items = manager.getItems().length;
-            overrideMarkAllActions(manager);
-            Global.tempLog(TEMP_LOG_TOPIC, "toggle: action added, manager items=" + items //$NON-NLS-1$
-                + "->" + manager.getItems().length); //$NON-NLS-1$
+            manager.update(true);
+            watchToolBar(manager);
         }
 
         /**
-         * Кнопки EDT «пометить/снять пометку со всех полнотекстовых вхождений»: в табличном режиме
-         * они работают по выделению таблицы. Подменяется вклад в {@code ToolBarManager} панели —
-         * своё действие вызывает штатное, когда табличный режим выключен или выделения нет.
+         * Штатные кнопки панели (в том числе «пометить/снять пометку со всех полнотекстовых вхождений»
+         * от EDT) работают с деревом и о таблице не знают: после нажатия перечитываем состояние строк.
+         * Только наблюдение — сами кнопки и их поведение не подменяются.
          */
-        private void overrideMarkAllActions(ToolBarManager manager)
+        private void watchToolBar(ToolBarManager manager)
         {
-            for (IContributionItem contribution : manager.getItems())
-            {
-                if (!(contribution instanceof ActionContributionItem actionItem))
-                    continue;
-                IAction action = actionItem.getAction();
-                if (action == null || !isMarkAllAction(action))
-                    continue;
-                boolean check = action.getClass().getSimpleName().startsWith("Check"); //$NON-NLS-1$
-                String id = action.getId() != null ? action.getId() : contribution.getId();
-                ActionContributionItem replacement = new ActionContributionItem(new MarkAllDelegate(action, check));
-                try
-                {
-                    manager.insertBefore(id, replacement);
-                    manager.remove(contribution);
-                }
-                catch (RuntimeException e)
-                {
-                    // Вклад без идентификатора — оставляем штатную кнопку как есть: пометить
-                    // выделенные строки можно пробелом и контекстным меню таблицы.
-                    Global.tempLogException(TEMP_LOG_TOPIC, "overrideMarkAllActions", e); //$NON-NLS-1$
-                }
-            }
-            manager.update(true);
-        }
-
-        private static boolean isMarkAllAction(IAction action)
-        {
-            return action.getClass().getSimpleName().contains("FullTextSearchChangesAction"); //$NON-NLS-1$
-        }
-
-        /** Штатное действие «пометить/снять все», перенаправленное на выделение таблицы. */
-        private final class MarkAllDelegate extends Action
-        {
-            private final IAction original;
-            private final boolean check;
-
-            MarkAllDelegate(IAction original, boolean check)
-            {
-                super(original.getText(), original.getStyle());
-                this.original = original;
-                this.check = check;
-                setId(original.getId());
-                setImageDescriptor(original.getImageDescriptor());
-                setToolTipText(original.getToolTipText());
-            }
-
-            @Override
-            public void run()
-            {
-                List<PreviewRow> selected = selectedRows();
-                if (!tableMode || selected.isEmpty())
-                {
-                    original.run();
-                    refreshRows();
+            ToolBar bar = manager.getControl();
+            if (bar == null || bar.isDisposed())
+                return;
+            bar.addListener(SWT.Selection, event -> {
+                if (table.isDisposed())
                     return;
-                }
-                PreviewTablePane.this.setChecked(selected, check);
-            }
+                table.getDisplay().asyncExec(this::refreshRows);
+            });
         }
 
         void setTableMode(boolean value)
@@ -667,7 +623,6 @@ public final class RefactoringPreviewTableHook
             viewer.refresh();
             syncSelectionFromTree();
             scheduleContextResolution();
-            Global.tempLog(TEMP_LOG_TOPIC, "reload: rows=" + rows.size()); //$NON-NLS-1$
         }
 
         private void collect(ITreeContentProvider provider, Object node, int depth)
@@ -788,9 +743,7 @@ public final class RefactoringPreviewTableHook
             }
             if (change instanceof TextFileChange textFileChange)
                 return textFileChange.getFile();
-            Global.tempLog(TEMP_LOG_TOPIC, "fileOfChange: unresolved, change=" //$NON-NLS-1$
-                + change.getClass().getName() + ", modified=" //$NON-NLS-1$
-                + (modified == null ? "null" : modified.getClass().getName())); //$NON-NLS-1$
+            // Обёрточные изменения EDT файла не несут — у строки просто нет колонок модуля.
             return null;
         }
 
@@ -857,13 +810,6 @@ public final class RefactoringPreviewTableHook
                     return false;
             }
             return !target.isEmpty();
-        }
-
-        private void invertChecked()
-        {
-            for (PreviewRow row : selectedRows())
-                fireCheck(row.node, activeState(row.node) == INACTIVE);
-            afterCheckChanged();
         }
 
         private void setChecked(Collection<PreviewRow> target, boolean value)
