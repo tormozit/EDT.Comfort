@@ -112,9 +112,9 @@ public final class GitAddToObjectSetHandler extends AbstractHandler implements I
             element.setTooltip("Выберите активный набор в панели \u00abНаборы объектов\u00bb" + Global.pluginSignForTooltip());
             return;
         }
-        element.setText("Добавить в набор <" + target.name + ">");
-        element.setTooltip("Добавить выбранные объекты метаданных в набор \u00ab"
-            + target.name + "\u00bb" + Global.pluginSignForTooltip());
+        element.setText("Добавить в набор " + ObjectSets.bracketedName(target));
+        element.setTooltip("Добавить выбранные объекты метаданных в набор "
+            + ObjectSets.quotedName(target) + Global.pluginSignForTooltip());
     }
 
     private static ObjectSets.SetDef currentTargetSet()

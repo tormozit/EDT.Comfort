@@ -63,9 +63,9 @@ public final class NavigatorAddToObjectSetHandler extends AbstractHandler implem
             return;
         }
 
-        element.setText("Добавить в набор <" + target.name + ">"); //$NON-NLS-1$ //$NON-NLS-2$
-        element.setTooltip("Добавить выбранный объект метаданных в набор «" //$NON-NLS-1$
-            + target.name + "»" + Global.pluginSignForTooltip()); //$NON-NLS-1$
+        element.setText("Добавить в набор " + ObjectSets.bracketedName(target)); //$NON-NLS-1$
+        element.setTooltip("Добавить выбранный объект метаданных в набор " //$NON-NLS-1$
+            + ObjectSets.quotedName(target) + Global.pluginSignForTooltip());
 
     }
 

@@ -7,6 +7,7 @@ import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.WeakHashMap;
 
 import com.google.inject.Injector;
 
@@ -14,6 +15,8 @@ import org.eclipse.core.runtime.Platform;
 import org.eclipse.debug.core.DebugException;
 import org.eclipse.debug.core.DebugPlugin;
 import org.eclipse.debug.core.ILaunchListener;
+import org.eclipse.debug.core.model.IErrorReportingExpression;
+import org.eclipse.debug.core.model.IExpression;
 import org.eclipse.debug.core.model.IValue;
 import org.eclipse.debug.core.model.IVariable;
 import org.eclipse.debug.internal.ui.viewers.model.provisional.IElementLabelProvider;
@@ -72,6 +75,10 @@ public final class DebugVariablePresentationHook implements IStartup
 
     private static final Set<ILabelUpdate> WRAPPED_LABEL_UPDATES =
         Collections.newSetFromMap(new IdentityHashMap<>());
+
+    /** Выражения с ошибкой, для которых дочерняя строка-дубликат уже один раз схлопнута. */
+    private static final Set<Object> AUTO_COLLAPSED_ERROR_EXPRESSIONS =
+        Collections.newSetFromMap(new WeakHashMap<>());
 
     private static final String LABEL_PROVIDER_CLASS =
         "org.eclipse.debug.internal.ui.viewers.model.provisional.IElementLabelProvider"; //$NON-NLS-1$
@@ -702,11 +709,14 @@ public final class DebugVariablePresentationHook implements IStartup
                 iface.getClassLoader(), new Class<?>[] { iface },
                 (proxy, method, args) ->
                 {
-                    if (args != null && args.length == 1 && args[0] instanceof ILabelUpdate update)
+                    if (args != null && args.length == 1 && args[0] instanceof ILabelUpdate update
+                        && "labelUpdateComplete".equals(method.getName())) //$NON-NLS-1$
                     {
-                        if ("labelUpdateComplete".equals(method.getName()) //$NON-NLS-1$
-                            && update.getElement() instanceof IBslVariable)
+                        Object element = update.getElement();
+                        if (element instanceof IBslVariable)
                             enhanceAndApplyStockValueColumn(update);
+                        else if (element instanceof IExpression expression)
+                            enhanceAndApplyExpressionErrorColumn(update, expression);
                     }
                     return defaultProxyReturn(method.getReturnType());
                 });
@@ -763,6 +773,86 @@ public final class DebugVariablePresentationHook implements IStartup
         }
         if (shouldRetryStringRelabel(update, valueIndex, after) && attempt < 5)
             scheduleStringRelabel(update, attempt);
+    }
+
+    /**
+     * Колонка «Значение» строки-выражения с ошибкой вычисления (штатный {@code IWatchExpression})
+     * показывает не текст ошибки, а фиксированный флаг {@code <ошибки-в-ходе-вычисления>}
+     * ({@code ExpressionLabelProvider.getExpressionValueText}, штатный {@code IErrorReportingExpression}).
+     * Подставляем туда сам текст ошибки — так же, как уже подставляется полный текст строк
+     * {@link #enhanceAndApplyStockValueColumn}. Дублирующую дочернюю строку с тем же текстом
+     * ({@code ExpressionContentProvider$ErrorMessageElement}) не убираем (это отдельный
+     * {@code IElementContentProvider}, не перехватываемый отсюда) — один раз схлопываем, если она
+     * успела развернуться, см. {@link #collapseErrorChildRowOnce}.
+     */
+    private static void enhanceAndApplyExpressionErrorColumn(ILabelUpdate update, IExpression expression)
+    {
+        if (!ComfortSettings.isImproveDebuggerWindowsEnabled() || update.isCanceled())
+            return;
+        if (!(expression instanceof IErrorReportingExpression errorExpression) || !errorExpression.hasErrors())
+            return;
+        String errorText = joinErrorMessages(errorExpression.getErrorMessages());
+        if (errorText.isEmpty())
+            return;
+        String[] columns = update.getColumnIds();
+        int valueIndex = indexOfColumn(columns, COL_VAR_VALUE);
+        if (valueIndex < 0)
+            return;
+        Object labelsObj = Global.getField(update, "fLabels"); //$NON-NLS-1$
+        if (!(labelsObj instanceof String[] labels) || valueIndex >= labels.length)
+            return;
+        if (errorText.equals(labels[valueIndex]))
+            return;
+        update.setLabel(errorText, valueIndex);
+        applyLabelUpdateToViewer(update);
+        Object provider = Global.getField(update, "fProvider"); //$NON-NLS-1$
+        Object viewerObj = provider != null ? Global.getField(provider, "fViewer") : null; //$NON-NLS-1$
+        if (viewerObj instanceof Viewer viewer)
+        {
+            TreePath path = update.getElementPath();
+            if (path != null)
+                collapseErrorChildRowOnce(expression, viewer, path);
+            // Панель деталей ("подробное значение") иначе обновляется только по повторному
+            // выделению уже активной строки — довыгружаем текст ошибки сразу.
+            Object treeObj = viewer.getData(INSPECTOR_TREE_KEY);
+            if (treeObj instanceof Tree tree)
+                DebugInspectorTreeEnhancement.refreshDetailPaneForTree(tree);
+        }
+    }
+
+    /** {@link DebugDetailPaneFullTextSupport#joinErrorMessages} — общий текст для колонки и панели деталей. */
+    private static String joinErrorMessages(String[] messages)
+    {
+        return DebugDetailPaneFullTextSupport.joinErrorMessages(messages);
+    }
+
+    private static void collapseErrorChildRowOnce(IExpression expression, Viewer viewer, TreePath path)
+    {
+        if (!AUTO_COLLAPSED_ERROR_EXPRESSIONS.add(expression))
+            return;
+        collapseErrorChildRow(viewer, path, 0);
+    }
+
+    private static void collapseErrorChildRow(Viewer viewer, TreePath path, int attempt)
+    {
+        Object treeObj = viewer.getData(INSPECTOR_TREE_KEY);
+        if (!(treeObj instanceof Tree tree) || tree.isDisposed())
+            return;
+        TreeItem item = findTreeItemForPath(tree, path);
+        if (item == null || item.isDisposed())
+            item = findTreeItemForData(tree.getItems(), path.getLastSegment());
+        if (item == null || item.isDisposed())
+        {
+            if (attempt >= 3)
+                return;
+            Display display = tree.getDisplay();
+            if (display == null || display.isDisposed())
+                return;
+            display.timerExec(150, () -> collapseErrorChildRow(viewer, path, attempt + 1));
+            return;
+        }
+        if (item.getExpanded())
+            item.setExpanded(false);
     }
 
     private static boolean shouldRetryStringRelabel(ILabelUpdate update, int valueIndex, String displayed)

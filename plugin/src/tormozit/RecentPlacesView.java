@@ -1264,8 +1264,8 @@ public final class RecentPlacesView extends ViewPart
         {
             MenuItem direct = new MenuItem(menu, SWT.PUSH);
             direct.setData(ADD_TO_SET_MENU_MARKER, Boolean.TRUE);
-            direct.setText("Добавить в набор <" + selectedSet.name + ">"); //$NON-NLS-1$ //$NON-NLS-2$
-            direct.setToolTipText("Добавить выделенные записи в набор «" + selectedSet.name + "»"); //$NON-NLS-1$ //$NON-NLS-2$
+            direct.setText("Добавить в набор " + ObjectSets.bracketedName(selectedSet)); //$NON-NLS-1$
+            direct.setToolTipText("Добавить выделенные записи в набор " + ObjectSets.quotedName(selectedSet)); //$NON-NLS-1$
             direct.setEnabled(!entries.isEmpty());
             direct.addListener(SWT.Selection, e -> addSelectedToSet(selectedSet));
             return;

@@ -40,20 +40,26 @@ import com.e1c.g5.v8.dt.check.settings.CheckUid;
 import com.e1c.g5.v8.dt.check.settings.ICheckRepository;
 
 /**
- * Двойной клик / Open по ошибке «Битая ссылка на картинку» в панели «Ошибки конфигурации»:
- * штатный {@code BmMarkerUiHandler} (через {@code OpenAndLinkWithEditorHelper}) открывает
- * редактор формы, а этот хук дополнительно показывает панель «Свойства» и активирует поле
- * «Картинка» — как двойной клик по вхождению в результатах поиска по конфигурации
- * ({@link ConfigSearchResultsHook.PropertyFieldFocus}).
+ * Двойной клик / Open по проблеме в панели «Проблемы конфигурации» EDT — после штатного открытия
+ * редактора хук доводит переход до конкретного места:
+ * <ul>
+ * <li><b>«Битая ссылка на картинку»</b> — показывает панель «Свойства» и активирует поле
+ * «Картинка» (как двойной клик по вхождению в результатах поиска по конфигурации,
+ * {@link ConfigSearchResultsHook.PropertyFieldFocus});</li>
+ * <li><b>право роли на объект</b> ({@code ObjectRight}/{@code ObjectRights} из
+ * {@code com._1c.g5.v8.dt.rights.model}) — открывает редактор роли на странице «Права», выделяет
+ * строку объекта и прокручивает колонку права в видимую область
+ * ({@link ConfigSearchResultsHook#revealRoleRightsRow}, issue #463).</li>
+ * </ul>
  * <p>
  * Штатный путь панели — {@code IOpenListener} ({@code OpenAndLinkWithEditorHelper.open}), а не
  * {@code IDoubleClickListener}; поэтому слушаем open + doubleClick + SWT {@code MouseDoubleClick}
  * на дереве (запасной путь, как в {@link NavigatorAttributePropertiesHook}).
  */
-public final class ProblemViewPropertyFocusHook implements IStartup
+public final class ProblemViewOpenTargetHook implements IStartup
 {
-    private static final String VIEWER_MARKER = "tormozit.problemViewPropertyFocusHook"; //$NON-NLS-1$
-    private static final String TREE_MARKER = "tormozit.problemViewPropertyFocusTree"; //$NON-NLS-1$
+    private static final String VIEWER_MARKER = "tormozit.problemViewOpenTargetHook"; //$NON-NLS-1$
+    private static final String TREE_MARKER = "tormozit.problemViewOpenTargetTree"; //$NON-NLS-1$
 
     private static volatile boolean displayFilterInstalled;
 
@@ -84,7 +90,7 @@ public final class ProblemViewPropertyFocusHook implements IStartup
         Display display = Display.getDefault();
         if (display == null || display.isDisposed())
             return;
-        display.addFilter(SWT.MouseDoubleClick, ProblemViewPropertyFocusHook::onDisplayDoubleClick);
+        display.addFilter(SWT.MouseDoubleClick, ProblemViewOpenTargetHook::onDisplayDoubleClick);
         displayFilterInstalled = true;
     }
 
@@ -233,7 +239,7 @@ public final class ProblemViewPropertyFocusHook implements IStartup
     {
         Object element = structured.getFirstElement();
         Marker marker = resolveMarker(element);
-        if (marker == null || !isBrokenFormPictureMarker(marker))
+        if (marker == null)
             return;
 
         IWorkbenchPage page = PlatformUI.getWorkbench().getActiveWorkbenchWindow() != null
@@ -241,6 +247,63 @@ public final class ProblemViewPropertyFocusHook implements IStartup
         if (page == null)
             return;
 
+        if (isBrokenFormPictureMarker(marker))
+        {
+            focusBrokenFormPicture(marker, page);
+            return;
+        }
+
+        Function<EObject, EObject> identity = obj -> obj;
+        EObject markerObject = marker.provideObject(identity);
+        if (markerObject != null)
+        {
+            ConfigSearchResultsHook.revealRoleRightsRow(page, markerObject,
+                roleRightName(markerObject, marker));
+        }
+    }
+
+    /** Имя права по объекту проблемы ({@code ObjectRight.getRight()}) либо из текста сообщения. */
+    private static String roleRightName(EObject markerObject, Marker marker)
+    {
+        for (EObject cur = markerObject; cur != null; cur = cur.eContainer())
+        {
+            String className = cur.eClass() != null ? cur.eClass().getName() : null;
+            if ("ObjectRights".equals(className)) //$NON-NLS-1$
+                break;
+            if ("ObjectRight".equals(className)) //$NON-NLS-1$
+            {
+                Object right = Global.invoke(cur, "getRight"); //$NON-NLS-1$
+                String nameRu = asString(Global.invoke(right, "getNameRu")); //$NON-NLS-1$
+                if (nameRu != null && !nameRu.isBlank())
+                    return nameRu;
+                String name = asString(Global.invoke(right, "getName")); //$NON-NLS-1$
+                if (name != null && !name.isBlank())
+                    return name;
+                break;
+            }
+        }
+        String message = marker.getMessage();
+        if (message != null)
+        {
+            int open = message.indexOf('"');
+            int close = open >= 0 ? message.indexOf('"', open + 1) : -1;
+            if (close > open + 1)
+                return message.substring(open + 1, close);
+        }
+        return null;
+    }
+
+    private static String asString(Object value)
+    {
+        return value instanceof String s ? s : null;
+    }
+
+    /**
+     * Показывает панель «Свойства» и активирует поле «Картинка» — как двойной клик по вхождению
+     * в результатах поиска по конфигурации ({@link ConfigSearchResultsHook.PropertyFieldFocus}).
+     */
+    private static void focusBrokenFormPicture(Marker marker, IWorkbenchPage page)
+    {
         Function<EObject, EObject> identity = obj -> obj;
         EObject object = marker.provideObject(identity);
         if (object == null)

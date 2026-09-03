@@ -16,8 +16,8 @@ import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.navigator.CommonViewer;
 
 /**
- * Двойной клик по реквизиту в навигаторе: штатный {@code OpenHelper} открывает редактор
- * объекта МД; панель «Свойства» активирует {@link OpenHelperAttributePropertiesHook}.
+ * Двойной клик по реквизиту или значению перечисления в навигаторе: штатный {@code OpenHelper}
+ * открывает редактор объекта МД; панель «Свойства» активирует {@link OpenHelperAttributePropertiesHook}.
  * Этот хук — запасной путь, если {@code OpenAction} не дошёл до {@code OpenHelper}.
  */
 public final class NavigatorAttributePropertiesHook implements IStartup
@@ -122,7 +122,7 @@ public final class NavigatorAttributePropertiesHook implements IStartup
         return item != null ? item.getData() : null;
     }
 
-    /** Реквизит метаданных в навигаторе (обычный, стандартный, общий, ТЧ…). */
+    /** Узел навигатора без своего редактора: реквизит (обычный, стандартный, ТЧ…) или значение перечисления. */
     static boolean isMetadataAttributeNode(Object element)
     {
         if (element == null || NavigatorTreeElementLabels.isGroupNode(element))
@@ -139,7 +139,8 @@ public final class NavigatorAttributePropertiesHook implements IStartup
             return false;
         String typeName = eObject.eClass().getName();
         return typeName != null
-                && (typeName.equals("Attribute") || typeName.endsWith("Attribute")); //$NON-NLS-1$ //$NON-NLS-2$
+                && (typeName.equals("Attribute") || typeName.endsWith("Attribute") //$NON-NLS-1$ //$NON-NLS-2$
+                        || typeName.equals("EnumValue")); //$NON-NLS-1$
     }
 
     private static CommonViewer getCommonViewer(IViewPart navigator)

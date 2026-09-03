@@ -16,7 +16,7 @@ import org.eclipse.swt.widgets.Text;
 /**
  * Активация (передача фокуса ввода) поля AEF по его компоненту — единый механизм для всех
  * мест плагина: панель «Свойства» ({@code ConfigSearchResultsHook.PropertyFieldFocus},
- * {@code ProblemViewPropertyFocusHook}), редакторы объектов метаданных
+ * {@code ProblemViewOpenTargetHook}), редакторы объектов метаданных
  * ({@link EventHandlersOpenHandlerHook} — поле «Источник» подписки) и т.п.
  *
  * <p>Как это работает: компонент AEF сам по себе не контрол — он держит {@code IViewModel},

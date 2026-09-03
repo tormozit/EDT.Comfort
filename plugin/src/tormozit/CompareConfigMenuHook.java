@@ -254,6 +254,7 @@ public class CompareConfigMenuHook implements IStartup
             CompareDialogCurrentLinesHook.install(Display.getDefault());
             RefactoringPreviewCurrentLinesHook.install(Display.getDefault());
             RefactoringPreviewMarksHook.install(Display.getDefault());
+            RefactoringPreviewTableHook.install(Display.getDefault());
 
             IWorkbench wb = PlatformUI.getWorkbench();
             for (IWorkbenchWindow w : wb.getWorkbenchWindows())

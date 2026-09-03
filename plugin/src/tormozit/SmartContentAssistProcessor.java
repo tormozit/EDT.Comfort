@@ -5229,6 +5229,50 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
             return false;
         }
 
+        /**
+         * Типы приёмника по уже загруженному ресурсу модуля — для потребителей вне редактора
+         * (колонка «Тип родителя» в {@link BslOccurrenceContextResolver}). В отличие от
+         * {@link #resolveFromResource} текстом выражения не подменяет: пусто — значит тип не
+         * вычислен, и потребитель показывает это отдельно.
+         *
+         * @param dotOffset смещение точки member-access
+         * @param offsetAfterDot смещение сразу за точкой (имя члена)
+         */
+        static String resolveTypesInResource(XtextResource resource, int dotOffset, int offsetAfterDot)
+        {
+            Expression receiver = findReceiverExpression(resource, dotOffset, offsetAfterDot);
+            return receiver == null ? "" : formatExpressionTypes(receiver); //$NON-NLS-1$
+        }
+
+        /** Выражение-приёмник member-access по загруженному ресурсу (для принудительного расчёта типов). */
+        static Expression receiverInResource(XtextResource resource, int dotOffset, int offsetAfterDot)
+        {
+            return findReceiverExpression(resource, dotOffset, offsetAfterDot);
+        }
+
+        /** Типы выражения строкой: составные — через запятую, русские имена. */
+        static String formatTypes(Expression expression)
+        {
+            return formatExpressionTypes(expression);
+        }
+
+        /** Список типов строкой: составные — через запятую, русские имена. */
+        static String formatTypeItems(Iterable<? extends TypeItem> types)
+        {
+            if (types == null)
+                return ""; //$NON-NLS-1$
+            StringBuilder sb = new StringBuilder();
+            for (TypeItem type : types)
+            {
+                if (type == null)
+                    continue;
+                if (sb.length() > 0)
+                    sb.append(", "); //$NON-NLS-1$
+                sb.append(formatTypeItem(type));
+            }
+            return sb.toString();
+        }
+
         private static String resolveFromResource(XtextResource resource, int dotOffset,
                                                 int completionOffset)
         {

@@ -238,6 +238,15 @@ public final class ComfortSettings
     /** По умолчанию проверки показываются деревом, как в EDT. */
     public static final boolean DEFAULT_VALIDATION_CHECKS_TABLE_MODE = false;
 
+    /**
+     * Ключ: табличный режим страницы «Вносимые изменения» мастера рефакторинга
+     * ({@link RefactoringPreviewTableHook}).
+     */
+    public static final String PREF_REFACTORING_PREVIEW_TABLE_MODE = "comfort.refactoringPreview.tableMode"; //$NON-NLS-1$
+
+    /** По умолчанию изменения показываются деревом, как в EDT. */
+    public static final boolean DEFAULT_REFACTORING_PREVIEW_TABLE_MODE = false;
+
     // ---- Spell checking ----
 
     /**
@@ -595,6 +604,35 @@ public final class ComfortSettings
         catch (Exception ex)
         {
             Global.log("ComfortSettings save error (validationChecksTableMode): " + ex); //$NON-NLS-1$
+        }
+    }
+
+    /**
+     * Показывать ли изменения таблицей вместо дерева на странице «Вносимые изменения» мастера
+     * рефакторинга — запоминается между запусками EDT.
+     */
+    public static boolean isRefactoringPreviewTableMode()
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return DEFAULT_REFACTORING_PREVIEW_TABLE_MODE;
+        return settings.preferenceStore.getBoolean(PREF_REFACTORING_PREVIEW_TABLE_MODE);
+    }
+
+    /** Сохранить состояние кнопки табличного режима на странице «Вносимые изменения». */
+    public static void setRefactoringPreviewTableMode(boolean tableMode)
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return;
+        settings.preferenceStore.setValue(PREF_REFACTORING_PREVIEW_TABLE_MODE, tableMode);
+        try
+        {
+            settings.preferenceStore.save();
+        }
+        catch (Exception ex)
+        {
+            Global.log("ComfortSettings save error (refactoringPreviewTableMode): " + ex); //$NON-NLS-1$
         }
     }
 

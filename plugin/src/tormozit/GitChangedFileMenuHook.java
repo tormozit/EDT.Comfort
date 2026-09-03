@@ -1104,8 +1104,8 @@ public final class GitChangedFileMenuHook implements IStartup
                 if (addTarget != null)
                 {
                     addToSetItem.setText(ComfortSubmenuHelper.menuItemTextWithKeyBinding(
-                        "Добавить в набор <" + addTarget.name + ">", ADD_TO_SET_CMD, GIT_CONTEXT_ID));
-                    addToSetItem.setToolTipText("Добавить выбранные объекты метаданных в набор \u00ab" + addTarget.name + "\u00bb" + Global.pluginSignForTooltip());
+                        "Добавить в набор " + ObjectSets.bracketedName(addTarget), ADD_TO_SET_CMD, GIT_CONTEXT_ID));
+                    addToSetItem.setToolTipText("Добавить выбранные объекты метаданных в набор " + ObjectSets.quotedName(addTarget) + Global.pluginSignForTooltip());
                     addToSetItem.setEnabled(true);
                 }
                 else

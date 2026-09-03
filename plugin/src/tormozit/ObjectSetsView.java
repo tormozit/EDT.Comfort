@@ -1336,7 +1336,7 @@ public final class ObjectSetsView extends ViewPart
     private static void showSystemSetNotEditableToast(ObjectSets.SetDef set)
     {
         ToastNotification.show("Наборы объектов",
-            "Набор «" + set.name + "» — состав не редактируется", 4000); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "Набор " + ObjectSets.quotedName(set) + " — состав не редактируется", 4000); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     static boolean isObjectSetItemsDrag(IStructuredSelection selection)

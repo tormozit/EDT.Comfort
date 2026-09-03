@@ -15,6 +15,8 @@ import java.util.Set;
 
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IProject;
+import org.eclipse.core.resources.ResourcesPlugin;
+import org.eclipse.core.runtime.Path;
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.IStatus;
 import org.eclipse.core.runtime.Status;
@@ -98,6 +100,7 @@ import com._1c.g5.v8.dt.ui.editor.input.IDtEditorInput;
 import com._1c.g5.v8.dt.ui.util.OpenHelper;
 import com._1c.g5.v8.dt.search.core.BmObjectMatch;
 import com._1c.g5.v8.dt.search.core.refs.BmReferenceMatch;
+import com._1c.g5.v8.dt.search.core.refs.BslReferenceMatch;
 import com._1c.g5.v8.dt.search.core.text.TextSearchFileMatch;
 import com._1c.g5.v8.dt.search.core.text.TextSearchModelMatch;
 import org.eclipse.swt.SWT;
@@ -121,6 +124,7 @@ import org.eclipse.swt.widgets.Table;
 import org.eclipse.swt.widgets.TableColumn;
 import org.eclipse.swt.widgets.TableItem;
 import org.eclipse.swt.widgets.Tree;
+import org.eclipse.swt.widgets.TreeColumn;
 import org.eclipse.swt.widgets.TreeItem;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IPageLayout;
@@ -356,12 +360,19 @@ public final class ConfigSearchResultsHook implements IStartup
     {
         final String path;
         final String property;
-        final long lineNumber;
+        /**
+         * Номер строки вхождения (1-based), {@code 0} — неизвестен. Для {@code TextSearchFileMatch} —
+         * сразу из {@code getLineNumber()}; для {@code BslReferenceMatch} («Найти ссылки на объект»
+         * внутри модуля) появляется только после штатного {@code calculate()} элемента таблицы
+         * (см. {@link #applyDeferredCalcResult}) — поэтому не final.
+         */
+        long lineNumber;
         /** Не final — обновляется после фонового {@code calculate()} для отложенных BSL-совпадений. */
         String text;
         /** С подсветкой вхождения (стили штатного {@code getDecoratedText()}/{@code getStyledText()}). */
         StyledString styledText;
-        final IFile file;
+        /** Не final — для {@code BslReferenceMatch} модуль определяется по URI ссылки (не из Match). */
+        IFile file;
         /** Исходный элемент таблицы (IMatchItem) — нужен для открытия через {@code handleOpen}. */
         final Object tableItem;
         /**
@@ -695,8 +706,19 @@ public final class ConfigSearchResultsHook implements IStartup
                 file = fm.getFile();
                 lineNumber = fm.getLineNumber();
             }
+            else
+            {
+                // «Найти ссылки на объект» внутри BSL-модуля (BslReferenceMatch): у Match нет ни
+                // файла, ни строки. Файл берём из URI ссылки сразу; строка появляется в самом
+                // элементе таблицы только после его calculate() (см. applyDeferredCalcResult) —
+                // если он уже вычислен (переоткрытие того же результата), читаем сразу.
+                file = bslReferenceMatchFile(match);
+                Long calculatedLine = calculatedItemLine(tableItem);
+                if (calculatedLine != null)
+                    lineNumber = calculatedLine;
+            }
             String path = formatPathForTableItem(tableItem, null);
-            String segment = moduleKindSegment(tableItem);
+            String segment = moduleKindSegment(tableItem, file);
             MatchRow row = new MatchRow(path, extractPropertyText(tableItem), lineNumber,
                 extractMatchStyledText(tableItem), file, tableItem, segment);
             // Значение из кэша резолвера — сразу, без чтения файла: при потоковом обновлении списка
@@ -948,7 +970,97 @@ public final class ConfigSearchResultsHook implements IStartup
         StyledString styled = extractMatchStyledText(row.tableItem);
         row.styledText = styled;
         row.text = styled != null ? styled.getString() : ""; //$NON-NLS-1$
+
+        // calculate() у BSL-элемента «Найти ссылки» проставляет номер строки вхождения в сам элемент
+        // таблицы (MatchTreeTableItem.lineNumber). До него колонки «Строка»/«Свойство» пусты —
+        // теперь дочитываем строку (и файл модуля, если ещё не известен) и до-разрешаем имя метода.
+        boolean gainedLocation = false;
+        if (row.lineNumber <= 0)
+        {
+            Long line = calculatedItemLine(row.tableItem);
+            if (line != null)
+            {
+                row.lineNumber = line;
+                gainedLocation = true;
+            }
+        }
+        if (row.file == null)
+        {
+            IFile file = bslReferenceMatchFile(Global.invoke(row.tableItem, "getData")); //$NON-NLS-1$
+            if (file != null)
+            {
+                row.file = file;
+                gainedLocation = true;
+            }
+        }
         matchViewer.update(row, null);
+
+        if (gainedLocation && row.methodProperty == null && row.file != null && row.lineNumber > 0
+            && matchViewer.getInput() instanceof List<?> input)
+        {
+            @SuppressWarnings("unchecked")
+            List<MatchRow> rows = (List<MatchRow>) input;
+            scheduleMatchMethodResolution(matchViewer, rows);
+        }
+    }
+
+    /**
+     * Номер строки (1-based), вычисленный штатным {@code calculate()} и сохранённый в самом элементе
+     * таблицы ({@code MatchTreeTableItem.lineNumber} — приватное поле, объявлено декомпиляцией
+     * {@code com._1c.g5.v8.dt.search.ui}). {@code null}, пока {@code calculate()} не отработал.
+     */
+    private static Long calculatedItemLine(Object tableItem)
+    {
+        for (Class<?> c = tableItem == null ? null : tableItem.getClass(); c != null; c = c.getSuperclass())
+        {
+            try
+            {
+                java.lang.reflect.Field f = c.getDeclaredField("lineNumber"); //$NON-NLS-1$
+                f.setAccessible(true);
+                Object v = f.get(tableItem);
+                return v instanceof Long l && l > 0 ? l : null;
+            }
+            catch (NoSuchFieldException e)
+            {
+                // поле объявлено в суперклассе — продолжаем подъём
+            }
+            catch (Exception e)
+            {
+                return null;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * IFile BSL-модуля для {@code BslReferenceMatch} («Найти ссылки на объект» внутри модуля):
+     * у {@code Match} нет {@code getFile()}, но есть URI источника ссылки. {@code null} для прочих
+     * типов {@code Match} и когда URI не {@code platform:/resource}.
+     */
+    private static IFile bslReferenceMatchFile(Object match)
+    {
+        if (!(match instanceof BslReferenceMatch ref))
+            return null;
+        try
+        {
+            URI uri = ref.getSourceURI();
+            if (uri == null)
+                uri = ref.getContainerURI();
+            if (uri == null)
+                return null;
+            uri = uri.trimFragment();
+            if (!uri.isPlatformResource())
+                return null;
+            String platformPath = uri.toPlatformString(true);
+            if (platformPath == null || platformPath.isEmpty())
+                return null;
+            IFile file = ResourcesPlugin.getWorkspace().getRoot().getFile(new Path(platformPath));
+            return file != null && file.exists() ? file : null;
+        }
+        catch (Exception e)
+        {
+            return null;
+        }
     }
 
     // =====================================================================================
@@ -986,9 +1098,11 @@ public final class ConfigSearchResultsHook implements IStartup
      * общего модуля). Для модуля формы полное имя оканчивается на {@code .Форма} — приводим к
      * {@code .Форма.Модуль} ({@link GetRef#toSetTextModuleName}), т.е. сегмент «Модуль», а не «Форма».
      */
-    private static String moduleKindSegment(Object tableItem)
+    private static String moduleKindSegment(Object tableItem, IFile fallbackFile)
     {
         String modulePath = modulePathFromTableItem(tableItem);
+        if ((modulePath == null || modulePath.isEmpty()) && fallbackFile != null)
+            modulePath = modulePathFromFile(fallbackFile);
         if (modulePath == null || modulePath.isEmpty())
             return null;
         modulePath = GetRef.toSetTextModuleName(modulePath);
@@ -2350,7 +2464,7 @@ public final class ConfigSearchResultsHook implements IStartup
             return false;
         }
         scheduleContentReveal(editor,
-            new ContentTarget(kind, feature, componentClass, target, selectionObject), 0);
+            new ContentTarget(kind, feature, componentClass, target, selectionObject, null), 0);
         return true;
     }
 
@@ -2623,9 +2737,15 @@ public final class ConfigSearchResultsHook implements IStartup
         NAVIGATOR_TREE, ROLE_RIGHTS
     }
 
-    /** Куда переходить в редакторе владельца состава — см. {@link #openContentMatch}. */
+    /**
+     * Куда переходить в редакторе владельца состава — см. {@link #openContentMatch}.
+     * {@code rightName} задаётся только для {@link ContentKind#ROLE_RIGHTS} и только когда право
+     * известно однозначно (двойной клик по проблеме права роли в панели «Проблемы конфигурации»,
+     * см. {@link ProblemViewOpenTargetHook}): по нему колонка права прокручивается в видимую
+     * область после выделения строки. В остальных случаях — {@code null}.
+     */
     private record ContentTarget(ContentKind kind, EStructuralFeature feature, String componentClass,
-        MdObject target, EObject selectionObject)
+        MdObject target, EObject selectionObject, String rightName)
     {
     }
 
@@ -2797,7 +2917,7 @@ public final class ConfigSearchResultsHook implements IStartup
     private static boolean selectContentRow(IEditorPart editor, ContentTarget content)
     {
         if (content.kind() == ContentKind.ROLE_RIGHTS)
-            return selectRoleRightsRow(editor, content.target());
+            return selectRoleRightsRow(editor, content);
         Object page = Global.invoke(editor, "getActivePageInstance"); //$NON-NLS-1$
         Object root = page != null ? Global.getField(page, "pageComponent") : null; //$NON-NLS-1$
         Object component = findComponentByClass(root, content.componentClass(), 0);
@@ -2842,21 +2962,129 @@ public final class ConfigSearchResultsHook implements IStartup
      *
      * @return {@code true}, если строка выделена
      */
-    private static boolean selectRoleRightsRow(IEditorPart editor, MdObject target)
+    private static boolean selectRoleRightsRow(IEditorPart editor, ContentTarget content)
     {
         Object page = Global.invoke(editor, "getActivePageInstance"); //$NON-NLS-1$
         Object section = page != null ? Global.getField(page, "objectsSection") : null; //$NON-NLS-1$
         if (section == null || !(Global.getField(section, "viewer") instanceof TreeViewer viewer) //$NON-NLS-1$
             || !(viewer.getContentProvider() instanceof ITreeContentProvider provider))
             return false;
-        Object row = findRightsRow(provider, provider.getElements(viewer.getInput()), target, 0);
+        Object row = findRightsRow(provider, provider.getElements(viewer.getInput()), content.target(), 0);
+        Global.tempLog("issue463", "selectRoleRightsRow row=" + (row == null ? "null" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            : String.valueOf(Global.invoke(row, "getEObjectName")))); //$NON-NLS-1$
         if (row == null)
             return false;
         viewer.setSelection(new StructuredSelection(row), true);
         Tree tree = viewer.getTree();
         if (tree != null && !tree.isDisposed() && tree.getSelectionCount() > 0)
             tree.showSelection();
+        showRoleRightColumn(section, tree, content.rightName());
         return true;
+    }
+
+    /**
+     * Прокручивает колонку права {@code rightName} в видимую область (само право не выделяется —
+     * дерево {@code SWT.SINGLE}). Соответствие «индекс колонки → право» {@code ObjectsSection}
+     * держит в поле {@code columnRight}; сверяем по русскому и английскому имени права и по
+     * тексту заголовка колонки.
+     */
+    private static void showRoleRightColumn(Object section, Tree tree, String rightName)
+    {
+        if (rightName == null || rightName.isBlank() || tree == null || tree.isDisposed())
+            return;
+        String wanted = rightName.trim();
+        if (!(Global.getField(section, "columnRight") instanceof Map<?, ?> columnRight)) //$NON-NLS-1$
+            return;
+        for (Map.Entry<?, ?> entry : columnRight.entrySet())
+        {
+            if (!(entry.getKey() instanceof Integer index) || entry.getValue() == null)
+                continue;
+            String nameRu = asString(Global.invoke(entry.getValue(), "getNameRu")); //$NON-NLS-1$
+            String name = asString(Global.invoke(entry.getValue(), "getName")); //$NON-NLS-1$
+            if (!wanted.equalsIgnoreCase(nameRu) && !wanted.equalsIgnoreCase(name))
+                continue;
+            if (index >= 0 && index < tree.getColumnCount())
+            {
+                TreeColumn column = tree.getColumn(index);
+                if (column != null && !column.isDisposed())
+                    tree.showColumn(column);
+            }
+            return;
+        }
+    }
+
+    private static String asString(Object value)
+    {
+        return value instanceof String s ? s : null;
+    }
+
+    private static String eClassName(EObject object)
+    {
+        return object == null ? "null" //$NON-NLS-1$
+            : object.eClass() != null ? object.eClass().getName() : object.getClass().getName();
+    }
+
+    /**
+     * Открывает редактор роли на странице «Права» и выделяет строку объекта, для которого право
+     * роли задано ({@code markerObject} — {@code ObjectRight}/{@code ObjectRights} из
+     * {@code com._1c.g5.v8.dt.rights.model}, обычно объект проблемы из панели «Проблемы
+     * конфигурации»). Переиспользует ту же механику перехода, что и открытие вхождения прав роли
+     * из результатов поиска по конфигурации ({@link #openContentMatch}).
+     *
+     * @param rightName имя права для прокрутки его колонки в видимую область либо {@code null}
+     * @return {@code true}, если открытие обработано здесь
+     */
+    static boolean revealRoleRightsRow(IWorkbenchPage page, EObject markerObject, String rightName)
+    {
+        if (page == null || markerObject == null)
+            return false;
+        EObject rights = markerObject;
+        while (rights != null && !isObjectRights(rights))
+            rights = rights.eContainer();
+        Global.tempLog("issue463", "markerObject=" + eClassName(markerObject) //$NON-NLS-1$ //$NON-NLS-2$
+            + " objectRights=" + eClassName(rights) + " rightName=" + rightName); //$NON-NLS-1$ //$NON-NLS-2$
+        if (rights == null)
+            return false;
+        Object targetObj = Global.invoke(rights, "getObject"); //$NON-NLS-1$
+        if (targetObj instanceof EObject proxy && proxy.eIsProxy())
+            targetObj = EcoreUtil.resolve(proxy, rights);
+        Global.tempLog("issue463", "target=" + (targetObj instanceof EObject t //$NON-NLS-1$ //$NON-NLS-2$
+            ? eClassName(t) + " " + GetRef.eObjectToFullName(t) : String.valueOf(targetObj))); //$NON-NLS-1$
+        if (!(targetObj instanceof MdObject target))
+            return false;
+
+        IEditorPart editor = openRoleRightsEditor(page, rights);
+        Global.tempLog("issue463", "editor=" + (editor == null ? "null" : editor.getClass().getName())); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        if (editor == null)
+            return false;
+        scheduleContentReveal(editor, new ContentTarget(ContentKind.ROLE_RIGHTS,
+            MdClassPackage.Literals.ROLE__RIGHTS, null, target, rights, rightName), 0);
+        return true;
+    }
+
+    /**
+     * Редактор роли по описанию прав. Владелец-{@code Role} у {@code RoleDescription} лежит в
+     * отдельном BM-ресурсе, поэтому пробуем по очереди: найденный подъёмом по контейнерам МД-объект,
+     * само описание прав, объект прав.
+     */
+    private static IEditorPart openRoleRightsEditor(IWorkbenchPage page, EObject rights)
+    {
+        for (EObject candidate : new EObject[] {roleOfObjectRights(null, rights), rights.eContainer(), rights})
+        {
+            if (candidate == null)
+                continue;
+            try
+            {
+                IEditorPart editor = new OpenHelper(page).openEditor(candidate);
+                if (editor != null)
+                    return editor;
+            }
+            catch (RuntimeException e)
+            {
+                // следующий кандидат
+            }
+        }
+        return null;
     }
 
     private static Object findRightsRow(ITreeContentProvider provider, Object[] rows, MdObject target,
@@ -4454,6 +4682,27 @@ public final class ConfigSearchResultsHook implements IStartup
     }
 
     /**
+     * Полное имя модуля из его файла — запасной путь для {@code BslReferenceMatch}, у которого
+     * {@code Match.getFile()} возвращает {@code null} (файл модуля определяется по URI ссылки,
+     * см. {@link #bslReferenceMatchFile}).
+     */
+    private static String modulePathFromFile(IFile file)
+    {
+        try
+        {
+            IPath rel = file.getProjectRelativePath();
+            if (rel == null)
+                return null;
+            GetRef.ModuleRef ref = GetRef.pathToModuleRef(rel.toString());
+            return ref != null ? ref.modulePath : null;
+        }
+        catch (Exception e)
+        {
+            return null;
+        }
+    }
+
+    /**
      * Путь через верхний BM-объект совпадения — тот же механизм, что и штатный двойной клик по строке
      * поиска для открытия редактора объекта. Надёжнее и проще, чем парсинг подписей дерева:
      * работает для любого типа {@code Match} (не только {@code TextSearchModelMatch}) и даёт
@@ -5917,7 +6166,7 @@ public final class ConfigSearchResultsHook implements IStartup
      */
     /**
      * Активация поля панели «Свойства». Package-visible: второй потребитель —
-     * {@link ProblemViewPropertyFocusHook} (ошибки битых ссылок на картинки).
+     * {@link ProblemViewOpenTargetHook} (ошибки битых ссылок на картинки).
      * При появлении третьего потребителя — вынести в {@code PropertyFieldFocus.java}.
      */
     static final class PropertyFieldFocus

@@ -185,6 +185,20 @@ final class DebugInspectorTreeEnhancement
         return resolveViewer(shell.getData());
     }
 
+    /**
+     * Довыгрузка панели деталей сразу по завершении вычисления строки с ошибкой
+     * ({@link DebugVariablePresentationHook#enhanceAndApplyExpressionErrorColumn}) — без этого текст
+     * ошибки попадал в панель только по повторному клику на уже активной корневой строке (issue).
+     */
+    static void refreshDetailPaneForTree(Tree tree)
+    {
+        if (tree == null || tree.isDisposed())
+            return;
+        Object data = tree.getData(ENHANCED_KEY);
+        if (data instanceof DebugInspectorTreeEnhancement enhancement)
+            enhancement.scheduleDetailPaneFullTextRefresh();
+    }
+
     private static Tree resolveInspectorTree(Object dialog, Shell shell)
     {
         Object host = unwrapInspectorDialogHost(dialog);

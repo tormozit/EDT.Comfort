@@ -40,7 +40,7 @@
     <startup class="tormozit.QueryConstructorFilterHook"/>
     <startup class="tormozit.FormEditorHook"/>
     <startup class="tormozit.TreeExpander"/>
-    <startup class="tormozit.ProblemViewPropertyFocusHook"/>
+    <startup class="tormozit.ProblemViewOpenTargetHook"/>
     <startup class="tormozit.MdEditorTreeHook"/>
     <startup class="tormozit.IrKeyBindingHook"/>
     <startup class="tormozit.BslEditorHoverHook"/>
@@ -130,6 +130,7 @@
     <startup class="tormozit.DeployChangesColumnHook"/>
     <startup class="tormozit.LongOperationNotifyHook"/>
     <startup class="tormozit.LaunchConfigurationHook"/>
+    <startup class="tormozit.LaunchSaveDirtyEditorsHook"/>
     <startup class="tormozit.ExportConfigurationXmlFixHook"/>
     <startup class="tormozit.FilterBySubsystemsDialogHook"/>
     <startup class="tormozit.GitChangedFileMenuHook"/>
@@ -1057,6 +1058,11 @@
             label="Проверить"
             style="push"
             tooltip="Перепроверить объекты по текущему отбору панели (Комфорт)"/>
+      </menuContribution>
+      <menuContribution locationURI="menu:com._1c.g5.v8.dt.ui.command.configureFilters?before=com._1c.g5.v8.dt.ui.command.configureFilters.separator">
+        <dynamic
+            class="tormozit.ProblemViewComfortScopeMenu"
+            id="tormozit.problemView.comfortScopeMenu"/>
       </menuContribution>
     </extension>
 

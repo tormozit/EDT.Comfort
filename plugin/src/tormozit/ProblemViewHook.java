@@ -5,12 +5,18 @@ import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Proxy;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
 
+import org.eclipse.core.commands.ExecutionException;
+import org.eclipse.core.commands.IExecutionListener;
+import org.eclipse.core.commands.NotHandledException;
 import org.eclipse.core.resources.IProject;
+import org.eclipse.core.resources.ResourcesPlugin;
 import org.eclipse.core.runtime.ICoreRunnable;
 import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.emf.ecore.EObject;
@@ -36,6 +42,8 @@ import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.TreeColumn;
 import org.eclipse.swt.widgets.TreeItem;
 import org.eclipse.ui.IPartListener2;
+import org.eclipse.ui.ISelectionListener;
+import org.eclipse.ui.ISelectionService;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.IViewPart;
 import org.eclipse.ui.IViewReference;
@@ -46,6 +54,7 @@ import org.eclipse.ui.IWorkbenchPart;
 import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
+import org.eclipse.ui.commands.ICommandService;
 import org.eclipse.ui.dialogs.PreferencesUtil;
 
 import com._1c.g5.v8.dt.validation.marker.IMarkerInfo;
@@ -114,6 +123,28 @@ public final class ProblemViewHook implements IStartup
     private static final String SCOPE_CURRENT_PROJECT = "CURRENT_PROJECT"; //$NON-NLS-1$
     /** Режим без отбора по области — им же подписывается включённое «Показывать все». */
     private static final String SCOPE_ALL = "ALL"; //$NON-NLS-1$
+
+    private static final String SCOPE_SELECTION_CLASS =
+        "com._1c.g5.v8.dt.internal.ui.validation.ScopeSelection"; //$NON-NLS-1$
+    private static final String SCOPE_ENUM_CLASS =
+        "com._1c.g5.v8.dt.internal.ui.validation.ProblemFilters$Scope"; //$NON-NLS-1$
+    /** Штатная команда радио «Области возникновения» (тулбар-пулдаун / меню панели). */
+    private static final String NATIVE_SCOPE_COMMAND_ID =
+        "com._1c.g5.v8.dt.ui.command.filtersScopeRadio"; //$NON-NLS-1$
+    /** Команда включения/выключения фильтра по подсистемам в навигаторе. */
+    private static final String NAVIGATOR_SUBSYSTEMS_FILTER_COMMAND_ID =
+        "com._1c.g5.v8.dt.navigator.ui.filterBySubsystems"; //$NON-NLS-1$
+    /** Период «дешёвой» перепроверки, что панель не сбросила нашу синтетическую область. */
+    private static final int COMFORT_REASSERT_MS = 3000;
+
+    /** Установлен ли уже {@link #installComfortScope} для панели. */
+    private static final Map<IViewPart, Boolean> comfortInstalled = new WeakHashMap<>();
+    /** Синтетическая {@code ScopeSelection}, наложенная нами на панель (для сверки). */
+    private static final Map<IViewPart, Object> comfortSyntheticSelection = new WeakHashMap<>();
+    /** Имя штатной области ({@code CURRENT_ELEMENT}/{@code CURRENT_PROJECT}/{@code ALL}), которую мы выставили. */
+    private static final Map<IViewPart, String> comfortAppliedScope = new WeakHashMap<>();
+    /** Проект, под который наложена область (для сверки со сменой активного проекта). */
+    private static final Map<IViewPart, IProject> comfortAppliedProject = new WeakHashMap<>();
 
     private static volatile boolean installed;
 
@@ -240,6 +271,8 @@ public final class ProblemViewHook implements IStartup
         installResultChangeGate(view);
         installScopeLabel(view);
         installOpenOverride(view);
+        installComfortScope(view);
+        refreshComfortScope(view);
     }
 
     /**
@@ -559,6 +592,13 @@ public final class ProblemViewHook implements IStartup
 
     private static String scopeSuffix(IViewPart view, Object filters, ClassLoader loader)
     {
+        // Наши варианты области не относятся к штатному enum: под ними панель
+        // работает в режиме «Текущий элемент»/«Текущий проект», но показывать надо
+        // выбранный вариант — с именем проекта (и набора).
+        String comfortLabel = ComfortSettings.isReplaceListFiltersEnabled() ? comfortScopeLabel(view) : null;
+        if (comfortLabel != null && !Boolean.TRUE.equals(Global.invoke(filters, "isShowAll"))) //$NON-NLS-1$
+            return SCOPE_SEPARATOR + SCOPE_TITLE + ": " + comfortLabel; //$NON-NLS-1$
+
         // При «Показывать все» панель полностью пропускает отбор по области
         // (LazyProblemView: isShowAll() -> область не применяется), поэтому
         // выбранный в настройках режим показывать нельзя — он ничего не отбирает.
@@ -693,6 +733,53 @@ public final class ProblemViewHook implements IStartup
         return scope instanceof Enum<?> constant ? constant.name() : null;
     }
 
+    /**
+     * Подпись нашей области над деревом: «Отобранное в проекте &lt;Проект&gt; навигатора»
+     * либо «Набор «&lt;Набор&gt;» проекта &lt;Проект&gt;» (+ « пуст», если набор без
+     * объектов). Проект — из фактически наложенной области ({@link #comfortAppliedProject}),
+     * а если её нет (набор пуст) — активный проект страницы.
+     */
+    private static String comfortScopeLabel(IViewPart view)
+    {
+        ProblemViewComfortScope.Mode mode = ProblemViewComfortScope.mode();
+        IProject project = comfortAppliedProject.get(view);
+        String projectName = project != null ? project.getName() : null;
+        if (mode == ProblemViewComfortScope.Mode.NAVIGATOR)
+        {
+            return projectName != null
+                ? "Отобранное в проекте " + projectName + " навигатора" //$NON-NLS-1$ //$NON-NLS-2$
+                : ProblemViewComfortScope.NAVIGATOR_LABEL;
+        }
+        if (mode == ProblemViewComfortScope.Mode.ACTIVE_SETS)
+        {
+            boolean empty = project == null; // область по объектам не наложена → набор пуст
+            if (projectName == null && view.getSite() != null)
+            {
+                IProject active = ActiveProjectTracker.resolveContextProject(view.getSite().getPage());
+                projectName = active != null ? active.getName() : null;
+            }
+            if (projectName == null)
+                return empty ? "Активный набор проекта пуст" : ProblemViewComfortScope.ACTIVE_SETS_LABEL; //$NON-NLS-1$
+            ObjectSets.SetDef set = activeSet(projectName);
+            String setPart = set != null ? "Набор " + ObjectSets.quotedName(set) : "Активный набор"; //$NON-NLS-1$ //$NON-NLS-2$
+            boolean suffixEmpty = empty && (set == null || !set.isDefaultSet());
+            return setPart + " проекта " + projectName + (suffixEmpty ? " пуст" : ""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        }
+        return null;
+    }
+
+    private static ObjectSets.SetDef activeSet(String projectName)
+    {
+        try
+        {
+            return ObjectSetsAddTargetState.getInstance().getAddTargetSet(projectName);
+        }
+        catch (RuntimeException e)
+        {
+            return null;
+        }
+    }
+
     /** Имя поля {@code Messages} с названием режима: {@code CURRENT_PROJECT} → {@code Scope_current_project}. */
     private static String scopeField(String constantName)
     {
@@ -776,6 +863,458 @@ public final class ProblemViewHook implements IStartup
     private static boolean isProblemView(IViewPart view)
     {
         return view != null && ProblemViewMarkers.PROBLEM_VIEW_ID.equals(view.getViewSite().getId());
+    }
+
+    // === Области отбора «Отобранное в проекте навигатора» / «Активный набор проекта» (issue 462) ===
+    //
+    // Радио добавляет ProblemFiltersDialogHook, режим хранит ProblemViewComfortScope. Здесь:
+    // синтетическая ScopeSelection из объектов области + перевод штатной «Области возникновения»
+    // в CURRENT_ELEMENT (по ней панель отбирает маркеры по конкретным объектам и их потомкам).
+
+    private static void installComfortScope(IViewPart view)
+    {
+        synchronized (comfortInstalled)
+        {
+            if (comfortInstalled.containsKey(view))
+                return;
+            comfortInstalled.put(view, Boolean.TRUE);
+        }
+        ClassLoader loader = view.getClass().getClassLoader();
+        Object filters = problemFilters(loader);
+        if (filters == null)
+        {
+            Debug.log("installComfortScope: no ProblemFilters"); //$NON-NLS-1$
+            return;
+        }
+
+        installComfortGlobalListeners();
+
+        // Смена активного проекта страницы — пересобрать нашу область (её проект =
+        // активный проект). Это не «каждый клик»: слушатель срабатывает только на
+        // реальную смену контекстного проекта, потому потока обновлений нет.
+        IWorkbenchPage page = view.getSite().getPage();
+        ActiveProjectTracker.bootstrapPage(page);
+        ActiveProjectTracker.ContextProjectListener projectListener = (p, previous, current) ->
+        {
+            if (!java.util.Objects.equals(previous, current) && view.getSite() != null
+                && ProblemViewComfortScope.mode() != ProblemViewComfortScope.Mode.NONE)
+            {
+                Display.getDefault().asyncExec(() -> applyComfortScope(view, filters, loader));
+            }
+        };
+        ActiveProjectTracker.addListener(page, projectListener);
+
+        // Метку установки снять при закрытии панели (иначе следующий её экземпляр
+        // не переустановит хук).
+        if (view.getAdapter(TreeViewer.class) instanceof TreeViewer viewer
+            && viewer.getTree() != null && !viewer.getTree().isDisposed())
+        {
+            viewer.getTree().addDisposeListener(e ->
+            {
+                ActiveProjectTracker.removeListener(page, projectListener);
+                synchronized (comfortInstalled)
+                {
+                    comfortInstalled.remove(view);
+                }
+                comfortSyntheticSelection.remove(view);
+                comfortAppliedScope.remove(view);
+                comfortAppliedProject.remove(view);
+            });
+        }
+
+        startComfortReassertTicker(view, filters, loader);
+    }
+
+    private static volatile boolean comfortGlobalListeners;
+
+    /**
+     * Слушатели наборов — один раз на процесс: панель проблем — синглтон, набор
+     * объектов у режимов общий, поэтому на изменение наборов пересобираем область
+     * во всех открытых панелях.
+     */
+    private static void installComfortGlobalListeners()
+    {
+        if (comfortGlobalListeners)
+            return;
+        comfortGlobalListeners = true;
+        Runnable rebuildAll = () -> Display.getDefault().asyncExec(ProblemViewHook::rebuildComfortScopeEverywhere);
+        try
+        {
+            ObjectSets.getInstance().addChangeListener(rebuildAll);
+            ObjectSetsAddTargetState.getInstance().addListener(rebuildAll);
+        }
+        catch (RuntimeException e)
+        {
+            Debug.log("installComfortGlobalListeners: " + e); //$NON-NLS-1$
+        }
+        ProblemViewComfortScope.addListener(
+            () -> Display.getDefault().asyncExec(ProblemViewHook::rebuildComfortScopeEverywhere));
+
+        // Выбор штатного радио «Области возникновения» (в диалоге его перехватывает
+        // ProblemFiltersDialogHook, а вот пулдаун/меню панели идут прямо через команду)
+        // — сбрасывает наш режим.
+        ICommandService commandService = PlatformUI.isWorkbenchRunning()
+            ? PlatformUI.getWorkbench().getService(ICommandService.class) : null;
+        if (commandService != null)
+        {
+            commandService.addExecutionListener(new IExecutionListener()
+            {
+                @Override public void postExecuteSuccess(String commandId, Object returnValue)
+                {
+                    if (NATIVE_SCOPE_COMMAND_ID.equals(commandId))
+                    {
+                        ProblemViewComfortScope.setMode(ProblemViewComfortScope.Mode.NONE);
+                    }
+                    else if (NAVIGATOR_SUBSYSTEMS_FILTER_COMMAND_ID.equals(commandId)
+                        && ProblemViewComfortScope.mode() == ProblemViewComfortScope.Mode.NAVIGATOR)
+                    {
+                        // Фильтр по подсистемам в навигаторе применяется асинхронно.
+                        Display.getDefault().timerExec(400, ProblemViewHook::rebuildComfortScopeEverywhere);
+                    }
+                }
+
+                @Override public void preExecute(String commandId, org.eclipse.core.commands.ExecutionEvent event) {}
+                @Override public void postExecuteFailure(String commandId, ExecutionException exception) {}
+                @Override public void notHandled(String commandId, NotHandledException exception) {}
+            });
+        }
+    }
+
+    private static void rebuildComfortScopeEverywhere()
+    {
+        java.util.List<IViewPart> views;
+        synchronized (comfortInstalled)
+        {
+            views = new java.util.ArrayList<>(comfortInstalled.keySet());
+        }
+        for (IViewPart view : views)
+        {
+            if (view.getSite() == null)
+                continue;
+            ClassLoader loader = view.getClass().getClassLoader();
+            Object filters = problemFilters(loader);
+            if (filters != null)
+                applyComfortScope(view, filters, loader);
+        }
+    }
+
+    /**
+     * Вызывается на каждый показ панели: если режим активен — восстановить нашу
+     * область, если панель её сбросила. Дешёвая сверка, без пересборки на каждый
+     * показ (полная пересборка — только на смену режима/наборов).
+     */
+    private static void refreshComfortScope(IViewPart view)
+    {
+        if (view.getSite() == null || ProblemViewComfortScope.mode() == ProblemViewComfortScope.Mode.NONE)
+            return;
+        ClassLoader loader = view.getClass().getClassLoader();
+        Object filters = problemFilters(loader);
+        if (filters != null)
+            reassertComfortScope(view, filters, loader);
+    }
+
+    /**
+     * Полное наложение: разрешить объекты области в фоне (открывает BM-транзакции),
+     * затем в UI-потоке подменить {@code scopeSelection} и обновить панель.
+     */
+    private static void applyComfortScope(IViewPart view, Object filters, ClassLoader loader)
+    {
+        if (view.getSite() == null)
+            return;
+        ProblemViewComfortScope.Mode mode = ProblemViewComfortScope.mode();
+        if (mode == ProblemViewComfortScope.Mode.NONE || !ComfortSettings.isReplaceListFiltersEnabled())
+        {
+            clearComfortScope(view, filters, loader);
+            return;
+        }
+        IWorkbenchPage page = view.getSite().getPage();
+        // Панель отбирает по одному проекту (getCurrentProject), поэтому область
+        // ограничивается активным проектом.
+        IProject active = ActiveProjectTracker.resolveContextProject(page);
+        Map<String, List<String>> refs = ProblemViewComfortScope.collectRefs();
+
+        // Нечем сузить: «Отобранное в проекте навигатора» без активного отбора —
+        // это весь проект навигатора; «Активный набор проекта» без набора — без
+        // ограничения. Так режим никогда не «залипает» на текущем выделении.
+        IProject fallbackProject =
+            mode == ProblemViewComfortScope.Mode.NAVIGATOR ? active : null;
+
+        Job job = Job.create("Комфорт: область панели проблем", (ICoreRunnable)monitor -> //$NON-NLS-1$
+        {
+            Map<IProject, Set<EObject>> data =
+                refs.isEmpty() ? Map.of() : resolveComfortScopeObjects(page, refs, active);
+            Display.getDefault().asyncExec(
+                () -> injectComfortScope(view, filters, loader, data, fallbackProject));
+        });
+        job.setSystem(true);
+        job.schedule();
+    }
+
+    /** Разрешение владеющих ссылок в {@link EObject} метаданных активного проекта. */
+    private static Map<IProject, Set<EObject>> resolveComfortScopeObjects(
+        IWorkbenchPage page, Map<String, List<String>> refs, IProject preferred)
+    {
+        Map<IProject, Set<EObject>> result = new LinkedHashMap<>();
+        // Ровно один проект: активный, если он есть среди отобранных, иначе первый.
+        String chosen = chooseComfortScopeProject(refs, preferred);
+        for (Map.Entry<String, List<String>> entry : refs.entrySet())
+        {
+            String projectName = entry.getKey();
+            if (projectName == null || !projectName.equals(chosen))
+                continue;
+            IProject project = ResourcesPlugin.getWorkspace().getRoot().getProject(projectName);
+            if (project == null || !project.isOpen())
+                continue;
+            Set<EObject> objects = new LinkedHashSet<>();
+            for (String ref : entry.getValue())
+            {
+                EObject eObject = null;
+                try
+                {
+                    eObject = GoToDefinition.resolveEObjectForFullName(ref, page, project);
+                }
+                catch (RuntimeException e)
+                {
+                    Debug.log("resolveComfortScopeObjects: " + ref + ": " + e); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+                if (eObject != null)
+                    objects.add(eObject);
+            }
+            if (!objects.isEmpty())
+                result.put(project, objects);
+        }
+        return result;
+    }
+
+    /**
+     * Проект, по объектам которого сужаем: только активный, и только если отбор
+     * навигатора его затрагивает. Иначе {@code null} — {@link #injectComfortScope}
+     * возьмёт весь активный проект ({@code CURRENT_PROJECT}).
+     */
+    private static String chooseComfortScopeProject(Map<String, List<String>> refs, IProject preferred)
+    {
+        String preferredName = preferred != null ? preferred.getName() : null;
+        return preferredName != null && refs.containsKey(preferredName) ? preferredName : null;
+    }
+
+    private static void injectComfortScope(IViewPart view, Object filters, ClassLoader loader,
+        Map<IProject, Set<EObject>> data, IProject fallbackProject)
+    {
+        if (view.getSite() == null || ProblemViewComfortScope.mode() == ProblemViewComfortScope.Mode.NONE
+            || !ComfortSettings.isReplaceListFiltersEnabled())
+            return;
+
+        Object selection;
+        String scopeName;
+        IProject scopeProject;
+        if (!data.isEmpty())
+        {
+            selection = newObjectsScopeSelection(loader, data);
+            scopeName = SCOPE_CURRENT_ELEMENT;
+            scopeProject = data.keySet().iterator().next();
+        }
+        else if (fallbackProject != null)
+        {
+            selection = newProjectScopeSelection(loader, fallbackProject);
+            scopeName = SCOPE_CURRENT_PROJECT;
+            scopeProject = fallbackProject;
+        }
+        else
+        {
+            // «Активный набор проекта» без набора — без ограничения по области.
+            selection = newProjectScopeSelection(loader, null);
+            scopeName = SCOPE_ALL;
+            scopeProject = null;
+        }
+        if (selection == null)
+            return;
+
+        comfortSyntheticSelection.put(view, selection);
+        comfortAppliedScope.put(view, scopeName);
+        if (scopeProject != null)
+            comfortAppliedProject.put(view, scopeProject);
+        else
+            comfortAppliedProject.remove(view);
+        Global.setField(view, "scopeSelection", selection); //$NON-NLS-1$
+        forceComfortScope(filters, loader, scopeName);
+        // Пока наша область активна, панель не должна перестраивать scopeSelection на
+        // каждое выделение в навигаторе/редакторе — снимаем её слушатель выделения.
+        setPanelSelectionTracking(view, false);
+        Global.invoke(filters, "update"); //$NON-NLS-1$
+    }
+
+    /**
+     * Тихая сверка (тикер): если поле {@code scopeSelection} или область кто-то
+     * подменил — вернуть наши <b>без</b> {@code update()}: содержимое не менялось.
+     */
+    private static void reassertComfortScope(IViewPart view, Object filters, ClassLoader loader)
+    {
+        if (view.getSite() == null || ProblemViewComfortScope.mode() == ProblemViewComfortScope.Mode.NONE
+            || !ComfortSettings.isReplaceListFiltersEnabled())
+        {
+            clearComfortScope(view, filters, loader);
+            return;
+        }
+        Object synthetic = comfortSyntheticSelection.get(view);
+        String scopeName = comfortAppliedScope.get(view);
+        if (synthetic == null || scopeName == null)
+        {
+            applyComfortScope(view, filters, loader);
+            return;
+        }
+        // Активный проект сменился — область относится к другому проекту, пересобрать.
+        IProject appliedProject = comfortAppliedProject.get(view);
+        if (appliedProject != null && view.getSite().getPage() != null
+            && !appliedProject.equals(ActiveProjectTracker.resolveContextProject(view.getSite().getPage())))
+        {
+            applyComfortScope(view, filters, loader);
+            return;
+        }
+        setPanelSelectionTracking(view, false);
+        if (Global.getField(view, "scopeSelection") != synthetic) //$NON-NLS-1$
+            Global.setField(view, "scopeSelection", synthetic); //$NON-NLS-1$
+        if (!scopeName.equals(scopeName(Global.invoke(filters, "getScope")))) //$NON-NLS-1$
+            forceComfortScope(filters, loader, scopeName);
+    }
+
+    /**
+     * Слушатель выделения самой панели ({@code LazyProblemView implements ISelectionListener},
+     * регистрируется через {@code ISelectionService.addPostSelectionListener}).
+     */
+    private static void setPanelSelectionTracking(IViewPart view, boolean enabled)
+    {
+        if (!(view instanceof ISelectionListener listener) || view.getSite() == null)
+            return;
+        IWorkbenchWindow window = view.getSite().getWorkbenchWindow();
+        ISelectionService service = window != null ? window.getSelectionService() : null;
+        if (service == null)
+            return;
+        try
+        {
+            if (enabled)
+                service.addPostSelectionListener(listener);
+            else
+                service.removePostSelectionListener(listener);
+        }
+        catch (RuntimeException e)
+        {
+            Debug.log("setPanelSelectionTracking: " + e); //$NON-NLS-1$
+        }
+    }
+
+    private static void clearComfortScope(IViewPart view, Object filters, ClassLoader loader)
+    {
+        setPanelSelectionTracking(view, true);
+        String applied = comfortAppliedScope.remove(view);
+        comfortAppliedProject.remove(view);
+        if (comfortSyntheticSelection.remove(view) == null)
+            return;
+        // Если область всё ещё та, что выставили мы (режим выключили нашим флажком) —
+        // вернуть в «Показывать всё», иначе список остался бы сужен нашим
+        // CURRENT_ELEMENT/CURRENT_PROJECT. Если область уже другая (пользователь выбрал
+        // штатное радио) — не трогать его выбор.
+        boolean stillOurs = applied != null
+            && applied.equals(scopeName(Global.invoke(filters, "getScope"))); //$NON-NLS-1$
+        Object all = stillOurs ? scopeConstant(loader, SCOPE_ALL) : null;
+        if (all != null)
+        {
+            Global.invokeVoid(filters, "setScope", all); //$NON-NLS-1$
+            Global.invokeVoid(filters, "setShowAll", Boolean.TRUE); //$NON-NLS-1$
+        }
+        Object manager = Global.getField(view, "scopeSelectionManager"); //$NON-NLS-1$
+        Object fresh = manager != null
+            ? Global.invoke(manager, "getScopeFromNavigatorSelection", view.getSite()) : null; //$NON-NLS-1$
+        if (fresh == null)
+            fresh = newProjectScopeSelection(loader, null);
+        if (fresh != null)
+            Global.setField(view, "scopeSelection", fresh); //$NON-NLS-1$
+        Global.invoke(filters, "update"); //$NON-NLS-1$
+    }
+
+    /** Синтетическая область с объектами по проектам ({@code CURRENT_ELEMENT}). */
+    private static Object newObjectsScopeSelection(ClassLoader loader, Map<IProject, Set<EObject>> data)
+    {
+        Object selection = newEmptyScopeSelection(loader);
+        if (selection != null && data != null && !data.isEmpty()
+            && Global.invoke(selection, "getSelectedObjects") instanceof Map<?, ?> mapObj) //$NON-NLS-1$
+        {
+            @SuppressWarnings("unchecked")
+            Map<IProject, Set<EObject>> map = (Map<IProject, Set<EObject>>)mapObj;
+            map.putAll(data);
+        }
+        return selection;
+    }
+
+    /** Синтетическая область с одним проектом ({@code CURRENT_PROJECT}); {@code null} — пустая. */
+    private static Object newProjectScopeSelection(ClassLoader loader, IProject project)
+    {
+        Object selection = newEmptyScopeSelection(loader);
+        if (selection != null && project != null
+            && Global.invoke(selection, "getSelectedProjects") instanceof java.util.Set<?> setObj) //$NON-NLS-1$
+        {
+            @SuppressWarnings("unchecked")
+            java.util.Set<IProject> set = (java.util.Set<IProject>)setObj;
+            set.add(project);
+        }
+        return selection;
+    }
+
+    private static Object newEmptyScopeSelection(ClassLoader loader)
+    {
+        try
+        {
+            return loader.loadClass(SCOPE_SELECTION_CLASS).getDeclaredConstructor().newInstance();
+        }
+        catch (ReflectiveOperationException e)
+        {
+            Debug.log("newEmptyScopeSelection: " + e); //$NON-NLS-1$
+            return null;
+        }
+    }
+
+    private static void forceComfortScope(Object filters, ClassLoader loader, String scopeName)
+    {
+        Object scope = scopeConstant(loader, scopeName);
+        if (scope == null)
+            return;
+        // Всегда showAll=false: наши режимы оставляют отбор по критичности/типу, а
+        // сама область при SCOPE_ALL просто ничего не сужает.
+        if (Boolean.TRUE.equals(Global.invoke(filters, "isShowAll"))) //$NON-NLS-1$
+            Global.invokeVoid(filters, "setShowAll", Boolean.FALSE); //$NON-NLS-1$
+        if (Global.invoke(filters, "getScope") != scope) //$NON-NLS-1$
+            Global.invokeVoid(filters, "setScope", scope); //$NON-NLS-1$
+    }
+
+    @SuppressWarnings({ "unchecked", "rawtypes" })
+    private static Object scopeConstant(ClassLoader loader, String name)
+    {
+        try
+        {
+            return Enum.valueOf((Class)loader.loadClass(SCOPE_ENUM_CLASS), name);
+        }
+        catch (ReflectiveOperationException | IllegalArgumentException e)
+        {
+            Debug.log("scopeConstant: " + name + ": " + e); //$NON-NLS-1$ //$NON-NLS-2$
+            return null;
+        }
+    }
+
+    private static void startComfortReassertTicker(IViewPart view, Object filters, ClassLoader loader)
+    {
+        Display display = Display.getDefault();
+        Runnable[] tick = new Runnable[1];
+        tick[0] = () ->
+        {
+            if (view.getSite() == null)
+                return;
+            if (ProblemViewComfortScope.mode() != ProblemViewComfortScope.Mode.NONE
+                && view.getSite().getPage().isPartVisible(view))
+            {
+                reassertComfortScope(view, filters, loader);
+            }
+            display.timerExec(COMFORT_REASSERT_MS, tick[0]);
+        };
+        display.timerExec(COMFORT_REASSERT_MS, tick[0]);
     }
 
     /**

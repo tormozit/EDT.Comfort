@@ -212,9 +212,9 @@ public final class NavigatorAddToObjectSetMenuHook implements IStartup
             item.setEnabled(false);
             return;
         }
-        item.setText("Добавить в набор <" + set.name + ">"); //$NON-NLS-1$ //$NON-NLS-2$
-        item.setToolTipText("Добавить выбранный объект метаданных в набор «" //$NON-NLS-1$
-            + set.name + "»" + Global.pluginSignForTooltip()); //$NON-NLS-1$
+        item.setText("Добавить в набор " + ObjectSets.bracketedName(set)); //$NON-NLS-1$
+        item.setToolTipText("Добавить выбранный объект метаданных в набор " //$NON-NLS-1$
+            + ObjectSets.quotedName(set) + Global.pluginSignForTooltip());
         IStructuredSelection selection = viewer.getStructuredSelection();
         boolean enabled = !selection.isEmpty()
             && ObjectSetsItems.canAddFromNavigatorSelection(selection, set);

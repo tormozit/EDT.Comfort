@@ -120,6 +120,19 @@ public final class BslModuleMethodResolver
         return result;
     }
 
+    /**
+     * Текст BSL-модуля с тем же кэшем, что и у разбора методов: несколько потребителей одного
+     * модуля (имя метода, родитель вхождения, синтаксический вид) читают диск один раз.
+     *
+     * @return {@code null}, если файл не BSL-модуль или прочитать его не удалось
+     */
+    static String moduleText(IFile file)
+    {
+        if (!isBslModule(file))
+            return null;
+        return fileText(file, file.getModificationStamp());
+    }
+
     static boolean isBslModule(IFile file)
     {
         if (file == null || !file.exists())

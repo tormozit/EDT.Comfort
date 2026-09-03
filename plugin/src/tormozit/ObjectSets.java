@@ -477,6 +477,46 @@ public final class ObjectSets
         return true;
     }
 
+    /**
+     * Имя набора для вставки в текст (тост, подсказка, пункт меню). Обычное имя обрамляется
+     * кавычками-«ёлочками»; системное имя «с треугольными скобками» ({@code <Основной>},
+     * {@code <Измененные …>}) само себе ограничитель — кавычки к нему не добавляются.
+     */
+    public static String quotedName(String name)
+    {
+        if (name == null || name.isBlank())
+            return "«»"; //$NON-NLS-1$
+        String trimmed = name.trim();
+        boolean bracketed = trimmed.startsWith("<") && trimmed.endsWith(">"); //$NON-NLS-1$ //$NON-NLS-2$
+        return bracketed ? name : "«" + name + "»"; //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /** {@link #quotedName(String)} для набора; {@code null}-набор — «ёлочки» вокруг пустой строки. */
+    public static String quotedName(SetDef set)
+    {
+        return quotedName(set != null ? set.name : null);
+    }
+
+    /**
+     * Имя набора в угловых скобках для текста пункта меню («Добавить в набор &lt;…&gt;»).
+     * Системное имя уже само в скобках ({@code <Основной>}, {@code <Измененные …>}) —
+     * второй пары не добавляем.
+     */
+    public static String bracketedName(String name)
+    {
+        if (name == null || name.isBlank())
+            return "<>"; //$NON-NLS-1$
+        String trimmed = name.trim();
+        boolean bracketed = trimmed.startsWith("<") && trimmed.endsWith(">"); //$NON-NLS-1$ //$NON-NLS-2$
+        return bracketed ? name : "<" + name + ">"; //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /** {@link #bracketedName(String)} для набора. */
+    public static String bracketedName(SetDef set)
+    {
+        return bracketedName(set != null ? set.name : null);
+    }
+
     /** UUID информационной базы набора {@link SetKind#INFOBASE_CHANGED} (иначе {@code null}). */
     public static String infobaseUuidOf(SetDef set)
     {

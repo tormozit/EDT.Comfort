@@ -6,6 +6,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -171,6 +172,8 @@ public final class FilterBySubsystemsDialogHook implements IStartup
     private static final String INCLUDE_SUBORDINATE_LABEL = "Включать подчинённые подсистемы"; //$NON-NLS-1$
     private static final String INCLUDE_PARENT_LABEL = "Включать родительские подсистемы"; //$NON-NLS-1$
     private static final String OUR_CHECKBOX_KEY = "tormozit.filterBySubsystemsOwnCheckbox"; //$NON-NLS-1$
+    private static final String GRAY_ANCESTORS_PROVIDER_KEY =
+        "tormozit.filterBySubsystemsGrayAncestors"; //$NON-NLS-1$
 
     @Override
     public void earlyStartup()
@@ -243,6 +246,7 @@ public final class FilterBySubsystemsDialogHook implements IStartup
         installComfortToolbarActions(dialog, panel, viewer);
         installTreeContextMarkMenu(panel, viewer);
         installLastChildCheckGuard(panel, viewer);
+        installGrayAncestorMarks(dialog, panel, viewer);
         installTreeCellCopy(viewer);
         installDeselectAllAlwaysEnabled(dialog, panel, viewer);
         installCompareBothSidesMode(dialog, panel, viewer);
@@ -1088,6 +1092,12 @@ public final class FilterBySubsystemsDialogHook implements IStartup
             nativeChecks.get(0).setText(INCLUDE_SUBORDINATE_LABEL);
         if (nativeChecks.size() > 1)
             nativeChecks.get(1).setText(INCLUDE_PARENT_LABEL);
+        CheckboxTreeViewer includeViewer = resolveViewer(panel);
+        for (Button nativeCheck : nativeChecks)
+        {
+            nativeCheck.addSelectionListener(afterSelection(
+                () -> recomputeGrayAncestorMarks(includeViewer)));
+        }
         host.layout(true, true);
         FilterBySubsystemsDialogDebug.step("labels", "renamed=" + nativeChecks.size()); //$NON-NLS-1$ //$NON-NLS-2$
     }
@@ -1310,6 +1320,7 @@ public final class FilterBySubsystemsDialogHook implements IStartup
         }
 
         tree.setData(LAST_PATTERN_KEY, pattern);
+        recomputeGrayAncestorMarks(viewer);
         FilterBySubsystemsDialogDebug.step("smartFilter", "pattern=\"" + pattern //$NON-NLS-1$ //$NON-NLS-2$
             + "\" filtering=" + filtering); //$NON-NLS-1$ //$NON-NLS-2$
     }
@@ -2718,6 +2729,216 @@ public final class FilterBySubsystemsDialogHook implements IStartup
         }
         for (TreeItem child : item.getItems())
             reapplyTreeItemCheckRecursive(child, provider);
+    }
+
+    /**
+     * Серые (частичные) пометки на предках статически помеченных подсистем — во всех режимах,
+     * в том числе при снятых флажках «Включать подчинённые/родительские подсистемы».
+     *
+     * <p>Штатный {@code AbstractSubsystemsPanel$2} (провайдер состояния чекбоксов) при снятых
+     * этих флажках принудительно возвращает {@code isGrayed == false} для любого узла, а
+     * {@code setState} не поднимает пометку на родителей — поэтому помеченный узел в свёрнутом
+     * дереве ничем не выдаёт себя. Обёртка провайдера добавляет предкам {@code checked+grayed}.
+     *
+     * <p>Серые пометки в сохранение не попадают: {@code AbstractViewerPanel.getOnlyCheckedElements()}
+     * вычитает {@code getGrayedElements()} до вызова {@code setSubsystemChecked}.
+     *
+     * <p>Диалог сравнения не трогаем — там своя обёртка {@link BothSidesCheckStateProvider}.
+     */
+    private static void installGrayAncestorMarks(Object dialog, Object panel, CheckboxTreeViewer viewer)
+    {
+        if (dialog == null || panel == null || viewer == null)
+            return;
+        // Диалог сравнения (в т.ч. git-сторона OTHER) — своя обёртка BothSidesCheckStateProvider.
+        if (isCompareFilterDialog(dialog)
+            || dialog.getClass().getName().contains(".compare.")) //$NON-NLS-1$
+            return;
+        Tree tree = viewer.getTree();
+        if (tree == null || tree.isDisposed())
+            return;
+
+        Object existing = tree.getData(GRAY_ANCESTORS_PROVIDER_KEY);
+        if (existing instanceof GrayAncestorsCheckStateProvider ready)
+        {
+            ready.recompute();
+            reapplyTreeChecksFromProvider(viewer);
+            return;
+        }
+
+        org.eclipse.jface.viewers.ICheckStateProvider nativeProvider = resolveCheckStateProvider(viewer);
+        if (nativeProvider == null)
+            return;
+
+        GrayAncestorsCheckStateProvider wrapped =
+            new GrayAncestorsCheckStateProvider(panel, viewer, nativeProvider);
+        viewer.setCheckStateProvider(wrapped);
+        // ImprovedCheckboxTreeViewer дублирует provider в customized*.
+        Object customized = Global.getField(viewer, "customizedCheckStateProvider"); //$NON-NLS-1$
+        if (customized != null)
+            Global.setField(customized, "delegate", wrapped); //$NON-NLS-1$
+        tree.setData(GRAY_ANCESTORS_PROVIDER_KEY, wrapped);
+
+        wrapped.recompute();
+        reapplyTreeChecksFromProvider(viewer);
+        // Настройки фильтра/дерево могут дозаполниться после первого прохода патча.
+        tree.getDisplay().asyncExec(() ->
+        {
+            if (!tree.isDisposed())
+                recomputeGrayAncestorMarks(viewer);
+        });
+
+        viewer.addCheckStateListener((ICheckStateListener) event -> tree.getDisplay().asyncExec(() ->
+        {
+            if (tree.isDisposed())
+                return;
+            wrapped.recompute();
+            reapplyTreeChecksFromProvider(viewer);
+        }));
+        FilterBySubsystemsDialogDebug.log("grayAncestors: обёртка провайдера установлена"); //$NON-NLS-1$
+    }
+
+    /** Пересчитать серые пометки предков и перерисовать видимые узлы. */
+    private static void recomputeGrayAncestorMarks(CheckboxTreeViewer viewer)
+    {
+        if (viewer == null || viewer.getTree() == null || viewer.getTree().isDisposed())
+            return;
+        Object gp = viewer.getTree().getData(GRAY_ANCESTORS_PROVIDER_KEY);
+        if (!(gp instanceof GrayAncestorsCheckStateProvider provider))
+            return;
+        provider.recompute();
+        reapplyTreeChecksFromProvider(viewer);
+    }
+
+    /**
+     * Обёртка штатного {@link org.eclipse.jface.viewers.ICheckStateProvider}: к штатному
+     * состоянию добавляет {@code checked+grayed} для предков статически помеченных подсистем.
+     */
+    private static final class GrayAncestorsCheckStateProvider
+        implements org.eclipse.jface.viewers.ICheckStateProvider
+    {
+        private final Object panel;
+        private final CheckboxTreeViewer viewer;
+        private final org.eclipse.jface.viewers.ICheckStateProvider delegate;
+        private volatile Set<Object> grayAncestors = new HashSet<>();
+        private volatile Set<Object> staticMarks = new HashSet<>();
+
+        GrayAncestorsCheckStateProvider(Object panel, CheckboxTreeViewer viewer,
+            org.eclipse.jface.viewers.ICheckStateProvider delegate)
+        {
+            this.panel = panel;
+            this.viewer = viewer;
+            this.delegate = delegate;
+        }
+
+        @Override
+        public boolean isChecked(Object element)
+        {
+            if (grayAncestors.contains(element))
+                return true;
+            return delegate != null && delegate.isChecked(element);
+        }
+
+        @Override
+        public boolean isGrayed(Object element)
+        {
+            if (delegate != null && delegate.isGrayed(element))
+                return true;
+            return grayAncestors.contains(element) && !staticMarks.contains(element);
+        }
+
+        /**
+         * Пересчёт множества предков. При включённых «включать …» серую динамику ставит
+         * штатный {@code grayNodes()} со своей семантикой — свою обёртку выключаем.
+         * Обход только вверх ({@code getParent}) от уже материализованных статических узлов —
+         * без {@code getChildren} по всему дереву (секунды на больших конфигурациях).
+         */
+        void recompute()
+        {
+            Set<Object> statics = new HashSet<>();
+            Set<Object> ancestors = new HashSet<>();
+            try
+            {
+                if (Boolean.TRUE.equals(Global.invoke(panel,
+                    "doesIncludeFromSubordinateOrParentParameterSet"))) //$NON-NLS-1$
+                {
+                    grayAncestors = ancestors;
+                    staticMarks = statics;
+                    return;
+                }
+                Tree tree = viewer.getTree();
+                if (tree == null || tree.isDisposed()
+                    || !(viewer.getContentProvider() instanceof ITreeContentProvider tcp))
+                {
+                    grayAncestors = ancestors;
+                    staticMarks = statics;
+                    return;
+                }
+                for (TreeItem root : tree.getItems())
+                    collectStaticMarks(root, statics);
+                // При открытии дерево свёрнуто — статические подсистемы берём из настроек,
+                // не из материализованных TreeItem (обход getParent модельный, раскрытия не требует).
+                seedFromSettings(tree, statics, ancestors);
+                for (Object mark : statics)
+                {
+                    for (Object parent = tcp.getParent(mark);
+                        parent != null && !(parent instanceof Object[]);
+                        parent = tcp.getParent(parent))
+                    {
+                        if (!ancestors.add(parent))
+                            break;
+                    }
+                }
+            }
+            catch (RuntimeException ex)
+            {
+                FilterBySubsystemsDialogDebug.step("grayAncestors", "recompute: " + ex); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            grayAncestors = ancestors;
+            staticMarks = statics;
+        }
+
+        private void seedFromSettings(Tree tree, Set<Object> statics, Set<Object> ancestors)
+        {
+            Object manager = Global.getField(panel, "filterBySubsystemsManager"); //$NON-NLS-1$
+            Object settings = Global.getField(panel, "currentFilterSettings"); //$NON-NLS-1$
+            if (settings == null)
+                settings = Global.getField(panel, "filterSettings"); //$NON-NLS-1$
+            if (manager == null || settings == null || tree == null || tree.isDisposed())
+                return;
+            for (TreeItem root : tree.getItems())
+            {
+                if (root == null || root.isDisposed())
+                    continue;
+                Object data = root.getData();
+                IDtProject dt = toDtProjectElement(data);
+                if (dt == null)
+                    continue;
+                Object subsObj = Global.invoke(manager, "getCheckedSubsystems", settings, dt); //$NON-NLS-1$
+                if (subsObj instanceof Set<?> subs)
+                {
+                    for (Object subsystem : subs)
+                        if (subsystem != null)
+                            statics.add(subsystem);
+                }
+                boolean hasSubs = countSubsystemIdsForProject(settings, dt) > 0;
+                boolean includeNot = Boolean.TRUE.equals(Global.invoke(settings,
+                    "isIncludeNotIncludedInSubsystems", dt)); //$NON-NLS-1$
+                if (data != null && !statics.contains(data) && (hasSubs || includeNot))
+                    ancestors.add(data);
+            }
+        }
+
+        private void collectStaticMarks(TreeItem item, Set<Object> statics)
+        {
+            if (item == null || item.isDisposed())
+                return;
+            Object data = item.getData();
+            if (data != null && delegate != null
+                && delegate.isChecked(data) && !delegate.isGrayed(data))
+                statics.add(data);
+            for (TreeItem child : item.getItems())
+                collectStaticMarks(child, statics);
+        }
     }
 
     private static int countCheckedProjectsInSettings(Object settings)

@@ -18,7 +18,11 @@ import com._1c.g5.v8.dt.debug.core.model.values.IBslValue;
 import com._1c.g5.v8.dt.debug.model.calculations.BaseValueInfoData;
 import com._1c.g5.v8.dt.debug.model.calculations.CalculationResultBaseData;
 import com._1c.g5.v8.dt.debug.model.calculations.ViewInterface;
+import org.eclipse.debug.core.model.IErrorReportingExpression;
+import org.eclipse.debug.core.model.IExpression;
 import org.eclipse.debug.core.model.IValue;
+import org.eclipse.jface.text.IDocument;
+import org.eclipse.jface.text.source.SourceViewer;
 import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Tree;
@@ -64,12 +68,95 @@ final class DebugDetailPaneFullTextSupport
     {
         if (!ComfortSettings.isImproveDebuggerWindowsEnabled())
             return;
+        IExpression errorExpression = selectedErrorExpression(tree);
+        if (errorExpression instanceof IErrorReportingExpression errorReporting)
+        {
+            String text = joinErrorMessages(errorReporting.getErrorMessages());
+            if (!text.isEmpty())
+                scheduleErrorDetailWrite(tree, detailPaneHost, detailPaneFieldName, errorExpression, text, 0);
+            return;
+        }
         IBslValue bsl = selectedStringValue(tree);
         if (bsl == null)
             return;
         if (RESOLVED.containsKey(bsl) || PENDING.contains(bsl))
             return;
         requestFullDetailText(tree, viewer, detailPaneHost, detailPaneFieldName, bsl);
+    }
+
+    /** Общий текст ошибки для колонки «Значение» ({@link DebugVariablePresentationHook}) и панели деталей. */
+    static String joinErrorMessages(String[] messages)
+    {
+        if (messages == null || messages.length == 0)
+            return ""; //$NON-NLS-1$
+        StringBuilder result = new StringBuilder();
+        for (String message : messages)
+        {
+            if (message == null || message.isEmpty())
+                continue;
+            if (result.length() > 0)
+                result.append('\n');
+            result.append(message);
+        }
+        return result.toString();
+    }
+
+    private static IExpression selectedErrorExpression(Tree tree)
+    {
+        if (tree == null || tree.isDisposed())
+            return null;
+        TreeItem[] selection = tree.getSelection();
+        if (selection.length == 0)
+            return null;
+        Object data = selection[0].getData();
+        if (data instanceof IErrorReportingExpression errorExpression && errorExpression.hasErrors()
+            && data instanceof IExpression expression)
+            return expression;
+        return null;
+    }
+
+    /**
+     * Штатный {@code DetailPane$DetailJob} для выражения с ошибкой не вызывает
+     * {@code computeDetail} ({@code IExpression.getValue()} после ошибки {@code null}) и асинхронно
+     * пишет в панель пустую строку. Наш текст ошибки подставляем следом (с догоняющим повтором),
+     * проверяя, что выделение за это время не сменилось.
+     */
+    private static void scheduleErrorDetailWrite(Tree tree, Object detailPaneHost, String detailPaneFieldName,
+        IExpression expression, String text, int attempt)
+    {
+        if (tree.isDisposed() || attempt > 4)
+            return;
+        Display display = tree.getDisplay();
+        if (display == null || display.isDisposed())
+            return;
+        display.timerExec(attempt == 0 ? 60 : 200, () ->
+        {
+            if (tree.isDisposed() || selectedErrorExpression(tree) != expression)
+                return;
+            writeDetailPaneDocument(detailPaneHost, detailPaneFieldName, text);
+            scheduleErrorDetailWrite(tree, detailPaneHost, detailPaneFieldName, expression, text, attempt + 1);
+        });
+    }
+
+    /** Пишет текст напрямую в документ панели деталей ({@code DefaultDetailPane.fDetailDocument}). */
+    private static void writeDetailPaneDocument(Object detailPaneHost, String detailPaneFieldName, String text)
+    {
+        if (detailPaneHost == null)
+            return;
+        Object detailPaneProxy = Global.getField(detailPaneHost, detailPaneFieldName);
+        if (detailPaneProxy == null)
+            return;
+        Object pane = Global.getField(detailPaneProxy, "fCurrentPane"); //$NON-NLS-1$
+        if (pane == null)
+            return;
+        Object documentObj = Global.getField(pane, "fDetailDocument"); //$NON-NLS-1$
+        if (!(documentObj instanceof IDocument document))
+            return;
+        if (!text.equals(document.get()))
+            document.set(text);
+        Object sourceViewerObj = Global.getField(pane, "fSourceViewer"); //$NON-NLS-1$
+        if (sourceViewerObj instanceof SourceViewer sourceViewer)
+            sourceViewer.setEditable(false);
     }
 
     private static IBslValue selectedStringValue(Tree tree)

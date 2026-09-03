@@ -15,6 +15,7 @@ import org.eclipse.jface.resource.ImageDescriptor;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
+import org.eclipse.swt.widgets.Combo;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.ui.IEditorPart;
 import org.osgi.framework.Bundle;
@@ -94,10 +95,35 @@ public final class BslInspectSupport
             watch.setExpressionContext(frame);
             Global.invoke(dialog, "open"); //$NON-NLS-1$
             registerInspectShell(dialog, watch);
+            clearExpressionComboIfEmpty(dialog, watch);
         }
         catch (Exception e)
         {
             DebugInspectorDebug.problem("openInspectPopup: " + e.getMessage()); //$NON-NLS-1$
+        }
+    }
+
+    /**
+     * Пустое выражение — пустое поле ввода в попапе.
+     *
+     * <p>{@code PendingAwareInspectPopupDialog.createExpressionCombo} после
+     * {@code combo.setText(текст)} вызывает {@code combo.select(0)}. Для непустого выражения это
+     * незаметно: его же только что положили в историю первым элементом. А при пустом выражении
+     * в историю класть нечего, и {@code select(0)} подставляет прошлый запрос — окно открывается
+     * со старым выражением, которое к текущему месту в модуле отношения не имеет. Очищаем поле
+     * сразу после открытия; история в выпадающем списке остаётся.
+     */
+    private static void clearExpressionComboIfEmpty(Object dialog, IWatchExpression watch)
+    {
+        String text = watch.getExpressionText();
+        if (text != null && !text.isBlank())
+            return;
+        Object combo = Global.getField(dialog, "searchCombo"); //$NON-NLS-1$
+        if (combo instanceof Combo widget && !widget.isDisposed())
+        {
+            widget.deselectAll();
+            widget.setText(""); //$NON-NLS-1$
+            widget.setFocus();
         }
     }
 

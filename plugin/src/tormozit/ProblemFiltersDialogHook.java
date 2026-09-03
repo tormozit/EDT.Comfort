@@ -1,10 +1,14 @@
 package tormozit;
 
+import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
 
+import org.eclipse.jface.window.Window;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.CLabel;
+import org.eclipse.swt.events.SelectionAdapter;
+import org.eclipse.swt.events.SelectionEvent;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.layout.GridData;
@@ -63,6 +67,20 @@ public final class ProblemFiltersDialogHook implements IStartup
     /** Прокручиваемая форма, внутри которой лежат секции отбора. */
     private static final String FORM_CLASS_NAME = "org.eclipse.ui.forms.widgets.ScrolledForm"; //$NON-NLS-1$
 
+    private static final String MESSAGES_CLASS = "com._1c.g5.v8.dt.internal.ui.validation.Messages"; //$NON-NLS-1$
+    /** Метка на композите группы «Область возникновения» — признак «наши радио уже добавлены». */
+    private static final String COMFORT_SCOPE_KEY = "tormozit.problemFiltersComfortScope"; //$NON-NLS-1$
+    /** Имена полей {@code Messages} со штатными названиями радио «Области возникновения». */
+    private static final String[] SCOPE_MESSAGE_FIELDS = {"Scope_All", "Scope_current_project", //$NON-NLS-1$ //$NON-NLS-2$
+        "Scope_current_object", "Scope_current_element", "Scope_subsystems_filter"}; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+
+    private static final String NAVIGATOR_TOOLTIP =
+        "Проблемы только в объектах активного проекта, видимых в навигаторе с учётом его"
+            + " активного отбора (фильтр по подсистемам или по набору). Если отбор в навигаторе"
+            + " не включён — область не ограничивается"; //$NON-NLS-1$
+    private static final String ACTIVE_SETS_TOOLTIP =
+        "Проблемы только в объектах активного набора активного проекта"; //$NON-NLS-1$
+
     @Override
     public void earlyStartup()
     {
@@ -109,12 +127,271 @@ public final class ProblemFiltersDialogHook implements IStartup
 
         renameWarningType(shell);
         Composite severityHost = applyModuleSeverityIcons(shell);
+        Object dialog = shell.getData();
+        installComfortScopeRadios(shell, dialog,
+            dialog != null ? dialog.getClass().getClassLoader() : null);
 
         shell.layout(true, true);
         // Раскладка секций внутри прокручиваемой формы к этому моменту ещё не
         // выполнена (её ширина — ноль), поэтому недостачу считаем после показа.
         shell.getDisplay().asyncExec(() -> grantMissingWidth(shell, severityHost));
         Debug.log("patch: header=" + (header != null) + " configErrors=" + (configErrors != null)); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /**
+     * В группу «Область возникновения» добавляются радио «Отобранное в навигаторе»
+     * и «Активные наборы» (issue 462) — как в окне поиска по конфигурации
+     * ({@link ConfigSearchDialogHook}). Оба варианта не привязаны к штатному enum
+     * {@code ProblemFilters.Scope}; выбранный режим хранит {@link ProblemViewComfortScope},
+     * а применяет {@link ProblemViewHook}.
+     *
+     * <p>Радио создаются в том же {@link Composite}, что и штатные, поэтому SWT сам
+     * держит их взаимоисключение. При выборе штатного радио наш режим сбрасывается,
+     * при выборе нашего — снимаются отметки штатных.
+     */
+    private static void installComfortScopeRadios(Shell shell, Object dialog, ClassLoader loader)
+    {
+        List<Button> nativeRadios = findScopeRadios(shell, loader);
+        if (nativeRadios.isEmpty())
+        {
+            Debug.log("comfortScope: native scope radios not found"); //$NON-NLS-1$
+            return;
+        }
+        Composite host = nativeRadios.get(0).getParent();
+        if (host == null || host.isDisposed() || Boolean.TRUE.equals(host.getData(COMFORT_SCOPE_KEY)))
+            return;
+        host.setData(COMFORT_SCOPE_KEY, Boolean.TRUE);
+
+        Button navigator = comfortRadio(host, ProblemViewComfortScope.NAVIGATOR_LABEL, NAVIGATOR_TOOLTIP);
+        Button activeSets = comfortRadio(host, ProblemViewComfortScope.ACTIVE_SETS_LABEL, ACTIVE_SETS_TOOLTIP);
+        placeComfortRadiosRight(host, nativeRadios, loader, navigator, activeSets);
+
+        // Наш режим — как и все настройки этого диалога — фиксируется только по «OK»
+        // (см. okPressed: setScope/setShowAll пишутся в ProblemFilters лишь там).
+        // Клики по радио меняют лишь «ожидаемый» выбор.
+        ProblemViewComfortScope.Mode[] pending = { ProblemViewComfortScope.mode() };
+
+        for (Button nativeRadio : nativeRadios)
+        {
+            nativeRadio.addSelectionListener(new SelectionAdapter()
+            {
+                @Override public void widgetSelected(SelectionEvent e)
+                {
+                    if (!nativeRadio.getSelection())
+                        return;
+                    pending[0] = ProblemViewComfortScope.Mode.NONE;
+                    navigator.setSelection(false);
+                    activeSets.setSelection(false);
+                }
+            });
+        }
+        navigator.addSelectionListener(comfortRadioListener(navigator, activeSets, nativeRadios,
+            ProblemViewComfortScope.Mode.NAVIGATOR, pending));
+        activeSets.addSelectionListener(comfortRadioListener(activeSets, navigator, nativeRadios,
+            ProblemViewComfortScope.Mode.ACTIVE_SETS, pending));
+
+        restoreComfortScope(navigator, activeSets, nativeRadios);
+        hookCommitButtons(shell, dialog, pending, navigator, activeSets);
+
+        Composite form = findForm(host);
+        if (form != null)
+            Global.invoke(form, "reflow", Boolean.TRUE); //$NON-NLS-1$
+        host.getShell().layout(true, true);
+        Debug.log("comfortScope: radios added"); //$NON-NLS-1$
+    }
+
+    private static SelectionAdapter comfortRadioListener(Button self, Button otherComfort,
+        List<Button> nativeRadios, ProblemViewComfortScope.Mode mode, ProblemViewComfortScope.Mode[] pending)
+    {
+        return new SelectionAdapter()
+        {
+            @Override public void widgetSelected(SelectionEvent e)
+            {
+                if (self.isDisposed() || !self.getSelection())
+                    return;
+                pending[0] = mode;
+                if (!otherComfort.isDisposed())
+                    otherComfort.setSelection(false);
+                for (Button nativeRadio : nativeRadios)
+                {
+                    if (!nativeRadio.isDisposed())
+                        nativeRadio.setSelection(false);
+                }
+            }
+        };
+    }
+
+    /** На старте диалога отметить ранее применённый вариант нашей области. */
+    private static void restoreComfortScope(Button navigator, Button activeSets, List<Button> nativeRadios)
+    {
+        ProblemViewComfortScope.Mode mode = ProblemViewComfortScope.mode();
+        if (mode == ProblemViewComfortScope.Mode.NONE)
+            return;
+        Button self = mode == ProblemViewComfortScope.Mode.NAVIGATOR ? navigator : activeSets;
+        Runnable apply = () ->
+        {
+            if (self.isDisposed())
+                return;
+            for (Button nativeRadio : nativeRadios)
+            {
+                if (!nativeRadio.isDisposed())
+                    nativeRadio.setSelection(false);
+            }
+            navigator.setSelection(self == navigator);
+            activeSets.setSelection(self == activeSets);
+        };
+        // Штатная привязка на старте отмечает нативное радио от значения scope
+        // (у активного режима оно = «Текущий элемент») — снимаем уже после неё.
+        self.getDisplay().asyncExec(apply);
+        self.getDisplay().timerExec(80, apply);
+    }
+
+    /**
+     * Фиксация выбора: {@code ProblemViewComfortScope.setMode} — только когда диалог
+     * закрывается по «OK» (как и штатный {@code okPressed}, который пишет
+     * {@code setScope}/{@code setShowAll} лишь там). Слушатель самого закрытия, а не
+     * кнопки «OK»: {@code okPressed} диспозит {@code Shell} до наших слушателей кнопки.
+     * «Восстановить значения по умолчанию» снимает наш выбор визуально и сбрасывает
+     * ожидаемый режим; «Отмена» не трогает ничего.
+     */
+    private static void hookCommitButtons(Shell shell, Object dialog, ProblemViewComfortScope.Mode[] pending,
+        Button navigator, Button activeSets)
+    {
+        shell.addDisposeListener(e ->
+        {
+            Object returnCode = Global.invoke(dialog, "getReturnCode"); //$NON-NLS-1$
+            if (Integer.valueOf(Window.OK).equals(returnCode))
+                ProblemViewComfortScope.setMode(pending[0]);
+        });
+        Button defaults = findButtonContaining(shell, "умолчанию", "Default"); //$NON-NLS-1$ //$NON-NLS-2$
+        if (defaults != null && !defaults.isDisposed())
+        {
+            defaults.addSelectionListener(new SelectionAdapter()
+            {
+                @Override public void widgetSelected(SelectionEvent e)
+                {
+                    pending[0] = ProblemViewComfortScope.Mode.NONE;
+                    if (!navigator.isDisposed())
+                        navigator.setSelection(false);
+                    if (!activeSets.isDisposed())
+                        activeSets.setSelection(false);
+                }
+            });
+        }
+    }
+
+    private static Button findButtonContaining(Control control, String... substrings)
+    {
+        if (control instanceof Button button && (button.getStyle() & SWT.PUSH) != 0 && button.getText() != null)
+        {
+            for (String substring : substrings)
+            {
+                if (button.getText().contains(substring))
+                    return button;
+            }
+        }
+        if (control instanceof Composite composite)
+        {
+            for (Control child : composite.getChildren())
+            {
+                Button found = findButtonContaining(child, substrings);
+                if (found != null)
+                    return found;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Наши радио — в 3-ю колонку, в пустое место справа от «Текущий проект» /
+     * «Текущий элемент», а не отдельной строкой снизу: иначе группа «Область
+     * возникновения», а с ней и окно, становятся выше.
+     *
+     * <p>{@code numColumns} 2 → 3; порядок ячеек GridLayout — это порядок в
+     * {@code getChildren()}, поэтому наши радио переставляются сразу за нужным
+     * штатным ({@code moveBelow}). Итог: строка 1 — Все/Текущий проект/навигатор,
+     * строка 2 — Текущий объект/Текущий элемент/наборы, строка 3 — подсистемы/кнопка.
+     */
+    private static void placeComfortRadiosRight(Composite host, List<Button> nativeRadios,
+        ClassLoader loader, Button navigator, Button activeSets)
+    {
+        Button afterNavigator = radioByField(nativeRadios, loader, "Scope_current_project"); //$NON-NLS-1$
+        Button afterActiveSets = radioByField(nativeRadios, loader, "Scope_current_element"); //$NON-NLS-1$
+        if (afterNavigator == null || afterActiveSets == null
+            || !(host.getLayout() instanceof GridLayout grid))
+        {
+            return;
+        }
+        grid.numColumns = Math.max(grid.numColumns, 3);
+        navigator.moveBelow(afterNavigator);
+        activeSets.moveBelow(afterActiveSets);
+    }
+
+    private static Button radioByField(List<Button> radios, ClassLoader loader, String field)
+    {
+        String text = message(loader, field);
+        if (text == null)
+            return null;
+        for (Button radio : radios)
+        {
+            if (!radio.isDisposed() && radio.getText() != null && text.equals(radio.getText().trim()))
+                return radio;
+        }
+        return null;
+    }
+
+    private static Button comfortRadio(Composite host, String text, String tooltip)
+    {
+        Button radio = new Button(host, SWT.RADIO);
+        radio.setText(text);
+        radio.setToolTipText(TooltipText.wrap(radio, tooltip + Global.pluginSignForTooltip()));
+        radio.setLayoutData(new GridData(SWT.BEGINNING, SWT.CENTER, false, false));
+        return radio;
+    }
+
+    /** Штатные радио «Области возникновения» по локализованным подписям из {@code Messages}. */
+    private static List<Button> findScopeRadios(Shell shell, ClassLoader loader)
+    {
+        List<String> texts = new ArrayList<>();
+        for (String field : SCOPE_MESSAGE_FIELDS)
+        {
+            String value = message(loader, field);
+            if (value != null)
+                texts.add(value);
+        }
+        List<Button> radios = new ArrayList<>();
+        collectRadios(shell, texts, radios);
+        return radios;
+    }
+
+    private static void collectRadios(Control control, List<String> texts, List<Button> out)
+    {
+        if (control instanceof Button button && (button.getStyle() & SWT.RADIO) != 0
+            && button.getText() != null && texts.contains(button.getText().trim()))
+        {
+            out.add(button);
+        }
+        if (control instanceof Composite composite)
+        {
+            for (Control child : composite.getChildren())
+                collectRadios(child, texts, out);
+        }
+    }
+
+    private static String message(ClassLoader loader, String fieldName)
+    {
+        try
+        {
+            Class<?> messages = loader != null ? loader.loadClass(MESSAGES_CLASS) : Class.forName(MESSAGES_CLASS);
+            Field field = messages.getDeclaredField(fieldName);
+            field.setAccessible(true);
+            Object value = field.get(null);
+            return value instanceof String text && !text.isBlank() ? text.trim() : null;
+        }
+        catch (ReflectiveOperationException e)
+        {
+            return null;
+        }
     }
 
     /**
