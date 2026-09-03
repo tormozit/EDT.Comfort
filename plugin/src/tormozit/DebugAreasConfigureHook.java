@@ -53,7 +53,9 @@ import com._1c.g5.v8.dt.debug.model.base.data.DebugTargetType;
  *
  * <p>Охватывает оба вклада {@code DebugTargetsConfigureAction}: тулбарную pulldown-кнопку
  * (actionSet {@code debugActionSet1}, {@code WWinPluginAction}) и push-пункт в меню Debug-вьюхи
- * ({@code ViewPluginAction}, подменю «Платформа 1С:Предприятие»).
+ * ({@code ViewPluginAction}, подменю «Платформа 1С:Предприятие»). Тулбарный вклад появляется
+ * в окне только вместе с перспективой «Отладка», поэтому его поиск повторяется и при смене
+ * перспективы — см. {@link #hookWindowPerspectives}.
  */
 public final class DebugAreasConfigureHook implements IStartup
 {
@@ -71,6 +73,7 @@ public final class DebugAreasConfigureHook implements IStartup
     private static final Set<IViewPart> HOOKED_VIEWS = ConcurrentHashMap.newKeySet();
     private static final Set<IWorkbenchPage> PAGES_LISTENED = ConcurrentHashMap.newKeySet();
     private static final Set<IAction> WIRED_ACTIONS = ConcurrentHashMap.newKeySet();
+    private static final Set<IWorkbenchWindow> PERSPECTIVES_LISTENED = ConcurrentHashMap.newKeySet();
 
     @Override
     public void earlyStartup()
@@ -82,6 +85,7 @@ public final class DebugAreasConfigureHook implements IStartup
     {
         for (IWorkbenchWindow window : PlatformUI.getWorkbench().getWorkbenchWindows())
         {
+            hookWindowPerspectives(window);
             hookWindowToolbar(window);
             IWorkbenchPage page = window.getActivePage();
             if (page != null)
@@ -92,6 +96,7 @@ public final class DebugAreasConfigureHook implements IStartup
             @Override
             public void windowOpened(IWorkbenchWindow window)
             {
+                hookWindowPerspectives(window);
                 hookWindowToolbar(window);
                 IWorkbenchPage page = window.getActivePage();
                 if (page != null)
@@ -124,6 +129,66 @@ public final class DebugAreasConfigureHook implements IStartup
     private static void scheduleRetry(long delayMs)
     {
         Display.getDefault().timerExec((int) delayMs, DebugAreasConfigureHook::recheckAllPages);
+    }
+
+    /**
+     * Тулбарный вклад живёт в actionSet {@code org.eclipse.debug.ui.debugActionSet1}
+     * с {@code visible="false"}: в окне он материализуется только когда его показывает
+     * перспектива «Отладка». При старте EDT в другой перспективе (например «Навигатор»)
+     * ни первичный проход, ни ретраи 1.5/8 с кнопку не находят, а {@code windowActivated}
+     * при смене перспективы не срабатывает — кнопка остаётся недоступной навсегда.
+     * Поэтому перепроверяем тулбар на активацию перспективы и на показ набора действий.
+     */
+    private static void hookWindowPerspectives(IWorkbenchWindow window)
+    {
+        if (window == null || !PERSPECTIVES_LISTENED.add(window))
+            return;
+        try
+        {
+            window.addPerspectiveListener(new org.eclipse.ui.IPerspectiveListener2()
+            {
+                @Override
+                public void perspectiveActivated(IWorkbenchPage page,
+                    org.eclipse.ui.IPerspectiveDescriptor perspective)
+                {
+                    recheckWindowSoon(window, page);
+                }
+
+                @Override
+                public void perspectiveChanged(IWorkbenchPage page,
+                    org.eclipse.ui.IPerspectiveDescriptor perspective, String changeId)
+                {
+                    if (IWorkbenchPage.CHANGE_ACTION_SET_SHOW.equals(changeId))
+                        recheckWindowSoon(window, page);
+                }
+
+                @Override
+                public void perspectiveChanged(IWorkbenchPage page,
+                    org.eclipse.ui.IPerspectiveDescriptor perspective,
+                    IWorkbenchPartReference partRef, String changeId)
+                {
+                    // no-op: изменения по частям к набору действий отношения не имеют
+                }
+            });
+        }
+        catch (Exception e)
+        {
+            // no-op
+        }
+    }
+
+    /**
+     * Событие перспективы приходит раньше, чем окно пересоберёт панель инструментов и создаст
+     * {@code WWinPluginAction} набора действий, поэтому кроме немедленной проверки делаем ещё две
+     * отложенные.
+     */
+    private static void recheckWindowSoon(IWorkbenchWindow window, IWorkbenchPage page)
+    {
+        hookWindowToolbar(window);
+        if (page != null)
+            hookPage(page);
+        Display.getDefault().timerExec(300, () -> hookWindowToolbar(window));
+        Display.getDefault().timerExec(1500, () -> hookWindowToolbar(window));
     }
 
     private static void recheckAllPages()

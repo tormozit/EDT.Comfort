@@ -4,6 +4,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 
 /**
  * Единственный источник правды для маппинга имён типов метаданных 1С
@@ -63,6 +64,15 @@ public final class MdTypeMapping
 
     /** EN ед.ч. типа под-объекта → имя EMF-коллекции (attributes, forms…). */
     private static final Map<String, String> SUB_OBJECT_TO_EMF_FEATURE = new LinkedHashMap<>();
+
+    /**
+     * Все написания имён типов МД одним набором, без учёта регистра: RU ед.ч. (включая алиасы),
+     * RU мн.ч., EN ед.ч., EN мн.ч. (папка EDT) и мн.ч. под-объектов. Нужен там, где по одному
+     * слову перед точкой надо понять, что это тип метаданных, а не произвольный идентификатор
+     * («Справочник.Номенклатура» — полное имя, «Товар.Номенклатура» — обращение к реквизиту).
+     * Собирается в конце статического блока из остальных таблиц.
+     */
+    private static final Set<String> MD_TYPE_TOKENS = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
 
     // =========================================================================
     // Единая таблица: (RU ед.ч., EN ед.ч., EN мн.ч./папка)
@@ -262,6 +272,12 @@ public final class MdTypeMapping
         for (Map.Entry<String, String> entry : SUB_OBJECT_RU_PLURAL.entrySet())
             SYSTEM_LABEL_TO_SINGULAR.put(entry.getValue(), entry.getKey());
         SYSTEM_LABEL_TO_SINGULAR.putAll(FOLDER_TO_EN_SING);
+
+        MD_TYPE_TOKENS.addAll(RU_TO_EN_SING.keySet());
+        MD_TYPE_TOKENS.addAll(RU_PLURAL_TO_RU.keySet());
+        MD_TYPE_TOKENS.addAll(EN_SING_TO_RU.keySet());
+        MD_TYPE_TOKENS.addAll(FOLDER_TO_RU.keySet());
+        MD_TYPE_TOKENS.addAll(SUB_OBJECT_RU_PLURAL.values());
     }
 
     // =========================================================================
@@ -363,6 +379,17 @@ public final class MdTypeMapping
             return false;
         String ru = anyToRu(segment.strip());
         return ru != null && RU_TO_FOLDER.containsKey(ru);
+    }
+
+    /**
+     * Слово — имя типа метаданных в любом написании (RU ед./мн. ч., EN ед./мн. ч.), без учёта
+     * регистра? В отличие от {@link #isKnownMdRootType} сюда попадают и формы мн. ч.
+     * («Справочники», «Catalogs»), и типы под-объектов («Реквизит», «Формы»), — то есть всё,
+     * что может стоять перед точкой в полном имени объекта. См. {@link #MD_TYPE_TOKENS}.
+     */
+    public static boolean isMdTypeToken(String token)
+    {
+        return token != null && !token.isEmpty() && MD_TYPE_TOKENS.contains(token);
     }
 
     // =========================================================================
