@@ -74,6 +74,9 @@ import com._1c.g5.v8.dt.metadata.mdclass.MdClassPackage;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com._1c.g5.v8.dt.metadata.mdclass.Predefined;
 import com._1c.g5.v8.dt.metadata.mdclass.Subsystem;
+import com._1c.g5.v8.dt.ui.DtUiUtil;
+import com._1c.g5.v8.dt.ui.validation.ProblemsDecorationHelper;
+import com._1c.g5.v8.dt.validation.marker.MarkerSeverity;
 
 /**
  * В заголовки вкладок-списков редактора объекта метаданных добавляет число строк
@@ -895,7 +898,7 @@ public final class MdEditorListTabCountHook implements IStartup
         {
             if (item == null || item.isDisposed())
                 continue;
-            if (usableImage(item.getImage()))
+            if (stockImageWins(item.getImage()))
                 continue;
             Image comfort = dataImage(item, KEY_COMFORT_IMAGE);
             if (comfort == null)
@@ -904,7 +907,7 @@ public final class MdEditorListTabCountHook implements IStartup
             {
                 wrote = true;
             }
-            Global.setField(item, "image", comfort); //$NON-NLS-1$
+            Global.setField(item, "image", withSeverityOverlay(comfort, item.getImage())); //$NON-NLS-1$
         }
     }
 
@@ -1677,7 +1680,7 @@ public final class MdEditorListTabCountHook implements IStartup
             IFormPage page = pageObj instanceof IFormPage formPage ? formPage : null;
             Image ours = resolveTabImage(editor, page);
             Image comfort = usableImage(ours) ? ours : dataImage(item, KEY_COMFORT_IMAGE);
-            Image current = usableImage(item.getImage()) ? item.getImage() : null;
+            Image current = stockImageWins(item.getImage()) ? item.getImage() : null;
             if (current == null && usableImage(comfort))
                 return true;
             if (navOk && i < nav.getItemCount())
@@ -1698,9 +1701,9 @@ public final class MdEditorListTabCountHook implements IStartup
         if (usableImage(ours))
             item.setData(KEY_COMFORT_IMAGE, ours);
         Image comfort = dataImage(item, KEY_COMFORT_IMAGE);
-        Image current = usableImage(item.getImage()) ? item.getImage() : null;
+        Image current = stockImageWins(item.getImage()) ? item.getImage() : null;
         if (current == null && comfort != null)
-            item.setImage(comfort);
+            item.setImage(withSeverityOverlay(comfort, item.getImage()));
 
         CTabFolder folder = item.getParent();
         Table nav = leftNavOf(folder);
@@ -1710,7 +1713,7 @@ public final class MdEditorListTabCountHook implements IStartup
         if (index < 0 || index >= nav.getItemCount())
             return;
         TableItem row = nav.getItem(index);
-        Image shown = usableImage(item.getImage()) ? item.getImage() : comfort;
+        Image shown = stockImageWins(item.getImage()) ? item.getImage() : comfort;
         if (row.getImage() != shown)
             row.setImage(shown);
     }
@@ -1729,7 +1732,7 @@ public final class MdEditorListTabCountHook implements IStartup
         {
             if (item == null || item.isDisposed())
                 continue;
-            if (!usableImage(item.getImage()) && dataImage(item, KEY_COMFORT_IMAGE) != null)
+            if (!stockImageWins(item.getImage()) && dataImage(item, KEY_COMFORT_IMAGE) != null)
                 return true;
         }
         return false;
@@ -1855,6 +1858,64 @@ public final class MdEditorListTabCountHook implements IStartup
     private static boolean usableImage(Image image)
     {
         return image != null && !image.isDisposed();
+    }
+
+    /**
+     * Картинка вкладки, поставленная EDT, важнее нашей — кроме значка критичности проблем:
+     * им {@code DtGranularEditorMarkerSupport} замещает картинку вкладки целиком, и страницу
+     * становится не узнать. Такую подмену не принимаем: возвращаем иконку страницы, а
+     * критичность накладываем на неё уголком — см. {@link #withSeverityOverlay}.
+     */
+    private static boolean stockImageWins(Image image)
+    {
+        return usableImage(image) && severityOfImage(image) == null;
+    }
+
+    /**
+     * Иконка страницы со значком критичности поверх — тот же приём, что у декоратора
+     * навигатора ({@code ProblemsDecorationHelper}): фон крупный, критичность уголком.
+     *
+     * @param stockImage картинка, которую поставил EDT; из неё узнаём критичность
+     */
+    private static Image withSeverityOverlay(Image comfort, Image stockImage)
+    {
+        MarkerSeverity severity = severityOfImage(stockImage);
+        if (comfort == null || severity == null)
+            return comfort;
+        try
+        {
+            Image decorated = ProblemsDecorationHelper.decorateImage(comfort, severity);
+            return decorated != null ? decorated : comfort;
+        }
+        catch (RuntimeException ignored)
+        {
+            return comfort;
+        }
+    }
+
+    /** Критичность, значком которой EDT заместил картинку вкладки; {@code null} — не заместил. */
+    private static MarkerSeverity severityOfImage(Image image)
+    {
+        if (image == null)
+            return null;
+        for (MarkerSeverity severity : MarkerSeverity.values())
+        {
+            if (severity != MarkerSeverity.NONE && severityImage(severity) == image)
+                return severity;
+        }
+        return null;
+    }
+
+    private static Image severityImage(MarkerSeverity severity)
+    {
+        try
+        {
+            return DtUiUtil.getImageByMarkerSeverity(severity);
+        }
+        catch (RuntimeException ignored)
+        {
+            return null;
+        }
     }
 
     // =========================================================================
