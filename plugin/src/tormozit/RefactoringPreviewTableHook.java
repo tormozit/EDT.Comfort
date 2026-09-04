@@ -87,7 +87,7 @@ import com._1c.g5.v8.dt.core.platform.IResourceLookup;
  * {@link CheckStateChangedEvent}, что и клик по флажку в дереве: работу делает штатный слушатель
  * LTK (включение изменения, поддерево, серые родители) и слушатель EDT.
  *
- * <p>Колонки «Метод», «Родитель», «Тип родителя» и «Синтаксический тип» считает
+ * <p>Колонки «Метод», «Родитель», «Тип родителя» и «Категория» считает
  * {@link BslOccurrenceContextResolver} в фоне: тип родителя требует разбора модуля моделью BSL, на
  * сотнях вхождений это заметно. До расчёта в ячейке типа стоит «?», а в заголовке колонки виден
  * счётчик обработанных вхождений.
@@ -265,7 +265,7 @@ public final class RefactoringPreviewTableHook
             this.length = length;
         }
 
-        /** Колонки «Метод», «Родитель», «Тип родителя», «Синтаксический тип» есть только у модулей. */
+        /** Колонки «Метод», «Родитель», «Тип родителя», «Категория» есть только у модулей. */
         boolean needsContext()
         {
             return offset >= 0 && length > 0 && BslModuleMethodResolver.isBslModule(file);
@@ -282,14 +282,14 @@ public final class RefactoringPreviewTableHook
         private static final String KEY_COLUMNS_FILL = "columnsFill"; //$NON-NLS-1$
         private static final String[] WIDTH_KEYS = {"changeWidth", "fileWidth", "fileTypeWidth", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             "moduleWidth", "methodWidth", "parentWidth", "parentTypeWidth", "syntaxWidth"}; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
-        private static final int[] DEFAULT_WIDTHS = {320, 200, 90, 260, 180, 180, 220, 140};
+        private static final int[] DEFAULT_WIDTHS = {320, 200, 90, 260, 180, 180, 220, 90};
         private static final int MIN_COLUMN_WIDTH = 40;
 
         /** Пометка на меню таблицы: свои пункты дописаны, второй раз не создавать. */
         private static final String MARK_MENU_KEY = "tormozit.refactoringPreviewMarkMenu"; //$NON-NLS-1$
 
         private static final String UNKNOWN_TYPE = "?"; //$NON-NLS-1$
-        private static final String PARENT_TYPE_TITLE = "Тип родителя"; //$NON-NLS-1$
+        private static final String PARENT_TYPE_TITLE = BslOccurrenceContextResolver.COL_PARENT_TYPE;
 
         /** Значения {@code PreviewNode.getActive()}. */
         private static final int INACTIVE = 0;
@@ -407,10 +407,12 @@ public final class RefactoringPreviewTableHook
             addTextColumn(columnLayout, settings, 2, "Тип файла", row -> row.fileType); //$NON-NLS-1$
             addTextColumn(columnLayout, settings, 3, "Модуль", row -> row.module); //$NON-NLS-1$
             addTextColumn(columnLayout, settings, 4, "Метод", row -> row.method); //$NON-NLS-1$
-            addTextColumn(columnLayout, settings, 5, "Родитель", row -> row.parent); //$NON-NLS-1$
+            TableColumn parentColumn = addTextColumn(columnLayout, settings, 5,
+                BslOccurrenceContextResolver.COL_PARENT, row -> row.parent);
             parentTypeColumn = addTextColumn(columnLayout, settings, 6, PARENT_TYPE_TITLE,
                 row -> row.parentType != null ? row.parentType : UNKNOWN_TYPE);
-            addTextColumn(columnLayout, settings, 7, "Синтаксический тип", row -> row.syntaxKind); //$NON-NLS-1$
+            TableColumn syntaxColumn = addTextColumn(columnLayout, settings, 7,
+                BslOccurrenceContextResolver.COL_SYNTAX_KIND, row -> row.syntaxKind);
 
             viewer.setContentProvider(ArrayContentProvider.getInstance());
             viewer.setCheckStateProvider(new ICheckStateProvider()
@@ -439,6 +441,8 @@ public final class RefactoringPreviewTableHook
             interaction.install(
                 FormTableColumnState.hasSavedColumnWidths(settings, KEY_COLUMNS_FILL, WIDTH_KEYS));
             interaction.enableHeaderSort();
+            BslOccurrenceContextResolver.applyColumnHeaderTooltips(interaction, parentColumn,
+                parentTypeColumn, syntaxColumn);
             installMarkMenu();
         }
 
@@ -561,7 +565,7 @@ public final class RefactoringPreviewTableHook
             toggle.setImageDescriptor(tableModeIconDescriptor());
             toggle.setToolTipText(TooltipText.wrap(pane,
                 "Табличный режим: изменения плоским списком с колонками «Файл», «Модуль», «Метод», " //$NON-NLS-1$
-                    + "«Родитель», «Тип родителя» и «Синтаксический тип»" + Global.pluginSignForTooltip())); //$NON-NLS-1$
+                    + "«Родитель», «Тип родителя» и «Категория»" + Global.pluginSignForTooltip())); //$NON-NLS-1$
             toggle.setChecked(ComfortSettings.isRefactoringPreviewTableMode());
             manager.add(toggle);
             toggleAction = toggle;
@@ -914,7 +918,7 @@ public final class RefactoringPreviewTableHook
         // ---- Фоновый расчёт колонок ----
 
         /**
-         * Считает «Метод», «Родитель», «Синтаксический тип» и «Тип родителя». Первые три —
+         * Считает «Метод», «Родитель», «Категория» и «Тип родителя». Первые три —
          * лексический разбор текста модуля, последний поднимает модель BSL, поэтому проход только
          * фоновый. Видимые строки идут первыми, устаревшие проходы отсекает поколение.
          */

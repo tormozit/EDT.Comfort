@@ -181,6 +181,9 @@ public final class ConfigSearchResultsHook implements IStartup
     private static final String KEY_COL_PATH_WIDTH = "matchColPathWidth"; //$NON-NLS-1$
     private static final String KEY_COL_PROPERTY_WIDTH = "matchColPropertyWidth"; //$NON-NLS-1$
     private static final String KEY_COL_LINE_WIDTH = "matchColLineWidth"; //$NON-NLS-1$
+    private static final String KEY_COL_PARENT_WIDTH = "matchColParentWidth"; //$NON-NLS-1$
+    private static final String KEY_COL_PARENT_TYPE_WIDTH = "matchColParentTypeWidth"; //$NON-NLS-1$
+    private static final String KEY_COL_SYNTAX_WIDTH = "matchColSyntaxWidth"; //$NON-NLS-1$
     private static final String KEY_COL_TEXT_WIDTH = "matchColTextWidth"; //$NON-NLS-1$
     /** Был ли при закрытии активен режим заполнения по ширине (см. {@link FormTableColumnState}). */
     private static final String KEY_COL_FILL_MODE = "matchColFillMode"; //$NON-NLS-1$
@@ -326,8 +329,14 @@ public final class ConfigSearchResultsHook implements IStartup
     private static TableColumn cachedMatchPathColumn;
     private static TableColumn cachedMatchPropertyColumn;
     private static TableColumn cachedMatchLineColumn;
+    private static TableColumn cachedMatchParentColumn;
+    private static TableColumn cachedMatchParentTypeColumn;
+    private static TableColumn cachedMatchSyntaxColumn;
     private static TableColumn cachedMatchTextColumn;
     private static FormTableInteraction cachedMatchTableInteraction;
+    /** Заголовок колонки «Тип родителя» — к нему дописывается счётчик прогресса фонового расчёта. */
+    private static final String MATCH_PARENT_TYPE_TITLE = BslOccurrenceContextResolver.COL_PARENT_TYPE;
+    private static final String MATCH_UNKNOWN_TYPE = "?"; //$NON-NLS-1$
     private static final int MATCH_PATH_COLUMN_WIDTH = 220;
     private static final int MATCH_TEXT_COLUMN_WIDTH = 280;
 
@@ -387,8 +396,27 @@ public final class ConfigSearchResultsHook implements IStartup
          */
         volatile String methodProperty;
 
+        /**
+         * URI источника ссылки ({@code BslReferenceMatch.getSourceURI()} — с фрагментом на исходный
+         * EObject вхождения), ссылка и её индекс в списке — для колонок «Родитель»/«Тип
+         * родителя»/«Категория» ({@link BslOccurrenceContextResolver}). {@code null} —
+         * вхождение не {@code BslReferenceMatch}, колонки контекста пусты.
+         */
+        final URI sourceUri;
+        final EReference sourceReference;
+        final int sourceIndexInList;
+        /**
+         * Колонки контекста BSL-вхождения. {@code null} — ещё не вычислено (фоновый Job,
+         * см. {@link #scheduleMatchContextResolution}); для {@link #parentType} {@code ""} —
+         * вычислить не удалось (в ячейке «?»).
+         */
+        volatile String parent;
+        volatile String syntaxKind;
+        volatile String parentType;
+
         MatchRow(String path, String property, long lineNumber, StyledString styledText, IFile file,
-                Object tableItem, String moduleKindSegment)
+                Object tableItem, String moduleKindSegment, URI sourceUri, EReference sourceReference,
+                int sourceIndexInList)
         {
             this.path = path;
             this.property = property;
@@ -398,6 +426,15 @@ public final class ConfigSearchResultsHook implements IStartup
             this.file = file;
             this.tableItem = tableItem;
             this.moduleKindSegment = moduleKindSegment;
+            this.sourceUri = sourceUri;
+            this.sourceReference = sourceReference;
+            this.sourceIndexInList = sourceIndexInList;
+        }
+
+        /** Нужны ли этой строке колонки контекста BSL-вхождения (есть ссылка и модуль). */
+        boolean needsContext()
+        {
+            return sourceUri != null && file != null && BslModuleMethodResolver.isBslModule(file);
         }
     }
 
@@ -510,7 +547,6 @@ public final class ConfigSearchResultsHook implements IStartup
         IDialogSettings matchSettings = dialogSettings();
         TableViewerColumn pathCol = new TableViewerColumn(matchViewer, SWT.LEFT);
         pathCol.getColumn().setText("Путь"); //$NON-NLS-1$
-        pathCol.getColumn().setToolTipText("Путь" + Global.pluginSignForTooltip());
         pathCol.getColumn().setWidth(
             FormTableColumnState.readWidth(matchSettings, KEY_COL_PATH_WIDTH, MATCH_PATH_COLUMN_WIDTH, 1));
         cachedMatchPathColumn = pathCol.getColumn();
@@ -527,7 +563,6 @@ public final class ConfigSearchResultsHook implements IStartup
 
         TableViewerColumn propertyCol = new TableViewerColumn(matchViewer, SWT.LEFT);
         propertyCol.getColumn().setText("Свойство"); //$NON-NLS-1$
-        propertyCol.getColumn().setToolTipText("Свойство"); //$NON-NLS-1$
         propertyCol.getColumn().setWidth(
             FormTableColumnState.readWidth(matchSettings, KEY_COL_PROPERTY_WIDTH, 140, 1));
         propertyCol.setLabelProvider(new ColumnLabelProvider()
@@ -541,7 +576,6 @@ public final class ConfigSearchResultsHook implements IStartup
 
         TableViewerColumn lineCol = new TableViewerColumn(matchViewer, SWT.RIGHT);
         lineCol.getColumn().setText("Строка"); //$NON-NLS-1$
-        lineCol.getColumn().setToolTipText("Номер строки" + Global.pluginSignForTooltip());
         lineCol.getColumn().setWidth(
             FormTableColumnState.readWidth(matchSettings, KEY_COL_LINE_WIDTH, 60, 1));
         lineCol.setLabelProvider(new ColumnLabelProvider()
@@ -555,9 +589,49 @@ public final class ConfigSearchResultsHook implements IStartup
             }
         });
 
+        TableViewerColumn parentCol = new TableViewerColumn(matchViewer, SWT.LEFT);
+        parentCol.getColumn().setText(BslOccurrenceContextResolver.COL_PARENT);
+        parentCol.getColumn().setWidth(
+            FormTableColumnState.readWidth(matchSettings, KEY_COL_PARENT_WIDTH, 160, 1));
+        parentCol.setLabelProvider(new ColumnLabelProvider()
+        {
+            @Override
+            public String getText(Object element)
+            {
+                return element instanceof MatchRow row && row.parent != null ? row.parent : ""; //$NON-NLS-1$
+            }
+        });
+
+        TableViewerColumn parentTypeCol = new TableViewerColumn(matchViewer, SWT.LEFT);
+        parentTypeCol.getColumn().setText(MATCH_PARENT_TYPE_TITLE);
+        parentTypeCol.getColumn().setWidth(
+            FormTableColumnState.readWidth(matchSettings, KEY_COL_PARENT_TYPE_WIDTH, 200, 1));
+        parentTypeCol.setLabelProvider(new ColumnLabelProvider()
+        {
+            @Override
+            public String getText(Object element)
+            {
+                if (!(element instanceof MatchRow row) || !row.needsContext())
+                    return ""; //$NON-NLS-1$
+                return row.parentType != null ? row.parentType : MATCH_UNKNOWN_TYPE;
+            }
+        });
+
+        TableViewerColumn syntaxCol = new TableViewerColumn(matchViewer, SWT.LEFT);
+        syntaxCol.getColumn().setText(BslOccurrenceContextResolver.COL_SYNTAX_KIND);
+        syntaxCol.getColumn().setWidth(
+            FormTableColumnState.readWidth(matchSettings, KEY_COL_SYNTAX_WIDTH, 150, 1));
+        syntaxCol.setLabelProvider(new ColumnLabelProvider()
+        {
+            @Override
+            public String getText(Object element)
+            {
+                return element instanceof MatchRow row && row.syntaxKind != null ? row.syntaxKind : ""; //$NON-NLS-1$
+            }
+        });
+
         TableViewerColumn textCol = new TableViewerColumn(matchViewer, SWT.LEFT);
         textCol.getColumn().setText("Текст"); //$NON-NLS-1$
-        textCol.getColumn().setToolTipText("Текст"); //$NON-NLS-1$
         textCol.getColumn().setWidth(
             FormTableColumnState.readWidth(matchSettings, KEY_COL_TEXT_WIDTH, MATCH_TEXT_COLUMN_WIDTH, 1));
         textCol.setLabelProvider(new SelectionAwareStyledCellLabelProvider(new IStyledLabelProvider()
@@ -621,10 +695,25 @@ public final class ConfigSearchResultsHook implements IStartup
         interaction.setOwnerDrawColumns(textCol.getColumn());
         // Колонки «Путь»/«Текст» динамически прячутся (см. ниже, applyResults) — прячем их через
         // FormTableInteraction.setColumnHidden, тогда авто-заполнение их не растягивает обратно.
-        boolean hasSavedColumnWidths = FormTableColumnState.hasSavedColumnWidths(matchSettings, KEY_COL_FILL_MODE,
-            KEY_COL_PATH_WIDTH, KEY_COL_PROPERTY_WIDTH, KEY_COL_LINE_WIDTH, KEY_COL_TEXT_WIDTH);
-        interaction.install(hasSavedColumnWidths);
+        // false — таблица всегда открывается в режиме заполнения по ширине: сохранённые ширины
+        // применены выше как стартовые пропорции, дальше колонки авто-пересчитываются под ширину
+        // таблицы (в т.ч. при перетаскивании разделителя SashForm). Ручной ресайз колонки в сессии
+        // при этом работает как обычно.
+        interaction.install(false);
         interaction.enableHeaderSort();
+        // Подсказки заголовков — через FormTableInteraction: если заголовок обрезан, первой строкой
+        // подсказки идёт полный текст заголовка, затем описание (setToolTipText напрямую это правило
+        // нарушает).
+        String sign = Global.pluginSignForTooltip();
+        interaction.setHeaderTooltipExtra(pathCol.getColumn(), "Полное имя объекта метаданных" + sign); //$NON-NLS-1$
+        interaction.setHeaderTooltipExtra(propertyCol.getColumn(),
+            "Для вхождений в BSL-модуле — модуль и метод" + sign); //$NON-NLS-1$
+        interaction.setHeaderTooltipExtra(lineCol.getColumn(), "Номер строки вхождения" + sign); //$NON-NLS-1$
+        interaction.setHeaderTooltipExtra(textCol.getColumn(), "Строка исходного текста с вхождением" + sign); //$NON-NLS-1$
+        // Колонки «Родитель»/«Тип родителя»/«Категория» — общие с табличным режимом
+        // рефакторинга, заголовки и подсказки в едином источнике.
+        BslOccurrenceContextResolver.applyColumnHeaderTooltips(interaction, parentCol.getColumn(),
+            parentTypeCol.getColumn(), syntaxCol.getColumn());
         // Второстепенные данные — при закрытии панели; при повторном поиске — явно в
         // {@link #saveMatchColumnStateOnUiThread} (Dispose не срабатывает, панель остаётся открытой).
         outer.addDisposeListener(e -> saveMatchColumnState());
@@ -640,17 +729,25 @@ public final class ConfigSearchResultsHook implements IStartup
         cachedMatchTextColumn = textCol.getColumn();
         cachedMatchPropertyColumn = propertyCol.getColumn();
         cachedMatchLineColumn = lineCol.getColumn();
+        cachedMatchParentColumn = parentCol.getColumn();
+        cachedMatchParentTypeColumn = parentTypeCol.getColumn();
+        cachedMatchSyntaxColumn = syntaxCol.getColumn();
         cachedMatchTableInteraction = interaction;
         pageContainer.setData(MATCH_PANE_HOOKED_KEY, Boolean.TRUE);
         matchTable.addDisposeListener(e -> {
             if (cachedMatchTableViewer == matchViewer)
             {
                 cancelMatchMethodResolution();
+                cancelMatchContextResolution();
+                BslOccurrenceContextResolver.clearCaches();
                 cachedMatchTableViewer = null;
                 cachedMatchTextColumn = null;
                 cachedMatchPathColumn = null;
                 cachedMatchPropertyColumn = null;
                 cachedMatchLineColumn = null;
+                cachedMatchParentColumn = null;
+                cachedMatchParentTypeColumn = null;
+                cachedMatchSyntaxColumn = null;
                 cachedMatchTableInteraction = null;
             }
         });
@@ -718,9 +815,29 @@ public final class ConfigSearchResultsHook implements IStartup
                     lineNumber = calculatedLine;
             }
             String path = formatPathForTableItem(tableItem, null);
+            // BslReferenceMatch: у Match нет файла, и formatPathForTableItem падает на BM-топ
+            // (Обработка.ЗагрузкаКурсовВалют вместо …Форма.ПодборВалютИзКлассификатора). Файл ссылки
+            // известен — берём путь модуля по нему, но только когда он уточняет вложенный объект
+            // (форму/макет), а не просто дописывает вид модуля (…МодульОбъекта) — как preferFileFullName.
+            if (match instanceof BslReferenceMatch && file != null)
+            {
+                String fromFile = GetRef.stripLowValueModuleSuffix(canonicalizeMdPath(modulePathFromFile(file)));
+                if (fromFile != null && !fromFile.isEmpty() && preferFileFullName(fromFile, path))
+                    path = fromFile;
+            }
             String segment = moduleKindSegment(tableItem, file);
+            URI sourceUri = null;
+            EReference sourceReference = null;
+            int sourceIndexInList = -1;
+            if (match instanceof BslReferenceMatch ref)
+            {
+                sourceUri = ref.getSourceURI();
+                sourceReference = ref.getReference();
+                sourceIndexInList = ref.getIndexInList();
+            }
             MatchRow row = new MatchRow(path, extractPropertyText(tableItem), lineNumber,
-                extractMatchStyledText(tableItem), file, tableItem, segment);
+                extractMatchStyledText(tableItem), file, tableItem, segment, sourceUri, sourceReference,
+                sourceIndexInList);
             // Значение из кэша резолвера — сразу, без чтения файла: при потоковом обновлении списка
             // во время поиска строки пересоздаются постоянно, без этого ячейка мигала бы «пусто → имя».
             if (file != null && lineNumber > 0)
@@ -733,6 +850,7 @@ public final class ConfigSearchResultsHook implements IStartup
         }
         matchViewer.setInput(rows);
         scheduleMatchMethodResolution(matchViewer, rows);
+        scheduleMatchContextResolution(matchViewer, rows);
 
         // При терминальном узле путь у всех строк одинаковый (сам узел и есть этот путь) — как и
         // у штатной таблицы (см. hidePathColumn/showPathColumn), колонку тогда прячем.
@@ -784,11 +902,16 @@ public final class ConfigSearchResultsHook implements IStartup
         int pathWidth = columnWidthOrZero(cachedMatchPathColumn);
         int propertyWidth = columnWidthOrZero(cachedMatchPropertyColumn);
         int lineWidth = columnWidthOrZero(cachedMatchLineColumn);
+        int parentWidth = columnWidthOrZero(cachedMatchParentColumn);
+        int parentTypeWidth = columnWidthOrZero(cachedMatchParentTypeColumn);
+        int syntaxWidth = columnWidthOrZero(cachedMatchSyntaxColumn);
         int textWidth = columnWidthOrZero(cachedMatchTextColumn);
         FormTableColumnState.saveOrderAndWidths(dialogSettings(), KEY_COL_ORDER,
             KEY_COL_FILL_MODE, fillMode,
-            new String[] { KEY_COL_PATH_WIDTH, KEY_COL_PROPERTY_WIDTH, KEY_COL_LINE_WIDTH, KEY_COL_TEXT_WIDTH },
-            new int[] { pathWidth, propertyWidth, lineWidth, textWidth }, matchTable);
+            new String[] { KEY_COL_PATH_WIDTH, KEY_COL_PROPERTY_WIDTH, KEY_COL_LINE_WIDTH,
+                KEY_COL_PARENT_WIDTH, KEY_COL_PARENT_TYPE_WIDTH, KEY_COL_SYNTAX_WIDTH, KEY_COL_TEXT_WIDTH },
+            new int[] { pathWidth, propertyWidth, lineWidth, parentWidth, parentTypeWidth, syntaxWidth,
+                textWidth }, matchTable);
     }
 
     /** Как {@link #saveMatchColumnState()}, но безопасно из любого потока (query listener). */
@@ -1231,6 +1354,10 @@ public final class ConfigSearchResultsHook implements IStartup
                     List<MatchRow> updated = new ArrayList<>(fileRows);
                     runOnUi(() -> applyMethodResolveBatch(matchViewer, updated, generation));
                 }
+                runOnUi(() -> {
+                    if (isCurrentMethodResolveGeneration(generation))
+                        resortMatchTable(matchViewer);
+                });
                 return Status.OK_STATUS;
             }
         };
@@ -1261,6 +1388,186 @@ public final class ConfigSearchResultsHook implements IStartup
         // update(null-properties) перерисовывает ячейки и, если сортировка идёт по этой колонке,
         // переставляет только затронутые строки — без полного refresh() таблицы.
         matchViewer.update(updated.toArray(), null);
+    }
+
+    // =====================================================================================
+    // Колонки «Родитель», «Тип родителя», «Категория» для вхождений-ссылок BSL
+    // ({@code BslReferenceMatch} команды «Найти ссылки»)
+    // =====================================================================================
+    //
+    // Разбор — {@link BslOccurrenceContextResolver}: «Родитель» и «Категория» лексические,
+    // «Тип родителя» поднимает модель BSL. У {@code BslReferenceMatch} смещения вхождения в элементе
+    // таблицы нет — оно берётся из URI источника ссылки ({@code MatchRow.sourceUri}). Всё вычисляется
+    // одним фоновым Job (модель нужна уже для смещения), модули из видимой области — первыми.
+    // Прогресс виден счётчиком в заголовке колонки «Тип родителя».
+
+    private static final Object CONTEXT_RESOLVE_LOCK = new Object();
+    private static Job contextResolveJob;
+    /** Поколение: {@link #refreshMatchTable} пересобирает строки — результаты старого Job отбрасываем. */
+    private static long contextResolveGeneration;
+
+    private static boolean isCurrentContextResolveGeneration(long generation)
+    {
+        synchronized (CONTEXT_RESOLVE_LOCK)
+        {
+            return generation == contextResolveGeneration;
+        }
+    }
+
+    static void cancelMatchContextResolution()
+    {
+        synchronized (CONTEXT_RESOLVE_LOCK)
+        {
+            contextResolveGeneration++;
+            if (contextResolveJob != null)
+            {
+                contextResolveJob.cancel();
+                contextResolveJob = null;
+            }
+        }
+    }
+
+    private static void scheduleMatchContextResolution(TableViewer matchViewer, List<MatchRow> rows)
+    {
+        // Во время потокового поиска строки пересобираются постоянно — модель ради каждой пересборки
+        // не поднимаем; после завершения поиска расчёт запускает onSearchFinished.
+        if (searchQueryRunning)
+            return;
+        LinkedHashMap<IFile, List<MatchRow>> byFile = new LinkedHashMap<>();
+        for (MatchRow row : rows)
+        {
+            if (row.parent != null || !row.needsContext())
+                continue;
+            byFile.computeIfAbsent(row.file, f -> new ArrayList<>()).add(row);
+        }
+        if (byFile.isEmpty())
+        {
+            cancelMatchContextResolution();
+            updateMatchParentTypeProgress(0, 0);
+            return;
+        }
+        int total = 0;
+        for (List<MatchRow> fileRows : byFile.values())
+            total += fileRows.size();
+        List<IFile> ordered = orderModulesVisibleFirst(matchViewer, byFile.keySet());
+        synchronized (CONTEXT_RESOLVE_LOCK)
+        {
+            contextResolveGeneration++;
+            long generation = contextResolveGeneration;
+            if (contextResolveJob != null)
+                contextResolveJob.cancel();
+            contextResolveJob = startMatchContextResolveJob(matchViewer, byFile, ordered, total, generation);
+        }
+    }
+
+    private static Job startMatchContextResolveJob(TableViewer matchViewer,
+            Map<IFile, List<MatchRow>> byFile, List<IFile> ordered, int total, long generation)
+    {
+        Job job = new Job("Комфорт: контекст вхождений для колонки «Тип родителя»") //$NON-NLS-1$
+        {
+            @Override
+            protected IStatus run(IProgressMonitor monitor)
+            {
+                int done = 0;
+                runOnUi(() -> updateMatchParentTypeProgress(0, total));
+                for (IFile file : ordered)
+                {
+                    if (monitor.isCanceled() || !isCurrentContextResolveGeneration(generation))
+                        return Status.CANCEL_STATUS;
+                    List<MatchRow> fileRows = byFile.get(file);
+                    if (fileRows == null || fileRows.isEmpty())
+                        continue;
+                    String content = BslModuleMethodResolver.moduleText(file);
+                    List<MatchRow> updated = new ArrayList<>();
+                    for (MatchRow row : fileRows)
+                    {
+                        if (monitor.isCanceled() || !isCurrentContextResolveGeneration(generation))
+                            return Status.CANCEL_STATUS;
+                        resolveMatchContextRow(row, content);
+                        updated.add(row);
+                        done++;
+                    }
+                    int doneNow = done;
+                    runOnUi(() -> applyMatchContextBatch(matchViewer, updated, doneNow, total, generation));
+                }
+                return Status.OK_STATUS;
+            }
+        };
+        job.setSystem(true);
+        job.schedule();
+        return job;
+    }
+
+    private static void resolveMatchContextRow(MatchRow row, String content)
+    {
+        int[] region = BslOccurrenceContextResolver.referenceNodeRegion(row.file, row.sourceUri,
+            row.sourceReference, row.sourceIndexInList);
+        if (region == null || content == null)
+        {
+            row.parent = ""; //$NON-NLS-1$
+            row.syntaxKind = ""; //$NON-NLS-1$
+            row.parentType = ""; //$NON-NLS-1$
+            return;
+        }
+        int offset = region[0];
+        int length = region[1];
+        row.parent = BslOccurrenceContextResolver.parentText(content, offset);
+        row.syntaxKind = BslOccurrenceContextResolver.syntaxKind(content, offset, length);
+        String snippet = offset >= 0 && offset < content.length()
+            ? content.substring(Math.max(0, offset - 20),
+                Math.min(content.length(), offset + Math.max(length, 1) + 5)).replace("\r", "").replace("\n", "\\n") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            : "<offset вне текста>"; //$NON-NLS-1$
+        Global.tempLog("parent-type", row.file.getName() + " | uri=" + row.sourceUri //$NON-NLS-1$ //$NON-NLS-2$
+            + " | ref=" + (row.sourceReference != null ? row.sourceReference.getName() : "null") //$NON-NLS-1$ //$NON-NLS-2$
+            + " | region=[" + offset + "," + length + "] | «" + snippet + "» | parent=«" + row.parent //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
+            + "» | syntaxKind=" + row.syntaxKind); //$NON-NLS-1$
+        // Комментарии и строковые литералы модели не принадлежат — типа родителя у них нет.
+        if (BslOccurrenceContextResolver.KIND_COMMENT.equals(row.syntaxKind)
+            || BslOccurrenceContextResolver.KIND_LITERAL.equals(row.syntaxKind))
+        {
+            row.parentType = ""; //$NON-NLS-1$
+            return;
+        }
+        row.parentType = BslOccurrenceContextResolver.parentType(row.file, content, offset);
+        Global.tempLog("parent-type", "  → parentType=«" + row.parentType + "»"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+    }
+
+    private static void applyMatchContextBatch(TableViewer matchViewer, List<MatchRow> updated, int done,
+            int total, long generation)
+    {
+        if (!isCurrentContextResolveGeneration(generation) || updated.isEmpty())
+            return;
+        Table table = matchViewer.getTable();
+        if (table == null || table.isDisposed())
+            return;
+        matchViewer.update(updated.toArray(), null);
+        updateMatchParentTypeProgress(done, total);
+        // Строки создаются в порядке элементов EDT, а сортировка по «Свойству»/строке становится
+        // осмысленной только когда фон дозаполнил метод/строку/тип — переупорядочиваем целиком по
+        // завершении прохода (update(...,null) сам строки не переставляет).
+        if (done >= total)
+            resortMatchTable(matchViewer);
+    }
+
+    /** Полная пересортировка таблицы вхождений — после фонового дозаполнения колонок. */
+    private static void resortMatchTable(TableViewer matchViewer)
+    {
+        if (searchQueryRunning)
+            return;
+        Table table = matchViewer.getTable();
+        if (table != null && !table.isDisposed())
+            matchViewer.refresh();
+    }
+
+    /** Счётчик обработанных вхождений в заголовке колонки «Тип родителя» (окно поиска не модальное, но
+     *  отдельного индикатора у нашей таблицы нет — как в табличном режиме рефакторинга). */
+    private static void updateMatchParentTypeProgress(int done, int total)
+    {
+        TableColumn column = cachedMatchParentTypeColumn;
+        if (column == null || column.isDisposed())
+            return;
+        column.setText(done >= total ? MATCH_PARENT_TYPE_TITLE
+            : MATCH_PARENT_TYPE_TITLE + " (" + done + "/" + total + ")"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
     }
 
     /**
@@ -3662,7 +3969,19 @@ public final class ConfigSearchResultsHook implements IStartup
             return;
         // #165 триггерится двойным кликом по строке результата, не завершением поиска —
         // автофикс только в open/panelHealth/watchdog, здесь не лечим.
-        display.asyncExec(() -> startFirstRootWatch(0));
+        display.asyncExec(() -> {
+            startFirstRootWatch(0);
+            // Во время поиска расчёт контекста был отложен (модель ради каждой пересборки строк не
+            // поднимаем) — запускаем его теперь по накопленным строкам.
+            TableViewer matchViewer = cachedMatchTableViewer;
+            if (matchViewer != null && !matchViewer.getTable().isDisposed()
+                && matchViewer.getInput() instanceof List<?> input)
+            {
+                @SuppressWarnings("unchecked")
+                List<MatchRow> matchRows = (List<MatchRow>) input;
+                scheduleMatchContextResolution(matchViewer, matchRows);
+            }
+        });
     }
 
     /**

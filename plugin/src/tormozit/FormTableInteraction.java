@@ -2944,7 +2944,9 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
             {
                 boolean showName = header != null && !header.isEmpty()
                     && isHeaderTextTruncated(column, header);
-                String desired = showName ? header + "\n" + extra : extra; //$NON-NLS-1$
+                // Заголовок первой строкой оканчивается точкой перед переносом (правило проекта).
+                String desired = showName
+                    ? (header.endsWith(".") ? header : header + ".") + "\n" + extra : extra; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 if (!Objects.equals(column.getToolTipText(), desired))
                     column.setToolTipText(desired);
                 column.setData(AUTO_HEADER_TOOLTIP_KEY, Boolean.TRUE);

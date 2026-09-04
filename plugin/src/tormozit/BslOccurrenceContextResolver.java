@@ -8,10 +8,14 @@ import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.EObject;
+import org.eclipse.emf.ecore.EReference;
+import org.eclipse.emf.ecore.EStructuralFeature;
 import org.eclipse.emf.ecore.resource.Resource;
+import org.eclipse.swt.widgets.TableColumn;
 import org.eclipse.emf.ecore.resource.ResourceSet;
 import org.eclipse.xtext.EcoreUtil2;
 import org.eclipse.xtext.nodemodel.ILeafNode;
+import org.eclipse.xtext.nodemodel.INode;
 import org.eclipse.xtext.nodemodel.util.NodeModelUtils;
 import org.eclipse.xtext.resource.IResourceServiceProvider;
 import org.eclipse.xtext.resource.XtextResource;
@@ -22,11 +26,11 @@ import com._1c.g5.v8.dt.bsl.model.Expression;
 import com._1c.g5.v8.dt.bsl.model.FeatureEntry;
 import com._1c.g5.v8.dt.bsl.model.Module;
 import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
+import com._1c.g5.v8.dt.bsl.model.Variable;
 import com._1c.g5.v8.dt.bsl.resource.BslResource;
 import com._1c.g5.v8.dt.bsl.resource.TypesComputer;
-import com._1c.g5.v8.dt.mcore.ContextDef;
+
 import com._1c.g5.v8.dt.mcore.Environmental;
-import com._1c.g5.v8.dt.mcore.Property;
 import com._1c.g5.v8.dt.mcore.TypeItem;
 import com._1c.g5.v8.dt.mcore.util.Environments;
 
@@ -41,8 +45,10 @@ import com._1c.g5.v8.dt.mcore.util.Environments;
  *
  * <p>Разделяемый резолвер по образцу {@link BslModuleMethodResolver}: первый потребитель — колонки
  * табличного режима страницы «Вносимые изменения» мастера рефакторинга
- * ({@link RefactoringPreviewTableHook}), в задаче заложен второй — те же колонки в результатах
- * поиска ссылок.
+ * ({@link RefactoringPreviewTableHook}), второй — те же колонки «Родитель», «Тип родителя» и
+ * «Категория» в результатах команды «Найти ссылки» ({@code ConfigSearchResultsHook}). У
+ * вхождений-ссылок BSL ({@code BslReferenceMatch}) смещения в элементе таблицы нет — оно берётся из
+ * URI источника ссылки через {@link #referenceNodeRegion}, дальше работает та же offset-логика.
  *
  * <p>Расчёты разделены по цене:
  * <ul>
@@ -67,9 +73,14 @@ public final class BslOccurrenceContextResolver
     static final String KIND_METHOD = "Метод"; //$NON-NLS-1$
     static final String KIND_PROPERTY = "Свойство"; //$NON-NLS-1$
 
-    /** Свойство контекста модуля, тип которого и есть тип объекта модуля. */
-    private static final String THIS_OBJECT_RU = "ЭтотОбъект"; //$NON-NLS-1$
-    private static final String THIS_OBJECT_EN = "ThisObject"; //$NON-NLS-1$
+    /** Единые заголовки колонок контекста вхождения для обоих потребителей. */
+    static final String COL_PARENT = "Родитель"; //$NON-NLS-1$
+    static final String COL_PARENT_TYPE = "Тип родителя"; //$NON-NLS-1$
+    static final String COL_SYNTAX_KIND = "Категория"; //$NON-NLS-1$
+
+    private static final String TIP_PARENT = "Выражение слева от точки перед вхождением"; //$NON-NLS-1$
+    private static final String TIP_PARENT_TYPE = "Тип выражения-родителя"; //$NON-NLS-1$
+    private static final String TIP_SYNTAX_KIND = "Свойство, метод, литерал или комментарий"; //$NON-NLS-1$
 
     private static final int TYPE_CACHE_LIMIT = 8192;
     /** {@code путь#штамп#смещение} → тип родителя ({@code ""} — вычислить не удалось). */
@@ -166,6 +177,111 @@ public final class BslOccurrenceContextResolver
         return resolved;
     }
 
+    /**
+     * Смещение и длина узла вхождения-ссылки BSL по URI источника ссылки
+     * ({@code BslReferenceMatch.getSourceURI()} — платформенный URI модуля с фрагментом на исходный
+     * EObject вхождения). В самом элементе таблицы результатов поиска смещения нет
+     * ({@code BslResourceMatchTreeTableItem.calculate()} проставляет только номер строки), поэтому
+     * позиция восстанавливается из модели — так же, как это делает штатный {@code calculate()}.
+     *
+     * <p>Дорогой вызов: поднимает {@link XtextResource} модуля (кэш {@link #RESOURCE_SETS}) — только
+     * фоновый поток.
+     *
+     * <p>Позиция берётся у узла самой ссылающейся ссылки ({@code reference}) — это последний сегмент
+     * обращения ({@code Справочники.Валюты} → {@code Валюты}), а не всё выражение; так {@code offset}
+     * попадает сразу за точку, и {@link #parentText}/{@link #parentType} видят родителя.
+     *
+     * @param reference ссылка вхождения ({@code BslReferenceMatch.getReference()}); {@code null}
+     *            допустим — тогда берётся узел всего исходного EObject
+     * @param indexInList индекс в многозначной ссылке ({@code BslReferenceMatch.getIndexInList()});
+     *            {@code < 0} — брать последний узел
+     * @return {@code [offset, length]} модельные координаты в тексте модуля; {@code null}, если
+     *         файл не BSL-модуль, URI без фрагмента, либо ресурс/EObject/узел не разрешились
+     */
+    static int[] referenceNodeRegion(IFile file, URI sourceUri, EReference reference, int indexInList)
+    {
+        if (!BslModuleMethodResolver.isBslModule(file) || sourceUri == null)
+            return null;
+        String fragment = sourceUri.fragment();
+        if (fragment == null || fragment.isEmpty())
+            return null;
+        try
+        {
+            URI moduleUri = URI.createPlatformResourceURI(file.getFullPath().toString(), true);
+            IResourceServiceProvider provider =
+                IResourceServiceProvider.Registry.INSTANCE.getResourceServiceProvider(moduleUri);
+            if (provider == null)
+                return null;
+            ResourceSet resourceSet = resourceSet(provider, file.getProject());
+            if (resourceSet == null)
+                return null;
+            Resource resource = resourceSet.getResource(moduleUri, true);
+            if (!(resource instanceof BslResource bslResource))
+                return null;
+            EObject source = bslResource.getSourceEObject(fragment);
+            Global.tempLog("parent-type", "  referenceNodeRegion frag=" + fragment //$NON-NLS-1$ //$NON-NLS-2$
+                + " source=" + (source != null ? source.eClass().getName() : "null") //$NON-NLS-1$ //$NON-NLS-2$
+                + " container=" + (source != null && source.eContainer() != null //$NON-NLS-1$
+                    ? source.eContainer().eClass().getName() : "null")); //$NON-NLS-1$
+            if (source == null)
+                return null;
+            INode node = referenceNode(source, reference, indexInList);
+            if (node == null)
+                return null;
+            return new int[] {node.getOffset(), node.getLength()};
+        }
+        catch (Exception | LinkageError e)
+        {
+            Global.tempLog("parent-type", "  referenceNodeRegion EX: " + e); //$NON-NLS-1$ //$NON-NLS-2$
+            return null;
+        }
+    }
+
+    private static INode referenceNode(EObject source, EReference reference, int indexInList)
+    {
+        // Токен вхождения — имя обращения (FeatureAccess.name): у «Справочники.Валюты» это «Валюты»,
+        // у внешнего «ОсновнаяВалюта.ОсновнаяВалюта» — второй «ОсновнаяВалюта» (сразу за точкой).
+        // Так offset попадает за точку, и parentText/parentType видят родителя. У BslReferenceMatch
+        // на обращения к свойствам getReference() часто null, поэтому это основной путь.
+        EStructuralFeature nameFeature = source.eClass().getEStructuralFeature("name"); //$NON-NLS-1$
+        if (nameFeature != null)
+        {
+            List<INode> nodes = NodeModelUtils.findNodesForFeature(source, nameFeature);
+            if (!nodes.isEmpty())
+                return nodes.get(nodes.size() - 1);
+        }
+        if (reference != null)
+        {
+            List<INode> nodes = NodeModelUtils.findNodesForFeature(source, reference);
+            if (!nodes.isEmpty())
+            {
+                if (indexInList >= 0 && indexInList < nodes.size())
+                    return nodes.get(indexInList);
+                return nodes.get(nodes.size() - 1);
+            }
+        }
+        return NodeModelUtils.findActualNodeFor(source);
+    }
+
+    /**
+     * Ставит единые подсказки заголовков колонок «Родитель»/«Тип родителя»/«Категория»
+     * (через {@link FormTableInteraction#setHeaderTooltipExtra} — при обрезанном заголовке первой
+     * строкой его полный текст). Любая из колонок может быть {@code null}.
+     */
+    static void applyColumnHeaderTooltips(FormTableInteraction interaction, TableColumn parent,
+        TableColumn parentType, TableColumn syntaxKind)
+    {
+        if (interaction == null)
+            return;
+        String sign = Global.pluginSignForTooltip();
+        if (parent != null && !parent.isDisposed())
+            interaction.setHeaderTooltipExtra(parent, TIP_PARENT + sign);
+        if (parentType != null && !parentType.isDisposed())
+            interaction.setHeaderTooltipExtra(parentType, TIP_PARENT_TYPE + sign);
+        if (syntaxKind != null && !syntaxKind.isDisposed())
+            interaction.setHeaderTooltipExtra(syntaxKind, TIP_SYNTAX_KIND + sign);
+    }
+
     /** Отпускает разобранные модули и вычисленные типы — вызывать при закрытии окна-потребителя. */
     static void clearCaches()
     {
@@ -199,10 +315,12 @@ public final class BslOccurrenceContextResolver
         // Точки перед вхождением нет: родителем может быть сам объект модуля — так выглядит прямое
         // обращение к его реквизиту (ДатаОтгрузки = 123 в модуле объекта).
         if (dotOffset < 0)
-            return contextTypeOfOwnProperty(xtextResource, offset);
+            return contextTypeOfOwnProperty(xtextResource, offset, file);
 
         Expression receiver = SmartContentAssistProcessor.ReceiverTypeLabel.receiverInResource(xtextResource,
             dotOffset, offset);
+        Global.tempLog("parent-type", "  receiver path: dotOffset=" + dotOffset //$NON-NLS-1$ //$NON-NLS-2$
+            + " receiver=" + (receiver != null ? receiver.eClass().getName() : "null")); //$NON-NLS-1$ //$NON-NLS-2$
         if (receiver == null)
             return ""; //$NON-NLS-1$
         String types = SmartContentAssistProcessor.ReceiverTypeLabel.formatTypes(receiver);
@@ -210,26 +328,67 @@ public final class BslOccurrenceContextResolver
             return types;
         // У загруженного нами ресурса типы в самом выражении пустые (их проставляет конвейер
         // редактора), поэтому берём результат вычислителя, а не состояние модели.
-        return SmartContentAssistProcessor.ReceiverTypeLabel.formatTypeItems(computeTypes(provider, receiver));
+        String computed = SmartContentAssistProcessor.ReceiverTypeLabel.formatTypeItems(computeTypes(provider, receiver));
+        Global.tempLog("parent-type", "  receiver computed types=«" + computed + "»"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        return computed;
     }
 
     /**
-     * Прямое обращение к реквизиту объекта в его же модуле ({@code ДатаОтгрузки = 123}): точки перед
-     * вхождением нет, а родителем является сам объект модуля. Тип берётся у свойства
-     * {@code ЭтотОбъект} контекста модуля — то же, что показала бы подсказка для {@code ЭтотОбъект}.
+     * Прямое обращение к реквизиту объекта в его же модуле ({@code ОсновнаяВалюта = …} в модуле
+     * объекта справочника): точки перед вхождением нет, родителем является сам объект модуля.
      *
-     * @return {@code ""}, если вхождение не является свойством контекста (локальная переменная,
-     *     параметр, имя метода, текст вне кода)
+     * <p>Тип объекта модуля берётся у его владельца ({@link Module#getOwner()} + тип модуля):
+     * {@code Справочник.Валюты + МодульОбъекта} → {@code СправочникОбъект.Валюты}
+     * ({@link MdTypeMapping#directModuleName}). Контекст модуля ({@code ContextDef.allProperties()})
+     * у поднятого нами ресурса часто не содержит ни реквизитов объекта, ни свойства {@code ЭтотОбъект}
+     * — на него не опираемся.
+     *
+     * @return {@code ""}, если вхождение — объявленная локальная переменная/параметр, либо владелец
+     *     модуля / тип модуля не определяются
      */
-    private static String contextTypeOfOwnProperty(XtextResource resource, int offset)
+    private static String contextTypeOfOwnProperty(XtextResource resource, int offset, IFile file)
     {
         Module module = moduleOf(resource);
-        ContextDef contextDef = module != null ? module.getContextDef() : null;
-        if (contextDef == null)
+        if (module == null)
             return ""; //$NON-NLS-1$
-        if (!isContextProperty(resource, contextDef, offset))
+        EObject semantic = semanticAt(resource, offset);
+        StaticFeatureAccess access = EcoreUtil2.getContainerOfType(semantic, StaticFeatureAccess.class);
+        if (access == null)
             return ""; //$NON-NLS-1$
-        return SmartContentAssistProcessor.ReceiverTypeLabel.formatTypeItems(thisObjectTypes(contextDef));
+        boolean localVar = false;
+        for (FeatureEntry entry : access.getFeatureEntries())
+        {
+            if (entry.getFeature() instanceof Variable)
+                localVar = true;
+        }
+        String type = localVar ? "" : moduleObjectTypeName(module, file); //$NON-NLS-1$
+        EObject owner = module.getOwner();
+        Global.tempLog("parent-type", "  contextTypeOfOwnProperty: access=«" + access.getName() //$NON-NLS-1$ //$NON-NLS-2$
+            + "» localVar=" + localVar //$NON-NLS-1$
+            + " owner=" + (owner != null ? owner.eClass().getName() : "null") //$NON-NLS-1$ //$NON-NLS-2$
+            + " ownerName=" + (owner != null ? Global.invoke(owner, "getName") : null) //$NON-NLS-1$ //$NON-NLS-2$
+            + " → type=«" + type + "»"); //$NON-NLS-1$ //$NON-NLS-2$
+        return type;
+    }
+
+    /**
+     * Тип объекта модуля ({@code СправочникОбъект.Валюты}, {@code ДокументОбъект.Заказ},
+     * {@code РегистрСведенийНаборЗаписей.Курсы} …) — из владельца модуля и типа модуля по файлу.
+     *
+     * @return {@code ""}, если владелец/тип не в справочнике {@link MdTypeMapping}
+     */
+    private static String moduleObjectTypeName(Module module, IFile file)
+    {
+        EObject owner = module.getOwner();
+        if (owner == null || file == null)
+            return ""; //$NON-NLS-1$
+        String typeRu = MdTypeMapping.anyToRu(owner.eClass().getName());
+        String moduleRu = MdTypeMapping.bslFilenameToModuleRu(file.getName());
+        Object nameObj = Global.invoke(owner, "getName"); //$NON-NLS-1$
+        if (typeRu == null || moduleRu == null || !(nameObj instanceof String name) || name.isEmpty())
+            return ""; //$NON-NLS-1$
+        String direct = MdTypeMapping.directModuleName(typeRu + "." + name + "." + moduleRu); //$NON-NLS-1$ //$NON-NLS-2$
+        return direct != null ? direct : ""; //$NON-NLS-1$
     }
 
     private static Module moduleOf(XtextResource resource)
@@ -242,54 +401,12 @@ public final class BslOccurrenceContextResolver
         return null;
     }
 
-    /**
-     * Вхождение — свойство контекста модуля. Основной путь — по разрешённым ссылкам обращения
-     * ({@link StaticFeatureAccess#getFeatureEntries}); если ресурс ещё не связан и ссылок нет,
-     * сверяем имя со списком свойств контекста.
-     */
-    private static boolean isContextProperty(XtextResource resource, ContextDef contextDef, int offset)
-    {
-        EObject semantic = semanticAt(resource, offset);
-        StaticFeatureAccess access = EcoreUtil2.getContainerOfType(semantic, StaticFeatureAccess.class);
-        if (access == null)
-            return false;
-        for (FeatureEntry entry : access.getFeatureEntries())
-        {
-            if (entry.getFeature() instanceof Property property && contextDef.allProperties().contains(property))
-                return true;
-        }
-        if (!access.getFeatureEntries().isEmpty())
-            return false;
-        String name = access.getName();
-        if (name == null || name.isEmpty())
-            return false;
-        for (Property property : contextDef.allProperties())
-        {
-            if (name.equalsIgnoreCase(property.getName()) || name.equalsIgnoreCase(property.getNameRu()))
-                return true;
-        }
-        return false;
-    }
-
     private static EObject semanticAt(XtextResource resource, int offset)
     {
         if (resource.getParseResult() == null || resource.getParseResult().getRootNode() == null)
             return null;
         ILeafNode leaf = NodeModelUtils.findLeafNodeAtOffset(resource.getParseResult().getRootNode(), offset);
         return leaf != null ? leaf.getSemanticElement() : null;
-    }
-
-    private static List<TypeItem> thisObjectTypes(ContextDef contextDef)
-    {
-        for (Property property : contextDef.allProperties())
-        {
-            if (THIS_OBJECT_RU.equalsIgnoreCase(property.getNameRu())
-                || THIS_OBJECT_EN.equalsIgnoreCase(property.getName()))
-            {
-                return property.getTypes();
-            }
-        }
-        return List.of();
     }
 
     /**
@@ -420,7 +537,7 @@ public final class BslOccurrenceContextResolver
 
     /**
      * Разбор вхождения на месте: используется потребителями, которым нужны сразу текстовые колонки
-     * («Родитель» и «Синтаксический тип»), а тип родителя добирается фоном.
+     * («Родитель» и «Категория»), а тип родителя добирается фоном.
      */
     static final class Occurrence
     {
