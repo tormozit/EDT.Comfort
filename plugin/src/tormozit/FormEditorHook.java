@@ -7,6 +7,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -27,6 +28,9 @@ import org.eclipse.core.commands.NotHandledException;
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.commands.AbstractHandler;
 import org.eclipse.core.runtime.IProgressMonitor;
+import org.eclipse.core.runtime.IStatus;
+import org.eclipse.core.runtime.Status;
+import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.jface.action.Action;
 import org.eclipse.jface.action.ActionContributionItem;
 import org.eclipse.jface.action.IAction;
@@ -160,14 +164,18 @@ import com._1c.g5.v8.dt.form.model.Addition;
 import com._1c.g5.v8.dt.form.model.AutoCommandBar;
 import com._1c.g5.v8.dt.form.model.AbstractFormAttribute;
 import com._1c.g5.v8.dt.form.model.AbstractFormDataSourceInfo;
+import com._1c.g5.v8.dt.form.model.Button;
 import com._1c.g5.v8.dt.form.model.ContextMenu;
+import com._1c.g5.v8.dt.form.model.DataItem;
 import com._1c.g5.v8.dt.form.model.DataPathReferredObject;
 import com._1c.g5.v8.dt.form.model.EventHandler;
 import com._1c.g5.v8.dt.form.model.EventHandlerContainer;
 import com._1c.g5.v8.dt.form.model.DynamicListExtInfo;
 import com._1c.g5.v8.dt.form.model.Form;
 import com._1c.g5.v8.dt.form.model.FormAttribute;
+import com._1c.g5.v8.dt.form.model.FormCommand;
 import com._1c.g5.v8.dt.form.model.FormGroup;
+import com._1c.g5.v8.dt.form.model.FormStandardCommand;
 import com._1c.g5.v8.dt.form.model.FormItem;
 import com._1c.g5.v8.dt.form.model.FormItemContainer;
 import com._1c.g5.v8.dt.form.model.FormVisualEntity;
@@ -175,6 +183,8 @@ import com._1c.g5.v8.dt.form.model.FormField;
 import com._1c.g5.v8.dt.form.model.ManagedFormGroupType;
 import com._1c.g5.v8.dt.form.model.Table;
 import com._1c.g5.v8.dt.form.model.TableHolder;
+import com._1c.g5.v8.dt.form.model.Titled;
+import com._1c.g5.v8.dt.form.model.TooltipContainer;
 import com._1c.g5.v8.dt.form.service.item.FormNewItemDescriptor;
 import com._1c.g5.v8.dt.form.service.item.IFormItemManagementService;
 import com._1c.g5.v8.dt.form.service.item.IFormItemMovementService;
@@ -209,9 +219,11 @@ import org.eclipse.xtext.EcoreUtil2;
 import org.eclipse.emf.ecore.EEnumLiteral;
 import org.eclipse.emf.ecore.EStructuralFeature;
 import org.eclipse.emf.ecore.util.EcoreUtil;
+import org.eclipse.emf.common.util.EMap;
 import org.eclipse.emf.common.util.URI;
 import com._1c.g5.v8.dt.ui.commands.ShowPropertiesHandler;
 import com._1c.g5.v8.dt.ui.util.ContentUtil;
+import com._1c.g5.v8.dt.ui.util.OpenHelper;
 
 /**
  * Объединяет поведения редактора форм EDT:
@@ -1667,6 +1679,638 @@ public class FormEditorHook implements IStartup
     }
 
     // -----------------------------------------------------------------------
+    // Язык и вариант встроенного языка редактируемой формы
+    // -----------------------------------------------------------------------
+
+    private static IV8Project formV8Project(FormEditorPage page)
+    {
+        Object manager = page != null ? Global.getField(page, "v8projectManager") : null; //$NON-NLS-1$
+        return manager instanceof IV8ProjectManager projectManager
+            ? projectManager.getProject(page.getModel()) : null;
+    }
+
+    /** Код языка редактирования — ключ многоязычных строк («Заголовок», «Синоним», «Подсказка»). */
+    private static String formEditingLanguage(FormEditorPage page)
+    {
+        Object languages = page != null ? Global.getField(page, "languageManager") : null; //$NON-NLS-1$
+        IV8Project project = formV8Project(page);
+        return project != null && languages instanceof IEditingLanguageManager languageManager
+            ? languageManager.getEditingLanguageCode(project.getDtProject()) : null;
+    }
+
+    /** Вариант встроенного языка проекта. */
+    private static ScriptVariant formScriptVariant(FormEditorPage page)
+    {
+        IV8Project project = formV8Project(page);
+        ScriptVariant variant = project == null ? null : project.getScriptVariant();
+        return variant == null ? ScriptVariant.RUSSIAN : variant;
+    }
+
+    // -----------------------------------------------------------------------
+    // Эффективный заголовок и подсказка элемента формы (EffectiveTitle)
+    // -----------------------------------------------------------------------
+
+    /**
+     * Эффективный заголовок элемента формы — тот, который увидит пользователь в
+     * 1С:Предприятии, и место, откуда элемент его берёт.
+     *
+     * <p>Цепочка та же, что у платформы: собственный «Заголовок» элемента; если он не задан —
+     * заголовок команды (у кнопки) или заголовок реквизита формы / синоним поля объекта
+     * метаданных, к которому элемент привязан данными; если и там пусто — имя источника.
+     *
+     * <p>Источник данных берётся из самого пути к данным: {@code AbstractDataPath.getObjects()}
+     * хранит объект каждого сегмента ({@link DataPathReferredObject}), последний из них и есть
+     * то, откуда платформа берёт представление. Это тот же путь, каким плагин уже резолвит
+     * поля метаданных в дереве реквизитов ({@link #resolveReferredMetadataObject}).
+     *
+     * <p>Многоязычные строки читаются строго по языку редактирования — так же, как их читает
+     * сама EDT ({@code FormPropertyInfoExtension.getPropertyInfoPresentation}). Заголовок на
+     * другом языке вместо пустого не подставляется: он ввёл бы в заблуждение.
+     */
+    private static final class EffectiveTitle
+    {
+        /** Откуда взят заголовок: от этого зависит и цвет ячейки, и переход по двойному клику. */
+        enum Origin
+        {
+            /** Задан у самого элемента формы. */
+            OWN,
+            /** Взят у объекта формы — реквизита или команды. */
+            FORM_OBJECT,
+            /** Взят у поля или объекта метаданных. */
+            METADATA
+        }
+
+        /**
+         * Язык редактирования и вариант встроенного языка спрашиваются на каждую строку списка,
+         * а меняются редко — и добираются до них через рефлексию и менеджер проектов. Кеш живёт
+         * секунду: столько же, сколько интервал сверки значений колонок, так что смена языка
+         * редактирования доходит до списков не позже, чем любая другая правка модели.
+         *
+         * <p>Только UI-поток: и провайдеры подписей, и фильтр вызываются из него.
+         */
+        private static final int LANGUAGE_CACHE_MS = 1000;
+
+        private static final Map<FormEditorPage, Object[]> LANGUAGE_CACHE = new WeakHashMap<>();
+
+        /** Код языка редактирования формы. */
+        static String language(FormEditorPage page)
+        {
+            Object[] cached = languageEntry(page);
+            return cached != null && cached[0] instanceof String code ? code : null;
+        }
+
+        /** Вариант встроенного языка проекта формы. */
+        static ScriptVariant scriptVariant(FormEditorPage page)
+        {
+            Object[] cached = languageEntry(page);
+            return cached != null && cached[1] instanceof ScriptVariant variant ? variant
+                : ScriptVariant.RUSSIAN;
+        }
+
+        private static Object[] languageEntry(FormEditorPage page)
+        {
+            if (page == null)
+                return null;
+            long now = System.currentTimeMillis();
+            Object[] cached = LANGUAGE_CACHE.get(page);
+            if (cached != null && now - ((Long)cached[2]).longValue() < LANGUAGE_CACHE_MS)
+                return cached;
+            Object[] entry = { formEditingLanguage(page), formScriptVariant(page), Long.valueOf(now) };
+            LANGUAGE_CACHE.put(page, entry);
+            return entry;
+        }
+
+        /** Заголовок и его источник; {@code source} — объект, к которому ведёт двойной клик. */
+        private static final class Info
+        {
+            final String text;
+
+            final Origin origin;
+
+            final EObject source;
+
+            Info(String text, Origin origin, EObject source)
+            {
+                this.text = text == null ? "" : text; //$NON-NLS-1$
+                this.origin = origin;
+                this.source = source;
+            }
+        }
+
+        /**
+         * Заголовок элемента для показа в списке. Собственный считается здесь и сейчас,
+         * наследуемый берётся из кеша {@link InheritedTitles} — пока его там нет, ячейка
+         * пустая, а элемент встаёт в очередь фонового джоба.
+         */
+        static Info of(FormEditorPage page, FormItem item)
+        {
+            if (item == null)
+                return null;
+            String language = language(page);
+            if (item instanceof Titled titled)
+            {
+                String own = localized(titled.getTitle(), language);
+                if (own != null)
+                    return new Info(own, Origin.OWN, item);
+            }
+            return InheritedTitles.cached(page, item).toInfo(language);
+        }
+
+        /**
+         * То же, но источник наследуемого заголовка при промахе кеша разрешается сразу.
+         * Только для действий пользователя (двойной клик) — не для отрисовки.
+         */
+        static Info ofNow(FormEditorPage page, FormItem item)
+        {
+            if (item == null)
+                return null;
+            String language = language(page);
+            if (item instanceof Titled titled)
+            {
+                String own = localized(titled.getTitle(), language);
+                if (own != null)
+                    return new Info(own, Origin.OWN, item);
+            }
+            return InheritedTitles.resolveNow(page, item).toInfo(language);
+        }
+
+        /**
+         * Эффективная подсказка: своя, а если её нет — подсказка источника заголовка.
+         *
+         * @param info уже посчитанный заголовок этого же элемента — чтобы не считать его второй раз
+         */
+        static String tooltipText(FormEditorPage page, FormItem item, Info info)
+        {
+            if (item == null)
+                return null;
+            String language = language(page);
+            if (item instanceof TooltipContainer container)
+            {
+                String own = localized(container.getToolTip(), language);
+                if (own != null)
+                    return own;
+            }
+            EObject source = info != null && info.origin != Origin.OWN ? info.source : null;
+            return source != null ? localizedByGetter(source, "getToolTip", language) : null; //$NON-NLS-1$
+        }
+
+        /** Значение многоязычной строки на языке редактирования; {@code null} — не задано. */
+        static String localized(EMap<String, String> map, String language)
+        {
+            if (map == null || map.isEmpty() || language == null)
+                return null;
+            return trimToNull(map.get(language));
+        }
+
+        /** То же для объекта, у которого нужный геттер есть, но общего интерфейса нет. */
+        private static String localizedByGetter(EObject object, String getter, String language)
+        {
+            if (object == null || language == null)
+                return null;
+            Object value = Global.invoke(object, getter);
+            if (!(value instanceof EMap<?, ?> map))
+                return null;
+            Object text = map.get(language);
+            return text instanceof String string ? trimToNull(string) : null;
+        }
+
+        private static EObject asEObject(Object value)
+        {
+            return value instanceof EObject eObject ? eObject : null;
+        }
+
+        private static String trimToNull(String value)
+        {
+            if (value == null)
+                return null;
+            String trimmed = value.trim();
+            return trimmed.isEmpty() ? null : trimmed;
+        }
+
+        private EffectiveTitle()
+        {
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Наследуемые заголовки: фоновое разрешение ссылок (InheritedTitles)
+    // -----------------------------------------------------------------------
+
+    /**
+     * Источник наследуемого заголовка элемента формы — объект, у которого этот заголовок лежит.
+     *
+     * <p>Почему это отдельный механизм, а не пара строк в провайдере подписи: за наследуемым
+     * заголовком почти всегда надо идти в ДРУГОЙ объект метаданных. Путь к данным хранит объект
+     * сегмента ссылкой BM ({@code DataPathReferredObject.object}), а BM держит ссылки не
+     * указателями, а URI: чтение такой ссылки — это
+     * {@code GlobalReferenceValueGetResult.getObject}, то есть read-транзакция BM с подъёмом
+     * top-объекта. Для колонки «Наименование полное» списка справочника это подъём самого
+     * справочника; для колонок динамического списка — ещё и таблиц, на которых он построен.
+     * В отрисовке строки такому не место.
+     *
+     * <p>Поэтому ссылки разрешаются в фоновом джобе, а в кеше остаётся уже разрешённый объект.
+     * Кешируется именно ОБЪЕКТ, а не текст: сам текст (заголовок реквизита, синоним поля) потом
+     * читается из него на каждой отрисовке обычным чтением многоязычной строки — это дёшево и
+     * не требует инвалидации кеша, когда пользователь правит заголовок.
+     *
+     * <p>Первый проход идёт по всей модели формы сразу при подключении к дереву: так колонка
+     * заполняется целиком, и отбор по заголовкам ищет по всем строкам, а не только по видимым.
+     * Элементы, добавленные позже, встают в очередь при первой же отрисовке.
+     */
+    private static final class InheritedTitles
+    {
+        /** Тема временного лога разбора источников заголовков. */
+        static final String LOG = "form-title-source"; //$NON-NLS-1$
+
+        /** Сколько элементов разрешаем между выдачами результата в UI. */
+        private static final int BATCH = 50;
+
+        /** Пауза перед запуском джоба — чтобы собрать в очередь пачку, а не по строке. */
+        private static final int SCHEDULE_DELAY_MS = 200;
+
+        private static final Map<FormEditorPage, PageState> STATES = new WeakHashMap<>();
+
+        /** Источник не найден — элемент без наследуемого заголовка. Не {@code null}, чтобы отличать «посчитано и пусто» от «ещё не считали». */
+        static final Source NONE = new Source(null, null, null);
+
+        /** «Ещё не считали» — при обращении элемент встаёт в очередь. */
+        private static final Source UNKNOWN = new Source(null, null, null);
+
+        /** Объект, у которого лежит заголовок, и вид этого объекта. */
+        private static final class Source
+        {
+            final EObject object;
+
+            final EffectiveTitle.Origin origin;
+
+            /** Имя поля, если у объекта-источника ни заголовка, ни синонима нет. */
+            final String fallbackName;
+
+            Source(EObject object, EffectiveTitle.Origin origin, String fallbackName)
+            {
+                this.object = object;
+                this.origin = origin;
+                this.fallbackName = fallbackName;
+            }
+
+            /** Текст заголовка читается из источника каждый раз — правка заголовка видна сразу. */
+            EffectiveTitle.Info toInfo(String language)
+            {
+                if (origin == null)
+                    return null;
+                String text = titleOf(object, language);
+                if (text == null)
+                    text = EffectiveTitle.trimToNull(fallbackName);
+                return text == null ? null : new EffectiveTitle.Info(text, origin, object);
+            }
+
+            private static String titleOf(EObject source, String language)
+            {
+                if (source == null)
+                    return null;
+                // Стандартная команда («Справка», «Закрыть») многоязычной строки не хранит:
+                // её надпись уже локализована платформой и лежит в getText(). Имя такой
+                // команды всегда английское (Help, Close) — как заголовок оно не годится.
+                if (source instanceof FormStandardCommand standard)
+                    return EffectiveTitle.trimToNull(standard.getText());
+                if (source instanceof Titled titled)
+                    return EffectiveTitle.localized(titled.getTitle(), language);
+                if (source instanceof MdObject mdObject)
+                    return EffectiveTitle.localized(mdObject.getSynonym(), language);
+                // Поля метаданных — реквизиты, стандартные реквизиты, измерения, ресурсы:
+                // «Синоним» есть у всех, общего интерфейса с ним нет.
+                String synonym = EffectiveTitle.localizedByGetter(source, "getSynonym", language); //$NON-NLS-1$
+                if (synonym != null)
+                    return synonym;
+                return Global.invoke(source, "getName") instanceof String name //$NON-NLS-1$
+                    ? EffectiveTitle.trimToNull(name) : null;
+            }
+        }
+
+        /** Состояние одной страницы редактора формы: что посчитано, что в очереди, чем обновлять. */
+        private static final class PageState
+        {
+            final Map<FormItem, Source> resolved = new HashMap<>();
+
+            final LinkedHashSet<FormItem> pending = new LinkedHashSet<>();
+
+            TreeViewer viewer;
+
+            Tree tree;
+
+            Job job;
+
+            boolean scheduled;
+        }
+
+        /**
+         * Подключение к дереву элементов: запоминаем просмотрщик (его строки потом обновляем)
+         * и ставим в очередь всю модель формы.
+         */
+        static void install(FormEditorPage page, TreeViewer viewer, Tree tree)
+        {
+            if (page == null || viewer == null || tree == null || tree.isDisposed())
+                return;
+            PageState state = state(page);
+            state.viewer = viewer;
+            state.tree = tree;
+            tree.addListener(SWT.Dispose, event -> dispose(page));
+            Form form = safeModel(page);
+            if (form != null)
+                enqueueAll(state, form);
+            schedule(page, state);
+        }
+
+        /** Источник из кеша; при промахе элемент встаёт в очередь и вернётся пустой заголовок. */
+        static Source cached(FormEditorPage page, FormItem item)
+        {
+            if (page == null || item == null)
+                return NONE;
+            PageState state = STATES.get(page);
+            if (state == null)
+                return NONE;
+            Source source = state.resolved.get(item);
+            if (source != null)
+                return source;
+            if (state.pending.add(item))
+                schedule(page, state);
+            return UNKNOWN;
+        }
+
+        /**
+         * Источник немедленно, с разрешением ссылки в текущем потоке. Только для действий
+         * пользователя: один элемент, и он сам ждёт результата.
+         */
+        static Source resolveNow(FormEditorPage page, FormItem item)
+        {
+            if (page == null || item == null)
+                return NONE;
+            PageState state = state(page);
+            Source source = state.resolved.get(item);
+            if (source != null)
+                return source;
+            Source computed = resolve(item);
+            state.resolved.put(item, computed);
+            state.pending.remove(item);
+            return computed;
+        }
+
+        private static PageState state(FormEditorPage page)
+        {
+            return STATES.computeIfAbsent(page, key -> new PageState());
+        }
+
+        private static void dispose(FormEditorPage page)
+        {
+            PageState state = STATES.remove(page);
+            if (state != null && state.job != null)
+                state.job.cancel();
+        }
+
+        private static void enqueueAll(PageState state, Form form)
+        {
+            for (FormItem item : form.getItems())
+                enqueueItem(state, item, 0);
+        }
+
+        private static void enqueueItem(PageState state, FormItem item, int depth)
+        {
+            if (item == null || depth > 32)
+                return;
+            if (!state.resolved.containsKey(item))
+                state.pending.add(item);
+            if (item instanceof FormItemContainer container)
+            {
+                for (FormItem child : container.getItems())
+                    enqueueItem(state, child, depth + 1);
+            }
+        }
+
+        /**
+         * Джоб системный: колонка — не та работа, о которой пользователю нужно докладывать
+         * индикатором фоновых задач. Перезапуск — только пока очередь не пуста, и каждый взятый
+         * в работу элемент из неё уходит в любом случае, даже если разрешить ссылку не удалось:
+         * иначе джоб перезапускал бы сам себя без конца.
+         */
+        private static void schedule(FormEditorPage page, PageState state)
+        {
+            if (state.scheduled || state.pending.isEmpty() || state.tree == null
+                || state.tree.isDisposed())
+                return;
+            state.scheduled = true;
+            if (state.job == null)
+                state.job = createJob(page, state);
+            state.job.schedule(SCHEDULE_DELAY_MS);
+        }
+
+        private static Job createJob(FormEditorPage page, PageState state)
+        {
+            Job job = new Job("Комфорт: заголовки элементов формы") //$NON-NLS-1$
+            {
+                @Override
+                protected IStatus run(IProgressMonitor monitor)
+                {
+                    runBatch(page, state, monitor);
+                    return Status.OK_STATUS;
+                }
+            };
+            job.setSystem(true);
+            job.setPriority(Job.DECORATE);
+            return job;
+        }
+
+        private static void runBatch(FormEditorPage page, PageState state, IProgressMonitor monitor)
+        {
+            List<FormItem> batch = new ArrayList<>(BATCH);
+            Display display = Display.getDefault();
+            if (display == null || display.isDisposed())
+                return;
+            try
+            {
+                // Очередь живёт в UI-потоке — снимок берём оттуда же, а не читаем её из джоба.
+                display.syncExec(() -> {
+                    for (FormItem item : state.pending)
+                    {
+                        batch.add(item);
+                        if (batch.size() >= BATCH)
+                            break;
+                    }
+                });
+            }
+            catch (SWTException e)
+            {
+                return;
+            }
+            if (batch.isEmpty())
+            {
+                display.asyncExec(() -> state.scheduled = false);
+                return;
+            }
+            Map<FormItem, Source> computed = new HashMap<>();
+            for (FormItem item : batch)
+            {
+                if (monitor != null && monitor.isCanceled())
+                    break;
+                computed.put(item, resolve(item));
+            }
+            display.asyncExec(() -> apply(page, state, batch, computed));
+        }
+
+        private static void apply(FormEditorPage page, PageState state, List<FormItem> batch,
+            Map<FormItem, Source> computed)
+        {
+            state.scheduled = false;
+            for (FormItem item : batch)
+            {
+                // Из очереди уходит КАЖДЫЙ взятый элемент — иначе джоб зациклится на неудачном.
+                state.pending.remove(item);
+                state.resolved.put(item, computed.getOrDefault(item, NONE));
+            }
+            refresh(state, batch);
+            schedule(page, state);
+        }
+
+        /**
+         * При наложенном отборе нужен полный refresh: со свежими заголовками в отбор могут войти
+         * строки, которых в нём не было. Без отбора хватает перерисовки видимых строк — до
+         * остальных дело дойдёт при прокрутке: сверка значений колонок ({@code isStale}) увидит,
+         * что текст ячейки разошёлся с моделью, и обновит строку сама.
+         */
+        private static void refresh(PageState state, List<FormItem> batch)
+        {
+            TreeViewer viewer = state.viewer;
+            Tree tree = state.tree;
+            if (viewer == null || tree == null || tree.isDisposed()
+                || viewer.getControl().isDisposed())
+                return;
+            SmartMatcher matcher = ItemsTree.matcherOf(tree);
+            if (matcher != null && !matcher.isEmpty)
+            {
+                viewer.refresh();
+                viewer.expandAll();
+                return;
+            }
+            Set<FormItem> updated = new HashSet<>(batch);
+            for (TreeItem row : ItemsTree.visibleRows(tree))
+            {
+                if (row.getData() != null && updated.contains(ItemsTree.domainItem(row.getData())))
+                    viewer.update(row.getData(), null);
+            }
+        }
+
+        /** Разрешение ссылок — фоновый поток. Здесь и только здесь допустимы походы в BM. */
+        private static Source resolve(FormItem item)
+        {
+            try
+            {
+                if (item instanceof Button button)
+                {
+                    Source fromCommand = sourceOf(button.getCommandName());
+                    if (fromCommand != null)
+                        return log(item, fromCommand);
+                }
+                if (item instanceof DataItem dataItem)
+                {
+                    Source fromData = sourceOf(referredObject(dataItem.getDataPath()));
+                    if (fromData != null)
+                        return log(item, fromData);
+                }
+            }
+            catch (RuntimeException | LinkageError e)
+            {
+                Global.tempLog(LOG, "resolve: " + safeName(item) + " — исключение " + e); //$NON-NLS-1$ //$NON-NLS-2$
+                return NONE;
+            }
+            return log(item, NONE);
+        }
+
+        /** Временная диагностика: что нашлось у каждого элемента (см. AGENTS, временные логи). */
+        private static Source log(FormItem item, Source source)
+        {
+            Global.tempLog(LOG, safeName(item) + " -> " //$NON-NLS-1$
+                + (source.object == null ? "нет источника" : source.object.getClass().getSimpleName()) //$NON-NLS-1$
+                + ", origin=" + source.origin + ", fallback=" + source.fallbackName); //$NON-NLS-1$ //$NON-NLS-2$
+            return source;
+        }
+
+        private static String safeName(FormItem item)
+        {
+            try
+            {
+                return item == null ? "null" : String.valueOf(item.getName()); //$NON-NLS-1$
+            }
+            catch (RuntimeException e)
+            {
+                return "?"; //$NON-NLS-1$
+            }
+        }
+
+        private static Source sourceOf(Object candidate)
+        {
+            if (!(candidate instanceof EObject source))
+                return null;
+            if (source instanceof AbstractFormAttribute || source instanceof FormCommand
+                || source instanceof FormStandardCommand)
+                return new Source(source, EffectiveTitle.Origin.FORM_OBJECT, nameOf(source));
+            if (source instanceof DbViewFieldDef fieldDef)
+            {
+                // Представление поля лежит не на самом поле, а на объекте, из которого оно
+                // получено: реквизите справочника, стандартном реквизите, самом объекте.
+                EObject presentation = fieldDef.getPresentationSource();
+                if (presentation == null)
+                    presentation = fieldDef.getMdObject();
+                return new Source(presentation != null ? ContentUtil.getActualObject(presentation) : null,
+                    EffectiveTitle.Origin.METADATA, fieldDef.getName());
+            }
+            return new Source(ContentUtil.getActualObject(source), EffectiveTitle.Origin.METADATA,
+                nameOf(source));
+        }
+
+        private static String nameOf(EObject source)
+        {
+            return Global.invoke(source, "getName") instanceof String name ? name : null; //$NON-NLS-1$
+        }
+
+        /** Объект последнего сегмента пути к данным — от него платформа и берёт представление. */
+        private static EObject referredObject(AbstractDataPath path)
+        {
+            if (path == null)
+                return null;
+            EObject best = null;
+            int bestSegmentIdx = -1;
+            for (Object ref : path.getObjects())
+            {
+                if (!(ref instanceof DataPathReferredObject referred) || referred.isVirtual()
+                    || referred.isIndex() || referred.getSegmentIdx() < bestSegmentIdx)
+                    continue;
+                EObject object = referred.getObject();
+                if (object == null)
+                    continue;
+                bestSegmentIdx = referred.getSegmentIdx();
+                best = object;
+            }
+            return best;
+        }
+
+        private static Form safeModel(FormEditorPage page)
+        {
+            try
+            {
+                Form form = page.getModel();
+                return form == null || form.eIsProxy() ? null : form;
+            }
+            catch (RuntimeException e)
+            {
+                return null;
+            }
+        }
+
+        private InheritedTitles()
+        {
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Переупорядочивание подменю
     // -----------------------------------------------------------------------
 
@@ -2195,6 +2839,14 @@ public class FormEditorHook implements IStartup
                         + " персонально для пользователя, между сеансами, как и положение окна" //$NON-NLS-1$
                         + " или ширина колонок. Колонка видна, только если для формы включено" //$NON-NLS-1$
                         + " сохранение данных в настройках."); //$NON-NLS-1$
+            if (AttributesExtraColumns.TITLE_TITLE.equals(text))
+                return withTitleIfTruncated(column,
+                    "Заголовок реквизита — тот, который увидит пользователь." //$NON-NLS-1$
+                        + " Собственный заголовок реквизита формы показан обычным цветом," //$NON-NLS-1$
+                        + " представление поля метаданных (синоним) — серым." //$NON-NLS-1$
+                        + " Если заголовок не задан и представление совпадает с именем," //$NON-NLS-1$
+                        + " ячейка пустая. Двойной клик активирует свойство «Заголовок»" //$NON-NLS-1$
+                        + " в панели «Свойства»."); //$NON-NLS-1$
             if (AttributesExtraColumns.TITLE_FUNCTIONAL_OPTIONS.equals(text))
                 return withTitleIfTruncated(column,
                     "Число функциональных опций, в состав которых включён реквизит." //$NON-NLS-1$
@@ -2242,9 +2894,13 @@ public class FormEditorHook implements IStartup
     // -----------------------------------------------------------------------
 
     /**
-     * Добавляет в штатную таблицу «Реквизиты» редактора формы два узких столбца, которых там нет:
+     * Добавляет в штатную таблицу «Реквизиты» редактора формы столбцы, которых там нет:
      *
      * <ol>
+     *   <li><b>«Заголовок»</b> — собственный «Заголовок» реквизита формы (обычным цветом) или
+     *       представление поля метаданных (серым). Двойной клик активирует свойство «Заголовок»
+     *       в панели «Свойства». <b>Выключена</b>, см. {@link #TITLE_COLUMN_ENABLED}.
+     *
      *   <li><b>«Функциональные опции»</b> — число функциональных опций, в состав которых включён
      *       реквизит ({@code AbstractFormAttribute.functionalOptions}). Двойной клик активирует
      *       это свойство в панели «Свойства» — как {@link ItemsTree} делает для «Обработчиков».
@@ -2269,15 +2925,29 @@ public class FormEditorHook implements IStartup
 
         private static final int MAX_ATTEMPTS = 100;
 
+        /**
+         * Колонка «Заголовок» выключена: пользы от неё в этом списке оказалось мало — у
+         * пользовательских реквизитов заголовок обычно не задан, а у полей метаданных
+         * представление почти всегда совпадает с именем, и колонка стоит пустая.
+         * Код оставлен рабочим: включается сменой флага на {@code true}.
+         */
+        private static final boolean TITLE_COLUMN_ENABLED = false;
+
+        static final String TITLE_TITLE = "Заголовок"; //$NON-NLS-1$
+
         static final String TITLE_FUNCTIONAL_OPTIONS = "Функциональные опции"; //$NON-NLS-1$
 
         static final String TITLE_SAVED_DATA = "Сохраняемые данные"; //$NON-NLS-1$
+
+        private static final int WIDTH_TITLE = 140;
 
         private static final int WIDTH_FUNCTIONAL_OPTIONS = 40;
 
         private static final int WIDTH_SAVED_DATA = 28;
 
         private static final String FUNCTIONAL_OPTIONS_FEATURE = "functionalOptions"; //$NON-NLS-1$
+
+        private static final String TITLE_FEATURE = "title"; //$NON-NLS-1$
 
         static void install()
         {
@@ -2310,6 +2980,17 @@ public class FormEditorHook implements IStartup
 
         private static void addColumns(FormEditorPage page, TreeViewer viewer, Tree tree)
         {
+            TreeColumn titleSwtColumn = null;
+            if (TITLE_COLUMN_ENABLED)
+            {
+                TreeViewerColumn titleColumn = new TreeViewerColumn(viewer, SWT.LEFT);
+                titleColumn.getColumn().setText(TITLE_TITLE);
+                titleColumn.getColumn().setWidth(WIDTH_TITLE);
+                titleColumn.getColumn().setMoveable(false);
+                titleColumn.setLabelProvider(new TitleLabelProvider(page));
+                titleSwtColumn = titleColumn.getColumn();
+            }
+
             TreeViewerColumn functionalOptionsColumn = new TreeViewerColumn(viewer, SWT.RIGHT);
             functionalOptionsColumn.getColumn().setText(TITLE_FUNCTIONAL_OPTIONS);
             functionalOptionsColumn.getColumn().setWidth(WIDTH_FUNCTIONAL_OPTIONS);
@@ -2326,7 +3007,7 @@ public class FormEditorHook implements IStartup
 
             TreeColumn funcOptionsSwtColumn = functionalOptionsColumn.getColumn();
             tree.addListener(SWT.MouseDoubleClick,
-                event -> onDoubleClick(page, tree, event, funcOptionsSwtColumn));
+                event -> onDoubleClick(page, tree, event, funcOptionsSwtColumn, titleSwtColumn));
 
             Object editingContextObj = Global.invoke(page, "getEditingContext"); //$NON-NLS-1$
             if (editingContextObj instanceof IBmEditingContext editingContext)
@@ -2405,7 +3086,7 @@ public class FormEditorHook implements IStartup
         }
 
         private static void onDoubleClick(FormEditorPage page, Tree tree, Event event,
-            TreeColumn funcOptionsColumn)
+            TreeColumn funcOptionsColumn, TreeColumn titleColumn)
         {
             if (event.button != 1 || tree.isDisposed() || funcOptionsColumn.isDisposed())
                 return;
@@ -2413,36 +3094,45 @@ public class FormEditorHook implements IStartup
             if (row == null || row.isDisposed())
                 return;
             int index = FormTreeInteraction.columnAtX(tree, event.x);
-            if (index < 0 || index >= tree.getColumnCount() || tree.getColumn(index) != funcOptionsColumn)
+            if (index < 0 || index >= tree.getColumnCount())
                 return;
-            focusFunctionalOptions(page, row.getData());
+            TreeColumn column = tree.getColumn(index);
+            if (column == funcOptionsColumn)
+                focusProperty(page, row.getData(), FUNCTIONAL_OPTIONS_FEATURE, TITLE_FUNCTIONAL_OPTIONS);
+            else if (titleColumn != null && !titleColumn.isDisposed() && column == titleColumn)
+                focusProperty(page, row.getData(), TITLE_FEATURE, TITLE_TITLE);
         }
 
-        private static void focusFunctionalOptions(FormEditorPage page, Object data)
+        /**
+         * Активирует поле свойства реквизита в панели «Свойства». У полей метаданных
+         * (стандартные реквизиты, поля объекта) своих свойств формы нет — там ничего не делаем.
+         */
+        private static void focusProperty(FormEditorPage page, Object data, String featureName,
+            String fallbackLabel)
         {
             if (page == null || page.getSite() == null)
                 return;
             if (!(data instanceof PropertyInfo info)
                 || !(info.getSource() instanceof AbstractFormAttribute source))
                 return;
-            List<String> labels = featureLabels(source);
+            List<String> labels = featureLabels(source, featureName, fallbackLabel);
             if (labels.isEmpty())
                 return;
             ShowPropertiesHandler.run(page.getSite());
             scheduleFocus(page.getSite().getPage(), labels, 0);
         }
 
-        /** Подпись поля палитры для «функциональных опций» — из локализации EDT, запасная — своя. */
-        private static List<String> featureLabels(AbstractFormAttribute source)
+        /** Подпись поля палитры — из локализации EDT, запасная — своя. */
+        private static List<String> featureLabels(AbstractFormAttribute source, String featureName,
+            String fallbackLabel)
         {
             List<String> labels = new ArrayList<>(2);
-            EStructuralFeature feature =
-                source.eClass().getEStructuralFeature(FUNCTIONAL_OPTIONS_FEATURE);
+            EStructuralFeature feature = source.eClass().getEStructuralFeature(featureName);
             String localized = feature != null ? ItemsTree.FEATURE_NAMES.getString(feature) : null;
             if (localized != null && !localized.isBlank())
                 labels.add(localized);
-            if (!labels.contains(TITLE_FUNCTIONAL_OPTIONS))
-                labels.add(TITLE_FUNCTIONAL_OPTIONS);
+            if (!labels.contains(fallbackLabel))
+                labels.add(fallbackLabel);
             return labels;
         }
 
@@ -2460,6 +3150,67 @@ public class FormEditorHook implements IStartup
                 else
                     scheduleFocus(workbenchPage, labels, attempt + 1);
             });
+        }
+
+        /**
+         * Заголовок реквизита — тот, который увидит пользователь: собственный «Заголовок»
+         * реквизита формы, а у полей метаданных — их представление (синоним объекта или поля).
+         * Считает представление сама EDT ({@code PropertyInfo.getPresentation}) — теми же
+         * правилами, по которым она подписывает реквизит в остальных своих списках.
+         *
+         * <p>Собственный заголовок показан обычным цветом, взятое представление — серым (та же
+         * договорённость, что у колонок дерева элементов). Если представление совпало с именем
+         * реквизита, ячейка пустая: имя и так видно в соседней колонке.
+         */
+        private static final class TitleLabelProvider
+            extends ColumnLabelProvider
+        {
+            private final FormEditorPage page;
+
+            TitleLabelProvider(FormEditorPage page)
+            {
+                this.page = page;
+            }
+
+            @Override
+            public String getText(Object element)
+            {
+                if (!(element instanceof PropertyInfo info))
+                    return ""; //$NON-NLS-1$
+                String language = EffectiveTitle.language(page);
+                if (language == null)
+                    return ""; //$NON-NLS-1$
+                String presentation;
+                try
+                {
+                    presentation = info.getPresentation(language, EffectiveTitle.scriptVariant(page));
+                }
+                catch (RuntimeException e)
+                {
+                    return ""; //$NON-NLS-1$
+                }
+                if (presentation == null)
+                    return ""; //$NON-NLS-1$
+                presentation = presentation.trim();
+                return presentation.equals(info.getName()) || presentation.equals(info.getNameRu())
+                    ? "" : presentation; //$NON-NLS-1$
+            }
+
+            @Override
+            public Color getForeground(Object element)
+            {
+                Display display = Display.getCurrent();
+                if (display == null || isOwnTitle(element))
+                    return null;
+                return display.getSystemColor(SWT.COLOR_DARK_GRAY);
+            }
+
+            private boolean isOwnTitle(Object element)
+            {
+                return element instanceof PropertyInfo info
+                    && info.getSource() instanceof AbstractFormAttribute attribute
+                    && EffectiveTitle.localized(attribute.getTitle(), EffectiveTitle.language(page)) != null;
+            }
         }
 
         /** Число; ноль (или реквизит без функциональных опций) — колонка остаётся пустой. */
@@ -3408,25 +4159,18 @@ public class FormEditorHook implements IStartup
 
         private static String editingLanguage(FormEditorPage page)
         {
-            Object languages = Global.getField(page, "languageManager"); //$NON-NLS-1$
-            IV8Project project = v8project(page);
-            return project != null && languages instanceof IEditingLanguageManager languageManager
-                ? languageManager.getEditingLanguageCode(project.getDtProject()) : null;
+            return formEditingLanguage(page);
         }
 
         /** Вариант встроенного языка проекта — от него зависит имя группы по умолчанию. */
         private static ScriptVariant scriptVariant(FormEditorPage page)
         {
-            IV8Project project = v8project(page);
-            ScriptVariant variant = project == null ? null : project.getScriptVariant();
-            return variant == null ? ScriptVariant.RUSSIAN : variant;
+            return formScriptVariant(page);
         }
 
         private static IV8Project v8project(FormEditorPage page)
         {
-            Object manager = Global.getField(page, "v8projectManager"); //$NON-NLS-1$
-            return manager instanceof IV8ProjectManager projectManager
-                ? projectManager.getProject(page.getModel()) : null;
+            return formV8Project(page);
         }
 
         // -------------------------------------------------------------------
@@ -3552,6 +4296,16 @@ public class FormEditorHook implements IStartup
      *       «Всплывающее меню» и т.п. Нейтральные виды («Обычная», «Группа кнопок»,
      *       «Группа колонок») не дописываются.
      *
+     *   <li><b>Колонка «Заголовок»</b> — эффективный заголовок элемента ({@link EffectiveTitle}):
+     *       собственный — обычным цветом, взятый у реквизита формы, команды или поля метаданных —
+     *       серым. Двойной клик переходит к месту, где заголовок задан. Наследуемые заголовки
+     *       требуют похода в другой объект метаданных, поэтому их источники разрешает фоновый
+     *       джоб ({@link InheritedTitles}), а не отрисовка строки.
+     *
+     *   <li><b>Отбор по заголовку и подсказке.</b> Поле фильтра ищет не только по имени элемента,
+     *       но и по его эффективному заголовку и подсказке; найденный фрагмент дописывается серым
+     *       справа от имени — как это делает фильтр навигатора.
+     *
      *   <li><b>Колонка «Обработчики»</b> — число непустых обработчиков событий элемента.
      *       Двойной клик активирует поле первого обработчика в панели «Свойства».
      *
@@ -3612,22 +4366,26 @@ public class FormEditorHook implements IStartup
 
         private static final int COLUMN_NAME = 0;
 
-        private static final int COLUMN_HANDLERS = 1;
+        private static final int COLUMN_TITLE = 1;
 
-        private static final int COLUMN_APPEARANCE = 2;
+        private static final int COLUMN_HANDLERS = 2;
 
-        private static final int COLUMN_INVISIBLE = 3;
+        private static final int COLUMN_APPEARANCE = 3;
 
-        private static final int COLUMN_READ_ONLY = 4;
+        private static final int COLUMN_INVISIBLE = 4;
 
-        private static final int COLUMN_HEIGHT = 5;
+        private static final int COLUMN_READ_ONLY = 5;
 
-        private static final int COLUMN_WIDTH = 6;
+        private static final int COLUMN_HEIGHT = 6;
+
+        private static final int COLUMN_WIDTH = 7;
 
         /** Последняя добавленная плагином колонка. */
         private static final int COLUMN_LAST = COLUMN_WIDTH;
 
         private static final String TITLE_NAME = "Элемент"; //$NON-NLS-1$
+
+        private static final String TITLE_TITLE = "Заголовок"; //$NON-NLS-1$
 
         private static final String TITLE_HANDLERS = "Обработчики"; //$NON-NLS-1$
 
@@ -3659,10 +4417,13 @@ public class FormEditorHook implements IStartup
 
         private static final int WIDTH_NAME_START = 200;
 
+        /** Ширина колонки «Заголовок» по умолчанию: в неё умещается короткая фраза. */
+        private static final int WIDTH_TITLE_START = 140;
+
         private static final String SETTINGS_SECTION = "tormozit.formItemsTree"; //$NON-NLS-1$
 
         /** Ключи ширин колонок в {@link IDialogSettings}, по индексу колонки. */
-        private static final String[] WIDTH_KEYS = { null, "colWidthHandlers", //$NON-NLS-1$
+        private static final String[] WIDTH_KEYS = { null, "colWidthTitle", "colWidthHandlers", //$NON-NLS-1$ //$NON-NLS-2$
             "colWidthAppearance", "colWidthInvisible", "colWidthReadOnly", "colWidthHeight", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
             "colWidthWidth" }; //$NON-NLS-1$
 
@@ -3693,6 +4454,10 @@ public class FormEditorHook implements IStartup
         private static final String VISIBLE_FEATURE = "visible"; //$NON-NLS-1$
 
         private static final String READ_ONLY_FEATURE = "readOnly"; //$NON-NLS-1$
+
+        private static final String TITLE_FEATURE = "title"; //$NON-NLS-1$
+
+        private static final String SYNONYM_FEATURE = "synonym"; //$NON-NLS-1$
 
         /** Подписи полей палитры — из локализации EDT (см. {@link #propertyLabels}). */
         private static final FeatureNameLocalizationProvider FEATURE_NAMES =
@@ -3734,6 +4499,7 @@ public class FormEditorHook implements IStartup
                 createColumns(page, viewer, tree);
                 Global.tempLog(SelectionMemory.LOG, "attach: колонки созданы, попытка " + attempt); //$NON-NLS-1$
                 SelectionMemory.install(page, viewer, tree);
+                InheritedTitles.install(page, viewer, tree);
             }
             catch (Exception e)
             {
@@ -3762,13 +4528,28 @@ public class FormEditorHook implements IStartup
             tree.setHeaderVisible(true);
             tree.setLinesVisible(true);
 
-            installFilter(viewer, tree);
+            installFilter(page, viewer, tree);
             installExpandCollapseHandlers(page, viewer, tree);
             TreeViewerColumn nameColumn = new TreeViewerColumn(viewer, SWT.LEFT);
             assert tree.getColumnCount() - 1 == COLUMN_NAME;
             nameColumn.getColumn().setText(TITLE_NAME);
             nameColumn.getColumn().setWidth(WIDTH_NAME_START);
-            nameColumn.setLabelProvider(new NameLabelProvider(base, tree));
+            nameColumn.setLabelProvider(new NameLabelProvider(base, page, tree));
+
+            // Заголовок — единственная добавленная колонка с текстом, а не с числом или галочкой:
+            // значок в шапке ей не нужен, подпись и так короткая.
+            TreeViewerColumn titleColumn = new TreeViewerColumn(viewer, SWT.LEFT);
+            assert tree.getColumnCount() - 1 == COLUMN_TITLE;
+            titleColumn.getColumn().setText(TITLE_TITLE);
+            titleColumn.getColumn().setWidth(savedWidth(tree, COLUMN_TITLE));
+            titleColumn.getColumn().setMoveable(false);
+            titleColumn.getColumn().setToolTipText(TooltipText.wrap(tree,
+                TITLE_TITLE + ": эффективный заголовок элемента — тот, который увидит" //$NON-NLS-1$
+                    + " пользователь. Собственный заголовок показан обычным цветом," //$NON-NLS-1$
+                    + " взятый у реквизита формы, команды или поля метаданных — серым." //$NON-NLS-1$
+                    + " Двойной клик переходит к месту, где заголовок задан." //$NON-NLS-1$
+                    + Global.pluginSignForTooltip()));
+            titleColumn.setLabelProvider(new TitleLabelProvider(page, tree));
 
             addColumn(viewer, TITLE_HANDLERS, ICON_HANDLERS, COLUMN_HANDLERS, SWT.RIGHT,
                 TITLE_HANDLERS + ": число непустых обработчиков событий элемента." //$NON-NLS-1$
@@ -3990,7 +4771,7 @@ public class FormEditorHook implements IStartup
          * ({@link FilterInputBox#MAX_WIDTH}), история запросов переживает закрытие редактора
          * ({@link FilterInputBox.Scope#FORM_ITEMS}).
          */
-        private static void installFilter(TreeViewer viewer, Tree tree)
+        private static void installFilter(FormEditorPage page, TreeViewer viewer, Tree tree)
         {
             Composite treeHost = tree.getParent();
             Composite body = treeHost != null ? treeHost.getParent() : null;
@@ -4002,7 +4783,7 @@ public class FormEditorHook implements IStartup
             toolBar.setParent(bar);
             FilterInputBox[] filter = new FilterInputBox[1];
             filter[0] = FilterInputBox.forFormItems(bar,
-                () -> applyFilter(viewer, tree, filter[0].getText()));
+                () -> applyFilter(page, viewer, tree, filter[0].getText()));
             // Стрелки, PgUp/PgDn и Enter из поля фильтра ведут по дереву, не выводя ввод из поля.
             FilterInputBoxListNavigation.installTreeNavigation(filter[0].widget(), tree);
             bar.setLayout(new FilterBarLayout(toolBar, filter[0].widget()));
@@ -4079,7 +4860,7 @@ public class FormEditorHook implements IStartup
                 && tree.getData(KEY_MATCHER) instanceof SmartMatcher matcher ? matcher : null;
         }
 
-        private static void applyFilter(TreeViewer viewer, Tree tree, String pattern)
+        private static void applyFilter(FormEditorPage page, TreeViewer viewer, Tree tree, String pattern)
         {
             if (tree.isDisposed() || viewer.getControl().isDisposed())
                 return;
@@ -4091,11 +4872,13 @@ public class FormEditorHook implements IStartup
                     viewer.removeFilter(existing);
             }
             if (!matcher.isEmpty)
-                viewer.addFilter(new ItemsFilter(matcher));
+                viewer.addFilter(new ItemsFilter(page, matcher));
             viewer.refresh();
+            // Дерево разворачивается и при отборе, и при его сбросе: свёрнутое дерево после
+            // сброса прятало бы строку, которую пользователь только что нашёл фильтром.
+            viewer.expandAll();
             if (!matcher.isEmpty)
             {
-                viewer.expandAll();
                 // После отбора текущая строка могла уйти из списка — иначе стрелки из поля
                 // фильтра вели бы по невидимому выделению.
                 FilterInputBoxListNavigation.selectFirstRowIfSelectionLost(tree);
@@ -4106,14 +4889,21 @@ public class FormEditorHook implements IStartup
          * Отбор строк дерева: многословный фильтр применяется к КАЖДОЙ строке отдельно (плоское
          * совпадение), а строка остаётся видимой ещё и тогда, когда совпал кто-то из её потомков —
          * иначе найденный вложенный элемент негде было бы показать.
+         *
+         * <p>Строка ищется не только по имени, но и по своему эффективному заголовку и подсказке —
+         * как навигатор ищет по синониму и комментарию; что именно совпало, показывает серая
+         * декорация справа от имени (см. {@link NameLabelProvider}).
          */
         private static final class ItemsFilter
             extends ViewerFilter
         {
+            private final FormEditorPage page;
+
             private final SmartMatcher matcher;
 
-            ItemsFilter(SmartMatcher matcher)
+            ItemsFilter(FormEditorPage page, SmartMatcher matcher)
             {
+                this.page = page;
                 this.matcher = matcher;
             }
 
@@ -4127,7 +4917,7 @@ public class FormEditorHook implements IStartup
             {
                 if (element == null || depth > 32)
                     return false;
-                if (matcher.matches(elementText(element)))
+                if (matcher.matches(searchText(page, element)))
                     return true;
                 if (!(viewer instanceof TreeViewer treeViewer)
                     || !(treeViewer.getContentProvider() instanceof ITreeContentProvider content))
@@ -4139,16 +4929,44 @@ public class FormEditorHook implements IStartup
                 }
                 return false;
             }
+        }
 
-            /** Текст строки: имя элемента формы, у корня — подпись «Форма». */
-            private static String elementText(Object element)
-            {
-                FormItem item = domainItem(element);
-                if (item != null && item.getName() != null)
-                    return item.getName();
-                Object name = Global.invoke(element, "getName"); //$NON-NLS-1$
-                return name instanceof String text ? text : ""; //$NON-NLS-1$
-            }
+        /** Текст строки: имя элемента формы, у корня — подпись «Форма». */
+        private static String elementName(Object element)
+        {
+            FormItem item = domainItem(element);
+            if (item != null && item.getName() != null)
+                return item.getName();
+            Object name = Global.invoke(element, "getName"); //$NON-NLS-1$
+            return name instanceof String text ? text : ""; //$NON-NLS-1$
+        }
+
+        /** Всё, по чему ищет фильтр в одной строке: имя, эффективный заголовок, подсказка. */
+        private static String searchText(FormEditorPage page, Object element)
+        {
+            StringBuilder sb = new StringBuilder(elementName(element));
+            for (String hidden : hiddenTexts(page, element))
+                sb.append(' ').append(hidden);
+            return sb.toString();
+        }
+
+        /**
+         * Свойства строки, кроме имени, по которым тоже идёт отбор. Из них же собирается серая
+         * декорация с найденным фрагментом.
+         */
+        private static List<String> hiddenTexts(FormEditorPage page, Object element)
+        {
+            FormItem item = domainItem(element);
+            if (item == null)
+                return List.of();
+            List<String> texts = new ArrayList<>(2);
+            EffectiveTitle.Info info = EffectiveTitle.of(page, item);
+            if (info != null && !info.text.isEmpty())
+                texts.add(info.text);
+            String tooltip = EffectiveTitle.tooltipText(page, item, info);
+            if (tooltip != null && !texts.contains(tooltip))
+                texts.add(tooltip);
+            return texts;
         }
 
         // -------------------------------------------------------------------
@@ -4165,8 +4983,8 @@ public class FormEditorHook implements IStartup
         private static int savedWidth(Tree tree, int index)
         {
             String key = WIDTH_KEYS[index];
-            return FormTableColumnState.readWidth(widthSettings(), key, minimalColumnWidth(tree),
-                MIN_WIDTH);
+            int fallback = index == COLUMN_TITLE ? WIDTH_TITLE_START : minimalColumnWidth(tree);
+            return FormTableColumnState.readWidth(widthSettings(), key, fallback, MIN_WIDTH);
         }
 
         /** Ширина под три символа текущего шрифта дерева, но не уже значка в шапке. */
@@ -4194,7 +5012,7 @@ public class FormEditorHook implements IStartup
             if (tree == null || tree.getColumnCount() <= COLUMN_LAST)
                 return;
             IDialogSettings settings = widthSettings();
-            for (int index = COLUMN_HANDLERS; index <= COLUMN_LAST; index++)
+            for (int index = COLUMN_TITLE; index <= COLUMN_LAST; index++)
             {
                 int width = tree.getColumn(index).getWidth();
                 if (width >= MIN_WIDTH)
@@ -4275,8 +5093,15 @@ public class FormEditorHook implements IStartup
         private static boolean isStale(TreeViewer viewer, TreeItem row)
         {
             Object element = row.getData();
-            for (int column = COLUMN_HANDLERS; column <= COLUMN_LAST; column++)
+            for (int column = COLUMN_TITLE; column <= COLUMN_LAST; column++)
             {
+                // «Заголовок» рисуется своим стилевым провайдером — у него текст берётся отдельно.
+                if (viewer.getLabelProvider(column) instanceof TitleLabelProvider titleProvider)
+                {
+                    if (!titleProvider.getText(element).equals(row.getText(column)))
+                        return true;
+                    continue;
+                }
                 if (!(viewer.getLabelProvider(column) instanceof ColumnLabelProvider labelProvider))
                     continue;
                 String text = labelProvider.getText(element);
@@ -4611,6 +5436,7 @@ public class FormEditorHook implements IStartup
             switch (column)
             {
                 case COLUMN_NAME -> openLikeLabelDoubleClick(tree, row, event);
+                case COLUMN_TITLE -> revealTitleSource(page, viewer, item);
                 case COLUMN_HANDLERS -> focusFirstHandlerField(page, row.getData());
                 case COLUMN_APPEARANCE -> AppearancePage.activate(page);
                 case COLUMN_INVISIBLE ->
@@ -4664,7 +5490,7 @@ public class FormEditorHook implements IStartup
          * ({@code localization/FeatureNames*.properties} — тот же источник, из которого палитра
          * подписывает поля), запасная нужна, если NLS почему-то недоступна.
          */
-        private static List<String> propertyLabels(FormItem item, String featureName)
+        private static List<String> propertyLabels(EObject item, String featureName)
         {
             List<String> labels = new ArrayList<>(2);
             EStructuralFeature feature = findFeature(item, featureName);
@@ -4681,7 +5507,7 @@ public class FormEditorHook implements IStartup
          * Признак модели по имени: сначала у самого элемента, затем в его {@code extInfo} —
          * «Ширина» и «Высота» у полей и декораций объявлены именно там (см. {@link #sizeValue}).
          */
-        private static EStructuralFeature findFeature(FormItem item, String featureName)
+        private static EStructuralFeature findFeature(EObject item, String featureName)
         {
             EStructuralFeature feature =
                 item != null ? item.eClass().getEStructuralFeature(featureName) : null;
@@ -4701,8 +5527,294 @@ public class FormEditorHook implements IStartup
                 case READ_ONLY_FEATURE -> "Только просмотр"; //$NON-NLS-1$
                 case HEIGHT_FEATURE -> "Высота"; //$NON-NLS-1$
                 case WIDTH_FEATURE -> "Ширина"; //$NON-NLS-1$
+                case TITLE_FEATURE -> TITLE_TITLE;
+                case SYNONYM_FEATURE -> "Синоним"; //$NON-NLS-1$
                 default -> null;
             };
+        }
+
+        /**
+         * Двойной клик по колонке «Заголовок» — переход к месту, где заголовок задан:
+         *
+         * <ul>
+         *   <li>свой заголовок — активируется поле «Заголовок» этого же элемента в панели
+         *       «Свойства»;
+         *   <li>заголовок реквизита формы или команды формы — строка выделяется в своём списке
+         *       («Реквизиты» / «Команды»), и открывается панель «Свойства»;
+         *   <li>синоним поля метаданных — поле выделяется в дереве реквизитов формы, и там
+         *       активируется его «Синоним»; редактор объекта метаданных открывается только если
+         *       такой строки в дереве нет.
+         * </ul>
+         */
+        private static void revealTitleSource(FormEditorPage page, TreeViewer viewer, FormItem item)
+        {
+            EffectiveTitle.Info info = EffectiveTitle.ofNow(page, item);
+            Global.tempLog(InheritedTitles.LOG, "dblclick: " //$NON-NLS-1$
+                + (item == null ? "null" : item.getName()) + " -> " //$NON-NLS-1$ //$NON-NLS-2$
+                + (info == null ? "нет заголовка" //$NON-NLS-1$
+                    : info.origin + ", source=" //$NON-NLS-1$
+                        + (info.source == null ? "null" : info.source.getClass().getSimpleName()))); //$NON-NLS-1$
+            if (info == null || page == null || page.getSite() == null)
+                return;
+            if (info.origin == EffectiveTitle.Origin.OWN)
+            {
+                revealProperty(page, viewer, item, null, TITLE_FEATURE);
+                return;
+            }
+            if (!runGoToAction(page))
+            {
+                // «Перейти» у элемента нет — доходим до источника сами.
+                if (info.origin == EffectiveTitle.Origin.FORM_OBJECT)
+                    revealFormObject(page, item, info.source);
+                else
+                    revealMetadataField(page, item, info.source);
+                return;
+            }
+            ShowPropertiesHandler.run(page.getSite());
+            focusTitleProperty(page, info.source);
+        }
+
+        /**
+         * Штатная команда «Перейти» контекстного меню дерева элементов: она сама решает, куда
+         * ведёт элемент — в реквизиты, в команды формы, в стандартные команды, — переключает
+         * вкладку и выделяет строку. Свой обход дерева этого не повторяет: у EDT в переходе
+         * учтены и динамические списки, и параметризуемые команды.
+         *
+         * <p>Действует на текущее выделение дерева элементов — к моменту двойного клика строка
+         * уже текущая. Сначала спрашиваем, есть ли куда идти: без целей штатный переход просто
+         * ничего не делает, и мы бы не отличили это от удачного перехода.
+         *
+         * @return {@code false} — переходить некуда, дальше сами
+         */
+        private static boolean runGoToAction(FormEditorPage page)
+        {
+            Object group = Global.getField(page, "itemsActionsGroup"); //$NON-NLS-1$
+            // Имя метода EDT с опечаткой (GoToTtems) — так в бандле, менять нельзя.
+            Object targets = group == null ? null
+                : Global.invoke(group, "calculateAvailablesGoToTtems"); //$NON-NLS-1$
+            boolean hasTargets = targets instanceof List<?> list && !list.isEmpty();
+            Global.tempLog(InheritedTitles.LOG, "goto: группа=" //$NON-NLS-1$
+                + (group == null ? "нет" : group.getClass().getSimpleName()) + ", целей=" //$NON-NLS-1$ //$NON-NLS-2$
+                + (targets instanceof List<?> found ? String.valueOf(found.size()) : "?")); //$NON-NLS-1$
+            return hasTargets && Global.invokeVoid(group, "runGoToAction"); //$NON-NLS-1$
+        }
+
+        /**
+         * Поле метаданных, чей синоним стал заголовком, — в дереве реквизитов формы: именно там
+         * оно и представлено, и там же видны его свойства. Уходить в редактор объекта
+         * метаданных ради синонима незачем — это уводит из формы.
+         *
+         * <p>Строка ищется по пути к данным самого элемента, сегмент за сегментом: у узлов
+         * дерева реквизитов путь тот же. Обход по сегментам, а не поиск по всему дереву:
+         * дерево ленивое, и раскрывать его целиком ради одной строки не нужно.
+         */
+        private static void revealMetadataField(FormEditorPage page, FormItem item, EObject source)
+        {
+            TreeViewer viewer = attributesViewer(page);
+            PropertyInfo found = findAttributeNode(page, item, source);
+            if (viewer == null || found == null)
+            {
+                openMetadataEditor(page, source);
+                return;
+            }
+            selectAttributeNode(viewer, found);
+            // Свойства поля метаданных показываются не как у обычного узла: у стандартных
+            // реквизитов палитре нужен прокси — этим занимается уже существующий путь.
+            runMetadataPropertyDoubleClickActions(page, found);
+            focusTitleProperty(page, source);
+        }
+
+        /**
+         * Строка дерева реквизитов для источника заголовка.
+         *
+         * <p>Основной способ — по пути к данным самого элемента, сегмент за сегментом: у узлов
+         * дерева реквизитов путь тот же. Обход по сегментам, а не поиск по всему дереву:
+         * дерево ленивое, и раскрывать его целиком ради одной строки не нужно.
+         *
+         * <p>Запасной способ — поиск по самому объекту-источнику. Сравнение при этом идёт по
+         * {@code ContentUtil.getActualObject}, а не по ссылке: источник разрешал фоновый джоб,
+         * и его экземпляр может быть не тем, что держит просмотрщик.
+         */
+        private static PropertyInfo findAttributeNode(FormEditorPage page, FormItem item,
+            EObject source)
+        {
+            TreeViewer viewer = attributesViewer(page);
+            if (viewer == null || !(viewer.getContentProvider() instanceof ITreeContentProvider content))
+                return null;
+            Object[] roots = content.getElements(viewer.getInput());
+            List<String> segments = dataPathSegments(item);
+            PropertyInfo byPath = segments.isEmpty() ? null : findByPath(content, roots, segments, 0);
+            if (byPath != null)
+                return byPath;
+            return source == null ? null : findPropertyInfo(content, roots, source, 0);
+        }
+
+        private static List<String> dataPathSegments(FormItem item)
+        {
+            AbstractDataPath path =
+                item instanceof DataItem dataItem ? dataItem.getDataPath() : null;
+            List<String> segments = path != null ? path.getSegments() : null;
+            return segments == null ? List.of() : segments;
+        }
+
+        private static TreeViewer attributesViewer(FormEditorPage page)
+        {
+            if (!(Global.getField(page, "attributesViewer") instanceof TreeViewer viewer) //$NON-NLS-1$
+                || viewer.getControl() == null || viewer.getControl().isDisposed())
+                return null;
+            return viewer;
+        }
+
+        private static void selectAttributeNode(TreeViewer viewer, PropertyInfo node)
+        {
+            viewer.setSelection(new StructuredSelection(node), true);
+            viewer.getControl().setFocus();
+        }
+
+        /** Сегменты пути сверяются и с английским именем узла, и с русским: путь хранится на одном из них. */
+        private static PropertyInfo findByPath(ITreeContentProvider content, Object[] elements,
+            List<String> segments, int level)
+        {
+            if (elements == null || level >= segments.size())
+                return null;
+            String segment = segments.get(level);
+            for (Object element : elements)
+            {
+                if (!(element instanceof PropertyInfo info) || !matchesSegment(info, segment))
+                    continue;
+                return level == segments.size() - 1 ? info
+                    : findByPath(content, content.getChildren(info), segments, level + 1);
+            }
+            return null;
+        }
+
+        private static boolean matchesSegment(PropertyInfo info, String segment)
+        {
+            return segment != null && (segment.equalsIgnoreCase(info.getName())
+                || segment.equalsIgnoreCase(info.getNameRu()));
+        }
+
+        /**
+         * Выделяет реквизит или команду формы в её списке. Реквизиты показываются не сами собой,
+         * а через {@link PropertyInfo}, поэтому строка ищется по модели просмотрщика: у неё есть
+         * родители, и {@code setSelection} с раскрытием доберётся до вложенной колонки таблицы.
+         */
+        private static void revealFormObject(FormEditorPage page, FormItem item, EObject source)
+        {
+            if (source == null)
+                return;
+            if (source instanceof AbstractFormAttribute)
+            {
+                TreeViewer viewer = attributesViewer(page);
+                PropertyInfo found = findAttributeNode(page, item, source);
+                if (viewer == null || found == null)
+                    return;
+                selectAttributeNode(viewer, found);
+                ShowPropertiesHandler.run(page.getSite());
+            }
+            else
+            {
+                revealCommand(page, source);
+                ShowPropertiesHandler.run(page.getSite());
+                // Выделения в списке команд мало: палитра свойств осталась бы на кнопке, а
+                // нужна сама команда. Это тот же штатный путь, каким список команд показывает
+                // свойства своей строки.
+                Object group = Global.getField(page, "formCommandsActionsGroup"); //$NON-NLS-1$
+                if (group != null)
+                    Global.invokeVoid(group, "setSelectionAndNavigateToProperties", //$NON-NLS-1$
+                        new StructuredSelection(source));
+            }
+            focusTitleProperty(page, source);
+        }
+
+        /**
+         * Ставит ввод в поле «Заголовок» источника в палитре «Свойства»: двойной клик по
+         * наследуемому заголовку должен приводить туда, где этот заголовок правится, а не
+         * просто выделять строку в списке.
+         */
+        private static void focusTitleProperty(FormEditorPage page, EObject source)
+        {
+            List<String> labels = titleFieldLabels(source);
+            if (labels.isEmpty() || page.getSite() == null)
+                return;
+            schedulePropertyFocus(page.getSite().getPage(), labels, 0);
+        }
+
+        /**
+         * Подписи поля палитры, в котором заголовок и задан: у объектов формы это «Заголовок»,
+         * у объектов и полей метаданных — «Синоним».
+         *
+         * <p>Берём подписи ОБОИХ признаков, а не выбираем по источнику: палитра показывает
+         * свойства не самого объекта-источника, а строки, на которую привёл переход, — у поля
+         * динамического списка это одно, у реквизита формы другое. Активация всё равно идёт по
+         * первой подписи, которая в палитре нашлась.
+         */
+        private static List<String> titleFieldLabels(EObject source)
+        {
+            if (source == null)
+                return List.of();
+            List<String> labels = new ArrayList<>(propertyLabels(source, TITLE_FEATURE));
+            for (String label : propertyLabels(source, SYNONYM_FEATURE))
+                if (!labels.contains(label))
+                    labels.add(label);
+            return labels;
+        }
+
+        /**
+         * Строка дерева реквизитов, чей источник — искомый реквизит. Глубже колонок таблиц
+         * (второй уровень) искать незачем: заголовок элемента формы берётся только у них.
+         */
+        private static PropertyInfo findPropertyInfo(ITreeContentProvider content, Object[] elements,
+            EObject source, int depth)
+        {
+            if (elements == null || depth > 2)
+                return null;
+            for (Object element : elements)
+            {
+                if (!(element instanceof PropertyInfo info))
+                    continue;
+                if (sameSource(info.getSource(), source))
+                    return info;
+                PropertyInfo found =
+                    findPropertyInfo(content, content.getChildren(info), source, depth + 1);
+                if (found != null)
+                    return found;
+            }
+            return null;
+        }
+
+        /** Выделение строки в списке команд формы — по возможности; свойства показываются отдельно. */
+        /** Экземпляры BM у одного объекта могут различаться — сверяем «настоящие» объекты. */
+        private static boolean sameSource(Object candidate, EObject source)
+        {
+            if (candidate == source)
+                return true;
+            return candidate instanceof EObject other
+                && ContentUtil.getActualObject(other) == ContentUtil.getActualObject(source);
+        }
+
+        private static void revealCommand(FormEditorPage page, EObject command)
+        {
+            if (!(Global.getField(page, "formCommandsViewer") instanceof StructuredViewer viewer) //$NON-NLS-1$
+                || viewer.getControl() == null || viewer.getControl().isDisposed())
+                return;
+            viewer.setSelection(new StructuredSelection(command), true);
+        }
+
+        /** Объект метаданных, чей синоним стал заголовком, — в его штатном редакторе. */
+        private static void openMetadataEditor(FormEditorPage page, EObject metadata)
+        {
+            IWorkbenchPage workbenchPage = page.getSite().getPage();
+            if (metadata == null || workbenchPage == null)
+                return;
+            try
+            {
+                new OpenHelper(workbenchPage).openEditor(metadata);
+            }
+            catch (RuntimeException e)
+            {
+                Global.logError("FormEditorHook.ItemsTree", "openMetadataEditor", e); //$NON-NLS-1$ //$NON-NLS-2$
+            }
         }
 
         /** Выделяет в дереве элемент, от которого унаследовано эффективное значение. */
@@ -4901,6 +6013,10 @@ public class FormEditorHook implements IStartup
                 if (focused)
                     return true;
             }
+            // Временная диагностика: без списка подписей самой палитры промах по подписи не
+            // отличить от того, что палитра ещё не достроилась.
+            Global.tempLog(InheritedTitles.LOG, "focus[" + phase + "]: искали " + labels //$NON-NLS-1$ //$NON-NLS-2$
+                + ", в палитре " + PropertyNameIdentifierHook.labels(scene)); //$NON-NLS-1$
             return false;
         }
 
@@ -4983,12 +6099,15 @@ public class FormEditorHook implements IStartup
         {
             private final ColumnLabelProvider base;
 
+            private final FormEditorPage page;
+
             private final Tree tree;
 
-            NameLabelProvider(ColumnLabelProvider base, Tree tree)
+            NameLabelProvider(ColumnLabelProvider base, FormEditorPage page, Tree tree)
             {
                 super(COLORS_ON_SELECTION);
                 this.base = base;
+                this.page = page;
                 this.tree = tree;
             }
 
@@ -4998,12 +6117,16 @@ public class FormEditorHook implements IStartup
                 Object element = cell.getElement();
                 String text = base.getText(element);
                 StyledString styled = new StyledString(text == null ? "" : text); //$NON-NLS-1$
-                SmartMatcher matcher = matcherOf(tree);
-                if (matcher != null && !matcher.isEmpty && text != null)
-                    SmartMatchHighlight.applyRanges(styled, matcher.getHighlightRanges(text), tree);
                 String kind = groupKindName(domainItem(element));
                 if (kind != null)
                     styled.append(" (" + kind + ")", StyledString.DECORATIONS_STYLER); //$NON-NLS-1$ //$NON-NLS-2$
+                SmartMatcher matcher = matcherOf(tree);
+                if (matcher != null && !matcher.isEmpty)
+                {
+                    appendQualifier(styled, element, matcher);
+                    SmartMatchHighlight.applyRanges(styled,
+                        matcher.getHighlightRanges(styled.getString()), tree);
+                }
                 cell.setText(styled.toString());
                 cell.setStyleRanges(styled.getStyleRanges());
                 cell.setImage(base.getImage(element));
@@ -5012,10 +6135,71 @@ public class FormEditorHook implements IStartup
                 super.update(cell);
             }
 
+            /**
+             * Серый фрагмент справа от имени — то место заголовка или подсказки, из-за которого
+             * строка попала в отбор. Без него непонятно, почему строка видна: имя-то не совпало.
+             */
+            private void appendQualifier(StyledString styled, Object element, SmartMatcher matcher)
+            {
+                NavigatorFuzzySearch.QualifierMatch qualifier = NavigatorFuzzySearch
+                    .findQualifierMatch(hiddenTexts(page, element), matcher.fullPattern,
+                        elementName(element));
+                if (qualifier != null && qualifier.text != null && !qualifier.text.isBlank())
+                    styled.append("  " + qualifier.text, StyledString.DECORATIONS_STYLER); //$NON-NLS-1$
+            }
+
             @Override
             public String getToolTipText(Object element)
             {
                 return base.getToolTipText(element);
+            }
+        }
+
+        /**
+         * Эффективный заголовок элемента. Собственный — обычным цветом, взятый у реквизита,
+         * команды или поля метаданных — серым (та же договорённость, что у колонок
+         * «Невидимость» и «ТолькоПросмотр»: унаследованное значение приглушено).
+         *
+         * <p>Свой {@link StyledCellLabelProvider} с {@code COLORS_ON_SELECTION}, а не
+         * {@code DelegatingStyledCellLabelProvider}: иначе на выделенной строке JFace выбрасывает
+         * цвета стилей и подсветка вхождений фильтра пропадает именно на текущей строке.
+         */
+        private static final class TitleLabelProvider
+            extends StyledCellLabelProvider
+        {
+            private final FormEditorPage page;
+
+            private final Tree tree;
+
+            TitleLabelProvider(FormEditorPage page, Tree tree)
+            {
+                super(COLORS_ON_SELECTION);
+                this.page = page;
+                this.tree = tree;
+            }
+
+            /** Текст ячейки без стилей — им {@link #isStale} сверяет колонку с моделью. */
+            String getText(Object element)
+            {
+                EffectiveTitle.Info info = EffectiveTitle.of(page, domainItem(element));
+                return info == null ? "" : info.text; //$NON-NLS-1$
+            }
+
+            @Override
+            public void update(ViewerCell cell)
+            {
+                Object element = cell.getElement();
+                EffectiveTitle.Info info = EffectiveTitle.of(page, domainItem(element));
+                String text = info == null ? "" : info.text; //$NON-NLS-1$
+                StyledString styled = new StyledString(text);
+                if (info != null && info.origin != EffectiveTitle.Origin.OWN && !text.isEmpty())
+                    styled.setStyle(0, text.length(), StyledString.DECORATIONS_STYLER);
+                SmartMatcher matcher = matcherOf(tree);
+                if (matcher != null && !matcher.isEmpty && !text.isEmpty())
+                    SmartMatchHighlight.applyRanges(styled, matcher.getHighlightRanges(text), tree);
+                cell.setText(styled.toString());
+                cell.setStyleRanges(styled.getStyleRanges());
+                super.update(cell);
             }
         }
 

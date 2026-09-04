@@ -2,17 +2,9 @@ package tormozit;
 
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.IdentityHashMap;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 
 import org.eclipse.core.resources.IFile;
-import org.eclipse.core.runtime.IProgressMonitor;
-import org.eclipse.core.runtime.IStatus;
-import org.eclipse.core.runtime.Status;
-import org.eclipse.core.runtime.jobs.IJobFunction;
-import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.action.Action;
 import org.eclipse.jface.action.ActionContributionItem;
@@ -46,13 +38,10 @@ import org.eclipse.swt.custom.ViewForm;
 import org.eclipse.swt.graphics.GC;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.ImageData;
-import org.eclipse.swt.graphics.Point;
-import org.eclipse.swt.graphics.Rectangle;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
-import org.eclipse.swt.widgets.Layout;
 import org.eclipse.swt.widgets.Menu;
 import org.eclipse.swt.widgets.MenuItem;
 import org.eclipse.swt.widgets.Shell;
@@ -203,42 +192,8 @@ public final class RefactoringPreviewTableHook
             control.setData(PAGE_HANDLED_KEY, Boolean.TRUE);
     }
 
-    /**
-     * То же, что {@code StackLayout}, но предпочтительный размер берётся только у текущего верхнего
-     * контрола: у таблицы с {@link TableColumnLayout} он равен сумме ширин колонок и иначе задавал
-     * бы ширину всей страницы мастера.
-     */
-    private static final class TopControlStack extends Layout
-    {
-        Control topControl;
-
-        @Override
-        protected Point computeSize(Composite composite, int wHint, int hHint, boolean flushCache)
-        {
-            Point size = topControl == null || topControl.isDisposed() ? new Point(0, 0)
-                : topControl.computeSize(wHint, hHint, flushCache);
-            if (wHint != SWT.DEFAULT)
-                size.x = wHint;
-            if (hHint != SWT.DEFAULT)
-                size.y = hHint;
-            return size;
-        }
-
-        @Override
-        protected void layout(Composite composite, boolean flushCache)
-        {
-            Rectangle client = composite.getClientArea();
-            for (Control child : composite.getChildren())
-            {
-                child.setVisible(child == topControl);
-                if (child == topControl)
-                    child.setBounds(client);
-            }
-        }
-    }
-
     /** Строка таблицы: лист дерева изменений и всё, что о нём удалось вычислить. */
-    private static final class PreviewRow
+    private static final class PreviewRow implements OccurrenceContextResolveJob.Target
     {
         /** Узел дерева ({@code PreviewNode} из неэкспортированного пакета LTK — только рефлексия). */
         final Object node;
@@ -253,6 +208,9 @@ public final class RefactoringPreviewTableHook
         String method = ""; //$NON-NLS-1$
         String parent = ""; //$NON-NLS-1$
         String syntaxKind = ""; //$NON-NLS-1$
+        String lineText = ""; //$NON-NLS-1$
+        int highlightStart;
+        int highlightLength;
         /** {@code null} — тип ещё не вычисляли (в ячейке «?»). */
         String parentType;
 
@@ -265,11 +223,52 @@ public final class RefactoringPreviewTableHook
             this.length = length;
         }
 
+        @Override
+        public IFile file()
+        {
+            return file;
+        }
+
         /** Колонки «Метод», «Родитель», «Тип родителя», «Категория» есть только у модулей. */
-        boolean needsContext()
+        @Override
+        public boolean needsContext()
         {
             return offset >= 0 && length > 0 && BslModuleMethodResolver.isBslModule(file);
         }
+
+        /** Позиция вхождения известна заранее — из группы правок LTK. */
+        @Override
+        public int[] resolveRegion()
+        {
+            return offset >= 0 && length > 0 ? new int[] {offset, length} : null;
+        }
+
+        @Override
+        public int[] resolvedRegion()
+        {
+            return resolveRegion();
+        }
+
+        @Override
+        public void applyFast(OccurrenceContextResolveJob.FastContext context)
+        {
+            method = context.method;
+            parent = context.parent;
+            syntaxKind = context.syntaxKind;
+            lineText = context.lineText;
+            highlightStart = context.highlightStart;
+            highlightLength = context.highlightLength;
+        }
+
+        @Override
+        public void applyParentType(String type)
+        {
+            parentType = type;
+        }
+
+        @Override public String occurrenceLineText() { return lineText; }
+        @Override public int occurrenceHighlightStart() { return highlightStart; }
+        @Override public int occurrenceHighlightLength() { return highlightLength; }
     }
 
     /** Таблица вместо дерева изменений и всё её поведение. */
@@ -281,8 +280,8 @@ public final class RefactoringPreviewTableHook
         /** Ширины на момент закрытия были чистым авто-заполнением, а не ручной подгонкой. */
         private static final String KEY_COLUMNS_FILL = "columnsFill"; //$NON-NLS-1$
         private static final String[] WIDTH_KEYS = {"changeWidth", "fileWidth", "fileTypeWidth", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "moduleWidth", "methodWidth", "parentWidth", "parentTypeWidth", "syntaxWidth"}; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
-        private static final int[] DEFAULT_WIDTHS = {320, 200, 90, 260, 180, 180, 220, 90};
+            "moduleWidth", "methodWidth", "parentWidth", "parentTypeWidth", "syntaxWidth", "textWidth"}; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
+        private static final int[] DEFAULT_WIDTHS = {320, 200, 90, 260, 180, 180, 220, 90, 320};
         private static final int MIN_COLUMN_WIDTH = 40;
 
         /** Пометка на меню таблицы: свои пункты дописаны, второй раз не создавать. */
@@ -309,13 +308,11 @@ public final class RefactoringPreviewTableHook
 
         private FormTableInteraction interaction;
         private TableColumn parentTypeColumn;
+        private OccurrenceContextResolveJob contextResolver;
         private IAction toggleAction;
         private ToolBarManager toolBarManager;
         private boolean tableMode;
         private boolean syncing;
-        private Job contextJob;
-        /** Читается фоновым потоком — устаревшая пачка результатов в таблицу не попадает. */
-        private volatile long contextGeneration;
 
         private PreviewTablePane(CheckboxTreeViewer treeViewer, Composite stack, TopControlStack stackLayout,
             Composite tableHost, Table table, CheckboxTableViewer viewer)
@@ -413,6 +410,8 @@ public final class RefactoringPreviewTableHook
                 row -> row.parentType != null ? row.parentType : UNKNOWN_TYPE);
             TableColumn syntaxColumn = addTextColumn(columnLayout, settings, 7,
                 BslOccurrenceContextResolver.COL_SYNTAX_KIND, row -> row.syntaxKind);
+            TableColumn occurrenceTextColumn = OccurrenceContextResolveJob.addTextColumn(viewer).getColumn();
+            applyWidth(columnLayout, occurrenceTextColumn, settings, 8);
 
             viewer.setContentProvider(ArrayContentProvider.getInstance());
             viewer.setCheckStateProvider(new ICheckStateProvider()
@@ -435,6 +434,7 @@ public final class RefactoringPreviewTableHook
                 (item, col) -> cellText(item != null ? item.getData() : null, col));
             interaction.setFilterTextResolver(PreviewTablePane::cellText);
             interaction.setColumnReorderEnabled(true);
+            interaction.setOwnerDrawColumns(occurrenceTextColumn);
             FormTableColumnState.loadOrder(settings, KEY_COL_ORDER, table);
             // true — пользователь уже подстраивал ширины сам, режим заполнения по ширине не навязываем.
             // Ширины, оставшиеся от авто-заполнения, за «подстроенные» не считаются (KEY_COLUMNS_FILL).
@@ -443,6 +443,11 @@ public final class RefactoringPreviewTableHook
             interaction.enableHeaderSort();
             BslOccurrenceContextResolver.applyColumnHeaderTooltips(interaction, parentColumn,
                 parentTypeColumn, syntaxColumn);
+            // Порог MAX_VALUE — окно рефакторинга модальное, кнопки «Рассчитать типы» тут нет:
+            // «Тип родителя» всегда считается автоматически системным проходом, как и раньше.
+            contextResolver = new OccurrenceContextResolveJob(table, viewer, parentTypeColumn,
+                PARENT_TYPE_TITLE, Integer.MAX_VALUE, null);
+            contextResolver.trackViewportScrolling();
             installMarkMenu();
         }
 
@@ -504,7 +509,7 @@ public final class RefactoringPreviewTableHook
             treeViewer.getTree().addListener(SWT.Selection, event -> refreshRows());
             table.addDisposeListener(event ->
             {
-                cancelContextResolution();
+                contextResolver.cancel();
                 BslOccurrenceContextResolver.clearCaches();
                 saveColumnLayout();
                 // Режим — как он оставлен на момент закрытия окна: следующее открытие начнётся с него.
@@ -608,7 +613,7 @@ public final class RefactoringPreviewTableHook
             if (value)
                 reload();
             else
-                cancelContextResolution();
+                contextResolver.cancel();
             stackLayout.topControl = value ? tableHost : treeViewer.getTree();
             stack.layout();
         }
@@ -626,7 +631,7 @@ public final class RefactoringPreviewTableHook
                 collect(provider, root, 0);
             viewer.refresh();
             syncSelectionFromTree();
-            scheduleContextResolution();
+            contextResolver.reschedule(rows);
         }
 
         private void collect(ITreeContentProvider provider, Object node, int depth)
@@ -915,169 +920,6 @@ public final class RefactoringPreviewTableHook
             }
         }
 
-        // ---- Фоновый расчёт колонок ----
-
-        /**
-         * Считает «Метод», «Родитель», «Категория» и «Тип родителя». Первые три —
-         * лексический разбор текста модуля, последний поднимает модель BSL, поэтому проход только
-         * фоновый. Видимые строки идут первыми, устаревшие проходы отсекает поколение.
-         */
-        private void scheduleContextResolution()
-        {
-            cancelContextResolution();
-            List<PreviewRow> pending = new ArrayList<>();
-            for (PreviewRow row : rows)
-            {
-                if (row.needsContext() && row.parentType == null)
-                    pending.add(row);
-            }
-            if (pending.isEmpty())
-            {
-                updateProgressTitle(0, 0);
-                return;
-            }
-            long generation = ++contextGeneration;
-            List<PreviewRow> ordered = visibleFirst(pending);
-            updateProgressTitle(0, ordered.size());
-
-            // Приведение обязательно: Job.create перегружен под ICoreRunnable и IJobFunction
-            Job job = Job.create("Комфорт: контекст вхождений рефакторинга", (IJobFunction)(monitor -> //$NON-NLS-1$
-                resolveContext(ordered, generation, monitor)));
-            job.setSystem(true);
-            contextJob = job;
-            job.schedule();
-        }
-
-        private IStatus resolveContext(List<PreviewRow> ordered, long generation, IProgressMonitor monitor)
-        {
-            Map<IFile, String> texts = new IdentityHashMap<>();
-            List<PreviewRow> batch = new ArrayList<>();
-            int done = 0;
-            for (PreviewRow row : ordered)
-            {
-                if (monitor.isCanceled() || generation != contextGeneration)
-                    return Status.CANCEL_STATUS;
-                // Текст модуля читается один раз на файл; null (файл не прочитан) тоже запоминаем,
-                // иначе каждая строка такого модуля снова полезет на диск.
-                if (!texts.containsKey(row.file))
-                    texts.put(row.file, BslModuleMethodResolver.moduleText(row.file));
-                resolveRow(row, texts.get(row.file));
-                batch.add(row);
-                done++;
-                if (batch.size() >= 25 || done == ordered.size())
-                {
-                    publish(new ArrayList<>(batch), done, ordered.size(), generation);
-                    batch.clear();
-                }
-            }
-            return Status.OK_STATUS;
-        }
-
-        private void resolveRow(PreviewRow row, String content)
-        {
-            if (content == null)
-            {
-                row.parentType = ""; //$NON-NLS-1$
-                return;
-            }
-            row.parent = BslOccurrenceContextResolver.parentText(content, row.offset);
-            row.syntaxKind = BslOccurrenceContextResolver.syntaxKind(content, row.offset, row.length);
-            String method = BslModuleMethodResolver.methodAtLine(row.file, lineOf(content, row.offset));
-            row.method = method != null ? method : ""; //$NON-NLS-1$
-            // Комментарии и строковые литералы модели не принадлежат — типа родителя у них нет,
-            // и модуль ради них не поднимается.
-            if (BslOccurrenceContextResolver.KIND_COMMENT.equals(row.syntaxKind)
-                || BslOccurrenceContextResolver.KIND_LITERAL.equals(row.syntaxKind))
-            {
-                row.parentType = ""; //$NON-NLS-1$
-                return;
-            }
-            row.parentType = BslOccurrenceContextResolver.parentType(row.file, content, row.offset);
-        }
-
-        private void publish(List<PreviewRow> batch, int done, int total, long generation)
-        {
-            Display display = table.getDisplay();
-            if (display == null || display.isDisposed())
-                return;
-            display.asyncExec(() ->
-            {
-                if (table.isDisposed() || generation != contextGeneration)
-                    return;
-                viewer.update(batch.toArray(), null);
-                updateProgressTitle(done, total);
-            });
-        }
-
-        /** Прогресс виден в заголовке колонки: окно мастера модальное, штатный индикатор в нём не показать. */
-        private void updateProgressTitle(int done, int total)
-        {
-            if (parentTypeColumn == null || parentTypeColumn.isDisposed())
-                return;
-            parentTypeColumn.setText(done >= total ? PARENT_TYPE_TITLE
-                : PARENT_TYPE_TITLE + " (" + done + "/" + total + ")"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        }
-
-        private void cancelContextResolution()
-        {
-            contextGeneration++;
-            if (contextJob != null)
-            {
-                contextJob.cancel();
-                contextJob = null;
-            }
-        }
-
-        /** Видимый диапазон таблицы — первым: пользователь видит заполнение сразу, а не через минуту. */
-        private List<PreviewRow> visibleFirst(List<PreviewRow> pending)
-        {
-            int top = table.getTopIndex();
-            int itemHeight = Math.max(table.getItemHeight(), 1);
-            int visible = table.getClientArea().height / itemHeight + 2;
-            Map<PreviewRow, Boolean> onScreen = new IdentityHashMap<>();
-            for (int i = top; i < Math.min(top + visible, table.getItemCount()); i++)
-            {
-                if (table.getItem(i).getData() instanceof PreviewRow row)
-                    onScreen.put(row, Boolean.TRUE);
-            }
-            List<PreviewRow> ordered = new ArrayList<>(pending.size());
-            for (PreviewRow row : pending)
-            {
-                if (onScreen.containsKey(row))
-                    ordered.add(row);
-            }
-            for (PreviewRow row : pending)
-            {
-                if (!onScreen.containsKey(row))
-                    ordered.add(row);
-            }
-            return groupByFile(ordered);
-        }
-
-        /** Внутри порядка «видимые сначала» строки одного модуля идут подряд — текст читается один раз. */
-        private static List<PreviewRow> groupByFile(List<PreviewRow> ordered)
-        {
-            Map<IFile, List<PreviewRow>> byFile = new LinkedHashMap<>();
-            for (PreviewRow row : ordered)
-                byFile.computeIfAbsent(row.file, key -> new ArrayList<>()).add(row);
-            List<PreviewRow> result = new ArrayList<>(ordered.size());
-            for (List<PreviewRow> group : byFile.values())
-                result.addAll(group);
-            return result;
-        }
-
-        private static int lineOf(String content, int offset)
-        {
-            int line = 1;
-            int limit = Math.min(offset, content.length());
-            for (int i = 0; i < limit; i++)
-            {
-                if (content.charAt(i) == '\n')
-                    line++;
-            }
-            return line;
-        }
-
         // ---- Прочее ----
 
         private static String cellText(Object element, int column)
@@ -1094,6 +936,7 @@ public final class RefactoringPreviewTableHook
                 case 5 -> row.parent;
                 case 6 -> row.parentType != null ? row.parentType : UNKNOWN_TYPE;
                 case 7 -> row.syntaxKind;
+                case 8 -> row.lineText;
                 default -> ""; //$NON-NLS-1$
             };
         }

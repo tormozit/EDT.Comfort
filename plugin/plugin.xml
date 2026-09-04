@@ -26,6 +26,7 @@
     <startup class="tormozit.BslOverviewRulerUnfoldHook"/>
     <startup class="tormozit.QuickDiffHook"/>
     <startup class="tormozit.BslRevisionOccurrenceHighlightHook"/>
+    <startup class="tormozit.BslOccurrenceMarkerHook"/>
     <startup class="tormozit.BlameHyperlinkOpenFixHook"/>
     <startup class="tormozit.TextEditorRightClickCaretHook"/>
     <startup class="tormozit.TextEditorCtrlClickSelectWordHook"/>
@@ -84,7 +85,7 @@
     <!-- <startup class="tormozit.ListSelectionThemeHook"/> -->
     <startup class="tormozit.NavigatorFilterHook"/>
     <startup class="tormozit.NavigatorShowInExplorerMenuHook"/>
-    <startup class="tormozit.NavigatorOpenObjectMenuHook"/>
+    <startup class="tormozit.ProjectStructureViewHook"/>
     <startup class="tormozit.FileSearchShowInProjectStructureMenuHook"/>
     <startup class="tormozit.InfobasesViewHook"/>
     <startup class="tormozit.ProjectStructureFilterHook"/>
@@ -135,11 +136,13 @@
     <startup class="tormozit.FilterBySubsystemsDialogHook"/>
     <startup class="tormozit.GitChangedFileMenuHook"/>
     <startup class="tormozit.GitStagingFilterHook"/>
+    <startup class="tormozit.FetchResultDialogHook"/>
     <startup class="tormozit.ValidationChecksFilterHook"/>
     <startup class="tormozit.ProblemFiltersDialogHook"/>
     <startup class="tormozit.ProblemViewHook"/>
     <startup class="tormozit.TextEditorFastSearchKeyBindingHook"/> 
     <startup class="tormozit.ConfigSearchResultsHook"/>
+    <startup class="tormozit.BslReferenceSearchTableHook"/>
     <startup class="tormozit.FileSearchResultsHook"/>
     <startup class="tormozit.GitHistoryHook"/>
     <startup class="tormozit.ConfigSearchDialogHook"/>
@@ -578,6 +581,16 @@
         name="Перейти к родителю в дереве"
         categoryId="tormozit.commands.global"
         description="Перейти к родительскому элементу текущего выделения в дереве с фокусом (Комфорт)"/>
+    <command
+        id="tormozit.dcs.sortFields"
+        name="Сортировать поля схемы компоновки"
+        categoryId="tormozit.commands.global"
+        description="Упорядочить поля набора данных или вычисляемые поля схемы компоновки по указанной колонке (Комфорт)">
+      <commandParameter
+          id="tormozit.dcs.sortFields.key"
+          name="Колонка"
+          optional="false"/>
+    </command>
   </extension>
 
   <extension point="org.eclipse.ui.handlers">
@@ -951,6 +964,10 @@
         class="tormozit.GoToParentInTreeHandler"
         commandId="tormozit.GoToParentInTree">
     </handler>
+    <handler
+        class="tormozit.DcsFieldsSortHandler"
+        commandId="tormozit.dcs.sortFields">
+    </handler>
   </extension>
 
   <extension point="org.eclipse.core.expressions.propertyTesters">
@@ -1016,6 +1033,109 @@
             </with>
           </visibleWhen>
         </command>
+      </menuContribution>
+      <!-- Таблицы конструктора схемы компоновки: меню наполняются через IMenuService
+           (DcsUiUtil.addContextMenuToViewer), поэтому вклады декларативные. -->
+      <menuContribution locationURI="popup:com._1c.g5.v8.dt.dcs.ui.datasets.fields?after=additions">
+        <menu
+            id="tormozit.dcs.sortFields.menu"
+            label="Сортировать по">
+          <command
+              commandId="tormozit.dcs.sortFields"
+              label="Поле"
+              style="push"
+              tooltip="Упорядочить поля текущего уровня по колонке «Поле» (Комфорт)">
+            <parameter
+                name="tormozit.dcs.sortFields.key"
+                value="field"/>
+          </command>
+          <command
+              commandId="tormozit.dcs.sortFields"
+              label="Путь к данным"
+              style="push"
+              tooltip="Упорядочить поля текущего уровня по колонке «Путь к данным» (Комфорт)">
+            <parameter
+                name="tormozit.dcs.sortFields.key"
+                value="path"/>
+          </command>
+          <command
+              commandId="tormozit.dcs.sortFields"
+              label="Заголовок"
+              style="push"
+              tooltip="Упорядочить поля текущего уровня по колонке «Заголовок» (Комфорт)">
+            <parameter
+                name="tormozit.dcs.sortFields.key"
+                value="title"/>
+          </command>
+        </menu>
+      </menuContribution>
+      <menuContribution locationURI="popup:com._1c.g5.v8.dt.dcs.ui.parameters?after=additions">
+        <menu
+            id="tormozit.dcs.sortParameters.menu"
+            label="Сортировать по">
+          <command
+              commandId="tormozit.dcs.sortFields"
+              label="Имя"
+              style="push"
+              tooltip="Упорядочить параметры по колонке «Имя» (Комфорт)">
+            <parameter
+                name="tormozit.dcs.sortFields.key"
+                value="name"/>
+          </command>
+          <command
+              commandId="tormozit.dcs.sortFields"
+              label="Заголовок"
+              style="push"
+              tooltip="Упорядочить параметры по колонке «Заголовок» (Комфорт)">
+            <parameter
+                name="tormozit.dcs.sortFields.key"
+                value="title"/>
+          </command>
+        </menu>
+      </menuContribution>
+      <menuContribution locationURI="popup:com._1c.g5.v8.dt.dcs.ui.dataSets?after=additions">
+        <command
+            commandId="tormozit.dcs.sortFields"
+            label="Сортировать по имени"
+            style="push"
+            tooltip="Упорядочить по имени наборы данных того же уровня, что и выделенный (Комфорт)">
+          <parameter
+              name="tormozit.dcs.sortFields.key"
+              value="name"/>
+        </command>
+      </menuContribution>
+      <menuContribution locationURI="popup:com._1c.g5.v8.dt.dcs.ui.calculated?after=additions">
+        <menu
+            id="tormozit.dcs.sortCalculatedFields.menu"
+            label="Сортировать по">
+          <command
+              commandId="tormozit.dcs.sortFields"
+              label="Путь к данным"
+              style="push"
+              tooltip="Упорядочить вычисляемые поля по колонке «Путь к данным» (Комфорт)">
+            <parameter
+                name="tormozit.dcs.sortFields.key"
+                value="path"/>
+          </command>
+          <command
+              commandId="tormozit.dcs.sortFields"
+              label="Выражение"
+              style="push"
+              tooltip="Упорядочить вычисляемые поля по колонке «Выражение» (Комфорт)">
+            <parameter
+                name="tormozit.dcs.sortFields.key"
+                value="expression"/>
+          </command>
+          <command
+              commandId="tormozit.dcs.sortFields"
+              label="Заголовок"
+              style="push"
+              tooltip="Упорядочить вычисляемые поля по колонке «Заголовок» (Комфорт)">
+            <parameter
+                name="tormozit.dcs.sortFields.key"
+                value="title"/>
+          </command>
+        </menu>
       </menuContribution>
       <menuContribution locationURI="popup:com._1c.g5.v8.dt.ui.problemView?after=additions">
         <command

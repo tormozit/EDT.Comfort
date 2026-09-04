@@ -2730,18 +2730,43 @@ public final class BslModuleSpellCheckHook implements IStartup
         }
     }
 
-    /** Точное совпадение имеет приоритет и останавливает перебор сразу; иначе - первое на расстоянии 1. */
+    /**
+     * issue #460: было фиксированное расстояние 1, не находило опечатки в реальном примере
+     * (расстояние 3 на имени из 27 символов). Порог растёт вместе с длиной набранного слова -
+     * иначе на коротких идентификаторах (3-4 символа) большое фиксированное расстояние даёт
+     * случайные совпадения с несвязанными именами.
+     */
+    private static int maxEditDistance(int typedLength)
+    {
+        if (typedLength < 5)
+            return 1;
+        if (typedLength < 12)
+            return 2;
+        return 3;
+    }
+
+    /**
+     * Точное совпадение имеет приоритет и останавливает перебор сразу; иначе - ближайшее по
+     * расстоянию редактирования (issue #460: до {@link #maxEditDistance(int)} включительно), при
+     * равном расстоянии - первое найденное.
+     */
     private static NameMatch matchInNames(Iterable<String> names, String typed)
     {
+        int max = maxEditDistance(typed.length());
         String close = null;
+        int closeDistance = Integer.MAX_VALUE;
         for (String name : names)
         {
             if (name == null)
                 continue;
             if (name.equals(typed))
                 return new NameMatch(true, name);
-            if (close == null && isEditDistanceOne(typed, name))
+            int distance = editDistance(typed, name, max);
+            if (distance <= max && distance < closeDistance)
+            {
                 close = name;
+                closeDistance = distance;
+            }
         }
         return close != null ? new NameMatch(false, close) : null;
     }
@@ -2946,40 +2971,34 @@ public final class BslModuleSpellCheckHook implements IStartup
         return file != null ? file.getProject() : null;
     }
 
-    /** {@code true}, если a и b различаются ровно на одну вставку/удаление/замену символа. */
-    private static boolean isEditDistanceOne(String a, String b)
+    /**
+     * Расстояние Левенштейна (вставка/удаление/замена символа) между a и b, не более max + 1 -
+     * при превышении max точное значение не считается, дальше нужно только "больше max".
+     */
+    private static int editDistance(String a, String b, int max)
     {
-        if (a.equals(b))
-            return false;
         int la = a.length();
         int lb = b.length();
-        if (Math.abs(la - lb) > 1)
-            return false;
-        int i = 0;
-        int j = 0;
-        boolean editUsed = false;
-        while (i < la && j < lb)
+        if (Math.abs(la - lb) > max)
+            return max + 1;
+        int[] prev = new int[lb + 1];
+        int[] curr = new int[lb + 1];
+        for (int j = 0; j <= lb; j++)
+            prev[j] = j;
+        for (int i = 1; i <= la; i++)
         {
-            if (a.charAt(i) == b.charAt(j))
+            curr[0] = i;
+            char ca = a.charAt(i - 1);
+            for (int j = 1; j <= lb; j++)
             {
-                i++;
-                j++;
-                continue;
+                int cost = ca == b.charAt(j - 1) ? 0 : 1;
+                curr[j] = Math.min(Math.min(curr[j - 1] + 1, prev[j] + 1), prev[j - 1] + cost);
             }
-            if (editUsed)
-                return false;
-            editUsed = true;
-            if (la == lb)
-            {
-                i++;
-                j++;
-            }
-            else if (la > lb)
-                i++;
-            else
-                j++;
+            int[] tmp = prev;
+            prev = curr;
+            curr = tmp;
         }
-        return true;
+        return prev[lb];
     }
 
     private static final String BSL_UI_BUNDLE = "com._1c.g5.v8.dt.bsl.ui"; //$NON-NLS-1$

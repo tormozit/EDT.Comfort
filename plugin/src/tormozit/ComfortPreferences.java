@@ -1042,26 +1042,35 @@ public final class ComfortPreferences
             + (msg != null && !msg.isBlank() ? ": " + msg : ""); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
+    /** Тег журнала «Комфорт» для разбора отказов открытия внешних ссылок. */
+    private static final String URL_LOG_TAG = "Заявка"; //$NON-NLS-1$
+
     private static void openExternalUrl(String url)
     {
 
         Display display = Display.getDefault();
         if (display == null || display.isDisposed())
+        {
+
+            Global.log(URL_LOG_TAG, "выход: Display недоступен"); //$NON-NLS-1$
             return;
+        }
         display.asyncExec(() -> {
 
             try
             {
 
+                Global.log(URL_LOG_TAG, "открытие URL, длина " + url.length() + " симв."); //$NON-NLS-1$ //$NON-NLS-2$
                 IWorkbenchBrowserSupport support =
                     PlatformUI.getWorkbench().getBrowserSupport();
                 support.getExternalBrowser().openURL(URI.create(url).toURL());
+                Global.log(URL_LOG_TAG, "внешний браузер вызван без ошибки"); //$NON-NLS-1$
             }
 
             catch (Exception e)
             {
 
-                Global.log("Открытие URL: " + formatError(e)); //$NON-NLS-1$
+                Global.logError(URL_LOG_TAG, "открытие URL не удалось", e); //$NON-NLS-1$
             }
 
         });

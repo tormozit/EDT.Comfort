@@ -350,6 +350,34 @@ public class PropertyNameIdentifierHook implements IStartup
         return rows;
     }
 
+    /**
+     * Все подписи полей палитры в порядке отображения.
+     *
+     * <p>Нужны, когда активация поля по подписи не сработала: без списка того, что палитра
+     * реально показывает, промах по подписи неотличим от того, что палитра ещё не
+     * достроилась.
+     */
+    static java.util.List<String> labels(Object scene)
+    {
+        java.util.List<String> labels = new java.util.ArrayList<>();
+        Object renderer = Global.invoke(scene, "getRenderer"); //$NON-NLS-1$
+        Object mapObj = renderer != null ? Global.getField(renderer, "viewModelToView") : null; //$NON-NLS-1$
+        if (!(mapObj instanceof java.util.Map<?, ?> map))
+            return labels;
+        for (java.util.Map.Entry<?, ?> entry : map.entrySet())
+        {
+            Object key = entry.getKey();
+            if (key == null || !key.getClass().getName().contains("LabelViewModel")) //$NON-NLS-1$
+                continue;
+            Object text = Global.invoke(key, "getText"); //$NON-NLS-1$
+            if (text == null)
+                text = Global.getField(key, "text"); //$NON-NLS-1$
+            if (text instanceof String value && !value.isBlank())
+                labels.add(value);
+        }
+        return labels;
+    }
+
 
     private static void onNameFocusLost(Object nativeControl, Object typeModel, String initialName)
     {

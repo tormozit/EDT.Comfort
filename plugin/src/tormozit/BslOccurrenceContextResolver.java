@@ -82,6 +82,15 @@ public final class BslOccurrenceContextResolver
     private static final String TIP_PARENT_TYPE = "Тип выражения-родителя"; //$NON-NLS-1$
     private static final String TIP_SYNTAX_KIND = "Свойство, метод, литерал или комментарий"; //$NON-NLS-1$
 
+    /** Диагностика разбора типа родителя — по умолчанию выкл. (в горячем пути, лог рос до ~1 МБ). */
+    private static final boolean LOG_TYPE = false;
+
+    private static void logType(String text)
+    {
+        if (LOG_TYPE)
+            Global.tempLog("parent-type", text); //$NON-NLS-1$
+    }
+
     private static final int TYPE_CACHE_LIMIT = 8192;
     /** {@code путь#штамп#смещение} → тип родителя ({@code ""} — вычислить не удалось). */
     private static final Map<String, String> TYPE_CACHE = new ConcurrentHashMap<>();
@@ -200,6 +209,30 @@ public final class BslOccurrenceContextResolver
      */
     static int[] referenceNodeRegion(IFile file, URI sourceUri, EReference reference, int indexInList)
     {
+        return referenceNodeRegion(file, sourceUri, reference, indexInList, false);
+    }
+
+    /**
+     * @param referenceFirst {@code true} — узел брать по {@code reference} в первую очередь (Xtext-поиск
+     *     ссылок: {@code getEReference()} непустой и указывает прямо на токен вхождения — у объявления
+     *     параметра «Форма» это «Форма» в «(Форма)», а не имя процедуры); {@code false} — сначала
+     *     токен имени обращения ({@code BslReferenceMatch}, где {@code reference} часто null).
+     */
+    static int[] referenceNodeRegion(IFile file, URI sourceUri, EReference reference, int indexInList,
+        boolean referenceFirst)
+    {
+        return referenceNodeRegion(file, sourceUri, reference, indexInList, referenceFirst, null);
+    }
+
+    /**
+     * @param targetName простое имя искомого элемента (напр. «Форма»). Xtext на многие вхождения даёт
+     *     грубый источник (метод целиком, {@code getEReference()==null}); тогда позиция ищется как
+     *     первый неспрятанный лист с этим текстом в поддереве источника (или совпадающий сегмент
+     *     строкового литерала).
+     */
+    static int[] referenceNodeRegion(IFile file, URI sourceUri, EReference reference, int indexInList,
+        boolean referenceFirst, String targetName)
+    {
         if (!BslModuleMethodResolver.isBslModule(file) || sourceUri == null)
             return null;
         String fragment = sourceUri.fragment();
@@ -218,31 +251,138 @@ public final class BslOccurrenceContextResolver
             Resource resource = resourceSet.getResource(moduleUri, true);
             if (!(resource instanceof BslResource bslResource))
                 return null;
-            EObject source = bslResource.getSourceEObject(fragment);
-            Global.tempLog("parent-type", "  referenceNodeRegion frag=" + fragment //$NON-NLS-1$ //$NON-NLS-2$
+            // Xtext-поиск ссылок: getSourceEObjectUri() — обычный EMF-фрагмент, resource.getEObject
+            // возвращает ТОЧНОЕ обращение (StaticFeatureAccess «Форма»). BslResource.getSourceEObject
+            // (для BslReferenceMatch) отображает фрагмент на «исходную» модель и на xtext-фрагменте
+            // может отдать грубый узел (метод целиком) — тогда подсвечивалось имя процедуры.
+            EObject source = null;
+            if (referenceFirst)
+            {
+                try
+                {
+                    source = resource.getEObject(fragment);
+                }
+                catch (RuntimeException ignored)
+                {
+                    source = null;
+                }
+            }
+            if (source == null)
+                source = bslResource.getSourceEObject(fragment);
+            Global.tempLog("ref-node", file.getName() + " frag=" + fragment //$NON-NLS-1$ //$NON-NLS-2$
                 + " source=" + (source != null ? source.eClass().getName() : "null") //$NON-NLS-1$ //$NON-NLS-2$
-                + " container=" + (source != null && source.eContainer() != null //$NON-NLS-1$
-                    ? source.eContainer().eClass().getName() : "null")); //$NON-NLS-1$
+                + " ref=" + (reference != null ? reference.getName() : "null") + " idx=" + indexInList); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             if (source == null)
                 return null;
-            INode node = referenceNode(source, reference, indexInList);
-            if (node == null)
+            INode node = referenceNode(source, reference, indexInList, referenceFirst);
+            INode scope = NodeModelUtils.findActualNodeFor(source);
+            String nodeText = node != null ? node.getText() : null;
+
+            // 1. Строковый литерал: сегмент, совпадающий с искомым именем (иначе последний).
+            if (nodeText != null && nodeText.trim().startsWith("\"")) //$NON-NLS-1$
+            {
+                int[] r = literalSegmentRegion(nodeText, node.getOffset(), node.getLength(), targetName);
+                if (r != null)
+                    return logRegion("literal", r); //$NON-NLS-1$
+            }
+            // 2. Грубый источник (метод и т.п.): первый неспрятанный лист с текстом = искомое имя.
+            if (targetName != null && !targetName.isBlank() && scope != null)
+            {
+                for (org.eclipse.xtext.nodemodel.ILeafNode leaf : scope.getLeafNodes())
+                {
+                    if (!leaf.isHidden() && targetName.equalsIgnoreCase(leaf.getText()))
+                        return logRegion("byName", new int[] {leaf.getOffset(), leaf.getLength()}); //$NON-NLS-1$
+                }
+            }
+            // 3. Первый значимый лист узла (обрезаем ведущие комментарии/пробелы).
+            INode meaningful = firstMeaningfulLeaf(node != null ? node : scope);
+            if (meaningful == null)
                 return null;
-            return new int[] {node.getOffset(), node.getLength()};
+            return logRegion("leaf", new int[] {meaningful.getOffset(), meaningful.getLength()}); //$NON-NLS-1$
         }
         catch (Exception | LinkageError e)
         {
-            Global.tempLog("parent-type", "  referenceNodeRegion EX: " + e); //$NON-NLS-1$ //$NON-NLS-2$
+            logType("  referenceNodeRegion EX: " + e); //$NON-NLS-1$
             return null;
         }
     }
 
-    private static INode referenceNode(EObject source, EReference reference, int indexInList)
+    private static int[] logRegion(String how, int[] region)
     {
-        // Токен вхождения — имя обращения (FeatureAccess.name): у «Справочники.Валюты» это «Валюты»,
-        // у внешнего «ОсновнаяВалюта.ОсновнаяВалюта» — второй «ОсновнаяВалюта» (сразу за точкой).
-        // Так offset попадает за точку, и parentText/parentType видят родителя. У BslReferenceMatch
-        // на обращения к свойствам getReference() часто null, поэтому это основной путь.
+        Global.tempLog("ref-node", "  → " + how + " [" + region[0] + "," + region[1] + "]"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
+        return region;
+    }
+
+    /**
+     * Внутри строкового литерала ({@code "Обработка.X.Форма.Y"}) — сегмент, совпадающий с искомым
+     * именем ({@code targetName}); если имя не задано или не найдено — последний сегмент. Смещение
+     * попадает внутрь кавычек → {@link #syntaxKind}=«Литерал», {@link #parentText} собирает родителя.
+     */
+    private static int[] literalSegmentRegion(String tokenText, int offset, int length, String targetName)
+    {
+        int contentEnd = tokenText.length();
+        while (contentEnd > 0 && (tokenText.charAt(contentEnd - 1) == '"'
+            || Character.isWhitespace(tokenText.charAt(contentEnd - 1))))
+            contentEnd--;
+        int i = 0;
+        int lastStart = -1;
+        int lastLen = 0;
+        while (i < contentEnd)
+        {
+            if (isIdentifierChar(tokenText.charAt(i)))
+            {
+                int segStart = i;
+                while (i < contentEnd && isIdentifierChar(tokenText.charAt(i)))
+                    i++;
+                String seg = tokenText.substring(segStart, i);
+                if (targetName != null && targetName.equalsIgnoreCase(seg))
+                    return new int[] {offset + segStart, seg.length()};
+                lastStart = segStart;
+                lastLen = seg.length();
+            }
+            else
+            {
+                i++;
+            }
+        }
+        if (lastStart >= 0)
+            return new int[] {offset + lastStart, lastLen};
+        return new int[] {offset, length};
+    }
+
+    private static INode firstMeaningfulLeaf(INode node)
+    {
+        if (node == null)
+            return null;
+        for (org.eclipse.xtext.nodemodel.ILeafNode leaf : node.getLeafNodes())
+        {
+            if (!leaf.isHidden())
+            {
+                String text = leaf.getText();
+                if (text != null && !text.isBlank())
+                    return leaf;
+            }
+        }
+        return node;
+    }
+
+    private static boolean isIdentifierChar(char c)
+    {
+        return Character.isLetterOrDigit(c) || c == '_';
+    }
+
+    private static INode referenceNode(EObject source, EReference reference, int indexInList,
+        boolean referenceFirst)
+    {
+        if (referenceFirst)
+        {
+            INode byRef = nodeByReference(source, reference, indexInList);
+            if (byRef != null)
+                return byRef;
+        }
+        // Токен имени обращения (FeatureAccess.name): у «Справочники.Валюты» это «Валюты», у внешнего
+        // «ОсновнаяВалюта.ОсновнаяВалюта» — второй сегмент (сразу за точкой). Так offset попадает за
+        // точку, и parentText/parentType видят родителя.
         EStructuralFeature nameFeature = source.eClass().getEStructuralFeature("name"); //$NON-NLS-1$
         if (nameFeature != null)
         {
@@ -250,17 +390,25 @@ public final class BslOccurrenceContextResolver
             if (!nodes.isEmpty())
                 return nodes.get(nodes.size() - 1);
         }
-        if (reference != null)
+        if (!referenceFirst)
         {
-            List<INode> nodes = NodeModelUtils.findNodesForFeature(source, reference);
-            if (!nodes.isEmpty())
-            {
-                if (indexInList >= 0 && indexInList < nodes.size())
-                    return nodes.get(indexInList);
-                return nodes.get(nodes.size() - 1);
-            }
+            INode byRef = nodeByReference(source, reference, indexInList);
+            if (byRef != null)
+                return byRef;
         }
         return NodeModelUtils.findActualNodeFor(source);
+    }
+
+    private static INode nodeByReference(EObject source, EReference reference, int indexInList)
+    {
+        if (reference == null)
+            return null;
+        List<INode> nodes = NodeModelUtils.findNodesForFeature(source, reference);
+        if (nodes.isEmpty())
+            return null;
+        if (indexInList >= 0 && indexInList < nodes.size())
+            return nodes.get(indexInList);
+        return nodes.get(nodes.size() - 1);
     }
 
     /**
@@ -319,7 +467,7 @@ public final class BslOccurrenceContextResolver
 
         Expression receiver = SmartContentAssistProcessor.ReceiverTypeLabel.receiverInResource(xtextResource,
             dotOffset, offset);
-        Global.tempLog("parent-type", "  receiver path: dotOffset=" + dotOffset //$NON-NLS-1$ //$NON-NLS-2$
+        logType("  receiver path: dotOffset=" + dotOffset //$NON-NLS-1$
             + " receiver=" + (receiver != null ? receiver.eClass().getName() : "null")); //$NON-NLS-1$ //$NON-NLS-2$
         if (receiver == null)
             return ""; //$NON-NLS-1$
@@ -329,7 +477,7 @@ public final class BslOccurrenceContextResolver
         // У загруженного нами ресурса типы в самом выражении пустые (их проставляет конвейер
         // редактора), поэтому берём результат вычислителя, а не состояние модели.
         String computed = SmartContentAssistProcessor.ReceiverTypeLabel.formatTypeItems(computeTypes(provider, receiver));
-        Global.tempLog("parent-type", "  receiver computed types=«" + computed + "»"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        logType("  receiver computed types=«" + computed + "»"); //$NON-NLS-1$ //$NON-NLS-2$
         return computed;
     }
 
@@ -363,7 +511,7 @@ public final class BslOccurrenceContextResolver
         }
         String type = localVar ? "" : moduleObjectTypeName(module, file); //$NON-NLS-1$
         EObject owner = module.getOwner();
-        Global.tempLog("parent-type", "  contextTypeOfOwnProperty: access=«" + access.getName() //$NON-NLS-1$ //$NON-NLS-2$
+        logType("  contextTypeOfOwnProperty: access=«" + access.getName() //$NON-NLS-1$
             + "» localVar=" + localVar //$NON-NLS-1$
             + " owner=" + (owner != null ? owner.eClass().getName() : "null") //$NON-NLS-1$ //$NON-NLS-2$
             + " ownerName=" + (owner != null ? Global.invoke(owner, "getName") : null) //$NON-NLS-1$ //$NON-NLS-2$

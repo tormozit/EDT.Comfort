@@ -339,6 +339,9 @@ public final class ConfigSearchResultsHook implements IStartup
     private static final String MATCH_UNKNOWN_TYPE = "?"; //$NON-NLS-1$
     private static final int MATCH_PATH_COLUMN_WIDTH = 220;
     private static final int MATCH_TEXT_COLUMN_WIDTH = 280;
+    private static final int MATCH_PARENT_COLUMN_WIDTH = 160;
+    private static final int MATCH_PARENT_TYPE_COLUMN_WIDTH = 200;
+    private static final int MATCH_SYNTAX_COLUMN_WIDTH = 150;
 
     // Отложенное довычисление «Текст» для BslResourceMatchTreeTableItem (IMatchItemDeferredCalculation) —
     // штатный элемент результатов "Найти ссылки на объект" по BSL-модулям изначально отдаёт заглушку
@@ -592,7 +595,7 @@ public final class ConfigSearchResultsHook implements IStartup
         TableViewerColumn parentCol = new TableViewerColumn(matchViewer, SWT.LEFT);
         parentCol.getColumn().setText(BslOccurrenceContextResolver.COL_PARENT);
         parentCol.getColumn().setWidth(
-            FormTableColumnState.readWidth(matchSettings, KEY_COL_PARENT_WIDTH, 160, 1));
+            FormTableColumnState.readWidth(matchSettings, KEY_COL_PARENT_WIDTH, MATCH_PARENT_COLUMN_WIDTH, 1));
         parentCol.setLabelProvider(new ColumnLabelProvider()
         {
             @Override
@@ -605,7 +608,8 @@ public final class ConfigSearchResultsHook implements IStartup
         TableViewerColumn parentTypeCol = new TableViewerColumn(matchViewer, SWT.LEFT);
         parentTypeCol.getColumn().setText(MATCH_PARENT_TYPE_TITLE);
         parentTypeCol.getColumn().setWidth(
-            FormTableColumnState.readWidth(matchSettings, KEY_COL_PARENT_TYPE_WIDTH, 200, 1));
+            FormTableColumnState.readWidth(matchSettings, KEY_COL_PARENT_TYPE_WIDTH,
+                MATCH_PARENT_TYPE_COLUMN_WIDTH, 1));
         parentTypeCol.setLabelProvider(new ColumnLabelProvider()
         {
             @Override
@@ -620,7 +624,7 @@ public final class ConfigSearchResultsHook implements IStartup
         TableViewerColumn syntaxCol = new TableViewerColumn(matchViewer, SWT.LEFT);
         syntaxCol.getColumn().setText(BslOccurrenceContextResolver.COL_SYNTAX_KIND);
         syntaxCol.getColumn().setWidth(
-            FormTableColumnState.readWidth(matchSettings, KEY_COL_SYNTAX_WIDTH, 150, 1));
+            FormTableColumnState.readWidth(matchSettings, KEY_COL_SYNTAX_WIDTH, MATCH_SYNTAX_COLUMN_WIDTH, 1));
         syntaxCol.setLabelProvider(new ColumnLabelProvider()
         {
             @Override
@@ -880,8 +884,55 @@ public final class ConfigSearchResultsHook implements IStartup
             cachedMatchTableInteraction.setColumnHidden(cachedMatchTextColumn, !rows.isEmpty() && !anyText,
                 textWhenVisible);
         }
+
+        // Колонки «Родитель»/«Тип родителя»/«Категория» описывают контекст вхождения-ССЫЛКИ и
+        // наполняются только для BslReferenceMatch. В текстовом поиске по конфигурации они всегда
+        // пусты — показываем их только в режиме поиска ссылок, тем же приёмом, что «Путь»/«Текст».
+        boolean referenceSearch = isReferenceSearchResult(treeViewer);
+        setMatchColumnVisible(cachedMatchParentColumn, referenceSearch, KEY_COL_PARENT_WIDTH,
+            MATCH_PARENT_COLUMN_WIDTH);
+        setMatchColumnVisible(cachedMatchParentTypeColumn, referenceSearch, KEY_COL_PARENT_TYPE_WIDTH,
+            MATCH_PARENT_TYPE_COLUMN_WIDTH);
+        setMatchColumnVisible(cachedMatchSyntaxColumn, referenceSearch, KEY_COL_SYNTAX_WIDTH,
+            MATCH_SYNTAX_COLUMN_WIDTH);
+
         scheduleVisibleDeferredCalculations(matchViewer);
         return tableItems.size();
+    }
+
+    /**
+     * {@code true} — результаты команды «Найти ссылки на объект»
+     * ({@code FindReferencesSearchInput}), а не текстового поиска по конфигурации
+     * ({@code TextSearchInput}). Оба класса — внутренние для бандла search-ui и не экспортированы,
+     * поэтому проверка по простому имени класса (как в {@link #isDeferredCalculationItem}).
+     */
+    private static boolean isReferenceSearchResult(TreeViewer treeViewer)
+    {
+        Object searchResult = treeViewer.getInput();
+        if (searchResult == null)
+            return false;
+        Object query = Global.invoke(searchResult, "getQuery"); //$NON-NLS-1$
+        if (query == null)
+            return false;
+        Object searchInput = Global.getField(query, "searchInput"); //$NON-NLS-1$
+        return searchInput != null
+            && "FindReferencesSearchInput".equals(searchInput.getClass().getSimpleName()); //$NON-NLS-1$
+    }
+
+    /**
+     * Показать/скрыть колонку таблицы вхождений через {@link FormTableInteraction#setColumnHidden}
+     * (ширина 0, авто-заполнение её не растягивает). Живая ширина важнее сохранённой — иначе каждый
+     * refresh сбрасывал бы ручную подгонку пользователя.
+     */
+    private static void setMatchColumnVisible(TableColumn column, boolean visible, String widthKey,
+        int defaultWidth)
+    {
+        if (column == null || column.isDisposed() || cachedMatchTableInteraction == null)
+            return;
+        int widthWhenVisible = column.getWidth();
+        if (widthWhenVisible <= 0)
+            widthWhenVisible = FormTableColumnState.readWidth(dialogSettings(), widthKey, defaultWidth, 1);
+        cachedMatchTableInteraction.setColumnHidden(column, !visible, widthWhenVisible);
     }
 
     /**

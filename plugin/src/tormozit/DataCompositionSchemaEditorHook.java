@@ -13,10 +13,13 @@ import javax.xml.stream.XMLStreamException;
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.jface.dialogs.IPageChangedListener;
 import org.eclipse.jface.dialogs.PageChangedEvent;
+import org.eclipse.jface.viewers.ColumnViewer;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
+import org.eclipse.swt.widgets.Menu;
+import org.eclipse.swt.widgets.MenuItem;
 import org.eclipse.swt.widgets.ToolBar;
 import org.eclipse.swt.widgets.ToolItem;
 import org.eclipse.ui.IEditorPart;
@@ -38,6 +41,7 @@ import com._1c.g5.v8.dt.dcs.model.schema.DataCompositionSchema;
 import com._1c.g5.v8.dt.dcs.ui.DataCompositionSchemaEditor;
 import com._1c.g5.v8.dt.dcs.ui.DcsEvent;
 import com._1c.g5.v8.dt.dcs.ui.DcsEvent.DcsEventType;
+import com._1c.g5.v8.dt.dcs.ui.EditorPage;
 import com._1c.g5.v8.dt.dcs.ui.datasets.DataSets;
 import com._1c.g5.v8.dt.dcs.ui.datasets.DataSetsLoadHandler;
 import com._1c.g5.v8.dt.dcs.util.DcsV8Serializer;
@@ -139,6 +143,7 @@ public class DataCompositionSchemaEditorHook implements IStartup
             return;
         // page: com._1c.g5.v8.dt.internal.md.ui.editors.template.TemplateEditorDcsPage
         DataCompositionSchemaEditor dcsEditor = (DataCompositionSchemaEditor) page.getEmbeddedEditor();
+        installResourcesSortMenu(dcsEditor);
         DataSets firstPage = (DataSets) dcsEditor.getPages().get(0);
         ToolBar toolbar = findToolbar((Composite) firstPage);
         if (toolbar == null || toolbar.isDisposed()) {
@@ -183,6 +188,42 @@ public class DataCompositionSchemaEditorHook implements IStartup
             toolbar.pack();
             toolbar.getParent().layout(true);
         });
+    }
+
+    /**
+     * Вешает на таблицу ресурсов пункт «Сортировать по полю» ({@link DcsFieldsSortHandler}).
+     *
+     * <p>Своего контекстного меню у этой таблицы EDT не создаёт: в
+     * {@code DcsUiUtil.addContextMenuToViewer} идентификатор меню передан как {@code null},
+     * поэтому и меню не наполняется, и точки для декларативного вклада нет — меню заводим сами.
+     * Пакет {@code ...dcs.ui.resources} бандл не экспортирует, поэтому страница и её просмотрщик
+     * доступны только по имени класса и рефлексией.
+     */
+    private void installResourcesSortMenu(DataCompositionSchemaEditor dcsEditor)
+    {
+        for (EditorPage editorPage : dcsEditor.getPages())
+        {
+            if (!"com._1c.g5.v8.dt.dcs.ui.resources.Resources".equals(editorPage.getClass().getName())) //$NON-NLS-1$
+                continue;
+            Object viewer = Global.invoke(editorPage, "getViewer"); //$NON-NLS-1$
+            if (!(viewer instanceof ColumnViewer resourcesViewer))
+                return;
+            // getControl() отдаёт TableEx — композит-обёртку. Правый щелчок приходит во
+            // вложенный контрол данных, на него же вешает меню и сама EDT
+            // (DcsUiUtil.addContextMenuToViewer: table.getDataControl().setMenu(...)).
+            Object dataControl = Global.invoke(resourcesViewer.getControl(), "getDataControl"); //$NON-NLS-1$
+            Control control =
+                dataControl instanceof Control child ? child : resourcesViewer.getControl();
+            if (control == null || control.isDisposed() || control.getMenu() != null)
+                return;
+            Menu menu = new Menu(control);
+            MenuItem item = new MenuItem(menu, SWT.PUSH);
+            item.setText("Сортировать по полю"); //$NON-NLS-1$
+            item.addListener(SWT.Selection, event -> DcsFieldsSortHandler
+                .sortResourcesByField(dcsEditor.getControlContext(), resourcesViewer));
+            control.setMenu(menu);
+            return;
+        }
     }
 
     public static String exportToFile(DtGranularEditorEmbeddedEditorPage<?> page)

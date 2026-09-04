@@ -1,6 +1,7 @@
 package tormozit;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -86,7 +87,19 @@ public final class NavigatorFuzzySearch
     /** Лучший фрагмент для серого квалификатора справа от имени (не само имя). */
     public static QualifierMatch findQualifierMatch(MdObject mdObject, String pattern, String objectName)
     {
-        if (mdObject == null || pattern == null || pattern.trim().isEmpty())
+        if (mdObject == null)
+            return null;
+        return findQualifierMatch(collectHiddenTexts(mdObject), pattern, objectName);
+    }
+
+    /**
+     * То же для произвольного набора свойств строки, кроме имени: заголовок и подсказка элемента
+     * формы и т.п. Объект метаданных здесь ни при чём — считаются только переданные тексты.
+     */
+    public static QualifierMatch findQualifierMatch(Collection<String> hiddenTexts, String pattern,
+            String objectName)
+    {
+        if (hiddenTexts == null || hiddenTexts.isEmpty() || pattern == null || pattern.trim().isEmpty())
             return null;
 
         String safeName = objectName != null ? objectName.trim() : ""; //$NON-NLS-1$
@@ -94,7 +107,7 @@ public final class NavigatorFuzzySearch
         QualifierMatch best = null;
         List<QualifierMatch> parts = new ArrayList<>();
 
-        for (String hidden : collectHiddenTexts(mdObject))
+        for (String hidden : hiddenTexts)
         {
             QualifierMatch candidate = tryQualifier(hidden, pattern, safeName);
             if (candidate == null)

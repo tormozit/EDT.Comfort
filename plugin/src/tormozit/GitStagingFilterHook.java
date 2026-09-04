@@ -270,6 +270,24 @@ public final class GitStagingFilterHook implements IStartup
         return "colWidth" + COLUMN_KEYS[logical]; //$NON-NLS-1$
     }
 
+    /** Сортировка — общая для stagedViewer/unstagedViewer (как порядок/ширина колонок). */
+    private static String sortColumnKey()
+    {
+        return "sortColumn"; //$NON-NLS-1$
+    }
+
+    private static String sortAscendingKey()
+    {
+        return "sortAscending"; //$NON-NLS-1$
+    }
+
+    private static void saveSortState(int logical, boolean ascending)
+    {
+        IDialogSettings settings = columnSettings();
+        settings.put(sortColumnKey(), logical);
+        settings.put(sortAscendingKey(), ascending);
+    }
+
     private static int[] defaultOrder()
     {
         int[] result = new int[COLUMN_COUNT];
@@ -676,6 +694,7 @@ public final class GitStagingFilterHook implements IStartup
 
         GitStagingTreeInteraction interaction = new GitStagingTreeInteraction(tree, viewer);
         interaction.install();
+        interaction.restoreSort(settings);
         // Колонки растягиваются с панелью (issue #273). Ставится после installColumns: подгонка живёт на
         // дереве, поэтому переживает их пересоздание, а первичный проход идёт по уже готовым колонкам.
         ColumnAutoFit.install(tree, t -> stagingWidthBudget(view, t));
@@ -1769,10 +1788,32 @@ public final class GitStagingFilterHook implements IStartup
         {
             sortAscending = sortLogical == logical ? !sortAscending : true;
             sortLogical = logical;
+            applySort(logical, sortAscending, column, true);
+            saveSortState(logical, sortAscending);
+        }
 
-            Object[] selection = captureSelection();
+        /** Восстановить сохранённую сортировку при открытии панели (без записи настроек). */
+        void restoreSort(IDialogSettings settings)
+        {
+            if (settings.get(sortColumnKey()) == null)
+                return;
+            int logical = settings.getInt(sortColumnKey());
+            if (logical < 0 || logical >= COLUMN_COUNT)
+                return;
+            boolean ascending = settings.get(sortAscendingKey()) == null || settings.getBoolean(sortAscendingKey());
+            TreeColumn column = columnByLogical(tree, logical);
+            if (column == null)
+                return;
+            sortLogical = logical;
+            sortAscending = ascending;
+            applySort(logical, ascending, column, false);
+        }
+
+        private void applySort(int logical, boolean ascending, TreeColumn column, boolean keepSelection)
+        {
+            Object[] selection = keepSelection ? captureSelection() : new Object[0];
             int sortLogicalFinal = logical;
-            boolean ascendingFinal = sortAscending;
+            boolean ascendingFinal = ascending;
             viewer.setComparator(new ViewerComparator()
             {
                 @Override
@@ -1787,8 +1828,9 @@ public final class GitStagingFilterHook implements IStartup
                 }
             });
             tree.setSortColumn(column);
-            tree.setSortDirection(sortAscending ? SWT.UP : SWT.DOWN);
-            restoreSelection(selection);
+            tree.setSortDirection(ascending ? SWT.UP : SWT.DOWN);
+            if (keepSelection)
+                restoreSelection(selection);
         }
 
         private Object[] captureSelection()

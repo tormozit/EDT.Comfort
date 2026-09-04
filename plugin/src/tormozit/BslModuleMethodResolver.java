@@ -33,6 +33,9 @@ public final class BslModuleMethodResolver
     private static final Map<String, String> RESULT_CACHE = new ConcurrentHashMap<>();
     /** {@code путь#штамп} → текст модуля (чтобы несколько вхождений в одном модуле не читали диск повторно). */
     private static final Map<String, String> FILE_TEXT_CACHE = new ConcurrentHashMap<>();
+    /** {@code путь#штамп} → {@link Document} модуля: {@code new Document(text)} на КАЖДОЕ вхождение
+     * (сотни строк одного модуля) — заметная доля стоимости на крупных выборках. */
+    private static final Map<String, IDocument> DOC_CACHE = new ConcurrentHashMap<>();
 
     private BslModuleMethodResolver()
     {
@@ -53,12 +56,30 @@ public final class BslModuleMethodResolver
         if (cached != null)
             return cached;
 
+        IDocument doc = document(file, stamp);
+        if (doc == null)
+            return null;
+        String name = GetRef.findEnclosingMethodName(doc, line1Based);
+        String resolved = name != null ? name : ""; //$NON-NLS-1$
+        putBounded(RESULT_CACHE, key, resolved, RESULT_CACHE_LIMIT);
+        return resolved;
+    }
+
+    /** {@link Document} модуля с кэшем по {@code путь#штамп} — только чтение, потокобезопасно для наших нужд. */
+    private static IDocument document(IFile file, long stamp)
+    {
+        String key = file.getFullPath() + "#" + stamp; //$NON-NLS-1$
+        IDocument cached = DOC_CACHE.get(key);
+        if (cached != null)
+            return cached;
         String text = fileText(file, stamp);
         if (text == null)
             return null;
-        String resolved = resolveInText(text, line1Based);
-        putBounded(RESULT_CACHE, key, resolved, RESULT_CACHE_LIMIT);
-        return resolved;
+        IDocument doc = new Document(text);
+        if (DOC_CACHE.size() >= FILE_TEXT_CACHE_LIMIT)
+            DOC_CACHE.clear();
+        DOC_CACHE.put(key, doc);
+        return doc;
     }
 
     /**
@@ -104,10 +125,9 @@ public final class BslModuleMethodResolver
         if (!anyMissing)
             return result;
 
-        String text = fileText(file, stamp);
-        if (text == null)
+        IDocument doc = document(file, stamp);
+        if (doc == null)
             return null;
-        IDocument doc = new Document(text);
         for (Integer line : lines1Based)
         {
             if (line == null || line < 1 || result.containsKey(line))
@@ -140,14 +160,6 @@ public final class BslModuleMethodResolver
         String name = file.getName();
         return name != null && name.length() >= 4
             && name.regionMatches(true, name.length() - 4, ".bsl", 0, 4); //$NON-NLS-1$
-    }
-
-    private static String resolveInText(String text, int line1Based)
-    {
-        if (text.isEmpty())
-            return ""; //$NON-NLS-1$
-        String name = GetRef.findEnclosingMethodName(new Document(text), line1Based);
-        return name != null ? name : ""; //$NON-NLS-1$
     }
 
     private static String resultKey(IFile file, long stamp, int line1Based)

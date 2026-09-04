@@ -1425,6 +1425,19 @@ public final class ValidationChecksFilterHook implements IStartup
      * включения проверок переключаются штатным {@code ChecksTreeViewer.setItemChecked},
      * то есть через тот же код EDT, что и клик в дереве (он же ставит
      * {@code dirty} и {@code ICheckSettings.setEnabled}).
+     *
+     * <p>Таблица — {@code SWT.MULTI} (issue 467): множественное выделение строк
+     * обеспечивает сам {@link FormTableInteraction} (уже умеет это для таблиц с
+     * {@code CheckboxTableViewer}, ср. {@code RefactoringPreviewTableHook}), с
+     * деревом синхронизируется только первая выделенная строка. Пункт
+     * контекстного меню «Установить критичность» ({@link #installSeverityMenu})
+     * применяет критичность разом ко всем выделенным.
+     *
+     * <p>Синхронизация выделения с деревом ({@link #syncSelectionToTree}) —
+     * тяжёлая (пересборка панели параметров текущей проверки), поэтому запускается
+     * через {@code asyncExec}, а не прямо в обработчике {@code SWT.Selection}: иначе
+     * она заслоняла собой перерисовку подсветки выделенной строки (issue 467,
+     * «медленно обновляется подсветка текущей строки»).
      */
     /**
      * То же, что {@link StackLayout}, но предпочтительный размер берётся только
@@ -1567,7 +1580,7 @@ public final class ValidationChecksFilterHook implements IStartup
             // (отбор по значению ячейки, сортировка, refresh) пересоздаёт TableItem'ы,
             // и проставленные вручную пометки пропадают, хотя проверки остаются включёнными.
             CheckboxTableViewer viewer = new CheckboxTableViewer(new Table(columnHost, SWT.CHECK
-                | SWT.FULL_SELECTION));
+                | SWT.FULL_SELECTION | SWT.MULTI));
             Table table = viewer.getTable();
             table.setHeaderVisible(true);
             ThemeAwareColors.applyGridLines(table);
@@ -1637,6 +1650,56 @@ public final class ValidationChecksFilterHook implements IStartup
                 || settings.get(KEY_COL_CATEGORY_WIDTH) != null;
             interaction.install(hasSavedWidths);
             interaction.enableHeaderSort();
+            installSeverityMenu();
+        }
+
+        /**
+         * Пункт контекстного меню «Установить критичность» — применяет выбранную
+         * критичность сразу ко всем отмеченным строкам таблицы (issue 467).
+         *
+         * <p>Меню создаём заранее (до первого показа): штатный
+         * {@code FormTableInteraction.ensureCopyMenu()} добавляет «Копировать» и
+         * пересборщик пунктов отбора в уже существующее меню таблицы, если оно
+         * есть, — своих пунктов не трогает.
+         */
+        private void installSeverityMenu()
+        {
+            Menu menu = new Menu(table);
+            table.setMenu(menu);
+
+            MenuItem severityItem = new MenuItem(menu, SWT.CASCADE);
+            severityItem.setText("Установить критичность"); //$NON-NLS-1$
+            Menu severityMenu = new Menu(severityItem);
+            severityItem.setMenu(severityMenu);
+            for (IssueSeverity severity : IssueSeverity.values())
+            {
+                MenuItem item = new MenuItem(severityMenu, SWT.PUSH);
+                item.setText(localizedSeverity(severity));
+                item.setImage(severityImage(severity));
+                item.addListener(SWT.Selection, event -> applySeverityToSelection(severity));
+            }
+            new MenuItem(menu, SWT.SEPARATOR);
+            menu.addListener(SWT.Show,
+                event -> severityItem.setEnabled(!viewer.getStructuredSelection().isEmpty()));
+        }
+
+        /** Применяет критичность ко всем проверкам из текущего выделения строк таблицы. */
+        private void applySeverityToSelection(IssueSeverity severity)
+        {
+            IStructuredSelection selection = viewer.getStructuredSelection();
+            if (selection.isEmpty())
+                return;
+            for (Object element : selection.toList())
+            {
+                if (element instanceof CheckRow row)
+                    row.settings.setSeverity(severity);
+            }
+            // Как и штатный список критичности в панели справа (см. javadoc
+            // класса, lambda severity-комбо): просто refresh, без setDirty —
+            // штатный код тоже его не выставляет при смене критичности.
+            treeViewer.refresh();
+            viewer.refresh();
+            Debug.temp("applySeverityToSelection: severity=" + severity + " rows=" + selection.size()); //$NON-NLS-1$ //$NON-NLS-2$
         }
 
         private TableColumn addTextColumn(TableColumnLayout columnLayout, IDialogSettings settings, String title,
@@ -1660,7 +1723,18 @@ public final class ValidationChecksFilterHook implements IStartup
                 if (event.detail == SWT.CHECK)
                     toggleCheck(event.item);
                 else
-                    syncSelectionToTree();
+                {
+                    // Синхронизация с деревом пересобирает панель параметров
+                    // текущей проверки (issue 401) — тяжёлая работа на UI-потоке.
+                    // Выполненная прямо в обработчике SWT.Selection, она заслоняет
+                    // собой перерисовку подсветки строки: нативное выделение уже
+                    // выставлено, но закрашивается только после того, как этот
+                    // обработчик отработает целиком (issue 467, «медленно
+                    // обновляется подсветка текущей строки»). asyncExec отдаёт
+                    // управление в цикл событий — подсветка успевает
+                    // перерисоваться до начала тяжёлой синхронизации.
+                    table.getDisplay().asyncExec(this::syncSelectionToTree);
+                }
             });
             treeViewer.addSelectionChangedListener(event -> syncSelectionFromTree());
 
@@ -1694,7 +1768,7 @@ public final class ValidationChecksFilterHook implements IStartup
 
         private void syncSelectionToTree()
         {
-            if (syncing || !tableMode)
+            if (table.isDisposed() || syncing || !tableMode)
                 return;
             if (!(viewer.getStructuredSelection().getFirstElement() instanceof CheckRow row))
                 return;
@@ -1843,19 +1917,60 @@ public final class ValidationChecksFilterHook implements IStartup
             });
         }
 
-        /** Пересобирает строки по тем же правилам, по которым отбирается дерево. */
+        /**
+         * Пересобирает строки по тем же правилам, по которым отбирается дерево.
+         *
+         * <p>Строки — новые объекты {@link CheckRow} (см. {@link #collect}), поэтому
+         * штатное сохранение выделения у {@link CheckboxTableViewer} (оно ищет
+         * прежние элементы по {@code equals}/identity) не срабатывает — выделение
+         * пропадало бы при любом пересчёте, в т.ч. после группового «Установить
+         * критичность» (issue 467: тот же {@code refresh()} дерева, что обновляет
+         * иконки в нём, попутно взводит {@link #scheduleReload} через
+         * {@link ValidationSearchFilter#addTreeRefreshListener}). Восстанавливаем
+         * выделение по узлам дерева ({@link IChecksTreeNode} — стабильные объекты,
+         * см. {@link #syncSelectionToTree}), а не по прежним {@code CheckRow}.
+         *
+         * <p>Если ни одна из прежде выделенных строк не сохранилась (например, они
+         * перестали проходить отбор), выделение подтягиваем от дерева — как раньше.
+         */
         void reload()
         {
             if (table.isDisposed() || !(treeViewer.getContentProvider() instanceof ITreeContentProvider tcp))
                 return;
             filter.invalidate();
+            List<IChecksTreeNode> selectedNodes = new ArrayList<>();
+            for (Object element : viewer.getStructuredSelection().toList())
+            {
+                if (element instanceof CheckRow row)
+                    selectedNodes.add(row.node);
+            }
             rows.clear();
             for (Object root : tcp.getElements(treeViewer.getInput()))
                 collect(tcp, root, null);
             labels.setMatcher(filter.currentMatcher());
             viewer.refresh();
-            syncSelectionFromTree();
+            if (!restoreSelection(selectedNodes))
+                syncSelectionFromTree();
             Debug.temp("ChecksTablePane.reload: rows=" + rows.size()); //$NON-NLS-1$
+        }
+
+        /** @return {@code true}, если хотя бы одна из строк с этими узлами дерева нашлась среди новых {@link #rows}. */
+        private boolean restoreSelection(List<IChecksTreeNode> nodes)
+        {
+            if (nodes.isEmpty() || table.isDisposed())
+                return false;
+            List<CheckRow> matched = new ArrayList<>();
+            for (CheckRow row : rows)
+            {
+                if (nodes.contains(row.node))
+                    matched.add(row);
+            }
+            if (matched.isEmpty())
+                return false;
+            viewer.setSelection(new StructuredSelection(matched), true);
+            if (interaction != null)
+                interaction.revealSelection();
+            return true;
         }
 
         /** Обновляет уже собранные строки (значки, пометки), не пересобирая состав. */

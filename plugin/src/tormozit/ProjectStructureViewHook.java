@@ -2,6 +2,8 @@ package tormozit;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
+import java.util.Set;
 
 import org.eclipse.core.commands.AbstractHandler;
 import org.eclipse.core.commands.ExecutionEvent;
@@ -9,8 +11,11 @@ import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IFolder;
 import org.eclipse.core.resources.IResource;
 import org.eclipse.emf.ecore.EObject;
+import org.eclipse.jface.viewers.IOpenListener;
 import org.eclipse.jface.viewers.ISelection;
 import org.eclipse.jface.viewers.IStructuredSelection;
+import org.eclipse.jface.viewers.OpenEvent;
+import org.eclipse.jface.viewers.StructuredViewer;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.events.MenuAdapter;
 import org.eclipse.swt.events.MenuEvent;
@@ -20,6 +25,7 @@ import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Menu;
 import org.eclipse.swt.widgets.MenuItem;
 import org.eclipse.swt.widgets.Tree;
+import org.eclipse.ui.IEditorInput;
 import org.eclipse.ui.IPartListener2;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.IViewPart;
@@ -29,27 +35,34 @@ import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.IWorkbenchPart;
 import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
+import org.eclipse.ui.PartInitException;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.handlers.IHandlerService;
 import org.eclipse.ui.navigator.CommonViewer;
+import org.eclipse.ui.part.FileEditorInput;
 
 /**
- * Добавляет «Открыть объект» и «Показать в навигаторе» в подменю «Комфорт»
- * дерева «Структура проекта» ({@code org.eclipse.ui.navigator.ProjectExplorer} —
+ * Доработки дерева «Структура проекта» ({@code org.eclipse.ui.navigator.ProjectExplorer} —
  * подтверждено логом {@code isNavigatorView}, вопреки комментариям в остальном коде
  * плагина, где «Навигатор» — это {@code com._1c.g5.v8.dt.ui2.navigator},
- * {@link Global#NAVIGATOR_VIEW_ID}; это ДВА разных дерева) — те же команды,
- * что уже есть для изменённых файлов Git ({@link GitChangedFileMenuHook}).
- * <p>
- * Ctrl+T в этом дереве также подключён (см. {@link #installFocusNavigatorOverride}) —
+ * {@link Global#NAVIGATOR_VIEW_ID}; это ДВА разных дерева):
+ * <ul>
+ * <li>«Открыть объект» и «Показать в навигаторе» в подменю «Комфорт» — те же команды,
+ * что уже есть для изменённых файлов Git ({@link GitChangedFileMenuHook});</li>
+ * <li>Ctrl+T подключён к выделению дерева (см. {@link #installFocusNavigatorOverride}) —
  * подменяет обработчик штатной {@value #FOCUS_NAVIGATOR_COMMAND_ID}, которая иначе
- * работает по активному редактору, а не по выделению в дереве.
+ * работает по активному редактору;</li>
+ * <li>двойной клик по файлу-исходнику объекта ({@code .mdo}/{@code .form}/…) всегда
+ * открывает текстовый (XML) редактор — штатно EDT активирует уже открытый объектный
+ * редактор этого объекта (см. {@link #installOpenInTextEditorOverride}).</li>
+ * </ul>
  */
-public final class NavigatorOpenObjectMenuHook implements IStartup
+public final class ProjectStructureViewHook implements IStartup
 {
     private static final String PROJECT_EXPLORER_ID = "org.eclipse.ui.navigator.ProjectExplorer"; //$NON-NLS-1$
     private static final String FOCUS_NAVIGATOR_COMMAND_ID = "com._1c.g5.v8.dt.ui.commands.focusNavigator"; //$NON-NLS-1$
     private static final String HOOK_MARKER = "tormozit.navigatorOpenObjectHook"; //$NON-NLS-1$
+    private static final String OPEN_OVERRIDE_MARKER = "tormozit.navigatorOpenInTextEditorHook"; //$NON-NLS-1$
     private static final String ITEM_TEXT_OPEN = "Открыть объект"; //$NON-NLS-1$
     private static final String ITEM_TOOLTIP_OPEN =
             "Открыть редактор объекта метаданных выбранного элемента навигатора" //$NON-NLS-1$
@@ -58,6 +71,21 @@ public final class NavigatorOpenObjectMenuHook implements IStartup
     private static final String ITEM_TOOLTIP_REVEAL =
             "Выделить и прокрутить к объекту в дереве навигатора" //$NON-NLS-1$
             + Global.pluginSignForTooltip();
+
+    /** ID встроенного в Eclipse простого текстового редактора; литералом — как в {@code FileSearchResultsHook}. */
+    private static final String DEFAULT_TEXT_EDITOR_ID = "org.eclipse.ui.DefaultTextEditor"; //$NON-NLS-1$
+
+    /** «Открыть с помощью → Редактор XML» (org.eclipse.wst.xml.ui). */
+    private static final String XML_EDITOR_ID =
+        "org.eclipse.wst.xml.ui.internal.tabletree.XMLMultiPageEditorPart"; //$NON-NLS-1$
+
+    /** Исходники объектов метаданных, для которых двойной клик открывает XML-редактор. */
+    private static final Set<String> XML_SOURCE_EXTENSIONS = Set.of(
+        "mdo", "form", "cmi", "xml", "mxlx"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
+
+    /** Как в {@code org.eclipse.ui.actions.OpenWithMenu}: не переиспользовать чужой редактор по тому же input. */
+    private static final int OPEN_WITH_MATCH =
+        IWorkbenchPage.MATCH_INPUT | IWorkbenchPage.MATCH_ID | IWorkbenchPage.MATCH_IGNORE_SIZE;
 
     @Override
     public void earlyStartup()
@@ -131,6 +159,9 @@ public final class NavigatorOpenObjectMenuHook implements IStartup
         Tree tree = viewer.getTree();
         if (tree == null || tree.isDisposed())
             return;
+
+        installOpenInTextEditorOverride(viewer);
+
         if (Boolean.TRUE.equals(tree.getData(HOOK_MARKER)))
             return;
 
@@ -154,6 +185,89 @@ public final class NavigatorOpenObjectMenuHook implements IStartup
         });
 
         installFocusNavigatorOverride(navigator, viewer);
+    }
+
+    /**
+     * Штатно двойной клик по {@code .mdo} в дереве открывает текстовый редактор, но если
+     * объектный редактор этого объекта уже открыт — EDT активирует его, а не текст. Снимаем
+     * штатный open-listener ({@code OpenAndLinkWithEditorHelper$InternalListener}, срабатывает
+     * по {@code SWT.DefaultSelection}) и ставим свой: для файлов-исходников объектов
+     * ({@link #XML_SOURCE_EXTENSIONS}) явно открываем XML-редактор по его id (открытый объектный
+     * редактор по {@code MATCH_ID} не подхватывается), для остальных элементов — делегируем
+     * снятому listener'у, то есть прежнее поведение. «Связь с редактором» живёт в отдельном
+     * {@code selectionChanged} того же объекта и не затрагивается. Приём — как в
+     * {@code ProblemViewHook.installOpenOverride}.
+     */
+    private static void installOpenInTextEditorOverride(CommonViewer viewer)
+    {
+        Tree tree = viewer.getTree();
+        if (Boolean.TRUE.equals(tree.getData(OPEN_OVERRIDE_MARKER)))
+            return;
+
+        IOpenListener stock = findStockOpenListener(viewer);
+        if (stock == null)
+            return;
+        tree.setData(OPEN_OVERRIDE_MARKER, Boolean.TRUE);
+
+        viewer.removeOpenListener(stock);
+        viewer.addOpenListener((OpenEvent event) -> {
+            IFile file = sourceFileToOpenAsText(event.getSelection());
+            if (file != null)
+                openInTextEditor(file);
+            else
+                stock.open(event);
+        });
+        tree.addDisposeListener(e -> tree.setData(OPEN_OVERRIDE_MARKER, null));
+    }
+
+    private static IOpenListener findStockOpenListener(StructuredViewer viewer)
+    {
+        Object listenerList = Global.getField(viewer, "openListeners"); //$NON-NLS-1$
+        Object raw = listenerList != null ? Global.invoke(listenerList, "getListeners") : null; //$NON-NLS-1$
+        if (!(raw instanceof Object[] listeners))
+            return null;
+        for (Object listener : listeners)
+        {
+            if (listener instanceof IOpenListener open
+                && "org.eclipse.ui.OpenAndLinkWithEditorHelper$InternalListener" //$NON-NLS-1$
+                    .equals(listener.getClass().getName()))
+                return open;
+        }
+        return null;
+    }
+
+    /**
+     * Единственный выделенный элемент — файл-исходник объекта метаданных ({@code .mdo} и т.п.):
+     * такой открываем текстом. Иначе {@code null} — штатное открытие.
+     */
+    private static IFile sourceFileToOpenAsText(ISelection selection)
+    {
+        if (!(selection instanceof IStructuredSelection structured) || structured.size() != 1)
+            return null;
+        IResource resource = NavigatorResourceResolver.resolve(structured.getFirstElement());
+        if (!(resource instanceof IFile file) || !file.exists())
+            return null;
+        String ext = file.getFileExtension();
+        return ext != null && XML_SOURCE_EXTENSIONS.contains(ext.toLowerCase(Locale.ROOT)) ? file : null;
+    }
+
+    private static void openInTextEditor(IFile file)
+    {
+        IWorkbenchPage page = PlatformUI.getWorkbench().getActiveWorkbenchWindow().getActivePage();
+        if (page == null)
+            return;
+        String ext = file.getFileExtension();
+        String editorId = ext != null && XML_SOURCE_EXTENSIONS.contains(ext.toLowerCase(Locale.ROOT))
+            ? XML_EDITOR_ID : DEFAULT_TEXT_EDITOR_ID;
+        IEditorInput input = new FileEditorInput(file);
+        try
+        {
+            page.openEditor(input, editorId, true, OPEN_WITH_MATCH);
+        }
+        catch (PartInitException e)
+        {
+            // не мешаем пользователю: молча остаёмся без редактора
+        }
     }
 
     /**

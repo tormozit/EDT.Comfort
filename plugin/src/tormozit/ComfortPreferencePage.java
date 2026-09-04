@@ -988,9 +988,27 @@ public class ComfortPreferencePage
         Link newIssueLink = new Link(row, SWT.NONE);
         newIssueLink.setText("<a>Создать заявку</a>"); //$NON-NLS-1$
         newIssueLink.addListener(SWT.Selection, e -> {
+            Global.log(NewIssueReport.LOG_TAG,
+                "клик по ссылке, текст события: «" + e.text + "»"); //$NON-NLS-1$ //$NON-NLS-2$
             if (!"Создать заявку".equals(e.text)) //$NON-NLS-1$
+            {
+                Global.log(NewIssueReport.LOG_TAG,
+                    "выход: текст события не совпал с «Создать заявку»"); //$NON-NLS-1$
                 return;
-            ComfortPreferences.openChangesUrl(buildNewIssueUrl());
+            }
+            String url;
+            try
+            {
+                url = buildNewIssueUrl();
+            }
+            catch (Throwable error)
+            {
+                Global.logError(NewIssueReport.LOG_TAG, "сбой сборки URL заявки", error); //$NON-NLS-1$
+                throw error;
+            }
+            Global.log(NewIssueReport.LOG_TAG,
+                "URL заявки готов, длина " + url.length() + " симв."); //$NON-NLS-1$ //$NON-NLS-2$
+            ComfortPreferences.openChangesUrl(url);
         });
     }
 
@@ -1179,22 +1197,45 @@ public class ComfortPreferencePage
         private static final String PROP_IU_NAME = "org.eclipse.equinox.p2.name"; //$NON-NLS-1$
         private static final String COMFORT_BUNDLE_ID = "tormozit.comfort"; //$NON-NLS-1$
 
+        /** Тег журнала «Комфорт» для разбора отказа ссылки «Создать заявку». */
+        static final String LOG_TAG = "Заявка"; //$NON-NLS-1$
+
         static String buildBody()
         {
+            Global.log(LOG_TAG, "сборка тела: начало"); //$NON-NLS-1$
             StringBuilder body = new StringBuilder();
+
+            String comfortVersion = ComfortVersionInfo.installed().getDisplayVersion();
+            Global.log(LOG_TAG, "версия плагина: " + comfortVersion); //$NON-NLS-1$
+            String edt = edtVersion();
+            Global.log(LOG_TAG, "версия EDT: " + edt); //$NON-NLS-1$
+            String os = osInfo();
+            Global.log(LOG_TAG, "ОС: " + os); //$NON-NLS-1$
+            String theme = themeLabel();
+            Global.log(LOG_TAG, "тема: " + theme); //$NON-NLS-1$
+
             body.append("**Версия плагина Комфорт:** ") //$NON-NLS-1$
-                .append(ComfortVersionInfo.installed().getDisplayVersion()).append("\n") //$NON-NLS-1$
-                .append("**Версия 1C:EDT:** ").append(edtVersion()).append("\n") //$NON-NLS-1$ //$NON-NLS-2$
-                .append("**ОС:** ").append(osInfo()).append("\n") //$NON-NLS-1$ //$NON-NLS-2$
-                .append("**Тема:** ").append(themeLabel()).append("\n"); //$NON-NLS-1$ //$NON-NLS-2$
+                .append(comfortVersion).append("\n") //$NON-NLS-1$
+                .append("**Версия 1C:EDT:** ").append(edt).append("\n") //$NON-NLS-1$ //$NON-NLS-2$
+                .append("**ОС:** ").append(os).append("\n") //$NON-NLS-1$ //$NON-NLS-2$
+                .append("**Тема:** ").append(theme).append("\n"); //$NON-NLS-1$ //$NON-NLS-2$
 
             String irInfo = irTechnicalInfo();
+            Global.log(LOG_TAG, "ИР: " //$NON-NLS-1$
+                + (irInfo == null ? "нет данных" : irInfo.length() + " симв.")); //$NON-NLS-1$ //$NON-NLS-2$
             if (irInfo != null && !irInfo.isBlank())
                 body.append("**ИР:**\n```\n").append(irInfo.strip()).append("\n```\n"); //$NON-NLS-1$ //$NON-NLS-2$
 
-            appendCollapsed(body, "Установленные плагины", extraPluginsText()); //$NON-NLS-1$
-            appendCollapsed(body, "Флажки Комфорт", comfortFlagsText()); //$NON-NLS-1$
+            String plugins = extraPluginsText();
+            Global.log(LOG_TAG, "установленные плагины: " + plugins.length() + " симв."); //$NON-NLS-1$ //$NON-NLS-2$
+            appendCollapsed(body, "Установленные плагины", plugins); //$NON-NLS-1$
+
+            String flags = comfortFlagsText();
+            Global.log(LOG_TAG, "флажки Комфорт: " + flags.length() + " симв."); //$NON-NLS-1$ //$NON-NLS-2$
+            appendCollapsed(body, "Флажки Комфорт", flags); //$NON-NLS-1$
+
             body.append("\n"); //$NON-NLS-1$
+            Global.log(LOG_TAG, "сборка тела: готово, " + body.length() + " симв."); //$NON-NLS-1$ //$NON-NLS-2$
             return body.toString();
         }
 
@@ -1300,6 +1341,7 @@ public class ComfortPreferencePage
             }
             catch (RuntimeException e)
             {
+                Global.logError(LOG_TAG, "техническая информация ИР недоступна", e); //$NON-NLS-1$
                 return null;
             }
         }
@@ -1412,8 +1454,9 @@ public class ComfortPreferencePage
                     ctx.ungetService(agentRef);
                 }
             }
-            catch (ReflectiveOperationException | RuntimeException ignored)
+            catch (ReflectiveOperationException | RuntimeException e)
             {
+                Global.logError(LOG_TAG, "опрос корневых IU p2 не удался", e); //$NON-NLS-1$
                 return lines;
             }
             return lines;
