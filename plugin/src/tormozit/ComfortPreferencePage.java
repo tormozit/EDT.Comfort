@@ -37,6 +37,7 @@ import org.eclipse.swt.layout.GridLayout;
 import org.eclipse.swt.layout.RowLayout;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
+import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Group;
 import org.eclipse.swt.widgets.Label;
 import org.eclipse.swt.widgets.Link;
@@ -1223,6 +1224,8 @@ public class ComfortPreferencePage
             Global.log(LOG_TAG, "версия EDT: " + edt); //$NON-NLS-1$
             String os = osInfo();
             Global.log(LOG_TAG, "ОС: " + os); //$NON-NLS-1$
+            String textScale = osTextScale();
+            Global.log(LOG_TAG, "масштаб текста ОС: " + textScale); //$NON-NLS-1$
             String theme = themeLabel();
             Global.log(LOG_TAG, "тема: " + theme); //$NON-NLS-1$
 
@@ -1230,6 +1233,7 @@ public class ComfortPreferencePage
                 .append(comfortVersion).append("\n") //$NON-NLS-1$
                 .append("**Версия 1C:EDT:** ").append(edt).append("\n") //$NON-NLS-1$ //$NON-NLS-2$
                 .append("**ОС:** ").append(os).append("\n") //$NON-NLS-1$ //$NON-NLS-2$
+                .append("**Масштаб текста ОС:** ").append(textScale).append("\n") //$NON-NLS-1$ //$NON-NLS-2$
                 .append("**Тема:** ").append(theme).append("\n"); //$NON-NLS-1$ //$NON-NLS-2$
 
             String irInfo = irTechnicalInfo();
@@ -1321,6 +1325,28 @@ public class ComfortPreferencePage
             return System.getProperty("os.name", "?") + " " //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 + System.getProperty("os.version", "?") + " (" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 + System.getProperty("os.arch", "?") + ")"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        }
+
+        /**
+         * Масштаб «Дисплей → Масштаб и разметка» из Параметров Windows (100%, 125%, …),
+         * не отдельный ползунок размера текста в Специальных возможностях. 96 DPI = 100%.
+         */
+        private static String osTextScale()
+        {
+            try
+            {
+                Display display = Display.getDefault();
+                if (display == null || display.isDisposed())
+                    return "—"; //$NON-NLS-1$
+                int dpiX = display.getDPI().x;
+                if (dpiX <= 0)
+                    return "—"; //$NON-NLS-1$
+                return Math.round(dpiX / 96f * 100) + "%"; //$NON-NLS-1$
+            }
+            catch (RuntimeException e)
+            {
+                return "—"; //$NON-NLS-1$
+            }
         }
 
         private static String themeLabel()
