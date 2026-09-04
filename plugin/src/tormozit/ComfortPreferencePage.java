@@ -87,6 +87,11 @@ public class ComfortPreferencePage
             "Если вкладок больше 10, их список показывается слева.\n"
             + "При выключенном флажке вкладки остаются снизу."; //$NON-NLS-1$
 
+    private static final String SUPPRESS_MIN_PLATFORM_BUILD_TOOLTIP =
+            "Отключает требование ЕДТ к минимальной сборке внутри уже поддерживаемого релиза\n"
+            + "платформы (панель «Версии платформы», запуск клиента/сервера). Поддерживаемые\n"
+            + "релизы (major.minor) не меняются."; //$NON-NLS-1$
+
     private static final String THEME_AWARE_COLOR_TOOLTIP =
             "В поле — цвет текущей темы. В хранилище — всегда вариант для светлой темы.\n"
             + "При сохранении в тёмной теме цвет из поля обратно пересчитывается в вариант для светлой."; //$NON-NLS-1$
@@ -216,6 +221,13 @@ public class ComfortPreferencePage
             getFieldEditorParent());
         addField(improveDebuggerField);
         setFieldTooltip(improveDebuggerField, IMPROVE_DEBUGGER_WINDOWS_TOOLTIP);
+
+        BooleanFieldEditor suppressMinBuildField = new BooleanFieldEditor(
+            ComfortSettings.PREF_SUPPRESS_MIN_PLATFORM_BUILD,
+            "Подавлять требование минимальной сборки платформы", //$NON-NLS-1$
+            getFieldEditorParent());
+        addField(suppressMinBuildField);
+        setFieldTooltip(suppressMinBuildField, SUPPRESS_MIN_PLATFORM_BUILD_TOOLTIP);
 
         createGroupCommonModulesFields();
 

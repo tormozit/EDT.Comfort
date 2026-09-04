@@ -74,6 +74,9 @@ public final class ProblemFiltersDialogHook implements IStartup
     private static final String[] SCOPE_MESSAGE_FIELDS = {"Scope_All", "Scope_current_project", //$NON-NLS-1$ //$NON-NLS-2$
         "Scope_current_object", "Scope_current_element", "Scope_subsystems_filter"}; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
 
+    /** Имя поля {@code Messages} со штатным текстом флажка «Показывать все». */
+    private static final String SHOW_ALL_MESSAGE_FIELD = "Show_all"; //$NON-NLS-1$
+
     private static final String NAVIGATOR_TOOLTIP =
         "Проблемы только в объектах активного проекта, видимых в навигаторе с учётом его"
             + " активного отбора (фильтр по подсистемам или по набору). Если отбор в навигаторе"
@@ -192,6 +195,7 @@ public final class ProblemFiltersDialogHook implements IStartup
 
         restoreComfortScope(navigator, activeSets, nativeRadios);
         hookCommitButtons(shell, dialog, pending, navigator, activeSets);
+        wireShowAllToggle(shell, loader, navigator, activeSets);
 
         Composite form = findForm(host);
         if (form != null)
@@ -244,6 +248,39 @@ public final class ProblemFiltersDialogHook implements IStartup
         // (у активного режима оно = «Текущий элемент») — снимаем уже после неё.
         self.getDisplay().asyncExec(apply);
         self.getDisplay().timerExec(80, apply);
+    }
+
+    /**
+     * Штатно при включённом «Показывать все» диалог сам гасит радио «Области
+     * возникновения» и кнопку «Выбрать подсистемы» (декомпиляция
+     * {@code ProblemViewFiltersDialog}: и то, и другое привязано к вычисляемому
+     * {@code canAdjust = !isShowAll}). Наши добавленные радио в эту привязку не
+     * попадают — их недоступность приходится держать вручную, тем же условием.
+     */
+    private static void wireShowAllToggle(Shell shell, ClassLoader loader, Button navigator, Button activeSets)
+    {
+        Button showAll = findCheckbox(shell, message(loader, SHOW_ALL_MESSAGE_FIELD));
+        if (showAll == null)
+        {
+            Debug.log("wireShowAllToggle: checkbox not found"); //$NON-NLS-1$
+            return;
+        }
+        Runnable sync = () ->
+        {
+            boolean enabled = !showAll.isDisposed() && !showAll.getSelection();
+            if (!navigator.isDisposed())
+                navigator.setEnabled(enabled);
+            if (!activeSets.isDisposed())
+                activeSets.setEnabled(enabled);
+        };
+        sync.run();
+        showAll.addSelectionListener(new SelectionAdapter()
+        {
+            @Override public void widgetSelected(SelectionEvent e)
+            {
+                sync.run();
+            }
+        });
     }
 
     /**

@@ -125,6 +125,19 @@ public final class ComfortSettings
     /** Автодоработки отладчика включены по умолчанию. */
     public static final boolean DEFAULT_IMPROVE_DEBUGGER_WINDOWS = true;
 
+    // ---- Platform runtime installations ----
+
+    /**
+     * Ключ: подавлять требование ЕДТ по минимальной сборке платформы в рамках каждого
+     * релиза (см. {@link PlatformMinBuildRequirementHook}). Совместимость по релизам
+     * платформы (major.minor) не отключается — только требование сборки внутри уже
+     * поддерживаемого релиза.
+     */
+    public static final String PREF_SUPPRESS_MIN_PLATFORM_BUILD = "comfort.platform.suppressMinBuild"; //$NON-NLS-1$
+
+    /** Подавление требования минимальной сборки выключено по умолчанию. */
+    public static final boolean DEFAULT_SUPPRESS_MIN_PLATFORM_BUILD = false;
+
     // ---- Server call highlighting ----
 
     /** Ключ: включена ли подсветка серверных вызовов в редакторе BSL. */
@@ -490,6 +503,15 @@ public final class ComfortSettings
         if (settings == null)
             return DEFAULT_IMPROVE_DEBUGGER_WINDOWS;
         return settings.getPreferenceStore().getBoolean(PREF_IMPROVE_DEBUGGER_WINDOWS);
+    }
+
+    /** Подавлять требование ЕДТ по минимальной сборке платформы в рамках релиза. */
+    public static boolean isSuppressMinPlatformBuildEnabled()
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return DEFAULT_SUPPRESS_MIN_PLATFORM_BUILD;
+        return settings.preferenceStore.getBoolean(PREF_SUPPRESS_MIN_PLATFORM_BUILD);
     }
 
     public static boolean isDebugLogEnabled()

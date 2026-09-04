@@ -132,6 +132,7 @@
     <startup class="tormozit.LongOperationNotifyHook"/>
     <startup class="tormozit.LaunchConfigurationHook"/>
     <startup class="tormozit.LaunchSaveDirtyEditorsHook"/>
+    <startup class="tormozit.PlatformMinBuildRequirementHook"/>
     <startup class="tormozit.ExportConfigurationXmlFixHook"/>
     <startup class="tormozit.FilterBySubsystemsDialogHook"/>
     <startup class="tormozit.GitChangedFileMenuHook"/>
