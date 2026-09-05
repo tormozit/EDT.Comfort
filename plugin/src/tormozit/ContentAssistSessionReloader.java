@@ -782,18 +782,29 @@ suppressDisplay.asyncExec(
             @Override
             public void documentChanged(DocumentEvent event)
             {
-                keepWhitespaceBeforeCaretOnTypedSpace(event);
+                long t0 = ContentAssistDebug.perfStart("assist.documentChanged"); //$NON-NLS-1$
                 try
                 {
-                    logAssistInsertDocumentChanged(event);
-                    logParamHintDocumentChanged(event);
+                    keepWhitespaceBeforeCaretOnTypedSpace(event);
+                    try
+                    {
+                        logAssistInsertDocumentChanged(event);
+                        logParamHintDocumentChanged(event);
+                    }
+                    catch (Exception ignored)
+                    {
+                    }
+                    scheduleEnsureBslDocumentListenerAfterAssistInsert(event);
+                    maybeShowParamHintOnChar();
+                    onDocumentChangedForCompletionAutoOpen(event);
+                    closePopupIfMemberContextGone(event);
                 }
-                catch (Exception ignored)
+                finally
                 {
+                    String text = event == null ? null : event.getText();
+                    ContentAssistDebug.perfEnd("assist.documentChanged", t0, //$NON-NLS-1$
+                        "{\"len\":" + (text == null ? 0 : text.length()) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
                 }
-                scheduleEnsureBslDocumentListenerAfterAssistInsert(event);
-                maybeShowParamHintOnChar();
-                onDocumentChangedForCompletionAutoOpen(event);
             }
         };
         doc.addDocumentListener(completionAutoOpenDocumentListener);
@@ -1578,10 +1589,64 @@ suppressDisplay.asyncExec(
         maybeShowParamHintAfterInsert(caret);
     }
 
+    /**
+     * Закрывает окно автодополнения, когда member-access контекст исчез — например, набранный
+     * после точки фрагмент удалили вместе с самой точкой.
+     *
+     * <p>Замер 05.09.2026: после такого удаления процессор не вызывается вообще (ни
+     * {@code computeCompletionProposals}, ни {@code computeForPopupRefresh}), поэтому список
+     * никто не переоценивает и окно остаётся с членами прежнего типа. Единственное место,
+     * куда изменение документа доходит гарантированно, — этот слушатель.
+     */
+    private void closePopupIfMemberContextGone(DocumentEvent event)
+    {
+        try
+        {
+            if (event == null || isAssistProposalInsertInProgress())
+                return;
+            ContentAssistant assistant = getActiveAssistant();
+            if (assistant == null || !ContentAssistPopupSync.isPopupVisible(assistant))
+                return;
+            SmartContentAssistProcessor processor = ACTIVE_PROCESSOR.get();
+            if (processor == null)
+                return;
+            IDocument doc = event.getDocument();
+            // Каретку берём из самого события: виджет в этот момент ещё не сдвинулся.
+            String inserted = event.getText();
+            int caret = event.getOffset() + (inserted == null ? 0 : inserted.length());
+            if (!processor.isMemberAccessContextGone(doc, caret))
+                return;
+            ContentAssistDebug.perfMark("popupClose.memberContextGone", //$NON-NLS-1$
+                "{\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            ContentAssistPopupSync.hideProposalPopup(assistant);
+        }
+        catch (Exception e)
+        {
+            Global.tempLogException("assist-perf", "closePopupIfMemberContextGone", e); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
     private boolean isAssistProposalInsertInProgress()
     {
         return suppressDocumentAutoOpenAfterSession
             || Boolean.TRUE.equals(SmartCompletionProposal.PROPOSAL_APPLY_IN_PROGRESS.get());
+    }
+
+    /**
+     * Идёт ли прямо сейчас вставка предложения.
+     *
+     * <p>Точная замена запрету «окно автодополнения открыто» там, где запрет введён ради
+     * сохранности {@code BslDocumentListener.DataEvent} (LinkedMode: каретка внутри
+     * {@code Метод()}). Открытое окно — это почти всё время работы со списком, а вставка —
+     * доли секунды; запрещать расчёт на всё время окна значит не считать его никогда.
+     */
+    static boolean isProposalInsertInProgressGlobally()
+    {
+        ContentAssistSessionReloader reloader = getActiveReloader();
+        if (reloader != null && reloader.isAssistProposalInsertInProgress())
+            return true;
+        return Boolean.TRUE.equals(SmartCompletionProposal.PROPOSAL_APPLY_IN_PROGRESS.get())
+            || Boolean.TRUE.equals(SmartCompletionProposal.IR_PROPOSAL_APPLY_IN_PROGRESS.get());
     }
 
     static void logLinkedMode(String location, String json)

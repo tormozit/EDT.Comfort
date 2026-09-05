@@ -137,6 +137,8 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     /** Сколько раз ждать закрытия окна автодополнения перед расчётом member-stock. */
     private static final int MEMBER_STOCK_WAIT_ATTEMPTS = 8;
     private static final int MEMBER_STOCK_WAIT_STEP_MS = 25;
+    /** Повторы фонового расчёта членов: устаревший ресурс отдаёт пусто, ждать в фоне дёшево. */
+    private static final int MEMBER_STOCK_BG_ATTEMPTS = 3;
     /**
      * Поколение отмены {@link #scheduleMemberStockCapture}.
      * Инкремент в {@link #cancelDeferredDelegateComputes} — иначе отложенный
@@ -215,6 +217,16 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
 
     /** Job для фоновой загрузки delegate (EDT). */
     private Job asyncDelegateLoadJob;
+    /** Фоновый расчёт списка членов после точки. */
+    private Job memberStockBackgroundJob;
+    /**
+     * Точка member-access контекста, для которого построен показываемый сейчас список;
+     * -1 — контекст не member-access. По ней видно, что контекст ушёл (фрагмент удалили).
+     */
+    private volatile int activeMemberAccessDot = -1;
+    /** Точка, для которой фоновый расчёт уже идёт; -1 — не идёт. */
+    private volatile int memberStockBackgroundDot = -1;
+    private volatile int memberStockBackgroundGen = -1;
     /** Поколение для отмены устаревших async-загрузок. */
     private int asyncDelegateLoadGen;
 
@@ -1472,6 +1484,34 @@ return result;
             rescheduleIdleFullListLoad(viewer, false);
     }
 
+    /**
+     * Контекст member-access, для которого показан список, исчез или сместился: точки в
+     * позиции {@link #activeMemberAccessDot} больше нет (набранное удалили) либо каретка
+     * ушла в другой контекст. Окно с членами прежнего типа в этом случае держать нельзя.
+     */
+    boolean isMemberAccessContextGone(IDocument doc, int caret)
+    {
+        int active = activeMemberAccessDot;
+        if (active < 0 || doc == null || caret < 0)
+            return false;
+        // Каретка правее точки и точка на месте — контекст тот же: набор и удаление символов
+        // имени члена окно не закрывают. Закрываем только когда удалили саму точку или ушли
+        // левее неё. Сравнивать findMemberAccessDot нельзя: в момент documentChanged каретка
+        // виджета ещё не сдвинулась, и любое удаление выглядело как смена контекста.
+        if (caret <= active)
+            return true;
+        if (active >= doc.getLength())
+            return true;
+        try
+        {
+            return doc.getChar(active) != '.';
+        }
+        catch (org.eclipse.jface.text.BadLocationException e)
+        {
+            return false;
+        }
+    }
+
     private static boolean isPopupVisible()
     {
         ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
@@ -1527,7 +1567,7 @@ return result;
     {
         int caret = resolveInvocationCaret(viewer, offset);
         if (isStringLiteralAssistContext(viewer, caret))
-            return delegate.computeCompletionProposals(viewer, offset);
+            return probeDelegateOnce(viewer, offset);
         primeFilterTrackerOnly(viewer, caret);
         IDocument doc = viewer != null ? viewer.getDocument() : null;
         ensureFullListForContext(viewer, doc, caret, false);
@@ -1862,9 +1902,26 @@ return;
     @Override
     public ICompletionProposal[] computeCompletionProposals(ITextViewer viewer, int offset)
     {
+        long t0 = ContentAssistDebug.perfStart("computeCompletionProposals"); //$NON-NLS-1$
+        ICompletionProposal[] result = EMPTY;
+        try
+        {
+            result = computeCompletionProposalsImpl(viewer, offset);
+            return result;
+        }
+        finally
+        {
+            ContentAssistDebug.perfEnd("computeCompletionProposals", t0, //$NON-NLS-1$
+                "{\"off\":" + offset + ",\"n\":" + (result == null ? -1 : result.length) //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"popup\":" + isPopupVisible() + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    private ICompletionProposal[] computeCompletionProposalsImpl(ITextViewer viewer, int offset)
+    {
         if (!ComfortSettings.isReplaceListFiltersEnabled())
         {
-return delegate.computeCompletionProposals(viewer, offset);
+return probeDelegateOnce(viewer, offset);
         }
         int literalCaret = resolveInvocationCaret(viewer, offset);
         boolean inLiteral = isStringLiteralAssistContext(viewer, literalCaret);
@@ -1966,8 +2023,24 @@ return passthrough;
      */
     public ICompletionProposal[] computeForPopupRefresh(ITextViewer viewer, int offset)
     {
+        long t0 = ContentAssistDebug.perfStart("computeForPopupRefresh"); //$NON-NLS-1$
+        ICompletionProposal[] result = EMPTY;
+        try
+        {
+            result = computeForPopupRefreshImpl(viewer, offset);
+            return result;
+        }
+        finally
+        {
+            ContentAssistDebug.perfEnd("computeForPopupRefresh", t0, //$NON-NLS-1$
+                "{\"off\":" + offset + ",\"n\":" + (result == null ? -1 : result.length) + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        }
+    }
+
+    private ICompletionProposal[] computeForPopupRefreshImpl(ITextViewer viewer, int offset)
+    {
         if (!ComfortSettings.isReplaceListFiltersEnabled())
-            return delegate.computeCompletionProposals(viewer, offset);
+            return probeDelegateOnce(viewer, offset);
 
         int caret = offset >= 0 ? clampCaret(viewer != null ? viewer.getDocument() : null, offset)
             : resolveWidgetCaret(viewer);
@@ -2156,7 +2229,7 @@ if (isIrWordsResolvedForContext() && irN > 0)
         {
             if (off == null || off < 0)
                 continue;
-            ICompletionProposal[] raw = delegate.computeCompletionProposals(viewer, off);
+            ICompletionProposal[] raw = probeDelegateOnce(viewer, off);
             int count = raw != null ? raw.length : 0;
             if (offsetsSummary.length() > 0)
                 offsetsSummary.append(',');
@@ -2190,7 +2263,7 @@ if (isIrWordsResolvedForContext() && irN > 0)
         {
             if (off == null || off < 0)
                 continue;
-            ICompletionProposal[] raw = delegate.computeCompletionProposals(viewer, off);
+            ICompletionProposal[] raw = probeDelegateOnce(viewer, off);
             int count = raw != null ? raw.length : 0;
             if (count > best.length)
                 best = raw != null ? raw : EMPTY;
@@ -2232,6 +2305,25 @@ if (isIrWordsResolvedForContext() && irN > 0)
      */
     private ICompletionProposal[] resolveProposalList(ITextViewer viewer, int offset, int caret,
                                                       String filter, boolean smartEnabled)
+    {
+        long t0 = ContentAssistDebug.perfStart("resolveProposalList"); //$NON-NLS-1$
+        ICompletionProposal[] result = EMPTY;
+        try
+        {
+            result = resolveProposalListImpl(viewer, offset, caret, filter, smartEnabled);
+            return result;
+        }
+        finally
+        {
+            ContentAssistDebug.perfEnd("resolveProposalList", t0, //$NON-NLS-1$
+                "{\"caret\":" + caret + ",\"smart\":" + smartEnabled //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"cache\":" + fullListCache.length //$NON-NLS-1$
+                    + ",\"n\":" + (result == null ? -1 : result.length) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    private ICompletionProposal[] resolveProposalListImpl(ITextViewer viewer, int offset, int caret,
+                                                          String filter, boolean smartEnabled)
     {
         IDocument doc = viewer != null ? viewer.getDocument() : null;
         if (doc != null && caret >= 0)
@@ -3337,7 +3429,7 @@ int probe = -1;
         if (raw.length == 0)
         {
             probe = resolveDelegateProbeOffset(viewer, offset, caret);
-            ICompletionProposal[] fallback = delegate.computeCompletionProposals(viewer, probe);
+            ICompletionProposal[] fallback = probeDelegateOnce(viewer, probe);
             raw = unwrapProposals(fallback != null ? fallback : EMPTY);
 }
         if (dot >= 0)
@@ -3472,7 +3564,7 @@ if (!isIrAssistOrderingEnabled())
             }
         }
         ICompletionProposal[] nativeList =
-            delegate.computeCompletionProposals(viewer, invokeOffset);
+            probeDelegateOnce(viewer, invokeOffset);
         ICompletionProposal[] raw = unwrapProposals(nativeList != null ? nativeList : EMPTY);
         if (raw.length > 0)
         {
@@ -3485,9 +3577,9 @@ if (!isIrAssistOrderingEnabled())
 
     private ICompletionProposal[] fetchDelegateList(ITextViewer viewer, int probeOffset, int caret)
     {
-        ICompletionProposal[] nativeList = delegate.computeCompletionProposals(viewer, probeOffset);
+        ICompletionProposal[] nativeList = probeDelegateOnce(viewer, probeOffset);
         if ((nativeList == null || nativeList.length == 0) && caret >= 0 && caret != probeOffset)
-            nativeList = delegate.computeCompletionProposals(viewer, caret);
+            nativeList = probeDelegateOnce(viewer, caret);
         return nativeList != null ? nativeList : EMPTY;
     }
 
@@ -3674,6 +3766,22 @@ if (!SmartAssistFilterState.isSmartFilterEnabled())
     private void ensureFullListForContext(ITextViewer viewer, IDocument doc, int caret,
                                           boolean allowSyncMemberCapture)
     {
+        long t0 = ContentAssistDebug.perfStart("ensureFullListForContext"); //$NON-NLS-1$
+        try
+        {
+            ensureFullListForContextImpl(viewer, doc, caret, allowSyncMemberCapture);
+        }
+        finally
+        {
+            ContentAssistDebug.perfEnd("ensureFullListForContext", t0, //$NON-NLS-1$
+                "{\"caret\":" + caret + ",\"syncCapture\":" + allowSyncMemberCapture //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"cache\":" + fullListCache.length + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    private void ensureFullListForContextImpl(ITextViewer viewer, IDocument doc, int caret,
+                                              boolean allowSyncMemberCapture)
+    {
         int contextKey = computeFullListContextKey(doc, caret);
         String receiver = memberAccessReceiver(doc, caret);
         if (contextKey != fullListContextKey || !receiver.equals(fullListContextReceiver))
@@ -3697,6 +3805,11 @@ if (!SmartAssistFilterState.isSmartFilterEnabled())
             clearDelegateSyncProbe();
             ContentAssistDebug.log("fullList context change key=" + contextKey //$NON-NLS-1$
                 + " caret=" + caret); //$NON-NLS-1$
+            activeMemberAccessDot = ReceiverTypeLabel.findMemberAccessDot(doc, caret);
+            ContentAssistDebug.perfMark("contextChange", //$NON-NLS-1$
+                "{\"caret\":" + caret + ",\"key\":" + contextKey //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"dot\":" + ReceiverTypeLabel.findMemberAccessDot(doc, caret) //$NON-NLS-1$
+                    + ",\"popup\":" + isPopupVisible() + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             // В строковом литерале «.» — не member-access: иначе scheduleMemberStockCapture
             // (readOnly + computeCompletionProposals) занимает UI ~2 с и блокирует IR callback.
             if (isStringLiteralAssistContext(doc, caret))
@@ -3860,37 +3973,68 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
     private ICompletionProposal[] probeDelegateAtOffsets(ITextViewer viewer, int[] offsets,
                                                          int dot)
     {
-        if (dot < 0)
+        long t0 = ContentAssistDebug.perfStart("probeDelegateAtOffsets"); //$NON-NLS-1$
+        ICompletionProposal[] outcome = EMPTY;
+        try
         {
+            if (dot < 0)
+            {
+                ICompletionProposal[] best = EMPTY;
+                for (int off : offsets)
+                {
+                    if (off < 0)
+                        continue;
+                    ICompletionProposal[] raw = probeDelegateOnce(viewer, off);
+                    int count = raw != null ? raw.length : 0;
+                    if (count == 0)
+                        continue;
+                    if (count > best.length)
+                        best = raw;
+                }
+                outcome = best;
+                return best;
+            }
             ICompletionProposal[] best = EMPTY;
-for (int off : offsets)
+            for (int off : offsets)
             {
                 if (off < 0)
                     continue;
-                ICompletionProposal[] raw = delegate.computeCompletionProposals(viewer, off);
+                ICompletionProposal[] raw = probeDelegateOnce(viewer, off);
                 int count = raw != null ? raw.length : 0;
-if (count == 0)
+                if (count == 0)
                     continue;
                 if (count > best.length)
                     best = raw;
+                if (best.length >= MIN_STABLE_MEMBER_CACHE)
+                    break;
             }
-return best;
+            outcome = best;
+            return best;
         }
-        ICompletionProposal[] best = EMPTY;
-        for (int off : offsets)
+        finally
         {
-            if (off < 0)
-                continue;
-            ICompletionProposal[] raw = delegate.computeCompletionProposals(viewer, off);
-            int count = raw != null ? raw.length : 0;
-            if (count == 0)
-                continue;
-            if (count > best.length)
-                best = raw;
-            if (best.length >= MIN_STABLE_MEMBER_CACHE)
-                break;
+            ContentAssistDebug.perfEnd("probeDelegateAtOffsets", t0, //$NON-NLS-1$
+                "{\"dot\":" + dot //$NON-NLS-1$
+                    + ",\"offsets\":" + (offsets == null ? 0 : offsets.length) //$NON-NLS-1$
+                    + ",\"n\":" + outcome.length + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         }
-        return best;
+    }
+
+    /** Один вызов штатного процессора с замером: главный источник блокировки UI. */
+    private ICompletionProposal[] probeDelegateOnce(ITextViewer viewer, int off)
+    {
+        long t0 = ContentAssistDebug.perfStart("delegate.compute"); //$NON-NLS-1$
+        ICompletionProposal[] raw = null;
+        try
+        {
+            raw = delegate.computeCompletionProposals(viewer, off);
+            return raw;
+        }
+        finally
+        {
+            ContentAssistDebug.perfEnd("delegate.compute", t0, //$NON-NLS-1$
+                "{\"off\":" + off + ",\"n\":" + (raw == null ? -1 : raw.length) + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        }
     }
 
     // ---- Асинхронная загрузка delegate (EDT compute) в фоновом Job -------------
@@ -3907,95 +4051,24 @@ return best;
     }
 
     /**
-     * Запускает фоновую загрузку delegate (через {@code doc.readOnly(computeCompletionProposals)})
-     * в {@link Job}, чтобы не блокировать UI-поток.
-     * Все UI-зависимые данные (caret, dot, offsets) захватываются на EDT ДО создания Job.
+     * Фоновая загрузка полного списка через delegate — <b>отключена по результатам замеров</b>.
+     *
+     * <p>Она оборачивала расчёт во внешний {@code readOnly} на фоновом потоке, а это даёт
+     * «устаревшее состояние»: 05.09.2026 все без исключения такие расчёты возвращали
+     * {@code null}, потратив по 1–2 с, и при этом держали блокировку ресурса, мешая полезному
+     * фоновому расчёту членов — в логе «SCAP delegate async» крутился рядом с «SCAP member
+     * stock» на том же offset.
+     *
+     * <p>Список членов после точки считает {@link #runMemberStockCaptureInBackground}: он
+     * берёт блокировку так же, как штатный процессор, и результат отдаёт непустым.
      */
     private void scheduleAsyncDelegateLoad(ITextViewer viewer)
     {
-        if (viewer == null)
-            return;
-        IDocument doc = viewer.getDocument();
-        if (!(doc instanceof IXtextDocument xtextDoc))
-            return;
-        if (fullListReady && fullListComplete && fullListCache.length > 0)
-            return; // уже загружено
-        if (!isPopupVisible())
-            return; // H80 делает синхронную загрузку, async не нужен
-        ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
-        cancelAsyncDelegateLoad();
-
-        // ---- захват UI-состояния на EDT ----
-        final int ctxKey = fullListContextKey;
-        final int loadGen = ++asyncDelegateLoadGen;
-        final int caret = resolveWidgetCaret(viewer);
-        final int dot = ReceiverTypeLabel.findMemberAccessDot(doc, caret);
-        final int[] offsets;
-        if (dot >= 0)
-            offsets = memberAccessProbeOffsets(caret, dot, assistant, doc);
-        else
-            offsets = completionProbeOffsets(assistant, caret, dot, doc);
-        if (offsets == null || offsets.length == 0)
-            return;
-        // -----------------------------------
-
-        asyncDelegateLoadJob = new Job("SCAP delegate async") { //$NON-NLS-1$
-            @Override
-            protected IStatus run(IProgressMonitor monitor)
-            {
-                if (monitor.isCanceled() || ctxKey != fullListContextKey
-                    || loadGen != asyncDelegateLoadGen)
-                    return Status.CANCEL_STATUS;
-                if (computeFullListContextKey(doc, caret) != ctxKey)
-                    return Status.CANCEL_STATUS;
-                ICompletionProposal[] raw;
-                try
-                {
-                    raw = xtextDoc.readOnly(new IUnitOfWork<ICompletionProposal[], XtextResource>() {
-                        @Override
-                        public ICompletionProposal[] exec(XtextResource state) throws Exception
-                        {
-                            return probeDelegateAtOffsets(viewer, offsets, dot);
-                        }
-                    });
-                }
-                catch (Exception e)
-                {
-                    ContentAssistDebug.log("async delegate readOnly ERROR: " + e.getMessage()); //$NON-NLS-1$
-                    return Status.CANCEL_STATUS;
-                }
-                if (raw == null || raw.length == 0 || loadGen != asyncDelegateLoadGen
-                    || ctxKey != fullListContextKey)
-                    return Status.CANCEL_STATUS;
-
-                final ICompletionProposal[] result = raw;
-                org.eclipse.swt.widgets.Display.getDefault().asyncExec(() -> {
-                    if (loadGen != asyncDelegateLoadGen || ctxKey != fullListContextKey)
-                        return;
-                    onAsyncDelegateLoadComplete(result, ctxKey);
-                });
-                return Status.OK_STATUS;
-            }
-        };
-        asyncDelegateLoadJob.setSystem(true);
-        asyncDelegateLoadJob.schedule();
+        // намеренно ничего не делает, см. javadoc
     }
 
-    /**
-     * Обрабатывает результат фоновой загрузки delegate на UI-потоке.
-     * Обновляет кэш и триггерит обновление popup.
-     */
-    private void onAsyncDelegateLoadComplete(ICompletionProposal[] proposals, int ctxKey)
-    {
-        if (ctxKey != fullListContextKey)
-            return;
-        if (fullListReady && fullListCache.length > 0)
-            return;
-        assignFullListCache(unwrapProposals(proposals));
-        fullListReady = true;
-        fullListComplete = true;
-        ContentAssistSessionReloader.refreshPopupIfOpen();
-    }
+
+
 
     private static int[] completionProbeOffsets(ContentAssistant assistant, int caret, int dot,
                                                 IDocument doc)
@@ -4130,14 +4203,140 @@ return best;
                 return;
             org.eclipse.swt.widgets.Display display = viewer.getTextWidget().getDisplay();
             final int captureGen = memberStockCaptureGen;
+            if (runMemberStockCaptureInBackground(viewer, display, dotContextKey, captureGen))
+                return;
             display.asyncExec(() -> runMemberStockCapture(viewer, dotContextKey, 0, captureGen));
         }
         catch (Exception ignored) {}
     }
 
+    /**
+     * Расчёт списка членов в фоновом потоке. Такт нажатия клавиши не занимается ничем:
+     * буква печатается сразу, список приходит, когда посчитается.
+     *
+     * <p>Штатный расчёт побочно чистит {@code BslDocumentListener.DataEvent}, по которому EDT
+     * поднимает LinkedMode. Из фонового потока это опасно — поэтому карта {@code DataEvent}
+     * на время расчёта изолируется по потоку ({@link BslDataEventGuard}): всё, что фоновый
+     * расчёт в неё пишет и чистит, уходит в теневую копию, настоящая карта не меняется.
+     * Если изоляцию поставить не удалось — фон не запускаем и работаем как раньше.
+     *
+     * <p>Расчёт может вернуть пусто, если ресурс в этот момент устарел: повторяем в фоне,
+     * там повторы ничего не стоят. Публикация результата — только на UI-потоке.
+     *
+     * @return {@code true}, если фоновый расчёт запущен.
+     */
+    private boolean runMemberStockCaptureInBackground(ITextViewer viewer,
+        org.eclipse.swt.widgets.Display display, int dotContextKey, int captureGen)
+    {
+        IDocument doc = viewer.getDocument();
+        if (doc == null || !(doc instanceof IXtextDocument))
+            return false;
+        if (!BslDataEventGuard.install(doc))
+            return false;
+        // Один расчёт на точку. Job.cancel() уже запущенный расчёт не останавливает (монитор
+        // проверяется только между попытками), поэтому без этой проверки на каждый повторный
+        // заход рождался ещё один поток: замер 05.09.2026 — ПЯТЬ параллельных «SCAP member
+        // stock» на один и тот же offset, каждый по ~2030 мс и все с пустым результатом.
+        // Они просто ждали друг друга на блокировке ресурса, отсюда и 3-4 секунды.
+        if (memberStockBackgroundDot == dotContextKey && memberStockBackgroundGen == captureGen)
+            return true;
+        if (memberStockBackgroundJob != null)
+            memberStockBackgroundJob.cancel();
+        memberStockBackgroundDot = dotContextKey;
+        memberStockBackgroundGen = captureGen;
+        final int probeOffset = dotContextKey + 1;
+        Job job = new Job("SCAP member stock") { //$NON-NLS-1$
+            @Override
+            protected IStatus run(IProgressMonitor monitor)
+            {
+                ICompletionProposal[] raw = EMPTY;
+                int attempts = 0;
+                long t0 = System.nanoTime();
+                while (attempts < MEMBER_STOCK_BG_ATTEMPTS)
+                {
+                    if (monitor.isCanceled() || captureGen != memberStockCaptureGen)
+                        return Status.CANCEL_STATUS;
+                    attempts++;
+                    try
+                    {
+                        // Без внешнего readOnly: штатный процессор внутри сам берёт
+                        // readOnlyForContentAssist. Внешняя обёртка на фоновом потоке даёт
+                        // «устаревшее состояние» и null — этим и была бесполезна прошлая
+                        // фоновая загрузка.
+                        raw = BslDataEventGuard.runIsolated(
+                            () -> computeMemberStockViaSelectionProxy(viewer, probeOffset));
+                    }
+                    catch (Exception | LinkageError e)
+                    {
+                        Global.tempLogException("assist-perf", //$NON-NLS-1$
+                            "memberStockBackground attempt " + attempts, e); //$NON-NLS-1$
+                        raw = EMPTY;
+                    }
+                    if (raw != null && raw.length > 0)
+                        break;
+                }
+                ContentAssistDebug.perfLog("memberStockBackground", //$NON-NLS-1$
+                    (System.nanoTime() - t0) / 1_000_000L, 0,
+                    "{\"dot\":" + dotContextKey + ",\"attempts\":" + attempts //$NON-NLS-1$ //$NON-NLS-2$
+                        + ",\"n\":" + (raw == null ? -1 : raw.length) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+                // Метку «идёт расчёт для этой точки» снимаем в любом исходе, иначе после
+                // неудачи повторный расчёт для той же точки уже не запустится.
+                if (memberStockBackgroundGen == captureGen
+                    && memberStockBackgroundDot == dotContextKey)
+                    memberStockBackgroundDot = -1;
+                if (raw == null || raw.length == 0)
+                    return Status.CANCEL_STATUS;
+                final ICompletionProposal[] result = raw;
+                display.asyncExec(
+                    () -> publishMemberStock(viewer, dotContextKey, captureGen, result));
+                return Status.OK_STATUS;
+            }
+        };
+        job.setSystem(true);
+        memberStockBackgroundJob = job;
+        job.schedule();
+        return true;
+    }
+
+    /** Публикация фонового результата — только на UI-потоке. */
+    private void publishMemberStock(ITextViewer viewer, int dotContextKey, int captureGen,
+                                    ICompletionProposal[] result)
+    {
+        if (captureGen != memberStockCaptureGen)
+            return;
+        if (fullListContextKey != dotContextKey)
+            return;
+        // Пока считали, текст мог измениться — например, набранное удалили. Публиковать
+        // результат для исчезнувшего контекста нельзя: он не только показал бы чужие члены,
+        // но и удержал бы окно открытым (refreshPopupIfOpen), хотя контекст уже другой.
+        IDocument liveDoc = viewer.getDocument();
+        int liveCaret = resolveWidgetCaret(viewer);
+        if (liveDoc == null || liveCaret < 0
+            || ReceiverTypeLabel.findMemberAccessDot(liveDoc, liveCaret) != dotContextKey
+            || !memberAccessReceiver(liveDoc, liveCaret).equals(fullListContextReceiver)
+            || isStringLiteralAssistContext(liveDoc, liveCaret))
+        {
+            ContentAssistDebug.perfMark("memberStockBackground.dropContextGone", //$NON-NLS-1$
+                "{\"dot\":" + dotContextKey + ",\"caret\":" + liveCaret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            return;
+        }
+        int prev = memberStockFullListDot == dotContextKey ? memberStockFullList.length : 0;
+        if (result.length <= prev)
+            return;
+        captureMemberStockFullList(result, dotContextKey);
+        if (memberStockFullListDot == dotContextKey)
+            memberStockFullListComplete = true;
+        ContentAssistDebug.perfMark("memberStockBackground.publish", //$NON-NLS-1$
+            "{\"dot\":" + dotContextKey + ",\"n\":" + memberStockFullList.length + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        if (viewer instanceof SourceViewer)
+            ContentAssistPopupUi.updateContextTypeLabel((SourceViewer)viewer);
+        ContentAssistSessionReloader.refreshPopupIfOpen();
+    }
+
     private void runMemberStockCapture(ITextViewer viewer, int dotContextKey, int attempt,
                                        int captureGen)
     {
+        long t0 = ContentAssistDebug.perfStart("runMemberStockCapture"); //$NON-NLS-1$
         try
         {
             if (captureGen != memberStockCaptureGen)
@@ -4152,11 +4351,12 @@ return best;
                 return;
             if (ReceiverTypeLabel.findMemberAccessDot(doc, caret) != dotContextKey)
                 return;
-            // Пока окно автодополнения открыто — delegate не считать ни при каких условиях:
-            // это и задержка ввода, и риск затереть DataEvent во время вставки proposal
-            // (сломанный LinkedMode). Ждём закрытия окна, а если не дождались — сдаёмся.
-            // Считать «всё равно, раз попытки кончились» нельзя: инвариант важнее полноты кэша.
-            if (isPopupVisible())
+            // Идёт вставка предложения — расчёт запрещён: он чистит DataEvent, и каретка
+            // не встанет между скобок Метод() (сломанный LinkedMode). Раньше здесь стояла
+            // проверка «окно открыто», но открытое окно ≠ идущая вставка: из-за неё после
+            // точки список членов не считался НИ РАЗУ (лог 05.09.2026: 8 повторов подряд
+            // с popup:true и stock:0), и в окне оставался прежний список слов.
+            if (ContentAssistSessionReloader.isProposalInsertInProgressGlobally())
             {
                 if (attempt >= MEMBER_STOCK_WAIT_ATTEMPTS)
                     return;
@@ -4166,6 +4366,11 @@ return best;
                         () -> runMemberStockCapture(viewer, dotContextKey, attempt + 1, captureGen));
                 return;
             }
+            // Ждать «готовности» ресурса перед расчётом нельзя: сама по себе она не наступает.
+            // Разбор догоняет текст внутри штатного readOnlyForContentAssist — тот планирует
+            // contentAssistSyncJob и ждёт его, попутно отменяя XtextReconciler. Замер
+            // 05.09.2026: фоновое ожидание 4019 мс закончилось «не готов», список членов
+            // так и не появился.
             if (captureGen != memberStockCaptureGen)
                 return;
             int prev = memberStockFullListDot == dotContextKey ? memberStockFullList.length : 0;
@@ -4180,6 +4385,13 @@ return best;
             }
         }
         catch (Exception ignored) {}
+        finally
+        {
+            ContentAssistDebug.perfEnd("runMemberStockCapture", t0, //$NON-NLS-1$
+                "{\"dot\":" + dotContextKey + ",\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"popup\":" + isPopupVisible() //$NON-NLS-1$
+                    + ",\"stock\":" + memberStockFullList.length + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
     }
 
     private ICompletionProposal[] resolveMemberAccessOrderedList(ITextViewer viewer, int offset,
@@ -4242,9 +4454,12 @@ return best;
             return EMPTY;
         if (hasMemberStock(dot))
             return memberStockFullList;
-        // Окно открыто — идёт ввод/возможна вставка proposal: расчёт откладываем
-        // (иначе задержка ввода и затирание DataEvent).
-        if (!force && isPopupVisible())
+        // Набор символов: считать здесь нельзя — это блокировка ввода на время штатного
+        // ожидания (замер 05.09.2026: до 4138 мс на один вызов). Уходим в фон, буква при
+        // этом печатается сразу; список приходит, когда посчитается.
+        // Отдельно запрещено считать во время вставки предложения: расчёт чистит DataEvent
+        // и ломает LinkedMode (в фоне карта изолирована, см. BslDataEventGuard).
+        if (!force)
         {
             scheduleMemberStockCapture(viewer, dot);
             return memberStockFullListDot == dot ? memberStockFullList : EMPTY;
@@ -4261,6 +4476,8 @@ return best;
     {
         if (viewer == null || dot < 0 || hasMemberStock(dot))
             return memberStockFullListDot == dot ? memberStockFullList : EMPTY;
+        ContentAssistDebug.perfMark("captureMemberStockNow.enter", //$NON-NLS-1$
+            "{\"dot\":" + dot + ",\"popup\":" + isPopupVisible() + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         ICompletionProposal[] raw = requestMemberStockAtOffset(viewer, dot + 1, dot);
         if (raw.length > 0)
         {
@@ -4285,13 +4502,24 @@ return best;
                                                              int dot)
     {
         IDocument doc = viewer.getDocument();
+        long t0 = ContentAssistDebug.perfStart("requestMemberStockAtOffset"); //$NON-NLS-1$
+        long[] insideNanos = new long[1];
         try
         {
             if (doc instanceof IXtextDocument)
             {
-                return ((IXtextDocument) doc).readOnly(
-                    (IUnitOfWork<ICompletionProposal[], XtextResource>) state ->
-                        computeMemberStockViaSelectionProxy(viewer, probeOffset));
+                return ((IXtextDocument)doc).readOnly(
+                    (IUnitOfWork<ICompletionProposal[], XtextResource>)state -> {
+                        long t1 = System.nanoTime();
+                        try
+                        {
+                            return computeMemberStockViaSelectionProxy(viewer, probeOffset);
+                        }
+                        finally
+                        {
+                            insideNanos[0] = System.nanoTime() - t1;
+                        }
+                    });
             }
             return computeMemberStockViaSelectionProxy(viewer, probeOffset);
         }
@@ -4299,6 +4527,13 @@ return best;
         {
             ContentAssistDebug.log("captureMemberStockAtDot ERROR: " + e.getMessage()); //$NON-NLS-1$
             return EMPTY;
+        }
+        finally
+        {
+            // "inside" — сам расчёт; разница с "ms" — ожидание блокировки ресурса Xtext.
+            ContentAssistDebug.perfEnd("requestMemberStockAtOffset", t0, //$NON-NLS-1$
+                "{\"probeOffset\":" + probeOffset + ",\"dot\":" + dot //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"inside\":" + (insideNanos[0] / 1_000_000L) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 
@@ -4338,7 +4573,7 @@ return best;
         };
         ITextViewer proxy = (ITextViewer) java.lang.reflect.Proxy.newProxyInstance(
             real.getClass().getClassLoader(), ifaces.toArray(new Class<?>[0]), h);
-        ICompletionProposal[] r = delegate.computeCompletionProposals(proxy, probeOffset);
+        ICompletionProposal[] r = probeDelegateOnce(proxy, probeOffset);
         return unwrapProposals(r != null ? r : EMPTY);
     }
 
@@ -4648,7 +4883,9 @@ return best;
 
         if (filtered.isEmpty())
         {
-return EMPTY;
+            ContentAssistDebug.perfLog("filterAndSort", (System.nanoTime() - t0) / 1_000_000L, 0, //$NON-NLS-1$
+                "{\"in\":" + raw.length + ",\"n\":0}"); //$NON-NLS-1$ //$NON-NLS-2$
+            return EMPTY;
         }
 
         Integer[] idx = new Integer[filtered.size()];
@@ -4667,7 +4904,9 @@ return EMPTY;
         }
         long elapsedMs = (System.nanoTime() - t0) / 1_000_000;
         logFilterAndSortExitThrottled(result, elapsedMs);
-return result;
+        ContentAssistDebug.perfLog("filterAndSort", elapsedMs, 0, //$NON-NLS-1$
+            "{\"in\":" + raw.length + ",\"n\":" + result.length + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        return result;
     }
 
     private static int filterAndSortLoggedOpenGen = -1;
