@@ -686,6 +686,93 @@
         </with>
       </activeWhen>
     </handler>
+    <!-- Перехват штатных команд EDT «Перейти по операторным скобкам вперёд/назад» (в том числе
+         с выделением): внутри многострочного текстового литерала переход выполняется к его
+         границам, в остальных случаях работает штатная реализация.
+         Победитель среди обработчиков одной команды — максимум по sourcePriority: это ИЛИ битов
+         всех переменных, упомянутых в activeWhen (HandlerActivation.compareTo,
+         LegacyHandlerService$HandlerSelectionFunction). Замерено дампом активаций: у штатного
+         обработчика (определение com._1c.g5.v8.dt.bsl.Bsl.Editor.opened) 1114112 =
+         activePart | activeEditor, поэтому одного activePart мало. Здесь добавлен activePartId
+         (ISources.ACTIVE_PART_ID = 4194304), итог 5242944 — условие на нём заведомо истинно и
+         нужно только ради приоритета; смысловое условие — activeContexts + activePart. -->
+    <!-- ВАЖНО: не сужать этот набор переменных, не сверив приоритет заново. -->
+    <handler
+        class="tormozit.BslBracketSearchHandler"
+        commandId="com._1c.g5.v8.dt.bsl.ui.menu.ForwardBslBracketSearchHandler">
+      <activeWhen>
+        <and>
+          <with variable="activePartId">
+            <instanceof value="java.lang.String"/>
+          </with>
+          <with variable="activeContexts">
+            <iterate operator="or">
+              <equals value="com._1c.g5.v8.dt.bsl.ui.editor.BslEditorScope"/>
+            </iterate>
+          </with>
+          <with variable="activePart">
+            <instanceof value="org.eclipse.ui.IEditorPart"/>
+          </with>
+        </and>
+      </activeWhen>
+    </handler>
+    <handler
+        class="tormozit.BslBracketSearchHandler"
+        commandId="com._1c.g5.v8.dt.bsl.ui.menu.BackBslBracketSearchHandler">
+      <activeWhen>
+        <and>
+          <with variable="activePartId">
+            <instanceof value="java.lang.String"/>
+          </with>
+          <with variable="activeContexts">
+            <iterate operator="or">
+              <equals value="com._1c.g5.v8.dt.bsl.ui.editor.BslEditorScope"/>
+            </iterate>
+          </with>
+          <with variable="activePart">
+            <instanceof value="org.eclipse.ui.IEditorPart"/>
+          </with>
+        </and>
+      </activeWhen>
+    </handler>
+    <handler
+        class="tormozit.BslBracketSearchHandler"
+        commandId="com._1c.g5.v8.dt.bsl.ui.menu.ForwardBslBracketSearchWithSelectionHandler">
+      <activeWhen>
+        <and>
+          <with variable="activePartId">
+            <instanceof value="java.lang.String"/>
+          </with>
+          <with variable="activeContexts">
+            <iterate operator="or">
+              <equals value="com._1c.g5.v8.dt.bsl.ui.editor.BslEditorScope"/>
+            </iterate>
+          </with>
+          <with variable="activePart">
+            <instanceof value="org.eclipse.ui.IEditorPart"/>
+          </with>
+        </and>
+      </activeWhen>
+    </handler>
+    <handler
+        class="tormozit.BslBracketSearchHandler"
+        commandId="com._1c.g5.v8.dt.bsl.ui.menu.BackBslBracketSearchWithSelectionHandler">
+      <activeWhen>
+        <and>
+          <with variable="activePartId">
+            <instanceof value="java.lang.String"/>
+          </with>
+          <with variable="activeContexts">
+            <iterate operator="or">
+              <equals value="com._1c.g5.v8.dt.bsl.ui.editor.BslEditorScope"/>
+            </iterate>
+          </with>
+          <with variable="activePart">
+            <instanceof value="org.eclipse.ui.IEditorPart"/>
+          </with>
+        </and>
+      </activeWhen>
+    </handler>
     <handler
         class="tormozit.TextEditorFastSearchHandler"
         commandId="tormozit.TextEditorFastSearchForward"/>
