@@ -39,12 +39,10 @@ public final class NavigatorShowInExplorerMenuHook implements IStartup
     private static final String SUB_HOOK_MARKER = "tormozit.navigatorShowInExplorerSubHook"; //$NON-NLS-1$
     private static final String ITEM_TEXT = "Показать в проводнике"; //$NON-NLS-1$
     private static final String ITEM_TOOLTIP =
-            "Открыть проводник ОС на файле или папке выбранного элемента навигатора" //$NON-NLS-1$
-            + Global.pluginSignForTooltip();
+            "Открыть проводник ОС на файле или папке выбранного элемента навигатора"; //$NON-NLS-1$
     private static final String ITEM_TEXT_PROJECT_STRUCTURE = "Показать в Структуре проекта"; //$NON-NLS-1$
     private static final String ITEM_TOOLTIP_PROJECT_STRUCTURE =
-            "Показать файл или папку выбранного элемента навигатора в Project Explorer" //$NON-NLS-1$
-            + Global.pluginSignForTooltip();
+            "Показать файл или папку выбранного элемента навигатора в Project Explorer"; //$NON-NLS-1$
 
     @Override
     public void earlyStartup()
@@ -174,7 +172,7 @@ public final class NavigatorShowInExplorerMenuHook implements IStartup
                 added.add(new MenuItem(subMenu, SWT.SEPARATOR));
                 MenuItem item = new MenuItem(subMenu, SWT.PUSH);
                 item.setText(ITEM_TEXT);
-                item.setToolTipText(ITEM_TOOLTIP);
+                ComfortSubmenuHelper.setMenuItemTooltip(item, ITEM_TOOLTIP);
                 item.addSelectionListener(new SelectionAdapter()
                 {
                     @Override
@@ -237,7 +235,7 @@ public final class NavigatorShowInExplorerMenuHook implements IStartup
 
                 MenuItem explorerItem = ComfortSubmenuHelper.createSortedMenuItem(
                     comfortSub, SWT.PUSH, ITEM_TEXT);
-                explorerItem.setToolTipText(ITEM_TOOLTIP);
+                ComfortSubmenuHelper.setMenuItemTooltip(explorerItem, ITEM_TOOLTIP);
                 explorerItem.addSelectionListener(new SelectionAdapter()
                 {
                     @Override
@@ -252,7 +250,7 @@ public final class NavigatorShowInExplorerMenuHook implements IStartup
 
                 MenuItem structureItem = ComfortSubmenuHelper.createSortedMenuItem(
                     comfortSub, SWT.PUSH, ITEM_TEXT_PROJECT_STRUCTURE);
-                structureItem.setToolTipText(ITEM_TOOLTIP_PROJECT_STRUCTURE);
+                ComfortSubmenuHelper.setMenuItemTooltip(structureItem, ITEM_TOOLTIP_PROJECT_STRUCTURE);
                 structureItem.addSelectionListener(new SelectionAdapter()
                 {
                     @Override

@@ -168,6 +168,9 @@ final class ColumnFilterMenuBuilder
             activeCellFiltered ? "Снять отбор по значению ячейки" : "Отобрать по значению ячейки", //$NON-NLS-1$ //$NON-NLS-2$
             FILTER_COMMAND_ID, WINDOW_CONTEXT_ID));
         filterItem.setEnabled(activeCellFiltered || canFilter);
+        ComfortSubmenuHelper.setMenuItemTooltip(filterItem, activeCellFiltered
+            ? "Убрать отбор по значению активной ячейки." //$NON-NLS-1$
+            : "Оставить в списке только строки, где значение активной колонки равно значению текущей ячейки."); //$NON-NLS-1$
         // Снять отбор — та же иконка «×», что у «Отключить все отборы» (антикоманда).
         Image filterIcon = activeCellFiltered ? owner.clearAllIcon() : filterByValueIcon(menu.getDisplay());
         if (filterIcon != null)
@@ -180,6 +183,8 @@ final class ColumnFilterMenuBuilder
         valuesItem.setText(ComfortSubmenuHelper.menuItemTextWithKeyBinding(
             "Различные значения колонки", COLUMN_VALUES_COMMAND_ID, WINDOW_CONTEXT_ID)); //$NON-NLS-1$
         valuesItem.setEnabled(canBrowse);
+        ComfortSubmenuHelper.setMenuItemTooltip(valuesItem,
+            "Показать список различных значений активной колонки с числом строк по каждому; по выбранным значениям можно отобрать."); //$NON-NLS-1$
         valuesItem.addListener(SWT.Selection, ev -> owner.openColumnValuesDialog());
         trackedItems.add(valuesItem);
 
@@ -187,7 +192,7 @@ final class ColumnFilterMenuBuilder
         {
             MenuItem clearAllItem = new MenuItem(menu, SWT.PUSH);
             clearAllItem.setText("Отключить все отборы"); //$NON-NLS-1$
-            clearAllItem.setToolTipText(owner.activeFiltersDescription());
+            ComfortSubmenuHelper.setMenuItemTooltip(clearAllItem, owner.activeFiltersDescription());
             Image icon = owner.clearAllIcon();
             if (icon != null)
                 clearAllItem.setImage(icon);
@@ -196,7 +201,7 @@ final class ColumnFilterMenuBuilder
 
             MenuItem countItem = new MenuItem(menu, SWT.PUSH);
             countItem.setText("Отобрано элементов:  " + owner.filteredElementCount()); //$NON-NLS-1$
-            countItem.setToolTipText(owner.activeFiltersDescription());
+            ComfortSubmenuHelper.setMenuItemTooltip(countItem, owner.activeFiltersDescription());
             countItem.setEnabled(false);
             trackedItems.add(countItem);
         }

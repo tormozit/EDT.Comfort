@@ -1188,8 +1188,8 @@ public class FormEditorHook implements IStartup
 
                 MenuItem showNav = new MenuItem(swtMenu, SWT.PUSH, insertIndex + 1);
                 showNav.setText(ITEM_TEXT_SHOW_IN_NAVIGATOR);
-                showNav.setToolTipText("Показать объект-владелец в дереве навигатора" //$NON-NLS-1$
-                        + Global.pluginSignForTooltip());
+                ComfortSubmenuHelper.setMenuItemTooltip(showNav,
+                        "Показать объект-владелец в дереве навигатора"); //$NON-NLS-1$
                 showNav.setEnabled(target != null);
                 showNav.addListener(SWT.Selection, ev ->
                         showSelectedMetadataAttributeInNavigator(null));
@@ -3527,17 +3527,15 @@ public class FormEditorHook implements IStartup
 
             MenuItem group = new MenuItem(menu, SWT.PUSH, at);
             group.setText(MENU_TEXT);
-            group.setToolTipText(TooltipText.wrap(tree,
-                "Вставить новую группу в текущую позицию дерева и перенести в неё выделенные элементы" //$NON-NLS-1$
-                    + Global.pluginSignForTooltip()));
+            ComfortSubmenuHelper.setMenuItemTooltip(group,
+                "Вставить новую группу в текущую позицию дерева и перенести в неё выделенные элементы"); //$NON-NLS-1$
             group.setEnabled(resolveTarget(tree) != null);
             group.addListener(SWT.Selection, ev -> run(tree));
 
             MenuItem ungroup = new MenuItem(menu, SWT.PUSH, at + 1);
             ungroup.setText(UNGROUP_MENU_TEXT);
-            ungroup.setToolTipText(TooltipText.wrap(tree,
-                "Перенести содержимое выделенной группы на её место в родителе, а группу удалить" //$NON-NLS-1$
-                    + Global.pluginSignForTooltip()));
+            ComfortSubmenuHelper.setMenuItemTooltip(ungroup,
+                "Перенести содержимое выделенной группы на её место в родителе, а группу удалить"); //$NON-NLS-1$
             ungroup.setEnabled(resolveUngroup(tree) != null);
             ungroup.addListener(SWT.Selection, ev -> runUngroup(tree));
             return List.of(group, ungroup);
@@ -4670,9 +4668,8 @@ public class FormEditorHook implements IStartup
                         return;
                     MenuItem item = ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.PUSH,
                         EXPAND_ALL_TEXT);
-                    item.setToolTipText(TooltipText.wrap(tree,
-                        "Развернуть все ветки дерева элементов формы" //$NON-NLS-1$
-                            + Global.pluginSignForTooltip()));
+                    ComfortSubmenuHelper.setMenuItemTooltip(item,
+                        "Развернуть все ветки дерева элементов формы"); //$NON-NLS-1$
                     item.addListener(SWT.Selection,
                         ev -> expandAll(TreeCollapseOthers.resolveOwnerTree(comfortSub)));
                     added.add(item);

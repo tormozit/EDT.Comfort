@@ -208,13 +208,13 @@ public final class NavigatorAddToObjectSetMenuHook implements IStartup
         if (set == null)
         {
             item.setText("Добавить в набор <…>"); //$NON-NLS-1$
-            item.setToolTipText("Выберите активный набор в панели «Наборы объектов»" + Global.pluginSignForTooltip()); //$NON-NLS-1$
+            ComfortSubmenuHelper.setMenuItemTooltip(item, "Выберите активный набор в панели «Наборы объектов»"); //$NON-NLS-1$
             item.setEnabled(false);
             return;
         }
         item.setText("Добавить в набор " + ObjectSets.bracketedName(set)); //$NON-NLS-1$
-        item.setToolTipText("Добавить выбранный объект метаданных в набор " //$NON-NLS-1$
-            + ObjectSets.quotedName(set) + Global.pluginSignForTooltip());
+        ComfortSubmenuHelper.setMenuItemTooltip(item, "Добавить выбранный объект метаданных в набор " //$NON-NLS-1$
+            + ObjectSets.quotedName(set));
         IStructuredSelection selection = viewer.getStructuredSelection();
         boolean enabled = !selection.isEmpty()
             && ObjectSetsItems.canAddFromNavigatorSelection(selection, set);

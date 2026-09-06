@@ -1440,6 +1440,7 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
         MenuItem copyItem = new MenuItem(menu, SWT.PUSH);
         copyItem.setText("Копировать\tCtrl+C"); //$NON-NLS-1$
         copyItem.addListener(SWT.Selection, ev -> copyActiveCell());
+        OutputListCommand.appendMenuItem(menu, table);
         rebuildFilterMenuItems(menu);
     }
 

@@ -68,8 +68,7 @@ public final class InfobaseActiveProjectApplicationMenuHook implements IStartup
     private static final String ITEM_TEXT = "Приложение активного проекта"; //$NON-NLS-1$
     private static final String ITEM_TOOLTIP =
             "Найти в панели «Приложения» строку с этой базой для активного проекта," //$NON-NLS-1$
-            + " либо открыть мастер создания приложения" //$NON-NLS-1$
-            + Global.pluginSignForTooltip();
+            + " либо открыть мастер создания приложения"; //$NON-NLS-1$
 
     @Override
     public void earlyStartup()
@@ -151,6 +150,8 @@ public final class InfobaseActiveProjectApplicationMenuHook implements IStartup
         if (menu == null)
             return;
 
+        OutputListCommand.attach(tree);
+
         MenuAdapter listener = new MenuAdapter()
         {
             @Override
@@ -190,7 +191,7 @@ public final class InfobaseActiveProjectApplicationMenuHook implements IStartup
                     return;
 
                 MenuItem item = ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.PUSH, ITEM_TEXT);
-                item.setToolTipText(ITEM_TOOLTIP);
+                ComfortSubmenuHelper.setMenuItemTooltip(item, ITEM_TOOLTIP);
                 item.addSelectionListener(new SelectionAdapter()
                 {
                     @Override

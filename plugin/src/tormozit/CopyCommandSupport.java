@@ -111,6 +111,7 @@ public final class CopyCommandSupport
         if (control == null || control.isDisposed() || copyAction == null)
             return;
         targets.put(control, copyAction);
+        OutputListCommand.attach(control);
         control.addDisposeListener(e ->
         {
             targets.remove(control);

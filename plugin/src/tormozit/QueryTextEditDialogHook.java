@@ -207,9 +207,8 @@ public final class QueryTextEditDialogHook implements IStartup
                 PasteWithCompareActions.MENU_LABEL,
                 PasteWithCompareHandler.COMMAND_ID,
                 PasteWithCompareHandler.BINDING_CONTEXT_ID));
-        pasteItem.setToolTipText(
-            "Сравнить выделение с буфером обмена и вставить результат"
-                + Global.pluginSignForTooltip());
+        ComfortSubmenuHelper.setMenuItemTooltip(pasteItem,
+            "Сравнить выделение с буфером обмена и вставить результат");
 
         final Object qlEditor = qlContext.qlEditor;
         final ISourceViewer viewer = qlContext.viewer;
@@ -230,8 +229,8 @@ public final class QueryTextEditDialogHook implements IStartup
 
         MenuItem formatItem = ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.PUSH,
             IrFormatTextHandler.MENU_LABEL);
-        formatItem.setToolTipText(
-            "Форматировать текст запроса через приложение ИР" + Global.pluginSignForTooltip());
+        ComfortSubmenuHelper.setMenuItemTooltip(formatItem,
+            "Форматировать текст запроса через приложение ИР");
         formatItem.setEnabled(IrFormatTextHandler.isApplicableQuery(viewer));
         formatItem.addSelectionListener(new SelectionAdapter()
         {
@@ -244,9 +243,8 @@ public final class QueryTextEditDialogHook implements IStartup
 
         MenuItem irEditorItem = ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.PUSH,
             IrQueryTextEditorHandler.MENU_LABEL);
-        irEditorItem.setToolTipText(
-            "Открыть весь текст запроса в текстовом редакторе ИР"
-                + Global.pluginSignForTooltip());
+        ComfortSubmenuHelper.setMenuItemTooltip(irEditorItem,
+            "Открыть весь текст запроса в текстовом редакторе ИР");
         irEditorItem.setEnabled(IrFormatTextHandler.isApplicableQuery(viewer));
         irEditorItem.addSelectionListener(new SelectionAdapter()
         {
@@ -259,9 +257,8 @@ public final class QueryTextEditDialogHook implements IStartup
 
         MenuItem queryConstructorItem = ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.PUSH,
             IrQueryConstructorHandler.MENU_LABEL);
-        queryConstructorItem.setToolTipText(
-            "Открыть конструктор запроса приложения ИР для текста запроса"
-                + Global.pluginSignForTooltip());
+        ComfortSubmenuHelper.setMenuItemTooltip(queryConstructorItem,
+            "Открыть конструктор запроса приложения ИР для текста запроса");
         queryConstructorItem.setEnabled(IrQueryConstructorHandler.isApplicableQuery(viewer));
         queryConstructorItem.addSelectionListener(new SelectionAdapter()
         {

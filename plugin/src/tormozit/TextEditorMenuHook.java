@@ -555,7 +555,7 @@ public class TextEditorMenuHook implements IStartup
                         MenuItem item = ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.PUSH,
                             ComfortSubmenuHelper.menuItemTextWithKeyBinding(
                                 binding.label, binding.commandId, binding.bindingContextId));
-                        item.setToolTipText(binding.tooltip + Global.pluginSignForTooltip());
+                        ComfortSubmenuHelper.setMenuItemTooltip(item, binding.tooltip);
                         item.setEnabled(binding.isAvailable());
                         item.addSelectionListener(new SelectionAdapter()
                         {
@@ -572,9 +572,8 @@ public class TextEditorMenuHook implements IStartup
                     {
                         MenuItem formatItem = ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.PUSH,
                             IrFormatTextHandler.MENU_LABEL);
-                        formatItem.setToolTipText(
-                            "Форматировать текст через приложение ИР"
-                                + Global.pluginSignForTooltip());
+                        ComfortSubmenuHelper.setMenuItemTooltip(formatItem,
+                            "Форматировать текст через приложение ИР");
                         formatItem.setEnabled(true);
                         formatItem.addSelectionListener(new SelectionAdapter()
                         {
@@ -588,9 +587,8 @@ public class TextEditorMenuHook implements IStartup
 
                         MenuItem irEditorItem = ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.PUSH,
                             IrQueryTextEditorHandler.MENU_LABEL);
-                        irEditorItem.setToolTipText(
-                            "Открыть весь текст запроса в текстовом редакторе ИР"
-                                + Global.pluginSignForTooltip());
+                        ComfortSubmenuHelper.setMenuItemTooltip(irEditorItem,
+                            "Открыть весь текст запроса в текстовом редакторе ИР");
                         irEditorItem.setEnabled(true);
                         irEditorItem.addSelectionListener(new SelectionAdapter()
                         {

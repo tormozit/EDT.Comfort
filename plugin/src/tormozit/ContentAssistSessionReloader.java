@@ -8,6 +8,7 @@ import org.eclipse.jface.text.IDocumentExtension4;
 import org.eclipse.jface.text.IDocumentListener;
 import org.eclipse.jface.text.DocumentEvent;
 import org.eclipse.jface.text.IInformationControlCreator;
+import org.eclipse.jface.text.ITextViewer;
 import org.eclipse.jface.text.ITextViewerExtension5;
 import org.eclipse.jface.text.link.LinkedModeModel;
 import org.eclipse.jface.text.link.ProposalPosition;
@@ -804,6 +805,17 @@ suppressDisplay.asyncExec(
                     String text = event == null ? null : event.getText();
                     ContentAssistDebug.perfEnd("assist.documentChanged", t0, //$NON-NLS-1$
                         "{\"len\":" + (text == null ? 0 : text.length()) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+                    // Вставка предложения (несколько символов сразу) — момент истины для
+                    // LinkedMode: EDT ищет в карте DataEvent запись по вставленному тексту и,
+                    // не найдя, молча ничего не делает. Записываем, что там лежало.
+                    if (text != null && text.length() > 1 && event.getDocument() != null)
+                    {
+                        ContentAssistDebug.perfMark("linkedMode.insert", //$NON-NLS-1$
+                            "{\"off\":" + event.getOffset() //$NON-NLS-1$
+                                + ",\"text\":\"" + text.replace('"', '\'') + "\",\"map\":" //$NON-NLS-1$ //$NON-NLS-2$
+                                + BslDataEventGuard.describeRealMap(event.getDocument(), text)
+                                + "}"); //$NON-NLS-1$
+                    }
                 }
             }
         };
@@ -1649,10 +1661,17 @@ suppressDisplay.asyncExec(
             || Boolean.TRUE.equals(SmartCompletionProposal.IR_PROPOSAL_APPLY_IN_PROGRESS.get());
     }
 
+    /**
+     * Диагностика штатного LinkedMode. Тело было пустым, поэтому вся уже написанная
+     * инструментализация вокруг вставки (`prepare`, `postDoIt` с кареткой и
+     * {@code LinkedModeModel.hasInstalledModel}) писала в никуда — при разборе «LinkedMode не
+     * сработал» это оставляло нас без единственного нужного факта.
+     */
     static void logLinkedMode(String location, String json)
     {
         try
         {
+            ContentAssistDebug.perfMark("linkedMode." + location, json); //$NON-NLS-1$
         }
         catch (Exception ignored)
         {
@@ -3955,6 +3974,35 @@ processor.applyIrCompletion(snapshot);
     public static void refreshPopupIfOpen()
     {
         requestPopupRefresh(false);
+    }
+
+    /**
+     * Открывает окно списка, посчитанного в фоне уже после того, как расчёт вернул пусто.
+     *
+     * <p>{@link #refreshPopupIfOpen} тут бессилен: он выходит на {@code !isPopupVisible}, а до
+     * этого не находит сессию — {@code ACTIVE_*} это {@link ThreadLocal} на время расчёта.
+     * Сессия достаётся по вьюеру из {@code INSTALLED}.
+     *
+     * <p>Открытие безусловное, как Ctrl+Space, поэтому вызывающий обязан открывать не более
+     * одного раза на контекст: показ запускает новый расчёт, и при его неудаче получился бы
+     * цикл.
+     */
+    public static boolean openPopupForBackgroundList(ITextViewer viewer)
+    {
+        if (!ComfortSettings.isReplaceListFiltersEnabled())
+            return false;
+        if (!(viewer instanceof SourceViewer sv))
+            return false;
+        ContentAssistSessionReloader reloader = forViewer(sv);
+        ContentAssistant ca = reloader != null ? reloader.assistant : null;
+        if (ca == null || ContentAssistPopupSync.isPopupVisible(ca))
+            return false;
+        if (isProposalInsertInProgressGlobally())
+            return false;
+        StyledText widget = sv.getTextWidget();
+        if (widget == null || widget.isDisposed() || !widget.isFocusControl())
+            return false;
+        return ContentAssistPopupSync.showPossibleCompletions(ca);
     }
 
     /** Обновление popup после прихода слов ИР (сразу или в очередь при recompute). */

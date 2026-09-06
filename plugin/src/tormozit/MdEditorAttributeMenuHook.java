@@ -397,8 +397,8 @@ public final class MdEditorAttributeMenuHook implements IStartup
         Image foImage = mdImage(MdUiSharedImages.OBJS_FUNCTIONAL_OPTION);
         if (foImage != null)
             foItem.setImage(foImage);
-        foItem.setToolTipText("Открыть вкладку «Функц. опции» и выделить этот реквизит" //$NON-NLS-1$
-            + Global.pluginSignForTooltip());
+        ComfortSubmenuHelper.setMenuItemTooltip(foItem,
+            "Открыть вкладку «Функц. опции» и выделить этот реквизит"); //$NON-NLS-1$
         foItem.setEnabled(foPage != null);
         foItem.addListener(SWT.Selection, ev -> revealOnFunctionalOptions(editor, member));
 
@@ -407,8 +407,8 @@ public final class MdEditorAttributeMenuHook implements IStartup
         Image rightsImage = mdImage(MdUiSharedImages.OBJS_ROLE);
         if (rightsImage != null)
             rightsItem.setImage(rightsImage);
-        rightsItem.setToolTipText("Открыть вкладку «Права» и отфильтровать по относительному имени" //$NON-NLS-1$
-            + Global.pluginSignForTooltip());
+        ComfortSubmenuHelper.setMenuItemTooltip(rightsItem,
+            "Открыть вкладку «Права» и отфильтровать по относительному имени"); //$NON-NLS-1$
         rightsItem.setEnabled(rightsPage != null && relativeName != null && !relativeName.isBlank());
         final String filterText = relativeName;
         rightsItem.addListener(SWT.Selection, ev -> revealOnRights(editor, filterText));
@@ -418,8 +418,8 @@ public final class MdEditorAttributeMenuHook implements IStartup
         Image allRolesImage = mdImage(MdUiSharedImages.OBJS_ROLE);
         if (allRolesImage != null)
             allRolesItem.setImage(allRolesImage);
-        allRolesItem.setToolTipText("Открыть редактор «Все роли» и отфильтровать по относительному имени" //$NON-NLS-1$
-            + Global.pluginSignForTooltip());
+        ComfortSubmenuHelper.setMenuItemTooltip(allRolesItem,
+            "Открыть редактор «Все роли» и отфильтровать по относительному имени"); //$NON-NLS-1$
         allRolesItem.setEnabled(configuration != null);
         allRolesItem.addListener(SWT.Selection, ev -> revealOnAllRoles(editor, member, filterText));
     }

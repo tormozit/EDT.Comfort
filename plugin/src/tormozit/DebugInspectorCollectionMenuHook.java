@@ -28,9 +28,7 @@ public final class DebugInspectorCollectionMenuHook
 {
     private static final String HOOK_KEY = "tormozit.debugInspectorCollectionMenuHook"; //$NON-NLS-1$
     private static final String COLLECTION_ITEM_TEXT = "Показать коллекцию"; //$NON-NLS-1$
-    private static final String COLLECTION_TOOLTIP =
-        "Открыть коллекцию в отдельном окне" //$NON-NLS-1$
-            + Global.pluginSignForTooltip();
+    private static final String COLLECTION_TOOLTIP = "Открыть коллекцию в отдельном окне"; //$NON-NLS-1$
 
     private final Tree tree;
     private final Object viewer;
@@ -307,7 +305,7 @@ public final class DebugInspectorCollectionMenuHook
             COLLECTION_ITEM_TEXT,
             DebugCollectionShowHandler.COMMAND_ID,
             DebugCollectionShowHandler.BINDING_CONTEXT_ID));
-        item.setToolTipText(COLLECTION_TOOLTIP);
+        ComfortSubmenuHelper.setMenuItemTooltip(item, COLLECTION_TOOLTIP);
         item.addSelectionListener(new SelectionAdapter()
         {
             @Override

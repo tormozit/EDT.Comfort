@@ -150,7 +150,7 @@ public final class GotoDefinitionFieldMenuHook implements IStartup
         MenuItem item = new MenuItem(menu, SWT.PUSH);
         item.setText(ComfortSubmenuHelper.menuItemTextWithKeyBinding(
                 "Перейти к определению", "tormozit.GoToDefinition")); //$NON-NLS-1$ //$NON-NLS-2$
-        item.setToolTipText("Перейти к определению " + typeRef + Global.pluginSignForTooltip()); //$NON-NLS-1$
+        ComfortSubmenuHelper.setMenuItemTooltip(item, "Перейти к определению " + typeRef); //$NON-NLS-1$
         item.addListener(SWT.Selection, e -> control.getDisplay().asyncExec(
                 () -> runGotoDefinitionAction(control, fullText)));
         menu.setLocation(at);
@@ -239,7 +239,7 @@ public final class GotoDefinitionFieldMenuHook implements IStartup
             ComfortSubmenuHelper.menuItemTextWithKeyBinding(
                 "Перейти к определению", "tormozit.GoToDefinition")); //$NON-NLS-1$ //$NON-NLS-2$
         item.setData(ITEM_MARKER, Boolean.TRUE);
-        item.setToolTipText("Перейти к определению " + typeRef + Global.pluginSignForTooltip()); //$NON-NLS-1$
+        ComfortSubmenuHelper.setMenuItemTooltip(item, "Перейти к определению " + typeRef); //$NON-NLS-1$
         // Что именно передаётся дальше — см. runGotoDefinitionAction: для StyledText текст
         // поля не используется (штатная команда сама берёт выражение из каретки), для
         // остальных полей — передаётся целиком, GoToDefinition.jump сам разбирает составные

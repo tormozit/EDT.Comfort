@@ -120,7 +120,7 @@ final class BslHoverHintState
     static MenuItem addMenuItem(Menu comfortSub)
     {
         MenuItem item = ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.CHECK, ITEM_TEXT);
-        item.setToolTipText(ITEM_TOOLTIP + Global.pluginSignForTooltip());
+        ComfortSubmenuHelper.setMenuItemTooltip(item, ITEM_TOOLTIP);
         item.setSelection(isEnabled());
         item.addSelectionListener(new SelectionAdapter()
         {

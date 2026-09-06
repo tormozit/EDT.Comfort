@@ -2207,8 +2207,8 @@ final class DebugInspectorTreeEnhancement
                     // короткое, лишний уровень вложенности только мешает.
                     MenuItem irItem = new MenuItem(menu, SWT.PUSH, 0);
                     irItem.setText(IR_ITEM_TEXT);
-                    irItem.setToolTipText(
-                        "Открыть текст свойства в текстовом редакторе ИР" + Global.pluginSignForTooltip()); //$NON-NLS-1$
+                    ComfortSubmenuHelper.setMenuItemTooltip(irItem,
+                        "Открыть текст свойства в текстовом редакторе ИР"); //$NON-NLS-1$
                     irItem.addSelectionListener(new SelectionAdapter()
                     {
                         @Override
@@ -2223,8 +2223,8 @@ final class DebugInspectorTreeEnhancement
 
                     MenuItem queryItem = new MenuItem(menu, SWT.PUSH, 1);
                     queryItem.setText(QUERY_ITEM_TEXT);
-                    queryItem.setToolTipText(
-                        "Открыть текст свойства в редакторе запроса" + Global.pluginSignForTooltip()); //$NON-NLS-1$
+                    ComfortSubmenuHelper.setMenuItemTooltip(queryItem,
+                        "Открыть текст свойства в редакторе запроса"); //$NON-NLS-1$
                     queryItem.addSelectionListener(new SelectionAdapter()
                     {
                         @Override

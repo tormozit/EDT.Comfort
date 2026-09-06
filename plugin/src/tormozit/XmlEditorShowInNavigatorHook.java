@@ -146,8 +146,8 @@ public class XmlEditorShowInNavigatorHook implements IStartup
                         XmlEditorShowInNavigatorHandler.MENU_LABEL,
                         XmlEditorShowInNavigatorHandler.COMMAND_ID,
                         XmlEditorShowInNavigatorHandler.BINDING_CONTEXT_ID));
-                item.setToolTipText(
-                    XmlEditorShowInNavigatorHandler.MENU_TOOLTIP + Global.pluginSignForTooltip());
+                ComfortSubmenuHelper.setMenuItemTooltip(item,
+                    XmlEditorShowInNavigatorHandler.MENU_TOOLTIP);
                 item.setEnabled(target != null);
                 item.addSelectionListener(new SelectionAdapter()
                 {

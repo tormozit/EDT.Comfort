@@ -62,8 +62,7 @@ public final class NavigatorCopyProjectMenuHook implements IStartup
     private static final String HOOK_MARKER = "tormozit.navigatorCopyProjectHook"; //$NON-NLS-1$
     private static final String ITEM_TEXT = "Скопировать проект..."; //$NON-NLS-1$
     private static final String ITEM_TOOLTIP =
-            "Скопировать все файлы проекта в новый проект с другим именем, без git" //$NON-NLS-1$
-            + Global.pluginSignForTooltip();
+            "Скопировать все файлы проекта в новый проект с другим именем, без git"; //$NON-NLS-1$
 
     private static final String OVERLAY_LABEL_KEY = "tormozit.NavigatorCopyProjectMenuHook.overlay.label"; //$NON-NLS-1$
     private static final String OVERLAY_BAR_KEY = "tormozit.NavigatorCopyProjectMenuHook.overlay.bar"; //$NON-NLS-1$
@@ -189,7 +188,7 @@ public final class NavigatorCopyProjectMenuHook implements IStartup
                     return;
 
                 MenuItem item = ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.PUSH, ITEM_TEXT);
-                item.setToolTipText(ITEM_TOOLTIP);
+                ComfortSubmenuHelper.setMenuItemTooltip(item, ITEM_TOOLTIP);
                 item.addSelectionListener(new SelectionAdapter()
                 {
                     @Override

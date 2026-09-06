@@ -409,8 +409,8 @@ public class BSLEditorMenuHook implements IStartup
                             ITEM_TEXT_MethodConstructor,
                             IrMethodConstructorHandler.COMMAND_ID,
                             EditEmbeddedTextCommandHandler.BINDING_CONTEXT_ID));
-                    constructorItem.setToolTipText(
-                        "Открыть конструктор метода приложения ИР" + Global.pluginSignForTooltip());
+                    ComfortSubmenuHelper.setMenuItemTooltip(constructorItem,
+                        "Открыть конструктор метода приложения ИР");
                     constructorItem.addSelectionListener(new SelectionAdapter()
                     {
                         @Override
@@ -426,9 +426,8 @@ public class BSLEditorMenuHook implements IStartup
                             ITEM_TEXT_QueryConstructor,
                             IrQueryConstructorHandler.COMMAND_ID,
                             EditEmbeddedTextCommandHandler.BINDING_CONTEXT_ID));
-                    queryConstructorItem.setToolTipText(
-                        "Открыть конструктор запроса приложения ИР для текста запроса под кареткой"
-                            + Global.pluginSignForTooltip());
+                    ComfortSubmenuHelper.setMenuItemTooltip(queryConstructorItem,
+                        "Открыть конструктор запроса приложения ИР для текста запроса под кареткой");
                     queryConstructorItem.setEnabled(IrQueryConstructorHandler.isApplicable(editor));
                     queryConstructorItem.addSelectionListener(new SelectionAdapter()
                     {
@@ -442,9 +441,8 @@ public class BSLEditorMenuHook implements IStartup
 
                     MenuItem findRefsItem =
                         ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.PUSH, ITEM_TEXT_FindReferences);
-                    findRefsItem.setToolTipText(
-                        "Найти ссылки на слово или объект метаданных через приложение ИР"
-                            + Global.pluginSignForTooltip());
+                    ComfortSubmenuHelper.setMenuItemTooltip(findRefsItem,
+                        "Найти ссылки на слово или объект метаданных через приложение ИР");
                     findRefsItem.addSelectionListener(new SelectionAdapter()
                     {
                         @Override
@@ -460,8 +458,8 @@ public class BSLEditorMenuHook implements IStartup
                             ITEM_TEXT_ModuleCheck,
                             IrModuleCheckHandler.COMMAND_ID,
                             IrModuleCheckCommandHandler.BINDING_CONTEXT_ID));
-                    moduleCheckItem.setToolTipText(
-                        "Открыть проверку модуля через приложение ИР" + Global.pluginSignForTooltip());
+                    ComfortSubmenuHelper.setMenuItemTooltip(moduleCheckItem,
+                        "Открыть проверку модуля через приложение ИР");
                     moduleCheckItem.addSelectionListener(new SelectionAdapter()
                     {
                         @Override
@@ -477,9 +475,8 @@ public class BSLEditorMenuHook implements IStartup
                             ITEM_TEXT_ModuleCheckClear,
                             IrModuleCheckClearHandler.COMMAND_ID,
                             IrModuleCheckClearCommandHandler.BINDING_CONTEXT_ID));
-                    moduleCheckClearItem.setToolTipText(
-                        "Удалить все маркеры, оставленные проверкой модуля ИР, для текущего проекта"
-                            + Global.pluginSignForTooltip());
+                    ComfortSubmenuHelper.setMenuItemTooltip(moduleCheckClearItem,
+                        "Удалить все маркеры, оставленные проверкой модуля ИР, для текущего проекта");
                     moduleCheckClearItem.addSelectionListener(new SelectionAdapter()
                     {
                         @Override
@@ -495,8 +492,8 @@ public class BSLEditorMenuHook implements IStartup
                             ITEM_TEXT_FormatText,
                             IrFormatTextCommandHandler.COMMAND_ID,
                             IrFormatTextCommandHandler.BINDING_CONTEXT_ID));
-                    formatItem.setToolTipText(
-                        "Форматировать выделенный текст через приложение ИР" + Global.pluginSignForTooltip());
+                    ComfortSubmenuHelper.setMenuItemTooltip(formatItem,
+                        "Форматировать выделенный текст через приложение ИР");
                     formatItem.setEnabled(IrFormatTextHandler.isApplicableBsl(editor));
                     formatItem.addSelectionListener(new SelectionAdapter()
                     {
@@ -513,8 +510,8 @@ public class BSLEditorMenuHook implements IStartup
                             ITEM_TEXT_DeclareExpressionType,
                             IrDeclareExpressionTypeHandler.COMMAND_ID,
                             IrDeclareExpressionTypeCommandHandler.BINDING_CONTEXT_ID));
-                    declareTypeItem.setToolTipText(
-                        "Явно объявить тип выражения под кареткой через приложение ИР" + Global.pluginSignForTooltip());
+                    ComfortSubmenuHelper.setMenuItemTooltip(declareTypeItem,
+                        "Явно объявить тип выражения под кареткой через приложение ИР");
                     declareTypeItem.addSelectionListener(new SelectionAdapter()
                     {
                         @Override
@@ -530,9 +527,8 @@ public class BSLEditorMenuHook implements IStartup
                             ITEM_TEXT_ResetFolding,
                             ResetFoldingHandler.COMMAND_ID,
                             ResetFoldingHandler.BINDING_CONTEXT_ID));
-                    resetFoldingItem.setToolTipText(
-                        "Вернуть сворачиваемые группы к состоянию как при открытии модуля"
-                            + Global.pluginSignForTooltip());
+                    ComfortSubmenuHelper.setMenuItemTooltip(resetFoldingItem,
+                        "Вернуть сворачиваемые группы к состоянию как при открытии модуля");
                     resetFoldingItem.addSelectionListener(new SelectionAdapter()
                     {
                         @Override
@@ -591,8 +587,8 @@ public class BSLEditorMenuHook implements IStartup
                         EditEmbeddedTextCommandHandler.MENU_LABEL,
                         EditEmbeddedTextCommandHandler.COMMAND_ID,
                         EditEmbeddedTextCommandHandler.BINDING_CONTEXT_ID));
-                    item.setToolTipText(
-                        "Открыть вложенный текст в редакторе текста приложения ИР" + Global.pluginSignForTooltip());
+                    ComfortSubmenuHelper.setMenuItemTooltip(item,
+                        "Открыть вложенный текст в редакторе текста приложения ИР");
                     item.addSelectionListener(new SelectionAdapter()
                     {
                         @Override
@@ -608,8 +604,8 @@ public class BSLEditorMenuHook implements IStartup
                 {
                     MenuItem item = new MenuItem(menu, SWT.PUSH);
                     item.setText(ITEM_TEXT_DebugIR);
-                    item.setToolTipText(
-                        "Текущее выражение передается в отладочный инструмент в окно приложения ИР или предмета отладки" + Global.pluginSignForTooltip());
+                    ComfortSubmenuHelper.setMenuItemTooltip(item,
+                        "Текущее выражение передается в отладочный инструмент в окно приложения ИР или предмета отладки");
                     item.addSelectionListener(new SelectionAdapter()
                     {
                         @Override

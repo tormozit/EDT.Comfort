@@ -34,8 +34,7 @@ final class TreeCollapseOthers
 {
     static final String ITEM_TEXT = "Свернуть все другие"; //$NON-NLS-1$
     static final String ITEM_TOOLTIP =
-            "Свернуть все ветки дерева, кроме родителей текущего выделения" //$NON-NLS-1$
-            + Global.pluginSignForTooltip();
+            "Свернуть все ветки дерева, кроме родителей текущего выделения"; //$NON-NLS-1$
 
     private static final String COMFORT_HOOK_MARKER = "tormozit.treeCollapseOthers.comfort"; //$NON-NLS-1$
 
@@ -56,7 +55,7 @@ final class TreeCollapseOthers
         if (item == null || item.isDisposed())
             return;
         item.setText(ITEM_TEXT);
-        item.setToolTipText(ITEM_TOOLTIP);
+        ComfortSubmenuHelper.setMenuItemTooltip(item, ITEM_TOOLTIP);
         Image image = itemImage();
         if (image != null)
             item.setImage(image);

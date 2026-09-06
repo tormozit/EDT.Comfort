@@ -693,9 +693,8 @@ public final class GitChangedFileMenuHook implements IStartup
                         MenuItem replaceItem = new MenuItem(contextMenu, SWT.PUSH,
                             nativeIndex >= 0 ? nativeIndex : contextMenu.getItemCount());
                         replaceItem.setText(REPLACE_WITH_HEAD_ITEM_TEXT);
-                        replaceItem.setToolTipText(
-                            "Заменить содержимое выбранных файлов на состояние из HEAD (текущего коммита)"
-                                + Global.pluginSignForTooltip());
+                        ComfortSubmenuHelper.setMenuItemTooltip(replaceItem,
+                            "Заменить содержимое выбранных файлов на состояние из HEAD (текущего коммита)");
                         replaceItem.addSelectionListener(new SelectionAdapter()
                         {
                             @Override
@@ -1105,13 +1104,13 @@ public final class GitChangedFileMenuHook implements IStartup
                 {
                     addToSetItem.setText(ComfortSubmenuHelper.menuItemTextWithKeyBinding(
                         "Добавить в набор " + ObjectSets.bracketedName(addTarget), ADD_TO_SET_CMD, GIT_CONTEXT_ID));
-                    addToSetItem.setToolTipText("Добавить выбранные объекты метаданных в набор " + ObjectSets.quotedName(addTarget) + Global.pluginSignForTooltip());
+                    ComfortSubmenuHelper.setMenuItemTooltip(addToSetItem, "Добавить выбранные объекты метаданных в набор " + ObjectSets.quotedName(addTarget));
                     addToSetItem.setEnabled(true);
                 }
                 else
                 {
                     addToSetItem.setText("Добавить в набор <\u2026>");
-                    addToSetItem.setToolTipText("Выберите активный набор в панели \u00abНаборы объектов\u00bb" + Global.pluginSignForTooltip());
+                    ComfortSubmenuHelper.setMenuItemTooltip(addToSetItem, "Выберите активный набор в панели \u00abНаборы объектов\u00bb");
                     addToSetItem.setEnabled(false);
                 }
                 addToSetItem.setData(ADD_TO_SET_MARKER, Boolean.TRUE);
@@ -1688,8 +1687,8 @@ public final class GitChangedFileMenuHook implements IStartup
         String irText = ComfortSubmenuHelper.menuItemTextWithKeyBinding(
             IR_HISTORY_ITEM_TEXT, HistoryViewHandler.COMMAND_ID);
         MenuItem irItem = ComfortSubmenuHelper.createSortedMenuItem(submenu, SWT.PUSH, irText);
-        irItem.setToolTipText(
-            "Открыть историю выделенного коммита в приложении ИР" + Global.pluginSignForTooltip());
+        ComfortSubmenuHelper.setMenuItemTooltip(irItem,
+            "Открыть историю выделенного коммита в приложении ИР");
         irItem.addSelectionListener(new SelectionAdapter()
         {
             @Override

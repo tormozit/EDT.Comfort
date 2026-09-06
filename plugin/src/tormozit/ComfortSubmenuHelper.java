@@ -452,6 +452,44 @@ final class ComfortSubmenuHelper
         return item;
     }
 
+    /**
+     * Единственная точка решения про суффикс « (Комфорт)» в подсказке пункта контекстного меню.
+     * Вызывать её вместо {@code item.setToolTipText(text + Global.pluginSignForTooltip())}: сам
+     * пункт уже знает, где он лежит, — если внутри подменю «Комфорт», об авторстве говорит имя
+     * подменю и суффикс не добавляется; в штатном меню (в т.ч. когда та же команда продублирована
+     * в его корне) — добавляется. Текст всегда переносится через {@link TooltipText#wrap}.
+     *
+     * <p>{@code item} к моменту вызова уже создан в своём {@link Menu} (иначе никак), а пункт-каскад
+     * «Комфорт» помечен маркером в {@link #findOrCreateComfortSubmenu} — проверка ниже надёжна.
+     */
+    static void setMenuItemTooltip(MenuItem item, String text)
+    {
+        if (item == null || item.isDisposed() || text == null || text.isEmpty())
+            return;
+        String full = isInsideComfortSubmenu(item) ? text : text + Global.pluginSignForTooltip();
+        item.setToolTipText(TooltipText.wrap(item.getDisplay(), null, full));
+    }
+
+    /** Лежит ли пункт (на любой глубине вложенности) в подменю «Комфорт». */
+    static boolean isInsideComfortSubmenu(MenuItem item)
+    {
+        Menu menu = item == null || item.isDisposed() ? null : item.getParent();
+        while (menu != null && !menu.isDisposed())
+        {
+            // Меню, явно помеченное как «Комфорт» (напр. выпадающее меню одноимённой кнопки тулбара,
+            // не являющееся каскадным пунктом) — см. FilterBySubsystemsDialogHook.
+            if (Boolean.TRUE.equals(menu.getData(SUBMENU_MARKER)))
+                return true;
+            MenuItem cascade = menu.getParentItem();
+            if (cascade == null || cascade.isDisposed())
+                return false;
+            if (Boolean.TRUE.equals(cascade.getData(SUBMENU_MARKER)) || SUBMENU_TEXT.equals(cascade.getText()))
+                return true;
+            menu = cascade.getParent();
+        }
+        return false;
+    }
+
     private static int findSortedInsertIndex(Menu menu, String text)
     {
         if (menu == null || menu.isDisposed())

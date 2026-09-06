@@ -137,8 +137,21 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     /** Сколько раз ждать закрытия окна автодополнения перед расчётом member-stock. */
     private static final int MEMBER_STOCK_WAIT_ATTEMPTS = 8;
     private static final int MEMBER_STOCK_WAIT_STEP_MS = 25;
-    /** Повторы фонового расчёта членов: устаревший ресурс отдаёт пусто, ждать в фоне дёшево. */
+    /**
+     * Повторы фонового расчёта членов: устаревший ресурс отдаёт пусто, ждать в фоне дёшево.
+     * Столько же и с тем же шагом, что делал прежний путь на UI-потоке
+     * ({@link #MEMBER_STOCK_WAIT_ATTEMPTS} × {@link #MEMBER_STOCK_WAIT_STEP_MS}) — повторы
+     * впритык бесполезны, разбору нужно время догнать текст.
+     */
+    /**
+     * Повторов немного и они короткие. Растягивать бессмысленно: замер 05.09.2026 — восемь
+     * попыток за 922 мс для {@code стр.} дали восемь нулей, каждый вызов 4–36 мс (внутри
+     * штатного расчёта не сработало ни одно ожидание). Если фон не увидел членов сразу, он
+     * не увидит их и через секунду, а долгие повторы только откладывают переспрос с
+     * UI-потока, который и есть рабочий путь для этого случая.
+     */
     private static final int MEMBER_STOCK_BG_ATTEMPTS = 3;
+    private static final long MEMBER_STOCK_BG_RETRY_MS = MEMBER_STOCK_WAIT_STEP_MS;
     /**
      * Поколение отмены {@link #scheduleMemberStockCapture}.
      * Инкремент в {@link #cancelDeferredDelegateComputes} — иначе отложенный
@@ -218,6 +231,55 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     /** Job для фоновой загрузки delegate (EDT). */
     private Job asyncDelegateLoadJob;
     /** Фоновый расчёт списка членов после точки. */
+    /**
+     * Поколение <b>контекста</b> member-access для фонового расчёта членов.
+     *
+     * <p>Отдельно от {@link #memberStockCaptureGen}, который гасит отложенные расчёты на
+     * UI-потоке и растёт в том числе из {@code invalidateCache} — а тот вызывается в конце
+     * каждого пустого расчёта. С общим счётчиком фоновый результат отбрасывался всегда:
+     * поколение успевало вырасти за те 20 мс, что шёл расчёт (в логе — `dropGen was:12 now:13`
+     * на каждую букву). Здесь счётчик растёт только при смене самого контекста — другая точка
+     * или другой получатель.
+     *
+     * <p>Изоляция {@link BslDataEventGuard} делает это безопасным: фоновый расчёт не может
+     * тронуть {@code DataEvent}, ради чего {@code memberStockCaptureGen} и вводился, а
+     * публикация заново проверяет, что контекст жив.
+     */
+    private volatile int memberStockContextGen;
+
+    /** Готовый результат фонового расчёта, доступный ожидающему UI-потоку. */
+    private volatile BackgroundStock backgroundStock;
+
+    /** Идёт повторный проход расчёта после ожидания фона — второй раз ждать нельзя. */
+    private boolean memberStockAwaitInProgress;
+
+    /**
+     * Точка, на которой ожидание фонового расчёта уже не оправдалось. После точки, за которой
+     * членов нет вовсе (получатель не объект), ждать на каждой букве нельзя — один раз
+     * убедились и больше не ждём до смены контекста.
+     */
+    private int memberStockWaitFailedDot = -1;
+
+    /** Фоновый расчёт словарного списка: контекст в работе, неудачный и уже показанный. */
+    private Job wordListBackgroundJob;
+    private volatile int wordListBackgroundKey = Integer.MIN_VALUE;
+    private int wordListFailedKey = Integer.MIN_VALUE;
+    private int wordListOpenedKey = Integer.MIN_VALUE;
+
+    /**
+     * Сколько UI-поток готов ждать фоновый список членов, когда иначе список будет пуст.
+     *
+     * <p>При Ctrl+Space пользователь явно попросил список и готов подождать; при
+     * автооткрытии он всего лишь печатает, и лишнее ожидание там недопустимо.
+     */
+    private static final long MEMBER_STOCK_WAIT_MANUAL_MS = 1500;
+    private static final long MEMBER_STOCK_WAIT_AUTO_MS = 60;
+
+    /** Результат фонового расчёта вместе с контекстом, для которого он посчитан. */
+    private record BackgroundStock(int dot, int gen, String receiver, ICompletionProposal[] list,
+        java.util.Map<Object, Object> dataEvents)
+    {}
+
     private Job memberStockBackgroundJob;
     /**
      * Точка member-access контекста, для которого построен показываемый сейчас список;
@@ -1907,14 +1969,299 @@ return;
         try
         {
             result = computeCompletionProposalsImpl(viewer, offset);
+            if (result == null || result.length == 0)
+                result = awaitMemberStockWhenEmpty(viewer, offset, result);
             return result;
         }
         finally
         {
+            // Ставим изоляцию DataEvent сразу, как только штатный слушатель EDT появился.
+            // Он создаётся лениво внутри первого же расчёта, а без изоляции фоновый расчёт
+            // запускать нельзя — до этой строки перенос в фон не включался никогда.
+            if (viewer != null)
+                BslDataEventGuard.install(viewer.getDocument());
             ContentAssistDebug.perfEnd("computeCompletionProposals", t0, //$NON-NLS-1$
                 "{\"off\":" + offset + ",\"n\":" + (result == null ? -1 : result.length) //$NON-NLS-1$ //$NON-NLS-2$
                     + ",\"popup\":" + isPopupVisible() + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         }
+    }
+
+    /**
+     * Пустой список после точки — дожидаемся фонового расчёта членов прямо здесь.
+     *
+     * <p>Штатный расчёт после точки с набранным префиксом всегда возвращает 0 — окно не
+     * откроется, и показать фоновый результат потом уже некому: {@code refreshPopupIfOpen}
+     * работает только с открытым окном, а открывать его из публикации нельзя — показ
+     * запускает новый расчёт, тот снова пуст, и получается бесконечный цикл (замер
+     * 05.09.2026: 538 витков за секунду). Поэтому значение отдаём <b>внутри того же
+     * расчёта</b>, до {@code return}: зациклиться тут нечему.
+     *
+     * <p>Ждём только когда альтернатива — пустой список. При открытом окне сюда не заходим:
+     * там список не пуст, обновление идёт как раньше, асинхронно.
+     *
+     * @return список из фонового расчёта либо {@code fallback}, если ждать нечего или не
+     *     дождались.
+     */
+    private ICompletionProposal[] awaitMemberStockWhenEmpty(ITextViewer viewer, int offset,
+                                                            ICompletionProposal[] fallback)
+    {
+        if (memberStockAwaitInProgress || !ComfortSettings.isReplaceListFiltersEnabled())
+            return fallback;
+        IDocument doc = viewer != null ? viewer.getDocument() : null;
+        if (doc == null || offset < 0 || offset > doc.getLength())
+            return fallback;
+        int dot = ReceiverTypeLabel.findMemberAccessDot(doc, offset);
+        if (dot < 0 || isStringLiteralAssistContext(doc, offset))
+            return fallback;
+        if (dot == memberStockWaitFailedDot)
+            return fallback;
+        boolean manual = ManualInvocationDetect.isActive();
+        long budgetMs = manual ? MEMBER_STOCK_WAIT_MANUAL_MS : MEMBER_STOCK_WAIT_AUTO_MS;
+        long t0 = System.nanoTime();
+        AwaitOutcome outcome = awaitBackgroundStock(viewer, dot, budgetMs);
+        boolean got = outcome == AwaitOutcome.GOT;
+        long waitMs = (System.nanoTime() - t0) / 1_000_000L;
+        ICompletionProposal[] result = fallback;
+        // Помечаем точку «ждать нечего» только если расчёт ЗАВЕРШИЛСЯ пустым. По таймауту
+        // помечать нельзя: фон ещё работает (повторы идут с шагом 25 мс) и вполне может
+        // ответить — иначе после одного долгого раза мы бы перестали ждать навсегда.
+        if (outcome == AwaitOutcome.EMPTY)
+            memberStockWaitFailedDot = dot;
+        if (got)
+        {
+            memberStockAwaitInProgress = true;
+            try
+            {
+                result = computeCompletionProposalsImpl(viewer, offset);
+            }
+            finally
+            {
+                memberStockAwaitInProgress = false;
+            }
+        }
+        ContentAssistDebug.perfMark("memberStockAwait", //$NON-NLS-1$
+            "{\"dot\":" + dot + ",\"manual\":" + manual + ",\"ms\":" + waitMs //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"outcome\":\"" + outcome + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"n\":" + (result == null ? -1 : result.length) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+        return result == null || result.length == 0 ? fallback : result;
+    }
+
+    /**
+     * Дожидается фонового расчёта для точки {@code dot} и публикует его результат.
+     *
+     * <p>Забирать результат из полей, а не ждать {@code asyncExec}: пока UI-поток стоит в
+     * {@code join}, очередь дисплея не крутится и публикация из неё не выполнится никогда.
+     *
+     * @return {@link AwaitOutcome#GOT} — список есть; {@link AwaitOutcome#EMPTY} — расчёт
+     *     завершился и членов нет; {@link AwaitOutcome#TIMEOUT} — не дождались, фон ещё идёт.
+     */
+    private AwaitOutcome awaitBackgroundStock(ITextViewer viewer, int dot, long budgetMs)
+    {
+        if (hasMemberStock(dot))
+            return AwaitOutcome.GOT;
+        long deadline = System.nanoTime() + budgetMs * 1_000_000L;
+        // Расчёт мог и не стартовать (например, окно уже было открыто на прошлом такте) —
+        // запускаем сами, иначе ждать нечего.
+        scheduleMemberStockCapture(viewer, dot);
+        boolean jobFinished = false;
+        while (System.nanoTime() < deadline)
+        {
+            if (takeBackgroundStock(viewer, dot))
+                return AwaitOutcome.GOT;
+            Job job = memberStockBackgroundJob;
+            if (job == null)
+            {
+                jobFinished = true;
+                break;
+            }
+            long leftMs = (deadline - System.nanoTime()) / 1_000_000L;
+            if (leftMs <= 0)
+                break;
+            try
+            {
+                job.join(leftMs, null);
+            }
+            catch (InterruptedException e)
+            {
+                Thread.currentThread().interrupt();
+                break;
+            }
+            catch (org.eclipse.core.runtime.OperationCanceledException ignored)
+            {
+                // задание отменили — результат заберём, если он всё же появился
+            }
+            if (takeBackgroundStock(viewer, dot))
+                return AwaitOutcome.GOT;
+            if (job.getState() == Job.NONE && memberStockBackgroundJob == job)
+            {
+                jobFinished = true;
+                break;
+            }
+        }
+        if (hasMemberStock(dot))
+            return AwaitOutcome.GOT;
+        return jobFinished ? AwaitOutcome.EMPTY : AwaitOutcome.TIMEOUT;
+    }
+
+    /** Чем кончилось ожидание фонового списка членов. */
+    private enum AwaitOutcome
+    {
+        /** Список членов получен. */
+        GOT,
+        /** Расчёт завершился, членов для этой точки нет. */
+        EMPTY,
+        /** Бюджет вышел, расчёт ещё идёт. */
+        TIMEOUT
+    }
+
+    /**
+     * Уносит первичный штатный расчёт словарного списка из такта нажатия в фоновый Job.
+     *
+     * <p>Считаем <b>через selection-прокси</b>, как и список членов. Это обязательно: Xtext
+     * в {@code ParserBasedContentAssistContextFactory.initializeAndAdjustCompletionOffset}
+     * спрашивает у вьюера выделение, и настоящий вьюер уходит в {@code StyledText} — с
+     * фонового потока это {@code SWTException: Invalid thread access}.
+     *
+     * <p><b>Полнота не приносится в жертву.</b> Если фон вернул пусто, тот же расчёт делается
+     * синхронно — по ЖИВОЙ каретке, а не по запомненной. Короче имеющегося кэш не
+     * перезаписываем.
+     *
+     * @return {@code true}, если расчёт унесён в фон и вызывающий должен вернуть пустой
+     *     список <b>на этот такт</b>.
+     */
+    private boolean scheduleWordListInBackground(ITextViewer viewer, IDocument doc, int offset,
+                                                 int caret)
+    {
+        if (memberStockAwaitInProgress || doc == null || caret < 0)
+            return wordListSkip("state"); //$NON-NLS-1$
+        // Ctrl+Space оставляем как был: там пользователь явно попросил список и ждёт его
+        // сейчас, а откладывание дало бы задержку окна на ровном месте.
+        if (ManualInvocationDetect.isActive())
+            return wordListSkip("manual"); //$NON-NLS-1$
+        // Member-access живёт своей механикой (запас членов, ожидание, закрытие окна) —
+        // сюда его не пускаем, иначе два механизма будут спорить за один контекст.
+        if (ReceiverTypeLabel.findMemberAccessDot(doc, caret) >= 0)
+            return wordListSkip("memberAccess"); //$NON-NLS-1$
+        if (isStringLiteralAssistContext(doc, caret))
+            return wordListSkip("literal"); //$NON-NLS-1$
+        if (hasIrProposalsForCurrentContext())
+            return wordListSkip("ir"); //$NON-NLS-1$
+        final int key = fullListContextKey;
+        if (key == Integer.MIN_VALUE)
+            return wordListSkip("noKey"); //$NON-NLS-1$
+        if (key == wordListFailedKey)
+            return wordListSkip("failedKey"); //$NON-NLS-1$
+        if (key == wordListOpenedKey)
+            return wordListSkip("openedKey"); //$NON-NLS-1$
+        if (!BslDataEventGuard.install(doc))
+            return wordListSkip("noGuard"); //$NON-NLS-1$
+        if (wordListBackgroundKey == key)
+            return true;
+        org.eclipse.swt.widgets.Display display = viewer.getTextWidget() != null
+            && !viewer.getTextWidget().isDisposed() ? viewer.getTextWidget().getDisplay() : null;
+        if (display == null)
+            return wordListSkip("noDisplay"); //$NON-NLS-1$
+        wordListBackgroundKey = key;
+        final int gen = memberStockContextGen;
+        Job job = new Job("SCAP word list") //$NON-NLS-1$
+        {
+            @Override
+            protected IStatus run(IProgressMonitor monitor)
+            {
+                long t0 = System.nanoTime();
+                ICompletionProposal[] raw = EMPTY;
+                java.util.Map<Object, Object> events = java.util.Collections.emptyMap();
+                try
+                {
+                    raw = BslDataEventGuard.runIsolated(
+                        () -> computeMemberStockViaSelectionProxy(viewer, offset));
+                    events = BslDataEventGuard.drainIsolated(doc);
+                }
+                catch (Exception | LinkageError e)
+                {
+                    Global.tempLogException("assist-perf", "wordListBackground", e); //$NON-NLS-1$ //$NON-NLS-2$
+                    raw = EMPTY;
+                }
+                ContentAssistDebug.perfLog("wordListBackground", //$NON-NLS-1$
+                    (System.nanoTime() - t0) / 1_000_000L, 0,
+                    "{\"key\":" + key + ",\"n\":" + (raw == null ? -1 : raw.length) //$NON-NLS-1$ //$NON-NLS-2$
+                        + ",\"events\":" + events.size() + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+                final ICompletionProposal[] result = raw == null ? EMPTY : raw;
+                final java.util.Map<Object, Object> dataEvents = events;
+                display.asyncExec(() -> publishWordList(viewer, key, gen, result, dataEvents));
+                return Status.OK_STATUS;
+            }
+        };
+        job.setSystem(true);
+        wordListBackgroundJob = job;
+        job.schedule();
+        return true;
+    }
+
+    /** Отказ от переноса в фон с указанием причины — чтобы не гадать по пустому логу. */
+    private static boolean wordListSkip(String reason)
+    {
+        ContentAssistDebug.perfMark("wordListDefer.skip", //$NON-NLS-1$
+            "{\"why\":\"" + reason + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+        return false;
+    }
+
+    /** Публикация словарного списка из фона — только на UI-потоке. */
+    private void publishWordList(ITextViewer viewer, int key, int gen,
+                                 ICompletionProposal[] result,
+                                 java.util.Map<Object, Object> dataEvents)
+    {
+        if (wordListBackgroundKey == key)
+            wordListBackgroundKey = Integer.MIN_VALUE;
+        if (gen != memberStockContextGen)
+            return;
+        IDocument liveDoc = viewer != null ? viewer.getDocument() : null;
+        int liveCaret = resolveWidgetCaret(viewer);
+        if (liveDoc == null || liveCaret < 0
+            || computeFullListContextKey(liveDoc, liveCaret) != key)
+            return;
+        ICompletionProposal[] list = result;
+        if (list.length == 0)
+        {
+            // Фон не справился — добираем синхронно и ПО ЖИВОЙ КАРЕТКЕ. Буква уже на экране,
+            // а список обязан быть полным.
+            wordListFailedKey = key;
+            list = unwrapProposals(fetchDelegateList(viewer, liveCaret, liveCaret));
+            ContentAssistDebug.perfMark("wordListBackground.syncFallback", //$NON-NLS-1$
+                "{\"key\":" + key + ",\"n\":" + list.length + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        }
+        else if (!dataEvents.isEmpty())
+        {
+            BslDataEventGuard.mergeIntoReal(liveDoc, dataEvents);
+        }
+        // Кэш заменяем только если новый список не короче: усечённый список показывать нельзя.
+        if (list.length == 0 || list.length < fullListCache.length)
+            return;
+        assignFullListCache(unwrapProposals(list));
+        fullListReady = true;
+        fullListContextKey = key;
+        clearDelegateSyncProbe();
+        rememberInterimDelegateList(list);
+        ContentAssistDebug.perfMark("wordListBackground.publish", //$NON-NLS-1$
+            "{\"key\":" + key + ",\"cache\":" + fullListCache.length //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"events\":" + dataEvents.size() + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+        // Открываем окно ровно один раз на контекст: повторный показ снова запустил бы
+        // расчёт, и при неудаче получился бы цикл.
+        wordListOpenedKey = key;
+        if (!isPopupVisible())
+            ContentAssistSessionReloader.openPopupForBackgroundList(viewer);
+    }
+
+    /** Публикует готовый результат фонового расчёта, если он про эту точку. */
+    private boolean takeBackgroundStock(ITextViewer viewer, int dot)
+    {
+        BackgroundStock stock = backgroundStock;
+        if (stock == null || stock.dot() != dot)
+            return hasMemberStock(dot);
+        backgroundStock = null;
+        publishMemberStock(viewer, stock.dot(), stock.gen(), stock.receiver(), stock.list(),
+            stock.dataEvents());
+        return hasMemberStock(dot);
     }
 
     private ICompletionProposal[] computeCompletionProposalsImpl(ITextViewer viewer, int offset)
@@ -2380,7 +2727,15 @@ if (isIrWordsResolvedForContext() && irN > 0)
             debugResolveExit(doc, caret, filter, 0, false, "delegateProbed", EMPTY); //$NON-NLS-1$
             return EMPTY;
         }
-        // Первичное открытие (попап ещё не виден) — синхронная загрузка delegate
+        // Первичное открытие (попап ещё не виден). Штатный расчёт здесь стоит 75–96 мс и
+        // раньше выполнялся прямо в такте нажатия первой буквы слова — это и была задержка
+        // ввода. Уносим его в фон; буква печатается сразу, список приходит следом. Полнота
+        // не страдает: неудачу фона добираем синхронно, но уже вне такта нажатия.
+        if (!isPopupVisible() && scheduleWordListInBackground(viewer, doc, offset, caret))
+        {
+            debugResolveExit(doc, caret, filter, 0, false, "wordListDeferred", EMPTY); //$NON-NLS-1$
+            return EMPTY;
+        }
         if (!isPopupVisible())
         {
             ICompletionProposal[] raw = unwrapProposals(fetchDelegateList(viewer, offset, caret));
@@ -3799,6 +4154,19 @@ if (!SmartAssistFilterState.isSmartFilterEnabled())
             memberAccessReloadSeq++;
             memberAccessReloadScheduledSeq = -1;
             memberStockCaptureGen++;
+            memberStockContextGen++;
+            memberStockWaitFailedDot = -1;
+            // wordListFailedKey / wordListOpenedKey здесь НЕ сбрасываем. Они привязаны к
+            // ключу контекста и обесцениваются сами, а этот блок выполняется в том числе
+            // вхолостую: invalidateCache в начале каждой сессии ставит fullListContextKey в
+            // MIN_VALUE, и следующий расчёт видит «смену контекста» с тем же самым ключом.
+            // Сброс защиты здесь давал 84 витка publish → открытие окна → пустой расчёт →
+            // фон → publish, с писком на каждом витке (замер 05.09.2026).
+            if (wordListBackgroundJob != null)
+            {
+                wordListBackgroundJob.cancel();
+                wordListBackgroundKey = Integer.MIN_VALUE;
+            }
             resetMemberStockFullList();
             cancelIdleFullListLoad();
             cancelAsyncDelegateLoad();
@@ -4020,9 +4388,75 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         }
     }
 
-    /** Один вызов штатного процессора с замером: главный источник блокировки UI. */
+    /**
+     * Замок вокруг штатного расчёта: двух одновременных заходов в {@code BslProposalProvider}
+     * быть не должно.
+     *
+     * <p>{@code AbstractJavaBasedContentProposalProvider.createProposals} на входе пишет
+     * {@code handledArguments = newHashSet()}, а в {@code finally} — {@code null}. Поле
+     * обычное, провайдер один на язык: кто вышел первым, обнулил его у того, кто ещё считает,
+     * и тот падает {@code NullPointerException} в {@code announceProcessing}. Падает любая
+     * из сторон — в замере 05.09.2026 трижды фоновая и один раз <b>UI</b>
+     * ({@code delegate.compute ui:true n:-1}), а упавший UI-расчёт даёт пустой список, и окно
+     * автодополнения не открывается вовсе.
+     *
+     * <p>Замок один на все редакторы, потому что провайдер — синглтон Guice-модуля языка.
+     */
+    private static final java.util.concurrent.locks.ReentrantLock DELEGATE_LOCK =
+        new java.util.concurrent.locks.ReentrantLock();
+
+    /** Сколько фоновый расчёт ждёт освобождения замка, прежде чем сдаться до следующей попытки. */
+    private static final long DELEGATE_LOCK_BG_WAIT_MS = 300;
+
+    /**
+     * С какого ожидания замка на UI-потоке пишем строку в лог. Это порог наблюдения, а не
+     * задержка: ко времени расчёта он не добавляет ничего.
+     */
+    private static final long DELEGATE_LOCK_UI_REPORT_MS = 5;
+
+    /**
+     * Один вызов штатного процессора с замером: главный источник блокировки UI.
+     *
+     * <p>Расчёты сериализованы {@link #DELEGATE_LOCK}. UI-поток ждёт замок сколько нужно —
+     * пропустить расчёт он не может, иначе список будет неполным. Фоновый поток ждёт
+     * ограниченно и при занятости возвращает {@code null}: наверху это обычная неудачная
+     * попытка, она повторится.
+     */
     private ICompletionProposal[] probeDelegateOnce(ITextViewer viewer, int off)
     {
+        boolean onUi = org.eclipse.swt.widgets.Display.getCurrent() != null;
+        long tLock = System.nanoTime();
+        boolean locked;
+        try
+        {
+            if (onUi)
+            {
+                DELEGATE_LOCK.lock();
+                locked = true;
+            }
+            else
+            {
+                locked = DELEGATE_LOCK.tryLock(DELEGATE_LOCK_BG_WAIT_MS,
+                    java.util.concurrent.TimeUnit.MILLISECONDS);
+            }
+        }
+        catch (InterruptedException e)
+        {
+            Thread.currentThread().interrupt();
+            return null;
+        }
+        if (!locked)
+        {
+            ContentAssistDebug.perfMark("delegate.lockBusy", //$NON-NLS-1$
+                "{\"off\":" + off + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            return null;
+        }
+        long waitMs = (System.nanoTime() - tLock) / 1_000_000L;
+        if (onUi && waitMs >= DELEGATE_LOCK_UI_REPORT_MS)
+        {
+            ContentAssistDebug.perfMark("delegate.lockWaitUi", //$NON-NLS-1$
+                "{\"off\":" + off + ",\"ms\":" + waitMs + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        }
         long t0 = ContentAssistDebug.perfStart("delegate.compute"); //$NON-NLS-1$
         ICompletionProposal[] raw = null;
         try
@@ -4032,6 +4466,7 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         }
         finally
         {
+            DELEGATE_LOCK.unlock();
             ContentAssistDebug.perfEnd("delegate.compute", t0, //$NON-NLS-1$
                 "{\"off\":" + off + ",\"n\":" + (raw == null ? -1 : raw.length) + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         }
@@ -4202,9 +4637,10 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
             if (viewer.getTextWidget() == null || viewer.getTextWidget().isDisposed())
                 return;
             org.eclipse.swt.widgets.Display display = viewer.getTextWidget().getDisplay();
-            final int captureGen = memberStockCaptureGen;
-            if (runMemberStockCaptureInBackground(viewer, display, dotContextKey, captureGen))
+            if (runMemberStockCaptureInBackground(viewer, display, dotContextKey,
+                memberStockContextGen, fullListContextReceiver))
                 return;
+            final int captureGen = memberStockCaptureGen;
             display.asyncExec(() -> runMemberStockCapture(viewer, dotContextKey, 0, captureGen));
         }
         catch (Exception ignored) {}
@@ -4219,6 +4655,8 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
      * на время расчёта изолируется по потоку ({@link BslDataEventGuard}): всё, что фоновый
      * расчёт в неё пишет и чистит, уходит в теневую копию, настоящая карта не меняется.
      * Если изоляцию поставить не удалось — фон не запускаем и работаем как раньше.
+     * Записанные в теневую карту {@code DataEvent} не выбрасываются: они нужны для LinkedMode
+     * и возвращаются в настоящую карту при публикации (см. {@code publishMemberStock}).
      *
      * <p>Расчёт может вернуть пусто, если ресурс в этот момент устарел: повторяем в фоне,
      * там повторы ничего не стоят. Публикация результата — только на UI-потоке.
@@ -4226,7 +4664,8 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
      * @return {@code true}, если фоновый расчёт запущен.
      */
     private boolean runMemberStockCaptureInBackground(ITextViewer viewer,
-        org.eclipse.swt.widgets.Display display, int dotContextKey, int captureGen)
+        org.eclipse.swt.widgets.Display display, int dotContextKey, int contextGen,
+        String contextReceiver)
     {
         IDocument doc = viewer.getDocument();
         if (doc == null || !(doc instanceof IXtextDocument))
@@ -4238,23 +4677,24 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         // заход рождался ещё один поток: замер 05.09.2026 — ПЯТЬ параллельных «SCAP member
         // stock» на один и тот же offset, каждый по ~2030 мс и все с пустым результатом.
         // Они просто ждали друг друга на блокировке ресурса, отсюда и 3-4 секунды.
-        if (memberStockBackgroundDot == dotContextKey && memberStockBackgroundGen == captureGen)
+        if (memberStockBackgroundDot == dotContextKey && memberStockBackgroundGen == contextGen)
             return true;
         if (memberStockBackgroundJob != null)
             memberStockBackgroundJob.cancel();
         memberStockBackgroundDot = dotContextKey;
-        memberStockBackgroundGen = captureGen;
+        memberStockBackgroundGen = contextGen;
         final int probeOffset = dotContextKey + 1;
         Job job = new Job("SCAP member stock") { //$NON-NLS-1$
             @Override
             protected IStatus run(IProgressMonitor monitor)
             {
                 ICompletionProposal[] raw = EMPTY;
+                java.util.Map<Object, Object> dataEvents = java.util.Collections.emptyMap();
                 int attempts = 0;
                 long t0 = System.nanoTime();
                 while (attempts < MEMBER_STOCK_BG_ATTEMPTS)
                 {
-                    if (monitor.isCanceled() || captureGen != memberStockCaptureGen)
+                    if (monitor.isCanceled() || contextGen != memberStockContextGen)
                         return Status.CANCEL_STATUS;
                     attempts++;
                     try
@@ -4265,6 +4705,10 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                         // фоновая загрузка.
                         raw = BslDataEventGuard.runIsolated(
                             () -> computeMemberStockViaSelectionProxy(viewer, probeOffset));
+                        // Забираем DataEvent, записанный расчётом в теневую карту: по нему
+                        // EDT поднимает LinkedMode при вставке. Забирать только здесь, на
+                        // фоновом потоке — теневая карта привязана к потоку.
+                        dataEvents = BslDataEventGuard.drainIsolated(doc);
                     }
                     catch (Exception | LinkageError e)
                     {
@@ -4274,6 +4718,24 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                     }
                     if (raw != null && raw.length > 0)
                         break;
+                    // Пусто — значит разбор ещё не догнал текст (типичный случай сразу после
+                    // набранной точки: тип локальной переменной ещё не выведен). Повторять
+                    // ВПРИТЫК бессмысленно: замер 05.09.2026 — три попытки за 6 мс, все
+                    // пустые, и так пять заданий подряд, а в окне оставался прежний список
+                    // слов. Штатному разбору надо дать время, как это делал прежний путь на
+                    // UI-потоке (повтор через 25 мс). Спим в фоновом потоке — UI не страдает.
+                    if (attempts < MEMBER_STOCK_BG_ATTEMPTS)
+                    {
+                        try
+                        {
+                            Thread.sleep(MEMBER_STOCK_BG_RETRY_MS);
+                        }
+                        catch (InterruptedException e)
+                        {
+                            Thread.currentThread().interrupt();
+                            return Status.CANCEL_STATUS;
+                        }
+                    }
                 }
                 ContentAssistDebug.perfLog("memberStockBackground", //$NON-NLS-1$
                     (System.nanoTime() - t0) / 1_000_000L, 0,
@@ -4281,14 +4743,26 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                         + ",\"n\":" + (raw == null ? -1 : raw.length) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
                 // Метку «идёт расчёт для этой точки» снимаем в любом исходе, иначе после
                 // неудачи повторный расчёт для той же точки уже не запустится.
-                if (memberStockBackgroundGen == captureGen
+                if (memberStockBackgroundGen == contextGen
                     && memberStockBackgroundDot == dotContextKey)
                     memberStockBackgroundDot = -1;
                 if (raw == null || raw.length == 0)
+                {
+                    display.asyncExec(
+                        () -> dropStalePopupForEmptyMemberStock(viewer, dotContextKey, contextGen,
+                            contextReceiver));
                     return Status.CANCEL_STATUS;
+                }
                 final ICompletionProposal[] result = raw;
-                display.asyncExec(
-                    () -> publishMemberStock(viewer, dotContextKey, captureGen, result));
+                final java.util.Map<Object, Object> events = dataEvents;
+                // Результат кладём в поля ДО asyncExec: пока UI-поток ждёт нас в join,
+                // asyncExec не выполнится (очередь дисплея не крутится), и забрать результат
+                // он сможет только отсюда. Кто первый — тот и опубликует, второй увидит
+                // dropShorter и ничего не испортит.
+                backgroundStock = new BackgroundStock(dotContextKey, contextGen, contextReceiver,
+                    result, events);
+                display.asyncExec(() -> publishMemberStock(viewer, dotContextKey, contextGen,
+                    contextReceiver, result, events));
                 return Status.OK_STATUS;
             }
         };
@@ -4298,38 +4772,140 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         return true;
     }
 
-    /** Публикация фонового результата — только на UI-потоке. */
-    private void publishMemberStock(ITextViewer viewer, int dotContextKey, int captureGen,
-                                    ICompletionProposal[] result)
+    /**
+     * Членов для новой точки нет — окно не должно показывать список прошлого контекста.
+     *
+     * <p>Пустота здесь именно от EDT, а не от нашей механики. Замер 05.09.2026 для
+     * {@code стр.}: восемь попыток за 922 мс дали восемь нулей, каждый вызов 4–36 мс (внутри
+     * штатного расчёта не сработало ни одно ожидание — ресурс считался готовым), и
+     * переспрос <b>с UI-потока</b> тем же способом дал тот же ноль за 5 мс. Ни время, ни
+     * поток ни при чём.
+     *
+     * <p>Закрытие согласовано с пользователем и совпадает с уже принятым решением
+     * {@code syncMemberAccessPopupInPlace}: «закрытие — выход "показать нечего"». Это не
+     * жертва по контракту «никаких жертв»: жертва — это урезанный список вместо полного,
+     * а здесь показывать нечего вообще, и полного списка не существует.
+     */
+    private void dropStalePopupForEmptyMemberStock(ITextViewer viewer, int dotContextKey,
+                                                   int contextGen, String contextReceiver)
     {
-        if (captureGen != memberStockCaptureGen)
+        if (contextGen != memberStockContextGen || hasMemberStock(dotContextKey))
             return;
-        if (fullListContextKey != dotContextKey)
+        IDocument liveDoc = viewer != null ? viewer.getDocument() : null;
+        int liveCaret = resolveWidgetCaret(viewer);
+        if (liveDoc == null || liveCaret < 0
+            || ReceiverTypeLabel.findMemberAccessDot(liveDoc, liveCaret) != dotContextKey)
             return;
+        ContentAssistDebug.perfMark("memberStockEmpty", //$NON-NLS-1$
+            "{\"dot\":" + dotContextKey + ",\"receiver\":\"" //$NON-NLS-1$ //$NON-NLS-2$
+                + contextReceiver.replace('"', '\'') + "\",\"popup\":" + isPopupVisible() //$NON-NLS-1$
+                + ",\"cache\":" + fullListCache.length + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+        // В окне заведомо чужой список: контекст сменился на member-access, а для него у нас
+        // нет ничего (кэш контекста пуст и запаса членов нет). Показывать список прошлого
+        // контекста нельзя, дорастить его нечем — окно закрывается, как это уже делает
+        // syncMemberAccessPopupInPlace в аналогичном случае. Зацикливания нет: закрытие
+        // расчёта не запускает.
+        if (isPopupVisible() && fullListContextKey == dotContextKey && fullListCache.length == 0)
+        {
+            ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
+            if (assistant != null)
+            {
+                ContentAssistPopupSync.hideProposalPopup(assistant);
+                ContentAssistDebug.perfMark("memberStockEmpty.popupClosed", //$NON-NLS-1$
+                    "{\"dot\":" + dotContextKey + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+    }
+
+    /**
+     * Публикация фонового результата — только на UI-потоке.
+     *
+     * @param dataEvents записи {@code DataEvent}, добытые фоновым расчётом в изоляции. Их
+     *     нужно вернуть в настоящую карту, иначе при вставке предложения EDT не найдёт ключ
+     *     по вставленному тексту и LinkedMode не поднимется — каретка не встанет между
+     *     скобок {@code ЗначениеРеквизитаОбъектов(, )}. Перенос здесь безопасен: UI-поток,
+     *     контекст уже проверен, вставка строго после.
+     */
+    private void publishMemberStock(ITextViewer viewer, int dotContextKey, int contextGen,
+                                    String contextReceiver, ICompletionProposal[] result,
+                                    java.util.Map<Object, Object> dataEvents)
+    {
+        if (contextGen != memberStockContextGen)
+        {
+            ContentAssistDebug.perfMark("memberStockBackground.dropGen", //$NON-NLS-1$
+                "{\"dot\":" + dotContextKey + ",\"was\":" + contextGen //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"now\":" + memberStockContextGen + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        }
         // Пока считали, текст мог измениться — например, набранное удалили. Публиковать
         // результат для исчезнувшего контекста нельзя: он не только показал бы чужие члены,
         // но и удержал бы окно открытым (refreshPopupIfOpen), хотя контекст уже другой.
+        //
+        // Сверяемся с ЖИВЫМ документом и с получателем, запомненным на старте расчёта, а не с
+        // полями кэша: `invalidateCache()` в конце каждого пустого расчёта ставит
+        // `fullListContextKey = Integer.MIN_VALUE` и чистит получателя — по ним публикация
+        // отбрасывалась всегда (в логе `dropKey key:-2147483648`), хотя контекст на экране
+        // никуда не девался.
         IDocument liveDoc = viewer.getDocument();
         int liveCaret = resolveWidgetCaret(viewer);
+        String liveReceiver = liveDoc != null && liveCaret >= 0
+            ? memberAccessReceiver(liveDoc, liveCaret) : ""; //$NON-NLS-1$
         if (liveDoc == null || liveCaret < 0
             || ReceiverTypeLabel.findMemberAccessDot(liveDoc, liveCaret) != dotContextKey
-            || !memberAccessReceiver(liveDoc, liveCaret).equals(fullListContextReceiver)
+            || !liveReceiver.equals(contextReceiver)
             || isStringLiteralAssistContext(liveDoc, liveCaret))
         {
             ContentAssistDebug.perfMark("memberStockBackground.dropContextGone", //$NON-NLS-1$
                 "{\"dot\":" + dotContextKey + ",\"caret\":" + liveCaret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return;
         }
+        // Контекст на экране жив, а кэш его уже забыл — восстанавливаем ключ. Без этого
+        // следующий расчёт снова уйдёт в ветку смены контекста и сотрёт (`resetMemberStock-
+        // FullList`) ровно то, что мы сейчас публикуем.
+        if (fullListContextKey != dotContextKey || !liveReceiver.equals(fullListContextReceiver))
+        {
+            ContentAssistDebug.perfMark("memberStockBackground.restoreKey", //$NON-NLS-1$
+                "{\"dot\":" + dotContextKey + ",\"key\":" + fullListContextKey + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            fullListContextKey = dotContextKey;
+            fullListContextReceiver = liveReceiver;
+        }
+        // Контекст жив и совпадает с тем, для которого считали, — значит offset'ы в DataEvent
+        // те же (правки шли только правее точки и при вставке будут заменены целиком).
+        if (!dataEvents.isEmpty())
+        {
+            BslDataEventGuard.mergeIntoReal(liveDoc, dataEvents);
+            ContentAssistDebug.perfMark("memberStockBackground.dataEvents", //$NON-NLS-1$
+                "{\"dot\":" + dotContextKey + ",\"n\":" + dataEvents.size() + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        }
         int prev = memberStockFullListDot == dotContextKey ? memberStockFullList.length : 0;
         if (result.length <= prev)
+        {
+            ContentAssistDebug.perfMark("memberStockBackground.dropShorter", //$NON-NLS-1$
+                "{\"dot\":" + dotContextKey + ",\"n\":" + result.length //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"prev\":" + prev + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
+        }
         captureMemberStockFullList(result, dotContextKey);
         if (memberStockFullListDot == dotContextKey)
             memberStockFullListComplete = true;
+        // Положить список в поле мало — его никто не спросит. Расчёт, уже сходивший к делегату
+        // в этом контексте, помечен `markDelegateSyncProbed` и на следующем заходе выходит по
+        // «delegateProbed» → EMPTY, не заглянув в список членов вовсе. Именно поэтому Ctrl+Space
+        // после «ОбщегоНазначения.ЗначениеРеквизитаОбъектов» не давал НИЧЕГО, хотя 229 членов
+        // были посчитаны и опубликованы. Зонд устарел — у нас теперь строго больше данных.
+        boolean repaired = repairPopupListFromMemberStock(liveDoc, liveCaret);
+        clearDelegateSyncProbe();
+        ContentAssistDebug.perfMark("memberStockBackground.toCache", //$NON-NLS-1$
+            "{\"dot\":" + dotContextKey + ",\"repaired\":" + repaired //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"cache\":" + fullListCache.length + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         ContentAssistDebug.perfMark("memberStockBackground.publish", //$NON-NLS-1$
             "{\"dot\":" + dotContextKey + ",\"n\":" + memberStockFullList.length + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         if (viewer instanceof SourceViewer)
             ContentAssistPopupUi.updateContextTypeLabel((SourceViewer)viewer);
+        // Окно открыто — обновляем список на месте. Закрытое окно отсюда НЕ открываем: показ
+        // списка запускает новый расчёт, тот снова возвращает пусто (штатный расчёт после
+        // точки с префиксом всегда даёт 0), снова стартует фоновый расчёт — и цикл замыкается.
+        // Замер 05.09.2026: 538 витков publish → reopen → compute n:0 за одну секунду.
         ContentAssistSessionReloader.refreshPopupIfOpen();
     }
 

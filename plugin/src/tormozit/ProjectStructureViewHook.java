@@ -65,12 +65,10 @@ public final class ProjectStructureViewHook implements IStartup
     private static final String OPEN_OVERRIDE_MARKER = "tormozit.navigatorOpenInTextEditorHook"; //$NON-NLS-1$
     private static final String ITEM_TEXT_OPEN = "Открыть объект"; //$NON-NLS-1$
     private static final String ITEM_TOOLTIP_OPEN =
-            "Открыть редактор объекта метаданных выбранного элемента навигатора" //$NON-NLS-1$
-            + Global.pluginSignForTooltip();
+            "Открыть редактор объекта метаданных выбранного элемента навигатора"; //$NON-NLS-1$
     private static final String ITEM_TEXT_REVEAL = "Показать в навигаторе"; //$NON-NLS-1$
     private static final String ITEM_TOOLTIP_REVEAL =
-            "Выделить и прокрутить к объекту в дереве навигатора" //$NON-NLS-1$
-            + Global.pluginSignForTooltip();
+            "Выделить и прокрутить к объекту в дереве навигатора"; //$NON-NLS-1$
 
     /** ID встроенного в Eclipse простого текстового редактора; литералом — как в {@code FileSearchResultsHook}. */
     private static final String DEFAULT_TEXT_EDITOR_ID = "org.eclipse.ui.DefaultTextEditor"; //$NON-NLS-1$
@@ -168,6 +166,8 @@ public final class ProjectStructureViewHook implements IStartup
         Menu menu = tree.getMenu();
         if (menu == null)
             return;
+
+        OutputListCommand.attach(tree);
 
         MenuAdapter listener = new MenuAdapter()
         {
@@ -346,7 +346,7 @@ public final class ProjectStructureViewHook implements IStartup
 
                 MenuItem openItem = ComfortSubmenuHelper.createSortedMenuItem(
                     comfortSub, SWT.PUSH, ITEM_TEXT_OPEN);
-                openItem.setToolTipText(ITEM_TOOLTIP_OPEN);
+                ComfortSubmenuHelper.setMenuItemTooltip(openItem, ITEM_TOOLTIP_OPEN);
                 openItem.addSelectionListener(new SelectionAdapter()
                 {
                     @Override
@@ -359,7 +359,7 @@ public final class ProjectStructureViewHook implements IStartup
 
                 MenuItem revealItem = ComfortSubmenuHelper.createSortedMenuItem(
                     comfortSub, SWT.PUSH, ITEM_TEXT_REVEAL);
-                revealItem.setToolTipText(ITEM_TOOLTIP_REVEAL);
+                ComfortSubmenuHelper.setMenuItemTooltip(revealItem, ITEM_TOOLTIP_REVEAL);
                 revealItem.addSelectionListener(new SelectionAdapter()
                 {
                     @Override

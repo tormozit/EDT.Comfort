@@ -59,13 +59,9 @@ public final class DebugValuesInspectHook implements IStartup
 
     private static final String ITEM_TEXT = "Инспектировать"; //$NON-NLS-1$
     private static final String COLLECTION_ITEM_TEXT = "Показать коллекцию"; //$NON-NLS-1$
-    private static final String ITEM_TOOLTIP =
-        "Открыть элемент коллекции в инспекторе" //$NON-NLS-1$
-            + Global.pluginSignForTooltip();
+    private static final String ITEM_TOOLTIP = "Открыть элемент коллекции в инспекторе"; //$NON-NLS-1$
 
-    private static final String COLLECTION_TOOLTIP =
-        "Открыть коллекцию в отдельном окне" //$NON-NLS-1$
-            + Global.pluginSignForTooltip();
+    private static final String COLLECTION_TOOLTIP = "Открыть коллекцию в отдельном окне"; //$NON-NLS-1$
 
     private static final String INDEX_HEADER_RU = "Индекс"; //$NON-NLS-1$
     private static final String INDEX_HEADER_EN = "Index"; //$NON-NLS-1$
@@ -232,7 +228,7 @@ public final class DebugValuesInspectHook implements IStartup
     {
         MenuItem item = new MenuItem(menu, SWT.PUSH);
         item.setText(ITEM_TEXT);
-        item.setToolTipText(ITEM_TOOLTIP);
+        ComfortSubmenuHelper.setMenuItemTooltip(item, ITEM_TOOLTIP);
         Image inspectImage = BslInspectSupport.loadInspectCommandImage();
         if (inspectImage != null)
         {
@@ -260,7 +256,7 @@ public final class DebugValuesInspectHook implements IStartup
             COLLECTION_ITEM_TEXT,
             DebugCollectionShowHandler.COMMAND_ID,
             DebugCollectionShowHandler.BINDING_CONTEXT_ID));
-        item.setToolTipText(COLLECTION_TOOLTIP);
+        ComfortSubmenuHelper.setMenuItemTooltip(item, COLLECTION_TOOLTIP);
         item.addSelectionListener(new SelectionAdapter()
         {
             @Override

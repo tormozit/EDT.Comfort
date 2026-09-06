@@ -1389,12 +1389,12 @@ public final class FilterBySubsystemsDialogHook implements IStartup
                 if (!setMark.isDisposed())
                 {
                     setMark.setEnabled(hasSelection && !fromSubordinate);
-                    setMark.setToolTipText(subtreeMarkTooltip(true, fromSubordinate));
+                    ComfortSubmenuHelper.setMenuItemTooltip(setMark, subtreeMarkTooltip(true, fromSubordinate));
                 }
                 if (!clearMark.isDisposed())
                 {
                     clearMark.setEnabled(hasSelection && !fromSubordinate);
-                    clearMark.setToolTipText(subtreeMarkTooltip(false, fromSubordinate));
+                    ComfortSubmenuHelper.setMenuItemTooltip(clearMark, subtreeMarkTooltip(false, fromSubordinate));
                 }
             }
         };
@@ -1419,6 +1419,8 @@ public final class FilterBySubsystemsDialogHook implements IStartup
         boolean fromSubordinate = isIncludeObjectsFromSubordinateSubsystems(panel);
 
         Menu menu = new Menu(toolbar.getShell(), SWT.POP_UP);
+        // Это выпадающее меню кнопки «Комфорт» — пункты внутри не должны нести суффикс « (Комфорт)».
+        menu.setData(ComfortSubmenuHelper.SUBMENU_MARKER, Boolean.TRUE);
         MenuItem setMark = fillSubtreeMarkMenuItem(menu, panel, viewer, true, fromSubordinate);
         setMark.setEnabled(hasSelection && !fromSubordinate);
         MenuItem clearMark = fillSubtreeMarkMenuItem(menu, panel, viewer, false, fromSubordinate);
@@ -1427,9 +1429,8 @@ public final class FilterBySubsystemsDialogHook implements IStartup
         new MenuItem(menu, SWT.SEPARATOR);
         MenuItem saveItem = ComfortSubmenuHelper.createSortedMenuItem(menu, SWT.PUSH,
                 MENU_SAVE_PRESET);
-        saveItem.setToolTipText(
-                "Сохранить текущие пометки, флаги и чёрный список под именем" //$NON-NLS-1$
-                        + Global.pluginSignForTooltip());
+        ComfortSubmenuHelper.setMenuItemTooltip(saveItem,
+                "Сохранить текущие пометки, флаги и чёрный список под именем"); //$NON-NLS-1$
         saveItem.addSelectionListener(new SelectionAdapter()
         {
             @Override public void widgetSelected(SelectionEvent e)
@@ -1440,9 +1441,8 @@ public final class FilterBySubsystemsDialogHook implements IStartup
         });
         MenuItem loadItem = ComfortSubmenuHelper.createSortedMenuItem(menu, SWT.PUSH,
                 MENU_LOAD_PRESET);
-        loadItem.setToolTipText(
-                "Загрузить ранее сохранённое состояние фильтра по подсистемам" //$NON-NLS-1$
-                        + Global.pluginSignForTooltip());
+        ComfortSubmenuHelper.setMenuItemTooltip(loadItem,
+                "Загрузить ранее сохранённое состояние фильтра по подсистемам"); //$NON-NLS-1$
         loadItem.setEnabled(!FilterPresetStore.listNames().isEmpty());
         loadItem.addSelectionListener(new SelectionAdapter()
         {
@@ -1480,7 +1480,7 @@ public final class FilterBySubsystemsDialogHook implements IStartup
     {
         String label = setMark ? MENU_SET_MARK : MENU_CLEAR_MARK;
         MenuItem item = ComfortSubmenuHelper.createSortedMenuItem(menu, SWT.PUSH, label);
-        item.setToolTipText(subtreeMarkTooltip(setMark, fromSubordinate));
+        ComfortSubmenuHelper.setMenuItemTooltip(item, subtreeMarkTooltip(setMark, fromSubordinate));
         item.addSelectionListener(new SelectionAdapter()
         {
             @Override public void widgetSelected(SelectionEvent e)
@@ -1498,7 +1498,7 @@ public final class FilterBySubsystemsDialogHook implements IStartup
             : "Снять отметку с выделенной подсистемы и всех её подчинённых подсистем"; //$NON-NLS-1$
         if (fromSubordinate)
             base += ". Недоступно при включённом «Включать объекты из подчинённых подсистем»"; //$NON-NLS-1$
-        return base + Global.pluginSignForTooltip();
+        return base;
     }
 
     private static void applySubtreeMark(Object panel, CheckboxTreeViewer viewer, boolean checked)

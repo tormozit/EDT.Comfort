@@ -48,8 +48,7 @@ public final class FileSearchShowInProjectStructureMenuHook implements IStartup
     private static final String HOOK_MARKER = "tormozit.fileSearchShowInProjectStructureHook"; //$NON-NLS-1$
     private static final String ITEM_TEXT = "Показать в структуре проекта"; //$NON-NLS-1$
     private static final String ITEM_TOOLTIP =
-            "Выделить и прокрутить к файлу в дереве «Структура проекта»" //$NON-NLS-1$
-            + Global.pluginSignForTooltip();
+            "Выделить и прокрутить к файлу в дереве «Структура проекта»"; //$NON-NLS-1$
 
     @Override
     public void earlyStartup()
@@ -240,7 +239,7 @@ public final class FileSearchShowInProjectStructureMenuHook implements IStartup
                     return;
 
                 MenuItem item = ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.PUSH, ITEM_TEXT);
-                item.setToolTipText(ITEM_TOOLTIP);
+                ComfortSubmenuHelper.setMenuItemTooltip(item, ITEM_TOOLTIP);
                 item.addSelectionListener(new SelectionAdapter()
                 {
                     @Override
