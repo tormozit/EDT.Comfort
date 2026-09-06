@@ -786,7 +786,7 @@ suppressDisplay.asyncExec(
                 long t0 = ContentAssistDebug.perfStart("assist.documentChanged"); //$NON-NLS-1$
                 try
                 {
-                    keepWhitespaceBeforeCaretOnTypedSpace(event);
+                    resetAssistFilterPrefixOnNonFilterChar(event);
                     try
                     {
                         logAssistInsertDocumentChanged(event);
@@ -1479,6 +1479,72 @@ suppressDisplay.asyncExec(
         }
     }
 
+    /**
+     * Временная диагностика: жив ли штатный {@code BslSelectionChangedListener} и есть ли ему
+     * что показать.
+     *
+     * <p>Подсказку параметров показывает именно он: подписан на вьюер как {@code ITextListener},
+     * в {@code textChanged} ищет позицию под кареткой ({@code getPosOfShowAndInfo}) и зовёт
+     * {@code ParametersHoverInfoControl.showPage(pages, 0, seq)}. Пустой массив choices ему не
+     * мешает (разбор байткода 06.09.2026) — значит отказ либо в отсутствии самого слушателя,
+     * либо в пустом {@code pages}, либо в том, что позиция под кареткой не нашлась.
+     */
+    private String describeStockHoverListener()
+    {
+        try
+        {
+            if (viewer == null)
+                return "{\"viewer\":false}"; //$NON-NLS-1$
+            Field f = org.eclipse.jface.text.TextViewer.class.getDeclaredField("fTextListeners"); //$NON-NLS-1$
+            f.setAccessible(true);
+            Object listObj = f.get(viewer);
+            if (!(listObj instanceof List<?> listeners))
+                return "{\"listeners\":false}"; //$NON-NLS-1$
+            for (Object l : listeners)
+            {
+                if (l == null || !l.getClass().getName().endsWith("BslSelectionChangedListener")) //$NON-NLS-1$
+                    continue;
+                return "{\"found\":true,\"pages\":" + reflectCollectionSize(l, "pages") //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"allInfo\":" + reflectCollectionSize(l, "allInfo") //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"lastPos\":" + reflectInt(l, "lastPosOfShow") + "}"; //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            return "{\"found\":false,\"n\":" + listeners.size() + "}"; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        catch (Exception e)
+        {
+            return "{\"ex\":\"" + ContentAssistDebug.jsonEscapeForLog(String.valueOf(e)) + "\"}"; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    private static int reflectCollectionSize(Object target, String fieldName)
+    {
+        try
+        {
+            Field f = target.getClass().getDeclaredField(fieldName);
+            f.setAccessible(true);
+            Object v = f.get(target);
+            return v instanceof java.util.Collection<?> c ? c.size() : -1;
+        }
+        catch (Exception e)
+        {
+            return -2;
+        }
+    }
+
+    private static int reflectInt(Object target, String fieldName)
+    {
+        try
+        {
+            Field f = target.getClass().getDeclaredField(fieldName);
+            f.setAccessible(true);
+            return f.getInt(target);
+        }
+        catch (Exception e)
+        {
+            return -2;
+        }
+    }
+
     private void logLinkedModeDiagPhase(String phase, IDocument doc, int insertOffset, String text)
     {
         try
@@ -1513,6 +1579,7 @@ suppressDisplay.asyncExec(
                 + ",\"insertEnd\":" + insertEnd //$NON-NLS-1$
                 + ",\"hasModel\":" + hasModel //$NON-NLS-1$
                 + ",\"hover\":" + isParamHoverShellVisible() //$NON-NLS-1$
+                + ",\"stockHover\":" + describeStockHoverListener() //$NON-NLS-1$
                 + ",\"pendingHint\":" + pendingShowParamHintAfterInsert //$NON-NLS-1$
                 + ",\"bslPresent\":" + bslPresent //$NON-NLS-1$
                 + ",\"hasKey\":" + mapDiag.hasKey //$NON-NLS-1$
@@ -2175,29 +2242,46 @@ suppressDisplay.asyncExec(
     }
 
     /**
-     * Набран пробел (табуляция) при открытом списке — сдвинуть начало замены у предложений
-     * popup к каретке, иначе вставка съест этот пробел
-     * ({@link ContentAssistPopupSync#keepWhitespaceBeforeCaret}).
+     * Символ вне идентификатора (` `, `=`, `+`, `(` …) при открытом списке — сброс
+     * префикса фильтра на каретку. Окно не закрывается и не открывается.
+     * Точка — member-access, префикс не трогаем.
      */
-    private void keepWhitespaceBeforeCaretOnTypedSpace(DocumentEvent event)
+    private void resetAssistFilterPrefixOnNonFilterChar(DocumentEvent event)
     {
         try
         {
             if (event == null || event.getLength() != 0)
                 return;
-            String text = event.getText();
-            if (text == null || text.isEmpty())
+            if (isAssistProposalInsertInProgress())
                 return;
+            if (!SmartContentAssistProcessor.shouldCloseAssistOnDocumentEvent(event))
+                return;
+            if (!ContentAssistPopupSync.isPopupVisible(assistant))
+                return;
+            String text = event.getText();
+            int caret = event.getOffset() + text.length();
+            boolean onlyWs = true;
             for (int i = 0; i < text.length(); i++)
             {
                 char c = text.charAt(i);
                 if (c != ' ' && c != '\t')
-                    return;
+                {
+                    onlyWs = false;
+                    break;
+                }
             }
-            if (!ContentAssistPopupSync.isPopupVisible(assistant))
-                return;
-            ContentAssistPopupSync.keepWhitespaceBeforeCaret(assistant,
-                viewer != null ? viewer.getDocument() : null, event.getOffset() + text.length());
+            if (onlyWs)
+            {
+                ContentAssistPopupSync.keepWhitespaceBeforeCaret(assistant,
+                    viewer != null ? viewer.getDocument() : null, caret);
+            }
+            SmartContentAssistProcessor.primeFilterTrackerOnly(viewer, caret);
+            ContentAssistPopupSync.resetFilterPrefixToCaret(assistant, caret);
+            if (processor != null)
+            {
+                ContentAssistPopupSync.beginRecomputeTrigger("prefixReset"); //$NON-NLS-1$
+                ContentAssistPopupSync.recomputePopupList(assistant, viewer, processor, caret);
+            }
         }
         catch (Exception ignored)
         {

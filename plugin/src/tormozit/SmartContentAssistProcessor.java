@@ -1732,6 +1732,11 @@ return resolveProposalList(viewer, probeOffset, caret, filter, smart);
         if (!SmartAssistFilterState.isSmartFilterEnabled())
             return null;
         IDocument doc = viewer != null ? viewer.getDocument() : null;
+        // Ключ сменился (например Метод(|) после member-access) — кэш и «уже зондировали
+        // делегат» относятся к прошлому контексту, из них собирать попап нельзя.
+        if (doc != null && caret >= 0
+            && computeFullListContextKey(doc, caret) != fullListContextKey)
+            return null;
         // fullListReady может означать «неполный IR-only merge» (applyMergedFullListCache
         // при готовых словах ИР раньше делегата явно сбрасывает delegateSyncProbed) — тогда
         // не отдаём кэш без шаблонов EDT напрямую, а проваливаемся к веткам с реальным fetch.
@@ -2195,6 +2200,20 @@ return;
         wordListBackgroundJob = job;
         job.schedule();
         return true;
+    }
+
+    /**
+     * Отказ от переноса списка ЧЛЕНОВ в фон с указанием причины.
+     *
+     * <p>Отказ означает откат на {@code asyncExec}, то есть расчёт на UI-потоке. Без отметки
+     * это неотличимо в логе от «фон отработал и опубликовал», и по молчанию лога легко сделать
+     * неверный вывод о том, где считался список.
+     */
+    private static boolean memberStockSkip(String reason)
+    {
+        ContentAssistDebug.perfMark("memberStockDefer.skip", //$NON-NLS-1$
+            "{\"why\":\"" + reason + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+        return false;
     }
 
     /** Отказ от переноса в фон с указанием причины — чтобы не гадать по пустому логу. */
@@ -4189,7 +4208,12 @@ if (!SmartAssistFilterState.isSmartFilterEnabled())
                 if (viewer != null)
                 {
                     if (allowSyncMemberCapture)
+                    {
+                        // При открытом окне список членов захватывается прямо на UI — фон тут
+                        // не задействован вовсе.
+                        memberStockSkip("popupVisible"); //$NON-NLS-1$
                         captureMemberStockAtDot(viewer, dot);
+                    }
                     else
                         scheduleMemberStockCapture(viewer, dot);
                 }
@@ -4639,6 +4663,8 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
             if (runMemberStockCaptureInBackground(viewer, display, dotContextKey,
                 memberStockContextGen, fullListContextReceiver))
                 return;
+            ContentAssistDebug.perfMark("memberStockDefer.uiFallback", //$NON-NLS-1$
+                "{\"dot\":" + dotContextKey + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             final int captureGen = memberStockCaptureGen;
             display.asyncExec(() -> runMemberStockCapture(viewer, dotContextKey, 0, captureGen));
         }
@@ -4668,9 +4694,13 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
     {
         IDocument doc = viewer.getDocument();
         if (doc == null || !(doc instanceof IXtextDocument))
-            return false;
+            return memberStockSkip("noXtextDoc"); //$NON-NLS-1$
+        // Изоляция ставится в finally расчёта, то есть впервые — только после того, как
+        // расчёт закончился. На первом расчёте в документе её ещё нет, фон отказывает, и
+        // список членов считается на UI-потоке через asyncExec. Молчать об этом нельзя:
+        // именно отсюда берутся «а почему это на UI».
         if (!BslDataEventGuard.install(doc))
-            return false;
+            return memberStockSkip("noGuard"); //$NON-NLS-1$
         // Один расчёт на точку. Job.cancel() уже запущенный расчёт не останавливает (монитор
         // проверяется только между попытками), поэтому без этой проверки на каждый повторный
         // заход рождался ещё один поток: замер 05.09.2026 — ПЯТЬ параллельных «SCAP member
@@ -5961,23 +5991,17 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
             }
             try
             {
+                // Только имя члена: obj.| / obj.префикс|. Скобки не перескакивать —
+                // после вставки Метод(|) это аргументы, не члены obj. Иначе ключ кэша
+                // остаётся на той же точке, и попап фильтрует старый список членов.
                 int pos = caret;
-                while (pos > 0)
-                {
-                    char ch = doc.getChar(pos - 1);
-                    if (ch == ')' || ch == '(')
-                        pos--;
-                    else if (isFilterChar(ch))
-                        pos--;
-                    else
-                        break;
-                }
+                while (pos > 0 && isFilterChar(doc.getChar(pos - 1)))
+                    pos--;
                 if (pos <= 0 || doc.getChar(pos - 1) != '.')
                 {
                     return -1;
                 }
-                int dot = pos - 1;
-                return dot;
+                return pos - 1;
             }
             catch (Exception e)
             {
@@ -6299,6 +6323,22 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
         /** Ключ DataEvent до обрезки (max-запятые). */
         private static final ThreadLocal<String> PENDING_OLD_KEY = new ThreadLocal<>();
 
+        /**
+         * Не трогать {@code objects} штатного {@code DataEvent}: перегрузку закреплять не надо.
+         *
+         * <p>Замещение {@code objects} нужно только конструкторам: там выбранный
+         * {@code FakeCtor} задаёт число слотов LinkedMode. Для платформенного метода
+         * {@code additionalProposalInfo} — это {@code ProposalElement} со списком
+         * {@code ParamSet}; сигнатуру мы достаём изнутри него для подсчёта слотов, но список
+         * {@code objects} EDT уже построил правильно, и любое наше вмешательство там только
+         * вредит: в {@code DataEvent.doIt} по каждому элементу {@code objects} зовётся
+         * {@code getHoverDocumentationPages}, и {@code BslSelectionChangedListener} —
+         * единственный, кто показывает и затем освобождает подсказку параметров — создаётся,
+         * только если набралась хотя бы одна страница. Подставленный нами голый
+         * {@code ParamSet} страниц не давал, и подсказка не появлялась вовсе.
+         */
+        private static final ThreadLocal<Boolean> KEEP_STOCK_OBJECTS = new ThreadLocal<>();
+
         private CtorMinParamsInsert()
         {
         }
@@ -6308,6 +6348,7 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
             PENDING_SIGNATURE.remove();
             PENDING_INSERT_KEY.remove();
             PENDING_OLD_KEY.remove();
+            KEEP_STOCK_OBJECTS.remove();
         }
 
         /**
@@ -6462,6 +6503,7 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
             PENDING_SIGNATURE.set(signature);
             PENDING_INSERT_KEY.set(key);
             PENDING_OLD_KEY.set(oldKey);
+            KEEP_STOCK_OBJECTS.set(additional instanceof ProposalElement);
             IDocument doc = document;
             if (doc == null)
             {
@@ -6576,9 +6618,33 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
         private static void setDataEventObjects(Object dataEvent, EObject signature)
             throws Exception
         {
+            if (keepStockObjects(signature))
+                return;
             Field objectsField = dataEvent.getClass().getDeclaredField("objects"); //$NON-NLS-1$
             objectsField.setAccessible(true);
             objectsField.set(dataEvent, List.of(signature));
+        }
+
+        /** Штатный {@code objects} правильный — не подменять (см. {@link #KEEP_STOCK_OBJECTS}). */
+        private static boolean keepStockObjects(EObject signature)
+        {
+            return Boolean.TRUE.equals(KEEP_STOCK_OBJECTS.get()) && signature instanceof ParamSet;
+        }
+
+        /** Список {@code objects} штатного {@code DataEvent} — чтобы перенести его как есть. */
+        private static List<?> readDataEventObjects(Object dataEvent)
+        {
+            try
+            {
+                Field objectsField = dataEvent.getClass().getDeclaredField("objects"); //$NON-NLS-1$
+                objectsField.setAccessible(true);
+                Object value = objectsField.get(dataEvent);
+                return value instanceof List<?> list ? list : null;
+            }
+            catch (Exception e)
+            {
+                return null;
+            }
         }
 
         private static void migrateDataEvent(IDocumentListener listener, IDocument doc,
@@ -6665,8 +6731,9 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
                 model.addGroup(group);
             }
             int stopPos = base + (slots <= 1 ? 0 : (slots - 1) * commaStr.length()) + 1;
+            List<?> stockObjects = keepStockObjects(signature) ? readDataEventObjects(dataEvent) : null;
             Object newEvent = newDataEvent(listener, dataEvent.getClass(), base, 0, stopPos,
-                model, trimmed, List.of(signature));
+                model, trimmed, stockObjects != null ? stockObjects : List.of(signature));
             if (newEvent == null)
             {
                 setDataEventObjects(dataEvent, signature);

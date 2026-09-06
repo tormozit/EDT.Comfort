@@ -2946,6 +2946,36 @@ ensureFilterPending(popup);
         }
     }
 
+    /**
+     * Сброс префикса фильтра на текущую каретку. Окно не закрывается и не открывается:
+     * штатный отбор шёл от {@code fFilterOffset} (начало «ф»), после пробела/`=`/`+`
+     * префикс должен быть пустым.
+     */
+    static void resetFilterPrefixToCaret(ContentAssistant assistant, int caret)
+    {
+        if (assistant == null || caret < 0)
+            return;
+        try
+        {
+            Object popup = getPopup(assistant);
+            if (popup == null)
+                return;
+            initPopupReflection(popup);
+            if (fFilterOffsetField != null)
+                fFilterOffsetField.setInt(popup, caret);
+            if (fLastCompletionOffsetField != null)
+                fLastCompletionOffsetField.setInt(popup, caret);
+            if (fInvocationOffsetField != null)
+                fInvocationOffsetField.setInt(popup, caret);
+            if (fIsFilteredSubsetField != null)
+                fIsFilteredSubsetField.setBoolean(popup, false);
+            clearFilterPending(popup);
+        }
+        catch (Exception ignored)
+        {
+        }
+    }
+
     /** Начало вводимого идентификатора ({@code fFilterOffset}); не использовать для префикса. */
     public static int getFilterOffset(ContentAssistant assistant)
     {
