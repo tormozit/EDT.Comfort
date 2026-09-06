@@ -81,6 +81,8 @@ public final class ContentAssistPopupSync
     private static int lastSyncedIrMergeGen = -1;
     private static final ThreadLocal<Boolean> RECOMPUTE_GUARD =
         ThreadLocal.withInitial(() -> Boolean.FALSE);
+    /** Вложенный {@code showProposals} из {@code compute} во время уже идущего show. */
+    private static final ThreadLocal<Boolean> SHOW_PROPOSALS_GUARD = new ThreadLocal<>();
     /** fix12: session open literal no-IR — full smart recompute вместо literalStockOnly. */
     private static final ThreadLocal<Boolean> FORCE_SMART_LITERAL_OPEN = new ThreadLocal<>();
     /** H74/H75: sessionOpen | toggle | debounce */
@@ -4005,6 +4007,12 @@ ensureFilterPending(popup);
     {
         if (assistant == null)
             return false;
+        if (Boolean.TRUE.equals(SHOW_PROPOSALS_GUARD.get()))
+        {
+            Global.tempLog("assist-prefix", "showProposals skip reentry"); //$NON-NLS-1$ //$NON-NLS-2$
+            return isPopupVisible(assistant);
+        }
+        SHOW_PROPOSALS_GUARD.set(Boolean.TRUE);
         try
         {
             Object listener = Global.getField(assistant, "fAutoAssistListener"); //$NON-NLS-1$
@@ -4037,6 +4045,10 @@ ensureFilterPending(popup);
             ContentAssistDebug.log("showPossibleCompletions ERROR: " + e.getMessage()); //$NON-NLS-1$
             Global.tempLog("assist-prefix", "showProposals ERROR " + e.getMessage()); //$NON-NLS-1$ //$NON-NLS-2$
             return false;
+        }
+        finally
+        {
+            SHOW_PROPOSALS_GUARD.remove();
         }
     }
 

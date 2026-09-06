@@ -277,6 +277,13 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     private static final ThreadLocal<Boolean> CACHE_ONLY_COMPUTE = new ThreadLocal<>();
     /** Ctrl+Space (команда Eclipse, не Display KeyDown). Не откладывать список в фон. */
     private static final ThreadLocal<Boolean> CTRL_SPACE_INVOCATION = new ThreadLocal<>();
+    /**
+     * Один {@code computeCompletionProposals} может зайти в {@link #computeCompletionProposalsImpl}
+     * дважды: пустой результат → {@link #awaitMemberStockWhenEmpty} → повтор. Toggle «Фильтр»
+     * (Ctrl+Space при открытом popup) должен сработать один раз, иначе первое нажатие
+     * ON→OFF→ON (или наоборот) выглядит как «не сработало».
+     */
+    private static final ThreadLocal<Boolean> FILTER_TOGGLE_CONSUMED = new ThreadLocal<>();
 
     /**
      * Сколько UI-поток готов ждать фоновый список членов, когда иначе список будет пуст.
@@ -2009,6 +2016,7 @@ return;
             // запускать нельзя — до этой строки перенос в фон не включался никогда.
             if (viewer != null)
                 BslDataEventGuard.install(viewer.getDocument());
+            FILTER_TOGGLE_CONSUMED.remove();
             ContentAssistDebug.perfEnd("computeCompletionProposals", t0, //$NON-NLS-1$
                 "{\"off\":" + offset + ",\"n\":" + (result == null ? -1 : result.length) //$NON-NLS-1$ //$NON-NLS-2$
                     + ",\"popup\":" + isPopupVisible() + "}"); //$NON-NLS-1$ //$NON-NLS-2$
@@ -2321,6 +2329,29 @@ return;
         CTRL_SPACE_INVOCATION.remove();
     }
 
+    /**
+     * Ctrl+Space при открытом popup: переключить «Фильтр» один раз на стек
+     * {@code computeCompletionProposals} (повтор из {@link #awaitMemberStockWhenEmpty}
+     * не должен отменять первое переключение).
+     */
+    private static void applyRepeatedFilterToggleOnce()
+    {
+        if (Boolean.TRUE.equals(FILTER_TOGGLE_CONSUMED.get()))
+        {
+            Global.tempLog("assist-prefix", "filterToggle skip reentry smart=" //$NON-NLS-1$ //$NON-NLS-2$
+                + SmartAssistFilterState.isSmartFilterEnabled());
+            return;
+        }
+        FILTER_TOGGLE_CONSUMED.set(Boolean.TRUE);
+        ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
+        if (assistant != null)
+            ContentAssistPopupSync.captureSelectionBeforeFilterToggle(assistant);
+        boolean next = !SmartAssistFilterState.isSmartFilterEnabled();
+        SmartAssistFilterState.toggle();
+        ContentAssistSessionReloader.scheduleFilterToggleUiSync();
+        Global.tempLog("assist-prefix", "filterToggle → " + (next ? "ON" : "OFF")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+    }
+
     /** Публикация словарного списка из фона — только на UI-потоке. */
     private void publishWordList(ITextViewer viewer, int key, int gen, int epoch,
                                  ICompletionProposal[] result,
@@ -2425,7 +2456,8 @@ ContentAssistSessionReloader reloader = viewer instanceof SourceViewer sv
         boolean manualDetect = ManualInvocationDetect.isActive();
         debugLiteralContext(viewer, literalCaret);
         boolean selectionIrOnly = reloader != null && reloader.isSelectionIrOnlyContext();
-        if ((manualDetect || selectionIrOnly) && reloader != null)
+        if ((manualDetect || selectionIrOnly) && reloader != null
+            && !reloader.isManualDualAssistOpening())
             reloader.tryBeginManualDualAssist(literalCaret);
         boolean awaitingWords = reloader != null && reloader.isCompletionAutoOpenAwaitingWords();
         if (reloader != null && reloader.isManualIrAssistPending()
@@ -2455,13 +2487,7 @@ ContentAssistSessionReloader reloader = viewer instanceof SourceViewer sv
         // Повторный Ctrl+Space (toggle фильтра) в режиме выделения+ИР: сохраняем штатное
         // переключение флажка «Фильтр», но список ниже остаётся только ИР (не EDT+ИР).
         if (selectionIrOnly && RepeatedInvocationDetect.isActive())
-        {
-ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
-            if (assistant != null)
-                ContentAssistPopupSync.captureSelectionBeforeFilterToggle(assistant);
-            SmartAssistFilterState.toggle();
-            ContentAssistSessionReloader.scheduleFilterToggleUiSync();
-        }
+            applyRepeatedFilterToggleOnce();
         if (irOnlyManualMode || selectionIrOnly)
             return computeIrOnlyProposals(viewer, literalCaret);
         if (ContentAssistSessionReloader.consumeLiteralRepeatFromCommand() && inLiteral)
@@ -2479,31 +2505,22 @@ if (RepeatedInvocationDetect.isActive())
             boolean repeatLiteral = isStringLiteralAssistContext(viewer, caretProbe) && irConnected;
             if (repeatLiteral)
             {
-ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
-                if (assistant != null)
-                    ContentAssistPopupSync.captureSelectionBeforeFilterToggle(assistant);
-                SmartAssistFilterState.toggle();
-                ContentAssistSessionReloader.scheduleFilterToggleUiSync();
+                applyRepeatedFilterToggleOnce();
                 int caret = widgetCaret >= 0 ? widgetCaret : caretProbe;
                 return computeLiteralPopupRefresh(viewer, offset, caret);
             }
             if (!isStringLiteralAssistContext(viewer, caretProbe))
             {
-ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
-                if (assistant != null)
-                    ContentAssistPopupSync.captureSelectionBeforeFilterToggle(assistant);
-                final boolean wasSmart = SmartAssistFilterState.isSmartFilterEnabled();
-                SmartAssistFilterState.toggle();
-                ContentAssistSessionReloader.scheduleFilterToggleUiSync();
+                applyRepeatedFilterToggleOnce();
                 int caret = caretProbe;
                 primeAssistContext(viewer, caret);
                 IDocument doc = viewer == null ? null : viewer.getDocument();
                 String filter = SmartFilterTracker.getCurrentFilter();
                 ensureFullListForContext(viewer, doc, caret);
-                if (wasSmart)
+                boolean syncSmart = SmartAssistFilterState.isSmartFilterEnabled();
+                if (!syncSmart)
                     applyUnfilteredReloadIfNeeded(viewer);
                 int probeOffset = resolveDelegateProbeOffset(viewer, offset, caret);
-                boolean syncSmart = SmartAssistFilterState.isSmartFilterEnabled();
                 ICompletionProposal[] kept = resolveProposalList(viewer, probeOffset, caret, filter,
                     syncSmart);
                 return kept;

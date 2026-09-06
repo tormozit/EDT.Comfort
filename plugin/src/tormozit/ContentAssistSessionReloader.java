@@ -135,6 +135,12 @@ public final class ContentAssistSessionReloader
     private volatile int irWordsResolvedForCaret = -1;
     /** Popup уже открыт координатором dual-source (ручной Ctrl+Space). */
     private volatile boolean manualDualPopupOpened;
+    /**
+     * {@link #tryBeginManualDualAssist} уже внутри {@code showPossibleCompletions}:
+     * вложенный {@code compute} не должен начинать сессию заново (иначе рекурсия
+     * {@code compute → tryBegin → showProposals → compute}).
+     */
+    private volatile boolean manualDualAssistOpening;
     /** COM-запрос таблицы слов уже отправлен для {@link #wordsTableCaret}. */
     private volatile boolean wordsTableFetchInFlight;
     /** H54: порядковый номер fetch words table (диагностика гонки callback). */
@@ -3616,6 +3622,7 @@ if (!inLiteral)
         manualIrAssistPending = false;
         manualIrAssistCaret = -1;
         manualDualPopupOpened = false;
+        manualDualAssistOpening = false;
         irWordsResolvedForCaret = -1;
         clearLiteralOpenState();
     }
@@ -3641,6 +3648,11 @@ if (!inLiteral)
 
     public void tryBeginManualDualAssist(int caret)
     {
+        if (manualDualAssistOpening)
+        {
+            logAssistOpen("manual.skip", "{\"reason\":\"reentry\",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            return;
+        }
         if (caret < 0)
         {
             logAssistOpen("manual.skip", "{\"reason\":\"caret\"}"); //$NON-NLS-1$ //$NON-NLS-2$
@@ -3689,10 +3701,23 @@ if (!inLiteral)
             IrCompletionDebug.log("manualDualAssist defer caret=" + caret); //$NON-NLS-1$
             return;
         }
-        processor.enterIrOnlyManualMode(caret);
-        logAssistOpen("manual.open", "{\"caret\":" + caret + ",\"literal\":" + literal + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-        openManualDualAssistPopupOnce(caret);
+        manualDualAssistOpening = true;
+        try
+        {
+            processor.enterIrOnlyManualMode(caret);
+            logAssistOpen("manual.open", "{\"caret\":" + caret + ",\"literal\":" + literal + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            openManualDualAssistPopupOnce(caret);
+        }
+        finally
+        {
+            manualDualAssistOpening = false;
+        }
         IrCompletionDebug.log("manualDualAssist caret=" + caret); //$NON-NLS-1$
+    }
+
+    boolean isManualDualAssistOpening()
+    {
+        return manualDualAssistOpening;
     }
 
     /** @deprecated use {@link #tryBeginManualDualAssist} */
@@ -3756,8 +3781,9 @@ return;
         IrBslCompletionSupport.Snapshot snap = irCompletionSnapshot;
         int irN = snap != null && snap.proposals != null ? snap.proposals.length : -1;
         preShowLiteralBrowserPatch(expectedCaret);
-        boolean shown = ContentAssistPopupSync.showPossibleCompletions(assistant);
+        // До show: вложенный compute не должен снова зайти в tryBegin и сбросить флаг.
         manualDualPopupOpened = true;
+        boolean shown = ContentAssistPopupSync.showPossibleCompletions(assistant);
         boolean popupVisible = shown && ContentAssistPopupSync.isPopupVisible(assistant);
         if (popupVisible && assistBrowserCreator == null)
         {
