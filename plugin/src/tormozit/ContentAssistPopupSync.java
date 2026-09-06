@@ -2529,8 +2529,6 @@ return creatorResolved && creatorPatched;
                 // повторный validate() по 1000+ proposals на UI-потоке бессмысленен.
                 String currentFilter = SmartFilterTracker.getCurrentFilter();
                 boolean memberAccess = isMemberAccessAtCaret(doc, caret);
-                Global.tempLog("assist-prefix", "debounce member=" + memberAccess //$NON-NLS-1$ //$NON-NLS-2$
-                    + " filter=[" + currentFilter + "]"); //$NON-NLS-1$ //$NON-NLS-2$
                 if (hideIfPrefixStale(assistant, viewer, processor, caret))
                     return;
                 // Member-access: не stock+recompute (сброс DataEvent / LinkedMode).
@@ -2627,11 +2625,7 @@ return creatorResolved && creatorPatched;
         if (!processor.isPopupListStaleForPrefix(doc, caret))
             return false;
         if (processor.repairPopupListFromMemberStock(doc, caret))
-        {
-            Global.tempLog("assist-prefix", "stale repaired from memberStock caret=" + caret); //$NON-NLS-1$ //$NON-NLS-2$
             return false;
-        }
-        Global.tempLog("assist-prefix", "close stale caret=" + caret); //$NON-NLS-1$ //$NON-NLS-2$
         processor.releaseWordListOpenGuard("stalePrefix"); //$NON-NLS-1$
         ContentAssistSessionReloader.markSessionEndFromStalePrefixClose(viewer);
         hideProposalPopup(assistant);
@@ -4008,10 +4002,7 @@ ensureFilterPending(popup);
         if (assistant == null)
             return false;
         if (Boolean.TRUE.equals(SHOW_PROPOSALS_GUARD.get()))
-        {
-            Global.tempLog("assist-prefix", "showProposals skip reentry"); //$NON-NLS-1$ //$NON-NLS-2$
             return isPopupVisible(assistant);
-        }
         SHOW_PROPOSALS_GUARD.set(Boolean.TRUE);
         try
         {
@@ -4020,30 +4011,20 @@ ensureFilterPending(popup);
                 Global.invokeVoid(listener, "stop"); //$NON-NLS-1$
             Object prepared = Global.invoke(assistant, "prepareToShowCompletions", Boolean.TRUE); //$NON-NLS-1$
             if (!Boolean.TRUE.equals(prepared))
-            {
-                Global.tempLog("assist-prefix", "showProposals skip prepare=" + prepared); //$NON-NLS-1$ //$NON-NLS-2$
                 return false;
-            }
             Object popup = getPopup(assistant);
             if (popup == null)
-            {
-                Global.tempLog("assist-prefix", "showProposals skip noPopup"); //$NON-NLS-1$ //$NON-NLS-2$
                 return false;
-            }
             Runnable show = () -> Global.invoke(popup, "showProposals", Boolean.TRUE); //$NON-NLS-1$
             if (cachedListOnly)
                 SmartContentAssistProcessor.runWithCachedListOnly(show);
             else
                 show.run();
-            boolean visible = isPopupVisible(assistant);
-            Global.tempLog("assist-prefix", "showProposals(true) visible=" + visible //$NON-NLS-1$ //$NON-NLS-2$
-                + " cacheOnly=" + cachedListOnly); //$NON-NLS-1$
-            return visible;
+            return isPopupVisible(assistant);
         }
         catch (Exception e)
         {
             ContentAssistDebug.log("showPossibleCompletions ERROR: " + e.getMessage()); //$NON-NLS-1$
-            Global.tempLog("assist-prefix", "showProposals ERROR " + e.getMessage()); //$NON-NLS-1$ //$NON-NLS-2$
             return false;
         }
         finally

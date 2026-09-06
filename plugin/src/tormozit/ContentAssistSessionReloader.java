@@ -338,12 +338,7 @@ tryBeginManualDualAssist(caret);
                 boolean preserveAutoOpen = completionAutoOpenPending || completionAutoOpenEdtOpened;
                 if (!manualDualSession && !preserveLiteralIr && !preserveAutoOpen)
                 {
-                    if (processor.hasReadyFullListCacheForCaret(viewer, caret))
-                    {
-                        Global.tempLog("assist-prefix", "sessionStart keepCache caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
-                            + " n=" + processor.diagFullListCacheCount()); //$NON-NLS-1$
-                    }
-                    else
+                    if (!processor.hasReadyFullListCacheForCaret(viewer, caret))
                         processor.invalidateCache();
                 }
                 ContentAssistPopupSync.clearSyncState();
@@ -534,9 +529,6 @@ boolean inLiteral = endCaret >= 0
                 ContentAssistPopupSync.clearSyncState();
                 ContentAssistDebug.log("assistSessionEnded processor=" //$NON-NLS-1$
                     + processorName(event.processor));
-                Global.tempLog("assist-prefix", "assistSessionEnded caret=" + endCaret //$NON-NLS-1$ //$NON-NLS-2$
-                    + " preserve=" + preserveOnEnd //$NON-NLS-1$
-                    + " stack=" + assistEndStack()); //$NON-NLS-1$
                 if (!preserveOnEnd)
                     processor.invalidateCache();
                 processor.exitIrOnlyManualMode();
@@ -1511,72 +1503,6 @@ boolean inLiteral = endCaret >= 0
         }
     }
 
-    /**
-     * Временная диагностика: жив ли штатный {@code BslSelectionChangedListener} и есть ли ему
-     * что показать.
-     *
-     * <p>Подсказку параметров показывает именно он: подписан на вьюер как {@code ITextListener},
-     * в {@code textChanged} ищет позицию под кареткой ({@code getPosOfShowAndInfo}) и зовёт
-     * {@code ParametersHoverInfoControl.showPage(pages, 0, seq)}. Пустой массив choices ему не
-     * мешает (разбор байткода 06.09.2026) — значит отказ либо в отсутствии самого слушателя,
-     * либо в пустом {@code pages}, либо в том, что позиция под кареткой не нашлась.
-     */
-    private String describeStockHoverListener()
-    {
-        try
-        {
-            if (viewer == null)
-                return "{\"viewer\":false}"; //$NON-NLS-1$
-            Field f = org.eclipse.jface.text.TextViewer.class.getDeclaredField("fTextListeners"); //$NON-NLS-1$
-            f.setAccessible(true);
-            Object listObj = f.get(viewer);
-            if (!(listObj instanceof List<?> listeners))
-                return "{\"listeners\":false}"; //$NON-NLS-1$
-            for (Object l : listeners)
-            {
-                if (l == null || !l.getClass().getName().endsWith("BslSelectionChangedListener")) //$NON-NLS-1$
-                    continue;
-                return "{\"found\":true,\"pages\":" + reflectCollectionSize(l, "pages") //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"allInfo\":" + reflectCollectionSize(l, "allInfo") //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"lastPos\":" + reflectInt(l, "lastPosOfShow") + "}"; //$NON-NLS-1$ //$NON-NLS-2$
-            }
-            return "{\"found\":false,\"n\":" + listeners.size() + "}"; //$NON-NLS-1$ //$NON-NLS-2$
-        }
-        catch (Exception e)
-        {
-            return "{\"ex\":\"" + ContentAssistDebug.jsonEscapeForLog(String.valueOf(e)) + "\"}"; //$NON-NLS-1$ //$NON-NLS-2$
-        }
-    }
-
-    private static int reflectCollectionSize(Object target, String fieldName)
-    {
-        try
-        {
-            Field f = target.getClass().getDeclaredField(fieldName);
-            f.setAccessible(true);
-            Object v = f.get(target);
-            return v instanceof java.util.Collection<?> c ? c.size() : -1;
-        }
-        catch (Exception e)
-        {
-            return -2;
-        }
-    }
-
-    private static int reflectInt(Object target, String fieldName)
-    {
-        try
-        {
-            Field f = target.getClass().getDeclaredField(fieldName);
-            f.setAccessible(true);
-            return f.getInt(target);
-        }
-        catch (Exception e)
-        {
-            return -2;
-        }
-    }
-
     private void logLinkedModeDiagPhase(String phase, IDocument doc, int insertOffset, String text)
     {
         try
@@ -1611,7 +1537,6 @@ boolean inLiteral = endCaret >= 0
                 + ",\"insertEnd\":" + insertEnd //$NON-NLS-1$
                 + ",\"hasModel\":" + hasModel //$NON-NLS-1$
                 + ",\"hover\":" + isParamHoverShellVisible() //$NON-NLS-1$
-                + ",\"stockHover\":" + describeStockHoverListener() //$NON-NLS-1$
                 + ",\"pendingHint\":" + pendingShowParamHintAfterInsert //$NON-NLS-1$
                 + ",\"bslPresent\":" + bslPresent //$NON-NLS-1$
                 + ",\"hasKey\":" + mapDiag.hasKey //$NON-NLS-1$
@@ -1779,7 +1704,6 @@ boolean inLiteral = endCaret >= 0
 
     static void logAssistOpen(String location, String json)
     {
-        Global.tempLog("assist-prefix", location + " " + json); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private static String clipLogText(String text)
@@ -2613,8 +2537,6 @@ if (!pendingAutoOpen || !ComfortSettings.isReplaceListFiltersEnabled())
         IDocument doc = viewer.getDocument();
         String filter = caret >= 0 && doc != null
             ? SmartContentAssistProcessor.computeIdentifierFilter(doc, caret) : ""; //$NON-NLS-1$
-        Global.tempLog("assist-prefix", "afterStaleClose caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
-            + " filter=[" + filter + "]"); //$NON-NLS-1$ //$NON-NLS-2$
         if (filter.isEmpty())
             return;
         int seq = reloader.completionAutoOpenSeq.incrementAndGet();
@@ -2885,7 +2807,6 @@ openCompletionAutoEdtPopup(caret, autoOpenSeq);
             processor.releaseWordListOpenGuard(why);
         stopAutoAssistListener();
         cancelCompletionAutoOpenTimers(completionAutoOpenActiveSeq, why);
-        Global.tempLog("assist-prefix", "cancelPendingOrdinaryAssist why=" + why); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private void stopAutoAssistListener()
@@ -2906,30 +2827,6 @@ openCompletionAutoEdtPopup(caret, autoOpenSeq);
         Global.invokeVoid(listener, "stop"); //$NON-NLS-1$
         if (thread != null && thread.isAlive())
             thread.interrupt();
-    }
-
-    private static String assistEndStack()
-    {
-        StringBuilder sb = new StringBuilder();
-        int n = 0;
-        for (StackTraceElement frame : Thread.currentThread().getStackTrace())
-        {
-            String cls = frame.getClassName();
-            if (!cls.contains("tormozit") && !cls.contains("jface.text.contentassist") //$NON-NLS-1$ //$NON-NLS-2$
-                && !cls.contains("CompletionProposalPopup")) //$NON-NLS-1$
-                continue;
-            if (cls.contains("ContentAssistSessionReloader") //$NON-NLS-1$
-                && "assistEndStack".equals(frame.getMethodName())) //$NON-NLS-1$
-                continue;
-            if (n > 0)
-                sb.append('|');
-            String simple = cls.substring(cls.lastIndexOf('.') + 1);
-            sb.append(simple).append('.').append(frame.getMethodName());
-            n++;
-            if (n >= 8)
-                break;
-        }
-        return sb.toString();
     }
 
     private boolean isCompletionAutoOpenCaretMatch(int caret)
@@ -4084,8 +3981,6 @@ if (isCompletionAutoOpenCaretMatch(caret)
                 String filter = liveDoc != null && caret >= 0
                     ? SmartContentAssistProcessor.computeIdentifierFilter(liveDoc, caret)
                     : ""; //$NON-NLS-1$
-                Global.tempLog("assist-prefix", "irAutoOpen " + decision //$NON-NLS-1$ //$NON-NLS-2$
-                    + " filter=[" + filter + "] popup=" + popupVisible); //$NON-NLS-1$ //$NON-NLS-2$
                 if (!popupVisible && !filter.isEmpty())
                     openCompletionAutoEdtPopup(caret, autoOpenSeq);
                 clearCompletionAutoOpenState(decision, autoOpenSeq);
@@ -4217,32 +4112,18 @@ processor.applyIrCompletion(snapshot);
         ContentAssistSessionReloader reloader = forViewer(sv);
         ContentAssistant ca = reloader != null ? reloader.assistant : null;
         if (ca == null || ContentAssistPopupSync.isPopupVisible(ca))
-        {
-            Global.tempLog("assist-prefix", "openPopupForBackgroundList skip visibleOrNull"); //$NON-NLS-1$ //$NON-NLS-2$
             return false;
-        }
         if (isProposalInsertInProgressGlobally())
-        {
-            Global.tempLog("assist-prefix", "openPopupForBackgroundList skip insert"); //$NON-NLS-1$ //$NON-NLS-2$
             return false;
-        }
         StyledText widget = sv.getTextWidget();
         if (widget == null || widget.isDisposed() || !widget.isFocusControl())
-        {
-            Global.tempLog("assist-prefix", "openPopupForBackgroundList skip focus"); //$NON-NLS-1$ //$NON-NLS-2$
             return false;
-        }
         int caret = SmartContentAssistProcessor.resolveWidgetCaret(sv);
         IDocument doc = sv.getDocument();
         if (doc != null && caret >= 0
             && SmartContentAssistProcessor.ReceiverTypeLabel.findMemberAccessDot(doc, caret) >= 0)
-        {
-            Global.tempLog("assist-prefix", "openPopupForBackgroundList skip member caret=" + caret); //$NON-NLS-1$ //$NON-NLS-2$
             return false;
-        }
-        boolean shown = ContentAssistPopupSync.showPossibleCompletions(ca, true);
-        Global.tempLog("assist-prefix", "openPopupForBackgroundList shown=" + shown); //$NON-NLS-1$ //$NON-NLS-2$
-        return shown;
+        return ContentAssistPopupSync.showPossibleCompletions(ca, true);
     }
 
     /** Обновление popup после прихода слов ИР (сразу или в очередь при recompute). */
@@ -4426,7 +4307,6 @@ if (!hadFlag)
                         if (reloader != null && reloader.assistant != null)
                             ContentAssistPopupSync.ensureEmptyListAllowed(reloader.assistant, true);
                     }
-                    Global.tempLog("assist-prefix", "ctrlSpace.command preExecute"); //$NON-NLS-1$ //$NON-NLS-2$
                     ContentAssistSessionReloader reloader = openSessionReloader;
                     if (reloader == null)
                         reloader = getActiveReloader();

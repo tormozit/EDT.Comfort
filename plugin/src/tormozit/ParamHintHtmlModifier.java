@@ -130,6 +130,8 @@ public final class ParamHintHtmlModifier
     private static final String HTML_PATCHED_MARK = "tormozit.paramHintHtmlPatched"; //$NON-NLS-1$
     /** CaretListener на редакторе, пока открыт этот Browser подсказки. */
     private static final String CURRENT_PARAM_CARET_MARK = "tormozit.paramHintCaretSync"; //$NON-NLS-1$
+    /** Пачка setText за короткий интервал: стоп цикла Progress → modify. */
+    private static final String MODIFY_BURST_MARK = "tormozit.paramHintModifyBurst"; //$NON-NLS-1$
     private static final AtomicBoolean sigPickOnOpenPending = new AtomicBoolean(false);
     /** Реентрабельность tryModifyBrowserHtml (setText → Progress → снова modify). */
     private static final ThreadLocal<Boolean> MODIFY_IN_PROGRESS =
@@ -1355,12 +1357,29 @@ public final class ParamHintHtmlModifier
 
             ensureCurrentParamCaretSync(browser);
 
+            boolean hasPrefix = html.indexOf(HEADING_PREFIX_CLASS) >= 0;
+            boolean hasMeta = html.indexOf(COMFORT_META_MARKER) >= 0
+                || html.indexOf("data-comfort=\"1\"") >= 0; //$NON-NLS-1$
+            boolean headingDone = isHeadingAlreadyRewritten(html);
+            int headingAt = html.indexOf(HEADING_CLASS);
+            String headingSnippet = ""; //$NON-NLS-1$
+            if (headingAt >= 0)
+            {
+                int to = Math.min(html.length(), headingAt + 180);
+                headingSnippet = html.substring(headingAt, to).replace('\n', ' ').replace('\r', ' ');
+            }
+            Global.tempLog("param-hint-loop", //$NON-NLS-1$
+                "len=" + html.length() //$NON-NLS-1$
+                    + " prefix=" + hasPrefix //$NON-NLS-1$
+                    + " meta=" + hasMeta //$NON-NLS-1$
+                    + " headingDone=" + headingDone //$NON-NLS-1$
+                    + " rgb=" + (html.indexOf("rgb(") >= 0) //$NON-NLS-1$ //$NON-NLS-2$
+                    + " head=" + headingSnippet); //$NON-NLS-1$
+
             // Уже патчили этот HTML — не резолвить ctx и не showPage (иначе цикл Progress).
             // Native HTML после смены текущего параметра в EDT — патчим снова
             // (маркер на browser не блокирует: штатный setInput подменяет текст).
-            if (html.indexOf(COMFORT_META_MARKER) >= 0
-                || html.indexOf("data-comfort=\"1\"") >= 0 //$NON-NLS-1$
-                || isHeadingAlreadyRewritten(html))
+            if (hasMeta || headingDone)
                 return;
 
             HoverContext ctx = resolveHoverContext(browser);
@@ -1393,6 +1412,9 @@ public final class ParamHintHtmlModifier
                 return;
             }
 
+            if (abortIfModifyBurst(browser, "tryModify")) //$NON-NLS-1$
+                return;
+
             browser.setData(HTML_PATCHED_MARK, Boolean.TRUE);
             browser.setText(modified);
             scheduleScrollParamNameIntoView(browser);
@@ -1408,14 +1430,73 @@ public final class ParamHintHtmlModifier
     {
         if (html == null)
             return false;
+        // Браузер сериализует color:#737373 как rgb(115,115,115) — класс надёжнее <br>(.
+        if (html.indexOf(HEADING_PREFIX_CLASS) >= 0)
+            return true;
         String marker = "<span class=\"" + HEADING_CLASS + "\">"; //$NON-NLS-1$ //$NON-NLS-2$
         int spanStart = html.indexOf(marker);
         if (spanStart < 0)
             return false;
         int contentStart = spanStart + marker.length();
         int brPos = html.indexOf("<br>", contentStart); //$NON-NLS-1$
-        int firstParen = html.indexOf('(', contentStart);
+        int firstParen = indexOfHeadingSignatureParen(html, contentStart);
         return brPos >= 0 && (firstParen < 0 || brPos < firstParen);
+    }
+
+    /**
+     * Первая {@code '('} списка параметров: скобки внутри тегов
+     * ({@code style="color: rgb(...)"} ) не считаются.
+     */
+    private static int indexOfHeadingSignatureParen(String html, int from)
+    {
+        if (html == null || from < 0 || from >= html.length())
+            return -1;
+        int i = from;
+        int n = html.length();
+        while (i < n)
+        {
+            char c = html.charAt(i);
+            if (c == '<')
+            {
+                int gt = html.indexOf('>', i + 1);
+                if (gt < 0)
+                    return -1;
+                i = gt + 1;
+                continue;
+            }
+            if (c == '(')
+                return i;
+            i++;
+        }
+        return -1;
+    }
+
+    /**
+     * Стоп цикла setText → Progress → modify. Пачка за 250 мс больше порога —
+     * уже не штатное открытие.
+     */
+    private static boolean abortIfModifyBurst(Browser browser, String where)
+    {
+        if (browser == null || browser.isDisposed())
+            return true;
+        long now = System.currentTimeMillis();
+        int count = 1;
+        Object data = browser.getData(MODIFY_BURST_MARK);
+        if (data instanceof long[] burst && burst.length >= 2)
+        {
+            long last = burst[0];
+            int prev = (int) burst[1];
+            count = (now - last) < 250L ? prev + 1 : 1;
+        }
+        browser.setData(MODIFY_BURST_MARK, new long[] { now, count });
+        Global.tempLog("param-hint-loop", //$NON-NLS-1$
+            "setText where=" + where + " burst=" + count); //$NON-NLS-1$ //$NON-NLS-2$
+        if (count > 6)
+        {
+            Global.tempLog("param-hint-loop", "ABORT where=" + where + " burst=" + count); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            return true;
+        }
+        return false;
     }
 
     /** После setText — прокрутить к {@code <b>} имени текущего параметра. */
@@ -1537,6 +1618,8 @@ public final class ParamHintHtmlModifier
             return;
         if (Boolean.TRUE.equals(MODIFY_IN_PROGRESS.get()))
             return;
+        if (abortIfModifyBurst(browser, "caret")) //$NON-NLS-1$
+            return;
         MODIFY_IN_PROGRESS.set(Boolean.TRUE);
         try
         {
@@ -1587,9 +1670,11 @@ public final class ParamHintHtmlModifier
             return null;
 
         int contentStart = spanStart + marker.length();
+        if (html.indexOf(HEADING_PREFIX_CLASS, contentStart) >= 0)
+            return null;
 
         int brPos = html.indexOf("<br>", contentStart); //$NON-NLS-1$
-        int firstParen = html.indexOf('(', contentStart);
+        int firstParen = indexOfHeadingSignatureParen(html, contentStart);
         if (firstParen < 0)
             return null;
         if (brPos >= 0 && brPos < firstParen)
