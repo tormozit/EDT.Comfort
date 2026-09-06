@@ -334,6 +334,7 @@ public final class ContentAssistPopupSync
                             seedStableDelegateFromVisiblePopup(assistant, processor);
                             stableNAfterSeed = processor.literalStableDelegateCount();
                         }
+                        String previousFilter = SmartFilterTracker.getCurrentFilter();
                         if (caret >= 0)
                             SmartContentAssistProcessor.primeFilterTrackerOnly(viewer, caret);
                         String filter = SmartFilterTracker.getCurrentFilter();
@@ -347,7 +348,10 @@ public final class ContentAssistPopupSync
                         // здесь только in-place collapse (+ при префиксе refresh из кэша
                         // без stock filter).
                         boolean memberAccess = isMemberAccessAtCaret(doc, caret);
-                        boolean shouldRecompute = shouldRecomputePopupList(filter, false, doc, caret)
+                        if (hideIfPrefixStale(assistant, viewer, processor, caret))
+                            return;
+                        boolean shouldRecompute = shouldRecomputePopupList(filter, false, doc, caret,
+                            isFilterPrefixCleared(previousFilter, filter))
                             && !memberAccess;
                         logSessionPopupSync("beforeRecompute", inLiteral, irExpected, //$NON-NLS-1$
                             stableNAfterSeed, filter, shouldRecompute, forceSmartOpen,
@@ -918,6 +922,7 @@ if (processor != null && processor.isIrWordsResolvedForContext()
             {
                 int caret = SmartContentAssistProcessor.resolveWidgetCaret(viewer);
                 IDocument doc = viewer.getDocument();
+                String previousFilter = SmartFilterTracker.getCurrentFilter();
                 if (caret >= 0)
                     SmartContentAssistProcessor.primeFilterTrackerOnly(viewer, caret);
                 if (shouldClosePopupAtCaret(viewer, caret))
@@ -926,13 +931,16 @@ if (processor != null && processor.isIrWordsResolvedForContext()
                     return;
                 }
                 String currentFilter = SmartFilterTracker.getCurrentFilter();
+                if (hideIfPrefixStale(assistant, viewer, processor, caret))
+                    return;
                 if (isMemberAccessAtCaret(doc, caret))
                 {
                     processor.cancelDeferredDelegateComputes();
                     syncMemberAccessPopupInPlace(assistant, viewer, processor, caret,
                         currentFilter);
                 }
-                else if (shouldRecomputePopupList(currentFilter, false, doc, caret))
+                else if (shouldRecomputePopupList(currentFilter, false, doc, caret,
+                    isFilterPrefixCleared(previousFilter, currentFilter)))
                 {
                     runStockFilterRunnable(assistant);
                     if (SmartAssistFilterState.isSmartFilterEnabled())
@@ -2507,6 +2515,7 @@ return creatorResolved && creatorPatched;
                 return;
             try
             {
+                String previousFilter = SmartFilterTracker.getCurrentFilter();
                 primeAssistFilterContext(viewer);
                 ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
                 SmartContentAssistProcessor processor =
@@ -2518,6 +2527,10 @@ return creatorResolved && creatorPatched;
                 // повторный validate() по 1000+ proposals на UI-потоке бессмысленен.
                 String currentFilter = SmartFilterTracker.getCurrentFilter();
                 boolean memberAccess = isMemberAccessAtCaret(doc, caret);
+                Global.tempLog("assist-prefix", "debounce member=" + memberAccess //$NON-NLS-1$ //$NON-NLS-2$
+                    + " filter=[" + currentFilter + "]"); //$NON-NLS-1$ //$NON-NLS-2$
+                if (hideIfPrefixStale(assistant, viewer, processor, caret))
+                    return;
                 // Member-access: не stock+recompute (сброс DataEvent / LinkedMode).
                 if (memberAccess && assistant != null && processor != null)
                 {
@@ -2526,7 +2539,8 @@ return creatorResolved && creatorPatched;
                         currentFilter);
                 }
                 else if (assistant != null && processor != null
-                    && shouldRecomputePopupList(currentFilter, false, doc, caret))
+                    && shouldRecomputePopupList(currentFilter, false, doc, caret,
+                        isFilterPrefixCleared(previousFilter, currentFilter)))
                 {
                     runStockFilterRunnable(assistant);
                     if (SmartAssistFilterState.isSmartFilterEnabled())
@@ -2578,12 +2592,46 @@ return creatorResolved && creatorPatched;
      *
      * @param doc   не используется (сигнатура для call-site)
      * @param caret не используется (см. {@code doc})
+     * @param prefixCleared префикс стал пустым (Backspace последней буквы) — база под
+     *     префиксом урезана, нужен полный список
      */
     private static boolean shouldRecomputePopupList(String filter, boolean afterFilterToggle,
-                                                    IDocument doc, int caret)
+                                                    IDocument doc, int caret,
+                                                    boolean prefixCleared)
     {
         return afterFilterToggle
-            || (filter != null && !filter.isEmpty());
+            || (filter != null && !filter.isEmpty())
+            || prefixCleared;
+    }
+
+    private static boolean isFilterPrefixCleared(String previous, String next)
+    {
+        return previous != null && !previous.isEmpty()
+            && (next == null || next.isEmpty());
+    }
+
+    /**
+     * Единое правило: текущий префикс не поглощает стартовый — список врёт.
+     * Сначала запас членов той же точки (если есть), иначе закрыть. Без ветки member/не-member.
+     *
+     * @return {@code true} если окно закрыто
+     */
+    private static boolean hideIfPrefixStale(ContentAssistant assistant, SourceViewer viewer,
+                                             SmartContentAssistProcessor processor, int caret)
+    {
+        if (assistant == null || viewer == null || processor == null || caret < 0)
+            return false;
+        IDocument doc = viewer.getDocument();
+        if (!processor.isPopupListStaleForPrefix(doc, caret))
+            return false;
+        if (processor.repairPopupListFromMemberStock(doc, caret))
+        {
+            Global.tempLog("assist-prefix", "stale repaired from memberStock caret=" + caret); //$NON-NLS-1$ //$NON-NLS-2$
+            return false;
+        }
+        Global.tempLog("assist-prefix", "close stale caret=" + caret); //$NON-NLS-1$ //$NON-NLS-2$
+        hideProposalPopup(assistant);
+        return true;
     }
 
     /** Member-access ({@code obj.}) в позиции каретки. */
@@ -2609,19 +2657,6 @@ return creatorResolved && creatorPatched;
     {
         if (assistant == null || !isPopupVisible(assistant))
             return false;
-        // База popup посчитана делегатом под префиксом на каретке. При удалении символов
-        // корректный список — её надмножество, а дорастить базу пересчётом нельзя: при
-        // открытом окне делегат трогать запрещено (блокировка ввода + сброс DataEvent →
-        // LinkedMode). Поэтому сначала подменяем базу префикс-свободным запасом членов, и
-        // только если запаса нет — закрываем окно, как штатный JFace при Backspace за
-        // offset вызова.
-        if (processor != null && viewer != null
-            && processor.isPopupListStaleForPrefix(viewer.getDocument(), caret)
-            && !processor.repairPopupListFromMemberStock(viewer.getDocument(), caret))
-        {
-            hideProposalPopup(assistant);
-            return true;
-        }
         try
         {
             if (processor != null && filter != null && !filter.isEmpty()

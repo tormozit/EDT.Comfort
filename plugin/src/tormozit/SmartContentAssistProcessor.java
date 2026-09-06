@@ -2258,6 +2258,9 @@ return;
         assignFullListCache(unwrapProposals(list));
         fullListReady = true;
         fullListContextKey = key;
+        Global.tempLog("assist-prefix", "wordList.publish cacheN=" + fullListCache.length //$NON-NLS-1$ //$NON-NLS-2$
+            + " seedAfterAssign=[" + fullListCachePrefix + "] liveFilter=[" //$NON-NLS-1$ //$NON-NLS-2$
+            + computeIdentifierFilter(liveDoc, liveCaret) + "]"); //$NON-NLS-1$
         clearDelegateSyncProbe();
         rememberInterimDelegateList(list);
         ContentAssistDebug.perfMark("wordListBackground.publish", //$NON-NLS-1$
@@ -2879,12 +2882,29 @@ if (isIrWordsResolvedForContext() && irN > 0)
      */
     boolean isPopupListStaleForPrefix(IDocument doc, int caret)
     {
-        if (fullListComplete || fullListCachePrefix.isEmpty())
-            return false;
-        if (!isCacheValidForCaret(doc, caret))
-            return false;
         String now = computeIdentifierFilter(doc, caret);
-        return !now.regionMatches(true, 0, fullListCachePrefix, 0, fullListCachePrefix.length());
+        if (fullListComplete || fullListCachePrefix.isEmpty())
+        {
+            String reason = fullListComplete ? "complete" : "seedEmpty"; //$NON-NLS-1$ //$NON-NLS-2$
+            Global.tempLog("assist-prefix", "stale=false reason=" + reason //$NON-NLS-1$ //$NON-NLS-2$
+                + " now=[" + now + "] seed=[" + fullListCachePrefix + "]" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " complete=" + fullListComplete + " cacheN=" + fullListCache.length); //$NON-NLS-1$ //$NON-NLS-2$
+            return false;
+        }
+        if (!isCacheValidForCaret(doc, caret))
+        {
+            Global.tempLog("assist-prefix", "stale=false reason=cacheInvalid now=[" + now //$NON-NLS-1$
+                + "] seed=[" + fullListCachePrefix + "] ready=" + fullListReady //$NON-NLS-1$ //$NON-NLS-2$
+                + " cacheN=" + fullListCache.length); //$NON-NLS-1$
+            return false;
+        }
+        boolean absorbs = now.regionMatches(true, 0, fullListCachePrefix, 0,
+            fullListCachePrefix.length());
+        boolean stale = !absorbs;
+        Global.tempLog("assist-prefix", "stale=" + stale + " reason=" //$NON-NLS-1$ //$NON-NLS-2$
+            + (absorbs ? "absorbs" : "notAbsorbs") //$NON-NLS-1$ //$NON-NLS-2$
+            + " now=[" + now + "] seed=[" + fullListCachePrefix + "]"); //$NON-NLS-1$ //$NON-NLS-2$
+        return stale;
     }
 
     /**
