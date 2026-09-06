@@ -162,6 +162,11 @@ public final class ContentAssistSessionReloader
      */
     private volatile boolean suppressDocumentAutoOpenAfterSession;
     /**
+     * Закрытие окна из‑за устаревшего префикса: {@code assistSessionEnded} не должен
+     * глушить автооткрытие на следующей букве (подавление нужно только после apply).
+     */
+    private volatile boolean skipAutoOpenSuppressForStaleClose;
+    /**
      * Штатный {@code BslDocumentListener} на время apply: если {@code DataEvent.doIt}
      * упадёт до {@code addDocumentListener}, listener останется снятым — запомнили
      * экземпляр в aboutToBeChanged, чтобы вернуть на документ.
@@ -326,7 +331,15 @@ tryBeginManualDualAssist(caret);
                     || processor.isIrOnlyManualMode();
                 boolean preserveAutoOpen = completionAutoOpenPending || completionAutoOpenEdtOpened;
                 if (!manualDualSession && !preserveLiteralIr && !preserveAutoOpen)
-                    processor.invalidateCache();
+                {
+                    if (processor.hasReadyFullListCacheForCaret(viewer, caret))
+                    {
+                        Global.tempLog("assist-prefix", "sessionStart keepCache caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                            + " n=" + processor.diagFullListCacheCount()); //$NON-NLS-1$
+                    }
+                    else
+                        processor.invalidateCache();
+                }
                 ContentAssistPopupSync.clearSyncState();
                 ContentAssistDebug.log("assistSessionStarted auto=" + event.isAutoActivated //$NON-NLS-1$
                     + " processor=" + processorName(event.processor)); //$NON-NLS-1$
@@ -455,15 +468,25 @@ boolean inLiteral = endCaret >= 0
 
                 // proposal.apply() выполняется после assistSessionEnded — подавляем
                 // авто-открытие, которое иначе сработало бы на вставленный текст.
-                suppressDocumentAutoOpenAfterSession = true;
-                Control suppressWidget = (Control) viewer.getTextWidget();
-                if (suppressWidget != null && !suppressWidget.isDisposed())
+                // Закрытие из‑за устаревшего префикса — не apply: следующая буква должна
+                // снова открыть окно.
+                if (skipAutoOpenSuppressForStaleClose)
                 {
-                    Display suppressDisplay = suppressWidget.getDisplay();
-                    if (suppressDisplay != null && !suppressDisplay.isDisposed())
+                    skipAutoOpenSuppressForStaleClose = false;
+                    suppressDocumentAutoOpenAfterSession = false;
+                }
+                else
+                {
+                    suppressDocumentAutoOpenAfterSession = true;
+                    Control suppressWidget = (Control) viewer.getTextWidget();
+                    if (suppressWidget != null && !suppressWidget.isDisposed())
                     {
-suppressDisplay.asyncExec(
-                            () -> suppressDocumentAutoOpenAfterSession = false);
+                        Display suppressDisplay = suppressWidget.getDisplay();
+                        if (suppressDisplay != null && !suppressDisplay.isDisposed())
+                        {
+                            suppressDisplay.asyncExec(
+                                () -> suppressDocumentAutoOpenAfterSession = false);
+                        }
                     }
                 }
 
@@ -505,6 +528,9 @@ suppressDisplay.asyncExec(
                 ContentAssistPopupSync.clearSyncState();
                 ContentAssistDebug.log("assistSessionEnded processor=" //$NON-NLS-1$
                     + processorName(event.processor));
+                Global.tempLog("assist-prefix", "assistSessionEnded caret=" + endCaret //$NON-NLS-1$ //$NON-NLS-2$
+                    + " preserve=" + preserveOnEnd //$NON-NLS-1$
+                    + " stack=" + assistEndStack()); //$NON-NLS-1$
                 if (!preserveOnEnd)
                     processor.invalidateCache();
                 processor.exitIrOnlyManualMode();
@@ -1747,12 +1773,7 @@ suppressDisplay.asyncExec(
 
     static void logAssistOpen(String location, String json)
     {
-        try
-        {
-        }
-        catch (Exception ignored)
-        {
-        }
+        Global.tempLog("assist-prefix", location + " " + json); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private static String clipLogText(String text)
@@ -2525,6 +2546,8 @@ if (!pendingAutoOpen || !ComfortSettings.isReplaceListFiltersEnabled())
         completionAutoOpenAwaitingLogged = false;
         if (branch == null)
             return;
+        if ("dot".equals(branch))
+            cancelPendingOrdinaryAssist("dot"); //$NON-NLS-1$
         if ("space".equals(branch) || "symbol".equals(branch))
         {
             // Пробел и &~#: не открываем EDT-попап, ИР решает через ЗаполнитьТаблицуСлов
@@ -2561,6 +2584,35 @@ if (!pendingAutoOpen || !ComfortSettings.isReplaceListFiltersEnabled())
         {
             scheduleCompletionAutoOpen(caretAfter, seq);
         }
+    }
+
+    /** Следующий {@code assistSessionEnded} — закрытие из‑за устаревшего префикса, не apply. */
+    static void markSessionEndFromStalePrefixClose(SourceViewer viewer)
+    {
+        ContentAssistSessionReloader reloader = forViewer(viewer);
+        if (reloader != null)
+            reloader.skipAutoOpenSuppressForStaleClose = true;
+    }
+
+    /**
+     * После закрытия врющего списка: если буква уже набрана, автооткрытие на VerifyKey
+     * могло не встать ({@code popupWasOpen}).
+     */
+    static void requestAutoOpenAfterStalePrefixClose(SourceViewer viewer, int caret)
+    {
+        ContentAssistSessionReloader reloader = forViewer(viewer);
+        if (reloader == null)
+            return;
+        reloader.suppressDocumentAutoOpenAfterSession = false;
+        IDocument doc = viewer.getDocument();
+        String filter = caret >= 0 && doc != null
+            ? SmartContentAssistProcessor.computeIdentifierFilter(doc, caret) : ""; //$NON-NLS-1$
+        Global.tempLog("assist-prefix", "afterStaleClose caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
+            + " filter=[" + filter + "]"); //$NON-NLS-1$ //$NON-NLS-2$
+        if (filter.isEmpty())
+            return;
+        int seq = reloader.completionAutoOpenSeq.incrementAndGet();
+        reloader.scheduleCompletionAutoOpen(caret, seq);
     }
 
     /**
@@ -2693,17 +2745,11 @@ openCompletionAutoEdtPopup(caret, autoOpenSeq);
         ContentAssistPopupSync.ensureEmptyListAllowed(assistant, false); // false Заставляет штатную логику JFace вообще не открывать окно, если фильтрат пустой, но при этом вызывает звук Display.beep()
         beginLiteralOpenTracking();
         preShowLiteralBrowserPatch(expectedCaret);
-        boolean shown = false;
-
-        // From  org.eclipse.jface.text.contentassist.ContentAssistant.AutoAssistListener.showAssist(int)
-        Object fAutoAssistListener = Global.getField(assistant, "fAutoAssistListener");
-        Global.invokeVoid(fAutoAssistListener, "start", 1); // учитывает задержку перед открытием из настроек плагина
-        //
-        //Global.invoke(assistant, "prepareToShowCompletions", true);
-        //Object fProposalPopup = Global.getField(assistant, "fProposalPopup");
-        //Global.invoke(fProposalPopup, "showProposals", true); // Не учитывает задержку перед открытием из настроек плагина
-        //
-        //shown = ContentAssistPopupSync.showPossibleCompletions(assistant); // Для штатного механизма это безусловное открытие окна как если бы CTRL+Space нажал. Поэтому выше продублировал штатную логику автооткрытия окна  
+        // Задержка уже выдержана в scheduleCompletionAutoOpen (settings.getTimeout).
+        // AutoAssistListener.start() всегда создаёт НОВЫЙ поток, не останавливая прежний
+        // (JFace): поток от «ф» доживает и вызывает showAssist на каретке буквы, снося
+        // сессию членов. showPossibleCompletions сначала stop() у слушателя.
+        boolean shown = ContentAssistPopupSync.showPossibleCompletions(assistant);
         
         IDtProject dtProject = facade.getDtProject();
         boolean irConnected = dtProject != null && IRApplication.hasConnectedSessionForKeys(dtProject);
@@ -2821,7 +2867,64 @@ openCompletionAutoEdtPopup(caret, autoOpenSeq);
     private void cancelCompletionAutoOpenTimers(int autoOpenSeq, String reason)
     {
         completionAutoOpenScheduleGen.incrementAndGet();
-}
+    }
+
+    /**
+     * После {@code .} словарный Job и AutoAssistListener от предыдущей буквы не должны
+     * переоткрывать обычный список и сносить сессию членов.
+     */
+    private void cancelPendingOrdinaryAssist(String why)
+    {
+        if (processor != null)
+            processor.releaseWordListOpenGuard(why);
+        stopAutoAssistListener();
+        cancelCompletionAutoOpenTimers(completionAutoOpenActiveSeq, why);
+        Global.tempLog("assist-prefix", "cancelPendingOrdinaryAssist why=" + why); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    private void stopAutoAssistListener()
+    {
+        Object listener = Global.getField(assistant, "fAutoAssistListener"); //$NON-NLS-1$
+        if (listener == null)
+            return;
+        Thread thread = null;
+        try
+        {
+            Object raw = Global.getField(listener, "fThread"); //$NON-NLS-1$
+            if (raw instanceof Thread t)
+                thread = t;
+        }
+        catch (Exception ignored)
+        {
+        }
+        Global.invokeVoid(listener, "stop"); //$NON-NLS-1$
+        if (thread != null && thread.isAlive())
+            thread.interrupt();
+    }
+
+    private static String assistEndStack()
+    {
+        StringBuilder sb = new StringBuilder();
+        int n = 0;
+        for (StackTraceElement frame : Thread.currentThread().getStackTrace())
+        {
+            String cls = frame.getClassName();
+            if (!cls.contains("tormozit") && !cls.contains("jface.text.contentassist") //$NON-NLS-1$ //$NON-NLS-2$
+                && !cls.contains("CompletionProposalPopup")) //$NON-NLS-1$
+                continue;
+            if (cls.contains("ContentAssistSessionReloader") //$NON-NLS-1$
+                && "assistEndStack".equals(frame.getMethodName())) //$NON-NLS-1$
+                continue;
+            if (n > 0)
+                sb.append('|');
+            String simple = cls.substring(cls.lastIndexOf('.') + 1);
+            sb.append(simple).append('.').append(frame.getMethodName());
+            n++;
+            if (n >= 8)
+                break;
+        }
+        return sb.toString();
+    }
 
     private boolean isCompletionAutoOpenCaretMatch(int caret)
     {
@@ -3951,6 +4054,14 @@ if (isCompletionAutoOpenCaretMatch(caret)
             if (!irGate && !edtOpened)
             {
                 decision = "clearBothFail"; //$NON-NLS-1$
+                IDocument liveDoc = viewer != null ? viewer.getDocument() : null;
+                String filter = liveDoc != null && caret >= 0
+                    ? SmartContentAssistProcessor.computeIdentifierFilter(liveDoc, caret)
+                    : ""; //$NON-NLS-1$
+                Global.tempLog("assist-prefix", "irAutoOpen " + decision //$NON-NLS-1$ //$NON-NLS-2$
+                    + " filter=[" + filter + "] popup=" + popupVisible); //$NON-NLS-1$ //$NON-NLS-2$
+                if (!popupVisible && !filter.isEmpty())
+                    openCompletionAutoEdtPopup(caret, autoOpenSeq);
                 clearCompletionAutoOpenState(decision, autoOpenSeq);
             }
             else if (edtOpened && popupVisible)
@@ -4080,13 +4191,32 @@ processor.applyIrCompletion(snapshot);
         ContentAssistSessionReloader reloader = forViewer(sv);
         ContentAssistant ca = reloader != null ? reloader.assistant : null;
         if (ca == null || ContentAssistPopupSync.isPopupVisible(ca))
+        {
+            Global.tempLog("assist-prefix", "openPopupForBackgroundList skip visibleOrNull"); //$NON-NLS-1$ //$NON-NLS-2$
             return false;
+        }
         if (isProposalInsertInProgressGlobally())
+        {
+            Global.tempLog("assist-prefix", "openPopupForBackgroundList skip insert"); //$NON-NLS-1$ //$NON-NLS-2$
             return false;
+        }
         StyledText widget = sv.getTextWidget();
         if (widget == null || widget.isDisposed() || !widget.isFocusControl())
+        {
+            Global.tempLog("assist-prefix", "openPopupForBackgroundList skip focus"); //$NON-NLS-1$ //$NON-NLS-2$
             return false;
-        return ContentAssistPopupSync.showPossibleCompletions(ca);
+        }
+        int caret = SmartContentAssistProcessor.resolveWidgetCaret(sv);
+        IDocument doc = sv.getDocument();
+        if (doc != null && caret >= 0
+            && SmartContentAssistProcessor.ReceiverTypeLabel.findMemberAccessDot(doc, caret) >= 0)
+        {
+            Global.tempLog("assist-prefix", "openPopupForBackgroundList skip member caret=" + caret); //$NON-NLS-1$ //$NON-NLS-2$
+            return false;
+        }
+        boolean shown = ContentAssistPopupSync.showPossibleCompletions(ca, true);
+        Global.tempLog("assist-prefix", "openPopupForBackgroundList shown=" + shown); //$NON-NLS-1$ //$NON-NLS-2$
+        return shown;
     }
 
     /** Обновление popup после прихода слов ИР (сразу или в очередь при recompute). */
@@ -4264,6 +4394,13 @@ if (!hadFlag)
                 {
                     if (!CONTENT_ASSIST_PROPOSALS_COMMAND.equals(commandId))
                         return;
+                    SmartContentAssistProcessor.markCtrlSpaceInvocation();
+                    for (ContentAssistSessionReloader reloader : new java.util.ArrayList<>(INSTALLED.values()))
+                    {
+                        if (reloader != null && reloader.assistant != null)
+                            ContentAssistPopupSync.ensureEmptyListAllowed(reloader.assistant, true);
+                    }
+                    Global.tempLog("assist-prefix", "ctrlSpace.command preExecute"); //$NON-NLS-1$ //$NON-NLS-2$
                     ContentAssistSessionReloader reloader = openSessionReloader;
                     if (reloader == null)
                         reloader = getActiveReloader();
@@ -4275,6 +4412,8 @@ if (!hadFlag)
                 @Override
                 public void notHandled(String commandId, NotHandledException exception)
                 {
+                    if (CONTENT_ASSIST_PROPOSALS_COMMAND.equals(commandId))
+                        SmartContentAssistProcessor.clearCtrlSpaceInvocation();
                 }
 
                 @Override
@@ -4282,6 +4421,7 @@ if (!hadFlag)
                 {
                     if (!CONTENT_ASSIST_PROPOSALS_COMMAND.equals(commandId))
                         return;
+                    SmartContentAssistProcessor.clearCtrlSpaceInvocation();
                     logContentAssistCommandPost("failure", null, exception); //$NON-NLS-1$
                 }
 
@@ -4290,6 +4430,7 @@ if (!hadFlag)
                 {
                     if (!CONTENT_ASSIST_PROPOSALS_COMMAND.equals(commandId))
                         return;
+                    SmartContentAssistProcessor.clearCtrlSpaceInvocation();
                     logContentAssistCommandPost("success", returnValue, null); //$NON-NLS-1$
                 }
             };
@@ -4404,6 +4545,8 @@ scheduleFilterToggleUiSync();
             StyledText text = viewer.getTextWidget() instanceof StyledText st ? st : null;
             if (!isOwnWidgetFocused(text))
                 return;
+            SmartContentAssistProcessor.markCtrlSpaceInvocation();
+            ContentAssistPopupSync.ensureEmptyListAllowed(assistant, true);
             int probeCaret = modelCaretOffset();
             boolean popupVisible = ContentAssistPopupSync.isPopupVisible(assistant);
             boolean inLiteralProbe = probeCaret >= 0

@@ -2630,7 +2630,10 @@ return creatorResolved && creatorPatched;
             return false;
         }
         Global.tempLog("assist-prefix", "close stale caret=" + caret); //$NON-NLS-1$ //$NON-NLS-2$
+        processor.releaseWordListOpenGuard("stalePrefix"); //$NON-NLS-1$
+        ContentAssistSessionReloader.markSessionEndFromStalePrefixClose(viewer);
         hideProposalPopup(assistant);
+        ContentAssistSessionReloader.requestAutoOpenAfterStalePrefixClose(viewer, caret);
         return true;
     }
 
@@ -3983,19 +3986,56 @@ ensureFilterPending(popup);
             && name.regionMatches(true, 0, prefix, 0, prefix.length());
     }
 
-    /** Ручной Ctrl+Space — штатный API JFace. */
+    /**
+     * Показать список сразу, как автоактивация JFace ({@code showProposals(true)}),
+     * а не {@link ContentAssistant#showPossibleCompletions()} (это Ctrl+Space:
+     * {@code prepareToShowCompletions(false)} и при включённом prefix-complete —
+     * {@code incrementalComplete} без окна).
+     *
+     * <p>Полный расчёт (кэш может быть пуст — первая точка, первый список). Режим
+     * {@code cachedListOnly} — только когда список уже посчитан в фоне: иначе
+     * {@code cacheOnly miss} → {@code hideWhenNoProposals} и окно не открывается.
+     */
     public static boolean showPossibleCompletions(ContentAssistant assistant)
+    {
+        return showPossibleCompletions(assistant, false);
+    }
+
+    public static boolean showPossibleCompletions(ContentAssistant assistant, boolean cachedListOnly)
     {
         if (assistant == null)
             return false;
         try
         {
-            assistant.showPossibleCompletions();
-            return true;
+            Object listener = Global.getField(assistant, "fAutoAssistListener"); //$NON-NLS-1$
+            if (listener != null)
+                Global.invokeVoid(listener, "stop"); //$NON-NLS-1$
+            Object prepared = Global.invoke(assistant, "prepareToShowCompletions", Boolean.TRUE); //$NON-NLS-1$
+            if (!Boolean.TRUE.equals(prepared))
+            {
+                Global.tempLog("assist-prefix", "showProposals skip prepare=" + prepared); //$NON-NLS-1$ //$NON-NLS-2$
+                return false;
+            }
+            Object popup = getPopup(assistant);
+            if (popup == null)
+            {
+                Global.tempLog("assist-prefix", "showProposals skip noPopup"); //$NON-NLS-1$ //$NON-NLS-2$
+                return false;
+            }
+            Runnable show = () -> Global.invoke(popup, "showProposals", Boolean.TRUE); //$NON-NLS-1$
+            if (cachedListOnly)
+                SmartContentAssistProcessor.runWithCachedListOnly(show);
+            else
+                show.run();
+            boolean visible = isPopupVisible(assistant);
+            Global.tempLog("assist-prefix", "showProposals(true) visible=" + visible //$NON-NLS-1$ //$NON-NLS-2$
+                + " cacheOnly=" + cachedListOnly); //$NON-NLS-1$
+            return visible;
         }
         catch (Exception e)
         {
             ContentAssistDebug.log("showPossibleCompletions ERROR: " + e.getMessage()); //$NON-NLS-1$
+            Global.tempLog("assist-prefix", "showProposals ERROR " + e.getMessage()); //$NON-NLS-1$ //$NON-NLS-2$
             return false;
         }
     }

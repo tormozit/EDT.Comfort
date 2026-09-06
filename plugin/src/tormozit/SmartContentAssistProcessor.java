@@ -265,6 +265,18 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     private volatile int wordListBackgroundKey = Integer.MIN_VALUE;
     private int wordListFailedKey = Integer.MIN_VALUE;
     private int wordListOpenedKey = Integer.MIN_VALUE;
+    /**
+     * Поколение фона словарного списка. Растёт при закрытии окна из‑за устаревшего префикса:
+     * уже запущенный Job не должен открывать окно и ставить {@code wordListOpenedKey}.
+     */
+    private int wordListEpoch;
+    /**
+     * Показ окна после фонового списка: только фильтр кэша, без {@code fetchDelegateList}
+     * и без нового Job на UI-потоке.
+     */
+    private static final ThreadLocal<Boolean> CACHE_ONLY_COMPUTE = new ThreadLocal<>();
+    /** Ctrl+Space (команда Eclipse, не Display KeyDown). Не откладывать список в фон. */
+    private static final ThreadLocal<Boolean> CTRL_SPACE_INVOCATION = new ThreadLocal<>();
 
     /**
      * Сколько UI-поток готов ждать фоновый список членов, когда иначе список будет пуст.
@@ -940,7 +952,15 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         delegateListCache = EMPTY;
         irWordsResolved = false;
         irOverlapTypeByKey.clear();
+        Global.tempLog("assist-prefix", "invalidateCache"); //$NON-NLS-1$ //$NON-NLS-2$
         ContentAssistDebug.log("invalidateCache"); //$NON-NLS-1$
+    }
+
+    /** Кэш полного списка уже есть для этой каретки — сессия не должна его сбрасывать. */
+    boolean hasReadyFullListCacheForCaret(ITextViewer viewer, int caret)
+    {
+        IDocument doc = viewer != null ? viewer.getDocument() : null;
+        return isCacheValidForCaret(doc, caret);
     }
 
     /**
@@ -1628,6 +1648,10 @@ return result;
     private ICompletionProposal[] computeProposalsLight(ITextViewer viewer, int offset)
     {
         int caret = resolveInvocationCaret(viewer, offset);
+        int widgetCaret = resolveWidgetCaret(viewer);
+        if (widgetCaret >= 0 && caret != widgetCaret)
+            Global.tempLog("assist-prefix", "caretMismatch off=" + offset //$NON-NLS-1$ //$NON-NLS-2$
+                + " invoc=" + caret + " widget=" + widgetCaret); //$NON-NLS-1$ //$NON-NLS-2$
         if (isStringLiteralAssistContext(viewer, caret))
             return probeDelegateOnce(viewer, offset);
         primeFilterTrackerOnly(viewer, caret);
@@ -2147,6 +2171,11 @@ return;
         // сюда его не пускаем, иначе два механизма будут спорить за один контекст.
         if (ReceiverTypeLabel.findMemberAccessDot(doc, caret) >= 0)
             return wordListSkip("memberAccess"); //$NON-NLS-1$
+        int liveCaret = resolveWidgetCaret(viewer);
+        if (liveCaret >= 0 && liveCaret != caret
+            && (ReceiverTypeLabel.findMemberAccessDot(doc, liveCaret) >= 0
+                || isOrdinaryWordListStaleForLiveCaret(doc, liveCaret)))
+            return wordListSkip("liveMemberOrDot"); //$NON-NLS-1$
         if (isStringLiteralAssistContext(doc, caret))
             return wordListSkip("literal"); //$NON-NLS-1$
         if (hasIrProposalsForCurrentContext())
@@ -2161,13 +2190,17 @@ return;
         if (!BslDataEventGuard.install(doc))
             return wordListSkip("noGuard"); //$NON-NLS-1$
         if (wordListBackgroundKey == key)
+        {
+            Global.tempLog("assist-prefix", "wordListDefer inFlight key=" + key); //$NON-NLS-1$ //$NON-NLS-2$
             return true;
+        }
         org.eclipse.swt.widgets.Display display = viewer.getTextWidget() != null
             && !viewer.getTextWidget().isDisposed() ? viewer.getTextWidget().getDisplay() : null;
         if (display == null)
             return wordListSkip("noDisplay"); //$NON-NLS-1$
         wordListBackgroundKey = key;
         final int gen = memberStockContextGen;
+        final int epoch = wordListEpoch;
         Job job = new Job("SCAP word list") //$NON-NLS-1$
         {
             @Override
@@ -2192,7 +2225,8 @@ return;
                         + ",\"events\":" + events.size() + "}"); //$NON-NLS-1$ //$NON-NLS-2$
                 final ICompletionProposal[] result = raw == null ? EMPTY : raw;
                 final java.util.Map<Object, Object> dataEvents = events;
-                display.asyncExec(() -> publishWordList(viewer, key, gen, result, dataEvents));
+                display.asyncExec(
+                    () -> publishWordList(viewer, key, gen, epoch, result, dataEvents));
                 return Status.OK_STATUS;
             }
         };
@@ -2219,16 +2253,85 @@ return;
     /** Отказ от переноса в фон с указанием причины — чтобы не гадать по пустому логу. */
     private static boolean wordListSkip(String reason)
     {
+        if ("openedKey".equals(reason) || "failedKey".equals(reason) //$NON-NLS-1$ //$NON-NLS-2$
+            || "manual".equals(reason) || "liveMemberOrDot".equals(reason)) //$NON-NLS-1$ //$NON-NLS-2$
+            Global.tempLog("assist-prefix", "wordListSkip " + reason); //$NON-NLS-1$ //$NON-NLS-2$
         ContentAssistDebug.perfMark("wordListDefer.skip", //$NON-NLS-1$
             "{\"why\":\"" + reason + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
         return false;
     }
 
+    /**
+     * Окно закрыто из‑за устаревшего префикса: тот же якорь списка можно открыть снова.
+     * {@link #ensureFullListForContext} ключи не сбрасывает — иначе цикл publish→show.
+     */
+    void releaseWordListOpenGuard(String why)
+    {
+        wordListEpoch++;
+        wordListOpenedKey = Integer.MIN_VALUE;
+        wordListFailedKey = Integer.MIN_VALUE;
+        wordListBackgroundKey = Integer.MIN_VALUE;
+        if (wordListBackgroundJob != null)
+        {
+            wordListBackgroundJob.cancel();
+            wordListBackgroundJob = null;
+        }
+        Global.tempLog("assist-prefix", "releaseWordListOpenGuard why=" + why //$NON-NLS-1$ //$NON-NLS-2$
+            + " epoch=" + wordListEpoch); //$NON-NLS-1$
+    }
+
+    /** Каретка уже после {@code .} или на точке — словарный Job буквы не должен открывать окно. */
+    private static boolean isOrdinaryWordListStaleForLiveCaret(IDocument doc, int caret)
+    {
+        if (doc == null || caret < 0)
+            return false;
+        if (ReceiverTypeLabel.findMemberAccessDot(doc, caret) >= 0)
+            return true;
+        try
+        {
+            return caret < doc.getLength() && doc.getChar(caret) == '.';
+        }
+        catch (Exception ignored)
+        {
+            return false;
+        }
+    }
+
+    /** UI-показ по уже посчитанному кэшу: без делегата и без нового фонового Job. */
+    static void runWithCachedListOnly(Runnable action)
+    {
+        CACHE_ONLY_COMPUTE.set(Boolean.TRUE);
+        try
+        {
+            action.run();
+        }
+        finally
+        {
+            CACHE_ONLY_COMPUTE.remove();
+        }
+    }
+
+    static void markCtrlSpaceInvocation()
+    {
+        CTRL_SPACE_INVOCATION.set(Boolean.TRUE);
+    }
+
+    static void clearCtrlSpaceInvocation()
+    {
+        CTRL_SPACE_INVOCATION.remove();
+    }
+
     /** Публикация словарного списка из фона — только на UI-потоке. */
-    private void publishWordList(ITextViewer viewer, int key, int gen,
+    private void publishWordList(ITextViewer viewer, int key, int gen, int epoch,
                                  ICompletionProposal[] result,
                                  java.util.Map<Object, Object> dataEvents)
     {
+        if (epoch != wordListEpoch)
+        {
+            Global.tempLog("assist-prefix", "wordList.publish skip staleEpoch job=" + epoch //$NON-NLS-1$ //$NON-NLS-2$
+                + " now=" + wordListEpoch); //$NON-NLS-1$
+            return;
+        }
         if (wordListBackgroundKey == key)
             wordListBackgroundKey = Integer.MIN_VALUE;
         if (gen != memberStockContextGen)
@@ -2238,6 +2341,11 @@ return;
         if (liveDoc == null || liveCaret < 0
             || computeFullListContextKey(liveDoc, liveCaret) != key)
             return;
+        if (isOrdinaryWordListStaleForLiveCaret(liveDoc, liveCaret))
+        {
+            Global.tempLog("assist-prefix", "wordList.publish skip memberOrDot caret=" + liveCaret); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        }
         ICompletionProposal[] list = result;
         if (list.length == 0)
         {
@@ -2258,6 +2366,7 @@ return;
         assignFullListCache(unwrapProposals(list));
         fullListReady = true;
         fullListContextKey = key;
+        fullListCachePrefix = computeIdentifierFilter(liveDoc, liveCaret);
         Global.tempLog("assist-prefix", "wordList.publish cacheN=" + fullListCache.length //$NON-NLS-1$ //$NON-NLS-2$
             + " seedAfterAssign=[" + fullListCachePrefix + "] liveFilter=[" //$NON-NLS-1$ //$NON-NLS-2$
             + computeIdentifierFilter(liveDoc, liveCaret) + "]"); //$NON-NLS-1$
@@ -2291,6 +2400,23 @@ return;
         {
 return probeDelegateOnce(viewer, offset);
         }
+        if (Boolean.TRUE.equals(CACHE_ONLY_COMPUTE.get()))
+        {
+            int caret = resolveInvocationCaret(viewer, offset);
+            IDocument doc = viewer != null ? viewer.getDocument() : null;
+            String filter = computeIdentifierFilter(doc, caret);
+            if (!isCacheValidForCaret(doc, caret) || fullListCache.length == 0)
+            {
+                Global.tempLog("assist-prefix", "cacheOnly miss caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                    + " cacheN=" + fullListCache.length); //$NON-NLS-1$
+                return EMPTY;
+            }
+            ICompletionProposal[] cached = filter.isEmpty()
+                ? unwrapProposals(fullListCache) : filterAndSort(fullListCache, filter);
+            Global.tempLog("assist-prefix", "cacheOnly n=" + cached.length //$NON-NLS-1$ //$NON-NLS-2$
+                + " filter=[" + filter + "] cacheN=" + fullListCache.length); //$NON-NLS-1$ //$NON-NLS-2$
+            return cached;
+        }
         int literalCaret = resolveInvocationCaret(viewer, offset);
         boolean inLiteral = isStringLiteralAssistContext(viewer, literalCaret);
         String delegateName = delegate != null ? delegate.getClass().getSimpleName() : "null"; //$NON-NLS-1$
@@ -2314,9 +2440,17 @@ ContentAssistSessionReloader reloader = viewer instanceof SourceViewer sv
         }
         if (reloader != null && reloader.isCompletionAutoOpenAwaitingWords())
         {
-            ContentAssistSessionReloader.logAssistOpen("compute.empty", "{\"reason\":\"awaitingWords\"" //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"caret\":" + literalCaret + ",\"off\":" + offset + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            return EMPTY;
+            IDocument awaitDoc = viewer != null ? viewer.getDocument() : null;
+            boolean cacheReady = isCacheValidForCaret(awaitDoc, literalCaret)
+                && fullListCache.length > 0;
+            if (!cacheReady)
+            {
+                ContentAssistSessionReloader.logAssistOpen("compute.empty", "{\"reason\":\"awaitingWords\"" //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"caret\":" + literalCaret + ",\"off\":" + offset + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                return EMPTY;
+            }
+            ContentAssistSessionReloader.logAssistOpen("compute.awaitingWordsCache", "{\"caret\":" //$NON-NLS-1$ //$NON-NLS-2$
+                + literalCaret + ",\"cacheN\":" + fullListCache.length + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         }
         // Повторный Ctrl+Space (toggle фильтра) в режиме выделения+ИР: сохраняем штатное
         // переключение флажка «Фильтр», но список ниже остаётся только ИР (не EDT+ИР).
@@ -3631,10 +3765,14 @@ return stripEmptyPlaceholderProposals(result);
     {
     }
 
-    /** Бывший NDJSON-диагностический выход resolveProposalList — no-op. */
+    /** Бывший NDJSON-диагностический выход resolveProposalList — сейчас в assist-prefix. */
     private void debugResolveExit(IDocument doc, int caret, String filter, int interimN,
         boolean cacheValid, String exit, ICompletionProposal[] result)
     {
+        int n = result == null ? -1 : result.length;
+        Global.tempLog("assist-prefix", "resolve exit=" + exit //$NON-NLS-1$ //$NON-NLS-2$
+            + " n=" + n + " filter=[" + filter + "] cacheN=" + fullListCache.length //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " cacheValid=" + cacheValid + " caret=" + caret); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     /**
@@ -4857,6 +4995,13 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
             ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
             if (assistant != null)
             {
+                int shown = ContentAssistPopupSync.filteredProposalCountForAssistant(assistant);
+                if (shown > 0)
+                {
+                    Global.tempLog("assist-prefix", "memberStockEmpty keepVisible n=" + shown //$NON-NLS-1$ //$NON-NLS-2$
+                        + " caret=" + liveCaret); //$NON-NLS-1$
+                    return;
+                }
                 ContentAssistPopupSync.hideProposalPopup(assistant);
                 ContentAssistDebug.perfMark("memberStockEmpty.popupClosed", //$NON-NLS-1$
                     "{\"dot\":" + dotContextKey + "}"); //$NON-NLS-1$ //$NON-NLS-2$
@@ -5300,14 +5445,25 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         try
         {
             Point sel = viewer.getSelectedRange();
+            int fromSel = -1;
             if (sel != null && sel.x >= 0)
-                return sel.x + Math.max(0, sel.y);
+                fromSel = sel.x + Math.max(0, sel.y);
+            int fromWidget = -1;
             if (viewer.getTextWidget() != null)
             {
                 int caret = viewer.getTextWidget().getCaretOffset();
                 if (caret >= 0)
-                    return widgetToModelOffset(viewer, caret);
+                    fromWidget = widgetToModelOffset(viewer, caret);
             }
+            // После вставки «.» getSelectedRange иногда остаётся на букве (1628), а виджет
+            // уже на 1629. Берём виджет только если он впереди и выделения нет — иначе
+            // сломается обратный случай, когда виджет отстаёт от invocationOffset.
+            if (fromSel >= 0 && (sel == null || sel.y == 0) && fromWidget > fromSel)
+                return fromWidget;
+            if (fromSel >= 0)
+                return fromSel;
+            if (fromWidget >= 0)
+                return fromWidget;
         }
         catch (Exception ignored) {}
         return -1;
@@ -5912,6 +6068,8 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
 
         static boolean isActive()
         {
+            if (Boolean.TRUE.equals(CTRL_SPACE_INVOCATION.get()))
+                return true;
             StackTraceElement[] stack = Thread.currentThread().getStackTrace();
             boolean inShow = false;
             for (StackTraceElement frame : stack)
