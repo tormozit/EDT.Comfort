@@ -1823,7 +1823,6 @@ public final class ConfigSearchResultsHook implements IStartup
     private static final String SEARCH_CORE_BUNDLE = "com._1c.g5.v8.dt.search.core"; //$NON-NLS-1$
     private static final String BSL_BM_UI_SUPPLIER =
         "com._1c.g5.v8.dt.bsl.bm.ui.refactoring.BslTextSearchRefactoringSupplier"; //$NON-NLS-1$
-    private static final String FT_LOG = "fulltext-refs"; //$NON-NLS-1$
     private static volatile boolean fullTextAugmentRunning;
     /** Полное имя объекта, для которого посчитаны полнотекстовые вхождения ({@link #fullTextRowsCache}). */
     private static volatile String fullTextRowsKey;
@@ -1886,7 +1885,6 @@ public final class ConfigSearchResultsHook implements IStartup
                 {
                     List<MatchRow> extra = collectFullTextRows(project, qualifiedName, simpleName,
                         new java.util.HashSet<>(), monitor);
-                    Global.tempLog(FT_LOG, "готово: +" + extra.size() + " строк для " + qualifiedName); //$NON-NLS-1$ //$NON-NLS-2$
                     fullTextRowsCache = extra;
                     fullTextRowsKey = qualifiedName; // syntheticCountByFilePath заполнит appendFullTextRows
                     runOnUi(() -> {
@@ -1900,7 +1898,6 @@ public final class ConfigSearchResultsHook implements IStartup
                 }
                 catch (Exception | LinkageError e)
                 {
-                    Global.tempLog(FT_LOG, "augment EX: " + e); //$NON-NLS-1$
                 }
                 finally
                 {
@@ -1949,7 +1946,6 @@ public final class ConfigSearchResultsHook implements IStartup
             added++;
         }
         syntheticCountByFilePath = byFile; // ровно то, что реально добавлено (после дедупа)
-        Global.tempLog(FT_LOG, "в таблицу дописано " + added + " из кэша " + cache.size()); //$NON-NLS-1$ //$NON-NLS-2$
         if (added == 0)
         {
             updateMatchSuitableOnly();
@@ -1985,21 +1981,14 @@ public final class ConfigSearchResultsHook implements IStartup
         long syntheticTotal = byFile.values().stream().mapToLong(Long::longValue).sum();
         if (syntheticTotal <= 0)
             return;
-        // Ищем по всему дереву контролов панели поиска (от Shell) — надпись это отдельный
-        // Label/CLabel, не getContentDescription и не заголовок вкладки.
+        // Ищем по всему дереву контролов панели поиска (от Shell): надпись — отдельный виджет
+        // ({@code Link}), не getContentDescription и не заголовок вкладки.
         Composite root = treeViewer.getTree().getShell();
         Object[] found = new Object[1];
         String[] curText = new String[1];
-        List<String> seen = new ArrayList<>();
-        findHeaderCountLabel(root, found, curText, seen);
+        findHeaderCountLabel(root, found, curText);
         if (found[0] == null)
-        {
-            Global.tempLog(FT_LOG, "шапка: надпись не найдена; Label/CLabel: " + seen); //$NON-NLS-1$
-            IViewPart view = findSearchViewPart();
-            Global.tempLog(FT_LOG, "шапка: contentDescr=«" + (view != null ? Global.invoke(view, "getContentDescription") : "?") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + "» title=«" + (view != null ? Global.invoke(view, "getTitle") : "?") + "»"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
             return;
-        }
         Control c = (Control) found[0];
         installHeaderCountGuard(c);
         applyHeaderPatch(c, curText[0], syntheticTotal);
@@ -2060,34 +2049,26 @@ public final class ConfigSearchResultsHook implements IStartup
             c.getClass().getMethod("setText", String.class).invoke(c, patched); //$NON-NLS-1$
             c.requestLayout();
             headerLabelPatchedText = patched;
-            Global.tempLog(FT_LOG, "шапка (" + c.getClass().getSimpleName() + ") пропатчена: «" //$NON-NLS-1$ //$NON-NLS-2$
-                + text + "» → «" + patched + "»"); //$NON-NLS-1$ //$NON-NLS-2$
         }
         catch (Exception ignored)
         {
         }
     }
 
-    private static void findHeaderCountLabel(Control control, Object[] found, String[] text, List<String> seen)
+    private static void findHeaderCountLabel(Control control, Object[] found, String[] text)
     {
         if (found[0] != null || control == null || control.isDisposed())
             return;
         String t = controlText(control);
-        if (t != null && !t.isBlank())
+        if (t != null && !t.isBlank() && HEADER_COUNT_PATTERN.matcher(t).find())
         {
-            if (seen.size() < 120)
-                seen.add(control.getClass().getSimpleName() + ":«" //$NON-NLS-1$
-                    + (t.length() > 70 ? t.substring(0, 70) : t).replace('\n', ' ') + "»"); //$NON-NLS-1$
-            if (HEADER_COUNT_PATTERN.matcher(t).find())
-            {
-                found[0] = control;
-                text[0] = t;
-                return;
-            }
+            found[0] = control;
+            text[0] = t;
+            return;
         }
         if (control instanceof Composite comp)
             for (Control child : comp.getChildren())
-                findHeaderCountLabel(child, found, text, seen);
+                findHeaderCountLabel(child, found, text);
     }
 
     /** Текст произвольного контрола ({@code getText()} рефлексией) — надпись-шапка может быть любым виджетом. */
@@ -2129,18 +2110,12 @@ public final class ConfigSearchResultsHook implements IStartup
         Bundle searchCore = Platform.getBundle(SEARCH_CORE_BUNDLE);
         Bundle bslBmUi = Platform.getBundle("com._1c.g5.v8.dt.bsl.bm.ui"); //$NON-NLS-1$
         if (searchCore == null || bslBmUi == null)
-        {
-            Global.tempLog(FT_LOG, "нет бандла search.core/bsl.bm.ui"); //$NON-NLS-1$
             return result;
-        }
         IV8ProjectManager pm = (IV8ProjectManager) Global.getServiceByClass(IV8ProjectManager.class);
         IV8Project v8 = pm != null ? pm.getProject(project) : null;
         EObject target = v8 != null ? GoToDefinition.resolveEObjectByQualifiedName(qualifiedName, v8) : null;
         if (target == null)
-        {
-            Global.tempLog(FT_LOG, "объект не разрешён: " + qualifiedName); //$NON-NLS-1$
             return result;
-        }
         Object rsp = org.eclipse.xtext.resource.IResourceServiceProvider.Registry.INSTANCE
             .getResourceServiceProvider(URI.createURI("comfort.bsl")); //$NON-NLS-1$
         Object supplier = rsp != null
@@ -2148,73 +2123,44 @@ public final class ConfigSearchResultsHook implements IStartup
         Object factory = rsp != null ? Global.invoke(rsp, "get", searchCore.loadClass( //$NON-NLS-1$
             "com._1c.g5.v8.dt.search.core.refactoring.TextSearchRefactoringParticipantFactory")) : null; //$NON-NLS-1$
         if (supplier == null || factory == null)
-        {
-            Global.tempLog(FT_LOG, "инжектор: supplier=" + (supplier != null) + " factory=" + (factory != null)); //$NON-NLS-1$ //$NON-NLS-2$
             return result;
-        }
         Object participant = Global.invoke(factory, "create", simpleName, target, supplier); //$NON-NLS-1$
         if (participant == null)
-        {
-            Global.tempLog(FT_LOG, "factory.create → null"); //$NON-NLS-1$
             return result;
-        }
         Object scope = buildFullTextScope(searchCore, participant, project);
         Object changesObj = Global.invoke(participant, "createRefactoringChange", //$NON-NLS-1$
             new NullChange(), simpleName, scope, new NullProgressMonitor());
         if (!(changesObj instanceof java.util.Collection<?> changes))
-        {
-            Global.tempLog(FT_LOG, "createRefactoringChange → " + changesObj); //$NON-NLS-1$
             return result;
-        }
         List<Object> leaves = new ArrayList<>();
         for (Object c : changes)
             flattenChanges(c, leaves);
-        Global.tempLog(FT_LOG, "createRefactoringChange: верхних " + changes.size() + ", листьев " + leaves.size()); //$NON-NLS-1$ //$NON-NLS-2$
         Map<Object, String> contentCache = new java.util.HashMap<>();
-        Map<String, Integer> perModule = new java.util.TreeMap<>();
-        int edits = 0;
         for (Object ch : leaves)
         {
             if (monitor.isCanceled())
                 break;
-            String cn = ch.getClass().getSimpleName();
-            if (!(ch instanceof TextEditBasedChange tebc) || cn.contains("BmObjectTextContentChange")) //$NON-NLS-1$
-            {
-                Global.tempLog(FT_LOG, "  пропущен лист " + cn); //$NON-NLS-1$
+            if (!(ch instanceof TextEditBasedChange tebc)
+                || ch.getClass().getSimpleName().contains("BmObjectTextContentChange")) //$NON-NLS-1$
                 continue;
-            }
             IFile file = changeFile(tebc);
             if (file == null || !BslModuleMethodResolver.isBslModule(file))
-            {
-                Global.tempLog(FT_LOG, "  лист " + cn + " без BSL-файла (file=" + file + ")"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 continue;
-            }
             String content = changeContent(tebc, file, contentCache);
             if (content == null)
                 continue;
             List<TextEdit> leafEdits = new ArrayList<>();
             collectLeafEdits(Global.invoke(ch, "getEdit"), leafEdits); //$NON-NLS-1$
-            int taken = 0;
             for (TextEdit e : leafEdits)
             {
-                edits++;
                 MatchRow row = buildFullTextRowAt(file, content, e.getOffset(), simpleName);
                 if (row == null)
-                {
-                    Global.tempLog(FT_LOG, "  " + file.getName() + " offset=" + e.getOffset() //$NON-NLS-1$ //$NON-NLS-2$
-                        + " отклонён buildFullTextRowAt"); //$NON-NLS-1$
                     continue;
-                }
                 if (!existingKeys.add(file.getFullPath() + "@" + row.directOffset)) //$NON-NLS-1$
                     continue;
                 result.add(row);
-                taken++;
             }
-            Global.tempLog(FT_LOG, "  " + cn + " " + file.getName() + ": правок " + leafEdits.size() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " → строк " + taken); //$NON-NLS-1$
         }
-        Global.tempLog(FT_LOG, "рефакторинг: изменений-листьев " + leaves.size() + ", правок " + edits //$NON-NLS-1$ //$NON-NLS-2$
-            + " → строк " + result.size()); //$NON-NLS-1$
         return result;
     }
 
@@ -2389,7 +2335,6 @@ public final class ConfigSearchResultsHook implements IStartup
                 && !BslOccurrenceContextResolver.isSuitableYes(row.suitable))
                 pending.add(row);
         }
-        Global.tempLog("fulltext-refs", "IR: кандидатов " + pending.size()); //$NON-NLS-1$ //$NON-NLS-2$
         if (pending.isEmpty())
             return;
         matchIrEngine(matchViewer).startIrPassOnly(pending);
@@ -2463,7 +2408,6 @@ public final class ConfigSearchResultsHook implements IStartup
             {
                 int done = 0;
                 runOnUi(() -> updateMatchParentTypeProgress(0, total));
-                Global.tempLog("parent-type", "контекст: старт gen=" + generation + " строк=" + total); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 try
                 {
                     for (IFile file : ordered)
@@ -2495,10 +2439,6 @@ public final class ConfigSearchResultsHook implements IStartup
                 }
                 finally
                 {
-                    int doneNow = done;
-                    Global.tempLog("parent-type", "контекст: конец gen=" + generation //$NON-NLS-1$ //$NON-NLS-2$
-                        + " done=" + doneNow + "/" + total //$NON-NLS-1$ //$NON-NLS-2$
-                        + " актуален=" + isCurrentContextResolveGeneration(generation)); //$NON-NLS-1$
                     // Проход завершился (или его прервали) — счётчик в заголовке не оставляем висеть.
                     // Если проход вытеснен новым, заголовком распоряжается уже он.
                     if (isCurrentContextResolveGeneration(generation))
@@ -2531,14 +2471,6 @@ public final class ConfigSearchResultsHook implements IStartup
         row.contextLength = length;
         row.parent = BslOccurrenceContextResolver.parentText(content, offset);
         row.syntaxKind = BslOccurrenceContextResolver.syntaxKind(content, offset, length);
-        String snippet = offset >= 0 && offset < content.length()
-            ? content.substring(Math.max(0, offset - 20),
-                Math.min(content.length(), offset + Math.max(length, 1) + 5)).replace("\r", "").replace("\n", "\\n") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-            : "<offset вне текста>"; //$NON-NLS-1$
-        Global.tempLog("parent-type", row.file.getName() + " | uri=" + row.sourceUri //$NON-NLS-1$ //$NON-NLS-2$
-            + " | ref=" + (row.sourceReference != null ? row.sourceReference.getName() : "null") //$NON-NLS-1$ //$NON-NLS-2$
-            + " | region=[" + offset + "," + length + "] | «" + snippet + "» | parent=«" + row.parent //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
-            + "» | syntaxKind=" + row.syntaxKind); //$NON-NLS-1$
         // Комментарии и строковые литералы модели не принадлежат — типа родителя у них нет.
         if (BslOccurrenceContextResolver.KIND_COMMENT.equals(row.syntaxKind)
             || BslOccurrenceContextResolver.KIND_LITERAL.equals(row.syntaxKind))
@@ -2559,7 +2491,6 @@ public final class ConfigSearchResultsHook implements IStartup
         }
         row.parentType = BslOccurrenceContextResolver.parentType(row.file, content, offset);
         row.suitable = BslOccurrenceContextResolver.suitabilityByType(cachedSought, row.parentType);
-        Global.tempLog("parent-type", "  → parentType=«" + row.parentType + "» suitable=" + row.suitable); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
     }
 
     private static void applyMatchContextBatch(TableViewer matchViewer, List<MatchRow> updated, int done,

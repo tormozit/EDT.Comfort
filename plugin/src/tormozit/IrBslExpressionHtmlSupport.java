@@ -124,7 +124,7 @@ public final class IrBslExpressionHtmlSupport
             "", null, List.of()); //$NON-NLS-1$
         try
         {
-            String r = session.executeOnComThread(() -> {
+            return session.executeOnComThread(() -> {
                 session.applyPreparedCodeEditorSync(payload);
                 ensureCodeEditor(session);
                 session.invokeCodeEditor("РазобратьТекущийКонтекст"); //$NON-NLS-1$
@@ -133,14 +133,9 @@ public final class IrBslExpressionHtmlSupport
                 String types = ComBridge.toString(raw);
                 return types != null ? types.strip() : ""; //$NON-NLS-1$
             });
-            Global.tempLog("fulltext-refs", "  fetchCurrentExpressionTypes offset=" + offset //$NON-NLS-1$ //$NON-NLS-2$
-                + " модуль=«" + moduleName + "» → «" + r + "»"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            return r;
         }
         catch (RuntimeException e)
         {
-            Global.tempLog("fulltext-refs", "  fetchCurrentExpressionTypes offset=" + offset //$NON-NLS-1$ //$NON-NLS-2$
-                + " EX: " + e); //$NON-NLS-1$
             return null;
         }
     }

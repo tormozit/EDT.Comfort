@@ -2179,7 +2179,6 @@ return;
                 }
                 catch (Exception | LinkageError e)
                 {
-                    Global.tempLogException("assist-perf", "wordListBackground", e); //$NON-NLS-1$ //$NON-NLS-2$
                     raw = EMPTY;
                 }
                 ContentAssistDebug.perfLog("wordListBackground", //$NON-NLS-1$
@@ -4712,8 +4711,6 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                     }
                     catch (Exception | LinkageError e)
                     {
-                        Global.tempLogException("assist-perf", //$NON-NLS-1$
-                            "memberStockBackground attempt " + attempts, e); //$NON-NLS-1$
                         raw = EMPTY;
                     }
                     if (raw != null && raw.length > 0)

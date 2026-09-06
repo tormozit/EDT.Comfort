@@ -79,15 +79,10 @@ final class BslDataEventGuard
             IsolatingMap guard = new IsolatingMap(real);
             mapField.set(listener, guard);
             installed.put(doc, guard);
-            Global.tempLog("assist-perf", //$NON-NLS-1$
-                "{\"loc\":\"dataEventGuard.installed\"}"); //$NON-NLS-1$
             return true;
         }
         catch (Exception e)
         {
-            Global.tempLog("assist-perf", //$NON-NLS-1$
-                "{\"loc\":\"dataEventGuard.failed\",\"err\":\"" //$NON-NLS-1$
-                    + String.valueOf(e.getMessage()).replace('"', '\'') + "\"}"); //$NON-NLS-1$
             return false;
         }
     }

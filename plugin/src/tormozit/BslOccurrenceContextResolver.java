@@ -29,7 +29,6 @@ import org.eclipse.xtext.ui.resource.XtextLiveScopeResourceSetProvider;
 
 import com._1c.g5.v8.dt.bsl.model.Expression;
 import com._1c.g5.v8.dt.bsl.model.FeatureEntry;
-import com._1c.g5.v8.dt.bsl.model.FormalParam;
 import com._1c.g5.v8.dt.bsl.model.Module;
 import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.Variable;
@@ -92,7 +91,7 @@ public final class BslOccurrenceContextResolver
     static final String COL_SUITABLE = "Подходит"; //$NON-NLS-1$
 
     private static final String TIP_PARENT = "Выражение слева от точки перед вхождением"; //$NON-NLS-1$
-    private static final String TIP_PARENT_TYPE = "Тип выражения-родителя"; //$NON-NLS-1$
+    private static final String TIP_PARENT_TYPE = "Тип выражения-родителя. При подключенном ИР заполняется лучше."; //$NON-NLS-1$
     private static final String TIP_SYNTAX_KIND = "Свойство, метод, литерал или комментарий"; //$NON-NLS-1$
     static final String TIP_SUITABLE = "Тип родителя совместим с искомым"; //$NON-NLS-1$
 
@@ -254,9 +253,6 @@ public final class BslOccurrenceContextResolver
         // Мы в фоновом задании: ping-проверка checkAlive там отдаёт false и на живой сессии.
         if (session == null)
             session = IRApplication.getAnyConnectedSessionNoPing();
-        Global.tempLog("fulltext-refs", "  irSession: dtProject=" + (dtProject != null) //$NON-NLS-1$ //$NON-NLS-2$
-            + " session=" + (session != null) //$NON-NLS-1$
-            + " сессии: " + IRApplication.describeSessions()); //$NON-NLS-1$
         if (session == null || session.executor == null || session.executor.isShutdown())
             return null;
         return session;
@@ -339,9 +335,6 @@ public final class BslOccurrenceContextResolver
         {
             // Разбор модуля моделью BSL — не гарантированная операция: в колонке остаётся «?».
             resolved = ""; //$NON-NLS-1$
-            // ВРЕМЕННАЯ безусловная диагностика (плавающий сбой расчёта типа) — снять после разбора.
-            Global.tempLog("parent-type", "parentType EX " + (file != null ? file.getName() : "?") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " offset=" + offset + ": " + e); //$NON-NLS-1$ //$NON-NLS-2$
         }
         putBounded(TYPE_CACHE, key, resolved);
         return resolved;
@@ -440,9 +433,6 @@ public final class BslOccurrenceContextResolver
             }
             if (source == null)
                 source = bslResource.getSourceEObject(fragment);
-            Global.tempLog("ref-node", file.getName() + " frag=" + fragment //$NON-NLS-1$ //$NON-NLS-2$
-                + " source=" + (source != null ? source.eClass().getName() : "null") //$NON-NLS-1$ //$NON-NLS-2$
-                + " ref=" + (reference != null ? reference.getName() : "null") + " idx=" + indexInList); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             if (source == null)
                 return null;
             INode node = referenceNode(source, reference, indexInList, referenceFirst);
@@ -454,7 +444,7 @@ public final class BslOccurrenceContextResolver
             {
                 int[] r = literalSegmentRegion(nodeText, node.getOffset(), node.getLength(), targetName);
                 if (r != null)
-                    return logRegion("literal", r); //$NON-NLS-1$
+                    return r;
             }
             // 2. Грубый источник (метод и т.п.): первый неспрятанный лист с текстом = искомое имя.
             if (targetName != null && !targetName.isBlank() && scope != null)
@@ -462,26 +452,20 @@ public final class BslOccurrenceContextResolver
                 for (org.eclipse.xtext.nodemodel.ILeafNode leaf : scope.getLeafNodes())
                 {
                     if (!leaf.isHidden() && targetName.equalsIgnoreCase(leaf.getText()))
-                        return logRegion("byName", new int[] {leaf.getOffset(), leaf.getLength()}); //$NON-NLS-1$
+                        return new int[] {leaf.getOffset(), leaf.getLength()};
                 }
             }
             // 3. Первый значимый лист узла (обрезаем ведущие комментарии/пробелы).
             INode meaningful = firstMeaningfulLeaf(node != null ? node : scope);
             if (meaningful == null)
                 return null;
-            return logRegion("leaf", new int[] {meaningful.getOffset(), meaningful.getLength()}); //$NON-NLS-1$
+            return new int[] {meaningful.getOffset(), meaningful.getLength()};
         }
         catch (Exception | LinkageError e)
         {
             logType("  referenceNodeRegion EX: " + e); //$NON-NLS-1$
             return null;
         }
-    }
-
-    private static int[] logRegion(String how, int[] region)
-    {
-        Global.tempLog("ref-node", "  → " + how + " [" + region[0] + "," + region[1] + "]"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
-        return region;
     }
 
     /**
@@ -624,21 +608,13 @@ public final class BslOccurrenceContextResolver
         // Конвейер редактора/сборщика, без которого TypesComputer даёт пустоту: пакетное
         // связывание и производное состояние ресурса (окружения операторов, контекст модуля
         // его объектом-владельцем, установки обращений) — BslDerivedStateComputer.
-        boolean linkedNow = false;
         if (resource instanceof BslResource bslResource)
         {
             bslResource.setDeepAnalysis(true);
             if (!bslResource.isLinkedBatch())
-            {
                 bslResource.linkBatched(null);
-                linkedNow = true;
-            }
             bslResource.installDerivedState(false);
         }
-        // ВРЕМЕННАЯ безусловная диагностика (issue: тип родителя из doc-комментария) — снять после разбора.
-        Global.tempLog("parent-type", "resolveTypeFromModel " + file.getName() //$NON-NLS-1$ //$NON-NLS-2$
-            + " dotOffset=" + dotOffset + " offset=" + offset + " linkedNow=" + linkedNow //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " isLinkedBatch=" + (resource instanceof BslResource br && br.isLinkedBatch())); //$NON-NLS-1$
         // Точки перед вхождением нет: родителем может быть сам объект модуля — так выглядит прямое
         // обращение к его реквизиту (ДатаОтгрузки = 123 в модуле объекта).
         if (dotOffset < 0)
@@ -648,7 +624,6 @@ public final class BslOccurrenceContextResolver
             dotOffset, offset);
         logType("  receiver path: dotOffset=" + dotOffset //$NON-NLS-1$
             + " receiver=" + (receiver != null ? receiver.eClass().getName() : "null")); //$NON-NLS-1$ //$NON-NLS-2$
-        probeReceiver(receiver);
         if (receiver == null)
             return ""; //$NON-NLS-1$
         String types = SmartContentAssistProcessor.ReceiverTypeLabel.formatTypes(receiver);
@@ -659,7 +634,6 @@ public final class BslOccurrenceContextResolver
         String computed = sanitizeComputedTypes(
             SmartContentAssistProcessor.ReceiverTypeLabel.formatTypeItems(computeTypes(provider, receiver)));
         logType("  receiver computed types=«" + computed + "»"); //$NON-NLS-1$ //$NON-NLS-2$
-        Global.tempLog("parent-type", "  model types=«" + types + "» computed=«" + computed + "»"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
         if (!computed.isEmpty())
             return refineFormDataType(computed, xtextResource, content, offset);
         // Вычислитель молчит: приёмник мог связаться как ImplicitVariable без типового состояния —
@@ -802,37 +776,6 @@ public final class BslOccurrenceContextResolver
                 return form;
         }
         return null;
-    }
-
-    /** ВРЕМЕННАЯ диагностика: связался ли приёмник с объявлением и есть ли у него провайдер типового состояния. */
-    private static void probeReceiver(Expression receiver)
-    {
-        try
-        {
-            if (!(receiver instanceof StaticFeatureAccess sfa))
-            {
-                Global.tempLog("parent-type", "  receiver не StaticFeatureAccess: " //$NON-NLS-1$ //$NON-NLS-2$
-                    + (receiver != null ? receiver.eClass().getName() : "null")); //$NON-NLS-1$
-                return;
-            }
-            Global.tempLog("parent-type", "  sfa.name=" + sfa.getName() //$NON-NLS-1$ //$NON-NLS-2$
-                + " featureEntries=" + sfa.getFeatureEntries().size()); //$NON-NLS-1$
-            for (FeatureEntry fe : sfa.getFeatureEntries())
-            {
-                Object f = fe.getFeature();
-                String desc = f == null ? "null" //$NON-NLS-1$
-                    : f.getClass().getName() + (f instanceof EObject eo && eo.eIsProxy() ? " PROXY" : "") //$NON-NLS-1$ //$NON-NLS-2$
-                        + " name=" + Global.invoke(f, "getName"); //$NON-NLS-1$ //$NON-NLS-2$
-                Object tsp = f instanceof Variable || f instanceof FormalParam
-                    ? Global.invoke(f, "getTypeStateProvider") : null; //$NON-NLS-1$
-                Global.tempLog("parent-type", "  feature=" + desc //$NON-NLS-1$ //$NON-NLS-2$
-                    + " typeStateProvider=" + (tsp != null ? tsp.getClass().getSimpleName() : "null")); //$NON-NLS-1$ //$NON-NLS-2$
-            }
-        }
-        catch (Exception | LinkageError e)
-        {
-            Global.tempLog("parent-type", "  probeReceiver EX: " + e); //$NON-NLS-1$ //$NON-NLS-2$
-        }
     }
 
     /**

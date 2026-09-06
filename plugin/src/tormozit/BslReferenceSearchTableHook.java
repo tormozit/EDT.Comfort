@@ -766,7 +766,6 @@ public final class BslReferenceSearchTableHook implements IStartup
             if (result == null)
                 result = Global.getField(page, "searchResult"); //$NON-NLS-1$
             Object label = Global.invoke(result, "getLabel"); //$NON-NLS-1$
-            Global.tempLog("ref-node", "searchTargetName label=«" + label + "»"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             if (!(label instanceof String s))
                 return null;
             java.util.regex.Matcher m = java.util.regex.Pattern

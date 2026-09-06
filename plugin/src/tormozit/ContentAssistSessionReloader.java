@@ -1634,7 +1634,7 @@ suppressDisplay.asyncExec(
         }
         catch (Exception e)
         {
-            Global.tempLogException("assist-perf", "closePopupIfMemberContextGone", e); //$NON-NLS-1$ //$NON-NLS-2$
+            // закрытие popup — вспомогательное действие, сбой глушим молча
         }
     }
 
