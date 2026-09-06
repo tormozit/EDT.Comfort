@@ -1428,7 +1428,7 @@ public final class ValidationChecksFilterHook implements IStartup
      *
      * <p>Таблица — {@code SWT.MULTI} (issue 467): множественное выделение строк
      * обеспечивает сам {@link FormTableInteraction} (уже умеет это для таблиц с
-     * {@code CheckboxTableViewer}, ср. {@code RefactoringPreviewTableHook}), с
+     * {@code CheckboxTableViewer}, ср. {@code RefactoringPreviewHook}), с
      * деревом синхронизируется только первая выделенная строка. Пункт
      * контекстного меню «Установить критичность» ({@link #installSeverityMenu})
      * применяет критичность разом ко всем выделенным.

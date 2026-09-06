@@ -184,6 +184,7 @@ public final class ConfigSearchResultsHook implements IStartup
     private static final String KEY_COL_PARENT_WIDTH = "matchColParentWidth"; //$NON-NLS-1$
     private static final String KEY_COL_PARENT_TYPE_WIDTH = "matchColParentTypeWidth"; //$NON-NLS-1$
     private static final String KEY_COL_SYNTAX_WIDTH = "matchColSyntaxWidth"; //$NON-NLS-1$
+    private static final String KEY_COL_SUITABLE_WIDTH = "matchColSuitableWidth"; //$NON-NLS-1$
     private static final String KEY_COL_TEXT_WIDTH = "matchColTextWidth"; //$NON-NLS-1$
     /** Был ли при закрытии активен режим заполнения по ширине (см. {@link FormTableColumnState}). */
     private static final String KEY_COL_FILL_MODE = "matchColFillMode"; //$NON-NLS-1$
@@ -332,6 +333,7 @@ public final class ConfigSearchResultsHook implements IStartup
     private static TableColumn cachedMatchParentColumn;
     private static TableColumn cachedMatchParentTypeColumn;
     private static TableColumn cachedMatchSyntaxColumn;
+    private static TableColumn cachedMatchSuitableColumn;
     private static TableColumn cachedMatchTextColumn;
     private static FormTableInteraction cachedMatchTableInteraction;
     /** Заголовок колонки «Тип родителя» — к нему дописывается счётчик прогресса фонового расчёта. */
@@ -342,6 +344,7 @@ public final class ConfigSearchResultsHook implements IStartup
     private static final int MATCH_PARENT_COLUMN_WIDTH = 160;
     private static final int MATCH_PARENT_TYPE_COLUMN_WIDTH = 200;
     private static final int MATCH_SYNTAX_COLUMN_WIDTH = 150;
+    private static final int MATCH_SUITABLE_COLUMN_WIDTH = 80;
 
     // Отложенное довычисление «Текст» для BslResourceMatchTreeTableItem (IMatchItemDeferredCalculation) —
     // штатный элемент результатов "Найти ссылки на объект" по BSL-модулям изначально отдаёт заглушку
@@ -367,6 +370,13 @@ public final class ConfigSearchResultsHook implements IStartup
      * дёшево, пересчитывается на каждое изменение выбора в дереве результатов.
      */
     private static volatile String cachedSearchedObjectSimpleName;
+
+    /**
+     * Разобранное полное имя искомого объекта (из кавычек в заголовке запроса) — для колонки
+     * «Подходит» ({@link BslOccurrenceContextResolver#parseSought}). {@code null} — заголовок не
+     * полное имя объекта метаданных; тогда колонка «Подходит» скрыта.
+     */
+    private static volatile BslOccurrenceContextResolver.Sought cachedSought;
 
     private static final class MatchRow
     {
@@ -416,6 +426,11 @@ public final class ConfigSearchResultsHook implements IStartup
         volatile String parent;
         volatile String syntaxKind;
         volatile String parentType;
+        /**
+         * Колонка «Подходит»: {@code "Да"}/{@code "Нет"} — совместимость «Тип родителя» с искомым,
+         * {@code "?"} — «Тип родителя» ещё не вычислен, {@code ""}/{@code null} — судить не о чем.
+         */
+        volatile String suitable;
 
         MatchRow(String path, String property, long lineNumber, StyledString styledText, IFile file,
                 Object tableItem, String moduleKindSegment, URI sourceUri, EReference sourceReference,
@@ -634,6 +649,23 @@ public final class ConfigSearchResultsHook implements IStartup
             }
         });
 
+        TableViewerColumn suitableCol = new TableViewerColumn(matchViewer, SWT.LEFT);
+        suitableCol.getColumn().setText(BslOccurrenceContextResolver.COL_SUITABLE);
+        suitableCol.getColumn().setWidth(
+            FormTableColumnState.readWidth(matchSettings, KEY_COL_SUITABLE_WIDTH, MATCH_SUITABLE_COLUMN_WIDTH, 1));
+        suitableCol.setLabelProvider(new ColumnLabelProvider()
+        {
+            @Override
+            public String getText(Object element)
+            {
+                if (!(element instanceof MatchRow row) || !row.needsContext() || cachedSought == null)
+                    return ""; //$NON-NLS-1$
+                // «Тип родителя» ещё не вычислен — как и он сам, показываем «?» (кроме литералов/
+                // комментариев, где suitable уже проставлен быстрым проходом).
+                return row.suitable != null ? row.suitable : BslOccurrenceContextResolver.SUITABLE_UNKNOWN;
+            }
+        });
+
         TableViewerColumn textCol = new TableViewerColumn(matchViewer, SWT.LEFT);
         textCol.getColumn().setText("Текст"); //$NON-NLS-1$
         textCol.getColumn().setWidth(
@@ -718,6 +750,8 @@ public final class ConfigSearchResultsHook implements IStartup
         // рефакторинга, заголовки и подсказки в едином источнике.
         BslOccurrenceContextResolver.applyColumnHeaderTooltips(interaction, parentCol.getColumn(),
             parentTypeCol.getColumn(), syntaxCol.getColumn());
+        interaction.setHeaderTooltipExtra(suitableCol.getColumn(),
+            BslOccurrenceContextResolver.TIP_SUITABLE + sign);
         // Второстепенные данные — при закрытии панели; при повторном поиске — явно в
         // {@link #saveMatchColumnStateOnUiThread} (Dispose не срабатывает, панель остаётся открытой).
         outer.addDisposeListener(e -> saveMatchColumnState());
@@ -736,6 +770,7 @@ public final class ConfigSearchResultsHook implements IStartup
         cachedMatchParentColumn = parentCol.getColumn();
         cachedMatchParentTypeColumn = parentTypeCol.getColumn();
         cachedMatchSyntaxColumn = syntaxCol.getColumn();
+        cachedMatchSuitableColumn = suitableCol.getColumn();
         cachedMatchTableInteraction = interaction;
         pageContainer.setData(MATCH_PANE_HOOKED_KEY, Boolean.TRUE);
         matchTable.addDisposeListener(e -> {
@@ -752,6 +787,7 @@ public final class ConfigSearchResultsHook implements IStartup
                 cachedMatchParentColumn = null;
                 cachedMatchParentTypeColumn = null;
                 cachedMatchSyntaxColumn = null;
+                cachedMatchSuitableColumn = null;
                 cachedMatchTableInteraction = null;
             }
         });
@@ -791,6 +827,7 @@ public final class ConfigSearchResultsHook implements IStartup
         if (matchViewer.getTable() == null || matchViewer.getTable().isDisposed())
             return -1;
         cachedSearchedObjectSimpleName = extractSearchedObjectSimpleName(treeViewer);
+        cachedSought = BslOccurrenceContextResolver.parseSought(extractSearchedObjectQualifiedName(treeViewer));
         List<Object> selectedNodes = treeViewer.getStructuredSelection().toList();
         List<Object> tableItems = new ArrayList<>();
         for (Object node : selectedNodes)
@@ -895,6 +932,9 @@ public final class ConfigSearchResultsHook implements IStartup
             MATCH_PARENT_TYPE_COLUMN_WIDTH);
         setMatchColumnVisible(cachedMatchSyntaxColumn, referenceSearch, KEY_COL_SYNTAX_WIDTH,
             MATCH_SYNTAX_COLUMN_WIDTH);
+        // «Подходит» — только когда искомое разобрано в полное имя объекта метаданных.
+        setMatchColumnVisible(cachedMatchSuitableColumn, referenceSearch && cachedSought != null,
+            KEY_COL_SUITABLE_WIDTH, MATCH_SUITABLE_COLUMN_WIDTH);
 
         scheduleVisibleDeferredCalculations(matchViewer);
         return tableItems.size();
@@ -956,13 +996,15 @@ public final class ConfigSearchResultsHook implements IStartup
         int parentWidth = columnWidthOrZero(cachedMatchParentColumn);
         int parentTypeWidth = columnWidthOrZero(cachedMatchParentTypeColumn);
         int syntaxWidth = columnWidthOrZero(cachedMatchSyntaxColumn);
+        int suitableWidth = columnWidthOrZero(cachedMatchSuitableColumn);
         int textWidth = columnWidthOrZero(cachedMatchTextColumn);
         FormTableColumnState.saveOrderAndWidths(dialogSettings(), KEY_COL_ORDER,
             KEY_COL_FILL_MODE, fillMode,
             new String[] { KEY_COL_PATH_WIDTH, KEY_COL_PROPERTY_WIDTH, KEY_COL_LINE_WIDTH,
-                KEY_COL_PARENT_WIDTH, KEY_COL_PARENT_TYPE_WIDTH, KEY_COL_SYNTAX_WIDTH, KEY_COL_TEXT_WIDTH },
+                KEY_COL_PARENT_WIDTH, KEY_COL_PARENT_TYPE_WIDTH, KEY_COL_SYNTAX_WIDTH, KEY_COL_SUITABLE_WIDTH,
+                KEY_COL_TEXT_WIDTH },
             new int[] { pathWidth, propertyWidth, lineWidth, parentWidth, parentTypeWidth, syntaxWidth,
-                textWidth }, matchTable);
+                suitableWidth, textWidth }, matchTable);
     }
 
     /** Как {@link #saveMatchColumnState()}, но безопасно из любого потока (query listener). */
@@ -1000,11 +1042,33 @@ public final class ConfigSearchResultsHook implements IStartup
         String label = query != null ? query.getLabel() : null;
         if (label == null || label.isBlank())
             return null;
-        int start = label.indexOf('"');
-        int end = start >= 0 ? label.indexOf('"', start + 1) : -1;
-        String qualified = (start >= 0 && end > start) ? label.substring(start + 1, end) : label;
+        String qualified = extractSearchedObjectQualifiedName(label);
+        if (qualified == null)
+            return null;
         int dot = qualified.lastIndexOf('.');
         return dot >= 0 && dot + 1 < qualified.length() ? qualified.substring(dot + 1) : qualified;
+    }
+
+    /**
+     * Полное имя искомого объекта из заголовка запроса ({@code Ссылки на "Справочник.Валюты"} →
+     * {@code Справочник.Валюты}) — содержимое первых кавычек, иначе весь label. Для колонки
+     * «Подходит» ({@link BslOccurrenceContextResolver#parseSought}).
+     */
+    private static String extractSearchedObjectQualifiedName(TreeViewer treeViewer)
+    {
+        Object input = treeViewer.getInput();
+        if (!(input instanceof ISearchResult searchResult))
+            return null;
+        ISearchQuery query = searchResult.getQuery();
+        String label = query != null ? query.getLabel() : null;
+        return label == null || label.isBlank() ? null : extractSearchedObjectQualifiedName(label);
+    }
+
+    private static String extractSearchedObjectQualifiedName(String label)
+    {
+        int start = label.indexOf('"');
+        int end = start >= 0 ? label.indexOf('"', start + 1) : -1;
+        return (start >= 0 && end > start) ? label.substring(start + 1, end) : label;
     }
 
     /**
@@ -1558,6 +1622,7 @@ public final class ConfigSearchResultsHook implements IStartup
             row.parent = ""; //$NON-NLS-1$
             row.syntaxKind = ""; //$NON-NLS-1$
             row.parentType = ""; //$NON-NLS-1$
+            row.suitable = ""; //$NON-NLS-1$
             return;
         }
         int offset = region[0];
@@ -1577,10 +1642,22 @@ public final class ConfigSearchResultsHook implements IStartup
             || BslOccurrenceContextResolver.KIND_LITERAL.equals(row.syntaxKind))
         {
             row.parentType = ""; //$NON-NLS-1$
+            if (BslOccurrenceContextResolver.KIND_LITERAL.equals(row.syntaxKind))
+            {
+                String occName = offset >= 0 && offset + Math.max(length, 0) <= content.length()
+                    ? content.substring(offset, offset + Math.max(length, 0)) : ""; //$NON-NLS-1$
+                row.suitable = BslOccurrenceContextResolver.suitabilityByLiteralParent(
+                    cachedSought, row.parent, occName);
+            }
+            else
+            {
+                row.suitable = ""; //$NON-NLS-1$
+            }
             return;
         }
         row.parentType = BslOccurrenceContextResolver.parentType(row.file, content, offset);
-        Global.tempLog("parent-type", "  → parentType=«" + row.parentType + "»"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        row.suitable = BslOccurrenceContextResolver.suitabilityByType(cachedSought, row.parentType);
+        Global.tempLog("parent-type", "  → parentType=«" + row.parentType + "» suitable=" + row.suitable); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
     }
 
     private static void applyMatchContextBatch(TableViewer matchViewer, List<MatchRow> updated, int done,

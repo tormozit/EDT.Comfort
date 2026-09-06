@@ -1581,6 +1581,9 @@ public class ApplicationsViewHook implements IStartup
 
                     MenuItem cascade = new MenuItem(finalMenu, SWT.CASCADE);
                     cascade.setText("Комфорт"); //$NON-NLS-1$
+                    Image comfortIcon = Global.comfortIcon();
+                    if (comfortIcon != null)
+                        cascade.setImage(comfortIcon);
                     added.add(cascade);
 
                     // new Menu(cascade) — единственный корректный способ создать

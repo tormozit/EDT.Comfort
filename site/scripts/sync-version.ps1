@@ -1,4 +1,4 @@
-﻿param(
+param(
     [string]$SiteDir = (Split-Path $PSScriptRoot -Parent),
     [string]$Root = (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent)
 )
@@ -84,7 +84,12 @@ $siteTextNew = [regex]::Replace(
 [System.IO.File]::WriteAllText($sitePath, $siteTextNew, (New-Object System.Text.UTF8Encoding($false)))
 
 $parentVersionPattern = '(<artifactId>comfort\.parent</artifactId>\s*<version>)[^<]+(</version>)'
-Get-ChildItem -Path $Root -Recurse -Filter 'pom.xml' |
+@(
+    Get-ChildItem -Path $Root -Filter 'pom.xml' -File -ErrorAction SilentlyContinue
+    Get-ChildItem -Path $Root -Directory -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -notin @('.tmp', 'build', '.git') } |
+        ForEach-Object { Get-ChildItem -Path $_.FullName -Recurse -Filter 'pom.xml' -ErrorAction SilentlyContinue }
+) |
     Where-Object { $_.FullName -notmatch '\\\.tmp\\|\\build\\' } |
     ForEach-Object {
         $pomText = [System.IO.File]::ReadAllText($_.FullName, [System.Text.Encoding]::UTF8)

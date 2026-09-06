@@ -2,6 +2,7 @@ package tormozit;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 import org.eclipse.core.resources.IFile;
@@ -45,7 +46,7 @@ import com._1c.g5.v8.dt.mcore.util.Environments;
  *
  * <p>Разделяемый резолвер по образцу {@link BslModuleMethodResolver}: первый потребитель — колонки
  * табличного режима страницы «Вносимые изменения» мастера рефакторинга
- * ({@link RefactoringPreviewTableHook}), второй — те же колонки «Родитель», «Тип родителя» и
+ * ({@link RefactoringPreviewHook}), второй — те же колонки «Родитель», «Тип родителя» и
  * «Категория» в результатах команды «Найти ссылки» ({@code ConfigSearchResultsHook}). У
  * вхождений-ссылок BSL ({@code BslReferenceMatch}) смещения в элементе таблицы нет — оно берётся из
  * URI источника ссылки через {@link #referenceNodeRegion}, дальше работает та же offset-логика.
@@ -77,10 +78,20 @@ public final class BslOccurrenceContextResolver
     static final String COL_PARENT = "Родитель"; //$NON-NLS-1$
     static final String COL_PARENT_TYPE = "Тип родителя"; //$NON-NLS-1$
     static final String COL_SYNTAX_KIND = "Категория"; //$NON-NLS-1$
+    static final String COL_SUITABLE = "Подходит"; //$NON-NLS-1$
 
     private static final String TIP_PARENT = "Выражение слева от точки перед вхождением"; //$NON-NLS-1$
     private static final String TIP_PARENT_TYPE = "Тип выражения-родителя"; //$NON-NLS-1$
     private static final String TIP_SYNTAX_KIND = "Свойство, метод, литерал или комментарий"; //$NON-NLS-1$
+    static final String TIP_SUITABLE = "Тип родителя совместим с искомым"; //$NON-NLS-1$
+
+    /** Значения ячейки колонки «Подходит». */
+    static final String SUITABLE_YES = "Да"; //$NON-NLS-1$
+    static final String SUITABLE_NO = "Нет"; //$NON-NLS-1$
+    /** «Тип родителя» ещё не вычислен. */
+    static final String SUITABLE_UNKNOWN = "?"; //$NON-NLS-1$
+    /** Судить не о чем (искомое не разобрано / вид не поддержан). */
+    static final String SUITABLE_NA = ""; //$NON-NLS-1$
 
     /** Диагностика разбора типа родителя — по умолчанию выкл. (в горячем пути, лог рос до ~1 МБ). */
     private static final boolean LOG_TYPE = false;
@@ -681,6 +692,228 @@ public final class BslOccurrenceContextResolver
         if (cache.size() >= TYPE_CACHE_LIMIT)
             cache.clear();
         cache.put(key, value);
+    }
+
+    // =========================================================================
+    // Колонка «Подходит»: «Тип родителя» совместим с искомым элементом
+    // =========================================================================
+
+    /**
+     * Совместимость <b>направленная</b> и <b>без нормализации семейства типа</b> ({@code Ссылка},
+     * {@code Объект}, {@code Менеджер} различаются). Искомое разбирается из полного имени в заголовке
+     * запроса «Найти ссылки на объект». Правило по видам искомого — см. {@link #suitabilityFamilies}.
+     */
+    private enum SoughtKind
+    {
+        OBJECT, ATTRIBUTE, TABULAR_SECTION, TS_ATTRIBUTE, FORM_LIKE, OTHER
+    }
+
+    private static final Set<String> SUIT_FAM_OBJECT = Set.of("Ссылка", "Объект", "Менеджер", "Список", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+        "Выборка", "ВыборкаСписок", "НаборЗаписей", "МенеджерЗаписи", "Запись", "КлючЗаписи"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
+    private static final Set<String> SUIT_FAM_ATTRIBUTE = Set.of("Ссылка", "Объект", "Выборка", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        "ВыборкаСписок", "Запись", "МенеджерЗаписи", "Список"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+    private static final Set<String> SUIT_FAM_TABULAR = Set.of("Ссылка", "Объект"); //$NON-NLS-1$ //$NON-NLS-2$
+    private static final Set<String> SUIT_FAM_FORM_LIKE = Set.of("Менеджер"); //$NON-NLS-1$
+
+    /** Суффиксы-семейства типа объекта, в порядке убывания длины (важно: {@code Запись} — последним). */
+    private static final String[] SUIT_FAMILIES = {"МенеджерЗаписи", "НаборЗаписей", "КлючЗаписи", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        "ВыборкаСписок", "СписокНастроек", "Менеджер", "Выборка", "Список", "Ссылка", "Объект", "Запись"}; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$ //$NON-NLS-7$
+
+    private static final Set<String> SUIT_ATTRIBUTE_SUB_KINDS = Set.of("Реквизит", "Ресурс", "Измерение", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        "Признак", "СтандартныйРеквизит", "Графа", "АдресныйОбъект"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+
+    /** Разобранное полное имя искомого элемента. Один экземпляр на весь результат поиска. */
+    static final class Sought
+    {
+        private final String baseRu;
+        private final String objectName;
+        private final SoughtKind kind;
+        /** Для {@link SoughtKind#TS_ATTRIBUTE} — имя табличной части; иначе {@code null}. */
+        private final String tabularSection;
+
+        private Sought(String baseRu, String objectName, SoughtKind kind, String tabularSection)
+        {
+            this.baseRu = baseRu;
+            this.objectName = objectName;
+            this.kind = kind;
+            this.tabularSection = tabularSection;
+        }
+    }
+
+    /**
+     * Разбор полного имени искомого элемента из заголовка запроса ({@code Справочник.Валюты},
+     * {@code Справочник.Валюты.Реквизит.Курс},
+     * {@code Справочник.Валюты.ТабличнаяЧасть.Состав.Реквизит.X}).
+     *
+     * @return {@code null}, если это не полное имя объекта метаданных — тогда колонка «Подходит»
+     *     потребителем скрывается
+     */
+    static Sought parseSought(String qualifiedName)
+    {
+        if (qualifiedName == null || qualifiedName.isBlank())
+            return null;
+        String[] p = qualifiedName.trim().split("\\."); //$NON-NLS-1$
+        if (p.length < 2)
+            return null;
+        String base = suitSlot(p[0]);
+        if (!MdTypeMapping.isKnownMdRootType(base) && !MdTypeMapping.isKnownMdRootType(p[0]))
+            return null;
+        String objectName = p[1];
+        if (p.length == 2)
+            return new Sought(base, objectName, SoughtKind.OBJECT, null);
+        String sub = suitSlot(p[2]);
+        if (SUIT_ATTRIBUTE_SUB_KINDS.contains(sub))
+            return new Sought(base, objectName, SoughtKind.ATTRIBUTE, null);
+        if ("ТабличнаяЧасть".equals(sub)) //$NON-NLS-1$
+        {
+            if (p.length >= 6 && SUIT_ATTRIBUTE_SUB_KINDS.contains(suitSlot(p[4])))
+                return new Sought(base, objectName, SoughtKind.TS_ATTRIBUTE, p[3]);
+            return new Sought(base, objectName, SoughtKind.TABULAR_SECTION, p.length >= 4 ? p[3] : null);
+        }
+        if ("Форма".equals(sub) || "Команда".equals(sub) || "Макет".equals(sub)) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            return new Sought(base, objectName, SoughtKind.FORM_LIKE, null);
+        return new Sought(base, objectName, SoughtKind.OTHER, null);
+    }
+
+    /**
+     * Значение колонки «Подходит» по вычисленному «Типу родителя» (составной — типы через запятую).
+     *
+     * @return {@link #SUITABLE_YES}/{@link #SUITABLE_NO}; {@link #SUITABLE_UNKNOWN}, если тип ещё не
+     *     вычислен; {@link #SUITABLE_NA}, если искомое не разобрано
+     */
+    static String suitabilityByType(Sought sought, String parentTypeCsv)
+    {
+        if (sought == null || sought.kind == SoughtKind.OTHER)
+            return SUITABLE_NA;
+        if (parentTypeCsv == null || parentTypeCsv.isBlank())
+            return SUITABLE_UNKNOWN;
+        for (String raw : parentTypeCsv.split(",")) //$NON-NLS-1$
+        {
+            String type = raw.trim();
+            if (!type.isEmpty() && suitMatches(sought, type))
+                return SUITABLE_YES;
+        }
+        // Тип вычислен, совпадения нет: примитив/чужой объект — точно не ссылка на искомое.
+        return SUITABLE_NO;
+    }
+
+    /**
+     * Значение колонки «Подходит» для вхождения в строковом литерале: цепочка «Родитель» + имя
+     * вхождения должна укладываться в полное имя искомого объекта.
+     */
+    static String suitabilityByLiteralParent(Sought sought, String parentText, String occurrenceName)
+    {
+        if (sought == null || sought.kind == SoughtKind.OTHER)
+            return SUITABLE_NA;
+        String path = parentText == null ? "" : parentText.trim(); //$NON-NLS-1$
+        if (!path.isEmpty() && occurrenceName != null && !occurrenceName.isBlank())
+            path = path + "." + occurrenceName.trim(); //$NON-NLS-1$
+        else if (path.isEmpty() && occurrenceName != null)
+            path = occurrenceName.trim();
+        String[] have = path.isEmpty() ? new String[0] : path.split("\\."); //$NON-NLS-1$
+        if (have.length < 2)
+            return SUITABLE_NO;
+        String[] want = {suitSlot(sought.baseRu), sought.objectName};
+        for (int i = 0; i < Math.min(have.length, want.length); i++)
+        {
+            if (!suitSlot(have[i]).equalsIgnoreCase(want[i]))
+                return SUITABLE_NO;
+        }
+        return SUITABLE_YES;
+    }
+
+    private static Set<String> suitabilityFamilies(SoughtKind kind)
+    {
+        return switch (kind)
+        {
+            case OBJECT -> SUIT_FAM_OBJECT;
+            case ATTRIBUTE -> SUIT_FAM_ATTRIBUTE;
+            case TABULAR_SECTION -> SUIT_FAM_TABULAR;
+            case FORM_LIKE -> SUIT_FAM_FORM_LIKE;
+            default -> Set.of();
+        };
+    }
+
+    /** {@code СправочникОбъект.Валюты} / строка ТЧ и т. п. совместимо с искомым? */
+    private static boolean suitMatches(Sought sought, String type)
+    {
+        int dot = type.indexOf('.');
+        if (dot <= 0 || dot == type.length() - 1)
+            return false;
+        String head = type.substring(0, dot);
+        String tail = type.substring(dot + 1);
+        int nextDot = tail.indexOf('.');
+        String objectName = nextDot > 0 ? tail.substring(0, nextDot) : tail;
+        String tabularSection = nextDot > 0 ? tail.substring(nextDot + 1) : null;
+        boolean tabularRow = head.contains("СтрокаТабличнойЧасти") || head.contains("ТабличнаяЧастьСтрока"); //$NON-NLS-1$ //$NON-NLS-2$
+
+        String base = null;
+        String family = null;
+        for (String candidate : SUIT_FAMILIES)
+        {
+            if (head.endsWith(candidate))
+            {
+                String b = suitSlot(head.substring(0, head.length() - candidate.length()));
+                if (!b.isEmpty() && MdTypeMapping.isKnownMdRootType(b))
+                {
+                    base = b;
+                    family = candidate;
+                    break;
+                }
+            }
+        }
+        if (base == null && tabularRow)
+        {
+            base = suitTabularRowBase(head);
+            family = ""; //$NON-NLS-1$
+        }
+        if (base == null)
+        {
+            // Голый тип объекта без семейства ({@code Справочник.Валюты}) — трактуем как «Объект».
+            String b = suitSlot(head);
+            if (MdTypeMapping.isKnownMdRootType(b))
+            {
+                base = b;
+                family = "Объект"; //$NON-NLS-1$
+            }
+        }
+        if (base == null || !suitSlot(base).equalsIgnoreCase(suitSlot(sought.baseRu))
+            || !objectName.equalsIgnoreCase(sought.objectName))
+            return false;
+        if (sought.kind == SoughtKind.TS_ATTRIBUTE)
+            return tabularRow && (sought.tabularSection == null
+                || sought.tabularSection.equalsIgnoreCase(tabularSection));
+        return suitabilityFamilies(sought.kind).contains(family);
+    }
+
+    private static String suitTabularRowBase(String head)
+    {
+        for (String marker : new String[] {"СтрокаТабличнойЧасти", "ТабличнаяЧастьСтрока"}) //$NON-NLS-1$ //$NON-NLS-2$
+        {
+            int i = head.indexOf(marker);
+            if (i > 0)
+            {
+                String base = suitSlot(head.substring(0, i));
+                if (MdTypeMapping.isKnownMdRootType(base))
+                    return base;
+            }
+        }
+        return null;
+    }
+
+    /** Сегмент к RU-написанию ед. числа (Справочники→Справочник, Catalog→Справочник). */
+    private static String suitSlot(String segment)
+    {
+        if (segment == null)
+            return ""; //$NON-NLS-1$
+        String s = segment.trim();
+        if (s.isEmpty())
+            return ""; //$NON-NLS-1$
+        String ru = MdTypeMapping.anyToRu(s);
+        if (ru != null)
+            s = ru;
+        String singular = MdTypeMapping.ruPluralToRu(s);
+        return singular != null ? singular : s;
     }
 
     /**

@@ -253,7 +253,7 @@ public final class ComfortSettings
 
     /**
      * Ключ: табличный режим страницы «Вносимые изменения» мастера рефакторинга
-     * ({@link RefactoringPreviewTableHook}).
+     * ({@link RefactoringPreviewHook}).
      */
     public static final String PREF_REFACTORING_PREVIEW_TABLE_MODE = "comfort.refactoringPreview.tableMode"; //$NON-NLS-1$
 

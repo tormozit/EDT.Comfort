@@ -1463,6 +1463,12 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
         return !columnValueFilters.isEmpty();
     }
 
+    /** Наложен ли сейчас отбор по значению этой колонки (любым значением). */
+    public boolean isColumnFiltered(int column)
+    {
+        return columnValueFilters.containsKey(Integer.valueOf(column));
+    }
+
     @Override
     public int filteredElementCount()
     {
