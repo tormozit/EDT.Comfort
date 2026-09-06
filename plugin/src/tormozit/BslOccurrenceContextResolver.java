@@ -12,8 +12,12 @@ import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.EReference;
 import org.eclipse.emf.ecore.EStructuralFeature;
 import org.eclipse.emf.ecore.resource.Resource;
-import org.eclipse.swt.widgets.TableColumn;
 import org.eclipse.emf.ecore.resource.ResourceSet;
+import org.eclipse.swt.graphics.Color;
+import org.eclipse.swt.graphics.RGB;
+import org.eclipse.swt.widgets.Display;
+import org.eclipse.swt.widgets.TableColumn;
+import org.eclipse.emf.ecore.util.EcoreUtil;
 import org.eclipse.xtext.EcoreUtil2;
 import org.eclipse.xtext.nodemodel.ILeafNode;
 import org.eclipse.xtext.nodemodel.INode;
@@ -25,11 +29,18 @@ import org.eclipse.xtext.ui.resource.XtextLiveScopeResourceSetProvider;
 
 import com._1c.g5.v8.dt.bsl.model.Expression;
 import com._1c.g5.v8.dt.bsl.model.FeatureEntry;
+import com._1c.g5.v8.dt.bsl.model.FormalParam;
 import com._1c.g5.v8.dt.bsl.model.Module;
 import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.Variable;
 import com._1c.g5.v8.dt.bsl.resource.BslResource;
 import com._1c.g5.v8.dt.bsl.resource.TypesComputer;
+
+import com._1c.g5.v8.dt.core.platform.IDtProject;
+import com._1c.g5.v8.dt.form.model.Form;
+import com._1c.g5.v8.dt.form.model.FormAttribute;
+import com._1c.g5.v8.dt.mcore.TypeDescription;
+import com._1c.g5.v8.dt.mcore.util.McoreUtil;
 
 import com._1c.g5.v8.dt.mcore.Environmental;
 import com._1c.g5.v8.dt.mcore.TypeItem;
@@ -93,6 +104,35 @@ public final class BslOccurrenceContextResolver
     /** Судить не о чем (искомое не разобрано / вид не поддержан). */
     static final String SUITABLE_NA = ""; //$NON-NLS-1$
 
+    /** Цвет текста «подходящих» ячеек (тёмно-зелёный в координатах светлой темы). */
+    private static final RGB SUITABLE_TEXT_LIGHT_RGB = new RGB(0x1B, 0x5E, 0x20);
+    private static Color suitableTextColor;
+    private static RGB suitableTextColorRgb;
+
+    /** {@code true}, если значение колонки «Подходит» — «Да». */
+    static boolean isSuitableYes(String suitableValue)
+    {
+        return SUITABLE_YES.equals(suitableValue);
+    }
+
+    /**
+     * Цвет текста для ячеек, относящихся к «подходящему» вхождению (колонки «Изменение»/«Текст»,
+     * «Тип родителя», «Подходит»). Под текущую тему ({@link ThemeAwareColors#toEffectiveRgb}),
+     * пересоздаётся при смене темы; не освобождается (живёт сессию, как accent-цвета плагина).
+     */
+    static Color suitableTextColor(Display display)
+    {
+        Display d = display != null && !display.isDisposed() ? display : Display.getDefault();
+        RGB effective = ThemeAwareColors.toEffectiveRgb(SUITABLE_TEXT_LIGHT_RGB);
+        if (suitableTextColor == null || suitableTextColor.isDisposed()
+            || !effective.equals(suitableTextColorRgb))
+        {
+            suitableTextColor = new Color(d, effective);
+            suitableTextColorRgb = effective;
+        }
+        return suitableTextColor;
+    }
+
     /** Диагностика разбора типа родителя — по умолчанию выкл. (в горячем пути, лог рос до ~1 МБ). */
     private static final boolean LOG_TYPE = false;
 
@@ -100,6 +140,19 @@ public final class BslOccurrenceContextResolver
     {
         if (LOG_TYPE)
             Global.tempLog("parent-type", text); //$NON-NLS-1$
+    }
+
+    /**
+     * Разбор модели BSL (linkBatched / installDerivedState / TypesComputer) НЕ потокобезопасен на
+     * общем {@link ResourceSet}: несколько фоновых заданий (типы родителя, литералы через ИР,
+     * полнотекстовый догон) параллельно дёргают один ресурс → AIOOBE/NPE внутри Xtext, в колонке
+     * остаётся «?». Сериализуем всю работу с моделью по проекту.
+     */
+    private static final Map<IProject, Object> PROJECT_MODEL_LOCKS = new ConcurrentHashMap<>();
+
+    private static Object projectModelLock(IProject project)
+    {
+        return PROJECT_MODEL_LOCKS.computeIfAbsent(project, p -> new Object());
     }
 
     private static final int TYPE_CACHE_LIMIT = 8192;
@@ -127,6 +180,97 @@ public final class BslOccurrenceContextResolver
         while (start > 0 && isReceiverChar(content.charAt(start - 1)))
             start--;
         return start < dot ? content.substring(start, dot).trim() : ""; //$NON-NLS-1$
+    }
+
+    /**
+     * Смещение каретки для запроса «тип родителя» у приложения ИР — <b>сразу справа от точки</b>
+     * member-access перед вхождением (на первом символе имени-вхождения). {@code -1}, если точки
+     * перед вхождением нет: выражения-родителя нет, ИР не спрашиваем.
+     */
+    static int parentExpressionEnd(String content, int offset)
+    {
+        int dot = dotBefore(content, offset);
+        return dot >= 0 ? dot + 1 : -1;
+    }
+
+    /**
+     * «Тип родителя» вхождения в строковом литерале через подключённое приложение ИР — функцию
+     * {@code ирКлсПолеТекстаПрограммы.ПредставлениеМассиваСтруктурТипов(Неопределено)} (внутри зовёт
+     * {@code ТаблицаТиповТекущегоВыражения()}). У литерала точки перед вхождением нет, поэтому модель
+     * BSL ({@link #parentType}) тип не даёт; ИР же берёт выражение слева от точки перед литералом.
+     *
+     * <p>Модуль может быть не открыт в редакторе — текст берётся с диска, синхронизируется в поле
+     * кода ИР. ИР считает медленно и однопоточно
+     * ({@link IRSession#executeOnComThread}, таймаут 10 с) — вызывать только для строк, которые
+     * видит пользователь.
+     *
+     * @param file            модуль вхождения
+     * @param content         текст модуля с диска
+     * @param parentEndOffset смещение сразу за выражением-родителем ({@link #parentExpressionEnd});
+     *            {@code < 0} — родителя-выражения нет
+     * @return типы через запятую; {@code ""} — ИР без результата; {@code null} — ИР не подключён/ошибка
+     *         (у потребителя строка остаётся с предыдущей оценкой)
+     */
+    /**
+     * «Произвольный» в ответе ИР — это «тип не определён», а не тип. Пропустить такой ответ дальше
+     * нельзя: {@link #suitabilityByType} видит непустой тип, не находит совпадения с искомым и даёт
+     * «Подходит» = «Нет» — настоящее вхождение получает отрицательный вердикт и пропадает из отбора
+     * «Только подходящие». Поэтому такие имена выбрасываем; не осталось ничего — ответа нет.
+     */
+    private static String dropUnknownIrTypes(String types)
+    {
+        if (types == null || types.isBlank())
+            return types;
+        StringBuilder kept = new StringBuilder();
+        for (String raw : types.split(",")) //$NON-NLS-1$
+        {
+            String type = raw.trim();
+            if (type.isEmpty() || "Произвольный".equalsIgnoreCase(type)) //$NON-NLS-1$
+                continue;
+            if (kept.length() > 0)
+                kept.append(", "); //$NON-NLS-1$
+            kept.append(type);
+        }
+        return kept.toString();
+    }
+
+    /**
+     * Подключённая сессия ИР для модуля вхождения, или {@code null}. Потребителю нужна не только
+     * для вызова: пока сессии нет, строку нельзя помечать «в ИР уже ходили» — иначе после
+     * подключения ИР она навсегда останется без типа.
+     */
+    static IRSession irSession(IFile file)
+    {
+        if (file == null)
+            return null;
+        IDtProject dtProject = Global.getDtProjectFromWorkspaceProject(file.getProject());
+        IRSession session = dtProject != null ? IRApplication.peekConnectedSession(dtProject) : null;
+        if (session == null)
+            session = dtProject != null ? IRApplication.getConnectedSession(dtProject) : null;
+        // Пер-проектный поиск сессии бывает мимо (dtProject/IProject не совпадают по identity) —
+        // берём любую живую сессию ИР (обычно она одна).
+        if (session == null)
+            session = IRApplication.getAnyConnectedSession();
+        // Мы в фоновом задании: ping-проверка checkAlive там отдаёт false и на живой сессии.
+        if (session == null)
+            session = IRApplication.getAnyConnectedSessionNoPing();
+        Global.tempLog("fulltext-refs", "  irSession: dtProject=" + (dtProject != null) //$NON-NLS-1$ //$NON-NLS-2$
+            + " session=" + (session != null) //$NON-NLS-1$
+            + " сессии: " + IRApplication.describeSessions()); //$NON-NLS-1$
+        if (session == null || session.executor == null || session.executor.isShutdown())
+            return null;
+        return session;
+    }
+
+    static String parentTypeViaIr(IFile file, String content, int parentEndOffset)
+    {
+        if (file == null || content == null || parentEndOffset < 0)
+            return null;
+        IRSession session = irSession(file);
+        if (session == null)
+            return null;
+        return dropUnknownIrTypes(IrBslExpressionHtmlSupport.fetchCurrentExpressionTypes(
+            session, content, GetRef.resolveSetTextModuleName(file), parentEndOffset));
     }
 
     /**
@@ -186,12 +330,18 @@ public final class BslOccurrenceContextResolver
         String resolved = ""; //$NON-NLS-1$
         try
         {
-            resolved = resolveTypeFromModel(file, content, dotBefore(content, offset), offset);
+            synchronized (projectModelLock(file.getProject()))
+            {
+                resolved = resolveTypeFromModel(file, content, dotBefore(content, offset), offset);
+            }
         }
         catch (Exception | LinkageError e)
         {
             // Разбор модуля моделью BSL — не гарантированная операция: в колонке остаётся «?».
             resolved = ""; //$NON-NLS-1$
+            // ВРЕМЕННАЯ безусловная диагностика (плавающий сбой расчёта типа) — снять после разбора.
+            Global.tempLog("parent-type", "parentType EX " + (file != null ? file.getName() : "?") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " offset=" + offset + ": " + e); //$NON-NLS-1$ //$NON-NLS-2$
         }
         putBounded(TYPE_CACHE, key, resolved);
         return resolved;
@@ -249,6 +399,16 @@ public final class BslOccurrenceContextResolver
         String fragment = sourceUri.fragment();
         if (fragment == null || fragment.isEmpty())
             return null;
+        synchronized (projectModelLock(file.getProject()))
+        {
+            return referenceNodeRegionLocked(file, sourceUri, reference, indexInList, referenceFirst,
+                targetName, fragment);
+        }
+    }
+
+    private static int[] referenceNodeRegionLocked(IFile file, URI sourceUri, EReference reference,
+        int indexInList, boolean referenceFirst, String targetName, String fragment)
+    {
         try
         {
             URI moduleUri = URI.createPlatformResourceURI(file.getFullPath().toString(), true);
@@ -464,13 +624,21 @@ public final class BslOccurrenceContextResolver
         // Конвейер редактора/сборщика, без которого TypesComputer даёт пустоту: пакетное
         // связывание и производное состояние ресурса (окружения операторов, контекст модуля
         // его объектом-владельцем, установки обращений) — BslDerivedStateComputer.
+        boolean linkedNow = false;
         if (resource instanceof BslResource bslResource)
         {
             bslResource.setDeepAnalysis(true);
             if (!bslResource.isLinkedBatch())
+            {
                 bslResource.linkBatched(null);
+                linkedNow = true;
+            }
             bslResource.installDerivedState(false);
         }
+        // ВРЕМЕННАЯ безусловная диагностика (issue: тип родителя из doc-комментария) — снять после разбора.
+        Global.tempLog("parent-type", "resolveTypeFromModel " + file.getName() //$NON-NLS-1$ //$NON-NLS-2$
+            + " dotOffset=" + dotOffset + " offset=" + offset + " linkedNow=" + linkedNow //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " isLinkedBatch=" + (resource instanceof BslResource br && br.isLinkedBatch())); //$NON-NLS-1$
         // Точки перед вхождением нет: родителем может быть сам объект модуля — так выглядит прямое
         // обращение к его реквизиту (ДатаОтгрузки = 123 в модуле объекта).
         if (dotOffset < 0)
@@ -480,16 +648,191 @@ public final class BslOccurrenceContextResolver
             dotOffset, offset);
         logType("  receiver path: dotOffset=" + dotOffset //$NON-NLS-1$
             + " receiver=" + (receiver != null ? receiver.eClass().getName() : "null")); //$NON-NLS-1$ //$NON-NLS-2$
+        probeReceiver(receiver);
         if (receiver == null)
             return ""; //$NON-NLS-1$
         String types = SmartContentAssistProcessor.ReceiverTypeLabel.formatTypes(receiver);
         if (!types.isEmpty())
-            return types;
+            return refineFormDataType(types, xtextResource, content, offset);
         // У загруженного нами ресурса типы в самом выражении пустые (их проставляет конвейер
         // редактора), поэтому берём результат вычислителя, а не состояние модели.
-        String computed = SmartContentAssistProcessor.ReceiverTypeLabel.formatTypeItems(computeTypes(provider, receiver));
+        String computed = sanitizeComputedTypes(
+            SmartContentAssistProcessor.ReceiverTypeLabel.formatTypeItems(computeTypes(provider, receiver)));
         logType("  receiver computed types=«" + computed + "»"); //$NON-NLS-1$ //$NON-NLS-2$
-        return computed;
+        Global.tempLog("parent-type", "  model types=«" + types + "» computed=«" + computed + "»"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+        if (!computed.isEmpty())
+            return refineFormDataType(computed, xtextResource, content, offset);
+        // Вычислитель молчит: приёмник мог связаться как ImplicitVariable без типового состояния —
+        // так бывает у реквизита формы. Берём тип из модели формы напрямую.
+        String formType = formContextReceiverType(xtextResource, content, offset);
+        return formType.isEmpty() ? computed : formType;
+    }
+
+    /**
+     * Отсекает из строки типов нерезолвнутые прокси-объекты вида
+     * {@code com._1c.g5.v8.dt.mcore.impl.TypeSetImpl@5dd15ad (eProxyURI: …)} — их отдаёт вычислитель,
+     * когда ресурс не долинковался; для «Подходит»/подписи это мусор.
+     */
+    private static String sanitizeComputedTypes(String types)
+    {
+        if (types == null || types.isEmpty())
+            return ""; //$NON-NLS-1$
+        StringBuilder sb = new StringBuilder();
+        for (String raw : types.split(",")) //$NON-NLS-1$
+        {
+            String t = raw.trim();
+            if (t.isEmpty() || t.indexOf('@') >= 0 || t.indexOf('(') >= 0
+                || t.indexOf(' ') >= 0 || t.contains(".impl.") || t.contains("eProxyURI")) //$NON-NLS-1$ //$NON-NLS-2$
+                continue;
+            if (sb.length() > 0)
+                sb.append(", "); //$NON-NLS-1$
+            sb.append(t);
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Тип приёмника-реквизита формы, когда модель отдала пусто: имя первого сегмента родителя
+     * ({@code Объект}) ищется среди реквизитов формы, результат — {@code ДанныеФормыСтруктура:<тип>}
+     * (так же, как когда модель сама вернула {@code ДанныеФормыСтруктура}).
+     */
+    private static String formContextReceiverType(XtextResource resource, String content, int offset)
+    {
+        String parent = parentText(content, offset);
+        String attrName = parent.isEmpty() ? "" : parent.split("\\.")[0].trim(); //$NON-NLS-1$ //$NON-NLS-2$
+        if (attrName.isEmpty())
+            return ""; //$NON-NLS-1$
+        String generating = formAttributeType(resource, attrName);
+        return generating == null || generating.isBlank() ? "" : "ДанныеФормыСтруктура:" + generating; //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /** Синтетические типы данных управляемой формы, за которыми стоит конкретный тип метаданных. */
+    private static final Set<String> FORM_DATA_TYPES = Set.of("ДанныеФормыСтруктура", //$NON-NLS-1$
+        "ДанныеФормыКоллекция", "ДанныеФормыСтруктураСКоллекцией", "ДанныеФормыДерево", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        "ДанныеФормыЭлементКоллекции", "ДанныеФормыЭлементДерева"); //$NON-NLS-1$ //$NON-NLS-2$
+
+    /**
+     * Если «Тип родителя» — {@code ДанныеФормыСтруктура} (или родственный {@link #FORM_DATA_TYPES}),
+     * дописывает через «:» порождающий его тип метаданных из модели формы:
+     * {@code ДанныеФормыСтруктура:СправочникОбъект.Валюты}. Порождающий тип берётся у реквизита формы,
+     * чьё имя — первый сегмент выражения-родителя ({@code Объект} в {@code Объект.Валюта}).
+     */
+    private static String refineFormDataType(String types, XtextResource resource, String content, int offset)
+    {
+        if (types == null || types.isBlank() || types.indexOf(':') >= 0)
+            return types;
+        String[] parts = types.split(","); //$NON-NLS-1$
+        boolean anyFormData = false;
+        for (String p : parts)
+        {
+            if (FORM_DATA_TYPES.contains(p.trim()))
+            {
+                anyFormData = true;
+                break;
+            }
+        }
+        if (!anyFormData)
+            return types;
+        String parent = parentText(content, offset);
+        String attrName = parent.isEmpty() ? "" : parent.split("\\.")[0].trim(); //$NON-NLS-1$ //$NON-NLS-2$
+        String generating = attrName.isEmpty() ? null : formAttributeType(resource, attrName);
+        if (generating == null || generating.isBlank())
+            return types;
+        StringBuilder sb = new StringBuilder();
+        for (String p : parts)
+        {
+            String t = p.trim();
+            if (sb.length() > 0)
+                sb.append(", "); //$NON-NLS-1$
+            sb.append(FORM_DATA_TYPES.contains(t) ? t + ":" + generating : t); //$NON-NLS-1$
+        }
+        return sb.toString();
+    }
+
+    /** Тип реквизита формы {@code attrName} из модели формы (владелец модуля) — {@code null}, если не нашли. */
+    private static String formAttributeType(XtextResource resource, String attrName)
+    {
+        try
+        {
+            Module module = moduleOf(resource);
+            EObject owner = module != null ? module.getOwner() : null;
+            Form form = resolveForm(owner);
+            if (form == null)
+                return null;
+            for (FormAttribute attribute : form.getAttributes())
+            {
+                if (attribute == null || !attrName.equalsIgnoreCase(attribute.getName()))
+                    continue;
+                TypeDescription valueType = attribute.getValueType();
+                if (valueType == null)
+                    return null;
+                for (TypeItem typeItem : valueType.getTypes())
+                {
+                    if (typeItem == null)
+                        continue;
+                    TypeItem resolved = typeItem.eIsProxy() ? (TypeItem) EcoreUtil.resolve(typeItem, form) : typeItem;
+                    String name = McoreUtil.getTypeNameRu(resolved);
+                    if (name == null || name.isBlank())
+                        name = McoreUtil.getTypeName(resolved);
+                    if (name != null && !name.isBlank())
+                        return name;
+                }
+            }
+        }
+        catch (Exception | LinkageError e)
+        {
+            logType("  formAttributeType EX: " + e); //$NON-NLS-1$
+        }
+        return null;
+    }
+
+    private static Form resolveForm(EObject owner)
+    {
+        if (owner instanceof Form form)
+            return form;
+        if (owner == null)
+            return null;
+        Object nested = Global.invoke(owner, "getForm"); //$NON-NLS-1$
+        if (nested instanceof Form form)
+            return form;
+        if (nested instanceof EObject proxy && proxy.eIsProxy())
+        {
+            EObject resolved = EcoreUtil.resolve(proxy, owner);
+            if (resolved instanceof Form form)
+                return form;
+        }
+        return null;
+    }
+
+    /** ВРЕМЕННАЯ диагностика: связался ли приёмник с объявлением и есть ли у него провайдер типового состояния. */
+    private static void probeReceiver(Expression receiver)
+    {
+        try
+        {
+            if (!(receiver instanceof StaticFeatureAccess sfa))
+            {
+                Global.tempLog("parent-type", "  receiver не StaticFeatureAccess: " //$NON-NLS-1$ //$NON-NLS-2$
+                    + (receiver != null ? receiver.eClass().getName() : "null")); //$NON-NLS-1$
+                return;
+            }
+            Global.tempLog("parent-type", "  sfa.name=" + sfa.getName() //$NON-NLS-1$ //$NON-NLS-2$
+                + " featureEntries=" + sfa.getFeatureEntries().size()); //$NON-NLS-1$
+            for (FeatureEntry fe : sfa.getFeatureEntries())
+            {
+                Object f = fe.getFeature();
+                String desc = f == null ? "null" //$NON-NLS-1$
+                    : f.getClass().getName() + (f instanceof EObject eo && eo.eIsProxy() ? " PROXY" : "") //$NON-NLS-1$ //$NON-NLS-2$
+                        + " name=" + Global.invoke(f, "getName"); //$NON-NLS-1$ //$NON-NLS-2$
+                Object tsp = f instanceof Variable || f instanceof FormalParam
+                    ? Global.invoke(f, "getTypeStateProvider") : null; //$NON-NLS-1$
+                Global.tempLog("parent-type", "  feature=" + desc //$NON-NLS-1$ //$NON-NLS-2$
+                    + " typeStateProvider=" + (tsp != null ? tsp.getClass().getSimpleName() : "null")); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+        catch (Exception | LinkageError e)
+        {
+            Global.tempLog("parent-type", "  probeReceiver EX: " + e); //$NON-NLS-1$ //$NON-NLS-2$
+        }
     }
 
     /**
@@ -790,6 +1133,10 @@ public final class BslOccurrenceContextResolver
         for (String raw : parentTypeCsv.split(",")) //$NON-NLS-1$
         {
             String type = raw.trim();
+            // «ДанныеФормыСтруктура:СправочникОбъект.Валюты» — подходимость судим по типу после «:».
+            int colon = type.indexOf(':');
+            if (colon >= 0)
+                type = type.substring(colon + 1).trim();
             if (!type.isEmpty() && suitMatches(sought, type))
                 return SUITABLE_YES;
         }

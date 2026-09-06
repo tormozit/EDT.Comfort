@@ -19,8 +19,11 @@ import org.eclipse.core.resources.ResourcesPlugin;
 import org.eclipse.core.runtime.Path;
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.IStatus;
+import org.eclipse.core.runtime.NullProgressMonitor;
+import org.eclipse.core.runtime.Platform;
 import org.eclipse.core.runtime.Status;
 import org.eclipse.core.runtime.jobs.Job;
+import org.osgi.framework.Bundle;
 import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.EClass;
 import org.eclipse.emf.ecore.EObject;
@@ -29,7 +32,16 @@ import org.eclipse.emf.ecore.EStructuralFeature;
 import org.eclipse.emf.ecore.resource.Resource;
 import org.eclipse.emf.ecore.util.EcoreUtil;
 import org.eclipse.core.runtime.IPath;
+import org.eclipse.jface.action.Action;
+import org.eclipse.jface.action.ActionContributionItem;
+import org.eclipse.jface.action.IAction;
+import org.eclipse.jface.action.IToolBarManager;
+import org.eclipse.jface.action.Separator;
 import org.eclipse.jface.dialogs.IDialogSettings;
+import org.eclipse.ltk.core.refactoring.NullChange;
+import org.eclipse.ltk.core.refactoring.TextEditBasedChange;
+import org.eclipse.text.edits.MultiTextEdit;
+import org.eclipse.text.edits.TextEdit;
 import org.eclipse.jface.text.source.ISourceViewer;
 import org.eclipse.jface.text.source.SourceViewer;
 import org.eclipse.jface.viewers.ColumnLabelProvider;
@@ -57,6 +69,8 @@ import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.common.Functions;
 import com._1c.g5.v8.dt.common.localization.LocalizationManager;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
+import com._1c.g5.v8.dt.core.platform.IV8Project;
+import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
 import com._1c.g5.v8.dt.dcs.model.schema.DataCompositionSchema;
 import com._1c.g5.v8.dt.dcs.model.schema.DataCompositionSchemaCalculatedField;
 import com._1c.g5.v8.dt.dcs.model.schema.DataCompositionSchemaDataSetLink;
@@ -108,6 +122,7 @@ import org.eclipse.swt.custom.CTabFolder;
 import org.eclipse.swt.custom.CTabItem;
 import org.eclipse.swt.custom.SashForm;
 import org.eclipse.swt.custom.StyledText;
+import org.eclipse.swt.graphics.Color;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.dnd.Clipboard;
@@ -336,6 +351,11 @@ public final class ConfigSearchResultsHook implements IStartup
     private static TableColumn cachedMatchSuitableColumn;
     private static TableColumn cachedMatchTextColumn;
     private static FormTableInteraction cachedMatchTableInteraction;
+    private static IToolBarManager cachedMatchToolBar;
+    private static IAction cachedMatchSuitableOnlyAction;
+    private static ActionContributionItem cachedMatchSuitableOnlyItem;
+    private static boolean matchSuitableActionAdded;
+    private static final String MATCH_SUITABLE_ONLY_ID = "tormozit.configSearch.suitableOnly"; //$NON-NLS-1$
     /** Заголовок колонки «Тип родителя» — к нему дописывается счётчик прогресса фонового расчёта. */
     private static final String MATCH_PARENT_TYPE_TITLE = BslOccurrenceContextResolver.COL_PARENT_TYPE;
     private static final String MATCH_UNKNOWN_TYPE = "?"; //$NON-NLS-1$
@@ -378,7 +398,7 @@ public final class ConfigSearchResultsHook implements IStartup
      */
     private static volatile BslOccurrenceContextResolver.Sought cachedSought;
 
-    private static final class MatchRow
+    private static final class MatchRow implements OccurrenceContextResolveJob.Target
     {
         final String path;
         final String property;
@@ -431,6 +451,18 @@ public final class ConfigSearchResultsHook implements IStartup
          * {@code "?"} — «Тип родителя» ещё не вычислен, {@code ""}/{@code null} — судить не о чем.
          */
         volatile String suitable;
+        /** Модельное смещение вхождения — для запроса «типа родителя» у ИР (литералы); {@code -1} — нет. */
+        volatile int contextOffset = -1;
+        volatile int contextLength;
+        /**
+         * Прямые координаты вхождения в тексте модуля для синтетических строк полнотекстового
+         * прохода (у них нет ни {@code tableItem}, ни {@code sourceUri}); {@code -1} — обычная строка.
+         */
+        volatile int directOffset = -1;
+        volatile int directLength;
+        /** Диапазон подсветки вхождения внутри {@code styledText} — для синтетических строк. */
+        volatile int directHlStart = -1;
+        volatile int directHlLen;
 
         MatchRow(String path, String property, long lineNumber, StyledString styledText, IFile file,
                 Object tableItem, String moduleKindSegment, URI sourceUri, EReference sourceReference,
@@ -449,10 +481,70 @@ public final class ConfigSearchResultsHook implements IStartup
             this.sourceIndexInList = sourceIndexInList;
         }
 
-        /** Нужны ли этой строке колонки контекста BSL-вхождения (есть ссылка и модуль). */
-        boolean needsContext()
+        /** Нужны ли этой строке колонки контекста BSL-вхождения (есть позиция вхождения и модуль). */
+        @Override
+        public boolean needsContext()
         {
-            return sourceUri != null && file != null && BslModuleMethodResolver.isBslModule(file);
+            return file != null && BslModuleMethodResolver.isBslModule(file)
+                && (sourceUri != null || directOffset >= 0);
+        }
+
+        // ---- OccurrenceContextResolveJob.Target: панель пользуется только проходом ИР ----
+        // Быстрый проход и «Тип родителя» по модели у панели свои (scheduleMatchContextResolution),
+        // а очередь ИР — общая с мастером рефакторинга, чтобы логика была одна на оба списка.
+
+        @Override
+        public IFile file()
+        {
+            return file;
+        }
+
+        @Override
+        public int[] resolveRegion()
+        {
+            return resolvedRegion();
+        }
+
+        @Override
+        public int[] resolvedRegion()
+        {
+            return contextOffset >= 0 ? new int[] {contextOffset, contextLength} : null;
+        }
+
+        @Override
+        public void applyFast(OccurrenceContextResolveJob.FastContext context)
+        {
+            // Быстрый проход панели свой — движок его для этих строк не выполняет.
+        }
+
+        @Override
+        public void applyParentType(String type)
+        {
+            if (type == null || type.isBlank())
+                return;
+            parentType = type;
+            String verdict = BslOccurrenceContextResolver.suitabilityByType(cachedSought, type);
+            if (verdict != null && !verdict.isBlank()
+                && !BslOccurrenceContextResolver.SUITABLE_UNKNOWN.equals(verdict))
+                suitable = verdict;
+        }
+
+        @Override
+        public String occurrenceLineText()
+        {
+            return text;
+        }
+
+        @Override
+        public int occurrenceHighlightStart()
+        {
+            return directHlStart;
+        }
+
+        @Override
+        public int occurrenceHighlightLength()
+        {
+            return directHlLen;
         }
     }
 
@@ -549,6 +641,7 @@ public final class ConfigSearchResultsHook implements IStartup
                     matchTable.setBounds(matchTableStack.getClientArea());
             }
         });
+        installMatchSuitableAction(activePage, matchViewer);
         // Второстепенные данные — сохраняем при закрытии/пересоздании панели, не живьём на резайз.
         outer.addDisposeListener(e ->
         {
@@ -634,6 +727,12 @@ public final class ConfigSearchResultsHook implements IStartup
                     return ""; //$NON-NLS-1$
                 return row.parentType != null ? row.parentType : MATCH_UNKNOWN_TYPE;
             }
+
+            @Override
+            public Color getForeground(Object element)
+            {
+                return matchSuitableForeground(element, matchViewer);
+            }
         });
 
         TableViewerColumn syntaxCol = new TableViewerColumn(matchViewer, SWT.LEFT);
@@ -658,11 +757,15 @@ public final class ConfigSearchResultsHook implements IStartup
             @Override
             public String getText(Object element)
             {
-                if (!(element instanceof MatchRow row) || !row.needsContext() || cachedSought == null)
-                    return ""; //$NON-NLS-1$
                 // «Тип родителя» ещё не вычислен — как и он сам, показываем «?» (кроме литералов/
                 // комментариев, где suitable уже проставлен быстрым проходом).
-                return row.suitable != null ? row.suitable : BslOccurrenceContextResolver.SUITABLE_UNKNOWN;
+                return element instanceof MatchRow row ? matchSuitableCellValue(row) : ""; //$NON-NLS-1$
+            }
+
+            @Override
+            public Color getForeground(Object element)
+            {
+                return matchSuitableForeground(element, matchViewer);
             }
         });
 
@@ -675,9 +778,28 @@ public final class ConfigSearchResultsHook implements IStartup
             @Override
             public StyledString getStyledText(Object element)
             {
-                if (element instanceof MatchRow row && row.styledText != null)
-                    return row.styledText;
-                return new StyledString(""); //$NON-NLS-1$
+                if (!(element instanceof MatchRow row) || row.styledText == null)
+                    return new StyledString(""); //$NON-NLS-1$
+                // Синтетические полнотекстовые строки: подсветку кладём здесь, в UI-потоке, ТЕМИ ЖЕ
+                // стилями, что и родные строки (extractMatchStyledText) — иначе цвет вхождения разный.
+                if (row.directHlStart >= 0 && row.directHlLen > 0)
+                {
+                    String text = row.styledText.getString();
+                    int relOff = row.directHlStart;
+                    int relEnd = relOff + row.directHlLen;
+                    if (relEnd <= text.length())
+                    {
+                        Control ctx = cachedMatchTableViewer != null ? cachedMatchTableViewer.getTable() : null;
+                        StyledString s = new StyledString();
+                        if (relOff > 0)
+                            s.append(text.substring(0, relOff), SmartMatchHighlight.plainStyler());
+                        s.append(text.substring(relOff, relEnd), SmartMatchHighlight.textOnlyStyler(ctx));
+                        if (relEnd < text.length())
+                            s.append(text.substring(relEnd), SmartMatchHighlight.plainStyler());
+                        return s;
+                    }
+                }
+                return row.styledText;
             }
 
             @Override
@@ -758,10 +880,16 @@ public final class ConfigSearchResultsHook implements IStartup
 
         // Скролл/resize открывают новые строки — довычисляем "<Pending>" и для них
         // (см. scheduleVisibleDeferredCalculations).
-        matchTable.addListener(SWT.Resize, e -> scheduleVisibleDeferredCalculations(matchViewer));
+        matchTable.addListener(SWT.Resize, e -> {
+            scheduleVisibleDeferredCalculations(matchViewer);
+            scheduleVisibleLiteralIrTypes(matchViewer);
+        });
         ScrollBar matchVBar = matchTable.getVerticalBar();
         if (matchVBar != null)
-            matchVBar.addListener(SWT.Selection, e -> scheduleVisibleDeferredCalculations(matchViewer));
+            matchVBar.addListener(SWT.Selection, e -> {
+                scheduleVisibleDeferredCalculations(matchViewer);
+                scheduleVisibleLiteralIrTypes(matchViewer);
+            });
 
         cachedMatchTableViewer = matchViewer;
         cachedMatchTextColumn = textCol.getColumn();
@@ -892,6 +1020,10 @@ public final class ConfigSearchResultsHook implements IStartup
         matchViewer.setInput(rows);
         scheduleMatchMethodResolution(matchViewer, rows);
         scheduleMatchContextResolution(matchViewer, rows);
+        // «Найти ссылки» видит только индексированные ссылки — литералы/комментарии мимо. Догоняем
+        // их полнотекстовым проходом самого рефакторинга (мастер переименования делает так же).
+        applyFullTextAugmentation(treeViewer, matchViewer, rows);
+        patchHeaderTotalLabel(treeViewer);
 
         // При терминальном узле путь у всех строк одинаковый (сам узел и есть этот путь) — как и
         // у штатной таблицы (см. hidePathColumn/showPathColumn), колонку тогда прячем.
@@ -935,6 +1067,7 @@ public final class ConfigSearchResultsHook implements IStartup
         // «Подходит» — только когда искомое разобрано в полное имя объекта метаданных.
         setMatchColumnVisible(cachedMatchSuitableColumn, referenceSearch && cachedSought != null,
             KEY_COL_SUITABLE_WIDTH, MATCH_SUITABLE_COLUMN_WIDTH);
+        updateMatchSuitableOnly();
 
         scheduleVisibleDeferredCalculations(matchViewer);
         return tableItems.size();
@@ -1516,8 +1649,17 @@ public final class ConfigSearchResultsHook implements IStartup
     // одним фоновым Job (модель нужна уже для смещения), модули из видимой области — первыми.
     // Прогресс виден счётчиком в заголовке колонки «Тип родителя».
 
+    /** Через сколько посчитанных строк обновлять счётчик в заголовке колонки «Тип родителя». */
+    private static final int PARENT_TYPE_PROGRESS_STEP = 5;
+
     private static final Object CONTEXT_RESOLVE_LOCK = new Object();
     private static Job contextResolveJob;
+    /**
+     * Проход «Тип родителя через ИР» — общий движок с мастером рефакторинга
+     * (см. {@link #matchIrEngine(TableViewer)}), своей очереди у панели нет.
+     */
+    private static OccurrenceContextResolveJob matchIrEngine;
+    private static Table matchIrEngineTable;
     /** Поколение: {@link #refreshMatchTable} пересобирает строки — результаты старого Job отбрасываем. */
     private static long contextResolveGeneration;
 
@@ -1539,7 +1681,743 @@ public final class ConfigSearchResultsHook implements IStartup
                 contextResolveJob.cancel();
                 contextResolveJob = null;
             }
+            if (matchIrEngine != null)
+                matchIrEngine.cancel();
         }
+    }
+
+    /**
+     * Тёмно-зелёный цвет текста для колонок «Тип родителя»/«Подходит» «подходящей» строки — общий
+     * с табличным режимом мастера рефакторинга ({@link BslOccurrenceContextResolver#suitableTextColor}).
+     */
+    /**
+     * Кнопка-отбор «Только подходящие (N)» в тулбаре панели результатов поиска (тот же тулбар, куда
+     * штатно попадают кнопки представления) — по образцу {@code BslReferenceSearchTableHook}.
+     */
+    private static void installMatchSuitableAction(Object activePage, TableViewer matchViewer)
+    {
+        if (!(Global.invoke(activePage, "getSite") instanceof org.eclipse.ui.part.IPageSite site)) //$NON-NLS-1$
+            return;
+        org.eclipse.ui.IActionBars bars = site.getActionBars();
+        if (bars == null || bars.getToolBarManager() == null)
+            return;
+        cachedMatchToolBar = bars.getToolBarManager();
+        matchSuitableActionAdded = false;
+        Action suitableOnly = new Action("Только подходящие (0)", IAction.AS_CHECK_BOX) //$NON-NLS-1$
+        {
+            @Override
+            public void run()
+            {
+                setMatchSuitableFilterActive(isChecked());
+                updateMatchSuitableOnly();
+            }
+        };
+        suitableOnly.setId(MATCH_SUITABLE_ONLY_ID);
+        suitableOnly.setToolTipText(TooltipText.wrap(matchViewer.getTable(),
+            "Скрыть вхождения с «Подходит» = «Нет» (строки «?» остаются — тип ещё не вычислен)" //$NON-NLS-1$
+                + Global.pluginSignForTooltip()));
+        cachedMatchSuitableOnlyAction = suitableOnly;
+        cachedMatchSuitableOnlyItem = new ActionContributionItem(suitableOnly);
+        cachedMatchSuitableOnlyItem.setMode(ActionContributionItem.MODE_FORCE_TEXT);
+        updateMatchSuitableOnly();
+    }
+
+    /**
+     * Добавляет/убирает кнопку «Только подходящие» в тулбаре (только для результатов «Найти ссылки» с
+     * разобранным искомым), обновляет её подпись/счётчик/состояние.
+     */
+    private static void updateMatchSuitableOnly()
+    {
+        if (cachedMatchSuitableOnlyAction == null || cachedMatchToolBar == null)
+            return;
+        boolean available = cachedSought != null && cachedMatchTableViewer != null
+            && cachedMatchTableViewer.getInput() instanceof List<?>;
+        if (available && !matchSuitableActionAdded)
+        {
+            cachedMatchToolBar.add(new Separator(MATCH_SUITABLE_ONLY_ID + ".sep")); //$NON-NLS-1$
+            cachedMatchToolBar.add(cachedMatchSuitableOnlyItem);
+            matchSuitableActionAdded = true;
+        }
+        else if (!available && matchSuitableActionAdded)
+        {
+            cachedMatchToolBar.remove(MATCH_SUITABLE_ONLY_ID);
+            cachedMatchToolBar.remove(MATCH_SUITABLE_ONLY_ID + ".sep"); //$NON-NLS-1$
+            matchSuitableActionAdded = false;
+        }
+        if (available)
+        {
+            int n = 0;
+            for (Object row : (List<?>) cachedMatchTableViewer.getInput())
+                if (row instanceof MatchRow r && BslOccurrenceContextResolver.isSuitableYes(r.suitable))
+                    n++;
+            cachedMatchSuitableOnlyAction.setText("Только подходящие (" + n + ")"); //$NON-NLS-1$ //$NON-NLS-2$
+            boolean filtered = isMatchSuitableFilterActive();
+            if (cachedMatchSuitableOnlyAction.isChecked() != filtered)
+                cachedMatchSuitableOnlyAction.setChecked(filtered);
+        }
+        cachedMatchToolBar.update(true);
+        if (cachedMatchSuitableOnlyItem != null)
+            cachedMatchSuitableOnlyItem.update();
+    }
+
+    /**
+     * Отбор «Только подходящие» в таблице вхождений — отдельный {@link org.eclipse.jface.viewers.ViewerFilter}:
+     * скрывает только «Подходит» = «Нет», строки «?» (тип родителя ещё не вычислен) остаются.
+     */
+    private static org.eclipse.jface.viewers.ViewerFilter matchSuitableFilter;
+
+    private static void setMatchSuitableFilterActive(boolean active)
+    {
+        if (cachedMatchTableViewer == null || cachedMatchTableViewer.getTable().isDisposed())
+            return;
+        if (active)
+        {
+            if (matchSuitableFilter == null)
+                matchSuitableFilter = new org.eclipse.jface.viewers.ViewerFilter()
+                {
+                    @Override
+                    public boolean select(Viewer v, Object parent, Object element)
+                    {
+                        return !(element instanceof MatchRow row)
+                            || !BslOccurrenceContextResolver.SUITABLE_NO.equals(matchSuitableCellValue(row));
+                    }
+                };
+            if (!isMatchSuitableFilterActive())
+                cachedMatchTableViewer.addFilter(matchSuitableFilter);
+        }
+        else if (matchSuitableFilter != null && isMatchSuitableFilterActive())
+        {
+            cachedMatchTableViewer.removeFilter(matchSuitableFilter);
+        }
+    }
+
+    private static boolean isMatchSuitableFilterActive()
+    {
+        if (matchSuitableFilter == null || cachedMatchTableViewer == null
+            || cachedMatchTableViewer.getTable().isDisposed())
+            return false;
+        for (org.eclipse.jface.viewers.ViewerFilter f : cachedMatchTableViewer.getFilters())
+            if (f == matchSuitableFilter)
+                return true;
+        return false;
+    }
+
+    /** Значение колонки «Подходит» для строки — как его показывает {@code suitableCol}. */
+    private static String matchSuitableCellValue(MatchRow row)
+    {
+        if (row == null || !row.needsContext() || cachedSought == null)
+            return ""; //$NON-NLS-1$
+        return row.suitable != null ? row.suitable : BslOccurrenceContextResolver.SUITABLE_UNKNOWN;
+    }
+
+    private static Color matchSuitableForeground(Object element, TableViewer matchViewer)
+    {
+        if (!(element instanceof MatchRow row) || !BslOccurrenceContextResolver.isSuitableYes(row.suitable))
+            return null;
+        Table table = matchViewer != null ? matchViewer.getTable() : null;
+        return BslOccurrenceContextResolver.suitableTextColor(table != null ? table.getDisplay() : null);
+    }
+
+    // ================= Полнотекстовый догон ссылок (код мастера переименования) =================
+
+    private static final String SEARCH_CORE_BUNDLE = "com._1c.g5.v8.dt.search.core"; //$NON-NLS-1$
+    private static final String BSL_BM_UI_SUPPLIER =
+        "com._1c.g5.v8.dt.bsl.bm.ui.refactoring.BslTextSearchRefactoringSupplier"; //$NON-NLS-1$
+    private static final String FT_LOG = "fulltext-refs"; //$NON-NLS-1$
+    private static volatile boolean fullTextAugmentRunning;
+    /** Полное имя объекта, для которого посчитаны полнотекстовые вхождения ({@link #fullTextRowsCache}). */
+    private static volatile String fullTextRowsKey;
+    /** Готовые синтетические строки полнотекстового прохода — переживают пересборку таблицы. */
+    private static volatile List<MatchRow> fullTextRowsCache;
+    /** {@code файл → сколько синтетических полнотекстовых вхождений} — для счётчиков в ветках дерева. */
+    private static volatile Map<String, Long> syntheticCountByFilePath;
+    /** Текст подписи-шапки, который мы сами туда записали — чтобы не патчить повторно. */
+    private static volatile String headerLabelPatchedText;
+    /** Виджет подписи-шапки, на который уже повешен сторож (см. {@link #installHeaderCountGuard}). */
+    private static Control headerCountControl;
+    /** Патч шапки уже запланирован — не плодить {@code asyncExec} на каждую перерисовку. */
+    private static boolean headerRepatchPending;
+    private static final java.util.regex.Pattern HEADER_COUNT_PATTERN =
+        java.util.regex.Pattern.compile("(\\d+)(\\s*(?:совпад|соответ|match))"); //$NON-NLS-1$
+
+    /**
+     * Догоняет результаты «Найти ссылки на объект» вхождениями в строковых литералах и комментариях
+     * тем же полнотекстовым проходом, что делает мастер переименования: строки для поиска даёт
+     * {@code BslTextSearchRefactoringSupplier.getSearchStrings}, ищет {@code TextSearcher} (код EDT),
+     * лишнее отсекает {@code filterSearchResult}. Синтетические строки получают прямые координаты
+     * вхождения ({@link MatchRow#directOffset}) — «Родитель»/«Тип родителя»/«Подходит» считаются
+     * как для остальных BSL-вхождений.
+     *
+     * <p>Результат кэшируется по имени объекта и дописывается в таблицу при каждой её пересборке
+     * ({@link #refreshMatchTable}) — иначе поток обновлений во время поиска затирал бы синтетические
+     * строки. Тяжёлый проход запускается один раз на объект.
+     */
+    private static void applyFullTextAugmentation(TreeViewer treeViewer, TableViewer matchViewer,
+        List<MatchRow> rows)
+    {
+        if (searchQueryRunning || !isReferenceSearchResult(treeViewer))
+            return;
+        String qualifiedName = extractSearchedObjectQualifiedName(treeViewer);
+        if (qualifiedName == null || qualifiedName.isBlank())
+            return;
+        if (qualifiedName.equals(fullTextRowsKey))
+        {
+            if (fullTextRowsCache != null && !fullTextRowsCache.isEmpty())
+                appendFullTextRows(matchViewer, rows, fullTextRowsCache);
+            return;
+        }
+        if (fullTextAugmentRunning)
+            return;
+        IProject project = fullTextSearchProject(treeViewer, rows);
+        if (project == null)
+            return;
+        // Новый объект — сбрасываем кэш прошлого поиска.
+        fullTextRowsCache = null;
+        syntheticCountByFilePath = null;
+        headerLabelPatchedText = null;
+        String simpleName = new Path(qualifiedName.replace('.', '/')).lastSegment();
+        fullTextAugmentRunning = true;
+        Job job = new Job("Комфорт: полнотекстовые вхождения ссылок") //$NON-NLS-1$
+        {
+            @Override
+            protected IStatus run(IProgressMonitor monitor)
+            {
+                try
+                {
+                    List<MatchRow> extra = collectFullTextRows(project, qualifiedName, simpleName,
+                        new java.util.HashSet<>(), monitor);
+                    Global.tempLog(FT_LOG, "готово: +" + extra.size() + " строк для " + qualifiedName); //$NON-NLS-1$ //$NON-NLS-2$
+                    fullTextRowsCache = extra;
+                    fullTextRowsKey = qualifiedName; // syntheticCountByFilePath заполнит appendFullTextRows
+                    runOnUi(() -> {
+                        if (matchViewer.getTable().isDisposed())
+                            return;
+                        refreshMatchTable(treeViewer, matchViewer);
+                        // Счётчики в ветках дерева и в шапке — пересчитать под новые вхождения.
+                        if (!treeViewer.getTree().isDisposed())
+                            treeViewer.refresh(true);
+                    });
+                }
+                catch (Exception | LinkageError e)
+                {
+                    Global.tempLog(FT_LOG, "augment EX: " + e); //$NON-NLS-1$
+                }
+                finally
+                {
+                    fullTextAugmentRunning = false;
+                }
+                return Status.OK_STATUS;
+            }
+        };
+        job.setSystem(true);
+        job.schedule();
+    }
+
+    /** Дописывает кэшированные синтетические строки в текущий список строк таблицы (с дедупом). */
+    private static void appendFullTextRows(TableViewer matchViewer, List<MatchRow> rows, List<MatchRow> cache)
+    {
+        // Дедуп по файл@смещение — ТОЧНОЕ вхождение (несколько на одной строке не схлопываем).
+        // Обращения по коду, которые индекс уже нашёл на этой строке, не дублируем; литералы и
+        // комментарии оставляем всегда (индекс их не берёт).
+        java.util.Set<String> occKeys = new java.util.HashSet<>();
+        java.util.Set<String> nativeLines = new java.util.HashSet<>();
+        for (MatchRow r : rows)
+        {
+            if (r.file == null)
+                continue;
+            String fp = r.file.getFullPath().toString();
+            if (r.directOffset >= 0)
+                occKeys.add(fp + "@" + r.directOffset); //$NON-NLS-1$
+            else if (r.lineNumber > 0)
+                nativeLines.add(fp + "#" + r.lineNumber); //$NON-NLS-1$
+        }
+        int added = 0;
+        Map<String, Long> byFile = new java.util.HashMap<>();
+        for (MatchRow r : cache)
+        {
+            if (r.file == null)
+                continue;
+            String fp = r.file.getFullPath().toString();
+            boolean codeKind = BslOccurrenceContextResolver.KIND_METHOD.equals(r.syntaxKind)
+                || BslOccurrenceContextResolver.KIND_PROPERTY.equals(r.syntaxKind);
+            if (codeKind && nativeLines.contains(fp + "#" + r.lineNumber)) //$NON-NLS-1$
+                continue;
+            if (!occKeys.add(fp + "@" + r.directOffset)) //$NON-NLS-1$
+                continue;
+            rows.add(r);
+            byFile.merge(fp, 1L, Long::sum);
+            added++;
+        }
+        syntheticCountByFilePath = byFile; // ровно то, что реально добавлено (после дедупа)
+        Global.tempLog(FT_LOG, "в таблицу дописано " + added + " из кэша " + cache.size()); //$NON-NLS-1$ //$NON-NLS-2$
+        if (added == 0)
+        {
+            updateMatchSuitableOnly();
+            return;
+        }
+        if (matchViewer.getInput() == rows)
+            matchViewer.refresh();
+        if (cachedMatchTextColumn != null && !cachedMatchTextColumn.isDisposed()
+            && cachedMatchTableInteraction != null)
+        {
+            int w = cachedMatchTextColumn.getWidth() > 0 ? cachedMatchTextColumn.getWidth()
+                : FormTableColumnState.readWidth(dialogSettings(), KEY_COL_TEXT_WIDTH, MATCH_TEXT_COLUMN_WIDTH, 1);
+            cachedMatchTableInteraction.setColumnHidden(cachedMatchTextColumn, false, w);
+        }
+        scheduleMatchMethodResolution(matchViewer, rows);
+        scheduleMatchContextResolution(matchViewer, rows);
+        scheduleVisibleLiteralIrTypes(matchViewer);
+        updateMatchSuitableOnly();
+    }
+
+    /**
+     * Подпись «Ссылки на "…" - N совпадений» над деревом — не {@code getContentDescription} и не
+     * заголовок панели (там пусто / «Поиск»), а отдельный текстовый виджет в
+     * дереве контролов панели. Находим его по тексту и дописываем к числу количество синтетических
+     * полнотекстовых вхождений. Идемпотентно ({@link #headerLabelPatchedText}); EDT перезапишет
+     * подпись при изменении результата — следующий {@link #refreshMatchTable} пропатчит снова.
+     */
+    private static void patchHeaderTotalLabel(TreeViewer treeViewer)
+    {
+        Map<String, Long> byFile = syntheticCountByFilePath;
+        if (byFile == null || byFile.isEmpty() || treeViewer.getTree().isDisposed())
+            return;
+        long syntheticTotal = byFile.values().stream().mapToLong(Long::longValue).sum();
+        if (syntheticTotal <= 0)
+            return;
+        // Ищем по всему дереву контролов панели поиска (от Shell) — надпись это отдельный
+        // Label/CLabel, не getContentDescription и не заголовок вкладки.
+        Composite root = treeViewer.getTree().getShell();
+        Object[] found = new Object[1];
+        String[] curText = new String[1];
+        List<String> seen = new ArrayList<>();
+        findHeaderCountLabel(root, found, curText, seen);
+        if (found[0] == null)
+        {
+            Global.tempLog(FT_LOG, "шапка: надпись не найдена; Label/CLabel: " + seen); //$NON-NLS-1$
+            IViewPart view = findSearchViewPart();
+            Global.tempLog(FT_LOG, "шапка: contentDescr=«" + (view != null ? Global.invoke(view, "getContentDescription") : "?") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + "» title=«" + (view != null ? Global.invoke(view, "getTitle") : "?") + "»"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            return;
+        }
+        Control c = (Control) found[0];
+        installHeaderCountGuard(c);
+        applyHeaderPatch(c, curText[0], syntheticTotal);
+    }
+
+    /**
+     * EDT перезаписывает подпись-шапку своим значением после каждого обновления результата, поэтому
+     * одного патча мало: держим на самом виджете сторож, который возвращает наше число сразу после
+     * любой чужой записи (перерисовка — единственное событие, которое SWT даёт после {@code setText}).
+     * Сам патч выполняется вне обработчика перерисовки ({@code asyncExec}), чтобы не менять текст
+     * прямо во время отрисовки.
+     */
+    private static void installHeaderCountGuard(Control c)
+    {
+        if (c == null || c.isDisposed() || c == headerCountControl)
+            return;
+        headerCountControl = c;
+        c.addListener(SWT.Paint, event -> {
+            Map<String, Long> byFile = syntheticCountByFilePath;
+            if (byFile == null || byFile.isEmpty() || headerRepatchPending)
+                return;
+            long total = byFile.values().stream().mapToLong(Long::longValue).sum();
+            if (total <= 0)
+                return;
+            String t = controlText(c);
+            if (t == null || t.equals(headerLabelPatchedText))
+                return;
+            headerRepatchPending = true;
+            c.getDisplay().asyncExec(() -> {
+                headerRepatchPending = false;
+                if (!c.isDisposed())
+                    applyHeaderPatch(c, controlText(c), total);
+            });
+        });
+        c.addListener(SWT.Dispose, event -> headerCountControl = null);
+    }
+
+    /** Заменяет число в подписи-шапке на «штатное + синтетическое»; идемпотентно. */
+    private static void applyHeaderPatch(Control c, String text, long syntheticTotal)
+    {
+        if (c == null || c.isDisposed() || text == null || text.equals(headerLabelPatchedText))
+            return;
+        java.util.regex.Matcher m = HEADER_COUNT_PATTERN.matcher(text);
+        if (!m.find())
+            return;
+        long base;
+        try
+        {
+            base = Long.parseLong(m.group(1));
+        }
+        catch (NumberFormatException e)
+        {
+            return;
+        }
+        String patched = text.substring(0, m.start(1)) + (base + syntheticTotal) + text.substring(m.end(1));
+        try
+        {
+            c.getClass().getMethod("setText", String.class).invoke(c, patched); //$NON-NLS-1$
+            c.requestLayout();
+            headerLabelPatchedText = patched;
+            Global.tempLog(FT_LOG, "шапка (" + c.getClass().getSimpleName() + ") пропатчена: «" //$NON-NLS-1$ //$NON-NLS-2$
+                + text + "» → «" + patched + "»"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        catch (Exception ignored)
+        {
+        }
+    }
+
+    private static void findHeaderCountLabel(Control control, Object[] found, String[] text, List<String> seen)
+    {
+        if (found[0] != null || control == null || control.isDisposed())
+            return;
+        String t = controlText(control);
+        if (t != null && !t.isBlank())
+        {
+            if (seen.size() < 120)
+                seen.add(control.getClass().getSimpleName() + ":«" //$NON-NLS-1$
+                    + (t.length() > 70 ? t.substring(0, 70) : t).replace('\n', ' ') + "»"); //$NON-NLS-1$
+            if (HEADER_COUNT_PATTERN.matcher(t).find())
+            {
+                found[0] = control;
+                text[0] = t;
+                return;
+            }
+        }
+        if (control instanceof Composite comp)
+            for (Control child : comp.getChildren())
+                findHeaderCountLabel(child, found, text, seen);
+    }
+
+    /** Текст произвольного контрола ({@code getText()} рефлексией) — надпись-шапка может быть любым виджетом. */
+    private static String controlText(Control control)
+    {
+        try
+        {
+            java.lang.reflect.Method m = control.getClass().getMethod("getText"); //$NON-NLS-1$
+            Object r = m.invoke(control);
+            return r instanceof String s ? s : null;
+        }
+        catch (Exception e)
+        {
+            return null;
+        }
+    }
+
+    private static IProject fullTextSearchProject(TreeViewer treeViewer, List<MatchRow> rows)
+    {
+        for (MatchRow r : rows)
+            if (r.file != null && r.file.getProject() != null)
+                return r.file.getProject();
+        Object query = Global.invoke(treeViewer.getInput(), "getQuery"); //$NON-NLS-1$
+        Object input = query != null ? Global.getField(query, "searchInput") : null; //$NON-NLS-1$
+        Object p = input != null ? Global.invoke(input, "getProject") : null; //$NON-NLS-1$
+        return p instanceof IProject ip ? ip : null;
+    }
+
+    /**
+     * Полностью повторяет полнотекстовый проход мастера переименования: {@code TextSearchRefactoringParticipant}
+     * (та же цепочка getSearchStrings → TextSearcher → filterSearchResult → createChanges со ВСЕЙ его
+     * фильтрацией — граница слова, валидация комментариев и т.п.), затем координаты вхождений берутся
+     * из полученных {@code Change}.
+     */
+    private static List<MatchRow> collectFullTextRows(IProject project, String qualifiedName, String simpleName,
+        java.util.Set<String> existingKeys, IProgressMonitor monitor) throws Exception
+    {
+        List<MatchRow> result = new ArrayList<>();
+        Bundle searchCore = Platform.getBundle(SEARCH_CORE_BUNDLE);
+        Bundle bslBmUi = Platform.getBundle("com._1c.g5.v8.dt.bsl.bm.ui"); //$NON-NLS-1$
+        if (searchCore == null || bslBmUi == null)
+        {
+            Global.tempLog(FT_LOG, "нет бандла search.core/bsl.bm.ui"); //$NON-NLS-1$
+            return result;
+        }
+        IV8ProjectManager pm = (IV8ProjectManager) Global.getServiceByClass(IV8ProjectManager.class);
+        IV8Project v8 = pm != null ? pm.getProject(project) : null;
+        EObject target = v8 != null ? GoToDefinition.resolveEObjectByQualifiedName(qualifiedName, v8) : null;
+        if (target == null)
+        {
+            Global.tempLog(FT_LOG, "объект не разрешён: " + qualifiedName); //$NON-NLS-1$
+            return result;
+        }
+        Object rsp = org.eclipse.xtext.resource.IResourceServiceProvider.Registry.INSTANCE
+            .getResourceServiceProvider(URI.createURI("comfort.bsl")); //$NON-NLS-1$
+        Object supplier = rsp != null
+            ? Global.invoke(rsp, "get", bslBmUi.loadClass(BSL_BM_UI_SUPPLIER)) : null; //$NON-NLS-1$
+        Object factory = rsp != null ? Global.invoke(rsp, "get", searchCore.loadClass( //$NON-NLS-1$
+            "com._1c.g5.v8.dt.search.core.refactoring.TextSearchRefactoringParticipantFactory")) : null; //$NON-NLS-1$
+        if (supplier == null || factory == null)
+        {
+            Global.tempLog(FT_LOG, "инжектор: supplier=" + (supplier != null) + " factory=" + (factory != null)); //$NON-NLS-1$ //$NON-NLS-2$
+            return result;
+        }
+        Object participant = Global.invoke(factory, "create", simpleName, target, supplier); //$NON-NLS-1$
+        if (participant == null)
+        {
+            Global.tempLog(FT_LOG, "factory.create → null"); //$NON-NLS-1$
+            return result;
+        }
+        Object scope = buildFullTextScope(searchCore, participant, project);
+        Object changesObj = Global.invoke(participant, "createRefactoringChange", //$NON-NLS-1$
+            new NullChange(), simpleName, scope, new NullProgressMonitor());
+        if (!(changesObj instanceof java.util.Collection<?> changes))
+        {
+            Global.tempLog(FT_LOG, "createRefactoringChange → " + changesObj); //$NON-NLS-1$
+            return result;
+        }
+        List<Object> leaves = new ArrayList<>();
+        for (Object c : changes)
+            flattenChanges(c, leaves);
+        Global.tempLog(FT_LOG, "createRefactoringChange: верхних " + changes.size() + ", листьев " + leaves.size()); //$NON-NLS-1$ //$NON-NLS-2$
+        Map<Object, String> contentCache = new java.util.HashMap<>();
+        Map<String, Integer> perModule = new java.util.TreeMap<>();
+        int edits = 0;
+        for (Object ch : leaves)
+        {
+            if (monitor.isCanceled())
+                break;
+            String cn = ch.getClass().getSimpleName();
+            if (!(ch instanceof TextEditBasedChange tebc) || cn.contains("BmObjectTextContentChange")) //$NON-NLS-1$
+            {
+                Global.tempLog(FT_LOG, "  пропущен лист " + cn); //$NON-NLS-1$
+                continue;
+            }
+            IFile file = changeFile(tebc);
+            if (file == null || !BslModuleMethodResolver.isBslModule(file))
+            {
+                Global.tempLog(FT_LOG, "  лист " + cn + " без BSL-файла (file=" + file + ")"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                continue;
+            }
+            String content = changeContent(tebc, file, contentCache);
+            if (content == null)
+                continue;
+            List<TextEdit> leafEdits = new ArrayList<>();
+            collectLeafEdits(Global.invoke(ch, "getEdit"), leafEdits); //$NON-NLS-1$
+            int taken = 0;
+            for (TextEdit e : leafEdits)
+            {
+                edits++;
+                MatchRow row = buildFullTextRowAt(file, content, e.getOffset(), simpleName);
+                if (row == null)
+                {
+                    Global.tempLog(FT_LOG, "  " + file.getName() + " offset=" + e.getOffset() //$NON-NLS-1$ //$NON-NLS-2$
+                        + " отклонён buildFullTextRowAt"); //$NON-NLS-1$
+                    continue;
+                }
+                if (!existingKeys.add(file.getFullPath() + "@" + row.directOffset)) //$NON-NLS-1$
+                    continue;
+                result.add(row);
+                taken++;
+            }
+            Global.tempLog(FT_LOG, "  " + cn + " " + file.getName() + ": правок " + leafEdits.size() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " → строк " + taken); //$NON-NLS-1$
+        }
+        Global.tempLog(FT_LOG, "рефакторинг: изменений-листьев " + leaves.size() + ", правок " + edits //$NON-NLS-1$ //$NON-NLS-2$
+            + " → строк " + result.size()); //$NON-NLS-1$
+        return result;
+    }
+
+    private static void flattenChanges(Object change, List<Object> out)
+    {
+        if (change == null)
+            return;
+        Object children = Global.invoke(change, "getChildren"); //$NON-NLS-1$
+        if (children instanceof Object[] arr && arr.length > 0)
+        {
+            for (Object c : arr)
+                flattenChanges(c, out);
+            return;
+        }
+        out.add(change);
+    }
+
+    private static void collectLeafEdits(Object edit, List<TextEdit> out)
+    {
+        if (!(edit instanceof TextEdit te))
+            return;
+        if (te instanceof MultiTextEdit)
+        {
+            for (TextEdit child : te.getChildren())
+                collectLeafEdits(child, out);
+            return;
+        }
+        out.add(te);
+    }
+
+    private static IFile changeFile(Object change)
+    {
+        Object modified = Global.invoke(change, "getModifiedElement"); //$NON-NLS-1$
+        if (modified instanceof IFile f)
+            return f;
+        if (Global.invoke(modified, "getFile_") instanceof IFile hf) //$NON-NLS-1$
+            return hf;
+        Object viaGetFile = Global.invoke(change, "getFile"); //$NON-NLS-1$
+        return viaGetFile instanceof IFile f2 ? f2 : null;
+    }
+
+    private static String changeContent(Object change, IFile file, Map<Object, String> cache)
+    {
+        return cache.computeIfAbsent(file, f -> {
+            try
+            {
+                Object c = Global.invoke(change, "getCurrentContent", new NullProgressMonitor()); //$NON-NLS-1$
+                if (c instanceof String s && !s.isEmpty())
+                    return s;
+            }
+            catch (RuntimeException ignored)
+            {
+            }
+            return BslModuleMethodResolver.moduleText(file);
+        });
+    }
+
+    /** Область поиска для {@code TextSearchRefactoringParticipant} — как у штатных задач сбора ссылок. */
+    private static Object buildFullTextScope(Bundle bundle, Object participant, IProject project) throws Exception
+    {
+        Object scope = Global.newInstance(
+            bundle.loadClass("com._1c.g5.v8.dt.search.core.TextSearchScopeSettings")); //$NON-NLS-1$
+        Class<?> searchFor = bundle.loadClass("com._1c.g5.v8.dt.search.core.SearchFor"); //$NON-NLS-1$
+        Class<?> searchIn = bundle.loadClass("com._1c.g5.v8.dt.search.core.SearchIn"); //$NON-NLS-1$
+        Global.invoke(scope, "addSearchFor", //$NON-NLS-1$
+            java.util.Arrays.asList(searchFor.getEnumConstants()));
+        Global.invoke(scope, "addSearchIn", //$NON-NLS-1$
+            java.util.Arrays.asList(searchIn.getEnumConstants()));
+        Global.invoke(scope, "addSearchScope", //$NON-NLS-1$
+            java.util.Arrays.asList(bundle.loadClass("com._1c.g5.v8.dt.search.core.SearchScope").getEnumConstants())); //$NON-NLS-1$
+        Object projects = Global.invoke(participant, "getProjects", project); //$NON-NLS-1$
+        Global.invoke(scope, "addProjects", //$NON-NLS-1$
+            projects instanceof java.util.Collection ? projects : java.util.List.of(project));
+        return scope;
+    }
+
+    private static boolean isIdentChar(char c)
+    {
+        return Character.isLetterOrDigit(c) || c == '_';
+    }
+
+    /**
+     * Срезает хвостовой сегмент вида модуля ({@code МодульМенеджера}, {@code МодульОбъекта},
+     * {@code Модуль}, {@code МодульФормы} …) — в колонке «Путь» нужен объект метаданных
+     * ({@code Справочник.Валюты}), а не файл модуля. {@code Форма.<имя>} перед модулем формы
+     * остаётся.
+     */
+    private static String stripModuleKindSuffix(String path)
+    {
+        if (path == null || path.isEmpty())
+            return path;
+        int dot = path.lastIndexOf('.');
+        if (dot < 0)
+            return path;
+        String last = path.substring(dot + 1);
+        return last.startsWith("Модуль") ? path.substring(0, dot) : path; //$NON-NLS-1$
+    }
+
+    /**
+     * Вхождение по смещению из {@code Change} рефакторинга → синтетическая строка таблицы.
+     * Рефакторинг уже отфильтровал ложные — здесь только строим строку и защищаемся от границы слова.
+     */
+    private static MatchRow buildFullTextRowAt(IFile file, String content, int fileOffset, String simpleName)
+    {
+        if (content == null || fileOffset < 0 || fileOffset >= content.length())
+            return null;
+        if (simpleName != null && !simpleName.isEmpty())
+        {
+            if (!content.regionMatches(true, fileOffset, simpleName, 0,
+                Math.min(simpleName.length(), content.length() - fileOffset)))
+            {
+                // смещение правки может указывать не на имя (перед точкой и т.п.) — ищем имя рядом
+                int at = content.indexOf(simpleName, Math.max(0, fileOffset - 2));
+                if (at < 0 || at > fileOffset + simpleName.length())
+                    return null;
+                fileOffset = at;
+            }
+            int wordEnd = fileOffset + simpleName.length();
+            if ((fileOffset > 0 && isIdentChar(content.charAt(fileOffset - 1)))
+                || (wordEnd < content.length() && isIdentChar(content.charAt(wordEnd))))
+                return null;
+        }
+        int hlLength = simpleName != null ? simpleName.length() : 1;
+        long line = 1 + (int) content.substring(0, fileOffset).chars().filter(c -> c == '\n').count();
+        int lineStart = content.lastIndexOf('\n', Math.max(fileOffset - 1, 0)) + 1;
+        int lineEnd = content.indexOf('\n', fileOffset);
+        if (lineEnd < 0)
+            lineEnd = content.length();
+        String rawLine = content.substring(lineStart, lineEnd);
+        int lead = rawLine.length() - rawLine.stripLeading().length();
+        String lineText = rawLine.strip();
+        int hlInLine = fileOffset - lineStart - lead;
+        String path = stripModuleKindSuffix(canonicalizeMdPath(modulePathFromFile(file)));
+        MatchRow row = new MatchRow(path != null && !path.isEmpty() ? path : file.getName(), "", line, //$NON-NLS-1$
+            new StyledString(lineText), file, null, moduleKindSegment(null, file), null, null, -1);
+        row.directOffset = fileOffset;
+        row.directLength = Math.max(hlLength, 0);
+        row.syntaxKind = BslOccurrenceContextResolver.syntaxKind(content, fileOffset, hlLength);
+        if (hlLength > 0 && hlInLine >= 0 && hlInLine + hlLength <= lineText.length())
+        {
+            row.directHlStart = hlInLine;
+            row.directHlLen = hlLength;
+        }
+        return row;
+    }
+
+    /**
+     * «Тип родителя» через приложение ИР для вхождений, которым модель типа не дала (строковые
+     * литералы, параметры с типом только в doc-комментарии и т.п.).
+     *
+     * <p>Логика — <b>та же самая</b>, что в мастере рефакторинга: очередь ведёт общий движок
+     * {@link OccurrenceContextResolveJob} ({@link OccurrenceContextResolveJob#startIrPassOnly}).
+     * Видимые строки считаются первыми, остальные ждут прокрутки, недоступный ИР строку не теряет.
+     * Своей очереди и своих флажков «уже пробовали» здесь нет — именно они и приводили к тому, что
+     * строка, попавшая в проход до подключения ИР, оставалась без типа навсегда.
+     */
+    private static void scheduleVisibleLiteralIrTypes(TableViewer matchViewer)
+    {
+        if (searchQueryRunning || cachedSought == null)
+            return;
+        Table table = matchViewer.getTable();
+        if (table == null || table.isDisposed())
+            return;
+        List<MatchRow> pending = new ArrayList<>();
+        for (Object element : matchRowsOf(matchViewer))
+        {
+            // ИР зовём для ЛЮБОЙ строки, у которой модель не дала тип родителя (пусто/«?») и
+            // «Подходит» ещё не «Да» — не только для литералов. Так закрываются обращения по коду с
+            // параметром, типизированным doc-комментарием, и т.п.
+            if (element instanceof MatchRow row && row.needsContext() && row.contextOffset >= 0
+                && (row.parentType == null || row.parentType.isEmpty())
+                && !BslOccurrenceContextResolver.isSuitableYes(row.suitable))
+                pending.add(row);
+        }
+        Global.tempLog("fulltext-refs", "IR: кандидатов " + pending.size()); //$NON-NLS-1$ //$NON-NLS-2$
+        if (pending.isEmpty())
+            return;
+        matchIrEngine(matchViewer).startIrPassOnly(pending);
+    }
+
+    /** Строки таблицы результатов (её вход — список {@link MatchRow}). */
+    private static List<?> matchRowsOf(TableViewer matchViewer)
+    {
+        return matchViewer.getInput() instanceof List<?> list ? list : List.of();
+    }
+
+    /**
+     * Движок прохода ИР для таблицы результатов — общий с мастером рефакторинга. Быстрый проход и
+     * «Тип родителя» по модели у панели свои, поэтому движку отдаётся только проход ИР.
+     */
+    private static OccurrenceContextResolveJob matchIrEngine(TableViewer matchViewer)
+    {
+        Table table = matchViewer.getTable();
+        if (matchIrEngine != null && matchIrEngineTable == table && !table.isDisposed())
+            return matchIrEngine;
+        OccurrenceContextResolveJob engine =
+            new OccurrenceContextResolveJob(table, matchViewer, null, "", Integer.MAX_VALUE, null); //$NON-NLS-1$
+        engine.setIrParentTypeResolver(BslOccurrenceContextResolver::parentTypeViaIr);
+        engine.setRowsPublishedCallback(batch -> updateMatchSuitableOnly());
+        engine.trackViewportScrolling();
+        matchIrEngine = engine;
+        matchIrEngineTable = table;
+        return engine;
     }
 
     private static void scheduleMatchContextResolution(TableViewer matchViewer, List<MatchRow> rows)
@@ -1585,27 +2463,47 @@ public final class ConfigSearchResultsHook implements IStartup
             {
                 int done = 0;
                 runOnUi(() -> updateMatchParentTypeProgress(0, total));
-                for (IFile file : ordered)
+                Global.tempLog("parent-type", "контекст: старт gen=" + generation + " строк=" + total); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                try
                 {
-                    if (monitor.isCanceled() || !isCurrentContextResolveGeneration(generation))
-                        return Status.CANCEL_STATUS;
-                    List<MatchRow> fileRows = byFile.get(file);
-                    if (fileRows == null || fileRows.isEmpty())
-                        continue;
-                    String content = BslModuleMethodResolver.moduleText(file);
-                    List<MatchRow> updated = new ArrayList<>();
-                    for (MatchRow row : fileRows)
+                    for (IFile file : ordered)
                     {
                         if (monitor.isCanceled() || !isCurrentContextResolveGeneration(generation))
                             return Status.CANCEL_STATUS;
-                        resolveMatchContextRow(row, content);
-                        updated.add(row);
-                        done++;
+                        List<MatchRow> fileRows = byFile.get(file);
+                        if (fileRows == null || fileRows.isEmpty())
+                            continue;
+                        String content = BslModuleMethodResolver.moduleText(file);
+                        List<MatchRow> updated = new ArrayList<>();
+                        for (MatchRow row : fileRows)
+                        {
+                            if (monitor.isCanceled() || !isCurrentContextResolveGeneration(generation))
+                                return Status.CANCEL_STATUS;
+                            resolveMatchContextRow(row, content);
+                            updated.add(row);
+                            done++;
+                            // Счётчик в заголовке колонки — по строкам, а не по модулям: в одном
+                            // модуле вхождений бывает десятки, и «0/28» висело до конца прохода.
+                            int doneNow = done;
+                            if (doneNow % PARENT_TYPE_PROGRESS_STEP == 0)
+                                runOnUi(() -> updateMatchParentTypeProgress(doneNow, total));
+                        }
+                        int doneNow = done;
+                        runOnUi(() -> applyMatchContextBatch(matchViewer, updated, doneNow, total, generation));
                     }
-                    int doneNow = done;
-                    runOnUi(() -> applyMatchContextBatch(matchViewer, updated, doneNow, total, generation));
+                    return Status.OK_STATUS;
                 }
-                return Status.OK_STATUS;
+                finally
+                {
+                    int doneNow = done;
+                    Global.tempLog("parent-type", "контекст: конец gen=" + generation //$NON-NLS-1$ //$NON-NLS-2$
+                        + " done=" + doneNow + "/" + total //$NON-NLS-1$ //$NON-NLS-2$
+                        + " актуален=" + isCurrentContextResolveGeneration(generation)); //$NON-NLS-1$
+                    // Проход завершился (или его прервали) — счётчик в заголовке не оставляем висеть.
+                    // Если проход вытеснен новым, заголовком распоряжается уже он.
+                    if (isCurrentContextResolveGeneration(generation))
+                        runOnUi(() -> updateMatchParentTypeProgress(total, total));
+                }
             }
         };
         job.setSystem(true);
@@ -1615,8 +2513,10 @@ public final class ConfigSearchResultsHook implements IStartup
 
     private static void resolveMatchContextRow(MatchRow row, String content)
     {
-        int[] region = BslOccurrenceContextResolver.referenceNodeRegion(row.file, row.sourceUri,
-            row.sourceReference, row.sourceIndexInList);
+        int[] region = row.directOffset >= 0
+            ? new int[] {row.directOffset, row.directLength}
+            : BslOccurrenceContextResolver.referenceNodeRegion(row.file, row.sourceUri,
+                row.sourceReference, row.sourceIndexInList);
         if (region == null || content == null)
         {
             row.parent = ""; //$NON-NLS-1$
@@ -1627,6 +2527,8 @@ public final class ConfigSearchResultsHook implements IStartup
         }
         int offset = region[0];
         int length = region[1];
+        row.contextOffset = offset;
+        row.contextLength = length;
         row.parent = BslOccurrenceContextResolver.parentText(content, offset);
         row.syntaxKind = BslOccurrenceContextResolver.syntaxKind(content, offset, length);
         String snippet = offset >= 0 && offset < content.length()
@@ -1670,6 +2572,9 @@ public final class ConfigSearchResultsHook implements IStartup
             return;
         matchViewer.update(updated.toArray(), null);
         updateMatchParentTypeProgress(done, total);
+        updateMatchSuitableOnly();
+        // Литеральные вхождения в поле зрения: «Тип родителя» — у подключённого ИР.
+        scheduleVisibleLiteralIrTypes(matchViewer);
         // Строки создаются в порядке элементов EDT, а сортировка по «Свойству»/строке становится
         // осмысленной только когда фон дозаполнил метод/строку/тип — переупорядочиваем целиком по
         // завершении прохода (update(...,null) сам строки не переставляет).
@@ -1713,6 +2618,13 @@ public final class ConfigSearchResultsHook implements IStartup
             IStructuredSelection selection = matchViewer.getStructuredSelection();
             if (selection.isEmpty())
                 return;
+            // Синтетическая (полнотекстовая) строка штатного tableItem не имеет — открываем сами.
+            if (selection.size() == 1 && selection.getFirstElement() instanceof MatchRow synthetic
+                && synthetic.tableItem == null && synthetic.directOffset >= 0 && synthetic.file != null)
+            {
+                openSyntheticMatch(synthetic, workbenchPage);
+                return;
+            }
             List<Object> tableItems = new ArrayList<>();
             for (Object element : selection.toList())
                 if (element instanceof MatchRow row && row.tableItem != null)
@@ -1750,6 +2662,44 @@ public final class ConfigSearchResultsHook implements IStartup
             if (event.keyCode == SWT.CR || event.keyCode == SWT.KEYPAD_CR)
                 openSelected.run();
         });
+    }
+
+    /**
+     * Открывает файл синтетической (полнотекстовой) строки и выделяет в нём само вхождение.
+     * Смещение {@link MatchRow#directOffset} — от начала файла модуля, ровно того текста, по
+     * которому вхождение и нашлось, поэтому годится для {@code selectAndReveal} без пересчёта.
+     *
+     * <p>Xtext-редактор после открытия ещё догоняет разбор и успевает сбросить выделение —
+     * поэтому выделяем повторно с задержкой.
+     */
+    private static void openSyntheticMatch(MatchRow row, IWorkbenchPage page)
+    {
+        if (page == null)
+            return;
+        try
+        {
+            IEditorPart editor = org.eclipse.ui.ide.IDE.openEditor(page, row.file, true);
+            if (editor == null)
+                return;
+            Global.markNavigationLocation(editor);
+            revealSyntheticMatch(editor, row.directOffset, row.directLength, 0);
+        }
+        catch (Exception e)
+        {
+            log("openSyntheticMatch: " + e); //$NON-NLS-1$
+        }
+    }
+
+    private static void revealSyntheticMatch(IEditorPart editor, int offset, int length, int attempt)
+    {
+        ITextEditor textEditor = editor instanceof ITextEditor te ? te : editor.getAdapter(ITextEditor.class);
+        if (textEditor == null || editor.getSite() == null || editor.getSite().getShell() == null
+            || editor.getSite().getShell().isDisposed())
+            return;
+        textEditor.selectAndReveal(offset, Math.max(length, 0));
+        if (attempt < 2)
+            editor.getSite().getShell().getDisplay().timerExec(attempt == 0 ? 120 : 400,
+                () -> revealSyntheticMatch(editor, offset, length, attempt + 1));
     }
 
     /**
@@ -4458,6 +5408,52 @@ public final class ConfigSearchResultsHook implements IStartup
         return first.getData();
     }
 
+    /**
+     * Плагин оставляет у панели результатов поиска только иерархический (древовидный) вид. Плоский
+     * режим («список») не даёт правой таблицы вхождений и прочих доработок, пользы не несёт —
+     * по решению пользователя 06.09.2026. Здесь: (1) если панель осталась в плоском режиме,
+     * возвращаем её в древовидный ({@code ConfigurationSearchViewPage.setLayout(true)}); (2) убираем
+     * из выпадающего меню панели пункты «Показать как список» / «Показать в виде дерева»
+     * ({@code SearchViewMenuManager$SetLayoutAction}, группа {@code group.viewerSetup}). В контекстное
+     * меню и тулбар эти пункты штатно не попадают.
+     */
+    private static void suppressLayoutToggle(IViewPart view, Object activePage)
+    {
+        try
+        {
+            if (Boolean.FALSE.equals(Global.invoke(activePage, "getLayout"))) //$NON-NLS-1$
+                Global.invoke(activePage, "setLayout", Boolean.TRUE); //$NON-NLS-1$
+        }
+        catch (Exception e)
+        {
+            log("suppressLayoutToggle: setLayout: " + e); //$NON-NLS-1$
+        }
+        try
+        {
+            var site = view.getViewSite();
+            var bars = site != null ? site.getActionBars() : null;
+            var menu = bars != null ? bars.getMenuManager() : null;
+            if (menu == null)
+                return;
+            boolean removed = false;
+            for (var item : menu.getItems())
+            {
+                if (item instanceof ActionContributionItem aci && aci.getAction() != null
+                    && aci.getAction().getClass().getName().endsWith("$SetLayoutAction")) //$NON-NLS-1$
+                {
+                    menu.remove(item);
+                    removed = true;
+                }
+            }
+            if (removed)
+                menu.update(true);
+        }
+        catch (Exception e)
+        {
+            log("suppressLayoutToggle: menu: " + e); //$NON-NLS-1$
+        }
+    }
+
     private static boolean tryPatch(IViewPart view)
     {
         try
@@ -4472,6 +5468,8 @@ public final class ConfigSearchResultsHook implements IStartup
             }
             if (!activePage.getClass().getName().contains(PAGE_CLASS_MARKER))
                 return true; // другой вид страницы результатов (не конфигурационный поиск) — не наш случай
+
+            suppressLayoutToggle(view, activePage);
 
             Object treeLayout = Global.getField(activePage, "treeLayout"); //$NON-NLS-1$
             if (treeLayout == null)
@@ -6420,24 +7418,63 @@ public final class ConfigSearchResultsHook implements IStartup
 
     private static boolean isMatchTreeItem(Object element)
     {
-        return element != null && element.getClass().getName().contains("MatchTreeItem"); //$NON-NLS-1$
+        if (element == null
+            || !element.getClass().getName().startsWith("com._1c.g5.v8.dt.internal.search.ui")) //$NON-NLS-1$
+            return false;
+        // Любой узел дерева поиска, у которого есть дети или свои вхождения — в т.ч. корень проекта
+        // и групповые узлы («Общие», …), которым штатно счётчик не дописывается.
+        return Global.invoke(element, "getChildren") instanceof List //$NON-NLS-1$
+            || Global.invoke(element, "getTableItems") instanceof List; //$NON-NLS-1$
     }
 
     private static long countMatchItemsRecursively(Object node)
+    {
+        return countMatchItemsRecursively(node, new java.util.HashSet<>());
+    }
+
+    /**
+     * @param countedFiles файлы, чьи синтетические полнотекстовые вхождения уже учтены в текущем
+     *     обходе — чтобы один файл не сосчитался дважды в разных ветках
+     */
+    private static long countMatchItemsRecursively(Object node, java.util.Set<String> countedFiles)
     {
         if (node == null)
             return 0;
         long count = 0;
         Object ownItems = Global.invoke(node, "getTableItems"); //$NON-NLS-1$
         if (ownItems instanceof List<?> list)
+        {
             count += list.size();
+            Map<String, Long> synthetic = syntheticCountByFilePath;
+            if (synthetic != null && !synthetic.isEmpty())
+            {
+                for (Object item : list)
+                {
+                    IFile file = matchItemFile(item);
+                    if (file == null)
+                        continue;
+                    String key = file.getFullPath().toString();
+                    if (countedFiles.add(key))
+                        count += synthetic.getOrDefault(key, 0L);
+                }
+            }
+        }
         Object children = Global.invoke(node, "getChildren"); //$NON-NLS-1$
         if (children instanceof List<?> childList)
         {
             for (Object child : childList)
-                count += countMatchItemsRecursively(child);
+                count += countMatchItemsRecursively(child, countedFiles);
         }
         return count;
+    }
+
+    /** Файл вхождения элемента таблицы дерева поиска (для учёта синтетических полнотекстовых строк). */
+    private static IFile matchItemFile(Object matchItem)
+    {
+        Object data = Global.invoke(matchItem, "getData"); //$NON-NLS-1$
+        if (data instanceof TextSearchFileMatch fm)
+            return fm.getFile();
+        return bslReferenceMatchFile(data);
     }
 
     private static long parseMatchCountFromLabel(String label)

@@ -82,6 +82,17 @@ final class OccurrenceContextResolveJob
         /** Применить «Тип родителя» ({@code ""} — вычислить не удалось). Фоновый поток. */
         void applyParentType(String parentType);
 
+        /**
+         * Применить «Тип родителя», вычисленный приложением ИР для вхождения в строковом литерале
+         * ({@code null} — ИР недоступен/ошибка, оставить как есть). Фоновый поток. По умолчанию —
+         * как обычный {@link #applyParentType}.
+         */
+        default void applyIrParentType(String parentType)
+        {
+            if (parentType != null)
+                applyParentType(parentType);
+        }
+
         /** Текст строки кода вхождения (из {@link FastContext#lineText}) — для колонки «Текст». */
         String occurrenceLineText();
 
@@ -169,6 +180,28 @@ final class OccurrenceContextResolveJob
         }
     }
 
+    /**
+     * Источник «Типа родителя» для вхождений в строковых литералах — приложение ИР (у него точки
+     * перед литералом нет, модель BSL тип не даёт). Реализацию поставляет потребитель: она знает
+     * проект вхождения и подключённую сессию ИР. {@code null} — литералы остаются без типа родителя,
+     * как раньше.
+     *
+     * <p>ИР считает медленно и однопоточно, поэтому этот проход <b>всегда</b> ограничен полем зрения
+     * списка (кнопки «рассчитать всё» для него нет).
+     */
+    interface IrParentTypeResolver
+    {
+        /**
+         * @param file           модуль вхождения
+         * @param content        текст модуля с диска
+         * @param parentEndOffset смещение сразу за выражением-родителем
+         *     ({@link BslOccurrenceContextResolver#parentExpressionEnd})
+         * @return типы через запятую; {@code ""} — ИР ничего не вернул; {@code null} — ИР
+         *     недоступен/ошибка (строку не трогаем)
+         */
+        String resolve(IFile file, String content, int parentEndOffset);
+    }
+
     /** Тема временного лога — снять после подтверждения производительности. */
     private static final String LOG = "occ-context"; //$NON-NLS-1$
     private static final int FAST_BATCH = 150;
@@ -191,6 +224,8 @@ final class OccurrenceContextResolveJob
     private final int typeAutoThreshold;
     /** Вызывается в UI-потоке при изменении числа отложенных строк «Тип родителя» — обновить кнопку. */
     private final Runnable onTypePendingChanged;
+    /** Вызывается в UI-потоке после публикации порции строк тяжёлого/ИР-прохода (батч строк). */
+    private volatile java.util.function.Consumer<java.util.List<Target>> onRowsPublished;
 
     private final Object queueLock = new Object();
     private Deque<Target> fastQueue;
@@ -198,6 +233,14 @@ final class OccurrenceContextResolveJob
     /** Строки «Тип родителя», ждущие явной команды {@link #computeAllTypes()} (режим &gt; порога). */
     private final List<Target> typeDeferred = new ArrayList<>();
     private boolean typeDeferralActive;
+
+    /** Проход «Тип родителя через ИР» — только по видимой области. */
+    private volatile IrParentTypeResolver irResolver;
+    private Deque<Target> irQueue;
+    /** Строки для прохода ИР вне поля зрения — ждут прокрутки к ним (без повторов). */
+    private final LinkedHashSet<Target> irDeferred = new LinkedHashSet<>();
+    private Job irJob;
+    private volatile boolean irJobActive;
 
     private Job fastJob;
     private Job typeJob;
@@ -220,6 +263,36 @@ final class OccurrenceContextResolveJob
         this.parentTypeTitle = parentTypeTitle;
         this.typeAutoThreshold = typeAutoThreshold;
         this.onTypePendingChanged = onTypePendingChanged;
+    }
+
+    /**
+     * Подключить вычисление «Типа родителя» для вхождений в строковых литералах через приложение ИР
+     * (см. {@link IrParentTypeResolver}). Вызывать до {@link #reschedule}. Проход всегда ограничен
+     * полем зрения.
+     */
+    void setIrParentTypeResolver(IrParentTypeResolver resolver)
+    {
+        this.irResolver = resolver;
+    }
+
+    /** Колбэк (UI-поток) после публикации порции строк «Типа родителя»/ИР — напр. включить пометку по «Подходит». */
+    void setRowsPublishedCallback(java.util.function.Consumer<java.util.List<Target>> callback)
+    {
+        this.onRowsPublished = callback;
+    }
+
+    /**
+     * Запустить <b>только</b> проход «Тип родителя через ИР» для готовых строк — для потребителя,
+     * у которого свой быстрый проход ({@link ConfigSearchResultsHook}: панель «Найти ссылки на
+     * объект»). Дальше всё как у рефакторинга: очередь, видимые первыми, остальные ждут прокрутки
+     * ({@link #trackViewportScrolling()}), недоступный ИР строку не «сжигает» — она остаётся в
+     * очереди и посчитается, когда ИР ответит. UI-поток.
+     */
+    void startIrPassOnly(List<? extends Target> targets)
+    {
+        if (irResolver == null || targets == null || targets.isEmpty())
+            return;
+        startIrPass(new ArrayList<>(targets), generation);
     }
 
     /** Сколько строк «Тип родителя» отложено (ждут кнопки «Рассчитать типы»); 0 — режим автопрохода. */
@@ -307,11 +380,16 @@ final class OccurrenceContextResolveJob
             typeQueue = null;
             typeDeferred.clear();
             typeDeferralActive = false;
+            irQueue = null;
+            irDeferred.clear();
         }
         cancelJob(fastJob);
         cancelJob(typeJob);
+        cancelJob(irJob);
         fastJob = null;
         typeJob = null;
+        irJob = null;
+        irJobActive = false;
         typeJobActive = false;
         typeStopped = false;
         typeEnqueuedTotal = 0;
@@ -348,10 +426,29 @@ final class OccurrenceContextResolveJob
             return;
         long gen = generation;
         boolean pulled = false;
+        boolean irPulled = false;
         synchronized (queueLock)
         {
             moveToFront(fastQueue, visible);
             moveToFront(typeQueue, visible);
+            moveToFront(irQueue, visible);
+            // Литеральные строки прохода ИР: докрутил — посчиталось (кнопки «рассчитать всё» нет).
+            if (!irDeferred.isEmpty())
+            {
+                Set<Target> vis = new HashSet<>(visible);
+                List<Target> now = new ArrayList<>();
+                for (Target target : irDeferred)
+                {
+                    if (vis.contains(target))
+                        now.add(target);
+                }
+                if (!now.isEmpty())
+                {
+                    irDeferred.removeAll(now);
+                    enqueueIr(groupByFile(now));
+                    irPulled = true;
+                }
+            }
             // Видимые строки «Тип родителя» досчитываем автоматически (докрутил — посчиталось), но
             // НЕ после явной остановки пользователем: тогда только по кнопке.
             if (typeDeferralActive && !typeStopped && !typeDeferred.isEmpty())
@@ -377,6 +474,8 @@ final class OccurrenceContextResolveJob
             fireTypePendingChanged();
             maybeStartTypeJob(gen);
         }
+        if (irPulled)
+            maybeStartIrJob(gen);
     }
 
     private static void moveToFront(Deque<Target> queue, List<Target> visible)
@@ -408,6 +507,8 @@ final class OccurrenceContextResolveJob
         Map<IFile, String> texts = new IdentityHashMap<>();
         List<Target> batch = new ArrayList<>();
         List<Target> forType = new ArrayList<>();
+        List<Target> forIr = new ArrayList<>();
+        IrParentTypeResolver ir = irResolver;
         int done = 0;
         while (true)
         {
@@ -434,8 +535,12 @@ final class OccurrenceContextResolveJob
                     + (file != null ? file.getName() : "?")); //$NON-NLS-1$
             if (fc.wantsParentType)
                 forType.add(target);
+            else if (ir != null && BslOccurrenceContextResolver.KIND_LITERAL.equals(fc.syntaxKind)
+                && fc.offset >= 0 && texts.get(file) != null
+                && BslOccurrenceContextResolver.parentExpressionEnd(texts.get(file), fc.offset) >= 0)
+                forIr.add(target); // литерал с выражением-родителем: тип спросим у ИР (видимые строки)
             else
-                target.applyParentType(""); // комментарий/литерал/неразбор: типа родителя нет //$NON-NLS-1$
+                target.applyParentType(""); // комментарий/литерал без родителя/неразбор: типа нет //$NON-NLS-1$
             batch.add(target);
             done++;
             if (batch.size() >= FAST_BATCH || fastQueueEmpty())
@@ -447,7 +552,10 @@ final class OccurrenceContextResolveJob
         Global.tempLog(LOG, "fast done: " + done + "/" + total + " за " //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             + (System.currentTimeMillis() - startedAt) + " ms; тип нужен " + forType.size()); //$NON-NLS-1$
         if (gen == generation && !monitor.isCanceled())
+        {
             startTypePass(forType, gen);
+            startIrPass(forIr, gen);
+        }
         return Status.OK_STATUS;
     }
 
@@ -587,6 +695,7 @@ final class OccurrenceContextResolveJob
         }
         Map<IFile, String> texts = new IdentityHashMap<>();
         List<Target> batch = new ArrayList<>();
+        List<Target> irAfterType = new ArrayList<>();
         int processed = 0;
         boolean userStopped = false;
         try
@@ -622,6 +731,10 @@ final class OccurrenceContextResolveJob
                     Global.tempLog(LOG, "slow type " + spent + " ms: " //$NON-NLS-1$ //$NON-NLS-2$
                         + (file != null ? file.getName() : "?")); //$NON-NLS-1$
                 target.applyParentType(type);
+                // Модель типа не дала — спрашиваем ИР (он знает типы из doc-комментариев и т.п.).
+                // Раньше к ИР уходили только литералы, и обращение по коду оставалось с «?».
+                if ((type == null || type.isEmpty()) && irResolver != null)
+                    irAfterType.add(target);
                 batch.add(target);
                 typeDone.incrementAndGet();
                 monitor.worked(1);
@@ -633,7 +746,10 @@ final class OccurrenceContextResolveJob
                 }
             }
             Global.tempLog(LOG, "type done: " + processed + "/" + total + " за " //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + (System.currentTimeMillis() - startedAt) + " ms"); //$NON-NLS-1$
+                + (System.currentTimeMillis() - startedAt) + " ms; без типа → в ИР " //$NON-NLS-1$
+                + irAfterType.size());
+            if (!irAfterType.isEmpty() && gen == generation)
+                startIrPass(irAfterType, gen);
             return Status.OK_STATUS;
         }
         finally
@@ -676,7 +792,164 @@ final class OccurrenceContextResolveJob
                 return;
             viewer.update(batch.toArray(), CELL_UPDATE);
             updateProgress();
+            java.util.function.Consumer<java.util.List<Target>> cb = onRowsPublished;
+            if (cb != null)
+                cb.accept(batch);
         });
+    }
+
+    // ---- Проход «Тип родителя через ИР» (только видимая область) ----
+
+    private void startIrPass(List<Target> forIr, long gen)
+    {
+        if (forIr.isEmpty() || irResolver == null)
+            return;
+        Global.tempLog(LOG, "ir pass: литеральных кандидатов " + forIr.size()); //$NON-NLS-1$
+        runOnUi(() ->
+        {
+            if (gen != generation || table.isDisposed())
+                return;
+            Set<Target> visible = new HashSet<>(visibleTargets());
+            synchronized (queueLock)
+            {
+                List<Target> now = new ArrayList<>();
+                for (Target target : forIr)
+                {
+                    if (visible.contains(target))
+                        now.add(target);
+                    else
+                        irDeferred.add(target);
+                }
+                enqueueIr(groupByFile(now));
+            }
+            maybeStartIrJob(gen);
+        });
+    }
+
+    /** Только под {@link #queueLock}. */
+    private void enqueueIr(Collection<Target> targets)
+    {
+        if (targets.isEmpty())
+            return;
+        if (irQueue == null)
+            irQueue = new ArrayDeque<>();
+        // Проход могут запустить повторно (панель поиска дозаполняет строки порциями) — одну и ту же
+        // строку в очередь дважды не ставим: ИР медленный.
+        Set<Target> already = new HashSet<>(irQueue);
+        for (Target target : targets)
+        {
+            if (already.add(target))
+                irQueue.add(target);
+        }
+    }
+
+    private void maybeStartIrJob(long gen)
+    {
+        if (irJobActive || gen != generation || irResolver == null)
+            return;
+        synchronized (queueLock)
+        {
+            if (irQueue == null || irQueue.isEmpty())
+                return;
+        }
+        irJobActive = true;
+        Job created = new Job("Комфорт: тип родителя вхождений в литералах (ИР)") //$NON-NLS-1$
+        {
+            @Override
+            protected IStatus run(IProgressMonitor monitor)
+            {
+                return runIr(gen, monitor);
+            }
+        };
+        created.setSystem(true);
+        created.setPriority(Job.DECORATE);
+        irJob = created;
+        created.schedule();
+    }
+
+    private IStatus runIr(long gen, IProgressMonitor monitor)
+    {
+        long startedAt = System.currentTimeMillis();
+        IrParentTypeResolver ir = irResolver;
+        Map<IFile, String> texts = new IdentityHashMap<>();
+        List<Target> batch = new ArrayList<>();
+        int done = 0;
+        try
+        {
+            while (ir != null)
+            {
+                if (monitor.isCanceled() || gen != generation)
+                    return Status.CANCEL_STATUS;
+                Target target;
+                synchronized (queueLock)
+                {
+                    target = irQueue != null ? irQueue.pollFirst() : null;
+                }
+                if (target == null)
+                    break;
+                IFile file = target.file();
+                if (!texts.containsKey(file))
+                    texts.put(file, BslModuleMethodResolver.moduleText(file));
+                String content = texts.get(file);
+                int[] region = target.resolvedRegion();
+                String types = null;
+                boolean asked = false;
+                if (content != null && region != null)
+                {
+                    int parentEnd = BslOccurrenceContextResolver.parentExpressionEnd(content, region[0]);
+                    if (parentEnd >= 0)
+                    {
+                        asked = true;
+                        long t0 = System.currentTimeMillis();
+                        types = ir.resolve(file, content, parentEnd);
+                        long spent = System.currentTimeMillis() - t0;
+                        if (spent > 800)
+                            Global.tempLog(LOG, "slow ir type " + spent + " ms: " //$NON-NLS-1$ //$NON-NLS-2$
+                                + (file != null ? file.getName() : "?")); //$NON-NLS-1$
+                    }
+                }
+                if (asked && types == null)
+                {
+                    // ИР не подключён / сбой вызова: строку НЕ засчитываем — иначе она навсегда
+                    // останется без типа. Возвращаем в отложенные: посчитается, когда ИР ответит
+                    // (прокрутка к ней или следующий запуск прохода).
+                    synchronized (queueLock)
+                    {
+                        irDeferred.add(target);
+                    }
+                    continue;
+                }
+                // Не спрашивали (нет родителя-выражения) — гасим «?» в «Типе родителя», оценку
+                // «Подходит» по цепочке «Родитель» из applyFast не трогаем.
+                target.applyIrParentType(types != null ? types : ""); //$NON-NLS-1$
+                batch.add(target);
+                done++;
+                if (batch.size() >= TYPE_BATCH || irQueueEmpty())
+                {
+                    publishType(new ArrayList<>(batch), gen);
+                    batch.clear();
+                }
+            }
+            Global.tempLog(LOG, "ir done: " + done + " за " //$NON-NLS-1$ //$NON-NLS-2$
+                + (System.currentTimeMillis() - startedAt) + " ms"); //$NON-NLS-1$
+            return Status.OK_STATUS;
+        }
+        finally
+        {
+            irJobActive = false;
+            if (!batch.isEmpty())
+                publishType(new ArrayList<>(batch), gen);
+            if (gen == generation && !irQueueEmpty())
+                runOnUi(() -> maybeStartIrJob(gen));
+        }
+    }
+
+    private boolean irQueueEmpty()
+    {
+        synchronized (queueLock)
+        {
+            return irQueue == null || irQueue.isEmpty();
+        }
     }
 
     private void fireTypePendingChanged()

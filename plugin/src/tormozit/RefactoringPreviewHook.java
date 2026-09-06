@@ -48,6 +48,7 @@ import org.eclipse.ltk.core.refactoring.TextFileChange;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.custom.ViewForm;
+import org.eclipse.swt.graphics.Color;
 import org.eclipse.swt.graphics.GC;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.ImageData;
@@ -304,6 +305,26 @@ public final class RefactoringPreviewHook
                 suitable = BslOccurrenceContextResolver.suitabilityByType(sought, type);
         }
 
+        /**
+         * Литерал с выражением-родителем: тип посчитал ИР. Его ответ важнее предварительной оценки
+         * по текстовой цепочке «Родитель» из {@link #applyFast}. {@code null} — ИР недоступен/ошибка,
+         * оставляем как есть.
+         */
+        @Override
+        public void applyIrParentType(String type)
+        {
+            if (type == null)
+                return;
+            parentType = type;
+            if (sought != null && fullText && !type.isBlank())
+            {
+                String verdict = BslOccurrenceContextResolver.suitabilityByType(sought, type);
+                if (verdict != null && !verdict.isBlank()
+                    && !BslOccurrenceContextResolver.SUITABLE_UNKNOWN.equals(verdict))
+                    suitable = verdict;
+            }
+        }
+
         @Override public String occurrenceLineText() { return lineText; }
         @Override public int occurrenceHighlightStart() { return highlightStart; }
         @Override public int occurrenceHighlightLength() { return highlightLength; }
@@ -315,13 +336,16 @@ public final class RefactoringPreviewHook
         private static final String SETTINGS_SECTION = "tormozit.refactoringPreviewTable"; //$NON-NLS-1$
         private static final String TOGGLE_ID = SETTINGS_SECTION + ".toggle"; //$NON-NLS-1$
         private static final String MARKED_ONLY_ID = SETTINGS_SECTION + ".markedOnly"; //$NON-NLS-1$
-        private static final String KEY_COL_ORDER = "columnOrder"; //$NON-NLS-1$
+        private static final String SUITABLE_ONLY_ID = SETTINGS_SECTION + ".suitableOnly"; //$NON-NLS-1$
+        // Порядок колонок сменился (Подходит теперь сразу за «Тип родителя») — старый сохранённый
+        // порядок ссылается на прежние индексы, поэтому ключ новый.
+        private static final String KEY_COL_ORDER = "columnOrder2"; //$NON-NLS-1$
         /** Ширины на момент закрытия были чистым авто-заполнением, а не ручной подгонкой. */
         private static final String KEY_COLUMNS_FILL = "columnsFill"; //$NON-NLS-1$
         private static final String[] WIDTH_KEYS = {"markWidth", "changeWidth", "fileWidth", "fileTypeWidth", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-            "moduleWidth", "methodWidth", "parentWidth", "parentTypeWidth", "syntaxWidth", "textWidth", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
-            "suitableWidth"}; //$NON-NLS-1$
-        private static final int[] DEFAULT_WIDTHS = {74, 320, 200, 90, 260, 180, 180, 220, 90, 320, 80};
+            "moduleWidth", "methodWidth", "parentWidth", "parentTypeWidth", "suitableWidth", "syntaxWidth", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
+            "textWidth"}; //$NON-NLS-1$
+        private static final int[] DEFAULT_WIDTHS = {74, 320, 200, 90, 260, 180, 180, 220, 80, 90, 320};
         private static final int MIN_COLUMN_WIDTH = 40;
 
         /**
@@ -364,6 +388,10 @@ public final class RefactoringPreviewHook
         private IAction toggleAction;
         private IAction markedOnlyAction;
         private ActionContributionItem markedOnlyItem;
+        private IAction suitableOnlyAction;
+        private ActionContributionItem suitableOnlyItem;
+        /** Отбор «Только подходящие» — отдельный {@link ViewerFilter}, чтобы «Подходит=?» не скрывались. */
+        private ViewerFilter suitableOnlyFilter;
         private ToolBarManager toolBarManager;
         private boolean tableMode;
         private boolean syncing;
@@ -478,6 +506,12 @@ public final class RefactoringPreviewHook
                         return null;
                     return treeLabels.getImage(row.node);
                 }
+
+                @Override
+                public Color getForeground(Object element)
+                {
+                    return isSuitableRow(element) ? suitableTextColor() : null;
+                }
             });
             applyWidth(columnLayout, changeColumn.getColumn(), settings, 1);
 
@@ -487,14 +521,14 @@ public final class RefactoringPreviewHook
             addTextColumn(columnLayout, settings, 5, "Метод", row -> row.method); //$NON-NLS-1$
             TableColumn parentColumn = addTextColumn(columnLayout, settings, 6,
                 BslOccurrenceContextResolver.COL_PARENT, row -> row.parent);
-            parentTypeColumn = addTextColumn(columnLayout, settings, 7, PARENT_TYPE_TITLE,
+            parentTypeColumn = addColoredTextColumn(columnLayout, settings, 7, PARENT_TYPE_TITLE,
                 row -> row.parentType != null ? row.parentType : UNKNOWN_TYPE);
-            TableColumn syntaxColumn = addTextColumn(columnLayout, settings, 8,
+            suitableColumn = addColoredTextColumn(columnLayout, settings, 8,
+                BslOccurrenceContextResolver.COL_SUITABLE, PreviewTablePane::suitableCell);
+            TableColumn syntaxColumn = addTextColumn(columnLayout, settings, 9,
                 BslOccurrenceContextResolver.COL_SYNTAX_KIND, row -> row.syntaxKind);
             TableColumn occurrenceTextColumn = OccurrenceContextResolveJob.addTextColumn(viewer).getColumn();
-            applyWidth(columnLayout, occurrenceTextColumn, settings, 9);
-            suitableColumn = addTextColumn(columnLayout, settings, 10, BslOccurrenceContextResolver.COL_SUITABLE,
-                PreviewTablePane::suitableCell);
+            applyWidth(columnLayout, occurrenceTextColumn, settings, 10);
 
             viewer.setContentProvider(ArrayContentProvider.getInstance());
             viewer.setCheckStateProvider(new ICheckStateProvider()
@@ -530,11 +564,16 @@ public final class RefactoringPreviewHook
                 BslOccurrenceContextResolver.TIP_SUITABLE + Global.pluginSignForTooltip());
             // «Подходит» имеет смысл только при известном искомом объекте (заголовок мастера).
             if (sought == null)
-                interaction.setColumnHidden(suitableColumn, true, DEFAULT_WIDTHS[10]);
+                interaction.setColumnHidden(suitableColumn, true, DEFAULT_WIDTHS[8]);
             // Порог MAX_VALUE — окно рефакторинга модальное, кнопки «Рассчитать типы» тут нет:
             // «Тип родителя» всегда считается автоматически системным проходом, как и раньше.
             contextResolver = new OccurrenceContextResolveJob(table, viewer, parentTypeColumn,
                 PARENT_TYPE_TITLE, Integer.MAX_VALUE, null);
+            // Литеральные вхождения: «Тип родителя» модель BSL не даёт (точки перед литералом нет) —
+            // спрашиваем подключённое приложение ИР, но только для строк в поле зрения (ИР медленный
+            // и однопоточный).
+            contextResolver.setIrParentTypeResolver(BslOccurrenceContextResolver::parentTypeViaIr);
+            contextResolver.setRowsPublishedCallback(this::enableMarksBySuitability);
             contextResolver.trackViewportScrolling();
             installMarkMenu();
         }
@@ -557,6 +596,48 @@ public final class RefactoringPreviewHook
             });
             applyWidth(columnLayout, column.getColumn(), settings, index);
             return column.getColumn();
+        }
+
+        /**
+         * Текстовая колонка, в которой значение «подходящего» вхождения красится тёмно-зелёным текстом
+         * (та же оценка, что в колонке «Подходит»): «Тип родителя» и сама «Подходит».
+         */
+        private TableColumn addColoredTextColumn(TableColumnLayout columnLayout, IDialogSettings settings,
+            int index, String title, java.util.function.Function<PreviewRow, String> text)
+        {
+            TableViewerColumn column = new TableViewerColumn(viewer, SWT.NONE);
+            column.getColumn().setText(title);
+            column.setLabelProvider(new ColumnLabelProvider()
+            {
+                @Override
+                public String getText(Object element)
+                {
+                    if (!(element instanceof PreviewRow row))
+                        return ""; //$NON-NLS-1$
+                    String value = text.apply(row);
+                    return value != null ? value : ""; //$NON-NLS-1$
+                }
+
+                @Override
+                public Color getForeground(Object element)
+                {
+                    return isSuitableRow(element) ? suitableTextColor() : null;
+                }
+            });
+            applyWidth(columnLayout, column.getColumn(), settings, index);
+            return column.getColumn();
+        }
+
+        private static boolean isSuitableRow(Object element)
+        {
+            return element instanceof PreviewRow row
+                && BslOccurrenceContextResolver.isSuitableYes(row.suitable);
+        }
+
+        /** Тёмно-зелёный цвет текста «подходящих» ячеек — общий с панелью результатов «Найти ссылки». */
+        private Color suitableTextColor()
+        {
+            return BslOccurrenceContextResolver.suitableTextColor(table.getDisplay());
         }
 
         private static void applyWidth(TableColumnLayout columnLayout, TableColumn column,
@@ -718,6 +799,28 @@ public final class RefactoringPreviewHook
             manager.add(new Separator(MARKED_ONLY_ID + ".sep")); //$NON-NLS-1$
             manager.add(markedOnlyItem);
 
+            // «Только подходящие» — альтернатива «Только помеченных»; появляется, лишь когда искомое
+            // разобрано (иначе колонки «Подходит» нет).
+            if (sought != null)
+            {
+                Action suitableOnly = new Action("Только подходящие (0)", IAction.AS_CHECK_BOX) //$NON-NLS-1$
+                {
+                    @Override
+                    public void run()
+                    {
+                        applySuitableOnlyFilter(isChecked());
+                    }
+                };
+                suitableOnly.setId(SUITABLE_ONLY_ID);
+                suitableOnly.setToolTipText(TooltipText.wrap(pane,
+                    "Скрыть изменения с «Подходит» = «Нет»; строки «?» (тип родителя ещё не вычислен) остаются" //$NON-NLS-1$
+                        + Global.pluginSignForTooltip()));
+                suitableOnlyAction = suitableOnly;
+                suitableOnlyItem = new ActionContributionItem(suitableOnly);
+                suitableOnlyItem.setMode(ActionContributionItem.MODE_FORCE_TEXT);
+                manager.add(suitableOnlyItem);
+            }
+
             manager.update(true);
             watchToolBar(manager);
             updateMarkedOnly();
@@ -770,30 +873,128 @@ public final class RefactoringPreviewHook
             if (interaction == null)
                 return;
             if (markedOnly)
+            {
+                setSuitableOnlyFilterActive(false); // альтернатива «Только подходящих»
                 interaction.applyColumnFilterValue(MARK_COLUMN_INDEX, MARK_YES);
+            }
             else
+            {
                 interaction.clearColumnFilter(MARK_COLUMN_INDEX);
+            }
             updateMarkedOnly();
         }
 
-        /** Обновляет подпись со счётчиком, состояние нажатия и доступность кнопки «Только помеченные». */
+        /**
+         * Кнопка-переключатель «Только подходящие (N)»: скрыть строки с «Подходит» = «Нет».
+         * Строки «Подходит» = «?» (тип родителя ещё не вычислен) НЕ отбрасываются — они могут
+         * стать подходящими. Поэтому это отдельный {@link ViewerFilter}, а не отбор колонки по «Да».
+         */
+        private void applySuitableOnlyFilter(boolean suitableOnly)
+        {
+            if (interaction == null)
+                return;
+            if (suitableOnly)
+                interaction.clearColumnFilter(MARK_COLUMN_INDEX); // альтернатива «Только помеченных»
+            setSuitableOnlyFilterActive(suitableOnly);
+            updateMarkedOnly();
+        }
+
+        private void setSuitableOnlyFilterActive(boolean active)
+        {
+            if (viewer == null || viewer.getControl().isDisposed())
+                return;
+            if (active)
+            {
+                if (suitableOnlyFilter == null)
+                    suitableOnlyFilter = new ViewerFilter()
+                    {
+                        @Override
+                        public boolean select(Viewer v, Object parent, Object element)
+                        {
+                            return !(element instanceof PreviewRow row)
+                                || !BslOccurrenceContextResolver.SUITABLE_NO.equals(suitableCell(row));
+                        }
+                    };
+                if (!isSuitableOnlyFilterActive())
+                    viewer.addFilter(suitableOnlyFilter);
+            }
+            else if (suitableOnlyFilter != null && isSuitableOnlyFilterActive())
+            {
+                viewer.removeFilter(suitableOnlyFilter);
+            }
+        }
+
+        private boolean isSuitableOnlyFilterActive()
+        {
+            if (suitableOnlyFilter == null || viewer == null || viewer.getControl().isDisposed())
+                return false;
+            for (ViewerFilter f : viewer.getFilters())
+                if (f == suitableOnlyFilter)
+                    return true;
+            return false;
+        }
+
+        /** Обновляет подпись со счётчиком, состояние нажатия и доступность кнопок отбора. */
         private void updateMarkedOnly()
         {
-            if (markedOnlyAction == null)
-                return;
-            int marked = 0;
-            for (PreviewRow row : rows)
+            if (markedOnlyAction != null)
             {
-                if (activeState(row.node) != INACTIVE)
-                    marked++;
+                int marked = 0;
+                for (PreviewRow row : rows)
+                {
+                    if (activeState(row.node) != INACTIVE)
+                        marked++;
+                }
+                markedOnlyAction.setText("Только помеченные (" + marked + ")"); //$NON-NLS-1$ //$NON-NLS-2$
+                markedOnlyAction.setEnabled(tableMode);
+                boolean filtered = interaction != null && interaction.isColumnFiltered(MARK_COLUMN_INDEX);
+                if (markedOnlyAction.isChecked() != filtered)
+                    markedOnlyAction.setChecked(filtered);
+                if (markedOnlyItem != null)
+                    markedOnlyItem.update();
             }
-            markedOnlyAction.setText("Только помеченные (" + marked + ")"); //$NON-NLS-1$ //$NON-NLS-2$
-            markedOnlyAction.setEnabled(tableMode);
-            boolean filtered = interaction != null && interaction.isColumnFiltered(MARK_COLUMN_INDEX);
-            if (markedOnlyAction.isChecked() != filtered)
-                markedOnlyAction.setChecked(filtered);
-            if (markedOnlyItem != null)
-                markedOnlyItem.update();
+            if (suitableOnlyAction != null)
+            {
+                int suitable = 0;
+                for (PreviewRow row : rows)
+                {
+                    if (BslOccurrenceContextResolver.isSuitableYes(row.suitable))
+                        suitable++;
+                }
+                suitableOnlyAction.setText("Только подходящие (" + suitable + ")"); //$NON-NLS-1$ //$NON-NLS-2$
+                suitableOnlyAction.setEnabled(tableMode);
+                boolean filtered = isSuitableOnlyFilterActive();
+                if (suitableOnlyAction.isChecked() != filtered)
+                    suitableOnlyAction.setChecked(filtered);
+                if (suitableOnlyItem != null)
+                    suitableOnlyItem.update();
+            }
+        }
+
+        /**
+         * После публикации порции строк фоновым проходом «Тип родителя»/ИР: у полнотекстовых
+         * вхождений, ставших подходящими, включаем пометку (штатная расстановка {@link Marks} шла
+         * по текстовой оценке и не знала про уточнение через ИР/модель).
+         */
+        private void enableMarksBySuitability(java.util.List<OccurrenceContextResolveJob.Target> batch)
+        {
+            if (table.isDisposed())
+                return;
+            List<PreviewRow> toMark = new ArrayList<>();
+            for (OccurrenceContextResolveJob.Target target : batch)
+            {
+                if (target instanceof PreviewRow row && row.fullText
+                    && BslOccurrenceContextResolver.isSuitableYes(row.suitable)
+                    && activeState(row.node) == INACTIVE)
+                    toMark.add(row);
+            }
+            if (!toMark.isEmpty())
+                setChecked(toMark, true);
+            // Под активным отбором «Только подходящие» строки, ставшие «Нет», должны уйти, а «?» —
+            // остаться: viewer.update стили не перефильтровывает, нужен refresh.
+            else if (isSuitableOnlyFilterActive() && !viewer.getControl().isDisposed())
+                viewer.refresh();
+            updateMarkedOnly();
         }
 
         /** Пересобирает строки по тем же правилам, по которым показывает изменения дерево. */
@@ -1143,9 +1344,9 @@ public final class RefactoringPreviewHook
                 case 5 -> row.method;
                 case 6 -> row.parent;
                 case 7 -> row.parentType != null ? row.parentType : UNKNOWN_TYPE;
-                case 8 -> row.syntaxKind;
-                case 9 -> row.lineText;
-                case 10 -> suitableCell(row);
+                case 8 -> suitableCell(row);
+                case 9 -> row.syntaxKind;
+                case 10 -> row.lineText;
                 default -> ""; //$NON-NLS-1$
             };
         }

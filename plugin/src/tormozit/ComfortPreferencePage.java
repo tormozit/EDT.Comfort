@@ -945,11 +945,13 @@ public class ComfortPreferencePage
     private static final String HOME_PAGE_URL = "https://tormozit.github.io/EDT.Comfort"; //$NON-NLS-1$
     private static final String NEW_ISSUE_URL =
         "https://github.com/tormozit/EDT.Comfort/issues/new"; //$NON-NLS-1$
+    private static final String TELEGRAM_CHAT_URL = "https://t.me/EdtComfort"; //$NON-NLS-1$
 
     /**
-     * Ссылки «Клавиши», «Домашняя страница», «Создать заявку» на одной строке.
+     * Ссылки «Клавиши», «Создать заявку», «Телеграм чат», «Домашняя страница»
+     * (каждая со своей иконкой слева) на одной строке.
      *
-     * <p>Родительский {@code parent} — грид на 2 колонки, а виджетов три, поэтому
+     * <p>Родительский {@code parent} — грид на 2 колонки, а виджетов больше, поэтому
      * они кладутся в общий {@link Composite} с {@link RowLayout}, а не как прямые
      * соседи по гриду. Все margin-поля {@link RowLayout} (включая отдельные
      * {@code marginLeft/Top/Right/Bottom}, у которых значение по умолчанию — 3px и
@@ -976,6 +978,14 @@ public class ComfortPreferencePage
         rowLayout.center = true;
         row.setLayout(rowLayout);
 
+        Image keysIcon = loadBundleImage("icons/obj16/keys.png"); //$NON-NLS-1$
+        if (keysIcon != null)
+        {
+            Label keysIconLabel = new Label(row, SWT.NONE);
+            keysIconLabel.setImage(keysIcon);
+            keysIconLabel.addDisposeListener(e -> keysIcon.dispose());
+        }
+
         Link keysLink = new Link(row, SWT.NONE);
         keysLink.setText("<a>Клавиши</a>"); //$NON-NLS-1$
         keysLink.setToolTipText("Настройки клавиш с фильтром «Комфорт»"); //$NON-NLS-1$
@@ -990,13 +1000,13 @@ public class ComfortPreferencePage
             }
         });
 
-        Link homePageLink = new Link(row, SWT.NONE);
-        homePageLink.setText("<a>Домашняя страница</a>"); //$NON-NLS-1$
-        homePageLink.addListener(SWT.Selection, e -> {
-            if (!"Домашняя страница".equals(e.text)) //$NON-NLS-1$
-                return;
-            ComfortPreferences.openChangesUrl(HOME_PAGE_URL);
-        });
+        Image newIssueIcon = loadBundleImage("icons/obj16/new_issue.png"); //$NON-NLS-1$
+        if (newIssueIcon != null)
+        {
+            Label newIssueIconLabel = new Label(row, SWT.NONE);
+            newIssueIconLabel.setImage(newIssueIcon);
+            newIssueIconLabel.addDisposeListener(e -> newIssueIcon.dispose());
+        }
 
         Link newIssueLink = new Link(row, SWT.NONE);
         newIssueLink.setText("<a>Создать заявку</a>"); //$NON-NLS-1$
@@ -1023,6 +1033,44 @@ public class ComfortPreferencePage
                 "URL заявки готов, длина " + url.length() + " симв."); //$NON-NLS-1$ //$NON-NLS-2$
             ComfortPreferences.openChangesUrl(url);
         });
+
+        Image telegramIcon = loadBundleImage("icons/obj16/telegram.png"); //$NON-NLS-1$
+        if (telegramIcon != null)
+        {
+            Label telegramIconLabel = new Label(row, SWT.NONE);
+            telegramIconLabel.setImage(telegramIcon);
+            telegramIconLabel.addDisposeListener(e -> telegramIcon.dispose());
+        }
+
+        Link telegramLink = new Link(row, SWT.NONE);
+        telegramLink.setText("<a>Телеграм чат</a>"); //$NON-NLS-1$
+        telegramLink.setToolTipText(TooltipText.wrap(telegramLink,
+            "Открыть чат сообщества в Телеграме: t.me/EdtComfort")); //$NON-NLS-1$
+        telegramLink.addListener(SWT.Selection, e -> {
+            if (!"Телеграм чат".equals(e.text)) //$NON-NLS-1$
+                return;
+            ComfortPreferences.openChangesUrl(TELEGRAM_CHAT_URL);
+        });
+
+        Link homePageLink = new Link(row, SWT.NONE);
+        homePageLink.setText("<a>Домашняя страница</a>"); //$NON-NLS-1$
+        homePageLink.addListener(SWT.Selection, e -> {
+            if (!"Домашняя страница".equals(e.text)) //$NON-NLS-1$
+                return;
+            ComfortPreferences.openChangesUrl(HOME_PAGE_URL);
+        });
+    }
+
+    /** Образ из ресурсов бандла; вызывающий обязан его освободить. */
+    private static Image loadBundleImage(String bundlePath)
+    {
+        Bundle bundle = org.osgi.framework.FrameworkUtil.getBundle(ComfortPreferencePage.class);
+        if (bundle == null)
+            return null;
+        URL url = bundle.getEntry(bundlePath);
+        if (url == null)
+            return null;
+        return org.eclipse.jface.resource.ImageDescriptor.createFromURL(url).createImage();
     }
 
     /**

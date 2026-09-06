@@ -5,6 +5,7 @@ import com._1c.g5.v8.dt.core.platform.IDtProject;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -96,6 +97,52 @@ public final class IrBslExpressionHtmlSupport
             return;
         Object irCache = session.getModule("ирКэш"); //$NON-NLS-1$
         session.codeEditor = ComBridge.invoke(irCache, "ПолеТекстаПрограммы", 0); //$NON-NLS-1$
+    }
+
+    /**
+     * Имена типов «текущего выражения» ИР для произвольного модуля, который может быть не открыт
+     * в редакторе: синхронизирует текст модуля в поле кода ИР с кареткой в {@code offset}, разбирает
+     * контекст и возвращает {@code ирКлсПолеТекстаПрограммы.ПредставлениеМассиваСтруктурТипов(Неопределено)}
+     * — внутри та зовёт {@code ТаблицаТиповТекущегоВыражения()}.
+     *
+     * <p>ИР считает медленно и однопоточно (вызов сериализуется через {@link IRSession#executor},
+     * таймаут 10 с) — вызывать только для строк в поле зрения списка.
+     *
+     * @param session      подключённая сессия ИР
+     * @param moduleText   полный текст модуля с диска
+     * @param moduleName   имя модуля для ИР ({@link GetRef#resolveSetTextModuleName}); {@code ""} допустимо
+     * @param offset       смещение каретки — на выражении, тип которого нужен
+     * @return типы через запятую, {@code ""} если ИР ничего не вернул, {@code null} при ошибке вызова
+     */
+    public static String fetchCurrentExpressionTypes(
+        IRSession session, String moduleText, String moduleName, int offset)
+    {
+        if (session == null || moduleText == null || offset < 0 || offset > moduleText.length())
+            return null;
+        IRSession.CodeEditorSyncPayload payload = new IRSession.CodeEditorSyncPayload(
+            moduleText, moduleName == null ? "" : moduleName, offset, offset, //$NON-NLS-1$
+            "", null, List.of()); //$NON-NLS-1$
+        try
+        {
+            String r = session.executeOnComThread(() -> {
+                session.applyPreparedCodeEditorSync(payload);
+                ensureCodeEditor(session);
+                session.invokeCodeEditor("РазобратьТекущийКонтекст"); //$NON-NLS-1$
+                Object raw = session.invokeCodeEditor(
+                    "ПредставлениеМассиваСтруктурТипов", ComBridge.undefinedParam()); //$NON-NLS-1$
+                String types = ComBridge.toString(raw);
+                return types != null ? types.strip() : ""; //$NON-NLS-1$
+            });
+            Global.tempLog("fulltext-refs", "  fetchCurrentExpressionTypes offset=" + offset //$NON-NLS-1$ //$NON-NLS-2$
+                + " модуль=«" + moduleName + "» → «" + r + "»"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            return r;
+        }
+        catch (RuntimeException e)
+        {
+            Global.tempLog("fulltext-refs", "  fetchCurrentExpressionTypes offset=" + offset //$NON-NLS-1$ //$NON-NLS-2$
+                + " EX: " + e); //$NON-NLS-1$
+            return null;
+        }
     }
 
     /**

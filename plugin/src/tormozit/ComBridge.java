@@ -256,6 +256,26 @@ public final class ComBridge
             throw new UnsupportedOperationException("Jacob недоступен: " + unavailableReason); //$NON-NLS-1$
     }
 
+    /**
+     * Jacob {@code Variant} VT_EMPTY — передаётся в COM-вызов как BSL {@code Неопределено} для
+     * входного параметра, у которого нет значения по умолчанию (Java {@code null} в массиве
+     * аргументов Jacob маршалит как «параметр не задан», а не {@code Неопределено}).
+     *
+     * @return {@code Variant} или {@code null}, если Jacob недоступен
+     */
+    static Object undefinedParam()
+    {
+        requireJacob();
+        try
+        {
+            return classVariant.getDeclaredConstructor().newInstance();
+        }
+        catch (Exception e)
+        {
+            return null;
+        }
+    }
+
     // -----------------------------------------------------------------------
     // COM-поток
     // -----------------------------------------------------------------------

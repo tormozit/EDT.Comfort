@@ -1388,6 +1388,41 @@ public final class IRApplication
         return null;
     }
 
+    /**
+     * Подключённая сессия ИР без ping-проверки {@code checkAlive}: та зовёт COM на
+     * {@code session.executor} и на прерванном/занятом фоновом потоке возвращает {@code false}
+     * (её {@code catch (Exception)} ловит и {@code InterruptedException}) — то есть «нет сессии»
+     * там, где ИР на самом деле подключён. Живость процесса проверяется по pid.
+     */
+    public static IRSession getAnyConnectedSessionNoPing()
+    {
+        for (IRSession session : sessions.values())
+            if (session.state == State.CONNECTED && session.isProcessAlive()
+                && session.executor != null && !session.executor.isShutdown())
+                return session;
+        return null;
+    }
+
+    /** Диагностика: состояние всех известных сессий ИР одной строкой. */
+    public static String describeSessions()
+    {
+        if (sessions.isEmpty())
+            return "нет сессий"; //$NON-NLS-1$
+        StringBuilder sb = new StringBuilder();
+        for (Map.Entry<String, IRSession> e : sessions.entrySet())
+        {
+            IRSession s = e.getValue();
+            if (sb.length() > 0)
+                sb.append("; "); //$NON-NLS-1$
+            sb.append(e.getKey()).append(" state=").append(s.state) //$NON-NLS-1$
+                .append(" pid=").append(s.pid) //$NON-NLS-1$
+                .append(" alive=").append(s.isProcessAlive()) //$NON-NLS-1$
+                .append(" project=").append(s.project != null ? s.project.getName() : "null") //$NON-NLS-1$ //$NON-NLS-2$
+                .append(" exec=").append(s.executor != null && !s.executor.isShutdown()); //$NON-NLS-1$
+        }
+        return sb.toString();
+    }
+
     /** Любая подключённая сессия ИР (fallback для transport-сообщений без ИД процесса). */
     public static IRSession getAnyConnectedSession()
     {
