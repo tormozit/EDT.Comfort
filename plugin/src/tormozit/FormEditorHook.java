@@ -54,6 +54,7 @@ import org.eclipse.jface.viewers.TreeViewerColumn;
 import org.eclipse.emf.common.notify.Adapter;
 import org.eclipse.emf.common.notify.Notification;
 import org.eclipse.emf.ecore.util.EContentAdapter;
+import org.eclipse.jface.viewers.DoubleClickEvent;
 import org.eclipse.jface.viewers.ISelection;
 import org.eclipse.jface.viewers.StructuredViewer;
 import org.eclipse.jface.viewers.StyledCellLabelProvider;
@@ -1919,9 +1920,6 @@ public class FormEditorHook implements IStartup
      */
     private static final class InheritedTitles
     {
-        /** Тема временного лога разбора источников заголовков. */
-        static final String LOG = "form-title-source"; //$NON-NLS-1$
-
         /** Сколько элементов разрешаем между выдачами результата в UI. */
         private static final int BATCH = 50;
 
@@ -2207,42 +2205,20 @@ public class FormEditorHook implements IStartup
                 {
                     Source fromCommand = sourceOf(button.getCommandName());
                     if (fromCommand != null)
-                        return log(item, fromCommand);
+                        return fromCommand;
                 }
                 if (item instanceof DataItem dataItem)
                 {
                     Source fromData = sourceOf(referredObject(dataItem.getDataPath()));
                     if (fromData != null)
-                        return log(item, fromData);
+                        return fromData;
                 }
             }
             catch (RuntimeException | LinkageError e)
             {
-                Global.tempLog(LOG, "resolve: " + safeName(item) + " — исключение " + e); //$NON-NLS-1$ //$NON-NLS-2$
                 return NONE;
             }
-            return log(item, NONE);
-        }
-
-        /** Временная диагностика: что нашлось у каждого элемента (см. AGENTS, временные логи). */
-        private static Source log(FormItem item, Source source)
-        {
-            Global.tempLog(LOG, safeName(item) + " -> " //$NON-NLS-1$
-                + (source.object == null ? "нет источника" : source.object.getClass().getSimpleName()) //$NON-NLS-1$
-                + ", origin=" + source.origin + ", fallback=" + source.fallbackName); //$NON-NLS-1$ //$NON-NLS-2$
-            return source;
-        }
-
-        private static String safeName(FormItem item)
-        {
-            try
-            {
-                return item == null ? "null" : String.valueOf(item.getName()); //$NON-NLS-1$
-            }
-            catch (RuntimeException e)
-            {
-                return "?"; //$NON-NLS-1$
-            }
+            return NONE;
         }
 
         private static Source sourceOf(Object candidate)
@@ -3144,9 +3120,9 @@ public class FormEditorHook implements IStartup
             if (display == null || display.isDisposed())
                 return;
             display.timerExec(RETRY_DELAY_MS, () -> {
-                if (ItemsTree.tryFocusPropertyField(workbenchPage, labels, "attempt " + attempt)) //$NON-NLS-1$
+                if (ItemsTree.tryFocusPropertyField(workbenchPage, labels))
                     AefFieldFocus.holdActivation(
-                        () -> ItemsTree.tryFocusPropertyField(workbenchPage, labels, "hold")); //$NON-NLS-1$
+                        () -> ItemsTree.tryFocusPropertyField(workbenchPage, labels));
                 else
                     scheduleFocus(workbenchPage, labels, attempt + 1);
             });
@@ -4362,6 +4338,31 @@ public class FormEditorHook implements IStartup
 
         private static final int FOCUS_RETRY_DELAY_MS = 150;
 
+        /**
+         * Поколение запроса активации поля палитры: новый двойной клик отменяет попытки
+         * предыдущего, иначе они продолжают искать поле в уже чужой (или пустой) палитре.
+         */
+        private static int propertyFocusGeneration;
+
+        /**
+         * Поколение отложенного «Перейти»: новый двойной клик отменяет ещё не начатый переход
+         * предыдущего.
+         */
+        private static int titleGoToGeneration;
+
+        /**
+         * Просмотрщики, куда штатное «Перейти» может привести, и их группы действий.
+         * После «Перейти» палитру связываем с тем из них, у кого фокус — не со своим
+         * источником заголовка и не с соседней вкладкой, где осталось старое выделение.
+         */
+        private static final String[][] GO_TO_PROPERTY_TARGETS = {
+            { "attributesViewer", "attributeActionsGroup" }, //$NON-NLS-1$ //$NON-NLS-2$
+            { "formCommandsViewer", "formCommandsActionsGroup" }, //$NON-NLS-1$ //$NON-NLS-2$
+            { "standardCommandsViewer", "standardCommandActionsGroup" }, //$NON-NLS-1$ //$NON-NLS-2$
+            { "independentCommandsViewer", "independentCommandActionsGroup" }, //$NON-NLS-1$ //$NON-NLS-2$
+            { "parametrizedCommandsViewer", "parametrizedCommandActionGroup" } //$NON-NLS-1$ //$NON-NLS-2$
+        };
+
         private static final int COLUMN_NAME = 0;
 
         private static final int COLUMN_TITLE = 1;
@@ -5433,7 +5434,7 @@ public class FormEditorHook implements IStartup
             switch (column)
             {
                 case COLUMN_NAME -> openLikeLabelDoubleClick(tree, row, event);
-                case COLUMN_TITLE -> revealTitleSource(page, viewer, item);
+                case COLUMN_TITLE -> revealTitleSource(page, viewer, tree, row, item);
                 case COLUMN_HANDLERS -> focusFirstHandlerField(page, row.getData());
                 case COLUMN_APPEARANCE -> AppearancePage.activate(page);
                 case COLUMN_INVISIBLE ->
@@ -5536,21 +5537,17 @@ public class FormEditorHook implements IStartup
          * <ul>
          *   <li>свой заголовок — активируется поле «Заголовок» этого же элемента в панели
          *       «Свойства»;
-         *   <li>заголовок реквизита формы или команды формы — строка выделяется в своём списке
-         *       («Реквизиты» / «Команды»), и открывается панель «Свойства»;
+         *   <li>заголовок реквизита или команды — выделяется строка элемента, затем штатное
+         *       «Перейти» (как в меню) и двойной клик по строке, на которую оно привело;
          *   <li>синоним поля метаданных — поле выделяется в дереве реквизитов формы, и там
          *       активируется его «Синоним»; редактор объекта метаданных открывается только если
          *       такой строки в дереве нет.
          * </ul>
          */
-        private static void revealTitleSource(FormEditorPage page, TreeViewer viewer, FormItem item)
+        private static void revealTitleSource(FormEditorPage page, TreeViewer viewer, Tree tree,
+            TreeItem row, FormItem item)
         {
             EffectiveTitle.Info info = EffectiveTitle.ofNow(page, item);
-            Global.tempLog(InheritedTitles.LOG, "dblclick: " //$NON-NLS-1$
-                + (item == null ? "null" : item.getName()) + " -> " //$NON-NLS-1$ //$NON-NLS-2$
-                + (info == null ? "нет заголовка" //$NON-NLS-1$
-                    : info.origin + ", source=" //$NON-NLS-1$
-                        + (info.source == null ? "null" : info.source.getClass().getSimpleName()))); //$NON-NLS-1$
             if (info == null || page == null || page.getSite() == null)
                 return;
             if (info.origin == EffectiveTitle.Origin.OWN)
@@ -5558,42 +5555,201 @@ public class FormEditorHook implements IStartup
                 revealProperty(page, viewer, item, null, TITLE_FEATURE);
                 return;
             }
-            if (!runGoToAction(page))
+            // Клик по колонке «Заголовок» штатное дерево не выделяет (нет FULL_SELECTION),
+            // FormTreeInteraction ставит строку только в asyncExec. «Перейти» до этого видит
+            // прежнюю строку — поэтому выделяем сейчас, а саму команду зовём на следующем
+            // цикле, когда дойдут selectionChanged / post-selection группы действий.
+            Object element = row == null ? null : row.getData();
+            if (element != null && viewer != null && !viewer.getControl().isDisposed())
+                viewer.setSelection(new StructuredSelection(element), true);
+            int generation = ++titleGoToGeneration;
+            Display display = tree == null ? null : tree.getDisplay();
+            if (display == null || display.isDisposed())
+                return;
+            EffectiveTitle.Origin origin = info.origin;
+            EObject source = info.source;
+            display.asyncExec(() -> revealTitleSourceGoTo(page, item, origin, source, generation));
+        }
+
+        private static void revealTitleSourceGoTo(FormEditorPage page, FormItem item,
+            EffectiveTitle.Origin origin, EObject source, int generation)
+        {
+            if (generation != titleGoToGeneration || page == null || page.getSite() == null)
+                return;
+            if (runGoToAction(page))
             {
-                // «Перейти» у элемента нет — доходим до источника сами.
-                if (info.origin == EffectiveTitle.Origin.FORM_OBJECT)
-                    revealFormObject(page, item, info.source);
-                else
-                    revealMetadataField(page, item, info.source);
+                fireGoToTargetDoubleClick(page);
+                focusTitleProperty(page, source);
                 return;
             }
-            ShowPropertiesHandler.run(page.getSite());
-            focusTitleProperty(page, info.source);
+            if (origin == EffectiveTitle.Origin.FORM_OBJECT)
+                revealFormObject(page, item, source);
+            else
+                revealMetadataField(page, item, source);
         }
 
         /**
-         * Штатная команда «Перейти» контекстного меню дерева элементов: она сама решает, куда
-         * ведёт элемент — в реквизиты, в команды формы, в стандартные команды, — переключает
-         * вкладку и выделяет строку. Свой обход дерева этого не повторяет: у EDT в переходе
-         * учтены и динамические списки, и параметризуемые команды.
-         *
-         * <p>Действует на текущее выделение дерева элементов — к моменту двойного клика строка
-         * уже текущая. Сначала спрашиваем, есть ли куда идти: без целей штатный переход просто
-         * ничего не делает, и мы бы не отличили это от удачного перехода.
+         * Штатная команда «Перейти» контекстного меню дерева элементов — та же, что вручную.
          *
          * @return {@code false} — переходить некуда, дальше сами
          */
         private static boolean runGoToAction(FormEditorPage page)
         {
             Object group = Global.getField(page, "itemsActionsGroup"); //$NON-NLS-1$
-            // Имя метода EDT с опечаткой (GoToTtems) — так в бандле, менять нельзя.
             Object targets = group == null ? null
                 : Global.invoke(group, "calculateAvailablesGoToTtems"); //$NON-NLS-1$
             boolean hasTargets = targets instanceof List<?> list && !list.isEmpty();
-            Global.tempLog(InheritedTitles.LOG, "goto: группа=" //$NON-NLS-1$
-                + (group == null ? "нет" : group.getClass().getSimpleName()) + ", целей=" //$NON-NLS-1$ //$NON-NLS-2$
-                + (targets instanceof List<?> found ? String.valueOf(found.size()) : "?")); //$NON-NLS-1$
             return hasTargets && Global.invokeVoid(group, "runGoToAction"); //$NON-NLS-1$
+        }
+
+        /**
+         * Палитра «Свойства» по строке, на которую «Перейти» уже поставило фокус.
+         * Сама команда палитру не открывает; {@link ShowPropertiesHandler} иначе берёт
+         * выделение дерева элементов.
+         */
+        private static void showGoToTargetProperties(FormEditorPage page)
+        {
+            Object group = null;
+            IStructuredSelection forSheet = null;
+            Control focused = goToFocusedControl(page);
+            for (String[] pair : GO_TO_PROPERTY_TARGETS)
+            {
+                if (!(Global.getField(page, pair[0]) instanceof StructuredViewer viewer))
+                    continue;
+                Control control = viewer.getControl();
+                if (control == null || control.isDisposed() || !isUnder(control, focused))
+                    continue;
+                if (!(viewer.getSelection() instanceof IStructuredSelection selection)
+                    || selection.isEmpty())
+                    continue;
+                group = Global.getField(page, pair[1]);
+                forSheet = propertiesSelectionOf(selection);
+                break;
+            }
+            if (group != null && forSheet != null)
+                Global.invokeVoid(group, "setSelectionAndNavigateToProperties", forSheet); //$NON-NLS-1$
+            ShowPropertiesHandler.run(page.getSite());
+            if (group != null && forSheet != null)
+                Global.invokeVoid(group, "setSelectionAndNavigateToProperties", forSheet); //$NON-NLS-1$
+        }
+
+        /**
+         * Штатный двойной клик по строке, на которую «Перейти» уже поставило фокус: у реквизитов
+         * ДС свойства поля метаданных поднимаются только так, у команд — ShowProperties + Edit.
+         */
+        private static void fireGoToTargetDoubleClick(FormEditorPage page)
+        {
+            StructuredViewer viewer = focusedGoToViewer(page);
+            if (viewer == null)
+            {
+                showGoToTargetProperties(page);
+                return;
+            }
+            Control control = viewer.getControl();
+            if (control instanceof Tree tree && tree == getAttributesTree(page))
+            {
+                Event event = new Event();
+                event.widget = tree;
+                event.display = tree.getDisplay();
+                event.button = 1;
+                handleAttributesTreeDoubleClick(event, page, tree);
+                PropertyInfo selected = getSelectedPropertyInfo(tree);
+                if (selected != null && !isUserFormAttribute(selected)
+                    && !stockEdtHandlesPropertyDoubleClick(resolveEdtPropertySource(selected)))
+                    return;
+            }
+            fireViewerDoubleClick(page, viewer);
+        }
+
+        private static StructuredViewer focusedGoToViewer(FormEditorPage page)
+        {
+            Control focused = goToFocusedControl(page);
+            for (String[] pair : GO_TO_PROPERTY_TARGETS)
+            {
+                if (!(Global.getField(page, pair[0]) instanceof StructuredViewer viewer))
+                    continue;
+                Control control = viewer.getControl();
+                if (control != null && !control.isDisposed() && isUnder(control, focused))
+                    return viewer;
+            }
+            return null;
+        }
+
+        private static void fireViewerDoubleClick(FormEditorPage page, StructuredViewer viewer)
+        {
+            ISelection selection = viewer.getSelection();
+            if (selection == null || selection.isEmpty())
+                return;
+            if (!Global.invokeVoid(viewer, "fireDoubleClick", //$NON-NLS-1$
+                new DoubleClickEvent(viewer, selection)))
+                showGoToTargetProperties(page);
+        }
+
+        private static Control goToFocusedControl(FormEditorPage page)
+        {
+            if (Global.getField(page, "lastFocusedControl") instanceof Control last //$NON-NLS-1$
+                && !last.isDisposed())
+                return last;
+            Display display = Display.getCurrent();
+            return display == null || display.isDisposed() ? null : display.getFocusControl();
+        }
+
+        private static boolean isUnder(Control root, Control child)
+        {
+            for (Control current = child; current != null; current = current.getParent())
+            {
+                if (current == root)
+                    return true;
+            }
+            return false;
+        }
+
+        /** Группа действий списка, в котором лежит источник заголовка. */
+        private static Object actionsGroupForSource(FormEditorPage page, EObject source)
+        {
+            if (source instanceof AbstractFormAttribute)
+                return Global.getField(page, "attributeActionsGroup"); //$NON-NLS-1$
+            if (source instanceof FormCommand)
+                return Global.getField(page, "formCommandsActionsGroup"); //$NON-NLS-1$
+            if (source instanceof FormStandardCommand)
+                return Global.getField(page, "standardCommandActionsGroup"); //$NON-NLS-1$
+            return Global.getField(page, "attributeActionsGroup"); //$NON-NLS-1$
+        }
+
+        private static FormEditorComponent componentForSource(EObject source)
+        {
+            if (source instanceof AbstractFormAttribute)
+                return FormEditorComponent.ATTRIBUTES;
+            if (source instanceof FormCommand)
+                return FormEditorComponent.FORM_COMMANDS;
+            if (source instanceof FormStandardCommand)
+                return FormEditorComponent.STANDARD_COMMANDS;
+            return null;
+        }
+
+        /**
+         * Выделение для палитры «Свойства»: у реквизитов в дереве лежит {@link PropertyInfo},
+         * а палитре нужен сам объект (и прокси стандартного реквизита — как при двойном клике
+         * по дереву реквизитов).
+         */
+        private static IStructuredSelection propertiesSelectionOf(IStructuredSelection selection)
+        {
+            Object first = selection.getFirstElement();
+            if (!(first instanceof PropertyInfo info))
+                return selection;
+            if (isUserFormAttribute(info))
+            {
+                Object source = info.getSource();
+                return source != null ? new StructuredSelection(source) : selection;
+            }
+            EObject metadata = resolveMetadataPropertyEObject(info);
+            if (metadata instanceof StandardAttribute standardAttribute)
+            {
+                StandardAttributeProxy proxy = createStandardAttributeProxy(standardAttribute);
+                if (proxy != null)
+                    return new StructuredSelection(proxy);
+            }
+            return metadata != null ? new StructuredSelection(metadata) : selection;
         }
 
         /**
@@ -5692,35 +5848,35 @@ public class FormEditorHook implements IStartup
         }
 
         /**
-         * Выделяет реквизит или команду формы в её списке. Реквизиты показываются не сами собой,
-         * а через {@link PropertyInfo}, поэтому строка ищется по модели просмотрщика: у неё есть
-         * родители, и {@code setSelection} с раскрытием доберётся до вложенной колонки таблицы.
+         * Выделяет реквизит или команду формы в её списке и показывает их свойства.
+         * Страница редактора — {@link FormEditorPage#setSelection} с компонентом источника
+         * заголовка, не штатное «Перейти»: у кнопки «Перейти» может указать другую команду.
          */
         private static void revealFormObject(FormEditorPage page, FormItem item, EObject source)
         {
             if (source == null)
                 return;
+            FormEditorComponent component = componentForSource(source);
+            if (component == null)
+                return;
+            Object toSelect = source;
+            IStructuredSelection forSheet = new StructuredSelection(source);
             if (source instanceof AbstractFormAttribute)
             {
-                TreeViewer viewer = attributesViewer(page);
                 PropertyInfo found = findAttributeNode(page, item, source);
-                if (viewer == null || found == null)
+                if (found == null)
                     return;
-                selectAttributeNode(viewer, found);
-                ShowPropertiesHandler.run(page.getSite());
+                toSelect = found;
+                forSheet = propertiesSelectionOf(new StructuredSelection(found));
             }
-            else
-            {
-                revealCommand(page, source);
-                ShowPropertiesHandler.run(page.getSite());
-                // Выделения в списке команд мало: палитра свойств осталась бы на кнопке, а
-                // нужна сама команда. Это тот же штатный путь, каким список команд показывает
-                // свойства своей строки.
-                Object group = Global.getField(page, "formCommandsActionsGroup"); //$NON-NLS-1$
-                if (group != null)
-                    Global.invokeVoid(group, "setSelectionAndNavigateToProperties", //$NON-NLS-1$
-                        new StructuredSelection(source));
-            }
+            page.setSelection(component, true, toSelect);
+            Object group = actionsGroupForSource(page, source);
+            if (group != null)
+                Global.invokeVoid(group, "setSelectionAndNavigateToProperties", forSheet); //$NON-NLS-1$
+            ShowPropertiesHandler.run(page.getSite());
+            page.setSelection(component, true, toSelect);
+            if (group != null)
+                Global.invokeVoid(group, "setSelectionAndNavigateToProperties", forSheet); //$NON-NLS-1$
             focusTitleProperty(page, source);
         }
 
@@ -5780,7 +5936,6 @@ public class FormEditorHook implements IStartup
             return null;
         }
 
-        /** Выделение строки в списке команд формы — по возможности; свойства показываются отдельно. */
         /** Экземпляры BM у одного объекта могут различаться — сверяем «настоящие» объекты. */
         private static boolean sameSource(Object candidate, EObject source)
         {
@@ -5788,14 +5943,6 @@ public class FormEditorHook implements IStartup
                 return true;
             return candidate instanceof EObject other
                 && ContentUtil.getActualObject(other) == ContentUtil.getActualObject(source);
-        }
-
-        private static void revealCommand(FormEditorPage page, EObject command)
-        {
-            if (!(Global.getField(page, "formCommandsViewer") instanceof StructuredViewer viewer) //$NON-NLS-1$
-                || viewer.getControl() == null || viewer.getControl().isDisposed())
-                return;
-            viewer.setSelection(new StructuredSelection(command), true);
         }
 
         /** Объект метаданных, чей синоним стал заголовком, — в его штатном редакторе. */
@@ -5972,28 +6119,36 @@ public class FormEditorHook implements IStartup
         private static void schedulePropertyFocus(IWorkbenchPage workbenchPage, List<String> labels,
             int attempt)
         {
-            if (workbenchPage == null || attempt >= MAX_FOCUS_ATTEMPTS)
+            schedulePropertyFocus(workbenchPage, labels, attempt, ++propertyFocusGeneration);
+        }
+
+        private static void schedulePropertyFocus(IWorkbenchPage workbenchPage, List<String> labels,
+            int attempt, int generation)
+        {
+            if (workbenchPage == null || attempt >= MAX_FOCUS_ATTEMPTS
+                || generation != propertyFocusGeneration)
                 return;
             Display display = Display.getDefault();
             if (display == null || display.isDisposed())
                 return;
             display.timerExec(FOCUS_RETRY_DELAY_MS, () -> {
-                if (tryFocusPropertyField(workbenchPage, labels, "attempt " + attempt)) //$NON-NLS-1$
+                if (generation != propertyFocusGeneration)
+                    return;
+                if (tryFocusPropertyField(workbenchPage, labels))
                 {
                     // Панель дозаполняется и после успешной активации, отбирая ввод в поле «Имя» —
                     // поэтому активация ещё некоторое время повторяется (см. AefFieldFocus).
-                    AefFieldFocus.holdActivation(
-                        () -> tryFocusPropertyField(workbenchPage, labels, "hold")); //$NON-NLS-1$
+                    AefFieldFocus.holdActivation(() -> generation == propertyFocusGeneration
+                        && tryFocusPropertyField(workbenchPage, labels));
                 }
                 else
                 {
-                    schedulePropertyFocus(workbenchPage, labels, attempt + 1);
+                    schedulePropertyFocus(workbenchPage, labels, attempt + 1, generation);
                 }
             });
         }
 
-        private static boolean tryFocusPropertyField(IWorkbenchPage workbenchPage, List<String> labels,
-            String phase)
+        private static boolean tryFocusPropertyField(IWorkbenchPage workbenchPage, List<String> labels)
         {
             IViewPart view = findPropertySheetView(workbenchPage);
             Object sheetPage =
@@ -6010,10 +6165,6 @@ public class FormEditorHook implements IStartup
                 if (focused)
                     return true;
             }
-            // Временная диагностика: без списка подписей самой палитры промах по подписи не
-            // отличить от того, что палитра ещё не достроилась.
-            Global.tempLog(InheritedTitles.LOG, "focus[" + phase + "]: искали " + labels //$NON-NLS-1$ //$NON-NLS-2$
-                + ", в палитре " + PropertyNameIdentifierHook.labels(scene)); //$NON-NLS-1$
             return false;
         }
 
