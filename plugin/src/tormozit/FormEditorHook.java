@@ -5622,17 +5622,6 @@ public class FormEditorHook implements IStartup
             return VIEW_FEATURE.equals(featureName) ? attribute.getView() : attribute.getEdit();
         }
 
-        /**
-         * Значение по умолчанию — «общее» и без переопределений по ролям: именно таким
-         * ({@code Common = true}, пустой список ролей) EDT создаёт и «Использование», и
-         * «Просмотр», и «Редактирование», и «Пользовательскую видимость»
-         * (см. {@code FormObjectFactory.newAdjustableBoolean}).
-         */
-        private static boolean isDefaultAdjustable(AdjustableBoolean value)
-        {
-            return value == null || value.isCommon() && value.getFor().isEmpty();
-        }
-
         // -------------------------------------------------------------------
         // Двойной клик
         // -------------------------------------------------------------------
@@ -8720,5 +8709,19 @@ public class FormEditorHook implements IStartup
             display.asyncExec(instance::selectLinkedItems);
             display.timerExec(100, instance::selectLinkedItems);
         }
+    }
+
+    /**
+     * Значение по умолчанию — «общее» и без переопределений по ролям: именно таким
+     * ({@code Common = true}, пустой список ролей) EDT создаёт и «Использование», и
+     * «Просмотр», и «Редактирование», и «Пользовательскую видимость»
+     * (см. {@code FormObjectFactory.newAdjustableBoolean}).
+     *
+     * <p>Кроме дерева элементов формы этим же правилом пользуется палитра свойств —
+     * см. {@link PropertySheetNonDefaultHighlightHook}.
+     */
+    static boolean isDefaultAdjustable(AdjustableBoolean value)
+    {
+        return value == null || value.isCommon() && value.getFor().isEmpty();
     }
 }

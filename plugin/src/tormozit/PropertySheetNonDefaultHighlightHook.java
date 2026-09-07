@@ -32,17 +32,30 @@ import org.eclipse.ui.forms.editor.IFormPage;
 
 import com._1c.g5.v8.dt.md.ui.editor.aef.AbstractDtGranularEditorAefPage;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
+import com._1c.g5.v8.dt.metadata.mdclass.AdjustableBoolean;
 
 /**
- * В палитре свойств помечает списки выбора, в которых есть пункт «Авто», а выбрано
- * другое значение: цвет текста поля и иконка в штатной декорации слева (только если
- * у поля нет ошибки).
+ * В палитре свойств помечает значения, отличающиеся от значения по умолчанию, значком в
+ * штатной декорации слева от поля (только если у поля нет ошибки). Помечаются
+ * <ul>
+ * <li>списки выбора, в которых есть пункт «Авто», а выбрано другое значение, — у них
+ * дополнительно окрашивается текст значения;</li>
+ * <li>поля-ссылки «Открыть» с ограничением по ролям («Использование» команды формы,
+ * «Просмотр» и «Редактирование» реквизита формы, «Пользовательская видимость» элемента) —
+ * их значение {@code AdjustableBoolean} по умолчанию разрешено всем ролям. Цвет самой
+ * ссылки не меняем: «Открыть» должно читаться как гиперссылка.</li>
+ * </ul>
  */
 public final class PropertySheetNonDefaultHighlightHook implements IStartup
 {
     private static final String DECORATION_KEY = "DecorationSupport.LwtControlDecoration"; //$NON-NLS-1$
     private static final String CHANGED_LISTENER = "com._1c.g5.lwt.controls.IChangedListener"; //$NON-NLS-1$
+    private static final String VALUE_LISTENER = "com._1c.g5.aef2.models.value.IValueListener"; //$NON-NLS-1$
     private static final String DECORATION_TOOLTIP = "Значение не Авто"; //$NON-NLS-1$
+    private static final String LINK_DECORATION_TOOLTIP = "Значение не по умолчанию"; //$NON-NLS-1$
+    private static final String LINK_VIEW_MODEL = "LinkViewModel"; //$NON-NLS-1$
+    /** Глубина обхода дерева компонентов сцены: поля лежат внутри секций и групп. */
+    private static final int COMPONENT_SCAN_DEPTH = 12;
     private static final int SYNC_DELAY_MS = 100;
 
     private static final Set<IViewPart> HOOKED_VIEWS =
@@ -55,9 +68,15 @@ public final class PropertySheetNonDefaultHighlightHook implements IStartup
         Collections.newSetFromMap(new IdentityHashMap<>());
     /** Исходный цвет текста комбо, которое мы окрашивали. */
     private static final Map<Object, Color> ORIGINAL_FOREGROUND = new IdentityHashMap<>();
-    /** Комбо, у которых мы сами показали декорацию (не штатную ошибку). */
+    /** Комбо и ссылки, у которых мы сами показали декорацию (не штатную ошибку). */
     private static final Set<Object> OUR_DECORATION =
         Collections.newSetFromMap(new IdentityHashMap<>());
+    /** Ссылки «Открыть», которые мы пометили значком (цвет самой ссылки не трогаем). */
+    private static final Set<Object> MARKED_LINKS =
+        Collections.newSetFromMap(new IdentityHashMap<>());
+    /** Модели полей-ссылок, на изменение значения которых мы уже подписаны. */
+    private static final Set<Object> WIRED_MODELS =
+        Collections.newSetFromMap(new WeakHashMap<>());
 
     /** Коричневый акцент подсветки, в координатах светлой темы (см. {@link ThemeAwareColors}). */
     private static final org.eclipse.swt.graphics.RGB ACCENT_LIGHT_RGB =
@@ -169,21 +188,23 @@ public final class PropertySheetNonDefaultHighlightHook implements IStartup
     {
         pruneDead();
         Set<Object> live = Collections.newSetFromMap(new IdentityHashMap<>());
+        Set<Object> liveLinks = Collections.newSetFromMap(new IdentityHashMap<>());
         for (IViewPart view : HOOKED_VIEWS)
         {
             Object page = PropertyNameIdentifierHook.resolvePropertySheetPage(view);
-            applyPage(page, live);
+            applyPage(page, live, liveLinks);
         }
         for (DtGranularEditor<?> editor : HOOKED_EDITORS)
         {
             IFormPage page = editor.getActivePageInstance();
             if (page instanceof AbstractDtGranularEditorAefPage<?>)
-                applyPage(page, live);
+                applyPage(page, live, liveLinks);
         }
         restoreMissing(live);
+        restoreMissingLinks(liveLinks);
     }
 
-    private static void applyPage(Object page, Set<Object> live)
+    private static void applyPage(Object page, Set<Object> live, Set<Object> liveLinks)
     {
         if (page == null)
             return;
@@ -203,6 +224,113 @@ public final class PropertySheetNonDefaultHighlightHook implements IStartup
             wireCombo(light);
             applyCombo(vm, light);
         }
+        applyAdjustableLinks(page, liveLinks);
+    }
+
+    // -----------------------------------------------------------------------
+    // Поля-ссылки «Открыть» с ограничением по ролям (AdjustableBoolean)
+    // -----------------------------------------------------------------------
+
+    /**
+     * Проход по дереву компонентов сцены: поле такого свойства — {@code LinkComponent}
+     * (в форме это {@code UserVisibilityComponent}), его значение — {@code AdjustableBoolean},
+     * а по карте {@code viewModelToView} находится сам {@code Hyperlink} «Открыть».
+     * Карты недостаточно: значение свойства известно модели поля, а не модели представления.
+     */
+    private static void applyAdjustableLinks(Object page, Set<Object> liveLinks)
+    {
+        Object scene = Global.invoke(page, "getScene"); //$NON-NLS-1$
+        Object renderer = scene != null ? Global.invoke(scene, "getRenderer") : null; //$NON-NLS-1$
+        if (renderer == null)
+            return;
+        visitComponent(PropertySheetControlInterop.sceneRootComponent(scene), renderer, liveLinks, 0);
+    }
+
+    private static void visitComponent(Object component, Object renderer, Set<Object> liveLinks,
+        int depth)
+    {
+        if (component == null || depth > COMPONENT_SCAN_DEPTH)
+            return;
+        applyAdjustableComponent(component, renderer, liveLinks);
+        Object children = Global.invoke(component, "getComponents"); //$NON-NLS-1$
+        if (!(children instanceof Iterable<?> list))
+            return;
+        for (Object child : list)
+            visitComponent(child, renderer, liveLinks, depth + 1);
+    }
+
+    private static void applyAdjustableComponent(Object component, Object renderer,
+        Set<Object> liveLinks)
+    {
+        Object viewModel = linkViewModel(component);
+        if (viewModel == null)
+            return;
+        Object model = Global.invoke(component, "getModel"); //$NON-NLS-1$
+        Object value = model != null ? Global.invoke(model, "get") : null; //$NON-NLS-1$
+        if (!(value instanceof AdjustableBoolean adjustable))
+            return;
+        wireModel(model);
+        Object light = Global.invoke(
+            PropertySheetControlInterop.viewForViewModel(renderer, viewModel), "getNativeControl"); //$NON-NLS-1$
+        if (light == null || isDisposed(light))
+            return;
+        liveLinks.add(light);
+        if (FormEditorHook.isDefaultAdjustable(adjustable))
+        {
+            restoreLink(light, viewModel);
+            return;
+        }
+        markLink(light, viewModel);
+    }
+
+    /** Модель представления самого поля-ссылки — {@code null}, если компонент не ссылка. */
+    private static Object linkViewModel(Object component)
+    {
+        Object viewModels = Global.invoke(component, "getViewModels"); //$NON-NLS-1$
+        if (!(viewModels instanceof Iterable<?> list))
+            return null;
+        for (Object vm : list)
+        {
+            if (vm != null && vm.getClass().getName().contains(LINK_VIEW_MODEL))
+                return vm;
+        }
+        return null;
+    }
+
+    /**
+     * Пометка ссылки — только значок в штатной декорации слева. Цвет самой ссылки не
+     * трогаем: «Открыть» здесь читается как гиперссылка, и перекрашивание сбивает это
+     * (к тому же его пришлось бы восстанавливать после каждого наведения мыши — штатный
+     * {@code HyperlinkGroup} возвращает свой цвет при уходе курсора).
+     */
+    private static void markLink(Object light, Object viewModel)
+    {
+        MARKED_LINKS.add(light);
+        showDecorationIfNoError(viewModel, light, LINK_DECORATION_TOOLTIP);
+    }
+
+    private static void restoreLink(Object light, Object viewModel)
+    {
+        MARKED_LINKS.remove(light);
+        hideOurDecoration(light, viewModel);
+    }
+
+    private static void restoreMissingLinks(Set<Object> liveLinks)
+    {
+        for (Object light : MARKED_LINKS.toArray())
+        {
+            if (!liveLinks.contains(light))
+                restoreLink(light, null);
+        }
+    }
+
+    /** Значение меняет диалог «Настройки видимости» — пересчитываем пометку по событию модели. */
+    private static void wireModel(Object model)
+    {
+        if (model == null || !WIRED_MODELS.add(model))
+            return;
+        Global.addGenericListener(model, "addValueListener", VALUE_LISTENER, //$NON-NLS-1$
+            PropertySheetNonDefaultHighlightHook::scheduleSync);
     }
 
     private static void applyCombo(Object viewModel, Object light)
@@ -214,7 +342,7 @@ public final class PropertySheetNonDefaultHighlightHook implements IStartup
             Color accent = accentColor();
             if (!sameRgb(readForeground(light), accent))
                 writeForeground(light, accent);
-            showDecorationIfNoError(viewModel, light);
+            showDecorationIfNoError(viewModel, light, DECORATION_TOOLTIP);
             return;
         }
         restoreCombo(light, viewModel);
@@ -329,7 +457,7 @@ public final class PropertySheetNonDefaultHighlightHook implements IStartup
             && (text.equalsIgnoreCase("Авто") || text.equalsIgnoreCase("Auto")); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
-    private static void showDecorationIfNoError(Object viewModel, Object light)
+    private static void showDecorationIfNoError(Object viewModel, Object light, String tooltip)
     {
         if (!statusOk(viewModel))
         {
@@ -344,7 +472,7 @@ public final class PropertySheetNonDefaultHighlightHook implements IStartup
             return;
         Global.invokeVoid(deco, "setImage", image); //$NON-NLS-1$
         Global.invokeVoid(deco, "setTooltip", //$NON-NLS-1$
-            DECORATION_TOOLTIP + Global.pluginSignForTooltip());
+            tooltip + Global.pluginSignForTooltip());
         Global.invokeVoid(deco, "show"); //$NON-NLS-1$
         OUR_DECORATION.add(light);
     }
@@ -502,5 +630,6 @@ public final class PropertySheetNonDefaultHighlightHook implements IStartup
         ORIGINAL_FOREGROUND.keySet().removeIf(PropertySheetNonDefaultHighlightHook::isDisposed);
         OUR_DECORATION.removeIf(PropertySheetNonDefaultHighlightHook::isDisposed);
         WIRED_COMBOS.removeIf(PropertySheetNonDefaultHighlightHook::isDisposed);
+        MARKED_LINKS.removeIf(PropertySheetNonDefaultHighlightHook::isDisposed);
     }
 }

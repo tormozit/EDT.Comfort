@@ -10,11 +10,14 @@ import org.eclipse.core.runtime.IStatus;
 import org.eclipse.core.runtime.NullProgressMonitor;
 import org.eclipse.core.runtime.Platform;
 import org.eclipse.core.runtime.Status;
+import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.BusyIndicator;
+import org.eclipse.swt.program.Program;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Shell;
 import org.osgi.framework.Bundle;
 import org.eclipse.ui.PlatformUI;
+import org.eclipse.ui.browser.IWebBrowser;
 import org.eclipse.ui.browser.IWorkbenchBrowserSupport;
 import org.eclipse.ui.dialogs.PreferencesUtil;
 import org.eclipse.ui.IWorkbenchWindow;
@@ -1063,8 +1066,11 @@ public final class ComfortPreferences
                 Global.log(URL_LOG_TAG, "открытие URL, длина " + url.length() + " симв."); //$NON-NLS-1$ //$NON-NLS-2$
                 IWorkbenchBrowserSupport support =
                     PlatformUI.getWorkbench().getBrowserSupport();
-                support.getExternalBrowser().openURL(URI.create(url).toURL());
-                Global.log(URL_LOG_TAG, "внешний браузер вызван без ошибки"); //$NON-NLS-1$
+                IWebBrowser browser = support.getExternalBrowser();
+                logBrowserEnvironment(browser);
+                browser.openURL(URI.create(url).toURL());
+                Global.log(URL_LOG_TAG,
+                    "внешний браузер вызван без исключения (успех запуска не гарантирован)"); //$NON-NLS-1$
             }
 
             catch (Exception e)
@@ -1074,6 +1080,83 @@ public final class ComfortPreferences
             }
 
         });
+    }
+
+    /**
+     * Безусловная диагностика открытия внешней ссылки: по какой ветке пойдёт
+     * {@code SystemBrowserInstance.openURL} и что вокруг него в окружении.
+     *
+     * <p>Штатный {@code SystemBrowserInstance} сначала пробует
+     * {@code Program.findProgram("html").execute(url)} и при {@code true} молча выходит,
+     * иначе зовёт {@code Program.launch(url)} и бросает {@code PartInitException} только
+     * при {@code false}. На Linux обе операции возвращают {@code true}, отдав команду
+     * дочернему процессу, — поэтому «вызван без исключения» не означает, что браузер
+     * открылся. Здесь ничего не запускается: пишем только то, что позволяет отличить
+     * ветку {@code execute} от ветки {@code launch} и увидеть переменные окружения,
+     * унаследованные от лаунчера EDT.
+     */
+    private static void logBrowserEnvironment(IWebBrowser browser)
+    {
+
+        try
+        {
+
+            Global.log(URL_LOG_TAG, "браузер: " //$NON-NLS-1$
+                + (browser == null ? "null" : browser.getClass().getName()) //$NON-NLS-1$
+                + ", id " + (browser == null ? "-" : browser.getId())); //$NON-NLS-1$ //$NON-NLS-2$
+            Global.log(URL_LOG_TAG, "платформа SWT: " + SWT.getPlatform() //$NON-NLS-1$
+                + ", " + System.getProperty("os.name")); //$NON-NLS-1$ //$NON-NLS-2$
+            Program html = Program.findProgram("html"); //$NON-NLS-1$
+            Global.log(URL_LOG_TAG, "обработчик html: " //$NON-NLS-1$
+                + (html == null ? "не найден (пойдёт Program.launch)" //$NON-NLS-1$
+                    : html.getName() + " → " + html + " (пойдёт Program.execute)")); //$NON-NLS-1$ //$NON-NLS-2$
+            for (String name : new String[] { "BROWSER", "XDG_CURRENT_DESKTOP", //$NON-NLS-1$ //$NON-NLS-2$
+                "GDK_BACKEND", "LD_LIBRARY_PATH", "GTK_PATH", "GIO_MODULE_DIR", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+                "GSETTINGS_SCHEMA_DIR" }) //$NON-NLS-1$
+            {
+
+                String value = System.getenv(name);
+                Global.log(URL_LOG_TAG, "env " + name + ": " //$NON-NLS-1$ //$NON-NLS-2$
+                    + (value == null ? "не задана" : truncateForLog(value))); //$NON-NLS-1$
+            }
+
+            Global.log(URL_LOG_TAG, "xdg-open: " + findOnPath("xdg-open")); //$NON-NLS-1$ //$NON-NLS-2$
+            Global.log(URL_LOG_TAG, "gio: " + findOnPath("gio")); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        catch (Exception e)
+        {
+
+            Global.logError(URL_LOG_TAG, "диагностика окружения не удалась", e); //$NON-NLS-1$
+        }
+
+    }
+
+    private static String truncateForLog(String value)
+    {
+
+        return value.length() <= 200 ? value
+            : value.substring(0, 200) + "… (всего " + value.length() + " симв.)"; //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /** Путь к исполняемому файлу в {@code PATH} либо причина, почему его нет. */
+    private static String findOnPath(String executable)
+    {
+
+        String path = System.getenv("PATH"); //$NON-NLS-1$
+        if (path == null || path.isBlank())
+            return "PATH не задан"; //$NON-NLS-1$
+        for (String dir : path.split(java.io.File.pathSeparator))
+        {
+
+            if (dir.isBlank())
+                continue;
+            java.io.File file = new java.io.File(dir, executable);
+            if (file.isFile() && file.canExecute())
+                return file.getAbsolutePath();
+        }
+
+        return "не найден в PATH"; //$NON-NLS-1$
     }
 
     private static Shell resolveShell()

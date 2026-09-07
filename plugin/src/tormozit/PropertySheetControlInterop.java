@@ -1053,7 +1053,7 @@ final class PropertySheetControlInterop
     }
 
     /** Корень AEF-сцены: у страницы редактора МД {@code getComponent()} иногда ещё пуст. */
-    private static Object sceneRootComponent(Object scene)
+    static Object sceneRootComponent(Object scene)
     {
         if (scene == null)
             return null;
