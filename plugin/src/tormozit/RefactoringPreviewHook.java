@@ -68,6 +68,7 @@ import org.eclipse.swt.widgets.Table;
 import org.eclipse.swt.widgets.TableColumn;
 import org.eclipse.swt.widgets.TableItem;
 import org.eclipse.swt.widgets.ToolBar;
+import org.eclipse.swt.widgets.ToolItem;
 import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.Widget;
 import org.eclipse.text.edits.MultiTextEdit;
@@ -337,6 +338,11 @@ public final class RefactoringPreviewHook
         private static final String TOGGLE_ID = SETTINGS_SECTION + ".toggle"; //$NON-NLS-1$
         private static final String MARKED_ONLY_ID = SETTINGS_SECTION + ".markedOnly"; //$NON-NLS-1$
         private static final String SUITABLE_ONLY_ID = SETTINGS_SECTION + ".suitableOnly"; //$NON-NLS-1$
+        /** Штатные кнопки EDT: пометить / снять пометку со всех полнотекстовых вхождений. */
+        private static final String CHECK_ALL_FULL_TEXT_ID =
+            "com._1c.g5.v8.dt.lcore.ui.refactoring.checkAllFullTextSearchChanges"; //$NON-NLS-1$
+        private static final String UNCHECK_ALL_FULL_TEXT_ID =
+            "com._1c.g5.v8.dt.lcore.ui.refactoring.uncheckAllFullTextSearchChanges"; //$NON-NLS-1$
         // Порядок колонок сменился (Подходит теперь сразу за «Тип родителя») — старый сохранённый
         // порядок ссылается на прежние индексы, поэтому ключ новый.
         private static final String KEY_COL_ORDER = "columnOrder2"; //$NON-NLS-1$
@@ -752,7 +758,7 @@ public final class RefactoringPreviewHook
         /**
          * Кнопка табличного режима — в тулбаре штатной панели над деревом изменений. Тулбар
          * принадлежит {@code ToolBarManager} панели, а его {@code update(true)} чужие «сырые»
-         * {@code ToolItem} стирает (вызываем и мы сами в {@link #overrideMarkAllActions}, и EDT) —
+         * {@code ToolItem} стирает (вызываем и мы сами, и EDT) —
          * поэтому кнопка оформлена действием в менеджере, как у переключателей панелей сравнения.
          */
         private void installToggle(ViewForm pane)
@@ -822,25 +828,90 @@ public final class RefactoringPreviewHook
             }
 
             manager.update(true);
+            overrideMarkAllActions(manager);
             watchToolBar(manager);
             updateMarkedOnly();
         }
 
         /**
-         * Штатные кнопки панели (в том числе «пометить/снять пометку со всех полнотекстовых вхождений»
-         * от EDT) работают с деревом и о таблице не знают: после нажатия перечитываем состояние строк.
-         * Только наблюдение — сами кнопки и их поведение не подменяются.
+         * Штатные «пометить/снять пометку со всех полнотекстовых вхождений» меняют {@code Change}
+         * и обновляют дерево; таблица об этом не узнаёт. Подменяем действие вкладки, чтобы после
+         * штатного {@code run()} перечитать пометки строк. Эталон подмены —
+         * {@code CompareConfigMenuHook.wrapToolbarSelectAllActions}.
+         */
+        private void overrideMarkAllActions(ToolBarManager manager)
+        {
+            for (IContributionItem item : manager.getItems())
+            {
+                if (!(item instanceof ActionContributionItem aci))
+                    continue;
+                IAction action = aci.getAction();
+                if (action == null || action instanceof MarkAllRefreshAction
+                    || !isFullTextMarkAllAction(action))
+                    continue;
+                MarkAllRefreshAction wrapper = new MarkAllRefreshAction(action);
+                Global.setFieldForce(aci, "action", wrapper); //$NON-NLS-1$
+            }
+        }
+
+        private static boolean isFullTextMarkAllAction(IAction action)
+        {
+            String id = action.getId();
+            if (CHECK_ALL_FULL_TEXT_ID.equals(id) || UNCHECK_ALL_FULL_TEXT_ID.equals(id))
+                return true;
+            String cn = action.getClass().getName();
+            return cn.endsWith("CheckAllFullTextSearchChangesAction") //$NON-NLS-1$
+                || cn.endsWith("UncheckAllFullTextSearchChangesAction"); //$NON-NLS-1$
+        }
+
+        /**
+         * Прочие кнопки панели тоже работают с деревом. {@code SWT.Selection} приходит на
+         * {@link ToolItem}, не на тулбар — слушаем фильтром дисплея, чтобы пережить
+         * {@code ToolBarManager.update(true)}.
          */
         private void watchToolBar(ToolBarManager manager)
         {
             ToolBar bar = manager.getControl();
             if (bar == null || bar.isDisposed())
                 return;
-            bar.addListener(SWT.Selection, event -> {
+            Display display = bar.getDisplay();
+            Listener refresh = event -> {
+                if (!(event.widget instanceof ToolItem item) || item.getParent() != bar)
+                    return;
                 if (table.isDisposed())
                     return;
-                table.getDisplay().asyncExec(this::refreshRows);
+                display.asyncExec(this::refreshRows);
+            };
+            display.addFilter(SWT.Selection, refresh);
+            table.addDisposeListener(event -> {
+                if (!display.isDisposed())
+                    display.removeFilter(SWT.Selection, refresh);
             });
+        }
+
+        /** Делегат штатной кнопки пометки полнотекстовых вхождений: после неё обновляем таблицу. */
+        private final class MarkAllRefreshAction extends Action
+        {
+            private final IAction original;
+
+            MarkAllRefreshAction(IAction original)
+            {
+                super(original.getText() != null ? original.getText() : "", original.getStyle()); //$NON-NLS-1$
+                this.original = original;
+                setId(original.getId());
+                setImageDescriptor(original.getImageDescriptor());
+                setDisabledImageDescriptor(original.getDisabledImageDescriptor());
+                setHoverImageDescriptor(original.getHoverImageDescriptor());
+                setToolTipText(original.getToolTipText());
+                setEnabled(original.isEnabled());
+            }
+
+            @Override
+            public void run()
+            {
+                original.run();
+                refreshRows();
+            }
         }
 
         void setTableMode(boolean value)
