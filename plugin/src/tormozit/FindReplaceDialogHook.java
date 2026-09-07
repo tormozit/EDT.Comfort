@@ -14,6 +14,7 @@ import org.eclipse.swt.SWT;
 import org.eclipse.swt.events.SelectionListener;
 import org.eclipse.swt.events.ShellAdapter;
 import org.eclipse.swt.events.ShellEvent;
+import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.widgets.Button;
 import org.eclipse.swt.widgets.Combo;
 import org.eclipse.swt.widgets.Display;
@@ -45,6 +46,12 @@ import org.eclipse.ui.texteditor.ITextEditor;
  * <p>Прокрутка/выделение первого совпадения по мере ввода намеренно не реализованы — это уже
  * делает штатный флажок «Инкрементный» диалога.
  *
+ * <p>После нажатия «Найти» в статусной строке вместо общего числа совпадений показывается
+ * номер текущего вхождения — «Вхождение 3 из 15» (см. {@link Session#onFindNext()}). Номер
+ * считается по модельному смещению выделения, оставленного штатным поиском; если совпадения
+ * с этим смещением нет (штатный поиск ничего не нашёл), статусная строка штатного диалога не
+ * трогается.
+ *
  * <p>Флажок «Слово целиком» — штатно отключается, если строка поиска содержит хоть один символ
  * не-идентификатора ({@code FindReplaceDialog.isWord}: {@code Character.isJavaIdentifierPart}
  * для каждого символа), например точку. При этом {@code isWholeWordSearch()} штатного диалога
@@ -69,6 +76,8 @@ public final class FindReplaceDialogHook implements IStartup
     private static final int MIN_CHARS = 2;
     private static final int SEARCH_DELAY_MS = 150;
     private static final int MAX_MATCHES = 50000;
+    /** Значение {@code selectionOffset}: считаем только общее число совпадений, без номера вхождения. */
+    private static final int NO_SELECTION = -1;
 
     @Override
     public void earlyStartup()
@@ -190,6 +199,11 @@ public final class FindReplaceDialogHook implements IStartup
             });
             addReenableListener(findNextButton);
             addReenableListener(selectAllButton);
+            if (findNextButton != null && !findNextButton.isDisposed())
+            {
+                findNextButton.addSelectionListener(
+                    SelectionListener.widgetSelectedAdapter(e -> onFindNext()));
+            }
             addReenableListener(replaceFindButton);
             addReenableListener(replaceSelectionButton);
             addReenableListener(replaceAllButton);
@@ -342,11 +356,63 @@ public final class FindReplaceDialogHook implements IStartup
                 @Override
                 protected IStatus run(IProgressMonitor monitor)
                 {
-                    return runSearch(text, findString, caseSensitive, wholeWord, regEx, myGeneration, monitor);
+                    return runSearch(text, findString, caseSensitive, wholeWord, regEx, NO_SELECTION,
+                        myGeneration, monitor);
                 }
             };
             job.setSystem(true);
             job.schedule(SEARCH_DELAY_MS);
+        }
+
+        /**
+         * Штатный поиск уже выполнен (наш слушатель добавлен позже штатного) и оставил выделение
+         * на найденном вхождении — считаем его номер среди всех совпадений документа. Выделение
+         * берётся модельным ({@link ITextViewer#getSelectedRange()}), а не виджетным: со свёртками
+         * координаты виджета не совпадают с документом.
+         */
+        private void onFindNext()
+        {
+            String findString = findField.getText();
+            if (findString.isEmpty() || viewer == null)
+                return;
+
+            IDocument document = viewer.getDocument();
+            String fullText;
+            Point selection;
+            try
+            {
+                fullText = document != null ? document.get() : null;
+                selection = viewer.getSelectedRange();
+            }
+            catch (RuntimeException e)
+            {
+                return;
+            }
+            if (fullText == null || selection == null || selection.y <= 0)
+                return;
+
+            boolean caseSensitive = caseCheckBox != null && !caseCheckBox.isDisposed()
+                && caseCheckBox.getSelection();
+            boolean wholeWord = wholeWordCheckBox != null && !wholeWordCheckBox.isDisposed()
+                && wholeWordCheckBox.getSelection();
+            boolean regEx = regExCheckBox != null && !regExCheckBox.isDisposed()
+                && regExCheckBox.getSelection();
+
+            cancelJob();
+            long myGeneration = ++generation;
+            String text = fullText;
+            int selectionOffset = selection.x;
+            job = new Job("Комфорт: номер вхождения Find/Replace") //$NON-NLS-1$
+            {
+                @Override
+                protected IStatus run(IProgressMonitor monitor)
+                {
+                    return runSearch(text, findString, caseSensitive, wholeWord, regEx, selectionOffset,
+                        myGeneration, monitor);
+                }
+            };
+            job.setSystem(true);
+            job.schedule();
         }
 
         /**
@@ -372,10 +438,16 @@ public final class FindReplaceDialogHook implements IStartup
                 job.cancel();
         }
 
+        /**
+         * @param selectionOffset модельное смещение выделенного вхождения — тогда считается ещё и
+         *            его номер; {@link #NO_SELECTION} — только общее число совпадений.
+         */
         private IStatus runSearch(String fullText, String findString, boolean caseSensitive,
-            boolean wholeWord, boolean regEx, long myGeneration, IProgressMonitor monitor)
+            boolean wholeWord, boolean regEx, int selectionOffset, long myGeneration,
+            IProgressMonitor monitor)
         {
             int count = 0;
+            int current = 0;
 
             if (regEx)
             {
@@ -386,7 +458,7 @@ public final class FindReplaceDialogHook implements IStartup
                 }
                 catch (PatternSyntaxException e)
                 {
-                    postResult(0, myGeneration);
+                    postResult(0, resultCurrent(0, selectionOffset), myGeneration);
                     return Status.OK_STATUS;
                 }
                 Matcher matcher = pattern.matcher(fullText);
@@ -396,6 +468,8 @@ public final class FindReplaceDialogHook implements IStartup
                     if (monitor.isCanceled() || generation != myGeneration)
                         return Status.CANCEL_STATUS;
                     count++;
+                    if (matcher.start() == selectionOffset)
+                        current = count;
                     from = matcher.end() > matcher.start() ? matcher.end() : matcher.end() + 1;
                     if (count > MAX_MATCHES)
                         break;
@@ -412,17 +486,35 @@ public final class FindReplaceDialogHook implements IStartup
                     if (idx < 0)
                         break;
                     count++;
+                    if (idx == selectionOffset)
+                        current = count;
                     from = idx + Math.max(findString.length(), 1);
                     if (count > MAX_MATCHES)
                         break;
                 }
             }
 
-            postResult(count, myGeneration);
+            postResult(count, resultCurrent(current, selectionOffset), myGeneration);
             return Status.OK_STATUS;
         }
 
-        private void postResult(int count, long myGeneration)
+        /**
+         * Режим общего счётчика — {@code 0} (показать число совпадений); режим «Найти» — номер
+         * вхождения либо {@code -1}, если вхождения с таким смещением нет (штатный поиск ничего не
+         * нашёл — его сообщение не затираем).
+         */
+        private static int resultCurrent(int current, int selectionOffset)
+        {
+            if (selectionOffset == NO_SELECTION)
+                return 0;
+            return current > 0 ? current : -1;
+        }
+
+        /**
+         * @param current номер текущего вхождения; {@code 0} — показать общее число совпадений,
+         *            отрицательное — не трогать статусную строку (см. {@link #resultCurrent}).
+         */
+        private void postResult(int count, int current, long myGeneration)
         {
             Display display = shell.getDisplay();
             if (display == null || display.isDisposed())
@@ -431,7 +523,10 @@ public final class FindReplaceDialogHook implements IStartup
             {
                 if (shell.isDisposed() || generation != myGeneration)
                     return;
-                statusLabel.setText(formatCount(count));
+                if (current > 0)
+                    statusLabel.setText("Вхождение " + current + " из " + count); //$NON-NLS-1$ //$NON-NLS-2$
+                else if (current == 0)
+                    statusLabel.setText(formatCount(count));
             });
         }
 
