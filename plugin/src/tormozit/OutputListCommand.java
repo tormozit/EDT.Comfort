@@ -19,9 +19,13 @@ import org.eclipse.core.runtime.IStatus;
 import org.eclipse.core.runtime.Status;
 import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.jface.resource.ImageDescriptor;
+import org.eclipse.nebula.widgets.grid.Grid;
+import org.eclipse.nebula.widgets.grid.GridColumn;
+import org.eclipse.nebula.widgets.grid.GridItem;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.program.Program;
+import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Menu;
@@ -41,9 +45,11 @@ import org.osgi.framework.Bundle;
  * табличный документ ODS и открывает его в приложении по умолчанию. Формирование файла и
  * открытие идут в фоновом {@link Job} — поток ввода не блокируется. issue #23.
  *
- * <p>Работает с любым {@link Table}/{@link Tree}/{@link org.eclipse.swt.widgets.List}, который
- * зарегистрирован через {@link CopyCommandSupport#wireCopyOverride(Control)} — оттуда вызывается
- * {@link #attach(Control)}. В контекстном меню <b>штатного</b> списка EDT пункт идёт в подменю
+ * <p>Работает с {@link Table}/{@link Tree}/{@link org.eclipse.swt.widgets.List}, а также с
+ * Nebula {@link Grid} (в нём построены списки конструктора схемы компоновки данных). Контрол
+ * либо регистрируется через {@link CopyCommandSupport#wireCopyOverride(Control)} (оттуда
+ * вызывается {@link #attach(Control)}), либо подключается напрямую — {@link #attach(Control)} /
+ * {@link #attachDescendants(Composite)}. В контекстном меню <b>штатного</b> списка EDT пункт идёт в подменю
  * «Комфорт», в меню <b>собственного окна плагина</b> — в корень (см. {@link #attach(Control)}).
  * Окна, которые сами пересобирают меню при каждом показе ({@code FormTableInteraction} внешнего
  * режима, {@code DebugCollectionWindow}), зовут {@link #appendMenuItem(Menu, Control)}.
@@ -55,6 +61,8 @@ import org.osgi.framework.Bundle;
 public final class OutputListCommand
 {
     private static final String ITEM_KEY = "tormozit.outputListItem"; //$NON-NLS-1$
+
+    private static final String ATTACHED_KEY = "tormozit.outputListAttached"; //$NON-NLS-1$
 
     private static final String LABEL = "Вывести список"; //$NON-NLS-1$
 
@@ -87,8 +95,11 @@ public final class OutputListCommand
         if (control == null || control.isDisposed())
             return;
         if (!(control instanceof Table) && !(control instanceof Tree)
-            && !(control instanceof org.eclipse.swt.widgets.List))
+            && !(control instanceof org.eclipse.swt.widgets.List) && !(control instanceof Grid))
             return;
+        if (Boolean.TRUE.equals(control.getData(ATTACHED_KEY)))
+            return;
+        control.setData(ATTACHED_KEY, Boolean.TRUE);
         boolean nativeList = control.getMenu() != null;
         control.addListener(SWT.MenuDetect, e ->
         {
@@ -102,6 +113,27 @@ public final class OutputListCommand
             }
             installShowHook(menu, control, nativeList);
         });
+    }
+
+    /**
+     * Рекурсивно подключает пункт «Вывести список» ко всем {@link Table}/{@link Tree}/
+     * {@link org.eclipse.swt.widgets.List}/{@link Grid} внутри {@code root}. Для готовых списков
+     * стороннего редактора, у которых нет единой точки подключения — например страниц
+     * конструктора схемы компоновки данных ({@code DataCompositionSchemaEditorHook}).
+     * Повторный вызов безвреден: {@link #attach(Control)} идемпотентен для контрола.
+     */
+    public static void attachDescendants(Composite root)
+    {
+        if (root == null || root.isDisposed())
+            return;
+        for (Control child : root.getChildren())
+        {
+            if (child instanceof Table || child instanceof Tree
+                || child instanceof org.eclipse.swt.widgets.List || child instanceof Grid)
+                attach(child);
+            else if (child instanceof Composite composite)
+                attachDescendants(composite);
+        }
     }
 
     private static void installShowHook(Menu menu, Control control, boolean nativeList)
@@ -260,6 +292,8 @@ public final class OutputListCommand
             return fromTree(tree);
         if (control instanceof org.eclipse.swt.widgets.List list && !list.isDisposed())
             return fromList(list);
+        if (control instanceof Grid grid && !grid.isDisposed())
+            return fromGrid(grid);
         return null;
     }
 
@@ -375,6 +409,80 @@ public final class OutputListCommand
         {
             TreeColumn column = tree.getColumn(c);
             if (column.getWidth() > 0)
+                visible.add(c);
+        }
+        if (visible.isEmpty())
+        {
+            for (int c = 0; c < count; c++)
+                visible.add(c);
+        }
+        int[] result = new int[visible.size()];
+        for (int i = 0; i < result.length; i++)
+            result[i] = visible.get(i);
+        return result;
+    }
+
+    // Nebula Grid: списки конструктора СКД. GridColumn/GridItem — наследники
+    // org.eclipse.swt.widgets.Item, поэтому getText() у колонки берётся оттуда.
+    private static Model fromGrid(Grid grid)
+    {
+        Model model = new Model();
+        int[] cols = visibleGridColumns(grid);
+        if (grid.getColumnCount() > 0 && grid.getHeaderVisible())
+        {
+            for (int c : cols)
+                model.headers.add(text(grid.getColumn(c).getText()));
+        }
+        GridItem[] selection = grid.getSelection();
+        if (selection.length > 1)
+        {
+            for (GridItem item : selection)
+                model.rows.add(gridRow(item, cols, item.getLevel()));
+        }
+        else
+        {
+            for (GridItem root : grid.getRootItems())
+                appendGridItem(model, root, cols);
+        }
+        return model;
+    }
+
+    private static void appendGridItem(Model model, GridItem item, int[] cols)
+    {
+        if (item.isDisposed())
+            return;
+        model.rows.add(gridRow(item, cols, item.getLevel()));
+        if (item.isExpanded())
+        {
+            for (GridItem child : item.getItems())
+                appendGridItem(model, child, cols);
+        }
+    }
+
+    private static String[] gridRow(GridItem item, int[] cols, int depth)
+    {
+        String[] row = new String[cols.length];
+        for (int i = 0; i < cols.length; i++)
+        {
+            String value = text(item.getText(cols[i]));
+            if (i == 0 && depth > 0)
+                value = INDENT.repeat(depth) + value;
+            row[i] = value;
+        }
+        return row;
+    }
+
+    private static int[] visibleGridColumns(Grid grid)
+    {
+        int count = grid.getColumnCount();
+        if (count == 0)
+            return new int[] {0};
+        int[] order = grid.getColumnOrder();
+        ArrayList<Integer> visible = new ArrayList<>();
+        for (int c : order)
+        {
+            GridColumn column = grid.getColumn(c);
+            if (column.isVisible() && column.getWidth() > 0)
                 visible.add(c);
         }
         if (visible.isEmpty())

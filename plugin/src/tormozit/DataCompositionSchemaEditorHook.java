@@ -7,6 +7,7 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
 
 import javax.xml.stream.XMLStreamException;
 
@@ -144,6 +145,7 @@ public class DataCompositionSchemaEditorHook implements IStartup
         // page: com._1c.g5.v8.dt.internal.md.ui.editors.template.TemplateEditorDcsPage
         DataCompositionSchemaEditor dcsEditor = (DataCompositionSchemaEditor) page.getEmbeddedEditor();
         installResourcesSortMenu(dcsEditor);
+        installOutputListCommand(dcsEditor);
         DataSets firstPage = (DataSets) dcsEditor.getPages().get(0);
         ToolBar toolbar = findToolbar((Composite) firstPage);
         if (toolbar == null || toolbar.isDisposed()) {
@@ -223,6 +225,28 @@ public class DataCompositionSchemaEditorHook implements IStartup
                 .sortResourcesByField(dcsEditor.getControlContext(), resourcesViewer));
             control.setMenu(menu);
             return;
+        }
+    }
+
+    /** Простые имена страниц-композитов конструктора СКД, в списки которых добавляем «Вывести список». */
+    private static final Set<String> OUTPUT_LIST_PAGES =
+        Set.of("DataSets", "Links", "CalculatedFields", "Parameters", "Resources"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
+
+    /**
+     * Добавляет пункт «Вывести список» ({@link OutputListCommand}) в контекстные меню списков
+     * основных страниц схемы: поля наборов данных, связи наборов, вычисляемые поля, ресурсы,
+     * параметры. Эти списки — виджеты Nebula {@code Grid}, единой точки подключения у них нет,
+     * поэтому обходим дерево контролов каждой страницы. Вкладку «Настройки» не трогаем.
+     */
+    private void installOutputListCommand(DataCompositionSchemaEditor dcsEditor)
+    {
+        for (EditorPage editorPage : dcsEditor.getPages())
+        {
+            if (!(editorPage instanceof Composite pageComposite) || pageComposite.isDisposed())
+                continue;
+            String name = editorPage.getClass().getSimpleName();
+            if (OUTPUT_LIST_PAGES.contains(name))
+                OutputListCommand.attachDescendants(pageComposite);
         }
     }
 

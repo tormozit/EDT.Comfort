@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.Map;
 import java.util.WeakHashMap;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.BooleanSupplier;
 
 import org.eclipse.core.commands.AbstractHandler;
 import org.eclipse.core.commands.ExecutionEvent;
@@ -74,7 +75,7 @@ public final class CopyCommandSupport
 {
     private static final String EDIT_COPY_COMMAND_ID = "org.eclipse.ui.edit.copy"; //$NON-NLS-1$
 
-    private static final Map<Control, Runnable> targets = new ConcurrentHashMap<>();
+    private static final Map<Control, BooleanSupplier> targets = new ConcurrentHashMap<>();
 
     private static final Map<IActionBars, IAction> wrappedBars = new WeakHashMap<>();
 
@@ -107,6 +108,23 @@ public final class CopyCommandSupport
      * перехватывается у остальных полей активной части.
      */
     public static void wireCopyOverride(Control control, Runnable copyAction)
+    {
+        if (copyAction == null)
+            return;
+        wireCopyOverride(control, () ->
+        {
+            copyAction.run();
+            return true;
+        });
+    }
+
+    /**
+     * Как {@link #wireCopyOverride(Control, Runnable)}, но {@code copyAction} возвращает
+     * {@code false}, когда копировать нечего именно нам, — тогда Ctrl+C отдаётся штатному
+     * обработчику (в редакторе он уже успел записать буфер, мы его просто не перетираем).
+     * Нужно спискам, где часть колонок наша, а часть — со штатным поведением копирования.
+     */
+    public static void wireCopyOverride(Control control, BooleanSupplier copyAction)
     {
         if (control == null || control.isDisposed() || copyAction == null)
             return;
@@ -326,11 +344,10 @@ public final class CopyCommandSupport
         Control target = focusedTarget();
         if (target == null)
             return false;
-        Runnable action = targets.get(target);
+        BooleanSupplier action = targets.get(target);
         if (action == null)
             return false;
-        action.run();
-        return true;
+        return action.getAsBoolean();
     }
 
     private static boolean isOurTargetFocused()

@@ -67,10 +67,12 @@ import org.eclipse.jface.viewers.ViewerCell;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.SWTError;
 import org.eclipse.swt.SWTException;
+import org.eclipse.swt.dnd.Clipboard;
 import org.eclipse.swt.dnd.DND;
 import org.eclipse.swt.dnd.DropTarget;
 import org.eclipse.swt.dnd.DropTargetAdapter;
 import org.eclipse.swt.dnd.DropTargetEvent;
+import org.eclipse.swt.dnd.TextTransfer;
 import org.eclipse.swt.dnd.Transfer;
 import org.eclipse.swt.dnd.TransferData;
 import org.eclipse.swt.custom.CTabFolder;
@@ -4599,8 +4601,44 @@ public class FormEditorHook implements IStartup
             ColumnAutoFit.install(tree, null, index -> index != COLUMN_NAME);
             // Клик по ячейке добавленных колонок штатное дерево не считает выбором строки:
             // оно создано без SWT.FULL_SELECTION.
-            FormTreeInteraction.install(tree, viewer);
+            FormTreeInteraction interaction = FormTreeInteraction.install(tree, viewer);
+            // Пункт «Вывести список» в подменю «Комфорт» и Ctrl+C. В первой колонке («Элемент»)
+            // Ctrl+C оставляем штатным — это копирование элемента формы; в добавленных плагином
+            // колонках копируем текст активной ячейки (см. copyActiveCellText).
+            CopyCommandSupport.wireCopyOverride(tree, () -> copyActiveCellText(tree, interaction));
             viewer.refresh();
+        }
+
+        /**
+         * Ctrl+C в дереве элементов формы: в колонке «Элемент» ({@link #COLUMN_NAME}) отдаём
+         * штатному обработчику (копирование элемента формы) — возвращаем {@code false}. В любой
+         * добавленной плагином колонке кладём в буфер текст активной ячейки текущей строки.
+         *
+         * @return {@code true}, если текст ячейки скопирован нами
+         */
+        private static boolean copyActiveCellText(Tree tree, FormTreeInteraction interaction)
+        {
+            if (tree == null || tree.isDisposed() || interaction == null)
+                return false;
+            int column = interaction.activeColumn();
+            if (column <= COLUMN_NAME || column >= tree.getColumnCount())
+                return false;
+            TreeItem[] selection = tree.getSelection();
+            if (selection.length == 0 || selection[0].isDisposed())
+                return false;
+            String text = selection[0].getText(column);
+            if (text == null || text.isEmpty())
+                return false;
+            Clipboard clipboard = new Clipboard(tree.getDisplay());
+            try
+            {
+                clipboard.setContents(new Object[] {text}, new Transfer[] {TextTransfer.getInstance()});
+            }
+            finally
+            {
+                clipboard.dispose();
+            }
+            return true;
         }
 
         /**

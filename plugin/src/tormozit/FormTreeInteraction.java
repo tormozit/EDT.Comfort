@@ -30,8 +30,11 @@ import org.eclipse.swt.widgets.TreeItem;
  * активной ячейки (её фон и рамку). В тёмной теме системная подсветка стирала бы этот акцент,
  * поэтому там всё рисуется самим плагином.
  *
- * <p>Ctrl+C намеренно не перехватывается: у штатных деревьев копирование своё (в редакторе формы
- * это копирование элемента формы), и подменять его нельзя.
+ * <p>Ctrl+C сам этот класс не трогает. Штатное копирование дерева (в редакторе формы —
+ * копирование элемента формы) остаётся за первой колонкой; вызывающий код может подключить
+ * {@link CopyCommandSupport#wireCopyOverride(org.eclipse.swt.widgets.Control, java.util.function.BooleanSupplier)}
+ * и по {@link #activeColumn()} копировать текст ячейки только в своих колонках (см.
+ * {@code FormEditorHook.ItemsTree}).
  */
 final class FormTreeInteraction
 {
