@@ -34,6 +34,14 @@ public final class DebugSessionHelper
 {
     private static final String THICK_CLIENT_MARKER = "Толстый клиент"; //$NON-NLS-1$
 
+    /**
+     * Предел длины текста значения в ответе отладчика. По умолчанию
+     * {@code EvaluationRequest.EvaluationRequestBuilder.maxTestSize} равен 100 символам — этого мало
+     * даже для служебной строки {@code ирОбщий.От}, которую ИР возвращает для команды «Открыть объект
+     * для отладки». Тот же предел используется в {@code DebugDetailPaneFullTextSupport}.
+     */
+    private static final int MAX_TEXT_SIZE = 2_000_000;
+
     private DebugSessionHelper() {}
 
     public static final class SuspendedContext
@@ -124,6 +132,8 @@ public final class DebugSessionHelper
                 .setStackFrame(frame)
                 .setExpressionUuid(UUID.randomUUID())
                 .setInterface(ViewInterface.NONE)
+                .setMaxTestSize(MAX_TEXT_SIZE)
+                .setMultiLine(true)
                 .setEvaluationListener(listener)
                 .build();
             target.getEvaluationEngine().evaluateExpression(request);
