@@ -66,7 +66,26 @@ public final class BslCompareParseErrorSuppressor
     /** Класс, чьё поле {@code errors} читает {@code Resource.getErrors()} (BslResource его затеняет). */
     private static final String RESOURCE_IMPL_CLASS = "org.eclipse.emf.ecore.resource.impl.ResourceImpl"; //$NON-NLS-1$
 
+    /** Сколько первых обращений к обёртке расписывать в журнале (issue 475). */
+    private static final int REPORTED_REQUESTS = 5;
+
     private static final ThreadLocal<Boolean> SUPPRESSION_DISABLED = ThreadLocal.withInitial(() -> Boolean.FALSE);
+
+    /** Отчёт об установке обёртки — выводится отложенно, см. {@link #ensureInstalled}. */
+    private static volatile String installReport;
+
+    /** Отчёт уже выведен (журнал на старте обычно ещё выключен). */
+    private static volatile boolean installReportLogged;
+
+    /** Выводит отчёт об установке обёртки при первом обращении к bsl-ресурсу. */
+    private static void logInstallReportOnce()
+    {
+        if (installReportLogged || !Global.isLogEnabled())
+            return;
+        installReportLogged = true;
+        String report = installReport;
+        log(report != null ? report : "обёртка провайдера bsl-ресурсов работает без отчёта об установке"); //$NON-NLS-1$
+    }
 
     private BslCompareParseErrorSuppressor()
     {
@@ -88,8 +107,15 @@ public final class BslCompareParseErrorSuppressor
             if (current instanceof SuppressingProvider)
                 return;
             map.put(BSL_EXTENSION, new SuppressingProvider(current));
-            log("установлена обёртка провайдера bsl-ресурсов (была: " //$NON-NLS-1$
-                + (current != null ? current.getClass().getName() : "нет записи") + ")"); //$NON-NLS-1$ //$NON-NLS-2$
+            /*
+             * Обёртка ставится в earlyStartup, когда флажок «Общее логирование» у пользователя
+             * ещё выключен, и запись об установке в журнал не попадает. Поэтому отчёт об
+             * установке запоминается и выводится позже — при первом обращении к bsl-ресурсу
+             * (issue 475: надо понимать, что именно лежало в реестре на старте).
+             */
+            installReport = "обёртка провайдера bsl-ресурсов установлена, прежняя запись: " //$NON-NLS-1$
+                + (current != null ? current.getClass().getName() : "нет записи"); //$NON-NLS-1$
+            log(installReport);
         }
         catch (Exception | LinkageError e)
         {
@@ -149,12 +175,28 @@ public final class BslCompareParseErrorSuppressor
         private volatile IResourceServiceProvider cachedDelegate;
         private volatile SuppressingResourceServiceProvider cachedWrapper;
 
+        /** Сколько раз реестр спросил у нас провайдер (issue 475: ходит ли конвейер через обёртку). */
+        private final java.util.concurrent.atomic.AtomicInteger requests =
+            new java.util.concurrent.atomic.AtomicInteger();
+
         @Override
         public IResourceServiceProvider get(URI uri, String contentType)
         {
+            logInstallReportOnce();
             IResourceServiceProvider delegate = resolveDelegate(uri, contentType);
+            int request = requests.incrementAndGet();
+            if (request <= REPORTED_REQUESTS)
+            {
+                log("запрос провайдера " + request + ": uri=" + uri + ", тип=" + contentType //$NON-NLS-1$ //$NON-NLS-2$
+                    + ", источник записи=" + (original != null ? original.getClass().getName() : "нет записи") //$NON-NLS-1$ //$NON-NLS-2$
+                    + ", делегат=" + (delegate != null ? delegate.getClass().getName() : "НЕТ (вернём null)")); //$NON-NLS-1$ //$NON-NLS-2$
+            }
             if (delegate == null)
+            {
+                // Аномалия: под нашей записью потребитель не получит провайдер языка вовсе
+                log("[!] делегат не найден, провайдер bsl не отдан: uri=" + uri + ", тип=" + contentType); //$NON-NLS-1$ //$NON-NLS-2$
                 return null;
+            }
             SuppressingResourceServiceProvider wrapper = cachedWrapper;
             if (delegate != cachedDelegate || wrapper == null)
             {
@@ -191,8 +233,15 @@ public final class BslCompareParseErrorSuppressor
             Object saved = map.remove(BSL_EXTENSION);
             try
             {
-                return IResourceServiceProvider.Registry.INSTANCE
+                IResourceServiceProvider resolved = IResourceServiceProvider.Registry.INSTANCE
                     .getResourceServiceProvider(URI.createURI(COMPARE_PROVIDER_URI));
+                if (resolved == null)
+                {
+                    // Записи для bsl не было и реестр её не дал: под нашей записью язык BSL
+                    // остаётся без провайдера — потребители (билдер, валидация) молча не работают
+                    log("[!] обход реестра не дал провайдера bsl — язык остался без провайдера"); //$NON-NLS-1$
+                }
+                return resolved;
             }
             finally
             {
@@ -247,6 +296,12 @@ public final class BslCompareParseErrorSuppressor
         public <T> T get(Class<T> type)
         {
             T service = delegate.get(type);
+            if (service == null)
+            {
+                // Потребитель просил у языка службу, которой нет: сама по себе ситуация штатная,
+                // но в issue 475 важно видеть, за чем к обёртке вообще обращаются
+                log("служба " + type.getName() + " у делегата отсутствует"); //$NON-NLS-1$ //$NON-NLS-2$
+            }
             if (type == IResourceFactory.class && service instanceof IResourceFactory factory)
                 return (T)new SuppressingResourceFactory(factory);
             return service;
@@ -263,11 +318,23 @@ public final class BslCompareParseErrorSuppressor
             this.delegate = delegate;
         }
 
+        /** Первые обращения расписываются в журнал — issue 475. */
+        private static final java.util.concurrent.atomic.AtomicInteger CREATED =
+            new java.util.concurrent.atomic.AtomicInteger();
+
         @Override
         public Resource createResource(URI uri)
         {
             Resource resource = delegate.createResource(uri);
-            if (resource != null && isCompareResource(uri) && isSuppressionActive())
+            boolean compare = isCompareResource(uri);
+            int created = CREATED.incrementAndGet();
+            if (compare || created <= REPORTED_REQUESTS)
+            {
+                log("создан bsl-ресурс " + created + ": uri=" + uri //$NON-NLS-1$ //$NON-NLS-2$
+                    + ", класс=" + (resource != null ? resource.getClass().getName() : "null") //$NON-NLS-1$ //$NON-NLS-2$
+                    + (compare ? ", ресурс сравнения — ошибки разбора будут скрыты" : "")); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            if (resource != null && compare && isSuppressionActive())
                 hideErrors(resource);
             return resource;
         }

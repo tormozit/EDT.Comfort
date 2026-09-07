@@ -6,6 +6,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -2688,17 +2689,6 @@ public final class FilterBySubsystemsDialogHook implements IStartup
             resetTreeItemChecksRecursive(child);
     }
 
-    private static void reapplyTreeChecksFromProvider(CheckboxTreeViewer viewer)
-    {
-        if (viewer == null || viewer.getTree() == null || viewer.getTree().isDisposed())
-            return;
-        org.eclipse.jface.viewers.ICheckStateProvider provider = resolveCheckStateProvider(viewer);
-        if (provider == null)
-            return;
-        for (TreeItem item : viewer.getTree().getItems())
-            reapplyTreeItemCheckRecursive(item, provider);
-    }
-
     private static org.eclipse.jface.viewers.ICheckStateProvider resolveCheckStateProvider(
             CheckboxTreeViewer viewer)
     {
@@ -2712,23 +2702,6 @@ public final class FilterBySubsystemsDialogHook implements IStartup
         Object provider = Global.invoke(viewer, "getCheckStateProvider"); //$NON-NLS-1$
         return provider instanceof org.eclipse.jface.viewers.ICheckStateProvider checkProvider
                 ? checkProvider : null;
-    }
-
-    private static void reapplyTreeItemCheckRecursive(
-            TreeItem item, org.eclipse.jface.viewers.ICheckStateProvider provider)
-    {
-        if (item == null || item.isDisposed())
-            return;
-        Object data = item.getData();
-        if (data != null)
-        {
-            boolean checked = provider.isChecked(data);
-            boolean grayed = provider.isGrayed(data);
-            item.setChecked(checked);
-            item.setGrayed(grayed);
-        }
-        for (TreeItem child : item.getItems())
-            reapplyTreeItemCheckRecursive(child, provider);
     }
 
     /**
@@ -2761,7 +2734,7 @@ public final class FilterBySubsystemsDialogHook implements IStartup
         if (existing instanceof GrayAncestorsCheckStateProvider ready)
         {
             ready.recompute();
-            reapplyTreeChecksFromProvider(viewer);
+            ready.applyMarks();
             return;
         }
 
@@ -2779,7 +2752,7 @@ public final class FilterBySubsystemsDialogHook implements IStartup
         tree.setData(GRAY_ANCESTORS_PROVIDER_KEY, wrapped);
 
         wrapped.recompute();
-        reapplyTreeChecksFromProvider(viewer);
+        wrapped.applyMarks();
         // Настройки фильтра/дерево могут дозаполниться после первого прохода патча.
         tree.getDisplay().asyncExec(() ->
         {
@@ -2792,7 +2765,7 @@ public final class FilterBySubsystemsDialogHook implements IStartup
             if (tree.isDisposed())
                 return;
             wrapped.recompute();
-            reapplyTreeChecksFromProvider(viewer);
+            wrapped.applyMarks();
         }));
         FilterBySubsystemsDialogDebug.log("grayAncestors: обёртка провайдера установлена"); //$NON-NLS-1$
     }
@@ -2806,7 +2779,7 @@ public final class FilterBySubsystemsDialogHook implements IStartup
         if (!(gp instanceof GrayAncestorsCheckStateProvider provider))
             return;
         provider.recompute();
-        reapplyTreeChecksFromProvider(viewer);
+        provider.applyMarks();
     }
 
     /**
@@ -2821,6 +2794,8 @@ public final class FilterBySubsystemsDialogHook implements IStartup
         private final org.eclipse.jface.viewers.ICheckStateProvider delegate;
         private volatile Set<Object> grayAncestors = new HashSet<>();
         private volatile Set<Object> staticMarks = new HashSet<>();
+        /** Узлы, которым пометку поставили мы сами — только их и снимаем при пересчёте. */
+        private volatile Set<Object> appliedMarks = new HashSet<>();
 
         GrayAncestorsCheckStateProvider(Object panel, CheckboxTreeViewer viewer,
             org.eclipse.jface.viewers.ICheckStateProvider delegate)
@@ -2873,11 +2848,20 @@ public final class FilterBySubsystemsDialogHook implements IStartup
                     staticMarks = statics;
                     return;
                 }
+                // Истина о пометке — состояние самого узла дерева, а не настройки: штатный
+                // setState при включённых «Включать …» на снятие пометки настройки не правит.
+                Map<Object, TreeItem> materialized = new HashMap<>();
                 for (TreeItem root : tree.getItems())
-                    collectStaticMarks(root, statics);
-                // При открытии дерево свёрнуто — статические подсистемы берём из настроек,
-                // не из материализованных TreeItem (обход getParent модельный, раскрытия не требует).
-                seedFromSettings(tree, statics, ancestors);
+                    collectMaterializedItems(root, materialized);
+                for (Map.Entry<Object, TreeItem> entry : materialized.entrySet())
+                {
+                    TreeItem item = entry.getValue();
+                    if (item.getChecked() && !item.getGrayed())
+                        statics.add(entry.getKey());
+                }
+                // При открытии дерево свёрнуто — нематериализованные подсистемы берём из
+                // настроек (обход getParent модельный, раскрытия не требует).
+                seedFromSettings(tree, materialized, statics, ancestors);
                 for (Object mark : statics)
                 {
                     for (Object parent = tcp.getParent(mark);
@@ -2897,7 +2881,71 @@ public final class FilterBySubsystemsDialogHook implements IStartup
             staticMarks = statics;
         }
 
-        private void seedFromSettings(Tree tree, Set<Object> statics, Set<Object> ancestors)
+        /**
+         * Поставить в дереве только <b>свои</b> пометки (серые предки) и снять свои же,
+         * которых больше нет. Чужие узлы не трогаем.
+         *
+         * <p>Раньше здесь была полная перерисовка всех узлов из провайдера состояния. Штатный
+         * провайдер {@code AbstractSubsystemsPanel$2} читает {@code currentFilterSettings}, а
+         * штатный {@code setState} при включённых «Включать подчинённые/родительские подсистемы»
+         * на снятие пометки {@code updateCurrentModel} для самого узла <b>не</b> зовёт (только
+         * {@code setSubtreeChecked}) — настройки остаются с пометкой. Перерисовка возвращала
+         * снятую пометку назад: пометка не снималась кликом (issue 484).
+         */
+        void applyMarks()
+        {
+            Tree tree = viewer.getTree();
+            if (tree == null || tree.isDisposed())
+                return;
+            Set<Object> ancestors = grayAncestors;
+            Set<Object> statics = staticMarks;
+            Set<Object> previous = appliedMarks;
+            Set<Object> painted = new HashSet<>();
+            Set<Object> visited = new HashSet<>();
+            for (TreeItem root : tree.getItems())
+                applyMarksRecursive(root, ancestors, statics, previous, painted, visited);
+            // Свёрнутые ветки этот проход не видел — их пометки помним до следующего раза.
+            for (Object mark : previous)
+                if (!visited.contains(mark))
+                    painted.add(mark);
+            appliedMarks = painted;
+        }
+
+        private void applyMarksRecursive(TreeItem item, Set<Object> ancestors, Set<Object> statics,
+            Set<Object> previous, Set<Object> painted, Set<Object> visited)
+        {
+            if (item == null || item.isDisposed())
+                return;
+            Object data = item.getData();
+            if (data != null)
+            {
+                visited.add(data);
+                if (ancestors.contains(data))
+                {
+                    item.setChecked(true);
+                    item.setGrayed(!statics.contains(data));
+                    painted.add(data);
+                }
+                // Снимаем только то, что выглядит нашей пометкой (серая): чёрную поставил
+                // кто-то другой. Штатный провайдер здесь не спрашиваем — он читает настройки,
+                // а они после снятия пометки в режиме «Включать …» устаревают (issue 484).
+                else if (previous.contains(data) && item.getChecked() && item.getGrayed())
+                {
+                    item.setChecked(false);
+                    item.setGrayed(false);
+                }
+            }
+            for (TreeItem child : item.getItems())
+                applyMarksRecursive(child, ancestors, statics, previous, painted, visited);
+        }
+
+        /**
+         * Подсистемы из настроек — только для узлов, которых в дереве ещё нет (свёрнутое дерево
+         * при открытии). Для материализованного узла настройки игнорируем: они устаревают,
+         * пометка узла — истина.
+         */
+        private void seedFromSettings(Tree tree, Map<Object, TreeItem> materialized,
+            Set<Object> statics, Set<Object> ancestors)
         {
             Object manager = Global.getField(panel, "filterBySubsystemsManager"); //$NON-NLS-1$
             Object settings = Global.getField(panel, "currentFilterSettings"); //$NON-NLS-1$
@@ -2913,31 +2961,56 @@ public final class FilterBySubsystemsDialogHook implements IStartup
                 IDtProject dt = toDtProjectElement(data);
                 if (dt == null)
                     continue;
+                boolean hasSubs = false;
                 Object subsObj = Global.invoke(manager, "getCheckedSubsystems", settings, dt); //$NON-NLS-1$
                 if (subsObj instanceof Set<?> subs)
                 {
                     for (Object subsystem : subs)
-                        if (subsystem != null)
-                            statics.add(subsystem);
+                    {
+                        if (subsystem == null)
+                            continue;
+                        if (materialized.containsKey(subsystem))
+                        {
+                            hasSubs |= statics.contains(subsystem);
+                            continue;
+                        }
+                        statics.add(subsystem);
+                        hasSubs = true;
+                    }
                 }
-                boolean hasSubs = countSubsystemIdsForProject(settings, dt) > 0;
-                boolean includeNot = Boolean.TRUE.equals(Global.invoke(settings,
-                    "isIncludeNotIncludedInSubsystems", dt)); //$NON-NLS-1$
+                Boolean attached = attachedNodeChecked(root);
+                boolean includeNot = attached != null ? attached.booleanValue()
+                    : Boolean.TRUE.equals(Global.invoke(settings,
+                        "isIncludeNotIncludedInSubsystems", dt)); //$NON-NLS-1$
                 if (data != null && !statics.contains(data) && (hasSubs || includeNot))
                     ancestors.add(data);
             }
         }
 
-        private void collectStaticMarks(TreeItem item, Set<Object> statics)
+        /**
+         * Пометка узла «Включить объекты, ранее не включённые в подсистемы» этого проекта,
+         * если узел уже есть в дереве; {@code null} — узла нет, спрашивать настройки.
+         */
+        private Boolean attachedNodeChecked(TreeItem root)
+        {
+            for (TreeItem child : root.getItems())
+            {
+                Object data = child.getData();
+                if (data != null && data.getClass().getName().contains("AttachedNavigatorAdapter")) //$NON-NLS-1$
+                    return Boolean.valueOf(child.getChecked());
+            }
+            return null;
+        }
+
+        private void collectMaterializedItems(TreeItem item, Map<Object, TreeItem> materialized)
         {
             if (item == null || item.isDisposed())
                 return;
             Object data = item.getData();
-            if (data != null && delegate != null
-                && delegate.isChecked(data) && !delegate.isGrayed(data))
-                statics.add(data);
+            if (data != null)
+                materialized.putIfAbsent(data, item);
             for (TreeItem child : item.getItems())
-                collectStaticMarks(child, statics);
+                collectMaterializedItems(child, materialized);
         }
     }
 

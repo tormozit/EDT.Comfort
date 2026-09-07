@@ -11,6 +11,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
+import java.util.stream.Collectors;
 
 import org.eclipse.core.commands.ExecutionException;
 import org.eclipse.core.commands.IExecutionListener;
@@ -58,6 +59,7 @@ import org.eclipse.ui.commands.ICommandService;
 import org.eclipse.ui.dialogs.PreferencesUtil;
 
 import com._1c.g5.v8.dt.validation.marker.IMarkerInfo;
+import com._1c.g5.v8.dt.validation.marker.IMarkerManager;
 import com._1c.g5.v8.dt.validation.marker.IMarkerUpdateListener;
 import com._1c.g5.v8.dt.validation.marker.Marker;
 import com._1c.g5.v8.dt.validation.marker.MarkerFilter;
@@ -291,6 +293,13 @@ public final class ProblemViewHook implements IStartup
      * метода панели, но требующего UI-потока, поэтому он снимается заранее и кэшируется.
      * Сомнение всегда трактуется в пользу обновления: нет кэша отбора, слишком много маркеров,
      * любая ошибка — событие проходит, то есть остаётся штатное поведение.
+     *
+     * <p><b>Диагностика</b> (журнал «Комфорт», флажок «Общее логирование»): установка заслонки,
+     * каждая сверка с решением «передано / не дошло», отпечаток до и после, проекты события,
+     * сколько событий подряд не дошло и когда панель обновлялась в последний раз, снятый отбор
+     * (отдельно помечается отбор «ВСЕГДА ЛОЖЬ» — под ним маркеров всегда ноль, а значит отпечаток
+     * застывает), вытеснение несверенного события из пачки и срыв сверки с исключением. По этим
+     * строкам видно, обновляется ли панель по маркерам вообще (issue 475).
      */
     private static void installResultChangeGate(IViewPart view)
     {
@@ -303,19 +312,90 @@ public final class ProblemViewHook implements IStartup
             if (!(manager instanceof IMarkerManagerV2 markerManager)
                 || !(listener instanceof IMarkerUpdateListener stock))
             {
-                Debug.log("installResultChangeGate: fields not found"); //$NON-NLS-1$
+                Debug.log("заслонка обновлений: поля панели не найдены — markerManager=" //$NON-NLS-1$
+                    + className(manager) + ", updateListener=" + className(listener) //$NON-NLS-1$
+                    + " (панель обновляется штатно)"); //$NON-NLS-1$
                 return;
             }
+            installMarkerEventProbe(markerManager);
             ResultChangeGate gate = new ResultChangeGate(view, markerManager, stock);
             gates.put(view, gate);
             markerManager.removeListener(stock);
             markerManager.addListener(gate);
             gate.refreshFilterSnapshot();
-            Debug.log("installResultChangeGate: installed"); //$NON-NLS-1$
+            Debug.log("заслонка обновлений: установлена на " + view.getClass().getName() //$NON-NLS-1$
+                + ", штатный слушатель " + stock.getClass().getName()); //$NON-NLS-1$
         }
         catch (RuntimeException e)
         {
-            Debug.log("installResultChangeGate: " + e); //$NON-NLS-1$
+            Debug.log("заслонка обновлений: не установлена — " + e); //$NON-NLS-1$
+        }
+    }
+
+    private static volatile boolean markerProbeInstalled;
+
+    /**
+     * Наблюдатель за событиями об изменении маркеров (issue 475): ничего не подменяет и
+     * ничего не задерживает, только пишет в журнал факт события.
+     *
+     * <p>По журналу issue 475 видно, что в {@link ResultChangeGate} за семь минут не пришло
+     * ни одного события — при том что в модуле лежала синтаксическая ошибка, а перепроверка
+     * объекта отчиталась «0 ошибок». Наблюдатель отвечает на два вопроса: рассылает ли события
+     * хоть кто-нибудь и тот ли это экземпляр менеджера маркеров, который держит панель
+     * (менеджеры — {@code IManagedService}, экземпляр сервиса и экземпляр панели могут
+     * оказаться разными, и тогда заслонка слушает не тот канал).
+     *
+     * @param viewManager менеджер маркеров, взятый из поля панели
+     */
+    private static void installMarkerEventProbe(Object viewManager)
+    {
+        if (markerProbeInstalled)
+            return;
+        markerProbeInstalled = true;
+        try
+        {
+            IMarkerManagerV2 serviceV2 = Global.getOsgiService(IMarkerManagerV2.class);
+            IMarkerManager serviceV1 = Global.getOsgiService(IMarkerManager.class);
+            Debug.log("наблюдатель маркеров: менеджер панели " + identity(viewManager) //$NON-NLS-1$
+                + ", сервис IMarkerManagerV2 " + identity(serviceV2) //$NON-NLS-1$
+                + (serviceV2 == viewManager ? " (тот же экземпляр)" : " (ДРУГОЙ экземпляр)") //$NON-NLS-1$ //$NON-NLS-2$
+                + ", сервис IMarkerManager " + identity(serviceV1)); //$NON-NLS-1$
+            if (serviceV2 != null && serviceV2 != viewManager)
+                serviceV2.addListener(new MarkerEventProbe("сервис V2")); //$NON-NLS-1$
+            if (serviceV1 != null)
+                serviceV1.addListener(new MarkerEventProbe("сервис V1")); //$NON-NLS-1$
+        }
+        catch (RuntimeException | LinkageError e)
+        {
+            Global.logError(Debug.TAG, "наблюдатель маркеров: не установлен", e); //$NON-NLS-1$
+        }
+    }
+
+    /** Класс и хэш объекта для журнала: по хэшу видно, один это экземпляр или разные. */
+    private static String identity(Object value)
+    {
+        return value == null ? "нет" //$NON-NLS-1$
+            : value.getClass().getSimpleName() + "@" + Integer.toHexString(System.identityHashCode(value)); //$NON-NLS-1$
+    }
+
+    /** См. {@link #installMarkerEventProbe(Object)}. */
+    private static final class MarkerEventProbe implements IMarkerUpdateListener
+    {
+        private final String channel;
+
+        private int count;
+
+        MarkerEventProbe(String channel)
+        {
+            this.channel = channel;
+        }
+
+        @Override
+        public void handleMarkersChanged(MarkersChangedEvent event)
+        {
+            count++;
+            Debug.log("наблюдатель маркеров: событие " + count + " (" + channel + "), проекты " //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + ResultChangeGate.changedProjectNames(event));
         }
     }
 
@@ -327,6 +407,9 @@ public final class ProblemViewHook implements IStartup
 
         /** Пауза перед сверкой: события коммиттера идут пачками, считать на каждое незачем. */
         private static final int EVALUATE_DELAY_MS = 100;
+
+        /** Сколько символов описания отбора писать в журнал. */
+        private static final int FILTER_LOG_LIMIT = 400;
 
         private final IViewPart view;
 
@@ -341,6 +424,22 @@ public final class ProblemViewHook implements IStartup
 
         /** Последнее событие, ожидающее сверки. */
         private volatile MarkersChangedEvent pending;
+
+        /** Диагностика: описание снятого отбора и когда он снят. */
+        private volatile String filterDescription = "нет"; //$NON-NLS-1$
+
+        private volatile long filterSnapshotAt;
+
+        /** Диагностика: сколько событий подряд не дошло до панели. */
+        private volatile int swallowedInRow;
+
+        /** Диагностика: сколько всего событий пришло и сколько дошло до панели. */
+        private volatile int eventCount;
+
+        private volatile int passedCount;
+
+        /** Диагностика: когда событие последний раз доходило до панели. */
+        private volatile long lastPassedAt;
 
         /** Сверка идёт в своей задаче: событие приходит в потоке коммиттера маркеров. */
         private final Job evaluateJob;
@@ -362,7 +461,17 @@ public final class ProblemViewHook implements IStartup
         {
             // Считать отпечаток прямо здесь нельзя: это поток коммиттера маркеров, он в этот
             // момент держит хранилище — читать его отсюда и задерживать коммит одинаково плохо
+            eventCount++;
+            MarkersChangedEvent previous = pending;
             pending = event;
+            if (previous != null)
+            {
+                // Пачка схлопывается в одну сверку: проекты вытесненного события в отпечаток
+                // уже не попадут, и его изменения до панели могут не дойти вовсе
+                Debug.log("заслонка обновлений: событие " + eventCount //$NON-NLS-1$
+                    + " вытеснило несверенное предыдущее (проекты " //$NON-NLS-1$
+                    + changedProjectNames(previous) + ")"); //$NON-NLS-1$
+            }
             evaluateJob.cancel();
             evaluateJob.schedule(EVALUATE_DELAY_MS);
         }
@@ -372,13 +481,41 @@ public final class ProblemViewHook implements IStartup
             MarkersChangedEvent event = pending;
             if (event == null)
                 return;
-            String digest = digest(event);
-            if (digest != null && digest.equals(lastDigest))
-                return;
-            lastDigest = digest;
-            stock.handleMarkersChanged(event);
-            // Отбор мог измениться вместе с результатом (например, сменился текущий объект)
-            refreshFilterSnapshot();
+            try
+            {
+                String digest = digest(event);
+                if (digest != null && digest.equals(lastDigest))
+                {
+                    swallowedInRow++;
+                    Debug.log("заслонка обновлений: событие " + eventCount + " (проекты " //$NON-NLS-1$ //$NON-NLS-2$
+                        + changedProjectNames(event) + ") не дошло до панели — отпечаток " //$NON-NLS-1$
+                        + "не изменился (" + digest + "), подряд не дошло " + swallowedInRow //$NON-NLS-1$ //$NON-NLS-2$
+                        + ", последнее обновление " + sinceText(lastPassedAt) //$NON-NLS-1$
+                        + ", отбор снят " + sinceText(filterSnapshotAt) + ": " + filterDescription); //$NON-NLS-1$
+                    return;
+                }
+                String previousDigest = lastDigest;
+                lastDigest = digest;
+                swallowedInRow = 0;
+                passedCount++;
+                Debug.log("заслонка обновлений: событие " + eventCount + " (проекты " //$NON-NLS-1$ //$NON-NLS-2$
+                    + changedProjectNames(event) + ") передано панели, всего передано " //$NON-NLS-1$
+                    + passedCount + " из " + eventCount + " — отпечаток " + previousDigest //$NON-NLS-1$ //$NON-NLS-2$
+                    + " → " + digest //$NON-NLS-1$
+                    + (digest == null ? " (посчитать не удалось — пропускаем безусловно)" : "")); //$NON-NLS-1$ //$NON-NLS-2$
+                lastPassedAt = System.currentTimeMillis();
+                stock.handleMarkersChanged(event);
+                // Отбор мог измениться вместе с результатом (например, сменился текущий объект)
+                refreshFilterSnapshot();
+            }
+            catch (Throwable t)
+            {
+                // Ошибка здесь означает, что событие до панели не дошло и уже не дойдёт:
+                // повторного события про это изменение маркеров не будет
+                Global.logError(Debug.TAG, "заслонка обновлений: сверка сорвалась, событие " //$NON-NLS-1$
+                    + eventCount + " потеряно", t); //$NON-NLS-1$
+                throw t;
+            }
         }
 
         /**
@@ -391,20 +528,27 @@ public final class ProblemViewHook implements IStartup
         {
             MarkerFilter filter = filterSnapshot;
             if (filter == null || event == null)
+            {
+                Debug.log("заслонка обновлений: отпечаток не считаем — отбор панели не снят"); //$NON-NLS-1$
                 return null;
+            }
             try
             {
                 IMarkerReader reader = markerManager.createReader(projects(event));
                 IMarkerInfo info = reader.getMarkerInfo(filter);
                 int total = info == null ? -1 : info.getTotalCount();
                 if (total < 0 || total > DIGEST_LIMIT)
+                {
+                    Debug.log("заслонка обновлений: отпечаток не считаем — маркеров под отбором " //$NON-NLS-1$
+                        + total + " (предел " + DIGEST_LIMIT + ")"); //$NON-NLS-1$ //$NON-NLS-2$
                     return null;
+                }
                 long sum = reader.markers(filter).mapToLong(Marker::hashCode).sum();
                 return total + ":" + sum; //$NON-NLS-1$
             }
             catch (RuntimeException e)
             {
-                Debug.log("resultChangeGate: отпечаток не посчитан: " + e); //$NON-NLS-1$
+                Global.logError(Debug.TAG, "заслонка обновлений: отпечаток не посчитан", e); //$NON-NLS-1$
                 return null;
             }
         }
@@ -426,14 +570,68 @@ public final class ProblemViewHook implements IStartup
                         return;
                     Object filter = Global.invoke(view, "getMarkerFilter"); //$NON-NLS-1$
                     if (filter instanceof MarkerFilter markerFilter)
+                    {
                         filterSnapshot = markerFilter;
+                        filterSnapshotAt = System.currentTimeMillis();
+                        String description = describeFilter(markerFilter);
+                        if (!description.equals(filterDescription))
+                            Debug.log("заслонка обновлений: отбор панели снят заново — " + description //$NON-NLS-1$
+                                + " (был " + filterDescription + ")"); //$NON-NLS-1$ //$NON-NLS-2$
+                        filterDescription = description;
+                    }
+                    else
+                    {
+                        Debug.log("заслонка обновлений: панель вернула не отбор — " + className(filter)); //$NON-NLS-1$
+                    }
                 }
                 catch (RuntimeException e)
                 {
-                    Debug.log("resultChangeGate: отбор не снят: " + e); //$NON-NLS-1$
+                    Global.logError(Debug.TAG, "заслонка обновлений: отбор панели не снят", e); //$NON-NLS-1$
                     filterSnapshot = null;
+                    filterDescription = "нет"; //$NON-NLS-1$
                 }
             });
+        }
+
+        /**
+         * Описание отбора для журнала. Отдельно помечается отбор «всегда ложь»: его строит
+         * {@code LazyProblemView.buildTreeFilter}, когда область отбора ни во что не
+         * разрешилась, и под ним маркеров всегда ноль — то есть отпечаток застывает.
+         */
+        private static String describeFilter(MarkerFilter filter)
+        {
+            String text = String.valueOf(filter);
+            if (text.equals(alwaysFalseDescription()))
+                return "ВСЕГДА ЛОЖЬ (" + text + ")"; //$NON-NLS-1$ //$NON-NLS-2$
+            return text.length() > FILTER_LOG_LIMIT ? text.substring(0, FILTER_LOG_LIMIT) + "…" : text; //$NON-NLS-1$
+        }
+
+        private static String alwaysFalseDescription()
+        {
+            String known = alwaysFalseDescription;
+            if (known == null)
+            {
+                known = String.valueOf(MarkerFilter.createAlwaysFalseFilter());
+                alwaysFalseDescription = known;
+            }
+            return known;
+        }
+
+        private static volatile String alwaysFalseDescription;
+
+        private static String changedProjectNames(MarkersChangedEvent event)
+        {
+            Collection<IProject> changed = event != null ? event.getChangedProjects() : null;
+            if (changed == null || changed.isEmpty())
+                return "нет (отпечаток посчитается по пустому набору проектов)"; //$NON-NLS-1$
+            return changed.stream().map(IProject::getName).collect(Collectors.joining(", ")); //$NON-NLS-1$
+        }
+
+        private static String sinceText(long moment)
+        {
+            if (moment == 0L)
+                return "ни разу"; //$NON-NLS-1$
+            return (System.currentTimeMillis() - moment) + " мс назад"; //$NON-NLS-1$
         }
     }
 
@@ -1415,9 +1613,15 @@ public final class ProblemViewHook implements IStartup
         return marker instanceof Marker m ? m : null;
     }
 
+    /** Имя класса объекта для журнала. */
+    private static String className(Object value)
+    {
+        return value == null ? "нет" : value.getClass().getName(); //$NON-NLS-1$
+    }
+
     private static final class Debug
     {
-        private static final String TAG = "ProblemView"; //$NON-NLS-1$
+        static final String TAG = "ProblemView"; //$NON-NLS-1$
 
         private Debug() {}
 

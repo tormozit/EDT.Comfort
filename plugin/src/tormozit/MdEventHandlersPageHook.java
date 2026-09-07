@@ -5,6 +5,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.WeakHashMap;
@@ -64,12 +65,18 @@ import org.eclipse.ui.forms.editor.IFormPage;
 import org.eclipse.ui.forms.widgets.Form;
 import org.eclipse.ui.forms.widgets.ScrolledForm;
 import org.eclipse.ui.handlers.IHandlerService;
+import org.eclipse.xtext.naming.QualifiedName;
+import org.eclipse.xtext.resource.IEObjectDescription;
+import org.eclipse.xtext.scoping.IGlobalScopeProvider;
+import org.eclipse.xtext.scoping.IScope;
 import org.osgi.framework.Bundle;
 
 import com._1c.g5.v8.dt.core.platform.IConfigurationProject;
 import com._1c.g5.v8.dt.core.platform.IExtensionProject;
 import com._1c.g5.v8.dt.core.platform.IV8Project;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
+import com._1c.g5.v8.dt.mcore.McorePackage;
+import com._1c.g5.v8.dt.mcore.TypeItem;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorPage;
 import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
@@ -82,8 +89,10 @@ import com.google.inject.Injector;
  * ({@link DtGranularEditor}).
  *
  * <p>Страница воспроизводит результат команды «Все подписки на события» из контекстного
- * меню навигатора: тот же контент (встроенный EDT {@code EventHandlersEditor}), тот же
- * фильтр по производным типам объекта, что и у подменю «Найти подписки на события → Все».
+ * меню навигатора: тот же контент (встроенный EDT {@code EventHandlersEditor}) и фильтр
+ * по производным типам объекта, что и у подменю «Найти подписки на события → Все», плюс
+ * супертипы этих типов — наборы типов платформы («СправочникОбъект» и т.п.), чтобы были
+ * видны и подписки на весь набор, а не только на конкретный объект.
  *
  * <p>Страница добавляется только для объектов с производными типами (ссылочные объекты,
  * регистры, константы) — критерий тот же, что у {@code ProdusedTypesUtil} EDT.
@@ -472,6 +481,63 @@ public final class MdEventHandlersPageHook implements IStartup
         return result;
     }
 
+    /**
+     * Производные типы объекта плюс их супертипы — наборы типов платформы
+     * ({@code CatalogObject} / «СправочникОбъект», {@code InformationRegisterRecordSet}
+     * / «РегистрСведенийНаборЗаписей» и т.п.).
+     *
+     * <p>Источник подписки может быть задан не конкретным типом
+     * («СправочникОбъект.Товары»), а всем набором («СправочникОбъект» — любой
+     * справочник). {@code EventHandlersFilter} EDT сравнивает источники подписки с
+     * элементами отбора напрямую ({@code getSource().getTypes().contains(item)}),
+     * поэтому без наборов типов такие подписки на странице не видны.
+     *
+     * <p>Имя набора — часть имени производного типа до точки. Сам набор берётся так же,
+     * как это делает {@code FilterSourceViewerContentProvider} EDT: глобальная область
+     * видимости по ссылке {@code TypeDescription.types} (односегментные имена — это
+     * наборы типов) и {@code EcoreUtil.resolve} относительно конфигурации — только так
+     * получается тот же экземпляр {@code TypeItem}, что и в источниках подписок.
+     */
+    private static List<Object> withSourceTypeSets(Injector injector, Configuration configuration,
+        List<Object> producedTypes)
+    {
+        List<Object> result = new ArrayList<>(producedTypes);
+        try
+        {
+            Set<String> typeSetNames = new LinkedHashSet<>();
+            for (Object producedType : producedTypes)
+            {
+                if (!(producedType instanceof TypeItem typeItem) || typeItem.getName() == null)
+                    continue;
+                int dot = typeItem.getName().indexOf('.');
+                if (dot > 0)
+                    typeSetNames.add(typeItem.getName().substring(0, dot));
+            }
+            if (typeSetNames.isEmpty())
+                return result;
+
+            IGlobalScopeProvider scopeProvider = injector.getInstance(IGlobalScopeProvider.class);
+            IScope scope = scopeProvider.getScope(configuration.eResource(),
+                McorePackage.Literals.TYPE_DESCRIPTION__TYPES,
+                description -> description.getName().getSegmentCount() == 1);
+
+            for (String typeSetName : typeSetNames)
+            {
+                IEObjectDescription description = scope.getSingleElement(QualifiedName.create(typeSetName));
+                if (description == null)
+                    continue;
+                EObject typeSet = EcoreUtil.resolve(description.getEObjectOrProxy(), configuration);
+                if (typeSet instanceof TypeItem && !typeSet.eIsProxy() && !result.contains(typeSet))
+                    result.add(typeSet);
+            }
+        }
+        catch (RuntimeException e)
+        {
+            Global.logError(TAG, "collect source type sets", e); //$NON-NLS-1$
+        }
+        return result;
+    }
+
     // =========================================================================
     // Базовая конфигурация проекта объекта (как AbstractEventHandlersHandler EDT)
     // =========================================================================
@@ -532,6 +598,13 @@ public final class MdEventHandlersPageHook implements IStartup
 
         private final List<Object> producedTypes;
 
+        /**
+         * Элементы отбора: производные типы объекта и их супертипы (наборы типов
+         * платформы). Наборы известны только после получения инжектора и конфигурации —
+         * до наполнения страницы здесь одни производные типы.
+         */
+        private List<Object> filterSources;
+
         private Composite host;
 
         private Object embeddedEditor;
@@ -557,6 +630,7 @@ public final class MdEventHandlersPageHook implements IStartup
             super(PAGE_ID, PAGE_TITLE);
             this.mdObject = mdObject;
             this.producedTypes = producedTypes;
+            this.filterSources = producedTypes;
         }
 
         @Override
@@ -690,6 +764,10 @@ public final class MdEventHandlersPageHook implements IStartup
                     showError("Не удалось определить конфигурацию объекта"); //$NON-NLS-1$
                     return;
                 }
+
+                // Подписки бывают заданы на набор типов целиком («СправочникОбъект»),
+                // а не на конкретный производный тип объекта — добавляем и наборы.
+                filterSources = withSourceTypeSets(injector, configuration, producedTypes);
 
                 Object editor = bundle.loadClass(EDITOR_CLASS).getDeclaredConstructor().newInstance();
                 injector.injectMembers(editor);
@@ -968,8 +1046,8 @@ public final class MdEventHandlersPageHook implements IStartup
             // Сравнение как множество: источники фильтра (HashSet) против набора производных
             // типов объекта (устойчиво к дублям в списке).
             if (sources == null
-                || sources.size() != new HashSet<>(producedTypes).size()
-                || !sources.containsAll(producedTypes))
+                || sources.size() != new HashSet<>(filterSources).size()
+                || !sources.containsAll(filterSources))
                 return false;
 
             @SuppressWarnings("unchecked")
@@ -1006,7 +1084,7 @@ public final class MdEventHandlersPageHook implements IStartup
             Collection<Object> sources =
                 (Collection<Object>)Global.invoke(filter, "getSources"); //$NON-NLS-1$
             if (sources != null)
-                sources.addAll(producedTypes);
+                sources.addAll(filterSources);
 
             TreeViewer viewer = (TreeViewer)Global.invoke(mainSection, "getEventHandlersTreeViewer"); //$NON-NLS-1$
             if (viewer != null && !viewer.getControl().isDisposed())

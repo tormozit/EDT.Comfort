@@ -378,7 +378,7 @@ public class ComfortPreferencePage
 
         createTextEditorsGroup();
 
-        createLoggingGroup();
+        createLoggingCheckbox();
 
         // Поле «Символы» намеренно не добавляется:
         // значение задано константой ContentAssistSettings.CHARSET_VALUE
@@ -746,43 +746,16 @@ public class ComfortPreferencePage
             ctrlClickHost);
     }
 
-    private void createLoggingGroup()
+    private void createLoggingCheckbox()
     {
-        Group loggingGroup = new Group(getFieldEditorParent(), SWT.NONE);
-        loggingGroup.setText("Журнал");
-        GridData groupData = new GridData(SWT.FILL, SWT.TOP, true, false);
-        groupData.horizontalSpan = 2;
-        groupData.verticalIndent = 8;
-        loggingGroup.setLayoutData(groupData);
+        // BooleanFieldEditor.createControl() подменяет layout родителя на GridLayout —
+        // отдельный host, иначе ломается сетка страницы.
+        Composite checkboxHost = new Composite(getFieldEditorParent(), SWT.NONE);
+        GridData hostData = new GridData(SWT.FILL, SWT.CENTER, true, false);
+        hostData.horizontalSpan = 2;
+        hostData.verticalIndent = 8;
+        checkboxHost.setLayoutData(hostData);
 
-        GridLayout groupLayout = new GridLayout(2, false);
-        groupLayout.marginWidth = 10;
-        groupLayout.marginHeight = 8;
-        groupLayout.horizontalSpacing = 8;
-        groupLayout.verticalSpacing = 4;
-        loggingGroup.setLayout(groupLayout);
-
-        Composite logRow = new Composite(loggingGroup, SWT.NONE);
-        GridData logRowData = new GridData(SWT.FILL, SWT.CENTER, true, false);
-        logRowData.horizontalSpan = 2;
-        logRow.setLayoutData(logRowData);
-        GridLayout logRowLayout = new GridLayout(1, false);
-        logRowLayout.marginWidth = 0;
-        logRowLayout.marginHeight = 0;
-        logRow.setLayout(logRowLayout);
-
-        Composite logControls = new Composite(logRow, SWT.NONE);
-        logControls.setLayoutData(new GridData(SWT.LEFT, SWT.CENTER, false, false));
-        RowLayout controlsLayout = new RowLayout(SWT.HORIZONTAL);
-        controlsLayout.spacing = 8;
-        controlsLayout.marginWidth = 0;
-        controlsLayout.marginHeight = 0;
-        controlsLayout.center = true;
-        logControls.setLayout(controlsLayout);
-
-        // BooleanFieldEditor.createControl() заменяет layout родителя на GridLayout —
-        // поэтому чекбокс в отдельном composite, а «Журнал» — сосед в RowLayout.
-        Composite checkboxHost = new Composite(logControls, SWT.NONE);
         BooleanFieldEditor debugLogField = new BooleanFieldEditor(
             ComfortSettings.PREF_DEBUG_LOG,
             "Вести журнал",
@@ -790,16 +763,8 @@ public class ComfortPreferencePage
         addField(debugLogField);
         setFieldTooltip(debugLogField,
             "Журнал отладки: content assist, установщик «Сменить»/«Обновить» и др.\n"
-            + "Окно: Показать представление → Прочее → Журнал Комфорт"); //$NON-NLS-1$
-
-        Link logViewLink = new Link(logControls, SWT.NONE);
-        logViewLink.setText("<a>Журнал</a>"); //$NON-NLS-1$
-        logViewLink.setToolTipText("Открыть представление «Журнал Комфорт»"); //$NON-NLS-1$
-        logViewLink.addListener(SWT.Selection, e -> {
-            if (!"Журнал".equals(e.text)) //$NON-NLS-1$
-                return;
-            GlobalLog.showView();
-        });
+            + "Окно: Показать представление → Прочее → Журнал Комфорт", //$NON-NLS-1$
+            checkboxHost);
     }
 
     private void createVersionSection()

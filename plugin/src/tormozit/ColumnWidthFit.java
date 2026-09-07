@@ -7,7 +7,6 @@ import org.eclipse.jface.layout.TreeColumnLayout;
 import org.eclipse.jface.viewers.ColumnPixelData;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.graphics.GC;
-import org.eclipse.swt.internal.win32.OS;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Listener;
@@ -361,13 +360,13 @@ final class ColumnWidthFit
     }
 
     /**
-     * Зажата ли клавиша Ctrl в данный момент (Win32, состояние клавиши на момент применения). С Ctrl
-     * перетаскивание границы колонки не трогает соседей — пользователь осознанно делает колонку шире
-     * контрола, вместе с горизонтальной прокруткой.
+     * Зажата ли клавиша Ctrl в данный момент (состояние клавиши на момент применения, см.
+     * {@link KeyStateProbe}). С Ctrl перетаскивание границы колонки не трогает соседей —
+     * пользователь осознанно делает колонку шире контрола, вместе с горизонтальной прокруткой.
      */
     static boolean isCtrlPressed()
     {
-        return (OS.GetKeyState(OS.VK_CONTROL) & 0x8000) != 0;
+        return KeyStateProbe.isCtrlPressed();
     }
 
     /** Суммарная ширина всех колонок (включая non-resizable и скрытые — это фактическая занятая ширина). */

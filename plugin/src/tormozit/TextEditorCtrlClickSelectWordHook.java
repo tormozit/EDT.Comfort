@@ -3,7 +3,6 @@ package tormozit;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.graphics.Point;
-import org.eclipse.swt.internal.win32.OS;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
 import org.eclipse.ui.IStartup;
@@ -304,6 +303,9 @@ public final class TextEditorCtrlClickSelectWordHook implements IStartup
      */
     private static void suppressHyperlinkModifier(Event event)
     {
+        // Трекер модификаторов должен увидеть настоящее состояние: дальше по цепочке
+        // фильтров у события уже не будет бита Ctrl (см. KeyStateProbe).
+        KeyStateProbe.note(event);
         event.stateMask &= ~SWT.MOD1;
     }
 
@@ -316,10 +318,7 @@ public final class TextEditorCtrlClickSelectWordHook implements IStartup
     /** Текущее состояние клавиш (не {@code stateMask} прошлого события): Ctrl без Shift и Alt. */
     private static boolean isCtrlOnlyPressed()
     {
-        boolean ctrl = (OS.GetKeyState(OS.VK_CONTROL) & 0x8000) != 0;
-        boolean shift = (OS.GetKeyState(OS.VK_SHIFT) & 0x8000) != 0;
-        boolean alt = (OS.GetKeyState(OS.VK_MENU) & 0x8000) != 0;
-        return ctrl && !shift && !alt;
+        return KeyStateProbe.isCtrlOnlyPressed();
     }
 
     /**

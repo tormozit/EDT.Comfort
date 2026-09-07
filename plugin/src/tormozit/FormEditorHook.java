@@ -211,6 +211,7 @@ import com._1c.g5.v8.dt.mcore.TypeDescription;
 import com._1c.g5.v8.dt.mcore.TypeItem;
 import com._1c.g5.v8.dt.mcore.util.McoreUtil;
 import com._1c.g5.v8.dt.metadata.dbview.DbViewFieldDef;
+import com._1c.g5.v8.dt.metadata.mdclass.AdjustableBoolean;
 import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com._1c.g5.v8.dt.metadata.mdclass.ScriptVariant;
@@ -4290,7 +4291,9 @@ public class FormEditorHook implements IStartup
      *
      *   <li><b>Колонки «Невидимость» и «ТолькоПросмотр»</b> — эффективные значения, с учётом
      *       родительских групп. Двойной клик выделяет элемент, от которого значение
-     *       унаследовано; унаследованное значение показано серым.
+     *       унаследовано; унаследованное значение показано серым. Звёздочка вместо галочки —
+     *       значение не установлено, но действует ограничение по ролям
+     *       (см. {@link RoleRestriction}).
      *
      *   <li><b>Линии сетки</b> в дереве.
      * </ol>
@@ -4460,6 +4463,18 @@ public class FormEditorHook implements IStartup
 
         private static final String SYNONYM_FEATURE = "synonym"; //$NON-NLS-1$
 
+        /** «Использование» команды формы. */
+        private static final String USE_FEATURE = "use"; //$NON-NLS-1$
+
+        /** «Просмотр» реквизита формы. */
+        private static final String VIEW_FEATURE = "view"; //$NON-NLS-1$
+
+        /** «Редактирование» реквизита формы. */
+        private static final String EDIT_FEATURE = "edit"; //$NON-NLS-1$
+
+        /** «Пользовательская видимость» элемента формы. */
+        private static final String USER_VISIBLE_FEATURE = "userVisible"; //$NON-NLS-1$
+
         /** Подписи полей палитры — из локализации EDT (см. {@link #propertyLabels}). */
         private static final FeatureNameLocalizationProvider FEATURE_NAMES =
             new FeatureNameLocalizationProvider();
@@ -4470,6 +4485,12 @@ public class FormEditorHook implements IStartup
 
         /** Пометка в колонках «Невидимость» и «ТолькоПросмотр». */
         private static final String FLAG_MARK = "✓"; //$NON-NLS-1$
+
+        /**
+         * Пометка ограничения по ролям в тех же колонках: само значение не установлено, но
+         * элемент всё равно может оказаться скрытым или недоступным у части пользователей.
+         */
+        private static final String ROLE_MARK = "*"; //$NON-NLS-1$
 
         static void install()
         {
@@ -4569,17 +4590,26 @@ public class FormEditorHook implements IStartup
                 TITLE_INVISIBLE + ": галочка, если у самого элемента или у любой родительской" //$NON-NLS-1$
                     + " группы снят флажок «Видимость»." //$NON-NLS-1$
                     + " Унаследованное значение — серой галочкой." //$NON-NLS-1$
-                    + " Двойной клик переходит к элементу, от которого значение унаследовано." //$NON-NLS-1$
+                    + " Звёздочка — видимость включена, но элемент виден не всем: недефолтное" //$NON-NLS-1$
+                    + " «Использование» его команды, «Просмотр» его реквизита формы или" //$NON-NLS-1$
+                    + " «Пользовательская видимость» самого элемента." //$NON-NLS-1$
+                    + " Двойной клик переходит к элементу или объекту формы, от которого" //$NON-NLS-1$
+                    + " значение получено, и активирует само это свойство." //$NON-NLS-1$
                     + Global.pluginSignForTooltip())
-                        .setLabelProvider(new FlagLabelProvider(ItemsTree::invisibilitySource));
+                        .setLabelProvider(new FlagLabelProvider(ItemsTree::invisibilitySource,
+                            ItemsTree::visibilityRestriction));
 
             addColumn(viewer, TITLE_READ_ONLY, ICON_READ_ONLY, COLUMN_READ_ONLY, SWT.CENTER,
                 TITLE_READ_ONLY + ": галочка, если «ТолькоПросмотр» установлен у самого элемента" //$NON-NLS-1$
                     + " или у любой родительской группы." //$NON-NLS-1$
                     + " Унаследованное значение — серой галочкой." //$NON-NLS-1$
-                    + " Двойной клик переходит к элементу, от которого значение унаследовано." //$NON-NLS-1$
+                    + " Звёздочка — «ТолькоПросмотр» не установлен, но редактировать может не" //$NON-NLS-1$
+                    + " каждый: у реквизита формы недефолтное «Редактирование»." //$NON-NLS-1$
+                    + " Двойной клик переходит к элементу или реквизиту, от которого значение" //$NON-NLS-1$
+                    + " получено, и активирует само это свойство." //$NON-NLS-1$
                     + Global.pluginSignForTooltip())
-                        .setLabelProvider(new FlagLabelProvider(ItemsTree::readOnlySource));
+                        .setLabelProvider(new FlagLabelProvider(ItemsTree::readOnlySource,
+                            ItemsTree::readOnlyRestriction));
 
             addColumn(viewer, TITLE_HEIGHT, ICON_HEIGHT, COLUMN_HEIGHT, SWT.RIGHT,
                 sizeTooltip(TITLE_HEIGHT, TITLE_HEIGHT))
@@ -5452,6 +5482,158 @@ public class FormEditorHook implements IStartup
         }
 
         // -------------------------------------------------------------------
+        // Ограничения по ролям
+        // -------------------------------------------------------------------
+
+        /**
+         * Ограничение по ролям: где именно оно задано и каким свойством.
+         *
+         * @param owner объект, у которого свойство задано — сам элемент формы (у него это
+         *        «Пользовательская видимость») либо реквизит или команда формы
+         * @param featureName имя признака модели ({@code use} / {@code view} / {@code edit} /
+         *        {@code userVisible}) — по нему берётся подпись поля палитры
+         */
+        private record RoleRestriction(EObject owner, String featureName)
+        {
+        }
+
+        /**
+         * Ограничение, из-за которого элемент с включённой видимостью всё же может не показаться
+         * пользователю: недефолтное «Использование» команды, «Просмотр» реквизита или
+         * «Пользовательская видимость» самого элемента. Приоритет — у реквизита и команды:
+         * оттуда ограничение приходит к элементу, а не задано у него.
+         */
+        private static RoleRestriction visibilityRestriction(FormItem item)
+        {
+            if (item == null || isServiceItem(item))
+                return null;
+            RoleRestriction fromObject = formObjectRestriction(item, USE_FEATURE, VIEW_FEATURE);
+            if (fromObject != null)
+                return fromObject;
+            if (item instanceof Visible visible && !isDefaultAdjustable(visible.getUserVisible()))
+                return new RoleRestriction(item, USER_VISIBLE_FEATURE);
+            return null;
+        }
+
+        /**
+         * То же для «ТолькоПросмотр»: у реквизита формы за доступность отвечает
+         * «Редактирование». Своего аналога «Пользовательской видимости» у доступности нет,
+         * а у команд нет и самого «Редактирования» — только реквизиты.
+         */
+        private static RoleRestriction readOnlyRestriction(FormItem item)
+        {
+            if (item == null || isServiceItem(item))
+                return null;
+            return formObjectRestriction(item, null, EDIT_FEATURE);
+        }
+
+        /**
+         * Ограничение у объекта формы, с которым связан элемент: у кнопки — «Использование»
+         * её команды, у элемента с путём к данным — свойство реквизита формы.
+         *
+         * @param commandFeature признак команды; {@code null} — команды в расчёте не участвуют
+         * @param attributeFeature признак реквизита ({@code view} или {@code edit})
+         */
+        private static RoleRestriction formObjectRestriction(FormItem item, String commandFeature,
+            String attributeFeature)
+        {
+            if (commandFeature != null && item instanceof Button button)
+            {
+                FormCommand command = buttonCommand(button);
+                if (command != null && !isDefaultAdjustable(command.getUse()))
+                    return new RoleRestriction(command, commandFeature);
+            }
+            for (AbstractFormAttribute attribute : boundAttributes(item))
+            {
+                if (!isDefaultAdjustable(attributeFlag(attribute, attributeFeature)))
+                    return new RoleRestriction(attribute, attributeFeature);
+            }
+            return null;
+        }
+
+        /**
+         * Команда формы, на которую ссылается кнопка, — или {@code null}, если команда не из
+         * этой формы («Использования» у общих и стандартных команд нет).
+         *
+         * <p>Ссылку разрешаем штатным геттером, хотя колонка и считается на каждой отрисовке
+         * строки: ровно это на каждой строке делает и штатный {@code FormItemsLabelProvider}
+         * этого же дерева — дороже, чем уже есть, не станет. Неразрешённая ссылка
+         * ({@code eGet(..., false)}) здесь не годится: команда приходит прокси, у прокси все
+         * свойства пусты, и {@code getUse()} у него всегда {@code null}.
+         */
+        private static FormCommand buttonCommand(Button button)
+        {
+            return button.getCommandName() instanceof FormCommand command && !command.eIsProxy()
+                ? command : null;
+        }
+
+        /**
+         * Реквизиты формы, через которые элемент добирается до данных, — от ближайшего к
+         * корневому (для «Объект.Товары.Номенклатура» это колонка «Номенклатура», затем
+         * «Товары», затем «Объект»). Ограничение любого из них действует на элемент, а
+         * показываем и открываем ближайший.
+         *
+         * <p>Путь разбирается по именам в модели самой формы, без чтения ссылок BM: колонка
+         * считается на каждой отрисовке строки, и подъём чужих объектов ей не по карману.
+         */
+        private static List<AbstractFormAttribute> boundAttributes(FormItem item)
+        {
+            if (!(item instanceof DataItem dataItem))
+                return List.of();
+            AbstractDataPath path = dataItem.getDataPath();
+            List<String> segments = path == null ? null : path.getSegments();
+            if (segments == null || segments.isEmpty())
+                return List.of();
+            Form form = EcoreUtil2.getContainerOfType(item, Form.class);
+            if (form == null)
+                return List.of();
+            List<AbstractFormAttribute> chain = new ArrayList<>(segments.size());
+            List<? extends AbstractFormAttribute> level = form.getAttributes();
+            for (String segment : segments)
+            {
+                AbstractFormAttribute found = attributeByName(level, segment);
+                if (found == null)
+                    break;
+                chain.add(found);
+                level = found instanceof FormAttribute attribute ? attribute.getColumns()
+                    : List.<AbstractFormAttribute> of();
+            }
+            Collections.reverse(chain);
+            return chain;
+        }
+
+        private static AbstractFormAttribute attributeByName(
+            List<? extends AbstractFormAttribute> attributes, String name)
+        {
+            if (attributes == null || name == null)
+                return null;
+            for (AbstractFormAttribute attribute : attributes)
+            {
+                if (name.equalsIgnoreCase(attribute.getName()))
+                    return attribute;
+            }
+            return null;
+        }
+
+        private static AdjustableBoolean attributeFlag(AbstractFormAttribute attribute, String featureName)
+        {
+            if (attribute == null)
+                return null;
+            return VIEW_FEATURE.equals(featureName) ? attribute.getView() : attribute.getEdit();
+        }
+
+        /**
+         * Значение по умолчанию — «общее» и без переопределений по ролям: именно таким
+         * ({@code Common = true}, пустой список ролей) EDT создаёт и «Использование», и
+         * «Просмотр», и «Редактирование», и «Пользовательскую видимость»
+         * (см. {@code FormObjectFactory.newAdjustableBoolean}).
+         */
+        private static boolean isDefaultAdjustable(AdjustableBoolean value)
+        {
+            return value == null || value.isCommon() && value.getFor().isEmpty();
+        }
+
+        // -------------------------------------------------------------------
         // Двойной клик
         // -------------------------------------------------------------------
 
@@ -5475,10 +5657,10 @@ public class FormEditorHook implements IStartup
                 case COLUMN_TITLE -> revealTitleSource(page, viewer, tree, row, item);
                 case COLUMN_HANDLERS -> focusFirstHandlerField(page, row.getData());
                 case COLUMN_APPEARANCE -> AppearancePage.activate(page);
-                case COLUMN_INVISIBLE ->
-                    revealProperty(page, viewer, item, invisibilitySource(item), VISIBLE_FEATURE);
-                case COLUMN_READ_ONLY ->
-                    revealProperty(page, viewer, item, readOnlySource(item), READ_ONLY_FEATURE);
+                case COLUMN_INVISIBLE -> revealFlagProperty(page, viewer, item,
+                    invisibilitySource(item), visibilityRestriction(item), VISIBLE_FEATURE);
+                case COLUMN_READ_ONLY -> revealFlagProperty(page, viewer, item,
+                    readOnlySource(item), readOnlyRestriction(item), READ_ONLY_FEATURE);
                 case COLUMN_HEIGHT -> revealProperty(page, viewer, item, null, HEIGHT_FEATURE);
                 case COLUMN_WIDTH -> revealProperty(page, viewer, item, null, WIDTH_FEATURE);
                 default -> { }
@@ -5499,6 +5681,32 @@ public class FormEditorHook implements IStartup
             Display display = tree.getDisplay();
             if (display != null && !display.isDisposed())
                 display.asyncExec(FormEditorHook::runWysiwygDoubleClickActions);
+        }
+
+        /**
+         * Двойной клик по колонке «Невидимость» / «ТолькоПросмотр». Порядок тот же, в каком
+         * колонка выбирает пометку: установленное значение (галочка) важнее ограничения по ролям
+         * (звёздочка), а из ограничений первым идёт то, что пришло от реквизита или команды.
+         *
+         * @param source элемент, от которого унаследовано установленное значение, или {@code null}
+         * @param restriction ограничение по ролям, если установленного значения нет
+         * @param featureName признак самого элемента ({@code visible} / {@code readOnly})
+         */
+        private static void revealFlagProperty(FormEditorPage page, TreeViewer viewer, FormItem item,
+            FormItem source, RoleRestriction restriction, String featureName)
+        {
+            if (source != null || restriction == null)
+            {
+                revealProperty(page, viewer, item, source, featureName);
+                return;
+            }
+            if (restriction.owner() == item)
+            {
+                revealProperty(page, viewer, item, item, restriction.featureName());
+                return;
+            }
+            revealFormObject(page, item, restriction.owner(),
+                propertyLabels(restriction.owner(), restriction.featureName()));
         }
 
         /**
@@ -5561,6 +5769,10 @@ public class FormEditorHook implements IStartup
             {
                 case VISIBLE_FEATURE -> "Видимость"; //$NON-NLS-1$
                 case READ_ONLY_FEATURE -> "Только просмотр"; //$NON-NLS-1$
+                case USE_FEATURE -> "Использование"; //$NON-NLS-1$
+                case VIEW_FEATURE -> "Просмотр"; //$NON-NLS-1$
+                case EDIT_FEATURE -> "Редактирование"; //$NON-NLS-1$
+                case USER_VISIBLE_FEATURE -> "Пользовательская видимость"; //$NON-NLS-1$
                 case HEIGHT_FEATURE -> "Высота"; //$NON-NLS-1$
                 case WIDTH_FEATURE -> "Ширина"; //$NON-NLS-1$
                 case TITLE_FEATURE -> TITLE_TITLE;
@@ -5892,6 +6104,17 @@ public class FormEditorHook implements IStartup
          */
         private static void revealFormObject(FormEditorPage page, FormItem item, EObject source)
         {
+            revealFormObject(page, item, source, titleFieldLabels(source));
+        }
+
+        /**
+         * То же, но в палитре активируется поле с одной из подписей {@code labels}, а не
+         * «Заголовок»: по колонкам «Невидимость» и «ТолькоПросмотр» переход ведёт к
+         * «Использованию», «Просмотру» или «Редактированию» объекта формы.
+         */
+        private static void revealFormObject(FormEditorPage page, FormItem item, EObject source,
+            List<String> labels)
+        {
             if (source == null)
                 return;
             FormEditorComponent component = componentForSource(source);
@@ -5915,7 +6138,7 @@ public class FormEditorHook implements IStartup
             page.setSelection(component, true, toSelect);
             if (group != null)
                 Global.invokeVoid(group, "setSelectionAndNavigateToProperties", forSheet); //$NON-NLS-1$
-            focusTitleProperty(page, source);
+            focusProperty(page, labels);
         }
 
         /**
@@ -5925,7 +6148,12 @@ public class FormEditorHook implements IStartup
          */
         private static void focusTitleProperty(FormEditorPage page, EObject source)
         {
-            List<String> labels = titleFieldLabels(source);
+            focusProperty(page, titleFieldLabels(source));
+        }
+
+        /** Ставит ввод в поле палитры с одной из подписей {@code labels}. */
+        private static void focusProperty(FormEditorPage page, List<String> labels)
+        {
             if (labels.isEmpty() || page.getSite() == null)
                 return;
             schedulePropertyFocus(page.getSite().getPage(), labels, 0);
@@ -6408,21 +6636,34 @@ public class FormEditorHook implements IStartup
             }
         }
 
-        /** Эффективный признак: «Да» своё — обычным цветом, унаследованное — серым. */
+        /**
+         * Эффективный признак: «Да» своё — обычным цветом, унаследованное — серым.
+         *
+         * <p>Если признак не установлен, но по ролям элемент всё же может оказаться скрытым или
+         * недоступным ({@link RoleRestriction}), вместо галочки показывается
+         * {@link #ROLE_MARK звёздочка} — тоже серая, когда ограничение задано не у самого
+         * элемента, а у реквизита или команды.
+         */
         private static final class FlagLabelProvider
             extends ColumnLabelProvider
         {
             private final Function<FormItem, FormItem> sourceFinder;
 
-            FlagLabelProvider(Function<FormItem, FormItem> sourceFinder)
+            private final Function<FormItem, RoleRestriction> restrictionFinder;
+
+            FlagLabelProvider(Function<FormItem, FormItem> sourceFinder,
+                Function<FormItem, RoleRestriction> restrictionFinder)
             {
                 this.sourceFinder = sourceFinder;
+                this.restrictionFinder = restrictionFinder;
             }
 
             @Override
             public String getText(Object element)
             {
-                return source(element) == null ? "" : FLAG_MARK; //$NON-NLS-1$
+                if (source(element) != null)
+                    return FLAG_MARK;
+                return restriction(element) == null ? "" : ROLE_MARK; //$NON-NLS-1$
             }
 
             @Override
@@ -6430,8 +6671,14 @@ public class FormEditorHook implements IStartup
             {
                 FormItem item = domainItem(element);
                 FormItem source = source(element);
+                EObject owner = source;
+                if (source == null)
+                {
+                    RoleRestriction restriction = restriction(element);
+                    owner = restriction == null ? null : restriction.owner();
+                }
                 Display display = Display.getCurrent();
-                if (source == null || source == item || display == null)
+                if (owner == null || owner == item || display == null)
                     return null;
                 return display.getSystemColor(SWT.COLOR_DARK_GRAY);
             }
@@ -6440,6 +6687,12 @@ public class FormEditorHook implements IStartup
             {
                 FormItem item = domainItem(element);
                 return item != null ? sourceFinder.apply(item) : null;
+            }
+
+            private RoleRestriction restriction(Object element)
+            {
+                FormItem item = domainItem(element);
+                return item != null ? restrictionFinder.apply(item) : null;
             }
         }
 

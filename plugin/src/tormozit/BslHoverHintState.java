@@ -20,7 +20,6 @@ import org.eclipse.swt.events.MenuEvent;
 import org.eclipse.swt.events.SelectionAdapter;
 import org.eclipse.swt.events.SelectionEvent;
 import org.eclipse.swt.graphics.Point;
-import org.eclipse.swt.internal.win32.OS;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
@@ -546,7 +545,8 @@ final class BslHoverHintState
     /**
      * Реальное удержание Ctrl. {@code KeyDown}/{@code KeyUp} надёжны сами по себе;
      * на {@code MouseMove} {@code stateMask} может быть уже без Ctrl — другой Display-фильтр
-     * снимает {@link SWT#MOD1}, чтобы {@code HyperlinkManager} не активировался.
+     * снимает {@link SWT#MOD1}, чтобы {@code HyperlinkManager} не активировался, — поэтому
+     * состояние берётся у {@link KeyStateProbe}, а не из {@code stateMask} события.
      */
     private static boolean isCtrlHeld(Event event)
     {
@@ -554,31 +554,7 @@ final class BslHoverHintState
             return true;
         if (event.type == SWT.KeyUp && event.keyCode == SWT.CTRL)
             return false;
-        return isCtrlPhysicallyHeld();
-    }
-
-    /**
-     * Диагностика: {@code OS.GetKeyState} — Win32-специфичный внутренний API SWT
-     * ({@code org.eclipse.swt.internal.win32.OS}). На платформах, где SWT собран не
-     * под win32 (Linux GTK и т.п.), вызов может завершиться {@link LinkageError}
-     * (класс/метод недоступен в фрагменте SWT этой платформы) прямо внутри
-     * глобального Display-фильтра, отслеживающего Ctrl для переключателя «Подсказки
-     * при наведении без Ctrl». Временно логируем такой сбой в журнал «Комфорт» и
-     * пробрасываем исключение дальше без изменения поведения — чтобы подтвердить
-     * гипотезу по логу пользователя, прежде чем менять логику фильтра.
-     */
-    private static boolean isCtrlPhysicallyHeld()
-    {
-        try
-        {
-            return (OS.GetKeyState(OS.VK_CONTROL) & 0x8000) != 0;
-        }
-        catch (LinkageError | RuntimeException e)
-        {
-            IrBslHoverDebug.problem("OS.GetKeyState failed: " + e.getClass().getName() //$NON-NLS-1$
-                + ": " + e.getMessage() + "; os.name=" + System.getProperty("os.name")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            throw e;
-        }
+        return KeyStateProbe.isCtrlPressed();
     }
 
     private static void updateCtrlState(boolean now)

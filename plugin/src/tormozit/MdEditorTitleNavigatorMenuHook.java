@@ -325,6 +325,10 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
 
         String pageName = parts[lastNonEmpty].strip();
 
+        String configTitle = formatConfigurationPageTitle(parts, lastNonEmpty, mdObject);
+        if (configTitle != null)
+            return configTitle;
+
         String fullName = mdObject == null ? null : GetRef.eObjectToFullName(mdObject);
         if (fullName != null && !fullName.isBlank())
         {
@@ -356,6 +360,53 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
                 formatted.append(segment);
         }
         return formatted.length() == 0 ? title : formatted.toString();
+    }
+
+    /**
+     * Заголовок страницы самой конфигурации: отбрасывает сегменты пути до имени
+     * конфигурации — «Рабочая область → Конфигурация → Конфигурация → Модуль приложения»
+     * превращается в «Конфигурация.Модуль приложения».
+     *
+     * <p>У конфигурации, в отличие от прочих объектов, штатный путь
+     * ({@code LabelUtil.getPath}) начинается от корня рабочей области и проекта. Полного
+     * имени модели у неё нет ({@link GetRef#eObjectToFullName} возвращает {@code null}
+     * для односегментного FQN), поэтому обрезка идёт по имени объекта: берём
+     * <b>последний</b> сегмент пути, равный имени конфигурации — имя проекта часто
+     * совпадает с именем конфигурации, и первое совпадение указало бы на проект.
+     *
+     * @return готовый заголовок, или {@code null}, если это не конфигурация либо
+     *         обрезать нечего (тогда работает общий разбор)
+     */
+    private static String formatConfigurationPageTitle(String[] parts, int lastNonEmpty,
+        MdObject mdObject)
+    {
+        if (!(mdObject instanceof Configuration))
+            return null;
+
+        String objectName = mdObject.getName();
+        if (objectName == null || objectName.isBlank())
+            return null;
+
+        int nameIndex = -1;
+        for (int i = 0; i < lastNonEmpty; i++)
+        {
+            if (objectName.equals(parts[i].strip()))
+                nameIndex = i;
+        }
+        if (nameIndex < 1)
+            return null;
+
+        StringBuilder formatted = new StringBuilder();
+        for (int i = nameIndex; i <= lastNonEmpty; i++)
+        {
+            String segment = parts[i].strip();
+            if (segment.isEmpty())
+                continue;
+            if (formatted.length() > 0)
+                formatted.append('.');
+            formatted.append(segment);
+        }
+        return formatted.length() == 0 ? null : formatted.toString();
     }
 
     /**

@@ -24,8 +24,10 @@ import org.eclipse.jface.action.Action;
 import org.eclipse.jface.action.Separator;
 import org.eclipse.jface.action.ToolBarManager;
 import org.eclipse.jface.resource.ImageDescriptor;
+import org.eclipse.jface.text.BadLocationException;
 import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.ITextViewer;
+import org.eclipse.jface.text.Position;
 import org.eclipse.jface.text.link.LinkedModeModel;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.browser.Browser;
@@ -167,6 +169,8 @@ public final class ParamHintHtmlModifier
             if (browser == null || browser.isDisposed())
                 return;
 
+            LinkedModeParamHintCloser.ensureInstalled();
+
             ensureParamHintCloseButton(browser);
 
             if (browser.getData(SHOW_COMFORT_PROGRESS) == null
@@ -249,6 +253,138 @@ public final class ParamHintHtmlModifier
         }
         catch (Exception ignored)
         {
+        }
+    }
+
+    /**
+     * Закрытие подсказки параметров, открытой автоматически из LinkedMode.
+     * <p>
+     * Дефект EDT. Автоподсказку показывает
+     * {@code com._1c.g5.v8.dt.bsl.ui.contentassist.BslSelectionChangedListener} — свой
+     * {@code ParametersHoverInfoControl}, мимо {@code InvocationParametersHoverHandler},
+     * поэтому штатного {@code CustomCaretListener} (он закрывает подсказку при выходе
+     * каретки) здесь нет вовсе. Закрытие у EDT одно — в {@code textChanged}, когда
+     * {@code model.anyPositionContains(caret)} ложно, но {@code textChanged} — это
+     * {@link org.eclipse.jface.text.ITextListener}: перемещение каретки его не вызывает.
+     * Методы {@code left}/{@code suspend}/{@code resume} у него пустые. Итог: каретка
+     * давно вне параметров, а подсказка висит до ближайшей правки текста.
+     * <p>
+     * Здесь добавляется недостающий триггер: на движение каретки повторяем штатное
+     * условие и зовём его же {@code removeListenersDispose()} — чтобы снялись и
+     * key-listener, и text-listener, и вернулась видимая каретка, а не только
+     * закрылось окно.
+     * <p>
+     * Две грабли, каждая стоила прогона.
+     * <ol>
+     * <li>Закрывать можно только уже показанную подсказку. Листенер живёт с момента
+     * вставки предложения, а окно показывает позже, из {@code textChanged}; до первого
+     * показа каретка законно вне позиций, и снос листенера просто лишает пользователя
+     * подсказки.</li>
+     * <li>Позицию каретки брать из события, а не из {@code viewer.getSelectedRange()}:
+     * в момент {@code caretMoved} выделение viewer'а ещё старое (отстаёт ровно на один
+     * шаг), и условие получается инвертированным — закрывает при возврате внутрь и
+     * молчит при выходе.</li>
+     * </ol>
+     */
+    private static final class LinkedModeParamHintCloser
+        implements CaretListener
+    {
+        private static final String LISTENER_CLASS =
+            "com._1c.g5.v8.dt.bsl.ui.contentassist.BslSelectionChangedListener"; //$NON-NLS-1$
+
+        /** Один слушатель на виджет редактора — маркер, чтобы не вешать повторно. */
+        private static final String INSTALLED_MARK = "tormozit.paramHintLinkedCloser"; //$NON-NLS-1$
+
+        private final ITextViewer viewer;
+
+        private LinkedModeParamHintCloser(ITextViewer viewer)
+        {
+            this.viewer = viewer;
+        }
+
+        /** Активный редактор BSL: поставить слушатель каретки, если его ещё нет. */
+        static void ensureInstalled()
+        {
+            try
+            {
+                IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+                if (window == null || window.getActivePage() == null)
+                    return;
+                BslXtextEditor editor =
+                    GetRef.getActiveBslEditor(window.getActivePage().getActiveEditor());
+                if (editor == null)
+                    return;
+                ITextViewer viewer = editor.getInternalSourceViewer();
+                if (viewer == null)
+                    return;
+                StyledText widget = viewer.getTextWidget();
+                if (widget == null || widget.isDisposed())
+                    return;
+                if (widget.getData(INSTALLED_MARK) != null)
+                    return;
+                widget.setData(INSTALLED_MARK, Boolean.TRUE);
+                widget.addCaretListener(new LinkedModeParamHintCloser(viewer));
+            }
+            catch (Exception ignored)
+            {
+                // отсутствие закрытия по каретке не должно ломать сам редактор
+            }
+        }
+
+        @Override
+        public void caretMoved(CaretEvent event)
+        {
+            try
+            {
+                Object listener = findListener();
+                if (listener == null || !isHintShown(listener))
+                    return;
+                if (!(Global.getField(listener, "model") instanceof LinkedModeModel linked)) //$NON-NLS-1$
+                    return;
+                // Смещение модели, как в штатном textChanged, но из события: выделение
+                // viewer'а на этот момент ещё не обновлено (см. грабли 2 в javadoc).
+                int caret = SmartContentAssistProcessor.widgetToModelOffset(viewer,
+                    event.caretOffset);
+                if (caret < 0 || linked.anyPositionContains(caret))
+                    return;
+                Global.invokeVoid(listener, "removeListenersDispose"); //$NON-NLS-1$
+            }
+            catch (Exception ignored)
+            {
+                // см. выше
+            }
+        }
+
+        /**
+         * Окно подсказки этого листенера действительно показано. Признак тот же,
+         * что использует сама EDT в {@code textChanged}: {@code getControl()} у
+         * {@code ParametersHoverInfoControl} не {@code null}; дополнительно
+         * требуем видимости, если контрол умеет об этом сказать.
+         */
+        private static boolean isHintShown(Object listener)
+        {
+            Object infoControl = Global.getField(listener, "infoControl"); //$NON-NLS-1$
+            if (infoControl == null)
+                return false;
+            Object control = Global.invoke(infoControl, "getControl"); //$NON-NLS-1$
+            if (control == null)
+                return false;
+            Object visible = Global.invoke(control, "isVisible"); //$NON-NLS-1$
+            return !(visible instanceof Boolean shown) || shown.booleanValue();
+        }
+
+        /** Живой экземпляр EDT — он подписан текстовым слушателем этого же viewer. */
+        private Object findListener()
+        {
+            Object listeners = Global.getField(viewer, "fTextListeners"); //$NON-NLS-1$
+            if (!(listeners instanceof List<?> list))
+                return null;
+            for (Object listener : list)
+            {
+                if (listener != null && LISTENER_CLASS.equals(listener.getClass().getName()))
+                    return listener;
+            }
+            return null;
         }
     }
 
@@ -552,9 +688,17 @@ public final class ParamHintHtmlModifier
                         "{\"reason\":\"noCallSite\",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
                     return Boolean.FALSE;
                 }
-                EObjectAtOffsetHelper helper = new EObjectAtOffsetHelper();
-                EObject resolved = helper.resolveContainedElementAt(resource, caret);
-                Invocation invocation = findInvocationNear(resolved);
+                // Вызов берём тот же, чьи границы посчитаны в siteInfo: отдельный
+                // поиск по каретке давал вложенный вызов, начинающийся ровно у неё,
+                // и подсказка расходилась с границами.
+                Invocation invocation = siteInfo.owner instanceof Invocation own ? own : null;
+                EObject resolved = siteInfo.owner;
+                if (invocation == null)
+                {
+                    EObjectAtOffsetHelper helper = new EObjectAtOffsetHelper();
+                    resolved = helper.resolveContainedElementAt(resource, caret);
+                    invocation = findInvocationNear(resolved);
+                }
                 if (invocation == null || invocation.getMethodAccess() == null)
                 {
                     String resolvedName = resolved != null && resolved.eClass() != null
@@ -727,7 +871,7 @@ public final class ParamHintHtmlModifier
                 if (!shown)
                 {
                     shown = showParamHintControlDirect(viewer, documentationLocal,
-                        languageProviderLocal, site, caPages, paramNumber);
+                        languageProviderLocal, site, caPages, paramNumber, siteInfo);
                 }
                 return Boolean.valueOf(shown);
             });
@@ -840,10 +984,16 @@ public final class ParamHintHtmlModifier
         return handler;
     }
 
-    /** Запасной показ без showControlInfo. Esc — Browser/Shell + KeyAdapter на редакторе. */
+    /**
+     * Запасной показ без showControlInfo. Esc — Browser/Shell + KeyAdapter на редакторе.
+     * <p>
+     * Контрол создаём сами, поэтому штатных {@code CustomCaretListener} и
+     * {@code CustomPositionUpdater} у него нет: закрытие по выходу каретки надо
+     * ставить здесь же, иначе подсказка висит до Esc.
+     */
     private static boolean showParamHintControlDirect(ITextViewer viewer, Object documentation,
         Object languageProvider, org.eclipse.ui.IWorkbenchSite site, List<Object> pages,
-        int paramNumber)
+        int paramNumber, CallSiteInfo siteInfo)
     {
         try
         {
@@ -872,6 +1022,7 @@ public final class ParamHintHtmlModifier
             Object handler = resolveParamHoverHandlerForMiss();
             if (handler != null && PARAM_HOVER_HANDLER_CLASS.equals(handler.getClass().getName()))
                 Global.setFieldForce(handler, "infoControl", control); //$NON-NLS-1$
+            installDirectParamHintCaretClose(viewer, control, siteInfo);
             installDirectParamHintEscClose(viewer, control);
             ensureParamHintCloseButtonOnHover(control);
             tryModifyFindMissBrowser(control);
@@ -933,6 +1084,69 @@ public final class ParamHintHtmlModifier
         {
         }
         return null;
+    }
+
+    /**
+     * Закрытие подсказки запасного пути при выходе каретки за скобки её вызова —
+     * то, что штатно делает {@code CustomCaretListener}, которого у самодельного
+     * контрола нет.
+     * <p>
+     * Границы держим в {@link Position} документа: документ сам сдвигает её при
+     * правке текста, поэтому отдельный аналог {@code CustomPositionUpdater} не
+     * нужен. Смещение каретки берём из события и переводим виджет→модель:
+     * {@code viewer.getSelectedRange()} в этот момент ещё показывает прошлую
+     * позицию.
+     */
+    private static void installDirectParamHintCaretClose(ITextViewer viewer, Object control,
+        CallSiteInfo siteInfo)
+    {
+        if (viewer == null || control == null || siteInfo == null)
+            return;
+        StyledText widget = viewer.getTextWidget();
+        IDocument document = viewer.getDocument();
+        if (widget == null || widget.isDisposed() || document == null)
+            return;
+        int first = Math.max(0, siteInfo.methodAccessEnd);
+        Position area = new Position(first, Math.max(0, siteInfo.callEnd - first));
+        try
+        {
+            document.addPosition(area);
+        }
+        catch (BadLocationException ex)
+        {
+            return;
+        }
+        AtomicBoolean closed = new AtomicBoolean();
+        CaretListener caretListener = new CaretListener()
+        {
+            @Override
+            public void caretMoved(CaretEvent event)
+            {
+                if (closed.get())
+                    return;
+                int caret = SmartContentAssistProcessor.widgetToModelOffset(viewer,
+                    event.caretOffset);
+                boolean inside = !area.isDeleted() && caret >= area.getOffset()
+                    && caret < area.getOffset() + area.getLength();
+                if (inside)
+                    return;
+                closed.set(true);
+                Global.invoke(control, "dispose"); //$NON-NLS-1$
+            }
+        };
+        widget.addCaretListener(caretListener);
+        DisposeListener cleanup = e ->
+        {
+            closed.set(true);
+            document.removePosition(area);
+            if (!widget.isDisposed())
+                widget.removeCaretListener(caretListener);
+        };
+        if (!Global.invokeVoid(control, "addDisposeListener", cleanup)) //$NON-NLS-1$
+        {
+            document.removePosition(area);
+            widget.removeCaretListener(caretListener);
+        }
     }
 
     private static void installDirectParamHintEscClose(ITextViewer viewer, Object control)
@@ -1069,47 +1283,52 @@ public final class ParamHintHtmlModifier
         return paramNumberAt(site.separatorOffsets, caret);
     }
 
+    /**
+     * Вызов, к параметрам которого относится каретка.
+     * <p>
+     * Кандидат годится только если каретка внутри его скобок
+     * ({@link CallSiteInfo#contains}) — то же условие, что у штатных
+     * {@code inInvocationParameters}/{@code inCtorParameters}. Без этой проверки
+     * каретка сразу после {@code Найти(} попадала на начало вложенного вызова
+     * ({@code Найти(|ПолучитьСклонения…(…))}), Xtext резолвил именно вложенный, и
+     * подсказка показывалась не для того метода. Первый найденный вызов остаётся
+     * запасным ответом — на случай, когда границы посчитать не удалось.
+     */
     private static CallSiteInfo findCallSiteAt(XtextResource resource, int caret)
     {
         EObjectAtOffsetHelper helper = new EObjectAtOffsetHelper();
         EObject obj = helper.resolveContainedElementAt(resource, caret);
         if (obj == null && caret > 0)
             obj = helper.resolveContainedElementAt(resource, caret - 1);
+        CallSiteInfo fallback = null;
         for (EObject cur = obj; cur != null; cur = cur.eContainer())
         {
+            CallSiteInfo site = null;
             if (cur instanceof Invocation invocation)
-            {
-                CallSiteInfo site = callSiteForInvocation(invocation);
-                if (site != null)
+                site = callSiteForInvocation(invocation);
+            else if (cur instanceof OperatorStyleCreator ctor)
+                site = callSiteForOperatorCtor(ctor);
+            if (site == null)
+                continue;
+            if (site.contains(caret))
                 return site;
-            }
-            if (cur instanceof OperatorStyleCreator ctor)
-            {
-                CallSiteInfo site = callSiteForOperatorCtor(ctor);
-                if (site != null)
-                return site;
-            }
+            if (fallback == null)
+                fallback = site;
         }
-        if (obj instanceof Invocation invocation)
+        if (obj instanceof FeatureAccess && obj.eContainer() instanceof Invocation parentCall)
         {
-            CallSiteInfo site = callSiteForInvocation(invocation);
-            if (site != null)
-            return site;
-        }
-        if (obj instanceof FeatureAccess)
-        {
-            EObject parent = obj.eContainer();
-            if (parent instanceof Invocation invocation)
-            {
-                CallSiteInfo site = callSiteForInvocation(invocation);
-                if (site != null)
+            CallSiteInfo site = callSiteForInvocation(parentCall);
+            if (site != null && site.contains(caret))
                 return site;
-            }
+            if (site != null && fallback == null)
+                fallback = site;
         }
         CallSiteInfo fromNode = findCallSiteFromNodeModel(resource, caret);
-        if (fromNode != null)
+        if (fromNode != null && fromNode.contains(caret))
             return fromNode;
-        return null;
+        if (fallback != null)
+            return fallback;
+        return fromNode;
     }
 
     private static CallSiteInfo findCallSiteFromNodeModel(XtextResource resource, int caret)
@@ -1122,15 +1341,25 @@ public final class ParamHintHtmlModifier
         INode leaf = NodeModelUtils.findLeafNodeAtOffset(root, caret);
         if (leaf == null && caret > 0)
             leaf = NodeModelUtils.findLeafNodeAtOffset(root, caret - 1);
+        CallSiteInfo fallback = null;
         for (INode node = leaf; node != null; node = node.getParent())
         {
             EObject sem = node.getSemanticElement();
+            CallSiteInfo site = null;
             if (sem instanceof Invocation invocation)
-                return callSiteForInvocation(invocation);
-            if (sem instanceof OperatorStyleCreator ctor)
-                return callSiteForOperatorCtor(ctor);
+                site = callSiteForInvocation(invocation);
+            else if (sem instanceof OperatorStyleCreator ctor)
+                site = callSiteForOperatorCtor(ctor);
+            if (site == null)
+                continue;
+            // См. findCallSiteAt: вложенный вызов, начинающийся ровно у каретки,
+            // не должен перебивать внешний, в чьих скобках каретка стоит.
+            if (site.contains(caret))
+                return site;
+            if (fallback == null)
+                fallback = site;
         }
-        return null;
+        return fallback;
     }
 
     private static CallSiteInfo callSiteForInvocation(Invocation invocation)
@@ -1144,7 +1373,7 @@ public final class ParamHintHtmlModifier
         ICompositeNode invNode = NodeModelUtils.findActualNodeFor(invocation);
         if (invNode == null)
             return null;
-        return new CallSiteInfo(methodNodes.get(0).getTotalEndOffset(),
+        return new CallSiteInfo(invocation, methodNodes.get(0).getTotalEndOffset(),
             invNode.getTotalEndOffset(), argSeparatorOffsets(invocation));
     }
 
@@ -1159,7 +1388,7 @@ public final class ParamHintHtmlModifier
         ICompositeNode ctorNode = NodeModelUtils.findActualNodeFor(ctor);
         if (ctorNode == null)
             return null;
-        return new CallSiteInfo(typeNodes.get(0).getTotalEndOffset(),
+        return new CallSiteInfo(ctor, typeNodes.get(0).getTotalEndOffset(),
             ctorNode.getTotalEndOffset(), argSeparatorOffsets(ctor));
     }
 
@@ -1169,9 +1398,13 @@ public final class ParamHintHtmlModifier
         final int callEnd;
         /** Смещения запятых самого вызова (узловая модель), для {@code commaPosition}. */
         final List<Integer> separatorOffsets;
+        /** Сам вызов: подсказку строим по нему же, а не по отдельному поиску. */
+        final EObject owner;
 
-        CallSiteInfo(int methodAccessEnd, int callEnd, List<Integer> separatorOffsets)
+        CallSiteInfo(EObject owner, int methodAccessEnd, int callEnd,
+            List<Integer> separatorOffsets)
         {
+            this.owner = owner;
             this.methodAccessEnd = methodAccessEnd;
             this.callEnd = callEnd;
             this.separatorOffsets = separatorOffsets != null
