@@ -27,6 +27,7 @@ import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.StyleRange;
 import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.graphics.Color;
+import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.graphics.RGB;
 import org.eclipse.swt.widgets.Composite;
@@ -44,6 +45,7 @@ import org.eclipse.ui.IWindowListener;
 import org.eclipse.ui.IWorkbench;
 import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.IWorkbenchPart;
+import org.eclipse.ui.IWorkbenchPartConstants;
 import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
@@ -410,18 +412,20 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
     }
 
     /**
-     * Гасит перевыпуск {@code PROP_TITLE} по каждому событию декоратора.
+     * Гасит перевыпуск {@code PROP_TITLE} по каждому событию декоратора, если не изменились
+     * ни заголовок, ни картинка вкладки.
      *
-     * <p>Декоратор EDT рассылает {@code labelProviderChanged} около пяти раз в секунду.
-     * Слушатель {@code DtGranularEditor$5} на каждое такое событие зовёт
+     * <p>Декоратор EDT рассылает {@code labelProviderChanged} часто. Слушатель
+     * {@code DtGranularEditor$5} на событие с моделью объекта в {@code getElements()} зовёт
      * {@code firePropertyChange(PROP_TITLE)}, EDT переписывает заголовок формы **тем же текстом**,
      * а {@code TitleRegion.setText} безусловно делает {@code layout()} и {@code redraw()} — то есть
-     * перерисовывается вся область части, включая линейку номеров (issue про мигание линейки).
+     * перерисовывается вся область части, включая линейку номеров.
      *
-     * <p>Здесь слушатель редактора подменяется обёрткой, которая пропускает событие дальше, только
-     * если заголовок или подсказка вкладки действительно изменились. Перевыпуск при неизменном
-     * заголовке — чистая потеря, штатное обновление при переименовании или смене маркеров работает
-     * как прежде.
+     * <p>Декоратор проблем шлёт событие <b>без</b> элементов, и {@code $5} его игнорирует.
+     * Картинка вкладки воркбенча при этом уже другая ({@code getTitleImage} с уголком), но без
+     * {@code PROP_TITLE} Eclipse её не подхватывает. Обёртка сравнивает и текст, и картинку:
+     * тот же заголовок и та же картинка — событие гасится; сменилась картинка — сами шлём
+     * {@code PROP_TITLE}.
      */
     private static void throttleDecoratorTitleRefire()
     {
@@ -461,6 +465,8 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
 
         private String lastTitle;
 
+        private Image lastImage;
+
         TitleRefireThrottle(ILabelProviderListener delegate, IEditorPart editor)
         {
             this.delegate = delegate;
@@ -470,11 +476,44 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
         @Override
         public void labelProviderChanged(LabelProviderChangedEvent event)
         {
-            String now = editor.getTitle() + ' ' + editor.getTitleToolTip();
-            if (now.equals(lastTitle))
+            Display display = Display.getCurrent();
+            if (display == null)
+            {
+                display = Display.getDefault();
+                if (display == null || display.isDisposed())
+                    return;
+                display.asyncExec(() -> handleDecoratorEvent(event));
                 return;
-            lastTitle = now;
-            delegate.labelProviderChanged(event);
+            }
+            handleDecoratorEvent(event);
+        }
+
+        private void handleDecoratorEvent(LabelProviderChangedEvent event)
+        {
+            if (editor.getSite() == null)
+                return;
+            String nowTitle;
+            Image nowImage;
+            try
+            {
+                nowTitle = editor.getTitle() + ' ' + editor.getTitleToolTip();
+                nowImage = editor.getTitleImage();
+            }
+            catch (RuntimeException ignored)
+            {
+                return;
+            }
+            boolean titleChanged = lastTitle == null || !nowTitle.equals(lastTitle);
+            boolean imageChanged = lastImage != nowImage;
+            if (!titleChanged && !imageChanged)
+                return;
+            lastTitle = nowTitle;
+            lastImage = nowImage;
+            if (titleChanged)
+                delegate.labelProviderChanged(event);
+            if (imageChanged)
+                Global.invokeVoid(editor, "firePropertyChange", //$NON-NLS-1$
+                    Integer.valueOf(IWorkbenchPartConstants.PROP_TITLE));
         }
     }
 

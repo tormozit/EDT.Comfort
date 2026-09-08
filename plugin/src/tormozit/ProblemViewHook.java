@@ -2,6 +2,7 @@ package tormozit;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
 import java.util.Collection;
 import java.util.HashMap;
@@ -11,6 +12,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 import org.eclipse.core.commands.ExecutionException;
@@ -19,7 +21,9 @@ import org.eclipse.core.commands.NotHandledException;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.ResourcesPlugin;
 import org.eclipse.core.runtime.ICoreRunnable;
+import org.eclipse.core.runtime.jobs.IJobChangeEvent;
 import org.eclipse.core.runtime.jobs.Job;
+import org.eclipse.core.runtime.jobs.JobChangeAdapter;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.e4.ui.model.application.MApplication;
 import org.eclipse.e4.ui.model.application.descriptor.basic.MPartDescriptor;
@@ -42,6 +46,7 @@ import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.TreeColumn;
 import org.eclipse.swt.widgets.TreeItem;
+import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IPartListener2;
 import org.eclipse.ui.ISelectionListener;
 import org.eclipse.ui.ISelectionService;
@@ -58,11 +63,14 @@ import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.commands.ICommandService;
 import org.eclipse.ui.dialogs.PreferencesUtil;
 
+import com._1c.g5.v8.derived.IDerivedDataManager;
+import com._1c.g5.v8.dt.core.platform.IDerivedDataManagerProvider;
 import com._1c.g5.v8.dt.validation.marker.IMarkerInfo;
 import com._1c.g5.v8.dt.validation.marker.IMarkerManager;
 import com._1c.g5.v8.dt.validation.marker.IMarkerUpdateListener;
 import com._1c.g5.v8.dt.validation.marker.Marker;
 import com._1c.g5.v8.dt.validation.marker.MarkerFilter;
+import com._1c.g5.v8.dt.validation.marker.MarkerIndex;
 import com._1c.g5.v8.dt.validation.marker.MarkersChangedEvent;
 import com._1c.g5.v8.dt.validation.marker.v2.IMarkerManagerV2;
 import com._1c.g5.v8.dt.validation.marker.v2.IMarkerReader;
@@ -83,6 +91,16 @@ import com.e1c.g5.v8.dt.check.settings.ICheckRepository;
  * редактора для этой колонки подавляется, иначе поверх настроек открывался бы
  * ещё и редактор объекта.</li>
  * </ul>
+ *
+ * <p><b>Все доработки поведения панели подчиняются флажку</b> Параметры → Комфорт →
+ * «Улучшать списки» ({@link ComfortSettings#PREF_REPLACE_LIST_FILTERS}): имя панели,
+ * заслонка обновлений, подпись «Область: …», индикатор ожидания слева от итогов
+ * на время загрузки списка, открытие настройки проверки двойным
+ * щелчком и свои области отбора ({@link ProblemViewComfortScope}). Флажок читается в
+ * момент срабатывания, а его переключение обрабатывается сразу
+ * ({@link #listenReplaceListFilters}) — перезапуск EDT не нужен. Команды, добавленные
+ * плагином в меню и тулбар панели, флажку не подчиняются: это не изменение штатного
+ * поведения, а отдельные команды.</p>
  *
  * <p>То же открытие настройки ({@link #openCheckSettings}) переиспользуют команда
  * «Открыть настройку проверки» в тулбаре и контекстном меню панели
@@ -147,6 +165,8 @@ public final class ProblemViewHook implements IStartup
     private static final Map<IViewPart, String> comfortAppliedScope = new WeakHashMap<>();
     /** Проект, под который наложена область (для сверки со сменой активного проекта). */
     private static final Map<IViewPart, IProject> comfortAppliedProject = new WeakHashMap<>();
+    /** Штатные имена панели по {@code MPart} / {@code MPartDescriptor} — см. {@link #stockLabel}. */
+    private static final Map<Object, String> stockLabels = new WeakHashMap<>();
 
     private static volatile boolean installed;
 
@@ -194,7 +214,49 @@ public final class ProblemViewHook implements IStartup
             }
         });
 
+        listenReplaceListFilters(workbench);
+
         Debug.log("install: installed"); //$NON-NLS-1$
+    }
+
+    /**
+     * Переключили «Улучшать списки» — привести панель в соответствие сразу, не
+     * дожидаясь перезапуска EDT: имя вернуть штатное (или переименовать заново) и
+     * снять нашу область отбора. Подпись «Область: …», заслонка обновлений и
+     * индикатор ожидания читают флажок при каждом срабатывании и подстраиваются сами.
+     */
+    private static void listenReplaceListFilters(IWorkbench workbench)
+    {
+        ComfortSettings settings = ComfortSettings.getInstance();
+        if (settings == null)
+            return;
+        settings.getPreferenceStore().addPropertyChangeListener(event ->
+        {
+            if (!ComfortSettings.PREF_REPLACE_LIST_FILTERS.equals(event.getProperty()))
+                return;
+            Display.getDefault().asyncExec(() ->
+            {
+                applyDescriptorTitle(workbench);
+                for (IWorkbenchWindow window : workbench.getWorkbenchWindows())
+                {
+                    for (IWorkbenchPage page : window.getPages())
+                    {
+                        for (IViewReference ref : page.getViewReferences())
+                        {
+                            IViewPart view = ref.getView(false);
+                            if (view == null || !isProblemView(view))
+                                continue;
+                            applyTitle(view);
+                            ClassLoader loader = view.getClass().getClassLoader();
+                            Object filters = problemFilters(loader);
+                            if (filters != null)
+                                applyComfortScope(view, filters, loader);
+                            UpdateWaitIndicator.apply(view, UpdateWaitIndicator.statusLabel(view));
+                        }
+                    }
+                }
+            });
+        });
     }
 
     private static void hookWindow(IWorkbenchWindow window)
@@ -244,14 +306,36 @@ public final class ProblemViewHook implements IStartup
         MApplication application = workbench.getService(MApplication.class);
         if (application == null)
             return;
+        boolean enabled = ComfortSettings.isReplaceListFiltersEnabled();
         for (MPartDescriptor descriptor : application.getDescriptors())
         {
-            if (ProblemViewMarkers.PROBLEM_VIEW_ID.equals(descriptor.getElementId())
-                && !VIEW_TITLE.equals(descriptor.getLabel()))
+            if (!ProblemViewMarkers.PROBLEM_VIEW_ID.equals(descriptor.getElementId()))
+                continue;
+            String wanted = enabled ? VIEW_TITLE : stockLabel(descriptor, descriptor.getLabel());
+            if (wanted != null && !wanted.equals(descriptor.getLabel()))
             {
-                descriptor.setLabel(VIEW_TITLE);
-                Debug.log("applyDescriptorTitle: renamed"); //$NON-NLS-1$
+                descriptor.setLabel(wanted);
+                Debug.log("applyDescriptorTitle: " + wanted); //$NON-NLS-1$
             }
+        }
+    }
+
+    /**
+     * Штатное имя панели, запомненное до первого переименования: при выключенном
+     * «Улучшать списки» имя надо вернуть, а взять его больше неоткуда — в модели e4
+     * уже стоит наше.
+     *
+     * @param owner {@code MPart} панели или её {@code MPartDescriptor}
+     * @param current текущее имя (наше или ещё штатное)
+     * @return штатное имя или {@code null}, если оно ни разу не наблюдалось
+     */
+    private static String stockLabel(Object owner, String current)
+    {
+        synchronized (stockLabels)
+        {
+            if (current != null && !VIEW_TITLE.equals(current))
+                stockLabels.put(owner, current);
+            return stockLabels.get(owner);
         }
     }
 
@@ -265,15 +349,21 @@ public final class ProblemViewHook implements IStartup
         if (!(part instanceof IViewPart view) || !isProblemView(view))
             return;
         Object mpart = view.getSite().getService(MPart.class);
-        if (mpart instanceof MPart model && !VIEW_TITLE.equals(model.getLabel()))
+        if (mpart instanceof MPart model)
         {
-            model.setLabel(VIEW_TITLE);
-            Debug.log("applyTitle: renamed"); //$NON-NLS-1$
+            String wanted = ComfortSettings.isReplaceListFiltersEnabled()
+                ? VIEW_TITLE : stockLabel(model, model.getLabel());
+            if (wanted != null && !wanted.equals(model.getLabel()))
+            {
+                model.setLabel(wanted);
+                Debug.log("applyTitle: " + wanted); //$NON-NLS-1$
+            }
         }
         installResultChangeGate(view);
         installScopeLabel(view);
         installOpenOverride(view);
         installComfortScope(view);
+        UpdateWaitIndicator.install(view);
         refreshComfortScope(view);
     }
 
@@ -287,19 +377,28 @@ public final class ProblemViewHook implements IStartup
      * моргает целиком, даже если под текущим отбором ничего не поменялось: дерево перерисовывается,
      * а надпись на миг теряет дописанное «Область: …».
      *
-     * <p>Штатный слушатель подменяется обёрткой: на каждое событие считается отпечаток результата
-     * под текущим отбором панели (количество и сумма хэшей маркеров) и событие пропускается дальше,
-     * только если отпечаток изменился. Отбор берётся из {@code getMarkerFilter()} — публичного
-     * метода панели, но требующего UI-потока, поэтому он снимается заранее и кэшируется.
-     * Сомнение всегда трактуется в пользу обновления: нет кэша отбора, слишком много маркеров,
-     * любая ошибка — событие проходит, то есть остаётся штатное поведение.
+     * <p>Штатный слушатель подменяется обёрткой, и решение принимается <b>по отбору панели, а не
+     * по её содержимому</b>: {@link MarkerChangeTap} знает, какие объекты попали в текущую пачку
+     * коммита маркеров, и событие не передаётся только тогда, когда ни один из них не входит в
+     * отбор панели. Проверка стоит O(размера отбора), хранилище маркеров не читается.
      *
-     * <p><b>Диагностика</b> (Журнал Комфорт, флажок «Вести журнал»): установка заслонки,
-     * каждая сверка с решением «передано / не дошло», отпечаток до и после, проекты события,
-     * сколько событий подряд не дошло и когда панель обновлялась в последний раз, снятый отбор
-     * (отдельно помечается отбор «ВСЕГДА ЛОЖЬ» — под ним маркеров всегда ноль, а значит отпечаток
-     * застывает), вытеснение несверенного события из пачки и срыв сверки с исключением. По этим
-     * строкам видно, обновляется ли панель по маркерам вообще (issue 475).
+     * <p>Сомнение всегда в пользу обновления: наблюдатель пачки не установлен, пачку не удалось
+     * разобрать, отбор не снят или в нём нет объектов — событие проходит, то есть остаётся штатное
+     * поведение.
+     *
+     * <p><b>Чего здесь больше нет и почему.</b> Прежняя редакция сверяла отпечаток результата
+     * (количество и сумма хэшей маркеров под отбором). Отпечаток требовал чтения хранилища,
+     * зависел от асинхронного снимка отбора и на области «Текущий элемент» всегда давал «0:0» —
+     * то есть не отвечал на нужный вопрос. Отсюда росли костыли: перепроверки через 2 и 5 секунд
+     * (событие могло прийти раньше публикации изменений) и аварийный клапан на минуту без
+     * обновлений. Инцидент 08.09.2026: после сохранения модуля отпечаток «0:0» под отбором с
+     * модулем сравнили с «0:0» под отбором без модуля, событие проглотили вместе с
+     * перепроверками, и панель показала проблемы только после ручного переключения области.
+     *
+     * <p><b>Диагностика</b> (Журнал Комфорт, флажок «Вести журнал»): установка заслонки и
+     * наблюдателя пачки, каждое решение с причиной, проекты события, сколько событий подряд не
+     * передано, снятый отбор (отдельно помечается отбор «ВСЕГДА ЛОЖЬ» — его строит
+     * {@code buildTreeFilter}, когда область ни во что не разрешилась).
      */
     private static void installResultChangeGate(IViewPart view)
     {
@@ -318,7 +417,8 @@ public final class ProblemViewHook implements IStartup
                 return;
             }
             installMarkerEventProbe(markerManager);
-            ResultChangeGate gate = new ResultChangeGate(view, markerManager, stock);
+            MarkerChangeTap.get().install(markerManager);
+            ResultChangeGate gate = new ResultChangeGate(view, stock);
             gates.put(view, gate);
             markerManager.removeListener(stock);
             markerManager.addListener(gate);
@@ -399,31 +499,421 @@ public final class ProblemViewHook implements IStartup
         }
     }
 
+    /**
+     * Что именно изменилось в текущей пачке коммита маркеров — сведения, которых нет в самом
+     * событии ({@code MarkersChangedEvent} несёт только список проектов).
+     *
+     * <p><b>Откуда берутся.</b> Рассылает события {@code Committer}
+     * ({@code com._1c.g5.v8.dt.internal.validation.marker}) — один на менеджер маркеров. Он копит
+     * записи в очереди {@code records} и раз в такт (1500 мс, {@code e1c.dt.marker.commitIntervalMs})
+     * забирает их через {@code poll()}, коммитит и рассылает событие. Самих маркеров в записи нет
+     * ({@code commitLater} кладёт {@code COMMIT} с {@code markers = null}), но есть хранилище
+     * проекта {@code ProjectMarkerStorage}, а у него — набор идентификаторов объектов, которые
+     * уходят в этот коммит ({@code markUncommitted}, публичный {@code isUncommitted}).
+     *
+     * <p><b>Как вклиниваемся.</b> Поле {@code records} подменяется обёрткой над очередью: она
+     * работает как обычная очередь, но на каждом {@code poll()} успевает спросить хранилище про
+     * идентификаторы <b>из отбора панели</b> — то есть проверка стоит O(размера отбора), а не
+     * O(числа проблем в списке, как отпечаток), и хранилище маркеров при этом не читается.
+     *
+     * <p><b>Почему так, а не отпечатком.</b> Отпечаток (количество и сумма хэшей маркеров под
+     * отбором) требовал чтения хранилища, зависел от снимка отбора и не отвечал на нужный вопрос:
+     * под отбором «Текущий элемент» он всегда выходил «0:0» и не менялся ни при появлении, ни при
+     * исчезновении проблем модуля. На нём панель и застревала со старым списком.
+     *
+     * <p>Сомнение всегда в пользу обновления: если пачку не удалось разобрать, отбор не снят или
+     * в нём нет объектов — событие проходит.
+     */
+    private static final class MarkerChangeTap
+    {
+        /** Класс отправителя событий; поле с его экземпляром ищем по имени класса. */
+        private static final String COMMITTER_CLASS_SUFFIX = ".Committer"; //$NON-NLS-1$
+
+        private static final String RECORDS_FIELD = "records"; //$NON-NLS-1$
+
+        private static final String RECORD_STORAGE_FIELD = "storage"; //$NON-NLS-1$
+
+        private static final String IS_UNCOMMITTED_METHOD = "isUncommitted"; //$NON-NLS-1$
+
+        private static final String GET_PROJECT_NAME_METHOD = "getProjectName"; //$NON-NLS-1$
+
+        /** Идентификаторы объектов отбора: больше — считаем отбор слишком широким и не решаем. */
+        private static final int MAX_SCOPE_IDS = 200;
+
+        /** Сколько последних снимков отбора учитывать — см. {@link #setScope}. */
+        private static final int SCOPE_HISTORY = 3;
+
+        /** Последние снимки отбора; область наблюдателя — их объединение. */
+        private final java.util.ArrayDeque<Snapshot> scopeHistory = new java.util.ArrayDeque<>();
+
+        private static final MarkerChangeTap INSTANCE = new MarkerChangeTap();
+
+        /** Идентификаторы объектов из отбора панели; пусто — решать не по чему. */
+        private volatile Object[] scopeIds = new Object[0];
+
+        /**
+         * Проекты отбора панели. Идентификаторы объектов ({@code bmGetId}) уникальны только внутри
+         * проекта, поэтому запись чужого проекта с тем же числом дала бы ложное «наше» и лишнее
+         * обновление; пусто — проект не ограничиваем.
+         */
+        private volatile java.util.Set<String> scopeProjects = java.util.Set.of();
+
+        /** В пачке был объект из отбора панели. */
+        private final java.util.concurrent.atomic.AtomicBoolean hit =
+            new java.util.concurrent.atomic.AtomicBoolean();
+
+        /** Сколько записей пачки удалось осмотреть. */
+        private final java.util.concurrent.atomic.AtomicInteger inspected =
+            new java.util.concurrent.atomic.AtomicInteger();
+
+        /** Пачку разобрать не удалось — что изменилось, неизвестно. */
+        private volatile boolean unknown;
+
+        private volatile boolean installed;
+
+        static MarkerChangeTap get()
+        {
+            return INSTANCE;
+        }
+
+        /** Подменяет очередь коммиттера обёрткой. Повторные вызовы дёшевы. */
+        synchronized void install(Object markerManager)
+        {
+            if (installed)
+                return;
+            try
+            {
+                // Панель держит службу через прокси peaberry — у него нет ни полей, ни коммиттера
+                Object owner = Global.unwrapServiceProxy(markerManager);
+                Object committer = fieldByClassSuffix(owner, COMMITTER_CLASS_SUFFIX);
+                if (committer == null)
+                {
+                    // Экземпляр панели и экземпляр службы могут быть разными, коммиттер — один
+                    Object service = Global.unwrapServiceProxy(Global.getOsgiService(IMarkerManagerV2.class));
+                    if (service != null && service != owner)
+                    {
+                        committer = fieldByClassSuffix(service, COMMITTER_CLASS_SUFFIX);
+                        if (committer != null)
+                            owner = service;
+                    }
+                }
+                if (committer == null)
+                {
+                    Debug.log("наблюдатель пачки: коммиттер не найден ни у " + className(markerManager) //$NON-NLS-1$
+                        + ", ни у службы из реестра"); //$NON-NLS-1$
+                    return;
+                }
+                Debug.log("наблюдатель пачки: коммиттер найден у " + className(owner)); //$NON-NLS-1$
+                Object queue = Global.getField(committer, RECORDS_FIELD);
+                if (!(queue instanceof java.util.Queue<?> raw))
+                {
+                    Debug.log("наблюдатель пачки: поле " + RECORDS_FIELD + " не очередь"); //$NON-NLS-1$ //$NON-NLS-2$
+                    return;
+                }
+                if (raw instanceof ObservingQueue)
+                {
+                    installed = true;
+                    return;
+                }
+                @SuppressWarnings("unchecked")
+                java.util.Queue<Object> delegate = (java.util.Queue<Object>)raw;
+                java.lang.reflect.Field field = findField(committer.getClass(), RECORDS_FIELD);
+                if (field == null)
+                    return;
+                field.setAccessible(true);
+                field.set(committer, new ObservingQueue(delegate));
+                installed = true;
+                Debug.log("наблюдатель пачки: очередь коммиттера подменена"); //$NON-NLS-1$
+            }
+            catch (Exception | LinkageError e)
+            {
+                Debug.log("наблюдатель пачки: не установлен — " + e); //$NON-NLS-1$
+            }
+        }
+
+        /**
+         * Повторная попытка установки: при открытии панели служба маркеров может быть ещё не
+         * поднята, а другого случая вклиниться потом не представится.
+         */
+        void ensureInstalled()
+        {
+            if (!installed)
+                install(Global.getOsgiService(IMarkerManagerV2.class));
+        }
+
+        /**
+         * Идентификаторы объектов из отбора панели — по ним и спрашиваем хранилище.
+         *
+         * <p>Берётся <b>объединение последних {@value #SCOPE_HISTORY} снимков</b>, а не только
+         * последний. Панель отдаёт свой отбор то полным, то усечённым: сразу после доставки
+         * события она ещё перестраивается, текущий элемент не доразрешён, и из отбора пропадает
+         * модуль ({@code OBJECT_ID + путь Module.bsl} → только {@code OBJECT_ID}). Решать по
+         * такому снимку нельзя: изменения модуля выглядят «не нашими», и панель замирает с пустым
+         * списком (инцидент 08.09.2026). Объединение смещает ошибку в безопасную сторону — в
+         * худшем случае лишнее обновление.
+         */
+        void setScope(MarkerFilter filter)
+        {
+            java.util.LinkedHashSet<Object> ids = new java.util.LinkedHashSet<>();
+            for (MarkerIndex index : new MarkerIndex[] { MarkerIndex.OBJECT_ID, MarkerIndex.TOP_OBJECT_ID })
+            {
+                java.util.Set<Object> values = filter.getValues(index);
+                if (values == null)
+                    continue;
+                for (Object value : values)
+                {
+                    // -1 приходит из отбора «ВСЕГДА ЛОЖЬ»: такого объекта нет, совпасть не с чем
+                    if (!Long.valueOf(-1L).equals(value))
+                        ids.add(value);
+                }
+            }
+            // Проекты — из той же истории, что и идентификаторы: иначе идентификаторы прошлого
+            // снимка остались бы в области, а проект уже не совпал бы, и изменения были бы
+            // отброшены как чужие
+            Snapshot snapshot = new Snapshot(ids, projectNames(filter));
+            synchronized (scopeHistory)
+            {
+                scopeHistory.addLast(snapshot);
+                while (scopeHistory.size() > SCOPE_HISTORY)
+                    scopeHistory.removeFirst();
+                java.util.LinkedHashSet<Object> unionIds = new java.util.LinkedHashSet<>();
+                java.util.LinkedHashSet<String> unionProjects = new java.util.LinkedHashSet<>();
+                for (Snapshot item : scopeHistory)
+                {
+                    unionIds.addAll(item.ids());
+                    unionProjects.addAll(item.projects());
+                }
+                scopeIds = unionIds.size() > MAX_SCOPE_IDS ? new Object[0] : unionIds.toArray();
+                scopeProjects = unionProjects;
+            }
+        }
+
+        /** Снимок отбора панели: объекты и проекты снимаются и учитываются вместе. */
+        private record Snapshot(java.util.Set<Object> ids, java.util.Set<String> projects)
+        {
+        }
+
+        /** Забирает решение по накопленной пачке и начинает копить заново. */
+        Verdict take()
+        {
+            boolean sawHit = hit.getAndSet(false);
+            int records = inspected.getAndSet(0);
+            boolean lost = unknown;
+            unknown = false;
+            Object[] ids = scopeIds;
+
+            if (!installed)
+                return new Verdict(false, "наблюдатель пачки не установлен"); //$NON-NLS-1$
+            if (lost)
+                return new Verdict(false, "пачку разобрать не удалось"); //$NON-NLS-1$
+            if (ids.length == 0)
+                return new Verdict(false, "в отборе панели нет объектов — решать не по чему"); //$NON-NLS-1$
+            if (records == 0)
+                return new Verdict(false, "пачка пуста — сведений об изменениях нет"); //$NON-NLS-1$
+            if (sawHit)
+                return new Verdict(false, "в пачке есть объект из отбора панели"); //$NON-NLS-1$
+            return new Verdict(true, "ни одна из " + records //$NON-NLS-1$
+                + " записей пачки не тронула объекты отбора: " + previewIds(ids)); //$NON-NLS-1$
+        }
+
+        /** Имена проектов отбора: в значениях {@code PROJECT} лежат сами {@link IProject}. */
+        private static java.util.Set<String> projectNames(MarkerFilter filter)
+        {
+            java.util.Set<Object> values = filter.getValues(MarkerIndex.PROJECT);
+            if (values == null || values.isEmpty())
+                return java.util.Set.of();
+            java.util.LinkedHashSet<String> names = new java.util.LinkedHashSet<>();
+            for (Object value : values)
+            {
+                if (value instanceof IProject project)
+                    names.add(project.getName());
+            }
+            return names;
+        }
+
+        /**
+         * Идентификаторы отбора для журнала: по ним видно, в той ли форме они, что и в хранилище
+         * (у одного и того же модуля это либо число {@code bmGetId}, либо путь к файлу).
+         */
+        private static String previewIds(Object[] ids)
+        {
+            StringBuilder text = new StringBuilder();
+            for (int i = 0; i < ids.length && i < 5; i++)
+                text.append(i == 0 ? "" : ", ").append(ids[i]); //$NON-NLS-1$ //$NON-NLS-2$
+            if (ids.length > 5)
+                text.append(", … всего ").append(ids.length); //$NON-NLS-1$
+            return text.toString();
+        }
+
+        /** Осматривает запись пачки в момент, когда коммиттер забирает её из очереди. */
+        private void inspect(Object record)
+        {
+            Object[] ids = scopeIds;
+            if (ids.length == 0)
+                return;
+            try
+            {
+                Object storage = Global.getField(record, RECORD_STORAGE_FIELD);
+                if (storage == null)
+                {
+                    // Запись без хранилища (NOTIFY) — что изменилось, отсюда не видно
+                    unknown = true;
+                    return;
+                }
+                java.util.Set<String> projects = scopeProjects;
+                if (!projects.isEmpty())
+                {
+                    Object name = Global.invoke(storage, GET_PROJECT_NAME_METHOD);
+                    if (name instanceof String projectName && !projects.contains(projectName))
+                    {
+                        // Чужой проект: его объекты в списке панели не показываются
+                        inspected.incrementAndGet();
+                        return;
+                    }
+                }
+                inspected.incrementAndGet();
+                for (Object id : ids)
+                {
+                    if (Boolean.TRUE.equals(Global.invoke(storage, IS_UNCOMMITTED_METHOD, id)))
+                    {
+                        hit.set(true);
+                        return;
+                    }
+                }
+            }
+            catch (Exception | LinkageError e)
+            {
+                unknown = true;
+                Debug.log("наблюдатель пачки: запись не разобрана — " + e); //$NON-NLS-1$
+            }
+        }
+
+        /** Первое поле объекта, тип которого оканчивается на {@code suffix}. */
+        private static Object fieldByClassSuffix(Object owner, String suffix)
+            throws ReflectiveOperationException
+        {
+            for (Class<?> type = owner.getClass(); type != null && type != Object.class; type =
+                type.getSuperclass())
+            {
+                for (java.lang.reflect.Field field : type.getDeclaredFields())
+                {
+                    if (!field.getType().getName().endsWith(suffix))
+                        continue;
+                    field.setAccessible(true);
+                    Object value = field.get(owner);
+                    if (value != null)
+                        return value;
+                }
+            }
+            return null;
+        }
+
+        private static java.lang.reflect.Field findField(Class<?> type, String name)
+        {
+            for (Class<?> current = type; current != null && current != Object.class; current =
+                current.getSuperclass())
+            {
+                try
+                {
+                    return current.getDeclaredField(name);
+                }
+                catch (NoSuchFieldException ignored)
+                {
+                    // ищем дальше по иерархии
+                }
+            }
+            return null;
+        }
+
+        /** Решение по пачке: передавать событие панели или нет. */
+        private record Verdict(boolean skip, String reason)
+        {
+        }
+
+        /**
+         * Очередь записей коммиттера: работает как исходная, но на выдаче записи успевает
+         * осмотреть её. Коммиттер разбирает очередь только через {@code poll()}.
+         */
+        private static final class ObservingQueue
+            extends java.util.AbstractQueue<Object>
+        {
+            private final java.util.Queue<Object> delegate;
+
+            ObservingQueue(java.util.Queue<Object> delegate)
+            {
+                this.delegate = delegate;
+            }
+
+            @Override
+            public boolean offer(Object record)
+            {
+                return delegate.offer(record);
+            }
+
+            @Override
+            public Object poll()
+            {
+                Object record = delegate.poll();
+                if (record != null)
+                    INSTANCE.inspect(record);
+                return record;
+            }
+
+            @Override
+            public Object peek()
+            {
+                return delegate.peek();
+            }
+
+            @Override
+            public java.util.Iterator<Object> iterator()
+            {
+                return delegate.iterator();
+            }
+
+            @Override
+            public int size()
+            {
+                return delegate.size();
+            }
+        }
+    }
+
     /** См. {@link #installResultChangeGate(IViewPart)}. */
     private static final class ResultChangeGate implements IMarkerUpdateListener
     {
-        /** Столько маркеров под отбором ещё считаем: выше — обновляем панель без сверки. */
-        private static final int DIGEST_LIMIT = 5000;
-
-        /** Пауза перед сверкой: события коммиттера идут пачками, считать на каждое незачем. */
+        /** Пауза перед решением: события коммиттера идут пачками, решать на каждое незачем. */
         private static final int EVALUATE_DELAY_MS = 100;
+
+        /** Пауза между запросами индекса, пока Lucene ещё отвечает нулём после коммита. */
+        private static final int INDEX_EMPTY_DELAY_MS = 400;
+
+        /** Сколько раз подождать индекс, прежде чем принять ноль как настоящий. */
+        private static final int MAX_INDEX_EMPTY_DEFERS = 10;
+
+        /**
+         * После {@code isIdle()} следующая волна проверок ещё не стартовала.
+         * Журнал 08.09.2026: idle=true, через ~1 с — ещё одна пачка маркеров.
+         * Такт коммиттера — 1500 мс.
+         */
+        private static final int SOURCE_IDLE_SETTLE_MS = 1500;
 
         /** Сколько символов описания отбора писать в журнал. */
         private static final int FILTER_LOG_LIMIT = 400;
 
         private final IViewPart view;
 
-        private final IMarkerManagerV2 markerManager;
-
         private final IMarkerUpdateListener stock;
 
         /** Отбор панели, снятый в UI-потоке: в потоке события его строить нельзя. */
         private volatile MarkerFilter filterSnapshot;
 
-        private volatile String lastDigest;
-
-        /** Последнее событие, ожидающее сверки. */
-        private volatile MarkersChangedEvent pending;
+        /**
+         * Последнее событие, ожидающее сверки. Сверка его забирает: иначе поле остаётся
+         * заполненным навсегда и каждое следующее событие выглядит как вытеснившее несверенное.
+         */
+        private final java.util.concurrent.atomic.AtomicReference<MarkersChangedEvent> pending =
+            new java.util.concurrent.atomic.AtomicReference<>();
 
         /** Диагностика: описание снятого отбора и когда он снят. */
         private volatile String filterDescription = "нет"; //$NON-NLS-1$
@@ -441,29 +931,56 @@ public final class ProblemViewHook implements IStartup
         /** Диагностика: когда событие последний раз доходило до панели. */
         private volatile long lastPassedAt;
 
-        /** Сверка идёт в своей задаче: событие приходит в потоке коммиттера маркеров. */
+        /** Решение принимается в своей задаче: событие приходит в потоке коммиттера маркеров. */
         private final Job evaluateJob;
 
-        ResultChangeGate(IViewPart view, IMarkerManagerV2 markerManager, IMarkerUpdateListener stock)
+        /**
+         * Событие, которое не отдаём панели, пока {@code getMarkerInfo} по текущему отбору
+         * даёт 0, а предыдущий ненулевой запрос по тем же объектам уже был. Индекс Lucene
+         * после коммита ещё пуст — штатный Job успел бы очистить дерево.
+         */
+        private final java.util.concurrent.atomic.AtomicReference<MarkersChangedEvent> deferredUntilIndex =
+            new java.util.concurrent.atomic.AtomicReference<>();
+
+        private volatile int indexEmptyDefers;
+
+        private final Job indexRetryJob;
+
+        private final Job sourceIdleJob;
+
+        /** Когда {@code isIdle()} стал true; 0 — сейчас не idle. */
+        private volatile long sourceIdleSince;
+
+        ResultChangeGate(IViewPart view, IMarkerUpdateListener stock)
         {
             this.view = view;
-            this.markerManager = markerManager;
             this.stock = stock;
             // Приведение обязательно: Job.create перегружен под ICoreRunnable и IJobFunction,
             // а лямбда без результата подходит обеим
             this.evaluateJob = Job.create("Комфорт: сверка результата панели проблем", //$NON-NLS-1$
                 (ICoreRunnable)monitor -> evaluate());
             this.evaluateJob.setSystem(true);
+            this.indexRetryJob = Job.create("Комфорт: ожидание индекса панели проблем", //$NON-NLS-1$
+                (ICoreRunnable)monitor -> retryWhenIndexReady());
+            this.indexRetryJob.setSystem(true);
+            this.sourceIdleJob = Job.create("Комфорт: ожидание расчёта проверок панели проблем", //$NON-NLS-1$
+                (ICoreRunnable)monitor -> retryWhenSourceIdle());
+            this.sourceIdleJob.setSystem(true);
         }
 
         @Override
         public void handleMarkersChanged(MarkersChangedEvent event)
         {
+            if (!ComfortSettings.isReplaceListFiltersEnabled())
+            {
+                // Флажок «Улучшать списки» снят — заслонки нет, панель обновляется штатно
+                stock.handleMarkersChanged(event);
+                return;
+            }
             // Считать отпечаток прямо здесь нельзя: это поток коммиттера маркеров, он в этот
             // момент держит хранилище — читать его отсюда и задерживать коммит одинаково плохо
             eventCount++;
-            MarkersChangedEvent previous = pending;
-            pending = event;
+            MarkersChangedEvent previous = pending.getAndSet(event);
             if (previous != null)
             {
                 // Пачка схлопывается в одну сверку: проекты вытесненного события в отпечаток
@@ -476,87 +993,199 @@ public final class ProblemViewHook implements IStartup
             evaluateJob.schedule(EVALUATE_DELAY_MS);
         }
 
+        /**
+         * Решение по событию: обновлять панель или нет.
+         *
+         * <p>Ничего не читает из хранилища маркеров коммиттера. Всё, что нужно для отсечения
+         * чужих объектов, уже известно {@link MarkerChangeTap}. Если ни один из них не входит в
+         * отбор панели — список от этой пачки не изменится, и обновлять нечего.
+         *
+         * <p>Перед передачей панели спрашиваем индекс Lucene тем же {@code getMarkerInfo}.
+         * Журнал 08.09.2026: сразу после коммита запрос по полному отбору (id + {@code Module.bsl})
+         * даёт 0 за 0 мс, через несколько секунд тот же отбор находит маркеры. Если отдать Job
+         * сейчас, дерево очистится. Ждём индекс, держим последние полные итоги
+         * и показываем индикатор слева от них, список не трогаем.
+         */
         private void evaluate()
         {
-            MarkersChangedEvent event = pending;
+            MarkersChangedEvent event = pending.getAndSet(null);
             if (event == null)
                 return;
             try
             {
-                String digest = digest(event);
-                if (digest != null && digest.equals(lastDigest))
+                MarkerChangeTap.get().ensureInstalled();
+                MarkerChangeTap.Verdict verdict = MarkerChangeTap.get().take();
+                if (verdict.skip())
                 {
                     swallowedInRow++;
                     Debug.log("заслонка обновлений: событие " + eventCount + " (проекты " //$NON-NLS-1$ //$NON-NLS-2$
-                        + changedProjectNames(event) + ") не дошло до панели — отпечаток " //$NON-NLS-1$
-                        + "не изменился (" + digest + "), подряд не дошло " + swallowedInRow //$NON-NLS-1$ //$NON-NLS-2$
-                        + ", последнее обновление " + sinceText(lastPassedAt) //$NON-NLS-1$
+                        + changedProjectNames(event) + ") не передано — " + verdict.reason() //$NON-NLS-1$
+                        + ", подряд не передано " + swallowedInRow //$NON-NLS-1$
                         + ", отбор снят " + sinceText(filterSnapshotAt) + ": " + filterDescription); //$NON-NLS-1$
                     return;
                 }
-                String previousDigest = lastDigest;
-                lastDigest = digest;
-                swallowedInRow = 0;
-                passedCount++;
-                Debug.log("заслонка обновлений: событие " + eventCount + " (проекты " //$NON-NLS-1$ //$NON-NLS-2$
-                    + changedProjectNames(event) + ") передано панели, всего передано " //$NON-NLS-1$
-                    + passedCount + " из " + eventCount + " — отпечаток " + previousDigest //$NON-NLS-1$ //$NON-NLS-2$
-                    + " → " + digest //$NON-NLS-1$
-                    + (digest == null ? " (посчитать не удалось — пропускаем безусловно)" : "")); //$NON-NLS-1$ //$NON-NLS-2$
-                lastPassedAt = System.currentTimeMillis();
-                stock.handleMarkersChanged(event);
-                // Отбор мог измениться вместе с результатом (например, сменился текущий объект)
-                refreshFilterSnapshot();
+                boolean sourceIdle = isSourceIdle(event, filterSnapshot);
+                if (UpdateWaitIndicator.indexNotReadyYet(view, filterSnapshot))
+                {
+                    deferUntilIndex(event);
+                    return;
+                }
+                finishIndexWait();
+                applySourceWait(!sourceIdle);
+                deliver(event, verdict.reason());
             }
             catch (Throwable t)
             {
                 // Ошибка здесь означает, что событие до панели не дошло и уже не дойдёт:
                 // повторного события про это изменение маркеров не будет
-                Global.logError(Debug.TAG, "заслонка обновлений: сверка сорвалась, событие " //$NON-NLS-1$
+                Global.logError(Debug.TAG, "заслонка обновлений: решение сорвалось, событие " //$NON-NLS-1$
                     + eventCount + " потеряно", t); //$NON-NLS-1$
                 throw t;
             }
         }
 
-        /**
-         * Отпечаток результата под текущим отбором: количество маркеров и сумма их хэшей.
-         * Сумма не зависит от порядка выдачи, а {@code Marker} переопределяет {@code hashCode}.
-         *
-         * @return {@code null}, если отпечаток посчитать нельзя — тогда событие проходит дальше
-         */
-        private String digest(MarkersChangedEvent event)
+        private boolean isSourceIdle(MarkersChangedEvent event, MarkerFilter snapshot)
         {
-            MarkerFilter filter = filterSnapshot;
-            if (filter == null || event == null)
-            {
-                Debug.log("заслонка обновлений: отпечаток не считаем — отбор панели не снят"); //$NON-NLS-1$
-                return null;
-            }
             try
             {
-                IMarkerReader reader = markerManager.createReader(projects(event));
-                IMarkerInfo info = reader.getMarkerInfo(filter);
-                int total = info == null ? -1 : info.getTotalCount();
-                if (total < 0 || total > DIGEST_LIMIT)
+                IProject project = firstChangedProject(event);
+                if (project == null && snapshot != null)
                 {
-                    Debug.log("заслонка обновлений: отпечаток не считаем — маркеров под отбором " //$NON-NLS-1$
-                        + total + " (предел " + DIGEST_LIMIT + ")"); //$NON-NLS-1$ //$NON-NLS-2$
-                    return null;
+                    Set<Object> values = snapshot.getValues(MarkerIndex.PROJECT);
+                    if (values != null)
+                    {
+                        for (Object value : values)
+                        {
+                            if (value instanceof IProject found)
+                            {
+                                project = found;
+                                break;
+                            }
+                        }
+                    }
                 }
-                long sum = reader.markers(filter).mapToLong(Marker::hashCode).sum();
-                return total + ":" + sum; //$NON-NLS-1$
+                if (project == null)
+                    return true;
+                IDerivedDataManagerProvider provider =
+                    Global.getOsgiService(IDerivedDataManagerProvider.class);
+                IDerivedDataManager manager = provider != null ? provider.get(project) : null;
+                return manager == null || manager.isIdle();
             }
-            catch (RuntimeException e)
+            catch (RuntimeException | LinkageError ignored)
             {
-                Global.logError(Debug.TAG, "заслонка обновлений: отпечаток не посчитан", e); //$NON-NLS-1$
-                return null;
+                return true;
             }
         }
 
-        private Collection<IProject> projects(MarkersChangedEvent event)
+        private static IProject firstChangedProject(MarkersChangedEvent event)
         {
-            Collection<IProject> changed = event.getChangedProjects();
-            return changed == null ? Set.of() : changed;
+            Collection<IProject> changed = event != null ? event.getChangedProjects() : null;
+            if (changed == null)
+                return null;
+            for (IProject project : changed)
+            {
+                if (project != null && project.isAccessible())
+                    return project;
+            }
+            return null;
+        }
+
+        private void deferUntilIndex(MarkersChangedEvent event)
+        {
+            deferredUntilIndex.set(event);
+            if (indexEmptyDefers == 0)
+                indexEmptyDefers = 1;
+            UpdateWaitIndicator.setWaitingForIndex(view, true);
+            indexRetryJob.schedule(INDEX_EMPTY_DELAY_MS);
+        }
+
+        private void finishIndexWait()
+        {
+            indexRetryJob.cancel();
+            deferredUntilIndex.set(null);
+            indexEmptyDefers = 0;
+        }
+
+        private void applySourceWait(boolean busy)
+        {
+            if (busy)
+                sourceIdleSince = 0;
+            UpdateWaitIndicator.setWaitingForIndex(view, busy);
+            if (busy)
+                sourceIdleJob.schedule(INDEX_EMPTY_DELAY_MS);
+            else
+                sourceIdleJob.cancel();
+        }
+
+        private void retryWhenSourceIdle()
+        {
+            if (view.getSite() == null)
+            {
+                UpdateWaitIndicator.setWaitingForIndex(view, false);
+                return;
+            }
+            if (!isSourceIdle(null, filterSnapshot))
+            {
+                sourceIdleSince = 0;
+                sourceIdleJob.schedule(INDEX_EMPTY_DELAY_MS);
+                return;
+            }
+            long now = System.currentTimeMillis();
+            if (sourceIdleSince == 0)
+                sourceIdleSince = now;
+            long waited = now - sourceIdleSince;
+            if (waited < SOURCE_IDLE_SETTLE_MS)
+            {
+                sourceIdleJob.schedule(INDEX_EMPTY_DELAY_MS);
+                return;
+            }
+            UpdateWaitIndicator.setWaitingForIndex(view, false);
+        }
+
+        private void retryWhenIndexReady()
+        {
+            if (view.getSite() == null)
+            {
+                finishIndexWait();
+                UpdateWaitIndicator.setWaitingForIndex(view, false);
+                sourceIdleJob.cancel();
+                return;
+            }
+            boolean stillEmpty = UpdateWaitIndicator.indexNotReadyYet(view, filterSnapshot);
+            MarkersChangedEvent event = deferredUntilIndex.get();
+            if (event == null)
+            {
+                UpdateWaitIndicator.setWaitingForIndex(view, false);
+                return;
+            }
+            if (stillEmpty && indexEmptyDefers < MAX_INDEX_EMPTY_DEFERS)
+            {
+                indexEmptyDefers++;
+                indexRetryJob.schedule(INDEX_EMPTY_DELAY_MS);
+                return;
+            }
+            deferredUntilIndex.set(null);
+            int attempts = indexEmptyDefers;
+            indexEmptyDefers = 0;
+            applySourceWait(!isSourceIdle(event, filterSnapshot));
+            String reason = stillEmpty
+                ? "индекс Lucene так и 0 после " + attempts + " попыток" //$NON-NLS-1$ //$NON-NLS-2$
+                : "индекс Lucene готов после " + attempts + " попыток"; //$NON-NLS-1$ //$NON-NLS-2$
+            deliver(event, reason);
+        }
+
+        /** Передаёт событие штатному слушателю панели. */
+        private synchronized void deliver(MarkersChangedEvent event, String reason)
+        {
+            swallowedInRow = 0;
+            passedCount++;
+            lastPassedAt = System.currentTimeMillis();
+            Debug.log("заслонка обновлений: событие " + eventCount + " (проекты " //$NON-NLS-1$ //$NON-NLS-2$
+                + changedProjectNames(event) + ") передано панели, всего передано " //$NON-NLS-1$
+                + passedCount + " из " + eventCount + " — " + reason); //$NON-NLS-1$ //$NON-NLS-2$
+            stock.handleMarkersChanged(event);
+            // Отбор мог измениться вместе с результатом (например, сменился текущий объект)
+            refreshFilterSnapshot();
         }
 
         /** Снимает текущий отбор панели в UI-потоке — там его строить безопасно. */
@@ -573,6 +1202,7 @@ public final class ProblemViewHook implements IStartup
                     {
                         filterSnapshot = markerFilter;
                         filterSnapshotAt = System.currentTimeMillis();
+                        MarkerChangeTap.get().setScope(markerFilter);
                         String description = describeFilter(markerFilter);
                         if (!description.equals(filterDescription))
                             Debug.log("заслонка обновлений: отбор панели снят заново — " + description //$NON-NLS-1$
@@ -713,7 +1343,8 @@ public final class ProblemViewHook implements IStartup
         viewer.addOpenListener(event ->
         {
             int index = lastColumn[0];
-            Marker marker = firstMarker(event.getSelection());
+            Marker marker = ComfortSettings.isReplaceListFiltersEnabled()
+                ? firstMarker(event.getSelection()) : null;
             if (marker != null && index >= 0 && index < tree.getColumnCount()
                 && CODE_COLUMN_TITLE.equals(columnTitle(tree, index)))
             {
@@ -772,6 +1403,14 @@ public final class ProblemViewHook implements IStartup
     {
         if (status.isDisposed())
             return;
+        if (!ComfortSettings.isReplaceListFiltersEnabled())
+        {
+            // Флажок «Улучшать списки» снят — вернуть штатные итоги без дописанного отбора
+            int appended = status.getText().indexOf(SCOPE_SEPARATOR);
+            if (appended >= 0)
+                status.setText(status.getText().substring(0, appended));
+            return;
+        }
         String suffix = scopeSuffix(view, filters, loader);
         if (suffix == null)
             return;
@@ -920,6 +1559,7 @@ public final class ProblemViewHook implements IStartup
         {
             if (status.isDisposed())
                 return;
+            UpdateWaitIndicator.apply(view, status);
             appendScope(view, status, filters, loader);
             display.timerExec(SCOPE_REFRESH_MS, tick[0]);
         };
@@ -1546,6 +2186,683 @@ public final class ProblemViewHook implements IStartup
             return;
         CheckDescriptionRefresh.install(dialog);
         dialog.open();
+    }
+
+    /**
+     * Пока штатные Job обновления и загрузки списка ещё работают, надпись
+     * «0 элементов» вводит в заблуждение: {@code LazyProblemView.update} сначала
+     * ставит в очередь UI очистку дерева, потом на том же Job ждёт
+     * {@code IMarkerReader.getMarkerInfo} (индекс Lucene), и только после ответа
+     * пишет итоги. Если итог пока ноль, штатный текст — {@code MarkerStats_0_items}.
+     *
+     * <p>На области «Текущий элемент» Job иногда строит отбор только из числового
+     * id объекта, без пути {@code Module.bsl}. Маркеры висят на файле модуля, запрос
+     * даёт 0, дерево очищается. В тот же объект фильтра, который уже ушёл в
+     * {@code updateViewer}, возвращаем пути модуля с последнего ненулевого запроса
+     * по тем же id — и индекс, и дерево видят полный отбор. Повтор
+     * {@code selectionChanged} здесь не помогает: он тоже даёт усечённый отбор.
+     * Повтор с редактора оставляем только для отбора «всегда ложь».
+     *
+     * <p>Пока {@code IDerivedDataManager.isIdle()} ложь (проверки ещё считают этот
+     * объект) или заслонка ждёт индекс Lucene (запрос 0, а раньше уже были
+     * результаты), слева от итогов крутится индикатор, а в шапке остаются последние
+     * полные итоги — не промежуточные «Ошибок: 13». Штатные Job перестроения списка
+     * индикатор не ставят.
+     */
+    private static final class UpdateWaitIndicator
+    {
+        /** Прежний текстовый суффикс — снимаем, если ещё остался в шапке. */
+        private static final String WAIT_TEXT = "Обновление…"; //$NON-NLS-1$
+
+        private static final String WAIT_SUFFIX = ", " + WAIT_TEXT; //$NON-NLS-1$
+
+        private static final String LAZY_MESSAGES =
+            "com._1c.g5.v8.dt.internal.ui.validation.lazytree.Messages"; //$NON-NLS-1$
+
+        private static final String STATS_MESSAGES =
+            "com._1c.g5.v8.dt.internal.ui.validation.Messages"; //$NON-NLS-1$
+
+        private static final String MARKER_STATS =
+            "com._1c.g5.v8.dt.internal.ui.validation.MarkerStats"; //$NON-NLS-1$
+
+        private static final Map<IViewPart, State> views = new WeakHashMap<>();
+
+        private static final Set<Job> tracked = ConcurrentHashMap.newKeySet();
+
+        private static volatile boolean jobListenerInstalled;
+
+        private static volatile String updateJobName;
+
+        private static volatile String loadJobName;
+
+        private static volatile String zeroItemsText;
+
+        private static final ThreadLocal<Boolean> PEEKING = new ThreadLocal<>();
+
+        private UpdateWaitIndicator() {}
+
+        static void install(IViewPart view)
+        {
+            if (view.getSite() == null)
+                return;
+            synchronized (views)
+            {
+                if (views.containsKey(view))
+                    return;
+                views.put(view, new State());
+            }
+            rememberJobNames(view.getClass().getClassLoader());
+            wrapMarkerManager(view);
+            installJobListener();
+            TreeViewer viewer = view.getAdapter(TreeViewer.class);
+            Tree tree = viewer != null ? viewer.getTree() : null;
+            if (tree != null && !tree.isDisposed())
+            {
+                tree.addDisposeListener(e ->
+                {
+                    State disposed;
+                    synchronized (views)
+                    {
+                        disposed = views.remove(view);
+                    }
+                    if (disposed != null && disposed.spinner != null)
+                        disposed.spinner.setActive(false);
+                });
+            }
+            apply(view, statusLabel(view));
+        }
+
+        static void apply(IViewPart view, Label status)
+        {
+            if (status == null || status.isDisposed())
+                return;
+            State state;
+            synchronized (views)
+            {
+                state = views.get(view);
+            }
+            if (state == null)
+                return;
+            boolean waiting = ComfortSettings.isReplaceListFiltersEnabled() && state.waitingForIndex;
+            String original = status.getText();
+            String base = stripSuffix(original);
+            String stats = stripWaitSuffix(base);
+            if (isRealStats(stats) && !waiting)
+                state.lastGoodStatus = stats;
+            String wantedBase = null;
+            if (waiting)
+            {
+                String counts = isRealStats(state.lastGoodStatus) ? state.lastGoodStatus : stats;
+                if (!isRealStats(counts))
+                    counts = stockStatusText(view);
+                if (!isRealStats(counts))
+                    counts = stats;
+                wantedBase = counts;
+            }
+            else if (base.endsWith(WAIT_SUFFIX) || WAIT_TEXT.equals(base))
+                wantedBase = stockStatusText(view);
+            if (wantedBase != null && !wantedBase.equals(base))
+            {
+                int scopeAt = original.indexOf(SCOPE_SEPARATOR);
+                String extra = scopeAt >= 0 ? original.substring(scopeAt) : ""; //$NON-NLS-1$
+                status.setText(wantedBase + extra);
+            }
+            applySpinner(status, state, waiting);
+            applyCursor(view, waiting);
+        }
+
+        private static void applyAll()
+        {
+            Display display = Display.getDefault();
+            if (display == null || display.isDisposed())
+                return;
+            display.asyncExec(() ->
+            {
+                List<IViewPart> snapshot;
+                synchronized (views)
+                {
+                    snapshot = List.copyOf(views.keySet());
+                }
+                for (IViewPart view : snapshot)
+                    apply(view, statusLabel(view));
+            });
+        }
+
+        private static void applySpinner(Label status, State state, boolean waiting)
+        {
+            if (!waiting && state.spinner == null)
+                return;
+            if (state.spinner == null || state.spinner.isDisposed())
+                state.spinner = WaitSpinner.attach(status, "Список проблем ещё обновляется"); //$NON-NLS-1$
+            if (state.spinner != null)
+                state.spinner.setActive(waiting);
+        }
+
+        private static void applyCursor(IViewPart view, boolean waiting)
+        {
+            TreeViewer viewer = view.getAdapter(TreeViewer.class);
+            Tree tree = viewer != null ? viewer.getTree() : null;
+            if (tree == null || tree.isDisposed())
+                return;
+            if (waiting)
+                tree.setCursor(tree.getDisplay().getSystemCursor(SWT.CURSOR_WAIT));
+            else if (tree.getCursor() != null)
+                tree.setCursor(null);
+        }
+
+        private static Label statusLabel(IViewPart view)
+        {
+            Object statusObj = Global.getField(view, "statusLabel"); //$NON-NLS-1$
+            return statusObj instanceof Label status && !status.isDisposed() ? status : null;
+        }
+
+        private static String stripSuffix(String text)
+        {
+            if (text == null)
+                return ""; //$NON-NLS-1$
+            int appended = text.indexOf(SCOPE_SEPARATOR);
+            return appended >= 0 ? text.substring(0, appended) : text;
+        }
+
+        private static String stripWaitSuffix(String text)
+        {
+            if (text == null || text.isEmpty())
+                return ""; //$NON-NLS-1$
+            if (WAIT_TEXT.equals(text))
+                return ""; //$NON-NLS-1$
+            if (text.endsWith(WAIT_SUFFIX))
+                return text.substring(0, text.length() - WAIT_SUFFIX.length());
+            return text;
+        }
+
+        private static boolean isRealStats(String text)
+        {
+            if (text == null || text.isBlank())
+                return false;
+            if (WAIT_TEXT.equals(text) || text.endsWith(WAIT_SUFFIX))
+                return false;
+            String zero = zeroItemsText;
+            return zero == null || !zero.equals(text);
+        }
+
+        private static String stockStatusText(IViewPart view)
+        {
+            Object info = Global.invoke(view, "getEstimatedMarkerInfo"); //$NON-NLS-1$
+            try
+            {
+                Class<?> statsClass = view.getClass().getClassLoader().loadClass(MARKER_STATS);
+                Object stats = Global.invoke(statsClass, "of", info); //$NON-NLS-1$
+                Object text = stats != null ? Global.invoke(stats, "getStatusText") : null; //$NON-NLS-1$
+                if (text instanceof String s && !s.isBlank())
+                    return s;
+            }
+            catch (Exception ignored)
+            {
+            }
+            String zero = zeroItemsText;
+            return zero != null ? zero : ""; //$NON-NLS-1$
+        }
+
+        private static void rememberJobNames(ClassLoader loader)
+        {
+            if (updateJobName != null)
+                return;
+            try
+            {
+                Class<?> lazy = loader.loadClass(LAZY_MESSAGES);
+                updateJobName = stringField(lazy, "LazyProblemView_UpdateJobName"); //$NON-NLS-1$
+                loadJobName = stringField(lazy, "LazyTreeNodeContentProvider_LoadMarkersJobName"); //$NON-NLS-1$
+                Class<?> stats = loader.loadClass(STATS_MESSAGES);
+                zeroItemsText = stringField(stats, "MarkerStats_0_items"); //$NON-NLS-1$
+            }
+            catch (Exception ignored)
+            {
+            }
+        }
+
+        private static String stringField(Class<?> type, String name)
+        {
+            try
+            {
+                Field field = type.getDeclaredField(name);
+                field.setAccessible(true);
+                Object value = field.get(null);
+                return value instanceof String s ? s : null;
+            }
+            catch (Exception ignored)
+            {
+                return null;
+            }
+        }
+
+        private static boolean isTrackedJob(Job job)
+        {
+            if (job == null)
+                return false;
+            String name = job.getName();
+            if (name == null || name.isBlank())
+                return false;
+            return name.equals(updateJobName) || name.equals(loadJobName);
+        }
+
+        private static void installJobListener()
+        {
+            if (jobListenerInstalled)
+                return;
+            jobListenerInstalled = true;
+            Job.getJobManager().addJobChangeListener(new JobChangeAdapter()
+            {
+                @Override
+                public void aboutToRun(IJobChangeEvent event)
+                {
+                    Job job = event.getJob();
+                    if (!isTrackedJob(job))
+                        return;
+                    tracked.add(job);
+                    applyAll();
+                }
+
+                @Override
+                public void done(IJobChangeEvent event)
+                {
+                    Job job = event.getJob();
+                    if (job == null || !tracked.remove(job))
+                        return;
+                    applyAll();
+                }
+            });
+        }
+
+        private static void wrapMarkerManager(IViewPart view)
+        {
+            Object manager = Global.getField(view, "markerManager"); //$NON-NLS-1$
+            if (!(manager instanceof IMarkerManagerV2 origin))
+                return;
+            if (Proxy.isProxyClass(origin.getClass())
+                && Proxy.getInvocationHandler(origin) instanceof ManagerTap)
+                return;
+            IMarkerManagerV2 wrapped = (IMarkerManagerV2)Proxy.newProxyInstance(
+                IMarkerManagerV2.class.getClassLoader(),
+                new Class<?>[] { IMarkerManagerV2.class },
+                new ManagerTap(origin, view));
+            if (!Global.setFieldForce(view, "markerManager", wrapped)) //$NON-NLS-1$
+                return;
+            Object current = Global.getField(view, "markerReader"); //$NON-NLS-1$
+            if (current instanceof IMarkerReader reader
+                && !(Proxy.isProxyClass(reader.getClass())
+                    && Proxy.getInvocationHandler(reader) instanceof ReaderTap))
+            {
+                IMarkerReader wrappedReader = (IMarkerReader)Proxy.newProxyInstance(
+                    IMarkerReader.class.getClassLoader(),
+                    new Class<?>[] { IMarkerReader.class },
+                    new ReaderTap(reader, view));
+                Global.setFieldForce(view, "markerReader", wrappedReader); //$NON-NLS-1$
+            }
+        }
+
+        private static final class State
+        {
+            volatile boolean retryingEmpty;
+
+            volatile boolean retriedEmpty;
+
+            volatile boolean waitingForIndex;
+
+            volatile String lastGoodStatus = ""; //$NON-NLS-1$
+
+            volatile Set<Object> lastGoodObjectIds = Set.of();
+
+            volatile Set<String> lastGoodProjects = Set.of();
+
+            WaitSpinner spinner;
+        }
+
+        static void setWaitingForIndex(IViewPart view, boolean waiting)
+        {
+            State state = stateOf(view);
+            if (state == null)
+                return;
+            if (state.waitingForIndex == waiting)
+            {
+                if (waiting)
+                    applyAll();
+                return;
+            }
+            state.waitingForIndex = waiting;
+            applyAll();
+        }
+
+        /**
+         * После коммита индекс ещё не видит маркеры: предыдущий запрос по тем же
+         * объектам (с путём модуля) был ненулевой, а сейчас {@code getMarkerInfo} — 0.
+         * Тогда панель не обновляем. Нет прошлого результата — не ждём, это обычный ноль.
+         */
+        static boolean indexNotReadyYet(IViewPart view, MarkerFilter snapshot)
+        {
+            if (!ComfortSettings.isReplaceListFiltersEnabled() || snapshot == null)
+                return false;
+            State state = stateOf(view);
+            if (state == null || !hasResourcePath(state.lastGoodObjectIds))
+                return false;
+            if (String.valueOf(snapshot).equals(ResultChangeGate.alwaysFalseDescription()))
+                return false;
+            PEEKING.set(Boolean.TRUE);
+            try
+            {
+                Object manager = Global.getField(view, "markerManager"); //$NON-NLS-1$
+                if (!(manager instanceof IMarkerManagerV2 origin))
+                    return false;
+                IMarkerReader reader = origin.createReader(List.of());
+                if (reader == null)
+                    return false;
+                IMarkerInfo info = reader.getMarkerInfo(snapshot);
+                int total = info != null ? info.getTotalCount() : 0;
+                return info == null || total == 0;
+            }
+            catch (RuntimeException | LinkageError ignored)
+            {
+                return false;
+            }
+            finally
+            {
+                PEEKING.remove();
+            }
+        }
+
+        private static State stateOf(IViewPart view)
+        {
+            synchronized (views)
+            {
+                return views.get(view);
+            }
+        }
+
+        private static MarkerFilter unwrapFilter(Object arg)
+        {
+            if (arg instanceof MarkerFilter filter)
+                return filter;
+            if (arg instanceof MarkerFilter[] filters)
+                return filters.length > 0 ? filters[0] : null;
+            return null;
+        }
+
+        private static boolean hasResourcePath(Set<Object> ids)
+        {
+            if (ids == null)
+                return false;
+            for (Object id : ids)
+            {
+                if (id instanceof String)
+                    return true;
+            }
+            return false;
+        }
+
+        private static Set<Object> numericIds(Set<Object> ids)
+        {
+            LinkedHashSet<Object> numbers = new LinkedHashSet<>();
+            if (ids == null)
+                return numbers;
+            for (Object id : ids)
+            {
+                if (id instanceof Long || id instanceof Integer)
+                    numbers.add(id);
+            }
+            return numbers;
+        }
+
+        private static Set<String> projectNames(Set<Object> values)
+        {
+            LinkedHashSet<String> names = new LinkedHashSet<>();
+            if (values == null)
+                return names;
+            for (Object value : values)
+            {
+                if (value instanceof IProject project)
+                    names.add(project.getName());
+                else if (value != null)
+                    names.add(String.valueOf(value));
+            }
+            return names;
+        }
+
+        /**
+         * Журнал 08.09.2026: полный отбор {@code OBJECT_ID=id + путь Module.bsl} даёт
+         * маркеры, усечённый {@code OBJECT_ID=id} — ноль. {@code updateViewer} уже
+         * держит тот же экземпляр фильтра: добавляем недостающие пути в него до
+         * запроса индекса.
+         */
+        private static void restoreModulePaths(IViewPart view, Object[] args)
+        {
+            if (!ComfortSettings.isReplaceListFiltersEnabled())
+                return;
+            State state = stateOf(view);
+            MarkerFilter filter = unwrapFilter(args != null && args.length > 0 ? args[0] : null);
+            if (state == null || filter == null)
+                return;
+            Set<Object> current = filter.getValues(MarkerIndex.OBJECT_ID);
+            if (current == null || current.isEmpty() || hasResourcePath(current))
+                return;
+            Set<Object> last = state.lastGoodObjectIds;
+            if (last == null || last.isEmpty() || !hasResourcePath(last))
+                return;
+            Set<Object> currentIds = numericIds(current);
+            Set<Object> lastIds = numericIds(last);
+            if (currentIds.isEmpty() || !lastIds.containsAll(currentIds))
+                return;
+            Set<String> lastProjects = state.lastGoodProjects;
+            Set<String> currentProjects = projectNames(filter.getValues(MarkerIndex.PROJECT));
+            if (!lastProjects.isEmpty() && !currentProjects.isEmpty())
+            {
+                boolean sameProject = false;
+                for (String name : currentProjects)
+                {
+                    if (lastProjects.contains(name))
+                    {
+                        sameProject = true;
+                        break;
+                    }
+                }
+                if (!sameProject)
+                    return;
+            }
+            for (Object id : last)
+            {
+                if (!current.contains(id))
+                    filter.addValue(MarkerIndex.OBJECT_ID, id);
+            }
+        }
+
+        private static void rememberGoodFilter(IViewPart view, Object filterArg, boolean empty)
+        {
+            if (Boolean.TRUE.equals(PEEKING.get()))
+                return;
+            if (empty)
+                return;
+            State state = stateOf(view);
+            MarkerFilter filter = unwrapFilter(filterArg);
+            if (state == null || filter == null)
+                return;
+            Set<Object> ids = filter.getValues(MarkerIndex.OBJECT_ID);
+            if (!hasResourcePath(ids))
+                return;
+            state.lastGoodObjectIds = Set.copyOf(ids);
+            state.lastGoodProjects = Set.copyOf(projectNames(filter.getValues(MarkerIndex.PROJECT)));
+        }
+
+        /**
+         * {@code getMarkerInfo} вернул 0 за нули миллисекунд — Job сейчас запишет
+         * «0 элементов» как готовый итог. По журналу это часто отбор, который ещё
+         * не снялся; клик в модуле тогда заново вызывает {@code selectionChanged} и
+         * список появляется. Делаем то же без клика, один раз.
+         */
+        private static void onEmptyMarkerInfo(IViewPart view, Object filterArg, boolean empty)
+        {
+            if (Boolean.TRUE.equals(PEEKING.get()))
+                return;
+            State state = stateOf(view);
+            if (state == null)
+                return;
+            if (!empty)
+            {
+                if (state.retryingEmpty || state.retriedEmpty)
+                {
+                    state.retryingEmpty = false;
+                    state.retriedEmpty = false;
+                    applyAll();
+                }
+                return;
+            }
+            if (!ComfortSettings.isReplaceListFiltersEnabled())
+                return;
+            MarkerFilter filter = unwrapFilter(filterArg);
+            boolean alwaysFalse = filter != null
+                && String.valueOf(filter).equals(ResultChangeGate.alwaysFalseDescription());
+            if (!alwaysFalse)
+            {
+                state.retryingEmpty = false;
+                state.retriedEmpty = false;
+                return;
+            }
+            if (state.retriedEmpty)
+            {
+                state.retryingEmpty = false;
+                state.retriedEmpty = false;
+                applyAll();
+                return;
+            }
+            state.retryingEmpty = true;
+            state.retriedEmpty = true;
+            applyAll();
+            Display display = Display.getDefault();
+            if (display == null || display.isDisposed())
+            {
+                state.retryingEmpty = false;
+                state.retriedEmpty = false;
+                return;
+            }
+            display.asyncExec(() -> retryFromEditor(view, state));
+        }
+
+        private static void retryFromEditor(IViewPart view, State state)
+        {
+            if (view.getSite() == null)
+            {
+                state.retryingEmpty = false;
+                state.retriedEmpty = false;
+                return;
+            }
+            try
+            {
+                IEditorPart editor = view.getSite().getPage().getActiveEditor();
+                if (editor != null)
+                {
+                    ISelection selection = null;
+                    if (editor.getSite() != null && editor.getSite().getSelectionProvider() != null)
+                        selection = editor.getSite().getSelectionProvider().getSelection();
+                    Global.invoke(view, "selectionChanged", editor, selection); //$NON-NLS-1$
+                }
+                Object listener = Global.getField(view, "updateListener"); //$NON-NLS-1$
+                if (listener == null)
+                {
+                    state.retryingEmpty = false;
+                    state.retriedEmpty = false;
+                    return;
+                }
+                Global.invoke(listener, "scheduleUpdateJob", Boolean.TRUE); //$NON-NLS-1$
+            }
+            catch (RuntimeException ignored)
+            {
+                state.retryingEmpty = false;
+                state.retriedEmpty = false;
+            }
+        }
+
+        private static final class ManagerTap implements InvocationHandler
+        {
+            private final IMarkerManagerV2 origin;
+
+            private final IViewPart view;
+
+            ManagerTap(IMarkerManagerV2 origin, IViewPart view)
+            {
+                this.origin = origin;
+                this.view = view;
+            }
+
+            @Override
+            public Object invoke(Object proxy, java.lang.reflect.Method method, Object[] args)
+                throws Throwable
+            {
+                if (method.getDeclaringClass() == Object.class)
+                    return method.invoke(origin, args);
+                try
+                {
+                    Object result = method.invoke(origin, args == null ? new Object[0] : args);
+                    if (result instanceof IMarkerReader reader
+                        && !(Proxy.isProxyClass(reader.getClass())
+                            && Proxy.getInvocationHandler(reader) instanceof ReaderTap))
+                    {
+                        return Proxy.newProxyInstance(IMarkerReader.class.getClassLoader(),
+                            new Class<?>[] { IMarkerReader.class }, new ReaderTap(reader, view));
+                    }
+                    return result;
+                }
+                catch (InvocationTargetException e)
+                {
+                    Throwable cause = e.getCause();
+                    if (cause instanceof RuntimeException runtime)
+                        throw runtime;
+                    if (cause instanceof Error error)
+                        throw error;
+                    throw e;
+                }
+            }
+        }
+
+        private static final class ReaderTap implements InvocationHandler
+        {
+            private final IMarkerReader origin;
+
+            private final IViewPart view;
+
+            ReaderTap(IMarkerReader origin, IViewPart view)
+            {
+                this.origin = origin;
+                this.view = view;
+            }
+
+            @Override
+            public Object invoke(Object proxy, java.lang.reflect.Method method, Object[] args)
+                throws Throwable
+            {
+                if (method.getDeclaringClass() == Object.class)
+                    return method.invoke(origin, args);
+                try
+                {
+                    if ("getMarkerInfo".equals(method.getName())) //$NON-NLS-1$
+                        restoreModulePaths(view, args);
+                    Object result = method.invoke(origin, args == null ? new Object[0] : args);
+                    if ("getMarkerInfo".equals(method.getName()) && result instanceof IMarkerInfo info) //$NON-NLS-1$
+                    {
+                        Object filterArg = args != null && args.length > 0 ? args[0] : null;
+                        boolean empty = info.getTotalCount() == 0;
+                        rememberGoodFilter(view, filterArg, empty);
+                        onEmptyMarkerInfo(view, filterArg, empty);
+                    }
+                    return result;
+                }
+                catch (InvocationTargetException e)
+                {
+                    Throwable cause = e.getCause();
+                    if (cause instanceof RuntimeException runtime)
+                        throw runtime;
+                    if (cause instanceof Error error)
+                        throw error;
+                    throw e;
+                }
+            }
+        }
     }
 
     /**

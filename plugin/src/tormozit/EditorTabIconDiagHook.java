@@ -339,7 +339,8 @@ public final class EditorTabIconDiagHook implements IStartup
     /**
      * {@code CTabItem.setImage} бросает на уже disposed-картинке, поэтому подставляем
      * живую: title image редактора или иконка из {@code MPart.iconURI}.
-     * Из {@code e4_override_icon_image_key} убираем disposed, иначе StackRenderer вернёт её снова.
+     * В {@code e4_override_icon_image_key} кладём живую картинку: иначе StackRenderer
+     * вернёт старый override (в том числе живой, но уже без уголка проблем).
      */
     private static boolean restoreItem(CTabItem item)
     {
@@ -351,6 +352,8 @@ public final class EditorTabIconDiagHook implements IStartup
         Image live = liveImage(editor, mpart);
         if (!usableImage(live))
             return false;
+        if (mpart != null)
+            mpart.getTransientData().put(OVERRIDE_ICON_KEY, live);
         try
         {
             item.setImage(live);
@@ -447,15 +450,16 @@ public final class EditorTabIconDiagHook implements IStartup
             return;
         CTabFolder folder = folderOf(editor);
         CTabItem item = itemOf(editor, folder);
-        clearDisposedOverride(mpartOf(editor));
         if (item == null || item.isDisposed())
             return;
-        if ("ok".equals(itemState(item)) && usableImage(titleImageOf(editor))) //$NON-NLS-1$
+        Image live = titleImageOf(editor);
+        Image current = safeImage(item::getImage);
+        if (usableImage(live) && current == live && usableImage(current))
             return;
-        if (!"ok".equals(itemState(item))) //$NON-NLS-1$
-            logEditor(editor, "propTitle"); //$NON-NLS-1$
-        else
-            restoreItem(item);
+        if (!usableImage(current))
+            log("propTitle " + describeItem(item, folder != null && folder.getSelection() == item) //$NON-NLS-1$
+                + " live=" + describeImage(live)); //$NON-NLS-1$
+        restoreItem(item);
     }
 
     private static String itemState(CTabItem item)

@@ -43,6 +43,7 @@ import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
+import org.eclipse.swt.widgets.Label;
 import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Text;
@@ -85,6 +86,8 @@ public class CompareConfigSearchDialogHook
 
     /** scopeId для {@link FilterHistoryStore} — история запросов этого диалога отдельна от других полей фильтра. */
     private static final String COMPARE_SEARCH_HISTORY_SCOPE = "compareConfigSearch"; //$NON-NLS-1$
+
+    private static final String SPINNER_TOOLTIP = "Поиск по дереву ещё выполняется"; //$NON-NLS-1$
 
     // Кэш узлов между открытиями диалога, пока жив редактор сравнения
     private static final Map<IEditorPart, SearchCache> searchCacheByEditor = new WeakHashMap<>();
@@ -2003,6 +2006,7 @@ public class CompareConfigSearchDialogHook
         private Runnable progressTick;
         /** Тик статуса prefetch, пока поиск ещё не запущен (диалог только открыт). */
         private Runnable prefetchStatusTick;
+        private WaitSpinner waitSpinner;
 
         private IEditorPart editorPart;
 
@@ -2059,6 +2063,7 @@ public class CompareConfigSearchDialogHook
         {
             cancelByUser();
             stopPrefetchStatusTimer();
+            updateWaitSpinner();
         }
 
         /**
@@ -2071,6 +2076,7 @@ public class CompareConfigSearchDialogHook
             cancelPrefetch();
             if (shell != null && !shell.isDisposed())
                 clearStatus(dialog);
+            updateWaitSpinner();
         }
 
         void cancel()
@@ -2241,6 +2247,7 @@ public class CompareConfigSearchDialogHook
                     {
                         if (prefetchJob == this)
                             prefetchJob = null;
+                        updateWaitSpinner();
                     }
                 }
             };
@@ -2251,6 +2258,7 @@ public class CompareConfigSearchDialogHook
             job.schedule();
             Global.log("CompareSearch", "prefetch started"); //$NON-NLS-1$
             startPrefetchStatusTimer();
+            updateWaitSpinner();
         }
 
         /**
@@ -2350,6 +2358,7 @@ public class CompareConfigSearchDialogHook
 
             setSearchButtonsToCancelMode();
             startProgressTimer(generation);
+            updateWaitSpinner();
 
             Global.log("CompareSearch", "start query=\"" + query + "\" backward=" + backward //$NON-NLS-1$ //$NON-NLS-2$
                     + " allColumns=" + searchAllColumns + " wholeWord=" + wholeWord //$NON-NLS-1$ //$NON-NLS-2$
@@ -2550,6 +2559,7 @@ public class CompareConfigSearchDialogHook
                 && isPrefetchRunningFor(input, filterHash);
             setSearchButtonsToCancelMode();
             startProgressTimer(generation);
+            updateWaitSpinner();
 
             ISelection sel = viewer.getSelection();
             Object selectionElement = (sel instanceof IStructuredSelection && !sel.isEmpty())
@@ -2692,6 +2702,7 @@ public class CompareConfigSearchDialogHook
             findAllJob = null;
             running = false;
             restoreSearchButtons();
+            updateWaitSpinner();
             if (!matches.isEmpty())
             {
                 setStatus(dialog, "Найдено: " + matches.size()); //$NON-NLS-1$
@@ -2763,6 +2774,7 @@ public class CompareConfigSearchDialogHook
                 restoreSearchButtons();
                 updateDialog(dialog);
                 refreshSearchButtons();
+                updateWaitSpinner();
             });
         }
 
@@ -2872,6 +2884,47 @@ public class CompareConfigSearchDialogHook
             if (display != null && !display.isDisposed())
                 display.timerExec(-1, prefetchStatusTick);
             prefetchStatusTick = null;
+        }
+
+        /**
+         * Спиннер слева от {@code labelInfo}, пока идёт prefetch индекса или сам поиск.
+         * Вызов с рабочего потока переносится на UI.
+         */
+        private void updateWaitSpinner()
+        {
+            if (shell == null || shell.isDisposed())
+                return;
+            Display display = shell.getDisplay();
+            if (display == null || display.isDisposed())
+                return;
+            if (display.getThread() == Thread.currentThread())
+                applyWaitSpinnerNow();
+            else
+                display.asyncExec(() ->
+                {
+                    if (!shell.isDisposed())
+                        applyWaitSpinnerNow();
+                });
+        }
+
+        private void applyWaitSpinnerNow()
+        {
+            boolean waiting = running;
+            if (!waiting)
+            {
+                Job pf = prefetchJob;
+                waiting = pf != null && pf.getState() != Job.NONE;
+            }
+            if (!waiting && waitSpinner == null)
+                return;
+            if (waitSpinner == null || waitSpinner.isDisposed())
+            {
+                Object info = getField(dialog, "labelInfo"); //$NON-NLS-1$
+                Label label = info instanceof Label status && !status.isDisposed() ? status : null;
+                waitSpinner = WaitSpinner.attach(label, SPINNER_TOOLTIP);
+            }
+            if (waitSpinner != null)
+                waitSpinner.setActive(waiting);
         }
     }
 }

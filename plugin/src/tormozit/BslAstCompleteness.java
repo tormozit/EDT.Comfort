@@ -1,5 +1,9 @@
 package tormozit;
 
+import java.util.Collections;
+import java.util.Map;
+import java.util.WeakHashMap;
+
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.resource.Resource;
 import org.eclipse.xtext.nodemodel.ICompositeNode;
@@ -72,6 +76,17 @@ public final class BslAstCompleteness
 {
     private static final String[] METHOD_KEYWORDS = { "Процедура", "Функция", "Procedure", "Function" }; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
 
+    /**
+     * Итог обхода узловой модели по результату разбора. Ключ слабый и неизменяемый: результат
+     * разбора живёт ровно до следующего разбора этого модуля, после чего запись собирается сама.
+     *
+     * <p>Обход стоит O(лексем) и повторяется на каждый пересчёт в модуле с синтаксической
+     * ошибкой — а пересчётов по одному и тому же разбору несколько: пометка обрыва в редакторе,
+     * проверка {@link BslAstTruncationCheck}, панель «Структура».
+     */
+    private static final Map<IParseResult, Boolean> ANALYSIS_CACHE =
+        Collections.synchronizedMap(new WeakHashMap<>());
+
     private BslAstCompleteness()
     {
     }
@@ -84,32 +99,63 @@ public final class BslAstCompleteness
         return isTruncated(xtextResource.getParseResult());
     }
 
-    /** То же по результату разбора — для мест, где ресурса под рукой нет (панель «Структура»). */
+    /**
+     * То же по результату разбора — для мест, где ресурса под рукой нет (панель «Структура»).
+     *
+     * <p>Запас прочности в сторону «оборвано»: если убедиться в целости дерева не удалось,
+     * считаем его оборванным. Для подавления ошибок ({@link BslCompareParseErrorSuppressor})
+     * это безопасная сторона — сомнительный случай не подавляется.
+     */
     public static boolean isTruncated(IParseResult parseResult)
+    {
+        Boolean truncated = analyze(parseResult);
+        return truncated == null || truncated.booleanValue();
+    }
+
+    /**
+     * То же с обратным запасом прочности: {@code true} только когда обрыв <b>установлен</b>.
+     *
+     * <p>Нужен там, где из ответа рождается проблема для пользователя ({@link
+     * BslAstTruncationCheck}): сомнительный случай — «дерево цело», иначе на ровном месте
+     * (нет узловой модели, исключение при обходе) появится ложная ошибка в панели «Проблемы».
+     */
+    public static boolean isTruncatedConfirmed(IParseResult parseResult)
+    {
+        return Boolean.TRUE.equals(analyze(parseResult));
+    }
+
+    /** @return {@code TRUE}/{@code FALSE} — обрыв установлен; {@code null} — установить не удалось */
+    private static Boolean analyze(IParseResult parseResult)
     {
         try
         {
             if (parseResult == null)
-                return true;
+                return null;
             /*
              * Дешёвая отсечка обычного случая: без синтаксических ошибок обрыва не бывает.
              * Ниже идёт обход узлов синтаксических ошибок (их единицы) с разбором их текста —
              * незачем делать это на каждый пересчёт в модуле без ошибок.
              */
             if (!parseResult.hasSyntaxErrors())
-                return false;
+                return Boolean.FALSE;
             EObject root = parseResult.getRootASTElement();
             if (!(root instanceof Module))
-                return true;
+                return null;
+
+            Boolean cached = ANALYSIS_CACHE.get(parseResult);
+            if (cached != null)
+                return cached;
 
             int keywordLeaves = countMethodKeywordLeaves(parseResult.getRootNode());
             int methods = ((Module)root).allMethods().size();
-            return keywordLeaves > methods
-                || errorNodeSwallowingDeclaration(parseResult) != null;
+            Boolean truncated = Boolean.valueOf(keywordLeaves > methods
+                || errorNodeSwallowingDeclaration(parseResult) != null);
+            ANALYSIS_CACHE.put(parseResult, truncated);
+            return truncated;
         }
         catch (Exception | LinkageError e)
         {
-            return true; // не смогли убедиться в целости дерева — не подавляем
+            return null; // не смогли убедиться в целости дерева
         }
     }
 

@@ -1,6 +1,7 @@
 package tormozit;
 
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
 
@@ -12,6 +13,8 @@ import org.eclipse.swt.widgets.Display;
 import org.eclipse.ui.IViewPart;
 import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.handlers.HandlerUtil;
+
+import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
 
 /**
  * «Проверить» в панели «Ошибки конфигурации» — перезапускает проверки по текущей области отбора
@@ -39,22 +42,108 @@ public class ProblemViewRecomputeChecksHandler extends AbstractHandler
         IWorkbenchPage page = HandlerUtil.getActiveWorkbenchWindow(event).getActivePage();
         IViewPart part = page != null ? page.findView(ProblemViewMarkers.PROBLEM_VIEW_ID) : null;
         Object scopeSelection = Global.getField(part, "scopeSelection"); //$NON-NLS-1$
+        Debug.log("команда вызвана: страница=" + (page != null) //$NON-NLS-1$
+            + ", панель=" + (part == null ? "не найдена" : part.getClass().getName()) //$NON-NLS-1$ //$NON-NLS-2$
+            + ", область=" + (scopeSelection == null ? "null" : scopeSelection.getClass().getName())); //$NON-NLS-1$ //$NON-NLS-2$
         if (scopeSelection == null)
             return null;
 
         Map<IProject, Set<EObject>> selectedObjects = nonEmptySelectedObjects(scopeSelection);
-        if (selectedObjects.isEmpty())
+        Set<IProject> selectedProjects = selectedProjects(scopeSelection);
+        logScope(selectedObjects, selectedProjects);
+        if (selectedObjects.isEmpty() && selectedProjects.isEmpty())
         {
             toast("Проверить", //$NON-NLS-1$
-                "В текущей области отбора панели нет конкретных объектов."
-                + " Выберите область «Текущий объект» или «Текущий элемент»,"
-                + " либо запустите штатную проверку проекта.");
+                "В текущей области отбора панели нет ни объектов, ни проекта — проверять нечего.");
             return null;
         }
 
         for (Map.Entry<IProject, Set<EObject>> entry : selectedObjects.entrySet())
-            ComfortCheckRecompute.recomputeObjects(entry.getKey(), entry.getValue());
+        {
+            if (isWholeProject(entry.getValue()))
+                ComfortCheckRecompute.recomputeProject(entry.getKey());
+            else
+                ComfortCheckRecompute.recomputeObjects(entry.getKey(), entry.getValue());
+        }
+
+        // Область — проект целиком: конкретных объектов у панели нет
+        for (IProject project : selectedProjects)
+        {
+            if (!selectedObjects.containsKey(project))
+                ComfortCheckRecompute.recomputeProject(project);
+        }
         return null;
+    }
+
+    /** Что панель кладёт в область отбора — в журнал «Комфорт». */
+    private static void logScope(Map<IProject, Set<EObject>> objects, Set<IProject> projects)
+    {
+        if (!Global.isLogEnabled())
+            return;
+        StringBuilder text = new StringBuilder("область команды: проекты="); //$NON-NLS-1$
+        for (IProject project : projects)
+            text.append(project.getName()).append(' ');
+        text.append("| объекты="); //$NON-NLS-1$
+        if (objects.isEmpty())
+            text.append("нет"); //$NON-NLS-1$
+        for (Map.Entry<IProject, Set<EObject>> entry : objects.entrySet())
+        {
+            text.append(entry.getKey().getName()).append(": "); //$NON-NLS-1$
+            for (EObject object : entry.getValue())
+            {
+                text.append(object == null ? "null" : object.getClass().getName()) //$NON-NLS-1$
+                    .append(object instanceof Configuration ? " (Configuration)" : "") //$NON-NLS-1$ //$NON-NLS-2$
+                    .append(' ');
+            }
+        }
+        Debug.log(text.toString());
+    }
+
+    /** Журнал «Комфорт» — при включённом флажке «Вести журнал». */
+    private static final class Debug
+    {
+        private static final String TAG = "CheckCommand"; //$NON-NLS-1$
+
+        private Debug()
+        {
+        }
+
+        static void log(String msg)
+        {
+            if (Global.isLogEnabled())
+                Global.log(TAG, msg);
+        }
+    }
+
+    /**
+     * Выбран корневой узел проекта: в области отбора стоит сама конфигурация. Точечная
+     * перепроверка такого объекта отрабатывает мгновенно и не проверяет ничего — на корне нужна
+     * полная проверка всех объектов проекта.
+     */
+    private static boolean isWholeProject(Set<EObject> objects)
+    {
+        for (EObject object : objects)
+        {
+            if (object instanceof Configuration)
+                return true;
+        }
+        return false;
+    }
+
+    /** Проекты области отбора панели. */
+    private static Set<IProject> selectedProjects(Object scopeSelection)
+    {
+        Object result = Global.invoke(scopeSelection, "getSelectedProjects"); //$NON-NLS-1$
+        if (!(result instanceof Set<?> raw) || raw.isEmpty())
+            return Set.of();
+
+        Set<IProject> projects = new LinkedHashSet<>();
+        for (Object item : raw)
+        {
+            if (item instanceof IProject project)
+                projects.add(project);
+        }
+        return projects;
     }
 
     /**

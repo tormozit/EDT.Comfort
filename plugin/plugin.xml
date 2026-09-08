@@ -18,6 +18,7 @@
     <startup class="tormozit.NaparnikManualModeHook"/>
     <startup class="tormozit.NaparnikPasteCompareHook"/>
     <startup class="tormozit.BslParseTruncationMarkHook"/>
+    <startup class="tormozit.GitBaselineFilterHook"/>
     <startup class="tormozit.BslModulePositionMemoryHook"/>
     <startup class="tormozit.BslBracketJumpHistoryHook"/>
     <startup class="tormozit.HorizontalScrollBarPositionFixHook"/>
@@ -171,6 +172,8 @@
     <startup class="tormozit.LocalStringDialogSpellCheckHook"/>
     <startup class="tormozit.FindReplaceDialogHook"/>
     <startup class="tormozit.AnnotationsPreferenceHook"/>
+    <startup class="tormozit.CheckDevelopmentPageHook"/>
+    <startup class="tormozit.MassiveChecksExemptionHook"/>
   </extension>
 
   <extension point="org.eclipse.ui.contexts">
@@ -1533,9 +1536,13 @@
     аннотации с наибольшим слоем, и со значением 6 наш значок оставался под штатным красным
     крестом ошибки (она на той же строке всегда). Хвост рисуется только на полосе обзора,
     ему слой не важен.
+
+    super=error у точки: подсказка линейки (ProblemAnnotationHover) берёт только аннотации
+    типа ошибка/предупреждение/информация. Без предка наш тип в список «несколько маркеров»
+    не попадал.
   -->
   <extension point="org.eclipse.ui.editors.annotationTypes">
-    <type name="tormozit.bslParseTruncation"/>
+    <type name="tormozit.bslParseTruncation" super="org.eclipse.ui.workbench.texteditor.error"/>
     <type name="tormozit.bslParseTruncationTail"/>
   </extension>
 
@@ -1588,6 +1595,17 @@
         id="tormozit.comfort.bookmarkMethodField"
         class="tormozit.MarkersListViewsHook$MethodField"
         name="Метод"/>
+  </extension>
+
+  <extension point="com.e1c.g5.v8.dt.check.checks">
+    <category
+        id="tormozit.comfort.checks"
+        title="Комфорт"
+        description="Проверки, добавленные плагином «Комфорт»."
+        category="com.e1c.g5.v8.dt.check.edt.checks"/>
+    <check
+        category="tormozit.comfort.checks"
+        class="tormozit.BslAstTruncationCheck"/>
   </extension>
 
 </plugin>

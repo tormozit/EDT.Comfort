@@ -52,6 +52,10 @@ import com.e1c.g5.v8.dt.check.settings.ICheckRepository;
  * ({@link ConfigSearchResultsHook#revealRoleRightsRow}, issue #463).</li>
  * </ul>
  * <p>
+ * Включение: Параметры → Комфорт → «Улучшать списки»
+ * ({@link ComfortSettings#PREF_REPLACE_LIST_FILTERS}), как и прочие доработки панели
+ * ({@link ProblemViewHook}); флажок читается в момент открытия.
+ * <p>
  * Штатный путь панели — {@code IOpenListener} ({@code OpenAndLinkWithEditorHelper.open}), а не
  * {@code IDoubleClickListener}; поэтому слушаем open + doubleClick + SWT {@code MouseDoubleClick}
  * на дереве (запасной путь, как в {@link NavigatorAttributePropertiesHook}).
@@ -237,6 +241,9 @@ public final class ProblemViewOpenTargetHook implements IStartup
 
     private static void handleOpenFromSelection(IStructuredSelection structured, String source)
     {
+        // Доработка поведения панели — как и остальные, подчиняется «Улучшать списки»
+        if (!ComfortSettings.isReplaceListFiltersEnabled())
+            return;
         Object element = structured.getFirstElement();
         Marker marker = resolveMarker(element);
         if (marker == null)

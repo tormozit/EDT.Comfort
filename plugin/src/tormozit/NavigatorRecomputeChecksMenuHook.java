@@ -205,16 +205,36 @@ public final class NavigatorRecomputeChecksMenuHook implements IStartup
     private static void recomputeChecks(IStructuredSelection selection)
     {
         EObject model = NavigatorElementModels.resolveEObject(selection.getFirstElement());
-        if (!(model instanceof IBmObject) && !(model instanceof com._1c.g5.v8.dt.metadata.mdclass.BasicForm))
-        {
-            toast("Выбранный элемент нельзя точечно перепроверить.");
-            return;
-        }
         IResource resource = NavigatorResourceResolver.resolveFirst(selection);
         IProject project = resource != null ? resource.getProject() : null;
+        if (Global.isLogEnabled())
+        {
+            Object firstElement = selection.getFirstElement();
+            Global.log("CheckCommand", "навигатор «Проверить»: узел=" //$NON-NLS-1$ //$NON-NLS-2$
+                + (firstElement == null ? "null" : firstElement.getClass().getName()) //$NON-NLS-1$
+                + ", модель=" + (model == null ? "null" : model.getClass().getName()) //$NON-NLS-1$ //$NON-NLS-2$
+                + ", проект=" + (project == null ? "null" : project.getName())); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        if (project == null && selection.getFirstElement() instanceof IProject selected)
+            project = selected;
         if (project == null)
         {
             toast("Не удалось определить проект выбранного объекта.");
+            return;
+        }
+
+        // Корень навигатора — конфигурация или сам проект: точечная перепроверка такого узла
+        // отрабатывает мгновенно и не проверяет ничего, нужна полная проверка всех объектов
+        if (model instanceof com._1c.g5.v8.dt.metadata.mdclass.Configuration
+            || selection.getFirstElement() instanceof IProject)
+        {
+            ComfortCheckRecompute.recomputeProject(project);
+            return;
+        }
+
+        if (!(model instanceof IBmObject) && !(model instanceof com._1c.g5.v8.dt.metadata.mdclass.BasicForm))
+        {
+            toast("Выбранный элемент нельзя точечно перепроверить.");
             return;
         }
 

@@ -587,6 +587,45 @@ public final class Global
         return ref != null ? ctx.getService(ref) : null;
     }
 
+    /** Суффикс класса динамического прокси peaberry. */
+    private static final String PEABERRY_PROXY_SUFFIX = "$pbryglu"; //$NON-NLS-1$
+
+    /** Поле прокси peaberry со ссылкой на службу ({@code ImportGlue.PROXY_HANDLE}). */
+    private static final String PEABERRY_HANDLE_FIELD = "__pbry__"; //$NON-NLS-1$
+
+    /**
+     * Настоящий объект службы вместо динамического прокси peaberry.
+     * <p>
+     * В модулях Guice службы ЕДТ связаны как {@code bind(X.class).toService()}, поэтому в поля
+     * потребителей внедряется прокси {@code X$pbryglu}: у него нет ни полей, ни внутренностей
+     * настоящей службы, и рефлексия по нему ничего не находит. Прокси хранит службу в поле
+     * {@code __pbry__} типа {@code org.ops4j.peaberry.Import} и берёт её через {@code get()}.
+     *
+     * @param service объект службы или прокси; {@code null} допустим
+     * @return настоящая служба, либо исходный объект, если это не прокси или развернуть не вышло
+     */
+    public static Object unwrapServiceProxy(Object service)
+    {
+        if (service == null || !service.getClass().getName().endsWith(PEABERRY_PROXY_SUFFIX))
+            return service;
+        try
+        {
+            java.lang.reflect.Field handle = service.getClass().getDeclaredField(PEABERRY_HANDLE_FIELD);
+            handle.setAccessible(true);
+            Object handleValue = handle.get(service);
+            if (handleValue == null)
+                return service;
+            java.lang.reflect.Method get = handleValue.getClass().getMethod("get"); //$NON-NLS-1$
+            get.setAccessible(true);
+            Object real = get.invoke(handleValue);
+            return real != null ? real : service;
+        }
+        catch (ReflectiveOperationException | RuntimeException e)
+        {
+            return service;
+        }
+    }
+
     // =========================================================================
     // Проекты
     // =========================================================================
