@@ -16,6 +16,7 @@
     <startup class="tormozit.BSLEditorMenuHook"/>
     <!-- ВРЕМЕННАЯ ДИАГНОСТИКА: долгая запись модуля блокирует UI -->
     <startup class="tormozit.BslModuleSaveDiagHook"/>
+    <startup class="tormozit.BslXtextDocumentHook"/>
     <startup class="tormozit.BslHandlerBlankLineHook"/>
     <startup class="tormozit.NaparnikManualModeHook"/>
     <startup class="tormozit.NaparnikPasteCompareHook"/>
