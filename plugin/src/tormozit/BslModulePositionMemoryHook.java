@@ -2,8 +2,12 @@ package tormozit;
 
 import java.util.HashSet;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.eclipse.core.resources.IFile;
+import org.eclipse.core.runtime.IProgressMonitor;
+import org.eclipse.core.runtime.IStatus;
+import org.eclipse.core.runtime.Status;
 import org.eclipse.jface.text.BadLocationException;
 import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.IRegion;
@@ -22,8 +26,10 @@ import org.eclipse.ui.IStartup;
 import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
+import org.eclipse.ui.IWindowListener;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.forms.editor.IFormPage;
+import org.eclipse.ui.progress.UIJob;
 
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
@@ -52,16 +58,76 @@ public class BslModulePositionMemoryHook implements IStartup
     /** Число повторов ожидания viewer через asyncExec (issue #130 — не бесконечно). */
     private static final int MAX_ATTACH_ATTEMPTS = 100;
 
+    private static final AtomicBoolean INSTALLED = new AtomicBoolean();
+
+    private static BslModulePositionMemoryHook instance;
+
+    private final Set<IWorkbenchWindow> hookedWindows = new HashSet<>();
+
     private final Set<DtGranularEditor<?>> hookedGranularEditors =
         new HashSet<>();
+
+    /**
+     * Подключение UI: из {@link Activator#start} и из {@code IStartup}.
+     * Повторный вызов не ставит второго слушателя. {@link UIJob} — без
+     * {@code Display} в {@code Activator.start()}.
+     */
+    public static void bootUi()
+    {
+        new UIJob("Comfort BSL module position") //$NON-NLS-1$
+        {
+            @Override
+            public IStatus runInUIThread(IProgressMonitor monitor)
+            {
+                installUi();
+                return Status.OK_STATUS;
+            }
+        }.schedule();
+    }
 
     @Override
     public void earlyStartup()
     {
-        Display.getDefault().asyncExec(() ->
+        bootUi();
+    }
+
+    private static void installUi()
+    {
+        if (!PlatformUI.isWorkbenchRunning())
         {
-            for (IWorkbenchWindow window : PlatformUI.getWorkbench().getWorkbenchWindows())
-                hookWindow(window);
+            Display display = Display.getDefault();
+            if (display != null && !display.isDisposed())
+                display.timerExec(200, BslModulePositionMemoryHook::installUi);
+            return;
+        }
+        if (!INSTALLED.compareAndSet(false, true))
+            return;
+        instance = new BslModulePositionMemoryHook();
+        for (IWorkbenchWindow window : PlatformUI.getWorkbench().getWorkbenchWindows())
+            instance.hookWindow(window);
+        PlatformUI.getWorkbench().addWindowListener(new IWindowListener()
+        {
+            @Override
+            public void windowOpened(IWorkbenchWindow window)
+            {
+                instance.hookWindow(window);
+            }
+
+            @Override
+            public void windowActivated(IWorkbenchWindow window)
+            {
+            }
+
+            @Override
+            public void windowDeactivated(IWorkbenchWindow window)
+            {
+            }
+
+            @Override
+            public void windowClosed(IWorkbenchWindow window)
+            {
+                instance.hookedWindows.remove(window);
+            }
         });
     }
 
@@ -71,6 +137,8 @@ public class BslModulePositionMemoryHook implements IStartup
 
     private void hookWindow(IWorkbenchWindow window)
     {
+        if (window == null || !hookedWindows.add(window))
+            return;
         IWorkbenchPage page = window.getActivePage();
         if (page != null)
         {

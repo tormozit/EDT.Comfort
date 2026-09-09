@@ -3975,30 +3975,21 @@ return stripEmptyPlaceholderProposals(result);
         return n;
     }
 
+    @SuppressWarnings("unused")
     private void debugFilterCachedExit(ITextViewer viewer, int caret, String filter, IDocument doc,
         int interimN, String path, ICompletionProposal[] result)
     {
-        debugResolveExit(doc, caret, filter, interimN, true, "cached." + path, result); //$NON-NLS-1$
     }
 
+    @SuppressWarnings("unused")
     private void debugResolveExit(IDocument doc, int caret, String filter, int interimN,
         boolean cacheValid, String exit, ICompletionProposal[] result)
     {
-        ContentAssistDebug.perfMark("resolve." + exit, //$NON-NLS-1$
-            "{\"caret\":" + caret //$NON-NLS-1$
-                + ",\"filterLen\":" + (filter == null ? 0 : filter.length()) //$NON-NLS-1$
-                + ",\"interimN\":" + interimN //$NON-NLS-1$
-                + ",\"cacheValid\":" + cacheValid //$NON-NLS-1$
-                + ",\"n\":" + (result == null ? -1 : result.length) //$NON-NLS-1$
-                + ",\"irN\":" + irProposals.length //$NON-NLS-1$
-                + ",\"irCtx\":" + isIrWordsResolvedForContext() //$NON-NLS-1$
-                + ",\"docLen\":" + (doc == null ? -1 : doc.getLength()) //$NON-NLS-1$
-                + ",\"cacheN\":" + fullListCache.length + "}"); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     /**
      * H90: аудит дублей merge ИР+EDT — только диагностика, без изменения списка.
-     * Пишет в журнал при «Общем логировании».
+     * Пишет в журнал при включённом «Вести журнал».
      */
     private static void debugMergeDedupAudit(String phase, ICompletionProposal[] delegateList,
         ICompletionProposal[] irList, ICompletionProposal[] result, int delegateIrN)
@@ -6180,7 +6171,6 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         if (raw == null || raw.length == 0)
             return EMPTY;
 
-        long t0 = System.nanoTime();
         SmartCodeMatcher matcher = new SmartCodeMatcher(filter);
         List<ICompletionProposal> filtered = new ArrayList<>(raw.length);
 
@@ -6191,19 +6181,11 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         }
 
         if (filtered.isEmpty())
-        {
-            ContentAssistDebug.perfLog("filterAndSort", (System.nanoTime() - t0) / 1_000_000L, 0, //$NON-NLS-1$
-                "{\"in\":" + raw.length + ",\"n\":0}"); //$NON-NLS-1$ //$NON-NLS-2$
             return EMPTY;
-        }
 
         dropTypedIdentifierGhostInPlace(filtered);
         if (filtered.isEmpty())
-        {
-            ContentAssistDebug.perfLog("filterAndSort", (System.nanoTime() - t0) / 1_000_000L, 0, //$NON-NLS-1$
-                "{\"in\":" + raw.length + ",\"n\":0,\"ghost\":true}"); //$NON-NLS-1$ //$NON-NLS-2$
             return EMPTY;
-        }
 
         Integer[] idx = new Integer[filtered.size()];
         for (int i = 0; i < idx.length; i++)
@@ -6219,10 +6201,6 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
             int order = delegateOrderOf(p);
             result[i] = wrapProposal(p, order >= 0 ? order : idx[i]);
         }
-        long elapsedMs = (System.nanoTime() - t0) / 1_000_000;
-        logFilterAndSortExitThrottled(result, elapsedMs);
-        ContentAssistDebug.perfLog("filterAndSort", elapsedMs, 0, //$NON-NLS-1$
-            "{\"in\":" + raw.length + ",\"n\":" + result.length + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         return result;
     }
 
@@ -6443,20 +6421,6 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
             return null;
         }
     }
-
-    private static int filterAndSortLoggedOpenGen = -1;
-
-    private void logFilterAndSortExitThrottled(ICompletionProposal[] result, long elapsedMs)
-    {
-        if (!"sessionOpen".equals(ContentAssistPopupSync.peekRecomputeTrigger())) //$NON-NLS-1$
-            return;
-        int openGen = ContentAssistSessionReloader.literalOpenGenForLog();
-        if (openGen < 0 || openGen == filterAndSortLoggedOpenGen)
-            return;
-        filterAndSortLoggedOpenGen = openGen;
-        String firstKey = result.length > 0
-            ? ContentAssistDebug.firstProposalKey(result) : ""; //$NON-NLS-1$
-}
 
     static int computeScore(SmartCodeMatcher matcher, ICompletionProposal proposal)
     {

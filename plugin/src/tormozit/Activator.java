@@ -53,6 +53,13 @@ public class Activator extends AbstractUIPlugin
         catch (Throwable ignored)
         {
         }
+        try
+        {
+            BslModulePositionMemoryHook.bootUi();
+        }
+        catch (Throwable ignored)
+        {
+        }
 
         // Только инициализация синглтонов — никакого UI и обращений к Workbench.
         // manager.start() будет вызван из earlyStartup() после запуска Workbench.

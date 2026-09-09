@@ -732,7 +732,7 @@ public final class QueryTextEditDialogHook implements IStartup
     /**
      * Диагностика подменю «Комфорт» в «Редакторе запроса».
      *
-     * <p>Включение: Параметры → Комфорт → «Общее логирование».
+     * <p>Включение: Параметры → Комфорт → «Вести журнал».
      */
     private static final class QueryTextEditDialogDebug
     {

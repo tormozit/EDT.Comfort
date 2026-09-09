@@ -103,7 +103,7 @@ import org.eclipse.ui.preferences.ScopedPreferenceStore;
  * <p>Колонки и фильтр файлов: Параметры → Комфорт → «Улучшать списки»
  * ({@link ComfortSettings#PREF_REPLACE_LIST_FILTERS}). История поиска коммитов
  * и восстановление страницы Git ставятся всегда. Логирование: Параметры → Комфорт
- * → «Общее логирование».
+ * → «Вести журнал».
  */
 public final class GitHistoryHook implements IStartup
 {

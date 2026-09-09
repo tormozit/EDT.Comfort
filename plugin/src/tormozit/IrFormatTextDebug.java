@@ -36,14 +36,14 @@ import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 /**
  * Рантайм-диагностика Alt+Shift+F / конфликтов привязок для «Форматировать текст ИР».
  * По умолчанию выключена ({@link #KEY_DIAGNOSTIC_ENABLED}). Для включения: флаг true
- * + Параметры → Комфорт → «Общее логирование». Код сохранён для повторной отладки
+ * + Параметры → Комфорт → «Вести журнал». Код сохранён для повторной отладки
  * и будущего пользовательского инструмента «кто кого вытесняет».
  */
 public final class IrFormatTextDebug
 {
     private static final String TAG = "IrFormatText"; //$NON-NLS-1$
 
-    /** Переключатель разработчика: true + «Общее логирование» → полный report. */
+    /** Переключатель разработчика: true + «Вести журнал» → полный report. */
     private static final boolean KEY_DIAGNOSTIC_ENABLED = false;
 
     /**

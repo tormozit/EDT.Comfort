@@ -1,0 +1,59 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<schema targetNamespace="tormozit.comfort" xmlns="http://www.eclipse.org/xml/ns/pde/plugin">
+<annotation>
+      <appinfo>
+         <meta.schema plugin="tormozit.comfort" id="startup" name="Старт хуков Комфорт"/>
+      </appinfo>
+      <documentation>
+         Хуки Комфорт при старте workbench. Диспетчер {@code tormozit.ComfortStartup} создаёт
+         и вызывает каждый класс отдельно: исключение в одном не отменяет остальные.
+      </documentation>
+   </annotation>
+
+   <element name="extension">
+      <complexType>
+         <sequence minOccurs="1" maxOccurs="unbounded">
+            <element ref="startup"/>
+         </sequence>
+         <attribute name="point" type="string" use="required">
+            <annotation>
+               <documentation>
+                  
+               </documentation>
+            </annotation>
+         </attribute>
+         <attribute name="id" type="string">
+            <annotation>
+               <documentation>
+                  
+               </documentation>
+            </annotation>
+         </attribute>
+         <attribute name="name" type="string">
+            <annotation>
+               <documentation>
+                  
+               </documentation>
+               <appinfo>
+                  <meta.attribute translatable="true"/>
+               </appinfo>
+            </annotation>
+         </attribute>
+      </complexType>
+   </element>
+
+   <element name="startup">
+      <complexType>
+         <attribute name="class" type="string" use="required">
+            <annotation>
+               <documentation>
+                  Класс, реализующий org.eclipse.ui.IStartup.
+               </documentation>
+               <appinfo>
+                  <meta.attribute kind="java" basedOn="org.eclipse.ui.IStartup:"/>
+               </appinfo>
+            </annotation>
+         </attribute>
+      </complexType>
+   </element>
+</schema>

@@ -1871,21 +1871,9 @@ boolean inLiteral = endCaret >= 0
             || Boolean.TRUE.equals(SmartCompletionProposal.IR_PROPOSAL_APPLY_IN_PROGRESS.get());
     }
 
-    /**
-     * Диагностика штатного LinkedMode. Тело было пустым, поэтому вся уже написанная
-     * инструментализация вокруг вставки (`prepare`, `postDoIt` с кареткой и
-     * {@code LinkedModeModel.hasInstalledModel}) писала в никуда — при разборе «LinkedMode не
-     * сработал» это оставляло нас без единственного нужного факта.
-     */
+    /** No-op: раньше temp-log {@code assist-ui}. */
     static void logLinkedMode(String location, String json)
     {
-        try
-        {
-            ContentAssistDebug.perfMark("linkedMode." + location, json); //$NON-NLS-1$
-        }
-        catch (Exception ignored)
-        {
-        }
     }
 
     /**
@@ -1970,9 +1958,9 @@ boolean inLiteral = endCaret >= 0
         }
     }
 
+    /** No-op: раньше temp-log {@code assist-ui}. */
     static void logAssistOpen(String location, String json)
     {
-        ContentAssistDebug.perfMark(location, json);
     }
 
     private static String clipLogText(String text)
@@ -3467,20 +3455,6 @@ if (!inLiteral)
     int getLiteralOpenGen()
     {
         return literalOpenGen;
-    }
-
-    /** H76: openGen для NDJSON вне экземпляра reloader. */
-    public static int literalOpenGenForLog()
-    {
-        ContentAssistSessionReloader reloader = getActiveReloader();
-        return reloader != null ? reloader.getLiteralOpenGen() : -1;
-    }
-
-    /** H76: ms с начала literal open. */
-    public static long msSinceLiteralSessionStartForLog()
-    {
-        ContentAssistSessionReloader reloader = getActiveReloader();
-        return reloader != null ? reloader.msSinceLiteralOpen() : -1;
     }
 
     /** Ожидаемое число ИР-строк в literal popup (H37 audit). */

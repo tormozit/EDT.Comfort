@@ -71,7 +71,10 @@ $featureTextNew = [regex]::Replace(
 
 $sitePath = Join-Path $SiteDir 'site.xml'
 $siteText = [System.IO.File]::ReadAllText($sitePath, [System.Text.Encoding]::UTF8)
-$siteJar = "features/tormozit.comfort.feature_${qualifier}.jar"
+# 0.0.0 = любая версия фичи в workspace. Нельзя писать 1.0.1.N-qualifier:
+# PDE вытаскивает версию из URL и ищет диапазон [1.0.1.N-,1.0.1.N0),
+# а после бампа feature.xml уже другая — Build Site падает.
+$siteJar = "features/tormozit.comfort.feature_0.0.0.jar"
 $sitePattern = 'url="features/tormozit\.comfort\.feature_[^"]+\.jar"'
 if (-not [regex]::IsMatch($siteText, $sitePattern)) {
     Write-Error "feature url not found in site.xml"

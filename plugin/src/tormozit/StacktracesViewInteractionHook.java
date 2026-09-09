@@ -174,7 +174,7 @@ public final class StacktracesViewInteractionHook implements IStartup
     static final String HIDDEN_LINES_MARK = " ..."; //$NON-NLS-1$
     /**
      * Аудит memento save/load в {@code .tmp/stacktraces-memento-audit.log} — только при включённом
-     * «Общее логирование» ({@link Global#isLogEnabled()}); файл не чистится при старте плагина
+     * «Вести журнал» ({@link Global#isLogEnabled()}); файл не чистится при старте плагина
      * (в отличие от temp-logs). Обычный save/load — одна строка с счётчиками; полный инвентарь
      * и детали — только при DEDUP и ALERT.
      */

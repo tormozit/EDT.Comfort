@@ -3540,7 +3540,7 @@ public final class BslOutlineEventsSupport
         }
     }
 
-    /** Диагностика подписей подписок в BSL outline (только при «Общем логировании»). */
+    /** Диагностика подписей подписок в BSL outline (только при включённом «Вести журнал»). */
     private static final class BslOutlineDebug
     {
         private static final String TAG = "BslOutline"; //$NON-NLS-1$

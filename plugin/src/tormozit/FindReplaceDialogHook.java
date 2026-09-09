@@ -575,7 +575,7 @@ public final class FindReplaceDialogHook implements IStartup
     /**
      * Диагностика живого счётчика Find/Replace.
      *
-     * <p>Включение: Параметры → Комфорт → «Общее логирование».
+     * <p>Включение: Параметры → Комфорт → «Вести журнал».
      */
     private static final class FindReplaceLiveCountDebug
     {

@@ -1095,7 +1095,7 @@ public class OpenMdObjectHook implements IStartup {
 
     /**
      * Логи диалога «Открыть объект метаданных» через {@link Global}.
-     * Включение: Параметры → Комфорт → «Общее логирование».
+     * Включение: Параметры → Комфорт → «Вести журнал».
      */
     private static final class OpenMdObjectDebug
     {

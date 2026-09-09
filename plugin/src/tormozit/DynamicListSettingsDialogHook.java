@@ -1126,7 +1126,7 @@ public final class DynamicListSettingsDialogHook implements IStartup
     }
 
     /**
-     * Отладочный журнал канала «Комфорт». Включение: Параметры → Комфорт → «Общее логирование».
+     * Отладочный журнал канала «Комфорт». Включение: Параметры → Комфорт → «Вести журнал».
      */
     private static final class DynamicListSettingsDialogDebug
     {

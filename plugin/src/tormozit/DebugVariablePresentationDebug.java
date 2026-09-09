@@ -3,7 +3,7 @@ package tormozit;
 /**
  * Диагностика {@link DebugVariablePresentationHook} — префикс {@code [N]} в деревьях отладчика.
  *
- * <p>Включение: параметры → Комфорт → «Общее логирование».
+ * <p>Включение: параметры → Комфорт → «Вести журнал».
  */
 public final class DebugVariablePresentationDebug
 {

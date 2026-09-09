@@ -179,7 +179,7 @@ import org.eclipse.ui.texteditor.ITextEditor;
  * <p>Все внутренние 1С-классы ({@code ConfigurationSearchViewPage}, {@code TreeSearchViewPageLayout},
  * {@code MatchTreeItem}, {@code TreeSearchViewTablePartModel}) — из закрытого пакета
  * {@code com._1c.g5.v8.dt.internal.search.ui.*}, поэтому весь доступ — только через
- * {@link Global#getField}/{@link Global#invoke} (см. журнал: Параметры → Комфорт → «Общее логирование»).
+ * {@link Global#getField}/{@link Global#invoke} (см. журнал: Параметры → Комфорт → «Вести журнал»).
  * 
  * <p>Включение: Параметры → Комфорт → «Улучшать списки» ({@link ComfortSettings#PREF_REPLACE_LIST_FILTERS}).
  */

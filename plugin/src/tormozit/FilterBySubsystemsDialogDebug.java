@@ -2,7 +2,7 @@ package tormozit;
 
 /**
  * Логи хука «Фильтр по подсистемам» через {@link Global}.
- * Включение: Параметры → Комфорт → «Общее логирование».
+ * Включение: Параметры → Комфорт → «Вести журнал».
  */
 public final class FilterBySubsystemsDialogDebug
 {

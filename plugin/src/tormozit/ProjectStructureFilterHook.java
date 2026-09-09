@@ -89,7 +89,7 @@ import com._1c.g5.v8.dt.common.ui.controls.search.SearchBox;
  *
  * <p>Обход дерева — в фоновом {@link Job} (конфигурация 1С — тысячи файлов),
  * как в {@link GitStagingFilterHook}. Логирование: Параметры → Комфорт →
- * «Общее логирование».
+ * «Вести журнал».
  */
 public final class ProjectStructureFilterHook implements IStartup
 {

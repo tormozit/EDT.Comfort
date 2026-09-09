@@ -139,7 +139,7 @@ import org.eclipse.ui.PlatformUI;
  * ({@link ComfortSettings#PREF_REPLACE_LIST_FILTERS}). Проверяется при установке патча
  * (открытие панели), а не только на старте EDT — как {@link GitHistoryHook}.
  *
- * <p>Логирование: Параметры → Комфорт → «Общее логирование».
+ * <p>Логирование: Параметры → Комфорт → «Вести журнал».
  */
 public final class GitStagingFilterHook implements IStartup
 {

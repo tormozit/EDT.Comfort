@@ -37,7 +37,7 @@ import com._1c.g5.v8.dt.common.ui.controls.search.SearchBox;
  * {@link InfobaseByNameFilter}), отключает нативный фильтр и подставляет {@link SmartOutlineFilter}
  * с {@link CellLabelHighlightWrapper} (штатный {@code ColumnLabelProvider}) для подсветки.
  *
- * <p>Логирование: Параметры → Комфорт → «Общее логирование».
+ * <p>Логирование: Параметры → Комфорт → «Вести журнал».
  */
 public final class InfobasesViewHook implements IStartup
 {
@@ -711,7 +711,7 @@ public final class InfobasesViewHook implements IStartup
 
     /**
      * Логи хука «Информационные базы» через {@link Global}.
-     * Включение: Параметры → Комфорт → «Общее логирование».
+     * Включение: Параметры → Комфорт → «Вести журнал».
      */
     private static final class InfobasesViewDebug
     {

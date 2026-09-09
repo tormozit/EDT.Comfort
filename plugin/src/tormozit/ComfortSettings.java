@@ -95,7 +95,7 @@ public final class ComfortSettings
     /** Цвет фильтра по умолчанию — RGB(150,0,0) в координатах светлой темы. */
     public static final String DEFAULT_FILTER_MATCH_COLOR = "150,0,0"; //$NON-NLS-1$
 
-    /** Общее логирование выключено по умолчанию. */
+    /** «Вести журнал» выключен по умолчанию. */
     public static final boolean DEFAULT_DEBUG_LOG = false;
 
     /** Автопрокрутка журнала включена по умолчанию. */

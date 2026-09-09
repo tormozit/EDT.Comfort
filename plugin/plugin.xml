@@ -1,7 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <?eclipse version="3.4"?>
 <plugin>
+  <extension-point id="startup" name="Старт хуков Комфорт" schema="schema/startup.exsd"/>
+  <!-- Один IStartup на плагин: Eclipse иначе обрывает остальные хуки того же расширения
+       при исключении в createExecutableExtension / earlyStartup. -->
   <extension point="org.eclipse.ui.startup">
+    <startup class="tormozit.ComfortStartup"/>
+  </extension>
+  <extension point="tormozit.comfort.startup">
     <startup class="tormozit.ComfortShutdownHook"/>
     <startup class="tormozit.EditorStatusFieldsFixHook"/>
     <startup class="tormozit.LwtComboPopupFixHook"/>
@@ -14,8 +20,6 @@
     <startup class="tormozit.DataCompositionSchemaEditorHook"/> 
     <startup class="tormozit.MoxelEditorHook"/>
     <startup class="tormozit.BSLEditorMenuHook"/>
-    <!-- ВРЕМЕННАЯ ДИАГНОСТИКА: долгая запись модуля блокирует UI -->
-    <startup class="tormozit.BslModuleSaveDiagHook"/>
     <startup class="tormozit.BslXtextDocumentHook"/>
     <startup class="tormozit.BslHandlerBlankLineHook"/>
     <startup class="tormozit.NaparnikManualModeHook"/>

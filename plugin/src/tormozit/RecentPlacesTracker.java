@@ -1,23 +1,38 @@
 package tormozit;
 
-import org.eclipse.swt.SWT;
-import org.eclipse.swt.widgets.Display;
-import org.eclipse.swt.widgets.Event;
-import org.eclipse.swt.widgets.Listener;
+import org.eclipse.jface.text.IDocument;
+import org.eclipse.jface.text.ITextSelection;
+import org.eclipse.jface.text.source.ISourceViewer;
 import org.eclipse.jface.viewers.ILabelProvider;
 import org.eclipse.jface.viewers.ITreeContentProvider;
 import org.eclipse.jface.viewers.TreeViewer;
+import org.eclipse.swt.SWT;
+import org.eclipse.swt.custom.ST;
+import org.eclipse.swt.custom.StyledText;
+import org.eclipse.swt.widgets.Display;
+import org.eclipse.swt.widgets.Event;
+import org.eclipse.swt.widgets.Listener;
 import org.eclipse.ui.IEditorPart;
+import org.eclipse.ui.IEditorReference;
+import org.eclipse.ui.IPartListener2;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.IWorkbenchPage;
+import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 
 /**
- * Отслеживает «активное место»: если редактор (метод BSL или объект МД)
- * держит фокус ввода 3 и более секунд — место фиксируется в {@link RecentPlaces}.
+ * Отслеживает «активное место» для {@link RecentPlaces}.
+ *
+ * <p>BSL: метод фиксируется, когда каретка <b>3 секунды находится в одном методе</b>
+ * сфокусированного модуля. Движение каретки внутри того же метода таймер не сбрасывает.
+ * Смена метода или потеря фокуса модулем — отмена / новый отсчёт.
+ * Каретка вне метода 3 секунды при фокусе модуля — владелец модуля.
+ *
+ * <p>Не-BSL (объект МД): по-прежнему 3 секунды после FocusIn/Activate,
+ * пока активный редактор не BSL.
  *
  * <p><b>Ключ дедупликации</b> (стабильный, без номера строки):
  * <ul>
@@ -36,64 +51,277 @@ public class RecentPlacesTracker implements IStartup
     /** Задержка в мс, после которой место считается «посещённым». */
     private static final int DWELL_MS = 3000;
 
+    private static final String INSTALLED_KEY = "tormozit.recentPlacesTrackerInstalled"; //$NON-NLS-1$
+    private static final String CARET_WIRED_KEY = "tormozit.recentPlacesCaretWired"; //$NON-NLS-1$
+    private static final int MAX_WIRE_ATTEMPTS = 50;
+
+    private static Display display;
+    private static Runnable bslPending;
+    private static String bslPendingKey;
+    private static BslXtextEditor bslPendingEditor;
+    private static Runnable mdPending;
+
     @Override
     public void earlyStartup()
     {
         Display.getDefault().asyncExec(() -> install(Display.getDefault()));
     }
 
-    public static void install(Display display)
+    public static void install(Display d)
     {
-        if (display == null || display.isDisposed()) return;
+        if (d == null || d.isDisposed()) return;
+        if (Boolean.TRUE.equals(d.getData(INSTALLED_KEY)))
+            return;
+        d.setData(INSTALLED_KEY, Boolean.TRUE);
+        display = d;
 
-        final Runnable[] pending = { null };
-
-        Listener focusListener = new Listener()
+        Listener uiListener = new Listener()
         {
             @Override
             public void handleEvent(Event event)
             {
-                if (pending[0] != null)
-                {
-                    display.timerExec(-1, pending[0]);
-                    pending[0] = null;
-                }
-                pending[0] = () -> { pending[0] = null; recordCurrentPlace(); };
-                display.timerExec(DWELL_MS, pending[0]);
+                onUiFocusOrActivate();
             }
         };
+        d.addFilter(SWT.FocusIn, uiListener);
+        d.addFilter(SWT.Activate, uiListener);
 
-        display.addFilter(SWT.FocusIn,  focusListener);
-        display.addFilter(SWT.Activate, focusListener);
+        for (IWorkbenchWindow window : PlatformUI.getWorkbench().getWorkbenchWindows())
+            hookWindow(window);
+
+        onUiFocusOrActivate();
+    }
+
+    private static void hookWindow(IWorkbenchWindow window)
+    {
+        if (window == null)
+            return;
+        IWorkbenchPage page = window.getActivePage();
+        if (page != null)
+        {
+            hookEditorIfNeeded(page.getActiveEditor());
+            for (IEditorReference ref : page.getEditorReferences())
+                hookEditorIfNeeded(ref.getEditor(false));
+        }
+        window.getPartService().addPartListener(new IPartListener2()
+        {
+            @Override
+            public void partOpened(IWorkbenchPartReference ref)
+            {
+                if (ref instanceof IEditorReference edRef)
+                    hookEditorIfNeeded(edRef.getEditor(false));
+            }
+
+            @Override
+            public void partActivated(IWorkbenchPartReference ref)
+            {
+                if (ref instanceof IEditorReference edRef)
+                    hookEditorIfNeeded(edRef.getEditor(false));
+                onUiFocusOrActivate();
+            }
+
+            @Override public void partBroughtToTop(IWorkbenchPartReference r) {}
+            @Override public void partClosed(IWorkbenchPartReference r)       {}
+            @Override public void partDeactivated(IWorkbenchPartReference r)  {}
+            @Override public void partHidden(IWorkbenchPartReference r)       {}
+            @Override public void partVisible(IWorkbenchPartReference r)      {}
+            @Override public void partInputChanged(IWorkbenchPartReference r) {}
+        });
+    }
+
+    private static void hookEditorIfNeeded(IEditorPart editor)
+    {
+        if (editor == null)
+            return;
+        BslXtextEditor bsl = GetRef.getActiveBslEditor(editor);
+        if (bsl != null)
+            ensureCaretWired(bsl, 0);
+    }
+
+    private static void onUiFocusOrActivate()
+    {
+        BslXtextEditor bsl = getActiveBslEditorFromWorkbench();
+        if (isBslFocused(bsl))
+        {
+            cancelMd();
+            ensureCaretWired(bsl, 0);
+            armBslDwell(bsl);
+            return;
+        }
+        cancelBsl();
+        armMd();
+    }
+
+    private static void ensureCaretWired(BslXtextEditor editor, int attempt)
+    {
+        if (display == null || display.isDisposed() || editor == null)
+            return;
+        StyledText st = textWidget(editor);
+        if (st == null || st.isDisposed())
+        {
+            if (attempt >= MAX_WIRE_ATTEMPTS)
+                return;
+            display.asyncExec(() -> ensureCaretWired(editor, attempt + 1));
+            return;
+        }
+        if (Boolean.TRUE.equals(st.getData(CARET_WIRED_KEY)))
+            return;
+        st.setData(CARET_WIRED_KEY, Boolean.TRUE);
+        st.addListener(ST.CaretMoved, e -> armBslDwell(editor));
+        st.addListener(SWT.FocusIn, e -> armBslDwell(editor));
+        st.addListener(SWT.FocusOut, e ->
+        {
+            if (bslPendingEditor == editor)
+                cancelBsl();
+        });
+        if (st.isFocusControl())
+            armBslDwell(editor);
+    }
+
+    private static void armBslDwell(BslXtextEditor editor)
+    {
+        if (display == null || display.isDisposed())
+            return;
+        if (!isBslFocused(editor))
+        {
+            if (bslPendingEditor == editor)
+                cancelBsl();
+            return;
+        }
+        String key = bslPlaceKey(editor);
+        if (key == null)
+        {
+            if (bslPendingEditor == editor)
+                cancelBsl();
+            return;
+        }
+        if (key.equals(bslPendingKey) && bslPendingEditor == editor)
+            return;
+        cancelBsl();
+        cancelMd();
+        bslPendingKey = key;
+        bslPendingEditor = editor;
+        bslPending = () ->
+        {
+            bslPending = null;
+            fireBsl(editor, key);
+        };
+        display.timerExec(DWELL_MS, bslPending);
+    }
+
+    private static void fireBsl(BslXtextEditor editor, String expectedKey)
+    {
+        if (!isBslFocused(editor))
+        {
+            bslPendingKey = null;
+            bslPendingEditor = null;
+            return;
+        }
+        String now = bslPlaceKey(editor);
+        if (!expectedKey.equals(now))
+        {
+            bslPendingKey = null;
+            bslPendingEditor = null;
+            return;
+        }
+        recordBslPlace(editor);
+    }
+
+    private static void cancelBsl()
+    {
+        if (bslPending != null && display != null && !display.isDisposed())
+            display.timerExec(-1, bslPending);
+        bslPending = null;
+        bslPendingKey = null;
+        bslPendingEditor = null;
+    }
+
+    private static void armMd()
+    {
+        if (display == null || display.isDisposed())
+            return;
+        if (mdPending != null)
+        {
+            display.timerExec(-1, mdPending);
+            mdPending = null;
+        }
+        mdPending = () ->
+        {
+            mdPending = null;
+            recordMdPlace();
+        };
+        display.timerExec(DWELL_MS, mdPending);
+    }
+
+    private static void cancelMd()
+    {
+        if (mdPending == null)
+            return;
+        if (display != null && !display.isDisposed())
+            display.timerExec(-1, mdPending);
+        mdPending = null;
+    }
+
+    private static boolean isBslFocused(BslXtextEditor editor)
+    {
+        if (editor == null)
+            return false;
+        StyledText st = textWidget(editor);
+        return st != null && !st.isDisposed() && st.isFocusControl();
+    }
+
+    private static StyledText textWidget(BslXtextEditor editor)
+    {
+        if (editor == null)
+            return null;
+        ISourceViewer viewer = editor.getInternalSourceViewer();
+        if (viewer == null)
+            return null;
+        return viewer.getTextWidget();
+    }
+
+    /** Ключ текущего места BSL: {@code "Модуль: Метод"} или владелец модуля. */
+    private static String bslPlaceKey(BslXtextEditor editor)
+    {
+        org.eclipse.ui.IEditorInput input = editor.getEditorInput();
+        if (input == null)
+            return null;
+        org.eclipse.core.resources.IFile file =
+            input.getAdapter(org.eclipse.core.resources.IFile.class);
+        if (file == null)
+            return null;
+        GetRef.ModuleRef moduleRef =
+            GetRef.pathToModuleRef(file.getProjectRelativePath().toString());
+        if (moduleRef == null)
+            return null;
+        String methodName = resolveMethodNameAtCaret(editor);
+        if (methodName != null)
+            return moduleRef.modulePath + ": " + methodName; //$NON-NLS-1$
+        return stripModuleTypeSuffix(moduleRef.modulePath);
     }
 
     // =========================================================================
     // Определение текущего места
     // =========================================================================
 
-    private static void recordCurrentPlace()
+    private static void recordMdPlace()
     {
         IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
-        if (window == null) return;
+        if (window == null)
+            return;
         IWorkbenchPage page = window.getActivePage();
-        if (page == null) return;
+        if (page == null)
+            return;
         IEditorPart editor = page.getActiveEditor();
-        BslXtextEditor bslEditor = null;
-        if (editor != null) 
-            bslEditor = GetRef.getActiveBslEditor(editor);
-        if (bslEditor != null)
-        {
-            recordBslPlace(bslEditor);
-        }
-        else
-        {
-            String ref = GetRef.getRefFromPart(page.getActivePart());
-            if (ref == null || ref.isBlank()) return;
-            String ownName = lastSegment(ref);
-            String projectName = resolveProjectName(page, null);
-            if (RecentPlaces.getInstance().add(ref, ref, ref, ownName, projectName))
-                Global.log("RecentPlaces add (MD): " + ref); //$NON-NLS-1$
-        }
+        if (editor != null && GetRef.getActiveBslEditor(editor) != null)
+            return;
+        String ref = GetRef.getRefFromPart(page.getActivePart());
+        if (ref == null || ref.isBlank())
+            return;
+        String ownName = lastSegment(ref);
+        String projectName = resolveProjectName(page, null);
+        if (RecentPlaces.getInstance().add(ref, ref, ref, ownName, projectName))
+            Global.log("RecentPlaces add (MD): " + ref); //$NON-NLS-1$
     }
 
     // =========================================================================
@@ -207,14 +435,17 @@ public class RecentPlacesTracker implements IStartup
     private static void recordBslPlace(BslXtextEditor bslEditor)
     {
         org.eclipse.ui.IEditorInput input = bslEditor.getEditorInput();
-        if (input == null) return;
+        if (input == null)
+            return;
         org.eclipse.core.resources.IFile file =
             input.getAdapter(org.eclipse.core.resources.IFile.class);
-        if (file == null) return;
+        if (file == null)
+            return;
 
         GetRef.ModuleRef moduleRef =
             GetRef.pathToModuleRef(file.getProjectRelativePath().toString());
-        if (moduleRef == null) return;
+        if (moduleRef == null)
+            return;
 
         // modulePath, например "Справочник.Валюты.МодульОбъекта"
         String modulePath = moduleRef.modulePath;
@@ -222,8 +453,10 @@ public class RecentPlacesTracker implements IStartup
         // navRef — расширенная ссылка с позицией строки (для навигации)
         String navRef = GetRef.buildExtendedRef(bslEditor, false);
 
-        // Имя метода извлекаем из navRef
-        String methodName = (navRef != null) ? extractMethodName(navRef) : null;
+        // Имя метода — по документу (не разбором navRef: тот ломался на "_" и на лишнем ':').
+        String methodName = resolveMethodNameAtCaret(bslEditor);
+        if (methodName == null)
+            methodName = extractMethodName(navRef);
 
         final String key;
         final String displayName;
@@ -252,6 +485,23 @@ public class RecentPlacesTracker implements IStartup
         if (RecentPlaces.getInstance().add(key, navRef != null ? navRef : key,
                                         displayName, ownName, resolveProjectName(null, file)))
             Global.log("RecentPlaces add (BSL): " + displayName); //$NON-NLS-1$
+    }
+
+    /**
+     * Имя объемлющего метода по модельной каретке документа (не виджетный offset).
+     */
+    private static String resolveMethodNameAtCaret(BslXtextEditor bslEditor)
+    {
+        ISourceViewer viewer = bslEditor.getInternalSourceViewer();
+        if (viewer == null)
+            return null;
+        IDocument doc = viewer.getDocument();
+        if (doc == null || viewer.getSelectionProvider() == null)
+            return null;
+        Object selObj = viewer.getSelectionProvider().getSelection();
+        if (!(selObj instanceof ITextSelection textSel))
+            return null;
+        return GetRef.findEnclosingMethodName(doc, textSel.getStartLine() + 1);
     }
 
     private static String resolveProjectName(IWorkbenchPage page,
@@ -290,7 +540,7 @@ public class RecentPlacesTracker implements IStartup
         if (end < 0) return null;
         String name = ref.substring(colon + 1, end).trim();
         // Имя метода — идентификатор: буквы/цифры/подчёркивание
-        return name.isEmpty() || !Character.isLetter(name.charAt(0)) ? null : name;
+        return isMethodIdentifier(name) ? name : null;
     }
 
     /**

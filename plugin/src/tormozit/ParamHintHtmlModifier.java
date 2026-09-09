@@ -1736,28 +1736,9 @@ public final class ParamHintHtmlModifier
 
             ensureCurrentParamCaretSync(browser);
 
-            boolean hasPrefix = html.indexOf(HEADING_PREFIX_CLASS) >= 0;
             boolean hasMeta = html.indexOf(COMFORT_META_MARKER) >= 0
                 || html.indexOf("data-comfort=\"1\"") >= 0; //$NON-NLS-1$
             boolean headingDone = isHeadingAlreadyRewritten(html);
-            int headingAt = html.indexOf(HEADING_CLASS);
-            String headingSnippet = ""; //$NON-NLS-1$
-            if (headingAt >= 0)
-            {
-                int to = Math.min(html.length(), headingAt + 180);
-                headingSnippet = html.substring(headingAt, to).replace('\n', ' ').replace('\r', ' ');
-            }
-            Global.tempLog("param-hint-loop", //$NON-NLS-1$
-                "len=" + html.length() //$NON-NLS-1$
-                    + " prefix=" + hasPrefix //$NON-NLS-1$
-                    + " meta=" + hasMeta //$NON-NLS-1$
-                    + " headingDone=" + headingDone //$NON-NLS-1$
-                    + " rgb=" + (html.indexOf("rgb(") >= 0) //$NON-NLS-1$ //$NON-NLS-2$
-                    + " head=" + headingSnippet); //$NON-NLS-1$
-
-            // Уже патчили этот HTML — не резолвить ctx и не showPage (иначе цикл Progress).
-            // Native HTML после смены текущего параметра в EDT — патчим снова
-            // (маркер на browser не блокирует: штатный setInput подменяет текст).
             if (hasMeta || headingDone)
                 return;
 
@@ -1791,7 +1772,7 @@ public final class ParamHintHtmlModifier
                 return;
             }
 
-            if (abortIfModifyBurst(browser, "tryModify")) //$NON-NLS-1$
+            if (abortIfModifyBurst(browser))
                 return;
 
             browser.setData(HTML_PATCHED_MARK, Boolean.TRUE);
@@ -1854,7 +1835,7 @@ public final class ParamHintHtmlModifier
      * Стоп цикла setText → Progress → modify. Пачка за 250 мс больше порога —
      * уже не штатное открытие.
      */
-    private static boolean abortIfModifyBurst(Browser browser, String where)
+    private static boolean abortIfModifyBurst(Browser browser)
     {
         if (browser == null || browser.isDisposed())
             return true;
@@ -1868,13 +1849,8 @@ public final class ParamHintHtmlModifier
             count = (now - last) < 250L ? prev + 1 : 1;
         }
         browser.setData(MODIFY_BURST_MARK, new long[] { now, count });
-        Global.tempLog("param-hint-loop", //$NON-NLS-1$
-            "setText where=" + where + " burst=" + count); //$NON-NLS-1$ //$NON-NLS-2$
         if (count > 6)
-        {
-            Global.tempLog("param-hint-loop", "ABORT where=" + where + " burst=" + count); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return true;
-        }
         return false;
     }
 
@@ -1997,7 +1973,7 @@ public final class ParamHintHtmlModifier
             return;
         if (Boolean.TRUE.equals(MODIFY_IN_PROGRESS.get()))
             return;
-        if (abortIfModifyBurst(browser, "caret")) //$NON-NLS-1$
+        if (abortIfModifyBurst(browser))
             return;
         MODIFY_IN_PROGRESS.set(Boolean.TRUE);
         try

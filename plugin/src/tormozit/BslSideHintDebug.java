@@ -2,7 +2,7 @@ package tormozit;
 
 /**
  * Логи боковой подсказки BSL (outline-popup) через {@link Global}.
- * Включение: Параметры → Комфорт → «Общее логирование».
+ * Включение: Параметры → Комфорт → «Вести журнал».
  */
 public final class BslSideHintDebug
 {
