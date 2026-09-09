@@ -41,10 +41,11 @@ import com.e1c.g5.v8.dt.check.settings.IssueType;
  * <p>Поэтому: заголовок становится «Показывать предупреждения:» со значком
  * предупреждения, а штатный флажок ошибок конфигурации переносится наверх,
  * прямо под заголовок — рядом с остальными видами проблем (текст флажка
- * остаётся штатным). Заодно тип «Предупреждение» показывается как «Прочее
- * предупреждение» с нейтральным значком (см.
- * {@link ValidationChecksFilterHook#typeImage}) — штатный значок этого типа
- * совпадает с маркером критичности «Незначительная» в модуле.
+ * остаётся штатным). У флажка нет пары в секции «Тип»: {@code IssueType.ERROR}
+ * штатно исключён из неё и привязан к тому же флажку, что и критичность
+ * {@code MarkerSeverity.ERRORS}. Подсказка флажка это объясняет. Заодно тип
+ * «Предупреждение» показывается как «Прочее предупреждение» с нейтральным значком
+ * (см. {@link ValidationChecksFilterHook#typeImage}).
  *
  * <p>Отдельный файл, а не вложенный класс: точка входа из {@code plugin.xml}.
  */
@@ -57,6 +58,14 @@ public final class ProblemFiltersDialogHook implements IStartup
     /** Штатные тексты EDT ({@code internal/ui/validation/messages.properties}). */
     private static final String SHOW_PROBLEMS_LABEL = "Показывать проблемы:"; //$NON-NLS-1$
     private static final String SHOW_BUILD_ERRORS_LABEL = "Показывать ошибки конфигурации"; //$NON-NLS-1$
+    /**
+     * Штатный флажок биндит и критичность {@code MarkerSeverity.ERRORS}, и тип
+     * {@code IssueType.ERROR} — в секции «Тип» последнего нет.
+     */
+    private static final String SHOW_BUILD_ERRORS_TOOLTIP =
+        "Включает сразу два вида проблем.\n" //$NON-NLS-1$
+            + "«Ошибки конфигурации» — синтаксис, разбор, сборка метаданных; они попадают в счётчик «Ошибок».\n" //$NON-NLS-1$
+            + "«Прочая ошибка» — тип проверки (красный крестик); в секции «Тип» отдельного флажка нет."; //$NON-NLS-1$
 
     /** Двоеточие — как у штатного заголовка: за ним идут перечисляемые виды проблем. */
     private static final String SHOW_WARNINGS_LABEL = "Показывать предупреждения:"; //$NON-NLS-1$
@@ -125,8 +134,13 @@ public final class ProblemFiltersDialogHook implements IStartup
 
         // Текст флажка оставляем штатным — меняется только его место: сразу под
         // заголовком, рядом с остальными видами проблем.
-        if (configErrors != null && replacement != null && configErrors.getParent() == replacement.getParent())
-            configErrors.moveBelow(replacement);
+        if (configErrors != null)
+        {
+            configErrors.setToolTipText(TooltipText.wrap(configErrors,
+                SHOW_BUILD_ERRORS_TOOLTIP + Global.pluginSignForTooltip()));
+            if (replacement != null && configErrors.getParent() == replacement.getParent())
+                configErrors.moveBelow(replacement);
+        }
 
         renameWarningType(shell);
         Composite severityHost = applyModuleSeverityIcons(shell);

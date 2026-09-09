@@ -10,6 +10,7 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
@@ -90,6 +91,8 @@ public final class IRApplication
     }
     
     static private final Map<String, IRSession>  sessions           = new ConcurrentHashMap<>();
+    /** Бронь CONNECTING и проверка «та же база» — атомарно, без гонки двух COM. */
+    static private final Object                  CONNECT_GUARD      = new Object();
     static private final List<Runnable>          changeListeners    = new CopyOnWriteArrayList<>();
     /** Аналог ПапкаПортативногоИР — каталог, содержащий ирПортативный.epf и модули.
      *  Пусто = ещё не определён или не найден. */
@@ -100,16 +103,13 @@ public final class IRApplication
     public void removeChangeListener(Runnable l) { changeListeners.remove(l); }
     public boolean isConnected(Object infobase)
     {
-        String key = sessionKey((InfobaseReference)infobase);
-        IRSession s = sessions.get(key);
+        IRSession s = findSession((InfobaseReference)infobase);
         return s != null && s.state == State.CONNECTED;
     }
 
     public boolean isConnecting(InfobaseReference infobase)
     {
-        if (infobase == null)
-            return false;
-        IRSession s = sessions.get(sessionKey(infobase));
+        IRSession s = findSession(infobase);
         return s != null && s.state == State.CONNECTING;
     }
 
@@ -119,8 +119,7 @@ public final class IRApplication
     public LocalDateTime getSessionStart(Object element)
     {
         InfobaseReference infobase = ApplicationsViewHook.getInfobaseFromApplication(element);
-        String key = sessionKey(infobase);
-        IRSession s = sessions.get(key);
+        IRSession s = findSession(infobase);
         return (s != null && s.state == State.CONNECTED) ? s.startTime : null;
     }
 
@@ -133,15 +132,13 @@ public final class IRApplication
     public String getSessionPlatformVersion(Object element)
     {
         InfobaseReference infobase = ApplicationsViewHook.getInfobaseFromApplication(element);
-        String key = sessionKey(infobase);
-        IRSession s = sessions.get(key);
+        IRSession s = findSession(infobase);
         return (s != null && s.state == State.CONNECTED) ? s.platformVersion : null;
     }
 
     public IRSession getSessionByInfobase(InfobaseReference infobase)
     {
-        if (infobase == null) return null;
-        IRSession s = sessions.get(sessionKey(infobase));
+        IRSession s = findSession(infobase);
         return (s != null && s.state == State.CONNECTED) ? s : null;
     }
 
@@ -302,13 +299,8 @@ public final class IRApplication
         IRConnectDebug.logConnectStart(element);
         InfobaseReference infobase = ApplicationsViewHook.getInfobaseFromApplication(element);
         String key = sessionKey(infobase);
+        String identity = connectionIdentity(infobase);
 
-        IRSession existing = sessions.get(key);
-        if (existing != null && existing.state == State.CONNECTED) {
-            doDisconnect(key, existing, false);
-        }
-        else if (existing != null && existing.state == State.CONNECTING)
-            return;
         IProject activeProject = (IProject) Global.getField(element, "project");
         if (activeProject == null)
         {
@@ -323,17 +315,46 @@ public final class IRApplication
         final IProject resolvedProject = activeProject;
         IRConnectDebug.logResolvedInfobaseAndProject(element, infobase, resolvedProject);
 
-        // Создаем поток-одиночку для этой сессии. Поток будет жить, пока сессия активна.
-        ExecutorService executor = Executors.newSingleThreadExecutor(r -> {
-            Thread t = new Thread(r, "IR-COMThread-" + extractInfobaseUuid(infobase));
-            t.setDaemon(true);
-            return t;
-        });
-
-        IRSession connectingSession = newSession(executor);
-        sessions.put(key, connectingSession);
-        connectingSession.project = resolvedProject;
-        connectingSession.application = element;
+        IRSession existingToDrop = null;
+        ExecutorService executor = null;
+        synchronized (CONNECT_GUARD)
+        {
+            IRSession existing = sessions.get(key);
+            if (existing != null && existing.state == State.CONNECTING)
+                return;
+            IRSession other = findLiveSessionByConnectionIdentity(identity, key);
+            if (other != null)
+            {
+                IRConnectDebug.log("пропуск подключения: база уже занята сессией ИР identity=" //$NON-NLS-1$
+                    + identity);
+                return;
+            }
+            if (existing != null && existing.state == State.CONNECTED)
+            {
+                existingToDrop = existing;
+            }
+            else
+            {
+                executor = Executors.newSingleThreadExecutor(r -> {
+                    Thread t = new Thread(r, "IR-COMThread-" + extractInfobaseUuid(infobase));
+                    t.setDaemon(true);
+                    return t;
+                });
+                IRSession connectingSession = newSession(executor);
+                connectingSession.project = resolvedProject;
+                connectingSession.application = element;
+                connectingSession.infobase = infobase;
+                sessions.put(key, connectingSession);
+            }
+        }
+        if (existingToDrop != null)
+        {
+            doDisconnect(key, existingToDrop, false);
+            connectInfobaseApplication(element);
+            return;
+        }
+        if (executor == null)
+            return;
         notifyListeners();
 
         // Запускаем подключение строго в контексте этого потока
@@ -920,9 +941,10 @@ public final class IRApplication
 
     static public void disconnect(InfobaseReference infobase)
     {
-        String key = sessionKey(infobase);
-        IRSession session = sessions.get(key);
+        IRSession session = findSession(infobase);
         if (session == null || session.state == State.IDLE) return;
+        InfobaseReference mapped = session.infobase != null ? session.infobase : infobase;
+        String key = sessionKey(mapped);
         
         // Закрываем строго в том же потоке, где выполнялась работа
         session.executor.submit(() -> doDisconnect(key, session, false));
@@ -1089,6 +1111,95 @@ public final class IRApplication
     {
         String uuid = extractInfobaseUuid(infobase);
         return uuid.isEmpty() ? String.valueOf(System.identityHashCode(infobase)) : uuid;
+    }
+
+    /**
+     * Сессия этой инфобазы: сначала UUID, затем та же база по строке соединения
+     * ({@code File=} / {@code Srvr+Ref}), если UUID в карте нет.
+     */
+    private static IRSession findSession(InfobaseReference infobase)
+    {
+        if (infobase == null)
+            return null;
+        String key = sessionKey(infobase);
+        IRSession byKey = sessions.get(key);
+        if (byKey != null)
+            return byKey;
+        return findLiveSessionByConnectionIdentity(connectionIdentity(infobase), key);
+    }
+
+    /**
+     * CONNECTING или живая CONNECTED-сессия той же базы, кроме {@code exceptKey}.
+     * Пустой identity не с чем сопоставлять — не блокирует чужие UUID.
+     */
+    private static IRSession findLiveSessionByConnectionIdentity(String identity, String exceptKey)
+    {
+        if (identity == null || identity.isEmpty())
+            return null;
+        for (Map.Entry<String, IRSession> entry : sessions.entrySet())
+        {
+            if (exceptKey != null && exceptKey.equals(entry.getKey()))
+                continue;
+            IRSession session = entry.getValue();
+            if (session == null)
+                continue;
+            if (session.state == State.CONNECTING)
+            {
+                if (identity.equals(connectionIdentity(session.infobase)))
+                    return session;
+                continue;
+            }
+            if (session.state == State.CONNECTED && session.isProcessAlive()
+                && identity.equals(connectionIdentity(session.infobase)))
+                return session;
+        }
+        return null;
+    }
+
+    /**
+     * Идентичность базы для запрета второго COM: файловый путь или {@code Srvr+Ref}.
+     * Пусто — сопоставление по строке соединения недоступно, остаётся только UUID.
+     */
+    static String connectionIdentity(InfobaseReference infobase)
+    {
+        if (infobase == null)
+            return ""; //$NON-NLS-1$
+        String cs = buildConnectionString(infobase, false);
+        if (cs == null || cs.isEmpty())
+            return ""; //$NON-NLS-1$
+        String file = extractConnectionValue(cs, "File="); //$NON-NLS-1$
+        if (!file.isEmpty())
+            return "file=" + normalizeFilePath(file); //$NON-NLS-1$
+        String srvr = extractConnectionValue(cs, "Srvr="); //$NON-NLS-1$
+        String ref = extractConnectionValue(cs, "Ref="); //$NON-NLS-1$
+        if (!srvr.isEmpty() && !ref.isEmpty())
+            return "srvr=" + srvr.toLowerCase(Locale.ROOT) //$NON-NLS-1$
+                + ";ref=" + ref.toLowerCase(Locale.ROOT); //$NON-NLS-1$
+        return ""; //$NON-NLS-1$
+    }
+
+    private static String extractConnectionValue(String connectionString, String key)
+    {
+        int i = connectionString.indexOf(key);
+        if (i < 0)
+            return ""; //$NON-NLS-1$
+        int start = i + key.length();
+        if (start < connectionString.length() && connectionString.charAt(start) == '"')
+        {
+            int end = connectionString.indexOf('"', start + 1);
+            return end > start ? connectionString.substring(start + 1, end) : ""; //$NON-NLS-1$
+        }
+        int end = connectionString.indexOf(';', start);
+        String raw = end < 0 ? connectionString.substring(start) : connectionString.substring(start, end);
+        return raw.trim();
+    }
+
+    private static String normalizeFilePath(String path)
+    {
+        String s = path.replace('/', '\\').trim();
+        while (s.endsWith("\\") && s.length() > 1) //$NON-NLS-1$
+            s = s.substring(0, s.length() - 1);
+        return s.toLowerCase(Locale.ROOT);
     }
 
     static String extractInfobaseUuid(Object infobase)
@@ -1444,6 +1555,15 @@ public final class IRApplication
         IInfobaseApplication application = findApplicationForDtProject(dtProject);
         if (application == null)
             return null;
+        InfobaseReference infobase = ApplicationsViewHook.getInfobaseFromApplication(application);
+        IRSession byInfobase = findSession(infobase);
+        if (byInfobase != null)
+        {
+            if (byInfobase.state == State.CONNECTING)
+                return null;
+            if (byInfobase.state == State.CONNECTED && checkAlive(byInfobase))
+                return byInfobase;
+        }
         if (!connectIfAbsent)
         {
             // Форсируем подключение при «Авто ИР»

@@ -254,6 +254,7 @@ public final class IrCompletionProposal implements
         try
         {
             InsertPlan plan = buildInsertPlan();
+            SmartCompletionProposal.padIrPlanAfterEquals(document, offset, plan);
             document.replace(replaceStart, replaceLen, plan.text);
             pendingCaretAfterApply = replaceStart + plan.caretOffset;
         }

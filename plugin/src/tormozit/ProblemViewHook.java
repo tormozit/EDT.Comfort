@@ -20,6 +20,7 @@ import org.eclipse.core.commands.IExecutionListener;
 import org.eclipse.core.commands.NotHandledException;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.ResourcesPlugin;
+import org.eclipse.core.runtime.Adapters;
 import org.eclipse.core.runtime.ICoreRunnable;
 import org.eclipse.core.runtime.jobs.IJobChangeEvent;
 import org.eclipse.core.runtime.jobs.Job;
@@ -30,10 +31,14 @@ import org.eclipse.e4.ui.model.application.descriptor.basic.MPartDescriptor;
 import org.eclipse.e4.ui.model.application.ui.basic.MPart;
 import org.eclipse.jface.preference.IPreferencePage;
 import org.eclipse.jface.preference.PreferenceDialog;
+import org.eclipse.jface.viewers.CellLabelProvider;
+import org.eclipse.jface.viewers.ColumnLabelProvider;
 import org.eclipse.jface.viewers.ISelection;
 import org.eclipse.jface.viewers.IOpenListener;
 import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.jface.viewers.TreeViewer;
+import org.eclipse.jface.viewers.TreeViewerColumn;
+import org.eclipse.jface.viewers.ViewerCell;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.browser.Browser;
 import org.eclipse.swt.browser.ProgressListener;
@@ -71,11 +76,13 @@ import com._1c.g5.v8.dt.validation.marker.IMarkerUpdateListener;
 import com._1c.g5.v8.dt.validation.marker.Marker;
 import com._1c.g5.v8.dt.validation.marker.MarkerFilter;
 import com._1c.g5.v8.dt.validation.marker.MarkerIndex;
+import com._1c.g5.v8.dt.validation.marker.MarkerSeverity;
 import com._1c.g5.v8.dt.validation.marker.MarkersChangedEvent;
 import com._1c.g5.v8.dt.validation.marker.v2.IMarkerManagerV2;
 import com._1c.g5.v8.dt.validation.marker.v2.IMarkerReader;
 import com.e1c.g5.v8.dt.check.settings.CheckUid;
 import com.e1c.g5.v8.dt.check.settings.ICheckRepository;
+import com.e1c.g5.v8.dt.check.settings.IssueType;
 
 /**
  * Панель проблем конфигурации ({@code com._1c.g5.v8.dt.ui.problemView}), issue 401.
@@ -85,6 +92,15 @@ import com.e1c.g5.v8.dt.check.settings.ICheckRepository;
  * показывает не только ошибки, но и предупреждения, а «ошибка конфигурации» —
  * это отдельный вид проблемы (он же отдельный флажок в «Настройках отбора», см.
  * {@link ProblemFiltersDialogHook}).</li>
+ * <li><b>Подсказка строки итогов.</b> Штатная надпись «Ошибок / Предупреждений»
+ * считает по критичности (группы дерева), а не по типу строки. Подсказка
+ * объясняет это: тип «Прочая ошибка» (красный крестик) при критичности
+ * «Значительная» попадает в предупреждения.</li>
+ * <li><b>Тип «Прочая ошибка».</b> Штатное имя {@code IssueType.ERROR} совпадает
+ * с критичностью «Ошибки конфигурации». В дереве и подсказке строки тип
+ * показывается как «Прочая ошибка». В окне отбора отдельного флажка этого типа
+ * нет: он привязан к «Показывать ошибки конфигурации», у которого своя подсказка
+ * ({@link ProblemFiltersDialogHook}).</li>
  * <li><b>Двойной щелчок в колонке «Код проверки»</b> открывает настройку этой
  * проверки на странице «Проверки» параметров проекта — вместо перехода к самой
  * проблеме, который остаётся на всех остальных колонках. Штатное открытие
@@ -94,10 +110,10 @@ import com.e1c.g5.v8.dt.check.settings.ICheckRepository;
  *
  * <p><b>Все доработки поведения панели подчиняются флажку</b> Параметры → Комфорт →
  * «Улучшать списки» ({@link ComfortSettings#PREF_REPLACE_LIST_FILTERS}): имя панели,
- * заслонка обновлений, подпись «Область: …», индикатор ожидания слева от итогов
- * на время загрузки списка, открытие настройки проверки двойным
- * щелчком и свои области отбора ({@link ProblemViewComfortScope}). Флажок читается в
- * момент срабатывания, а его переключение обрабатывается сразу
+ * заслонка обновлений, подпись «Область: …», подсказка строки итогов, имя типа
+ * «Прочая ошибка», индикатор ожидания слева от итогов на время загрузки списка,
+ * открытие настройки проверки двойным щелчком и свои области отбора ({@link ProblemViewComfortScope}). Флажок
+ * читается в момент срабатывания, а его переключение обрабатывается сразу
  * ({@link #listenReplaceListFilters}) — перезапуск EDT не нужен. Команды, добавленные
  * плагином в меню и тулбар панели, флажку не подчиняются: это не изменение штатного
  * поведения, а отдельные команды.</p>
@@ -119,6 +135,8 @@ public final class ProblemViewHook implements IStartup
     private static final String VIEW_TITLE = "Проблемы конфигурации"; //$NON-NLS-1$
 
     private static final String SCOPE_LABEL_KEY = "tormozit.problemViewScopeLabel"; //$NON-NLS-1$
+    private static final String STATS_TOOLTIP_KEY = "tormozit.problemViewStatsTooltip"; //$NON-NLS-1$
+    private static final String TYPE_RENAME_KEY = "tormozit.problemViewTypeRename"; //$NON-NLS-1$
     private static final String OPEN_OVERRIDE_KEY = "tormozit.problemViewOpenOverride"; //$NON-NLS-1$
     /** Отделяет дописанный отбор от штатных итогов — он же признак «уже дописано». */
     private static final String SCOPE_SEPARATOR = "   │   "; //$NON-NLS-1$
@@ -137,6 +155,14 @@ public final class ProblemViewHook implements IStartup
      * и длинный штатный заголовок в одной строке с итогами уже мешает.
      */
     private static final String SCOPE_TITLE = "Область"; //$NON-NLS-1$
+    /**
+     * Подсказка штатной надписи «Ошибок / Предупреждений»: счётчики идут по
+     * критичности (группы дерева), а не по типу строки.
+     */
+    private static final String STATS_TOOLTIP =
+        "Счётчики считают по критичности (группы в дереве), а не по типу проблемы.\n" //$NON-NLS-1$
+            + "«Ошибок» — только группа «Ошибки конфигурации»: синтаксис, разбор, сборка метаданных.\n" //$NON-NLS-1$
+            + "«Предупреждений» — остальные группы: блокирующие, критические, значительные, незначительные, тривиальные.\n"; //$NON-NLS-1$ 
     /** Режимы {@code ProblemFilters.Scope}, у которых есть конкретный источник отбора. */
     private static final String SCOPE_CURRENT_OBJECT = "CURRENT_OBJECT"; //$NON-NLS-1$
     private static final String SCOPE_CURRENT_ELEMENT = "CURRENT_ELEMENT"; //$NON-NLS-1$
@@ -222,8 +248,9 @@ public final class ProblemViewHook implements IStartup
     /**
      * Переключили «Улучшать списки» — привести панель в соответствие сразу, не
      * дожидаясь перезапуска EDT: имя вернуть штатное (или переименовать заново) и
-     * снять нашу область отбора. Подпись «Область: …», заслонка обновлений и
-     * индикатор ожидания читают флажок при каждом срабатывании и подстраиваются сами.
+     * снять нашу область отбора. Подпись «Область: …», подсказка итогов, заслонка
+     * обновлений и индикатор ожидания читают флажок при каждом срабатывании и
+     * подстраиваются сами.
      */
     private static void listenReplaceListFilters(IWorkbench workbench)
     {
@@ -251,7 +278,11 @@ public final class ProblemViewHook implements IStartup
                             Object filters = problemFilters(loader);
                             if (filters != null)
                                 applyComfortScope(view, filters, loader);
-                            UpdateWaitIndicator.apply(view, UpdateWaitIndicator.statusLabel(view));
+                            Label status = UpdateWaitIndicator.statusLabel(view);
+                            UpdateWaitIndicator.apply(view, status);
+                            applyStatsTooltip(status);
+                            if (view.getAdapter(TreeViewer.class) instanceof TreeViewer viewer)
+                                viewer.refresh();
                         }
                     }
                 }
@@ -362,6 +393,7 @@ public final class ProblemViewHook implements IStartup
         installResultChangeGate(view);
         installScopeLabel(view);
         installOpenOverride(view);
+        installTypeRename(view);
         installComfortScope(view);
         UpdateWaitIndicator.install(view);
         refreshComfortScope(view);
@@ -1282,7 +1314,8 @@ public final class ProblemViewHook implements IStartup
      * её при каждом обновлении маркеров и о своих записях никак не сообщает
      * ({@code Label} события смены текста не шлёт), поэтому дополнение
      * восстанавливается по таймеру: сравнивается только строка, и лишь при
-     * расхождении вызывается {@code setText}.
+     * расхождении вызывается {@code setText}. На ту же надпись ставится
+     * {@link #applyStatsTooltip подсказка} про «Ошибок / Предупреждений».
      */
     private static void installScopeLabel(IViewPart view)
     {
@@ -1299,9 +1332,170 @@ public final class ProblemViewHook implements IStartup
         ClassLoader loader = view.getClass().getClassLoader();
         Object filters = problemFilters(loader);
         appendScope(view, status, filters, loader);
+        applyStatsTooltip(status);
         listenScopeChanges(view, status, filters, loader);
         keepScopeAppended(view, status, filters, loader);
         Debug.log("installScopeLabel: installed"); //$NON-NLS-1$
+    }
+
+    /**
+     * Подсказка штатной надписи с итогами: что в «Ошибок», что в «Предупреждений».
+     * Снимается вместе с флажком «Улучшать списки». Текст ставится один раз —
+     * повторный {@code setToolTipText} сбросил бы уже показанную подсказку.
+     */
+    private static void applyStatsTooltip(Label status)
+    {
+        if (status == null || status.isDisposed())
+            return;
+        boolean enable = ComfortSettings.isReplaceListFiltersEnabled();
+        boolean applied = Boolean.TRUE.equals(status.getData(STATS_TOOLTIP_KEY));
+        if (enable == applied)
+            return;
+        status.setToolTipText(enable
+            ? TooltipText.wrap(status, STATS_TOOLTIP + Global.pluginSignForTooltip())
+            : null);
+        status.setData(STATS_TOOLTIP_KEY, enable ? Boolean.TRUE : null);
+    }
+
+    /**
+     * В дереве и подсказках строк штатное имя {@link IssueType#ERROR} совпадает
+     * с критичностью {@code ERRORS}. Подменяем только там, где элемент — этот
+     * тип, не группу «Ошибки конфигурации».
+     */
+    private static void installTypeRename(IViewPart view)
+    {
+        if (!(view.getAdapter(TreeViewer.class) instanceof TreeViewer viewer))
+            return;
+        Tree tree = viewer.getTree();
+        if (tree == null || tree.isDisposed() || Boolean.TRUE.equals(tree.getData(TYPE_RENAME_KEY)))
+            return;
+        ClassLoader loader = view.getClass().getClassLoader();
+        int wrapped = 0;
+        for (int i = 0; i < tree.getColumnCount(); i++)
+        {
+            TreeViewerColumn column = resolveViewerColumn(viewer, tree, i);
+            if (column == null)
+                continue;
+            Object lpObj = Global.invoke(column, "getLabelProvider"); //$NON-NLS-1$
+            if (lpObj instanceof TypeRenameLabelProvider || !(lpObj instanceof CellLabelProvider lp))
+                continue;
+            TypeRenameLabelProvider wrapper = new TypeRenameLabelProvider(lp, loader);
+            if (!Global.invokeVoid(column, "setLabelProvider", wrapper, Boolean.FALSE)) //$NON-NLS-1$
+            {
+                Debug.log("installTypeRename: 2-arg setLabelProvider not found"); //$NON-NLS-1$
+                continue;
+            }
+            wrapped++;
+        }
+        if (wrapped > 0)
+        {
+            tree.setData(TYPE_RENAME_KEY, Boolean.TRUE);
+            Debug.log("installTypeRename: wrapped " + wrapped + " columns"); //$NON-NLS-1$
+        }
+    }
+
+    private static TreeViewerColumn resolveViewerColumn(TreeViewer viewer, Tree tree, int index)
+    {
+        Object vc = Global.invoke(viewer, "getViewerColumn", Integer.valueOf(index)); //$NON-NLS-1$
+        if (vc instanceof TreeViewerColumn tvc)
+            return tvc;
+        if (index >= 0 && index < tree.getColumnCount())
+        {
+            TreeColumn column = tree.getColumn(index);
+            if (column != null && column.getData("org.eclipse.jface.columnViewer") instanceof TreeViewerColumn fromData) //$NON-NLS-1$
+                return fromData;
+        }
+        return null;
+    }
+
+    private static IssueType issueTypeOf(Object element, ClassLoader loader)
+    {
+        if (element == null || loader == null)
+            return null;
+        try
+        {
+            Class<?> lazy = loader.loadClass(
+                "com._1c.g5.v8.dt.internal.ui.validation.lazytree.LazyTreeNode"); //$NON-NLS-1$
+            Object node = lazy.isInstance(element) ? element : Adapters.adapt(element, lazy);
+            if (node != null)
+            {
+                Object marker = Global.invoke(node, "getMarker"); //$NON-NLS-1$
+                if (marker instanceof Marker m)
+                    return issueTypeOfMarker(m, loader);
+                Object group = Global.invoke(node, "getGroup"); //$NON-NLS-1$
+                Object id = group != null ? Global.invoke(group, "getId") : null; //$NON-NLS-1$
+                if (id instanceof IssueType type)
+                    return type;
+            }
+            if (element instanceof Marker marker)
+                return issueTypeOfMarker(marker, loader);
+        }
+        catch (Exception ignored)
+        {
+        }
+        return null;
+    }
+
+    private static IssueType issueTypeOfMarker(Marker marker, ClassLoader loader)
+    {
+        if (marker.getSeverity() == MarkerSeverity.ERRORS)
+            return null;
+        try
+        {
+            Class<?> helper = loader.loadClass("com._1c.g5.v8.dt.internal.ui.validation.UIHelper"); //$NON-NLS-1$
+            Object type = Global.invoke(helper, "getIssueType", marker); //$NON-NLS-1$
+            return type instanceof IssueType t ? t : null;
+        }
+        catch (Exception ignored)
+        {
+            return null;
+        }
+    }
+
+    /**
+     * Подмена штатного имени {@link IssueType#ERROR} в тексте ячейки и подсказке.
+     * Штатный провайдер не диспозится ({@code setLabelProvider(..., false)}).
+     */
+    private static final class TypeRenameLabelProvider extends ColumnLabelProvider
+    {
+        private final CellLabelProvider delegate;
+
+        private final ClassLoader loader;
+
+        private TypeRenameLabelProvider(CellLabelProvider delegate, ClassLoader loader)
+        {
+            this.delegate = delegate;
+            this.loader = loader;
+        }
+
+        @Override
+        public void update(ViewerCell cell)
+        {
+            delegate.update(cell);
+            String rewritten = rewrite(cell.getElement(), cell.getText());
+            if (rewritten != null && !rewritten.equals(cell.getText()))
+                cell.setText(rewritten);
+        }
+
+        @Override
+        public String getToolTipText(Object element)
+        {
+            Object tip = Global.invoke(delegate, "getToolTipText", element); //$NON-NLS-1$
+            return rewrite(element, tip instanceof String s ? s : null);
+        }
+
+        private String rewrite(Object element, String text)
+        {
+            if (!ComfortSettings.isReplaceListFiltersEnabled())
+                return text;
+            return ValidationChecksFilterHook.replaceDisplayedType(issueTypeOf(element, loader), text);
+        }
+
+        @Override
+        public void dispose()
+        {
+            // Штатный провайдер живёт у колонки; не диспозить его вместе с обёрткой.
+        }
     }
 
     /**
@@ -1561,6 +1755,7 @@ public final class ProblemViewHook implements IStartup
                 return;
             UpdateWaitIndicator.apply(view, status);
             appendScope(view, status, filters, loader);
+            applyStatsTooltip(status);
             display.timerExec(SCOPE_REFRESH_MS, tick[0]);
         };
         display.timerExec(SCOPE_REFRESH_MS, tick[0]);

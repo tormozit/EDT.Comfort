@@ -44,13 +44,19 @@ import org.eclipse.ui.IWorkbenchPart;
 import org.eclipse.ui.IWorkbenchPartSite;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.commands.ICommandService;
+import org.eclipse.xtext.EcoreUtil2;
+import org.eclipse.xtext.nodemodel.ICompositeNode;
+import org.eclipse.xtext.nodemodel.util.NodeModelUtils;
 import org.eclipse.xtext.resource.EObjectAtOffsetHelper;
 import org.eclipse.xtext.resource.IResourceServiceProvider;
 import org.eclipse.xtext.resource.XtextResource;
 import org.eclipse.xtext.ui.editor.model.IXtextDocument;
 import org.eclipse.xtext.util.concurrent.IUnitOfWork;
 
+import com._1c.g5.v8.dt.bsl.model.FeatureAccess;
+import com._1c.g5.v8.dt.bsl.resource.DynamicFeatureAccessComputer;
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
+import com._1c.g5.v8.dt.mcore.Environmental;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
 
 import java.lang.reflect.Field;
@@ -190,6 +196,8 @@ public final class ContentAssistSessionReloader
      */
     private volatile boolean pendingParamHintOnChar;
     private volatile int pendingParamHintOnCharCaret = -1;
+    /** Последняя выделенная строка popup — для сдвига каретки после пробела у {@code =}. */
+    private ICompletionProposal lastAssistSelection;
     /** Поколение отложенного param hint — отмена повторного timerExec. */
     private final AtomicInteger paramHintPostGen = new AtomicInteger();
     /** Автооткрытие assist (порт ИР ПриНажатииКлавишиАвтодополнение). */
@@ -308,6 +316,8 @@ this.completionListener = new CompletionListenerAdapter() {
                 ContentAssistDebug.resetValidateStats();
                 SmartAssistFilterState.reset();
                 int caret = ContentAssistPopupSync.syncSessionOffsets(assistant, viewer);
+                IDocument startDoc = viewer != null ? viewer.getDocument() : null;
+                ContentAssistPopupSync.syncEqualsSpacePad(assistant, startDoc, caret);
                 boolean inLiteral = caret >= 0
                     && SmartContentAssistProcessor.isStringLiteralAssistContext(viewer, caret);
                 if (!event.isAutoActivated && inLiteral && !manualIrAssistPending
@@ -445,6 +455,12 @@ if (Boolean.TRUE.equals(LITERAL_REPEAT_FROM_COMMAND.get()))
                 boolean preserveOnEnd = manualAwait || isCompletionAutoOpenAwaitingIr();
                 boolean popupVisible = ContentAssistPopupSync.isPopupVisible(assistant);
                 int endCaret = ContentAssistPopupSync.syncSessionOffsets(assistant, viewer);
+                Display restoreDisplay = viewer != null && viewer.getTextWidget() != null
+                    ? viewer.getTextWidget().getDisplay() : Display.getCurrent();
+                if (restoreDisplay != null && !restoreDisplay.isDisposed())
+                    restoreDisplay.asyncExec(ContentAssistPopupSync::restoreEqualsSpacePads);
+                else
+                    ContentAssistPopupSync.restoreEqualsSpacePads();
 boolean inLiteral = endCaret >= 0
                     && SmartContentAssistProcessor.isStringLiteralAssistContext(viewer, endCaret);
                 if (!inLiteral && !preserveOnEnd
@@ -543,6 +559,9 @@ boolean inLiteral = endCaret >= 0
                 org.eclipse.jface.text.contentassist.ICompletionProposal proposal,
                 boolean smartToggle)
             {
+                lastAssistSelection = proposal;
+                IDocument padDoc = viewer != null ? viewer.getDocument() : null;
+                ContentAssistPopupSync.syncEqualsSpacePad(assistant, padDoc, modelCaretOffset());
                 if (proposal == null)
                     return;
                 org.eclipse.jface.text.contentassist.ICompletionProposal raw =
@@ -864,6 +883,8 @@ boolean inLiteral = endCaret >= 0
         boolean insertInProgress = isAssistProposalInsertInProgress();
         boolean irApply = Boolean.TRUE.equals(
             SmartCompletionProposal.IR_PROPOSAL_APPLY_IN_PROGRESS.get());
+        if (text.length() > 1)
+            scheduleEqualsSpacePadAfterInsert(event);
         if (!insertInProgress && !hasParen)
             return;
         if (!insertInProgress)
@@ -1073,19 +1094,25 @@ boolean inLiteral = endCaret >= 0
             + ",\"mismatch\":" + (modelCaret != desiredCaret) //$NON-NLS-1$
             + ",\"gen\":" + gen //$NON-NLS-1$
             + ",\"hasModel\":" + hasModel + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-        display.timerExec(0, () -> pollAstReadyThenShowParamHint(desiredCaret, gen, 0, startedMs));
+        display.timerExec(0,
+            () -> pollAstReadyThenShowParamHint(desiredCaret, gen, 0, startedMs, 0L));
     }
 
     private static final int PARAM_HINT_AST_POLL_MS = 20;
-    private static final int PARAM_HINT_AST_TIMEOUT_MS = 500;
+    /**
+     * Штатный показ после {@code ,} на огромном модуле сам запускает linking.
+     * Первый проход часто пустой; повтор — когда модель уже досчитана.
+     */
+    private static final int PARAM_HINT_AST_TIMEOUT_MS = 2500;
+    /** Пауза между повторными показами, чтобы не долбить readOnly каждые 20 мс. */
+    private static final int PARAM_HINT_RETRY_MS = 200;
 
     /**
-     * Пока Xtext не видит {@code Invocation}/{@code OperatorStyleCreator} у каретки —
-     * {@code InvocationParametersHover} молча ничего не показывает. Опрос AST, затем
-     * один {@code executeCommand}.
+     * Ждём {@code resolveObject} (им EDT собирает подсказку), не
+     * {@code getFeatureEntries}. Если окна нет — повтор до таймаута.
      */
     private void pollAstReadyThenShowParamHint(int desiredCaret, int gen, int attempt,
-        long startedMs)
+        long startedMs, long lastExecMs)
     {
         if (gen != paramHintPostGen.get())
             return;
@@ -1105,7 +1132,8 @@ boolean inLiteral = endCaret >= 0
                         + ",\"desired\":" + desiredCaret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
                 }
                 display.timerExec(PARAM_HINT_AST_POLL_MS,
-                    () -> pollAstReadyThenShowParamHint(desiredCaret, gen, attempt + 1, startedMs));
+                    () -> pollAstReadyThenShowParamHint(desiredCaret, gen, attempt + 1, startedMs,
+                        lastExecMs));
                 return;
             }
             logLinkedMode("poll.skip", "{\"reason\":\"caretMismatch\",\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
@@ -1121,7 +1149,7 @@ boolean inLiteral = endCaret >= 0
             return;
         }
         String astAt = describeInvocationAt(desiredCaret);
-        boolean astReady = isAstDescriptionReady(astAt);
+        boolean astReady = isAstDescriptionReady(astAt) && nodeEndCoversCaret(astAt, desiredCaret);
         waitMs = System.currentTimeMillis() - startedMs;
         if (!astReady && waitMs < PARAM_HINT_AST_TIMEOUT_MS)
         {
@@ -1132,7 +1160,18 @@ boolean inLiteral = endCaret >= 0
                     + ",\"timeoutMs\":" + PARAM_HINT_AST_TIMEOUT_MS + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             }
             display.timerExec(PARAM_HINT_AST_POLL_MS,
-                () -> pollAstReadyThenShowParamHint(desiredCaret, gen, attempt + 1, startedMs));
+                () -> pollAstReadyThenShowParamHint(desiredCaret, gen, attempt + 1, startedMs,
+                    lastExecMs));
+            return;
+        }
+        long now = System.currentTimeMillis();
+        boolean retryWait = lastExecMs > 0 && now - lastExecMs < PARAM_HINT_RETRY_MS
+            && waitMs < PARAM_HINT_AST_TIMEOUT_MS;
+        if (retryWait)
+        {
+            display.timerExec(PARAM_HINT_RETRY_MS,
+                () -> pollAstReadyThenShowParamHint(desiredCaret, gen, attempt + 1, startedMs,
+                    lastExecMs));
             return;
         }
         logLinkedMode("poll.run", "{\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
@@ -1142,6 +1181,15 @@ boolean inLiteral = endCaret >= 0
             + ",\"around\":\"" + ContentAssistDebug.jsonEscapeForLog(clipAroundCaret(caret)) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
             + ",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         runInvocationParametersHoverCommand(desiredCaret, gen, attempt);
+        if (isParamHoverShellVisible() || isParamHoverInfoControlVisible())
+            return;
+        waitMs = System.currentTimeMillis() - startedMs;
+        if (waitMs < PARAM_HINT_AST_TIMEOUT_MS)
+        {
+            display.timerExec(PARAM_HINT_RETRY_MS,
+                () -> pollAstReadyThenShowParamHint(desiredCaret, gen, attempt + 1, startedMs,
+                    System.currentTimeMillis()));
+        }
     }
 
     private static boolean isAstDescriptionReady(String ast)
@@ -1149,7 +1197,48 @@ boolean inLiteral = endCaret >= 0
         if (ast == null || ast.isEmpty() || ast.startsWith("none") || ast.startsWith("err") //$NON-NLS-1$ //$NON-NLS-2$
             || ast.startsWith("noXtext") || ast.startsWith("resourceNull")) //$NON-NLS-1$ //$NON-NLS-2$
             return false;
-        return ast.indexOf("Invocation") >= 0 || ast.indexOf("OperatorStyleCreator") >= 0; //$NON-NLS-1$ //$NON-NLS-2$
+        if (ast.indexOf("Invocation") < 0 && ast.indexOf("OperatorStyleCreator") < 0) //$NON-NLS-1$ //$NON-NLS-2$
+            return false;
+        int resolved = astSuffixInt(ast, "|resolved:"); //$NON-NLS-1$
+        if (resolved >= 0)
+            return resolved > 0;
+        int entries = astSuffixInt(ast, "|entries:"); //$NON-NLS-1$
+        return entries != 0;
+    }
+
+    /** Как {@code inInvocationParameters}: каретка строго левее конца узла вызова. */
+    private static boolean nodeEndCoversCaret(String ast, int caret)
+    {
+        int nodeEnd = astSuffixInt(ast, "|nodeEnd:"); //$NON-NLS-1$
+        if (nodeEnd < 0)
+            return true;
+        return caret < nodeEnd;
+    }
+
+    private static int astSuffixInt(String ast, String mark)
+    {
+        int i = ast.lastIndexOf(mark);
+        if (i < 0)
+            return -1;
+        int from = i + mark.length();
+        int to = from;
+        while (to < ast.length())
+        {
+            char ch = ast.charAt(to);
+            if (ch < '0' || ch > '9')
+                break;
+            to++;
+        }
+        if (to == from)
+            return -1;
+        try
+        {
+            return Integer.parseInt(ast.substring(from, to));
+        }
+        catch (NumberFormatException ignored)
+        {
+            return -1;
+        }
     }
 
     /** Цепочка EObject от каретки. */
@@ -1160,7 +1249,7 @@ boolean inLiteral = endCaret >= 0
             return "noXtext"; //$NON-NLS-1$
         try
         {
-            String described = xdoc.readOnly(
+            String described = readOnlyPeekAst(xdoc,
                 (IUnitOfWork<String, XtextResource>) resource -> {
                     if (resource == null)
                         return "resourceNull"; //$NON-NLS-1$
@@ -1172,18 +1261,64 @@ boolean inLiteral = endCaret >= 0
                         return "none"; //$NON-NLS-1$
                     StringBuilder sb = new StringBuilder();
                     boolean foundCall = false;
+                    int entries = 0;
+                    int resolved = 0;
+                    int nodeEnd = 0;
                     int depth = 0;
+                    IResourceServiceProvider rsp = resource.getURI() != null
+                        ? IResourceServiceProvider.Registry.INSTANCE.getResourceServiceProvider(
+                            resource.getURI())
+                        : null;
+                    DynamicFeatureAccessComputer computer = rsp != null
+                        ? rsp.get(DynamicFeatureAccessComputer.class) : null;
                     for (EObject cur = obj; cur != null && depth < 12; cur = cur.eContainer(), depth++)
                     {
                         String name = cur.eClass() != null ? cur.eClass().getName() : "?"; //$NON-NLS-1$
                         if (sb.length() > 0)
                             sb.append('>');
                         sb.append(name);
-                        if ("Invocation".equals(name) //$NON-NLS-1$
-                            || "OperatorStyleCreator".equals(name)) //$NON-NLS-1$
+                        if ("Invocation".equals(name)) //$NON-NLS-1$
+                        {
                             foundCall = true;
+                            ICompositeNode node = NodeModelUtils.findActualNodeFor(cur);
+                            if (node != null)
+                                nodeEnd = Math.max(nodeEnd, node.getTotalEndOffset());
+                            Object access = Global.invoke(cur, "getMethodAccess"); //$NON-NLS-1$
+                            Object list = access != null
+                                ? Global.invoke(access, "getFeatureEntries") : null; //$NON-NLS-1$
+                            if (list instanceof List<?> feat && !feat.isEmpty())
+                                entries = feat.size();
+                            if (computer != null && access instanceof FeatureAccess fa)
+                            {
+                                Environmental env = EcoreUtil2.getContainerOfType(fa,
+                                    Environmental.class);
+                                if (env != null)
+                                {
+                                    List<?> resolvedList = computer.resolveObject(fa,
+                                        env.environments());
+                                    if (resolvedList != null)
+                                        resolved = Math.max(resolved, resolvedList.size());
+                                }
+                            }
+                        }
+                        else if ("OperatorStyleCreator".equals(name)) //$NON-NLS-1$
+                        {
+                            foundCall = true;
+                            ICompositeNode node = NodeModelUtils.findActualNodeFor(cur);
+                            if (node != null)
+                                nodeEnd = Math.max(nodeEnd, node.getTotalEndOffset());
+                            if (Global.invoke(cur, "getType") != null) //$NON-NLS-1$
+                            {
+                                entries = Math.max(entries, 1);
+                                resolved = Math.max(resolved, 1);
+                            }
+                        }
                     }
-                    return foundCall ? sb.toString() : "none:" + sb; //$NON-NLS-1$
+                    if (!foundCall)
+                        return "none:" + sb; //$NON-NLS-1$
+                    return sb.append("|entries:").append(entries) //$NON-NLS-1$
+                        .append("|resolved:").append(resolved) //$NON-NLS-1$
+                        .append("|nodeEnd:").append(nodeEnd).toString(); //$NON-NLS-1$
                 });
             return described != null ? described : "none"; //$NON-NLS-1$
         }
@@ -1283,6 +1418,7 @@ boolean inLiteral = endCaret >= 0
             return;
         }
         ParamHoverProbe probe = new ParamHoverProbe();
+        long tOpen = ContentAssistDebug.perfStart("paramHint.open"); //$NON-NLS-1$
         try
         {
             IWorkbenchPartSite site = facade != null ? facade.getSite() : null;
@@ -1295,7 +1431,6 @@ boolean inLiteral = endCaret >= 0
             }
             if (!st.isFocusControl())
                 st.setFocus();
-            ParamHintHtmlModifier.ensureFirstActualArgTypesComputed();
             probe = executeInvocationParametersHoverCommand();
             if (!probe.popupShown && isParamHoverShellVisible())
                 probe.popupShown = true;
@@ -1306,6 +1441,12 @@ boolean inLiteral = endCaret >= 0
         {
             probe.execOk = false;
             probe.err = String.valueOf(ex);
+        }
+        finally
+        {
+            ContentAssistDebug.perfEnd("paramHint.open", tOpen, //$NON-NLS-1$
+                "{\"popupShown\":" + probe.popupShown //$NON-NLS-1$
+                    + ",\"execOk\":" + probe.execOk + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         }
         logLinkedMode("hover.exec", "{\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
             + ",\"caret\":" + caret //$NON-NLS-1$
@@ -1500,6 +1641,51 @@ boolean inLiteral = endCaret >= 0
         {
             ContentAssistDebug.debugModeLog("H-INSERT", "postDoItDiag", "registerError", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 "{\"ex\":\"" + ContentAssistDebug.jsonEscapeForLog(String.valueOf(ex)) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    /**
+     * Запасной пробел после {@code =} для вставок без {@code ()}, если {@code apply}
+     * не дописал его в {@code initialReplacementContent}. Для методов/конструкторов
+     * второй {@code replace} срывает LinkedMode — пробел ставится до apply.
+     */
+    private void scheduleEqualsSpacePadAfterInsert(DocumentEvent event)
+    {
+        IDocument doc = event.getDocument();
+        String text = event.getText();
+        int offset = event.getOffset();
+        if (!SmartCompletionProposal.needsSpaceAfterEquals(doc, offset, text))
+            return;
+        if (text.indexOf('(') >= 0)
+            return;
+        if (!(doc instanceof IDocumentExtension ext) || completionAutoOpenDocumentListener == null)
+            return;
+        try
+        {
+            ext.registerPostNotificationReplace(completionAutoOpenDocumentListener, (d, owner) ->
+            {
+                try
+                {
+                    d.replace(offset, 0, " "); //$NON-NLS-1$
+                    boolean linked = LinkedModeModel.hasInstalledModel(d);
+                    ICompletionProposal selected = lastAssistSelection;
+                    if (selected == null)
+                        selected = ContentAssistPopupSync.peekSelectedProposal(assistant);
+                    ICompletionProposal raw =
+                        SmartContentAssistProcessor.unwrapProposal(selected);
+                    if (!linked
+                        && raw instanceof org.eclipse.xtext.ui.editor.contentassist.ConfigurableCompletionProposal cp)
+                        cp.shiftOffset(1);
+                    if (!linked && pendingParamHintDesiredCaret >= 0)
+                        pendingParamHintDesiredCaret++;
+                }
+                catch (Exception ignored)
+                {
+                }
+            });
+        }
+        catch (Exception ignored)
+        {
         }
     }
 
@@ -1702,8 +1888,91 @@ boolean inLiteral = endCaret >= 0
         }
     }
 
+    /**
+     * Чтение AST без переподсветки модуля. Штатный {@code IXtextDocument.readOnly}
+     * после работы вызывает {@code notifyModelListenersOnUiThread}; на файле
+     * ~590 тыс. символов это ~3.7 с на каждый проход (три прохода при {@code ,} → ~11 с).
+     * {@code BslXtextDocument.readOnlyForContentAssist} ту же модель читает без notify.
+     */
+    static <T> T readOnlyForContentAssist(IXtextDocument doc, IUnitOfWork<T, XtextResource> work)
+    {
+        Object result = invokeBslRead(doc, "readOnlyForContentAssist", work); //$NON-NLS-1$
+        if (result != BSL_READ_MISSING)
+        {
+            @SuppressWarnings("unchecked")
+            T typed = (T) result;
+            return typed;
+        }
+        return doc == null || work == null ? null : doc.readOnly(work);
+    }
+
+    /**
+     * Только заглянуть в модель: без notify и без отмены {@code XtextReconciler}.
+     * {@code readOnlyForContentAssist} отменяет reconciler — после этого штатный
+     * hover не находит FeatureEntry и молча не открывается.
+     */
+    static <T> T readOnlyPeekAst(IXtextDocument doc, IUnitOfWork<T, XtextResource> work)
+    {
+        Object result = invokeBslRead(doc, "readOnlyDataModelWithoutSync", work); //$NON-NLS-1$
+        if (result != BSL_READ_MISSING)
+        {
+            @SuppressWarnings("unchecked")
+            T typed = (T) result;
+            return typed;
+        }
+        result = invokeBslRead(doc, "readOnlyForContentAssist", work); //$NON-NLS-1$
+        if (result != BSL_READ_MISSING)
+        {
+            @SuppressWarnings("unchecked")
+            T typed = (T) result;
+            return typed;
+        }
+        return null;
+    }
+
+    private static final Object BSL_READ_MISSING = new Object();
+
+    private static Object invokeBslRead(IXtextDocument doc, String methodName,
+        IUnitOfWork<?, XtextResource> work)
+    {
+        if (doc == null || work == null || methodName == null)
+            return BSL_READ_MISSING;
+        try
+        {
+            java.lang.reflect.Method method = null;
+            for (Class<?> cls = doc.getClass(); cls != null && method == null; cls = cls.getSuperclass())
+            {
+                try
+                {
+                    method = cls.getDeclaredMethod(methodName, IUnitOfWork.class);
+                }
+                catch (NoSuchMethodException ignored)
+                {
+                }
+            }
+            if (method == null)
+                return BSL_READ_MISSING;
+            method.setAccessible(true);
+            return method.invoke(doc, work);
+        }
+        catch (java.lang.reflect.InvocationTargetException ex)
+        {
+            Throwable cause = ex.getCause();
+            if (cause instanceof RuntimeException runtime)
+                throw runtime;
+            if (cause instanceof Error error)
+                throw error;
+            return BSL_READ_MISSING;
+        }
+        catch (Exception ignored)
+        {
+            return BSL_READ_MISSING;
+        }
+    }
+
     static void logAssistOpen(String location, String json)
     {
+        ContentAssistDebug.perfMark(location, json);
     }
 
     private static String clipLogText(String text)
@@ -2444,11 +2713,16 @@ if (!pendingAutoOpen || !ComfortSettings.isReplaceListFiltersEnabled())
             return;
         }
         // Вставка необёрнутого proposal (пустой префикс — делегат не подключён).
+        // Точка после apply — новый member-access, не текст вставки (лог 15:53: Форма.).
         if (suppressDocumentAutoOpenAfterSession)
         {
-            logAssistOpen("autoOpen.skip", "{\"reason\":\"suppressAfterSession\"" //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"ch\":\"" + ContentAssistDebug.jsonEscapeForLog(String.valueOf(inserted)) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-            return;
+            if (inserted != '.')
+            {
+                logAssistOpen("autoOpen.skip", "{\"reason\":\"suppressAfterSession\"" //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"ch\":\"" + ContentAssistDebug.jsonEscapeForLog(String.valueOf(inserted)) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            }
+            suppressDocumentAutoOpenAfterSession = false;
         }
         int insertOffset = event.getOffset();
         int caretAfter;
@@ -2466,6 +2740,7 @@ if (!pendingAutoOpen || !ComfortSettings.isReplaceListFiltersEnabled())
             doc, inserted, insertOffset, caretAfter, popupWasOpen, 0);
         logAssistOpen("autoOpen.doc", "{\"ch\":\"" + ContentAssistDebug.jsonEscapeForLog(String.valueOf(inserted)) + "\"" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             + ",\"caret\":" + caretAfter //$NON-NLS-1$
+            + ",\"docLen\":" + (doc == null ? -1 : doc.getLength()) //$NON-NLS-1$
             + ",\"branch\":\"" + (branch == null ? "null" : branch) + "\"" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             + ",\"popupWasOpen\":" + popupWasOpen //$NON-NLS-1$
             + ",\"irPending\":" + manualIrAssistPending //$NON-NLS-1$
@@ -2642,6 +2917,9 @@ display.timerExec(delay, () -> fireCompletionAutoOpenTimer(expectedCaretAfter, a
         ContentAssistPopupSync.ensureEmptyListAllowed(assistant, false);
         processor.onAssistSessionContextReady(viewer, caret);
         IRSession session = IrBslExpressionHtmlSupport.resolveIrSessionForAssist(facade, viewer);
+        IDocument doc = viewer != null ? viewer.getDocument() : null;
+        int docLen = doc == null ? -1 : doc.getLength();
+        boolean memberAccess = isMemberAccessAtCaret(caret);
         boolean irScheduled = false;
         if (session != null && !isWordsTableFetchInFlightForCaret(caret))
         {
@@ -2649,14 +2927,30 @@ display.timerExec(delay, () -> fireCompletionAutoOpenTimer(expectedCaretAfter, a
             if (irScheduled)
             {
                 completionAutoOpenIrScheduled = true;
-                logAssistOpen("autoOpen.begin", "{\"path\":\"waitIr\",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                logAssistOpen("autoOpen.begin", "{\"path\":\"waitIr\",\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"docLen\":" + docLen + ",\"memberAccess\":" + memberAccess + "}"); //$NON-NLS-1$ //$NON-NLS-2$
                 // Ждём ИР: открытие только при autoOpenSuggested (ЗаполнитьТаблицуСлов).
                 // Browser warmup — в openCompletionAutoIrPopup (preShowLiteralBrowserPatch).
                 return;
             }
         }
+        if (memberAccess && processor.shouldDeferMemberAccessAutoOpen(viewer, caret))
+        {
+            logAssistOpen("autoOpen.begin", "{\"path\":\"memberDefer\",\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"docLen\":" + docLen + ",\"memberAccess\":true}"); //$NON-NLS-1$ //$NON-NLS-2$
+            completionAutoOpenPending = false;
+            return;
+        }
+        if (!memberAccess && processor.prepareWordListAutoOpen(viewer, caret))
+        {
+            logAssistOpen("autoOpen.begin", "{\"path\":\"wordDefer\",\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"docLen\":" + docLen + ",\"memberAccess\":false}"); //$NON-NLS-1$ //$NON-NLS-2$
+            completionAutoOpenPending = false;
+            return;
+        }
         logAssistOpen("autoOpen.begin", "{\"path\":\"edt\",\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
-            + ",\"irScheduled\":" + irScheduled + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            + ",\"irScheduled\":" + irScheduled //$NON-NLS-1$
+            + ",\"docLen\":" + docLen + ",\"memberAccess\":" + memberAccess + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         warmupAssistBrowserCreator(caret);
         completionAutoOpenEdtOpened = true;
 openCompletionAutoEdtPopup(caret, autoOpenSeq);
@@ -4113,7 +4407,8 @@ processor.applyIrCompletion(snapshot);
         ContentAssistant ca = reloader != null ? reloader.assistant : null;
         if (ca == null || ContentAssistPopupSync.isPopupVisible(ca))
             return false;
-        if (isProposalInsertInProgressGlobally())
+        if (Boolean.TRUE.equals(SmartCompletionProposal.PROPOSAL_APPLY_IN_PROGRESS.get())
+            || Boolean.TRUE.equals(SmartCompletionProposal.IR_PROPOSAL_APPLY_IN_PROGRESS.get()))
             return false;
         StyledText widget = sv.getTextWidget();
         if (widget == null || widget.isDisposed() || !widget.isFocusControl())
@@ -4124,6 +4419,49 @@ processor.applyIrCompletion(snapshot);
             && SmartContentAssistProcessor.ReceiverTypeLabel.findMemberAccessDot(doc, caret) >= 0)
             return false;
         return ContentAssistPopupSync.showPossibleCompletions(ca, true);
+    }
+
+    /**
+     * Как {@link #openPopupForBackgroundList}, но для member-access: список уже в кэше
+     * после фонового захвата членов. Обычный {@code showPossibleCompletions} здесь
+     * нельзя — после точки штатный compute часто пустой и замыкает цикл reopen.
+     */
+    public static boolean openPopupForBackgroundMemberList(ITextViewer viewer)
+    {
+        if (!ComfortSettings.isReplaceListFiltersEnabled())
+        {
+            ContentAssistDebug.perfMark("openPopup.memberBg", //$NON-NLS-1$
+                "{\"ok\":false,\"why\":\"filters\"}"); //$NON-NLS-1$
+            return false;
+        }
+        if (!(viewer instanceof SourceViewer sv))
+        {
+            ContentAssistDebug.perfMark("openPopup.memberBg", "{\"ok\":false,\"why\":\"viewer\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+            return false;
+        }
+        ContentAssistSessionReloader reloader = forViewer(sv);
+        ContentAssistant ca = reloader != null ? reloader.assistant : null;
+        if (ca == null || ContentAssistPopupSync.isPopupVisible(ca))
+        {
+            ContentAssistDebug.perfMark("openPopup.memberBg", //$NON-NLS-1$
+                "{\"ok\":false,\"why\":\"visibleOrNoCa\"}"); //$NON-NLS-1$
+            return false;
+        }
+        if (Boolean.TRUE.equals(SmartCompletionProposal.PROPOSAL_APPLY_IN_PROGRESS.get())
+            || Boolean.TRUE.equals(SmartCompletionProposal.IR_PROPOSAL_APPLY_IN_PROGRESS.get()))
+        {
+            ContentAssistDebug.perfMark("openPopup.memberBg", "{\"ok\":false,\"why\":\"apply\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+            return false;
+        }
+        StyledText widget = sv.getTextWidget();
+        if (widget == null || widget.isDisposed() || !widget.isFocusControl())
+        {
+            ContentAssistDebug.perfMark("openPopup.memberBg", "{\"ok\":false,\"why\":\"focus\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+            return false;
+        }
+        boolean ok = ContentAssistPopupSync.showPossibleCompletions(ca, true);
+        ContentAssistDebug.perfMark("openPopup.memberBg", "{\"ok\":" + ok + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+        return ok;
     }
 
     /** Обновление popup после прихода слов ИР (сразу или в очередь при recompute). */

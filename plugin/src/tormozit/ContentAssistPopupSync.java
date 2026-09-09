@@ -66,6 +66,10 @@ public final class ContentAssistPopupSync
     private static final IdentityHashMap<Object, PendingDebouncedFilter> PENDING_FILTER_TASKS =
         new IdentityHashMap<>();
 
+    /** Снимок {@code initialReplacementContent} до пробела после {@code =}. */
+    private static final IdentityHashMap<ConfigurableCompletionProposal, EqualsPadState> EQUALS_PADS =
+        new IdentityHashMap<>();
+
     private static final int FILTER_DEBOUNCE_MS = 60;
     private static final int INITIAL_POPUP_DISPLAY_LIMIT = 150;
     private static final int POPUP_DISPLAY_STEP = 100;
@@ -3569,6 +3573,24 @@ ensureFilterPending(popup);
         return null;
     }
 
+    public static ICompletionProposal peekSelectedProposal(ContentAssistant assistant)
+    {
+        if (assistant == null)
+            return null;
+        try
+        {
+            Object popup = getPopupObject(assistant);
+            if (popup == null)
+                return null;
+            initPopupReflection(popup);
+            return resolveProposalByDisplay(popup, null);
+        }
+        catch (Exception ignored)
+        {
+            return null;
+        }
+    }
+
     public static boolean isSelectedDisplay(ContentAssistant assistant, String displayKey)
     {
         // Активная строка assist (Eclipse selected), не подтверждение apply.
@@ -3700,9 +3722,104 @@ ensureFilterPending(popup);
                     (List<ICompletionProposal>) fComputedProposalsField.get(popup);
                 shiftWhitespaceReplacementStart(computed, document, caret);
             }
+            syncEqualsSpacePad(assistant, document, caret);
         }
         catch (Exception ignored)
         {
+        }
+    }
+
+    /**
+     * {@code CustomBslConfigurableCompletionProposal.apply} вставляет
+     * {@code initialReplacementContent}, не {@code replacementString}. Правим поле
+     * у предложений в popup, пока окно открыто: {@code insertProposal} часто зовёт
+     * необёрнутый EDT-{@code apply}.
+     */
+    public static void syncEqualsSpacePad(ContentAssistant assistant, IDocument document, int caret)
+    {
+        try
+        {
+            Object popup = getPopup(assistant);
+            if (popup == null || document == null || caret < 0)
+                return;
+            initPopupReflection(popup);
+            if (fFilteredProposalsField != null)
+            {
+                @SuppressWarnings("unchecked")
+                List<ICompletionProposal> filtered =
+                    (List<ICompletionProposal>) fFilteredProposalsField.get(popup);
+                syncEqualsSpacePadList(filtered, document, caret);
+            }
+            if (fComputedProposalsField != null)
+            {
+                @SuppressWarnings("unchecked")
+                List<ICompletionProposal> computed =
+                    (List<ICompletionProposal>) fComputedProposalsField.get(popup);
+                syncEqualsSpacePadList(computed, document, caret);
+            }
+        }
+        catch (Exception ignored)
+        {
+        }
+    }
+
+    public static void restoreEqualsSpacePads()
+    {
+        if (EQUALS_PADS.isEmpty())
+            return;
+        List<ConfigurableCompletionProposal> keys = new ArrayList<>(EQUALS_PADS.keySet());
+        for (ConfigurableCompletionProposal cp : keys)
+            restoreEqualsPad(cp);
+    }
+
+    private static void syncEqualsSpacePadList(List<ICompletionProposal> list, IDocument document,
+        int caret)
+    {
+        if (list == null || list.isEmpty())
+            return;
+        for (ICompletionProposal proposal : list)
+        {
+            ICompletionProposal raw = SmartContentAssistProcessor.unwrapProposal(proposal);
+            if (!(raw instanceof ConfigurableCompletionProposal cp))
+                continue;
+            EqualsPadState state = EQUALS_PADS.get(cp);
+            String repl = state != null ? state.original
+                : SmartCompletionProposal.EqualsSpacePad.readInsertText(cp);
+            int start = cp.getReplacementOffset();
+            int insertAt = start >= 0 ? start : caret;
+            boolean need = SmartCompletionProposal.needsSpaceAfterEquals(document, insertAt, repl);
+            if (need)
+            {
+                if (state != null)
+                    continue;
+                EQUALS_PADS.put(cp, new EqualsPadState(repl, true));
+                SmartContentAssistProcessor.writeReplacementContent(cp, " " + repl); //$NON-NLS-1$
+                cp.setCursorPosition(cp.getCursorPosition() + 1);
+            }
+            else if (state != null)
+                restoreEqualsPad(cp);
+        }
+    }
+
+    private static void restoreEqualsPad(ConfigurableCompletionProposal cp)
+    {
+        EqualsPadState state = EQUALS_PADS.remove(cp);
+        if (state == null)
+            return;
+        if (state.shifted)
+            cp.setCursorPosition(Math.max(0, cp.getCursorPosition() - 1));
+        SmartContentAssistProcessor.writeReplacementContent(cp, state.original);
+    }
+
+    private static final class EqualsPadState
+    {
+        final String original;
+        final boolean shifted;
+
+        EqualsPadState(String original, boolean shifted)
+        {
+            this.original = original;
+            this.shifted = shifted;
         }
     }
 
@@ -3862,6 +3979,12 @@ ensureFilterPending(popup);
             fComputedProposalsField.set(popup, applied);
         applySelection(popup, applied != null ? applied : list, saved, resetToFirst,
             restoreAfterFilterToggle);
+        SourceViewer activeViewer = ContentAssistSessionReloader.getActiveViewer();
+        IDocument doc = activeViewer != null ? activeViewer.getDocument() : null;
+        int caret = SmartContentAssistProcessor.resolveWidgetCaret(activeViewer);
+        ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
+        if (assistant != null)
+            syncEqualsSpacePad(assistant, doc, caret);
     }
 
     private static void applySelection(Object popup, List<ICompletionProposal> list,
@@ -4004,6 +4127,8 @@ ensureFilterPending(popup);
         if (Boolean.TRUE.equals(SHOW_PROPOSALS_GUARD.get()))
             return isPopupVisible(assistant);
         SHOW_PROPOSALS_GUARD.set(Boolean.TRUE);
+        long t0 = ContentAssistDebug.perfStart("showPossibleCompletions"); //$NON-NLS-1$
+        boolean visible = false;
         try
         {
             Object listener = Global.getField(assistant, "fAutoAssistListener"); //$NON-NLS-1$
@@ -4020,7 +4145,8 @@ ensureFilterPending(popup);
                 SmartContentAssistProcessor.runWithCachedListOnly(show);
             else
                 show.run();
-            return isPopupVisible(assistant);
+            visible = isPopupVisible(assistant);
+            return visible;
         }
         catch (Exception e)
         {
@@ -4029,6 +4155,8 @@ ensureFilterPending(popup);
         }
         finally
         {
+            ContentAssistDebug.perfEnd("showPossibleCompletions", t0, //$NON-NLS-1$
+                "{\"cachedListOnly\":" + cachedListOnly + ",\"visible\":" + visible + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             SHOW_PROPOSALS_GUARD.remove();
         }
     }

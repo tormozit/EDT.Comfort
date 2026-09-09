@@ -14,6 +14,8 @@
     <startup class="tormozit.DataCompositionSchemaEditorHook"/> 
     <startup class="tormozit.MoxelEditorHook"/>
     <startup class="tormozit.BSLEditorMenuHook"/>
+    <!-- ВРЕМЕННАЯ ДИАГНОСТИКА: долгая запись модуля блокирует UI -->
+    <startup class="tormozit.BslModuleSaveDiagHook"/>
     <startup class="tormozit.BslHandlerBlankLineHook"/>
     <startup class="tormozit.NaparnikManualModeHook"/>
     <startup class="tormozit.NaparnikPasteCompareHook"/>

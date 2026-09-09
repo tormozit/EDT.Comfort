@@ -113,19 +113,9 @@ public final class BslReferenceSearchTableHook implements IStartup
                     @Override public void queryStarting(ISearchQuery query) { onQueryEvent(); }
                     @Override public void queryFinished(ISearchQuery query) { onQueryEvent(); }
                 });
-                Global.tempLog("ref-search-table", "earlyStartup: слушатели подключены"); //$NON-NLS-1$ //$NON-NLS-2$
             }
             catch (RuntimeException | LinkageError e)
             {
-                Global.tempLog("ref-search-table", "earlyStartup failed: " + e); //$NON-NLS-1$ //$NON-NLS-2$
-            }
-            try
-            {
-                startUiStallWatch(display);
-            }
-            catch (RuntimeException | LinkageError e)
-            {
-                Global.tempLog("ref-search-table", "stall watch failed: " + e); //$NON-NLS-1$ //$NON-NLS-2$
             }
         });
     }
@@ -141,59 +131,6 @@ public final class BslReferenceSearchTableHook implements IStartup
             if (view != null)
                 schedulePatch(view, 0);
         });
-    }
-
-    /**
-     * ВРЕМЕННАЯ ДИАГНОСТИКА (issue 464 — подвисание UI на крупных выборках). Фоновый поток раз в
-     * 250 мс проверяет «пульс» UI-потока (таймер каждые 200 мс); если UI не отвечал &gt; 900 мс —
-     * снимает стек UI-потока прямо во время зависания. Снять после разбора.
-     */
-    private static void startUiStallWatch(Display display)
-    {
-        Thread ui = display.getThread();
-        if (ui == null)
-            return;
-        java.util.concurrent.atomic.AtomicLong heartbeat =
-            new java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis());
-        Runnable[] beat = new Runnable[1];
-        beat[0] = () ->
-        {
-            heartbeat.set(System.currentTimeMillis());
-            if (!display.isDisposed())
-                display.timerExec(200, beat[0]);
-        };
-        display.timerExec(200, beat[0]);
-        Thread watch = new Thread(() ->
-        {
-            boolean reported = false;
-            while (!display.isDisposed())
-            {
-                try
-                {
-                    Thread.sleep(250);
-                }
-                catch (InterruptedException e)
-                {
-                    return;
-                }
-                long lag = System.currentTimeMillis() - heartbeat.get();
-                if (lag > 900 && !reported)
-                {
-                    reported = true;
-                    StringBuilder sb = new StringBuilder("UI stalled ~" + lag + " ms; ui-thread stack:\n"); //$NON-NLS-1$ //$NON-NLS-2$
-                    StackTraceElement[] stack = ui.getStackTrace();
-                    for (int i = 0; i < Math.min(stack.length, 40); i++)
-                        sb.append("  at ").append(stack[i]).append('\n'); //$NON-NLS-1$
-                    Global.tempLog("ref-search-stall", sb.toString()); //$NON-NLS-1$
-                }
-                else if (lag < 300)
-                {
-                    reported = false;
-                }
-            }
-        }, "comfort-ref-search-stall-watch"); //$NON-NLS-1$
-        watch.setDaemon(true);
-        watch.start();
     }
 
     private static void hookWindow(IWorkbenchWindow window)
@@ -293,22 +230,18 @@ public final class BslReferenceSearchTableHook implements IStartup
         Object existing = host.getData(HANDLED_KEY);
         if (existing instanceof ReferenceTablePane pane)
         {
-            Global.tempLog("ref-search-table", "tryPatch: страница уже с таблицей → reload"); //$NON-NLS-1$ //$NON-NLS-2$
             pane.reload();
             return true;
         }
         try
         {
-            long t0 = System.currentTimeMillis();
             ReferenceTablePane pane = ReferenceTablePane.install(activePage, treeViewer);
             if (pane != null)
                 host.setData(HANDLED_KEY, pane);
-            Global.tempLog("ref-search-table", "install: " + (System.currentTimeMillis() - t0) + " ms"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         }
         catch (RuntimeException | LinkageError e)
         {
             // Вёрстка/классы страницы могли измениться в новой версии EDT — остаётся штатное дерево.
-            Global.tempLog("ref-search-table", "install failed: " + e); //$NON-NLS-1$ //$NON-NLS-2$
         }
         return true;
     }
@@ -673,7 +606,6 @@ public final class BslReferenceSearchTableHook implements IStartup
             }
             catch (RuntimeException | LinkageError e)
             {
-                Global.tempLog("ref-search-table", "detachStockTree: " + e); //$NON-NLS-1$ //$NON-NLS-2$
             }
         }
 
@@ -716,7 +648,6 @@ public final class BslReferenceSearchTableHook implements IStartup
         {
             if (table.isDisposed())
                 return;
-            long t0 = System.currentTimeMillis();
             String targetName = searchTargetName();
             rows.clear();
             for (IReferenceDescription reference : matchingReferences())
@@ -728,12 +659,8 @@ public final class BslReferenceSearchTableHook implements IStartup
                     rows.add(row);
                 }
             }
-            long tBuild = System.currentTimeMillis();
             viewer.refresh();
-            long tRefresh = System.currentTimeMillis();
             contextResolver.reschedule(rows);
-            Global.tempLog("ref-search-table", "rebuildRows: " + rows.size() + " строк; сбор " //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + (tBuild - t0) + " мс, refresh таблицы " + (tRefresh - tBuild) + " мс"); //$NON-NLS-1$ //$NON-NLS-2$
         }
 
         /** Плоский список вхождений напрямую из результата поиска (минуя дерево). */
@@ -856,7 +783,6 @@ public final class BslReferenceSearchTableHook implements IStartup
             }
             catch (RuntimeException | LinkageError e)
             {
-                Global.tempLog("ref-search-table", "open failed: " + e); //$NON-NLS-1$ //$NON-NLS-2$
             }
         }
 

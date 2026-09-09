@@ -126,6 +126,7 @@ public class Activator extends AbstractUIPlugin
         IRModuleChangeCollector.ensureListenerInstalled();
         // Как можно раньше: WeavingHook до первой загрузки BslDocumentationComment
         BslDocCommentDescriptionFix.install();
+        BslDocCommentTypeMerge.install();
     }
 
     @Override

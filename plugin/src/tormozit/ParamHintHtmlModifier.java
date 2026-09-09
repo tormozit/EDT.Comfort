@@ -269,10 +269,12 @@ public final class ParamHintHtmlModifier
      * Методы {@code left}/{@code suspend}/{@code resume} у него пустые. Итог: каретка
      * давно вне параметров, а подсказка висит до ближайшей правки текста.
      * <p>
-     * Здесь добавляется недостающий триггер: на движение каретки повторяем штатное
-     * условие и зовём его же {@code removeListenersDispose()} — чтобы снялись и
-     * key-listener, и text-listener, и вернулась видимая каретка, а не только
-     * закрылось окно.
+     * Здесь добавляется недостающий триггер: на движение каретки закрываем, если
+     * она вышла за весь список аргументов (от первой до последней позиции
+     * LinkedMode, включая запятые между пустыми слотами). Штатное
+     * {@code anyPositionContains} для стрелок слишком узкое: запятая — не слот,
+     * «Вправо» с первого параметра туда попадало и окно снималось.
+     * Снос — его же {@code removeListenersDispose()}.
      * <p>
      * Две грабли, каждая стоила прогона.
      * <ol>
@@ -345,7 +347,7 @@ public final class ParamHintHtmlModifier
                 // viewer'а на этот момент ещё не обновлено (см. грабли 2 в javadoc).
                 int caret = SmartContentAssistProcessor.widgetToModelOffset(viewer,
                     event.caretOffset);
-                if (caret < 0 || linked.anyPositionContains(caret))
+                if (caret < 0 || isInsideLinkedArgumentSpan(linked, caret))
                     return;
                 Global.invokeVoid(listener, "removeListenersDispose"); //$NON-NLS-1$
             }
@@ -353,6 +355,39 @@ public final class ParamHintHtmlModifier
             {
                 // см. выше
             }
+        }
+
+        /**
+         * Каретка ещё в списке аргументов LinkedMode, включая запятые и пробелы
+         * между пустыми слотами. {@code anyPositionContains} их не считает:
+         * слоты нулевой длины, запятая — дырка, «Вправо» туда попадает и
+         * штатное условие ложно закрывало бы подсказку.
+         */
+        private static boolean isInsideLinkedArgumentSpan(LinkedModeModel linked, int caret)
+        {
+            if (linked.anyPositionContains(caret))
+                return true;
+            int min = Integer.MAX_VALUE;
+            int max = Integer.MIN_VALUE;
+            boolean any = false;
+            List<?> seq = linked.getTabStopSequence();
+            if (seq == null)
+                return false;
+            for (Object next : seq)
+            {
+                if (!(next instanceof Position pos))
+                    continue;
+                any = true;
+                int start = pos.getOffset();
+                int end = start + pos.getLength();
+                if (start < min)
+                    min = start;
+                if (end > max)
+                    max = end;
+            }
+            if (!any)
+                return false;
+            return caret >= min && caret <= max;
         }
 
         /**
@@ -399,7 +434,8 @@ public final class ParamHintHtmlModifier
             return;
         try
         {
-            xdoc.readOnly((IUnitOfWork<Void, XtextResource>) resource -> {
+            ContentAssistSessionReloader.readOnlyPeekAst(xdoc,
+                (IUnitOfWork<Void, XtextResource>) resource -> {
                 if (resource == null)
                     return null;
                 EObject invocationLike = findInvocationLikeAt(resource, active.caret);
@@ -419,6 +455,65 @@ public final class ParamHintHtmlModifier
         }
         catch (Exception ignored)
         {
+        }
+    }
+
+    /**
+     * Автооткрытие по {@code ,}/{@code (} без штатного {@code execute()}: тот зовёт
+     * {@code IXtextDocument.readOnly} и тем самым переподсветку всего модуля.
+     * {@code ParameterInfo} считается тем же {@code UnitOfWork} EDT через
+     * {@code readOnlyPeekAst} (без переподсветки и без отмены reconciler),
+     * показ — штатный {@code showControlInfo}. Если e4-обёртка не разворачивается —
+     * запасной Direct-показ.
+     */
+    static boolean openParamHintWithoutHighlight(ITextViewer viewer, int caret)
+    {
+        try
+        {
+            if (viewer == null || caret < 0)
+                return false;
+            IDocument document = viewer.getDocument();
+            if (!(document instanceof IXtextDocument xdoc))
+                return false;
+            Object handler = resolveParamHoverHandlerForMiss();
+            String handlerCls = handler == null ? "null" : handler.getClass().getName(); //$NON-NLS-1$
+            boolean realHandler = PARAM_HOVER_HANDLER_CLASS.equals(handlerCls);
+            if (!realHandler)
+                return tryOpenParamHintAfterEdtMiss();
+            ensureFirstActualArgTypesComputed();
+            Class<?> workClass = Class.forName(PARAM_HOVER_HANDLER_CLASS + "$1"); //$NON-NLS-1$
+            java.lang.reflect.Constructor<?> ctor = workClass.getDeclaredConstructors()[0];
+            ctor.setAccessible(true);
+            Object unit = ctor.newInstance(handler, Integer.valueOf(caret));
+            if (!(unit instanceof IUnitOfWork<?, ?>))
+                return false;
+            @SuppressWarnings("unchecked")
+            IUnitOfWork<Object, XtextResource> work =
+                (IUnitOfWork<Object, XtextResource>) unit;
+            Object info = ContentAssistSessionReloader.readOnlyPeekAst(xdoc, work);
+            if (info == null)
+            {
+                ContentAssistSessionReloader.logLinkedMode("openFast.skip", //$NON-NLS-1$
+                    "{\"reason\":\"noInfo\",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+                return false;
+            }
+            Object oldControl = Global.getField(handler, "infoControl"); //$NON-NLS-1$
+            if (oldControl != null)
+                Global.invoke(oldControl, "dispose"); //$NON-NLS-1$
+            Global.setFieldForce(handler, "infoControl", null); //$NON-NLS-1$
+            org.eclipse.ui.IWorkbenchSite site = null;
+            IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+            if (window != null && window.getActivePage() != null
+                && window.getActivePage().getActivePart() != null)
+                site = window.getActivePage().getActivePart().getSite();
+            return Global.invokeVoid(handler, "showControlInfo", //$NON-NLS-1$
+                viewer, info, Integer.valueOf(0), site);
+        }
+        catch (Exception ex)
+        {
+            ContentAssistSessionReloader.logLinkedMode("openFast.err", "{\"ex\":\"" //$NON-NLS-1$ //$NON-NLS-2$
+                + ContentAssistDebug.jsonEscapeForLog(String.valueOf(ex)) + "\"}"); //$NON-NLS-1$
+            return false;
         }
     }
 
@@ -647,38 +742,41 @@ public final class ParamHintHtmlModifier
      * Только промах EDT (нет popup): Error-страницы вместо CA, напр. Найти().
      * Основной modifyHtml/Esc не меняем. HTML — через tryModifyBrowserHtml этого control.
      */
-    private static void tryOpenParamHintAfterEdtMiss()
+    private static boolean tryOpenParamHintAfterEdtMiss()
     {
         try
         {
             if (isParamHintAlreadyVisible())
-                return;
+                return true;
             // Реальный handler с инъекцией (e4). Command.getHandler() — оболочка без полей.
             Object handler = resolveParamHoverHandlerForMiss();
             if (handler == null)
             {
-                return;
+                ContentAssistSessionReloader.logLinkedMode("miss.skip", //$NON-NLS-1$
+                    "{\"reason\":\"handlerNull\"}"); //$NON-NLS-1$
+                return false;
             }
             Object documentation = Global.getField(handler, "documentation"); //$NON-NLS-1$
             Object languageProvider = Global.getField(handler, "languageProvider"); //$NON-NLS-1$
 
             IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
             if (window == null || window.getActivePage() == null)
-                return;
+                return false;
             BslXtextEditor editor = GetRef.getActiveBslEditor(window.getActivePage().getActiveEditor());
             if (editor == null)
-                return;
+                return false;
             ITextViewer viewer = editor.getInternalSourceViewer();
             if (viewer == null || viewer.getTextWidget() == null || viewer.getTextWidget().isDisposed())
-                return;
+                return false;
             IDocument document = viewer.getDocument();
             if (!(document instanceof IXtextDocument xdoc))
-                return;
+                return false;
             int caret = SmartContentAssistProcessor.resolveWidgetCaret(viewer);
             org.eclipse.ui.IWorkbenchSite site = editor.getSite();
 
             final Object handlerRef = handler;
-            Boolean opened = xdoc.readOnly((IUnitOfWork<Boolean, XtextResource>) resource -> {
+            Boolean opened = ContentAssistSessionReloader.readOnlyPeekAst(xdoc,
+                (IUnitOfWork<Boolean, XtextResource>) resource -> {
                 if (resource == null)
                     return Boolean.FALSE;
                 CallSiteInfo siteInfo = findCallSiteAt(resource, caret);
@@ -719,6 +817,8 @@ public final class ParamHintHtmlModifier
                 Object environments = envOwner != null ? envOwner.environments() : null;
                 if (computer == null || environments == null)
                 {
+                    ContentAssistSessionReloader.logLinkedMode("miss.skip", //$NON-NLS-1$
+                        "{\"reason\":\"noComputer\"}"); //$NON-NLS-1$
                     return Boolean.FALSE;
                 }
 
@@ -750,6 +850,8 @@ public final class ParamHintHtmlModifier
                 }
                 if (documentationLocal == null)
                 {
+                    ContentAssistSessionReloader.logLinkedMode("miss.skip", //$NON-NLS-1$
+                        "{\"reason\":\"noDoc\"}"); //$NON-NLS-1$
                     return Boolean.FALSE;
                 }
                 String lang = asString(Global.invoke(languageProviderLocal, "getLanguage")); //$NON-NLS-1$
@@ -760,6 +862,8 @@ public final class ParamHintHtmlModifier
                     methodAccess, environments);
                 if (!(plain instanceof List<?> entries) || entries.isEmpty())
                 {
+                    ContentAssistSessionReloader.logLinkedMode("miss.skip", //$NON-NLS-1$
+                        "{\"reason\":\"noEntries\"}"); //$NON-NLS-1$
                     return Boolean.FALSE;
                 }
 
@@ -829,6 +933,8 @@ public final class ParamHintHtmlModifier
                 }
                 if (caPages.isEmpty())
                 {
+                    ContentAssistSessionReloader.logLinkedMode("miss.skip", //$NON-NLS-1$
+                        "{\"reason\":\"noPages\"}"); //$NON-NLS-1$
                     return Boolean.FALSE;
                 }
 
@@ -877,11 +983,13 @@ public final class ParamHintHtmlModifier
             });
             ContentAssistSessionReloader.logLinkedMode("miss.open", "{\"opened\":" + opened //$NON-NLS-1$ //$NON-NLS-2$
                 + ",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            return Boolean.TRUE.equals(opened);
         }
         catch (Exception ex)
         {
             ContentAssistSessionReloader.logLinkedMode("miss.err", "{\"ex\":\"" //$NON-NLS-1$ //$NON-NLS-2$
                 + ContentAssistDebug.jsonEscapeForLog(String.valueOf(ex)) + "\"}"); //$NON-NLS-1$
+            return false;
         }
     }
 
@@ -911,20 +1019,27 @@ public final class ParamHintHtmlModifier
             }
             if (context != null)
             {
+                Object leaf = Global.invoke(context, "getActiveLeaf"); //$NON-NLS-1$
+                Object fromType = findHandlerInEclipseContext(leaf != null ? leaf : context);
+                if (fromType != null)
+                    return fromType;
                 Class<?> impl = Class.forName(
                     "org.eclipse.e4.core.commands.internal.HandlerServiceImpl"); //$NON-NLS-1$
                 java.lang.reflect.Method lookUp = impl.getMethod("lookUpHandler", //$NON-NLS-1$
                     Class.forName("org.eclipse.e4.core.contexts.IEclipseContext"), //$NON-NLS-1$
                     String.class);
-                Object h = lookUp.invoke(null, context, INVOCATION_PARAMETERS_HOVER_COMMAND);
-                if (h instanceof org.eclipse.core.commands.IHandler)
-                    return unwrapParamHoverHandler(h);
+                Object lookupCtx = leaf != null ? leaf : context;
+                Object h = lookUp.invoke(null, lookupCtx, INVOCATION_PARAMETERS_HOVER_COMMAND);
+                Object unwrapped = unwrapParamHoverHandler(h);
+                if (isRealParamHoverHandler(unwrapped))
+                    return unwrapped;
                 java.lang.reflect.Method get =
                     context.getClass().getMethod("get", String.class); //$NON-NLS-1$
-                Object direct = get.invoke(context,
+                Object direct = get.invoke(lookupCtx,
                     "handler::" + INVOCATION_PARAMETERS_HOVER_COMMAND); //$NON-NLS-1$
-                if (direct instanceof org.eclipse.core.commands.IHandler)
-                    return unwrapParamHoverHandler(direct);
+                unwrapped = unwrapParamHoverHandler(direct);
+                if (isRealParamHoverHandler(unwrapped))
+                    return unwrapped;
             }
         }
         catch (Exception ignored)
@@ -982,6 +1097,37 @@ public final class ParamHintHtmlModifier
             }
         }
         return handler;
+    }
+
+    private static boolean isRealParamHoverHandler(Object handler)
+    {
+        return handler != null && PARAM_HOVER_HANDLER_CLASS.equals(handler.getClass().getName());
+    }
+
+    /** Реальный handler живёт в e4-контексте, не в поле WorkbenchHandlerServiceHandler. */
+    private static Object findHandlerInEclipseContext(Object context)
+    {
+        if (context == null)
+            return null;
+        try
+        {
+            Class<?> handlerClass = Class.forName(PARAM_HOVER_HANDLER_CLASS);
+            Object cur = context;
+            for (int depth = 0; depth < 10 && cur != null; depth++)
+            {
+                Object byType = Global.invoke(cur, "get", handlerClass); //$NON-NLS-1$
+                if (isRealParamHoverHandler(byType))
+                    return byType;
+                Object byName = Global.invoke(cur, "get", PARAM_HOVER_HANDLER_CLASS); //$NON-NLS-1$
+                if (isRealParamHoverHandler(byName))
+                    return byName;
+                cur = Global.invoke(cur, "getParent"); //$NON-NLS-1$
+            }
+        }
+        catch (Exception ignored)
+        {
+        }
+        return null;
     }
 
     /**
@@ -3343,7 +3489,7 @@ public final class ParamHintHtmlModifier
         try
         {
             String hintName = hintMethodName(ctx);
-            InvocationSnapshot snap = xdoc.readOnly(
+            InvocationSnapshot snap = ContentAssistSessionReloader.readOnlyForContentAssist(xdoc,
                 (IUnitOfWork<InvocationSnapshot, XtextResource>) resource -> {
                     if (resource == null)
                         return null;

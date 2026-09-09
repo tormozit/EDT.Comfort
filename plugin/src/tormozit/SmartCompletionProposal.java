@@ -33,6 +33,7 @@ import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 /**
  * Обёртка proposal: кастомны только {@link #validate} и {@link #getStyledDisplayString()};
  * {@link #apply} — pass-through к delegate; если каретка перед {@code (}, вставка без {@code ()}.
+ * Каретка сразу после {@code =} с пробелом перед знаком — перед вставляемым словом тоже пробел.
  */
 public class SmartCompletionProposal implements
     ICompletionProposal,
@@ -189,6 +190,8 @@ public class SmartCompletionProposal implements
     @Override
     public void apply(IDocument document)
     {
+        int caret = resolveApplyCaret(document, -1);
+        EqualsSpacePad pad = EqualsSpacePad.install(document, caret, delegate);
         boolean irApply = delegate instanceof IrCompletionProposal;
         boolean replaceParentOverlap = isEdtOverlapReplaceParent();
         beginProposalApply(document, irApply, replaceParentOverlap);
@@ -204,7 +207,7 @@ public class SmartCompletionProposal implements
             }
             if (irApply)
             {
-                applyIrBareCtorOrDelegate(document, null, (char) 0, 0, resolveApplyCaretOffset(document));
+                applyIrBareCtorOrDelegate(document, null, (char) 0, 0, caret);
                 return;
             }
             delegate.apply(document);
@@ -212,6 +215,7 @@ public class SmartCompletionProposal implements
         finally
         {
             endProposalApply();
+            pad.scheduleRestore();
         }
     }
 
@@ -220,6 +224,8 @@ public class SmartCompletionProposal implements
     @Override
     public void apply(IDocument document, char trigger, int offset)
     {
+        int caret = resolveApplyCaret(document, offset);
+        EqualsSpacePad pad = EqualsSpacePad.install(document, caret, delegate);
         boolean irApply = delegate instanceof IrCompletionProposal;
         boolean replaceParentOverlap = isEdtOverlapReplaceParent();
         beginProposalApply(document, irApply, replaceParentOverlap);
@@ -235,7 +241,7 @@ public class SmartCompletionProposal implements
             }
             if (irApply)
             {
-                applyIrBareCtorOrDelegate(document, null, trigger, 0, offset);
+                applyIrBareCtorOrDelegate(document, null, trigger, 0, caret);
                 return;
             }
             if (delegate instanceof ICompletionProposalExtension)
@@ -246,6 +252,7 @@ public class SmartCompletionProposal implements
         finally
         {
             endProposalApply();
+            pad.scheduleRestore();
         }
     }
 
@@ -276,16 +283,18 @@ public class SmartCompletionProposal implements
     @Override
     public void apply(ITextViewer viewer, char trigger, int stateMask, int offset)
     {
+        IDocument document = viewer != null ? viewer.getDocument() : null;
+        int caret = resolveApplyCaret(document, offset);
+        EqualsSpacePad pad = EqualsSpacePad.install(document, caret, delegate);
         boolean irApply = delegate instanceof IrCompletionProposal;
         boolean replaceParentOverlap = isEdtOverlapReplaceParent();
-        beginProposalApply(viewer != null ? viewer.getDocument() : null, irApply, replaceParentOverlap);
+        beginProposalApply(document, irApply, replaceParentOverlap);
         try
         {
             logApplyStart("viewer"); //$NON-NLS-1$
-            if (replaceParentOverlap && tryApplyEdtOverlapReplaceParent(
-                viewer != null ? viewer.getDocument() : null, viewer, offset))
+            if (replaceParentOverlap && tryApplyEdtOverlapReplaceParent(document, viewer, offset))
                 return;
-            if (viewer != null && tryApplyWordOnly(viewer.getDocument(), viewer, offset, stateMask))
+            if (viewer != null && tryApplyWordOnly(document, viewer, offset, stateMask))
             {
                 logApplyWordOnly("viewer"); //$NON-NLS-1$
                 return;
@@ -295,18 +304,18 @@ public class SmartCompletionProposal implements
                 return;
             if (irApply)
             {
-                applyIrBareCtorOrDelegate(viewer != null ? viewer.getDocument() : null,
-                    viewer, trigger, stateMask, offset);
+                applyIrBareCtorOrDelegate(document, viewer, trigger, stateMask, caret);
                 return;
             }
             if (delegate instanceof ICompletionProposalExtension2)
                 ((ICompletionProposalExtension2) delegate).apply(viewer, trigger, stateMask, offset);
-            else if (viewer != null && viewer.getDocument() != null)
-                apply(viewer.getDocument(), trigger, offset);
+            else if (document != null)
+                apply(document, trigger, offset);
         }
         finally
         {
             endProposalApply();
+            pad.scheduleRestore();
         }
     }
 
@@ -664,6 +673,7 @@ public class SmartCompletionProposal implements
                 replaceFrom = SmartContentAssistProcessor.computeIdentifierWordStart(
                     document, insertOffset);
             replaceLen = Math.max(0, insertOffset - replaceFrom);
+            padIrPlanAfterEquals(document, insertOffset, plan);
         }
         // Отступ вычисляем ДО вставки, по полной строке (не обрезая по каретке)
         try
@@ -1011,6 +1021,109 @@ public class SmartCompletionProposal implements
     {
         ICompletionProposal raw = SmartContentAssistProcessor.unwrapProposal(proposal);
         return raw instanceof ConfigurableCompletionProposal cp ? cp : null;
+    }
+
+    /**
+     * Каретка сразу после {@code =}, перед знаком пробел — перед вставляемым текстом
+     * тоже пробел ({@code А =|} → {@code А = Слово}).
+     */
+    static void padIrPlanAfterEquals(IDocument document, int caret,
+        IrCompletionProposal.InsertPlan plan)
+    {
+        if (plan == null || !needsSpaceAfterEquals(document, caret, plan.text))
+            return;
+        plan.text = " " + plan.text; //$NON-NLS-1$
+        plan.caretOffset++;
+    }
+
+    static boolean needsSpaceAfterEquals(IDocument document, int caret, String insertText)
+    {
+        if (document == null || caret < 2 || insertText == null || insertText.isEmpty())
+            return false;
+        char first = insertText.charAt(0);
+        if (first == ' ' || first == '\t' || first == '\n' || first == '\r')
+            return false;
+        try
+        {
+            return document.getChar(caret - 1) == '=' && document.getChar(caret - 2) == ' ';
+        }
+        catch (BadLocationException e)
+        {
+            return false;
+        }
+    }
+
+    /**
+     * Временно добавляет ведущий пробел в {@code replacementString} EDT-предложения.
+     * Восстанавливает поля после {@code apply}, чтобы объект из кэша списка не остался
+     * с изменённой строкой.
+     */
+    static final class EqualsSpacePad
+    {
+        private final ConfigurableCompletionProposal proposal;
+        private final String original;
+        private final boolean padded;
+
+        static EqualsSpacePad install(IDocument document, int caret, ICompletionProposal delegate)
+        {
+            ConfigurableCompletionProposal cp = asConfigurable(delegate);
+            if (cp == null)
+                return new EqualsSpacePad(null, null, false);
+            String repl = readInsertText(cp);
+            int start = cp.getReplacementOffset();
+            int insertAt = start >= 0 ? start : caret;
+            if (!needsSpaceAfterEquals(document, insertAt, repl))
+                return new EqualsSpacePad(null, null, false);
+            SmartContentAssistProcessor.writeReplacementContent(cp, " " + repl); //$NON-NLS-1$
+            cp.setCursorPosition(cp.getCursorPosition() + 1);
+            return new EqualsSpacePad(cp, repl, true);
+        }
+
+        private EqualsSpacePad(ConfigurableCompletionProposal proposal, String original,
+            boolean padded)
+        {
+            this.proposal = proposal;
+            this.original = original;
+            this.padded = padded;
+        }
+
+        void restore()
+        {
+            if (!padded || proposal == null || original == null)
+                return;
+            proposal.setCursorPosition(Math.max(0, proposal.getCursorPosition() - 1));
+            SmartContentAssistProcessor.writeReplacementContent(proposal, original);
+        }
+
+        void scheduleRestore()
+        {
+            if (!padded)
+                return;
+            Display display = Display.getCurrent();
+            if (display == null || display.isDisposed())
+            {
+                restore();
+                return;
+            }
+            display.asyncExec(this::restore);
+        }
+
+        static String readInsertText(ConfigurableCompletionProposal cp)
+        {
+            Object initial = Global.getField(cp, "initialReplacementContent"); //$NON-NLS-1$
+            if (initial instanceof String s && !s.isEmpty())
+                return s;
+            return cp.getReplacementString();
+        }
+    }
+
+    /** Модельная каретка для чтения документа; {@code fallbackOffset} — аргумент JFace {@code apply}. */
+    private static int resolveApplyCaret(IDocument document, int fallbackOffset)
+    {
+        int model = resolveApplyCaretOffset(document);
+        if (model >= 0)
+            return model;
+        return fallbackOffset;
     }
 
     private static int resolveApplyCaretOffset(IDocument document)

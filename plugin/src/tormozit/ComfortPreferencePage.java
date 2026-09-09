@@ -27,6 +27,9 @@ import org.eclipse.jface.preference.IntegerFieldEditor;
 import org.eclipse.jface.preference.PreferenceConverter;
 import org.eclipse.jface.preference.StringFieldEditor;
 import org.eclipse.swt.SWT;
+import org.eclipse.swt.dnd.Clipboard;
+import org.eclipse.swt.dnd.TextTransfer;
+import org.eclipse.swt.dnd.Transfer;
 import org.eclipse.swt.events.ControlAdapter;
 import org.eclipse.swt.events.ControlEvent;
 import org.eclipse.swt.graphics.Image;
@@ -984,10 +987,12 @@ public class ComfortPreferencePage
                     "выход: текст события не совпал с «Создать заявку»"); //$NON-NLS-1$
                 return;
             }
+            String body;
             String url;
             try
             {
-                url = buildNewIssueUrl();
+                body = NewIssueReport.buildBody();
+                url = buildNewIssueUrl(body);
             }
             catch (Throwable error)
             {
@@ -996,7 +1001,7 @@ public class ComfortPreferencePage
             }
             Global.log(NewIssueReport.LOG_TAG,
                 "URL заявки готов, длина " + url.length() + " симв."); //$NON-NLS-1$ //$NON-NLS-2$
-            ComfortPreferences.openChangesUrl(url);
+            ComfortPreferences.openChangesUrl(url, () -> openIssueWithoutBody(body));
         });
 
         Image telegramIcon = loadBundleImage("icons/obj16/telegram.png"); //$NON-NLS-1$
@@ -1042,12 +1047,45 @@ public class ComfortPreferencePage
      * URL «Создать заявку» с предзаполненным телом — версии, ОС, тема, ИР,
      * дополнительные плагины и флажки Комфорт.
      */
-    private static String buildNewIssueUrl()
+    private static String buildNewIssueUrl(String body)
     {
         String encodedBody = java.net.URLEncoder.encode(
-                NewIssueReport.buildBody(), java.nio.charset.StandardCharsets.UTF_8)
+                body, java.nio.charset.StandardCharsets.UTF_8)
             .replace("+", "%20"); //$NON-NLS-1$ //$NON-NLS-2$
         return NEW_ISSUE_URL + "?body=" + encodedBody; //$NON-NLS-1$
+    }
+
+    /**
+     * Запасной путь, когда браузер не удалось открыть со ссылкой с телом заявки:
+     * открывается обычная форма новой заявки, а техническая информация показывается
+     * липким тостом — по клику на тост открывается окно с полным текстом, ссылка
+     * «Копировать» кладёт его в буфер обмена.
+     */
+    private static void openIssueWithoutBody(String body)
+    {
+        Global.log(NewIssueReport.LOG_TAG,
+            "запасной путь: обычная ссылка на заявку и тост с техинформацией"); //$NON-NLS-1$
+        ComfortPreferences.openChangesUrl(NEW_ISSUE_URL);
+        ToastNotification.showStickyUntilToastHover(
+            "Вставьте техническую информацию в заявку", //$NON-NLS-1$
+            body, () -> copyIssueBody(body), "Копировать"); //$NON-NLS-1$
+    }
+
+    private static void copyIssueBody(String body)
+    {
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        Clipboard clipboard = new Clipboard(display);
+        try
+        {
+            clipboard.setContents(new Object[] { body },
+                new Transfer[] { TextTransfer.getInstance() });
+        }
+        finally
+        {
+            clipboard.dispose();
+        }
     }
 
     /**

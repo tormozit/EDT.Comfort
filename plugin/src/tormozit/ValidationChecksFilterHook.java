@@ -177,6 +177,12 @@ public final class ValidationChecksFilterHook implements IStartup
     private static final String EXCLUDED_NAMES_SHORT = "исключаемых объектов"; //$NON-NLS-1$
     /** Название типа {@code IssueType.WARNING} в местах, которые перехватывает плагин (issue 401). */
     static final String OTHER_WARNING_TYPE_TITLE = "Прочее предупреждение"; //$NON-NLS-1$
+    /**
+     * Название типа {@code IssueType.ERROR}: штатное «Ошибка конфигурации» совпадает
+     * с критичностью {@code MarkerSeverity.ERRORS} и с флажком отбора языковых/сборочных
+     * ошибок. «Прочая ошибка» — в пару к {@link #OTHER_WARNING_TYPE_TITLE}.
+     */
+    static final String OTHER_ERROR_TYPE_TITLE = "Прочая ошибка"; //$NON-NLS-1$
 
     private static final WeakHashMap<Shell, Boolean> pendingWiring = new WeakHashMap<>();
     private static final Map<Display, Image> OTHER_WARNING_ICONS = new WeakHashMap<>();
@@ -222,8 +228,8 @@ public final class ValidationChecksFilterHook implements IStartup
     }
 
     /**
-     * Подменю «Тип» в меню отбора над списком проверок: пункт «Предупреждение»
-     * показываем как «Прочее предупреждение» с нейтральной иконкой (issue 401).
+     * Подменю «Тип» в меню отбора над списком проверок: «Предупреждение» →
+     * «Прочее предупреждение», «Ошибка конфигурации» → «Прочая ошибка» (issue 401).
      *
      * <p>Меню строится заново на каждый показ (штатный {@code CheckFilterMenuProvider}
      * пересоздаёт {@code MenuManager} в {@code Action.run}), поэтому ловим показ,
@@ -238,9 +244,11 @@ public final class ValidationChecksFilterHook implements IStartup
             return;
 
         String warningTitle = LocalizedEnumProvider.getLocalizedString(IssueType.WARNING);
+        String errorTitle = LocalizedEnumProvider.getLocalizedString(IssueType.ERROR);
         String spellingTitle = LocalizedEnumProvider.getLocalizedString(IssueType.SPELLING);
         String codeStyleTitle = LocalizedEnumProvider.getLocalizedString(IssueType.CODE_STYLE);
         MenuItem warningItem = null;
+        MenuItem errorItem = null;
         boolean otherTypesPresent = false;
         for (MenuItem item : menu.getItems())
         {
@@ -249,16 +257,22 @@ public final class ValidationChecksFilterHook implements IStartup
                 continue;
             if (text.equals(warningTitle))
                 warningItem = item;
+            else if (text.equals(errorTitle))
+                errorItem = item;
             else if (text.equals(spellingTitle) || text.equals(codeStyleTitle))
                 otherTypesPresent = true;
         }
-        if (warningItem == null || !otherTypesPresent)
+        if (!otherTypesPresent)
             return;
-
-        warningItem.setText(OTHER_WARNING_TYPE_TITLE);
-        Image icon = typeImage(menu.getDisplay(), IssueType.WARNING);
-        if (icon != null)
-            warningItem.setImage(icon);
+        if (warningItem != null)
+        {
+            warningItem.setText(OTHER_WARNING_TYPE_TITLE);
+            Image icon = typeImage(menu.getDisplay(), IssueType.WARNING);
+            if (icon != null)
+                warningItem.setImage(icon);
+        }
+        if (errorItem != null)
+            errorItem.setText(OTHER_ERROR_TYPE_TITLE);
         Debug.temp("patchTypeMenu: renamed"); //$NON-NLS-1$
     }
 
@@ -753,9 +767,9 @@ public final class ValidationChecksFilterHook implements IStartup
     }
 
     /**
-     * Иконка и подсказка типа в панели параметров проверки: для
-     * {@link IssueType#WARNING} — «Прочее предупреждение» и своя нейтральная
-     * иконка (см. {@link #typeImage}).
+     * Иконка и подсказка типа в панели параметров проверки: штатные имена
+     * {@link IssueType#WARNING} и {@link IssueType#ERROR} подменяются
+     * ({@link #localizedType}), у предупреждения ещё и нейтральная иконка.
      *
      * <p>Штатный обработчик выбора проверки перезаписывает и то, и другое,
      * поэтому подписываемся на тот же источник ({@code getSelectedCheckObjects()})
@@ -791,10 +805,12 @@ public final class ValidationChecksFilterHook implements IStartup
                 return;
             single = type;
         }
-        if (single != IssueType.WARNING)
+        if (single == null)
             return;
-        typeLabel.setImage(typeImage(typeLabel.getDisplay(), IssueType.WARNING));
-        typeLabel.setToolTipText(TooltipText.wrap(typeLabel, "Тип: " + OTHER_WARNING_TYPE_TITLE)); //$NON-NLS-1$
+        Image icon = typeImage(typeLabel.getDisplay(), single);
+        if (icon != null)
+            typeLabel.setImage(icon);
+        typeLabel.setToolTipText(TooltipText.wrap(typeLabel, "Тип: " + localizedType(single))); //$NON-NLS-1$
     }
 
     /**
@@ -1252,10 +1268,9 @@ public final class ValidationChecksFilterHook implements IStartup
     }
 
     /**
-     * Название типа проблемы. Для {@link IssueType#WARNING} — «Прочее
-     * предупреждение» вместо штатного «Предупреждение» (issue 401): само слово
-     * «предупреждение» описывает не характер проблемы, а её значимость, и в
-     * штатном виде путается с критичностью. Остальные типы — как в EDT.
+     * Название типа проблемы. {@link IssueType#WARNING} — «Прочее предупреждение»,
+     * {@link IssueType#ERROR} — «Прочая ошибка»: штатные имена совпадают с
+     * критичностью и со счётчиком шапки панели. Остальные типы — как в EDT.
      */
     static String localizedType(IssueType type)
     {
@@ -1263,7 +1278,32 @@ public final class ValidationChecksFilterHook implements IStartup
             return ""; //$NON-NLS-1$
         if (type == IssueType.WARNING)
             return OTHER_WARNING_TYPE_TITLE;
+        if (type == IssueType.ERROR)
+            return OTHER_ERROR_TYPE_TITLE;
         return LocalizedEnumProvider.getLocalizedString(type);
+    }
+
+    /**
+     * Подменяет штатное имя типа в уже собранной подписи (группа дерева, подсказка
+     * строки). Только если {@code type} — тот тип, чьё имя мы меняем: иначе
+     * «Ошибки конфигурации» критичности {@code ERRORS} совпало бы с множественным
+     * именем {@link IssueType#ERROR}.
+     */
+    static String replaceDisplayedType(IssueType type, String text)
+    {
+        if (type == null || text == null || text.isEmpty())
+            return text;
+        String displayed = localizedType(type);
+        String stock = LocalizedEnumProvider.getLocalizedString(type);
+        if (displayed.equals(stock))
+            return text;
+        String result = text;
+        String plural = LocalizedEnumProvider.getLocalizedString(type, true);
+        if (plural != null && !plural.isEmpty() && !plural.equals(stock))
+            result = result.replace(plural, displayed);
+        if (stock != null && !stock.isEmpty())
+            result = result.replace(stock, displayed);
+        return result;
     }
 
     /** Название критичности. В UI EDT оно берётся от {@link MarkerSeverity}, а не от {@link IssueSeverity}. */

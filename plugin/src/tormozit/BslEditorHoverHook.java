@@ -81,6 +81,7 @@ public final class BslEditorHoverHook implements IStartup
     {
         ContentAssistDebug.logLiteralAssistBuildStamp();
         BslDocCommentDescriptionFix.install();
+        BslDocCommentTypeMerge.install();
         Display.getDefault().asyncExec(() ->
         {
             ParamHintHtmlModifier.install(Display.getDefault());

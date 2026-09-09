@@ -620,9 +620,21 @@ public final class ComfortPreferences
     public static void openChangesUrl(String url)
     {
 
+        openChangesUrl(url, null);
+    }
+
+    /**
+     * Открывает страницу во внешнем браузере.
+     *
+     * @param onFailure вызывается в UI-потоке, если запуск браузера не подтверждён
+     *        ({@code null} — запасного пути нет)
+     */
+    public static void openChangesUrl(String url, Runnable onFailure)
+    {
+
         if (url == null || url.isBlank())
             return;
-        openExternalUrl(url);
+        openExternalUrl(url, onFailure);
     }
 
     private static boolean tryOpenInstallWizardForSite(String siteUrl)
@@ -1048,7 +1060,9 @@ public final class ComfortPreferences
     /** Тег журнала «Комфорт» для разбора отказов открытия внешних ссылок. */
     private static final String URL_LOG_TAG = "Заявка"; //$NON-NLS-1$
 
-    private static void openExternalUrl(String url)
+    private static final boolean GTK = "gtk".equals(SWT.getPlatform()); //$NON-NLS-1$
+
+    private static void openExternalUrl(String url, Runnable onFailure)
     {
 
         Display display = Display.getDefault();
@@ -1060,26 +1074,66 @@ public final class ComfortPreferences
         }
         display.asyncExec(() -> {
 
-            try
-            {
-
-                Global.log(URL_LOG_TAG, "открытие URL, длина " + url.length() + " симв."); //$NON-NLS-1$ //$NON-NLS-2$
-                IWorkbenchBrowserSupport support =
-                    PlatformUI.getWorkbench().getBrowserSupport();
-                IWebBrowser browser = support.getExternalBrowser();
-                logBrowserEnvironment(browser);
-                browser.openURL(URI.create(url).toURL());
-                Global.log(URL_LOG_TAG,
-                    "внешний браузер вызван без исключения (успех запуска не гарантирован)"); //$NON-NLS-1$
-            }
-
-            catch (Exception e)
-            {
-
-                Global.logError(URL_LOG_TAG, "открытие URL не удалось", e); //$NON-NLS-1$
-            }
-
+            if (!launchBrowser(url) && onFailure != null)
+                onFailure.run();
         });
+    }
+
+    /**
+     * Запускает внешний браузер с URL.
+     *
+     * @return {@code false}, если запуск заведомо не удался; {@code true} не гарантирует
+     *         открытие страницы — платформа сообщает лишь о том, что команда отдана
+     */
+    private static boolean launchBrowser(String url)
+    {
+
+        try
+        {
+
+            Global.log(URL_LOG_TAG, "открытие URL, длина " + url.length() + " симв."); //$NON-NLS-1$ //$NON-NLS-2$
+            if (GTK)
+                return launchViaGio(url);
+            IWorkbenchBrowserSupport support = PlatformUI.getWorkbench().getBrowserSupport();
+            IWebBrowser browser = support.getExternalBrowser();
+            logBrowserEnvironment(browser);
+            browser.openURL(URI.create(url).toURL());
+            Global.log(URL_LOG_TAG, "внешний браузер вызван без исключения"); //$NON-NLS-1$
+            return true;
+        }
+
+        catch (Exception e)
+        {
+
+            Global.logError(URL_LOG_TAG, "открытие URL не удалось", e); //$NON-NLS-1$
+            return false;
+        }
+
+    }
+
+    /**
+     * Linux/GTK: запуск в обход {@code SystemBrowserInstance}.
+     *
+     * <p>Штатный {@code SystemBrowserInstance.openURL} сначала пробует
+     * {@code Program.findProgram("html").execute(url)}. SWT строит команду из строки
+     * {@code Exec=} десктоп-файла и подставляет URL только вместо {@code %f}/{@code %u}.
+     * У браузера из Flatpak {@code Exec} содержит токены {@code @@u … @@}, понятные лишь
+     * {@code gio-launch-desktop}: браузер стартует без URL, а {@code execute} возвращает
+     * {@code true} — отказ ничем себя не проявляет (issue 480).
+     *
+     * <p>{@code Program.launch} на GTK — это {@code g_app_info_launch_default_for_uri},
+     * тот же путь, что у {@code xdg-open}: URL доходит и до Flatpak-браузера, а возврат
+     * {@code false} — честный признак отказа.
+     */
+    private static boolean launchViaGio(String url)
+    {
+
+        Global.log(URL_LOG_TAG,
+            "ветка: Program.launch, минуя SystemBrowserInstance (gtk)"); //$NON-NLS-1$
+        logBrowserEnvironment(null);
+        boolean launched = Program.launch(url);
+        Global.log(URL_LOG_TAG, "Program.launch вернул " + launched); //$NON-NLS-1$
+        return launched;
     }
 
     /**
@@ -1101,9 +1155,9 @@ public final class ComfortPreferences
         try
         {
 
-            Global.log(URL_LOG_TAG, "браузер: " //$NON-NLS-1$
-                + (browser == null ? "null" : browser.getClass().getName()) //$NON-NLS-1$
-                + ", id " + (browser == null ? "-" : browser.getId())); //$NON-NLS-1$ //$NON-NLS-2$
+            if (browser != null)
+                Global.log(URL_LOG_TAG, "браузер: " + browser.getClass().getName() //$NON-NLS-1$
+                    + ", id " + browser.getId()); //$NON-NLS-1$
             Global.log(URL_LOG_TAG, "платформа SWT: " + SWT.getPlatform() //$NON-NLS-1$
                 + ", " + System.getProperty("os.name")); //$NON-NLS-1$ //$NON-NLS-2$
             Program html = Program.findProgram("html"); //$NON-NLS-1$
