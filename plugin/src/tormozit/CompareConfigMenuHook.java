@@ -205,9 +205,10 @@ import com._1c.g5.v8.dt.compare.model.SymlinkComparisonNode;
  * <p>В тулбаре добавляется кнопка-dropdown «Развернуть» (чистое подменю —
  * при любом клике открывается меню с тремя пунктами):
  * <ul>
- *   <li>До измененных — развернуть всё кроме добавленных/удалённых.</li>
+ *   <li>До измененных — развернуть ветки как фильтр «Показывать измененные»
+ *       ({@code hasChanged}): без добавленных/удалённых и без неизменённых поддеревьев.</li>
  *   <li>До объектов   — развернуть до верхних объектов конфигурации.</li>
- *   <li>До помеченных — развернуть до узлов с установленным чекбоксом.</li>
+ *   <li>До помеченных — развернуть ветки до помеченных листьев.</li>
  * </ul>
  */
 public class CompareConfigMenuHook implements IStartup
@@ -564,7 +565,7 @@ public class CompareConfigMenuHook implements IStartup
         Menu menu = new Menu(bar.getShell(), SWT.POP_UP);
 
         addExpandMenuItem(menu, "До измененных",
-            "Развернуть всё, кроме добавленных/удалённых",
+            "Развернуть ветки до узлов фильтра «Показывать измененные»",
             editor, CompareConfigExpandMode.toBothElement);
 
         addExpandMenuItem(menu, "До объектов",
@@ -572,7 +573,7 @@ public class CompareConfigMenuHook implements IStartup
             editor, CompareConfigExpandMode.toObject);
 
         addExpandMenuItem(menu, "До помеченных",
-            "Развернуть до узлов с установленным чекбоксом",
+            "Развернуть ветки до помеченных листьев",
             editor, CompareConfigExpandMode.toMarked);
 
         // Позиционируем меню под кнопкой тулбара
@@ -5263,7 +5264,7 @@ public class CompareConfigMenuHook implements IStartup
                     Global.logError("CompareConfig", "collectElementsToExpand", e); //$NON-NLS-1$ //$NON-NLS-2$
                 }
             }
-            TreeExpander.runSuppressed(() ->
+            applyExpandedState(viewer, () ->
             {
                 viewer.collapseAll();
                 viewer.setExpandedElements(toExpand.toArray());
@@ -5301,7 +5302,7 @@ public class CompareConfigMenuHook implements IStartup
             if (toExpand.isEmpty() && !skipAddedRoot)
                 return;
 
-            TreeExpander.runSuppressed(() ->
+            applyExpandedState(viewer, () ->
             {
                 if (skipAddedRoot)
                     viewer.setExpandedState(root, false);
@@ -5313,7 +5314,11 @@ public class CompareConfigMenuHook implements IStartup
         /**
          * Рекурсивно собирает список узлов для раскрытия.
          * В {@code toExpand} попадают только узлы, видимые при текущих фильтрах дерева.
-         * Обход модели — по полному дереву content provider; вызовов вьювера внутри нет.
+         * Обход модели — по content provider, без вызовов вьювера.
+         * Для «До измененных» неизменённые объекты не обходятся ({@code hasChanged}),
+         * {@code getChildren} не материализует формы и реквизиты.
+         * Для «До помеченных» спускаемся по помеченным узлам до листьев;
+         * непомеченные поддеревья не обходятся.
          */
         private static void collectElementsToExpand(ITreeContentProvider cp, Object element,
                 CompareConfigExpandMode mode, Set<Object> toExpand, AbstractTreeViewer viewer)
@@ -5321,7 +5326,8 @@ public class CompareConfigMenuHook implements IStartup
             if (!cp.hasChildren(element)
                     || mode == CompareConfigExpandMode.toBothElement && isAddedOrDeleted(element)
                     || mode == CompareConfigExpandMode.toObject && isObject(element)
-                    || mode == CompareConfigExpandMode.toMarked && !isMarked(element))
+                    || mode == CompareConfigExpandMode.toMarked && !isMarked(element)
+                    || mode == CompareConfigExpandMode.toBothElement && skipUnchangedForExpandToChanged(element))
                 return;
 
             if (CompareConfigSearchDialogHook.isNodeMatchFilters(element, viewer))
@@ -5340,6 +5346,45 @@ public class CompareConfigMenuHook implements IStartup
                 return;
             for (Object child : children)
                 collectElementsToExpand(cp, child, mode, toExpand, viewer);
+        }
+
+        /**
+         * Не спускаться в узел без {@code hasChanged(MAIN, OTHER)} — тот же критерий,
+         * что у фильтра «Показывать измененные». Контейнеры не отсекаем.
+         */
+        private static boolean skipUnchangedForExpandToChanged(Object element)
+        {
+            if (isExpandContainer(element) || !(element instanceof IPartialModelNode node))
+                return false;
+            try
+            {
+                return !node.hasChanged(ComparisonSide.MAIN, ComparisonSide.OTHER);
+            }
+            catch (RuntimeException e)
+            {
+                Global.logError("CompareConfig", "hasChanged", e); //$NON-NLS-1$ //$NON-NLS-2$
+                return false;
+            }
+        }
+
+        private static void applyExpandedState(AbstractTreeViewer viewer, Runnable action)
+        {
+            TreeExpander.runSuppressed(() ->
+            {
+                Control control = viewer.getControl();
+                boolean redraw = control != null && !control.isDisposed();
+                if (redraw)
+                    control.setRedraw(false);
+                try
+                {
+                    action.run();
+                }
+                finally
+                {
+                    if (redraw && !control.isDisposed())
+                        control.setRedraw(true);
+                }
+            });
         }
 
         /**
