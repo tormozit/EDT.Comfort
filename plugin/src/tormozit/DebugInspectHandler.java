@@ -27,6 +27,7 @@ import org.osgi.framework.Bundle;
 
 import com._1c.g5.v8.dt.bsl.model.Expression;
 import com._1c.g5.v8.dt.bsl.model.Invocation;
+import com._1c.g5.v8.dt.bsl.model.Variable;
 import com._1c.g5.v8.dt.debug.core.model.IBslStackFrame;
 import com._1c.g5.v8.dt.debug.core.model.IDebugMonitoringManager;
 
@@ -133,6 +134,10 @@ public final class DebugInspectHandler extends AbstractHandler
      * скобками и аргументами. Цепочка {@code а.б.в} в модели вложенная, поэтому каретка на
      * {@code б} даёт {@code а.б}, а не всю цепочку.
      *
+     * <p>Объявление параметра метода и {@code Перем} в модели — {@link Variable}, не
+     * {@link Expression}. Для них берётся {@link Variable#getName()}, а не весь узел
+     * ({@code Знач Имя = …} не является выражением отладчика).
+     *
      * <p>Если под кареткой пусто (пробел, перевод строки, комментарий) — {@code null}: попап
      * открывается с пустым полем ввода.
      */
@@ -158,11 +163,9 @@ public final class DebugInspectHandler extends AbstractHandler
                     return null;
 
                 int offset = caretOffset(document, selection.getOffset());
-                int[] range = xtextDocument.readOnly(
-                    (IUnitOfWork<int[], XtextResource>)resource -> expressionRange(resource, offset));
-                if (range == null)
-                    return null;
-                return document.get(range[0], range[1]).trim();
+                String text = xtextDocument.readOnly(
+                    (IUnitOfWork<String, XtextResource>)resource -> expressionText(resource, document, offset));
+                return text == null || text.isBlank() ? null : text;
             }
             catch (Exception e)
             {
@@ -185,7 +188,8 @@ public final class DebugInspectHandler extends AbstractHandler
             return Character.isLetterOrDigit(before) || before == '_' ? offset - 1 : offset;
         }
 
-        private static int[] expressionRange(XtextResource resource, int offset)
+        private static String expressionText(XtextResource resource, IDocument document, int offset)
+            throws Exception
         {
             IParseResult parseResult = resource == null ? null : resource.getParseResult();
             if (parseResult == null || parseResult.getRootNode() == null)
@@ -195,8 +199,13 @@ public final class DebugInspectHandler extends AbstractHandler
                 return null;
 
             EObject element = leaf.getSemanticElement();
-            while (element != null && !(element instanceof Expression))
+            while (element != null && !(element instanceof Expression) && !(element instanceof Variable))
                 element = element.eContainer();
+            if (element instanceof Variable variable)
+            {
+                String name = variable.getName();
+                return name == null || name.isBlank() ? null : name;
+            }
             if (element == null)
                 return null;
 
@@ -208,7 +217,9 @@ public final class DebugInspectHandler extends AbstractHandler
             }
 
             INode node = NodeModelUtils.findActualNodeFor(element);
-            return node == null ? null : new int[] { node.getOffset(), node.getLength() };
+            if (node == null)
+                return null;
+            return document.get(node.getOffset(), node.getLength()).trim();
         }
 
         private static ITextSelection textSelection(Object inspectDelegate)

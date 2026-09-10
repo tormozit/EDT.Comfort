@@ -457,13 +457,10 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
                     continue;
                 manager.removeListener(listener);
                 manager.addListener(new TitleRefireThrottle(listener, editor));
-                EditorTabIconDiagHook.overlayDiag(editor, "wrap", //$NON-NLS-1$
-                    "listener=" + listener.getClass().getName()); //$NON-NLS-1$
             }
         }
-        catch (Exception e)
+        catch (Exception ignored)
         {
-            Global.tempLog(EditorTabIconDiagHook.OVERLAY_TOPIC, "wrap-fail " + e); //$NON-NLS-1$
         }
     }
 
@@ -510,9 +507,8 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
                 nowTitle = editor.getTitle() + ' ' + editor.getTitleToolTip();
                 nowImage = editor.getTitleImage();
             }
-            catch (RuntimeException ex)
+            catch (RuntimeException ignored)
             {
-                EditorTabIconDiagHook.overlayDiag(editor, "decorator-fail", String.valueOf(ex)); //$NON-NLS-1$
                 return;
             }
             boolean titleChanged = lastTitle == null || !nowTitle.equals(lastTitle);
@@ -520,21 +516,12 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
             boolean drop = isTransientOverlayDrop(editor, lastImage, nowImage);
             boolean targeted = eventTargetsEditor(event, editor);
             boolean liveOverlay = isLiveProblemOverlay(editor, nowImage);
-            String eventInfo = "titleChg=" + titleChanged + " imgChg=" + imageChanged //$NON-NLS-1$ //$NON-NLS-2$
-                + " drop=" + drop + " targeted=" + targeted //$NON-NLS-1$ //$NON-NLS-2$
-                + " last=" + EditorTabIconDiagHook.describeImageForOverlay(lastImage) //$NON-NLS-1$
-                + " elems=" + eventElementsInfo(event, editor); //$NON-NLS-1$
             if (!titleChanged && !imageChanged)
             {
-                EditorTabIconDiagHook.overlayDiag(editor, liveOverlay ? "decorator-same-live" : "decorator-same", //$NON-NLS-1$ //$NON-NLS-2$
-                    eventInfo);
-                if (liveOverlay)
+                if (liveOverlay && MdEditorListTabCountHook.innerTabsShowProblemOverlay(editor))
                 {
-                    if (MdEditorListTabCountHook.innerTabsShowProblemOverlay(editor))
-                    {
-                        rememberWorkbenchOverlay(editor, nowImage);
-                        EditorTabIconDiagHook.applyLiveProblemOverlay(editor, nowImage);
-                    }
+                    rememberWorkbenchOverlay(editor, nowImage);
+                    EditorTabIconDiagHook.applyLiveProblemOverlay(editor, nowImage);
                 }
                 return;
             }
@@ -543,7 +530,6 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
                 if (MdEditorListTabCountHook.innerTabsShowProblemOverlay(editor))
                 {
                     rememberWorkbenchOverlay(editor, lastImage);
-                    EditorTabIconDiagHook.overlayDiag(editor, "decorator-skip-drop", eventInfo); //$NON-NLS-1$
                     if (titleChanged)
                     {
                         lastTitle = nowTitle;
@@ -554,7 +540,6 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
                 clearWorkbenchOverlay(editor);
                 lastTitle = nowTitle;
                 lastImage = nowImage;
-                EditorTabIconDiagHook.overlayDiag(editor, "decorator-drop-plain", eventInfo); //$NON-NLS-1$
                 EditorTabIconDiagHook.applyWorkbenchTabImage(editor, nowImage);
                 if (titleChanged)
                     delegate.labelProviderChanged(event);
@@ -566,8 +551,6 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
                 rememberWorkbenchOverlay(editor, nowImage);
             lastTitle = nowTitle;
             lastImage = nowImage;
-            EditorTabIconDiagHook.overlayDiag(editor, imageChanged ? "decorator-fire" : "decorator-title", //$NON-NLS-1$ //$NON-NLS-2$
-                eventInfo);
             if (titleChanged)
                 delegate.labelProviderChanged(event);
             if (imageChanged)
@@ -650,32 +633,6 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
                 return true;
         }
         return false;
-    }
-
-    private static String eventElementsInfo(LabelProviderChangedEvent event, IEditorPart editor)
-    {
-        if (event == null)
-            return "null"; //$NON-NLS-1$
-        Object[] elements = event.getElements();
-        if (elements == null)
-            return "null"; //$NON-NLS-1$
-        boolean hasModel = false;
-        if (editor instanceof DtGranularEditor<?> granular)
-        {
-            EObject model = granular.getModel();
-            if (model != null)
-            {
-                for (Object element : elements)
-                {
-                    if (element == model)
-                    {
-                        hasModel = true;
-                        break;
-                    }
-                }
-            }
-        }
-        return elements.length + " hasModel=" + hasModel; //$NON-NLS-1$
     }
 
     /** Область заголовка формы — {@code org.eclipse.ui.internal.forms.widgets.TitleRegion}. */

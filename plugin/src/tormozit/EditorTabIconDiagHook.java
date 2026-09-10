@@ -5,7 +5,6 @@ import java.util.ArrayList;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 
 import org.eclipse.core.runtime.FileLocator;
@@ -54,10 +53,6 @@ public final class EditorTabIconDiagHook implements IStartup
     private static final String OVERRIDE_ICON_KEY = "e4_override_icon_image_key"; //$NON-NLS-1$
     /** Однократная проверка соседей после закрытия вкладки: dispose titleImage идёт после partClosed. */
     private static final int CLOSE_SCAN_MS = 100;
-
-    static final String OVERLAY_TOPIC = "editor-tab-overlay"; //$NON-NLS-1$
-
-    private static final AtomicLong OVERLAY_SEQ = new AtomicLong();
 
     private static final Map<IWorkbenchPart, IPropertyListener> TITLE_LISTENERS = new IdentityHashMap<>();
     private static final List<CTabFolder> WATCHED = new ArrayList<>();
@@ -356,10 +351,7 @@ public final class EditorTabIconDiagHook implements IStartup
     {
         if (!usableImage(overlay)
             || !MdEditorTitleNavigatorMenuHook.isLiveProblemOverlay(editor, overlay))
-        {
-            overlayDiag(editor, "apply-live-skip", "usable=" + usableImage(overlay)); //$NON-NLS-1$ //$NON-NLS-2$
             return;
-        }
         applyTitleImage(editor, overlay);
     }
 
@@ -380,16 +372,10 @@ public final class EditorTabIconDiagHook implements IStartup
         try
         {
             if (item.getImage() != image)
-            {
                 item.setImage(image);
-                overlayDiag(editor, "setImage", "ok"); //$NON-NLS-1$ //$NON-NLS-2$
-            }
-            else
-                overlayDiag(editor, "setImage", "already"); //$NON-NLS-1$ //$NON-NLS-2$
         }
         catch (RuntimeException ex)
         {
-            overlayDiag(editor, "setImage", "fail " + ex); //$NON-NLS-1$ //$NON-NLS-2$
             log("setImage fail tab='" + safeText(item.getText()) + "' " + ex); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
@@ -497,29 +483,19 @@ public final class EditorTabIconDiagHook implements IStartup
         boolean innerOverlay = MdEditorListTabCountHook.innerTabsShowProblemOverlay(editor);
         if (innerOverlay && MdEditorTitleNavigatorMenuHook.isLiveProblemOverlay(editor, live))
         {
-            overlayDiag(editor, "propTitle", "apply-live"); //$NON-NLS-1$ //$NON-NLS-2$
             applyLiveProblemOverlay(editor, live);
             return;
         }
         Image held = MdEditorTitleNavigatorMenuHook.heldWorkbenchOverlay(editor);
         if (innerOverlay && usableImage(held) && current != held)
         {
-            overlayDiag(editor, "propTitle", "rehold"); //$NON-NLS-1$ //$NON-NLS-2$
             applyTitleImage(editor, held);
             return;
         }
         if (innerOverlay && usableImage(held) && current == held)
-        {
-            overlayDiag(editor, "propTitle", "rehold-same"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
-        }
         if (usableImage(live) && current == live && usableImage(current))
-        {
-            overlayDiag(editor, "propTitle", "noop same"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
-        }
-        overlayDiag(editor, "propTitle", "restore-live currentUsable=" + usableImage(current)
-            + " innerOverlay=" + innerOverlay); //$NON-NLS-1$ //$NON-NLS-2$
         if (!usableImage(current))
             log("propTitle " + describeItem(item, folder != null && folder.getSelection() == item) //$NON-NLS-1$
                 + " live=" + describeImage(live)); //$NON-NLS-1$
@@ -581,49 +557,6 @@ public final class EditorTabIconDiagHook implements IStartup
             + " iconURI=" + (mpart != null ? mpart.getIconURI() : "null") //$NON-NLS-1$ //$NON-NLS-2$
             + " editor=" + className(editor) //$NON-NLS-1$
             + " dirty=" + editor.isDirty(); //$NON-NLS-1$
-    }
-
-    static void overlayDiag(IEditorPart editor, String action, String extra)
-    {
-        long n = OVERLAY_SEQ.incrementAndGet();
-        StringBuilder sb = new StringBuilder();
-        sb.append('#').append(n).append(' ').append(action);
-        sb.append(" title='").append(safeTitle(editor)).append('\''); //$NON-NLS-1$
-        if (editor != null)
-            sb.append(" dirty=").append(editor.isDirty()); //$NON-NLS-1$
-        Image live = titleImageOf(editor);
-        Object stored = editor != null ? Global.getField(editor, "titleImage") : null; //$NON-NLS-1$
-        Image field = stored instanceof Image image ? image : null;
-        CTabFolder folder = folderOf(editor);
-        CTabItem item = itemOf(editor, folder);
-        Image tab = item != null && !item.isDisposed() ? safeImage(item::getImage) : null;
-        MPart mpart = mpartOf(editor);
-        if (mpart == null && item != null)
-            mpart = mpartOfItem(item);
-        Object ov = mpart != null ? mpart.getTransientData().get(OVERRIDE_ICON_KEY) : null;
-        Image override = ov instanceof Image image ? image : null;
-        sb.append(" wbTab=").append(describeImage(tab)); //$NON-NLS-1$
-        if (item != null && !item.isDisposed())
-            sb.append(" wbText='").append(safeText(item.getText())).append('\''); //$NON-NLS-1$
-        sb.append(" live=").append(describeImage(live)); //$NON-NLS-1$
-        sb.append(" field=").append(describeImage(field)); //$NON-NLS-1$
-        sb.append(" override=").append(describeImage(override)); //$NON-NLS-1$
-        sb.append(" liveIsField=").append(live != null && live == field); //$NON-NLS-1$
-        sb.append(" wbIsLive=").append(tab != null && tab == live); //$NON-NLS-1$
-        sb.append(" wbIsField=").append(tab != null && tab == field); //$NON-NLS-1$
-        sb.append(" liveOverlay=").append(MdEditorTitleNavigatorMenuHook.isLiveProblemOverlay(editor, live)); //$NON-NLS-1$
-        Image held = MdEditorTitleNavigatorMenuHook.heldWorkbenchOverlay(editor);
-        sb.append(" held=").append(describeImage(held)); //$NON-NLS-1$
-        sb.append(" wbIsHeld=").append(tab != null && tab == held); //$NON-NLS-1$
-        sb.append(" module=").append(MdEditorListTabCountHook.describeModuleTabState(editor)); //$NON-NLS-1$
-        if (extra != null && !extra.isEmpty())
-            sb.append(' ').append(extra);
-        Global.tempLog(OVERLAY_TOPIC, sb.toString());
-    }
-
-    static String describeImageForOverlay(Image image)
-    {
-        return describeImage(image);
     }
 
     private static String describeImage(Image image)

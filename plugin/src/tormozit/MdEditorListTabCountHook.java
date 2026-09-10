@@ -127,8 +127,6 @@ public final class MdEditorListTabCountHook implements IStartup
 
     private static final String KEY_EDITOR = "tormozit.mdListTabCount.editor"; //$NON-NLS-1$
 
-    private static final String KEY_MODULE_LOG_SHOWN = "tormozit.mdListTabCount.moduleLogShown"; //$NON-NLS-1$
-
     private static final String KEY_CONTENT_APPLIED = "tormozit.mdListTabCount.contentApplied"; //$NON-NLS-1$
 
     private static final String KEY_OVERFLOW_MENU = "tormozit.mdListTabCount.overflowMenu"; //$NON-NLS-1$
@@ -889,10 +887,8 @@ public final class MdEditorListTabCountHook implements IStartup
                 return;
             if (folder.isDisposed() || folder.getData(KEY_FOLDER) == null)
                 return;
-            logModuleIconIfChanged(folder, "paint-before"); //$NON-NLS-1$
             if (tabImageNeedsRestore(folder))
                 restoreTabImagesQuiet(folder);
-            logModuleIconIfChanged(folder, "paint-after"); //$NON-NLS-1$
         });
     }
 
@@ -900,8 +896,6 @@ public final class MdEditorListTabCountHook implements IStartup
     {
         if (folder == null || folder.isDisposed())
             return;
-        logModuleIconIfChanged(folder, "restore-before"); //$NON-NLS-1$
-        boolean wrote = false;
         for (CTabItem item : folder.getItems())
         {
             if (item == null || item.isDisposed())
@@ -911,15 +905,10 @@ public final class MdEditorListTabCountHook implements IStartup
             Image comfort = dataImage(item, KEY_COMFORT_IMAGE);
             if (comfort == null)
                 continue;
-            if (!wrote)
-            {
-                wrote = true;
-            }
             Image before = item.getImage();
             Image wanted = withSeverityOverlay(comfort, before);
             Global.setField(item, "image", wanted); //$NON-NLS-1$
         }
-        logModuleIconIfChanged(folder, "restore"); //$NON-NLS-1$
     }
 
     /**
@@ -1718,9 +1707,6 @@ public final class MdEditorListTabCountHook implements IStartup
         Image current = stockImageWins(before) ? before : null;
         if (current == null && comfort != null)
             item.setImage(withSeverityOverlay(comfort, before));
-        CTabFolder parent = item.getParent();
-        if (parent != null && (isModulePage(page) || looksLikeModuleTabTitle(item.getText())))
-            logModuleIconIfChanged(parent, "apply"); //$NON-NLS-1$
 
         CTabFolder folder = item.getParent();
         Table nav = leftNavOf(folder);
@@ -1939,19 +1925,6 @@ public final class MdEditorListTabCountHook implements IStartup
     // Вкладки модулей: (+) / (-)
     // =========================================================================
 
-    static String describeModuleTabState(IEditorPart editor)
-    {
-        if (!(editor instanceof DtGranularEditor<?> granular))
-            return "n/a"; //$NON-NLS-1$
-        Object container = Global.invoke(granular, "getContainer"); //$NON-NLS-1$
-        if (!(container instanceof CTabFolder folder) || folder.isDisposed())
-            return "no-folder"; //$NON-NLS-1$
-        CTabItem item = findModuleTab(granular, folder);
-        if (item == null || item.isDisposed())
-            return "no-module-tab items=" + folder.getItemCount(); //$NON-NLS-1$
-        return describeInnerTab(item);
-    }
-
     /**
      * На внутренних вкладках сейчас виден значок критичности EDT или наш уголок.
      * Только чтение, картинки не меняет.
@@ -1975,54 +1948,6 @@ public final class MdEditorListTabCountHook implements IStartup
                 return true;
         }
         return false;
-    }
-
-    private static CTabItem findModuleTab(DtGranularEditor<?> editor, CTabFolder folder)
-    {
-        Object pagesObj = Global.getField(editor, "pages"); //$NON-NLS-1$
-        List<?> pages = pagesObj instanceof List<?> list ? list : List.of();
-        CTabItem[] items = folder.getItems();
-        for (int i = 0; i < items.length; i++)
-        {
-            CTabItem item = items[i];
-            if (item == null || item.isDisposed())
-                continue;
-            Object pageObj = i < pages.size() ? pages.get(i) : null;
-            IFormPage page = pageObj instanceof IFormPage formPage ? formPage : null;
-            if (isModulePage(page) || looksLikeModuleTabTitle(item.getText()))
-                return item;
-        }
-        return null;
-    }
-
-    private static void logModuleIconIfChanged(CTabFolder folder, String reason)
-    {
-        if (folder == null || folder.isDisposed())
-            return;
-        Object editorObj = folder.getData(KEY_EDITOR);
-        if (!(editorObj instanceof DtGranularEditor<?> editor))
-            return;
-        CTabItem item = findModuleTab(editor, folder);
-        if (item == null || item.isDisposed())
-            return;
-        Image shown = item.getImage();
-        if (item.getData(KEY_MODULE_LOG_SHOWN) == shown)
-            return;
-        item.setData(KEY_MODULE_LOG_SHOWN, shown);
-        EditorTabIconDiagHook.overlayDiag(editor, "module-" + reason, null); //$NON-NLS-1$
-    }
-
-    private static String describeInnerTab(CTabItem item)
-    {
-        Image shown = item.getImage();
-        Image comfort = dataImage(item, KEY_COMFORT_IMAGE);
-        MarkerSeverity stockSev = severityOfImage(shown);
-        return "text='" + item.getText() + "'" //$NON-NLS-1$ //$NON-NLS-2$
-            + " shown=" + EditorTabIconDiagHook.describeImageForOverlay(shown) //$NON-NLS-1$
-            + " comfort=" + EditorTabIconDiagHook.describeImageForOverlay(comfort) //$NON-NLS-1$
-            + " stockSev=" + (stockSev == null ? "none" : stockSev.name()) //$NON-NLS-1$ //$NON-NLS-2$
-            + " stockWins=" + stockImageWins(shown) //$NON-NLS-1$
-            + " overlaid=" + (shown != null && comfort != null && shown != comfort); //$NON-NLS-1$
     }
 
     private static boolean isModulePage(IFormPage page)

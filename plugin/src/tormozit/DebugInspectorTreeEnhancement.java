@@ -669,6 +669,8 @@ final class DebugInspectorTreeEnhancement
             return false;
         if (!(focus instanceof StyledText) && !(focus instanceof Text))
             return false;
+        if (Boolean.TRUE.equals(focus.getData(DebugInspectorHook.INSPECT_EXPRESSION_EDITOR_KEY)))
+            return false;
         Shell inspector = tree.getShell();
         if (inspector == null || inspector.isDisposed())
             return false;

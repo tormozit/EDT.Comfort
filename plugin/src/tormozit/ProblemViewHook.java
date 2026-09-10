@@ -450,10 +450,7 @@ public final class ProblemViewHook implements IStartup
         try
         {
             if (gates.containsKey(view))
-            {
-                Debug.temp("заслонка: уже установлена на " + view.getClass().getName()); //$NON-NLS-1$
                 return;
-            }
             Object manager = Global.getField(view, "markerManager"); //$NON-NLS-1$
             Object listener = Global.getField(view, "updateListener"); //$NON-NLS-1$
             if (!(manager instanceof IMarkerManagerV2 markerManager)
@@ -463,7 +460,6 @@ public final class ProblemViewHook implements IStartup
                     + className(manager) + ", updateListener=" + className(listener) //$NON-NLS-1$
                     + " (панель обновляется штатно)"; //$NON-NLS-1$
                 Debug.log(msg);
-                Debug.temp(msg);
                 return;
             }
             installMarkerEventProbe(markerManager);
@@ -479,12 +475,10 @@ public final class ProblemViewHook implements IStartup
                 + ", менеджер " + identity(markerManager) //$NON-NLS-1$
                 + ", тумблер=" + ComfortSettings.isProblemViewUpdateGateEnabled(); //$NON-NLS-1$
             Debug.log(installed);
-            Debug.temp(installed);
         }
         catch (RuntimeException e)
         {
             Debug.log("заслонка обновлений: не установлена — " + e); //$NON-NLS-1$
-            Debug.temp("заслонка обновлений: не установлена — " + e); //$NON-NLS-1$
         }
     }
 
@@ -496,7 +490,6 @@ public final class ProblemViewHook implements IStartup
     {
         ComfortSettings.setProblemViewUpdateGateEnabled(enabled);
         syncUpdateGateCommandState(enabled);
-        Debug.temp("заслонка: тумблер " + (enabled ? "вкл" : "выкл")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         if (enabled)
             return;
         for (ResultChangeGate gate : new java.util.ArrayList<>(gates.values()))
@@ -548,7 +541,6 @@ public final class ProblemViewHook implements IStartup
                 + (serviceV2 == viewManager ? " (тот же экземпляр)" : " (ДРУГОЙ экземпляр)") //$NON-NLS-1$ //$NON-NLS-2$
                 + ", сервис IMarkerManager " + identity(serviceV1); //$NON-NLS-1$
             Debug.log(probe);
-            Debug.temp(probe);
             if (serviceV2 != null && serviceV2 != viewManager)
                 serviceV2.addListener(new MarkerEventProbe("сервис V2")); //$NON-NLS-1$
             if (serviceV1 != null)
@@ -586,7 +578,6 @@ public final class ProblemViewHook implements IStartup
             String msg = "наблюдатель маркеров: событие " + count + " (" + channel + "), проекты " //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 + ResultChangeGate.changedProjectNames(event);
             Debug.log(msg);
-            Debug.temp(msg);
         }
     }
 
@@ -701,45 +692,34 @@ public final class ProblemViewHook implements IStartup
                     String msg = "наблюдатель пачки: коммиттер не найден ни у " + className(markerManager) //$NON-NLS-1$
                         + ", ни у службы из реестра"; //$NON-NLS-1$
                     Debug.log(msg);
-                    Debug.temp(msg);
                     return;
                 }
                 Debug.log("наблюдатель пачки: коммиттер найден у " + className(owner)); //$NON-NLS-1$
-                Debug.temp("наблюдатель пачки: коммиттер найден у " + className(owner) //$NON-NLS-1$
-                    + " " + identity(committer)); //$NON-NLS-1$
                 Object queue = Global.getField(committer, RECORDS_FIELD);
                 if (!(queue instanceof java.util.Queue<?> raw))
                 {
                     String msg = "наблюдатель пачки: поле " + RECORDS_FIELD + " не очередь"; //$NON-NLS-1$ //$NON-NLS-2$
                     Debug.log(msg);
-                    Debug.temp(msg + " (" + className(queue) + ")"); //$NON-NLS-1$ //$NON-NLS-2$
                     return;
                 }
                 if (raw instanceof ObservingQueue)
                 {
                     installed = true;
-                    Debug.temp("наблюдатель пачки: очередь уже обёртка"); //$NON-NLS-1$
                     return;
                 }
                 @SuppressWarnings("unchecked")
                 java.util.Queue<Object> delegate = (java.util.Queue<Object>)raw;
                 java.lang.reflect.Field field = findField(committer.getClass(), RECORDS_FIELD);
                 if (field == null)
-                {
-                    Debug.temp("наблюдатель пачки: поле records не найдено"); //$NON-NLS-1$
                     return;
-                }
                 field.setAccessible(true);
                 field.set(committer, new ObservingQueue(delegate));
                 installed = true;
                 Debug.log("наблюдатель пачки: очередь коммиттера подменена"); //$NON-NLS-1$
-                Debug.temp("наблюдатель пачки: очередь коммиттера подменена, было " //$NON-NLS-1$
-                    + className(raw)); //$NON-NLS-1$
             }
             catch (Exception | LinkageError e)
             {
                 Debug.log("наблюдатель пачки: не установлен — " + e); //$NON-NLS-1$
-                Debug.temp("наблюдатель пачки: не установлен — " + e); //$NON-NLS-1$
             }
         }
 
@@ -815,10 +795,6 @@ public final class ProblemViewHook implements IStartup
                 int unionSize = expanded.size();
                 scopeIds = unionSize > MAX_SCOPE_IDS ? new Object[0] : expanded.toArray();
                 scopeProjects = unionProjects;
-                Debug.temp("пачка scope: ids=" + previewIds(scopeIds) + " projects=" + scopeProjects //$NON-NLS-1$ //$NON-NLS-2$
-                    + " history=" + scopeHistory.size() + " related=" + relatedIds.size() //$NON-NLS-1$ //$NON-NLS-2$
-                    + " extra=" + (extraIds == null ? 0 : extraIds.size()) //$NON-NLS-1$
-                    + (unionSize > MAX_SCOPE_IDS ? " СБРОШЕН (>MAX " + unionSize + ")" : "")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             }
         }
 
@@ -872,7 +848,6 @@ public final class ProblemViewHook implements IStartup
 
         private static Verdict finishTake(boolean skip, boolean touched, String reason)
         {
-            Debug.temp("пачка take: skip=" + skip + " touched=" + touched + " — " + reason); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return new Verdict(skip, touched, reason);
         }
 
@@ -972,26 +947,15 @@ public final class ProblemViewHook implements IStartup
             Object[] ids = scopeIds;
             try
             {
-                Object type = Global.getField(record, "type"); //$NON-NLS-1$
                 Object storage = Global.getField(record, RECORD_STORAGE_FIELD);
-                Object projectField = Global.getField(record, "project"); //$NON-NLS-1$
-                String projectName = projectField instanceof IProject project ? project.getName()
-                    : String.valueOf(projectField);
                 if (storage == null)
                 {
                     // Запись без хранилища (NOTIFY) — что изменилось, отсюда не видно
                     unknown = true;
-                    Debug.temp("пачка inspect: type=" + type + " project=" + projectName //$NON-NLS-1$ //$NON-NLS-2$
-                        + " storage=нет → unknown"); //$NON-NLS-1$
                     return;
                 }
-                String uncommitted = uncommittedPreview(storage);
                 if (ids.length == 0)
-                {
-                    Debug.temp("пачка inspect: type=" + type + " project=" + projectName //$NON-NLS-1$ //$NON-NLS-2$
-                        + " scope пуст, uncommitted=" + uncommitted); //$NON-NLS-1$
                     return;
-                }
                 java.util.Set<String> projects = scopeProjects;
                 if (!projects.isEmpty())
                 {
@@ -1000,76 +964,24 @@ public final class ProblemViewHook implements IStartup
                     {
                         // Чужой проект: его объекты в списке панели не показываются
                         inspected.incrementAndGet();
-                        Debug.temp("пачка inspect: чужой проект " + storageProject //$NON-NLS-1$
-                            + " (отбор " + projects + ")"); //$NON-NLS-1$ //$NON-NLS-2$
                         return;
                     }
                 }
                 inspected.incrementAndGet();
-                StringBuilder checks = new StringBuilder();
-                boolean found = false;
-                int logged = 0;
                 for (Object id : ids)
                 {
-                    boolean yes = Boolean.TRUE.equals(Global.invoke(storage, IS_UNCOMMITTED_METHOD, id));
-                    if (logged < 8)
+                    if (Boolean.TRUE.equals(Global.invoke(storage, IS_UNCOMMITTED_METHOD, id)))
                     {
-                        if (logged > 0)
-                            checks.append(", "); //$NON-NLS-1$
-                        checks.append(describeId(id)).append("=").append(yes); //$NON-NLS-1$
-                        logged++;
+                        hit.set(true);
+                        break;
                     }
-                    if (yes)
-                        found = true;
                 }
-                if (found)
-                    hit.set(true);
-                Debug.temp("пачка inspect: type=" + type + " project=" + projectName //$NON-NLS-1$ //$NON-NLS-2$
-                    + " hit=" + found + " checks=[" + checks + "] uncommitted=" + uncommitted); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             }
             catch (Exception | LinkageError e)
             {
                 unknown = true;
                 Debug.log("наблюдатель пачки: запись не разобрана — " + e); //$NON-NLS-1$
-                Debug.temp("пачка inspect: запись не разобрана — " + e); //$NON-NLS-1$
             }
-        }
-
-        /** Снимок {@code uncommittedIds} хранилища: с чем сравнивается отбор панели. */
-        private static String uncommittedPreview(Object storage)
-        {
-            Object raw = Global.getField(storage, "uncommittedIds"); //$NON-NLS-1$
-            if (!(raw instanceof java.util.Set<?>[] slots))
-                return "нет поля (" + className(raw) + ")"; //$NON-NLS-1$ //$NON-NLS-2$
-            StringBuilder text = new StringBuilder();
-            for (int i = 0; i < slots.length; i++)
-            {
-                if (i > 0)
-                    text.append("; "); //$NON-NLS-1$
-                java.util.Set<?> slot = slots[i];
-                text.append("slot").append(i).append("="); //$NON-NLS-1$ //$NON-NLS-2$
-                if (slot == null)
-                {
-                    text.append("null"); //$NON-NLS-1$
-                    continue;
-                }
-                text.append(slot.size()).append("["); //$NON-NLS-1$
-                int n = 0;
-                for (Object id : slot)
-                {
-                    if (n >= 8)
-                    {
-                        text.append("…"); //$NON-NLS-1$
-                        break;
-                    }
-                    if (n > 0)
-                        text.append(", "); //$NON-NLS-1$
-                    text.append(describeId(id));
-                    n++;
-                }
-                text.append("]"); //$NON-NLS-1$
-            }
-            return text.toString();
         }
 
         /** Первое поле объекта, тип которого оканчивается на {@code suffix}. */
@@ -1137,14 +1049,9 @@ public final class ProblemViewHook implements IStartup
             @Override
             public Object poll()
             {
-                int size = delegate.size();
                 Object record = delegate.poll();
                 if (record != null)
-                {
-                    Debug.temp("пачка poll: очередь была " + size + " type=" //$NON-NLS-1$ //$NON-NLS-2$
-                        + Global.getField(record, "type")); //$NON-NLS-1$
                     INSTANCE.inspect(record);
-                }
                 return record;
             }
 
@@ -1245,10 +1152,6 @@ public final class ProblemViewHook implements IStartup
             if (!ComfortSettings.isReplaceListFiltersEnabled()
                 || !ComfortSettings.isProblemViewUpdateGateEnabled())
             {
-                Debug.temp("заслонка: пропуск — списки=" //$NON-NLS-1$
-                    + ComfortSettings.isReplaceListFiltersEnabled() + " тумблер=" //$NON-NLS-1$
-                    + ComfortSettings.isProblemViewUpdateGateEnabled() + ", событие сразу панели, проекты " //$NON-NLS-1$
-                    + changedProjectNames(event));
                 stock.handleMarkersChanged(event);
                 return;
             }
@@ -1256,8 +1159,6 @@ public final class ProblemViewHook implements IStartup
             // момент держит хранилище — читать его отсюда и задерживать коммит одинаково плохо
             eventCount++;
             MarkersChangedEvent previous = pending.getAndSet(event);
-            Debug.temp("заслонка событие " + eventCount + " проекты=" + changedProjectNames(event) //$NON-NLS-1$ //$NON-NLS-2$
-                + (previous != null ? " вытеснило предыдущее " + changedProjectNames(previous) : "")); //$NON-NLS-1$ //$NON-NLS-2$
             if (previous != null)
             {
                 // Пачка схлопывается в одну сверку: проекты вытесненного события в отпечаток
@@ -1283,10 +1184,7 @@ public final class ProblemViewHook implements IStartup
         {
             MarkersChangedEvent event = pending.getAndSet(null);
             if (event == null)
-            {
-                Debug.temp("заслонка evaluate: pending пуст"); //$NON-NLS-1$
                 return;
-            }
             try
             {
                 MarkerChangeTap.get().ensureInstalled();
@@ -1299,13 +1197,9 @@ public final class ProblemViewHook implements IStartup
                         + ", подряд не передано " + swallowedInRow //$NON-NLS-1$
                         + ", отбор снят " + sinceText(filterSnapshotAt) + ": " + filterDescription; //$NON-NLS-1$
                     Debug.log(msg);
-                    Debug.temp(msg);
                     return;
                 }
                 boolean sourceIdle = isSourceIdle(event, filterSnapshot);
-                Debug.temp("заслонка evaluate: событие " + eventCount + " skip=false reason=" //$NON-NLS-1$ //$NON-NLS-2$
-                    + verdict.reason() + " touched=" + verdict.touched() + " idle=" + sourceIdle //$NON-NLS-1$ //$NON-NLS-2$
-                    + " filter=" + filterDescription); //$NON-NLS-1$
                 applySourceWait(!sourceIdle);
                 deliver(event, verdict.reason());
             }
@@ -1315,7 +1209,6 @@ public final class ProblemViewHook implements IStartup
                 // повторного события про это изменение маркеров не будет
                 Global.logError(Debug.TAG, "заслонка обновлений: решение сорвалось, событие " //$NON-NLS-1$
                     + eventCount + " потеряно", t); //$NON-NLS-1$
-                Debug.temp("заслонка evaluate: СОРВАЛОСЬ событие " + eventCount + " — " + t); //$NON-NLS-1$ //$NON-NLS-2$
                 throw t;
             }
         }
@@ -1370,7 +1263,6 @@ public final class ProblemViewHook implements IStartup
         {
             if (busy)
                 sourceIdleSince = 0;
-            Debug.temp("заслонка sourceWait: busy=" + busy); //$NON-NLS-1$
             UpdateWaitIndicator.setWaitingForIndex(view, busy);
             if (busy)
                 sourceIdleJob.schedule(SOURCE_IDLE_POLL_MS);
@@ -1400,7 +1292,6 @@ public final class ProblemViewHook implements IStartup
                 sourceIdleJob.schedule(SOURCE_IDLE_POLL_MS);
                 return;
             }
-            Debug.temp("заслонка sourceWait: idle " + waited + " мс — спиннер снимаем"); //$NON-NLS-1$ //$NON-NLS-2$
             UpdateWaitIndicator.setWaitingForIndex(view, false);
         }
 
@@ -1415,7 +1306,6 @@ public final class ProblemViewHook implements IStartup
             MarkersChangedEvent held = pending.getAndSet(null);
             if (held == null)
                 return;
-            Debug.temp("заслонка: тумблер выкл — отдаём удержанное событие"); //$NON-NLS-1$
             deliver(held, "тумблер «Фильтр обновлений» выключен"); //$NON-NLS-1$
         }
 
@@ -1429,7 +1319,6 @@ public final class ProblemViewHook implements IStartup
                 + changedProjectNames(event) + ") передано панели, всего передано " //$NON-NLS-1$
                 + passedCount + " из " + eventCount + " — " + reason; //$NON-NLS-1$ //$NON-NLS-2$
             Debug.log(msg);
-            Debug.temp(msg);
             stock.handleMarkersChanged(event);
             // Отбор мог измениться вместе с результатом (например, сменился текущий объект)
             refreshFilterSnapshot();
@@ -1456,7 +1345,6 @@ public final class ProblemViewHook implements IStartup
                             String msg = "заслонка обновлений: отбор панели снят заново — " + description //$NON-NLS-1$
                                 + " (был " + filterDescription + ")"; //$NON-NLS-1$ //$NON-NLS-2$
                             Debug.log(msg);
-                            Debug.temp(msg);
                         }
                         filterDescription = description;
                     }
@@ -2868,7 +2756,6 @@ public final class ProblemViewHook implements IStartup
                     if (!isTrackedJob(job))
                         return;
                     tracked.add(job);
-                    Debug.temp("Job start: " + job.getName()); //$NON-NLS-1$
                     applyAll();
                 }
 
@@ -2878,7 +2765,6 @@ public final class ProblemViewHook implements IStartup
                     Job job = event.getJob();
                     if (job == null || !tracked.remove(job))
                         return;
-                    Debug.temp("Job done: " + job.getName()); //$NON-NLS-1$
                     applyAll();
                 }
             });
@@ -2897,11 +2783,7 @@ public final class ProblemViewHook implements IStartup
                 new Class<?>[] { IMarkerManagerV2.class },
                 new ManagerTap(origin, view));
             if (!Global.setFieldForce(view, "markerManager", wrapped)) //$NON-NLS-1$
-            {
-                Debug.temp("markerManager: не обёрнут"); //$NON-NLS-1$
                 return;
-            }
-            Debug.temp("markerManager обёрнут"); //$NON-NLS-1$
             Object current = Global.getField(view, "markerReader"); //$NON-NLS-1$
             if (current instanceof IMarkerReader reader
                 && !(Proxy.isProxyClass(reader.getClass())
@@ -2946,7 +2828,6 @@ public final class ProblemViewHook implements IStartup
                 return;
             }
             state.waitingForIndex = waiting;
-            Debug.temp("индикатор waitingForIndex=" + waiting); //$NON-NLS-1$
             applyAll();
         }
 
@@ -2957,7 +2838,6 @@ public final class ProblemViewHook implements IStartup
                 return;
             state.liveNumericIds = numbers == null ? Set.of() : Set.copyOf(numbers);
             state.liveModulePaths = paths == null ? Set.of() : Set.copyOf(paths);
-            Debug.temp("liveModule: numbers=" + numbers + " paths=" + paths); //$NON-NLS-1$ //$NON-NLS-2$
         }
 
         private static State stateOf(IViewPart view)
@@ -3113,9 +2993,6 @@ public final class ProblemViewHook implements IStartup
                 if (!current.contains(id))
                     filter.addValue(MarkerIndex.OBJECT_ID, id);
             }
-            Debug.temp("restoreModulePaths: добавлены пути из " //$NON-NLS-1$
-                + (sameLast && hasResourcePath(last) ? "lastGood" : "live") //$NON-NLS-1$ //$NON-NLS-2$
-                + " " + source + " к текущим " + current); //$NON-NLS-1$ //$NON-NLS-2$
         }
 
         private static void rememberGoodFilter(IViewPart view, Object filterArg, boolean empty)
@@ -3133,7 +3010,6 @@ public final class ProblemViewHook implements IStartup
                 return;
             state.lastGoodObjectIds = Set.copyOf(ids);
             state.lastGoodProjects = Set.copyOf(projectNames(filter.getValues(MarkerIndex.PROJECT)));
-            Debug.temp("lastGoodFilter: ids=" + ids + " projects=" + state.lastGoodProjects); //$NON-NLS-1$ //$NON-NLS-2$
         }
 
         /**
@@ -3164,8 +3040,6 @@ public final class ProblemViewHook implements IStartup
             MarkerFilter filter = unwrapFilter(filterArg);
             boolean alwaysFalse = filter != null
                 && String.valueOf(filter).equals(ResultChangeGate.alwaysFalseDescription());
-            Debug.temp("getMarkerInfo пусто: alwaysFalse=" + alwaysFalse //$NON-NLS-1$
-                + " retried=" + state.retriedEmpty + " retrying=" + state.retryingEmpty); //$NON-NLS-1$ //$NON-NLS-2$
             if (!alwaysFalse)
             {
                 state.retryingEmpty = false;
@@ -3215,12 +3089,9 @@ public final class ProblemViewHook implements IStartup
                 {
                     state.retryingEmpty = false;
                     state.retriedEmpty = false;
-                    Debug.temp("повтор: нет updateListener"); //$NON-NLS-1$
                     return;
                 }
                 Global.invoke(listener, "scheduleUpdateJob", Boolean.TRUE); //$NON-NLS-1$
-                Debug.temp("повтор поставлен, editor=" //$NON-NLS-1$
-                    + (editor != null ? editor.getTitle() : "нет")); //$NON-NLS-1$
             }
             catch (RuntimeException ignored)
             {
@@ -3293,19 +3164,11 @@ public final class ProblemViewHook implements IStartup
                 {
                     if (argsContainMarkerFilter(args))
                         restoreModulePaths(view, args);
-                    long started = System.nanoTime();
                     Object result = method.invoke(origin, args == null ? new Object[0] : args);
                     if ("getMarkerInfo".equals(method.getName()) && result instanceof IMarkerInfo info) //$NON-NLS-1$
                     {
                         Object filterArg = args != null && args.length > 0 ? args[0] : null;
                         boolean empty = info.getTotalCount() == 0;
-                        long ms = (System.nanoTime() - started) / 1_000_000L;
-                        String filterText = String.valueOf(filterArg);
-                        if (filterText.length() > 400)
-                            filterText = filterText.substring(0, 400) + "…"; //$NON-NLS-1$
-                        Debug.temp("getMarkerInfo total=" + info.getTotalCount() + " ms=" + ms //$NON-NLS-1$ //$NON-NLS-2$
-                            + " peek=" + Boolean.TRUE.equals(PEEKING.get()) //$NON-NLS-1$
-                            + " filter=" + filterText); //$NON-NLS-1$
                         rememberGoodFilter(view, filterArg, empty);
                         onEmptyMarkerInfo(view, filterArg, empty);
                     }
@@ -3399,25 +3262,12 @@ public final class ProblemViewHook implements IStartup
     {
         static final String TAG = "ProblemView"; //$NON-NLS-1$
 
-        /** Тема временного лога {@code .tmp/temp-logs/problem-view-update.log}. */
-        private static final String TEMP_TOPIC = "problem-view-update"; //$NON-NLS-1$
-
         private Debug() {}
 
         static void log(String msg)
         {
             if (Global.isLogEnabled())
                 Global.log(TAG, msg);
-        }
-
-        /**
-         * ВРЕМЕННАЯ диагностика пропуска обновления панели после записи с ошибкой:
-         * безусловная запись, независимо от флажка «Вести журнал». Снять после
-         * подтверждения фикса.
-         */
-        static void temp(String msg)
-        {
-            Global.tempLog(TEMP_TOPIC, Thread.currentThread().getName() + " " + msg); //$NON-NLS-1$
         }
     }
 }
