@@ -19,10 +19,12 @@ import org.eclipse.ui.texteditor.ITextEditor;
 import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.IWorkbenchPart;
 import org.eclipse.ui.IWorkbenchPartReference;
+import org.eclipse.ui.IWorkbenchPartSite;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
+import com._1c.g5.v8.dt.core.platform.IDtProject;
 import com._1c.g5.v8.dt.dcs.ui.DataCompositionSchemaEditor;
 import com._1c.g5.v8.dt.dcs.ui.datasets.DataSets;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
@@ -188,6 +190,21 @@ public final class ContentAssistManager
             sourceViewer, settings.getTimeout(), settings.getCharset(), facade);
     }
 
+    /**
+     * Встроенный BSL-редактор без {@link BslXtextEditor} (условие / выражение точки останова).
+     * @return {@code false}, если viewer ещё не готов (нет ContentAssistant) — повторить позже
+     */
+    boolean applyPatchToEmbeddedBslViewer(SourceViewer sourceViewer)
+    {
+        if (!settings.isEnabled())
+            return true;
+        if (sourceViewer == null)
+            return false;
+        return ContentAssistPatcher.applyPatch(
+            sourceViewer, settings.getTimeout(), settings.getCharset(),
+            new EmbeddedBslEditorFacade(sourceViewer));
+    }
+
     private void applyPatchToDcsQueryInPage(DtGranularEditorEmbeddedEditorPage<?> page)
     {
         if (!settings.isEnabled()) return;
@@ -302,6 +319,62 @@ public final class ContentAssistManager
             }
             if (page instanceof DtGranularEditorEmbeddedEditorPage<?> embeddedPage)
                 applyPatchToDcsQueryInPage(embeddedPage);
+        }
+    }
+
+    /**
+     * Facade для встроенного BSL без {@link BslXtextEditor}.
+     * {@link #getDtProject()} всегда {@code null}: иначе ИР пошёл бы по query-sync.
+     */
+    private static final class EmbeddedBslEditorFacade implements TextEditorFacade
+    {
+        private final SourceViewer viewer;
+
+        EmbeddedBslEditorFacade(SourceViewer viewer)
+        {
+            this.viewer = viewer;
+        }
+
+        @Override
+        public SourceViewer getSourceViewer()
+        {
+            return viewer;
+        }
+
+        @Override
+        public IDtProject getDtProject()
+        {
+            return null;
+        }
+
+        @Override
+        public IWorkbenchPartSite getSite()
+        {
+            return null;
+        }
+
+        @Override
+        public boolean isEditable()
+        {
+            return viewer != null && viewer.isEditable();
+        }
+
+        @Override
+        public String getDisplayName()
+        {
+            return "Редактор точки останова"; //$NON-NLS-1$
+        }
+
+        @Override
+        public boolean isQueryMode()
+        {
+            return false;
+        }
+
+        @Override
+        public Object getRaw()
+        {
+            return viewer;
         }
     }
 }

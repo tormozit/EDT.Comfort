@@ -12,6 +12,7 @@ import org.eclipse.jface.preference.PreferenceDialog;
 import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.ITextSelection;
 import org.eclipse.jface.text.source.ISourceViewer;
+import org.eclipse.jface.text.source.SourceViewer;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.ScrolledComposite;
 import org.eclipse.swt.graphics.Point;
@@ -55,6 +56,7 @@ public final class BreakpointPropertiesHook implements IStartup
     private static final String RESIZE_PANES_KEY = "tormozit.breakpointResizePanes"; //$NON-NLS-1$
     private static final String RESIZE_LISTENER_KEY = "tormozit.breakpointResizeListener"; //$NON-NLS-1$
     private static final String SIZE_MEMORY_KEY = "tormozit.breakpointSizeMemory"; //$NON-NLS-1$
+    private static final String CONTENT_ASSIST_KEY = "tormozit.breakpointContentAssistPatched"; //$NON-NLS-1$
     private static final String SETTINGS_SECTION = "tormozit.breakpointPropertiesDialog"; //$NON-NLS-1$
     private static final String KEY_DIALOG_WIDTH = "DIALOG_WIDTH"; //$NON-NLS-1$
     private static final String KEY_DIALOG_HEIGHT = "DIALOG_HEIGHT"; //$NON-NLS-1$
@@ -90,12 +92,15 @@ public final class BreakpointPropertiesHook implements IStartup
         {
             if (!(event.widget instanceof Shell shell))
                 return;
-            if (shell.isDisposed() || shell.getData(PATCHED_KEY) != null)
+            if (shell.isDisposed())
                 return;
             if (!isBreakpointPropertiesShell(shell))
                 return;
             installShellSizeMemory(shell);
-            schedulePatchAttempt(display, shell, 0);
+            if (shell.getData(PATCHED_KEY) == null)
+                schedulePatchAttempt(display, shell, 0);
+            if (shell.getData(CONTENT_ASSIST_KEY) == null)
+                scheduleContentAssistAttempt(display, shell, 0);
         };
 
         display.addFilter(SWT.Activate, listener);
@@ -128,6 +133,71 @@ public final class BreakpointPropertiesHook implements IStartup
             if (attempt < 12)
                 schedulePatchAttempt(display, shell, attempt + 1);
         });
+    }
+
+    /** Автооткрытие подсказки в полях условия и значения выражения. */
+    private static void scheduleContentAssistAttempt(Display display, Shell shell, int attempt)
+    {
+        if (shell.isDisposed() || shell.getData(CONTENT_ASSIST_KEY) != null)
+            return;
+        int delay = attempt == 0 ? 0 : 80;
+        display.timerExec(delay, () ->
+        {
+            if (shell.isDisposed() || shell.getData(CONTENT_ASSIST_KEY) != null)
+                return;
+            if (tryPatchContentAssist(shell))
+            {
+                shell.setData(CONTENT_ASSIST_KEY, Boolean.TRUE);
+                BreakpointPropertiesDebug.log("contentAssist patched"); //$NON-NLS-1$
+                return;
+            }
+            if (attempt < 12)
+                scheduleContentAssistAttempt(display, shell, attempt + 1);
+            else
+            {
+                shell.setData(CONTENT_ASSIST_KEY, Boolean.TRUE);
+                BreakpointPropertiesDebug.problem("contentAssist patch failed"); //$NON-NLS-1$
+            }
+        });
+    }
+
+    private static boolean tryPatchContentAssist(Shell shell)
+    {
+        ContentAssistManager mgr = ContentAssistManager.getInstance();
+        if (mgr == null)
+            return true;
+        ContentAssistSettings cas = ContentAssistSettings.getInstance();
+        if (cas == null || !cas.isEnabled())
+            return true;
+
+        Object conditionEditor = resolveBreakpointSubEditor(shell, CONDITION_EDITOR);
+        Object actionsEditor = resolveActionsEditor(shell);
+        SourceViewer conditionViewer = resolveEmbeddedViewer(
+            conditionEditor == null ? null : Global.getField(conditionEditor, "conditionPane")); //$NON-NLS-1$
+        SourceViewer expressionViewer = resolveEmbeddedViewer(
+            actionsEditor == null ? null : Global.getField(actionsEditor, "expressionPane")); //$NON-NLS-1$
+        if (conditionViewer == null && expressionViewer == null)
+            return false;
+
+        boolean ok = true;
+        if (conditionViewer != null && !mgr.applyPatchToEmbeddedBslViewer(conditionViewer))
+            ok = false;
+        if (expressionViewer != null && !mgr.applyPatchToEmbeddedBslViewer(expressionViewer))
+            ok = false;
+        if (conditionViewer == null || expressionViewer == null)
+            ok = false;
+        return ok;
+    }
+
+    private static SourceViewer resolveEmbeddedViewer(Object pane)
+    {
+        if (pane == null)
+            return null;
+        Object textEditor = Global.getField(pane, "textEditor"); //$NON-NLS-1$
+        if (textEditor == null)
+            return null;
+        Object viewer = Global.invoke(textEditor, "getViewer"); //$NON-NLS-1$
+        return viewer instanceof SourceViewer sourceViewer ? sourceViewer : null;
     }
 
     /** Размер окна «Свойства для …» — восстановление при открытии и запоминание при закрытии. */

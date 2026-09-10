@@ -764,7 +764,7 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
      * @param hasSavedColumnWidths потребитель восстановил ширины колонок из сохранённых настроек
      * (пользователь ранее сам их подстроил, в т.ч. специально оставил свободное место) — тогда режим
      * заполнения по ширине НЕ включается самовольно, даже если колонки сейчас умещаются в таблицу.
-     * {@code false} (в т.ч. {@link #install()}) — ширины дефолтные (сохранённых настроек нет): если они
+     * {@code false} (в т.ч. {@link #install()}) — ширины стандартные (сохранённых настроек нет): если они
      * уже умещаются в ширину таблицы, сразу входим в режим заполнения (см. {@link #columnsExactFillBefore}).
      */
     void install(boolean hasSavedColumnWidths)

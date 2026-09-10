@@ -421,7 +421,7 @@ public final class IrModuleCheckHandler
                 marker.setSourceObjectId(sourceKey);
                 // "BslEditor" — sourceType, под который зарегистрирован BslMarkerDynamicDataProvider
                 // (бандл com._1c.g5.v8.dt.bsl, extension markerDynamicDataProvider): он умеет резолвить
-                // PlainEObjectMarker с platform-URI на .bsl-файл. Пустой sourceType уходит в дефолтный
+                // PlainEObjectMarker с platform-URI на .bsl-файл. Пустой sourceType уходит в стандартный
                 // BmMarkerDynamicDataProvider, рассчитанный на BM-объекты, а не на «плоские» маркеры —
                 // с ним падает NullPointerException внутри V8ProjectManager.getProject(null).
                 marker.setSourceType("BslEditor"); //$NON-NLS-1$
