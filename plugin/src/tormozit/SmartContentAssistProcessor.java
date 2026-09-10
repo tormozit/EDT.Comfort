@@ -380,6 +380,15 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     /** Фоновый расчёт словарного списка: контекст в работе, неудачный и уже показанный. */
     private Job wordListBackgroundJob;
     private volatile int wordListBackgroundKey = Integer.MIN_VALUE;
+    /**
+     * Показ после фона: не инъекция клавиши (F20 → SOE). Фильтр {@code SWT.Paint}
+     * ставит {@code timerExec(0)} — подсветка и так рисует, очередь asyncExec не ждём.
+     */
+    private volatile Runnable pendingWordListUi;
+    private org.eclipse.swt.widgets.Listener wordListUiKickFilter;
+    private volatile boolean wordListFlushArmed;
+    private boolean wordListFlushRunning;
+    private volatile long pendingWordListAtNano;
     private int wordListFailedKey = Integer.MIN_VALUE;
     private int wordListOpenedKey = Integer.MIN_VALUE;
     /** Сколько раз перезапускали фон после пустого результата для {@link #wordListEmptyRestartKey}. */
@@ -1085,7 +1094,6 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         fullListContextReceiver = ""; //$NON-NLS-1$
         memberAccessReloadSeq++;
         memberAccessReloadScheduledSeq = -1;
-        resetMemberStockFullList();
         cancelDeferredDelegateComputes();
         lastTrackedFilter = ""; //$NON-NLS-1$
         terminalEmptyMemberAccess = false;
@@ -1579,18 +1587,21 @@ return;
         int dot = ReceiverTypeLabel.findMemberAccessDot(doc, caret);
         if (dot < 0)
             return false;
-        if (hasMemberStock(dot))
+        if (hasMemberListForDot(dot))
+        {
             repairPopupListFromMemberStock(doc, caret);
+            if (fullListCache.length == 0)
+                assignFullListCache(memberStockFullList);
+            fullListContextKey = dot;
+            fullListReady = true;
+            uiBlockLog("memberAccessDefer", "defer=false why=stockReady caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                + " cache=" + fullListCache.length + " dot=" + dot); //$NON-NLS-1$ //$NON-NLS-2$
+            return false;
+        }
         if (isCacheValidForCaret(doc, caret) && fullListCache.length > 0)
         {
             uiBlockLog("memberAccessDefer", "defer=false why=cacheReady caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
                 + " cache=" + fullListCache.length + " dot=" + dot); //$NON-NLS-1$ //$NON-NLS-2$
-            return false;
-        }
-        if (!wordListSeededOnUi)
-        {
-            uiBlockLog("memberAccessDefer", "defer=false why=firstFillUi caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
-                + " dot=" + dot); //$NON-NLS-1$
             return false;
         }
         if (!isMemberStockBackgroundInFlight(dot))
@@ -1602,15 +1613,89 @@ return;
     }
 
     /**
-     * Автооткрытие после буквы: не звать {@code showPossibleCompletions} с пустым списком,
-     * если словарь уже есть или его считает фон. Первое заполнение в экземпляре
-     * редактора сюда не входит — оно идёт штатным UI-путём.
+     * Сразу из {@code documentChanged}: Job.schedule(0) + INTERACTIVE, без
+     * {@code Display.timerExec}. Таймер автооткрытия на большом модуле не стреляет
+     * секундами (лог 10.09.2026: 12 с только {@code autoOpen.schedule}, Job не стартовал;
+     * Ctrl+Space за то же время открыл окно).
+     */
+    void kickWordListFromDocumentChange(ITextViewer viewer, int caret)
+    {
+        IDocument doc = viewer != null ? viewer.getDocument() : null;
+        if (doc == null || caret < 0)
+        {
+            uiBlockLog("wordList.kickDoc.skip", "why=noDoc caret=" + caret); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        }
+        if (isStringLiteralAssistContext(doc, caret))
+        {
+            uiBlockLog("wordList.kickDoc.skip", "why=literal caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                + " filter=" + computeIdentifierFilter(doc, caret)); //$NON-NLS-1$
+            return;
+        }
+        int memberDot = ReceiverTypeLabel.findMemberAccessDot(doc, caret);
+        if (memberDot >= 0)
+        {
+            abortWordListBackground("memberDot"); //$NON-NLS-1$
+            showMemberListAfterDot(viewer, memberDot);
+            uiBlockLog("wordList.kickDoc.skip", "why=memberDot caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                + " dot=" + memberDot + " stock=" + memberStockFullList.length); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        }
+        flushPendingWordListUi();
+        onAssistSessionContextReady(viewer, caret);
+        // #region agent log
+        uiBlockLog("wordList.kickDoc", "caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
+            + " filter=" + computeIdentifierFilter(doc, caret) //$NON-NLS-1$
+            + " seeded=" + wordListSeededOnUi); //$NON-NLS-1$
+        // #endregion
+        // Сразу Job, без Display.asyncExec: посев на UI стоял в той же очереди, что и
+        // подсветка большого модуля, и до compute не доходило ~20 с (лог 10.09.2026
+        // 22:28: kickDoc → seedUi). NPE картинок с воркера ловит probeDelegateOnce.
+        scheduleWordListInBackground(viewer, doc, caret, caret);
+    }
+
+    /**
+     * После «.»: подменить уже открытый словарь списком членов. Если попап слов
+     * уже виден, {@code beginCompletionAutoOpen} выходит по {@code popupVisible}
+     * и без этого кэш слов так и остаётся на экране.
+     */
+    private void showMemberListAfterDot(ITextViewer viewer, int dot)
+    {
+        if (hasMemberListForDot(dot))
+        {
+            IDocument doc = viewer != null ? viewer.getDocument() : null;
+            int caret = resolveWidgetCaret(viewer);
+            if (doc != null && caret >= 0)
+                repairPopupListFromMemberStock(doc, caret);
+            if (fullListCache.length == 0)
+                assignFullListCache(memberStockFullList);
+            fullListContextKey = dot;
+            fullListReady = true;
+            uiBlockLog("memberList.afterDot", "stock=" + memberStockFullList.length //$NON-NLS-1$ //$NON-NLS-2$
+                + " popup=" + isPopupVisible()); //$NON-NLS-1$
+            if (isPopupVisible())
+                ContentAssistSessionReloader.refreshPopupIfOpen();
+            else
+                ContentAssistSessionReloader.openPopupForBackgroundMemberList(viewer);
+            return;
+        }
+        scheduleMemberStockCapture(viewer, dot);
+    }
+
+    /**
+     * Автооткрытие после буквы: не звать {@code showPossibleCompletions} с пустым списком
+     * и не считать делегат на UI. Словарь считает фон; окно откроет {@code publishWordList}.
      */
     boolean prepareWordListAutoOpen(ITextViewer viewer, int caret)
     {
         IDocument doc = viewer != null ? viewer.getDocument() : null;
         if (doc == null || caret < 0)
             return false;
+        if (isStringLiteralAssistContext(doc, caret))
+        {
+            uiBlockLog("prepareWordListAutoOpen", "defer=true why=literal caret=" + caret); //$NON-NLS-1$ //$NON-NLS-2$
+            return true;
+        }
         if (ReceiverTypeLabel.findMemberAccessDot(doc, caret) >= 0)
             return false;
         restoreCtorTypeCatalog(doc, caret);
@@ -1627,24 +1712,36 @@ return;
                 return false;
             }
         }
-        if (!wordListSeededOnUi)
+        int key = computeFullListContextKey(doc, caret);
+        if (wordListBackgroundJob != null
+            && wordListBackgroundJob.getState() != Job.NONE
+            && wordListBackgroundKey == key)
         {
-            ContentAssistDebug.perfMark("wordListDefer.skip", //$NON-NLS-1$
-                "{\"why\":\"firstFillUi\"}"); //$NON-NLS-1$
             // #region agent log
-            uiBlockLog("prepareWordListAutoOpen", "defer=false why=firstFillUi caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
-                + " filter=" + computeIdentifierFilter(doc, caret) //$NON-NLS-1$
-                + " around=\"" + uiBlockAround(doc, caret) + "\""); //$NON-NLS-1$ //$NON-NLS-2$
+            uiBlockLog("prepareWordListAutoOpen", "defer=true why=inFlight caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                + " key=" + key); //$NON-NLS-1$
             // #endregion
-            return false;
+            return true;
         }
         boolean deferred = scheduleWordListInBackground(viewer, doc, caret, caret);
-        // #region agent log
-        uiBlockLog("prepareWordListAutoOpen", "defer=" + deferred + " caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        if (deferred)
+        {
+            uiBlockLog("prepareWordListAutoOpen", "defer=true why=job caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                + " filter=" + computeIdentifierFilter(doc, caret)); //$NON-NLS-1$
+            return true;
+        }
+        if (isCacheValidForCaret(doc, caret) && fullListCache.length > 0)
+        {
+            uiBlockLog("prepareWordListAutoOpen", "defer=false why=cacheAfterSkip caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                + " cache=" + fullListCache.length); //$NON-NLS-1$
+            return false;
+        }
+        // Skip (literal / ir / noKey / …) раньше означал «считай на UI».
+        // В литерале это 0.5–1.5 с на символ (лог 10.09.2026 22:39).
+        uiBlockLog("prepareWordListAutoOpen", "defer=true why=noUiCompute caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
             + " filter=" + computeIdentifierFilter(doc, caret) //$NON-NLS-1$
             + " around=\"" + uiBlockAround(doc, caret) + "\""); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-        return deferred;
+        return true;
     }
 
     private ICompletionProposal[] unwrapStableDelegateBase()
@@ -1891,7 +1988,7 @@ return result;
     {
         int caret = resolveInvocationCaret(viewer, offset);
         if (isStringLiteralAssistContext(viewer, caret))
-            return probeDelegateOnce(viewer, offset);
+            return computeLiteralPassthrough(viewer, offset, caret);
         primeFilterTrackerOnly(viewer, caret);
         IDocument doc = viewer != null ? viewer.getDocument() : null;
         ensureFullListForContext(viewer, doc, caret, false);
@@ -1969,6 +2066,11 @@ return resolveProposalList(viewer, probeOffset, caret, filter, smart);
             debugFilterCachedExit(viewer, caret, filter,
                 viewer != null ? viewer.getDocument() : null, irOnly.length, "irOnly", result); //$NON-NLS-1$
             return result;
+        }
+        if (isStringLiteralAssistContext(viewer, caret)
+            && !irOnlyManualMode)
+        {
+            rebindIrSnapshotContext();
         }
         if (isStringLiteralAssistContext(viewer, caret)
             && !irOnlyManualMode
@@ -2067,9 +2169,8 @@ return resolveProposalList(viewer, probeOffset, caret, filter, smart);
 
     private ICompletionProposal[] resolveStockLiteralProposalSource(ITextViewer viewer, int caret)
     {
-        ICompletionProposal[] stable = unwrapStableDelegateBase();
-        if (stable.length > 0)
-            return stable;
+        if (lastStableDelegateList.length > 0)
+            return stripIrProposals(unwrapProposals(lastStableDelegateList));
         IDocument doc = viewer != null ? viewer.getDocument() : null;
         ICompletionProposal[] interim = interimSourceForCaret(doc, caret);
         if (interim != null && interim.length > 0)
@@ -2314,6 +2415,7 @@ return;
                     + " cache=" + fullListCache.length //$NON-NLS-1$
                     + " ctx=" + fullListContextKey //$NON-NLS-1$
                     + " manual=" + ManualInvocationDetect.isActive() //$NON-NLS-1$
+                    + " inLiteral=" + isStringLiteralAssistContext(logDoc, offset) //$NON-NLS-1$
                     + " cacheOnly=" + Boolean.TRUE.equals(CACHE_ONLY_COMPUTE.get()) //$NON-NLS-1$
                     + " firstPopup=" + firstPopup //$NON-NLS-1$
                     + " caller=" + uiBlockCaller()); //$NON-NLS-1$
@@ -2490,10 +2592,7 @@ return;
         // сейчас, а откладывание дало бы задержку окна на ровном месте.
         if (ManualInvocationDetect.isActive())
             return wordListSkip("manual"); //$NON-NLS-1$
-        // Первое открытие попапа в этом редакторе — только UI (виджет + DataEvent).
-        // Фон на холодном экземпляре не создаёт попап и может отдать 2–3 шаблона.
-        if (!wordListSeededOnUi)
-            return wordListSkip("firstFillUi"); //$NON-NLS-1$
+        // Слушатель DataEvent — {@link #warmBslDocumentListener}, без delegate.compute на UI.
         // Member-access живёт своей механикой (запас членов, ожидание, закрытие окна) —
         // сюда его не пускаем, иначе два механизма будут спорить за один контекст.
         if (ReceiverTypeLabel.findMemberAccessDot(doc, caret) >= 0)
@@ -2529,6 +2628,20 @@ return;
         if (countNoLinkModelProposals(fullListCache) > 0
             && isCacheValidForCaret(doc, caret))
             return wordListSkip("cacheHasTypes"); //$NON-NLS-1$
+        if (wordListBackgroundJob != null
+            && wordListBackgroundJob.getState() != Job.NONE
+            && wordListBackgroundKey == key)
+        {
+            uiBlockLog("scheduleWordListInBackground", "reuse inFlight key=" + key //$NON-NLS-1$ //$NON-NLS-2$
+                + " caret=" + caret); //$NON-NLS-1$
+            return true;
+        }
+        if (pendingWordListUi != null && wordListBackgroundKey == key)
+        {
+            uiBlockLog("scheduleWordListInBackground", "reuse pendingUi key=" + key //$NON-NLS-1$ //$NON-NLS-2$
+                + " caret=" + caret); //$NON-NLS-1$
+            return true;
+        }
         // Слушатель DataEvent и addDisposeListener создаёт EDT только в первом
         // createProposals. С Job это NPE/SWTException (лог 17:13/17:17). Прогрев — на UI,
         // без самого compute.
@@ -2536,12 +2649,17 @@ return;
         if (!BslDataEventGuard.install(doc))
             ContentAssistDebug.perfMark("wordListDefer.bootstrap", //$NON-NLS-1$
                 "{\"why\":\"noGuard\"}"); //$NON-NLS-1$
-        if (wordListBackgroundKey == key)
-            return true;
+        if (wordListBackgroundJob != null)
+        {
+            wordListBackgroundJob.cancel();
+            wordListBackgroundJob = null;
+            wordListEpoch++;
+        }
         org.eclipse.swt.widgets.Display display = viewer.getTextWidget() != null
             && !viewer.getTextWidget().isDisposed() ? viewer.getTextWidget().getDisplay() : null;
         if (display == null)
             return wordListSkip("noDisplay"); //$NON-NLS-1$
+        installWordListUiKick(display);
         wordListBackgroundKey = key;
         final int gen = memberStockContextGen;
         final int epoch = wordListEpoch;
@@ -2550,24 +2668,30 @@ return;
             @Override
             protected IStatus run(IProgressMonitor monitor)
             {
+                uiBlockLog("wordListBackground.run", "key=" + key //$NON-NLS-1$ //$NON-NLS-2$
+                    + " canceled=" + monitor.isCanceled() //$NON-NLS-1$
+                    + " seeded=" + wordListSeededOnUi); //$NON-NLS-1$
+                try
+                {
                 long t0 = System.nanoTime();
                 ICompletionProposal[] raw = EMPTY;
                 java.util.Map<Object, Object> events = java.util.Collections.emptyMap();
                 int attempts = 0;
                 int lastProbe = offset;
-                // Как member-stock: сначала readOnlyForContentAssist на воркере (ждёт
-                // актуальную модель без подсветки). Без этого compute с воркера даёт
-                // null (лог 17:01: n:-1). Сам compute внешней обёрткой не оборачиваем.
-                // Типы после «Новый» не зависят от модели модуля: waitResource в большом
-                // файле — это 1–2 с на каждую букву (лог 10:18:23: 1833 мс до compute).
-                IDocument waitDoc = viewer.getDocument();
-                if (waitDoc == null || !isAfterNewKeyword(waitDoc, offset))
-                    waitContentAssistResource(waitDoc);
+                // Сначала compute без waitResource: readOnlyForContentAssist на воркере
+                // давал StackOverflow (лог 23:01 и раньше). Пустой ответ — короткий sleep.
                 while (attempts < MEMBER_STOCK_BG_ATTEMPTS)
                 {
                     if (monitor.isCanceled() || epoch != wordListEpoch
                         || gen != memberStockContextGen)
                         return Status.CANCEL_STATUS;
+                    IDocument liveNow = viewer.getDocument();
+                    int liveNowCaret = resolveWidgetCaret(viewer);
+                    if (isOrdinaryWordListStaleForLiveCaret(liveNow, liveNowCaret))
+                    {
+                        uiBlockLog("wordListBackground.abort", "why=liveMemberDot"); //$NON-NLS-1$ //$NON-NLS-2$
+                        return Status.CANCEL_STATUS;
+                    }
                     attempts++;
                     int probe = offset;
                     IDocument live = viewer.getDocument();
@@ -2646,20 +2770,111 @@ return;
                 }
                 final ICompletionProposal[] popupList = popup;
                 final String popupFilterFinal = popupFilter;
-                display.asyncExec(
-                    () -> publishWordList(viewer, key, gen, epoch, result, dataEvents,
-                        popupList, popupFilterFinal));
+                uiBlockLog("wordList.done", "n=" + result.length //$NON-NLS-1$ //$NON-NLS-2$
+                    + " key=" + key + " epoch=" + epoch); //$NON-NLS-1$ //$NON-NLS-2$
+                IDocument liveAfter = viewer.getDocument();
+                int liveAfterCaret = resolveWidgetCaret(viewer);
+                if (monitor.isCanceled() || epoch != wordListEpoch
+                    || isOrdinaryWordListStaleForLiveCaret(liveAfter, liveAfterCaret))
+                {
+                    uiBlockLog("wordListBackground.abort", "why=staleBeforePublish"); //$NON-NLS-1$ //$NON-NLS-2$
+                    return Status.CANCEL_STATUS;
+                }
+                runWordListOnUi(display, () -> publishWordList(viewer, key, gen, epoch, result,
+                    dataEvents, popupList, popupFilterFinal));
                 return Status.OK_STATUS;
+                }
+                catch (StackOverflowError e)
+                {
+                    uiBlockLog("wordListBackground.soe", "key=" + key); //$NON-NLS-1$ //$NON-NLS-2$
+                    return Status.CANCEL_STATUS;
+                }
             }
         };
         job.setSystem(true);
+        job.setPriority(Job.INTERACTIVE);
         wordListBackgroundJob = job;
         job.schedule(Math.max(0L, delayMs));
         // #region agent log
         uiBlockLog("scheduleWordListInBackground", "key=" + key + " caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " delayMs=" + delayMs + " seeded=" + wordListSeededOnUi); //$NON-NLS-1$ //$NON-NLS-2$
+            + " delayMs=" + delayMs + " prio=INTERACTIVE seeded=" + wordListSeededOnUi); //$NON-NLS-1$ //$NON-NLS-2$
         // #endregion
         return true;
+    }
+
+    /**
+     * Воркер только кладёт результат. UI будит ближайшая отрисовка (подсветка),
+     * не {@code Display.post} клавиши.
+     */
+    private void runWordListOnUi(org.eclipse.swt.widgets.Display display, Runnable action)
+    {
+        if (action == null || display == null)
+        {
+            uiBlockLog("wordList.pending.skip", "action=" + (action != null) //$NON-NLS-1$ //$NON-NLS-2$
+                + " display=" + (display != null)); //$NON-NLS-1$
+            return;
+        }
+        boolean onUi = display.getThread() == Thread.currentThread();
+        uiBlockLog("wordList.pending", "onUi=" + onUi); //$NON-NLS-1$ //$NON-NLS-2$
+        if (onUi)
+        {
+            action.run();
+            return;
+        }
+        pendingWordListAtNano = System.nanoTime();
+        pendingWordListUi = action;
+        uiBlockLog("wordList.asyncArm", ""); //$NON-NLS-1$ //$NON-NLS-2$
+        display.asyncExec(() -> flushPendingWordListUi());
+    }
+
+    private void installWordListUiKick(org.eclipse.swt.widgets.Display display)
+    {
+        if (wordListUiKickFilter != null)
+            return;
+        wordListUiKickFilter = event -> {
+            if (pendingWordListUi == null)
+                return;
+            if (wordListFlushArmed)
+                return;
+            wordListFlushArmed = true;
+            uiBlockLog("wordList.paint.arm", "type=" + event.type //$NON-NLS-1$ //$NON-NLS-2$
+                + " caller=" + uiBlockCaller()); //$NON-NLS-1$
+            display.timerExec(0, () -> {
+                uiBlockLog("wordList.paint.timer", "caller=" + uiBlockCaller()); //$NON-NLS-1$ //$NON-NLS-2$
+                wordListFlushArmed = false;
+                flushPendingWordListUi();
+            });
+        };
+        display.addFilter(org.eclipse.swt.SWT.Paint, wordListUiKickFilter);
+        uiBlockLog("wordList.paint.install", ""); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    void flushPendingWordListUi()
+    {
+        if (wordListFlushRunning)
+        {
+            uiBlockLog("wordList.uiFlush.skip", "why=running caller=" + uiBlockCaller()); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        }
+        Runnable r = pendingWordListUi;
+        if (r == null)
+            return;
+        pendingWordListUi = null;
+        long waitMs = pendingWordListAtNano == 0L ? -1L
+            : (System.nanoTime() - pendingWordListAtNano) / 1_000_000L;
+        pendingWordListAtNano = 0L;
+        wordListFlushRunning = true;
+        try
+        {
+            uiBlockLog("wordList.uiFlush", "waitMs=" + waitMs //$NON-NLS-1$ //$NON-NLS-2$
+                + " popup=" + isPopupVisible() //$NON-NLS-1$
+                + " caller=" + uiBlockCaller()); //$NON-NLS-1$
+            r.run();
+        }
+        finally
+        {
+            wordListFlushRunning = false;
+        }
     }
 
     /**
@@ -2708,8 +2923,25 @@ return;
         catch (Exception | LinkageError ignored)
         {
         }
-        ContentAssistDebug.perfLog("wordListBackground.waitResource", //$NON-NLS-1$
-            (System.nanoTime() - t0) / 1_000_000L, 0, "{}"); //$NON-NLS-1$
+        long ms = (System.nanoTime() - t0) / 1_000_000L;
+        ContentAssistDebug.perfLog("wordListBackground.waitResource", ms, 0, "{}"); //$NON-NLS-1$
+        uiBlockLog("wordListBackground.waitResource", "ms=" + ms); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    void abortWordListBackground(String why)
+    {
+        boolean hadJob = wordListBackgroundJob != null;
+        boolean hadPending = pendingWordListUi != null;
+        pendingWordListUi = null;
+        wordListBackgroundKey = Integer.MIN_VALUE;
+        if (wordListBackgroundJob != null)
+        {
+            wordListBackgroundJob.cancel();
+            wordListBackgroundJob = null;
+        }
+        wordListEpoch++;
+        if (hadJob || hadPending)
+            uiBlockLog("wordList.abort", "why=" + why + " epoch=" + wordListEpoch); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
     }
 
     /**
@@ -2800,8 +3032,16 @@ return;
                                  java.util.Map<Object, Object> dataEvents,
                                  ICompletionProposal[] popupList, String popupFilter)
     {
+        int publishN = result == null ? -1 : result.length;
+        uiBlockLog("wordListBackground.publish.enter", "key=" + key //$NON-NLS-1$ //$NON-NLS-2$
+            + " n=" + publishN //$NON-NLS-1$
+            + " epoch=" + epoch + "/" + wordListEpoch); //$NON-NLS-1$ //$NON-NLS-2$
+        if (publishN >= 0 && publishN < 50)
+            uiBlockLog("wordList.shortList", "n=" + publishN); //$NON-NLS-1$ //$NON-NLS-2$
         if (epoch != wordListEpoch)
         {
+            uiBlockLog("wordListBackground.dropEpoch", "key=" + key //$NON-NLS-1$ //$NON-NLS-2$
+                + " n=" + publishN + " epoch=" + epoch + "/" + wordListEpoch); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             ContentAssistDebug.perfMark("wordListBackground.dropEpoch", //$NON-NLS-1$
                 "{\"key\":" + key + ",\"n\":" + result.length + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return;
@@ -2838,6 +3078,8 @@ return;
         }
         if (isOrdinaryWordListStaleForLiveCaret(liveDoc, liveCaret))
         {
+            uiBlockLog("wordListBackground.dropStale", "key=" + key //$NON-NLS-1$ //$NON-NLS-2$
+                + " caret=" + liveCaret); //$NON-NLS-1$
             ContentAssistDebug.perfMark("wordListBackground.dropStale", //$NON-NLS-1$
                 "{\"key\":" + key + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
@@ -3097,8 +3339,14 @@ if (RepeatedInvocationDetect.isActive())
 
         if (inLiteral)
         {
-            ICompletionProposal[] passthrough = computeLiteralPassthrough(viewer, offset, literalCaret);
-return passthrough;
+            uiBlockLog("compute.literal", "manual=" + ManualInvocationDetect.isActive() //$NON-NLS-1$ //$NON-NLS-2$
+                + " popup=" + isPopupVisible() //$NON-NLS-1$
+                + " cacheOnly=" + Boolean.TRUE.equals(CACHE_ONLY_COMPUTE.get()) //$NON-NLS-1$
+                + " ir=" + isIrWordsResolvedForContext() //$NON-NLS-1$
+                + " irN=" + irProposals.length //$NON-NLS-1$
+                + " irCtx=" + irSnapshotContextKey //$NON-NLS-1$
+                + " ctx=" + fullListContextKey); //$NON-NLS-1$
+            return computeLiteralPassthrough(viewer, offset, literalCaret);
         }
 
         return computeProposalsLight(viewer, offset);
@@ -3211,35 +3459,50 @@ return EMPTY;
     /** В литерале — delegate + merge ИР; EDT пуст + ИР in-flight → EMPTY без beep. */
     private ICompletionProposal[] computeLiteralPassthrough(ITextViewer viewer, int offset, int caret)
     {
+        long t0 = System.nanoTime();
+        uiBlockLog("computeLiteralPassthrough.enter", "off=" + offset + " caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " manual=" + ManualInvocationDetect.isActive()); //$NON-NLS-1$
+        try
+        {
+            return computeLiteralPassthroughImpl(viewer, offset, caret);
+        }
+        finally
+        {
+            uiBlockLog("computeLiteralPassthrough.exit", "ms=" //$NON-NLS-1$ //$NON-NLS-2$
+                + ((System.nanoTime() - t0) / 1_000_000L) //$NON-NLS-1$
+                + " off=" + offset); //$NON-NLS-1$
+        }
+    }
+
+    private ICompletionProposal[] computeLiteralPassthroughImpl(ITextViewer viewer, int offset, int caret)
+    {
         IDocument doc = viewer != null ? viewer.getDocument() : null;
         ensureFullListForContext(viewer, doc, caret, false);
+        rebindIrSnapshotContext();
         String filter = SmartFilterTracker.getCurrentFilter();
-        ICompletionProposal[] best = probeLiteralDelegateBest(viewer, offset, caret);
-        ICompletionProposal[] edtClean = stripIrProposals(unwrapProposals(best));
+        ICompletionProposal[] edtClean = resolveStockLiteralProposalSource(viewer, caret);
+        if (edtClean.length == 0 && delegateListCache.length > 0)
+            edtClean = stripIrProposals(unwrapProposals(delegateListCache));
         int edtN = edtClean.length;
         int irN = isIrWordsResolvedForContext() ? irProposals.length : 0;
+        uiBlockLog("computeLiteralPassthrough.noDelegateUi", "off=" + offset //$NON-NLS-1$ //$NON-NLS-2$
+            + " caret=" + caret //$NON-NLS-1$
+            + " edtN=" + edtN //$NON-NLS-1$
+            + " irN=" + irN //$NON-NLS-1$
+            + " irCtx=" + irSnapshotContextKey //$NON-NLS-1$
+            + " ctx=" + fullListContextKey); //$NON-NLS-1$
         if (isIrWordsResolvedForContext() && irProposals.length > 0)
         {
-            String cacheSource = "probe"; //$NON-NLS-1$
             ICompletionProposal[] merged;
             if (edtN == 0 && fullListReady && fullListCache.length > 0
                 && irSnapshotContextKey == fullListContextKey)
-            {
                 merged = fullListCache;
-                cacheSource = "fullListCache"; //$NON-NLS-1$
-                edtN = -1;
-            }
-            else if (edtN == 0 && delegateListCache.length > 0
-                && irSnapshotContextKey == fullListContextKey)
-            {
+            else if (edtN == 0 && delegateListCache.length > 0)
                 merged = mergeIrForDisplay(delegateListCache);
-                cacheSource = "delegateCache"; //$NON-NLS-1$
-                edtN = delegateListCache.length;
-            }
             else
                 merged = mergeIrForDisplay(edtClean);
             ICompletionProposal[] result = applyLiteralSmartFilter(merged, filter);
-auditLiteralComputeReturn(viewer, resolveEditorForLiteralAudit(viewer),
+            auditLiteralComputeReturn(viewer, resolveEditorForLiteralAudit(viewer),
                 result.length, "computePassthrough", null); //$NON-NLS-1$
             return result;
         }
@@ -3248,17 +3511,12 @@ auditLiteralComputeReturn(viewer, resolveEditorForLiteralAudit(viewer),
         if (reloader != null && reloader.isManualIrAssistPending() && edtN == 0
             && !isIrWordsResolvedForContext())
         {
-return EMPTY;
+            return EMPTY;
         }
-ICompletionProposal[] result = edtN > 0 ? edtClean : best;
-        if (result != null && result.length > 0)
+        ICompletionProposal[] result = edtN > 0 ? edtClean : EMPTY;
+        if (result.length > 0)
             rememberInterimDelegateList(result);
-if (isIrWordsResolvedForContext() && irN > 0)
-        {
-            auditLiteralComputeReturn(viewer, resolveEditorForLiteralAudit(viewer),
-                result != null ? result.length : 0, "computePassthrough", "edtOnlyDespiteIr"); //$NON-NLS-1$ //$NON-NLS-2$
-        }
-        return result;
+        return applyLiteralSmartFilter(result, filter);
     }
 
     /** Gate EDT для автооткрытия: непустой список предложений. */
@@ -3687,8 +3945,7 @@ if (isIrWordsResolvedForContext() && irN > 0)
     boolean repairPopupListFromMemberStock(IDocument doc, int caret)
     {
         int dot = ReceiverTypeLabel.findMemberAccessDot(doc, caret);
-        if (dot < 0 || memberStockFullListDot != dot
-            || memberStockFullList.length <= fullListCache.length)
+        if (dot < 0 || memberStockFullListDot != dot || memberStockFullList.length == 0)
             return false;
         assignFullListCache(memberStockFullList);
         fullListReady = true;
@@ -5198,19 +5455,32 @@ if (!SmartAssistFilterState.isSmartFilterEnabled())
                 && wordListBackgroundKey == contextKey;
             boolean keepMember = contextKey >= 0
                 && (isMemberStockBackgroundInFlight(contextKey)
+                    || hasMemberListForDot(contextKey)
                     || (backgroundStock != null && backgroundStock.dot() == contextKey));
             boolean keepInFlight = previousKey == Integer.MIN_VALUE
                 && contextKey != Integer.MIN_VALUE
                 && (keepWord || keepMember);
+            // kickDoc уже запустил member stock, ключ ещё словарный. gen++ отменял Job.
+            boolean keepWordToMember = previousKey < 0 && previousKey != Integer.MIN_VALUE
+                && keepMember;
             fullListContextKey = contextKey;
             fullListContextReceiver = receiver;
-            if (keepInFlight)
+            if (keepWordToMember)
+            {
+                if (hasMemberListForDot(contextKey))
+                    assignFullListCache(memberStockFullList);
+                else
+                    assignFullListCache(EMPTY);
+            }
+            if (keepInFlight || keepWordToMember)
             {
                 ContentAssistDebug.perfMark("contextRestore.keepBg", //$NON-NLS-1$
                     "{\"key\":" + contextKey //$NON-NLS-1$
                         + ",\"word\":" + keepWord //$NON-NLS-1$
                         + ",\"member\":" + keepMember //$NON-NLS-1$
-                        + "}"); //$NON-NLS-1$
+                        + ",\"wordToMember\":" + keepWordToMember + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+                uiBlockLog("contextRestore.keepBg", "key=" + contextKey //$NON-NLS-1$ //$NON-NLS-2$
+                    + " prev=" + previousKey + " wordToMember=" + keepWordToMember); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
             }
             fullListReady = false;
@@ -5219,6 +5489,8 @@ if (!SmartAssistFilterState.isSmartFilterEnabled())
             cachedNonObjectDot = -1;
             nonObjectCheckedDot = -1;
             lastNonObjectResult = false;
+            if (isStringLiteralAssistContext(doc, caret))
+                rebindIrSnapshotContext();
             assignFullListCache(EMPTY);
             lastStableEmptyList = EMPTY;
             lastStableDelegateList = EMPTY;
@@ -5241,7 +5513,14 @@ if (!SmartAssistFilterState.isSmartFilterEnabled())
                 wordListBackgroundJob.cancel();
                 wordListBackgroundKey = Integer.MIN_VALUE;
             }
-            resetMemberStockFullList();
+            boolean keepMemberStock = previousKey >= 0 && contextKey < 0
+                && (hasMemberListForDot(previousKey)
+                    || (backgroundStock != null && backgroundStock.dot() == previousKey));
+            if (!keepMemberStock)
+                resetMemberStockFullList();
+            else
+                uiBlockLog("contextChange.keepMemberStock", "dot=" + previousKey //$NON-NLS-1$ //$NON-NLS-2$
+                    + " n=" + memberStockFullList.length); //$NON-NLS-1$
             cancelIdleFullListLoad();
             cancelAsyncDelegateLoad();
             clearDelegateSyncProbe();
@@ -5499,6 +5778,12 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
     private static final java.util.concurrent.locks.ReentrantLock DELEGATE_LOCK =
         new java.util.concurrent.locks.ReentrantLock();
 
+    /**
+     * Расчёт членов ждёт замок без лимита: словарный Job cancel() уже идущий compute
+     * не прерывает. tryLock(300)×3 давал null ≈ пусто и тишину после «ф.».
+     */
+    private static final ThreadLocal<Boolean> DELEGATE_LOCK_WAIT_BG = new ThreadLocal<>();
+
     /** Сколько фоновый расчёт ждёт освобождения замка, прежде чем сдаться до следующей попытки. */
     private static final long DELEGATE_LOCK_BG_WAIT_MS = 300;
 
@@ -5512,9 +5797,9 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
      * Один вызов штатного процессора с замером: главный источник блокировки UI.
      *
      * <p>Расчёты сериализованы {@link #DELEGATE_LOCK}. UI-поток ждёт замок сколько нужно —
-     * пропустить расчёт он не может, иначе список будет неполным. Фоновый поток ждёт
-     * ограниченно и при занятости возвращает {@code null}: наверху это обычная неудачная
-     * попытка, она повторится.
+     * пропустить расчёт он не может, иначе список будет неполным. Фоновый поток словаря
+     * ждёт ограниченно и при занятости возвращает {@code null}. Расчёт членов
+     * ({@link #DELEGATE_LOCK_WAIT_BG}) ждёт замок без лимита.
      */
     private ICompletionProposal[] probeDelegateOnce(ITextViewer viewer, int off)
     {
@@ -5524,6 +5809,11 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         try
         {
             if (onUi)
+            {
+                DELEGATE_LOCK.lock();
+                locked = true;
+            }
+            else if (Boolean.TRUE.equals(DELEGATE_LOCK_WAIT_BG.get()))
             {
                 DELEGATE_LOCK.lock();
                 locked = true;
@@ -5568,7 +5858,18 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
             // отключены (mode&1==0), в кэш попадают 3 шаблона вроде «~Метка».
             if (!onUi)
                 resetDelegateAssistMode();
-            raw = delegate.computeCompletionProposals(viewer, off);
+            try
+            {
+                raw = delegate.computeCompletionProposals(viewer, off);
+            }
+            catch (NullPointerException npe)
+            {
+                // SWT Image / getDisplay с воркера: Xtext пишет в Error Log
+                // «This is not an UI thread» и часть proposal теряется.
+                uiBlockLog("probeDelegateOnce.offUiNpe", "off=" + off //$NON-NLS-1$ //$NON-NLS-2$
+                    + " msg=" + String.valueOf(npe.getMessage())); //$NON-NLS-1$
+                raw = EMPTY;
+            }
             if (onUi && raw != null && raw.length > 0)
                 wordListSeededOnUi = true;
             return raw;
@@ -5718,6 +6019,12 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                 || memberStockFullList.length >= MIN_STABLE_MEMBER_CACHE);
     }
 
+    /** Есть что показать после «.» — не ждать новый Job (у типа может быть < 20 членов). */
+    private boolean hasMemberListForDot(int dot)
+    {
+        return dot >= 0 && memberStockFullListDot == dot && memberStockFullList.length > 0;
+    }
+
     private ICompletionProposal[] preferMemberFullList(ITextViewer viewer, int dot,
                                                        ICompletionProposal[] raw)
     {
@@ -5753,7 +6060,7 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
     {
         if (dot < 0)
             return null;
-        if (hasMemberStock(dot))
+        if (hasMemberListForDot(dot))
         {
             ICompletionProposal[] stock = buildDelegateOrderedList(memberStockFullList);
             if (filter == null || filter.isEmpty())
@@ -5792,15 +6099,19 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         int caretProbe = resolveWidgetCaret(viewer);
         if (caretProbe >= 0 && isStringLiteralAssistContext(viewer, caretProbe))
             return;
-        if (hasMemberStock(dotContextKey))
+        if (hasMemberListForDot(dotContextKey))
             return;
+        abortWordListBackground("memberStock"); //$NON-NLS-1$
         try
         {
             if (viewer.getTextWidget() == null || viewer.getTextWidget().isDisposed())
                 return;
             org.eclipse.swt.widgets.Display display = viewer.getTextWidget().getDisplay();
+            IDocument liveDoc = viewer.getDocument();
+            int caretForReceiver = caretProbe >= 0 ? caretProbe : dotContextKey + 1;
+            String receiver = memberAccessReceiver(liveDoc, caretForReceiver);
             if (runMemberStockCaptureInBackground(viewer, display, dotContextKey,
-                memberStockContextGen, fullListContextReceiver))
+                memberStockContextGen, receiver))
                 return;
             ContentAssistDebug.perfMark("memberStockDefer.uiFallback", //$NON-NLS-1$
                 "{\"dot\":" + dotContextKey + "}"); //$NON-NLS-1$ //$NON-NLS-2$
@@ -5852,107 +6163,106 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
             memberStockBackgroundJob.cancel();
         memberStockBackgroundDot = dotContextKey;
         memberStockBackgroundGen = contextGen;
+        installWordListUiKick(display);
         final int probeOffset = dotContextKey + 1;
         Job job = new Job("SCAP member stock") { //$NON-NLS-1$
             @Override
             protected IStatus run(IProgressMonitor monitor)
             {
-                IDocument jobDoc = viewer.getDocument();
-                if (jobDoc != null
-                    && ReceiverTypeLabel.isNonObjectReceiver(jobDoc, dotContextKey,
-                        probeOffset))
+                // Не isNonObjectReceiver до compute: readOnlyForContentAssist на модуле
+                // 1.4 млн ждёт reconciler 0.2–1.3 с (лог 11.09.2026 00:33: точка → probe).
+                // Штатный compute и так берёт тот же readOnly; для объекта это двойная пауза.
+                DELEGATE_LOCK_WAIT_BG.set(Boolean.TRUE);
+                try
                 {
-                    ContentAssistDebug.perfMark("memberStockBackground.nonObject", //$NON-NLS-1$
-                        "{\"dot\":" + dotContextKey + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+                    uiBlockLog("memberStock.bg.run", "dot=" + dotContextKey); //$NON-NLS-1$ //$NON-NLS-2$
+                    ICompletionProposal[] raw = EMPTY;
+                    java.util.Map<Object, Object> dataEvents = java.util.Collections.emptyMap();
+                    int attempts = 0;
+                    long t0 = System.nanoTime();
+                    while (attempts < MEMBER_STOCK_BG_ATTEMPTS)
+                    {
+                        if (monitor.isCanceled() || contextGen != memberStockContextGen)
+                            return Status.CANCEL_STATUS;
+                        attempts++;
+                        try
+                        {
+                            // Без внешнего readOnly: штатный процессор внутри сам берёт
+                            // readOnlyForContentAssist. Внешняя обёртка на фоновом потоке даёт
+                            // «устаревшее состояние» и null — этим и была бесполезна прошлая
+                            // фоновая загрузка.
+                            raw = BslDataEventGuard.runIsolated(
+                                () -> computeMemberStockViaSelectionProxy(viewer, probeOffset));
+                            // Забираем DataEvent, записанный расчётом в теневую карту: по нему
+                            // EDT поднимает LinkedMode при вставке. Забирать только здесь, на
+                            // фоновом потоке — теневая карта привязана к потоку.
+                            dataEvents = BslDataEventGuard.drainIsolated(doc);
+                        }
+                        catch (Exception | LinkageError e)
+                        {
+                            raw = EMPTY;
+                        }
+                        if (raw != null && raw.length > 0)
+                            break;
+                        // Пусто — значит разбор ещё не догнал текст (типичный случай сразу после
+                        // набранной точки: тип локальной переменной ещё не выведен). Повторять
+                        // ВПРИТЫК бессмысленно: замер 05.09.2026 — три попытки за 6 мс, все
+                        // пустые, и так пять заданий подряд, а в окне оставался прежний список
+                        // слов. Штатному разбору надо дать время, как это делал прежний путь на
+                        // UI-потоке (повтор через 25 мс). Спим в фоновом потоке — UI не страдает.
+                        if (attempts < MEMBER_STOCK_BG_ATTEMPTS)
+                        {
+                            try
+                            {
+                                Thread.sleep(MEMBER_STOCK_BG_RETRY_MS);
+                            }
+                            catch (InterruptedException e)
+                            {
+                                Thread.currentThread().interrupt();
+                                return Status.CANCEL_STATUS;
+                            }
+                        }
+                    }
+                    ContentAssistDebug.perfLog("memberStockBackground", //$NON-NLS-1$
+                        (System.nanoTime() - t0) / 1_000_000L, 0,
+                        "{\"dot\":" + dotContextKey + ",\"attempts\":" + attempts //$NON-NLS-1$ //$NON-NLS-2$
+                            + ",\"n\":" + (raw == null ? -1 : raw.length) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+                    // Метку «идёт расчёт для этой точки» снимаем в любом исходе, иначе после
+                    // неудачи повторный расчёт для той же точки уже не запустится.
                     if (memberStockBackgroundGen == contextGen
                         && memberStockBackgroundDot == dotContextKey)
                         memberStockBackgroundDot = -1;
-                    display.asyncExec(() -> {
-                        if (contextGen != memberStockContextGen)
-                            return;
-                        nonObjectCheckedDot = dotContextKey;
-                        lastNonObjectResult = true;
-                        markTerminalEmptyMemberAccess(dotContextKey);
-                    });
-                    return Status.CANCEL_STATUS;
-                }
-                ICompletionProposal[] raw = EMPTY;
-                java.util.Map<Object, Object> dataEvents = java.util.Collections.emptyMap();
-                int attempts = 0;
-                long t0 = System.nanoTime();
-                while (attempts < MEMBER_STOCK_BG_ATTEMPTS)
-                {
-                    if (monitor.isCanceled() || contextGen != memberStockContextGen)
+                    if (raw == null)
+                    {
+                        uiBlockLog("memberStock.bg.lockBusyGiveUp", "dot=" + dotContextKey); //$NON-NLS-1$ //$NON-NLS-2$
                         return Status.CANCEL_STATUS;
-                    attempts++;
-                    try
-                    {
-                        // Без внешнего readOnly: штатный процессор внутри сам берёт
-                        // readOnlyForContentAssist. Внешняя обёртка на фоновом потоке даёт
-                        // «устаревшее состояние» и null — этим и была бесполезна прошлая
-                        // фоновая загрузка.
-                        raw = BslDataEventGuard.runIsolated(
-                            () -> computeMemberStockViaSelectionProxy(viewer, probeOffset));
-                        // Забираем DataEvent, записанный расчётом в теневую карту: по нему
-                        // EDT поднимает LinkedMode при вставке. Забирать только здесь, на
-                        // фоновом потоке — теневая карта привязана к потоку.
-                        dataEvents = BslDataEventGuard.drainIsolated(doc);
                     }
-                    catch (Exception | LinkageError e)
+                    if (raw.length == 0)
                     {
-                        raw = EMPTY;
+                        runWordListOnUi(display,
+                            () -> dropStalePopupForEmptyMemberStock(viewer, dotContextKey, contextGen,
+                                contextReceiver));
+                        return Status.CANCEL_STATUS;
                     }
-                    if (raw != null && raw.length > 0)
-                        break;
-                    // Пусто — значит разбор ещё не догнал текст (типичный случай сразу после
-                    // набранной точки: тип локальной переменной ещё не выведен). Повторять
-                    // ВПРИТЫК бессмысленно: замер 05.09.2026 — три попытки за 6 мс, все
-                    // пустые, и так пять заданий подряд, а в окне оставался прежний список
-                    // слов. Штатному разбору надо дать время, как это делал прежний путь на
-                    // UI-потоке (повтор через 25 мс). Спим в фоновом потоке — UI не страдает.
-                    if (attempts < MEMBER_STOCK_BG_ATTEMPTS)
-                    {
-                        try
-                        {
-                            Thread.sleep(MEMBER_STOCK_BG_RETRY_MS);
-                        }
-                        catch (InterruptedException e)
-                        {
-                            Thread.currentThread().interrupt();
-                            return Status.CANCEL_STATUS;
-                        }
-                    }
+                    final ICompletionProposal[] result = raw;
+                    final java.util.Map<Object, Object> events = dataEvents;
+                    // Результат кладём в поля до постановки в UI: пока Display занят
+                    // подсветкой, asyncExec стоит секундами (лог 11.09.2026: probe n=5 в 00:19:00,
+                    // show в 00:19:10). Показ — тот же Paint+timerExec(0), что у списка слов.
+                    backgroundStock = new BackgroundStock(dotContextKey, contextGen, contextReceiver,
+                        result, events);
+                    runWordListOnUi(display, () -> publishMemberStock(viewer, dotContextKey, contextGen,
+                        contextReceiver, result, events));
+                    return Status.OK_STATUS;
                 }
-                ContentAssistDebug.perfLog("memberStockBackground", //$NON-NLS-1$
-                    (System.nanoTime() - t0) / 1_000_000L, 0,
-                    "{\"dot\":" + dotContextKey + ",\"attempts\":" + attempts //$NON-NLS-1$ //$NON-NLS-2$
-                        + ",\"n\":" + (raw == null ? -1 : raw.length) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-                // Метку «идёт расчёт для этой точки» снимаем в любом исходе, иначе после
-                // неудачи повторный расчёт для той же точки уже не запустится.
-                if (memberStockBackgroundGen == contextGen
-                    && memberStockBackgroundDot == dotContextKey)
-                    memberStockBackgroundDot = -1;
-                if (raw == null || raw.length == 0)
+                finally
                 {
-                    display.asyncExec(
-                        () -> dropStalePopupForEmptyMemberStock(viewer, dotContextKey, contextGen,
-                            contextReceiver));
-                    return Status.CANCEL_STATUS;
+                    DELEGATE_LOCK_WAIT_BG.remove();
                 }
-                final ICompletionProposal[] result = raw;
-                final java.util.Map<Object, Object> events = dataEvents;
-                // Результат кладём в поля ДО asyncExec: пока UI-поток ждёт нас в join,
-                // asyncExec не выполнится (очередь дисплея не крутится), и забрать результат
-                // он сможет только отсюда. Кто первый — тот и опубликует, второй увидит
-                // dropShorter и ничего не испортит.
-                backgroundStock = new BackgroundStock(dotContextKey, contextGen, contextReceiver,
-                    result, events);
-                display.asyncExec(() -> publishMemberStock(viewer, dotContextKey, contextGen,
-                    contextReceiver, result, events));
-                return Status.OK_STATUS;
             }
         };
         job.setSystem(true);
+        job.setPriority(Job.INTERACTIVE);
         memberStockBackgroundJob = job;
         job.schedule();
         return true;
@@ -6021,6 +6331,7 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
     {
         if (contextGen != memberStockContextGen)
         {
+            uiBlockLog("memberStock.publish.drop", "why=gen dot=" + dotContextKey); //$NON-NLS-1$ //$NON-NLS-2$
             ContentAssistDebug.perfMark("memberStockBackground.dropGen", //$NON-NLS-1$
                 "{\"dot\":" + dotContextKey + ",\"was\":" + contextGen //$NON-NLS-1$ //$NON-NLS-2$
                     + ",\"now\":" + memberStockContextGen + "}"); //$NON-NLS-1$ //$NON-NLS-2$
@@ -6037,15 +6348,31 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         // никуда не девался.
         IDocument liveDoc = viewer.getDocument();
         int liveCaret = resolveWidgetCaret(viewer);
+        int liveDot = liveDoc != null && liveCaret >= 0
+            ? ReceiverTypeLabel.findMemberAccessDot(liveDoc, liveCaret) : -1;
         String liveReceiver = liveDoc != null && liveCaret >= 0
             ? memberAccessReceiver(liveDoc, liveCaret) : ""; //$NON-NLS-1$
-        if (liveDoc == null || liveCaret < 0
-            || ReceiverTypeLabel.findMemberAccessDot(liveDoc, liveCaret) != dotContextKey
-            || !liveReceiver.equals(contextReceiver)
-            || isStringLiteralAssistContext(liveDoc, liveCaret))
+        boolean inLiteral = liveDoc != null && liveCaret >= 0
+            && isStringLiteralAssistContext(liveDoc, liveCaret);
+        if (liveDot != dotContextKey && liveDoc != null && liveCaret == dotContextKey + 1
+            && !inLiteral)
         {
-            ContentAssistDebug.perfMark("memberStockBackground.dropContextGone", //$NON-NLS-1$
-                "{\"dot\":" + dotContextKey + ",\"caret\":" + liveCaret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            try
+            {
+                if (dotContextKey >= 0 && dotContextKey < liveDoc.getLength()
+                    && liveDoc.getChar(dotContextKey) == '.')
+                    liveDot = dotContextKey;
+            }
+            catch (Exception ignored)
+            {
+            }
+        }
+        if (liveDoc == null || liveCaret < 0 || liveDot != dotContextKey || inLiteral)
+        {
+            uiBlockLog("memberStock.publish.drop", "why=contextGone caret=" + liveCaret //$NON-NLS-1$ //$NON-NLS-2$
+                + " liveDot=" + liveDot + " dot=" + dotContextKey //$NON-NLS-1$ //$NON-NLS-2$
+                + " inLiteral=" + inLiteral //$NON-NLS-1$
+                + " liveRcv=\"" + liveReceiver + "\" ctxRcv=\"" + contextReceiver + "\""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return;
         }
         // Контекст на экране жив, а кэш его уже забыл — восстанавливаем ключ. Без этого
@@ -6097,7 +6424,11 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         if (isPopupVisible())
             ContentAssistSessionReloader.refreshPopupIfOpen();
         else if (hasMemberStock(dotContextKey))
+        {
+            uiBlockLog("memberStock.publish.open", "dot=" + dotContextKey //$NON-NLS-1$ //$NON-NLS-2$
+                + " n=" + memberStockFullList.length + " caller=" + uiBlockCaller()); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             ContentAssistSessionReloader.openPopupForBackgroundMemberList(viewer);
+        }
     }
 
     private void runMemberStockCapture(ITextViewer viewer, int dotContextKey, int attempt,
@@ -6475,7 +6806,8 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
             catch (java.lang.reflect.InvocationTargetException ite)
             {
                 Throwable c = ite.getCause() != null ? ite.getCause() : ite;
-                if (offUi && c instanceof org.eclipse.swt.SWTException)
+                if (offUi && (c instanceof org.eclipse.swt.SWTException
+                    || c instanceof NullPointerException))
                 {
                     ContentAssistDebug.perfMark("proxy.swt", //$NON-NLS-1$
                         "{\"m\":\"" + name + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
@@ -7069,8 +7401,15 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         String typed = identifierAtCaret(doc, caret);
         if (typed.isEmpty())
             return;
-        ImplicitVariable phantom = phantomImplicitAtCaret(list, doc, caret, typed);
-        list.removeIf(p -> isTypedIdentifierGhost(p, typed, caret, phantom));
+        try
+        {
+            ImplicitVariable phantom = phantomImplicitAtCaret(list, doc, caret, typed);
+            list.removeIf(p -> isTypedIdentifierGhost(p, typed, caret, phantom));
+        }
+        catch (StackOverflowError t)
+        {
+            uiBlockLogThrowable("ghost.drop.soe", t); //$NON-NLS-1$
+        }
     }
 
     private static boolean isTypedIdentifierGhost(ICompletionProposal proposal, String typed,

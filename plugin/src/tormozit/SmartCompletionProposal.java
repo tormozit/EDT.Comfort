@@ -18,6 +18,7 @@ import org.eclipse.jface.text.contentassist.ICompletionProposalExtension6;
 import org.eclipse.jface.text.contentassist.IContextInformation;
 import org.eclipse.jface.text.source.SourceViewer;
 import org.eclipse.jface.viewers.StyledString;
+import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.widgets.Display;
@@ -223,6 +224,7 @@ public class SmartCompletionProposal implements
         try
         {
             logApplyStart("doc"); //$NON-NLS-1$
+            rebaseInspectExpressionReplacement(document, null, caret);
             if (replaceParentOverlap && tryApplyEdtOverlapReplaceParent(document, null, -1))
                 return;
             if (tryApplyWordOnly(document, null, -1, null))
@@ -257,6 +259,7 @@ public class SmartCompletionProposal implements
         try
         {
             logApplyStart("docTrigger"); //$NON-NLS-1$
+            rebaseInspectExpressionReplacement(document, null, caret);
             if (replaceParentOverlap && tryApplyEdtOverlapReplaceParent(document, null, offset))
                 return;
             if (tryApplyWordOnly(document, null, offset, null))
@@ -317,6 +320,7 @@ public class SmartCompletionProposal implements
         try
         {
             logApplyStart("viewer"); //$NON-NLS-1$
+            rebaseInspectExpressionReplacement(document, viewer, caret);
             if (replaceParentOverlap && tryApplyEdtOverlapReplaceParent(document, viewer, offset))
                 return;
             if (viewer != null && tryApplyWordOnly(document, viewer, offset, stateMask))
@@ -1159,6 +1163,59 @@ public class SmartCompletionProposal implements
         if (viewer == null || viewer.getDocument() != document)
             return -1;
         return SmartContentAssistProcessor.resolveWidgetCaret(viewer);
+    }
+
+    /**
+     * В поле выражения инспектора proposal иногда приходит со стартом замены
+     * от прошлого вызова (середина уже вставленного имени). Сужаем к текущему
+     * идентификатору, кроме {@code родитель.член}.
+     * Viewer берём из {@code apply(ITextViewer)}, не из {@code getActiveViewer()} —
+     * активным часто остаётся модульный редактор, и правка молча не срабатывала.
+     */
+    private void rebaseInspectExpressionReplacement(IDocument document, ITextViewer applyViewer,
+        int caret)
+    {
+        StyledText widget = applyViewer != null ? applyViewer.getTextWidget() : null;
+        if (widget == null || widget.isDisposed())
+        {
+            SourceViewer active = ContentAssistSessionReloader.getActiveViewer();
+            widget = active != null ? active.getTextWidget() : null;
+        }
+        if (widget == null || widget.isDisposed()
+            || !Boolean.TRUE.equals(widget.getData(DebugInspectorHook.INSPECT_EXPRESSION_EDITOR_KEY)))
+            return;
+        DebugInspectorHook.markInspectExpressionProposalApplied();
+        if (document == null || caret < 0)
+            return;
+        ConfigurableCompletionProposal cp = asConfigurable(delegate);
+        if (cp == null)
+            return;
+        int start = cp.getReplacementOffset();
+        int len = cp.getReplacementLength();
+        String filter = SmartContentAssistProcessor.computeIdentifierFilter(document, caret);
+        int identStart = filter.isEmpty() ? caret : caret - filter.length();
+        String repl = cp.getReplacementString();
+        String replClip = repl == null ? "null" : (repl.length() > 40 ? repl.substring(0, 40) : repl); //$NON-NLS-1$
+        Global.tempLog("inspect-expr", //$NON-NLS-1$
+            "apply start=" + start + " len=" + len //$NON-NLS-1$ //$NON-NLS-2$
+                + " identStart=" + identStart + " caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                + " filter=[" + filter + "] repl=[" + replClip + "]"); //$NON-NLS-1$ //$NON-NLS-2$
+        if (start >= identStart)
+            return;
+        try
+        {
+            if (identStart > 0 && document.getChar(identStart - 1) == '.')
+                return;
+        }
+        catch (BadLocationException e)
+        {
+            return;
+        }
+        int newLen = Math.max(0, caret - identStart);
+        cp.setReplacementOffset(identStart);
+        cp.setReplacementLength(newLen);
+        Global.tempLog("inspect-expr", //$NON-NLS-1$
+            "apply rebase " + start + "," + len + " -> " + identStart + "," + newLen); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
     }
 
     private static boolean needsWordOnlyInsert(ConfigurableCompletionProposal cp,

@@ -826,7 +826,23 @@ boolean inLiteral = endCaret >= 0
             @Override
             public void documentChanged(DocumentEvent event)
             {
-                long t0 = ContentAssistDebug.perfStart("assist.documentChanged"); //$NON-NLS-1$
+                long t0 = System.nanoTime();
+                String text = event == null ? null : event.getText();
+                boolean inDocLiteral = false;
+                if (text != null && !text.isEmpty() && event != null)
+                {
+                    IDocument d = viewer != null ? viewer.getDocument() : null;
+                    int caretAfter = event.getOffset() + text.length();
+                    String prefix = BslAssistSourceHeuristics.linePrefixToCaret(
+                        d, caretAfter, text.charAt(0), event.getOffset());
+                    inDocLiteral = BslAssistSourceHeuristics.isInsideStringLiteral(prefix);
+                }
+                SmartContentAssistProcessor.uiBlockLog("doc.chg", "text=\"" //$NON-NLS-1$ //$NON-NLS-2$
+                    + ContentAssistDebug.jsonEscapeForLog(clipLogText(text)) + "\"" //$NON-NLS-1$
+                    + " off=" + (event == null ? -1 : event.getOffset()) //$NON-NLS-1$
+                    + " pending=" + pendingAutoOpen //$NON-NLS-1$
+                    + " popup=" + ContentAssistPopupSync.isPopupVisible(assistant) //$NON-NLS-1$
+                    + " inLiteral=" + inDocLiteral); //$NON-NLS-1$
                 try
                 {
                     resetAssistFilterPrefixOnNonFilterChar(event);
@@ -845,7 +861,9 @@ boolean inLiteral = endCaret >= 0
                 }
                 finally
                 {
-                    String text = event == null ? null : event.getText();
+                    long ms = (System.nanoTime() - t0) / 1_000_000L;
+                    SmartContentAssistProcessor.uiBlockLog("doc.chg.exit", "ms=" + ms //$NON-NLS-1$ //$NON-NLS-2$
+                        + " text=\"" + ContentAssistDebug.jsonEscapeForLog(clipLogText(text)) + "\""); //$NON-NLS-1$ //$NON-NLS-2$
                     ContentAssistDebug.perfEnd("assist.documentChanged", t0, //$NON-NLS-1$
                         "{\"len\":" + (text == null ? 0 : text.length()) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
                     // Вставка предложения (несколько символов сразу) — момент истины для
@@ -2499,11 +2517,20 @@ boolean inLiteral = endCaret >= 0
     private void onVerifyKeyForCompletionAutoOpenImpl(VerifyEvent event)
     {
         pendingAutoOpen = false;
+        if (suppressDocumentAutoOpenAfterSession
+            && !Boolean.TRUE.equals(SmartCompletionProposal.PROPOSAL_APPLY_IN_PROGRESS.get()))
+        {
+            SmartContentAssistProcessor.uiBlockLog("autoOpen.suppress.clear", //$NON-NLS-1$
+                "ch=" + (event.character == 0 ? 0 : (char)event.character)); //$NON-NLS-1$
+            suppressDocumentAutoOpenAfterSession = false;
+        }
         char insertedPeek = event.character == 0 ? 0 : (char)event.character;
         boolean hintChar = insertedPeek == '(' || insertedPeek == ','
             || event.keyCode == '(' || event.keyCode == ',';
         if (!ComfortSettings.isReplaceListFiltersEnabled())
         {
+            SmartContentAssistProcessor.uiBlockLog("autoOpen.verify.skip", //$NON-NLS-1$
+                "why=listsOff ch=" + (int)insertedPeek); //$NON-NLS-1$
             if (hintChar)
                 logLinkedMode("verify.skip", "{\"reason\":\"listsOff\",\"ch\":" //$NON-NLS-1$ //$NON-NLS-2$
                     + (int)insertedPeek + ",\"key\":" + event.keyCode + "}"); //$NON-NLS-1$ //$NON-NLS-2$
@@ -2512,6 +2539,8 @@ boolean inLiteral = endCaret >= 0
         ContentAssistSettings settings = ContentAssistSettings.getInstance();
         if (settings == null || !settings.isEnabled())
         {
+            SmartContentAssistProcessor.uiBlockLog("autoOpen.verify.skip", //$NON-NLS-1$
+                "why=autoOpenOff ch=" + (int)insertedPeek); //$NON-NLS-1$
             if (hintChar)
                 logLinkedMode("verify.skip", "{\"reason\":\"autoOpenOff\",\"ch\":" //$NON-NLS-1$ //$NON-NLS-2$
                     + (int)insertedPeek + ",\"key\":" + event.keyCode + "}"); //$NON-NLS-1$ //$NON-NLS-2$
@@ -2520,6 +2549,8 @@ boolean inLiteral = endCaret >= 0
         char inserted = insertedPeek;
         if (inserted == 0)
         {
+            SmartContentAssistProcessor.uiBlockLog("autoOpen.verify.skip", //$NON-NLS-1$
+                "why=char0 key=" + event.keyCode); //$NON-NLS-1$
             if (hintChar)
                 logLinkedMode("verify.skip", "{\"reason\":\"char0\",\"key\":" + event.keyCode //$NON-NLS-1$ //$NON-NLS-2$
                     + ",\"mask\":" + event.stateMask + "}"); //$NON-NLS-1$ //$NON-NLS-2$
@@ -2530,16 +2561,21 @@ boolean inLiteral = endCaret >= 0
         int caretAfter = startOffset + 1;
         IDocument doc = viewer != null ? viewer.getDocument() : null;
         boolean popupWasOpen = ContentAssistPopupSync.isPopupVisible(assistant);
+        String linePrefix = BslAssistSourceHeuristics.linePrefixToCaret(
+            doc, caretAfter, inserted, startOffset);
+        boolean inLiteral = BslAssistSourceHeuristics.isInsideStringLiteral(linePrefix);
         String branch = CompletionAutoOpenTrigger.diagnoseFetch(
             doc, inserted, startOffset, caretAfter, popupWasOpen, event.stateMask);
         if (branch != null)
             pendingAutoOpen = true;
+        SmartContentAssistProcessor.uiBlockLog("autoOpen.verify", "ch=" + inserted //$NON-NLS-1$ //$NON-NLS-2$
+            + " popup=" + popupWasOpen + " branch=" + branch //$NON-NLS-1$ //$NON-NLS-2$
+            + " pending=" + pendingAutoOpen + " caret=" + caretAfter //$NON-NLS-1$ //$NON-NLS-2$
+            + " inLiteral=" + inLiteral); //$NON-NLS-1$
         if ((inserted == '(' || inserted == ',') && !popupWasOpen)
         {
-            String linePrefix = BslAssistSourceHeuristics.linePrefixToCaret(
-                doc, caretAfter, inserted, startOffset);
             boolean inComment = BslAssistSourceHeuristics.isInsideLineComment(linePrefix);
-            boolean inString = BslAssistSourceHeuristics.isInsideStringLiteral(linePrefix);
+            boolean inString = inLiteral;
             if (!inComment && !inString)
             {
                 pendingParamHintOnChar = true;
@@ -2673,31 +2709,71 @@ boolean inLiteral = endCaret >= 0
 
     private void onDocumentChangedForCompletionAutoOpenImpl(DocumentEvent event)
     {
-if (!pendingAutoOpen || !ComfortSettings.isReplaceListFiltersEnabled())
+        String skipText = event == null ? null : event.getText();
+        boolean inLiteral = false;
+        if (skipText != null && !skipText.isEmpty() && event != null)
+        {
+            IDocument d = viewer != null ? viewer.getDocument() : null;
+            int caretAfter = event.getOffset() + skipText.length();
+            String prefix = BslAssistSourceHeuristics.linePrefixToCaret(
+                d, caretAfter, skipText.charAt(0), event.getOffset());
+            inLiteral = BslAssistSourceHeuristics.isInsideStringLiteral(prefix);
+        }
+        // «.» при открытом попапе слов: VerifyKey не ставит pending (popupWasOpen).
+        // Без kickDoc окно остаётся со словарём (скрин 11.09.2026: «ф.» → шаблоны на «ф»).
+        if (".".equals(skipText) && processor != null && event != null
+            && ComfortSettings.isReplaceListFiltersEnabled())
+        {
+            IDocument d = viewer != null ? viewer.getDocument() : null;
+            int caretAfter = event.getOffset() + skipText.length();
+            if (d != null
+                && !SmartContentAssistProcessor.isStringLiteralAssistContext(d, caretAfter)
+                && SmartContentAssistProcessor.ReceiverTypeLabel.findMemberAccessDot(
+                    d, caretAfter) >= 0)
+            {
+                SmartContentAssistProcessor.uiBlockLog("autoOpen.doc.memberDotKick", //$NON-NLS-1$
+                    "caret=" + caretAfter + " pending=" + pendingAutoOpen); //$NON-NLS-1$ //$NON-NLS-2$
+                processor.kickWordListFromDocumentChange(viewer, caretAfter);
+            }
+        }
+        if (!pendingAutoOpen || !ComfortSettings.isReplaceListFiltersEnabled())
+        {
+            SmartContentAssistProcessor.uiBlockLog("autoOpen.doc.skip", "why=noPending" //$NON-NLS-1$ //$NON-NLS-2$
+                + " pending=" + pendingAutoOpen //$NON-NLS-1$
+                + " filters=" + ComfortSettings.isReplaceListFiltersEnabled() //$NON-NLS-1$
+                + " text=\"" + ContentAssistDebug.jsonEscapeForLog(clipLogText(skipText)) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                + " popup=" + ContentAssistPopupSync.isPopupVisible(assistant) //$NON-NLS-1$
+                + " inLiteral=" + inLiteral); //$NON-NLS-1$
             return;
+        }
         pendingAutoOpen = false;
         ContentAssistSettings settings = ContentAssistSettings.getInstance();
         if (settings == null || !settings.isEnabled())
         {
+            SmartContentAssistProcessor.uiBlockLog("autoOpen.doc.skip", "why=settingOff"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         if (event == null || event.getText() == null)
         {
+            SmartContentAssistProcessor.uiBlockLog("autoOpen.doc.skip", "why=noEvent"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         String text = event.getText();
         if (text.isEmpty())
         {
+            SmartContentAssistProcessor.uiBlockLog("autoOpen.doc.skip", "why=empty"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         char inserted = text.charAt(0);
         if (inserted == '\r' || inserted == '\n' || inserted == '\t')
         {
+            SmartContentAssistProcessor.uiBlockLog("autoOpen.doc.skip", "why=ws ch=" + (int)inserted); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         // Вставка proposal через SmartCompletionProposal.apply() — игнорируем.
         if (Boolean.TRUE.equals(SmartCompletionProposal.PROPOSAL_APPLY_IN_PROGRESS.get()))
         {
+            SmartContentAssistProcessor.uiBlockLog("autoOpen.doc.skip", "why=proposalApply ch=" + inserted); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         // Вставка необёрнутого proposal (пустой префикс — делегат не подключён).
@@ -2706,6 +2782,8 @@ if (!pendingAutoOpen || !ComfortSettings.isReplaceListFiltersEnabled())
         {
             if (inserted != '.')
             {
+                SmartContentAssistProcessor.uiBlockLog("autoOpen.doc.skip", //$NON-NLS-1$
+                    "why=suppressAfterSession ch=" + inserted); //$NON-NLS-1$
                 logAssistOpen("autoOpen.skip", "{\"reason\":\"suppressAfterSession\"" //$NON-NLS-1$ //$NON-NLS-2$
                     + ",\"ch\":\"" + ContentAssistDebug.jsonEscapeForLog(String.valueOf(inserted)) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
@@ -2734,11 +2812,18 @@ if (!pendingAutoOpen || !ComfortSettings.isReplaceListFiltersEnabled())
             + ",\"irPending\":" + manualIrAssistPending //$NON-NLS-1$
             + ",\"autoOpenPending\":" + completionAutoOpenPending //$NON-NLS-1$
             + ",\"awaitingWords\":" + isCompletionAutoOpenAwaitingWords() + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+        SmartContentAssistProcessor.uiBlockLog("autoOpen.doc", "ch=" + inserted //$NON-NLS-1$ //$NON-NLS-2$
+            + " caret=" + caretAfter + " branch=" + branch //$NON-NLS-1$ //$NON-NLS-2$
+            + " popup=" + popupWasOpen); //$NON-NLS-1$
         int seq = completionAutoOpenSeq.incrementAndGet();
         completionAutoOpenActiveSeq = seq;
         completionAutoOpenAwaitingLogged = false;
         if (branch == null)
+        {
+            SmartContentAssistProcessor.uiBlockLog("autoOpen.doc.skip", "why=noBranch ch=" + inserted //$NON-NLS-1$ //$NON-NLS-2$
+                + " popup=" + popupWasOpen); //$NON-NLS-1$
             return;
+        }
         if ("dot".equals(branch))
             cancelPendingOrdinaryAssist("dot"); //$NON-NLS-1$
         if ("space".equals(branch) || "symbol".equals(branch))
@@ -2771,6 +2856,11 @@ if (!pendingAutoOpen || !ComfortSettings.isReplaceListFiltersEnabled())
                 // каретки, то есть Ctrl+Space. Он после & работает правильно, автооткрытие
                 // же собирает попап по кэшу и без такой гарантии.
                 scheduleCompletionAutoOpen(caretAfter, seq);
+            }
+            else
+            {
+                SmartContentAssistProcessor.uiBlockLog("autoOpen.doc.skip", //$NON-NLS-1$
+                    "why=spaceOrSymbolNoEdt ch=" + inserted + " branch=" + branch); //$NON-NLS-1$ //$NON-NLS-2$
             }
         }
         else
@@ -2832,6 +2922,8 @@ if (!pendingAutoOpen || !ComfortSettings.isReplaceListFiltersEnabled())
         int delay = settings != null ? settings.getTimeout() : 0;
         SmartContentAssistProcessor.uiBlockLog("autoOpen.schedule", //$NON-NLS-1$
             "delay=" + delay + " caret=" + expectedCaretAfter); //$NON-NLS-1$ //$NON-NLS-2$
+        if (processor != null)
+            processor.kickWordListFromDocumentChange(viewer, expectedCaretAfter);
         Control c = (Control)viewer.getTextWidget();
         if (c == null || c.isDisposed())
         {
@@ -2842,7 +2934,7 @@ if (!pendingAutoOpen || !ComfortSettings.isReplaceListFiltersEnabled())
         {
             return;
         }
-display.timerExec(delay, () -> fireCompletionAutoOpenTimer(expectedCaretAfter, autoOpenSeq, gen));
+        display.timerExec(delay, () -> fireCompletionAutoOpenTimer(expectedCaretAfter, autoOpenSeq, gen));
     }
 
     private void fireCompletionAutoOpenTimer(int expectedCaretAfter, int autoOpenSeq, int gen)
@@ -2883,7 +2975,9 @@ display.timerExec(delay, () -> fireCompletionAutoOpenTimer(expectedCaretAfter, a
         {
             return;
         }
-        display.asyncExec(() -> beginCompletionAutoOpen(liveCaret, autoOpenSeq));
+        // Уже UI-поток (timerExec). Не asyncExec: лог 22:43 — таймер в 20.285,
+        // begin через asyncExec только в 41.109 за очередью подсветки.
+        beginCompletionAutoOpen(liveCaret, autoOpenSeq);
     }
 
     private void beginCompletionAutoOpen(int caret, int autoOpenSeq)
@@ -2902,19 +2996,31 @@ display.timerExec(delay, () -> fireCompletionAutoOpenTimer(expectedCaretAfter, a
         }
         if (ContentAssistPopupSync.isPopupVisible(assistant))
         {
+            if (processor != null && isMemberAccessAtCaret(caret))
+            {
+                SmartContentAssistProcessor.uiBlockLog("autoOpen.begin.memberRefresh", //$NON-NLS-1$
+                    "caret=" + caret); //$NON-NLS-1$
+                processor.flushPendingWordListUi();
+                processor.onAssistSessionContextReady(viewer, caret);
+                if (!processor.shouldDeferMemberAccessAutoOpen(viewer, caret))
+                    ContentAssistSessionReloader.refreshPopupIfOpen();
+                return;
+            }
             logAssistOpen("autoOpen.begin.skip", "{\"reason\":\"popupVisible\",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return;
         }
+        IDocument doc = viewer != null ? viewer.getDocument() : null;
+        int docLen = doc == null ? -1 : doc.getLength();
+        boolean inLiteral = SmartContentAssistProcessor.isStringLiteralAssistContext(viewer, caret);
         completionAutoOpenPending = true;
         completionAutoOpenCaret = caret;
         completionAutoOpenEdtOpened = false;
         completionAutoOpenIrScheduled = false;
         completionAutoOpenAwaitingLogged = false;
         ContentAssistPopupSync.ensureEmptyListAllowed(assistant, false);
+        processor.flushPendingWordListUi();
         processor.onAssistSessionContextReady(viewer, caret);
         IRSession session = IrBslExpressionHtmlSupport.resolveIrSessionForAssist(facade, viewer);
-        IDocument doc = viewer != null ? viewer.getDocument() : null;
-        int docLen = doc == null ? -1 : doc.getLength();
         boolean memberAccess = isMemberAccessAtCaret(caret);
         boolean irScheduled = false;
         if (session != null && !isWordsTableFetchInFlightForCaret(caret))
@@ -2924,17 +3030,32 @@ display.timerExec(delay, () -> fireCompletionAutoOpenTimer(expectedCaretAfter, a
             {
                 completionAutoOpenIrScheduled = true;
                 logAssistOpen("autoOpen.begin", "{\"path\":\"waitIr\",\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"docLen\":" + docLen + ",\"memberAccess\":" + memberAccess + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-                // #region agent log
+                    + ",\"docLen\":" + docLen + ",\"memberAccess\":" + memberAccess //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"literal\":" + inLiteral + "}"); //$NON-NLS-1$ //$NON-NLS-2$
                 SmartContentAssistProcessor.uiBlockLog("autoOpen.begin.waitIr", //$NON-NLS-1$
                     "caret=" + caret + " docLen=" + docLen //$NON-NLS-1$ //$NON-NLS-2$
-                        + " memberAccess=" + memberAccess //$NON-NLS-1$
+                        + " memberAccess=" + memberAccess + " literal=" + inLiteral //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                         + " around=\"" + SmartContentAssistProcessor.uiBlockAround(doc, caret) + "\""); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
-                // Ждём ИР: открытие только при autoOpenSuggested (ЗаполнитьТаблицуСлов).
-                // Browser warmup — в openCompletionAutoIrPopup (preShowLiteralBrowserPatch).
                 return;
             }
+        }
+        if (inLiteral)
+        {
+            if (session != null)
+            {
+                completionAutoOpenIrScheduled = true;
+                logAssistOpen("autoOpen.begin", "{\"path\":\"waitIr\",\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"docLen\":" + docLen + ",\"inFlight\":true,\"literal\":true}"); //$NON-NLS-1$ //$NON-NLS-2$
+                SmartContentAssistProcessor.uiBlockLog("autoOpen.begin.waitIr", //$NON-NLS-1$
+                    "caret=" + caret + " inFlight=true literal=true"); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            }
+            logAssistOpen("autoOpen.begin.skip", "{\"reason\":\"literalNoIr\",\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"docLen\":" + docLen + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            SmartContentAssistProcessor.uiBlockLog("autoOpen.begin.skipLiteralNoIr", //$NON-NLS-1$
+                "caret=" + caret + " docLen=" + docLen); //$NON-NLS-1$ //$NON-NLS-2$
+            completionAutoOpenPending = false;
+            return;
         }
         if (memberAccess && processor.shouldDeferMemberAccessAutoOpen(viewer, caret))
         {
@@ -2955,11 +3076,23 @@ display.timerExec(delay, () -> fireCompletionAutoOpenTimer(expectedCaretAfter, a
             completionAutoOpenPending = false;
             return;
         }
-        logAssistOpen("autoOpen.begin", "{\"path\":\"edt\",\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
+        boolean cachedOnly = cachedListOnlyForAutoOpen(viewer, caret);
+        if (!cachedOnly)
+        {
+            logAssistOpen("autoOpen.begin.skip", "{\"reason\":\"noCache\",\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"docLen\":" + docLen + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            SmartContentAssistProcessor.uiBlockLog("autoOpen.begin.skipNoCache", //$NON-NLS-1$
+                "caret=" + caret + " docLen=" + docLen //$NON-NLS-1$ //$NON-NLS-2$
+                    + " memberAccess=" + memberAccess //$NON-NLS-1$
+                    + " around=\"" + SmartContentAssistProcessor.uiBlockAround(doc, caret) + "\""); //$NON-NLS-1$ //$NON-NLS-2$
+            completionAutoOpenPending = false;
+            return;
+        }
+        logAssistOpen("autoOpen.begin", "{\"path\":\"edtCache\",\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
             + ",\"irScheduled\":" + irScheduled //$NON-NLS-1$
             + ",\"docLen\":" + docLen + ",\"memberAccess\":" + memberAccess + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         // #region agent log
-        SmartContentAssistProcessor.uiBlockLog("autoOpen.begin.edt", //$NON-NLS-1$
+        SmartContentAssistProcessor.uiBlockLog("autoOpen.begin.edtCache", //$NON-NLS-1$
             "caret=" + caret + " docLen=" + docLen //$NON-NLS-1$ //$NON-NLS-2$
                 + " memberAccess=" + memberAccess //$NON-NLS-1$
                 + " irScheduled=" + irScheduled //$NON-NLS-1$
@@ -2967,7 +3100,7 @@ display.timerExec(delay, () -> fireCompletionAutoOpenTimer(expectedCaretAfter, a
         // #endregion
         warmupAssistBrowserCreator(caret);
         completionAutoOpenEdtOpened = true;
-        openCompletionAutoEdtPopup(caret, autoOpenSeq, cachedListOnlyForAutoOpen(viewer, caret));
+        openCompletionAutoEdtPopup(caret, autoOpenSeq, true);
         if (!irScheduled)
             completionAutoOpenPending = false;
     }
@@ -2979,7 +3112,7 @@ display.timerExec(delay, () -> fireCompletionAutoOpenTimer(expectedCaretAfter, a
      */
     private boolean cachedListOnlyForAutoOpen(ITextViewer viewer, int caret)
     {
-        return processor != null && processor.isWordListSeededOnUi()
+        return processor != null
             && processor.hasReadyFullListCacheForCaret(viewer, caret);
     }
 
@@ -4141,14 +4274,16 @@ if (stillVisible)
         logLiteralOpenPhase(assistant, irN, "finishDone"); //$NON-NLS-1$
         auditLiteralList(assistant, viewer, irN, "finishDone"); //$NON-NLS-1$
         logLiteralMergeTimeline("finishDone"); //$NON-NLS-1$
+        manualIrAssistPending = false;
+        processor.exitIrOnlyManualMode();
         setLiteralOpenSetupComplete(true);
         if (pendingPopupRefresh)
             flushPendingPopupRefreshIfAny();
+        else if (ContentAssistPopupSync.isPopupVisible(assistant))
+            ContentAssistPopupSync.recomputePopupList(assistant, viewer, processor);
         if (browserMigrateAttempted
             && !ContentAssistPopupSync.hasAssistBrowserSidePanel(assistant))
             ContentAssistPopupSync.finishLiteralBrowserVisualRefresh(assistant, viewer);
-        manualIrAssistPending = false;
-        processor.exitIrOnlyManualMode();
     }
 
     private IInformationControlCreator resolveFreshAssistBrowserCreator(int literalCaret)
@@ -4300,9 +4435,9 @@ if (isCompletionAutoOpenCaretMatch(caret)
                 String filter = liveDoc != null && caret >= 0
                     ? SmartContentAssistProcessor.computeIdentifierFilter(liveDoc, caret)
                     : ""; //$NON-NLS-1$
-                if (!popupVisible && !filter.isEmpty())
-                    openCompletionAutoEdtPopup(caret, autoOpenSeq,
-                        cachedListOnlyForAutoOpen(viewer, caret));
+                if (!popupVisible && !filter.isEmpty()
+                    && cachedListOnlyForAutoOpen(viewer, caret))
+                    openCompletionAutoEdtPopup(caret, autoOpenSeq, true);
                 clearCompletionAutoOpenState(decision, autoOpenSeq);
             }
             else if (edtOpened && popupVisible)
@@ -4469,6 +4604,7 @@ processor.applyIrCompletion(snapshot);
         ContentAssistant ca = reloader != null ? reloader.assistant : null;
         if (ca == null || ContentAssistPopupSync.isPopupVisible(ca))
         {
+            SmartContentAssistProcessor.uiBlockLog("openPopup.memberBg", "ok=false why=visibleOrNoCa"); //$NON-NLS-1$ //$NON-NLS-2$
             ContentAssistDebug.perfMark("openPopup.memberBg", //$NON-NLS-1$
                 "{\"ok\":false,\"why\":\"visibleOrNoCa\"}"); //$NON-NLS-1$
             return false;
@@ -4482,10 +4618,12 @@ processor.applyIrCompletion(snapshot);
         StyledText widget = sv.getTextWidget();
         if (widget == null || widget.isDisposed() || !widget.isFocusControl())
         {
+            SmartContentAssistProcessor.uiBlockLog("openPopup.memberBg", "ok=false why=focus"); //$NON-NLS-1$ //$NON-NLS-2$
             ContentAssistDebug.perfMark("openPopup.memberBg", "{\"ok\":false,\"why\":\"focus\"}"); //$NON-NLS-1$ //$NON-NLS-2$
             return false;
         }
         boolean ok = ContentAssistPopupSync.showPossibleCompletions(ca, true);
+        SmartContentAssistProcessor.uiBlockLog("openPopup.memberBg", "ok=" + ok); //$NON-NLS-1$ //$NON-NLS-2$
         ContentAssistDebug.perfMark("openPopup.memberBg", "{\"ok\":" + ok + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         return ok;
     }

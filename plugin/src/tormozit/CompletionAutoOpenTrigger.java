@@ -20,7 +20,7 @@ public final class CompletionAutoOpenTrigger
     {
         if (doc == null || insertedChar == 0 || caretAfter < 0)
             return null;
-        if (popupWasOpen)
+        if (popupWasOpen && insertedChar != '.')
             return null;
 
         String linePrefix = BslAssistSourceHeuristics.linePrefixToCaret(
