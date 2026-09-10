@@ -1476,7 +1476,7 @@ public final class IRApplication
         return getSession(dtProject, false);
     }
 
-    /**
+    /** 
      * Уже подключённая живая сессия ИР без автоподключения и без запуска 1С.
      * В отличие от {@link #getConnectedSession}, флажок «Авто ИР» не форсирует connect.
      */
