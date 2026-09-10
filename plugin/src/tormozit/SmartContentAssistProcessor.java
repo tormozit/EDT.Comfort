@@ -269,11 +269,113 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     private int memberStockWaitFailedDot = -1;
 
     /**
-     * Первое заполнение словаря в этом экземпляре редактора уже прошло на UI.
-     * Пока false — фон не запускаем: холодный compute с Job даёт 2–3 шаблона
-     * и отравляет корневой кэш.
+     * Первое открытие попапа в этом экземпляре редактора уже прошло на UI.
+     * Пока false — автооткрытие идёт штатным {@code showPossibleCompletions} на UI,
+     * чтобы создались слушатель DataEvent и виджет попапа. Дальше список и фильтр — фон.
      */
     private boolean wordListSeededOnUi;
+    /**
+     * Каталог типов после «Новый». Не сбрасывается {@link #invalidateCache()}: закрытие
+     * попапа не должно снова звать {@code delegate.compute} на каждую букву имени типа.
+     */
+    private ICompletionProposal[] ctorTypeCatalog = EMPTY;
+    private String ctorTypeCatalogPrefix;
+    /** {@link #restoreCtorTypeCatalog} → {@link #assignFullListCache} не должен звать restore снова. */
+    private boolean restoringCtorCatalog;
+
+    /** Готовый к показу список после фонового {@link #filterAndSort}: UI его не пересчитывает. */
+    private ICompletionProposal[] backgroundPopupList = EMPTY;
+    private String backgroundPopupFilter = ""; //$NON-NLS-1$
+
+    /** Каретка/документ для снятия «призрака» с рабочего потока (без {@code StyledText}). */
+    private static final ThreadLocal<IDocument> GHOST_DOC = new ThreadLocal<>();
+    private static final ThreadLocal<Integer> GHOST_CARET = new ThreadLocal<>();
+
+    // #region agent log
+    static final String UI_BLOCK_LOG = "assist-ui-block"; //$NON-NLS-1$
+
+    static void uiBlockLog(String where, String data)
+    {
+        boolean onUi = org.eclipse.swt.widgets.Display.getCurrent() != null;
+        Global.tempLog(UI_BLOCK_LOG, where + " ui=" + onUi //$NON-NLS-1$
+            + " th=" + Thread.currentThread().getName() //$NON-NLS-1$
+            + (data == null || data.isEmpty() ? "" : " " + data)); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    static String uiBlockCaller()
+    {
+        StackTraceElement[] st = Thread.currentThread().getStackTrace();
+        StringBuilder sb = new StringBuilder();
+        int n = 0;
+        for (int i = 2; i < st.length && n < 10; i++)
+        {
+            String cn = st[i].getClassName();
+            if (cn == null)
+                continue;
+            String mn = st[i].getMethodName();
+            if ("uiBlockLog".equals(mn) || "uiBlockCaller".equals(mn) //$NON-NLS-1$ //$NON-NLS-2$
+                || "getStackTrace".equals(mn)) //$NON-NLS-1$
+                continue;
+            int dot = cn.lastIndexOf('.');
+            String shortName = dot >= 0 ? cn.substring(dot + 1) : cn;
+            if (sb.length() > 0)
+                sb.append('|');
+            sb.append(shortName).append('.').append(mn);
+            n++;
+        }
+        return sb.toString();
+    }
+
+    static void uiBlockLogThrowable(String where, Throwable t)
+    {
+        if (t == null)
+        {
+            uiBlockLog(where, "null"); //$NON-NLS-1$
+            return;
+        }
+        StringBuilder sb = new StringBuilder();
+        sb.append(t.getClass().getSimpleName());
+        if (t.getMessage() != null && !t.getMessage().isEmpty())
+            sb.append(':').append(t.getMessage());
+        StackTraceElement[] st = t.getStackTrace();
+        int n = 0;
+        for (int i = 0; i < st.length && n < 16; i++)
+        {
+            String cn = st[i].getClassName();
+            if (cn == null)
+                continue;
+            int dot = cn.lastIndexOf('.');
+            String shortName = dot >= 0 ? cn.substring(dot + 1) : cn;
+            sb.append('|').append(shortName).append('.').append(st[i].getMethodName())
+                .append(':').append(st[i].getLineNumber());
+            n++;
+        }
+        uiBlockLog(where, sb.toString());
+    }
+
+    static String uiBlockAround(IDocument doc, int offset)
+    {
+        if (doc == null || offset < 0)
+            return ""; //$NON-NLS-1$
+        try
+        {
+            int from = Math.max(0, offset - 20);
+            int to = Math.min(doc.getLength(), offset + 4);
+            if (to <= from)
+                return ""; //$NON-NLS-1$
+            return doc.get(from, to - from).replace('\r', ' ').replace('\n', ' ');
+        }
+        catch (Exception ignored)
+        {
+            return ""; //$NON-NLS-1$
+        }
+    }
+    // #endregion
+
+    boolean isWordListSeededOnUi()
+    {
+        return wordListSeededOnUi;
+    }
 
     /** Фоновый расчёт словарного списка: контекст в работе, неудачный и уже показанный. */
     private Job wordListBackgroundJob;
@@ -815,6 +917,16 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     {
         if (merged == null || merged.isEmpty())
             return merged;
+        int typeN = 0;
+        for (ICompletionProposal p : merged)
+        {
+            ICompletionProposal raw = unwrapProposal(p);
+            if (raw != null
+                && "NoLinkModelCompletionProposal".equals(raw.getClass().getSimpleName())) //$NON-NLS-1$
+                typeN++;
+        }
+        if (typeN > 0)
+            return merged;
         for (ICompletionProposal p : merged)
             CtorMinParamsInsert.trimIfNeeded(unwrapProposal(p));
         if (merged.size() <= 1)
@@ -870,6 +982,10 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     {
         if (merged == null || merged.length == 0)
             return merged != null ? merged : EMPTY;
+        // Типы после «Новый»: trimAll на 300 пунктах ждёт замок документа
+        // (лог 10:30:41 fetch 539 мс → filterAndSort через 1147 мс, показ 2 с).
+        if (countNoLinkModelProposals(merged) > 0)
+            return merged;
         CtorMinParamsInsert.trimAll(merged);
         if (merged.length <= 1)
             return merged;
@@ -989,6 +1105,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     boolean hasReadyFullListCacheForCaret(ITextViewer viewer, int caret)
     {
         IDocument doc = viewer != null ? viewer.getDocument() : null;
+        restoreCtorTypeCatalog(doc, caret);
         return isCacheValidForCaret(doc, caret);
     }
 
@@ -1445,9 +1562,14 @@ return;
     }
 
     /**
-     * Автооткрытие после точки: фон уже считает членов — не звать
-     * {@code showPossibleCompletions} (иначе UI идёт в {@code fetchFullDelegateListAtAnchor}
-     * и ждёт тот же ресурс, лог 15:53: {@code lockWaitUi} + compute на main).
+     * Автооткрытие после точки: не звать {@code showPossibleCompletions} с пустым
+     * кэшем. После первого UI-заполнения экземпляра ({@link #wordListSeededOnUi})
+     * показ идёт {@code cachedListOnly}; кэш после «.» — другой контекст и обычно пуст
+     * (лог 10.09.2026: {@code autoOpen.begin.edt} + {@code cacheOnly} n=0, окно не открылось).
+     * Фон считает членов, окно откроет {@code publishMemberStock}.
+     *
+     * <p>Первое открытие попапа в экземпляре редактора сюда не входит — оно идёт
+     * штатным UI-путём (слушатель DataEvent, сам попап).
      */
     boolean shouldDeferMemberAccessAutoOpen(ITextViewer viewer, int caret)
     {
@@ -1455,9 +1577,28 @@ return;
         if (doc == null || caret < 0)
             return false;
         int dot = ReceiverTypeLabel.findMemberAccessDot(doc, caret);
-        if (dot < 0 || hasMemberStock(dot))
+        if (dot < 0)
             return false;
-        return isMemberStockBackgroundInFlight(dot);
+        if (hasMemberStock(dot))
+            repairPopupListFromMemberStock(doc, caret);
+        if (isCacheValidForCaret(doc, caret) && fullListCache.length > 0)
+        {
+            uiBlockLog("memberAccessDefer", "defer=false why=cacheReady caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                + " cache=" + fullListCache.length + " dot=" + dot); //$NON-NLS-1$ //$NON-NLS-2$
+            return false;
+        }
+        if (!wordListSeededOnUi)
+        {
+            uiBlockLog("memberAccessDefer", "defer=false why=firstFillUi caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                + " dot=" + dot); //$NON-NLS-1$
+            return false;
+        }
+        if (!isMemberStockBackgroundInFlight(dot))
+            scheduleMemberStockCapture(viewer, dot);
+        uiBlockLog("memberAccessDefer", "defer=true caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
+            + " dot=" + dot //$NON-NLS-1$
+            + " inFlight=" + isMemberStockBackgroundInFlight(dot)); //$NON-NLS-1$
+        return true;
     }
 
     /**
@@ -1472,15 +1613,38 @@ return;
             return false;
         if (ReceiverTypeLabel.findMemberAccessDot(doc, caret) >= 0)
             return false;
+        restoreCtorTypeCatalog(doc, caret);
         if (isCacheValidForCaret(doc, caret) && fullListCache.length > 0)
-            return false;
+        {
+            if (countNoLinkModelProposals(fullListCache) > 0
+                || !isAfterNewKeyword(doc, caret))
+            {
+                // #region agent log
+                uiBlockLog("prepareWordListAutoOpen", "defer=false why=cacheReady caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                    + " cache=" + fullListCache.length //$NON-NLS-1$
+                    + " filter=" + computeIdentifierFilter(doc, caret)); //$NON-NLS-1$
+                // #endregion
+                return false;
+            }
+        }
         if (!wordListSeededOnUi)
         {
             ContentAssistDebug.perfMark("wordListDefer.skip", //$NON-NLS-1$
                 "{\"why\":\"firstFillUi\"}"); //$NON-NLS-1$
+            // #region agent log
+            uiBlockLog("prepareWordListAutoOpen", "defer=false why=firstFillUi caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                + " filter=" + computeIdentifierFilter(doc, caret) //$NON-NLS-1$
+                + " around=\"" + uiBlockAround(doc, caret) + "\""); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
             return false;
         }
-        return scheduleWordListInBackground(viewer, doc, caret, caret);
+        boolean deferred = scheduleWordListInBackground(viewer, doc, caret, caret);
+        // #region agent log
+        uiBlockLog("prepareWordListAutoOpen", "defer=" + deferred + " caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " filter=" + computeIdentifierFilter(doc, caret) //$NON-NLS-1$
+            + " around=\"" + uiBlockAround(doc, caret) + "\""); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
+        return deferred;
     }
 
     private ICompletionProposal[] unwrapStableDelegateBase()
@@ -1830,6 +1994,7 @@ return resolveProposalList(viewer, probeOffset, caret, filter, smart);
         if (!SmartAssistFilterState.isSmartFilterEnabled())
             return null;
         IDocument doc = viewer != null ? viewer.getDocument() : null;
+        restoreCtorTypeCatalog(doc, caret);
         // Ключ сменился (например Метод(|) после member-access) — кэш и «уже зондировали
         // делегат» относятся к прошлому контексту, из них собирать попап нельзя.
         if (doc != null && caret >= 0
@@ -1844,6 +2009,22 @@ return resolveProposalList(viewer, probeOffset, caret, filter, smart);
             ICompletionProposal[] result = filter == null || filter.isEmpty()
                 ? finalizeListForIrAssistDisplay(fullListCache)
                 : filterAndSort(fullListCache, filter);
+            if (result.length == 0 && filter != null && !filter.isEmpty()
+                && isAfterNewKeyword(doc, caret)
+                && countNoLinkModelProposals(fullListCache) > 0)
+            {
+                try
+                {
+                    result = prefixFilterCtorCatalog(fullListCache, filter);
+                }
+                catch (StackOverflowError t)
+                {
+                    uiBlockLogThrowable("popup.prefixFallback.crash", t); //$NON-NLS-1$
+                    result = EMPTY;
+                }
+                uiBlockLog("popup.prefixFallback", "filter=" + filter //$NON-NLS-1$ //$NON-NLS-2$
+                    + " n=" + result.length); //$NON-NLS-1$
+            }
             debugFilterCachedExit(viewer, caret, filter, doc, fullListCache.length, "cache", result); //$NON-NLS-1$
             return result;
         }
@@ -2068,6 +2249,8 @@ return;
     public ICompletionProposal[] computeCompletionProposals(ITextViewer viewer, int offset)
     {
         long t0 = ContentAssistDebug.perfStart("computeCompletionProposals"); //$NON-NLS-1$
+        long tUi = System.nanoTime();
+        boolean firstPopup = !wordListSeededOnUi;
         ICompletionProposal[] result = EMPTY;
         try
         {
@@ -2114,6 +2297,34 @@ return;
                     + ",\"dot\":" + dot //$NON-NLS-1$
                     + ",\"irN\":" + irProposals.length //$NON-NLS-1$
                     + ",\"irCtx\":" + isIrWordsResolvedForContext() + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            // #region agent log
+            IDocument logDoc = viewer != null ? viewer.getDocument() : null;
+            uiBlockLog("computeCompletionProposals", //$NON-NLS-1$
+                "ms=" + ((System.nanoTime() - tUi) / 1_000_000L) //$NON-NLS-1$
+                    + " off=" + offset //$NON-NLS-1$
+                    + " n=" + (result == null ? -1 : result.length) //$NON-NLS-1$
+                    + " popup=" + isPopupVisible() //$NON-NLS-1$
+                    + " docLen=" + docLen //$NON-NLS-1$
+                    + " filterLen=" + filterLen //$NON-NLS-1$
+                    + " filter=" + (logDoc != null ? computeIdentifierFilter(logDoc, offset) : "") //$NON-NLS-1$ //$NON-NLS-2$
+                    + " around=\"" + uiBlockAround(logDoc, offset) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                    + " dot=" + dot //$NON-NLS-1$
+                    + " irN=" + irProposals.length //$NON-NLS-1$
+                    + " seeded=" + wordListSeededOnUi //$NON-NLS-1$
+                    + " cache=" + fullListCache.length //$NON-NLS-1$
+                    + " ctx=" + fullListContextKey //$NON-NLS-1$
+                    + " manual=" + ManualInvocationDetect.isActive() //$NON-NLS-1$
+                    + " cacheOnly=" + Boolean.TRUE.equals(CACHE_ONLY_COMPUTE.get()) //$NON-NLS-1$
+                    + " firstPopup=" + firstPopup //$NON-NLS-1$
+                    + " caller=" + uiBlockCaller()); //$NON-NLS-1$
+            // #endregion
+            // В каталог — полный кэш, не отфильтрованный return (лог 10:40:09 n=11).
+            IDocument rememberDoc = viewer != null ? viewer.getDocument() : null;
+            if (rememberDoc != null && !Boolean.TRUE.equals(CACHE_ONLY_COMPUTE.get()))
+            {
+                int rememberCaret = resolveInvocationCaret(viewer, offset);
+                rememberCtorTypeCatalog(rememberDoc, rememberCaret, fullListCache);
+            }
         }
     }
 
@@ -2279,8 +2490,8 @@ return;
         // сейчас, а откладывание дало бы задержку окна на ровном месте.
         if (ManualInvocationDetect.isActive())
             return wordListSkip("manual"); //$NON-NLS-1$
-        // Первое заполнение словаря в этом редакторе — только UI. Фон на холодном
-        // экземпляре возвращает 2–3 шаблона и пишет их в корневой кэш.
+        // Первое открытие попапа в этом редакторе — только UI (виджет + DataEvent).
+        // Фон на холодном экземпляре не создаёт попап и может отдать 2–3 шаблона.
         if (!wordListSeededOnUi)
             return wordListSkip("firstFillUi"); //$NON-NLS-1$
         // Member-access живёт своей механикой (запас членов, ожидание, закрытие окна) —
@@ -2296,6 +2507,7 @@ return;
             return wordListSkip("literal"); //$NON-NLS-1$
         if (hasIrProposalsForCurrentContext())
             return wordListSkip("ir"); //$NON-NLS-1$
+        restoreCtorTypeCatalog(doc, caret);
         final int key = fullListContextKey;
         if (key == Integer.MIN_VALUE)
             return wordListSkip("noKey"); //$NON-NLS-1$
@@ -2306,11 +2518,17 @@ return;
             // Окно по этому якорю уже открывали. Повтор (после закрытия) не должен
             // идти на UI: кэш часто уже стёрт invalidateCache. Снимаем метку и
             // запускаем фон снова. Пока идёт показ из publish (CACHE_ONLY), сюда
-            // не заходим.
+            // не заходим. Типы после «Новый» не пересчитываем: повторный зонд на
+            // ';' отдаёт локальные имена и перетирает каталог.
+            if (countNoLinkModelProposals(fullListCache) > 0)
+                return wordListSkip("alreadyOpenedTypes"); //$NON-NLS-1$
             wordListOpenedKey = Integer.MIN_VALUE;
             ContentAssistDebug.perfMark("wordListDefer.reopenBg", //$NON-NLS-1$
                 "{\"key\":" + key + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         }
+        if (countNoLinkModelProposals(fullListCache) > 0
+            && isCacheValidForCaret(doc, caret))
+            return wordListSkip("cacheHasTypes"); //$NON-NLS-1$
         // Слушатель DataEvent и addDisposeListener создаёт EDT только в первом
         // createProposals. С Job это NPE/SWTException (лог 17:13/17:17). Прогрев — на UI,
         // без самого compute.
@@ -2340,7 +2558,11 @@ return;
                 // Как member-stock: сначала readOnlyForContentAssist на воркере (ждёт
                 // актуальную модель без подсветки). Без этого compute с воркера даёт
                 // null (лог 17:01: n:-1). Сам compute внешней обёрткой не оборачиваем.
-                waitContentAssistResource(viewer.getDocument());
+                // Типы после «Новый» не зависят от модели модуля: waitResource в большом
+                // файле — это 1–2 с на каждую букву (лог 10:18:23: 1833 мс до compute).
+                IDocument waitDoc = viewer.getDocument();
+                if (waitDoc == null || !isAfterNewKeyword(waitDoc, offset))
+                    waitContentAssistResource(waitDoc);
                 while (attempts < MEMBER_STOCK_BG_ATTEMPTS)
                 {
                     if (monitor.isCanceled() || epoch != wordListEpoch
@@ -2352,7 +2574,11 @@ return;
                     if (live != null && key < 0)
                     {
                         int anchor = -key - 1;
-                        probe = computeIdentifierWordEnd(live, Math.max(offset, anchor));
+                        if (anchor < 0)
+                            anchor = 0;
+                        // Не computeIdentifierWordEnd: это индекс ПОСЛЕ слова (';' в
+                        // «новый с;»). Штатный CA там отдаёт локальные/шаблоны, не типы.
+                        probe = computeTypeNameProbeOffset(live, anchor);
                     }
                     lastProbe = probe;
                     try
@@ -2394,14 +2620,45 @@ return;
                         + ",\"events\":" + events.size() + "}"); //$NON-NLS-1$ //$NON-NLS-2$
                 final ICompletionProposal[] result = raw == null ? EMPTY : raw;
                 final java.util.Map<Object, Object> dataEvents = events;
+                ICompletionProposal[] popup = result;
+                String popupFilter = ""; //$NON-NLS-1$
+                IDocument liveDoc = viewer.getDocument();
+                if (result.length > 0 && liveDoc != null)
+                {
+                    popupFilter = computeIdentifierFilter(liveDoc, lastProbe);
+                    GHOST_DOC.set(liveDoc);
+                    GHOST_CARET.set(Integer.valueOf(lastProbe));
+                    try
+                    {
+                        long tFilter = System.nanoTime();
+                        popup = popupFilter.isEmpty()
+                            ? result : filterAndSort(result, popupFilter);
+                        uiBlockLog("wordListBackground.filter", //$NON-NLS-1$
+                            "ms=" + ((System.nanoTime() - tFilter) / 1_000_000L) //$NON-NLS-1$
+                                + " raw=" + result.length + " n=" + popup.length //$NON-NLS-1$ //$NON-NLS-2$
+                                + " filter=" + popupFilter); //$NON-NLS-1$
+                    }
+                    finally
+                    {
+                        GHOST_DOC.remove();
+                        GHOST_CARET.remove();
+                    }
+                }
+                final ICompletionProposal[] popupList = popup;
+                final String popupFilterFinal = popupFilter;
                 display.asyncExec(
-                    () -> publishWordList(viewer, key, gen, epoch, result, dataEvents));
+                    () -> publishWordList(viewer, key, gen, epoch, result, dataEvents,
+                        popupList, popupFilterFinal));
                 return Status.OK_STATUS;
             }
         };
         job.setSystem(true);
         wordListBackgroundJob = job;
         job.schedule(Math.max(0L, delayMs));
+        // #region agent log
+        uiBlockLog("scheduleWordListInBackground", "key=" + key + " caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " delayMs=" + delayMs + " seeded=" + wordListSeededOnUi); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
         return true;
     }
 
@@ -2424,6 +2681,9 @@ return;
     {
         ContentAssistDebug.perfMark("wordListDefer.skip", //$NON-NLS-1$
             "{\"why\":\"" + reason + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+        // #region agent log
+        uiBlockLog("wordListSkip", "why=" + reason); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
         return false;
     }
 
@@ -2527,10 +2787,18 @@ return;
         ContentAssistSessionReloader.scheduleFilterToggleUiSync();
     }
 
-    /** Публикация словарного списка из фона — только на UI-потоке. */
     private void publishWordList(ITextViewer viewer, int key, int gen, int epoch,
                                  ICompletionProposal[] result,
                                  java.util.Map<Object, Object> dataEvents)
+    {
+        publishWordList(viewer, key, gen, epoch, result, dataEvents, null, ""); //$NON-NLS-1$
+    }
+
+    /** Публикация словарного списка из фона — только на UI-потоке. */
+    private void publishWordList(ITextViewer viewer, int key, int gen, int epoch,
+                                 ICompletionProposal[] result,
+                                 java.util.Map<Object, Object> dataEvents,
+                                 ICompletionProposal[] popupList, String popupFilter)
     {
         if (epoch != wordListEpoch)
         {
@@ -2550,12 +2818,23 @@ return;
             wordListBackgroundKey = Integer.MIN_VALUE;
         IDocument liveDoc = viewer != null ? viewer.getDocument() : null;
         int liveCaret = resolveWidgetCaret(viewer);
-        if (liveDoc == null || liveCaret < 0
-            || computeFullListContextKey(liveDoc, liveCaret) != key)
+        int liveKey = liveDoc != null && liveCaret >= 0
+            ? computeFullListContextKey(liveDoc, liveCaret) : Integer.MIN_VALUE;
+        if (liveDoc == null || liveCaret < 0 || liveKey != key)
         {
-            ContentAssistDebug.perfMark("wordListBackground.dropKey", //$NON-NLS-1$
-                "{\"key\":" + key + ",\"caret\":" + liveCaret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            return;
+            boolean keepCtor = liveDoc != null && liveCaret >= 0
+                && isAfterNewKeyword(liveDoc, liveCaret)
+                && countNoLinkModelProposals(result) > 0;
+            uiBlockLog("wordListBackground.dropKey", "key=" + key //$NON-NLS-1$ //$NON-NLS-2$
+                + " liveKey=" + liveKey + " caret=" + liveCaret //$NON-NLS-1$ //$NON-NLS-2$
+                + " keepCtor=" + keepCtor); //$NON-NLS-1$
+            if (!keepCtor)
+            {
+                ContentAssistDebug.perfMark("wordListBackground.dropKey", //$NON-NLS-1$
+                    "{\"key\":" + key + ",\"caret\":" + liveCaret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                return;
+            }
+            key = liveKey;
         }
         if (isOrdinaryWordListStaleForLiveCaret(liveDoc, liveCaret))
         {
@@ -2576,11 +2855,29 @@ return;
             BslDataEventGuard.mergeIntoReal(liveDoc, dataEvents);
         }
         // Кэш заменяем только если новый список не короче: усечённый список показывать нельзя.
-        if (list.length == 0 || list.length < fullListCache.length)
+        // И не подменяем каталог типов после «Новый» словарём локальных/шаблонов (лог:
+        // n=24 типы → n=30 «#Если» / n=38 «ДляСвойства», потому что 30>20).
+        int cacheTypes = countNoLinkModelProposals(fullListCache);
+        int newTypes = countNoLinkModelProposals(list);
+        if (list.length == 0 || list.length < fullListCache.length
+            || (cacheTypes > 0 && newTypes == 0))
         {
             ContentAssistDebug.perfMark("wordListBackground.dropShorter", //$NON-NLS-1$
                 "{\"key\":" + key + ",\"n\":" + list.length //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"cache\":" + fullListCache.length + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"cache\":" + fullListCache.length //$NON-NLS-1$
+                    + ",\"cacheTypes\":" + cacheTypes //$NON-NLS-1$
+                    + ",\"newTypes\":" + newTypes + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            // #region agent log
+            uiBlockLog("wordListBackground.drop", "n=" + list.length //$NON-NLS-1$ //$NON-NLS-2$
+                + " cache=" + fullListCache.length //$NON-NLS-1$
+                + " cacheTypes=" + cacheTypes + " newTypes=" + newTypes); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+            if (!isPopupVisible() && cacheTypes > 0)
+            {
+                uiBlockLog("wordListBackground.drop.openCache", //$NON-NLS-1$
+                    "n=" + fullListCache.length); //$NON-NLS-1$
+                ContentAssistSessionReloader.openPopupForBackgroundList(viewer);
+            }
             return;
         }
         assignFullListCache(unwrapProposals(list));
@@ -2589,6 +2886,7 @@ return;
         fullListCachePrefix = computeIdentifierFilter(liveDoc, liveCaret);
         clearDelegateSyncProbe();
         rememberInterimDelegateList(list);
+        rememberCtorTypeCatalog(liveDoc, liveCaret, list);
         ContentAssistDebug.perfMark("wordListBackground.publish", //$NON-NLS-1$
             "{\"key\":" + key + ",\"cache\":" + fullListCache.length //$NON-NLS-1$ //$NON-NLS-2$
                 + ",\"events\":" + dataEvents.size() + "}"); //$NON-NLS-1$ //$NON-NLS-2$
@@ -2597,8 +2895,27 @@ return;
         wordListOpenedKey = key;
         if (!isPopupVisible())
         {
-            boolean opened = ContentAssistSessionReloader.openPopupForBackgroundList(viewer);
-            ContentAssistDebug.perfMark("openPopup.wordBg", "{\"ok\":" + opened + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            String liveFilter = computeIdentifierFilter(liveDoc, liveCaret);
+            if (popupList != null && popupList.length > 0 && liveFilter.equals(popupFilter))
+            {
+                backgroundPopupList = popupList;
+                backgroundPopupFilter = popupFilter == null ? "" : popupFilter; //$NON-NLS-1$
+            }
+            else
+            {
+                backgroundPopupList = EMPTY;
+                backgroundPopupFilter = ""; //$NON-NLS-1$
+            }
+            try
+            {
+                boolean opened = ContentAssistSessionReloader.openPopupForBackgroundList(viewer);
+                ContentAssistDebug.perfMark("openPopup.wordBg", "{\"ok\":" + opened + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            finally
+            {
+                backgroundPopupList = EMPTY;
+                backgroundPopupFilter = ""; //$NON-NLS-1$
+            }
         }
     }
 
@@ -2656,15 +2973,61 @@ return;
         {
 return probeDelegateOnce(viewer, offset);
         }
+        IDocument restoreDoc = viewer != null ? viewer.getDocument() : null;
+        restoreCtorTypeCatalog(restoreDoc, resolveInvocationCaret(viewer, offset));
         if (Boolean.TRUE.equals(CACHE_ONLY_COMPUTE.get()))
         {
             int caret = resolveInvocationCaret(viewer, offset);
             IDocument doc = viewer != null ? viewer.getDocument() : null;
+            restoreCtorTypeCatalog(doc, caret);
             String filter = computeIdentifierFilter(doc, caret);
+            if (backgroundPopupList.length > 0 && backgroundPopupFilter.equals(filter))
+            {
+                // #region agent log
+                uiBlockLog("cacheOnly.ready", "filter=" + filter //$NON-NLS-1$ //$NON-NLS-2$
+                    + " n=" + backgroundPopupList.length); //$NON-NLS-1$
+                // #endregion
+                return backgroundPopupList;
+            }
+            if (!isCacheValidForCaret(doc, caret) || fullListCache.length == 0)
+            {
+                int dot = ReceiverTypeLabel.findMemberAccessDot(doc, caret);
+                if (dot >= 0 && hasMemberStock(dot))
+                    repairPopupListFromMemberStock(doc, caret);
+            }
             if (!isCacheValidForCaret(doc, caret) || fullListCache.length == 0)
                 return EMPTY;
-            ICompletionProposal[] cached = filter.isEmpty()
-                ? unwrapProposals(fullListCache) : filterAndSort(fullListCache, filter);
+            ICompletionProposal[] cached;
+            try
+            {
+                cached = filter.isEmpty()
+                    ? unwrapProposals(fullListCache) : filterAndSort(fullListCache, filter);
+            }
+            catch (RuntimeException ex)
+            {
+                uiBlockLog("cacheOnly.filterCrash", "filter=" + filter //$NON-NLS-1$ //$NON-NLS-2$
+                    + " err=" + ex.getClass().getSimpleName()); //$NON-NLS-1$
+                cached = EMPTY;
+            }
+            catch (StackOverflowError ex)
+            {
+                uiBlockLogThrowable("cacheOnly.filterCrash", ex); //$NON-NLS-1$
+                cached = EMPTY;
+            }
+            if (cached.length == 0 && !filter.isEmpty() && fullListCache.length > 0)
+            {
+                try
+                {
+                    cached = prefixFilterCtorCatalog(fullListCache, filter);
+                }
+                catch (StackOverflowError t)
+                {
+                    uiBlockLogThrowable("cacheOnly.prefixFallback.crash", t); //$NON-NLS-1$
+                    cached = EMPTY;
+                }
+                uiBlockLog("cacheOnly.prefixFallback", "filter=" + filter //$NON-NLS-1$ //$NON-NLS-2$
+                    + " n=" + cached.length); //$NON-NLS-1$
+            }
             return cached;
         }
         int literalCaret = resolveInvocationCaret(viewer, offset);
@@ -3031,6 +3394,7 @@ if (isIrWordsResolvedForContext() && irN > 0)
                                                       String filter, boolean smartEnabled)
     {
         long t0 = ContentAssistDebug.perfStart("resolveProposalList"); //$NON-NLS-1$
+        long tUi = System.nanoTime();
         ICompletionProposal[] result = EMPTY;
         try
         {
@@ -3043,6 +3407,17 @@ if (isIrWordsResolvedForContext() && irN > 0)
                 "{\"caret\":" + caret + ",\"smart\":" + smartEnabled //$NON-NLS-1$ //$NON-NLS-2$
                     + ",\"cache\":" + fullListCache.length //$NON-NLS-1$
                     + ",\"n\":" + (result == null ? -1 : result.length) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            // #region agent log
+            uiBlockLog("resolveProposalList", //$NON-NLS-1$
+                "ms=" + ((System.nanoTime() - tUi) / 1_000_000L) //$NON-NLS-1$
+                    + " caret=" + caret //$NON-NLS-1$
+                    + " filter=" + (filter == null ? "" : filter) //$NON-NLS-1$ //$NON-NLS-2$
+                    + " smart=" + smartEnabled //$NON-NLS-1$
+                    + " cache=" + fullListCache.length //$NON-NLS-1$
+                    + " n=" + (result == null ? -1 : result.length) //$NON-NLS-1$
+                    + " popup=" + isPopupVisible() //$NON-NLS-1$
+                    + " seeded=" + wordListSeededOnUi); //$NON-NLS-1$
+            // #endregion
         }
     }
 
@@ -3050,6 +3425,7 @@ if (isIrWordsResolvedForContext() && irN > 0)
                                                           String filter, boolean smartEnabled)
     {
         IDocument doc = viewer != null ? viewer.getDocument() : null;
+        restoreCtorTypeCatalog(doc, caret);
         if (doc != null && caret >= 0)
             filter = computeIdentifierFilter(doc, caret);
 
@@ -3126,14 +3502,32 @@ if (isIrWordsResolvedForContext() && irN > 0)
                     return shown;
                 }
             }
+            if (wordListSeededOnUi && !ManualInvocationDetect.isActive())
+            {
+                if (fullListCache.length > 0)
+                {
+                    ICompletionProposal[] result = filterAndSort(fullListCache, filter);
+                    debugResolveExit(doc, caret, filter, fullListCache.length, true, "seededNoUiFetch", result); //$NON-NLS-1$
+                    return result;
+                }
+                debugResolveExit(doc, caret, filter, 0, false, "seededNoUiFetchEmpty", EMPTY); //$NON-NLS-1$
+                return EMPTY;
+            }
             ICompletionProposal[] raw = unwrapProposals(fetchDelegateList(viewer, offset, caret));
             ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
             if (reloader == null || !reloader.isWordsTableFetchInFlightForContext(caret))
                 markDelegateSyncProbed();
             ICompletionProposal[] filtered = filterAndSort(mergeIrForDisplay(raw), filter);
-            ICompletionProposal[] cacheSeed = !filter.isEmpty() && filtered.length > 0 ? filtered : raw;
+            // После «Новый» в кэш — сырой зонд, не срез по первой букве (лог 11:03:
+            // cacheSeed=filtered n=333 при filter=т, дальше «схе» ищет только в этом срезе).
+            boolean ctorTypes = isAfterNewKeyword(doc, caret)
+                && countNoLinkModelProposals(raw) > 0;
+            ICompletionProposal[] cacheSeed = ctorTypes ? raw
+                : (!filter.isEmpty() && filtered.length > 0 ? filtered : raw);
             rememberInterimDelegateList(cacheSeed);
             absorbInterimIntoCache(viewer, caret, cacheSeed);
+            if (ctorTypes)
+                rememberCtorTypeCatalog(doc, caret, raw);
             if (filtered.length > 0)
             {
                 debugResolveExit(doc, caret, filter, raw.length, false, "fetchFiltered", filtered);
@@ -3158,7 +3552,8 @@ if (isIrWordsResolvedForContext() && irN > 0)
             // Попап мог открыть сам ИР программно (showPossibleCompletions), минуя
             // ветку «!isPopupVisible()» выше — делегат EDT тогда ни разу не запрошен
             // и stableBase пуст. Разовый sync-пробник — не молча мёржить с EMPTY.
-            if (stableBase.length == 0 && !isDelegateSyncProbedForContext())
+            if (stableBase.length == 0 && !isDelegateSyncProbedForContext()
+                && (!wordListSeededOnUi || ManualInvocationDetect.isActive()))
             {
                 stableBase = unwrapProposals(fetchDelegateList(viewer, offset, caret));
                 rememberInterimDelegateList(stableBase);
@@ -3168,6 +3563,24 @@ if (isIrWordsResolvedForContext() && irN > 0)
                 mergeIrForDisplay(stableBase), filter);
             debugResolveExit(doc, caret, filter, 0, false, "h84IrOnly", result);
             return result;
+        }
+        if (wordListSeededOnUi && !ManualInvocationDetect.isActive())
+        {
+            if (fullListCache.length > 0)
+            {
+                ICompletionProposal[] result = filterAndSort(fullListCache, filter);
+                debugResolveExit(doc, caret, filter, fullListCache.length, true, "h84SeededCache", result); //$NON-NLS-1$
+                return result;
+            }
+            ICompletionProposal[] stable = unwrapStableDelegateBase();
+            if (stable.length > 0)
+            {
+                ICompletionProposal[] result = filterAndSort(mergeIrForDisplay(stable), filter);
+                debugResolveExit(doc, caret, filter, stable.length, false, "h84SeededStable", result); //$NON-NLS-1$
+                return result;
+            }
+            debugResolveExit(doc, caret, filter, 0, false, "h84SeededNoFetch", EMPTY); //$NON-NLS-1$
+            return EMPTY;
         }
         ICompletionProposal[] raw = unwrapProposals(fetchDelegateList(viewer, offset, caret));
         ICompletionProposal[] filtered = filterAndSort(mergeIrForDisplay(raw), filter);
@@ -3250,6 +3663,10 @@ if (isIrWordsResolvedForContext() && irN > 0)
     boolean isPopupListStaleForPrefix(IDocument doc, int caret)
     {
         if (fullListComplete || fullListCachePrefix.isEmpty())
+            return false;
+        // Типы после «Новый» не зависят от префикса: Backspace не должен закрывать попап
+        // и запускать Job на 2+ с (лог 10:18:23 waitResource + dropKey).
+        if (isAfterNewKeyword(doc, caret) && countNoLinkModelProposals(fullListCache) > 0)
             return false;
         if (!isCacheValidForCaret(doc, caret))
             return false;
@@ -3985,6 +4402,19 @@ return stripEmptyPlaceholderProposals(result);
     private void debugResolveExit(IDocument doc, int caret, String filter, int interimN,
         boolean cacheValid, String exit, ICompletionProposal[] result)
     {
+        // #region agent log
+        uiBlockLog("resolveExit", "exit=" + exit //$NON-NLS-1$ //$NON-NLS-2$
+            + " caret=" + caret //$NON-NLS-1$
+            + " filter=" + (filter == null ? "" : filter) //$NON-NLS-1$ //$NON-NLS-2$
+            + " around=\"" + uiBlockAround(doc, caret) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+            + " interimN=" + interimN //$NON-NLS-1$
+            + " cacheValid=" + cacheValid //$NON-NLS-1$
+            + " cache=" + fullListCache.length //$NON-NLS-1$
+            + " n=" + (result == null ? -1 : result.length) //$NON-NLS-1$
+            + " popup=" + isPopupVisible() //$NON-NLS-1$
+            + " seeded=" + wordListSeededOnUi //$NON-NLS-1$
+            + " irN=" + irProposals.length); //$NON-NLS-1$
+        // #endregion
     }
 
     /**
@@ -4289,7 +4719,24 @@ return result;
         if (lastStableDelegateList.length > 0)
             return finalizeListForIrAssistDisplay(lastStableDelegateList);
 
+        if (wordListSeededOnUi && !ManualInvocationDetect.isActive())
+        {
+            // #region agent log
+            uiBlockLog("resolveDelegateOrderedList.skipFetch", "caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                + " around=\"" + uiBlockAround(doc, caret) + "\""); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+            if (scheduleWordListInBackground(viewer, doc, offset, caret))
+                return EMPTY;
+            return EMPTY;
+        }
+
         ICompletionProposal[] raw = fetchFullDelegateListAtAnchor(viewer, offset, caret);
+        // #region agent log
+        uiBlockLog("resolveDelegateOrderedList.fetch", "caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
+            + " n=" + (raw == null ? -1 : raw.length) //$NON-NLS-1$
+            + " cache=" + fullListCache.length //$NON-NLS-1$
+            + " around=\"" + uiBlockAround(doc, caret) + "\""); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
         if (raw.length > 0)
         {
             ICompletionProposal[] built = finalizeListForIrAssistDisplay(raw);
@@ -4343,10 +4790,19 @@ return result;
 
     private ICompletionProposal[] fetchDelegateList(ITextViewer viewer, int probeOffset, int caret)
     {
+        long t0 = System.nanoTime();
         ICompletionProposal[] nativeList = probeDelegateOnce(viewer, probeOffset);
         if ((nativeList == null || nativeList.length == 0) && caret >= 0 && caret != probeOffset)
             nativeList = probeDelegateOnce(viewer, caret);
-        return nativeList != null ? nativeList : EMPTY;
+        ICompletionProposal[] result = nativeList != null ? nativeList : EMPTY;
+        // #region agent log
+        uiBlockLog("fetchDelegateList", "ms=" + ((System.nanoTime() - t0) / 1_000_000L) //$NON-NLS-1$ //$NON-NLS-2$
+            + " probe=" + probeOffset + " caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
+            + " n=" + result.length //$NON-NLS-1$
+            + " popup=" + isPopupVisible() //$NON-NLS-1$
+            + " caller=" + uiBlockCaller()); //$NON-NLS-1$
+        // #endregion
+        return result;
     }
 
     static int computeIdentifierWordStart(IDocument doc, int caret)
@@ -4379,6 +4835,165 @@ return result;
         {
             return caret;
         }
+    }
+
+    /**
+     * Зонд имени типа после {@code Новый}: последний символ идентификатора, не позиция
+     * после него. {@link #computeIdentifierWordEnd} на {@code новый с;} даёт индекс {@code ;}
+     * — там EDT предлагает локальные и шаблоны.
+     */
+    static int computeTypeNameProbeOffset(IDocument doc, int caret)
+    {
+        int end = computeIdentifierWordEnd(doc, caret);
+        return end > caret ? end - 1 : caret;
+    }
+
+    /** Каретка в имени типа после {@code Новый}/{@code New} (пробел и недописанный идентификатор тоже). */
+    static boolean isAfterNewKeyword(IDocument doc, int caret)
+    {
+        if (doc == null || caret < 0)
+            return false;
+        try
+        {
+            int i = caret;
+            while (i > 0 && isFilterChar(doc.getChar(i - 1)))
+                i--;
+            while (i > 0 && Character.isWhitespace(doc.getChar(i - 1)))
+                i--;
+            int wordEnd = i;
+            while (i > 0 && isFilterChar(doc.getChar(i - 1)))
+                i--;
+            if (wordEnd <= i)
+                return false;
+            String word = doc.get(i, wordEnd - i);
+            return "новый".equalsIgnoreCase(word) || "new".equalsIgnoreCase(word); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        catch (Exception ignored)
+        {
+            return false;
+        }
+    }
+
+    static int countNoLinkModelProposals(ICompletionProposal[] list)
+    {
+        if (list == null || list.length == 0)
+            return 0;
+        int n = 0;
+        for (ICompletionProposal p : list)
+        {
+            ICompletionProposal raw = unwrapProposal(p);
+            if (raw != null
+                && "NoLinkModelCompletionProposal".equals(raw.getClass().getSimpleName())) //$NON-NLS-1$
+                n++;
+        }
+        return n;
+    }
+
+    /**
+     * Запоминает каталог типов после «Новый». Срез по префиксу (n=11 при 453 типах)
+     * не затирает полный список: типы не зависят от тела модуля.
+     */
+    private void rememberCtorTypeCatalog(IDocument document, int offset,
+                                         ICompletionProposal[] result)
+    {
+        if (result == null || result.length == 0 || document == null || offset < 0)
+            return;
+        if (!isAfterNewKeyword(document, offset))
+            return;
+        int newTypes = countNoLinkModelProposals(result);
+        if (newTypes <= 0)
+            return;
+        int savedTypes = countNoLinkModelProposals(ctorTypeCatalog);
+        if (savedTypes > 0 && newTypes < savedTypes)
+        {
+            uiBlockLog("ctorCatalog.keepBroader", "savedTypes=" + savedTypes //$NON-NLS-1$ //$NON-NLS-2$
+                + " newTypes=" + newTypes + " n=" + ctorTypeCatalog.length); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        }
+        if (savedTypes > 0 && newTypes == savedTypes
+            && result.length < ctorTypeCatalog.length)
+        {
+            uiBlockLog("ctorCatalog.keepBroader", "savedN=" + ctorTypeCatalog.length //$NON-NLS-1$ //$NON-NLS-2$
+                + " newN=" + result.length); //$NON-NLS-1$
+            return;
+        }
+        ctorTypeCatalog = unwrapProposals(result);
+        // Пустой префикс: тот же каталог на любую букву после «Новый».
+        ctorTypeCatalogPrefix = ""; //$NON-NLS-1$
+        fullListComplete = true;
+        uiBlockLog("ctorCatalog.remember", "n=" + ctorTypeCatalog.length //$NON-NLS-1$ //$NON-NLS-2$
+            + " types=" + newTypes); //$NON-NLS-1$
+    }
+
+    /**
+     * Возвращает каталог типов в {@link #fullListCache} после закрытия попапа.
+     *
+     * @return {@code true}, если кэш снова годится для текущей каретки
+     */
+    private boolean restoreCtorTypeCatalog(IDocument document, int offset)
+    {
+        if (restoringCtorCatalog)
+            return isCacheValidForCaret(document, offset)
+                && countNoLinkModelProposals(fullListCache) > 0;
+        if (ctorTypeCatalog.length == 0 || document == null || offset < 0)
+            return false;
+        if (!isAfterNewKeyword(document, offset))
+            return false;
+        String prefix = computeIdentifierFilter(document, offset);
+        if (prefix == null)
+            prefix = ""; //$NON-NLS-1$
+        String saved = ctorTypeCatalogPrefix == null ? "" : ctorTypeCatalogPrefix; //$NON-NLS-1$
+        // Пустой префикс после «Новый » — тот же каталог, не новый compute.
+        // Другая буква («д» при каталоге на «с») — каталог не подходит.
+        if (!prefix.isEmpty() && !saved.isEmpty()
+            && !prefix.regionMatches(true, 0, saved, 0, saved.length()))
+            return false;
+        if (isCacheValidForCaret(document, offset) && countNoLinkModelProposals(fullListCache) > 0)
+            return true;
+        restoringCtorCatalog = true;
+        try
+        {
+            int key = computeFullListContextKey(document, offset);
+            fullListContextKey = key;
+            fullListReady = true;
+            fullListComplete = true;
+            assignFullListCache(ctorTypeCatalog);
+            fullListCachePrefix = saved;
+            uiBlockLog("ctorCatalog.restore", "n=" + ctorTypeCatalog.length //$NON-NLS-1$ //$NON-NLS-2$
+                + " saved=\"" + saved + "\" prefix=\"" + prefix + "\" key=" + key); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            return true;
+        }
+        finally
+        {
+            restoringCtorCatalog = false;
+        }
+    }
+
+    /** Запасной отбор каталога типов, если smart-фильтр обнулил список (лог 10:19:02 n=0). */
+    private static ICompletionProposal[] prefixFilterCtorCatalog(ICompletionProposal[] raw,
+                                                                 String prefix)
+    {
+        if (raw == null || raw.length == 0)
+            return EMPTY;
+        if (prefix == null || prefix.isEmpty())
+            return unwrapProposals(raw);
+        List<ICompletionProposal> kept = new ArrayList<>(raw.length);
+        for (ICompletionProposal p : raw)
+        {
+            try
+            {
+                ICompletionProposal rawP = unwrapProposal(p);
+                String name = filterMatchName(rawP);
+                if (name != null && name.regionMatches(true, 0, prefix, 0, prefix.length()))
+                    kept.add(rawP);
+            }
+            catch (RuntimeException ignored)
+            {
+            }
+        }
+        if (kept.isEmpty())
+            return EMPTY;
+        return kept.toArray(new ICompletionProposal[kept.size()]);
     }
 
     private static int resolveDelegateProbeOffset(ITextViewer viewer, int invocationOffset,
@@ -4719,6 +5334,12 @@ if (!SmartAssistFilterState.isSmartFilterEnabled())
             return;
 
         ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
+        // #region agent log
+        uiBlockLog("loadFullList.enter", "caret=" + caret + " dot=" + dot //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " forceRO=" + forceDelegateReadOnly //$NON-NLS-1$
+            + " around=\"" + uiBlockAround(doc, caret) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+            + " caller=" + uiBlockCaller()); //$NON-NLS-1$
+        // #endregion
         ICompletionProposal[] raw = loadDelegateProposals(viewer, doc, caret, dot, assistant,
             forceDelegateReadOnly);
         if (dot >= 0)
@@ -4732,6 +5353,10 @@ if (!SmartAssistFilterState.isSmartFilterEnabled())
             fullListReady = false;
             if (dot >= 0 && shouldScheduleMemberReload(dot))
                 scheduleMemberAccessReload(viewer, dot);
+            // #region agent log
+            uiBlockLog("loadFullList.empty", "ms=" + (System.currentTimeMillis() - loadStarted) //$NON-NLS-1$ //$NON-NLS-2$
+                + " caret=" + caret + " dot=" + dot); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
             return;
         }
         if (computeFullListContextKey(doc, caret) != fullListContextKey)
@@ -4739,9 +5364,14 @@ if (!SmartAssistFilterState.isSmartFilterEnabled())
         assignFullListCache(unwrapProposals(raw));
         fullListReady = true;
         fullListComplete = true;
+        rememberCtorTypeCatalog(doc, caret, raw);
         ContentAssistDebug.log("loadFullList count=" + fullListCache.length //$NON-NLS-1$
             + " dot=" + dot + " caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
             + (forceDelegateReadOnly ? " readOnly" : "") + " complete"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        // #region agent log
+        uiBlockLog("loadFullList.done", "ms=" + (System.currentTimeMillis() - loadStarted) //$NON-NLS-1$ //$NON-NLS-2$
+            + " n=" + fullListCache.length + " caret=" + caret + " dot=" + dot); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        // #endregion
 if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
             && shouldScheduleMemberReload(dot))
             scheduleMemberAccessReload(viewer, dot);
@@ -4907,12 +5537,19 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         catch (InterruptedException e)
         {
             Thread.currentThread().interrupt();
+            // #region agent log
+            uiBlockLog("probeDelegateOnce", "off=" + off + " interrupted"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            // #endregion
             return null;
         }
         if (!locked)
         {
             ContentAssistDebug.perfMark("delegate.lockBusy", //$NON-NLS-1$
                 "{\"off\":" + off + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            // #region agent log
+            uiBlockLog("probeDelegateOnce", "off=" + off + " lockBusy waitMs=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + ((System.nanoTime() - tLock) / 1_000_000L));
+            // #endregion
             return null;
         }
         long waitMs = (System.nanoTime() - tLock) / 1_000_000L;
@@ -4922,6 +5559,7 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                 "{\"off\":" + off + ",\"ms\":" + waitMs + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         }
         long t0 = ContentAssistDebug.perfStart("delegate.compute"); //$NON-NLS-1$
+        long tCompute = System.nanoTime();
         ICompletionProposal[] raw = null;
         try
         {
@@ -4939,9 +5577,21 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         {
             DELEGATE_LOCK.unlock();
             IDocument d = viewer != null ? viewer.getDocument() : null;
+            long computeMs = (System.nanoTime() - tCompute) / 1_000_000L;
             ContentAssistDebug.perfEnd("delegate.compute", t0, //$NON-NLS-1$
                 "{\"off\":" + off + ",\"n\":" + (raw == null ? -1 : raw.length) //$NON-NLS-1$ //$NON-NLS-2$
                     + ",\"docLen\":" + (d == null ? -1 : d.getLength()) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            // #region agent log
+            uiBlockLog("probeDelegateOnce", "off=" + off //$NON-NLS-1$ //$NON-NLS-2$
+                + " waitMs=" + waitMs //$NON-NLS-1$
+                + " computeMs=" + computeMs //$NON-NLS-1$
+                + " n=" + (raw == null ? -1 : raw.length) //$NON-NLS-1$
+                + " docLen=" + (d == null ? -1 : d.getLength()) //$NON-NLS-1$
+                + " around=\"" + uiBlockAround(d, off) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                + " seeded=" + wordListSeededOnUi //$NON-NLS-1$
+                + " popup=" + isPopupVisible() //$NON-NLS-1$
+                + " caller=" + uiBlockCaller()); //$NON-NLS-1$
+            // #endregion
         }
     }
 
@@ -5496,9 +6146,13 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                 return;
             if (memberStockFullList.length > prev)
             {
+                repairPopupListFromMemberStock(doc, caret);
                 if (viewer instanceof SourceViewer)
                     ContentAssistPopupUi.updateContextTypeLabel((SourceViewer) viewer);
-                ContentAssistSessionReloader.refreshPopupIfOpen();
+                if (isPopupVisible())
+                    ContentAssistSessionReloader.refreshPopupIfOpen();
+                else if (hasMemberStock(dotContextKey))
+                    ContentAssistSessionReloader.openPopupForBackgroundMemberList(viewer);
             }
         }
         catch (Exception ignored) {}
@@ -6062,6 +6716,8 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         ICompletionProposal raw = unwrapProposal(proposal);
         if (raw instanceof IrCompletionProposal ir)
             return matchesIrStockPrefixFilter(ir, document, offset, event);
+        if (raw instanceof SmartCompletionProposal)
+            return true;
         if (raw instanceof ICompletionProposalExtension2)
             return ((ICompletionProposalExtension2) raw).validate(document, offset, event);
         if (raw instanceof ICompletionProposalExtension)
@@ -6119,16 +6775,19 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
 
     private static ICompletionProposal wrapProposal(ICompletionProposal proposal, int delegateOrder)
     {
-        if (proposal instanceof SmartCompletionProposal)
-        {
-            SmartCompletionProposal wrapped = (SmartCompletionProposal) proposal;
-            CtorMinParamsInsert.trimIfNeeded(wrapped.getDelegate());
-            if (delegateOrder < 0 || wrapped.getDelegateOrder() == delegateOrder)
-                return proposal;
-            return new SmartCompletionProposal(wrapped.getDelegate(), delegateOrder);
-        }
-        CtorMinParamsInsert.trimIfNeeded(proposal);
-        return new SmartCompletionProposal(proposal, delegateOrder);
+        ICompletionProposal raw = unwrapProposal(proposal);
+        if (raw == null)
+            return proposal;
+        if (raw instanceof SmartCompletionProposal)
+            return raw;
+        if (proposal instanceof SmartCompletionProposal wrapped
+            && wrapped.getDelegate() == raw
+            && (delegateOrder < 0 || wrapped.getDelegateOrder() == delegateOrder))
+            return proposal;
+        // Обрезка слотов конструктора — только в bindSelectedFakeCtorBeforeApply.
+        // trimIfNeeded здесь ждёт замок документа на каждом пункте списка (большой модуль:
+        // wrapMs ≈ blkMs секунды на каждую букву).
+        return new SmartCompletionProposal(raw, delegateOrder);
     }
 
     /** Перед apply конструктора — FakeCtor выбранной перегрузки в DataEvent. */
@@ -6171,37 +6830,202 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         if (raw == null || raw.length == 0)
             return EMPTY;
 
-        SmartCodeMatcher matcher = new SmartCodeMatcher(filter);
-        List<ICompletionProposal> filtered = new ArrayList<>(raw.length);
-
+        long t0 = System.nanoTime();
+        boolean dropGhost = true;
+        // #region agent log
+        uiBlockLog("filterAndSort.enter", "in=" + raw.length //$NON-NLS-1$ //$NON-NLS-2$
+            + " dropGhost=" + dropGhost //$NON-NLS-1$
+            + " filter=" + filter //$NON-NLS-1$
+            + " caller=" + uiBlockCaller()); //$NON-NLS-1$
+        // #endregion
+        java.lang.management.ThreadMXBean mx =
+            java.lang.management.ManagementFactory.getThreadMXBean();
+        long tid = Thread.currentThread().getId();
+        if (mx.isThreadCpuTimeSupported() && !mx.isThreadCpuTimeEnabled())
+            mx.setThreadCpuTimeEnabled(true);
+        if (mx.isThreadContentionMonitoringSupported() && !mx.isThreadContentionMonitoringEnabled())
+            mx.setThreadContentionMonitoringEnabled(true);
+        long cpu0 = mx.isThreadCpuTimeEnabled() ? mx.getCurrentThreadCpuTime() : -1L;
+        java.lang.management.ThreadInfo ti0 = mx.getThreadInfo(tid);
+        long blk0 = ti0 != null ? ti0.getBlockedTime() : -1L;
+        long wait0 = ti0 != null ? ti0.getWaitedTime() : -1L;
+        int wrappedN = 0;
+        Map<String, Integer> classHist = new LinkedHashMap<>();
         for (ICompletionProposal p : raw)
         {
-            if (computeScore(matcher, p) > 0)
-                filtered.add(unwrapProposal(p));
+            if (p instanceof SmartCompletionProposal)
+                wrappedN++;
+            ICompletionProposal u = unwrapProposal(p);
+            String cn = u == null ? "null" : u.getClass().getSimpleName(); //$NON-NLS-1$
+            classHist.merge(cn, 1, Integer::sum);
         }
-
-        if (filtered.isEmpty())
-            return EMPTY;
-
-        dropTypedIdentifierGhostInPlace(filtered);
-        if (filtered.isEmpty())
-            return EMPTY;
-
-        Integer[] idx = new Integer[filtered.size()];
-        for (int i = 0; i < idx.length; i++)
-            idx[i] = i;
-
-        Arrays.sort(idx, (a, b) -> compareProposals(matcher,
-            filtered.get(a), filtered.get(b)));
-
-        ICompletionProposal[] result = new ICompletionProposal[idx.length];
-        for (int i = 0; i < idx.length; i++)
+        StringBuilder classes = new StringBuilder();
+        for (Map.Entry<String, Integer> e : classHist.entrySet())
         {
-            ICompletionProposal p = filtered.get(idx[i]);
-            int order = delegateOrderOf(p);
-            result[i] = wrapProposal(p, order >= 0 ? order : idx[i]);
+            if (classes.length() > 0)
+                classes.append(',');
+            classes.append(e.getKey()).append(':').append(e.getValue());
         }
-        return result;
+        long scoreMs = -1L;
+        long ghostMs = -1L;
+        long sortMs = -1L;
+        long wrapMs = -1L;
+        long firstNs = -1L;
+        long maxItemNs = 0L;
+        long maxDispNs = 0L;
+        long maxMatchNs = 0L;
+        int maxIdx = -1;
+        int maxDispLen = -1;
+        int slowItems = 0;
+        String maxClass = ""; //$NON-NLS-1$
+        String maxDisp = ""; //$NON-NLS-1$
+        ICompletionProposal[] result = EMPTY;
+        try
+        {
+            SmartCodeMatcher matcher = new SmartCodeMatcher(filter);
+            List<ICompletionProposal> filtered = new ArrayList<>(raw.length);
+            long tScore = System.nanoTime();
+            for (int i = 0; i < raw.length; i++)
+            {
+                ICompletionProposal p = raw[i];
+                long i0 = System.nanoTime();
+                ICompletionProposal unwrapped = unwrapProposal(p);
+                long tDisp = System.nanoTime();
+                String display = displayString(unwrapped);
+                long dispNs = System.nanoTime() - tDisp;
+                int score = 0;
+                long tMatch = System.nanoTime();
+                if (display != null && !display.isEmpty())
+                {
+                    String name = filterMatchName(p);
+                    if (!name.isEmpty())
+                    {
+                        int nameScore = namePremium(matcher, p, name);
+                        if (nameScore > 0)
+                            score = nameScore * NAME_WEIGHT
+                                + matcher.computeParamPremium(display) * PARAM_WEIGHT;
+                    }
+                }
+                long matchNs = System.nanoTime() - tMatch;
+                long iNs = System.nanoTime() - i0;
+                if (firstNs < 0)
+                    firstNs = iNs;
+                if (dispNs > maxDispNs)
+                    maxDispNs = dispNs;
+                if (matchNs > maxMatchNs)
+                    maxMatchNs = matchNs;
+                if (iNs > maxItemNs)
+                {
+                    maxItemNs = iNs;
+                    maxIdx = i;
+                    maxClass = unwrapped == null ? "null" : unwrapped.getClass().getSimpleName(); //$NON-NLS-1$
+                    maxDispLen = display == null ? -1 : display.length();
+                    maxDisp = clipLogDisplay(display);
+                }
+                if (iNs >= 5_000_000L)
+                {
+                    slowItems++;
+                    // #region agent log
+                    uiBlockLog("filterAndSort.item", "i=" + i //$NON-NLS-1$ //$NON-NLS-2$
+                        + " ms=" + (iNs / 1_000_000L) //$NON-NLS-1$
+                        + " dispMs=" + (dispNs / 1_000_000L) //$NON-NLS-1$
+                        + " matchMs=" + (matchNs / 1_000_000L) //$NON-NLS-1$
+                        + " cls=" + (unwrapped == null ? "null" : unwrapped.getClass().getSimpleName()) //$NON-NLS-1$ //$NON-NLS-2$
+                        + " dispLen=" + (display == null ? -1 : display.length()) //$NON-NLS-1$
+                        + " disp=\"" + clipLogDisplay(display) + "\""); //$NON-NLS-1$ //$NON-NLS-2$
+                    // #endregion
+                }
+                if ((i + 1) % 50 == 0 || i == 0)
+                {
+                    // #region agent log
+                    uiBlockLog("filterAndSort.progress", "i=" + i //$NON-NLS-1$ //$NON-NLS-2$
+                        + " elapsedMs=" + ((System.nanoTime() - t0) / 1_000_000L) //$NON-NLS-1$
+                        + " itemMs=" + (iNs / 1_000_000L) //$NON-NLS-1$
+                        + " maxItemMs=" + (maxItemNs / 1_000_000L)); //$NON-NLS-1$
+                    // #endregion
+                }
+                if (score > 0)
+                    filtered.add(unwrapped);
+            }
+            scoreMs = (System.nanoTime() - tScore) / 1_000_000L;
+            if (filtered.isEmpty())
+            {
+                uiBlockLog("filterAndSort.empty", "in=" + raw.length //$NON-NLS-1$ //$NON-NLS-2$
+                    + " filter=" + filter); //$NON-NLS-1$
+                return EMPTY;
+            }
+
+            long tGhost = System.nanoTime();
+            dropTypedIdentifierGhostInPlace(filtered);
+            ghostMs = (System.nanoTime() - tGhost) / 1_000_000L;
+            if (filtered.isEmpty())
+                return EMPTY;
+
+            Integer[] idx = new Integer[filtered.size()];
+            for (int i = 0; i < idx.length; i++)
+                idx[i] = i;
+            long tSort = System.nanoTime();
+            Arrays.sort(idx, (a, b) -> compareProposals(matcher,
+                filtered.get(a), filtered.get(b)));
+            sortMs = (System.nanoTime() - tSort) / 1_000_000L;
+
+            result = new ICompletionProposal[idx.length];
+            long tWrap = System.nanoTime();
+            for (int i = 0; i < idx.length; i++)
+            {
+                ICompletionProposal p = filtered.get(idx[i]);
+                int order = delegateOrderOf(p);
+                result[i] = wrapProposal(p, order >= 0 ? order : idx[i]);
+            }
+            wrapMs = (System.nanoTime() - tWrap) / 1_000_000L;
+            return result;
+        }
+        catch (RuntimeException ex)
+        {
+            uiBlockLogThrowable("filterAndSort.crash", ex); //$NON-NLS-1$
+            return EMPTY;
+        }
+        catch (StackOverflowError t)
+        {
+            uiBlockLogThrowable("filterAndSort.crash", t); //$NON-NLS-1$
+            return EMPTY;
+        }
+        finally
+        {
+            long cpu1 = mx.isThreadCpuTimeEnabled() ? mx.getCurrentThreadCpuTime() : -1L;
+            java.lang.management.ThreadInfo ti1 = mx.getThreadInfo(tid);
+            long blk1 = ti1 != null ? ti1.getBlockedTime() : -1L;
+            long wait1 = ti1 != null ? ti1.getWaitedTime() : -1L;
+            long cpuMs = cpu0 >= 0 && cpu1 >= 0 ? (cpu1 - cpu0) / 1_000_000L : -1L;
+            long blkMs = blk0 >= 0 && blk1 >= 0 ? blk1 - blk0 : -1L;
+            long waitMs = wait0 >= 0 && wait1 >= 0 ? wait1 - wait0 : -1L;
+            // #region agent log
+            uiBlockLog("filterAndSort", "ms=" + ((System.nanoTime() - t0) / 1_000_000L) //$NON-NLS-1$ //$NON-NLS-2$
+                + " cpuMs=" + cpuMs + " blkMs=" + blkMs + " waitMs=" + waitMs //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " scoreMs=" + scoreMs + " ghostMs=" + ghostMs //$NON-NLS-1$ //$NON-NLS-2$
+                + " sortMs=" + sortMs + " wrapMs=" + wrapMs //$NON-NLS-1$ //$NON-NLS-2$
+                + " firstMs=" + (firstNs < 0 ? -1L : firstNs / 1_000_000L) //$NON-NLS-1$
+                + " maxItemMs=" + (maxItemNs / 1_000_000L) //$NON-NLS-1$
+                + " maxDispMs=" + (maxDispNs / 1_000_000L) //$NON-NLS-1$
+                + " maxMatchMs=" + (maxMatchNs / 1_000_000L) //$NON-NLS-1$
+                + " maxIdx=" + maxIdx + " maxCls=" + maxClass //$NON-NLS-1$ //$NON-NLS-2$
+                + " maxDispLen=" + maxDispLen + " maxDisp=\"" + maxDisp + "\"" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " slowItems=" + slowItems //$NON-NLS-1$
+                + " in=" + raw.length + " n=" + result.length //$NON-NLS-1$ //$NON-NLS-2$
+                + " wrapped=" + wrappedN //$NON-NLS-1$
+                + " dropGhost=" + dropGhost + " filter=" + filter //$NON-NLS-1$ //$NON-NLS-2$
+                + " classes=" + classes //$NON-NLS-1$
+                + " caller=" + uiBlockCaller()); //$NON-NLS-1$
+            // #endregion
+        }
+    }
+
+    private static String clipLogDisplay(String display)
+    {
+        if (display == null || display.isEmpty())
+            return ""; //$NON-NLS-1$
+        String s = display.replace('\r', ' ').replace('\n', ' ').replace('"', '\'');
+        return s.length() > 80 ? s.substring(0, 80) : s;
     }
 
     /**
@@ -6210,8 +7034,10 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
      * слово у каретки ({@code SimpleStatement} без {@code =}, см.
      * {@link BslEditorHighlighting#isImplicitVariableCreationSite}). Умный фильтр ставит точное
      * совпадение первым — Enter вставляет обрывок.
-     * <p>Убираем предложение только если это новая неявная переменная без других обращений
-     * и узел у каретки не место создания ({@code Перем} / присваивание / цикл).
+     * <p>Убираем предложение только если это новая неявная переменная, чьё определяющее
+     * обращение ({@code eContainer}) — узел у каретки, и это не место создания
+     * ({@code Перем} / присваивание / цикл). Повторное обращение (каретка не на
+     * {@code eContainer}) не трогаем.
      */
     private static ICompletionProposal[] dropTypedIdentifierGhost(ICompletionProposal[] raw)
     {
@@ -6229,13 +7055,21 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
     {
         if (list == null || list.isEmpty())
             return;
-        ISourceViewer viewer = ContentAssistSessionReloader.getActiveViewer();
-        IDocument doc = viewer != null ? viewer.getDocument() : null;
-        int caret = resolveWidgetCaret(viewer);
+        IDocument doc = GHOST_DOC.get();
+        Integer ghostCaret = GHOST_CARET.get();
+        int caret;
+        if (doc != null && ghostCaret != null)
+            caret = ghostCaret.intValue();
+        else
+        {
+            ISourceViewer viewer = ContentAssistSessionReloader.getActiveViewer();
+            doc = viewer != null ? viewer.getDocument() : null;
+            caret = resolveWidgetCaret(viewer);
+        }
         String typed = identifierAtCaret(doc, caret);
         if (typed.isEmpty())
             return;
-        ImplicitVariable phantom = phantomImplicitAtCaret(list, caret, typed);
+        ImplicitVariable phantom = phantomImplicitAtCaret(list, doc, caret, typed);
         list.removeIf(p -> isTypedIdentifierGhost(p, typed, caret, phantom));
     }
 
@@ -6285,13 +7119,33 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
     /**
      * Неявная переменная недописанного слова у каретки. Нужна, когда у самого предложения
      * нет {@code additionalProposalInfo} (штатный список имён из
-     * {@code getSortedLocalVariable}). Ресурс берём у соседнего предложения, без
-     * {@code readOnly} документа.
+     * {@code getSortedLocalVariable}). Ресурс — у соседнего предложения или из документа
+     * через {@code readOnlyPeekAst} (без notify и без отмены reconciler).
      */
     private static ImplicitVariable phantomImplicitAtCaret(List<ICompletionProposal> list,
-        int caret, String typed)
+        IDocument doc, int caret, String typed)
     {
-        XtextResource resource = xtextResourceFrom(list);
+        if (caret < 0 || typed == null || typed.isEmpty())
+            return null;
+        ImplicitVariable fromList = phantomFromResource(xtextResourceFrom(list), caret, typed);
+        if (fromList != null)
+            return fromList;
+        if (!(doc instanceof IXtextDocument xdoc))
+            return null;
+        try
+        {
+            return ContentAssistSessionReloader.readOnlyPeekAst(xdoc,
+                resource -> phantomFromResource(resource, caret, typed));
+        }
+        catch (Exception ignored)
+        {
+            return null;
+        }
+    }
+
+    private static ImplicitVariable phantomFromResource(XtextResource resource, int caret,
+        String typed)
+    {
         if (resource == null || caret < 0 || typed == null || typed.isEmpty())
             return null;
         try
@@ -6337,39 +7191,20 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
     }
 
     /**
-     * Единственное обращение к неявной переменной, и его имя покрывает каретку.
-     * {@code null} — есть другие обращения, узел не у каретки, или разобрать не удалось
-     * (тогда предложение не трогаем).
+     * Определяющее обращение неявной переменной покрывает каретку.
+     * {@code null} — это не первое обращение (есть другие: {@code eContainer} — другой узел)
+     * или разобрать не удалось.
      */
     private static StaticFeatureAccess uniqueAccessAtCaret(ImplicitVariable variable, int caret)
     {
         if (variable == null)
             return null;
         EObject container = variable.eContainer();
-        EObject scope = EcoreUtil2.getContainerOfType(variable, Block.class);
-        if (scope == null && container instanceof StaticFeatureAccess access)
-            scope = EcoreUtil2.getContainerOfType(access, Block.class);
-        StaticFeatureAccess found = null;
-        if (scope != null)
-        {
-            var contents = scope.eAllContents();
-            while (contents.hasNext())
-            {
-                EObject element = contents.next();
-                if (!(element instanceof StaticFeatureAccess access))
-                    continue;
-                if (access.getImplicitVariable() != variable)
-                    continue;
-                if (found != null)
-                    return null;
-                found = access;
-            }
-        }
-        if (found == null && container instanceof StaticFeatureAccess access)
-            found = access;
-        if (found == null || !nodeCoversCaret(found, caret))
+        if (!(container instanceof StaticFeatureAccess access))
             return null;
-        return found;
+        if (!nodeCoversCaret(access, caret))
+            return null;
+        return access;
     }
 
     private static boolean nodeCoversCaret(EObject object, int caret)
@@ -6440,8 +7275,15 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
 
     static ICompletionProposal unwrapProposal(ICompletionProposal proposal)
     {
+        ICompletionProposal start = proposal;
+        int depth = 0;
         while (proposal instanceof SmartCompletionProposal)
-            proposal = ((SmartCompletionProposal) proposal).getDelegate();
+        {
+            ICompletionProposal next = ((SmartCompletionProposal) proposal).getDelegate();
+            if (next == null || next == proposal || next == start || ++depth > 8)
+                return next == null || next == proposal || next == start ? start : next;
+            proposal = next;
+        }
         return proposal;
     }
 
@@ -6542,7 +7384,10 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
             int order = wrapped.getDelegateOrder();
             if (order >= 0)
                 return order;
-            cur = wrapped.getDelegate();
+            ICompletionProposal next = wrapped.getDelegate();
+            if (next == null || next == cur)
+                break;
+            cur = next;
         }
         SmartContentAssistProcessor processor = ContentAssistSessionReloader.getActiveProcessor();
         if (processor != null)
@@ -7462,6 +8307,7 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
         static void bindSelectedFakeCtorBeforeApply(ICompletionProposal proposal, IDocument document)
         {
             ICompletionProposal raw = unwrapProposal(proposal);
+            CtorMinParamsInsert.trimIfNeeded(raw);
             if (!(raw instanceof ConfigurableCompletionProposal cp))
                 return;
             EObject signature = readSignatureObject(cp);

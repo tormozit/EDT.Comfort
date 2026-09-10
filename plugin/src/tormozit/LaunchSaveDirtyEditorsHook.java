@@ -11,6 +11,9 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 
+import org.eclipse.core.resources.IContainer;
+import org.eclipse.core.resources.IFile;
+import org.eclipse.core.resources.IMarker;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.IResource;
 import org.eclipse.core.resources.ResourcesPlugin;
@@ -24,6 +27,8 @@ import org.eclipse.debug.core.ILaunchDelegate;
 import org.eclipse.debug.core.ILaunchManager;
 import org.eclipse.debug.core.model.ILaunchConfigurationDelegate;
 import org.eclipse.debug.core.model.ILaunchConfigurationDelegate2;
+import org.eclipse.emf.common.util.URI;
+import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.dialogs.Dialog;
 import org.eclipse.jface.dialogs.IDialogConstants;
 import org.eclipse.swt.SWT;
@@ -34,13 +39,29 @@ import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Label;
 import org.eclipse.swt.widgets.Shell;
+import org.eclipse.ui.IEditorInput;
 import org.eclipse.ui.IEditorPart;
+import org.eclipse.ui.IEditorReference;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.preferences.ScopedPreferenceStore;
 import org.eclipse.ui.texteditor.ITextEditor;
+
+import org.eclipse.xtext.resource.XtextResource;
+import org.eclipse.xtext.ui.editor.model.IXtextDocument;
+import org.eclipse.xtext.util.concurrent.IUnitOfWork;
+
+import com._1c.g5.v8.bm.core.IBmObject;
+import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
+import com._1c.g5.v8.dt.core.platform.IResourceLookup;
+import com._1c.g5.v8.dt.ui.editor.IDtEditor;
+import com._1c.g5.v8.dt.ui.editor.input.IDtEditorInput;
+import com._1c.g5.v8.dt.validation.marker.IMarkerManager;
+import com._1c.g5.v8.dt.validation.marker.Marker;
+import com._1c.g5.v8.dt.validation.marker.MarkerFilter;
+import com._1c.g5.v8.dt.validation.marker.MarkerSeverity;
 
 /**
  * Перед запуском клиентского приложения 1С предлагает сохранить несохранённые
@@ -67,17 +88,21 @@ import org.eclipse.ui.texteditor.ITextEditor;
  *   <li>при значении параметра «prompt» показывает {@link SaveAndLaunchDialog}
  *       со списком и кнопками «Сохранить и запустить» / «Не сохранять и запустить» / «Отмена»
  *       (при «always» — сохраняет молча, при «never» — не вмешивается);</li>
+ *   <li>если в открытых редакторах того же проекта есть ошибки конфигурации
+ *       ({@link MarkerSeverity#ERRORS}, в том числе у вложенных объектов — как значок
+ *       на вкладке), показывает {@link ErrorsAndLaunchDialog} со списком и кнопками
+ *       «Запустить» / «Отмена»
+ *       (<a href="https://github.com/tormozit/EDT.Comfort/issues/500">issue 500</a>);</li>
  *   <li>затем вызывает настоящий {@code preLaunchCheck}, временно выставив параметр
  *       в «never», чтобы штатное сохранение по всему рабочему пространству не спросило
  *       второй раз.</li>
  * </ul>
- *
- * <p>Предупреждение об ошибках конфигурации в открытых модулях (вторая часть issue 455)
- * пока не реализовано.
  */
 public final class LaunchSaveDirtyEditorsHook implements IStartup
 {
     private static final String TAG = "LaunchSaveDirtyEditors"; //$NON-NLS-1$
+    private static final String ERROR_LOG = "launch-errors"; //$NON-NLS-1$
+    private static final String BSL_EXTENSION = "bsl"; //$NON-NLS-1$
 
     private static final String RUNTIME_CLIENT_TYPE = "com._1c.g5.v8.dt.launching.core.RuntimeClient"; //$NON-NLS-1$
     private static final String ATTR_PROJECT_NAME = "com._1c.g5.v8.dt.debug.core.ATTR_PROJECT_NAME"; //$NON-NLS-1$
@@ -93,6 +118,7 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
 
     private static final int SAVE_AND_LAUNCH_ID = IDialogConstants.CLIENT_ID + 1;
     private static final int LAUNCH_WITHOUT_SAVE_ID = IDialogConstants.CLIENT_ID + 2;
+    private static final int LAUNCH_WITH_ERRORS_ID = IDialogConstants.CLIENT_ID + 3;
 
     private static volatile boolean patched;
 
@@ -198,6 +224,11 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
             {
                 return preLaunchCheck(config, method, args);
             }
+            if ("launch".equals(method.getName()) && args != null && args.length >= 1 //$NON-NLS-1$
+                && args[0] instanceof ILaunchConfiguration config)
+            {
+                LaunchConfigurationHook.prepareCheckModal(config);
+            }
             return forward(method, args);
         }
 
@@ -233,15 +264,36 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
         }
 
         /**
-         * @return {@code TRUE} — продолжать запуск (редакторы сохранены либо пользователь
-         *     выбрал «не сохранять»); {@code FALSE} — отменить запуск; {@code null} — мы не
-         *     вмешиваемся, обычный ход.
+         * @return {@code TRUE} — продолжать запуск (сохранение обработано нами);
+         *     {@code FALSE} — отменить запуск; {@code null} — мы не вмешиваемся, обычный ход.
          */
         private Boolean decide(ILaunchConfiguration config) throws CoreException
         {
             IProject project = resolveProject(config);
+            Global.tempLog(ERROR_LOG, "decide project=" //$NON-NLS-1$
+                + (project == null ? "null" : project.getName()) //$NON-NLS-1$
+                + " config=" + config.getName()); //$NON-NLS-1$
             if (project == null)
                 return null;
+
+            Boolean saveDecision = decideSave(project);
+            if (Boolean.FALSE.equals(saveDecision))
+                return Boolean.FALSE;
+
+            Boolean errorDecision = decideErrors(project);
+            if (Boolean.FALSE.equals(errorDecision))
+                return Boolean.FALSE;
+
+            // PrefGuard нужен, только если мы сами обработали сохранение.
+            return Boolean.TRUE.equals(saveDecision) ? Boolean.TRUE : null;
+        }
+
+        /**
+         * @return {@code TRUE} — сохранение обработано нами; {@code FALSE} — отмена;
+         *     {@code null} — несохранённых нет или параметр «never».
+         */
+        private Boolean decideSave(IProject project)
+        {
             List<IEditorPart> dirty = scopedDirtyEditors(project);
             if (dirty.isEmpty())
                 return null;
@@ -257,7 +309,7 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
 
             int[] answer = { IDialogConstants.CANCEL_ID };
             String projectName = project.getName();
-            Display.getDefault().syncExec(() -> answer[0] = openDialog(projectName, dirty));
+            Display.getDefault().syncExec(() -> answer[0] = openSaveDialog(projectName, dirty));
             if (answer[0] == SAVE_AND_LAUNCH_ID)
             {
                 saveEditors(dirty);
@@ -266,6 +318,67 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
             if (answer[0] == LAUNCH_WITHOUT_SAVE_ID)
                 return Boolean.TRUE;
             return Boolean.FALSE;
+        }
+
+        /**
+         * @return {@code TRUE} — пользователь подтвердил запуск при ошибках;
+         *     {@code FALSE} — отмена; {@code null} — ошибок в открытых редакторах нет.
+         */
+        private Boolean decideErrors(IProject project)
+        {
+            try
+            {
+                IMarkerManager markerManager = Global.getOsgiService(IMarkerManager.class);
+                Global.tempLog(ERROR_LOG, "start project=" + project.getName() //$NON-NLS-1$
+                    + " markerManager=" + (markerManager != null)); //$NON-NLS-1$
+                if (markerManager == null)
+                    return null;
+
+                List<Row> open = new ArrayList<>();
+                Display.getDefault().syncExec(() ->
+                {
+                    for (IEditorPart editor : scopedOpenEditors(project))
+                        open.add(rowOf(editor));
+                });
+
+                List<Row> rows = new ArrayList<>();
+                for (Row row : open)
+                {
+                    String hit = "none"; //$NON-NLS-1$
+                    try
+                    {
+                        hit = configErrorHit(markerManager, project, row);
+                        if (!"none".equals(hit)) //$NON-NLS-1$
+                            rows.add(row);
+                    }
+                    catch (RuntimeException e)
+                    {
+                        hit = "ex:" + e.getClass().getSimpleName(); //$NON-NLS-1$
+                        Global.logError(TAG, "не удалось проверить редактор " + row.text, e); //$NON-NLS-1$
+                        Global.tempLogException(ERROR_LOG, "editor " + row.text, e); //$NON-NLS-1$
+                    }
+                    Global.tempLog(ERROR_LOG, "editor text=" + row.text //$NON-NLS-1$
+                        + " class=" + row.editor.getClass().getSimpleName() //$NON-NLS-1$
+                        + " ids=" + row.ids //$NON-NLS-1$
+                        + " files=" + fileNames(row.files) //$NON-NLS-1$
+                        + " hit=" + hit); //$NON-NLS-1$
+                }
+                Global.tempLog(ERROR_LOG, "open=" + open.size() + " hits=" + rows.size()); //$NON-NLS-1$ //$NON-NLS-2$
+                if (rows.isEmpty())
+                    return null;
+
+                rows.sort(Comparator.comparing(row -> row.text));
+                int[] answer = { IDialogConstants.CANCEL_ID };
+                Display.getDefault().syncExec(() -> answer[0] = openErrorsDialog(project.getName(), rows));
+                Global.tempLog(ERROR_LOG, "dialog=" + answer[0]); //$NON-NLS-1$
+                return answer[0] == LAUNCH_WITH_ERRORS_ID ? Boolean.TRUE : Boolean.FALSE;
+            }
+            catch (Throwable t)
+            {
+                Global.logError(TAG, "ошибка проверки ошибок конфигурации", t); //$NON-NLS-1$
+                Global.tempLogException(ERROR_LOG, "decideErrors", t); //$NON-NLS-1$
+                return null;
+            }
         }
 
         private Object forward(Method method, Object[] args) throws Throwable
@@ -327,13 +440,276 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
             {
                 for (IEditorPart editor : page.getDirtyEditors())
                 {
-                    IResource resource = editor.getEditorInput().getAdapter(IResource.class);
+                    IResource resource = editorResource(editor);
                     if (resource != null && project.equals(resource.getProject()) && !result.contains(editor))
                         result.add(editor);
                 }
             }
         }
         return result;
+    }
+
+    private static List<IEditorPart> scopedOpenEditors(IProject project)
+    {
+        List<IEditorPart> result = new ArrayList<>();
+        for (IWorkbenchWindow window : PlatformUI.getWorkbench().getWorkbenchWindows())
+        {
+            for (IWorkbenchPage page : window.getPages())
+            {
+                for (IEditorReference reference : page.getEditorReferences())
+                {
+                    IEditorPart editor = reference.getEditor(false);
+                    if (editor != null && belongsToProject(editor, project) && !result.contains(editor))
+                        result.add(editor);
+                }
+            }
+        }
+        return result;
+    }
+
+    private static boolean belongsToProject(IEditorPart editor, IProject project)
+    {
+        IResource resource = editorResource(editor);
+        if (resource != null)
+            return project.equals(resource.getProject());
+        EObject model = editorModel(editor);
+        IFile file = platformFile(model);
+        return file != null && project.equals(file.getProject());
+    }
+
+    private static IResource editorResource(IEditorPart editor)
+    {
+        IEditorInput input = editor != null ? editor.getEditorInput() : null;
+        return input != null ? input.getAdapter(IResource.class) : null;
+    }
+
+    private static Row rowOf(IEditorPart editor)
+    {
+        LinkedHashSet<Object> ids = new LinkedHashSet<>();
+        LinkedHashSet<IFile> files = new LinkedHashSet<>();
+        collectEditorTargets(editor, ids, files);
+        return new Row(editor, editorPresentation(editor), new ArrayList<>(ids), new ArrayList<>(files));
+    }
+
+    private static void collectEditorTargets(IEditorPart editor, LinkedHashSet<Object> ids,
+        LinkedHashSet<IFile> files)
+    {
+        EObject model = editorModel(editor);
+        if (model instanceof IBmObject bm)
+            ids.add(Long.valueOf(bm.bmGetId()));
+        addFileTarget(editorResource(editor), ids, files);
+        addModuleFiles(model, ids, files);
+
+        BslXtextEditor bsl = GetRef.getActiveBslEditor(editor);
+        if (bsl != null)
+        {
+            addFileTarget(bsl.getEditorInput() != null ? bsl.getEditorInput().getAdapter(IResource.class) : null,
+                ids, files);
+            addBmIdFromBsl(bsl, ids);
+        }
+    }
+
+    private static void addFileTarget(IResource resource, LinkedHashSet<Object> ids, LinkedHashSet<IFile> files)
+    {
+        if (!(resource instanceof IFile file) || !file.exists())
+            return;
+        files.add(file);
+        addFileIds(ids, file);
+    }
+
+    /**
+     * Идентификаторы языковых маркеров: {@code IFile.getFullPath} и оба варианта
+     * {@code URI.toPlatformString} (как у контекста языковых проверок и у {@code PlainEObjectMarker}).
+     */
+    private static void addFileIds(LinkedHashSet<Object> ids, IFile file)
+    {
+        String path = file.getFullPath().toString();
+        if (path == null || path.isBlank())
+            return;
+        ids.add(path);
+        URI uri = URI.createPlatformResourceURI(path, true);
+        String decoded = uri.toPlatformString(true);
+        String encoded = uri.toPlatformString(false);
+        if (decoded != null && !decoded.isBlank())
+            ids.add(decoded);
+        if (encoded != null && !encoded.isBlank())
+            ids.add(encoded);
+        ids.add(uri.toString());
+        ids.add(uri.trimFragment().toString());
+    }
+
+    /** {@code *.bsl} папки объекта — языковые проверки живут на пути файла, не на BM-id родителя. */
+    private static void addModuleFiles(EObject model, LinkedHashSet<Object> ids, LinkedHashSet<IFile> files)
+    {
+        IFile objectFile = platformFile(model);
+        IContainer folder = objectFile != null ? objectFile.getParent() : null;
+        if (folder == null || !folder.isAccessible())
+            return;
+        try
+        {
+            folder.accept(resource ->
+            {
+                if (resource instanceof IFile file && BSL_EXTENSION.equalsIgnoreCase(file.getFileExtension()))
+                    addFileTarget(file, ids, files);
+                return true;
+            });
+        }
+        catch (CoreException ignored)
+        {
+        }
+    }
+
+    private static IFile platformFile(EObject model)
+    {
+        if (model == null)
+            return null;
+        IResourceLookup lookup = Global.getOsgiService(IResourceLookup.class);
+        if (lookup == null)
+            return null;
+        try
+        {
+            return lookup.getPlatformResource(model);
+        }
+        catch (RuntimeException e)
+        {
+            return null;
+        }
+    }
+
+    private static void addBmIdFromBsl(BslXtextEditor editor, LinkedHashSet<Object> ids)
+    {
+        if (editor == null || !(editor.getDocument() instanceof IXtextDocument document))
+            return;
+        try
+        {
+            EObject root = document.readOnly((IUnitOfWork<EObject, XtextResource>) resource ->
+            {
+                if (resource == null || resource.getContents().isEmpty())
+                    return null;
+                return resource.getContents().get(0);
+            });
+            for (EObject current = root; current != null; current = current.eContainer())
+            {
+                if (current instanceof IBmObject bm)
+                {
+                    ids.add(Long.valueOf(bm.bmGetId()));
+                    return;
+                }
+            }
+        }
+        catch (RuntimeException ignored)
+        {
+        }
+    }
+
+    private static EObject editorModel(IEditorPart editor)
+    {
+        if (editor instanceof IDtEditor<?> dt)
+        {
+            try
+            {
+                EObject model = dt.getModel();
+                if (model != null)
+                    return model;
+            }
+            catch (RuntimeException ignored)
+            {
+            }
+        }
+        IEditorInput input = editor.getEditorInput();
+        if (input instanceof IDtEditorInput<?> dtInput)
+        {
+            try
+            {
+                return dtInput.getModel();
+            }
+            catch (RuntimeException ignored)
+            {
+            }
+        }
+        return null;
+    }
+
+    /**
+     * @return причина попадания или {@code none}: языковые маркеры по пути файла,
+     *     вложенные модельные, либо {@code IMarker.PROBLEM} в самом редакторе
+     */
+    private static String configErrorHit(IMarkerManager markers, IProject project, Row row)
+    {
+        if (hasMarkerErrors(markers, project, row.ids))
+            return "markers"; //$NON-NLS-1$
+        for (Object id : row.ids)
+        {
+            if (id instanceof Long && containsConfigError(markers.getNestedMarkers(project, id)))
+                return "nested"; //$NON-NLS-1$
+        }
+        if (hasProblemErrors(row.files))
+            return "problem"; //$NON-NLS-1$
+        return "none"; //$NON-NLS-1$
+    }
+
+    private static boolean hasMarkerErrors(IMarkerManager markers, IProject project, List<Object> objectIds)
+    {
+        List<Object> bmIds = new ArrayList<>();
+        List<Object> pathIds = new ArrayList<>();
+        for (Object id : objectIds)
+        {
+            if (id instanceof Long)
+                bmIds.add(id);
+            else if (id != null)
+                pathIds.add(id);
+        }
+        return queryMarkerErrors(markers, project, bmIds) || queryMarkerErrors(markers, project, pathIds);
+    }
+
+    private static boolean queryMarkerErrors(IMarkerManager markers, IProject project, List<Object> ids)
+    {
+        if (ids == null || ids.isEmpty())
+            return false;
+        MarkerFilter filter = MarkerFilter.createObjectFilter(project, ids)
+            .combine(MarkerFilter.createSeverityFilter(MarkerSeverity.ERRORS));
+        return markers.markers(filter).findAny().isPresent();
+    }
+
+    private static boolean hasProblemErrors(List<IFile> files)
+    {
+        for (IFile file : files)
+        {
+            if (file == null || !file.exists())
+                continue;
+            try
+            {
+                for (IMarker marker : file.findMarkers(IMarker.PROBLEM, true, IResource.DEPTH_ZERO))
+                {
+                    if (marker.getAttribute(IMarker.SEVERITY, -1) == IMarker.SEVERITY_ERROR)
+                        return true;
+                }
+            }
+            catch (CoreException ignored)
+            {
+            }
+        }
+        return false;
+    }
+
+    private static boolean containsConfigError(Marker[] batch)
+    {
+        if (batch == null)
+            return false;
+        for (Marker marker : batch)
+        {
+            if (marker != null && marker.getSeverity() == MarkerSeverity.ERRORS)
+                return true;
+        }
+        return false;
+    }
+
+    private static String fileNames(List<IFile> files)
+    {
+        List<String> names = new ArrayList<>();
+        for (IFile file : files)
+            names.add(file.getProjectRelativePath().toString());
+        return names.toString();
     }
 
     /**
@@ -354,19 +730,27 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
         });
     }
 
-    private static int openDialog(String projectName, List<IEditorPart> dirty)
+    private static int openSaveDialog(String projectName, List<IEditorPart> dirty)
     {
-        Shell shell = Display.getDefault().getActiveShell();
-        if (shell == null)
-        {
-            IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
-            shell = window != null ? window.getShell() : null;
-        }
         List<Row> rows = new ArrayList<>();
         for (IEditorPart editor : dirty)
             rows.add(new Row(editor, editorPresentation(editor)));
         rows.sort(Comparator.comparing(row -> row.text));
-        return new SaveAndLaunchDialog(shell, projectName, rows).open();
+        return new SaveAndLaunchDialog(dialogShell(), projectName, rows).open();
+    }
+
+    private static int openErrorsDialog(String projectName, List<Row> rows)
+    {
+        return new ErrorsAndLaunchDialog(dialogShell(), projectName, rows).open();
+    }
+
+    private static Shell dialogShell()
+    {
+        Shell shell = Display.getDefault().getActiveShell();
+        if (shell != null)
+            return shell;
+        IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+        return window != null ? window.getShell() : null;
     }
 
     /**
@@ -405,16 +789,25 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
             page.activate(editor);
     }
 
-    /** Строка списка: редактор и его представление (полное имя объекта метаданных). */
+    /** Строка списка: редактор, представление, идентификаторы маркеров и файлы модуля. */
     private static final class Row
     {
         final IEditorPart editor;
         final String text;
+        final List<Object> ids;
+        final List<IFile> files;
 
         Row(IEditorPart editor, String text)
         {
+            this(editor, text, List.of(), List.of());
+        }
+
+        Row(IEditorPart editor, String text, List<Object> ids, List<IFile> files)
+        {
             this.editor = editor;
             this.text = text;
+            this.ids = ids;
+            this.files = files;
         }
     }
 
@@ -486,13 +879,13 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
 
     // -----------------------------------------------------------------------
 
-    /** Список несохранённых редакторов проекта и три кнопки выбора действия. */
-    private static final class SaveAndLaunchDialog extends Dialog
+    /** Общий список редакторов перед запуском: двойной клик отменяет запуск и открывает строку. */
+    private abstract static class EditorListDialog extends Dialog
     {
-        private final String projectName;
-        private final List<Row> rows;
+        protected final String projectName;
+        protected final List<Row> rows;
 
-        SaveAndLaunchDialog(Shell parentShell, String projectName, List<Row> rows)
+        EditorListDialog(Shell parentShell, String projectName, List<Row> rows)
         {
             super(parentShell);
             this.projectName = projectName;
@@ -513,14 +906,15 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
             return true;
         }
 
+        protected abstract String headerText();
+
         @Override
         protected Control createDialogArea(Composite parent)
         {
             Composite area = (Composite)super.createDialogArea(parent);
 
             Label header = new Label(area, SWT.WRAP);
-            header.setText("В проекте «" + projectName //$NON-NLS-1$
-                + "» есть несохранённые редакторы (двойной клик — открыть редактор):"); //$NON-NLS-1$
+            header.setText(headerText());
             header.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
 
             org.eclipse.swt.widgets.List list = new org.eclipse.swt.widgets.List(area,
@@ -548,18 +942,57 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
         }
 
         @Override
+        protected void buttonPressed(int buttonId)
+        {
+            setReturnCode(buttonId);
+            close();
+        }
+    }
+
+    /** Список несохранённых редакторов проекта и три кнопки выбора действия. */
+    private static final class SaveAndLaunchDialog extends EditorListDialog
+    {
+        SaveAndLaunchDialog(Shell parentShell, String projectName, List<Row> rows)
+        {
+            super(parentShell, projectName, rows);
+        }
+
+        @Override
+        protected String headerText()
+        {
+            return "В проекте «" + projectName //$NON-NLS-1$
+                + "» есть несохранённые редакторы (двойной клик — открыть редактор):"; //$NON-NLS-1$
+        }
+
+        @Override
         protected void createButtonsForButtonBar(Composite parent)
         {
             createButton(parent, SAVE_AND_LAUNCH_ID, "Сохранить и запустить", true); //$NON-NLS-1$
             createButton(parent, LAUNCH_WITHOUT_SAVE_ID, "Не сохранять и запустить", false); //$NON-NLS-1$
             createButton(parent, IDialogConstants.CANCEL_ID, "Отмена", false); //$NON-NLS-1$
         }
+    }
+
+    /** Список открытых редакторов с ошибками конфигурации. */
+    private static final class ErrorsAndLaunchDialog extends EditorListDialog
+    {
+        ErrorsAndLaunchDialog(Shell parentShell, String projectName, List<Row> rows)
+        {
+            super(parentShell, projectName, rows);
+        }
 
         @Override
-        protected void buttonPressed(int buttonId)
+        protected String headerText()
         {
-            setReturnCode(buttonId);
-            close();
+            return "В открытых редакторах проекта «" + projectName //$NON-NLS-1$
+                + "» есть ошибки конфигурации (двойной клик — открыть редактор):"; //$NON-NLS-1$
+        }
+
+        @Override
+        protected void createButtonsForButtonBar(Composite parent)
+        {
+            createButton(parent, LAUNCH_WITH_ERRORS_ID, "Запустить", true); //$NON-NLS-1$
+            createButton(parent, IDialogConstants.CANCEL_ID, "Отмена", false); //$NON-NLS-1$
         }
     }
 }

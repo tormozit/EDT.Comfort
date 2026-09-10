@@ -81,8 +81,24 @@ public class SmartCompletionProposal implements
 
     public SmartCompletionProposal(ICompletionProposal delegate, int delegateOrder)
     {
-        this.delegate = delegate;
+        // Вложенные обёртки: selected/getStyledDisplayString зовут delegate как Extension6
+        // и получают StackOverflowError (лог 10:40 / 11:05).
+        this.delegate = unwrapRaw(delegate);
         this.delegateOrder = delegateOrder;
+    }
+
+    private static ICompletionProposal unwrapRaw(ICompletionProposal proposal)
+    {
+        ICompletionProposal start = proposal;
+        int depth = 0;
+        while (proposal instanceof SmartCompletionProposal)
+        {
+            ICompletionProposal next = ((SmartCompletionProposal) proposal).delegate;
+            if (next == null || next == proposal || next == start || ++depth > 8)
+                return next instanceof SmartCompletionProposal ? start : (next == null ? start : next);
+            proposal = next;
+        }
+        return proposal;
     }
 
     public ICompletionProposal getDelegate()
@@ -101,14 +117,17 @@ public class SmartCompletionProposal implements
     public StyledString getStyledDisplayString()
     {
         String overlapDisplay = resolveIrOverlapDisplayOverride();
+        ICompletionProposal raw = delegate instanceof SmartCompletionProposal
+            ? null : delegate;
         String sourceDisplay = overlapDisplay != null
             ? overlapDisplay
-            : delegate.getDisplayString();
+            : (raw == null ? "" : raw.getDisplayString()); //$NON-NLS-1$
         String localized = SmartContentAssistProcessor.localizeAssistTypeNames(sourceDisplay);
         StyledString result;
         if (overlapDisplay != null || delegate instanceof IrCompletionProposal)
             result = buildIrStyledDisplayString(localized);
         else if (localized != null && localized.equals(sourceDisplay)
+            && !(delegate instanceof SmartCompletionProposal)
             && delegate instanceof ICompletionProposalExtension6 ext6)
             result = ext6.getStyledDisplayString();
         else
@@ -141,7 +160,11 @@ public class SmartCompletionProposal implements
     public String getDisplayString()
     {
         String overlapDisplay = resolveIrOverlapDisplayOverride();
-        String raw = overlapDisplay != null ? overlapDisplay : delegate.getDisplayString();
+        if (overlapDisplay != null)
+            return SmartContentAssistProcessor.localizeAssistTypeNames(overlapDisplay);
+        if (delegate instanceof SmartCompletionProposal)
+            return ""; //$NON-NLS-1$
+        String raw = delegate.getDisplayString();
         return SmartContentAssistProcessor.localizeAssistTypeNames(raw);
     }
 
@@ -151,6 +174,8 @@ public class SmartCompletionProposal implements
     private String resolveIrOverlapDisplayOverride()
     {
         if (delegate instanceof IrCompletionProposal)
+            return null;
+        if (delegate instanceof SmartCompletionProposal)
             return null;
         if (!ComfortSettings.isReplaceListFiltersEnabled())
             return null;
@@ -332,14 +357,16 @@ public class SmartCompletionProposal implements
             ensureLiteralOverlapBrowserIfNeeded(viewer);
             scheduleEdtRowActivation();
         }
-        if (delegate instanceof ICompletionProposalExtension2 ext2)
+        if (!(delegate instanceof SmartCompletionProposal)
+            && delegate instanceof ICompletionProposalExtension2 ext2)
             ext2.selected(viewer, smartToggle);
     }
 
     @Override
     public void unselected(ITextViewer viewer)
     {
-        if (delegate instanceof ICompletionProposalExtension2)
+        if (delegate instanceof ICompletionProposalExtension2
+            && !(delegate instanceof SmartCompletionProposal))
             ((ICompletionProposalExtension2) delegate).unselected(viewer);
     }
 

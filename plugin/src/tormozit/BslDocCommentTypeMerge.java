@@ -40,9 +40,12 @@ import com._1c.g5.v8.dt.mcore.util.Environments;
 import com._1c.g5.v8.dt.mcore.util.McoreUtil;
 
 /**
- * Несколько типов в {@code // Параметры:} через запятую: EDT пропускает
- * {@code LinkPart} (кроме ровно одного) и не сливает контексты. Собираем все
- * имена и объединяем {@code ContextDef} в один {@link ExtendedType}.
+ * Несколько типов через запятую на одной строке комментария:
+ * {@code ИмяПараметр - Тип1, Тип2 - комментарий} и
+ * {@code Возвращаемое значение: Тип1, Тип2 - комментарий}.
+ * EDT пропускает лишние {@code LinkPart} в {@code sourceDescription} и не сливает
+ * контексты. Собираем имена с этой строки и объединяем {@code ContextDef}
+ * в один {@link ExtendedType}. Соседние строки и поля не трогаем.
  */
 public final class BslDocCommentTypeMerge
 {
@@ -121,8 +124,8 @@ public final class BslDocCommentTypeMerge
     }
 
     /**
-     * Выход EDT {@code computeTypes(TypeSection, …)}: при двух и более контекстных
-     * типах — один {@link ExtendedType} с объединённым контекстом.
+     * Выход EDT {@code computeTypes(TypeSection, …)} — одна строка типов.
+     * При двух и более контекстных типах — один {@link ExtendedType}.
      */
     public static Collection<?> afterComputeTypes(Collection<?> types)
     {
@@ -158,7 +161,25 @@ public final class BslDocCommentTypeMerge
             return 0;
         int added = 0;
         for (Object field : fields)
-            added += collectInField(field);
+        {
+            if (field == null)
+                continue;
+            Object sectionsObj = Global.invoke(field, "getTypeSections"); //$NON-NLS-1$
+            if (sectionsObj instanceof List<?> sections && sections.isEmpty()
+                && fieldHasTypeParts(field))
+            {
+                Object created = createTypeSection(field);
+                if (created != null)
+                {
+                    @SuppressWarnings("unchecked")
+                    List<Object> writable = (List<Object>) sections;
+                    writable.add(created);
+                    added += collectFromParts(created, descriptionParts(
+                        Global.invoke(field, "getDescription"))); //$NON-NLS-1$
+                }
+            }
+            added += collectInTypeSections(sectionsObj);
+        }
         return added;
     }
 
@@ -167,62 +188,127 @@ public final class BslDocCommentTypeMerge
         Object section = Global.invoke(comment, "getReturnSection"); //$NON-NLS-1$
         if (section == null)
             return 0;
-        return collectInTypeSections(Global.invoke(section, "getReturnTypes"), null) //$NON-NLS-1$
-            + collectInTypeSections(Global.invoke(section, "getTypeSections"), null); //$NON-NLS-1$
+        return collectInTypeSections(Global.invoke(section, "getReturnTypes")); //$NON-NLS-1$
     }
 
-    private static int collectInField(Object field)
+    private static int collectInTypeSections(Object sectionsObj)
     {
-        if (field == null)
+        if (!(sectionsObj instanceof List<?>))
             return 0;
-        Object sectionsObj = Global.invoke(field, "getTypeSections"); //$NON-NLS-1$
-        if (sectionsObj instanceof List<?> sections && sections.isEmpty()
-            && fieldHasTypeParts(field))
+        @SuppressWarnings("unchecked")
+        List<Object> sections = (List<Object>) sectionsObj;
+        int added = consolidateSameLineSections(sections);
+        for (Object typeSection : new ArrayList<>(sections))
+            added += collectCommaTypesOnLine(typeSection);
+        return added;
+    }
+
+    /**
+     * EDT режет {@code Тип1, Тип2} на несколько {@code TypeSection} с одним именем
+     * в каждом — запятой внутри секции уже нет. Секции одной строки собираем
+     * в первую, чтобы {@code computeTypes} слил контексты. Соседние строки
+     * (другое {@code lineNumber}) не трогаем.
+     */
+    private static int consolidateSameLineSections(List<Object> sections)
+    {
+        if (sections == null || sections.size() < 2)
+            return 0;
+        LinkedHashMap<Integer, List<Object>> byLine = new LinkedHashMap<>();
+        for (Object section : sections)
         {
-            Object created = createTypeSection(field);
-            if (created != null)
+            Integer line = lineNumber(section);
+            if (line == null)
+                continue;
+            byLine.computeIfAbsent(line, key -> new ArrayList<>()).add(section);
+        }
+        int moved = 0;
+        List<Object> extras = new ArrayList<>();
+        for (List<Object> group : byLine.values())
+        {
+            if (group.size() < 2)
+                continue;
+            Object first = group.get(0);
+            int groupMoved = 0;
+            for (int i = 1; i < group.size(); i++)
             {
-                @SuppressWarnings("unchecked")
-                List<Object> writable = (List<Object>) sections;
-                writable.add(created);
+                Object extra = group.get(i);
+                groupMoved += moveTypeDefinitions(extra, first);
+                extras.add(extra);
+            }
+            moved += groupMoved;
+        }
+        if (!extras.isEmpty())
+        {
+            try
+            {
+                sections.removeAll(extras);
+            }
+            catch (UnsupportedOperationException ignored)
+            {
             }
         }
-        int added = collectInTypeSections(sectionsObj, field);
-        Object defsObj = Global.invoke(field, "getTypeDefinitions"); //$NON-NLS-1$
-        if (defsObj instanceof List<?> defs)
+        return moved;
+    }
+
+    private static int moveTypeDefinitions(Object from, Object to)
+    {
+        Object fromDefsObj = Global.invoke(from, "getTypeDefinitions"); //$NON-NLS-1$
+        Object toDefsObj = Global.invoke(to, "getTypeDefinitions"); //$NON-NLS-1$
+        if (!(fromDefsObj instanceof List<?> fromDefs) || !(toDefsObj instanceof List<?>))
+            return 0;
+        @SuppressWarnings("unchecked")
+        List<Object> toDefs = (List<Object>) toDefsObj;
+        Set<String> names = new LinkedHashSet<>();
+        for (Object def : toDefs)
         {
-            for (Object def : defs)
-                added += collectInFieldExtensions(def);
+            String name = typeDefName(def);
+            if (name != null && !name.isBlank())
+                names.add(name.toLowerCase(Locale.ROOT));
+        }
+        int added = 0;
+        for (Object def : new ArrayList<>(fromDefs))
+        {
+            String name = typeDefName(def);
+            if (name == null || name.isBlank())
+                continue;
+            String key = name.toLowerCase(Locale.ROOT);
+            if (names.contains(key))
+                continue;
+            toDefs.add(def);
+            names.add(key);
+            added++;
+        }
+        try
+        {
+            fromDefs.clear();
+        }
+        catch (UnsupportedOperationException ignored)
+        {
         }
         return added;
     }
 
-    private static int collectInFieldExtensions(Object typeDef)
-    {
-        if (typeDef == null)
-            return 0;
-        Object fieldsObj = Global.invoke(typeDef, "getFieldDefinitionExtension"); //$NON-NLS-1$
-        if (!(fieldsObj instanceof List<?> fields))
-            return 0;
-        int added = 0;
-        for (Object nested : fields)
-            added += collectInField(nested);
-        return added;
-    }
-
-    private static int collectInTypeSections(Object sectionsObj, Object field)
-    {
-        if (!(sectionsObj instanceof List<?> sections))
-            return 0;
-        int added = 0;
-        for (Object typeSection : sections)
-            added += collectLinkTypeDefinitions(typeSection, field);
-        return added;
-    }
-
-    private static int collectLinkTypeDefinitions(Object typeSection, Object field)
+    /**
+     * Имена типов этой строки: {@code sourceDescription} / {@code currentDescription}.
+     * Комментарий после второго {@code -} ({@code getDescription}) и поля следующих
+     * строк не читаем.
+     */
+    private static int collectCommaTypesOnLine(Object typeSection)
     {
         if (typeSection == null)
+            return 0;
+        Object defsObj = Global.invoke(typeSection, "getTypeDefinitions"); //$NON-NLS-1$
+        if (!(defsObj instanceof List<?>))
+            return 0;
+        List<Object> parts = typeLineParts(typeSection);
+        if (!isCommaSeparatedTypeLine(parts))
+            return 0;
+        return collectFromParts(typeSection, parts);
+    }
+
+    private static int collectFromParts(Object typeSection, List<Object> parts)
+    {
+        if (typeSection == null || parts == null || parts.isEmpty())
             return 0;
         Object defsObj = Global.invoke(typeSection, "getTypeDefinitions"); //$NON-NLS-1$
         if (!(defsObj instanceof List<?>))
@@ -237,7 +323,7 @@ public final class BslDocCommentTypeMerge
                 names.add(name.toLowerCase(Locale.ROOT));
         }
         int added = 0;
-        for (Object part : collectParts(typeSection, field))
+        for (Object part : parts)
         {
             if (part == null)
                 continue;
@@ -255,21 +341,68 @@ public final class BslDocCommentTypeMerge
                     added += addTypeIfMissing(typeSection, defs, names, null, piece);
             }
         }
-        int nested = 0;
-        for (Object def : new ArrayList<>(defs))
-            nested += collectInFieldExtensions(def);
-        return added + nested;
+        return added;
     }
 
-    private static List<Object> collectParts(Object typeSection, Object field)
+    private static List<Object> descriptionParts(Object description)
     {
-        List<Object> parts = new ArrayList<>();
-        appendDescriptionParts(parts, Global.invoke(typeSection, "getSourceDescription")); //$NON-NLS-1$
-        appendDescriptionParts(parts, Global.invoke(typeSection, "getCurrentDescription")); //$NON-NLS-1$
-        appendDescriptionParts(parts, Global.invoke(typeSection, "getDescription")); //$NON-NLS-1$
-        if (field != null)
-            appendDescriptionParts(parts, Global.invoke(field, "getDescription")); //$NON-NLS-1$
-        return parts;
+        List<Object> out = new ArrayList<>();
+        appendDescriptionParts(out, description);
+        return out;
+    }
+
+    private static boolean fieldHasTypeParts(Object field)
+    {
+        List<Object> parts = descriptionParts(Global.invoke(field, "getDescription")); //$NON-NLS-1$
+        return isCommaSeparatedTypeLine(parts);
+    }
+
+    private static Object createTypeSection(Object field)
+    {
+        ClassLoader cl = field.getClass().getClassLoader();
+        try
+        {
+            Class<?> typeSection = Class.forName(
+                "com._1c.g5.v8.dt.bsl.documentation.comment.TypeSection", true, cl); //$NON-NLS-1$
+            Class<?> part = Class.forName(
+                "com._1c.g5.v8.dt.bsl.documentation.comment.IDescriptionPart", true, cl); //$NON-NLS-1$
+            java.lang.reflect.Constructor<?> ctor = typeSection.getConstructor(part, int.class);
+            return ctor.newInstance(field, Integer.valueOf(0));
+        }
+        catch (Throwable t)
+        {
+            return null;
+        }
+    }
+
+    private static boolean isCommaSeparatedTypeLine(List<Object> parts)
+    {
+        int links = 0;
+        for (Object part : parts)
+        {
+            if (part == null)
+                continue;
+            String cn = part.getClass().getName();
+            if (LINK_PART.equals(cn))
+            {
+                links++;
+                continue;
+            }
+            if (!TEXT_PART.equals(cn))
+                continue;
+            String text = str(Global.invoke(part, "getText")); //$NON-NLS-1$
+            if (text != null && text.indexOf(',') >= 0)
+                return true;
+        }
+        return links >= 2;
+    }
+
+    private static List<Object> typeLineParts(Object typeSection)
+    {
+        List<Object> out = new ArrayList<>();
+        appendDescriptionParts(out, Global.invoke(typeSection, "getSourceDescription")); //$NON-NLS-1$
+        appendDescriptionParts(out, Global.invoke(typeSection, "getCurrentDescription")); //$NON-NLS-1$
+        return out;
     }
 
     private static void appendDescriptionParts(List<Object> out, Object description)
@@ -284,6 +417,14 @@ public final class BslDocCommentTypeMerge
             if (part != null)
                 out.add(part);
         }
+    }
+
+    private static Integer lineNumber(Object part)
+    {
+        Object raw = Global.invoke(part, "getLineNumber"); //$NON-NLS-1$
+        if (raw instanceof Integer line && line.intValue() > 0)
+            return line;
+        return null;
     }
 
     private static int addTypeIfMissing(Object typeSection, List<Object> defs, Set<String> names,
@@ -325,52 +466,6 @@ public final class BslDocCommentTypeMerge
             return false;
         }
         return true;
-    }
-
-    private static boolean fieldHasTypeParts(Object field)
-    {
-        Object description = Global.invoke(field, "getDescription"); //$NON-NLS-1$
-        Object partsObj = description == null ? null : Global.invoke(description, "getParts"); //$NON-NLS-1$
-        if (!(partsObj instanceof List<?> parts))
-            return false;
-        for (Object part : parts)
-        {
-            if (part == null)
-                continue;
-            String cn = part.getClass().getName();
-            if (LINK_PART.equals(cn) && isTypeName(linkText(part)))
-                return true;
-            if (TEXT_PART.equals(cn))
-            {
-                String text = str(Global.invoke(part, "getText")); //$NON-NLS-1$
-                if (text == null)
-                    continue;
-                for (String piece : text.split(",")) //$NON-NLS-1$
-                {
-                    if (isTypeName(piece.trim()))
-                        return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    private static Object createTypeSection(Object field)
-    {
-        ClassLoader cl = field.getClass().getClassLoader();
-        try
-        {
-            Class<?> typeSection = Class.forName(
-                "com._1c.g5.v8.dt.bsl.documentation.comment.TypeSection", true, cl); //$NON-NLS-1$
-            Class<?> part = Class.forName(
-                "com._1c.g5.v8.dt.bsl.documentation.comment.IDescriptionPart", true, cl); //$NON-NLS-1$
-            java.lang.reflect.Constructor<?> ctor = typeSection.getConstructor(part, int.class);
-            return ctor.newInstance(field, Integer.valueOf(0));
-        }
-        catch (Throwable t)
-        {
-            return null;
-        }
     }
 
     private static Object createTypeDefinition(Object typeSection, Object linkPart, String typeName)
@@ -615,10 +710,11 @@ public final class BslDocCommentTypeMerge
     {
         if (name == null || descriptor == null || !descriptor.endsWith(")Ljava/util/Collection;")) //$NON-NLS-1$
             return false;
+        // computeTypes — одна TypeSection. computeParameterTypes — все секции
+        // одного параметра (EDT режет «Тип1, Тип2» на две секции без запятой).
+        // computeReturnTypes не трогаем: он склеивает соседние строки возврата.
         return "computeTypes".equals(name) //$NON-NLS-1$
-            || "computeParameterTypes".equals(name) //$NON-NLS-1$
-            || "computeReturnTypes".equals(name) //$NON-NLS-1$
-            || "computeTypeSectionTypes".equals(name); //$NON-NLS-1$
+            || "computeParameterTypes".equals(name); //$NON-NLS-1$
     }
 
     private static final class ComputeTypesWeavingHook implements WeavingHook

@@ -28,6 +28,9 @@ public class ComfortInitializer extends AbstractPreferenceInitializer
             ComfortSettings.PREF_REPLACE_LIST_FILTERS,
             ComfortSettings.DEFAULT_REPLACE_LIST_FILTERS);
         store.setDefault(
+            ComfortSettings.PREF_PROBLEM_VIEW_UPDATE_GATE,
+            ComfortSettings.DEFAULT_PROBLEM_VIEW_UPDATE_GATE);
+        store.setDefault(
             ComfortSettings.PREF_FILTER_MATCH_COLOR,
             ComfortSettings.DEFAULT_FILTER_MATCH_COLOR);
         store.setDefault(

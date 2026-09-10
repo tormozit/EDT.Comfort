@@ -3,6 +3,7 @@ package tormozit;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
 
@@ -145,6 +146,12 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
     /** Редакторы, к которым уже подключён слушатель смены страницы. */
     private final Set<DtGranularEditor<?>> hookedEditors =
         Collections.newSetFromMap(new WeakHashMap<>());
+
+    /**
+     * Последняя живая картинка с уголком на вкладке воркбенча. Широковещательный
+     * пустой ответ индекса её не заменяет; целевое снятие декорации — сбрасывает.
+     */
+    private static final Map<IEditorPart, Image> HELD_WORKBENCH_OVERLAY = new WeakHashMap<>();
 
     // =========================================================================
     // IStartup
@@ -425,7 +432,9 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
      * Картинка вкладки воркбенча при этом уже другая ({@code getTitleImage} с уголком), но без
      * {@code PROP_TITLE} Eclipse её не подхватывает. Обёртка сравнивает и текст, и картинку:
      * тот же заголовок и та же картинка — событие гасится; сменилась картинка — сами шлём
-     * {@code PROP_TITLE}.
+     * {@code PROP_TITLE}. Снятие уголка по широковещательному событию (без элементов) не
+     * проталкиваем: после записи индекс на миг пустой, штатный {@code $5} такое событие
+     * игнорирует, а мы бы сняли индикатор с верхней вкладки насовсем.
      */
     private static void throttleDecoratorTitleRefire()
     {
@@ -448,11 +457,13 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
                     continue;
                 manager.removeListener(listener);
                 manager.addListener(new TitleRefireThrottle(listener, editor));
+                EditorTabIconDiagHook.overlayDiag(editor, "wrap", //$NON-NLS-1$
+                    "listener=" + listener.getClass().getName()); //$NON-NLS-1$
             }
         }
         catch (Exception e)
         {
-            // молча: без подавления останется прежнее поведение, ничего не ломается
+            Global.tempLog(EditorTabIconDiagHook.OVERLAY_TOPIC, "wrap-fail " + e); //$NON-NLS-1$
         }
     }
 
@@ -499,22 +510,172 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
                 nowTitle = editor.getTitle() + ' ' + editor.getTitleToolTip();
                 nowImage = editor.getTitleImage();
             }
-            catch (RuntimeException ignored)
+            catch (RuntimeException ex)
             {
+                EditorTabIconDiagHook.overlayDiag(editor, "decorator-fail", String.valueOf(ex)); //$NON-NLS-1$
                 return;
             }
             boolean titleChanged = lastTitle == null || !nowTitle.equals(lastTitle);
             boolean imageChanged = lastImage != nowImage;
+            boolean drop = isTransientOverlayDrop(editor, lastImage, nowImage);
+            boolean targeted = eventTargetsEditor(event, editor);
+            boolean liveOverlay = isLiveProblemOverlay(editor, nowImage);
+            String eventInfo = "titleChg=" + titleChanged + " imgChg=" + imageChanged //$NON-NLS-1$ //$NON-NLS-2$
+                + " drop=" + drop + " targeted=" + targeted //$NON-NLS-1$ //$NON-NLS-2$
+                + " last=" + EditorTabIconDiagHook.describeImageForOverlay(lastImage) //$NON-NLS-1$
+                + " elems=" + eventElementsInfo(event, editor); //$NON-NLS-1$
             if (!titleChanged && !imageChanged)
+            {
+                EditorTabIconDiagHook.overlayDiag(editor, liveOverlay ? "decorator-same-live" : "decorator-same", //$NON-NLS-1$ //$NON-NLS-2$
+                    eventInfo);
+                if (liveOverlay)
+                {
+                    if (MdEditorListTabCountHook.innerTabsShowProblemOverlay(editor))
+                    {
+                        rememberWorkbenchOverlay(editor, nowImage);
+                        EditorTabIconDiagHook.applyLiveProblemOverlay(editor, nowImage);
+                    }
+                }
                 return;
+            }
+            if (imageChanged && drop && !targeted)
+            {
+                if (MdEditorListTabCountHook.innerTabsShowProblemOverlay(editor))
+                {
+                    rememberWorkbenchOverlay(editor, lastImage);
+                    EditorTabIconDiagHook.overlayDiag(editor, "decorator-skip-drop", eventInfo); //$NON-NLS-1$
+                    if (titleChanged)
+                    {
+                        lastTitle = nowTitle;
+                        delegate.labelProviderChanged(event);
+                    }
+                    return;
+                }
+                clearWorkbenchOverlay(editor);
+                lastTitle = nowTitle;
+                lastImage = nowImage;
+                EditorTabIconDiagHook.overlayDiag(editor, "decorator-drop-plain", eventInfo); //$NON-NLS-1$
+                EditorTabIconDiagHook.applyWorkbenchTabImage(editor, nowImage);
+                if (titleChanged)
+                    delegate.labelProviderChanged(event);
+                return;
+            }
+            if (imageChanged && drop && targeted)
+                clearWorkbenchOverlay(editor);
+            else if (liveOverlay && MdEditorListTabCountHook.innerTabsShowProblemOverlay(editor))
+                rememberWorkbenchOverlay(editor, nowImage);
             lastTitle = nowTitle;
             lastImage = nowImage;
+            EditorTabIconDiagHook.overlayDiag(editor, imageChanged ? "decorator-fire" : "decorator-title", //$NON-NLS-1$ //$NON-NLS-2$
+                eventInfo);
             if (titleChanged)
                 delegate.labelProviderChanged(event);
             if (imageChanged)
                 Global.invokeVoid(editor, "firePropertyChange", //$NON-NLS-1$
                     Integer.valueOf(IWorkbenchPartConstants.PROP_TITLE));
+            if (liveOverlay)
+            {
+                if (MdEditorListTabCountHook.innerTabsShowProblemOverlay(editor))
+                    EditorTabIconDiagHook.applyLiveProblemOverlay(editor, nowImage);
+            }
         }
+    }
+
+    static Image heldWorkbenchOverlay(IEditorPart editor)
+    {
+        return editor == null ? null : HELD_WORKBENCH_OVERLAY.get(editor);
+    }
+
+    private static void rememberWorkbenchOverlay(IEditorPart editor, Image overlay)
+    {
+        if (editor == null || overlay == null)
+            return;
+        try
+        {
+            if (overlay.isDisposed())
+                return;
+        }
+        catch (RuntimeException ignored)
+        {
+            return;
+        }
+        HELD_WORKBENCH_OVERLAY.put(editor, overlay);
+    }
+
+    private static void clearWorkbenchOverlay(IEditorPart editor)
+    {
+        if (editor != null)
+            HELD_WORKBENCH_OVERLAY.remove(editor);
+    }
+
+    /**
+     * {@code getTitleImage} вернул базовую иконку, а в поле {@code titleImage} ещё лежит
+     * прежняя с уголком: декоратор снял наложение, поле обновляется только когда картинка
+     * с уголком появляется. Широковещательное событие так и выглядит после записи модуля.
+     */
+    static boolean isTransientOverlayDrop(IEditorPart editor, Image previous, Image now)
+    {
+        if (editor == null || previous == null || now == null || previous == now)
+            return false;
+        if (!(editor instanceof DtGranularEditor<?>))
+            return false;
+        Object stored = Global.getField(editor, "titleImage"); //$NON-NLS-1$
+        if (!(stored instanceof Image decorated) || decorated.isDisposed())
+            return false;
+        return now != decorated;
+    }
+
+    /** {@code getTitleImage} сейчас вернул картинку с уголком, не устаревшее поле. */
+    static boolean isLiveProblemOverlay(IEditorPart editor, Image now)
+    {
+        if (now == null || !(editor instanceof DtGranularEditor<?>))
+            return false;
+        Object stored = Global.getField(editor, "titleImage"); //$NON-NLS-1$
+        return stored instanceof Image decorated && !decorated.isDisposed() && now == decorated;
+    }
+
+    private static boolean eventTargetsEditor(LabelProviderChangedEvent event, IEditorPart editor)
+    {
+        if (event == null || !(editor instanceof DtGranularEditor<?> granular))
+            return false;
+        Object[] elements = event.getElements();
+        if (elements == null || elements.length == 0)
+            return false;
+        EObject model = granular.getModel();
+        if (model == null)
+            return false;
+        for (Object element : elements)
+        {
+            if (element == model)
+                return true;
+        }
+        return false;
+    }
+
+    private static String eventElementsInfo(LabelProviderChangedEvent event, IEditorPart editor)
+    {
+        if (event == null)
+            return "null"; //$NON-NLS-1$
+        Object[] elements = event.getElements();
+        if (elements == null)
+            return "null"; //$NON-NLS-1$
+        boolean hasModel = false;
+        if (editor instanceof DtGranularEditor<?> granular)
+        {
+            EObject model = granular.getModel();
+            if (model != null)
+            {
+                for (Object element : elements)
+                {
+                    if (element == model)
+                    {
+                        hasModel = true;
+                        break;
+                    }
+                }
+            }
+        }
+        return elements.length + " hasModel=" + hasModel; //$NON-NLS-1$
     }
 
     /** Область заголовка формы — {@code org.eclipse.ui.internal.forms.widgets.TitleRegion}. */

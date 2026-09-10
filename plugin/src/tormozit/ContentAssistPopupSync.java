@@ -85,6 +85,8 @@ public final class ContentAssistPopupSync
     private static int lastSyncedIrMergeGen = -1;
     private static final ThreadLocal<Boolean> RECOMPUTE_GUARD =
         ThreadLocal.withInitial(() -> Boolean.FALSE);
+    /** Не давать {@code flushPendingPopupRefresh} снова звать recompute из его же finally. */
+    private static final ThreadLocal<Boolean> FLUSH_RECOMPUTE_GUARD = new ThreadLocal<>();
     /** Вложенный {@code showProposals} из {@code compute} во время уже идущего show. */
     private static final ThreadLocal<Boolean> SHOW_PROPOSALS_GUARD = new ThreadLocal<>();
     /** fix12: session open literal no-IR — full smart recompute вместо literalStockOnly. */
@@ -567,6 +569,7 @@ public final class ContentAssistPopupSync
             return false;
         RECOMPUTE_GUARD.set(Boolean.TRUE);
         final long _t0 = System.nanoTime();
+        final String[] rec = { "", "-1" }; //$NON-NLS-1$ //$NON-NLS-2$
         try
         {
             Object popup = getPopup(assistant);
@@ -639,6 +642,12 @@ return true;
             }
 
             String filter = SmartFilterTracker.getCurrentFilter();
+            rec[0] = filter != null ? filter : ""; //$NON-NLS-1$
+            // #region agent log
+            SmartContentAssistProcessor.uiBlockLog("recomputePopupList.enter", //$NON-NLS-1$
+                "caret=" + caret + " filter=" + rec[0] //$NON-NLS-1$ //$NON-NLS-2$
+                    + " caller=" + SmartContentAssistProcessor.uiBlockCaller()); //$NON-NLS-1$
+            // #endregion
             ICompletionProposal[] proposals = processor.filterCachedProposalsForPopup(viewer, caret,
                 filter);
             if (proposals == null)
@@ -647,6 +656,7 @@ proposals = processor.computeForPopupRefresh(viewer, caret);
             }
             if (proposals == null)
                 proposals = new ICompletionProposal[0];
+            rec[1] = Integer.toString(proposals.length);
             if (inLiteralRecompute && !literalIrMerge && !literalIrExpected
                 && SmartAssistFilterState.isSmartFilterEnabled())
             {
@@ -776,19 +786,41 @@ if (inLiteralRecompute && literalIrMerge)
             ContentAssistDebug.log("popupSync ERROR: " + e.getMessage()); //$NON-NLS-1$
             return false;
         }
+        catch (StackOverflowError t)
+        {
+            // #region agent log
+            SmartContentAssistProcessor.uiBlockLogThrowable("recomputePopupList.crash", t); //$NON-NLS-1$
+            // #endregion
+            ContentAssistDebug.log("popupSync ERROR: StackOverflowError"); //$NON-NLS-1$
+            return false;
+        }
         finally
         {
             long elapsedMs = (System.nanoTime() - _t0) / 1_000_000;
+            // #region agent log
+            SmartContentAssistProcessor.uiBlockLog("recomputePopupList", //$NON-NLS-1$
+                "ms=" + elapsedMs + " filter=" + rec[0] + " n=" + rec[1]); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            // #endregion
 if (viewer != null && isPopupVisible(assistant))
                 ContentAssistPopupUi.updateContextTypeLabel(viewer);
             RECOMPUTE_GUARD.set(Boolean.FALSE);
             clearRecomputeContext();
             ContentAssistSessionReloader reloader =
                 ContentAssistSessionReloader.getActiveReloader();
-            if (reloader == null || !reloader.isLiteralOpenSetupPhase()
-                || !reloader.isPendingIrPopupRefresh())
+            boolean skipFlush = Boolean.TRUE.equals(FLUSH_RECOMPUTE_GUARD.get())
+                || (reloader != null && reloader.isLiteralOpenSetupPhase()
+                    && reloader.isPendingIrPopupRefresh());
+            if (!skipFlush)
             {
-                ContentAssistSessionReloader.flushPendingPopupRefreshIfAny();
+                FLUSH_RECOMPUTE_GUARD.set(Boolean.TRUE);
+                try
+                {
+                    ContentAssistSessionReloader.flushPendingPopupRefreshIfAny();
+                }
+                finally
+                {
+                    FLUSH_RECOMPUTE_GUARD.remove();
+                }
             }
         }
     }
@@ -802,6 +834,10 @@ if (viewer != null && isPopupVisible(assistant))
                                            boolean runStockFilterAfter,
                                            boolean deferRestoreUntilStockFilter) throws Exception
     {
+        long tApply = System.nanoTime();
+        int displayN = displayList == null ? -1 : displayList.size();
+        try
+        {
         boolean restoreNow = restoreAfterFilterToggle && !deferRestoreUntilStockFilter;
         List<ICompletionProposal> listToApply = displayList;
         if (processor != null && processor.isIrWordsResolvedForContext()
@@ -840,6 +876,19 @@ if (processor != null && processor.isIrWordsResolvedForContext()
             popup, assistant, viewer, processor);
         logPostRecomputeSidePanelIfLiteralIr(popup, assistant, viewer, processor, fullCount,
             tableRows, selectionNotifyCalled);
+        }
+        catch (StackOverflowError t)
+        {
+            SmartContentAssistProcessor.uiBlockLogThrowable("applyPopupListSync.crash", t); //$NON-NLS-1$
+        }
+        finally
+        {
+            // #region agent log
+            SmartContentAssistProcessor.uiBlockLog("applyPopupListSync", //$NON-NLS-1$
+                "ms=" + ((System.nanoTime() - tApply) / 1_000_000L) //$NON-NLS-1$
+                    + " displayN=" + displayN + " fullCount=" + fullCount); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+        }
     }
 
     /** После stock filter: убрать JFace EmptyProposal, если в popup есть элементы ИР. */
@@ -933,6 +982,7 @@ if (processor != null && processor.isIrWordsResolvedForContext()
                     SmartContentAssistProcessor.primeFilterTrackerOnly(viewer, caret);
                 if (shouldClosePopupAtCaret(viewer, caret))
                 {
+                    SmartContentAssistProcessor.uiBlockLog("hidePopup.paren", "caret=" + caret); //$NON-NLS-1$ //$NON-NLS-2$
                     hideProposalPopup(assistant);
                     return;
                 }
@@ -2628,6 +2678,8 @@ return creatorResolved && creatorPatched;
         IDocument doc = viewer.getDocument();
         if (!processor.isPopupListStaleForPrefix(doc, caret))
             return false;
+        SmartContentAssistProcessor.uiBlockLog("hideIfPrefixStale", //$NON-NLS-1$
+            "caret=" + caret + " filter=" + SmartContentAssistProcessor.computeIdentifierFilter(doc, caret)); //$NON-NLS-1$ //$NON-NLS-2$
         if (processor.repairPopupListFromMemberStock(doc, caret))
             return false;
         processor.releaseWordListOpenGuard("stalePrefix"); //$NON-NLS-1$
@@ -4128,6 +4180,7 @@ ensureFilterPending(popup);
             return isPopupVisible(assistant);
         SHOW_PROPOSALS_GUARD.set(Boolean.TRUE);
         long t0 = ContentAssistDebug.perfStart("showPossibleCompletions"); //$NON-NLS-1$
+        long tUi = System.nanoTime();
         boolean visible = false;
         try
         {
@@ -4157,6 +4210,13 @@ ensureFilterPending(popup);
         {
             ContentAssistDebug.perfEnd("showPossibleCompletions", t0, //$NON-NLS-1$
                 "{\"cachedListOnly\":" + cachedListOnly + ",\"visible\":" + visible + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            // #region agent log
+            SmartContentAssistProcessor.uiBlockLog("showPossibleCompletions", //$NON-NLS-1$
+                "ms=" + ((System.nanoTime() - tUi) / 1_000_000L) //$NON-NLS-1$
+                    + " cachedListOnly=" + cachedListOnly //$NON-NLS-1$
+                    + " visible=" + visible //$NON-NLS-1$
+                    + " caller=" + SmartContentAssistProcessor.uiBlockCaller()); //$NON-NLS-1$
+            // #endregion
             SHOW_PROPOSALS_GUARD.remove();
         }
     }

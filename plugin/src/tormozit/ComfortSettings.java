@@ -22,6 +22,16 @@ public final class ComfortSettings
      */
     public static final String PREF_REPLACE_LIST_FILTERS = "comfort.replaceListFilters"; //$NON-NLS-1$
 
+    /**
+     * Ключ: заслонка обновлений панели «Проблемы конфигурации».
+     * Включена — список не перестраивается, пока не изменились проблемы текущей области.
+     * Выключена — каждое изменение маркеров проекта сразу идёт в панель, как в EDT.
+     */
+    public static final String PREF_PROBLEM_VIEW_UPDATE_GATE = "comfort.problemView.updateGate"; //$NON-NLS-1$
+
+    /** Заслонка обновлений панели проблем включена по умолчанию. */
+    public static final boolean DEFAULT_PROBLEM_VIEW_UPDATE_GATE = true;
+
     /** Ключ: общий отладочный журнал ({@link GlobalLogView}). */
     public static final String PREF_DEBUG_LOG = "comfort.debugLog"; //$NON-NLS-1$
 
@@ -388,6 +398,34 @@ public final class ComfortSettings
         if (settings == null)
             return DEFAULT_REPLACE_LIST_FILTERS;
         return settings.preferenceStore.getBoolean(PREF_REPLACE_LIST_FILTERS);
+    }
+
+    /**
+     * Заслонка обновлений панели «Проблемы конфигурации»: не перестраивать список
+     * на чужие изменения маркеров. Тумблер тулбара панели.
+     */
+    public static boolean isProblemViewUpdateGateEnabled()
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return DEFAULT_PROBLEM_VIEW_UPDATE_GATE;
+        return settings.preferenceStore.getBoolean(PREF_PROBLEM_VIEW_UPDATE_GATE);
+    }
+
+    public static void setProblemViewUpdateGateEnabled(boolean enabled)
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return;
+        settings.preferenceStore.setValue(PREF_PROBLEM_VIEW_UPDATE_GATE, enabled);
+        try
+        {
+            settings.preferenceStore.save();
+        }
+        catch (Exception ex)
+        {
+            Global.log("ComfortSettings save error (problemView.updateGate): " + ex); //$NON-NLS-1$
+        }
     }
 
     /** Читает актуальное значение из хранилища (без кэша). */

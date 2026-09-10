@@ -95,6 +95,7 @@ public final class BslDocCommentDescriptionFix
             Instrumentation inst = ensureInstrumentation();
             if (inst == null)
             {
+                Global.logError("BslDocComment", "install: Instrumentation is null", null); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
             }
             registerPermanentTransformer(inst);
@@ -109,6 +110,7 @@ public final class BslDocCommentDescriptionFix
         }
         catch (Throwable t)
         {
+            Global.logError("BslDocComment", "install Instrumentation", t); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 
@@ -295,11 +297,14 @@ public final class BslDocCommentDescriptionFix
             }
             catch (Throwable t)
             {
+                Global.logError("BslDocComment", "ensureInstrumentation", t); //$NON-NLS-1$ //$NON-NLS-2$
                 return false;
             }
         }
         if (instrumentation == null)
         {
+            Global.logError("BslDocComment", "registerExtraTransformer: Instrumentation is null", //$NON-NLS-1$ //$NON-NLS-2$
+                null);
             return false;
         }
         try
@@ -324,6 +329,7 @@ public final class BslDocCommentDescriptionFix
         }
         catch (Throwable t)
         {
+            Global.logError("BslDocComment", "addTransformer", t); //$NON-NLS-1$ //$NON-NLS-2$
             return false;
         }
     }

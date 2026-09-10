@@ -589,6 +589,15 @@
         categoryId="tormozit.commands.global"
         description="Открыть настройку проверки выделенной проблемы на странице «Проверки» параметров проекта (Комфорт)"/>
     <command
+        id="tormozit.problemView.updateGate"
+        name="Фильтр обновлений"
+        categoryId="tormozit.commands.global"
+        description="Не перестраивать список панели «Проблемы конфигурации», пока не изменились проблемы текущей области. Выключено — обновлять как в EDT, на каждое изменение в проекте (Комфорт)">
+      <state
+          class="org.eclipse.ui.handlers.RegistryToggleState"
+          id="org.eclipse.ui.commands.toggleState"/>
+    </command>
+    <command
         id="tormozit.GoToParentInTree"
         name="Перейти к родителю в дереве"
         categoryId="tormozit.commands.global"
@@ -1060,6 +1069,10 @@
         commandId="tormozit.problemView.recomputeChecks">
     </handler>
     <handler
+        class="tormozit.ProblemViewUpdateGateHandler"
+        commandId="tormozit.problemView.updateGate">
+    </handler>
+    <handler
         class="tormozit.GoToParentInTreeHandler"
         commandId="tormozit.GoToParentInTree">
     </handler>
@@ -1269,6 +1282,12 @@
             label="Проверить"
             style="push"
             tooltip="Перепроверить объекты по текущему отбору панели (Комфорт)"/>
+        <command
+            commandId="tormozit.problemView.updateGate"
+            icon="icons/etool16/comfort.png"
+            label="Фильтр обновлений"
+            style="toggle"
+            tooltip="Не перестраивать список, пока не изменились проблемы текущей области. Выключите, чтобы обновлять как в EDT (Комфорт)"/>
       </menuContribution>
       <menuContribution locationURI="toolbar:com._1c.g5.v8.dt.ui.problemView?after=additions">
         <command
@@ -1277,6 +1296,12 @@
             label="Проверить"
             style="push"
             tooltip="Перепроверить объекты по текущему отбору панели (Комфорт)"/>
+        <command
+            commandId="tormozit.problemView.updateGate"
+            icon="icons/etool16/comfort.png"
+            label="Фильтр обновлений"
+            style="toggle"
+            tooltip="Не перестраивать список, пока не изменились проблемы текущей области. Выключите, чтобы обновлять как в EDT (Комфорт)"/>
       </menuContribution>
       <menuContribution locationURI="menu:com._1c.g5.v8.dt.ui.command.configureFilters?before=com._1c.g5.v8.dt.ui.command.configureFilters.separator">
         <dynamic

@@ -1,5 +1,6 @@
 package tormozit;
 
+import java.lang.invoke.MethodHandles;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.InvocationTargetException;
@@ -10,9 +11,12 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.WeakHashMap;
+
+import java.util.concurrent.ConcurrentHashMap;
 
 import org.eclipse.core.runtime.CoreException;
 import org.eclipse.debug.core.DebugPlugin;
@@ -29,6 +33,7 @@ import org.eclipse.swt.events.SelectionListener;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.layout.GridLayout;
+import org.eclipse.swt.widgets.Button;
 import org.eclipse.swt.widgets.Combo;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
@@ -38,6 +43,9 @@ import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Text;
 import org.eclipse.ui.IStartup;
+import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.MethodVisitor;
+import org.objectweb.asm.Opcodes;
 
 import com._1c.g5.v8.dt.platform.services.core.infobases.IInfobaseManager;
 import com._1c.g5.v8.dt.platform.services.core.runtimes.execution.IRuntimeComponentManager;
@@ -62,23 +70,30 @@ import com._1c.g5.v8.dt.platform.services.model.InfobaseReference;
  * 368</a>). Значение превращается в ключ командной строки клиента 1С: «Такси» →
  * {@code /iTaxi}, «8.5» → {@code /i85}, пусто → ключ не добавляется.
  *
+ * <h3>3. Флажок «Проверять модальные вызовы»</h3>
+ * В группе «Общие настройки» (<a href="https://github.com/tormozit/EDT.Comfort/issues/501">issue
+ * 501</a>). Включён по умолчанию. Лаунчеры EDT сами всегда вызывают
+ * {@code enableCheckModal()} ({@code /EnableCheckModal}). При снятом флажке ключ
+ * вырезается из командной строки в {@code appendAdditionalParameters} (подмена
+ * тонкого и толстого лаунчера на подклассы, созданные в runtime).
+ *
  * <p>В EDT нет ни атрибута конфигурации запуска, ни поля {@code RuntimeExecutionArguments}
- * под вариант интерфейса, поэтому штатного пути «значение → командная строка» не существует.
+ * под эти ключи, поэтому штатного пути «значение → командная строка» не существует.
  * Единственное место, куда произвольный ключ попадает в команду запуска клиента (и толстого,
  * и тонкого), — {@code AbstractRuntimeComponentExecutor.appendAdditionalParameters}, который
  * берёт {@code infobaseManager.findInfobaseByUuid(ref.getUuid()).orElse(ref)
  * .getAdditionalParameters()}. Поле {@code infobaseManager} используется в лаунчерах
  * <b>только</b> там — поэтому его подмена прокси безопасна и точечна. Отсюда:
  * <ul>
- *   <li><b>хранение</b> — свой атрибут конфигурации запуска пишется прямо в рабочую
- *       копию диалога (см. {@link VariantField});</li>
+ *   <li><b>хранение</b> — свои атрибуты конфигурации запуска пишутся прямо в рабочую
+ *       копию диалога (см. {@link VariantField}, {@link CheckModalField});</li>
  *   <li><b>подстановка</b> — у экземпляров лаунчеров подменяется приватное поле
  *       {@code infobaseManager} (см. {@link ManagerHandler}).</li>
  * </ul>
  *
- * <p>В точке подстановки конфигурации запуска уже нет, поэтому вариант запоминается
+ * <p>В точке подстановки конфигурации запуска уже нет, поэтому ключи запоминаются
  * в {@link #armPendingOption} при добавлении запуска ({@link ILaunchListener#launchAdded})
- * и расходуется первым же обращением к {@code findInfobaseByUuid}.
+ * и расходуются первым же обращением к {@code findInfobaseByUuid}.
  */
 public final class LaunchConfigurationHook implements IStartup
 {
@@ -87,9 +102,19 @@ public final class LaunchConfigurationHook implements IStartup
     private static final String DATA_SEPARATION_FIELD = "dataSeparation"; //$NON-NLS-1$
     private static final String PATCHED_KEY = "tormozit.launchConfigurationPatched"; //$NON-NLS-1$
     private static final String SCHEDULED_KEY = "tormozit.launchConfigurationScheduled"; //$NON-NLS-1$
+    private static final String RUNTIME_CLIENT_TYPE = "com._1c.g5.v8.dt.launching.core.RuntimeClient"; //$NON-NLS-1$
 
     /** Атрибут конфигурации запуска с выбранным вариантом интерфейса. */
     private static final String ATTR_INTERFACE_VARIANT = "tormozit.comfort.launch.interfaceVariant"; //$NON-NLS-1$
+    /** Атрибут конфигурации запуска: проверять модальные вызовы (по умолчанию включено). */
+    private static final String ATTR_CHECK_MODAL = "tormozit.comfort.launch.checkModal"; //$NON-NLS-1$
+    private static final String OPTION_CHECK_MODAL = "EnableCheckModal"; //$NON-NLS-1$
+    private static final String LAUNCHER_IMPL_PACKAGE =
+        "com._1c.g5.v8.dt.platform.services.core.runtimes.execution.impl."; //$NON-NLS-1$
+    private static final String BUILDER_INTERNAL =
+        "com/_1c/g5/v8/dt/platform/services/core/runtimes/execution/impl/AbstractExecutionCommandBuilder"; //$NON-NLS-1$
+    private static final String INFOBASE_INTERNAL =
+        "com/_1c/g5/v8/dt/platform/services/model/InfobaseReference"; //$NON-NLS-1$
 
     private static final String VARIANT_TAXI = "Taxi"; //$NON-NLS-1$
     private static final String VARIANT_V85 = "V85"; //$NON-NLS-1$
@@ -127,8 +152,15 @@ public final class LaunchConfigurationHook implements IStartup
 
     private static volatile String pendingOption;
     private static volatile long pendingStamp;
+    private static volatile boolean pendingSkipCheckModal;
+    private static volatile long pendingSkipStamp;
 
-    /** Лаунчеры уже подменены — повторный поиск менеджера при каждом запуске не нужен. */
+    /** Оригинальный лаунчер → обёртка с вырезом {@code /EnableCheckModal}. */
+    private static final Map<Object, Object> EXECUTOR_WRAPPERS =
+        Collections.synchronizedMap(new IdentityHashMap<>());
+    private static final Map<Class<?>, Class<?>> LAUNCHER_SUBCLASSES = new ConcurrentHashMap<>();
+
+    /** Лаунчеры уже хотя бы раз подменены — ошибку «менеджер не найден» не повторять. */
     private static volatile boolean launchersPatched;
 
     /**
@@ -235,6 +267,13 @@ public final class LaunchConfigurationHook implements IStartup
             if (dataSeparation == null)
                 return;
             createVariantCombo(dataSeparation, tab, dialog);
+            if (Global.getField(tab, "technicalSpecialistMode") instanceof Button specialist //$NON-NLS-1$
+                && !specialist.isDisposed())
+            {
+                createCheckModalButton(specialist, dataSeparation, tab, dialog);
+            }
+            else
+                Global.logError(TAG, "не найдена группа «Общие настройки»", null); //$NON-NLS-1$
             return;
         }
     }
@@ -376,6 +415,45 @@ public final class LaunchConfigurationHook implements IStartup
     }
 
     /**
+     * Добавляет флажок в группу «Общие настройки» сразу после штатного
+     * «Режим технического специалиста» и связывает его с рабочей копией.
+     */
+    private static void createCheckModalButton(Button specialist, Text dataSeparation,
+        ILaunchConfigurationTab tab, ILaunchConfigurationDialog dialog)
+    {
+        Composite parent = specialist.getParent();
+        if (parent == null || parent.isDisposed())
+        {
+            Global.logError(TAG, "не найдена группа «Общие настройки»", null); //$NON-NLS-1$
+            return;
+        }
+
+        Button button = new Button(parent, SWT.CHECK);
+        button.setText("Проверять модальные вызовы"); //$NON-NLS-1$
+        button.setSelection(true);
+        Object layoutData = specialist.getLayoutData();
+        if (layoutData instanceof GridData grid)
+        {
+            GridData copy = new GridData(grid.horizontalAlignment, grid.verticalAlignment,
+                grid.grabExcessHorizontalSpace, grid.grabExcessVerticalSpace);
+            copy.horizontalSpan = grid.horizontalSpan;
+            button.setLayoutData(copy);
+        }
+        else
+            button.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
+        button.setToolTipText(TooltipText.wrap(button,
+            "Проверка модальных вызовов в соответствии с настройками конфигурации" //$NON-NLS-1$
+                + Global.pluginSignForTooltip()));
+        button.moveBelow(specialist);
+
+        CheckModalField field = new CheckModalField(button, dialog, tab);
+        button.addSelectionListener(SelectionListener.widgetSelectedAdapter(e -> field.store()));
+        dataSeparation.addModifyListener(e -> field.load());
+        field.load();
+        relayoutTab(tab);
+    }
+
+    /**
      * Пересчитывает раскладку вкладки после вставки строки, чтобы заголовок
      * получил свою новую высоту. Если содержимое больше видимой области —
      * диалог чуть увеличивается, иначе «Разделение данных» снова сжимается.
@@ -449,10 +527,58 @@ public final class LaunchConfigurationHook implements IStartup
 
         private ILaunchConfiguration workingCopy()
         {
-            Object viewer = Global.invoke(dialog, "getTabViewer"); //$NON-NLS-1$
-            Object copy = viewer == null ? null : Global.invoke(viewer, "getWorkingCopy"); //$NON-NLS-1$
-            return copy instanceof ILaunchConfiguration config ? config : null;
+            return workingCopyOf(dialog);
         }
+    }
+
+    /** Связка флажка «Проверять модальные вызовы» с рабочей копией конфигурации запуска. */
+    private static final class CheckModalField
+    {
+        private final Button button;
+        private final ILaunchConfigurationDialog dialog;
+        private final ILaunchConfigurationTab tab;
+
+        CheckModalField(Button button, ILaunchConfigurationDialog dialog, ILaunchConfigurationTab tab)
+        {
+            this.button = button;
+            this.dialog = dialog;
+            this.tab = tab;
+        }
+
+        void load()
+        {
+            if (button.isDisposed())
+                return;
+            boolean value = true;
+            ILaunchConfiguration config = workingCopyOf(dialog);
+            if (config != null)
+            {
+                try
+                {
+                    value = config.getAttribute(ATTR_CHECK_MODAL, true);
+                }
+                catch (Exception e)
+                {
+                    Global.logError(TAG, "не удалось прочитать флажок проверки модальных вызовов", e); //$NON-NLS-1$
+                }
+            }
+            button.setSelection(value);
+        }
+
+        void store()
+        {
+            if (button.isDisposed() || !(workingCopyOf(dialog) instanceof ILaunchConfigurationWorkingCopy copy))
+                return;
+            copy.setAttribute(ATTR_CHECK_MODAL, button.getSelection());
+            Global.invoke(tab, "updateLaunchConfigurationDialog"); //$NON-NLS-1$
+        }
+    }
+
+    private static ILaunchConfiguration workingCopyOf(ILaunchConfigurationDialog dialog)
+    {
+        Object viewer = Global.invoke(dialog, "getTabViewer"); //$NON-NLS-1$
+        Object copy = viewer == null ? null : Global.invoke(viewer, "getWorkingCopy"); //$NON-NLS-1$
+        return copy instanceof ILaunchConfiguration config ? config : null;
     }
 
     private static int indexOfVariant(String value)
@@ -501,7 +627,10 @@ public final class LaunchConfigurationHook implements IStartup
         try
         {
             ILaunchConfiguration config = launch == null ? null : launch.getLaunchConfiguration();
-            String option = config == null ? null : optionFor(config.getAttribute(ATTR_INTERFACE_VARIANT, "")); //$NON-NLS-1$
+            if (!isRuntimeClient(config))
+                return;
+            prepareCheckModal(config);
+            String option = extraArgsFor(config);
             if (option == null)
             {
                 pendingOption = null;
@@ -514,6 +643,24 @@ public final class LaunchConfigurationHook implements IStartup
         {
             Global.logError(TAG, "подготовка запуска", e); //$NON-NLS-1$
         }
+    }
+
+    private static String extraArgsFor(ILaunchConfiguration config) throws CoreException
+    {
+        if (config == null)
+            return null;
+        StringBuilder sb = new StringBuilder();
+        String variant = optionFor(config.getAttribute(ATTR_INTERFACE_VARIANT, "")); //$NON-NLS-1$
+        if (variant != null)
+            appendArg(sb, variant);
+        return sb.length() == 0 ? null : sb.toString();
+    }
+
+    private static void appendArg(StringBuilder sb, String arg)
+    {
+        if (sb.length() > 0)
+            sb.append(' ');
+        sb.append(arg);
     }
 
     private static String optionFor(String variant)
@@ -531,6 +678,83 @@ public final class LaunchConfigurationHook implements IStartup
         pendingStamp = System.currentTimeMillis();
     }
 
+    /**
+     * Взводит пропуск штатного {@code /EnableCheckModal} по конфигурации запуска клиента.
+     * Вызывать до сборки командной строки: из {@code launch()} делегата и из {@code launchAdded}.
+     */
+    static void prepareCheckModal(ILaunchConfiguration config)
+    {
+        try
+        {
+            if (!isRuntimeClient(config))
+                return;
+            boolean checkModal = config.getAttribute(ATTR_CHECK_MODAL, true);
+            armPendingSkipCheckModal(!checkModal);
+            patchLaunchers(config, null);
+        }
+        catch (Exception e)
+        {
+            Global.logError(TAG, "подготовка флажка проверки модальных вызовов", e); //$NON-NLS-1$
+        }
+    }
+
+    private static boolean isRuntimeClient(ILaunchConfiguration config)
+    {
+        try
+        {
+            return config != null && RUNTIME_CLIENT_TYPE.equals(config.getType().getIdentifier());
+        }
+        catch (Exception e)
+        {
+            return false;
+        }
+    }
+
+    private static void armPendingSkipCheckModal(boolean skip)
+    {
+        pendingSkipCheckModal = skip;
+        pendingSkipStamp = System.currentTimeMillis();
+    }
+
+    /**
+     * {@code true} — вырезать штатный {@code /EnableCheckModal} в
+     * {@code appendAdditionalParameters}. Флаг не сбрасывается после первого вызова:
+     * за один запуск клиента метод может вызваться несколько раз.
+     */
+    private static boolean shouldSkipCheckModal()
+    {
+        boolean skip = pendingSkipCheckModal
+            && System.currentTimeMillis() - pendingSkipStamp <= PENDING_TTL_MS;
+        if (pendingSkipCheckModal && !skip)
+            pendingSkipCheckModal = false;
+        return skip;
+    }
+
+    static void stripCheckModalIfNeeded(Object builder)
+    {
+        if (!shouldSkipCheckModal() || builder == null)
+            return;
+        Object raw = Global.getField(builder, "commands"); //$NON-NLS-1$
+        if (!(raw instanceof List<?> list))
+        {
+            Global.logError(TAG, "не найден список команд лаунчера", null); //$NON-NLS-1$
+            return;
+        }
+        @SuppressWarnings("unchecked")
+        List<Object> commands = (List<Object>)list;
+        commands.removeIf(LaunchConfigurationHook::isCheckModalOption);
+    }
+
+    private static boolean isCheckModalOption(Object item)
+    {
+        if (item == null)
+            return false;
+        String text = item.toString();
+        if (!text.isEmpty() && (text.charAt(0) == '/' || text.charAt(0) == '-'))
+            text = text.substring(1);
+        return OPTION_CHECK_MODAL.equals(text);
+    }
+
     /** Взведённый вариант расходуется первым же обращением лаунчера к менеджеру ИБ. */
     private static String consumePendingOption()
     {
@@ -544,41 +768,216 @@ public final class LaunchConfigurationHook implements IStartup
     }
 
     /**
-     * Подменяет у лаунчеров EDT приватное поле {@code infobaseManager} на прокси.
+     * Подменяет лаунчеры EDT: тонкий/толстый клиент — на подклассы с вырезом
+     * {@code /EnableCheckModal}; поле {@code infobaseManager} — на прокси варианта интерфейса.
      *
      * <p>Список лаунчеров — приватное {@code executors} менеджера компонентов (загружается
-     * лениво, поэтому сначала вызывается {@code getExecutorExtensions}). Вызывается один
-     * раз после старта EDT и повторно при запуске, если тогда лаунчеры ещё не нашлись.
+     * лениво, поэтому сначала вызывается {@code getExecutorExtensions}). Вызывается после
+     * старта EDT и при каждом запуске клиента: обёртка идемпотентна.
      *
      * @param config конфигурация запуска или {@code null} при подмене после старта EDT
      */
     private static void patchLaunchers(ILaunchConfiguration config, String mode)
     {
-        if (launchersPatched)
-            return;
         Object manager = findComponentManager(config, mode);
         if (manager == null)
         {
-            Global.logError(TAG, "не найден IRuntimeComponentManager", null); //$NON-NLS-1$
+            if (!launchersPatched)
+                Global.logError(TAG, "не найден IRuntimeComponentManager", null); //$NON-NLS-1$
             return;
         }
         Object extensions = Global.invoke(manager, "getExecutorExtensions"); //$NON-NLS-1$
         if (!(extensions instanceof Iterable<?> list))
             return;
+        int wrapped = 0;
+        int proxied = 0;
         for (Object extension : list)
         {
             Object executor = Global.getField(extension, "executor"); //$NON-NLS-1$
-            if (executor == null || PATCHED_EXECUTORS.contains(executor))
+            if (executor == null)
                 continue;
-            Object real = Global.getField(executor, "infobaseManager"); //$NON-NLS-1$
-            if (!(real instanceof IInfobaseManager infobaseManager) || Proxy.isProxyClass(real.getClass()))
-                continue;
-            Object proxy = Proxy.newProxyInstance(IInfobaseManager.class.getClassLoader(),
-                new Class<?>[] { IInfobaseManager.class }, new ManagerHandler(infobaseManager));
-            if (Global.setFieldForce(executor, "infobaseManager", proxy)) //$NON-NLS-1$
+            Object replacement = wrapExecutor(executor);
+            if (replacement != executor && Global.setFieldForce(extension, "executor", replacement)) //$NON-NLS-1$
+                wrapped++;
+            if (patchInfobaseManager(replacement != null ? replacement : executor))
+                proxied++;
+        }
+        if (wrapped > 0 || proxied > 0)
+            launchersPatched = true;
+    }
+
+    /**
+     * Подменяет тонкий/толстый лаунчер на runtime-подкласс с вырезом
+     * {@code /EnableCheckModal}, копируя поля живого экземпляра (Guice-инъекция).
+     * Лаунчер сессии конфигуратора сам не наследник толстого: оборачивается
+     * только его поле {@code thickClientLauncher}.
+     */
+    private static Object wrapExecutor(Object executor)
+    {
+        if (executor == null)
+            return null;
+        if (isComfortLauncher(executor))
+            return executor;
+        Object cached = EXECUTOR_WRAPPERS.get(executor);
+        if (cached != null)
+            return cached;
+        Object wrapper;
+        if (isLauncher(executor, "ThinClientLauncher")) //$NON-NLS-1$
+            wrapper = newComfortLauncher("ThinClientLauncher", "ComfortThinClientLauncher"); //$NON-NLS-1$ //$NON-NLS-2$
+        else if (isLauncher(executor, "ThickClientLauncher")) //$NON-NLS-1$
+            wrapper = newComfortLauncher("ThickClientLauncher", "ComfortThickClientLauncher"); //$NON-NLS-1$ //$NON-NLS-2$
+        else if (isLauncher(executor, "DesignerSessionThickClientLauncher")) //$NON-NLS-1$
+        {
+            Object inner = Global.getField(executor, "thickClientLauncher"); //$NON-NLS-1$
+            Object wrappedInner = wrapExecutor(inner);
+            if (wrappedInner != null && wrappedInner != inner)
+                Global.setFieldForce(executor, "thickClientLauncher", wrappedInner); //$NON-NLS-1$
+            EXECUTOR_WRAPPERS.put(executor, executor);
+            return executor;
+        }
+        else
+            return executor;
+        if (wrapper == null)
+            return executor;
+        copyInstanceFields(executor, wrapper);
+        EXECUTOR_WRAPPERS.put(executor, wrapper);
+        EXECUTOR_WRAPPERS.put(wrapper, wrapper);
+        patchInfobaseManager(wrapper);
+        return wrapper;
+    }
+
+    private static boolean isComfortLauncher(Object executor)
+    {
+        return executor.getClass().getName().startsWith("tormozit.Comfort"); //$NON-NLS-1$
+    }
+
+    private static boolean isLauncher(Object executor, String simpleName)
+    {
+        Class<?> type = launcherClass(simpleName);
+        return type != null && type.isInstance(executor);
+    }
+
+    private static Class<?> launcherClass(String simpleName)
+    {
+        try
+        {
+            return Class.forName(LAUNCHER_IMPL_PACKAGE + simpleName, false,
+                LaunchConfigurationHook.class.getClassLoader());
+        }
+        catch (ClassNotFoundException e)
+        {
+            return null;
+        }
+    }
+
+    private static Object newComfortLauncher(String launcherSimpleName, String wrapperSimpleName)
+    {
+        Class<?> launcherType = launcherClass(launcherSimpleName);
+        if (launcherType == null)
+            return null;
+        Class<?> wrapperType = subclassOf(launcherType, wrapperSimpleName);
+        if (wrapperType == null)
+            return null;
+        try
+        {
+            return wrapperType.getDeclaredConstructor().newInstance();
+        }
+        catch (Exception e)
+        {
+            Global.logError(TAG, "создание обёртки лаунчера " + wrapperSimpleName, e); //$NON-NLS-1$
+            return null;
+        }
+    }
+
+    /**
+     * Runtime-подкласс лаунчера EDT: в исходниках нельзя {@code extends ThickClientLauncher} —
+     * JDT тянет {@code IDbUpdateConfirm} из бандла, которого нет в целевой платформе плагина.
+     */
+    private static Class<?> subclassOf(Class<?> launcherType, String simpleName)
+    {
+        Class<?> cached = LAUNCHER_SUBCLASSES.get(launcherType);
+        if (cached != null)
+            return cached;
+        synchronized (LAUNCHER_SUBCLASSES)
+        {
+            cached = LAUNCHER_SUBCLASSES.get(launcherType);
+            if (cached != null)
+                return cached;
+            String internal = "tormozit/" + simpleName; //$NON-NLS-1$
+            String superInternal = launcherType.getName().replace('.', '/');
+            String desc = "(L" + BUILDER_INTERNAL + ";L" + INFOBASE_INTERNAL + ";)V"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            ClassWriter writer = new ClassWriter(ClassWriter.COMPUTE_MAXS);
+            writer.visit(Opcodes.V17, Opcodes.ACC_PUBLIC | Opcodes.ACC_FINAL | Opcodes.ACC_SUPER,
+                internal, null, superInternal, null);
+            MethodVisitor ctor = writer.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null); //$NON-NLS-1$ //$NON-NLS-2$
+            ctor.visitCode();
+            ctor.visitVarInsn(Opcodes.ALOAD, 0);
+            ctor.visitMethodInsn(Opcodes.INVOKESPECIAL, superInternal, "<init>", "()V", false); //$NON-NLS-1$ //$NON-NLS-2$
+            ctor.visitInsn(Opcodes.RETURN);
+            ctor.visitMaxs(0, 0);
+            ctor.visitEnd();
+            MethodVisitor method = writer.visitMethod(Opcodes.ACC_PROTECTED, "appendAdditionalParameters", //$NON-NLS-1$
+                desc, null, null);
+            method.visitCode();
+            method.visitVarInsn(Opcodes.ALOAD, 1);
+            method.visitMethodInsn(Opcodes.INVOKESTATIC, "tormozit/LaunchConfigurationHook", //$NON-NLS-1$
+                "stripCheckModalIfNeeded", "(Ljava/lang/Object;)V", false); //$NON-NLS-1$ //$NON-NLS-2$
+            method.visitVarInsn(Opcodes.ALOAD, 0);
+            method.visitVarInsn(Opcodes.ALOAD, 1);
+            method.visitVarInsn(Opcodes.ALOAD, 2);
+            method.visitMethodInsn(Opcodes.INVOKESPECIAL, superInternal, "appendAdditionalParameters", //$NON-NLS-1$
+                desc, false);
+            method.visitInsn(Opcodes.RETURN);
+            method.visitMaxs(0, 0);
+            method.visitEnd();
+            writer.visitEnd();
+            try
             {
-                PATCHED_EXECUTORS.add(executor);
-                launchersPatched = true;
+                Class<?> defined = MethodHandles.lookup().defineClass(writer.toByteArray());
+                LAUNCHER_SUBCLASSES.put(launcherType, defined);
+                return defined;
+            }
+            catch (Throwable t)
+            {
+                Global.logError(TAG, "не удалось создать подкласс лаунчера " + simpleName, t); //$NON-NLS-1$
+                return null;
+            }
+        }
+    }
+
+    private static boolean patchInfobaseManager(Object executor)
+    {
+        if (executor == null || PATCHED_EXECUTORS.contains(executor))
+            return false;
+        Object real = Global.getField(executor, "infobaseManager"); //$NON-NLS-1$
+        if (!(real instanceof IInfobaseManager infobaseManager) || Proxy.isProxyClass(real.getClass()))
+            return false;
+        Object proxy = Proxy.newProxyInstance(IInfobaseManager.class.getClassLoader(),
+            new Class<?>[] { IInfobaseManager.class }, new ManagerHandler(infobaseManager));
+        if (!Global.setFieldForce(executor, "infobaseManager", proxy)) //$NON-NLS-1$
+            return false;
+        PATCHED_EXECUTORS.add(executor);
+        return true;
+    }
+
+    private static void copyInstanceFields(Object from, Object to)
+    {
+        for (Class<?> type = from.getClass(); type != null && type != Object.class; type = type.getSuperclass())
+        {
+            for (Field field : type.getDeclaredFields())
+            {
+                int modifiers = field.getModifiers();
+                if (Modifier.isStatic(modifiers) || Modifier.isFinal(modifiers) || field.isSynthetic())
+                    continue;
+                try
+                {
+                    field.setAccessible(true);
+                    field.set(to, field.get(from));
+                }
+                catch (Exception e)
+                {
+                    Global.logError(TAG, "копирование поля лаунчера " + field.getName(), e); //$NON-NLS-1$
+                }
             }
         }
     }

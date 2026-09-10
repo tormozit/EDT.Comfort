@@ -2830,6 +2830,8 @@ if (!pendingAutoOpen || !ComfortSettings.isReplaceListFiltersEnabled())
         int gen = completionAutoOpenScheduleGen.incrementAndGet();
         ContentAssistSettings settings = ContentAssistSettings.getInstance();
         int delay = settings != null ? settings.getTimeout() : 0;
+        SmartContentAssistProcessor.uiBlockLog("autoOpen.schedule", //$NON-NLS-1$
+            "delay=" + delay + " caret=" + expectedCaretAfter); //$NON-NLS-1$ //$NON-NLS-2$
         Control c = (Control)viewer.getTextWidget();
         if (c == null || c.isDisposed())
         {
@@ -2852,6 +2854,8 @@ display.timerExec(delay, () -> fireCompletionAutoOpenTimer(expectedCaretAfter, a
         boolean popupVisible = ContentAssistPopupSync.isPopupVisible(assistant);
         if (gen != genGlobal)
         {
+            SmartContentAssistProcessor.uiBlockLog("autoOpen.timer.skip", //$NON-NLS-1$
+                "why=genMismatch caret=" + liveCaret); //$NON-NLS-1$
             logAssistOpen("autoOpen.timer.skip", "{\"reason\":\"genMismatch\",\"caret\":" + liveCaret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return;
         }
@@ -2861,11 +2865,15 @@ display.timerExec(delay, () -> fireCompletionAutoOpenTimer(expectedCaretAfter, a
         }
         if (popupVisible)
         {
+            SmartContentAssistProcessor.uiBlockLog("autoOpen.timer.skip", //$NON-NLS-1$
+                "why=popupVisible caret=" + liveCaret); //$NON-NLS-1$
             logAssistOpen("autoOpen.timer.skip", "{\"reason\":\"popupVisible\",\"caret\":" + liveCaret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return;
         }
         if (liveCaret < expectedCaretAfter)
         {
+            SmartContentAssistProcessor.uiBlockLog("autoOpen.timer.skip", //$NON-NLS-1$
+                "why=caretBehind live=" + liveCaret + " expected=" + expectedCaretAfter); //$NON-NLS-1$ //$NON-NLS-2$
             logAssistOpen("autoOpen.timer.skip", "{\"reason\":\"caretBehind\",\"live\":" + liveCaret //$NON-NLS-1$ //$NON-NLS-2$
                 + ",\"expected\":" + expectedCaretAfter + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
@@ -2917,6 +2925,12 @@ display.timerExec(delay, () -> fireCompletionAutoOpenTimer(expectedCaretAfter, a
                 completionAutoOpenIrScheduled = true;
                 logAssistOpen("autoOpen.begin", "{\"path\":\"waitIr\",\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
                     + ",\"docLen\":" + docLen + ",\"memberAccess\":" + memberAccess + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+                // #region agent log
+                SmartContentAssistProcessor.uiBlockLog("autoOpen.begin.waitIr", //$NON-NLS-1$
+                    "caret=" + caret + " docLen=" + docLen //$NON-NLS-1$ //$NON-NLS-2$
+                        + " memberAccess=" + memberAccess //$NON-NLS-1$
+                        + " around=\"" + SmartContentAssistProcessor.uiBlockAround(doc, caret) + "\""); //$NON-NLS-1$ //$NON-NLS-2$
+                // #endregion
                 // Ждём ИР: открытие только при autoOpenSuggested (ЗаполнитьТаблицуСлов).
                 // Browser warmup — в openCompletionAutoIrPopup (preShowLiteralBrowserPatch).
                 return;
@@ -2926,6 +2940,11 @@ display.timerExec(delay, () -> fireCompletionAutoOpenTimer(expectedCaretAfter, a
         {
             logAssistOpen("autoOpen.begin", "{\"path\":\"memberDefer\",\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
                 + ",\"docLen\":" + docLen + ",\"memberAccess\":true}"); //$NON-NLS-1$ //$NON-NLS-2$
+            // #region agent log
+            SmartContentAssistProcessor.uiBlockLog("autoOpen.begin.memberDefer", //$NON-NLS-1$
+                "caret=" + caret + " docLen=" + docLen //$NON-NLS-1$ //$NON-NLS-2$
+                    + " around=\"" + SmartContentAssistProcessor.uiBlockAround(doc, caret) + "\""); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
             completionAutoOpenPending = false;
             return;
         }
@@ -2939,14 +2958,33 @@ display.timerExec(delay, () -> fireCompletionAutoOpenTimer(expectedCaretAfter, a
         logAssistOpen("autoOpen.begin", "{\"path\":\"edt\",\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
             + ",\"irScheduled\":" + irScheduled //$NON-NLS-1$
             + ",\"docLen\":" + docLen + ",\"memberAccess\":" + memberAccess + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+        // #region agent log
+        SmartContentAssistProcessor.uiBlockLog("autoOpen.begin.edt", //$NON-NLS-1$
+            "caret=" + caret + " docLen=" + docLen //$NON-NLS-1$ //$NON-NLS-2$
+                + " memberAccess=" + memberAccess //$NON-NLS-1$
+                + " irScheduled=" + irScheduled //$NON-NLS-1$
+                + " around=\"" + SmartContentAssistProcessor.uiBlockAround(doc, caret) + "\""); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
         warmupAssistBrowserCreator(caret);
         completionAutoOpenEdtOpened = true;
-openCompletionAutoEdtPopup(caret, autoOpenSeq);
+        openCompletionAutoEdtPopup(caret, autoOpenSeq, cachedListOnlyForAutoOpen(viewer, caret));
         if (!irScheduled)
             completionAutoOpenPending = false;
     }
 
-    private void openCompletionAutoEdtPopup(int expectedCaret, int autoOpenSeq)
+    /**
+     * {@code cachedListOnly} только если кэш этого контекста уже есть. После «.»
+     * {@link SmartContentAssistProcessor#isWordListSeededOnUi()} остаётся true, а кэш
+     * пуст — показ с cachedListOnly даёт n=0 и окно не открывается.
+     */
+    private boolean cachedListOnlyForAutoOpen(ITextViewer viewer, int caret)
+    {
+        return processor != null && processor.isWordListSeededOnUi()
+            && processor.hasReadyFullListCacheForCaret(viewer, caret);
+    }
+
+    private void openCompletionAutoEdtPopup(int expectedCaret, int autoOpenSeq,
+                                            boolean cachedListOnly)
     {
         // Ветки «пробел / = / буква» открываются с пустым словом, а «&~#» — со уже набранным
         // символом. Обнулять фильтр там нельзя: попап собирался по кэшированному полному
@@ -2959,7 +2997,20 @@ openCompletionAutoEdtPopup(caret, autoOpenSeq);
         // AutoAssistListener.start() всегда создаёт НОВЫЙ поток, не останавливая прежний
         // (JFace): поток от «ф» доживает и вызывает showAssist на каретке буквы, снося
         // сессию членов. showPossibleCompletions сначала stop() у слушателя.
-        boolean shown = ContentAssistPopupSync.showPossibleCompletions(assistant);
+        // #region agent log
+        long tShow = System.nanoTime();
+        SmartContentAssistProcessor.uiBlockLog("openCompletionAutoEdtPopup.beforeShow", //$NON-NLS-1$
+            "caret=" + expectedCaret //$NON-NLS-1$
+                + " cachedListOnly=" + cachedListOnly //$NON-NLS-1$
+                + " filter=" + currentDocumentFilter(expectedCaret)); //$NON-NLS-1$
+        // #endregion
+        boolean shown = ContentAssistPopupSync.showPossibleCompletions(assistant, cachedListOnly);
+        // #region agent log
+        SmartContentAssistProcessor.uiBlockLog("openCompletionAutoEdtPopup.afterShow", //$NON-NLS-1$
+            "ms=" + ((System.nanoTime() - tShow) / 1_000_000L) //$NON-NLS-1$
+                + " caret=" + expectedCaret + " shown=" + shown //$NON-NLS-1$ //$NON-NLS-2$
+                + " cachedListOnly=" + cachedListOnly); //$NON-NLS-1$
+        // #endregion
         
         IDtProject dtProject = facade.getDtProject();
         boolean irConnected = dtProject != null && IRApplication.hasConnectedSessionForKeys(dtProject);
@@ -4250,7 +4301,8 @@ if (isCompletionAutoOpenCaretMatch(caret)
                     ? SmartContentAssistProcessor.computeIdentifierFilter(liveDoc, caret)
                     : ""; //$NON-NLS-1$
                 if (!popupVisible && !filter.isEmpty())
-                    openCompletionAutoEdtPopup(caret, autoOpenSeq);
+                    openCompletionAutoEdtPopup(caret, autoOpenSeq,
+                        cachedListOnlyForAutoOpen(viewer, caret));
                 clearCompletionAutoOpenState(decision, autoOpenSeq);
             }
             else if (edtOpened && popupVisible)

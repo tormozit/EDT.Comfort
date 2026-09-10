@@ -69,6 +69,9 @@ public class Activator extends AbstractUIPlugin
             ComfortSettings.PREF_REPLACE_LIST_FILTERS,
             ComfortSettings.DEFAULT_REPLACE_LIST_FILTERS);
         settings.getPreferenceStore().setDefault(
+            ComfortSettings.PREF_PROBLEM_VIEW_UPDATE_GATE,
+            ComfortSettings.DEFAULT_PROBLEM_VIEW_UPDATE_GATE);
+        settings.getPreferenceStore().setDefault(
             ComfortSettings.PREF_FILTER_MATCH_COLOR,
             ComfortSettings.DEFAULT_FILTER_MATCH_COLOR);
         settings.getPreferenceStore().setDefault(
@@ -115,6 +118,9 @@ public class Activator extends AbstractUIPlugin
             ComfortSettings.DEFAULT_MD_EDITOR_VERTICAL_TABS);
         ContentAssistManager.init(settings);
         ComfortSettings.init(PLUGIN_ID);
+        ComfortSettings.getInstance().getPreferenceStore().setDefault(
+            ComfortSettings.PREF_PROBLEM_VIEW_UPDATE_GATE,
+            ComfortSettings.DEFAULT_PROBLEM_VIEW_UPDATE_GATE);
         settings.getPreferenceStore().addPropertyChangeListener(event -> {
             if (ComfortSettings.PREF_FILTER_MATCH_COLOR.equals(event.getProperty()))
                 SmartMatchHighlight.clearColorCache();
