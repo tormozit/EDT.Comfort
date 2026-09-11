@@ -1,8 +1,12 @@
 package tormozit;
 
 import java.lang.instrument.ClassFileTransformer;
+import java.lang.instrument.Instrumentation;
+import java.lang.reflect.Field;
+import java.nio.charset.StandardCharsets;
 import java.security.ProtectionDomain;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 
 import org.eclipse.core.commands.ExecutionEvent;
@@ -10,7 +14,10 @@ import org.eclipse.core.commands.ExecutionException;
 import org.eclipse.core.commands.IExecutionListener;
 import org.eclipse.core.commands.NotHandledException;
 import org.eclipse.core.resources.IFile;
+import org.eclipse.core.runtime.jobs.Job;
+import org.eclipse.swt.SWT;
 import org.eclipse.swt.widgets.Display;
+import org.eclipse.swt.widgets.Shell;
 import org.eclipse.ui.IEditorInput;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IFileEditorInput;
@@ -25,6 +32,11 @@ import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.Label;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
+import org.osgi.framework.Bundle;
+import org.osgi.framework.BundleContext;
+import org.osgi.framework.FrameworkUtil;
+import org.osgi.framework.hooks.weaving.WeavingHook;
+import org.osgi.framework.hooks.weaving.WovenClass;
 
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 
@@ -34,13 +46,13 @@ import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
  * при Ctrl+S из {@code BslBreakpointMarkerUpdater.updateMarker}. Комфорт на потоке UI
  * этот цикл пропускает: сохранение не блокирует интерфейс.
  *
- * <p>Инструментирование как {@link BslHandlerBlankLineHook}: вызов через
- * {@code System.getProperties}, без зависимости {@code bsl.ui} → Комфорт.
+ * <p>Плетение — в {@link #install()} из {@code Activator.start()}, до восстановления
+ * редакторов. {@code IStartup} слишком поздний: локер уже загружен.
+ * Вызов через {@code System.getProperties}, без зависимости {@code bsl.ui} → Комфорт.
  */
 public final class BslXtextDocumentHook implements IStartup
 {
     static final String PROP_SKIP_WAIT = "tormozit.bslXtextDoc.skipWaitUpdatingDataModel"; //$NON-NLS-1$
-    private static final String TAG = "BslXtextDocument"; //$NON-NLS-1$
     private static final String TARGET =
         "com._1c.g5.v8.dt.bsl.ui.editor.BslXtextDocument$CustomXtextDocumentLocker"; //$NON-NLS-1$
     private static final String TARGET_INTERNAL =
@@ -50,30 +62,42 @@ public final class BslXtextDocumentHook implements IStartup
     private static final String CMD_SAVE = "org.eclipse.ui.file.save"; //$NON-NLS-1$
 
     private static final AtomicBoolean transformerRegistered = new AtomicBoolean();
+    private static final AtomicBoolean ASM_SEEN = new AtomicBoolean();
+    private static final AtomicBoolean ASM_PATCHED = new AtomicBoolean();
+    private static final AtomicInteger SAVE_SKIP = new AtomicInteger();
+    private static final AtomicInteger SAVE_WAIT = new AtomicInteger();
     private static final ThreadLocal<Long> SAVE_STARTED_MS = new ThreadLocal<>();
     private static final ThreadLocal<String> SAVE_MODULE = new ThreadLocal<>();
+    private static volatile boolean saveActive;
+    private static volatile long saveUiUntilMs;
+    private static final AtomicBoolean weavingRegistered = new AtomicBoolean();
+    private static final AtomicBoolean uiInstalled = new AtomicBoolean();
+
+    /**
+     * Как можно раньше, из {@link Activator#start}: WeavingHook до загрузки локера.
+     */
+    public static void install()
+    {
+        System.getProperties().put(PROP_SKIP_WAIT,
+            (BooleanSupplier) BslXtextDocumentHook::skipWaitUpdatingDataModel);
+        registerWeavingHook();
+        registerTransformer();
+    }
 
     @Override
     public void earlyStartup()
     {
-        System.getProperties().put(PROP_SKIP_WAIT,
-            (BooleanSupplier) BslXtextDocumentHook::skipWaitUpdatingDataModel);
-        if (!registerTransformer())
-        {
-            Display display = Display.getDefault();
-            if (display != null && !display.isDisposed())
-            {
-                display.asyncExec(() ->
-                {
-                    if (!display.isDisposed())
-                        display.timerExec(2000, BslXtextDocumentHook::registerTransformer);
-                });
-            }
-        }
+        install();
         Display display = Display.getDefault();
         if (display == null || display.isDisposed())
             return;
-        display.asyncExec(BslXtextDocumentHook::installSaveLog);
+        display.asyncExec(() ->
+        {
+            installUi();
+            registerTransformer();
+            if (!display.isDisposed())
+                display.timerExec(2000, BslXtextDocumentHook::registerTransformer);
+        });
     }
 
     /**
@@ -82,20 +106,168 @@ public final class BslXtextDocumentHook implements IStartup
      */
     public static boolean skipWaitUpdatingDataModel()
     {
-        return Display.getCurrent() != null;
+        boolean ui = Display.getCurrent() != null;
+        if (saveActive && SaveDebug.isEnabled())
+        {
+            int n = ui ? SAVE_SKIP.incrementAndGet() : SAVE_WAIT.incrementAndGet();
+            if (n == 1)
+            {
+                SaveDebug.step("waitUpdatingDataModel", //$NON-NLS-1$
+                    (ui ? "skip" : "wait") //$NON-NLS-1$ //$NON-NLS-2$
+                        + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
+            }
+        }
+        return ui;
     }
 
     private static boolean registerTransformer()
     {
-        if (transformerRegistered.get())
-            return true;
-        boolean ok = BslDocCommentDescriptionFix.registerExtraTransformer(
-            new WaitUpdatingTransformer(), TARGET);
-        if (ok)
-            transformerRegistered.set(true);
-        else
-            Global.logError(TAG, "ASM transformer for waitUpdatingDataModel not registered", null); //$NON-NLS-1$
-        return ok;
+        if (!transformerRegistered.get())
+        {
+            boolean ok = BslDocCommentDescriptionFix.registerExtraTransformer(
+                new WaitUpdatingTransformer(), TARGET);
+            if (ok)
+                transformerRegistered.set(true);
+            else
+                SaveDebug.problem("ASM transformer for waitUpdatingDataModel not registered"); //$NON-NLS-1$
+        }
+        retransformLockers();
+        SaveDebug.step("asm", "transformer=" + transformerRegistered.get() //$NON-NLS-1$ //$NON-NLS-2$
+            + " seen=" + ASM_SEEN.get() + " patched=" + ASM_PATCHED.get()); //$NON-NLS-1$ //$NON-NLS-2$
+        return ASM_PATCHED.get();
+    }
+
+    private static void registerWeavingHook()
+    {
+        if (!weavingRegistered.compareAndSet(false, true))
+            return;
+        try
+        {
+            Bundle bundle = FrameworkUtil.getBundle(BslXtextDocumentHook.class);
+            BundleContext context = bundle != null ? bundle.getBundleContext() : null;
+            if (context == null)
+            {
+                SaveDebug.problem("WeavingHook: нет BundleContext"); //$NON-NLS-1$
+                weavingRegistered.set(false);
+                return;
+            }
+            context.registerService(WeavingHook.class, new LockerWeavingHook(), null);
+            SaveDebug.step("asm", "WeavingHook registered"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        catch (Throwable t)
+        {
+            weavingRegistered.set(false);
+            SaveDebug.problem("WeavingHook: " + t); //$NON-NLS-1$
+        }
+    }
+
+    private static void retransformLockers()
+    {
+        Instrumentation inst = instrumentation();
+        if (inst == null)
+        {
+            SaveDebug.step("asm", "retransform: Instrumentation is null"); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        }
+        int found = 0;
+        int modifiable = 0;
+        String error = null;
+        for (Class<?> c : inst.getAllLoadedClasses())
+        {
+            String name = c.getName();
+            if (name == null || !name.endsWith("BslXtextDocument$CustomXtextDocumentLocker")) //$NON-NLS-1$
+                continue;
+            found++;
+            if (!inst.isModifiableClass(c))
+            {
+                SaveDebug.problem("locker not modifiable: " + name); //$NON-NLS-1$
+                continue;
+            }
+            modifiable++;
+            try
+            {
+                inst.retransformClasses(c);
+            }
+            catch (Throwable t)
+            {
+                error = t.toString();
+            }
+        }
+        SaveDebug.step("asm", "retransform found=" + found + " modifiable=" + modifiable //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " seen=" + ASM_SEEN.get() + " patched=" + ASM_PATCHED.get() //$NON-NLS-1$ //$NON-NLS-2$
+            + (error != null ? " error=" + error : "")); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    private static Instrumentation instrumentation()
+    {
+        try
+        {
+            Field field = BslDocCommentDescriptionFix.class.getDeclaredField("instrumentation"); //$NON-NLS-1$
+            field.setAccessible(true);
+            Object value = field.get(null);
+            return value instanceof Instrumentation inst ? inst : null;
+        }
+        catch (Exception e)
+        {
+            return null;
+        }
+    }
+
+    private static void installUi()
+    {
+        if (!uiInstalled.compareAndSet(false, true))
+            return;
+        installSaveLog();
+        Display display = Display.getCurrent();
+        if (display == null || display.isDisposed())
+            return;
+        display.addFilter(SWT.Show, event ->
+        {
+            if (!saveActive && System.currentTimeMillis() > saveUiUntilMs)
+                return;
+            if (!(event.widget instanceof Shell shell) || shell.isDisposed())
+                return;
+            String title = shell.getText();
+            if (title == null || title.isBlank())
+                return;
+            boolean modal = (shell.getStyle() & (SWT.APPLICATION_MODAL | SWT.PRIMARY_MODAL
+                | SWT.SYSTEM_MODAL)) != 0;
+            if (!modal && !looksLikeJobsDialog(title))
+                return;
+            SaveDebug.step("modal", (modal ? "modal " : "") + title //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " jobs=" + runningJobsBrief()); //$NON-NLS-1$
+        });
+    }
+
+    private static boolean looksLikeJobsDialog(String title)
+    {
+        String t = title.toLowerCase();
+        return t.contains("ожид") //$NON-NLS-1$
+            || t.contains("wait") //$NON-NLS-1$
+            || t.contains("фонов") //$NON-NLS-1$
+            || t.contains("операция"); //$NON-NLS-1$
+    }
+
+    private static String runningJobsBrief()
+    {
+        Job[] jobs = Job.getJobManager().find(null);
+        StringBuilder sb = new StringBuilder();
+        int n = 0;
+        for (Job job : jobs)
+        {
+            if (job.getState() != Job.RUNNING)
+                continue;
+            n++;
+            if (n > 6)
+            {
+                sb.append(" …"); //$NON-NLS-1$
+                break;
+            }
+            if (sb.length() > 0)
+                sb.append("; "); //$NON-NLS-1$
+            sb.append(job.getName());
+        }
+        return n == 0 ? "none" : n + " " + sb; //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private static void installSaveLog()
@@ -117,6 +289,9 @@ public final class BslXtextDocumentHook implements IStartup
                 return;
             SAVE_STARTED_MS.remove();
             SAVE_MODULE.remove();
+            saveActive = false;
+            SAVE_SKIP.set(0);
+            SAVE_WAIT.set(0);
             if (!SaveDebug.isEnabled())
                 return;
             IEditorPart editor = resolveEditor(event);
@@ -126,8 +301,11 @@ public final class BslXtextDocumentHook implements IStartup
             String module = moduleLabel(bsl);
             SAVE_STARTED_MS.set(Long.valueOf(System.currentTimeMillis()));
             SAVE_MODULE.set(module);
+            saveActive = true;
+            saveUiUntilMs = Long.MAX_VALUE;
             boolean dirty = editor != null && editor.isDirty();
-            SaveDebug.step("save", module + " dirty=" + dirty); //$NON-NLS-1$ //$NON-NLS-2$
+            SaveDebug.step("save", module + " dirty=" + dirty //$NON-NLS-1$ //$NON-NLS-2$
+                + " asm seen=" + ASM_SEEN.get() + " patched=" + ASM_PATCHED.get()); //$NON-NLS-1$ //$NON-NLS-2$
         }
 
         @Override
@@ -161,7 +339,12 @@ public final class BslXtextDocumentHook implements IStartup
             return;
         long spent = System.currentTimeMillis() - started.longValue();
         String name = module != null && !module.isEmpty() ? module : "?"; //$NON-NLS-1$
-        SaveDebug.step("save-end", name + " " + outcome + " " + spent + "ms"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+        saveActive = false;
+        saveUiUntilMs = System.currentTimeMillis() + 5_000L;
+        SaveDebug.step("save-end", name + " " + outcome + " " + spent + "ms" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            + " skipWait=" + SAVE_SKIP.get() //$NON-NLS-1$
+            + " waitModel=" + SAVE_WAIT.get() //$NON-NLS-1$
+            + " asm seen=" + ASM_SEEN.get() + " patched=" + ASM_PATCHED.get()); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private static IEditorPart resolveEditor(ExecutionEvent event)
@@ -198,6 +381,12 @@ public final class BslXtextDocumentHook implements IStartup
         return input != null ? input.getName() : "?"; //$NON-NLS-1$
     }
 
+    private static boolean isLockerClass(String className)
+    {
+        return TARGET_INTERNAL.equals(className)
+            || className.endsWith("BslXtextDocument$CustomXtextDocumentLocker"); //$NON-NLS-1$
+    }
+
     private static final class SaveDebug
     {
         private static final String DEBUG_TAG = "BslModuleSave"; //$NON-NLS-1$
@@ -218,6 +407,12 @@ public final class BslXtextDocumentHook implements IStartup
             else
                 Global.log(DEBUG_TAG, phase + " " + detail); //$NON-NLS-1$
         }
+
+        static void problem(String msg)
+        {
+            if (isEnabled())
+                Global.log(DEBUG_TAG, "[!] " + msg); //$NON-NLS-1$
+        }
     }
 
     private static final class WaitUpdatingTransformer implements ClassFileTransformer
@@ -226,14 +421,24 @@ public final class BslXtextDocumentHook implements IStartup
         public byte[] transform(ClassLoader loader, String className, Class<?> classBeingRedefined,
             ProtectionDomain protectionDomain, byte[] classfileBuffer)
         {
-            if (!TARGET_INTERNAL.equals(className))
+            if (className == null || !isLockerClass(className))
                 return null;
+            ASM_SEEN.set(true);
+            if (!TARGET_INTERNAL.equals(className))
+                SaveDebug.step("asm", "locker className=" + className); //$NON-NLS-1$ //$NON-NLS-2$
             try
             {
-                return transformWaitUpdating(classfileBuffer);
+                byte[] out = transformWaitUpdating(classfileBuffer);
+                if (out != null)
+                    ASM_PATCHED.set(true);
+                SaveDebug.step("asm", "transform patched=" + ASM_PATCHED.get() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " bytes=" + (out != null) //$NON-NLS-1$
+                    + " redefine=" + (classBeingRedefined != null)); //$NON-NLS-1$
+                return out;
             }
             catch (Throwable t)
             {
+                SaveDebug.problem("transform: " + t); //$NON-NLS-1$
                 return null;
             }
         }
@@ -241,6 +446,13 @@ public final class BslXtextDocumentHook implements IStartup
 
     static byte[] transformWaitUpdating(byte[] classfileBuffer)
     {
+        if (classfileBuffer != null
+            && new String(classfileBuffer, StandardCharsets.ISO_8859_1).contains(PROP_SKIP_WAIT))
+        {
+            ASM_SEEN.set(true);
+            ASM_PATCHED.set(true);
+            return null;
+        }
         ClassReader reader = new ClassReader(classfileBuffer);
         ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_FRAMES)
         {
@@ -260,8 +472,10 @@ public final class BslXtextDocumentHook implements IStartup
                 MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
                 if (mv == null)
                     return null;
-                if (!"waitUpdatingDataModel".equals(name) || !WAIT_DESC.equals(descriptor)) //$NON-NLS-1$
+                if (!"waitUpdatingDataModel".equals(name)) //$NON-NLS-1$
                     return mv;
+                if (!WAIT_DESC.equals(descriptor))
+                    SaveDebug.step("asm", "waitUpdatingDataModel desc=" + descriptor); //$NON-NLS-1$ //$NON-NLS-2$
                 return new MethodVisitor(Opcodes.ASM9, mv)
                 {
                     @Override
@@ -274,6 +488,8 @@ public final class BslXtextDocumentHook implements IStartup
                 };
             }
         }, ClassReader.EXPAND_FRAMES);
+        if (!touched.get())
+            SaveDebug.problem("waitUpdatingDataModel not found in locker"); //$NON-NLS-1$
         return touched.get() ? writer.toByteArray() : null;
     }
 
@@ -301,5 +517,32 @@ public final class BslXtextDocumentHook implements IStartup
         mv.visitLabel(notSupplier);
         mv.visitInsn(Opcodes.POP);
         mv.visitLabel(original);
+    }
+
+    private static final class LockerWeavingHook implements WeavingHook
+    {
+        @Override
+        public void weave(WovenClass wovenClass)
+        {
+            if (!TARGET.equals(wovenClass.getClassName()))
+                return;
+            if (wovenClass.getState() != WovenClass.TRANSFORMING)
+                return;
+            ASM_SEEN.set(true);
+            try
+            {
+                byte[] transformed = transformWaitUpdating(wovenClass.getBytes());
+                if (transformed != null)
+                {
+                    wovenClass.setBytes(transformed);
+                    ASM_PATCHED.set(true);
+                    SaveDebug.step("asm", "WeavingHook patched locker"); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+            }
+            catch (Throwable t)
+            {
+                SaveDebug.problem("WeavingHook: " + t); //$NON-NLS-1$
+            }
+        }
     }
 }

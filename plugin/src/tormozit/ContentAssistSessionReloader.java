@@ -10,6 +10,7 @@ import org.eclipse.jface.text.DocumentEvent;
 import org.eclipse.jface.text.IInformationControlCreator;
 import org.eclipse.jface.text.ITextViewer;
 import org.eclipse.jface.text.ITextViewerExtension5;
+import org.eclipse.jface.text.IViewportListener;
 import org.eclipse.jface.text.link.LinkedModeModel;
 import org.eclipse.jface.text.link.ProposalPosition;
 import org.eclipse.jface.text.contentassist.ContentAssistant;
@@ -196,6 +197,11 @@ public final class ContentAssistSessionReloader
      */
     private volatile boolean pendingParamHintOnChar;
     private volatile int pendingParamHintOnCharCaret = -1;
+    /**
+     * {@code '('} — только скобка самого вызова, не группировка в выражении;
+     * {@code ','} — внутри скобок вызова; {@code 0} — после вставки proposal.
+     */
+    private volatile char pendingParamHintKind;
     /** Последняя выделенная строка popup — для сдвига каретки после пробела у {@code =}. */
     private ICompletionProposal lastAssistSelection;
     /** Поколение отложенного param hint — отмена повторного timerExec. */
@@ -211,6 +217,7 @@ public final class ContentAssistSessionReloader
     private VerifyKeyListener completionAutoOpenVerifyListener;
     private IDocumentListener completionAutoOpenDocumentListener;
     private volatile boolean completionAutoOpenAwaitingLogged;
+    private InputJumpProbe inputJumpProbe;
 
     private static final int WORDS_TABLE_DEBOUNCE_MS = 200;
     /** Задержка flush pending recompute после literal-open (fix10). */
@@ -585,6 +592,7 @@ boolean inLiteral = endCaret >= 0
         installStyledTextKeyListener();
         installCompletionAutoOpenVerifyListener();
         installCompletionAutoOpenDocumentListener();
+        installInputJumpProbe();
         installContentAssistCommandListener();
     }
 
@@ -603,6 +611,7 @@ boolean inLiteral = endCaret >= 0
         cancelIrEvaluationIfConnected();
         uninstallCtrlSpaceFilter();
         uninstallStyledTextKeyListener();
+        uninstallInputJumpProbe();
         uninstallCompletionAutoOpenVerifyListener();
         uninstallCompletionAutoOpenDocumentListener();
         uninstallSessionCaretListener();
@@ -648,6 +657,28 @@ boolean inLiteral = endCaret >= 0
                 text.removeCaretListener(sessionCaretListener);
         }
         sessionCaretListener = null;
+    }
+
+    private void installInputJumpProbe()
+    {
+        if (inputJumpProbe != null)
+            return;
+        if (!(viewer.getTextWidget() instanceof StyledText))
+            return;
+        StyledText text = (StyledText) viewer.getTextWidget();
+        if (text.isDisposed())
+            return;
+        inputJumpProbe = new InputJumpProbe(this);
+        inputJumpProbe.install(text);
+    }
+
+    private void uninstallInputJumpProbe()
+    {
+        if (inputJumpProbe == null)
+            return;
+        StyledText text = viewer.getTextWidget() instanceof StyledText st ? st : null;
+        inputJumpProbe.uninstall(text);
+        inputJumpProbe = null;
     }
 
     private void onSessionCaretMoved(CaretEvent event)
@@ -821,6 +852,8 @@ boolean inLiteral = endCaret >= 0
             public void documentAboutToBeChanged(DocumentEvent event)
             {
                 prepareStockLinkedModeBeforeAssistInsert(event);
+                if (inputJumpProbe != null)
+                    inputJumpProbe.aboutToChange(event);
             }
 
             @Override
@@ -828,6 +861,8 @@ boolean inLiteral = endCaret >= 0
             {
                 long t0 = System.nanoTime();
                 String text = event == null ? null : event.getText();
+                if (inputJumpProbe != null)
+                    inputJumpProbe.documentChanged(event);
                 boolean inDocLiteral = false;
                 if (text != null && !text.isEmpty() && event != null)
                 {
@@ -1039,6 +1074,7 @@ boolean inLiteral = endCaret >= 0
     /**
      * Ввод {@code (} или {@code ,}: открыть подсказку параметров метода,
      * если она не открыта (аналогично {@link #maybeShowParamHintAfterInsert}).
+     * {@code (} — только скобка самого вызова, не группировка в выражении.
      */
     private void maybeShowParamHintOnChar()
     {
@@ -1047,14 +1083,17 @@ boolean inLiteral = endCaret >= 0
         pendingParamHintOnChar = false;
         int caret = pendingParamHintOnCharCaret;
         pendingParamHintOnCharCaret = -1;
+        char hintKind = pendingParamHintKind;
         int modelCaret = modelCaretOffset();
         boolean applyInProgress =
             Boolean.TRUE.equals(SmartCompletionProposal.PROPOSAL_APPLY_IN_PROGRESS.get());
         boolean hoverVisible = isParamHoverShellVisible() || isParamHoverInfoControlVisible();
         if (caret < 0 || applyInProgress || suppressDocumentAutoOpenAfterSession || hoverVisible)
         {
+            pendingParamHintKind = 0;
             logLinkedMode("hint.onChar.skip", "{\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
                 + ",\"modelCaret\":" + modelCaret //$NON-NLS-1$
+                + ",\"kind\":\"" + hintKind + "\"" //$NON-NLS-1$ //$NON-NLS-2$
                 + ",\"apply\":" + applyInProgress //$NON-NLS-1$
                 + ",\"suppress\":" + suppressDocumentAutoOpenAfterSession //$NON-NLS-1$
                 + ",\"hover\":" + hoverVisible + "}"); //$NON-NLS-1$ //$NON-NLS-2$
@@ -1064,6 +1103,7 @@ boolean inLiteral = endCaret >= 0
         pendingParamHintDesiredCaret = caret;
         logLinkedMode("hint.onChar", "{\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
             + ",\"modelCaret\":" + modelCaret //$NON-NLS-1$
+            + ",\"kind\":\"" + hintKind + "\"" //$NON-NLS-1$ //$NON-NLS-2$
             + ",\"around\":\"" + ContentAssistDebug.jsonEscapeForLog(clipAroundCaret(caret)) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
         maybeShowParamHintAfterInsert(caret);
     }
@@ -1091,6 +1131,8 @@ boolean inLiteral = endCaret >= 0
         }
         pendingShowParamHintAfterInsert = false;
         pendingParamHintDesiredCaret = -1;
+        final char hintKind = pendingParamHintKind;
+        pendingParamHintKind = 0;
         if (desired < 0)
         {
             logLinkedMode("hint.skip", "{\"reason\":\"noDesired\",\"caret\":" + modelCaret //$NON-NLS-1$ //$NON-NLS-2$
@@ -1109,11 +1151,12 @@ boolean inLiteral = endCaret >= 0
         final long startedMs = System.currentTimeMillis();
         logLinkedMode("hint.poll", "{\"caret\":" + modelCaret //$NON-NLS-1$ //$NON-NLS-2$
             + ",\"desired\":" + desiredCaret //$NON-NLS-1$
+            + ",\"kind\":\"" + hintKind + "\"" //$NON-NLS-1$ //$NON-NLS-2$
             + ",\"mismatch\":" + (modelCaret != desiredCaret) //$NON-NLS-1$
             + ",\"gen\":" + gen //$NON-NLS-1$
             + ",\"hasModel\":" + hasModel + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         display.timerExec(0,
-            () -> pollAstReadyThenShowParamHint(desiredCaret, gen, 0, startedMs, 0L));
+            () -> pollAstReadyThenShowParamHint(desiredCaret, gen, 0, startedMs, 0L, hintKind));
     }
 
     private static final int PARAM_HINT_AST_POLL_MS = 20;
@@ -1128,9 +1171,11 @@ boolean inLiteral = endCaret >= 0
     /**
      * Ждём {@code resolveObject} (им EDT собирает подсказку), не
      * {@code getFeatureEntries}. Если окна нет — повтор до таймаута.
+     * {@code hintKind}: {@code '('} — только скобка самого вызова; {@code ','} —
+     * внутри скобок вызова; {@code 0} — после вставки proposal (как раньше).
      */
     private void pollAstReadyThenShowParamHint(int desiredCaret, int gen, int attempt,
-        long startedMs, long lastExecMs)
+        long startedMs, long lastExecMs, char hintKind)
     {
         if (gen != paramHintPostGen.get())
             return;
@@ -1151,7 +1196,7 @@ boolean inLiteral = endCaret >= 0
                 }
                 display.timerExec(PARAM_HINT_AST_POLL_MS,
                     () -> pollAstReadyThenShowParamHint(desiredCaret, gen, attempt + 1, startedMs,
-                        lastExecMs));
+                        lastExecMs, hintKind));
                 return;
             }
             logLinkedMode("poll.skip", "{\"reason\":\"caretMismatch\",\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
@@ -1167,19 +1212,64 @@ boolean inLiteral = endCaret >= 0
             return;
         }
         String astAt = describeInvocationAt(desiredCaret);
-        boolean astReady = isAstDescriptionReady(astAt) && nodeEndCoversCaret(astAt, desiredCaret);
+        boolean ownOpen = isOwnCallOpenParen(astAt, desiredCaret);
+        boolean callCovers = astHasCallNode(astAt) && nodeEndCoversCaret(astAt, desiredCaret);
+        boolean astReady = isAstDescriptionReady(astAt)
+            && (hintKind == '(' ? ownOpen : nodeEndCoversCaret(astAt, desiredCaret));
+        if (hintKind == '(' && ownOpen && isQueryOperatorOpenParen(desiredCaret))
+            astReady = true;
         waitMs = System.currentTimeMillis() - startedMs;
+        if (hintKind == '(' && !ownOpen)
+        {
+            if (waitMs < PARAM_HINT_AST_TIMEOUT_MS)
+            {
+                if (attempt == 0)
+                {
+                    logLinkedMode("poll.waitOwnParen", "{\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                        + ",\"ast\":\"" + ContentAssistDebug.jsonEscapeForLog(astAt) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+                display.timerExec(PARAM_HINT_AST_POLL_MS,
+                    () -> pollAstReadyThenShowParamHint(desiredCaret, gen, attempt + 1, startedMs,
+                        lastExecMs, hintKind));
+                return;
+            }
+            logLinkedMode("poll.skip", "{\"reason\":\"notOwnParen\",\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"waitMs\":" + waitMs //$NON-NLS-1$
+                + ",\"ast\":\"" + ContentAssistDebug.jsonEscapeForLog(astAt) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"around\":\"" + ContentAssistDebug.jsonEscapeForLog(clipAroundCaret(caret)) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        }
+        if (hintKind == ',' && !callCovers)
+        {
+            if (waitMs < PARAM_HINT_AST_TIMEOUT_MS)
+            {
+                if (attempt == 0)
+                {
+                    logLinkedMode("poll.waitCall", "{\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                        + ",\"ast\":\"" + ContentAssistDebug.jsonEscapeForLog(astAt) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+                display.timerExec(PARAM_HINT_AST_POLL_MS,
+                    () -> pollAstReadyThenShowParamHint(desiredCaret, gen, attempt + 1, startedMs,
+                        lastExecMs, hintKind));
+                return;
+            }
+            logLinkedMode("poll.skip", "{\"reason\":\"notInCall\",\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"waitMs\":" + waitMs //$NON-NLS-1$
+                + ",\"ast\":\"" + ContentAssistDebug.jsonEscapeForLog(astAt) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        }
         if (!astReady && waitMs < PARAM_HINT_AST_TIMEOUT_MS)
         {
             if (attempt == 0)
             {
                 logLinkedMode("poll.waitAst", "{\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"kind\":\"" + hintKind + "\"" //$NON-NLS-1$ //$NON-NLS-2$
                     + ",\"ast\":\"" + ContentAssistDebug.jsonEscapeForLog(astAt) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
                     + ",\"timeoutMs\":" + PARAM_HINT_AST_TIMEOUT_MS + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             }
             display.timerExec(PARAM_HINT_AST_POLL_MS,
                 () -> pollAstReadyThenShowParamHint(desiredCaret, gen, attempt + 1, startedMs,
-                    lastExecMs));
+                    lastExecMs, hintKind));
             return;
         }
         long now = System.currentTimeMillis();
@@ -1189,11 +1279,13 @@ boolean inLiteral = endCaret >= 0
         {
             display.timerExec(PARAM_HINT_RETRY_MS,
                 () -> pollAstReadyThenShowParamHint(desiredCaret, gen, attempt + 1, startedMs,
-                    lastExecMs));
+                    lastExecMs, hintKind));
             return;
         }
         logLinkedMode("poll.run", "{\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
             + ",\"waitMs\":" + waitMs //$NON-NLS-1$
+            + ",\"kind\":\"" + hintKind + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+            + ",\"ownOpen\":" + ownOpen //$NON-NLS-1$
             + ",\"astReady\":" + astReady //$NON-NLS-1$
             + ",\"ast\":\"" + ContentAssistDebug.jsonEscapeForLog(astAt) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
             + ",\"around\":\"" + ContentAssistDebug.jsonEscapeForLog(clipAroundCaret(caret)) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
@@ -1206,7 +1298,7 @@ boolean inLiteral = endCaret >= 0
         {
             display.timerExec(PARAM_HINT_RETRY_MS,
                 () -> pollAstReadyThenShowParamHint(desiredCaret, gen, attempt + 1, startedMs,
-                    System.currentTimeMillis()));
+                    System.currentTimeMillis(), hintKind));
         }
     }
 
@@ -1222,6 +1314,69 @@ boolean inLiteral = endCaret >= 0
             return resolved > 0;
         int entries = astSuffixInt(ast, "|entries:"); //$NON-NLS-1$
         return entries != 0;
+    }
+
+    private static boolean astHasCallNode(String ast)
+    {
+        if (ast == null || ast.isEmpty() || ast.startsWith("none") || ast.startsWith("err") //$NON-NLS-1$ //$NON-NLS-2$
+            || ast.startsWith("noXtext") || ast.startsWith("resourceNull")) //$NON-NLS-1$ //$NON-NLS-2$
+            return false;
+        return ast.indexOf("Invocation") >= 0 || ast.indexOf("OperatorStyleCreator") >= 0; //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /** Скобка, которую только что ввели, — открывающая скобка этого вызова, не группировка. */
+    private boolean isOwnCallOpenParen(String ast, int caretAfter)
+    {
+        int open = astSuffixInt(ast, "|open:"); //$NON-NLS-1$
+        if (open >= 0 && open == caretAfter - 1)
+            return true;
+        return isQueryOperatorOpenParen(caretAfter);
+    }
+
+    /** Оператор {@code ?()} — параметров три, в AST это не {@code Invocation}. */
+    private boolean isQueryOperatorOpenParen(int caretAfter)
+    {
+        IDocument doc = viewer != null ? viewer.getDocument() : null;
+        if (doc == null || caretAfter < 2)
+            return false;
+        try
+        {
+            int open = caretAfter - 1;
+            if (doc.getChar(open) != '(')
+                return false;
+            int i = open - 1;
+            while (i >= 0 && Character.isWhitespace(doc.getChar(i)))
+                i--;
+            return i >= 0 && doc.getChar(i) == '?';
+        }
+        catch (Exception ignored)
+        {
+            return false;
+        }
+    }
+
+    private static int firstOpenParenFrom(IDocument doc, int from)
+    {
+        if (doc == null || from < 0)
+            return -1;
+        try
+        {
+            int len = doc.getLength();
+            int p = from;
+            while (p < len)
+            {
+                char c = doc.getChar(p);
+                if (c == '(')
+                    return p;
+                if (!Character.isWhitespace(c))
+                    break;
+                p++;
+            }
+        }
+        catch (Exception ignored)
+        {
+        }
+        return -1;
     }
 
     /** Как {@code inInvocationParameters}: каретка строго левее конца узла вызова. */
@@ -1282,6 +1437,7 @@ boolean inLiteral = endCaret >= 0
                     int entries = 0;
                     int resolved = 0;
                     int nodeEnd = 0;
+                    int openParen = -1;
                     int depth = 0;
                     IResourceServiceProvider rsp = resource.getURI() != null
                         ? IResourceServiceProvider.Registry.INSTANCE.getResourceServiceProvider(
@@ -1297,11 +1453,18 @@ boolean inLiteral = endCaret >= 0
                         sb.append(name);
                         if ("Invocation".equals(name)) //$NON-NLS-1$
                         {
+                            boolean innermost = !foundCall;
                             foundCall = true;
                             ICompositeNode node = NodeModelUtils.findActualNodeFor(cur);
                             if (node != null)
                                 nodeEnd = Math.max(nodeEnd, node.getTotalEndOffset());
                             Object access = Global.invoke(cur, "getMethodAccess"); //$NON-NLS-1$
+                            if (innermost && access instanceof EObject acc)
+                            {
+                                ICompositeNode accNode = NodeModelUtils.findActualNodeFor(acc);
+                                if (accNode != null)
+                                    openParen = firstOpenParenFrom(xdoc, accNode.getTotalEndOffset());
+                            }
                             Object list = access != null
                                 ? Global.invoke(access, "getFeatureEntries") : null; //$NON-NLS-1$
                             if (list instanceof List<?> feat && !feat.isEmpty())
@@ -1321,11 +1484,19 @@ boolean inLiteral = endCaret >= 0
                         }
                         else if ("OperatorStyleCreator".equals(name)) //$NON-NLS-1$
                         {
+                            boolean innermost = !foundCall;
                             foundCall = true;
                             ICompositeNode node = NodeModelUtils.findActualNodeFor(cur);
                             if (node != null)
                                 nodeEnd = Math.max(nodeEnd, node.getTotalEndOffset());
-                            if (Global.invoke(cur, "getType") != null) //$NON-NLS-1$
+                            Object type = Global.invoke(cur, "getType"); //$NON-NLS-1$
+                            if (innermost && type instanceof EObject typeObj)
+                            {
+                                ICompositeNode typeNode = NodeModelUtils.findActualNodeFor(typeObj);
+                                if (typeNode != null)
+                                    openParen = firstOpenParenFrom(xdoc, typeNode.getTotalEndOffset());
+                            }
+                            if (type != null)
                             {
                                 entries = Math.max(entries, 1);
                                 resolved = Math.max(resolved, 1);
@@ -1336,7 +1507,8 @@ boolean inLiteral = endCaret >= 0
                         return "none:" + sb; //$NON-NLS-1$
                     return sb.append("|entries:").append(entries) //$NON-NLS-1$
                         .append("|resolved:").append(resolved) //$NON-NLS-1$
-                        .append("|nodeEnd:").append(nodeEnd).toString(); //$NON-NLS-1$
+                        .append("|nodeEnd:").append(nodeEnd) //$NON-NLS-1$
+                        .append("|open:").append(openParen).toString(); //$NON-NLS-1$
                 });
             return described != null ? described : "none"; //$NON-NLS-1$
         }
@@ -2517,6 +2689,8 @@ boolean inLiteral = endCaret >= 0
     private void onVerifyKeyForCompletionAutoOpenImpl(VerifyEvent event)
     {
         pendingAutoOpen = false;
+        if (event.character != 0 && inputJumpProbe != null)
+            inputJumpProbe.noteTyping();
         if (suppressDocumentAutoOpenAfterSession
             && !Boolean.TRUE.equals(SmartCompletionProposal.PROPOSAL_APPLY_IN_PROGRESS.get()))
         {
@@ -2576,10 +2750,13 @@ boolean inLiteral = endCaret >= 0
         {
             boolean inComment = BslAssistSourceHeuristics.isInsideLineComment(linePrefix);
             boolean inString = inLiteral;
-            if (!inComment && !inString)
+            boolean callParen = inserted != '('
+                || BslAssistSourceHeuristics.looksLikeCallOpenParen(doc, startOffset);
+            if (!inComment && !inString && callParen)
             {
                 pendingParamHintOnChar = true;
                 pendingParamHintOnCharCaret = caretAfter;
+                pendingParamHintKind = inserted;
             }
             logLinkedMode("verify.char", "{\"ch\":\"" + ContentAssistDebug.jsonEscapeForLog(String.valueOf(inserted)) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
                 + ",\"start\":" + startOffset //$NON-NLS-1$
@@ -2587,6 +2764,7 @@ boolean inLiteral = endCaret >= 0
                 + ",\"popup\":" + popupWasOpen //$NON-NLS-1$
                 + ",\"inComment\":" + inComment //$NON-NLS-1$
                 + ",\"inString\":" + inString //$NON-NLS-1$
+                + ",\"callParen\":" + callParen //$NON-NLS-1$
                 + ",\"pending\":" + pendingParamHintOnChar //$NON-NLS-1$
                 + ",\"mask\":" + event.stateMask + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         }
@@ -4579,7 +4757,10 @@ processor.applyIrCompletion(snapshot);
         if (doc != null && caret >= 0
             && SmartContentAssistProcessor.ReceiverTypeLabel.findMemberAccessDot(doc, caret) >= 0)
             return false;
-        return ContentAssistPopupSync.showPossibleCompletions(ca, true);
+        boolean ok = ContentAssistPopupSync.showPossibleCompletions(ca, true);
+        if (ok)
+            redrawEditorAfterBackgroundPopup(widget);
+        return ok;
     }
 
     /**
@@ -4623,9 +4804,29 @@ processor.applyIrCompletion(snapshot);
             return false;
         }
         boolean ok = ContentAssistPopupSync.showPossibleCompletions(ca, true);
+        if (ok)
+            redrawEditorAfterBackgroundPopup(widget);
         SmartContentAssistProcessor.uiBlockLog("openPopup.memberBg", "ok=" + ok); //$NON-NLS-1$ //$NON-NLS-2$
         ContentAssistDebug.perfMark("openPopup.memberBg", "{\"ok\":" + ok + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         return ok;
+    }
+
+    /**
+     * Показ попапа из фона поднимает layout и catchup свёрток ({@code setRedraw}/
+     * {@code fireTextSet}) — кадр модуля остаётся с пустыми строками, пока не придёт
+     * следующая полная отрисовка. Принудительный {@code redraw} после показа.
+     */
+    private static void redrawEditorAfterBackgroundPopup(StyledText widget)
+    {
+        if (widget == null || widget.isDisposed())
+            return;
+        Display display = widget.getDisplay();
+        if (display == null || display.isDisposed())
+            return;
+        display.timerExec(1, () -> {
+            if (!widget.isDisposed())
+                widget.redraw();
+        });
     }
 
     /** Обновление popup после прихода слов ИР (сразу или в очередь при recompute). */
@@ -5033,6 +5234,319 @@ return;
             if (display == null || display.isDisposed())
                 return false;
             return display.getFocusControl() == text;
+        }
+    }
+
+    /**
+     * Временный зонд: в лог {@code assist-ui-block} резкий необъяснённый
+     * скачок модельной каретки или верхней строки вьюпорта, плюс высота строк
+     * {@code StyledText} после ввода (удвоение межстрочного интервала на экране).
+     */
+    private static final class InputJumpProbe
+    {
+        private static final int CARET_JUMP_CHARS = 80;
+        private static final int VIEWPORT_JUMP_LINES = 4;
+        private static final int TYPING_WINDOW_MS = 800;
+        private static final int LINE_WATCH_MS = 8000;
+        private static final int EXPLAIN_PAD = 8;
+
+        private final ContentAssistSessionReloader host;
+        private CaretListener caretListener;
+        private IViewportListener viewportListener;
+        private long typingUntilNs;
+        private long lineWatchUntilNs;
+        private int lastModel = -1;
+        private int lastWidget = -1;
+        private int lastTop = -1;
+        private int lastDocOff = -1;
+        private int lastDocReplaced;
+        private int lastDocInserted;
+        private int lastDocNewlines;
+        private long lastDocNs;
+        private int lastDefH = Integer.MIN_VALUE;
+        private int lastSpacing = Integer.MIN_VALUE;
+        private int lastStep = Integer.MIN_VALUE;
+        private int lastH0 = Integer.MIN_VALUE;
+        private int lastH1 = Integer.MIN_VALUE;
+        private int lastClientH = Integer.MIN_VALUE;
+        private boolean lastWide;
+        private String lastLineFrom = ""; //$NON-NLS-1$
+
+        InputJumpProbe(ContentAssistSessionReloader host)
+        {
+            this.host = host;
+        }
+
+        void install(StyledText text)
+        {
+            seed(text);
+            caretListener = event -> check();
+            text.addCaretListener(caretListener);
+            viewportListener = verticalOffset -> check();
+            host.viewer.addViewportListener(viewportListener);
+        }
+
+        void uninstall(StyledText text)
+        {
+            if (text != null && !text.isDisposed() && caretListener != null)
+                text.removeCaretListener(caretListener);
+            if (viewportListener != null && host.viewer != null)
+                host.viewer.removeViewportListener(viewportListener);
+            caretListener = null;
+            viewportListener = null;
+        }
+
+        void noteTyping()
+        {
+            long now = System.nanoTime();
+            typingUntilNs = now + TYPING_WINDOW_MS * 1_000_000L;
+            lineWatchUntilNs = now + LINE_WATCH_MS * 1_000_000L;
+        }
+
+        void aboutToChange(DocumentEvent event)
+        {
+            if (event == null)
+                return;
+            lastDocReplaced = event.getLength();
+            int live = host.modelCaretOffset();
+            if (!inTypingWindow() || live < 0)
+                return;
+            if (Math.abs(event.getOffset() - live) < CARET_JUMP_CHARS)
+                return;
+            log("inputJump.docOff", live, widgetCaret(), topIndex(), //$NON-NLS-1$
+                event.getOffset() - live, 0, 0, "off=" + event.getOffset() //$NON-NLS-1$
+                    + " repl=" + event.getLength()); //$NON-NLS-1$
+        }
+
+        void documentChanged(DocumentEvent event)
+        {
+            noteTyping();
+            if (event == null)
+                return;
+            String text = event.getText();
+            lastDocOff = event.getOffset();
+            lastDocInserted = text == null ? 0 : text.length();
+            lastDocNewlines = countNewlines(text);
+            lastDocNs = System.nanoTime();
+        }
+
+        private void check()
+        {
+            StyledText text = widget();
+            if (text == null)
+                return;
+            int model = host.toModelOffset(text.getCaretOffset());
+            int widgetOff = text.getCaretOffset();
+            int top = text.getTopIndex();
+            if (lastModel < 0)
+            {
+                remember(model, widgetOff, top);
+                sampleLineMetrics(text, "caret"); //$NON-NLS-1$
+                return;
+            }
+            int dModel = model - lastModel;
+            int dWidget = widgetOff - lastWidget;
+            int dTop = top - lastTop;
+            boolean caretJump = Math.abs(dModel) >= CARET_JUMP_CHARS
+                && !explainedByDoc(model, Math.abs(dModel));
+            boolean viewJump = Math.abs(dTop) >= VIEWPORT_JUMP_LINES
+                && !explainedByDocLines(Math.abs(dTop));
+            if (inTypingWindow() && (caretJump || viewJump))
+            {
+                String why = caretJump && viewJump ? "caret+view" //$NON-NLS-1$
+                    : caretJump ? "caret" : "view"; //$NON-NLS-1$ //$NON-NLS-2$
+                log("inputJump", model, widgetOff, top, dModel, dWidget, dTop, "why=" + why); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            remember(model, widgetOff, top);
+            sampleLineMetrics(text, "caret"); //$NON-NLS-1$
+        }
+
+        private boolean explainedByDoc(int model, int absDelta)
+        {
+            if (lastDocNs == 0 || lastDocOff < 0)
+                return false;
+            if (System.nanoTime() - lastDocNs > TYPING_WINDOW_MS * 1_000_000L)
+                return false;
+            int from = lastDocOff - EXPLAIN_PAD;
+            int to = lastDocOff + lastDocInserted + EXPLAIN_PAD;
+            if (model >= from && model <= to)
+                return true;
+            int edit = lastDocInserted + lastDocReplaced;
+            return edit > 0 && absDelta <= edit + EXPLAIN_PAD;
+        }
+
+        private boolean explainedByDocLines(int absTop)
+        {
+            if (lastDocNs == 0)
+                return false;
+            if (System.nanoTime() - lastDocNs > TYPING_WINDOW_MS * 1_000_000L)
+                return false;
+            return lastDocNewlines >= absTop - 1;
+        }
+
+        private boolean inTypingWindow()
+        {
+            return System.nanoTime() <= typingUntilNs;
+        }
+
+        private boolean inLineWatch()
+        {
+            return System.nanoTime() <= lineWatchUntilNs;
+        }
+
+        /**
+         * Высота строк виджета. Только с каретки/вьюпорта — не из {@code SWT.Paint}:
+         * {@code getLinePixel} во время кадра портит отрисовку.
+         */
+        private void sampleLineMetrics(StyledText text, String from)
+        {
+            if (text == null || text.isDisposed() || !inLineWatch())
+                return;
+            int defH = text.getLineHeight();
+            int spacing = text.getLineSpacing();
+            int top = text.getTopIndex();
+            int lines = text.getLineCount();
+            int h0 = top >= 0 && top < lines ? text.getLineHeight(top) : -1;
+            int h1 = top >= 0 && top + 1 < lines ? text.getLineHeight(top + 1) : -1;
+            int step = -1;
+            if (top >= 0 && top + 1 < lines)
+                step = text.getLinePixel(top + 1) - text.getLinePixel(top);
+            int clientH = text.getClientArea().height;
+            boolean wide = defH > 0
+                && (spacing >= defH / 2
+                    || h0 >= defH + defH / 2
+                    || step >= defH + defH / 2);
+            boolean changed = defH != lastDefH || spacing != lastSpacing || step != lastStep
+                || h0 != lastH0 || h1 != lastH1 || clientH != lastClientH || wide != lastWide;
+            if (!changed)
+                return;
+            lastDefH = defH;
+            lastSpacing = spacing;
+            lastStep = step;
+            lastH0 = h0;
+            lastH1 = h1;
+            lastClientH = clientH;
+            lastWide = wide;
+            lastLineFrom = from;
+            if (wide)
+            {
+                long hold = System.nanoTime() + LINE_WATCH_MS * 1_000_000L;
+                if (hold > lineWatchUntilNs)
+                    lineWatchUntilNs = hold;
+            }
+            emitLineMetrics();
+        }
+
+        private void emitLineMetrics()
+        {
+            int visDef = lastDefH > 0 ? lastClientH / lastDefH : -1;
+            int visStep = lastStep > 0 ? lastClientH / lastStep : -1;
+            String where = lastWide ? "lineMetrics.wide" : "lineMetrics"; //$NON-NLS-1$ //$NON-NLS-2$
+            SmartContentAssistProcessor.uiBlockLog(where, "from=" + lastLineFrom //$NON-NLS-1$
+                + " defH=" + lastDefH + " spacing=" + lastSpacing //$NON-NLS-1$ //$NON-NLS-2$
+                + " step=" + lastStep + " h0=" + lastH0 + " h1=" + lastH1 //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " clientH=" + lastClientH + " visDef=" + visDef //$NON-NLS-1$ //$NON-NLS-2$
+                + " visStep=" + visStep //$NON-NLS-1$
+                + " top=" + lastTop //$NON-NLS-1$
+                + " popup=" + ContentAssistPopupSync.isPopupVisible(host.assistant)); //$NON-NLS-1$
+        }
+
+        private void remember(int model, int widgetOff, int top)
+        {
+            lastModel = model;
+            lastWidget = widgetOff;
+            lastTop = top;
+        }
+
+        private void seed(StyledText text)
+        {
+            if (text == null || text.isDisposed())
+                return;
+            remember(host.toModelOffset(text.getCaretOffset()), text.getCaretOffset(),
+                text.getTopIndex());
+        }
+
+        private void log(String where, int model, int widgetOff, int top,
+            int dModel, int dWidget, int dTop, String extra)
+        {
+            IDocument doc = host.viewer != null ? host.viewer.getDocument() : null;
+            long now = System.nanoTime();
+            long msKey = typingUntilNs == 0 ? -1
+                : (TYPING_WINDOW_MS - (typingUntilNs - now) / 1_000_000L);
+            long msDoc = lastDocNs == 0 ? -1 : (now - lastDocNs) / 1_000_000L;
+            SmartContentAssistProcessor.uiBlockLog(where, extra
+                + " model=" + model + " widget=" + widgetOff + " top=" + top //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " dModel=" + dModel + " dWidget=" + dWidget + " dTop=" + dTop //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " lastModel=" + lastModel + " lastTop=" + lastTop //$NON-NLS-1$ //$NON-NLS-2$
+                + " docOff=" + lastDocOff + " ins=" + lastDocInserted //$NON-NLS-1$ //$NON-NLS-2$
+                + " repl=" + lastDocReplaced //$NON-NLS-1$
+                + " msKey=" + msKey + " msDoc=" + msDoc //$NON-NLS-1$ //$NON-NLS-2$
+                + " popup=" + ContentAssistPopupSync.isPopupVisible(host.assistant) //$NON-NLS-1$
+                + " apply=" + host.isAssistProposalInsertInProgress() //$NON-NLS-1$
+                + " around=\"" + SmartContentAssistProcessor.uiBlockAround(doc, model) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                + " trace=" + jumpTrace()); //$NON-NLS-1$
+        }
+
+        private StyledText widget()
+        {
+            if (host.viewer == null)
+                return null;
+            return host.viewer.getTextWidget() instanceof StyledText st && !st.isDisposed()
+                ? st : null;
+        }
+
+        private int widgetCaret()
+        {
+            StyledText text = widget();
+            return text == null ? -1 : text.getCaretOffset();
+        }
+
+        private int topIndex()
+        {
+            StyledText text = widget();
+            return text == null ? -1 : text.getTopIndex();
+        }
+
+        private static int countNewlines(String text)
+        {
+            if (text == null || text.isEmpty())
+                return 0;
+            int n = 0;
+            for (int i = 0; i < text.length(); i++)
+            {
+                if (text.charAt(i) == '\n')
+                    n++;
+            }
+            return n;
+        }
+
+        private static String jumpTrace()
+        {
+            StackTraceElement[] st = Thread.currentThread().getStackTrace();
+            StringBuilder sb = new StringBuilder();
+            int n = 0;
+            for (int i = 2; i < st.length && n < 8; i++)
+            {
+                String cn = st[i].getClassName();
+                if (cn == null)
+                    continue;
+                if (cn.contains("InputJumpProbe") || cn.startsWith("org.eclipse.swt.")
+                    || "java.lang.Thread".equals(cn))
+                    continue;
+                String mn = st[i].getMethodName();
+                if ("getStackTrace".equals(mn) || "jumpTrace".equals(mn) || "log".equals(mn)
+                    || "check".equals(mn) || "onCaret".equals(mn) || "onViewport".equals(mn)
+                    || "sampleLineMetrics".equals(mn) || "emitLineMetrics".equals(mn))
+                    continue;
+                int dot = cn.lastIndexOf('.');
+                String shortName = dot >= 0 ? cn.substring(dot + 1) : cn;
+                if (sb.length() > 0)
+                    sb.append('|');
+                sb.append(shortName).append('.').append(mn).append(':')
+                    .append(st[i].getLineNumber());
+                n++;
+            }
+            return sb.toString();
         }
     }
 }

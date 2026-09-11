@@ -7,6 +7,7 @@ import java.lang.reflect.Modifier;
 import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
@@ -31,6 +32,10 @@ import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.dialogs.Dialog;
 import org.eclipse.jface.dialogs.IDialogConstants;
+import org.eclipse.jface.text.Position;
+import org.eclipse.jface.text.source.Annotation;
+import org.eclipse.jface.text.source.IAnnotationModel;
+import org.eclipse.jface.text.source.ISourceViewer;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.events.SelectionListener;
 import org.eclipse.swt.layout.GridData;
@@ -47,14 +52,18 @@ import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.preferences.ScopedPreferenceStore;
+import org.eclipse.ui.texteditor.IDocumentProvider;
 import org.eclipse.ui.texteditor.ITextEditor;
+import org.eclipse.ui.texteditor.MarkerAnnotation;
 
 import org.eclipse.xtext.resource.XtextResource;
 import org.eclipse.xtext.ui.editor.model.IXtextDocument;
 import org.eclipse.xtext.util.concurrent.IUnitOfWork;
 
 import com._1c.g5.v8.bm.core.IBmObject;
+import com._1c.g5.v8.derived.IDerivedDataManager;
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
+import com._1c.g5.v8.dt.core.platform.IDerivedDataManagerProvider;
 import com._1c.g5.v8.dt.core.platform.IResourceLookup;
 import com._1c.g5.v8.dt.ui.editor.IDtEditor;
 import com._1c.g5.v8.dt.ui.editor.input.IDtEditorInput;
@@ -103,6 +112,8 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
     private static final String TAG = "LaunchSaveDirtyEditors"; //$NON-NLS-1$
     private static final String ERROR_LOG = "launch-errors"; //$NON-NLS-1$
     private static final String BSL_EXTENSION = "bsl"; //$NON-NLS-1$
+    /** После сохранения ждём догоняющий пересчёт маркеров, но не дольше этого. */
+    private static final long CHECKS_WAIT_MS = 2_000;
 
     private static final String RUNTIME_CLIENT_TYPE = "com._1c.g5.v8.dt.launching.core.RuntimeClient"; //$NON-NLS-1$
     private static final String ATTR_PROJECT_NAME = "com._1c.g5.v8.dt.debug.core.ATTR_PROJECT_NAME"; //$NON-NLS-1$
@@ -280,7 +291,7 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
             if (Boolean.FALSE.equals(saveDecision))
                 return Boolean.FALSE;
 
-            Boolean errorDecision = decideErrors(project);
+            Boolean errorDecision = decideErrors(project, Boolean.TRUE.equals(saveDecision));
             if (Boolean.FALSE.equals(errorDecision))
                 return Boolean.FALSE;
 
@@ -324,13 +335,14 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
          * @return {@code TRUE} — пользователь подтвердил запуск при ошибках;
          *     {@code FALSE} — отмена; {@code null} — ошибок в открытых редакторах нет.
          */
-        private Boolean decideErrors(IProject project)
+        private Boolean decideErrors(IProject project, boolean savedNow)
         {
             try
             {
                 IMarkerManager markerManager = Global.getOsgiService(IMarkerManager.class);
                 Global.tempLog(ERROR_LOG, "start project=" + project.getName() //$NON-NLS-1$
-                    + " markerManager=" + (markerManager != null)); //$NON-NLS-1$
+                    + " markerManager=" + (markerManager != null) //$NON-NLS-1$
+                    + " savedNow=" + savedNow); //$NON-NLS-1$
                 if (markerManager == null)
                     return null;
 
@@ -341,35 +353,17 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
                         open.add(rowOf(editor));
                 });
 
-                List<Row> rows = new ArrayList<>();
-                for (Row row : open)
-                {
-                    String hit = "none"; //$NON-NLS-1$
-                    try
-                    {
-                        hit = configErrorHit(markerManager, project, row);
-                        if (!"none".equals(hit)) //$NON-NLS-1$
-                            rows.add(row);
-                    }
-                    catch (RuntimeException e)
-                    {
-                        hit = "ex:" + e.getClass().getSimpleName(); //$NON-NLS-1$
-                        Global.logError(TAG, "не удалось проверить редактор " + row.text, e); //$NON-NLS-1$
-                        Global.tempLogException(ERROR_LOG, "editor " + row.text, e); //$NON-NLS-1$
-                    }
-                    Global.tempLog(ERROR_LOG, "editor text=" + row.text //$NON-NLS-1$
-                        + " class=" + row.editor.getClass().getSimpleName() //$NON-NLS-1$
-                        + " ids=" + row.ids //$NON-NLS-1$
-                        + " files=" + fileNames(row.files) //$NON-NLS-1$
-                        + " hit=" + hit); //$NON-NLS-1$
-                }
+                List<Row> rows = collectErrorRows(markerManager, project, open, savedNow);
+                if (savedNow)
+                    rows = waitAndRecheck(markerManager, project, open, rows.isEmpty(), rows);
                 Global.tempLog(ERROR_LOG, "open=" + open.size() + " hits=" + rows.size()); //$NON-NLS-1$ //$NON-NLS-2$
                 if (rows.isEmpty())
                     return null;
 
                 rows.sort(Comparator.comparing(row -> row.text));
+                List<Row> errorRows = rows;
                 int[] answer = { IDialogConstants.CANCEL_ID };
-                Display.getDefault().syncExec(() -> answer[0] = openErrorsDialog(project.getName(), rows));
+                Display.getDefault().syncExec(() -> answer[0] = openErrorsDialog(project.getName(), errorRows));
                 Global.tempLog(ERROR_LOG, "dialog=" + answer[0]); //$NON-NLS-1$
                 return answer[0] == LAUNCH_WITH_ERRORS_ID ? Boolean.TRUE : Boolean.FALSE;
             }
@@ -379,6 +373,87 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
                 Global.tempLogException(ERROR_LOG, "decideErrors", t); //$NON-NLS-1$
                 return null;
             }
+        }
+
+        /**
+         * После сохранения и подчёркивания, и маркеры EDT отстают: новая ошибка
+         * появляется с задержкой, исправленная ещё какое-то время висит.
+         *
+         * @param appearing {@code true} — в первом проходе ошибок не было, ждём появления;
+         *     {@code false} — ошибки уже были, ждём, пока устаревшие пропадут.
+         */
+        private List<Row> waitAndRecheck(IMarkerManager markerManager, IProject project, List<Row> open,
+            boolean appearing, List<Row> rows)
+        {
+            long deadline = System.currentTimeMillis() + CHECKS_WAIT_MS;
+            int attempt = 0;
+            Global.tempLog(ERROR_LOG, "wait appearing=" + appearing + " startHits=" + rows.size()); //$NON-NLS-1$ //$NON-NLS-2$
+            while (System.currentTimeMillis() < deadline)
+            {
+                attempt++;
+                long remaining = deadline - System.currentTimeMillis();
+                if (remaining <= 0)
+                    break;
+                waitForChecks(project, remaining);
+                open.clear();
+                Display.getDefault().syncExec(() ->
+                {
+                    for (IEditorPart editor : scopedOpenEditors(project))
+                        open.add(rowOf(editor));
+                });
+                rows = collectErrorRows(markerManager, project, open, true);
+                Global.tempLog(ERROR_LOG, "afterWait attempt=" + attempt //$NON-NLS-1$
+                    + " hits=" + rows.size() //$NON-NLS-1$
+                    + " appearing=" + appearing); //$NON-NLS-1$
+                if (appearing && !rows.isEmpty())
+                    return rows;
+                if (!appearing && rows.isEmpty())
+                    return rows;
+                remaining = deadline - System.currentTimeMillis();
+                if (remaining <= 0)
+                    break;
+                try
+                {
+                    Thread.sleep(Math.min(200L, remaining));
+                }
+                catch (InterruptedException e)
+                {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+            return rows;
+        }
+
+        private List<Row> collectErrorRows(IMarkerManager markerManager, IProject project, List<Row> open,
+            boolean afterSave)
+        {
+            List<Row> rows = new ArrayList<>();
+            for (Row row : open)
+            {
+                String hit = "none"; //$NON-NLS-1$
+                try
+                {
+                    hit = configErrorHit(markerManager, project, row, afterSave);
+                    if (!"none".equals(hit)) //$NON-NLS-1$
+                        rows.add(row);
+                }
+                catch (RuntimeException e)
+                {
+                    hit = "ex:" + e.getClass().getSimpleName(); //$NON-NLS-1$
+                    Global.logError(TAG, "не удалось проверить редактор " + row.text, e); //$NON-NLS-1$
+                    Global.tempLogException(ERROR_LOG, "editor " + row.text, e); //$NON-NLS-1$
+                }
+                Global.tempLog(ERROR_LOG, "editor text=" + row.text //$NON-NLS-1$
+                    + " class=" + row.editor.getClass().getSimpleName() //$NON-NLS-1$
+                    + " ids=" + row.ids //$NON-NLS-1$
+                    + " files=" + fileNames(row.files) //$NON-NLS-1$
+                    + " live=" + row.liveHit //$NON-NLS-1$
+                    + " trusted=" + row.liveTrusted //$NON-NLS-1$
+                    + " afterSave=" + afterSave //$NON-NLS-1$
+                    + " hit=" + hit); //$NON-NLS-1$
+            }
+            return rows;
         }
 
         private Object forward(Method method, Object[] args) throws Throwable
@@ -488,7 +563,9 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
         LinkedHashSet<Object> ids = new LinkedHashSet<>();
         LinkedHashSet<IFile> files = new LinkedHashSet<>();
         collectEditorTargets(editor, ids, files);
-        return new Row(editor, editorPresentation(editor), new ArrayList<>(ids), new ArrayList<>(files));
+        String liveHit = liveErrorHit(editor);
+        return new Row(editor, editorPresentation(editor), new ArrayList<>(ids), new ArrayList<>(files), liveHit,
+            isLiveTrusted(editor, liveHit));
     }
 
     private static void collectEditorTargets(IEditorPart editor, LinkedHashSet<Object> ids,
@@ -631,11 +708,17 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
     }
 
     /**
-     * @return причина попадания или {@code none}: языковые маркеры по пути файла,
-     *     вложенные модельные, либо {@code IMarker.PROBLEM} в самом редакторе
+     * @return причина попадания или {@code none}: живые аннотации редактора,
+     *     языковые маркеры по пути файла, вложенные модельные, либо {@code IMarker.PROBLEM}
      */
-    private static String configErrorHit(IMarkerManager markers, IProject project, Row row)
+    private static String configErrorHit(IMarkerManager markers, IProject project, Row row, boolean afterSave)
     {
+        if (hasLiveError(row.liveHit))
+            return "live"; //$NON-NLS-1$
+        // Сразу после сохранения маркеры EDT ещё держат уже исправленную ошибку.
+        // Если живые аннотации модуля уже пустые — им верим.
+        if (afterSave && row.liveTrusted && "none".equals(row.liveHit)) //$NON-NLS-1$
+            return "none"; //$NON-NLS-1$
         if (hasMarkerErrors(markers, project, row.ids))
             return "markers"; //$NON-NLS-1$
         for (Object id : row.ids)
@@ -646,6 +729,119 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
         if (hasProblemErrors(row.files))
             return "problem"; //$NON-NLS-1$
         return "none"; //$NON-NLS-1$
+    }
+
+    private static boolean hasLiveError(String liveHit)
+    {
+        return liveHit != null && !"none".equals(liveHit) //$NON-NLS-1$
+            && !liveHit.startsWith("no-text") && !liveHit.startsWith("no-model"); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    private static boolean isLiveTrusted(IEditorPart editor, String liveHit)
+    {
+        if (!"none".equals(liveHit) && !hasLiveError(liveHit)) //$NON-NLS-1$
+            return false;
+        return GetRef.getActiveBslEditor(editor) != null;
+    }
+
+    /**
+     * Красные аннотации в открытом редакторе — живая валидация Xtext, ещё до записи
+     * маркеров в {@link IMarkerManager} после сохранения.
+     */
+    private static String liveErrorHit(IEditorPart editor)
+    {
+        IAnnotationModel model = annotationModelOf(editor);
+        if (model == null)
+        {
+            ITextEditor text = textEditorOf(editor);
+            return text == null ? "no-text" : "no-model:" + text.getClass().getSimpleName(); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        try
+        {
+            Iterator<?> iterator = model.getAnnotationIterator();
+            while (iterator.hasNext())
+            {
+                Object next = iterator.next();
+                if (!(next instanceof Annotation annotation) || annotation.isMarkedDeleted())
+                    continue;
+                if (!isErrorAnnotation(annotation, model))
+                    continue;
+                String type = annotation.getType();
+                return type != null ? type : "error"; //$NON-NLS-1$
+            }
+        }
+        catch (RuntimeException ignored)
+        {
+        }
+        return "none"; //$NON-NLS-1$
+    }
+
+    private static boolean isErrorAnnotation(Annotation annotation, IAnnotationModel model)
+    {
+        if (annotation instanceof MarkerAnnotation markerAnnotation)
+        {
+            IMarker marker = markerAnnotation.getMarker();
+            if (marker != null && marker.exists()
+                && marker.getAttribute(IMarker.SEVERITY, -1) == IMarker.SEVERITY_ERROR)
+                return true;
+        }
+        String type = annotation.getType();
+        if (type == null || !type.contains("error") || type.contains("warning")) //$NON-NLS-1$ //$NON-NLS-2$
+            return false;
+        Position position = model.getPosition(annotation);
+        return position != null && !position.isDeleted();
+    }
+
+    private static IAnnotationModel annotationModelOf(IEditorPart editor)
+    {
+        ITextEditor text = textEditorOf(editor);
+        if (text != null)
+        {
+            IDocumentProvider provider = text.getDocumentProvider();
+            IEditorInput input = text.getEditorInput();
+            IAnnotationModel fromProvider = provider != null && input != null
+                ? provider.getAnnotationModel(input) : null;
+            if (fromProvider != null)
+                return fromProvider;
+        }
+        Object adapted = editor.getAdapter(ISourceViewer.class);
+        return adapted instanceof ISourceViewer viewer ? viewer.getAnnotationModel() : null;
+    }
+
+    private static ITextEditor textEditorOf(IEditorPart editor)
+    {
+        if (editor instanceof ITextEditor text)
+            return text;
+        BslXtextEditor bsl = GetRef.getActiveBslEditor(editor);
+        if (bsl != null)
+            return bsl;
+        Object adapted = editor.getAdapter(ITextEditor.class);
+        return adapted instanceof ITextEditor text ? text : null;
+    }
+
+    private static void waitForChecks(IProject project, long timeoutMs)
+    {
+        long started = System.currentTimeMillis();
+        IDerivedDataManagerProvider provider = Global.getOsgiService(IDerivedDataManagerProvider.class);
+        IDerivedDataManager manager = provider != null ? provider.get(project) : null;
+        boolean idle = manager == null;
+        if (manager != null && timeoutMs > 0)
+        {
+            try
+            {
+                idle = manager.waitAllComputations(timeoutMs);
+            }
+            catch (InterruptedException e)
+            {
+                Thread.currentThread().interrupt();
+            }
+            catch (RuntimeException e)
+            {
+                Global.tempLog(ERROR_LOG, "waitChecks ex=" + e.getClass().getSimpleName()); //$NON-NLS-1$
+            }
+        }
+        Global.tempLog(ERROR_LOG, "waitChecks ms=" + (System.currentTimeMillis() - started) //$NON-NLS-1$
+            + " idle=" + idle); //$NON-NLS-1$
     }
 
     private static boolean hasMarkerErrors(IMarkerManager markers, IProject project, List<Object> objectIds)
@@ -796,18 +992,23 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
         final String text;
         final List<Object> ids;
         final List<IFile> files;
+        final String liveHit;
+        final boolean liveTrusted;
 
         Row(IEditorPart editor, String text)
         {
-            this(editor, text, List.of(), List.of());
+            this(editor, text, List.of(), List.of(), "none", false); //$NON-NLS-1$
         }
 
-        Row(IEditorPart editor, String text, List<Object> ids, List<IFile> files)
+        Row(IEditorPart editor, String text, List<Object> ids, List<IFile> files, String liveHit,
+            boolean liveTrusted)
         {
             this.editor = editor;
             this.text = text;
             this.ids = ids;
             this.files = files;
+            this.liveHit = liveHit;
+            this.liveTrusted = liveTrusted;
         }
     }
 

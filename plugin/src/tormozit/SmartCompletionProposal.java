@@ -25,6 +25,7 @@ import org.eclipse.swt.widgets.Display;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.PlatformUI;
+import org.eclipse.emf.ecore.EObject;
 import org.eclipse.xtext.ui.editor.contentassist.ConfigurableCompletionProposal;
 import org.eclipse.xtext.ui.editor.model.IXtextDocument;
 import org.eclipse.jface.text.source.SourceViewer;
@@ -359,7 +360,7 @@ public class SmartCompletionProposal implements
         else
         {
             ensureLiteralOverlapBrowserIfNeeded(viewer);
-            scheduleEdtRowActivation();
+            scheduleEdtRowActivation(null);
         }
         if (!(delegate instanceof SmartCompletionProposal)
             && delegate instanceof ICompletionProposalExtension2 ext2)
@@ -819,12 +820,7 @@ public class SmartCompletionProposal implements
     {
         if (delegate instanceof IrCompletionProposal ir)
             return resolveIrAdditionalProposalInfo(ir);
-        Object baseInfo;
-        if (delegate instanceof ICompletionProposalExtension5)
-            baseInfo = ((ICompletionProposalExtension5) delegate)
-                .getAdditionalProposalInfo(new NullProgressMonitor());
-        else
-            baseInfo = delegate.getAdditionalProposalInfo();
+        Object baseInfo = readDelegateEdtAdditionalInfo(new NullProgressMonitor());
         return objectToSideHintString(resolveEdtAssistSideHint(baseInfo));
     }
 
@@ -957,11 +953,7 @@ public class SmartCompletionProposal implements
     {
         if (delegate instanceof IrCompletionProposal ir)
             return resolveIrAdditionalProposalInfo(ir);
-        Object baseInfo = null;
-        if (delegate instanceof ICompletionProposalExtension5)
-            baseInfo = ((ICompletionProposalExtension5) delegate).getAdditionalProposalInfo(monitor);
-        else
-            baseInfo = delegate.getAdditionalProposalInfo();
+        Object baseInfo = readDelegateEdtAdditionalInfo(monitor);
         return resolveEdtAssistSideHint(baseInfo);
     }
 
@@ -1347,6 +1339,47 @@ public class SmartCompletionProposal implements
     }
 
     /**
+     * Штатный hover EDT ({@code ConfigurableCompletionProposal.getAdditionalProposalInfo(monitor)})
+     * для {@code EObject} без ресурса падает в
+     * {@code BslDocumentationProvider.getDocByNotFormalParamVariable}:
+     * {@code eResource().getURI()} без проверки. Не звать hover в этом случае.
+     */
+    private Object readDelegateEdtAdditionalInfo(IProgressMonitor monitor)
+    {
+        if (delegate instanceof ICompletionProposalExtension5 ext5)
+        {
+            if (isEdtAssistHoverUnsafe())
+                return null;
+            return ext5.getAdditionalProposalInfo(
+                monitor != null ? monitor : new NullProgressMonitor());
+        }
+        return delegate.getAdditionalProposalInfo();
+    }
+
+    private boolean isEdtAssistHoverUnsafe()
+    {
+        ICompletionProposal raw = SmartContentAssistProcessor.unwrapProposal(delegate);
+        if (!(raw instanceof ConfigurableCompletionProposal configurable))
+            return false;
+        Object additional = Global.getField(configurable, "additionalProposalInfo"); //$NON-NLS-1$
+        EObject object = eObjectFromProposalAdditionalInfo(additional);
+        return object != null && object.eResource() == null;
+    }
+
+    private static EObject eObjectFromProposalAdditionalInfo(Object additional)
+    {
+        if (additional instanceof EObject eObject)
+            return eObject;
+        if (additional instanceof com.google.inject.Provider<?> provider)
+        {
+            Object value = provider.get();
+            if (value instanceof EObject eObject)
+                return eObject;
+        }
+        return null;
+    }
+
+    /**
      * EDT-строка: штатная боковая подсказка + HTML из кэша активации
      * ({@code ОписаниеТекущегоСловаАвтодополнения}), без {@code ОписаниеХТМЛВыражения}.
      */
@@ -1378,7 +1411,7 @@ public class SmartCompletionProposal implements
         }
         // Активация (ОписаниеТекущегоСловаАвтодополнения) нужна и без BslBrowserInput —
         // иначе overlap EDT+ИР не получает calculated type в подписи строки.
-        maybeScheduleEdtRowActivation(reloader);
+        maybeScheduleEdtRowActivation(reloader, baseInfo);
         return baseInfo;
     }
 
@@ -1391,7 +1424,8 @@ public class SmartCompletionProposal implements
         return IrBslCompletionSupport.formatActivationHtml(act.description, act.rawHtml);
     }
 
-    private void maybeScheduleEdtRowActivation(ContentAssistSessionReloader reloader)
+    private void maybeScheduleEdtRowActivation(ContentAssistSessionReloader reloader,
+        Object baseInfo)
     {
         String cacheKey = BslCompletionSideHintResolver.resolveIrCacheKey(delegate);
         if (cacheKey == null || cacheKey.isEmpty())
@@ -1400,10 +1434,10 @@ public class SmartCompletionProposal implements
             return;
         if (reloader.isIrActivationPending(cacheKey))
             return;
-        scheduleEdtRowActivation();
+        scheduleEdtRowActivation(baseInfo);
     }
 
-    private void scheduleEdtRowActivation()
+    private void scheduleEdtRowActivation(Object baseInfo)
     {
         if (!ComfortSettings.isReplaceListFiltersEnabled())
             return;
@@ -1416,12 +1450,9 @@ public class SmartCompletionProposal implements
         if (cacheKey == null || cacheKey.isEmpty() || name == null || name.isEmpty()
             || kind == null)
             return;
-        Object baseInfo = null;
-        if (delegate instanceof ICompletionProposalExtension5 ext5)
-            baseInfo = ext5.getAdditionalProposalInfo(new NullProgressMonitor());
-        else
-            baseInfo = delegate.getAdditionalProposalInfo();
-        final Object baseInput = baseInfo;
+        final Object baseInput = baseInfo != null
+            ? baseInfo
+            : readDelegateEdtAdditionalInfo(new NullProgressMonitor());
         IrBslCompletionSupport.ActivationDescription cachedRaw = reloader.getIrActivation(cacheKey);
         // Пустой тип при overlap — обычно fetch без КлючНабораСлов до прихода ИР; не держим кэш.
         if (cachedRaw != null && (cachedRaw.type == null || cachedRaw.type.isEmpty())

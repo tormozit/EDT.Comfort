@@ -6,13 +6,19 @@ import org.eclipse.core.commands.ExecutionException;
 import org.eclipse.jface.text.source.ISourceViewer;
 import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.widgets.Control;
+import org.eclipse.swt.widgets.Display;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IWorkbenchPart;
 import org.eclipse.ui.handlers.HandlerUtil;
 import org.eclipse.ui.texteditor.ITextEditor;
 
 /**
- * Перехват команд word navigation в текстовых редакторах (граница идентификатора).
+ * Перехват команд word navigation (Ctrl+←/→ и Ctrl+Shift+←/→): граница идентификатора.
+ *
+ * <p>Цель — виджет с фокусом, а не обязательно {@link ITextEditor}. В поле результата
+ * объединения модулей Комфорт активирует {@code XtextEditorScope} (чтобы работало
+ * «Переключить комментарий»), и штатные привязки редактора забирают Ctrl+←/→ раньше
+ * виджета. Активный редактор при этом — не это поле: без фокуса каретка там не двигалась.
  */
 public final class IdentifierWordNavigationHandler extends AbstractHandler
 {
@@ -29,13 +35,16 @@ public final class IdentifierWordNavigationHandler extends AbstractHandler
     public Object execute(ExecutionEvent event) throws ExecutionException
     {
         String commandId = event.getCommand().getId();
-        IEditorPart editorPart = HandlerUtil.getActiveEditor(event);
-        IWorkbenchPart part = HandlerUtil.getActivePart(event);
-        ITextEditor textEditor = TextEditor.resolveTextEditor(editorPart);
-        if (textEditor == null && part instanceof IEditorPart ep)
-            textEditor = TextEditor.resolveTextEditor(ep);
-
-        StyledText text = resolveStyledText(textEditor);
+        StyledText text = resolveFocusedStyledText();
+        if (text == null)
+        {
+            IEditorPart editorPart = HandlerUtil.getActiveEditor(event);
+            IWorkbenchPart part = HandlerUtil.getActivePart(event);
+            ITextEditor textEditor = TextEditor.resolveTextEditor(editorPart);
+            if (textEditor == null && part instanceof IEditorPart ep)
+                textEditor = TextEditor.resolveTextEditor(ep);
+            text = resolveStyledText(textEditor);
+        }
         if (text == null)
             return null;
 
@@ -48,6 +57,19 @@ public final class IdentifierWordNavigationHandler extends AbstractHandler
         else
             IdentifierSelectionSupport.moveCaret(text, toLeft);
         return null;
+    }
+
+    private static StyledText resolveFocusedStyledText()
+    {
+        Display display = Display.getCurrent();
+        if (display == null)
+            display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return null;
+        Control focus = display.getFocusControl();
+        if (!(focus instanceof StyledText text) || text.isDisposed() || text.getBlockSelection())
+            return null;
+        return text;
     }
 
     private static StyledText resolveStyledText(ITextEditor textEditor)

@@ -63,6 +63,7 @@ import com._1c.g5.v8.dt.bsl.model.Expression;
 import com._1c.g5.v8.dt.bsl.model.ImplicitVariable;
 import com._1c.g5.v8.dt.bsl.model.ProposalElement;
 import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
+import com._1c.g5.v8.dt.bsl.ui.BslSharedImages;
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.mcore.Ctor;
 import com._1c.g5.v8.dt.mcore.DuallyNamedElement;
@@ -275,6 +276,16 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
      */
     private boolean wordListSeededOnUi;
     /**
+     * Иконки SWT для автодополнения уже созданы на UI. {@code ImageDescriptor.createImage()}
+     * берёт {@code Display.getCurrent()}: с воркера это NPE «This is not an UI thread»,
+     * диспетчер Xtext пишет warning в Error Log на каждый {@code complete_*}.
+     */
+    private static volatile boolean assistImagesWarmed;
+    /** {@link #wrapAssistLabelProvider} уже подменил штатный label provider языка. */
+    private static volatile boolean assistLabelProviderWrapped;
+    /** Один раз пишем в temp-log, если с воркера getImage всё же бросил. */
+    private static volatile boolean offUiImageLogged;
+    /**
      * Каталог типов после «Новый». Не сбрасывается {@link #invalidateCache()}: закрытие
      * попапа не должно снова звать {@code delegate.compute} на каждую букву имени типа.
      */
@@ -296,10 +307,59 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
 
     static void uiBlockLog(String where, String data)
     {
+        if (uiBlockLogQuiet(where))
+            return;
         boolean onUi = org.eclipse.swt.widgets.Display.getCurrent() != null;
+        String body = data == null || data.isEmpty() ? "" : " " + clipUiBlockCaller(data); //$NON-NLS-1$ //$NON-NLS-2$
         Global.tempLog(UI_BLOCK_LOG, where + " ui=" + onUi //$NON-NLS-1$
             + " th=" + Thread.currentThread().getName() //$NON-NLS-1$
-            + (data == null || data.isEmpty() ? "" : " " + data)); //$NON-NLS-1$ //$NON-NLS-2$
+            + body);
+    }
+
+    /** Служебный шум: модификаторы, каждый символ документа, Paint, прогресс фильтра. */
+    private static boolean uiBlockLogQuiet(String where)
+    {
+        if (where == null || where.isEmpty())
+            return true;
+        return switch (where)
+        {
+            case "autoOpen.verify.skip", "autoOpen.doc.skip", "doc.chg", "doc.chg.exit", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+                "wordList.paint.arm", "wordList.paint.timer", "wordList.paint.install", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "wordList.pending", "wordList.pending.skip", "wordList.asyncArm", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "wordList.uiFlush", "wordList.uiFlush.skip", "wordList.kickDoc.skip", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "filterAndSort.enter", "filterAndSort.progress", "filterAndSort.item", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "recomputePopupList.enter", "probeDelegateOnce", "resolveExit", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "resolveProposalList", "resolveDelegateOrderedList.fetch", //$NON-NLS-1$ //$NON-NLS-2$
+                "resolveDelegateOrderedList.skipFetch", "prepareWordListAutoOpen", //$NON-NLS-1$ //$NON-NLS-2$
+                "scheduleWordListInBackground", "wordListBackground.run", //$NON-NLS-1$ //$NON-NLS-2$
+                "memberStock.bg.run", "fetchDelegateList", "computeLiteralPassthrough.enter", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "computeLiteralPassthrough.exit" -> true; //$NON-NLS-1$
+            default -> false;
+        };
+    }
+
+    private static String clipUiBlockCaller(String data)
+    {
+        int idx = data.indexOf(" caller="); //$NON-NLS-1$
+        if (idx < 0)
+            return data;
+        String prefix = data.substring(0, idx + " caller=".length()); //$NON-NLS-1$
+        String caller = data.substring(idx + " caller=".length()); //$NON-NLS-1$
+        int pipes = 0;
+        int cut = caller.length();
+        for (int i = 0; i < caller.length(); i++)
+        {
+            if (caller.charAt(i) == '|')
+            {
+                pipes++;
+                if (pipes == 3)
+                {
+                    cut = i;
+                    break;
+                }
+            }
+        }
+        return prefix + caller.substring(0, cut);
     }
 
     static String uiBlockCaller()
@@ -307,14 +367,14 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         StackTraceElement[] st = Thread.currentThread().getStackTrace();
         StringBuilder sb = new StringBuilder();
         int n = 0;
-        for (int i = 2; i < st.length && n < 10; i++)
+        for (int i = 2; i < st.length && n < 3; i++)
         {
             String cn = st[i].getClassName();
             if (cn == null)
                 continue;
             String mn = st[i].getMethodName();
             if ("uiBlockLog".equals(mn) || "uiBlockCaller".equals(mn) //$NON-NLS-1$ //$NON-NLS-2$
-                || "getStackTrace".equals(mn)) //$NON-NLS-1$
+                || "clipUiBlockCaller".equals(mn) || "getStackTrace".equals(mn)) //$NON-NLS-1$ //$NON-NLS-2$
                 continue;
             int dot = cn.lastIndexOf('.');
             String shortName = dot >= 0 ? cn.substring(dot + 1) : cn;
@@ -381,11 +441,13 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     private Job wordListBackgroundJob;
     private volatile int wordListBackgroundKey = Integer.MIN_VALUE;
     /**
-     * Показ после фона: не инъекция клавиши (F20 → SOE). Фильтр {@code SWT.Paint}
-     * ставит {@code timerExec(0)} — подсветка и так рисует, очередь asyncExec не ждём.
+     * Показ после фона: не инъекция клавиши (F20 → SOE). Слушатель {@code SWT.Paint}
+     * на {@code StyledText} модуля (после кадра текста, не {@code Display.addFilter})
+     * ставит {@code timerExec(1)} — после конца кадра модуля, не внутри {@code WM_PAINT}.
      */
     private volatile Runnable pendingWordListUi;
     private org.eclipse.swt.widgets.Listener wordListUiKickFilter;
+    private org.eclipse.swt.custom.StyledText wordListUiKickWidget;
     private volatile boolean wordListFlushArmed;
     private boolean wordListFlushRunning;
     private volatile long pendingWordListAtNano;
@@ -1658,9 +1720,10 @@ return;
             + " filter=" + computeIdentifierFilter(doc, caret) //$NON-NLS-1$
             + " seeded=" + wordListSeededOnUi); //$NON-NLS-1$
         // #endregion
-        // Сразу Job, без Display.asyncExec: посев на UI стоял в той же очереди, что и
-        // подсветка большого модуля, и до compute не доходило ~20 с (лог 10.09.2026
-        // 22:28: kickDoc → seedUi). NPE картинок с воркера ловит probeDelegateOnce.
+        // Сразу Job, без Display.asyncExec полного compute: посев списка на UI стоял
+        // в той же очереди, что и подсветка большого модуля (~20 с, лог 10.09.2026
+        // 22:28: kickDoc → seedUi). Иконки SWT сеет {@link #warmAssistImages} в
+        // {@link #warmBslDocumentListener} — это миллисекунды, не полный список.
         scheduleWordListInBackground(viewer, doc, caret, caret);
     }
 
@@ -2665,11 +2728,12 @@ return;
             wordListBackgroundJob = null;
             wordListEpoch++;
         }
-        org.eclipse.swt.widgets.Display display = viewer.getTextWidget() != null
-            && !viewer.getTextWidget().isDisposed() ? viewer.getTextWidget().getDisplay() : null;
+        org.eclipse.swt.custom.StyledText text = viewer.getTextWidget() instanceof org.eclipse.swt.custom.StyledText st
+            && !st.isDisposed() ? st : null;
+        org.eclipse.swt.widgets.Display display = text != null ? text.getDisplay() : null;
         if (display == null)
             return wordListSkip("noDisplay"); //$NON-NLS-1$
-        installWordListUiKick(display);
+        installWordListUiKick(display, text);
         wordListBackgroundKey = key;
         final int gen = memberStockContextGen;
         final int epoch = wordListEpoch;
@@ -2710,9 +2774,14 @@ return;
                         int anchor = -key - 1;
                         if (anchor < 0)
                             anchor = 0;
-                        // Не computeIdentifierWordEnd: это индекс ПОСЛЕ слова (';' в
-                        // «новый с;»). Штатный CA там отдаёт локальные/шаблоны, не типы.
-                        probe = computeTypeNameProbeOffset(live, anchor);
+                        // Обычный словарь: зонд в НАЧАЛЕ идентификатора (пустой префикс EDT)
+                        // — полный глобальный список. Зонд на последней букве («мет») отдаёт
+                        // 2–30 пунктов; они попадали в кэш, Backspace помечал базу stale.
+                        // После «Новый» по-прежнему последний символ имени типа, не «;».
+                        int liveCaretForProbe = liveNowCaret >= 0 ? liveNowCaret : offset;
+                        probe = isAfterNewKeyword(live, liveCaretForProbe)
+                            ? computeTypeNameProbeOffset(live, liveCaretForProbe)
+                            : anchor;
                     }
                     lastProbe = probe;
                     try
@@ -2757,11 +2826,15 @@ return;
                 ICompletionProposal[] popup = result;
                 String popupFilter = ""; //$NON-NLS-1$
                 IDocument liveDoc = viewer.getDocument();
+                int liveCaretForFilter = resolveWidgetCaret(viewer);
                 if (result.length > 0 && liveDoc != null)
                 {
-                    popupFilter = computeIdentifierFilter(liveDoc, lastProbe);
+                    popupFilter = liveCaretForFilter >= 0
+                        ? computeIdentifierFilter(liveDoc, liveCaretForFilter)
+                        : computeIdentifierFilter(liveDoc, lastProbe);
                     GHOST_DOC.set(liveDoc);
-                    GHOST_CARET.set(Integer.valueOf(lastProbe));
+                    GHOST_CARET.set(Integer.valueOf(
+                        liveCaretForFilter >= 0 ? liveCaretForFilter : lastProbe));
                     try
                     {
                         long tFilter = System.nanoTime();
@@ -2780,8 +2853,10 @@ return;
                 }
                 final ICompletionProposal[] popupList = popup;
                 final String popupFilterFinal = popupFilter;
+                final int probeOffset = lastProbe;
                 uiBlockLog("wordList.done", "n=" + result.length //$NON-NLS-1$ //$NON-NLS-2$
-                    + " key=" + key + " epoch=" + epoch); //$NON-NLS-1$ //$NON-NLS-2$
+                    + " key=" + key + " epoch=" + epoch //$NON-NLS-1$ //$NON-NLS-2$
+                    + " probe=" + lastProbe); //$NON-NLS-1$
                 IDocument liveAfter = viewer.getDocument();
                 int liveAfterCaret = resolveWidgetCaret(viewer);
                 if (monitor.isCanceled() || epoch != wordListEpoch
@@ -2791,7 +2866,7 @@ return;
                     return Status.CANCEL_STATUS;
                 }
                 runWordListOnUi(display, () -> publishWordList(viewer, key, gen, epoch, result,
-                    dataEvents, popupList, popupFilterFinal));
+                    dataEvents, popupList, popupFilterFinal, probeOffset));
                 return Status.OK_STATUS;
                 }
                 catch (StackOverflowError e)
@@ -2837,11 +2912,16 @@ return;
         display.asyncExec(() -> flushPendingWordListUi());
     }
 
-    private void installWordListUiKick(org.eclipse.swt.widgets.Display display)
+    private void installWordListUiKick(org.eclipse.swt.widgets.Display display,
+        org.eclipse.swt.custom.StyledText text)
     {
+        if (text == null || text.isDisposed())
+            return;
         if (wordListUiKickFilter != null)
             return;
         wordListUiKickFilter = event -> {
+            if (event.widget != text)
+                return;
             if (pendingWordListUi == null)
                 return;
             if (wordListFlushArmed)
@@ -2849,14 +2929,22 @@ return;
             wordListFlushArmed = true;
             uiBlockLog("wordList.paint.arm", "type=" + event.type //$NON-NLS-1$ //$NON-NLS-2$
                 + " caller=" + uiBlockCaller()); //$NON-NLS-1$
-            display.timerExec(0, () -> {
+            display.timerExec(1, () -> {
                 uiBlockLog("wordList.paint.timer", "caller=" + uiBlockCaller()); //$NON-NLS-1$ //$NON-NLS-2$
                 wordListFlushArmed = false;
                 flushPendingWordListUi();
             });
         };
-        display.addFilter(org.eclipse.swt.SWT.Paint, wordListUiKickFilter);
-        uiBlockLog("wordList.paint.install", ""); //$NON-NLS-1$ //$NON-NLS-2$
+        text.addListener(org.eclipse.swt.SWT.Paint, wordListUiKickFilter);
+        wordListUiKickWidget = text;
+        text.addDisposeListener(e -> {
+            if (wordListUiKickWidget == text)
+            {
+                wordListUiKickWidget = null;
+                wordListUiKickFilter = null;
+            }
+        });
+        uiBlockLog("wordList.paint.install", "widget=styledText"); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     void flushPendingWordListUi()
@@ -3033,7 +3121,7 @@ return;
                                  ICompletionProposal[] result,
                                  java.util.Map<Object, Object> dataEvents)
     {
-        publishWordList(viewer, key, gen, epoch, result, dataEvents, null, ""); //$NON-NLS-1$
+        publishWordList(viewer, key, gen, epoch, result, dataEvents, null, "", -1); //$NON-NLS-1$
     }
 
     /** Публикация словарного списка из фона — только на UI-потоке. */
@@ -3041,6 +3129,16 @@ return;
                                  ICompletionProposal[] result,
                                  java.util.Map<Object, Object> dataEvents,
                                  ICompletionProposal[] popupList, String popupFilter)
+    {
+        publishWordList(viewer, key, gen, epoch, result, dataEvents, popupList, popupFilter, -1);
+    }
+
+    /** Публикация словарного списка из фона — только на UI-потоке. */
+    private void publishWordList(ITextViewer viewer, int key, int gen, int epoch,
+                                 ICompletionProposal[] result,
+                                 java.util.Map<Object, Object> dataEvents,
+                                 ICompletionProposal[] popupList, String popupFilter,
+                                 int probeOffset)
     {
         int publishN = result == null ? -1 : result.length;
         uiBlockLog("wordListBackground.publish.enter", "key=" + key //$NON-NLS-1$ //$NON-NLS-2$
@@ -3135,7 +3233,10 @@ return;
         assignFullListCache(unwrapProposals(list));
         fullListReady = true;
         fullListContextKey = key;
-        fullListCachePrefix = computeIdentifierFilter(liveDoc, liveCaret);
+        // Префикс базы — у зонда, не у живой каретки: иначе «мет» помечает полный
+        // словарь stale при Backspace до «м».
+        int prefixAt = probeOffset >= 0 ? probeOffset : liveCaret;
+        fullListCachePrefix = computeIdentifierFilter(liveDoc, prefixAt);
         clearDelegateSyncProbe();
         rememberInterimDelegateList(list);
         rememberCtorTypeCatalog(liveDoc, liveCaret, list);
@@ -6182,7 +6283,9 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
             memberStockBackgroundJob.cancel();
         memberStockBackgroundDot = dotContextKey;
         memberStockBackgroundGen = contextGen;
-        installWordListUiKick(display);
+        org.eclipse.swt.custom.StyledText text = viewer.getTextWidget() instanceof org.eclipse.swt.custom.StyledText st
+            && !st.isDisposed() ? st : null;
+        installWordListUiKick(display, text);
         final int probeOffset = dotContextKey + 1;
         Job job = new Job("SCAP member stock") { //$NON-NLS-1$
             @Override
@@ -6746,6 +6849,8 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                     "{\"ok\":false,\"why\":\"noProvider\"}"); //$NON-NLS-1$
                 return;
             }
+            // Иконки — на UI, до Job: иначе createImage с воркера забивает Error Log.
+            warmAssistImages(provider);
             java.lang.reflect.Method getDocEvent = null;
             for (Class<?> c = provider.getClass(); c != null && getDocEvent == null;
                 c = c.getSuperclass())
@@ -6775,6 +6880,262 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                 "{\"ok\":false,\"err\":\"" + cause.getClass().getSimpleName() //$NON-NLS-1$
                     + "\"}"); //$NON-NLS-1$
         }
+    }
+
+    /**
+     * Создаёт иконки автодополнения на UI, пока Job ещё не стартовал. Полный
+     * {@code delegate.compute} сюда не входит — только реестр BSL и штатные
+     * {@code get*Img} провайдера.
+     */
+    private static void warmAssistImages(Object provider)
+    {
+        if (provider == null || org.eclipse.swt.widgets.Display.getCurrent() == null)
+            return;
+        wrapAssistLabelProvider(provider);
+        if (assistImagesWarmed)
+            return;
+        long t0 = System.nanoTime();
+        int shared = 0;
+        int methods = 0;
+        try
+        {
+            shared = warmBslSharedImages();
+            methods = warmProposalProviderImages(provider);
+            assistImagesWarmed = true;
+        }
+        catch (RuntimeException e)
+        {
+            uiBlockLog("assistImages.warm.err", e.getClass().getSimpleName() //$NON-NLS-1$
+                + " " + String.valueOf(e.getMessage())); //$NON-NLS-1$
+        }
+        uiBlockLog("assistImages.warm", "ms=" + ((System.nanoTime() - t0) / 1_000_000L) //$NON-NLS-1$ //$NON-NLS-2$
+            + " shared=" + shared + " imgMethods=" + methods //$NON-NLS-1$ //$NON-NLS-2$
+            + " wrapped=" + assistLabelProviderWrapped); //$NON-NLS-1$
+    }
+
+    /** Материализует все {@code IMG_*} из {@link BslSharedImages} в реестре иконок. */
+    private static int warmBslSharedImages()
+    {
+        int n = 0;
+        for (java.lang.reflect.Field field : BslSharedImages.class.getFields())
+        {
+            if (field.getType() != String.class)
+                continue;
+            if (!java.lang.reflect.Modifier.isStatic(field.getModifiers()))
+                continue;
+            if (!field.getName().startsWith("IMG_")) //$NON-NLS-1$
+                continue;
+            try
+            {
+                String key = (String) field.get(null);
+                if (key == null || key.isEmpty())
+                    continue;
+                if (BslSharedImages.getImage(key) != null)
+                    n++;
+            }
+            catch (Exception ignored)
+            {
+            }
+        }
+        return n;
+    }
+
+    /**
+     * Штатные {@code get*Img}/{@code get*Image} без EObject: оверлеи
+     * тоже создаются здесь, на UI.
+     */
+    private static int warmProposalProviderImages(Object provider)
+    {
+        int n = 0;
+        for (java.lang.reflect.Method method : provider.getClass().getDeclaredMethods())
+        {
+            if (method.getReturnType() != org.eclipse.swt.graphics.Image.class)
+                continue;
+            String name = method.getName();
+            if (!name.startsWith("get")) //$NON-NLS-1$
+                continue;
+            if (!name.contains("Img") && !name.contains("Image")) //$NON-NLS-1$ //$NON-NLS-2$
+                continue;
+            Class<?>[] types = method.getParameterTypes();
+            boolean simple = true;
+            for (Class<?> type : types)
+            {
+                if (type != boolean.class && type != Boolean.class
+                    && type != int.class && type != Integer.class)
+                {
+                    simple = false;
+                    break;
+                }
+            }
+            if (!simple)
+                continue;
+            method.setAccessible(true);
+            n += invokeImgMethodCombos(provider, method, types, new Object[types.length], 0);
+        }
+        return n;
+    }
+
+    private static int invokeImgMethodCombos(Object target, java.lang.reflect.Method method,
+        Class<?>[] types, Object[] args, int index)
+    {
+        if (index == types.length)
+        {
+            try
+            {
+                return method.invoke(target, args) != null ? 1 : 0;
+            }
+            catch (Exception ignored)
+            {
+                return 0;
+            }
+        }
+        Class<?> type = types[index];
+        int n = 0;
+        if (type == boolean.class || type == Boolean.class)
+        {
+            args[index] = Boolean.FALSE;
+            n += invokeImgMethodCombos(target, method, types, args, index + 1);
+            args[index] = Boolean.TRUE;
+            n += invokeImgMethodCombos(target, method, types, args, index + 1);
+            return n;
+        }
+        args[index] = Integer.valueOf(0);
+        return invokeImgMethodCombos(target, method, types, args, index + 1);
+    }
+
+    /**
+     * {@code ILabelProvider.getImage} (ключевые слова / cross-ref) тоже зовёт
+     * {@code ImageDescriptor.createImage()} через Xtext {@code PluginImageHelper}.
+     * С воркера NPE уходит в polymorphic dispatcher и в Error Log.
+     */
+    private static void wrapAssistLabelProvider(Object provider)
+    {
+        if (assistLabelProviderWrapped || provider == null)
+            return;
+        try
+        {
+            java.lang.reflect.Method getter = null;
+            java.lang.reflect.Method setter = null;
+            for (Class<?> c = provider.getClass(); c != null && (getter == null || setter == null);
+                c = c.getSuperclass())
+            {
+                if (getter == null)
+                {
+                    try
+                    {
+                        getter = c.getDeclaredMethod("getLabelProvider"); //$NON-NLS-1$
+                    }
+                    catch (NoSuchMethodException ignored)
+                    {
+                    }
+                }
+                if (setter == null)
+                {
+                    try
+                    {
+                        setter = c.getDeclaredMethod("setLabelProvider", //$NON-NLS-1$
+                            org.eclipse.jface.viewers.ILabelProvider.class);
+                    }
+                    catch (NoSuchMethodException ignored)
+                    {
+                    }
+                }
+            }
+            if (getter == null || setter == null)
+                return;
+            getter.setAccessible(true);
+            setter.setAccessible(true);
+            Object original = getter.invoke(provider);
+            if (original == null)
+                return;
+            if (java.lang.reflect.Proxy.isProxyClass(original.getClass())
+                && java.lang.reflect.Proxy.getInvocationHandler(
+                    original) instanceof OffUiSafeAssistImages)
+            {
+                assistLabelProviderWrapped = true;
+                return;
+            }
+            java.util.LinkedHashSet<Class<?>> ifaces = new java.util.LinkedHashSet<>();
+            collectIfaces(original.getClass(), ifaces);
+            ifaces.add(org.eclipse.jface.viewers.ILabelProvider.class);
+            Object wrapped = java.lang.reflect.Proxy.newProxyInstance(
+                original.getClass().getClassLoader(),
+                ifaces.toArray(Class<?>[]::new),
+                new OffUiSafeAssistImages(original));
+            setter.invoke(provider, wrapped);
+            assistLabelProviderWrapped = true;
+        }
+        catch (Exception e)
+        {
+            uiBlockLog("assistImages.wrap.err", e.getClass().getSimpleName() //$NON-NLS-1$
+                + " " + String.valueOf(e.getMessage())); //$NON-NLS-1$
+        }
+    }
+
+    private static void collectIfaces(Class<?> type, java.util.Set<Class<?>> out)
+    {
+        if (type == null || type == Object.class)
+            return;
+        if (type.isInterface() && java.lang.reflect.Modifier.isPublic(type.getModifiers()))
+            out.add(type);
+        for (Class<?> iface : type.getInterfaces())
+            collectIfaces(iface, out);
+        collectIfaces(type.getSuperclass(), out);
+    }
+
+    /**
+     * С воркера {@code getImage} не создаёт SWT Image: либо кэш уже тёплый, либо
+     * {@code null} вместо NPE в Error Log.
+     */
+    private static final class OffUiSafeAssistImages implements java.lang.reflect.InvocationHandler
+    {
+        private final Object delegate;
+
+        OffUiSafeAssistImages(Object delegate)
+        {
+            this.delegate = delegate;
+        }
+
+        @Override
+        public Object invoke(Object proxy, java.lang.reflect.Method method, Object[] args)
+            throws Throwable
+        {
+            try
+            {
+                return method.invoke(delegate, args);
+            }
+            catch (java.lang.reflect.InvocationTargetException ite)
+            {
+                Throwable cause = ite.getCause() != null ? ite.getCause() : ite;
+                if ("getImage".equals(method.getName()) && isOffUiImageFailure(cause)) //$NON-NLS-1$
+                {
+                    if (!offUiImageLogged)
+                    {
+                        offUiImageLogged = true;
+                        uiBlockLog("assistImages.offUiGetImage", //$NON-NLS-1$
+                            cause.getClass().getSimpleName() + " " //$NON-NLS-1$
+                                + String.valueOf(cause.getMessage()));
+                    }
+                    return null;
+                }
+                throw cause;
+            }
+        }
+    }
+
+    private static boolean isOffUiImageFailure(Throwable t)
+    {
+        if (org.eclipse.swt.widgets.Display.getCurrent() != null)
+            return false;
+        if (t instanceof NullPointerException)
+            return true;
+        if (t instanceof org.eclipse.swt.SWTException)
+        {
+            String msg = t.getMessage();
+            return msg != null && (msg.contains("Invalid thread") //$NON-NLS-1$
+                || msg.contains("disposed")); //$NON-NLS-1$
+        }
+        return false;
     }
 
     private ICompletionProposal[] computeMemberStockViaSelectionProxy(ITextViewer real,

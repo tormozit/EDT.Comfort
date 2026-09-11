@@ -84,6 +84,10 @@ public class SmartCodeMatcher extends SmartMatcher {
             return 0;
         }
         String lower = partText.toLowerCase();
+        // Точное имя («Новый» при фильтре «новый») выше префикса («НовыйЗаменяемый…»):
+        // иначе оба получают 40 и штатный порядок EDT опускает короткое слово вниз.
+        if (lower.equals(fullPattern))
+            return 50;
         int idx = lower.indexOf(fullPattern);
         if (idx >= 0) {
             if (idx == 0) return 40;

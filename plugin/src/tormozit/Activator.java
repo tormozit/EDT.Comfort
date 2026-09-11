@@ -140,6 +140,7 @@ public class Activator extends AbstractUIPlugin
         // Как можно раньше: WeavingHook до первой загрузки BslDocumentationComment
         BslDocCommentDescriptionFix.install();
         BslDocCommentTypeMerge.install();
+        BslXtextDocumentHook.install();
     }
 
     @Override

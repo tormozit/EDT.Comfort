@@ -117,7 +117,7 @@ public final class TextMergeEditorHook
     }
 
     /**
-     * Tab / Shift+Tab и «Переключить комментарий» в редактируемом поле сравнения —
+     * Tab / Shift+Tab, Ctrl+←/→ и «Переключить комментарий» в редактируемом поле сравнения —
      * тот же механизм, что в поле результата объединения модулей.
      */
     static void installEditorKeys(StyledText text, SourceViewer viewer)
@@ -1635,7 +1635,7 @@ public final class TextMergeEditorHook
     }
 
     /**
-     * Tab / Shift+Tab и «Переключить комментарий» в поле «результат объединения» —
+     * Tab / Shift+Tab, Ctrl+←/→ и «Переключить комментарий» в поле «результат объединения» —
      * как в редакторе модуля.
      *
      * <p>Поле объединения — это {@code SourceViewer}, сконфигурированный тем же
@@ -1735,6 +1735,10 @@ public final class TextMergeEditorHook
          * редактора Xtext, это оказывалась «Свертывание» — она и всплывала в индикаторе
          * выполненных команд). С активным контекстом редактора воркбенч сам выбирает более
          * частную привязку — переключение комментария — и вызывает обработчик ниже.
+         *
+         * <p>Тот же контекст включает штатные Ctrl+←/→ редактора. Поле результата —
+         * не {@code ITextEditor}, поэтому команды выполняет
+         * {@link IdentifierWordNavigationHandler} по виджету с фокусом.
          */
         private static void hookToggleCommentCommand(StyledText text, SourceViewer viewer)
         {

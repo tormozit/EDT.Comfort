@@ -109,6 +109,35 @@ public final class BslAssistSourceHeuristics
         return Character.isLetter(insertedChar);
     }
 
+    /**
+     * Перед позицией открывающей скобки (сама {@code (} ещё может быть не в документе)
+     * стоит идентификатор или {@code ?} — похоже на вызов метода, конструктор {@code Тип()}
+     * или оператор {@code ?()}, а не на группировку {@code = (} / {@code + (} / {@code ((}.
+     * Слова вроде {@code Если} и {@code И} этой проверкой не отсекаются (это буквы):
+     * их отличает AST вызова.
+     */
+    public static boolean looksLikeCallOpenParen(IDocument doc, int openParenOffset)
+    {
+        if (doc == null || openParenOffset <= 0)
+            return false;
+        try
+        {
+            int i = openParenOffset - 1;
+            while (i >= 0 && Character.isWhitespace(doc.getChar(i)))
+                i--;
+            if (i < 0)
+                return false;
+            char c = doc.getChar(i);
+            if (c == '?')
+                return true;
+            return Character.isLetterOrDigit(c) || c == '_';
+        }
+        catch (BadLocationException e)
+        {
+            return false;
+        }
+    }
+
     /** Два символа слева от каретки (после вставки) различаются; &lt;2 символов → {@code true}. */
     public static boolean lastTwoCharsNotEqual(IDocument doc, int caretAfter, char pendingChar,
                                                int pendingOffset)
