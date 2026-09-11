@@ -1185,12 +1185,22 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         String filter = SmartFilterTracker.getCurrentFilter();
         if (!isIrWordsResolvedForContext())
         {
-return EMPTY;
+            uiBlockLog("computeIrOnly.empty", "why=irNotResolved caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                + " irN=" + irProposals.length //$NON-NLS-1$
+                + " irCtx=" + irSnapshotContextKey //$NON-NLS-1$
+                + " ctx=" + fullListContextKey); //$NON-NLS-1$
+            return EMPTY;
         }
         ICompletionProposal[] merged = mergeIrForDisplay(EMPTY);
-if (merged.length == 0)
+        if (merged.length == 0)
+        {
+            uiBlockLog("computeIrOnly.empty", "why=mergeEmpty caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                + " irN=" + irProposals.length); //$NON-NLS-1$
             return EMPTY;
+        }
         ICompletionProposal[] result = applyLiteralSmartFilter(merged, filter);
+        uiBlockLog("computeIrOnly", "caret=" + caret + " n=" + result.length //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " irN=" + irProposals.length + " filter=[" + filter + "]"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         auditLiteralComputeReturn(viewer, resolveEditorForLiteralAudit(viewer),
             result.length, "computeReturn", null); //$NON-NLS-1$
         return result;
@@ -3281,18 +3291,27 @@ ContentAssistSessionReloader reloader = viewer instanceof SourceViewer sv
         debugLiteralContext(viewer, literalCaret);
         boolean selectionIrOnly = reloader != null && reloader.isSelectionIrOnlyContext();
         if ((manualDetect || selectionIrOnly) && reloader != null
-            && !reloader.isManualDualAssistOpening())
+            && !reloader.isManualDualAssistOpening()
+            && !irOnlyManualMode)
             reloader.tryBeginManualDualAssist(literalCaret);
         if (reloader != null && reloader.isManualIrAssistPending()
+            && !irOnlyManualMode
             && !isIrWordsResolvedForContext())
+        {
+            uiBlockLog("compute.empty", "why=irPending caret=" + literalCaret); //$NON-NLS-1$ //$NON-NLS-2$
             return EMPTY;
-        if (reloader != null && reloader.isCompletionAutoOpenAwaitingWords())
+        }
+        if (reloader != null && reloader.isCompletionAutoOpenAwaitingWords()
+            && !irOnlyManualMode)
         {
             IDocument awaitDoc = viewer != null ? viewer.getDocument() : null;
             boolean cacheReady = isCacheValidForCaret(awaitDoc, literalCaret)
                 && fullListCache.length > 0;
             if (!cacheReady)
+            {
+                uiBlockLog("compute.empty", "why=awaitingWords caret=" + literalCaret); //$NON-NLS-1$ //$NON-NLS-2$
                 return EMPTY;
+            }
         }
         // Повторный Ctrl+Space (toggle фильтра) в режиме выделения+ИР: сохраняем штатное
         // переключение флажка «Фильтр», но список ниже остаётся только ИР (не EDT+ИР).

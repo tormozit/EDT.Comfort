@@ -4172,6 +4172,45 @@ ensureFilterPending(popup);
         return showPossibleCompletions(assistant, false);
     }
 
+    /**
+     * Как в ae68f67: штатный {@link ContentAssistant#showPossibleCompletions()}
+     * (Ctrl+Space, {@code prepareToShowCompletions(false)}). Нужен для ИР в литерале:
+     * автоактивация {@code showProposals(true)} из {@code bca217e3} считает список
+     * и не открывает окно ({@code visible=false}), слияние ИР+EDT не к чему применить.
+     */
+    public static boolean showPossibleCompletionsAsCommand(ContentAssistant assistant)
+    {
+        if (assistant == null)
+            return false;
+        if (Boolean.TRUE.equals(SHOW_PROPOSALS_GUARD.get()))
+            return isPopupVisible(assistant);
+        SHOW_PROPOSALS_GUARD.set(Boolean.TRUE);
+        long tUi = System.nanoTime();
+        boolean visible = false;
+        try
+        {
+            Object listener = Global.getField(assistant, "fAutoAssistListener"); //$NON-NLS-1$
+            if (listener != null)
+                Global.invokeVoid(listener, "stop"); //$NON-NLS-1$
+            assistant.showPossibleCompletions();
+            visible = isPopupVisible(assistant);
+            return visible;
+        }
+        catch (Exception e)
+        {
+            ContentAssistDebug.log("showPossibleCompletionsAsCommand ERROR: " + e.getMessage()); //$NON-NLS-1$
+            return false;
+        }
+        finally
+        {
+            SmartContentAssistProcessor.uiBlockLog("showPossibleCompletions.command", //$NON-NLS-1$
+                "ms=" + ((System.nanoTime() - tUi) / 1_000_000L) //$NON-NLS-1$
+                    + " visible=" + visible //$NON-NLS-1$
+                    + " caller=" + SmartContentAssistProcessor.uiBlockCaller()); //$NON-NLS-1$
+            SHOW_PROPOSALS_GUARD.remove();
+        }
+    }
+
     public static boolean showPossibleCompletions(ContentAssistant assistant, boolean cachedListOnly)
     {
         if (assistant == null)

@@ -399,7 +399,7 @@ lastCaretDocumentStamp = -1;
                     boolean autoOpenIrPending = completionAutoOpenIrScheduled
                         && caret == completionAutoOpenCaret;
                     if (!preserveWordsTable && !isWordsTableFetchInFlightForCaret(caret)
-                        && !autoOpenIrPending)
+                        && !autoOpenIrPending && !processor.isIrOnlyManualMode())
                         scheduleWordsTablePreparation(caret);
                     if (autoOpenIrPending)
                     {
@@ -3190,7 +3190,7 @@ boolean inLiteral = endCaret >= 0
         ContentAssistPopupSync.ensureEmptyListAllowed(assistant, true);
         beginLiteralOpenTracking();
         preShowLiteralBrowserPatch(liveCaret);
-        boolean shown = ContentAssistPopupSync.showPossibleCompletions(assistant);
+        boolean shown = ContentAssistPopupSync.showPossibleCompletionsAsCommand(assistant);
         boolean popupVisible = shown && ContentAssistPopupSync.isPopupVisible(assistant);
         if (popupVisible && assistBrowserCreator == null)
         {
@@ -4132,7 +4132,7 @@ return;
         preShowLiteralBrowserPatch(expectedCaret);
         // До show: вложенный compute не должен снова зайти в tryBegin и сбросить флаг.
         manualDualPopupOpened = true;
-        boolean shown = ContentAssistPopupSync.showPossibleCompletions(assistant);
+        boolean shown = ContentAssistPopupSync.showPossibleCompletionsAsCommand(assistant);
         boolean popupVisible = shown && ContentAssistPopupSync.isPopupVisible(assistant);
         if (popupVisible && assistBrowserCreator == null)
         {
@@ -4174,7 +4174,7 @@ return;
         int irN = snapshot.proposals != null ? snapshot.proposals.length : 0;
         beginLiteralOpenTracking();
         preShowLiteralBrowserPatch(liveCaret);
-        boolean shown = ContentAssistPopupSync.showPossibleCompletions(assistant);
+        boolean shown = ContentAssistPopupSync.showPossibleCompletionsAsCommand(assistant);
         boolean popupVisible = shown && ContentAssistPopupSync.isPopupVisible(assistant);
         if (popupVisible && assistBrowserCreator == null)
         {
