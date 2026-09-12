@@ -2499,6 +2499,7 @@ public final class DebugInspectorHook implements IStartup
             assist.lockVisibleRegion("layout"); //$NON-NLS-1$
             if (!text.isDisposed())
                 text.setFocus();
+            assist.placeCaretAtExpressionEnd("install"); //$NON-NLS-1$
             scheduleComfortAssistPatch(sourceViewer, assist, 0);
             log("installed prefixLen=" + wrap[0].length() //$NON-NLS-1$
                 + " suffixLen=" + wrap[2].length() //$NON-NLS-1$
@@ -2675,6 +2676,18 @@ public final class DebugInspectorHook implements IStartup
             {
                 lockingRegion = false;
             }
+        }
+
+        private void placeCaretAtExpressionEnd(String reason)
+        {
+            IRegion vis = sourceViewer.getVisibleRegion();
+            if (vis == null)
+                return;
+            int end = vis.getOffset() + vis.getLength();
+            sourceViewer.setSelectedRange(end, 0);
+            log("caret-end reason=" + reason //$NON-NLS-1$
+                + " pos=" + end //$NON-NLS-1$
+                + " " + dumpViewer(sourceViewer, prefix)); //$NON-NLS-1$
         }
 
         private static boolean documentStartsWithPrefix(IDocument document, String prefix)
@@ -3194,6 +3207,7 @@ public final class DebugInspectorHook implements IStartup
             if (text != null && !text.isDisposed())
                 text.setFocus();
             lockVisibleRegion("history"); //$NON-NLS-1$
+            placeCaretAtExpressionEnd("history"); //$NON-NLS-1$
             log("history item=[" + snippet(item, 80) + "] viaCustom=" + viaCustom //$NON-NLS-1$ //$NON-NLS-2$
                 + " now=[" + snippet(editableText(), 80) + "] " //$NON-NLS-1$ //$NON-NLS-2$
                 + dumpViewer(sourceViewer, prefix));

@@ -2164,6 +2164,7 @@ public final class ParamHintHtmlModifier
         try
         {
             browser.setText(updated);
+            scheduleScrollParamNameIntoView(browser);
         }
         finally
         {
@@ -2270,7 +2271,8 @@ public final class ParamHintHtmlModifier
 
     /**
      * Необязательные параметры в сигнатуре: {@code (Колонки, Строки?)} вместо
-     * штатных {@code [Строки]}.
+     * штатных {@code [Строки]}. Слоты за последним формальным до каретки —
+     * как {@code ?}, текущий из них жирный (прокрутка к {@code <b>}).
      */
     private static String rewriteHeadingOptionalParams(String html, HoverContext ctx)
     {
@@ -2287,9 +2289,12 @@ public final class ParamHintHtmlModifier
             return null;
         Object page = ctx.pages.get(ctx.pageIndex);
         Object paramsObj = Global.getField(page, "params"); //$NON-NLS-1$
-        if (!(paramsObj instanceof List<?> params) || params.isEmpty())
+        List<?> params = paramsObj instanceof List<?> typed ? typed : Collections.emptyList();
+        int formalCount = params.size();
+        int highlight = currentParamHighlightIndex(ctx, formalCount);
+        int extraUnknown = extraUnknownParamCount(ctx, formalCount);
+        if (params.isEmpty() && extraUnknown == 0)
             return null;
-        int highlight = currentParamHighlightIndex(ctx, params.size());
         StringBuilder list = new StringBuilder();
         for (int i = 0; i < params.size(); i++)
         {
@@ -2310,14 +2315,25 @@ public final class ParamHintHtmlModifier
             if (current)
                 list.append("</b>"); //$NON-NLS-1$
         }
+        for (int e = 0; e < extraUnknown; e++)
+        {
+            if (list.length() > 0)
+                list.append(", "); //$NON-NLS-1$
+            boolean current = highlight < 0 && e == extraUnknown - 1;
+            if (current)
+                list.append("<b>"); //$NON-NLS-1$
+            list.append('?');
+            if (current)
+                list.append("</b>"); //$NON-NLS-1$
+        }
         if (list.length() == 0)
             return null;
         return html.substring(0, open + 1) + list + html.substring(close);
     }
 
     /**
-     * Индекс жирного параметра в сигнатуре. {@code -1} — ни один: каретка за
-     * последним формальным (штатный EDT зажимает {@code paramIndex} на нём).
+     * Индекс жирного формального параметра. {@code -1} — каретка за последним
+     * (EDT зажимает {@code paramIndex}): в заголовке жирный слот {@code ?}.
      */
     private static int currentParamHighlightIndex(HoverContext ctx, int formalCount)
     {
@@ -2334,6 +2350,21 @@ public final class ParamHintHtmlModifier
             return ctx.currentArgIndex;
         }
         return ctx.paramIndex;
+    }
+
+    /**
+     * Несуществующие слоты от первого сверх формальных до каретки включительно.
+     * Для сигнатуры с неограниченным хвостом ({@code maxParams < 0}) — 0.
+     */
+    private static int extraUnknownParamCount(HoverContext ctx, int formalCount)
+    {
+        if (ctx == null || ctx.currentArgIndex < 0 || formalCount < 0)
+            return 0;
+        if (ctx.currentArgIndex < formalCount)
+            return 0;
+        if (formalCount > 0 && signatureAllowsExtraArgs(ctx, formalCount))
+            return 0;
+        return ctx.currentArgIndex - formalCount + 1;
     }
 
     private static boolean signatureAllowsExtraArgs(HoverContext ctx, int formalCount)
