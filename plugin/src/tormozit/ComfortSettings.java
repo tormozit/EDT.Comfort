@@ -208,6 +208,88 @@ public final class ComfortSettings
     /** Минимальное число строк по умолчанию — 50. */
     public static final int DEFAULT_BRACKET_CONTENT_HINT_MIN_LINES = 50;
 
+    // ---- Indent guides (направляющие отступов) ----
+
+    /** Префикс ключей направляющих отступов. */
+    public static final String PREF_INDENT_GUIDE_KEY = "comfort.indentGuide."; //$NON-NLS-1$
+
+    /** Суффикс ключа цвета для тёмной темы. */
+    public static final String PREF_INDENT_GUIDE_DARK_SUFFIX = ".dark"; //$NON-NLS-1$
+
+    /** Ключ: включены ли направляющие отступов. */
+    public static final String PREF_INDENT_GUIDE_ENABLED = PREF_INDENT_GUIDE_KEY + "enabled"; //$NON-NLS-1$
+
+    /** Ключ: прозрачность линии (0–255). */
+    public static final String PREF_INDENT_GUIDE_LINE_ALPHA = PREF_INDENT_GUIDE_KEY + "lineAlpha"; //$NON-NLS-1$
+
+    /** Ключ: стиль линии SWT (LINE_SOLID …). */
+    public static final String PREF_INDENT_GUIDE_LINE_STYLE = PREF_INDENT_GUIDE_KEY + "lineStyle"; //$NON-NLS-1$
+
+    /** Ключ: толщина линии в пикселях. */
+    public static final String PREF_INDENT_GUIDE_LINE_WIDTH = PREF_INDENT_GUIDE_KEY + "lineWidth"; //$NON-NLS-1$
+
+    /** Ключ: горизонтальный сдвиг линии в пикселях. */
+    public static final String PREF_INDENT_GUIDE_LINE_SHIFT = PREF_INDENT_GUIDE_KEY + "lineShift"; //$NON-NLS-1$
+
+    /** Ключ: цвет линии в светлой теме (RGB «r,g,b»). */
+    public static final String PREF_INDENT_GUIDE_LINE_COLOR = PREF_INDENT_GUIDE_KEY + "lineColor"; //$NON-NLS-1$
+
+    /** Ключ: цвет линии в тёмной теме. */
+    public static final String PREF_INDENT_GUIDE_LINE_COLOR_DARK =
+        PREF_INDENT_GUIDE_LINE_COLOR + PREF_INDENT_GUIDE_DARK_SUFFIX;
+
+    /** Ключ: рисовать направляющую на первой колонке. */
+    public static final String PREF_INDENT_GUIDE_DRAW_LEAD_EDGE =
+        PREF_INDENT_GUIDE_KEY + "drawLeadEdge"; //$NON-NLS-1$
+
+    /** Ключ: рисовать направляющие на пустых строках. */
+    public static final String PREF_INDENT_GUIDE_DRAW_BLANK_LINE =
+        PREF_INDENT_GUIDE_KEY + "drawBlankLine"; //$NON-NLS-1$
+
+    /** Ключ: рисовать в теле блочных комментариев C-стиля. */
+    public static final String PREF_INDENT_GUIDE_DRAW_COMMENT_BLOCK =
+        PREF_INDENT_GUIDE_KEY + "drawCommentBlock"; //$NON-NLS-1$
+
+    /**
+     * Ключ: исключённые content type id через «|»
+     * (неотмеченные в дереве на странице настроек).
+     */
+    public static final String PREF_INDENT_GUIDE_CONTENT_TYPES =
+        PREF_INDENT_GUIDE_KEY + "contentTypes"; //$NON-NLS-1$
+
+    /** Направляющие включены по умолчанию. */
+    public static final boolean DEFAULT_INDENT_GUIDE_ENABLED = true;
+
+    /** Прозрачность по умолчанию. */
+    public static final int DEFAULT_INDENT_GUIDE_LINE_ALPHA = 50;
+
+    /** Стиль линии по умолчанию — сплошная. */
+    public static final int DEFAULT_INDENT_GUIDE_LINE_STYLE = org.eclipse.swt.SWT.LINE_SOLID;
+
+    /** Толщина по умолчанию. */
+    public static final int DEFAULT_INDENT_GUIDE_LINE_WIDTH = 1;
+
+    /** Сдвиг по умолчанию. */
+    public static final int DEFAULT_INDENT_GUIDE_LINE_SHIFT = 2;
+
+    /** Цвет в светлой теме по умолчанию. */
+    public static final String DEFAULT_INDENT_GUIDE_LINE_COLOR = "0,0,0"; //$NON-NLS-1$
+
+    /** Цвет в тёмной теме по умолчанию. */
+    public static final String DEFAULT_INDENT_GUIDE_LINE_COLOR_DARK = "192,192,192"; //$NON-NLS-1$
+
+    /** Первая колонка выключена по умолчанию. */
+    public static final boolean DEFAULT_INDENT_GUIDE_DRAW_LEAD_EDGE = false;
+
+    /** Пустые строки включены по умолчанию. */
+    public static final boolean DEFAULT_INDENT_GUIDE_DRAW_BLANK_LINE = true;
+
+    /** Блочные комментарии выключены по умолчанию. */
+    public static final boolean DEFAULT_INDENT_GUIDE_DRAW_COMMENT_BLOCK = false;
+
+    /** Исключений по типам содержимого по умолчанию нет. */
+    public static final String DEFAULT_INDENT_GUIDE_CONTENT_TYPES = ""; //$NON-NLS-1$
+
     // ---- Ctrl+клик в текстовых полях ----
 
     /**
@@ -924,6 +1006,49 @@ public final class ComfortSettings
         if (settings == null)
             return DEFAULT_BRACKET_CONTENT_HINT_ENABLED;
         return settings.preferenceStore.getBoolean(PREF_BRACKET_CONTENT_HINT_ENABLED);
+    }
+
+    // ---- Indent guides accessors ----
+
+    /** Направляющие отступов включены. */
+    public static boolean isIndentGuideEnabled()
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return DEFAULT_INDENT_GUIDE_ENABLED;
+        return settings.preferenceStore.getBoolean(PREF_INDENT_GUIDE_ENABLED);
+    }
+
+    /** Ключ цвета линии для текущей темы (светлая или тёмная). */
+    public static String indentGuideLineColorKey()
+    {
+        return ThemeAwareColors.isDarkTheme()
+            ? PREF_INDENT_GUIDE_LINE_COLOR_DARK
+            : PREF_INDENT_GUIDE_LINE_COLOR;
+    }
+
+    /** Свойство относится к настройкам направляющих отступов. */
+    public static boolean isIndentGuideProperty(String property)
+    {
+        return property != null && property.startsWith(PREF_INDENT_GUIDE_KEY);
+    }
+
+    /** Записывает значения по умолчанию направляющих отступов в store. */
+    public static void applyIndentGuideDefaults(IPreferenceStore store)
+    {
+        if (store == null)
+            return;
+        store.setDefault(PREF_INDENT_GUIDE_ENABLED, DEFAULT_INDENT_GUIDE_ENABLED);
+        store.setDefault(PREF_INDENT_GUIDE_LINE_ALPHA, DEFAULT_INDENT_GUIDE_LINE_ALPHA);
+        store.setDefault(PREF_INDENT_GUIDE_LINE_STYLE, DEFAULT_INDENT_GUIDE_LINE_STYLE);
+        store.setDefault(PREF_INDENT_GUIDE_LINE_WIDTH, DEFAULT_INDENT_GUIDE_LINE_WIDTH);
+        store.setDefault(PREF_INDENT_GUIDE_LINE_SHIFT, DEFAULT_INDENT_GUIDE_LINE_SHIFT);
+        store.setDefault(PREF_INDENT_GUIDE_LINE_COLOR, DEFAULT_INDENT_GUIDE_LINE_COLOR);
+        store.setDefault(PREF_INDENT_GUIDE_LINE_COLOR_DARK, DEFAULT_INDENT_GUIDE_LINE_COLOR_DARK);
+        store.setDefault(PREF_INDENT_GUIDE_DRAW_LEAD_EDGE, DEFAULT_INDENT_GUIDE_DRAW_LEAD_EDGE);
+        store.setDefault(PREF_INDENT_GUIDE_DRAW_BLANK_LINE, DEFAULT_INDENT_GUIDE_DRAW_BLANK_LINE);
+        store.setDefault(PREF_INDENT_GUIDE_DRAW_COMMENT_BLOCK, DEFAULT_INDENT_GUIDE_DRAW_COMMENT_BLOCK);
+        store.setDefault(PREF_INDENT_GUIDE_CONTENT_TYPES, DEFAULT_INDENT_GUIDE_CONTENT_TYPES);
     }
 
     // ---- Ctrl+click accessors ----

@@ -4405,10 +4405,21 @@ ensureFilterPending(popup);
                 // Список мог прийти из кэша или каталога типов: начало замены у его
                 // предложений — от зонда того расчёта, а не от набранного сейчас слова.
                 SourceViewer active = ContentAssistSessionReloader.getActiveViewer();
+                IDocument alignDoc = active != null ? active.getDocument() : null;
+                int alignCaret = SmartContentAssistProcessor.resolveWidgetCaret(active);
+                // #region agent log
+                boolean inspectShow = DebugInspectorHook.isInspectExpressionViewer(active);
+                ContentAssistDebug.debugSessionLog("B", "showPossibleCompletions", "visible", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    "{\"cachedListOnly\":" + cachedListOnly //$NON-NLS-1$
+                        + ",\"inspect\":" + inspectShow //$NON-NLS-1$
+                        + ",\"sameActive\":" + (active != null) //$NON-NLS-1$
+                        + ",\"table\":" + tableItemCountForAssistant(assistant) //$NON-NLS-1$
+                        + ",\"filtered\":" + filteredProposalCountForAssistant(assistant) //$NON-NLS-1$
+                        + ",\"hypothesisId\":\"B\"}"); //$NON-NLS-1$
+                // #endregion
                 if (active != null)
                 {
-                    alignReplacementToTypedPrefix(assistant, active.getDocument(),
-                        SmartContentAssistProcessor.resolveWidgetCaret(active));
+                    alignReplacementToTypedPrefix(assistant, alignDoc, alignCaret);
                 }
             }
             return visible;

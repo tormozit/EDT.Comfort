@@ -276,13 +276,26 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
      */
     private boolean wordListSeededOnUi;
     /**
-     * Иконки SWT для автодополнения уже созданы на UI. {@code ImageDescriptor.createImage()}
-     * берёт {@code Display.getCurrent()}: с воркера это NPE «This is not an UI thread»,
-     * диспетчер Xtext пишет warning в Error Log на каждый {@code complete_*}.
+     * Провайдеры предложений, чьи иконки SWT уже созданы на UI.
+     * {@code ImageDescriptor.createImage()} и {@code JFaceResources.getResources()} берут
+     * {@code Display.getCurrent()}: с воркера это NPE «This is not an UI thread»,
+     * диспетчер Xtext пишет warning в Error Log и теряет остаток ветки {@code complete_*}.
+     *
+     * <p>Учёт — по экземпляру провайдера, не одним флагом на плагин: у встроенного
+     * редактора (поле «Выражение» инспектора отладки) свой процессор и свой экземпляр
+     * {@code BslProposalProvider}, а прогрев по общему флагу доставался только первому.
+     * Непрогретый экземпляр падал на {@code getDeclareMethodPropImg} внутри
+     * {@code complete_FeatureResolving} — фоновый расчёт отдавал 9 предложений вместо 2009,
+     * список отбрасывался как усечённый и окно не открывалось до первого Ctrl+Space
+     * (лог 12.09.2026 15:39).
      */
-    private static volatile boolean assistImagesWarmed;
-    /** {@link #wrapAssistLabelProvider} уже подменил штатный label provider языка. */
-    private static volatile boolean assistLabelProviderWrapped;
+    private static final java.util.Set<Object> assistImagesWarmedProviders =
+        java.util.Collections.synchronizedSet(
+            java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>()));
+    /** Провайдеры, которым {@link #wrapAssistLabelProvider} уже подменил label provider. */
+    private static final java.util.Set<Object> assistLabelProviderWrappedProviders =
+        java.util.Collections.synchronizedSet(
+            java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>()));
     /** Один раз пишем в temp-log, если с воркера getImage всё же бросил. */
     private static volatile boolean offUiImageLogged;
     /**
@@ -1682,7 +1695,6 @@ return;
             return false;
         if (hasMemberListForDot(dot))
         {
-            mergeKeptMemberEvents(doc);
             repairPopupListFromMemberStock(doc, caret);
             if (fullListCache.length == 0)
                 assignFullListCache(memberStockFullList);
@@ -1767,7 +1779,6 @@ return;
         {
             IDocument doc = viewer != null ? viewer.getDocument() : null;
             int caret = resolveWidgetCaret(viewer);
-            mergeKeptMemberEvents(doc);
             if (doc != null && caret >= 0)
                 repairPopupListFromMemberStock(doc, caret);
             if (fullListCache.length == 0)
@@ -2033,6 +2044,27 @@ return result;
         return assistant != null && ContentAssistPopupSync.isPopupVisible(assistant);
     }
 
+    private static String firstDisplayOf(ICompletionProposal[] list)
+    {
+        if (list == null || list.length == 0)
+            return ""; //$NON-NLS-1$
+        String disp = displayString(unwrapProposal(list[0]));
+        if (disp == null)
+            return ""; //$NON-NLS-1$
+        return disp.length() > 40 ? disp.substring(0, 40) : disp;
+    }
+
+    /**
+     * Поле выражения: EDT иногда отдаёт только локальные имена ({@code n=9},
+     * {@code events=0}) до готовности ресурса. Это не корневой словарь.
+     */
+    private static boolean isTruncatedInspectRootList(boolean inspect, ICompletionProposal[] list,
+        java.util.Map<?, ?> events)
+    {
+        return inspect && list != null && list.length > 0 && list.length < 50
+            && (events == null || events.isEmpty());
+    }
+
     private void markTerminalEmptyMemberAccess(int dot)
     {
         assignFullListCache(EMPTY);
@@ -2106,7 +2138,7 @@ return result;
         int probeOffset = resolveDelegateProbeOffset(viewer, offset, caret);
         String filter = SmartFilterTracker.getCurrentFilter();
         boolean smart = SmartAssistFilterState.isSmartFilterEnabled();
-return resolveProposalList(viewer, probeOffset, caret, filter, smart);
+        return resolveProposalList(viewer, probeOffset, caret, filter, smart);
     }
 
     private static void applyStockAssistImagesFromDelegate(
@@ -2523,6 +2555,20 @@ return;
                     + " cacheOnly=" + Boolean.TRUE.equals(CACHE_ONLY_COMPUTE.get()) //$NON-NLS-1$
                     + " firstPopup=" + firstPopup //$NON-NLS-1$
                     + " caller=" + uiBlockCaller()); //$NON-NLS-1$
+            if (DebugInspectorHook.isInspectExpressionViewer(viewer))
+            {
+                ContentAssistDebug.debugSessionLog("B", "computeCompletionProposals", "inspect", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    "{\"n\":" + (result == null ? -1 : result.length) //$NON-NLS-1$
+                        + ",\"cache\":" + fullListCache.length //$NON-NLS-1$
+                        + ",\"irN\":" + irProposals.length //$NON-NLS-1$
+                        + ",\"cacheOnly\":" + Boolean.TRUE.equals(CACHE_ONLY_COMPUTE.get()) //$NON-NLS-1$
+                        + ",\"irOnly\":" + (irOnlyManualMode || selectionIrOnlyActive()) //$NON-NLS-1$
+                        + ",\"filter\":\"" + ContentAssistDebug.jsonEscapeForLog(
+                            logDoc != null ? computeIdentifierFilter(logDoc, offset) : "") + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                        + ",\"first\":\"" + ContentAssistDebug.jsonEscapeForLog(firstDisplayOf(result)) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                        + ",\"around\":\"" + ContentAssistDebug.jsonEscapeForLog(uiBlockAround(logDoc, offset)) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                        + ",\"hypothesisId\":\"B\"}"); //$NON-NLS-1$
+            }
             // #endregion
             // В каталог — полный кэш, не отфильтрованный return (лог 10:40:09 n=11).
             IDocument rememberDoc = viewer != null ? viewer.getDocument() : null;
@@ -2773,6 +2819,7 @@ return;
         wordListBackgroundKey = key;
         final int gen = memberStockContextGen;
         final int epoch = wordListEpoch;
+        final boolean inspectJob = DebugInspectorHook.isInspectExpressionViewer(viewer);
         Job job = new Job("SCAP word list") //$NON-NLS-1$
         {
             @Override
@@ -2882,7 +2929,20 @@ return;
                                 + "\"}"); //$NON-NLS-1$
                         raw = EMPTY;
                     }
-                    if (raw != null && raw.length > 0)
+                    // mode == 2 — штатный расчёт отдал второй проход: полный проход
+                    // (mode 1) вернул пусто, а второй даёт лишь то, что не зависит от
+                    // режима. Такой список брать за словарь нельзя: замер 12.09.2026
+                    // 15:12 — 34 пункта без «Сообщить» вместо 1783, окно не открылось.
+                    boolean secondPass = delegateAssistMode() == 2;
+                    if (secondPass)
+                    {
+                        // #region agent log
+                        uiBlockLog("wordListBackground.secondPass", "attempt=" + attempts //$NON-NLS-1$ //$NON-NLS-2$
+                            + " n=" + (raw == null ? -1 : raw.length)); //$NON-NLS-1$
+                        // #endregion
+                    }
+                    if (raw != null && raw.length > 0 && !secondPass
+                        && !isTruncatedInspectRootList(inspectJob, raw, events))
                         break;
                     if (attempts < MEMBER_STOCK_BG_ATTEMPTS)
                     {
@@ -3246,6 +3306,18 @@ return;
         if (pendingPublishKey == key)
             pendingPublishKey = Integer.MIN_VALUE;
         int publishN = result == null ? -1 : result.length;
+        // #region agent log
+        boolean inspectPublish = DebugInspectorHook.isInspectExpressionViewer(viewer);
+        IDocument publishDoc = viewer != null ? viewer.getDocument() : null;
+        ContentAssistDebug.debugSessionLog("B", "publishWordList", inspectPublish ? "inspect" : "module", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            "{\"n\":" + publishN //$NON-NLS-1$
+                + ",\"events\":" + (dataEvents == null ? -1 : dataEvents.size()) //$NON-NLS-1$
+                + ",\"inspect\":" + inspectPublish //$NON-NLS-1$
+                + ",\"probe\":" + probeOffset //$NON-NLS-1$
+                + ",\"around\":\"" + ContentAssistDebug.jsonEscapeForLog(uiBlockAround(publishDoc, probeOffset)) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"hypothesisId\":\"D\"" //$NON-NLS-1$
+                + ",\"doc\":" + BslDataEventGuard.debugDocJson(publishDoc) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
         uiBlockLog("wordListBackground.publish.enter", "key=" + key //$NON-NLS-1$ //$NON-NLS-2$
             + " n=" + publishN //$NON-NLS-1$
             + " epoch=" + epoch + "/" + wordListEpoch); //$NON-NLS-1$ //$NON-NLS-2$
@@ -3273,6 +3345,21 @@ return;
         int liveCaret = resolveWidgetCaret(viewer);
         int liveKey = liveDoc != null && liveCaret >= 0
             ? computeFullListContextKey(liveDoc, liveCaret) : Integer.MIN_VALUE;
+        ContentAssistant thisCa = viewer instanceof SourceViewer sv
+            ? ContentAssistPatcher.getContentAssistant(sv) : null;
+        boolean thisPopup = thisCa != null && ContentAssistPopupSync.isPopupVisible(thisCa);
+        boolean activePopup = isPopupVisible();
+        // #region agent log
+        ContentAssistDebug.debugSessionLog("B", "publishWordList", "gate", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"n\":" + publishN //$NON-NLS-1$
+                + ",\"key\":" + key //$NON-NLS-1$
+                + ",\"liveKey\":" + liveKey //$NON-NLS-1$
+                + ",\"liveCaret\":" + liveCaret //$NON-NLS-1$
+                + ",\"thisPopup\":" + thisPopup //$NON-NLS-1$
+                + ",\"activePopup\":" + activePopup //$NON-NLS-1$
+                + ",\"inspect\":" + inspectPublish //$NON-NLS-1$
+                + ",\"hypothesisId\":\"B\"}"); //$NON-NLS-1$
+        // #endregion
         if (liveDoc == null || liveCaret < 0 || liveKey != key)
         {
             boolean keepCtor = liveDoc != null && liveCaret >= 0
@@ -3285,6 +3372,13 @@ return;
             {
                 ContentAssistDebug.perfMark("wordListBackground.dropKey", //$NON-NLS-1$
                     "{\"key\":" + key + ",\"caret\":" + liveCaret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                // #region agent log
+                ContentAssistDebug.debugSessionLog("B", "publishWordList", "dropKey", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    "{\"key\":" + key + ",\"liveKey\":" + liveKey //$NON-NLS-1$ //$NON-NLS-2$
+                        + ",\"liveCaret\":" + liveCaret //$NON-NLS-1$
+                        + ",\"inspect\":" + inspectPublish //$NON-NLS-1$
+                        + ",\"hypothesisId\":\"B\"}"); //$NON-NLS-1$
+                // #endregion
                 return;
             }
             key = liveKey;
@@ -3308,6 +3402,20 @@ return;
         else if (!dataEvents.isEmpty())
         {
             BslDataEventGuard.mergeIntoReal(liveDoc, dataEvents);
+        }
+        if (isTruncatedInspectRootList(inspectPublish, list, dataEvents))
+        {
+            // #region agent log
+            ContentAssistDebug.debugSessionLog("B", "publishWordList", "dropTruncated", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"n\":" + list.length //$NON-NLS-1$
+                    + ",\"events\":" + (dataEvents == null ? -1 : dataEvents.size()) //$NON-NLS-1$
+                    + ",\"inspect\":true" //$NON-NLS-1$
+                    + ",\"hypothesisId\":\"B\"}"); //$NON-NLS-1$
+            // #endregion
+            uiBlockLog("wordList.dropTruncatedInspect", "n=" + list.length //$NON-NLS-1$ //$NON-NLS-2$
+                + " events=" + (dataEvents == null ? -1 : dataEvents.size())); //$NON-NLS-1$
+            rescheduleWordListAfterEmpty(viewer, liveDoc, liveCaret, key);
+            return;
         }
         // Кэш заменяем только если новый список не короче: усечённый список показывать нельзя.
         // И не подменяем каталог типов после «Новый» словарём локальных/шаблонов (лог:
@@ -3356,7 +3464,9 @@ return;
         // Открываем окно ровно один раз на контекст: повторный показ снова запустил бы
         // расчёт, и при неудаче получился бы цикл.
         wordListOpenedKey = key;
-        if (!isPopupVisible())
+        boolean opened = false;
+        boolean refreshed = false;
+        if (!thisPopup)
         {
             String liveFilter = computeIdentifierFilter(liveDoc, liveCaret);
             if (popupList != null && popupList.length > 0 && liveFilter.equals(popupFilter))
@@ -3371,7 +3481,7 @@ return;
             }
             try
             {
-                boolean opened = ContentAssistSessionReloader.openPopupForBackgroundList(viewer);
+                opened = ContentAssistSessionReloader.openPopupForBackgroundList(viewer);
                 ContentAssistDebug.perfMark("openPopup.wordBg", "{\"ok\":" + opened + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             }
             finally
@@ -3380,6 +3490,22 @@ return;
                 backgroundPopupFilter = ""; //$NON-NLS-1$
             }
         }
+        else if (viewer instanceof SourceViewer sv && thisCa != null)
+        {
+            refreshed = ContentAssistPopupSync.recomputePopupList(thisCa, sv, this);
+        }
+        // #region agent log
+        ContentAssistDebug.debugSessionLog("B", "publishWordList", "shown", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"n\":" + publishN //$NON-NLS-1$
+                + ",\"cache\":" + fullListCache.length //$NON-NLS-1$
+                + ",\"thisPopup\":" + thisPopup //$NON-NLS-1$
+                + ",\"activePopup\":" + activePopup //$NON-NLS-1$
+                + ",\"opened\":" + opened //$NON-NLS-1$
+                + ",\"refreshed\":" + refreshed //$NON-NLS-1$
+                + ",\"inspect\":" + inspectPublish //$NON-NLS-1$
+                + ",\"first\":\"" + ContentAssistDebug.jsonEscapeForLog(firstDisplayOf(list)) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"hypothesisId\":\"B\"}"); //$NON-NLS-1$
+        // #endregion
     }
 
     /**
@@ -3428,6 +3554,33 @@ return;
         publishMemberStock(viewer, stock.dot(), stock.gen(), stock.receiver(), stock.list(),
             stock.dataEvents());
         return hasMemberStock(dot);
+    }
+
+    private int cacheOnlyRefetchCaret = -1;
+    private String cacheOnlyRefetchFilter = ""; //$NON-NLS-1$
+
+    /**
+     * Разрешает разовый доспрос EDT с UI, когда фоновый список под набранный префикс не
+     * дал ничего.
+     *
+     * <p>Фоновый расчёт иногда возвращает урезанный список: замер 12.09.2026 15:12 — на
+     * одном и том же тексте и смещении шесть фоновых расчётов подряд дали 34 пункта (без
+     * {@code Сообщить}), а расчёт с UI в той же точке — 1783. Урезанный список под «сооб»
+     * не дал ни одного совпадения, и окно не открывалось вовсе. Спросить EDT так, как это
+     * делает CTRL+Space, дешевле (замер: 54 мс), чем показать пользователю пустоту.
+     *
+     * <p>Ровно один доспрос на пару «каретка + префикс»: JFace дёргает расчёт дважды на
+     * один символ (открытие и фильтрация), а каждая новая буква — уже другой префикс.
+     */
+    private boolean beginCacheOnlyUiRefetch(int caret, String filter)
+    {
+        if (org.eclipse.swt.widgets.Display.getCurrent() == null)
+            return false;
+        if (cacheOnlyRefetchCaret == caret && cacheOnlyRefetchFilter.equals(filter))
+            return false;
+        cacheOnlyRefetchCaret = caret;
+        cacheOnlyRefetchFilter = filter;
+        return true;
     }
 
     private ICompletionProposal[] computeCompletionProposalsImpl(ITextViewer viewer, int offset)
@@ -3490,6 +3643,18 @@ return probeDelegateOnce(viewer, offset);
                 }
                 uiBlockLog("cacheOnly.prefixFallback", "filter=" + filter //$NON-NLS-1$ //$NON-NLS-2$
                     + " n=" + cached.length); //$NON-NLS-1$
+            }
+            if (cached.length == 0 && !filter.isEmpty()
+                && beginCacheOnlyUiRefetch(caret, filter))
+            {
+                ICompletionProposal[] raw =
+                    unwrapProposals(fetchDelegateList(viewer, offset, caret));
+                absorbInterimIntoCache(viewer, caret, raw);
+                cached = filterAndSort(mergeIrForDisplay(raw), filter);
+                // #region agent log
+                uiBlockLog("cacheOnly.uiRefetch", "filter=" + filter //$NON-NLS-1$ //$NON-NLS-2$
+                    + " raw=" + raw.length + " n=" + cached.length); //$NON-NLS-1$ //$NON-NLS-2$
+                // #endregion
             }
             return cached;
         }
@@ -4010,10 +4175,13 @@ return EMPTY;
             // cacheSeed=filtered n=333 при filter=т, дальше «схе» ищет только в этом срезе).
             boolean ctorTypes = isAfterNewKeyword(doc, caret)
                 && countNoLinkModelProposals(raw) > 0;
-            ICompletionProposal[] cacheSeed = ctorTypes ? raw
+            boolean fullWordProbe = offset == computeIdentifierWordStart(doc, caret);
+            ICompletionProposal[] cacheSeed = (ctorTypes || fullWordProbe) ? raw
                 : (!filter.isEmpty() && filtered.length > 0 ? filtered : raw);
             rememberInterimDelegateList(cacheSeed);
             absorbInterimIntoCache(viewer, caret, cacheSeed);
+            if (fullWordProbe)
+                fullListCachePrefix = ""; //$NON-NLS-1$
             if (ctorTypes)
                 rememberCtorTypeCatalog(doc, caret, raw);
             if (filtered.length > 0)
@@ -4072,9 +4240,13 @@ return EMPTY;
         }
         ICompletionProposal[] raw = unwrapProposals(fetchDelegateList(viewer, offset, caret));
         ICompletionProposal[] filtered = filterAndSort(mergeIrForDisplay(raw), filter);
-        ICompletionProposal[] cacheSeed = !filter.isEmpty() && filtered.length > 0 ? filtered : raw;
+        boolean fullWordProbe = offset == computeIdentifierWordStart(doc, caret);
+        ICompletionProposal[] cacheSeed = fullWordProbe ? raw
+            : (!filter.isEmpty() && filtered.length > 0 ? filtered : raw);
         rememberInterimDelegateList(cacheSeed);
         absorbInterimIntoCache(viewer, caret, cacheSeed);
+        if (fullWordProbe)
+            fullListCachePrefix = ""; //$NON-NLS-1$
         if (filtered.length > 0)
         {
             debugResolveExit(doc, caret, filter, raw.length, false, "h84Probe", filtered);
@@ -5289,6 +5461,9 @@ return result;
             + " popup=" + isPopupVisible() //$NON-NLS-1$
             + " caller=" + uiBlockCaller()); //$NON-NLS-1$
         // #endregion
+        IDocument fetchDoc = viewer != null ? viewer.getDocument() : null;
+        if (result.length > 0 && caret >= 0 && probeOffset != caret && fetchDoc != null)
+            rebaseProposalsToWord(fetchDoc, caret, result);
         return result;
     }
 
@@ -5839,11 +6014,22 @@ return result;
     private static int resolveDelegateProbeOffset(ITextViewer viewer, int invocationOffset,
                                                   int caret)
     {
+        int at = caret >= 0 ? caret : invocationOffset;
+        IDocument doc = viewer != null ? viewer.getDocument() : null;
+        // Ctrl+Space: зонд в начале идентификатора. Зонд на каретке (последняя буква)
+        // даёт префикс-срез EDT (лог 12.09.2026 13:44: n=122 → filterAndSort n=2
+        // «Окр,РежимОкругления» при Окр|()). Фон словаря уже так делает.
+        if (ManualInvocationDetect.isActive() && doc != null && at >= 0
+            && ReceiverTypeLabel.findMemberAccessDot(doc, at) < 0)
+        {
+            int wordStart = computeIdentifierWordStart(doc, at);
+            if (wordStart >= 0)
+                return wordStart;
+        }
         if (caret >= 0)
             return caret;
         if (viewer != null && invocationOffset >= 0)
         {
-            IDocument doc = viewer.getDocument();
             if (doc != null && invocationOffset <= doc.getLength())
                 return invocationOffset;
         }
@@ -6476,6 +6662,7 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         long t0 = ContentAssistDebug.perfStart("delegate.compute"); //$NON-NLS-1$
         long tCompute = System.nanoTime();
         ICompletionProposal[] raw = null;
+        int modeBefore = delegateAssistMode();
         try
         {
             // Штатный compute всегда делает nextMode до расчёта. Без reset() после
@@ -6515,6 +6702,8 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                 + " docLen=" + (d == null ? -1 : d.getLength()) //$NON-NLS-1$
                 + " around=\"" + uiBlockAround(d, off) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
                 + " seeded=" + wordListSeededOnUi //$NON-NLS-1$
+                + " mode=" + modeBefore + "/" + delegateAssistMode() //$NON-NLS-1$ //$NON-NLS-2$
+                + " head=\"" + previewProposals(raw) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
                 + " popup=" + isPopupVisible() //$NON-NLS-1$
                 + " caller=" + uiBlockCaller()); //$NON-NLS-1$
             // #endregion
@@ -6648,89 +6837,6 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
     private boolean hasMemberListForDot(int dot)
     {
         return dot >= 0 && memberStockFullListDot == dot && memberStockFullList.length > 0;
-    }
-
-    /**
-     * Запас членов по точке, переживающий закрытие окна и сброс кэша сессии.
-     *
-     * <p>Каждое обращение к EDT за членами на большом модуле стоит около секунды, причём
-     * первое после набранной точки штатно возвращает пусто (разбор не догнал текст) —
-     * замер 12.09.2026 11:39: 1119 мс на пустой ответ плюс 1065 мс на повтор. Раньше этот
-     * результат выбрасывался при закрытии окна, и следующий такт платил те же две секунды
-     * заново. Срок жизни — до следующего разбора модуля: дальше предложения EDT становятся
-     * ссылками в исчезнувшее состояние модели (см. {@code ctorCatalogModelGen}).
-     */
-    private final java.util.LinkedHashMap<Integer, CachedProposals> memberStockKeep =
-        new java.util.LinkedHashMap<>(8, 0.75f, true)
-        {
-            private static final long serialVersionUID = 1L;
-
-            @Override
-            protected boolean removeEldestEntry(
-                java.util.Map.Entry<Integer, CachedProposals> eldest)
-            {
-                return size() > 8;
-            }
-        };
-
-    private int memberStockKeepGen = -1;
-    /** Записи {@code DataEvent} восстановленного из запаса списка — вернуть в настоящую карту. */
-    private java.util.Map<Object, Object> keptMemberEvents;
-
-    private void keepMemberStockForDot(int dot, ICompletionProposal[] list,
-                                       java.util.Map<Object, Object> dataEvents)
-    {
-        if (dot < 0 || list == null || list.length == 0)
-            return;
-        if (memberStockKeepGen != ctorCatalogModelGen)
-        {
-            memberStockKeep.clear();
-            memberStockKeepGen = ctorCatalogModelGen;
-        }
-        CachedProposals saved = memberStockKeep.get(Integer.valueOf(dot));
-        if (saved != null && saved.list().length >= list.length
-            && !saved.dataEvents().isEmpty())
-            return;
-        memberStockKeep.put(Integer.valueOf(dot), new CachedProposals(list,
-            dataEvents == null || dataEvents.isEmpty() ? java.util.Collections.emptyMap()
-                : new java.util.LinkedHashMap<>(dataEvents)));
-    }
-
-    private boolean restoreMemberStockFromKeep(int dot)
-    {
-        if (memberStockKeepGen != ctorCatalogModelGen)
-        {
-            if (!memberStockKeep.isEmpty())
-                memberStockKeep.clear();
-            memberStockKeepGen = ctorCatalogModelGen;
-            return false;
-        }
-        CachedProposals kept = memberStockKeep.get(Integer.valueOf(dot));
-        if (kept == null || kept.list().length == 0)
-            return false;
-        memberStockFullList = kept.list();
-        memberStockFullListDot = dot;
-        memberStockFullListComplete = true;
-        keptMemberEvents = kept.dataEvents().isEmpty() ? null : kept.dataEvents();
-        uiBlockLog("memberStock.keepHit", "dot=" + dot + " n=" + kept.list().length //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " events=" + kept.dataEvents().size()); //$NON-NLS-1$
-        return true;
-    }
-
-    /**
-     * Возвращает в настоящую карту записи {@code DataEvent} списка, взятого из запаса.
-     *
-     * <p>Без них штатная вставка не находит ключ по вставленному тексту и LinkedMode не
-     * поднимается: каретка не встаёт между скобок у {@code Метод()}.
-     */
-    private void mergeKeptMemberEvents(IDocument document)
-    {
-        java.util.Map<Object, Object> events = keptMemberEvents;
-        if (events == null || events.isEmpty() || document == null)
-            return;
-        keptMemberEvents = null;
-        BslDataEventGuard.mergeIntoReal(document, events);
-        uiBlockLog("memberStock.keepEvents", "n=" + events.size()); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private ICompletionProposal[] preferMemberFullList(ITextViewer viewer, int dot,
@@ -7142,9 +7248,6 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         captureMemberStockFullList(result, dotContextKey);
         if (memberStockFullListDot == dotContextKey)
             memberStockFullListComplete = true;
-        // Запас держим вместе с записями DataEvent: показ из запаса без них ломает
-        // LinkedMode (каретка не встаёт между скобок).
-        keepMemberStockForDot(dotContextKey, memberStockFullList, dataEvents);
         // Положить список в поле мало — его никто не спросит. Расчёт, уже сходивший к делегату
         // в этом контексте, помечен `markDelegateSyncProbed` и на следующем заходе выходит по
         // «delegateProbed» → EMPTY, не заглянув в список членов вовсе. Именно поэтому Ctrl+Space
@@ -7397,6 +7500,63 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
      * Без reset после прошлого фона mode=1 → nextMode=2 → в кэш шаблоны, не словарь.
      * Только с рабочего потока: на UI Ctrl+Space сам крутит nextMode.
      */
+    /**
+     * Режим штатного поставщика предложений ({@code BslProposalProvider.mode}) или −1.
+     *
+     * <p>{@code reset()} ставит 2, {@code nextMode()} считает {@code mode % 2 + 1}, а все
+     * методы {@code complete*} выходят сразу при {@code (mode & 1) == 0}. То есть полный
+     * список считается только в режиме 1, а режим 2 отдаёт лишь то, что от режима не
+     * зависит. Значение нужно в логе, чтобы отличать урезанный второй проход от полного.
+     */
+    private int delegateAssistMode()
+    {
+        try
+        {
+            Object provider = delegate.getClass().getMethod("getContentProposalProvider") //$NON-NLS-1$
+                .invoke(delegate);
+            if (provider == null)
+                return -1;
+            for (Class<?> c = provider.getClass(); c != null; c = c.getSuperclass())
+            {
+                try
+                {
+                    java.lang.reflect.Field f = c.getDeclaredField("mode"); //$NON-NLS-1$
+                    f.setAccessible(true);
+                    return f.getInt(provider);
+                }
+                catch (NoSuchFieldException ignored)
+                {
+                }
+            }
+        }
+        catch (Exception ignored)
+        {
+        }
+        return -1;
+    }
+
+    /** Первые пункты списка — чтобы в логе было видно, ЧТО именно вернул штатный расчёт. */
+    private static String previewProposals(ICompletionProposal[] list)
+    {
+        if (list == null || list.length == 0)
+            return ""; //$NON-NLS-1$
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < list.length && i < 3; i++)
+        {
+            if (i > 0)
+                sb.append('|');
+            try
+            {
+                sb.append(String.valueOf(list[i].getDisplayString()));
+            }
+            catch (Exception | LinkageError e)
+            {
+                sb.append('?');
+            }
+        }
+        return sb.toString().replace('"', '\'');
+    }
+
     private void resetDelegateAssistMode()
     {
         try
@@ -7511,7 +7671,7 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         if (provider == null || org.eclipse.swt.widgets.Display.getCurrent() == null)
             return;
         wrapAssistLabelProvider(provider);
-        if (assistImagesWarmed)
+        if (assistImagesWarmedProviders.contains(provider))
             return;
         long t0 = System.nanoTime();
         int shared = 0;
@@ -7520,7 +7680,7 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         {
             shared = warmBslSharedImages();
             methods = warmProposalProviderImages(provider);
-            assistImagesWarmed = true;
+            assistImagesWarmedProviders.add(provider);
         }
         catch (RuntimeException e)
         {
@@ -7529,7 +7689,9 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         }
         uiBlockLog("assistImages.warm", "ms=" + ((System.nanoTime() - t0) / 1_000_000L) //$NON-NLS-1$ //$NON-NLS-2$
             + " shared=" + shared + " imgMethods=" + methods //$NON-NLS-1$ //$NON-NLS-2$
-            + " wrapped=" + assistLabelProviderWrapped); //$NON-NLS-1$
+            + " wrapped=" + assistLabelProviderWrappedProviders.contains(provider) //$NON-NLS-1$
+            + " provider=" + provider.getClass().getSimpleName() //$NON-NLS-1$
+            + "@" + Integer.toHexString(System.identityHashCode(provider))); //$NON-NLS-1$
     }
 
     /** Материализует все {@code IMG_*} из {@link BslSharedImages} в реестре иконок. */
@@ -7629,7 +7791,7 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
      */
     private static void wrapAssistLabelProvider(Object provider)
     {
-        if (assistLabelProviderWrapped || provider == null)
+        if (provider == null || assistLabelProviderWrappedProviders.contains(provider))
             return;
         try
         {
@@ -7671,7 +7833,7 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                 && java.lang.reflect.Proxy.getInvocationHandler(
                     original) instanceof OffUiSafeAssistImages)
             {
-                assistLabelProviderWrapped = true;
+                assistLabelProviderWrappedProviders.add(provider);
                 return;
             }
             java.util.LinkedHashSet<Class<?>> ifaces = new java.util.LinkedHashSet<>();
@@ -7682,7 +7844,7 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                 ifaces.toArray(Class<?>[]::new),
                 new OffUiSafeAssistImages(original));
             setter.invoke(provider, wrapped);
-            assistLabelProviderWrapped = true;
+            assistLabelProviderWrappedProviders.add(provider);
         }
         catch (Exception e)
         {

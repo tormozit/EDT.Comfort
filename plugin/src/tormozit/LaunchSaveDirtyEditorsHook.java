@@ -1183,6 +1183,13 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
         }
 
         @Override
+        protected void configureShell(Shell shell)
+        {
+            super.configureShell(shell);
+            shell.setImage(shell.getDisplay().getSystemImage(SWT.ICON_ERROR));
+        }
+
+        @Override
         protected String headerText()
         {
             return "В открытых редакторах проекта «" + projectName //$NON-NLS-1$

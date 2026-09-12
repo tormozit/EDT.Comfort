@@ -126,13 +126,16 @@ public final class ParamHintHtmlModifier
     /** Маркер ProgressListener основного SWT.Show фильтра (один на browser). */
     private static final String SHOW_COMFORT_PROGRESS =
         "tormozit.paramHintShowProgress"; //$NON-NLS-1$
-    /**
-     * Дедлайн (epoch ms) повторной посадки размера после Show: холодный Edge
-     * игнорирует {@code setSize} до готовности WebView2 и раздувает SWT.RESIZE-шелл.
-     */
-    private static final String SIZE_GUARD_MARK = "tormozit.paramHintSizeGuard"; //$NON-NLS-1$
-    private static final int SIZE_GUARD_MS = 800;
     private static final int SIZE_TOLERANCE_PX = 24;
+    /** Настройки EDT, где живёт сохранённый размер окна подсказки. */
+    private static final String HOVER_BOUNDS_SECTION =
+        "PARAMETERS_HOVER_INFO_CONTROL_SETTINGS"; //$NON-NLS-1$
+    private static final String HOVER_BOUNDS_WIDTH = "CONTROL_WIDTH"; //$NON-NLS-1$
+    private static final String HOVER_BOUNDS_HEIGHT = "CONTROL_HEIGHT"; //$NON-NLS-1$
+    /** Размер окна подсказки, когда посчитать по шрифту ещё нечем (до первого показа). */
+    private static final Point HOVER_FALLBACK_SIZE = new Point(360, 105);
+    private static final String SAVED_BOUNDS_CLOSE_MARK =
+        "tormozit.paramHintSavedBoundsClose"; //$NON-NLS-1$
     /** Маркер кнопки закрытия на нижней панели ParametersHoverInfoControl. */
     private static final String CLOSE_TOOLBAR_MARK = "tormozit.paramHintClose"; //$NON-NLS-1$
     /** Автовыбор сигнатуры: только при открытии (не на каждый Progress). */
@@ -168,6 +171,10 @@ public final class ParamHintHtmlModifier
 
         ContentAssistDebug.log("ParamHintHtmlModifier: install SWT.Show filter"); //$NON-NLS-1$
 
+        // Гигант, сохранённый в настройках EDT прошлым сеансом, раздувает окно подсказки
+        // при каждом штатном updateSize. Убираем его до первого показа.
+        SavedBounds.repair(null, "startup"); //$NON-NLS-1$
+
         display.addFilter(SWT.Show, event ->
         {
             if (!(event.widget instanceof Shell shell))
@@ -180,6 +187,60 @@ public final class ParamHintHtmlModifier
                 return;
 
             LinkedModeParamHintCloser.ensureInstalled();
+            GeometryTrace.attach(shell);
+            GeometryTrace.log("show.filter", shell, //$NON-NLS-1$
+                "giant=" + isGiantParamHintSize(shell.getSize(), HOVER_FALLBACK_SIZE, //$NON-NLS-1$
+                    paramHintMonitorClient(shell))
+                    + " intended=" + GeometryTrace.describeIntended(browser)); //$NON-NLS-1$
+
+            // Точная починка сохранённого размера: здесь EDT уже может посчитать его сам
+            // по шрифту подсказки. И тот же размер запишем при закрытии окна — иначе
+            // штатный saveBounds() вернёт гигант в настройки.
+            Object hoverForBounds = findParametersHover(browser);
+            SavedBounds.repair(hoverForBounds, "show"); //$NON-NLS-1$
+            ensureSavedBoundsRepairOnClose(shell);
+
+            // BrowserInformationControl.setVisible крутит readAndDispatch до Progress.
+            // Наш Comfort-патч HTML раньше вызывал updateSize в этом окне — повторный
+            // computeLocation мог посадить shell в (0,y) ещё до Show → вспышка в навигаторе.
+            // Если всё же у левого края / гигант: сначала alpha=0, потом геометрия, потом показать.
+            Point showLoc = shell.getLocation();
+            Point showSize = shell.getSize();
+            Rectangle mon = paramHintMonitorClient(shell);
+            boolean giant = isGiantParamHintSize(showSize, HOVER_FALLBACK_SIZE, mon);
+            if (showLoc.x <= 8 || giant)
+            {
+                int prevAlpha = 255;
+                boolean alphaHidden = false;
+                try
+                {
+                    prevAlpha = shell.getAlpha();
+                    shell.setAlpha(0);
+                    alphaHidden = true;
+                }
+                catch (Exception ignored)
+                {
+                }
+                boolean moved = ensureParamHintShellGeometry(shell,
+                    paramHintAnchorWidget(hoverForBounds));
+                ContentAssistSessionReloader.logLinkedMode("show.relocate", //$NON-NLS-1$
+                    "{\"before\":\"" + showLoc.x + "," + showLoc.y //$NON-NLS-1$ //$NON-NLS-2$
+                        + "\",\"after\":\"" + shell.getLocation().x + "," + shell.getLocation().y //$NON-NLS-1$ //$NON-NLS-2$
+                        + "\",\"size\":\"" + shell.getSize().x + "x" + shell.getSize().y //$NON-NLS-1$ //$NON-NLS-2$
+                        + "\",\"moved\":" + moved //$NON-NLS-1$
+                        + ",\"giant\":" + giant //$NON-NLS-1$
+                        + ",\"alpha\":" + alphaHidden + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+                if (alphaHidden)
+                {
+                    try
+                    {
+                        shell.setAlpha(prevAlpha <= 0 ? 255 : prevAlpha);
+                    }
+                    catch (Exception ignored)
+                    {
+                    }
+                }
+            }
 
             ensureParamHintCloseButton(browser);
 
@@ -193,7 +254,6 @@ public final class ParamHintHtmlModifier
                     public void completed(ProgressEvent event)
                     {
                         tryModifyBrowserHtml(browser);
-                        constrainParamHintSizeIfGuarding(browser);
                     }
 
                     @Override
@@ -205,7 +265,6 @@ public final class ParamHintHtmlModifier
             }
 
             tryModifyBrowserHtml(browser);
-            ensureParamHintSizeGuard(browser);
         });
 
         installParamHoverCommandProbe(display);
@@ -232,6 +291,9 @@ public final class ParamHintHtmlModifier
                 {
                     if (!INVOCATION_PARAMETERS_HOVER_COMMAND.equals(commandId))
                         return;
+                    // #region agent log
+                    Global.tempLog("inspect-hint-cmd", "preExecute"); //$NON-NLS-1$ //$NON-NLS-2$
+                    // #endregion
                     sigPickOnOpenPending.set(true);
                     // TypesComputer — только при нескольких сигнатурах (иначе сразу выход).
                     ensureFirstActualArgTypesComputed();
@@ -240,11 +302,20 @@ public final class ParamHintHtmlModifier
                 @Override
                 public void notHandled(String commandId, NotHandledException exception)
                 {
+                    // #region agent log
+                    if (INVOCATION_PARAMETERS_HOVER_COMMAND.equals(commandId))
+                        Global.tempLog("inspect-hint-cmd", "notHandled"); //$NON-NLS-1$ //$NON-NLS-2$
+                    // #endregion
                 }
 
                 @Override
                 public void postExecuteFailure(String commandId, ExecutionException exception)
                 {
+                    // #region agent log
+                    if (INVOCATION_PARAMETERS_HOVER_COMMAND.equals(commandId))
+                        Global.tempLog("inspect-hint-cmd", "failure " //$NON-NLS-1$ //$NON-NLS-2$
+                            + String.valueOf(exception));
+                    // #endregion
                 }
 
                 @Override
@@ -255,6 +326,8 @@ public final class ParamHintHtmlModifier
                     boolean alreadyVisible = isParamHintAlreadyVisible();
                     ContentAssistSessionReloader.logLinkedMode("cmd.post", "{\"visible\":" //$NON-NLS-1$ //$NON-NLS-2$
                         + alreadyVisible + "}"); //$NON-NLS-1$
+                    // #region agent log
+                    // #endregion
                     // Синхронно и только при реальном промахе — без asyncExec (иначе
                     // подмена comfort→EDT через ~50мс в основном режиме).
                     if (!alreadyVisible)
@@ -441,7 +514,7 @@ public final class ParamHintHtmlModifier
      */
     public static void ensureFirstActualArgTypesComputed()
     {
-        ActiveEditor active = resolveActiveBslEditor();
+        ActiveEditor active = resolveParamHintEditor();
         if (active == null || !(active.document instanceof IXtextDocument xdoc) || active.caret < 0)
             return;
         try
@@ -502,7 +575,9 @@ public final class ParamHintHtmlModifier
             @SuppressWarnings("unchecked")
             IUnitOfWork<Object, XtextResource> work =
                 (IUnitOfWork<Object, XtextResource>) unit;
-            Object info = ContentAssistSessionReloader.readOnlyPeekAst(xdoc, work);
+            // Синхронизированное чтение (то же, которым EDT считает список
+            // автодополнения): без него модель не знает только что вставленного вызова.
+            Object info = ContentAssistSessionReloader.readOnlyForContentAssist(xdoc, work);
             if (info == null)
             {
                 ContentAssistSessionReloader.logLinkedMode("openFast.skip", //$NON-NLS-1$
@@ -518,8 +593,15 @@ public final class ParamHintHtmlModifier
             if (window != null && window.getActivePage() != null
                 && window.getActivePage().getActivePart() != null)
                 site = window.getActivePage().getActivePart().getSite();
-            return Global.invokeVoid(handler, "showControlInfo", //$NON-NLS-1$
+            boolean shownFast = Global.invokeVoid(handler, "showControlInfo", //$NON-NLS-1$
                 viewer, info, Integer.valueOf(0), site);
+            if (shownFast)
+                repositionParamHintWhenReady(handler);
+            // #region agent log
+            Global.tempLog("inspect-hint-cmd", "openFast shown=" + shownFast //$NON-NLS-1$ //$NON-NLS-2$
+                + " caret=" + caret + " handler=" + handlerCls); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+            return shownFast;
         }
         catch (Exception ex)
         {
@@ -580,10 +662,42 @@ public final class ParamHintHtmlModifier
         Object viewPage = resolveViewPage(ctx);
         String name = viewPage != null
             ? asString(Global.invoke(viewPage, "getFirstName")) : null; //$NON-NLS-1$
-        if ((name == null || name.isBlank()) && ctx != null && ctx.pages != null
-            && ctx.pageIndex >= 0 && ctx.pageIndex < ctx.pages.size())
-            name = asString(Global.invoke(ctx.pages.get(ctx.pageIndex), "getName")); //$NON-NLS-1$
+        Object page = pageAt(ctx);
+        // ConstructorBslDocumentationPage сам CA-страница: getName — вариант
+        // сигнатуры («По типам»…), а не тип. Тип — в typeReference/container.
+        if (name == null || name.isBlank())
+            name = constructorTypeHintName(page != null ? page : viewPage);
+        if ((name == null || name.isBlank()) && page != null)
+            name = asString(Global.invoke(page, "getName")); //$NON-NLS-1$
         return name != null && !name.isBlank() ? name.trim() : null;
+    }
+
+    private static Object pageAt(HoverContext ctx)
+    {
+        if (ctx == null || ctx.pages == null || ctx.pageIndex < 0
+            || ctx.pageIndex >= ctx.pages.size())
+            return null;
+        return ctx.pages.get(ctx.pageIndex);
+    }
+
+    /**
+     * Имя типа конструктора из {@code typeReference}/{@code getContainer}
+     * ({@code PlatformReference.firstName} или {@code toShortString}).
+     */
+    private static String constructorTypeHintName(Object page)
+    {
+        if (page == null)
+            return null;
+        Object typeRef = Global.getField(page, "typeReference"); //$NON-NLS-1$
+        if (typeRef == null)
+            typeRef = Global.invoke(page, "getContainer"); //$NON-NLS-1$
+        if (typeRef == null)
+            return null;
+        String first = asString(Global.getField(typeRef, "firstName")); //$NON-NLS-1$
+        if (first != null && !first.isBlank())
+            return first.trim();
+        String shortName = asString(Global.invoke(typeRef, "toShortString")); //$NON-NLS-1$
+        return shortName != null && !shortName.isBlank() ? shortName.trim() : null;
     }
 
     /** Вызов относится к методу/типу подсказки: сверяем имя в коде и рус./англ. имена. */
@@ -778,16 +892,79 @@ public final class ParamHintHtmlModifier
             if (editor == null)
                 return false;
             ITextViewer viewer = editor.getInternalSourceViewer();
+            return tryOpenParamHintForViewer(viewer);
+        }
+        catch (Exception ex)
+        {
+            ContentAssistSessionReloader.logLinkedMode("miss.err", "{\"ex\":\"" //$NON-NLS-1$ //$NON-NLS-2$
+                + ContentAssistDebug.jsonEscapeForLog(String.valueOf(ex)) + "\"}"); //$NON-NLS-1$
+            return false;
+        }
+    }
+
+    /**
+     * Начало редактируемого выражения в поле инспектора (окно видимости) или {@code -1},
+     * если это обычный редактор. Вызовы, чьё имя метода кончается раньше этой границы,
+     * принадлежат служебной обёртке {@code Строка(…)}, а не тексту пользователя.
+     */
+    private static int inspectExpressionStart(ITextViewer viewer)
+    {
+        try
+        {
+            if (!DebugInspectorHook.isInspectExpressionViewer(viewer))
+                return -1;
+            org.eclipse.jface.text.IRegion visible = viewer.getVisibleRegion();
+            return visible == null ? -1 : visible.getOffset();
+        }
+        catch (Exception ignored)
+        {
+            return -1;
+        }
+    }
+
+    static boolean tryOpenParamHintForViewer(ITextViewer viewer)
+    {
+        try
+        {
+            if (isParamHintAlreadyVisible())
+            {
+                // #region agent log
+                // Важно для инспектора: раз окно уже видно, наш показ (а с ним и
+                // CustomCaretListener штатного handler) не выполняется — подсказка
+                // остаётся статической, от BslSelectionChangedListener.
+                Global.tempLog("inspect-hint-cmd", "openForViewer skip: alreadyVisible"); //$NON-NLS-1$ //$NON-NLS-2$
+                // #endregion
+                return true;
+            }
             if (viewer == null || viewer.getTextWidget() == null || viewer.getTextWidget().isDisposed())
+                return false;
+            Object handler = resolveParamHoverHandlerForMiss();
+            if (handler == null)
+            {
+                ContentAssistSessionReloader.logLinkedMode("miss.skip", //$NON-NLS-1$
+                    "{\"reason\":\"handlerNull\"}"); //$NON-NLS-1$
+                return false;
+            }
+            Object documentation = Global.getField(handler, "documentation"); //$NON-NLS-1$
+            Object languageProvider = Global.getField(handler, "languageProvider"); //$NON-NLS-1$
+            IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+            if (window == null || window.getActivePage() == null)
+                return false;
+            org.eclipse.ui.IWorkbenchPart part = window.getActivePage().getActivePart();
+            org.eclipse.ui.IWorkbenchSite site = part != null ? part.getSite() : null;
+            if (site == null)
                 return false;
             IDocument document = viewer.getDocument();
             if (!(document instanceof IXtextDocument xdoc))
                 return false;
             int caret = SmartContentAssistProcessor.resolveWidgetCaret(viewer);
-            org.eclipse.ui.IWorkbenchSite site = editor.getSite();
+            // Поле «Выражение» инспектора: текст выражения обёрнут искусственным
+            // вызовом Строка(…), и он же — самый внешний Invocation у каретки.
+            // Подсказку по нему показывать нельзя: пользователь его не писал.
+            final int expressionStart = inspectExpressionStart(viewer);
 
             final Object handlerRef = handler;
-            Boolean opened = ContentAssistSessionReloader.readOnlyPeekAst(xdoc,
+            Boolean opened = ContentAssistSessionReloader.readOnlyForContentAssist(xdoc,
                 (IUnitOfWork<Boolean, XtextResource>) resource -> {
                 if (resource == null)
                     return Boolean.FALSE;
@@ -796,6 +973,17 @@ public final class ParamHintHtmlModifier
                 {
                     ContentAssistSessionReloader.logLinkedMode("miss.skip", //$NON-NLS-1$
                         "{\"reason\":\"noCallSite\",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+                    return Boolean.FALSE;
+                }
+                if (expressionStart >= 0 && siteInfo.methodAccessEnd < expressionStart)
+                {
+                    ContentAssistSessionReloader.logLinkedMode("miss.skip", //$NON-NLS-1$
+                        "{\"reason\":\"wrapperCall\",\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                            + ",\"methodEnd\":" + siteInfo.methodAccessEnd //$NON-NLS-1$
+                            + ",\"exprStart\":" + expressionStart + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+                    Global.tempLog("inspect-hint-cmd", "skip wrapperCall caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                        + " methodEnd=" + siteInfo.methodAccessEnd //$NON-NLS-1$
+                        + " exprStart=" + expressionStart); //$NON-NLS-1$
                     return Boolean.FALSE;
                 }
                 // Вызов берём тот же, чьи границы посчитаны в siteInfo: отдельный
@@ -976,21 +1164,64 @@ public final class ParamHintHtmlModifier
                     Integer.valueOf(siteInfo.callEnd));
 
                 boolean shown = false;
-                if (PARAM_HOVER_HANDLER_CLASS.equals(handlerRef.getClass().getName()))
+                boolean realHandlerClass = PARAM_HOVER_HANDLER_CLASS.equals(
+                    handlerRef.getClass().getName());
+                String showErr = ""; //$NON-NLS-1$
+                if (realHandlerClass)
                 {
-                    shown = Global.invokeVoid(handlerRef, "showControlInfo", //$NON-NLS-1$
-                        viewer, info, Integer.valueOf(0), site);
+                    // Только этот путь ставит CustomCaretListener штатного handler:
+                    // от него зависят подсветка текущего параметра и автозакрытие
+                    // подсказки при уходе каретки из вызова.
+                    try
+                    {
+                        java.lang.reflect.Method show = null;
+                        for (java.lang.reflect.Method m : handlerRef.getClass().getDeclaredMethods())
+                        {
+                            if ("showControlInfo".equals(m.getName()) //$NON-NLS-1$
+                                && m.getParameterCount() == 4)
+                            {
+                                show = m;
+                                break;
+                            }
+                        }
+                        if (show == null)
+                            showErr = "noMethod"; //$NON-NLS-1$
+                        else
+                        {
+                            show.setAccessible(true);
+                            show.invoke(handlerRef, viewer, info, Integer.valueOf(0), site);
+                            shown = true;
+                        }
+                    }
+                    catch (Exception | LinkageError ex)
+                    {
+                        Throwable cause = ex instanceof java.lang.reflect.InvocationTargetException ite
+                            && ite.getCause() != null ? ite.getCause() : ex;
+                        showErr = cause.getClass().getSimpleName() + ": " + cause.getMessage(); //$NON-NLS-1$
+                    }
                     if (shown)
                     {
                         Object control = Global.getField(handlerRef, "infoControl"); //$NON-NLS-1$
                         tryModifyFindMissBrowser(control);
+                        repositionParamHintWhenReady(handlerRef);
                     }
                 }
+                Global.tempLog("inspect-hint-cmd", "showControlInfo real=" + realHandlerClass //$NON-NLS-1$ //$NON-NLS-2$
+                    + " shown=" + shown //$NON-NLS-1$
+                    + " handler=" + handlerRef.getClass().getName() //$NON-NLS-1$
+                    + (showErr.isEmpty() ? "" : " err=" + showErr)); //$NON-NLS-1$ //$NON-NLS-2$
+                boolean viaHandler = shown;
                 if (!shown)
                 {
                     shown = showParamHintControlDirect(viewer, documentationLocal,
                         languageProviderLocal, site, caPages, paramNumber, siteInfo);
                 }
+                // #region agent log
+                // viaHandler=true — показ штатным handler, значит есть и его
+                // CustomCaretListener (динамическая связь с кареткой); direct — без него.
+                Global.tempLog("inspect-hint-cmd", "openForViewer shown=" + shown //$NON-NLS-1$ //$NON-NLS-2$
+                    + " viaHandler=" + viaHandler + " caret=" + caret); //$NON-NLS-1$ //$NON-NLS-2$
+                // #endregion
                 return Boolean.valueOf(shown);
             });
             ContentAssistSessionReloader.logLinkedMode("miss.open", "{\"opened\":" + opened //$NON-NLS-1$ //$NON-NLS-2$
@@ -1057,7 +1288,353 @@ public final class ParamHintHtmlModifier
         catch (Exception ignored)
         {
         }
-        return unwrapParamHoverHandler(resolveInvocationParametersHoverHandler());
+        Object stock = unwrapParamHoverHandler(resolveInvocationParametersHoverHandler());
+        if (isRealParamHoverHandler(stock))
+            return stock;
+        // В диалоге (инспектор, свойства точки останова) у команды нет активного
+        // контекста, и e4 отдаёт обёртку либо ничего. Настоящий экземпляр создаём сами
+        // тем же механизмом, что и платформа — с внедрением зависимостей из контекста.
+        Object made = makeParamHoverHandler();
+        return made != null ? made : stock;
+    }
+
+
+    /**
+     * Двигает границы показанной подсказки параметров вслед за правкой текста.
+     *
+     * <p>Штатный {@code ParameterInfo} считается один раз в момент показа:
+     * {@code firstAvailablePosition}, {@code lastAvailablePosition} и позиции запятых
+     * фиксированы. Пока пользователь набирает аргументы, вызов растёт, а границы — нет,
+     * и {@code CustomCaretListener} на первой же запятой видит каретку за
+     * {@code lastAvailablePosition} и закрывает подсказку. В редакторе модуля этого не
+     * заметно: там висит подсказка LinkedMode, чьи позиции двигает position updater.
+     *
+     * @param offset смещение правки в документе
+     * @param removed сколько символов удалено
+     * @param inserted вставленный текст (может быть пустым)
+     */
+    /**
+     * То же, но с виджетом: границы правим у того {@code CustomCaretListener}, который
+     * реально висит на этом редакторе. Через обработчик их не найти — в диалоге точки
+     * останова подсказку ведёт экземпляр EDT, а не наш (в логе это было видно как полное
+     * отсутствие {@code bounds.adjust}).
+     */
+    static void adjustParamHintBounds(org.eclipse.swt.custom.StyledText widget, int offset,
+        int removed, String inserted)
+    {
+        int adjusted = 0;
+        try
+        {
+            if (widget != null && !widget.isDisposed())
+            {
+                for (org.eclipse.swt.widgets.Listener listener
+                    : widget.getListeners(org.eclipse.swt.custom.ST.CaretMoved))
+                {
+                    Object typed = listener instanceof org.eclipse.swt.widgets.TypedListener wrapper
+                        ? wrapper.getEventListener() : listener;
+                    if (typed == null
+                        || !typed.getClass().getName().endsWith("CustomCaretListener")) //$NON-NLS-1$
+                        continue;
+                    Object info = Global.getField(typed, "info"); //$NON-NLS-1$
+                    if (shiftParamInfoBounds(info, offset, removed, inserted))
+                        adjusted++;
+                }
+            }
+        }
+        catch (Exception | LinkageError ignored)
+        {
+        }
+        if (adjusted == 0)
+            adjustParamHintBounds(offset, removed, inserted);
+    }
+
+    static void adjustParamHintBounds(int offset, int removed, String inserted)
+    {
+        try
+        {
+            // Показать подсказку мог как наш экземпляр обработчика, так и штатный
+            // (в диалоге точки останова команду выполняет EDT). Берём тот, у которого
+            // окно действительно открыто, иначе границы правились бы у чужого.
+            Object handler = madeParamHoverHandler;
+            if (!isRealParamHoverHandler(handler)
+                || Global.getField(handler, "infoControl") == null) //$NON-NLS-1$
+                handler = resolveParamHoverHandlerForMiss();
+            if (!isRealParamHoverHandler(handler)
+                || Global.getField(handler, "infoControl") == null) //$NON-NLS-1$
+                return;
+            Object listener = Global.getField(handler, "caretListener"); //$NON-NLS-1$
+            Object info = listener == null ? null : Global.getField(listener, "info"); //$NON-NLS-1$
+            shiftParamInfoBounds(info, offset, removed, inserted);
+        }
+        catch (Exception | LinkageError ignored)
+        {
+        }
+    }
+
+    /** Сдвигает границы вызова и позиции запятых в {@code ParameterInfo}. */
+    private static boolean shiftParamInfoBounds(Object info, int offset, int removed,
+        String inserted)
+    {
+        if (info == null)
+            return false;
+        if (!(Global.getField(info, "firstAvailablePosition") instanceof Integer first) //$NON-NLS-1$
+            || !(Global.getField(info, "lastAvailablePosition") instanceof Integer last)) //$NON-NLS-1$
+            return false;
+        int added = inserted == null ? 0 : inserted.length();
+        int delta = added - removed;
+        if (offset > last.intValue())
+            return false;
+        int newFirst = offset < first.intValue() ? first.intValue() + delta : first.intValue();
+        int newLast = last.intValue() + delta;
+        Global.setFieldForce(info, "firstAvailablePosition", Integer.valueOf(newFirst)); //$NON-NLS-1$
+        Global.setFieldForce(info, "lastAvailablePosition", Integer.valueOf(newLast)); //$NON-NLS-1$
+        shiftCommaPositions(info, offset, removed, inserted, delta);
+        Global.tempLog("param-hint", "bounds.adjust offset=" + offset //$NON-NLS-1$ //$NON-NLS-2$
+            + " delta=" + delta + " first=" + newFirst + " last=" + newLast); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        return true;
+    }
+
+    private static void shiftCommaPositions(Object info, int offset, int removed, String inserted,
+        int delta)
+    {
+        if (!(Global.getField(info, "commaPosition") instanceof java.util.List<?> raw)) //$NON-NLS-1$
+            return;
+        @SuppressWarnings("unchecked")
+        java.util.List<Integer> commas = (java.util.List<Integer>)raw;
+        for (int i = 0; i < commas.size(); i++)
+        {
+            Integer at = commas.get(i);
+            if (at == null)
+                continue;
+            if (at.intValue() >= offset + removed)
+                commas.set(i, Integer.valueOf(at.intValue() + delta));
+        }
+        if (removed > 0)
+            commas.removeIf(at -> at != null && at.intValue() >= offset && at.intValue() < offset + removed);
+        if (inserted == null)
+            return;
+        for (int i = 0; i < inserted.length(); i++)
+        {
+            if (inserted.charAt(i) != ',')
+                continue;
+            int at = offset + i;
+            if (!commas.contains(Integer.valueOf(at)))
+                commas.add(Integer.valueOf(at));
+        }
+        commas.sort(null);
+    }
+
+    /**
+     * Ставит окно подсказки на место после загрузки содержимого.
+     *
+     * <p>{@code ParametersHoverInfoControl.updateSize()} считает точку как
+     * {@code anchor.y - size.y}, то есть поднимает окно над кареткой на его собственную
+     * высоту. При нашем показе окно создаётся заново, и в момент расчёта {@code Browser}
+     * ещё пуст: высота почти нулевая, окно оказывается у каретки снизу. При Ctrl+Shift+Space
+     * окно к этому моменту уже с содержимым, поэтому встаёт сверху. Повторяем расчёт, когда
+     * содержимое загружено.
+     */
+    /**
+     * Пересчитать положение уже показанной подсказки, кем бы она ни была показана —
+     * нашим путём или штатной командой. Без этого окно остаётся там, где его поставили
+     * при нулевой высоте пустого {@code Browser}, то есть снизу от каретки.
+     */
+    static void repositionShownParamHint()
+    {
+        Object handler = madeParamHoverHandler;
+        if (!isRealParamHoverHandler(handler)
+            || Global.getField(handler, "infoControl") == null) //$NON-NLS-1$
+            handler = resolveParamHoverHandlerForMiss();
+        if (isRealParamHoverHandler(handler))
+            repositionParamHintWhenReady(handler);
+    }
+
+    static void repositionParamHintWhenReady(Object handler)
+    {
+        try
+        {
+            Object control = handler == null ? null : Global.getField(handler, "infoControl"); //$NON-NLS-1$
+            if (control == null)
+                return;
+            Display display = Display.getCurrent();
+            if (display == null || display.isDisposed())
+                return;
+            Browser browser = findParamHintBrowser(control);
+            if (browser != null && !browser.isDisposed())
+            {
+                GeometryTrace.attach(browser.getShell());
+                GeometryTrace.log("reposition.arm", browser.getShell(), //$NON-NLS-1$
+                    GeometryTrace.describeIntended(browser));
+                browser.addProgressListener(org.eclipse.swt.browser.ProgressListener
+                    .completedAdapter(event -> updateParamHintSize(control)));
+            }
+            // Запасные такты: completed мог уже пройти, а размер ещё не применён.
+            display.timerExec(0, () -> updateParamHintSize(control));
+            display.timerExec(80, () -> updateParamHintSize(control));
+            display.timerExec(200, () -> updateParamHintSize(control));
+        }
+        catch (Exception | LinkageError ignored)
+        {
+        }
+    }
+
+    /**
+     * Замена штатному {@code ParametersHoverInfoControl.updateSize()}.
+     * <p>
+     * Штатный метод ставит размер (сохранённые границы либо
+     * {@code computeSizeConstraints}) и тут же пересчитывает по нему положение. Пока
+     * {@code Browser} не готов (холодный WebView2) или в настройках лежит гигант прошлого
+     * сеанса, размер выходит гигантским, и штатный {@code computeLocation} не находит
+     * места ни сверху, ни справа — окно уезжает к левому краю монитора, то есть в
+     * навигатор. Окно к этому моменту уже видимо, а зовём мы пересчёт несколько раз
+     * (такты после показа, каждый Progress) — отсюда гигантское мигающее окно в
+     * навигаторе при вводе в поле выражения.
+     * <p>
+     * Считаем то же самое сами: размер по тем же правилам, но с ограничением гиганта,
+     * положение — у каретки поля выражения или редактора. Промежуточной (неверной)
+     * геометрии не возникает вовсе.
+     */
+    private static void updateParamHintSize(Object control)
+    {
+        try
+        {
+            if (control == null)
+                return;
+            Object shown = Global.invoke(control, "isVisible"); //$NON-NLS-1$
+            if (shown instanceof Boolean visible && !visible.booleanValue())
+                return;
+            Object infoControl = Global.invoke(control, "getControl"); //$NON-NLS-1$
+            if (infoControl == null)
+                return;
+            Object shellObj = Global.invoke(infoControl, "getShell"); //$NON-NLS-1$
+            if (!(shellObj instanceof Shell shell) || shell.isDisposed())
+                return;
+            Point intended = resolveParamHintIntendedSize(control, infoControl, shell);
+            boolean resized = false;
+            if (intended != null && intended.x > 0 && intended.y > 0)
+            {
+                // Размер сверяем тем же способом, что и size-guard (getBounds контрола,
+                // не shell): иначе расхождение в рамку окна давало бы setSize на каждый
+                // Progress, то есть вспышку при каждой смене параметра.
+                Object boundsObj = Global.invoke(infoControl, "getBounds"); //$NON-NLS-1$
+                Rectangle bounds = boundsObj instanceof Rectangle rect ? rect : shell.getBounds();
+                Point current = new Point(bounds.width, bounds.height);
+                if (Math.abs(current.x - intended.x) > SIZE_TOLERANCE_PX
+                    || Math.abs(current.y - intended.y) > SIZE_TOLERANCE_PX)
+                {
+                    GeometryTrace.log("updateSize.apply", shell, "current=" //$NON-NLS-1$ //$NON-NLS-2$
+                        + GeometryTrace.size(current)
+                        + " intended=" + GeometryTrace.size(intended)); //$NON-NLS-1$
+                    Global.invokeVoid(infoControl, "setSize", //$NON-NLS-1$
+                        Integer.valueOf(intended.x), Integer.valueOf(intended.y));
+                    resized = true;
+                }
+            }
+            // Принудительно переносим только если сами меняли размер: тогда прежнее
+            // положение посчитано по другому размеру. Иначе — по обычным правилам, иначе
+            // окно ездило бы за кареткой при каждой смене параметра (вспышки в модуле).
+            relocateNearParamHintAnchor(shell, paramHintAnchorWidget(control), resized);
+        }
+        catch (Exception | LinkageError ignored)
+        {
+        }
+    }
+
+    /**
+     * Виджет, по каретке которого подсказку ставит штатный расчёт: поле {@code textViewer}
+     * самого {@code ParametersHoverInfoControl}.
+     * <p>
+     * Брать «последнее активное поле выражения» здесь нельзя: инспектор отладки — панель,
+     * а не диалог, и живёт рядом с редактором. Подсказка редактора модуля тогда встала бы
+     * по каретке поля инспектора.
+     */
+    private static StyledText paramHintAnchorWidget(Object parametersHover)
+    {
+        if (parametersHover == null)
+            return null;
+        Object viewer = Global.getField(parametersHover, "textViewer"); //$NON-NLS-1$
+        if (viewer instanceof ITextViewer textViewer)
+        {
+            StyledText st = textViewer.getTextWidget();
+            if (st != null && !st.isDisposed())
+                return st;
+        }
+        return null;
+    }
+
+    /** Перенос к каретке владельца подсказки; без него — к каретке активного поля/редактора. */
+    private static boolean relocateNearParamHintAnchor(Shell shell, StyledText anchor,
+        boolean force)
+    {
+        if (anchor != null && !anchor.isDisposed())
+            return relocateParamHintShellNearCaret(shell, anchor, force);
+        return relocateParamHintShellNearCaret(shell, force);
+    }
+
+    private static Browser findParamHintBrowser(Object control)
+    {
+        Object inner = Global.getField(control, "infoControl"); //$NON-NLS-1$
+        if (inner instanceof org.eclipse.jface.text.IInformationControl information)
+            return IrBslHoverHtml.findControlBrowser(information);
+        return null;
+    }
+
+    /**
+     * Показана ли подсказка, открытая через штатный {@code InvocationParametersHoverHandler}
+     * — то есть с его {@code CustomCaretListener} (подсветка параметра и автозакрытие).
+     * Подсказку LinkedMode снимаем только когда эта уже на экране, иначе пользователь
+     * остаётся вообще без подсказки.
+     */
+    static boolean isHandlerParamHintVisible()
+    {
+        try
+        {
+            Object handler = madeParamHoverHandler;
+            if (isRealParamHoverHandler(handler)
+                && Global.getField(handler, "infoControl") != null) //$NON-NLS-1$
+                return true;
+            handler = resolveParamHoverHandlerForMiss();
+            return isRealParamHoverHandler(handler)
+                && Global.getField(handler, "infoControl") != null; //$NON-NLS-1$
+        }
+        catch (Exception | LinkageError e)
+        {
+            return false;
+        }
+    }
+
+    /** Созданный нами экземпляр штатного обработчика подсказки параметров. */
+    private static volatile Object madeParamHoverHandler;
+
+    private static Object makeParamHoverHandler()
+    {
+        Object cached = madeParamHoverHandler;
+        if (cached != null)
+            return cached;
+        try
+        {
+            IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+            if (window == null)
+                return null;
+            Class<?> ctxClass = Class.forName("org.eclipse.e4.core.contexts.IEclipseContext"); //$NON-NLS-1$
+            Object context = window.getService(ctxClass);
+            if (context == null)
+                return null;
+            Class<?> factory =
+                Class.forName("org.eclipse.e4.core.contexts.ContextInjectionFactory"); //$NON-NLS-1$
+            java.lang.reflect.Method make = factory.getMethod("make", Class.class, ctxClass); //$NON-NLS-1$
+            Object handler = make.invoke(null, Class.forName(PARAM_HOVER_HANDLER_CLASS), context);
+            if (!isRealParamHoverHandler(handler))
+                return null;
+            madeParamHoverHandler = handler;
+            Global.tempLog("inspect-hint-cmd", "handler created by ContextInjectionFactory"); //$NON-NLS-1$ //$NON-NLS-2$
+            return handler;
+        }
+        catch (Exception | LinkageError e)
+        {
+            Global.tempLog("inspect-hint-cmd", "handler create failed: " + e); //$NON-NLS-1$ //$NON-NLS-2$
+            return null;
+        }
     }
 
     /** e4/Command часто отдают обёртку — достаём реальный handler (только Find-miss). */
@@ -1210,7 +1787,6 @@ public final class ParamHintHtmlModifier
                 public void completed(ProgressEvent event)
                 {
                     tryModifyBrowserHtml(browser);
-                    constrainParamHintSizeIfGuarding(browser);
                 }
 
                 @Override
@@ -1220,77 +1796,45 @@ public final class ParamHintHtmlModifier
             });
         }
         tryModifyBrowserHtml(browser);
-        ensureParamHintSizeGuard(browser);
+        GeometryTrace.attach(browser.getShell());
     }
 
     /**
-     * Первое открытие после старта EDT: холодный Edge/WebView2 и таймаут 100 мс
-     * в {@code BrowserInformationControl.setVisible} оставляют SWT.RESIZE-шелл
-     * дефолтного (гигантского) размера. Штатный {@code updateSize} уже вызывался
-     * до Show и к этому моменту не удерживается. Сажаем размер повторно, пока
-     * движок не готов; сохранённый гигант из прошлого сеанса тоже отбрасываем.
+     * При закрытии подсказки штатный {@code saveBounds()} пишет её размер в настройки.
+     * Если окно всё же успело раздуться, гигант остался бы там на все следующие сеансы —
+     * перезаписываем его сразу после закрытия.
      */
-    private static void ensureParamHintSizeGuard(Browser browser)
+    private static void ensureSavedBoundsRepairOnClose(Shell shell)
     {
-        if (browser == null || browser.isDisposed())
+        if (shell == null || shell.isDisposed()
+            || shell.getData(SAVED_BOUNDS_CLOSE_MARK) != null)
             return;
-        if (!looksLikeParamHintBrowser(browser))
-            return;
-        long deadline = System.currentTimeMillis() + SIZE_GUARD_MS;
-        browser.setData(SIZE_GUARD_MARK, Long.valueOf(deadline));
-        constrainParamHintSize(browser);
-        Display display = browser.getDisplay();
-        if (display == null || display.isDisposed())
-            return;
-        int[] delays = { 50, 150, 300, 500, 800 };
-        for (int delay : delays)
+        shell.setData(SAVED_BOUNDS_CLOSE_MARK, Boolean.TRUE);
+        Display display = shell.getDisplay();
+        shell.addListener(SWT.Dispose, event ->
         {
-            display.timerExec(delay, () -> constrainParamHintSizeIfGuarding(browser));
-        }
+            if (display != null && !display.isDisposed())
+                display.asyncExec(() -> SavedBounds.repair(null, "close")); //$NON-NLS-1$
+        });
     }
 
-    private static void constrainParamHintSizeIfGuarding(Browser browser)
+    /** @return {@code true}, если размер действительно уменьшили */
+    private static boolean constrainParamHintSize(Browser browser)
     {
         if (browser == null || browser.isDisposed())
-            return;
-        Object mark = browser.getData(SIZE_GUARD_MARK);
-        if (!(mark instanceof Long deadline)
-            || System.currentTimeMillis() > deadline.longValue())
-            return;
-        constrainParamHintSize(browser);
-    }
-
-    private static boolean looksLikeParamHintBrowser(Browser browser)
-    {
-        if (findParametersHover(browser) != null)
-            return true;
-        try
-        {
-            String html = browser.getText();
-            return html != null && html.indexOf(HEADING_CLASS) >= 0;
-        }
-        catch (Exception ignored)
-        {
             return false;
-        }
-    }
-
-    private static void constrainParamHintSize(Browser browser)
-    {
-        if (browser == null || browser.isDisposed())
-            return;
         Object hover = findParametersHover(browser);
         if (hover == null)
-            return;
+            return false;
         Object infoControl = Global.invoke(hover, "getControl"); //$NON-NLS-1$
         if (infoControl == null)
-            return;
+            return false;
         Object shellObj = Global.invoke(infoControl, "getShell"); //$NON-NLS-1$
         if (!(shellObj instanceof Shell shell) || shell.isDisposed())
-            return;
+            return false;
         Point intended = resolveParamHintIntendedSize(hover, infoControl, shell);
         if (intended == null || intended.x <= 0 || intended.y <= 0)
-            return;
+            return false;
         Rectangle current;
         Object boundsObj = Global.invoke(infoControl, "getBounds"); //$NON-NLS-1$
         if (boundsObj instanceof Rectangle rect)
@@ -1299,9 +1843,18 @@ public final class ParamHintHtmlModifier
             current = shell.getBounds();
         if (current.width <= intended.x + SIZE_TOLERANCE_PX
             && current.height <= intended.y + SIZE_TOLERANCE_PX)
-            return;
+        {
+            GeometryTrace.log("constrain.skip", shell, "current=" //$NON-NLS-1$ //$NON-NLS-2$
+                + current.width + "x" + current.height //$NON-NLS-1$
+                + " intended=" + GeometryTrace.size(intended)); //$NON-NLS-1$
+            return false;
+        }
+        GeometryTrace.log("constrain.apply", shell, "current=" //$NON-NLS-1$ //$NON-NLS-2$
+            + current.width + "x" + current.height //$NON-NLS-1$
+            + " intended=" + GeometryTrace.size(intended)); //$NON-NLS-1$
         Global.invokeVoid(infoControl, "setSize", //$NON-NLS-1$
             Integer.valueOf(intended.x), Integer.valueOf(intended.y));
+        return true;
     }
 
     private static Point resolveParamHintIntendedSize(Object hover, Object infoControl,
@@ -1900,6 +2453,237 @@ public final class ParamHintHtmlModifier
         }
     }
 
+    /**
+     * Координаты каретки в display уже согласованы с {@link StyledText} (не «левый край
+     * экрана» при живом редакторе справа). Иначе штатный computeLocation сажает окно в
+     * {@code (0,y)} — вспышка в навигаторе.
+     */
+    public static boolean isCaretDisplayReady(StyledText st)
+    {
+        Point caret = caretDisplayLocation(st);
+        if (caret == null)
+            return false;
+        try
+        {
+            Point origin = st.toDisplay(0, 0);
+            Rectangle client = st.getClientArea();
+            if (client.width <= 0 || client.height <= 0)
+                return false;
+            // Каретка должна попадать в полосу виджета (± небольшой запас на строку).
+            if (caret.x < origin.x - 20 || caret.x > origin.x + client.width + 40)
+                return false;
+            if (caret.y < origin.y - 20 || caret.y > origin.y + client.height + 40)
+                return false;
+            return true;
+        }
+        catch (Exception ignored)
+        {
+            return false;
+        }
+    }
+
+    /**
+     * Сжать гигантский shell (если раздут) и при необходимости перенести к каретке.
+     * Порядок важен: relocate по гигантскому size уводит окно на левый край монитора.
+     *
+     * @return {@code true}, если размер или положение изменили
+     */
+    public static boolean ensureParamHintShellGeometry(Shell shell)
+    {
+        if (shell == null || shell.isDisposed())
+            return false;
+        ActiveEditor active = resolveParamHintEditor();
+        StyledText st = active != null ? active.widget : null;
+        return ensureParamHintShellGeometry(shell, st);
+    }
+
+    public static boolean ensureParamHintShellGeometry(Shell shell, StyledText st)
+    {
+        if (shell == null || shell.isDisposed())
+            return false;
+        // Сжали гиганта — прежнее положение считалось по гигантскому размеру и теперь
+        // недействительно: окно стоит под кареткой (штатный computeLocation не нашёл
+        // места сверху для гиганта). Переносим принудительно, не по признаку «далеко».
+        boolean shrunk = constrainParamHintShellIfGiant(shell);
+        boolean changed = shrunk;
+        if (st != null && !st.isDisposed())
+            changed |= relocateParamHintShellNearCaret(shell, st, shrunk);
+        else
+            changed |= relocateParamHintShellNearCaret(shell, shrunk);
+        return changed;
+    }
+
+    /** Сжать shell подсказки, если он больше допустимого. Без продления size-guard. */
+    public static boolean constrainParamHintShellIfGiant(Shell shell)
+    {
+        if (shell == null || shell.isDisposed())
+            return false;
+        Browser browser = IrBslHoverHtml.findControlBrowser(shell);
+        if (browser != null && !browser.isDisposed())
+        {
+            Point before = shell.getSize();
+            constrainParamHintSize(browser);
+            Point after = shell.getSize();
+            return after.x != before.x || after.y != before.y;
+        }
+        Point size = shell.getSize();
+        Rectangle monitor = paramHintMonitorClient(shell);
+        Point def = new Point(360, 105);
+        if (!isGiantParamHintSize(size, def, monitor))
+            return false;
+        Point clamped = clampParamHintToMonitor(def, monitor);
+        if (clamped == null)
+            return false;
+        shell.setSize(clamped);
+        return true;
+    }
+
+    /**
+     * Если shell подсказки далеко от каретки — перенести к каретке (как EDT
+     * {@code ParametersHoverInfoControl.computeLocation}, но монитор от {@code StyledText}).
+     *
+     * @return {@code true}, если положение изменили
+     */
+    public static boolean relocateParamHintShellNearCaret(Shell shell)
+    {
+        return relocateParamHintShellNearCaret(shell, false);
+    }
+
+    public static boolean relocateParamHintShellNearCaret(Shell shell, boolean force)
+    {
+        if (shell == null || shell.isDisposed())
+            return false;
+        ActiveEditor active = resolveParamHintEditor();
+        StyledText st = active != null ? active.widget : null;
+        if (st == null || st.isDisposed())
+            return false;
+        return relocateParamHintShellNearCaret(shell, st, force);
+    }
+
+    public static boolean relocateParamHintShellNearCaret(Shell shell, StyledText st)
+    {
+        return relocateParamHintShellNearCaret(shell, st, false);
+    }
+
+    /**
+     * @param force переносить, даже если окно рядом с кареткой: после сжатия гиганта и
+     *            после штатного {@code updateSize} положение посчитано по чужому размеру
+     *            — окно оказывается под кареткой вместо «над» или у левого края монитора
+     */
+    public static boolean relocateParamHintShellNearCaret(Shell shell, StyledText st,
+        boolean force)
+    {
+        if (shell == null || shell.isDisposed() || st == null || st.isDisposed())
+            return false;
+        Point caret = caretDisplayLocation(st);
+        if (caret == null)
+            return false;
+        Point size = shell.getSize();
+        if (size.x < 50 || size.y < 20)
+            size = new Point(360, 105);
+        // Позицию считаем по нормальному размеру, не по гиганту — иначе x→левый край.
+        // Размер здесь не трогаем (это не size-guard).
+        Rectangle monitor = paramHintMonitorClient(shell);
+        Point def = new Point(360, 105);
+        if (isGiantParamHintSize(size, def, monitor))
+        {
+            Point clamped = clampParamHintToMonitor(def, monitor);
+            if (clamped != null)
+                size = clamped;
+        }
+        Point target = computeParamHintLocation(caret, size, st);
+        if (target == null)
+            return false;
+        Point now = shell.getLocation();
+        if (Math.abs(now.x - target.x) <= 8 && Math.abs(now.y - target.y) <= 8)
+        {
+            GeometryTrace.log("relocate.atTarget", shell, "caret=" //$NON-NLS-1$ //$NON-NLS-2$
+                + GeometryTrace.point(caret) + " target=" + GeometryTrace.point(target)); //$NON-NLS-1$
+            return false;
+        }
+        boolean far = Math.abs(now.x - caret.x) > 200 || Math.abs(now.y - caret.y) > 200
+            || now.x <= 8;
+        // Окно под кареткой, хотя место над ней есть: так штатный computeLocation сажает
+        // подсказку, когда считает положение по ещё гигантскому размеру Browser.
+        boolean wrongSide = now.y > caret.y && target.y + size.y <= caret.y;
+        String decision = "caret=" + GeometryTrace.point(caret) //$NON-NLS-1$
+            + " target=" + GeometryTrace.point(target) //$NON-NLS-1$
+            + " sizeUsed=" + GeometryTrace.size(size) //$NON-NLS-1$
+            + " far=" + far + " wrongSide=" + wrongSide + " force=" + force; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        if (!far && !wrongSide && !force)
+        {
+            GeometryTrace.log("relocate.skip", shell, decision); //$NON-NLS-1$
+            return false;
+        }
+        GeometryTrace.log("relocate.apply", shell, decision); //$NON-NLS-1$
+        shell.setLocation(target);
+        return true;
+    }
+
+    private static Point caretDisplayLocation(StyledText st)
+    {
+        if (st == null || st.isDisposed())
+            return null;
+        try
+        {
+            int caret = st.getCaretOffset();
+            int len = st.getCharCount();
+            if (caret < 0)
+                return null;
+            if (caret > len)
+                caret = len;
+            return st.toDisplay(st.getLocationAtOffset(caret));
+        }
+        catch (Exception ignored)
+        {
+            return null;
+        }
+    }
+
+    /** Как EDT {@code ParametersHoverInfoControl.computeLocation}, монитор — у виджета. */
+    private static Point computeParamHintLocation(Point caretDisp, Point size, StyledText st)
+    {
+        if (caretDisp == null || size == null || st == null || st.isDisposed())
+            return null;
+        Point loc = new Point(caretDisp.x, caretDisp.y - size.y);
+        Monitor monitor = st.getMonitor();
+        if (monitor == null)
+            return loc;
+        Rectangle bounds = monitor.getClientArea();
+        if (caretDisp.x + size.x > bounds.x + bounds.width)
+        {
+            int x = caretDisp.x > bounds.x + bounds.width
+                ? bounds.x + bounds.width - size.x
+                : caretDisp.x - size.x;
+            loc = new Point(x, loc.y);
+        }
+        if (loc.x < bounds.x)
+            loc = new Point(bounds.x, loc.y);
+        if (caretDisp.y - size.y < bounds.y)
+        {
+            int line = 16;
+            try
+            {
+                org.eclipse.swt.graphics.GC gc = new org.eclipse.swt.graphics.GC(st);
+                try
+                {
+                    line = Math.max(12, gc.getFontMetrics().getHeight());
+                }
+                finally
+                {
+                    gc.dispose();
+                }
+            }
+            catch (Exception ignored)
+            {
+            }
+            loc = new Point(loc.x, caretDisp.y + line);
+        }
+        if (loc.y + size.y > bounds.y + bounds.height)
+            loc = new Point(loc.x, Math.max(bounds.y, bounds.y + bounds.height - size.y));
+        return loc;
+    }
+
     /** Модифицировать HTML в браузере (сигнатура + формат строки типа). */
     private static void tryModifyBrowserHtml(Browser browser)
     {
@@ -1961,7 +2745,7 @@ public final class ParamHintHtmlModifier
                 return;
 
             browser.setData(HTML_PATCHED_MARK, Boolean.TRUE);
-            browser.setText(modified);
+            setBrowserTextKeepGeometry(browser, modified);
             scheduleScrollParamNameIntoView(browser);
         }
         finally
@@ -2103,9 +2887,10 @@ public final class ParamHintHtmlModifier
     }
 
     /**
-     * Пока подсказка открыта — обновлять жирность при движении каретки.
-     * Штатный EDT после последнего формального зажимает индекс и не вызывает
-     * {@code showPage}, поэтому HTML сам не пересобирается.
+     * Пока подсказка открыта — при движении каретки обновлять параметр через штатный
+     * {@code ParametersHoverInfoControl.showPage} (как LinkedMode), а не через
+     * {@code Browser.setText}. EDT после последнего формального зажимает индекс и
+     * иногда не зовёт showPage — догоняем здесь.
      */
     private static void ensureCurrentParamCaretSync(Browser browser)
     {
@@ -2113,7 +2898,7 @@ public final class ParamHintHtmlModifier
             return;
         if (Boolean.TRUE.equals(browser.getData(CURRENT_PARAM_CARET_MARK)))
             return;
-        ActiveEditor active = resolveActiveBslEditor();
+        ActiveEditor active = resolveParamHintEditor();
         if (active == null || active.widget == null || active.widget.isDisposed())
             return;
         StyledText widget = active.widget;
@@ -2132,9 +2917,8 @@ public final class ParamHintHtmlModifier
                 Display display = widget.getDisplay();
                 if (display == null || display.isDisposed())
                     return;
-                // После штатного CaretListener EDT (он зажимает paramIndex
-                // и часто не вызывает showPage при возврате на последний слот).
-                display.asyncExec(() -> updateHeadingCurrentParam(browser));
+                // После штатного CustomCaretListener EDT.
+                display.asyncExec(() -> refreshParamHintViaShowPage(browser));
             }
         };
         widget.addCaretListener(listener);
@@ -2145,31 +2929,59 @@ public final class ParamHintHtmlModifier
         });
     }
 
-    private static void updateHeadingCurrentParam(Browser browser)
+    private static final String LAST_SHOW_ARG_MARK = "tormozit.paramHintLastShowArg"; //$NON-NLS-1$
+
+    /**
+     * Смена активного параметра — только {@code showPage} → {@code setInput} →
+     * {@code updateSize}, как у LinkedMode. Без прямого {@code Browser.setText}.
+     */
+    private static void refreshParamHintViaShowPage(Browser browser)
     {
         if (browser == null || browser.isDisposed())
             return;
-        String html = browser.getText();
-        if (html == null || html.isBlank() || html.indexOf(HEADING_CLASS) < 0)
-            return;
-        HoverContext ctx = resolveHoverContext(browser);
-        String updated = rewriteHeadingOptionalParams(html, ctx);
-        if (updated == null || updated.equals(html))
-            return;
         if (Boolean.TRUE.equals(MODIFY_IN_PROGRESS.get()))
             return;
-        if (abortIfModifyBurst(browser))
+        HoverContext ctx = resolveHoverContext(browser);
+        if (ctx == null || ctx.parametersHover == null || ctx.pages == null || ctx.pages.isEmpty())
             return;
-        MODIFY_IN_PROGRESS.set(Boolean.TRUE);
-        try
-        {
-            browser.setText(updated);
-            scheduleScrollParamNameIntoView(browser);
-        }
-        finally
-        {
-            MODIFY_IN_PROGRESS.set(Boolean.FALSE);
-        }
+        if (ctx.pageIndex < 0 || ctx.pageIndex >= ctx.pages.size())
+            return;
+        int desired = ctx.currentArgIndex >= 0 ? ctx.currentArgIndex : ctx.paramIndex;
+        if (desired < 0)
+            desired = 0;
+        Object prev = browser.getData(LAST_SHOW_ARG_MARK);
+        if (prev instanceof Integer last && last.intValue() == desired)
+            return;
+        Object page = ctx.pages.get(ctx.pageIndex);
+        Object paramsObj = Global.getField(page, "params"); //$NON-NLS-1$
+        List<?> params = paramsObj instanceof List<?> typed ? typed : Collections.emptyList();
+        int formalCount = params.size();
+        int showIdx = desired;
+        if (formalCount > 0 && showIdx >= formalCount)
+            showIdx = formalCount - 1;
+        browser.setData(LAST_SHOW_ARG_MARK, Integer.valueOf(desired));
+        // showPage уже вызвал updateSize. Comfort-патч HTML — только setText,
+        // без повторного updateSize (см. setBrowserTextKeepGeometry).
+        // Геометрию здесь не трогаем вовсе: смена активного параметра — самая частая
+        // операция, любое наше вмешательство (сжатие, перенос, alpha) видно как вспышка.
+        // Но записываем: внутри showPage штатный updateSize меняет и размер, и место.
+        GeometryTrace.log("showPage.before", browser.getShell(), "arg=" + showIdx); //$NON-NLS-1$ //$NON-NLS-2$
+        Global.invokeVoid(ctx.parametersHover, "showPage", ctx.pages, //$NON-NLS-1$
+            Integer.valueOf(ctx.pageIndex), Integer.valueOf(showIdx));
+        GeometryTrace.log("showPage.after", browser.getShell(), "arg=" + showIdx); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /**
+     * Comfort-патч HTML без {@code updateSize}. Размер/место уже выставил
+     * {@code showPage}; повторный {@code updateSize} во время
+     * {@code BrowserInformationControl.setVisible} (цикл readAndDispatch до
+     * Progress) может пересчитать location в {@code (0,y)} → вспышка в навигаторе.
+     */
+    private static void setBrowserTextKeepGeometry(Browser browser, String html)
+    {
+        if (browser == null || browser.isDisposed() || html == null)
+            return;
+        browser.setText(html);
     }
 
     /**
@@ -2369,25 +3181,54 @@ public final class ParamHintHtmlModifier
 
     private static boolean signatureAllowsExtraArgs(HoverContext ctx, int formalCount)
     {
-        if (ctx == null || ctx.method == null)
+        if (ctx == null)
             return false;
-        EList<ParamSet> sets = ctx.method.getParamSet();
-        if (sets == null || sets.isEmpty())
-            return false;
-        ParamSet matched = null;
-        for (ParamSet set : sets)
+        if (ctx.method != null)
         {
-            if (set == null || set.getParams() == null)
+            EList<ParamSet> sets = ctx.method.getParamSet();
+            if (sets != null && !sets.isEmpty())
+            {
+                ParamSet matched = null;
+                for (ParamSet set : sets)
+                {
+                    if (set == null || set.getParams() == null)
+                        continue;
+                    if (set.getParams().size() != formalCount)
+                        continue;
+                    if (set.getMaxParams() < 0)
+                        return true;
+                    matched = set;
+                }
+                if (matched != null)
+                    return matched.getMaxParams() < 0;
+                ParamSet first = sets.get(0);
+                return first != null && first.getMaxParams() < 0;
+            }
+        }
+        return constructorAllowsExtraArgs(ctx.constructorType, formalCount);
+    }
+
+    private static boolean constructorAllowsExtraArgs(Type type, int formalCount)
+    {
+        if (type == null || formalCount < 0)
+            return false;
+        EList<Ctor> ctors = type.getCtors();
+        if (ctors == null || ctors.isEmpty())
+            return false;
+        Ctor matched = null;
+        for (Ctor ctor : ctors)
+        {
+            if (ctor == null || ctor.getParams() == null)
                 continue;
-            if (set.getParams().size() != formalCount)
+            if (ctor.getParams().size() != formalCount)
                 continue;
-            if (set.getMaxParams() < 0)
+            if (ctor.getMaxParams() < 0)
                 return true;
-            matched = set;
+            matched = ctor;
         }
         if (matched != null)
             return matched.getMaxParams() < 0;
-        ParamSet first = sets.get(0);
+        Ctor first = ctors.get(0);
         return first != null && first.getMaxParams() < 0;
     }
 
@@ -2436,14 +3277,19 @@ public final class ParamHintHtmlModifier
 
     private static Object resolveViewPage(HoverContext ctx)
     {
-        if (ctx == null || ctx.pages == null || ctx.pageIndex < 0
-            || ctx.pageIndex >= ctx.pages.size())
+        Object page = pageAt(ctx);
+        if (page == null)
             return null;
-        Object page = ctx.pages.get(ctx.pageIndex);
         Object viewPage = Global.invoke(page, "getViewPage"); //$NON-NLS-1$
         if (viewPage != null)
             return viewPage;
-        return Global.getField(page, "viewPage"); //$NON-NLS-1$
+        viewPage = Global.getField(page, "viewPage"); //$NON-NLS-1$
+        if (viewPage != null)
+            return viewPage;
+        // ConstructorBslDocumentationPage — сама CA-страница с typeReference
+        if (Global.getField(page, "typeReference") != null) //$NON-NLS-1$
+            return page;
+        return null;
     }
 
     private static String resolveHeadingMethodName(HoverContext ctx, String beforeHtml)
@@ -3610,7 +4456,7 @@ public final class ParamHintHtmlModifier
     {
         try
         {
-            ActiveEditor active = resolveActiveBslEditor();
+            ActiveEditor active = resolveParamHintEditor();
             if (active == null || active.document == null)
             {
                 return null;
@@ -3675,7 +4521,7 @@ public final class ParamHintHtmlModifier
 
     private static void fillInvocationContext(HoverContext ctx)
     {
-        ActiveEditor active = resolveActiveBslEditor();
+        ActiveEditor active = resolveParamHintEditor();
         if (active == null || !(active.document instanceof IXtextDocument xdoc) || active.caret < 0)
             return;
         try
@@ -3693,8 +4539,14 @@ public final class ParamHintHtmlModifier
             ctx.actualArgTypes = snap.actualArgTypes;
             ctx.actualArgTypeNames = snap.actualArgTypeNames;
             ctx.method = snap.method;
+            ctx.constructorType = snap.constructorType;
             ctx.directive = snap.directive;
             ctx.currentArgIndex = snap.currentArgIndex;
+            Global.tempLog("bp-param-hint", "fillInvocation argIndex=" //$NON-NLS-1$ //$NON-NLS-2$
+                    + snap.currentArgIndex + " formalHint=" + hintName //$NON-NLS-1$
+                    + " caret=" + active.caret //$NON-NLS-1$
+                    + " ctor=" + (snap.constructorType != null) //$NON-NLS-1$
+                    + " field=" + (active.fromExpressionField ? "expr" : "module")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         }
         catch (Exception ignored)
         {
@@ -3705,6 +4557,10 @@ public final class ParamHintHtmlModifier
         String hintName)
     {
         EObject invocationLike = findInvocationLikeAt(resource, caret, hintName);
+        // Подсказка конструктора раньше давала getName()≠тип → miss. Страховка:
+        // без фильтра имени, если с именем ничего не нашли.
+        if (invocationLike == null && hintName != null)
+            invocationLike = findInvocationLikeAt(resource, caret, null);
         if (invocationLike == null)
             return null;
 
@@ -3718,7 +4574,9 @@ public final class ParamHintHtmlModifier
         }
         else
         {
-            params = ((OperatorStyleCreator) invocationLike).getParams();
+            OperatorStyleCreator ctor = (OperatorStyleCreator) invocationLike;
+            params = ctor.getParams();
+            snap.constructorType = ctor.getType();
         }
         snap.actualArgCount = params != null ? params.size() : 0;
         snap.currentArgIndex = resolveCurrentArgIndex(invocationLike, caret);
@@ -3811,6 +4669,13 @@ public final class ParamHintHtmlModifier
         EList<Expression> params = paramsOfInvocationLike(invocationLike);
         if (invocationLike instanceof Invocation invocation)
             addNodeFor(nodes, invocation.getMethodAccess());
+        else if (invocationLike instanceof OperatorStyleCreator ctor)
+        {
+            List<INode> typeNodes = NodeModelUtils.findNodesForFeature(ctor,
+                BslPackage.Literals.OPERATOR_STYLE_CREATOR__TYPE);
+            if (typeNodes != null)
+                nodes.addAll(typeNodes);
+        }
         if (params != null)
         {
             for (Expression param : params)
@@ -4265,6 +5130,7 @@ public final class ParamHintHtmlModifier
             ActiveEditor active = new ActiveEditor();
             active.document = document;
             active.caret = -1;
+            active.fromExpressionField = false;
             ITextViewer viewer = bslEditor.getInternalSourceViewer();
             if (viewer != null)
             {
@@ -4277,6 +5143,35 @@ public final class ParamHintHtmlModifier
         {
             return null;
         }
+    }
+
+    /**
+     * Документ и каретка для подсказки параметров: сначала поле выражения
+     * (точка останова / инспектор), иначе активный редактор модуля. Иначе в диалоге
+     * свойств слот аргумента считался по каретке модуля, а EDT {@code paramIndex}
+     * зажат на последнем формальном — «?» для лишнего аргумента не появлялся.
+     */
+    private static ActiveEditor resolveParamHintEditor()
+    {
+        ActiveEditor fromField = activeFromExpressionField(BslExpressionField.focusedOrLastViewer());
+        if (fromField != null)
+            return fromField;
+        return resolveActiveBslEditor();
+    }
+
+    private static ActiveEditor activeFromExpressionField(ITextViewer viewer)
+    {
+        if (viewer == null)
+            return null;
+        IDocument document = viewer.getDocument();
+        if (document == null)
+            return null;
+        ActiveEditor active = new ActiveEditor();
+        active.document = document;
+        active.caret = SmartContentAssistProcessor.resolveWidgetCaret(viewer);
+        active.widget = viewer.getTextWidget();
+        active.fromExpressionField = true;
+        return active;
     }
 
     private static Iterable<?> asIterable(Object listeners)
@@ -4346,6 +5241,8 @@ public final class ParamHintHtmlModifier
         List<TypeItem> actualArgTypes = Collections.emptyList();
         Set<String> actualArgTypeNames = Collections.emptySet();
         Method method;
+        /** Тип {@code Новый Тип(...)} — для maxParams сигнатуры конструктора. */
+        Type constructorType;
         String directive;
     }
 
@@ -4356,6 +5253,7 @@ public final class ParamHintHtmlModifier
         List<TypeItem> actualArgTypes = Collections.emptyList();
         Set<String> actualArgTypeNames = Collections.emptySet();
         Method method;
+        Type constructorType;
         String directive;
     }
 
@@ -5138,10 +6036,281 @@ public final class ParamHintHtmlModifier
         }
     }
 
+    /**
+     * Сохранённый размер окна подсказки в настройках EDT
+     * ({@code PARAMETERS_HOVER_INFO_CONTROL_SETTINGS} в {@code dialog_settings.xml}
+     * бандла {@code com._1c.g5.v8.dt.bsl.ui}).
+     * <p>
+     * Это корень «гигантского окна». {@code ParametersHoverInfoControl.saveBounds()} при
+     * закрытии подсказки пишет туда её фактический размер, а {@code loadBounds()} при
+     * каждом {@code updateSize()} возвращает его обратно. Стоит окну один раз раздуться
+     * (непрогретый WebView2) — гигант попадает в настройки и раздувает окно уже всегда,
+     * в том числе на каждой смене активного параметра: в логе 13.09.2026
+     * {@code saved=1920x1011}, и окно прыгало к этому размеру после каждой запятой.
+     * <p>
+     * Поэтому гигант в настройках не оставляем — ни при старте, ни при закрытии окна.
+     * Размер, выставленный пользователем вручную, гигантом не считается и сохраняется
+     * как прежде.
+     */
+    private static final class SavedBounds
+    {
+        private static final String BSL_UI_PLUGIN =
+            "com._1c.g5.v8.dt.internal.bsl.ui.BslUiPlugin"; //$NON-NLS-1$
+        /** Последний размер, посчитанный самим EDT по шрифту подсказки. */
+        private static volatile Point lastSane;
+        /** Секция настроек, добытая у окна подсказки: пакет плагина EDT внутренний. */
+        private static volatile Object cachedSection;
+
+        private SavedBounds()
+        {
+        }
+
+        /**
+         * @param hover {@code ParametersHoverInfoControl}, если он уже есть: у него же
+         *            берём и секцию настроек, и размер, посчитанный EDT по шрифту
+         *            ({@code computeSizeConstraints}); при {@code null} — последние
+         *            известные или запасные
+         */
+        static void repair(Object hover, String reason)
+        {
+            try
+            {
+                Object infoControl = hover != null
+                    ? Global.invoke(hover, "getControl") : null; //$NON-NLS-1$
+                Point def = infoControl != null ? computeParamHintDefaultSize(infoControl) : null;
+                if (def != null && def.x > 0 && def.y > 0)
+                    lastSane = def;
+                Object section = section(hover);
+                if (section == null)
+                    return;
+                Point stored = read(section);
+                if (stored == null)
+                    return;
+                Point sane = def != null ? def : lastSane != null ? lastSane : HOVER_FALLBACK_SIZE;
+                Rectangle monitor = primaryMonitorClient();
+                if (!isGiantParamHintSize(stored, sane, monitor))
+                    return;
+                Point fixed = clampParamHintToMonitor(sane, monitor);
+                if (fixed == null || fixed.x <= 0 || fixed.y <= 0)
+                    fixed = sane;
+                Global.invoke(section, "put", HOVER_BOUNDS_WIDTH, String.valueOf(fixed.x)); //$NON-NLS-1$
+                Global.invoke(section, "put", HOVER_BOUNDS_HEIGHT, String.valueOf(fixed.y)); //$NON-NLS-1$
+                Global.tempLog("param-hint-geom", "savedBounds.repair reason=" + reason //$NON-NLS-1$ //$NON-NLS-2$
+                    + " stored=" + stored.x + "x" + stored.y //$NON-NLS-1$ //$NON-NLS-2$
+                    + " written=" + fixed.x + "x" + fixed.y); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            catch (Exception | LinkageError ignored)
+            {
+            }
+        }
+
+        private static Object section(Object hover)
+        {
+            if (hover != null)
+            {
+                // Свой же приватный getBoundsSettings() — не зависит от видимости
+                // внутреннего пакета плагина EDT.
+                Object own = Global.invoke(hover, "getBoundsSettings"); //$NON-NLS-1$
+                if (own != null)
+                {
+                    cachedSection = own;
+                    return own;
+                }
+            }
+            Object known = cachedSection;
+            if (known != null)
+                return known;
+            try
+            {
+                Class<?> pluginClass = Class.forName(BSL_UI_PLUGIN);
+                Object plugin = Global.invoke(pluginClass, "getInstance"); //$NON-NLS-1$
+                if (plugin == null)
+                    return null;
+                Object settings = Global.invoke(plugin, "getDialogSettings"); //$NON-NLS-1$
+                if (settings == null)
+                    return null;
+                // Нет секции — нечего и чинить: её создаст сам EDT при первом сохранении.
+                Object section = Global.invoke(settings, "getSection", HOVER_BOUNDS_SECTION); //$NON-NLS-1$
+                if (section != null)
+                    cachedSection = section;
+                return section;
+            }
+            catch (Exception | LinkageError ignored)
+            {
+                return null;
+            }
+        }
+
+        private static Point read(Object section)
+        {
+            String width = asString(Global.invoke(section, "get", HOVER_BOUNDS_WIDTH)); //$NON-NLS-1$
+            String height = asString(Global.invoke(section, "get", HOVER_BOUNDS_HEIGHT)); //$NON-NLS-1$
+            if (width == null || height == null)
+                return null;
+            try
+            {
+                return new Point(Integer.parseInt(width.trim()), Integer.parseInt(height.trim()));
+            }
+            catch (NumberFormatException ignored)
+            {
+                return null;
+            }
+        }
+
+        private static Rectangle primaryMonitorClient()
+        {
+            Display display = Display.getCurrent();
+            if (display == null || display.isDisposed())
+                return null;
+            Monitor monitor = display.getPrimaryMonitor();
+            return monitor != null ? monitor.getClientArea() : null;
+        }
+    }
+
+    /**
+     * Безусловная трассировка геометрии окна подсказки параметров.
+     * <p>
+     * Гигантское окно и прыжок к левому краю монитора (в навигатор) — один из главных
+     * дефектов этого места, а меняют размер и положение сразу несколько сторон: штатный
+     * {@code ParametersHoverInfoControl.updateSize}, {@code BrowserInformationControl}
+     * при готовности движка, наш size-guard и наш перенос к каретке. Разбирать это без
+     * записи <b>каждого</b> изменения и того, кто его сделал, нечем — поэтому слушаем
+     * {@code SWT.Resize}/{@code SWT.Move} самого shell: в стеке события виден вызывающий.
+     * <p>
+     * Канал временный и безусловный: {@code .tmp/temp-logs/param-hint-geom.log}, мимо
+     * флажка «Вести журнал» и мимо журнала «Комфорт».
+     */
+    private static final class GeometryTrace
+    {
+        private static final String TOPIC = "param-hint-geom"; //$NON-NLS-1$
+        private static final String MARK = "tormozit.paramHintGeomTrace"; //$NON-NLS-1$
+
+        private GeometryTrace()
+        {
+        }
+
+        static void attach(Shell shell)
+        {
+            if (shell == null || shell.isDisposed() || shell.getData(MARK) != null)
+                return;
+            shell.setData(MARK, Boolean.TRUE);
+            Listener listener = event -> log(eventName(event.type), shell, ""); //$NON-NLS-1$
+            shell.addListener(SWT.Resize, listener);
+            shell.addListener(SWT.Move, listener);
+            shell.addListener(SWT.Show, listener);
+            shell.addListener(SWT.Hide, listener);
+            shell.addListener(SWT.Dispose, listener);
+            log("attach", shell, ""); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        static void log(String event, Shell shell, String extra)
+        {
+            try
+            {
+                StringBuilder sb = new StringBuilder(event);
+                if (shell != null && !shell.isDisposed())
+                {
+                    Rectangle bounds = shell.getBounds();
+                    sb.append(" loc=").append(bounds.x).append(',').append(bounds.y) //$NON-NLS-1$
+                        .append(" size=").append(bounds.width).append('x').append(bounds.height) //$NON-NLS-1$
+                        .append(" visible=").append(shell.isVisible()); //$NON-NLS-1$
+                }
+                if (extra != null && !extra.isEmpty())
+                    sb.append(' ').append(extra);
+                sb.append(" at ").append(stack(8)); //$NON-NLS-1$
+                Global.tempLog(TOPIC, sb.toString());
+            }
+            catch (Exception ignored)
+            {
+            }
+        }
+
+        /** Размеры, из которых штатный расчёт выбирает: сохранённый, дефолтный, итоговый. */
+        static String describeIntended(Browser browser)
+        {
+            try
+            {
+                Object hover = findParametersHover(browser);
+                if (hover == null)
+                    return "hover=null"; //$NON-NLS-1$
+                Object infoControl = Global.invoke(hover, "getControl"); //$NON-NLS-1$
+                if (infoControl == null)
+                    return "control=null"; //$NON-NLS-1$
+                Object shellObj = Global.invoke(infoControl, "getShell"); //$NON-NLS-1$
+                Shell shell = shellObj instanceof Shell hintShell ? hintShell : null;
+                Object saved = Global.invoke(hover, "loadBounds"); //$NON-NLS-1$
+                Point def = computeParamHintDefaultSize(infoControl);
+                Point intended = shell != null
+                    ? resolveParamHintIntendedSize(hover, infoControl, shell) : null;
+                return "saved=" + size(saved) + " def=" + size(def) //$NON-NLS-1$ //$NON-NLS-2$
+                    + " intended=" + size(intended); //$NON-NLS-1$
+            }
+            catch (Exception ex)
+            {
+                return "intended.err=" + ex; //$NON-NLS-1$
+            }
+        }
+
+        static String size(Object point)
+        {
+            return point instanceof Point p ? p.x + "x" + p.y : "null"; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        static String point(Point p)
+        {
+            return p == null ? "null" : p.x + "," + p.y; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        private static String eventName(int type)
+        {
+            switch (type)
+            {
+            case SWT.Resize:
+                return "resize"; //$NON-NLS-1$
+            case SWT.Move:
+                return "move"; //$NON-NLS-1$
+            case SWT.Show:
+                return "show"; //$NON-NLS-1$
+            case SWT.Hide:
+                return "hide"; //$NON-NLS-1$
+            case SWT.Dispose:
+                return "dispose"; //$NON-NLS-1$
+            default:
+                return "event" + type; //$NON-NLS-1$
+            }
+        }
+
+        private static String stack(int frames)
+        {
+            StackTraceElement[] all = new Throwable().getStackTrace();
+            StringBuilder sb = new StringBuilder();
+            int taken = 0;
+            for (StackTraceElement frame : all)
+            {
+                String className = frame.getClassName();
+                if (className.contains("GeometryTrace") //$NON-NLS-1$
+                    || className.startsWith("java.") //$NON-NLS-1$
+                    || className.startsWith("jdk.") //$NON-NLS-1$
+                    || className.startsWith("sun.")) //$NON-NLS-1$
+                    continue;
+                if (sb.length() > 0)
+                    sb.append(" <- "); //$NON-NLS-1$
+                int dot = className.lastIndexOf('.');
+                sb.append(dot >= 0 ? className.substring(dot + 1) : className).append('.')
+                    .append(frame.getMethodName()).append(':').append(frame.getLineNumber());
+                if (++taken >= frames)
+                    break;
+            }
+            return sb.length() == 0 ? "-" : sb.toString(); //$NON-NLS-1$
+        }
+    }
+
     private static final class ActiveEditor
     {
         IDocument document;
         int caret;
         StyledText widget;
+        /** {@code true}, если документ/каретка взяты из поля выражения, не из модуля. */
+        boolean fromExpressionField;
     }
 }

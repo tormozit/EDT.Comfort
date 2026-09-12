@@ -141,6 +141,7 @@
     <startup class="tormozit.LongOperationNotifyHook"/>
     <startup class="tormozit.LaunchConfigurationHook"/>
     <startup class="tormozit.LaunchSaveDirtyEditorsHook"/>
+    <startup class="tormozit.SaveResourceDialogHook"/>
     <startup class="tormozit.PlatformMinBuildRequirementHook"/>
     <startup class="tormozit.ExportConfigurationXmlFixHook"/>
     <startup class="tormozit.FilterBySubsystemsDialogHook"/>
@@ -170,6 +171,7 @@
     <startup class="tormozit.PropertySheetNonDefaultHighlightHook"/>
     <startup class="tormozit.BslEditorHighlightingHook"/>
     <startup class="tormozit.BracketContentHintHook"/>
+    <startup class="tormozit.IndentGuideHook"/>
     <startup class="tormozit.GotoDefinitionFieldMenuHook"/>
     <startup class="tormozit.TypeComboOverlayHook"/>
     <startup class="tormozit.SpellCheckStartup"/>
@@ -1344,6 +1346,11 @@
         class="tormozit.ComfortPreferencePage"
         id="tormozit.ComfortPreferencePages"
         name="Комфорт"/>
+    <page
+        class="tormozit.IndentGuidePreferencePage"
+        id="tormozit.IndentGuidePreferencePage"
+        category="tormozit.ComfortPreferencePages"
+        name="Направляющие отступов"/>
   </extension>
 
   <extension point="org.eclipse.ui.propertyPages">

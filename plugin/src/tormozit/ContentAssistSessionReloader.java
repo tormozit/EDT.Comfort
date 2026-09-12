@@ -14,6 +14,7 @@ import org.eclipse.jface.text.ITextViewerExtension5;
 import org.eclipse.jface.text.IViewportListener;
 import org.eclipse.jface.text.TextViewer;
 import org.eclipse.jface.text.link.LinkedModeModel;
+import org.eclipse.jface.text.link.LinkedModeUI;
 import org.eclipse.jface.text.link.ProposalPosition;
 import org.eclipse.jface.text.contentassist.ContentAssistant;
 import org.eclipse.jface.text.contentassist.ICompletionProposal;
@@ -199,6 +200,10 @@ public final class ContentAssistSessionReloader
      * Ввод {@code (} или {@code ,} — открыть подсказку параметров метода,
      * если она не открыта (багфикс штатной логики).
      */
+    /** Идёт опрос готовности AST для показа подсказки параметров. */
+    private volatile boolean paramHintPollActive;
+    /** Позиция каретки для идущего опроса: её обновляют более поздние триггеры. */
+    private volatile int paramHintPollDesired = -1;
     private volatile boolean pendingParamHintOnChar;
     private volatile int pendingParamHintOnCharCaret = -1;
     /**
@@ -1011,11 +1016,20 @@ boolean inLiteral = endCaret >= 0
         int desiredCaret = open >= 0 ? event.getOffset() + open + 1 : -1;
         // Штатный ParametersHover строится из objects; если все отфильтрованы
         // (прикладной метод / bm:// без RSP) — подсказку параметров откроем сами.
-        if (after.objectsSize == 0 && before.hasKey && desiredCaret >= 0)
+        // В поле кода BSL нашу подсказку показываем сразу после вставки метода, не
+        // дожидаясь первой запятой: автоподсказка LinkedMode живёт без каретного
+        // слушателя и на запятой гаснет, после чего показ ждёт готовности AST (в логе
+        // 21:55:20 — 512 мс) и пользователь видит дыру. Наша встаёт один раз, дальше
+        // параметры переключает штатный CustomCaretListener, мгновенно.
+        if (desiredCaret >= 0)
         {
             pendingShowParamHintAfterInsert = true;
             pendingParamHintDesiredCaret = desiredCaret;
         }
+        // Штатную автоподсказку LinkedMode снимаем не здесь, а только после того, как
+        // показана наша (см. runInvocationParametersHoverCommand): иначе при любом
+        // промахе нашего показа пользователь остаётся вообще без подсказки — так и вышло
+        // с вводом «(» (лог 00:59:15: dropped → poll.skip caretMismatch → пусто).
         logLinkedMode("prepare", "{\"offset\":" + event.getOffset() //$NON-NLS-1$ //$NON-NLS-2$
             + ",\"desired\":" + desiredCaret //$NON-NLS-1$
             + ",\"clearedChoices\":" + clearedChoices //$NON-NLS-1$
@@ -1112,9 +1126,19 @@ boolean inLiteral = endCaret >= 0
         boolean applyInProgress =
             Boolean.TRUE.equals(SmartCompletionProposal.PROPOSAL_APPLY_IN_PROGRESS.get());
         boolean hoverVisible = isParamHoverShellVisible() || isParamHoverInfoControlVisible();
-        if (caret < 0 || applyInProgress || suppressDocumentAutoOpenAfterSession || hoverVisible)
+        // В модуле видимая подсказка с CustomCaretListener сама переключает параметр —
+        // новый показ и «починка» геометрии на каждый символ не нужны (вспышки).
+        boolean hoverBlocks = hoverVisible && !isExpressionFieldViewer();
+        if (caret < 0 || applyInProgress || suppressDocumentAutoOpenAfterSession || hoverBlocks)
         {
             pendingParamHintKind = 0;
+            // #region agent log
+            if (isExpressionFieldViewer())
+                Global.tempLog("inspect-hint-cmd", "onChar.skip kind=" + hintKind //$NON-NLS-1$ //$NON-NLS-2$
+                    + " caret=" + caret + " apply=" + applyInProgress //$NON-NLS-1$ //$NON-NLS-2$
+                    + " suppress=" + suppressDocumentAutoOpenAfterSession //$NON-NLS-1$
+                    + " hover=" + hoverVisible); //$NON-NLS-1$
+            // #endregion
             logLinkedMode("hint.onChar.skip", "{\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
                 + ",\"modelCaret\":" + modelCaret //$NON-NLS-1$
                 + ",\"kind\":\"" + hintKind + "\"" //$NON-NLS-1$ //$NON-NLS-2$
@@ -1125,6 +1149,13 @@ boolean inLiteral = endCaret >= 0
         }
         pendingShowParamHintAfterInsert = true;
         pendingParamHintDesiredCaret = caret;
+        // Если LinkedMode успел показать свою — снимаем: показываем только нашу.
+        forceRemoveLinkedModeParamHintListeners("onChar"); //$NON-NLS-1$
+        // #region agent log
+        if (isExpressionFieldViewer())
+            Global.tempLog("inspect-hint-cmd", "onChar kind=" + hintKind //$NON-NLS-1$ //$NON-NLS-2$
+                + " caret=" + caret + " hoverVisible=" + hoverVisible); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
         logLinkedMode("hint.onChar", "{\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
             + ",\"modelCaret\":" + modelCaret //$NON-NLS-1$
             + ",\"kind\":\"" + hintKind + "\"" //$NON-NLS-1$ //$NON-NLS-2$
@@ -1163,6 +1194,56 @@ boolean inLiteral = endCaret >= 0
                 + ",\"passed\":" + caret + ",\"hasModel\":" + hasModel + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return;
         }
+        // LinkedMode-автоподсказку снимаем синхронно до опроса: иначе первый тик
+        // видит чужое окно и раньше выходил (см. poll.dismissHover).
+        forceRemoveLinkedModeParamHintListeners("afterInsert"); //$NON-NLS-1$
+        if (isParamHoverShellVisible() || isParamHoverInfoControlVisible())
+            ParamHintHtmlModifier.dismissAllVisible();
+        // Каретка ещё после «)» — подвинем до старта опроса (не ждать async1).
+        if (modelCaret != desired && viewer != null)
+        {
+            IDocument hintDoc = viewer.getDocument();
+            int insertEnd = -1;
+            try
+            {
+                if (hintDoc != null && desired > 0 && desired <= hintDoc.getLength()
+                    && hintDoc.getChar(desired - 1) == '(')
+                {
+                    int close = desired;
+                    while (close < hintDoc.getLength() && hintDoc.getChar(close) != ')')
+                        close++;
+                    if (close < hintDoc.getLength())
+                        insertEnd = close + 1;
+                }
+            }
+            catch (Exception ignored)
+            {
+            }
+            // Только после вставки предложения (hintKind == 0). При наборе «(» или «,»
+            // мы здесь внутри уведомления об изменении документа: у поля выражения
+            // (инспектор, точка останова) документ виджета — ProjectionDocument, он ещё
+            // не обновлён, и setSelectedRange падает с IllegalArgumentException
+            // (Index out of bounds), унося с собой весь показ подсказки — подсказка по
+            // «,» гасла и не возвращалась, по «(» не открывалась вовсе. Каретка виджета
+            // догоняет набранный символ сама, к началу опроса (см. poll.caretAdopt).
+            if (hintKind == 0 && (isExpressionFieldViewer() || modelCaret == insertEnd))
+            {
+                try
+                {
+                    viewer.setSelectedRange(desired, 0);
+                    modelCaret = modelCaretOffset();
+                }
+                catch (RuntimeException ex)
+                {
+                    logLinkedMode("hint.restoreCaret.err", "{\"desired\":" + desired //$NON-NLS-1$ //$NON-NLS-2$
+                        + ",\"ex\":\"" + ContentAssistDebug.jsonEscapeForLog(String.valueOf(ex)) //$NON-NLS-1$
+                        + "\"}"); //$NON-NLS-1$
+                }
+                logLinkedMode("hint.restoreCaret", "{\"from\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"desired\":" + desired + ",\"after\":" + modelCaret //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"hasModel\":" + hasModel + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
         StyledText widget = viewer != null ? viewer.getTextWidget() : null;
         Display display = widget != null && !widget.isDisposed() ? widget.getDisplay() : null;
         if (display == null || display.isDisposed())
@@ -1170,7 +1251,20 @@ boolean inLiteral = endCaret >= 0
             logLinkedMode("hint.skip", "{\"reason\":\"noDisplay\",\"caret\":" + modelCaret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return;
         }
+        // Опрос уже идёт (например, начатый при вставке метода) — не начинаем новый:
+        // инкремент поколения убил бы предыдущий, и ожидание готовности AST началось бы
+        // заново. Достаточно передать ему новую позицию каретки (лог 22:00:59: запятая
+        // обнуляла опрос вставки и добавляла ещё 532 мс).
+        if (paramHintPollActive)
+        {
+            paramHintPollDesired = desired;
+            logLinkedMode("hint.poll.reuse", "{\"desired\":" + desired //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"kind\":\"" + hintKind + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        }
         final int desiredCaret = desired;
+        paramHintPollDesired = desired;
+        paramHintPollActive = true;
         final int gen = paramHintPostGen.incrementAndGet();
         final long startedMs = System.currentTimeMillis();
         logLinkedMode("hint.poll", "{\"caret\":" + modelCaret //$NON-NLS-1$ //$NON-NLS-2$
@@ -1198,17 +1292,35 @@ boolean inLiteral = endCaret >= 0
      * {@code hintKind}: {@code '('} — только скобка самого вызова; {@code ','} —
      * внутри скобок вызова; {@code 0} — после вставки proposal (как раньше).
      */
-    private void pollAstReadyThenShowParamHint(int desiredCaret, int gen, int attempt,
+    private void pollAstReadyThenShowParamHint(int desiredCaretStart, int gen, int attempt,
         long startedMs, long lastExecMs, char hintKind)
     {
         if (gen != paramHintPostGen.get())
+        {
+            paramHintPollActive = false;
             return;
+        }
+        // Позиция могла уехать, пока ждали AST (пользователь набрал запятую): берём
+        // актуальную, а не ту, с которой опрос начинался.
+        int desiredResolved = paramHintPollDesired >= 0 ? paramHintPollDesired : desiredCaretStart;
         StyledText st = viewer != null ? viewer.getTextWidget() : null;
         Display display = st != null && !st.isDisposed() ? st.getDisplay() : null;
         if (display == null || display.isDisposed())
             return;
         int caret = modelCaretOffset();
         long waitMs = System.currentTimeMillis() - startedMs;
+        if (caret >= 0 && caret != desiredResolved && Math.abs(caret - desiredResolved) <= 1)
+        {
+            // Позицию мы вычисляем в слушателе документа (модельная, сразу после
+            // вставленного символа), а каретка виджета к этому моменту ещё не сдвинулась —
+            // отсюда расхождение ровно в один символ, из-за которого показ по «(» ждал
+            // до таймаута и не срабатывал (лог 00:59:18: caret=281 desired=282).
+            logLinkedMode("poll.caretAdopt", "{\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"desired\":" + desiredResolved + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            desiredResolved = caret;
+            paramHintPollDesired = caret;
+        }
+        final int desiredCaret = desiredResolved;
         if (caret != desiredCaret)
         {
             if (waitMs < PARAM_HINT_AST_TIMEOUT_MS)
@@ -1223,17 +1335,49 @@ boolean inLiteral = endCaret >= 0
                         lastExecMs, hintKind));
                 return;
             }
+            paramHintPollActive = false;
+            paramHintPollDesired = -1;
             logLinkedMode("poll.skip", "{\"reason\":\"caretMismatch\",\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
                 + ",\"waitMs\":" + waitMs //$NON-NLS-1$
                 + ",\"caret\":" + caret + ",\"desired\":" + desiredCaret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return;
         }
-        if (isParamHoverShellVisible())
+        // Чужую/криво позиционированную подсказку (в т.ч. в навигаторе) снимаем всегда:
+        // isParamHoverShellVisible специально игнорирует окна дальше 600px от каретки,
+        // поэтому «вспышка в навигаторе» для опроса была невидима и открывалась вторая.
+        if (isAnyParamHintShellVisible() || isParamHoverInfoControlVisible())
         {
-            paramHintPostGen.incrementAndGet();
-            logLinkedMode("poll.skip", "{\"reason\":\"hoverVisible\",\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            return;
+            removeLinkedModeParamHintListeners("poll"); //$NON-NLS-1$
+            ParamHintHtmlModifier.dismissAllVisible();
+            logLinkedMode("poll.dismissHover", "{\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"caret\":" + caret + ",\"kind\":\"" + hintKind + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        }
+        // После автооткрытого списка shell попапа ещё активен / фокус не в StyledText —
+        // штатный computeLocation тогда сажает окно у левого края монитора (навигатор).
+        // Ручной Ctrl+Space этой гонки почти не даёт. Ждём фокус, закрытие попапа и
+        // согласованные display-координаты каретки.
+        if (hintKind == 0)
+        {
+            boolean assistOpen = ContentAssistPopupSync.isPopupVisible(assistant);
+            boolean focused = st.isFocusControl();
+            boolean caretReady = ParamHintHtmlModifier.isCaretDisplayReady(st);
+            if ((assistOpen || !focused || !caretReady) && waitMs < PARAM_HINT_AST_TIMEOUT_MS)
+            {
+                if (attempt == 0)
+                {
+                    logLinkedMode("poll.waitFocus", "{\"assistOpen\":" + assistOpen //$NON-NLS-1$ //$NON-NLS-2$
+                        + ",\"focused\":" + focused //$NON-NLS-1$
+                        + ",\"caretReady\":" + caretReady //$NON-NLS-1$
+                        + ",\"activeShell\":\"" + ContentAssistDebug.jsonEscapeForLog(
+                            describeActiveShell()) + "\"}"); //$NON-NLS-1$
+                }
+                if (!focused)
+                    st.setFocus();
+                display.timerExec(PARAM_HINT_AST_POLL_MS,
+                    () -> pollAstReadyThenShowParamHint(desiredCaret, gen, attempt + 1, startedMs,
+                        lastExecMs, hintKind));
+                return;
+            }
         }
         String astAt = describeInvocationAt(desiredCaret);
         boolean ownOpen = isOwnCallOpenParen(astAt, desiredCaret);
@@ -1257,6 +1401,8 @@ boolean inLiteral = endCaret >= 0
                         lastExecMs, hintKind));
                 return;
             }
+            paramHintPollActive = false;
+            paramHintPollDesired = -1;
             logLinkedMode("poll.skip", "{\"reason\":\"notOwnParen\",\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
                 + ",\"waitMs\":" + waitMs //$NON-NLS-1$
                 + ",\"ast\":\"" + ContentAssistDebug.jsonEscapeForLog(astAt) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
@@ -1277,6 +1423,8 @@ boolean inLiteral = endCaret >= 0
                         lastExecMs, hintKind));
                 return;
             }
+            paramHintPollActive = false;
+            paramHintPollDesired = -1;
             logLinkedMode("poll.skip", "{\"reason\":\"notInCall\",\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
                 + ",\"waitMs\":" + waitMs //$NON-NLS-1$
                 + ",\"ast\":\"" + ContentAssistDebug.jsonEscapeForLog(astAt) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
@@ -1316,8 +1464,33 @@ boolean inLiteral = endCaret >= 0
             + ",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         runInvocationParametersHoverCommand(desiredCaret, gen, attempt);
         if (isParamHoverShellVisible() || isParamHoverInfoControlVisible())
+        {
+            paramHintPollActive = false;
+            paramHintPollDesired = -1;
             return;
+        }
+        // Открылось у левого края / гигант — сжать и подвинуть, не мигать dismiss.
+        Shell far = findParamHintShell(false);
+        if (far != null && !far.isDisposed())
+        {
+            boolean moved = ParamHintHtmlModifier.ensureParamHintShellGeometry(far, st);
+            logLinkedMode("poll.relocate", "{\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"moved\":" + moved //$NON-NLS-1$
+                + ",\"loc\":\"" + far.getLocation().x + "," + far.getLocation().y + "\"" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + ",\"size\":\"" + far.getSize().x + "x" + far.getSize().y + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            if (isParamHoverShellVisible())
+            {
+                paramHintPollActive = false;
+                paramHintPollDesired = -1;
+                return;
+            }
+        }
         waitMs = System.currentTimeMillis() - startedMs;
+        if (waitMs >= PARAM_HINT_AST_TIMEOUT_MS)
+        {
+            paramHintPollActive = false;
+            paramHintPollDesired = -1;
+        }
         if (waitMs < PARAM_HINT_AST_TIMEOUT_MS)
         {
             display.timerExec(PARAM_HINT_RETRY_MS,
@@ -1354,7 +1527,28 @@ boolean inLiteral = endCaret >= 0
         int open = astSuffixInt(ast, "|open:"); //$NON-NLS-1$
         if (open >= 0 && open == caretAfter - 1)
             return true;
+        // Смещение «своей» скобки узловая модель отдаёт не всегда (в логе 01:09:46 —
+        // open:-1 при разобранном Invocation), и показ по «(» тогда ждал до таймаута.
+        // Тот же факт проверяем прямо: в AST у каретки есть узел вызова, а перед кареткой
+        // стоит «(». Для группирующей скобки узла вызова у каретки не будет.
+        if (astHasCallNode(ast) && isOpenParenBefore(caretAfter))
+            return true;
         return isQueryOperatorOpenParen(caretAfter);
+    }
+
+    private boolean isOpenParenBefore(int caret)
+    {
+        IDocument document = viewer != null ? viewer.getDocument() : null;
+        if (document == null || caret <= 0 || caret > document.getLength())
+            return false;
+        try
+        {
+            return document.getChar(caret - 1) == '(';
+        }
+        catch (BadLocationException e)
+        {
+            return false;
+        }
     }
 
     /** Оператор {@code ?()} — параметров три, в AST это не {@code Invocation}. */
@@ -1444,10 +1638,14 @@ boolean inLiteral = endCaret >= 0
         IDocument doc = viewer != null ? viewer.getDocument() : null;
         if (!(doc instanceof IXtextDocument xdoc))
             return "noXtext"; //$NON-NLS-1$
+        // В поле кода BSL читаем модель синхронизированно: «peek»-чтение EDT
+        // (readOnlyDataModelWithoutSync) отдаёт состояние до нашей вставки, и показ ждал
+        // чужой синхронизации больше секунды (лог 22:08:28: waitMs=1130). Документ поля —
+        // это модуль ~5 КБ, синхронный разбор здесь стоит миллисекунды.
+        boolean syncRead = isExpressionFieldViewer();
         try
         {
-            String described = readOnlyPeekAst(xdoc,
-                (IUnitOfWork<String, XtextResource>) resource -> {
+            IUnitOfWork<String, XtextResource> astWork = resource -> {
                     if (resource == null)
                         return "resourceNull"; //$NON-NLS-1$
                     EObjectAtOffsetHelper helper = new EObjectAtOffsetHelper();
@@ -1533,7 +1731,13 @@ boolean inLiteral = endCaret >= 0
                         .append("|resolved:").append(resolved) //$NON-NLS-1$
                         .append("|nodeEnd:").append(nodeEnd) //$NON-NLS-1$
                         .append("|open:").append(openParen).toString(); //$NON-NLS-1$
-                });
+                };
+            // Скорость: «peek»-чтение (readOnlyDataModelWithoutSync) отдаёт модель без
+            // синхронизации с текстом, и показ ждал чужой синхронизации по 0.5–1.1 с
+            // (лог 22:08:28 и 00:59:18). Берём чтение, которым EDT считает сам список
+            // автодополнения — оно синхронизирует модель, но без переподсветки модуля.
+            String described = syncRead ? xdoc.readOnly(astWork)
+                : readOnlyForContentAssist(xdoc, astWork);
             return described != null ? described : "none"; //$NON-NLS-1$
         }
         catch (Exception ex)
@@ -1562,16 +1766,44 @@ boolean inLiteral = endCaret >= 0
     /** Видимый shell подсказки параметров рядом с кареткой (probe по handler врёт). */
     private boolean isParamHoverShellVisible()
     {
+        return findParamHintShell(true) != null;
+    }
+
+    /**
+     * Любой видимый shell подсказки параметров, в том числе далеко от каретки
+     * (вспышка в навигаторе после автооткрытого списка).
+     */
+    private boolean isAnyParamHintShellVisible()
+    {
+        return findParamHintShell(false) != null;
+    }
+
+    /**
+     * @param nearCaretOnly {@code true} — только окна в радиусе 600px от каретки
+     */
+    private Shell findParamHintShell(boolean nearCaretOnly)
+    {
         try
         {
             StyledText st = viewer != null ? viewer.getTextWidget() : null;
             if (st == null || st.isDisposed())
-                return false;
+                return null;
             Display display = st.getDisplay();
             if (display == null || display.isDisposed())
-                return false;
+                return null;
             Shell editorShell = st.getShell();
-            Point caretDisp = st.toDisplay(st.getLocationAtOffset(st.getCaretOffset()));
+            Point caretDisp = null;
+            if (nearCaretOnly)
+            {
+                try
+                {
+                    caretDisp = st.toDisplay(st.getLocationAtOffset(st.getCaretOffset()));
+                }
+                catch (Exception ignored)
+                {
+                    return null;
+                }
+            }
             for (Shell shell : display.getShells())
             {
                 if (shell == null || shell.isDisposed() || !shell.isVisible())
@@ -1581,17 +1813,45 @@ boolean inLiteral = endCaret >= 0
                 Point size = shell.getSize();
                 if (size.x < 50 || size.y < 20)
                     continue;
-                Point loc = shell.getLocation();
-                if (Math.abs(loc.x - caretDisp.x) > 600 || Math.abs(loc.y - caretDisp.y) > 600)
-                    continue;
+                if (nearCaretOnly && caretDisp != null)
+                {
+                    Point loc = shell.getLocation();
+                    if (Math.abs(loc.x - caretDisp.x) > 600 || Math.abs(loc.y - caretDisp.y) > 600)
+                        continue;
+                }
                 if (hasBrowserDescendant(shell))
-                    return true;
+                    return shell;
             }
         }
         catch (Exception ignored)
         {
         }
-        return false;
+        return null;
+    }
+
+    private static String describeActiveShell()
+    {
+        try
+        {
+            Display display = Display.getCurrent();
+            if (display == null)
+                display = Display.getDefault();
+            if (display == null || display.isDisposed())
+                return "noDisplay"; //$NON-NLS-1$
+            Shell active = display.getActiveShell();
+            if (active == null || active.isDisposed())
+                return "null"; //$NON-NLS-1$
+            Point loc = active.getLocation();
+            Point size = active.getSize();
+            String text = active.getText();
+            return active.getClass().getSimpleName() + "@" + loc.x + "," + loc.y //$NON-NLS-1$ //$NON-NLS-2$
+                + " " + size.x + "x" + size.y //$NON-NLS-1$ //$NON-NLS-2$
+                + (text == null || text.isEmpty() ? "" : " \"" + text + "\""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        }
+        catch (Exception ex)
+        {
+            return "err:" + ex.getClass().getSimpleName(); //$NON-NLS-1$
+        }
     }
 
     private static boolean hasBrowserDescendant(Control root)
@@ -1611,6 +1871,77 @@ boolean inLiteral = endCaret >= 0
         return false;
     }
 
+    /**
+     * Снимает автоподсказку параметров, которую EDT показывает из LinkedMode
+     * ({@code BslSelectionChangedListener}). Она принципиально хуже командной: следит за
+     * позициями LinkedMode, а не за кареткой, поэтому не подсвечивает текущий параметр,
+     * не закрывается при уходе каретки из вызова и гаснет при вводе запятой. Её
+     * собственный метод {@code removeListenersDispose} и закрывает окно, и снимает
+     * слушателей — зовём его, а показ делаем своим путём.
+     */
+    private void dropLinkedModeParamHint(String reason)
+    {
+        StyledText text = viewer != null && viewer.getTextWidget() instanceof StyledText st ? st : null;
+        Display display = text != null && !text.isDisposed() ? text.getDisplay() : null;
+        if (display == null || display.isDisposed())
+            return;
+        // Слушателя EDT создаёт по ходу вставки — снимаем следующим тактом.
+        display.asyncExec(() -> removeLinkedModeParamHintListeners(reason));
+    }
+
+    /** Снятие без проверки «наша уже показана»: зовём непосредственно перед своим показом. */
+    private void forceRemoveLinkedModeParamHintListeners(String reason)
+    {
+        removeLinkedModeParamHintListeners(reason, true);
+    }
+
+    private void removeLinkedModeParamHintListeners(String reason)
+    {
+        removeLinkedModeParamHintListeners(reason, false);
+    }
+
+    private void removeLinkedModeParamHintListeners(String reason, boolean force)
+    {
+        try
+        {
+            // Снимаем штатную подсказку LinkedMode только когда наша уже на экране.
+            // Иначе любой промах нашего показа оставляет пользователя вообще без
+            // подсказки — так сломался ввод «(» (лог 00:59:15: dropped → poll.skip
+            // caretMismatch → пусто).
+            if (!force && !ParamHintHtmlModifier.isHandlerParamHintVisible())
+            {
+                logLinkedMode("linkedModeHint.kept", "{\"reason\":\"" + reason //$NON-NLS-1$ //$NON-NLS-2$
+                    + "\",\"why\":\"ownHintNotShown\"}"); //$NON-NLS-1$
+                return;
+            }
+            if (!(Global.getField(viewer, "fTextListeners") instanceof java.util.List<?> listeners)) //$NON-NLS-1$
+                return;
+            int dropped = 0;
+            for (Object listener : new java.util.ArrayList<>(listeners))
+            {
+                if (listener == null
+                    || !listener.getClass().getName().endsWith("BslSelectionChangedListener")) //$NON-NLS-1$
+                    continue;
+                Global.invoke(listener, "removeListenersDispose"); //$NON-NLS-1$
+                dropped++;
+            }
+            if (dropped > 0)
+                logLinkedMode("linkedModeHint.dropped", "{\"reason\":\"" + reason //$NON-NLS-1$ //$NON-NLS-2$
+                    + "\",\"n\":" + dropped + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        catch (Exception | LinkageError ignored)
+        {
+        }
+    }
+
+    /** Поле кода BSL в диалоге (инспектор, точка останова): {@link BslExpressionField}. */
+    private boolean isExpressionFieldViewer()
+    {
+        StyledText text = viewer != null && viewer.getTextWidget() instanceof StyledText st ? st : null;
+        return BslExpressionField.isFieldWidget(text)
+            || DebugInspectorHook.isInspectExpressionViewer(viewer);
+    }
+
     private void runInvocationParametersHoverCommand(int desiredCaret, int gen, int attempt)
     {
         if (gen != paramHintPostGen.get())
@@ -1625,29 +1956,93 @@ boolean inLiteral = endCaret >= 0
                 + ",\"desired\":" + desiredCaret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
-        if (isParamHoverShellVisible() || isParamHoverInfoControlVisible())
+        if (isAnyParamHintShellVisible() || isParamHoverInfoControlVisible())
         {
-            paramHintPostGen.incrementAndGet();
-            logLinkedMode("hover.skip", "{\"reason\":\"alreadyVisible\",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            return;
+            // Рядом с кареткой уже наша/нормальная — не дублируем.
+            // Далеко (навигатор) или поле выражения — сносим и открываем заново.
+            if (!isExpressionFieldViewer() && isParamHoverShellVisible())
+            {
+                paramHintPostGen.incrementAndGet();
+                logLinkedMode("hover.skip", "{\"reason\":\"alreadyVisible\",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                return;
+            }
+            removeLinkedModeParamHintListeners("hover"); //$NON-NLS-1$
+            ParamHintHtmlModifier.dismissAllVisible();
         }
         ParamHoverProbe probe = new ParamHoverProbe();
         long tOpen = ContentAssistDebug.perfStart("paramHint.open"); //$NON-NLS-1$
         try
         {
-            IWorkbenchPartSite site = facade != null ? facade.getSite() : null;
-            if (site != null && site.getPage() != null)
+            boolean inspect = isExpressionFieldViewer();
+            boolean assistOpen = ContentAssistPopupSync.isPopupVisible(assistant);
+            if (!inspect)
             {
-                if (bslEditor != null)
-                    site.getPage().activate(bslEditor);
-                else
-                    site.getPage().activate(site.getPart());
+                IWorkbenchPartSite site = facade != null ? facade.getSite() : null;
+                if (site != null && site.getPage() != null)
+                {
+                    if (bslEditor != null)
+                        site.getPage().activate(bslEditor);
+                    else
+                        site.getPage().activate(site.getPart());
+                }
             }
             if (!st.isFocusControl())
                 st.setFocus();
-            probe = executeInvocationParametersHoverCommand();
+            // Любые чужие окна (LinkedMode / промах с координатами в навигаторе) —
+            // до нашей команды, иначе получим два shell.
+            // Слушателя LinkedMode-подсказки снимаем здесь же и безусловно: показ уже
+            // решён, а если снимать после показа, пользователь видит мигание — сначала
+            // чужое окно, потом наше (жалоба 13.09.2026 про «каждое второе открытие»).
+            forceRemoveLinkedModeParamHintListeners("beforeShow"); //$NON-NLS-1$
+            ParamHintHtmlModifier.dismissAllVisible();
+            boolean focused = st.isFocusControl();
+            Point caretDisp = null;
+            try
+            {
+                caretDisp = st.toDisplay(st.getLocationAtOffset(st.getCaretOffset()));
+            }
+            catch (Exception ignored)
+            {
+            }
+            logLinkedMode("hover.pre", "{\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"inspect\":" + inspect //$NON-NLS-1$
+                + ",\"focused\":" + focused //$NON-NLS-1$
+                + ",\"assistOpen\":" + assistOpen //$NON-NLS-1$
+                + ",\"caretReady\":" + ParamHintHtmlModifier.isCaretDisplayReady(st) //$NON-NLS-1$
+                + ",\"caretDisp\":\"" + (caretDisp == null ? "null" : caretDisp.x + "," + caretDisp.y) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + "\",\"activeShell\":\"" + ContentAssistDebug.jsonEscapeForLog(
+                    describeActiveShell()) + "\"}"); //$NON-NLS-1$
+            if (inspect)
+            {
+                boolean opened = ParamHintHtmlModifier.tryOpenParamHintForViewer(viewer);
+                probe.execOk = opened;
+                probe.popupShown = opened || isParamHoverShellVisible();
+                ContentAssistDebug.debugSessionLog("F", "paramHint", "inspect", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    "{\"opened\":" + opened //$NON-NLS-1$
+                        + ",\"caret\":" + caret //$NON-NLS-1$
+                        + ",\"hypothesisId\":\"F\"}"); //$NON-NLS-1$
+            }
+            else
+                probe = executeInvocationParametersHoverCommand();
             if (!probe.popupShown && isParamHoverShellVisible())
                 probe.popupShown = true;
+            // Пересчёт положения после загрузки содержимого — для любого пути показа,
+            // включая штатную команду: иначе окно остаётся снизу от каретки, потому что
+            // в момент расчёта Browser пуст и высота почти нулевая.
+            if (probe.popupShown)
+                ParamHintHtmlModifier.repositionShownParamHint();
+            Shell shown = findParamHintShell(false);
+            if (shown != null && !shown.isDisposed())
+            {
+                boolean moved = ParamHintHtmlModifier.ensureParamHintShellGeometry(shown, st);
+                Point loc = shown.getLocation();
+                logLinkedMode("hover.shell", "{\"near\":" + (findParamHintShell(true) != null) //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"moved\":" + moved //$NON-NLS-1$
+                    + ",\"loc\":\"" + loc.x + "," + loc.y + "\"" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + ",\"size\":\"" + shown.getSize().x + "x" + shown.getSize().y + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                if (findParamHintShell(true) != null)
+                    probe.popupShown = true;
+            }
             if (probe.popupShown)
                 paramHintPostGen.incrementAndGet();
         }
@@ -1848,8 +2243,19 @@ boolean inLiteral = endCaret >= 0
         final int offset = insertOffset;
         try
         {
-            ext.registerPostNotificationReplace(completionAutoOpenDocumentListener,
-                (d, owner) -> logLinkedModeDiagPhase("postDoIt", d, offset, inserted)); //$NON-NLS-1$
+            ext.registerPostNotificationReplace(completionAutoOpenDocumentListener, (d, owner) ->
+            {
+                // LinkedMode уже вошёл в documentChanged и повесил BslSelectionChangedListener.
+                // Его showPage часто срабатывает, пока ещё жив shell автооткрытого списка
+                // (activeShell = popup) — подсказка рисуется у левого края / в навигаторе.
+                // Сносим синхронно до возврата в цикл сообщений, иначе мелькнет кадр.
+                if (pendingShowParamHintAfterInsert)
+                {
+                    forceRemoveLinkedModeParamHintListeners("postDoIt"); //$NON-NLS-1$
+                    ParamHintHtmlModifier.dismissAllVisible();
+                }
+                logLinkedModeDiagPhase("postDoIt", d, offset, inserted); //$NON-NLS-1$
+            });
         }
         catch (Exception ex)
         {
@@ -1931,6 +2337,23 @@ boolean inLiteral = endCaret >= 0
                     + ",\"objects\":" + mapDiag.objectsSize //$NON-NLS-1$
                     + ",\"text\":\"" + ContentAssistDebug.jsonEscapeForLog(
                         text != null && text.length() > 80 ? text.substring(0, 80) : text) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+            // #region agent log
+            SourceViewer active = getActiveViewer();
+            boolean expressionField = isExpressionFieldViewer();
+            boolean inspect = DebugInspectorHook.isInspectExpressionViewer(viewer);
+            ContentAssistDebug.debugSessionLog("F", "linkedModeDiag", phase, //$NON-NLS-1$ //$NON-NLS-2$
+                "{\"inspect\":" + inspect //$NON-NLS-1$
+                    + ",\"expressionField\":" + expressionField //$NON-NLS-1$
+                    + ",\"sameActive\":" + (active == viewer) //$NON-NLS-1$
+                    + ",\"hasModel\":" + hasModel //$NON-NLS-1$
+                    + ",\"hasKey\":" + mapDiag.hasKey //$NON-NLS-1$
+                    + ",\"mapSize\":" + mapDiag.mapSize //$NON-NLS-1$
+                    + ",\"caret\":" + caret //$NON-NLS-1$
+                    + ",\"modelCaret\":" + modelCaret //$NON-NLS-1$
+                    + ",\"desired\":" + desired //$NON-NLS-1$
+                    + ",\"text\":\"" + ContentAssistDebug.jsonEscapeForLog(clipLogText(text)) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"doc\":" + BslDataEventGuard.debugDocJson(doc) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
             logLinkedMode("diag." + phase, "{\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
                 + ",\"modelCaret\":" + modelCaret //$NON-NLS-1$
                 + ",\"desired\":" + desired //$NON-NLS-1$
@@ -1945,8 +2368,53 @@ boolean inLiteral = endCaret >= 0
                 + ",\"allInfo\":" + mapDiag.allInfoSize //$NON-NLS-1$
                 + ",\"posStart\":" + mapDiag.posStart //$NON-NLS-1$
                 + ",\"text\":\"" + ContentAssistDebug.jsonEscapeForLog(clipLogText(text)) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+            // После вставки proposal часто ставит каретку после «)», desired — внутри «()».
+            // Без restore опрос подсказки ждёт совпадения и падает с caretMismatch.
+            // Раньше только поля выражений; то же бывает в модуле, когда LinkedMode
+            // не вошёл или JFace переставил каретку после doIt.
+            boolean needRestore = ("async0".equals(phase) || "async1".equals(phase) //$NON-NLS-1$ //$NON-NLS-2$
+                || "async10".equals(phase)) //$NON-NLS-1$
+                && desired >= 0 && modelCaret != desired && viewer != null
+                && (expressionField || pendingShowParamHintAfterInsert
+                    || insertEnd >= 0 && modelCaret == insertEnd);
+            if (needRestore)
+            {
+                viewer.setSelectedRange(desired, 0);
+                int after = modelCaretOffset();
+                ContentAssistDebug.debugSessionLog("F", "linkedModeDiag", "restoreCaret", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    "{\"phase\":\"" + phase + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                        + ",\"from\":" + modelCaret //$NON-NLS-1$
+                        + ",\"desired\":" + desired //$NON-NLS-1$
+                        + ",\"after\":" + after //$NON-NLS-1$
+                        + ",\"hasModel\":" + hasModel //$NON-NLS-1$
+                        + ",\"expressionField\":" + expressionField //$NON-NLS-1$
+                        + ",\"hypothesisId\":\"F\"}"); //$NON-NLS-1$
+                logLinkedMode("restoreCaret", "{\"phase\":\"" + phase + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"from\":" + modelCaret + ",\"desired\":" + desired //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"after\":" + after + ",\"hasModel\":" + hasModel + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                if (hasModel && inspect)
+                    bindInspectLinkedModeUi(doc, desired);
+            }
         }
         catch (Exception ignored)
+        {
+        }
+    }
+
+    private void bindInspectLinkedModeUi(IDocument doc, int desired)
+    {
+        if (viewer == null || doc == null || desired < 0)
+            return;
+        try
+        {
+            LinkedModeModel model = LinkedModeModel.getModel(doc, desired);
+            if (model == null)
+                return;
+            new LinkedModeUI(model, viewer).enter();
+            ContentAssistDebug.debugSessionLog("F", "linkedModeDiag", "bindUi", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"desired\":" + desired + ",\"hypothesisId\":\"F\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        catch (RuntimeException ignored)
         {
         }
     }
@@ -2022,7 +2490,7 @@ boolean inLiteral = endCaret >= 0
             + ",\"hasKey\":" + mapDiag.hasKey //$NON-NLS-1$
             + ",\"objects\":" + mapDiag.objectsSize + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         logLinkedModeDiagPhase("async0", doc, insertOffset, text); //$NON-NLS-1$
-        maybeShowParamHintAfterInsert(caret);
+        maybeShowParamHintAfterInsert(modelCaretOffset());
     }
 
     /**
@@ -2086,9 +2554,17 @@ boolean inLiteral = endCaret >= 0
     }
 
     /** No-op: раньше temp-log {@code assist-ui}. */
+    // #region agent log
+    /**
+     * Временно включено: точки этой диагностики расставлены по всей цепочке подсказки
+     * параметров (hint.onChar → hint.poll → hover.exec → miss.skip → openFast.*), а метод
+     * был пустым — из-за этого цепочку не было видно вообще.
+     */
     static void logLinkedMode(String location, String json)
     {
+        Global.tempLog("param-hint", location + " " + json); //$NON-NLS-1$ //$NON-NLS-2$
     }
+    // #endregion
 
     /**
      * Чтение AST без переподсветки модуля. Штатный {@code IXtextDocument.readOnly}
@@ -2906,6 +3382,13 @@ boolean inLiteral = endCaret >= 0
 
     private void onDocumentChangedForCompletionAutoOpen(DocumentEvent event)
     {
+        // Границы показанной подсказки параметров должны ехать вслед за правкой в любом
+        // редакторе, а не только в полях диалогов: иначе набранная запятая уводит каретку
+        // за lastAvailablePosition, и штатный CustomCaretListener закрывает подсказку.
+        if (event != null)
+            ParamHintHtmlModifier.adjustParamHintBounds(
+                viewer != null ? viewer.getTextWidget() : null, event.getOffset(),
+                event.getLength(), event.getText());
         onDocumentChangedForCompletionAutoOpenImpl(event);
     }
 
@@ -3590,6 +4073,18 @@ if (!inLiteral)
         tryBeginManualDualAssist(caret);
         event.doit = false;
 }
+
+    /** Снимает признак ручного вызова следующим тактом UI — после штатной команды. */
+    private static void scheduleCtrlSpaceMarkerRelease(StyledText text)
+    {
+        Display display = text != null && !text.isDisposed() ? text.getDisplay() : Display.getCurrent();
+        if (display == null || display.isDisposed())
+        {
+            SmartContentAssistProcessor.clearCtrlSpaceInvocation();
+            return;
+        }
+        display.asyncExec(SmartContentAssistProcessor::clearCtrlSpaceInvocation);
+    }
 
     static boolean isCtrlSpaceKeyEvent(Event event)
     {
@@ -5230,6 +5725,13 @@ scheduleFilterToggleUiSync();
             if (!isOwnWidgetFocused(text))
                 return;
             SmartContentAssistProcessor.markCtrlSpaceInvocation();
+            // Признак ручного вызова живёт ровно один такт обработки клавиши: штатная
+            // команда Ctrl+Space выполняется в том же dispatch, а её postExecute снимает
+            // признак сам. Если команда не выполнилась (например, в диалоге инспектора
+            // у неё нет контекста) или мы вышли ниже по раннему return, признак оставался
+            // взведённым навсегда — и дальше каждый ввод давал wordListSkip why=manual,
+            // то есть автооткрытие списка умирало до конца сессии (лог 12.09.2026 21:00).
+            scheduleCtrlSpaceMarkerRelease(text);
             ContentAssistPopupSync.ensureEmptyListAllowed(assistant, true);
             int probeCaret = modelCaretOffset();
             boolean popupVisible = ContentAssistPopupSync.isPopupVisible(assistant);

@@ -403,6 +403,13 @@ public class SmartCompletionProposal implements
         PROPOSAL_APPLY_IN_PROGRESS.remove();
     }
 
+    /** Сейчас выполняется {@link #apply}. */
+    static boolean isAnyApplyInProgress()
+    {
+        return Boolean.TRUE.equals(PROPOSAL_APPLY_IN_PROGRESS.get())
+            || Boolean.TRUE.equals(IR_PROPOSAL_APPLY_IN_PROGRESS.get());
+    }
+
     /** Overlap EDT+ИР: слово ИР содержит разделитель варианта — вставка с заменой родителя. */
     private boolean isEdtOverlapReplaceParent()
     {
@@ -1176,11 +1183,10 @@ public class SmartCompletionProposal implements
         if (widget == null || widget.isDisposed()
             || !Boolean.TRUE.equals(widget.getData(DebugInspectorHook.INSPECT_EXPRESSION_EDITOR_KEY)))
             return;
-        DebugInspectorHook.markInspectExpressionProposalApplied();
-        if (document == null || caret < 0)
-            return;
         ConfigurableCompletionProposal cp = asConfigurable(delegate);
-        if (cp == null)
+        DebugInspectorHook.markInspectExpressionProposalApplied(
+            cp == null ? null : cp.getReplacementString(), delegate);
+        if (document == null || caret < 0 || cp == null)
             return;
         int start = cp.getReplacementOffset();
         int len = cp.getReplacementLength();

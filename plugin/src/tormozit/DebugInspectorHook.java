@@ -9,12 +9,15 @@ import org.eclipse.jface.text.IDocumentListener;
 import org.eclipse.jface.text.IInformationControlCreator;
 import org.eclipse.jface.text.IRegion;
 import org.eclipse.jface.text.ITextInputListener;
+import org.eclipse.jface.text.ITextViewer;
 import org.eclipse.jface.text.contentassist.ContentAssistEvent;
 import org.eclipse.jface.text.contentassist.ContentAssistant;
 import org.eclipse.jface.text.contentassist.ICompletionListener;
 import org.eclipse.jface.text.contentassist.ICompletionProposal;
 import org.eclipse.jface.text.source.ISourceViewer;
 import org.eclipse.jface.text.source.SourceViewer;
+import org.eclipse.jface.text.source.projection.IProjectionListener;
+import org.eclipse.jface.text.source.projection.ProjectionAnnotationModel;
 import org.eclipse.jface.text.source.projection.ProjectionViewer;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.CaretEvent;
@@ -53,13 +56,24 @@ import org.eclipse.core.runtime.Platform;
 import org.eclipse.debug.core.DebugException;
 import org.eclipse.debug.core.model.IWatchExpression;
 import org.eclipse.emf.common.util.URI;
-import org.eclipse.jface.text.ITextViewer;
+import org.eclipse.emf.ecore.resource.Resource;
+import org.eclipse.emf.ecore.resource.ResourceSet;
+import org.eclipse.jface.text.link.ILinkedModeListener;
+import org.eclipse.jface.text.link.LinkedModeModel;
+import org.eclipse.ui.IEditorInput;
 import org.eclipse.ui.IEditorPart;
+import org.eclipse.ui.IEditorReference;
+import org.eclipse.ui.IFileEditorInput;
+import org.eclipse.ui.ISaveablesSource;
+import org.eclipse.ui.Saveable;
+import org.eclipse.ui.texteditor.IDocumentProvider;
 import org.eclipse.xtext.resource.IResourceServiceProvider;
+import org.eclipse.xtext.resource.XtextResource;
 import org.eclipse.xtext.ui.editor.embedded.EmbeddedEditor;
 import org.eclipse.xtext.ui.editor.embedded.EmbeddedEditorFactory;
 import org.eclipse.xtext.ui.editor.embedded.EmbeddedEditorModelAccess;
 import org.eclipse.xtext.ui.editor.embedded.IEditedResourceProvider;
+import org.eclipse.xtext.ui.editor.model.IXtextDocument;
 
 import com._1c.g5.v8.dt.bsl.model.Module;
 import com._1c.g5.v8.dt.debug.util.DebugNodeModelUtils;
@@ -90,11 +104,15 @@ public final class DebugInspectorHook implements IStartup
     private static final String COMFORT_MENU_LAYOUT_KEY = "tormozit.inspectorMenuBarOriginalLayout"; //$NON-NLS-1$
     private static final String DETECT_LOG_KEY = "tormozit.debugInspectorDetectLog"; //$NON-NLS-1$
     static final String INSPECT_EXPRESSION_EDITOR_KEY = "tormozit.inspectExpressionEditor"; //$NON-NLS-1$
+    static final String INSPECT_EXPRESSION_WRAP_PREFIX = "Строка("; //$NON-NLS-1$
     private static boolean inspectExpressionProposalApplied;
 
-    static void markInspectExpressionProposalApplied()
+    static void markInspectExpressionProposalApplied(String replacement, Object proposal)
     {
         inspectExpressionProposalApplied = true;
+        // Признак «вставлен вызов со скобками» нужен общему полю кода: по нему решается,
+        // глотать ли Enter, чтобы не выпустить LinkedMode. Шаблоны туда не попадают.
+        BslExpressionField.markProposalApplied(replacement, proposal);
         Display display = Display.getCurrent();
         if (display == null || display.isDisposed())
             return;
@@ -106,6 +124,16 @@ public final class DebugInspectorHook implements IStartup
         boolean applied = inspectExpressionProposalApplied;
         inspectExpressionProposalApplied = false;
         return applied;
+    }
+
+    /** Только UI-поток: читает {@code StyledText.getData}. */
+    static boolean isInspectExpressionViewer(ITextViewer viewer)
+    {
+        if (viewer == null || Display.getCurrent() == null)
+            return false;
+        StyledText text = viewer.getTextWidget() instanceof StyledText st ? st : null;
+        return text != null && !text.isDisposed()
+            && Boolean.TRUE.equals(text.getData(INSPECT_EXPRESSION_EDITOR_KEY));
     }
 
     private static final String WINDOW_DATA_KEY = "org.eclipse.jface.window.Window"; //$NON-NLS-1$
@@ -2332,9 +2360,8 @@ public final class DebugInspectorHook implements IStartup
         private static final String LOG = "inspect-expr"; //$NON-NLS-1$
         private static final String INSTALLED_KEY = "tormozit.inspectExpressionAssist"; //$NON-NLS-1$
         private static final String FOCUS_RESTORE_KEY = "tormozit.inspectExpressionAssistFocus"; //$NON-NLS-1$
-        private static final String POPUP_ENTER_FILTER_KEY = "tormozit.inspectExprPopupEnterFilter"; //$NON-NLS-1$
-        private static final String EDITOR_PREFIX = " Строка("; //$NON-NLS-1$
-        private static final String EDITOR_SUFFIX = "); "; //$NON-NLS-1$
+        private static final String EDITOR_PREFIX = INSPECT_EXPRESSION_WRAP_PREFIX;
+        private static final String EDITOR_SUFFIX = ");"; //$NON-NLS-1$
         private static final String BSL_FILE_URI = "*.bsl"; //$NON-NLS-1$
         private static final String HISTORY_TOOLTIP = "История выражений"; //$NON-NLS-1$
 
@@ -2344,7 +2371,6 @@ public final class DebugInspectorHook implements IStartup
         private final Button historyButton;
         private final String prefix;
         private final String suffix;
-        private boolean lockingRegion;
         private int lastWidgetLines = 1;
 
         private InspectExpressionAssist(
@@ -2399,6 +2425,11 @@ public final class DebugInspectorHook implements IStartup
             configureResource(resourceProvider, watch);
 
             Composite host = new Composite(parent, SWT.NONE);
+            // #region agent log
+            // Пробник свёрток — до создания встроенного редактора: иначе состояние
+            // проекции живого редактора уже измерено после возможной поломки.
+            wireLiveFoldingProbe(host, sourceUri(watch));
+            // #endregion
             if (layoutData instanceof GridData gd)
                 host.setLayoutData(copyGridData(gd));
             else
@@ -2442,6 +2473,9 @@ public final class DebugInspectorHook implements IStartup
             try
             {
                 wrap = wrapExpression(watch, combo.getText());
+                // #region agent log
+                logInspectVsLive("before-create", null, sourceUri(watch)); //$NON-NLS-1$
+                // #endregion
                 modelAccess = editor.createPartialEditor(wrap[0], wrap[1], wrap[2], true);
             }
             catch (RuntimeException e)
@@ -2461,9 +2495,11 @@ public final class DebugInspectorHook implements IStartup
             }
             text.setData(INSPECT_EXPRESSION_EDITOR_KEY, Boolean.TRUE);
             text.setWordWrap(false);
-            if (sourceViewer instanceof ProjectionViewer projection)
-                projection.disableProjection();
-            lockVisibleRegion(sourceViewer, wrap[0], wrap[2], "install"); //$NON-NLS-1$
+            // Окно видимости держит сам EDT — {@code CustomEmbeddedEditorModelAccess}
+            // после {@code createPartialEditor}/{@code updateModel}, как в штатной панели
+            // выражения точки останова (BslBreakpointTextAndHistoryEditorPane). Свою
+            // блокировку на каждое событие каретки/документа не ставим: именно она давала
+            // инциденты с проекцией и координатами виджет↔модель.
 
             int editorHeight = editorRowHeight(text, comboHeight);
             editorGd.heightHint = editorHeight;
@@ -2494,13 +2530,33 @@ public final class DebugInspectorHook implements IStartup
                     text.setFocus();
             });
             wireEnter(text, sourceViewer, assist);
-            wireRegionLock(text, sourceViewer, assist);
+            wireRegionDiag(text, sourceViewer, assist);
+            // Общее поведение поля кода BSL (Enter из списка, Ctrl+Shift+Space, жизнь
+            // LinkedMode при всплывающих окнах, возврат фокуса) — в BslExpressionField:
+            // оно же подключается к полям окна точки останова.
+            BslExpressionField.attach(sourceViewer, LOG);
             parent.layout(true, true);
-            assist.lockVisibleRegion("layout"); //$NON-NLS-1$
             if (!text.isDisposed())
                 text.setFocus();
             assist.placeCaretAtExpressionEnd("install"); //$NON-NLS-1$
+            Display display = text.getDisplay();
+            if (display != null && !display.isDisposed())
+            {
+                display.timerExec(0, () ->
+                {
+                    if (!text.isDisposed())
+                        assist.placeCaretAtExpressionEnd("install-0"); //$NON-NLS-1$
+                });
+            }
             scheduleComfortAssistPatch(sourceViewer, assist, 0);
+            // #region agent log
+            URI installUri = sourceUri(watch);
+            logInspectVsLive("after-create", sourceViewer, installUri); //$NON-NLS-1$
+            wireInspectDirtyProbe(sourceViewer, installUri);
+            wireHintDiag(text, sourceViewer);
+            logLiveFolding("after-create", installUri); //$NON-NLS-1$
+            host.addDisposeListener(e -> logInspectVsLive("host-dispose", sourceViewer, installUri)); //$NON-NLS-1$
+            // #endregion
             log("installed prefixLen=" + wrap[0].length() //$NON-NLS-1$
                 + " suffixLen=" + wrap[2].length() //$NON-NLS-1$
                 + " expr=[" + snippet(wrap[1], 80) + "] " //$NON-NLS-1$ //$NON-NLS-2$
@@ -2596,33 +2652,6 @@ public final class DebugInspectorHook implements IStartup
             return "\n"; //$NON-NLS-1$
         }
 
-        private static void lockVisibleRegion(SourceViewer viewer, String prefix, String suffix,
-            String reason)
-        {
-            IDocument document = viewer.getDocument();
-            if (document == null || prefix == null || suffix == null)
-                return;
-            String delimiter = documentDelimiter(document);
-            int start = prefix.length();
-            int tail = suffix.length();
-            if (hasBreakAfterPrefix(document, prefix, delimiter))
-            {
-                start += delimiter.length();
-                tail += delimiter.length();
-            }
-            if (start > document.getLength())
-                start = document.getLength();
-            int len = Math.max(0, document.getLength() - start - tail);
-            IRegion vis = viewer.getVisibleRegion();
-            if (vis.getOffset() == start && vis.getLength() == len)
-                return;
-            log("lock reason=" + reason //$NON-NLS-1$
-                + " start=" + start + " len=" + len //$NON-NLS-1$ //$NON-NLS-2$
-                + " " + dumpViewer(viewer, prefix) //$NON-NLS-1$
-                + logStack());
-            viewer.setVisibleRegion(start, len);
-        }
-
         private static boolean hasBreakAfterPrefix(IDocument document, String prefix, String delimiter)
         {
             if (delimiter == null || delimiter.isEmpty())
@@ -2640,51 +2669,18 @@ public final class DebugInspectorHook implements IStartup
             }
         }
 
-        private void lockVisibleRegion(String reason)
-        {
-            if (lockingRegion || sourceViewer.getTextWidget() == null
-                || sourceViewer.getTextWidget().isDisposed())
-                return;
-            lockingRegion = true;
-            try
-            {
-                if (sourceViewer instanceof ProjectionViewer projection && projection.isProjectionMode())
-                    projection.disableProjection();
-                IDocument document = sourceViewer.getDocument();
-                if (document == null)
-                    return;
-                if (!documentStartsWithPrefix(document, prefix))
-                {
-                    String editable = combo.isDisposed() ? "" : combo.getText(); //$NON-NLS-1$
-                    if (editable == null)
-                        editable = ""; //$NON-NLS-1$
-                    modelAccess.updateModel(prefix, editable, suffix);
-                    log("rewrapped reason=" + reason //$NON-NLS-1$
-                        + " editable=[" + snippet(editable, 80) + "]" //$NON-NLS-1$ //$NON-NLS-2$
-                        + " " + dumpViewer(sourceViewer, prefix)); //$NON-NLS-1$
-                }
-                lockVisibleRegion(sourceViewer, prefix, suffix, reason);
-                IRegion vis = sourceViewer.getVisibleRegion();
-                Point sel = sourceViewer.getSelectedRange();
-                int caret = sel.x;
-                int from = vis.getOffset();
-                int to = vis.getOffset() + vis.getLength();
-                if (caret < from || caret > to)
-                    sourceViewer.setSelectedRange(Math.min(Math.max(caret, from), to), 0);
-            }
-            finally
-            {
-                lockingRegion = false;
-            }
-        }
-
         private void placeCaretAtExpressionEnd(String reason)
         {
+            if (sourceViewer.getTextWidget() == null || sourceViewer.getTextWidget().isDisposed())
+                return;
             IRegion vis = sourceViewer.getVisibleRegion();
             if (vis == null)
                 return;
             int end = vis.getOffset() + vis.getLength();
             sourceViewer.setSelectedRange(end, 0);
+            StyledText widget = sourceViewer.getTextWidget();
+            if (widget != null && !widget.isDisposed())
+                widget.setCaretOffset(widget.getCharCount());
             log("caret-end reason=" + reason //$NON-NLS-1$
                 + " pos=" + end //$NON-NLS-1$
                 + " " + dumpViewer(sourceViewer, prefix)); //$NON-NLS-1$
@@ -2722,7 +2718,13 @@ public final class DebugInspectorHook implements IStartup
                 + logStack());
         }
 
-        private static void wireRegionLock(StyledText text, SourceViewer sourceViewer,
+        /**
+         * Наблюдение за полем: срыв окна видимости (число строк виджета), правки документа
+         * и подмена входного документа. Окно видимости держит EDT
+         * ({@code CustomEmbeddedEditorModelAccess}) — своих {@code setVisibleRegion} здесь
+         * больше нет.
+         */
+        private static void wireRegionDiag(StyledText text, SourceViewer sourceViewer,
             InspectExpressionAssist assist)
         {
             text.addCaretListener(new CaretListener()
@@ -2731,10 +2733,11 @@ public final class DebugInspectorHook implements IStartup
                 public void caretMoved(CaretEvent event)
                 {
                     assist.logWidgetIfOpened("caret"); //$NON-NLS-1$
-                    assist.lockVisibleRegion("caret"); //$NON-NLS-1$
+                    // #region agent log
+                    attachLinkedModeProbe(sourceViewer);
+                    // #endregion
                 }
             });
-            text.addListener(SWT.FocusIn, e -> assist.lockVisibleRegion("focus")); //$NON-NLS-1$
             text.addListener(SWT.Paint, e -> assist.logWidgetIfOpened("paint")); //$NON-NLS-1$
             IDocumentListener docListener = new IDocumentListener()
             {
@@ -2747,21 +2750,15 @@ public final class DebugInspectorHook implements IStartup
                 public void documentChanged(DocumentEvent event)
                 {
                     String newText = event.getText();
-                    log("docChanged locking=" + assist.lockingRegion //$NON-NLS-1$
-                        + " offset=" + event.getOffset() //$NON-NLS-1$
+                    log("docChanged offset=" + event.getOffset() //$NON-NLS-1$
                         + " oldLen=" + event.getLength() //$NON-NLS-1$
                         + " newLen=" + (newText == null ? 0 : newText.length()) //$NON-NLS-1$
                         + " new=[" + snippet(newText, 80) + "] " //$NON-NLS-1$ //$NON-NLS-2$
                         + dumpViewer(sourceViewer, assist.prefix)
                         + logStack());
-                    Display display = text.getDisplay();
-                    if (display == null || display.isDisposed())
-                        return;
-                    display.asyncExec(() ->
-                    {
-                        if (!text.isDisposed())
-                            assist.lockVisibleRegion("doc"); //$NON-NLS-1$
-                    });
+                    // #region agent log
+                    attachLinkedModeProbe(sourceViewer);
+                    // #endregion
                 }
             };
             IDocument document = sourceViewer.getDocument();
@@ -2791,7 +2788,6 @@ public final class DebugInspectorHook implements IStartup
                         + logStack());
                     if (newInput != null)
                         newInput.addDocumentListener(docListener);
-                    assist.lockVisibleRegion("input"); //$NON-NLS-1$
                 }
             });
             text.addDisposeListener(e ->
@@ -2818,6 +2814,537 @@ public final class DebugInspectorHook implements IStartup
                 return URI.createURI(BSL_FILE_URI);
             return source.fragment() == null ? source.appendFragment("/0") : source; //$NON-NLS-1$
         }
+
+        // #region agent log
+        /**
+         * Временная диагностика: показ/скрытие всплывающих окон (список автодополнения,
+         * подсказка параметров) и переходы фокуса, пока живёт поле «Выражение».
+         * Пишет безусловно в {@code .tmp/temp-logs/inspect-hint.log} — нужна, чтобы
+         * увидеть, что именно гасит подсказку параметров сразу после вставки метода.
+         */
+        private static void wireHintDiag(StyledText text, SourceViewer viewer)
+        {
+            if (text == null || text.isDisposed())
+                return;
+            Display display = text.getDisplay();
+            if (display == null || display.isDisposed())
+                return;
+            Listener shells = event ->
+            {
+                if (!(event.widget instanceof Shell shell))
+                    return;
+                String phase = event.type == SWT.Show ? "show" //$NON-NLS-1$
+                    : event.type == SWT.Hide ? "hide" : "dispose"; //$NON-NLS-1$ //$NON-NLS-2$
+                // Стек только на гашении: нужен виновник закрытия подсказки параметров.
+                hintLog(phase, shell, text, viewer, display, event.type != SWT.Show);
+            };
+            display.addFilter(SWT.Show, shells);
+            display.addFilter(SWT.Hide, shells);
+            display.addFilter(SWT.Dispose, shells);
+            Listener focus = event ->
+            {
+                String phase = event.type == SWT.FocusIn ? "focusIn" : "focusOut"; //$NON-NLS-1$ //$NON-NLS-2$
+                hintLog(phase, null, text, viewer, display, event.type == SWT.FocusOut);
+                // Кто получил фокус, видно только следующим тактом.
+                display.asyncExec(() ->
+                {
+                    if (!text.isDisposed())
+                        hintLog(phase + "-after", null, text, viewer, display, false); //$NON-NLS-1$
+                });
+            };
+            text.addListener(SWT.FocusIn, focus);
+            text.addListener(SWT.FocusOut, focus);
+            text.addDisposeListener(e ->
+            {
+                if (display.isDisposed())
+                    return;
+                display.removeFilter(SWT.Show, shells);
+                display.removeFilter(SWT.Hide, shells);
+                display.removeFilter(SWT.Dispose, shells);
+            });
+        }
+
+        private static void hintLog(String phase, Shell shell, StyledText text,
+            SourceViewer viewer, Display display, boolean withStack)
+        {
+            try
+            {
+                StringBuilder sb = new StringBuilder(phase);
+                if (shell != null)
+                    sb.append(" shell=").append(describeShell(shell)); //$NON-NLS-1$
+                sb.append(" focus=").append(describeFocus(display.getFocusControl())); //$NON-NLS-1$
+                IDocument document = viewer.getDocument();
+                sb.append(" linked=") //$NON-NLS-1$
+                    .append(document != null && LinkedModeModel.hasInstalledModel(document));
+                Point sel = viewer.getSelectedRange();
+                IRegion vis = viewer.getVisibleRegion();
+                sb.append(" sel=").append(sel == null ? -1 : sel.x) //$NON-NLS-1$
+                    .append(',').append(sel == null ? -1 : sel.y);
+                sb.append(" vis=").append(vis == null ? -1 : vis.getOffset()) //$NON-NLS-1$
+                    .append(',').append(vis == null ? -1 : vis.getLength());
+                sb.append(" widgetLines=").append(text.isDisposed() ? -1 : text.getLineCount()); //$NON-NLS-1$
+                if (withStack)
+                    sb.append(logStack());
+                Global.tempLog("inspect-hint", sb.toString()); //$NON-NLS-1$
+            }
+            catch (Exception ignored)
+            {
+            }
+        }
+
+        private static String describeShell(Shell shell)
+        {
+            if (shell.isDisposed())
+                return "disposed"; //$NON-NLS-1$
+            StringBuilder sb = new StringBuilder(shell.getClass().getSimpleName());
+            sb.append('@').append(Integer.toHexString(System.identityHashCode(shell)));
+            String title = shell.getText();
+            if (title != null && !title.isEmpty())
+                sb.append(" text=[").append(snippet(title, 40)).append(']'); //$NON-NLS-1$
+            Rectangle bounds = shell.getBounds();
+            sb.append(" at=").append(bounds.x).append(',').append(bounds.y) //$NON-NLS-1$
+                .append(' ').append(bounds.width).append('x').append(bounds.height);
+            sb.append(" content=[").append(describeShellContent(shell, 0)).append(']'); //$NON-NLS-1$
+            return sb.toString();
+        }
+
+        /** Классы содержимого окна: Browser у подсказки, Table у списка автодополнения. */
+        private static String describeShellContent(Composite parent, int depth)
+        {
+            StringBuilder sb = new StringBuilder();
+            for (Control child : parent.getChildren())
+            {
+                if (child.isDisposed())
+                    continue;
+                if (sb.length() > 120)
+                {
+                    sb.append(",…"); //$NON-NLS-1$
+                    break;
+                }
+                if (sb.length() > 0)
+                    sb.append(',');
+                sb.append(child.getClass().getSimpleName());
+                if (child instanceof Composite composite && depth < 3)
+                {
+                    String inner = describeShellContent(composite, depth + 1);
+                    if (!inner.isEmpty())
+                        sb.append('(').append(inner).append(')');
+                }
+            }
+            return sb.toString();
+        }
+
+        /** Модели LinkedMode, к которым уже подключён пробник выхода. */
+        private static final java.util.Set<Object> linkedProbeAttached =
+            java.util.Collections.synchronizedSet(
+                java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>()));
+
+        /**
+         * Временная диагностика: кто и с какими флагами уводит LinkedMode из поля
+         * «Выражение». Подсказку параметров гасит {@code BslSelectionChangedListener}
+         * ровно потому, что модели LinkedMode к этому моменту уже нет.
+         */
+        private static void attachLinkedModeProbe(SourceViewer viewer)
+        {
+            try
+            {
+                IDocument document = viewer.getDocument();
+                if (document == null || !LinkedModeModel.hasInstalledModel(document))
+                    return;
+                Point sel = viewer.getSelectedRange();
+                int caret = sel == null ? 0 : sel.x;
+                LinkedModeModel model = null;
+                for (int at = caret; at >= caret - 2 && model == null; at--)
+                {
+                    if (at >= 0)
+                        model = LinkedModeModel.getModel(document, at);
+                }
+                if (model == null || !linkedProbeAttached.add(model))
+                    return;
+                Global.tempLog("inspect-linked", "attach model=" //$NON-NLS-1$ //$NON-NLS-2$
+                    + Integer.toHexString(System.identityHashCode(model)) + " caret=" + caret); //$NON-NLS-1$
+                model.addLinkingListener(new ILinkedModeListener()
+                {
+                    @Override
+                    public void left(LinkedModeModel owner, int flags)
+                    {
+                        Global.tempLog("inspect-linked", "left flags=" + flags //$NON-NLS-1$ //$NON-NLS-2$
+                            + logStack());
+                    }
+
+                    @Override
+                    public void suspend(LinkedModeModel owner)
+                    {
+                        Global.tempLog("inspect-linked", "suspend" + logStack()); //$NON-NLS-1$ //$NON-NLS-2$
+                    }
+
+                    @Override
+                    public void resume(LinkedModeModel owner, int flags)
+                    {
+                        Global.tempLog("inspect-linked", "resume flags=" + flags); //$NON-NLS-1$ //$NON-NLS-2$
+                    }
+                });
+            }
+            catch (Exception ignored)
+            {
+            }
+        }
+
+        /**
+         * Временная диагностика: гаснет ли projection (свёртки) у живого редактора модуля
+         * при открытии инспектора и кто её гасит. Пишет безусловно в
+         * {@code .tmp/temp-logs/inspect-fold.log}.
+         */
+        /** Состояние свёрток живого редактора модуля в произвольный момент. */
+        private static void logLiveFolding(String phase, URI sourceUri)
+        {
+            if (liveModuleViewer(sourceUri) instanceof ProjectionViewer projection)
+                foldingLog(phase, projection, false);
+        }
+
+        private static void wireLiveFoldingProbe(Control host, URI sourceUri)
+        {
+            if (host == null || host.isDisposed())
+                return;
+            if (!(liveModuleViewer(sourceUri) instanceof ProjectionViewer projection))
+                return;
+            foldingLog("attach", projection, false); //$NON-NLS-1$
+            IProjectionListener listener = new IProjectionListener()
+            {
+                @Override
+                public void projectionEnabled()
+                {
+                    foldingLog("enabled", projection, true); //$NON-NLS-1$
+                }
+
+                @Override
+                public void projectionDisabled()
+                {
+                    foldingLog("disabled", projection, true); //$NON-NLS-1$
+                }
+            };
+            projection.addProjectionListener(listener);
+            host.addDisposeListener(e ->
+            {
+                foldingLog("host-dispose", projection, false); //$NON-NLS-1$
+                projection.removeProjectionListener(listener);
+            });
+        }
+
+        private static void foldingLog(String phase, ProjectionViewer projection, boolean withStack)
+        {
+            try
+            {
+                StringBuilder sb = new StringBuilder(phase);
+                sb.append(" mode=").append(projection.isProjectionMode()); //$NON-NLS-1$
+                ProjectionAnnotationModel model = projection.getProjectionAnnotationModel();
+                int n = -1;
+                if (model != null)
+                {
+                    n = 0;
+                    for (java.util.Iterator<?> it = model.getAnnotationIterator(); it.hasNext(); it.next())
+                        n++;
+                }
+                sb.append(" annotations=").append(n); //$NON-NLS-1$
+                StyledText widget = projection.getTextWidget();
+                sb.append(" widgetLines=") //$NON-NLS-1$
+                    .append(widget == null || widget.isDisposed() ? -1 : widget.getLineCount());
+                IDocument document = projection.getDocument();
+                sb.append(" docLen=").append(document == null ? -1 : document.getLength()); //$NON-NLS-1$
+                // Подмена модели аннотаций отцепляет projection без события projectionDisabled.
+                sb.append(" annModel=") //$NON-NLS-1$
+                    .append(Integer.toHexString(System.identityHashCode(projection.getAnnotationModel())));
+                sb.append(" viewer=") //$NON-NLS-1$
+                    .append(Integer.toHexString(System.identityHashCode(projection)));
+                if (withStack)
+                    sb.append(logStack());
+                Global.tempLog("inspect-fold", sb.toString()); //$NON-NLS-1$
+            }
+            catch (Exception ignored)
+            {
+            }
+        }
+
+        /** Штатный редактор модуля кадра стека — для диагностики свёрток. */
+        private static SourceViewer liveModuleViewer(URI sourceUri)
+        {
+            try
+            {
+                URI fileUri = sourceUri == null ? null : sourceUri.trimFragment();
+                if (fileUri == null || !fileUri.isPlatformResource())
+                    return null;
+                String platform = fileUri.toPlatformString(true);
+                if (platform == null || platform.isBlank())
+                    return null;
+                IFile file = ResourcesPlugin.getWorkspace().getRoot().getFile(new Path(platform));
+                IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+                IWorkbenchPage page = window != null ? window.getActivePage() : null;
+                if (page == null)
+                    return null;
+                for (IEditorReference ref : page.getEditorReferences())
+                {
+                    IEditorPart part = ref.getEditor(false);
+                    if (part == null)
+                        continue;
+                    BslXtextEditor bsl = findOpenBslEditor(part);
+                    if (bsl == null)
+                        continue;
+                    IEditorInput input = bsl.getEditorInput();
+                    if (!(input instanceof IFileEditorInput fileInput) || !file.equals(fileInput.getFile()))
+                        continue;
+                    if (bsl.getInternalSourceViewer() instanceof SourceViewer viewer)
+                        return viewer;
+                }
+            }
+            catch (Exception ignored)
+            {
+            }
+            return null;
+        }
+
+        private static void wireInspectDirtyProbe(SourceViewer inspectViewer, URI sourceUri)
+        {
+            IDocument document = inspectViewer == null ? null : inspectViewer.getDocument();
+            if (document == null)
+                return;
+            int[] n = { 0 };
+            document.addDocumentListener(new IDocumentListener()
+            {
+                @Override
+                public void documentAboutToBeChanged(DocumentEvent event)
+                {
+                }
+
+                @Override
+                public void documentChanged(DocumentEvent event)
+                {
+                    if (n[0] >= 12)
+                        return;
+                    n[0]++;
+                    logInspectVsLive("doc-change-" + n[0], inspectViewer, sourceUri); //$NON-NLS-1$
+                }
+            });
+        }
+
+        private static String dumpXtextState(IDocument document)
+        {
+            if (!(document instanceof IXtextDocument xdoc))
+                return "{\"xtext\":false}"; //$NON-NLS-1$
+            try
+            {
+                String resUri = String.valueOf(xdoc.getResourceURI());
+                String inner = xdoc.readOnly((XtextResource res) ->
+                {
+                    if (res == null)
+                        return "{\"res\":null}"; //$NON-NLS-1$
+                    ResourceSet rs = res.getResourceSet();
+                    int sameUri = 0;
+                    if (rs != null && res.getURI() != null)
+                    {
+                        for (Resource other : rs.getResources())
+                        {
+                            if (res.getURI().equals(other.getURI()))
+                                sameUri++;
+                        }
+                    }
+                    return "{\"res\":" + System.identityHashCode(res) //$NON-NLS-1$
+                        + ",\"mod\":" + res.isModified() //$NON-NLS-1$
+                        + ",\"rs\":" + (rs == null ? 0 : System.identityHashCode(rs)) //$NON-NLS-1$
+                        + ",\"rsSize\":" + (rs == null ? 0 : rs.getResources().size()) //$NON-NLS-1$
+                        + ",\"sameUriCount\":" + sameUri + "}"; //$NON-NLS-1$
+                });
+                return "{\"resUri\":\"" + ContentAssistDebug.jsonEscapeForLog(resUri) + "\"," //$NON-NLS-1$ //$NON-NLS-2$
+                    + inner.substring(1);
+            }
+            catch (Exception e)
+            {
+                return "{\"err\":true}"; //$NON-NLS-1$
+            }
+        }
+
+        private static String dumpFileBuffer(IFile file, IDocument inspectDoc)
+        {
+            if (file == null)
+                return "null"; //$NON-NLS-1$
+            try
+            {
+                Class<?> fb = Class.forName("org.eclipse.core.filebuffers.FileBuffers"); //$NON-NLS-1$
+                Object mgr = fb.getMethod("getTextFileBufferManager").invoke(null); //$NON-NLS-1$
+                Class<?> locKind = Class.forName("org.eclipse.core.filebuffers.LocationKind"); //$NON-NLS-1$
+                @SuppressWarnings({ "unchecked", "rawtypes" })
+                Object ifile = Enum.valueOf((Class) locKind, "IFILE"); //$NON-NLS-1$
+                Object buf = mgr.getClass()
+                    .getMethod("getTextFileBuffer", org.eclipse.core.runtime.IPath.class, locKind) //$NON-NLS-1$
+                    .invoke(mgr, file.getFullPath(), ifile);
+                if (buf == null)
+                    return "null"; //$NON-NLS-1$
+                boolean dirty = Boolean.TRUE.equals(buf.getClass().getMethod("isDirty").invoke(buf)); //$NON-NLS-1$
+                Object doc = buf.getClass().getMethod("getDocument").invoke(buf); //$NON-NLS-1$
+                return "{\"dirty\":" + dirty //$NON-NLS-1$
+                    + ",\"doc\":" + System.identityHashCode(doc) //$NON-NLS-1$
+                    + ",\"sameInspect\":" + (doc == inspectDoc) + "}"; //$NON-NLS-1$
+            }
+            catch (Exception e)
+            {
+                return "\"err\""; //$NON-NLS-1$
+            }
+        }
+
+        private static void logInspectVsLive(String phase, SourceViewer inspectViewer, URI sourceUri)
+        {
+            IDocument inspectDoc = inspectViewer == null ? null : inspectViewer.getDocument();
+            IRegion inspectVis = inspectViewer == null ? null : inspectViewer.getVisibleRegion();
+            StringBuilder live = new StringBuilder("["); //$NON-NLS-1$
+            StringBuilder dirtyParts = new StringBuilder("["); //$NON-NLS-1$
+            int n = 0;
+            int dirtyN = 0;
+            IFile file = null;
+            try
+            {
+                URI fileUri = sourceUri == null ? null : sourceUri.trimFragment();
+                if (fileUri != null && fileUri.isPlatformResource())
+                {
+                    String platform = fileUri.toPlatformString(true);
+                    if (platform != null && !platform.isBlank())
+                        file = ResourcesPlugin.getWorkspace().getRoot().getFile(new Path(platform));
+                }
+                IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+                IWorkbenchPage page = window != null ? window.getActivePage() : null;
+                if (page != null)
+                {
+                    for (IEditorReference ref : page.getEditorReferences())
+                    {
+                        IEditorPart part = ref.getEditor(false);
+                        if (part == null)
+                            continue;
+                        if (part.isDirty())
+                        {
+                            if (dirtyN > 0)
+                                dirtyParts.append(',');
+                            dirtyParts.append("{\"part\":\"").append(part.getClass().getSimpleName()) //$NON-NLS-1$
+                                .append("\",\"title\":\"") //$NON-NLS-1$
+                                .append(ContentAssistDebug.jsonEscapeForLog(String.valueOf(part.getTitle())))
+                                .append("\"}"); //$NON-NLS-1$
+                            dirtyN++;
+                        }
+                        if (file == null || !file.exists())
+                            continue;
+                        BslXtextEditor bsl = findOpenBslEditor(part);
+                        if (bsl == null)
+                            continue;
+                        IEditorInput input = bsl.getEditorInput();
+                        if (!(input instanceof IFileEditorInput fi) || !file.equals(fi.getFile()))
+                            continue;
+                        ISourceViewer sv = bsl.getInternalSourceViewer();
+                        IDocument liveDoc = sv != null ? sv.getDocument() : bsl.getDocument();
+                        // Никогда не звать getVisibleRegion() у ЧУЖОГО viewer:
+                        // ProjectionViewer.getVisibleRegion() первым делом делает
+                        // disableProjection(), и в живом редакторе модуля гаснут свёртки —
+                        // слушателя модели он снимает раньше, чем removeAllAnnotations,
+                        // поэтому текст остаётся свёрнутым, а стрелки исчезают
+                        // (подтверждено стеком inspect-fold 12.09.2026 20:14:48).
+                        IRegion vis = null;
+                        IDocumentProvider dp = bsl.getDocumentProvider();
+                        boolean canSave = false;
+                        int pdoc = 0;
+                        boolean pdocInspect = false;
+                        boolean pdocLive = false;
+                        if (dp != null)
+                        {
+                            try
+                            {
+                                canSave = dp.canSaveDocument(input);
+                            }
+                            catch (Exception ignored)
+                            {
+                            }
+                            IDocument pd = dp.getDocument(input);
+                            pdoc = System.identityHashCode(pd);
+                            pdocInspect = pd == inspectDoc;
+                            pdocLive = pd == liveDoc;
+                        }
+                        if (n > 0)
+                            live.append(',');
+                        live.append("{\"sameDoc\":").append(liveDoc == inspectDoc); //$NON-NLS-1$
+                        live.append(",\"sameViewer\":").append(sv == inspectViewer); //$NON-NLS-1$
+                        live.append(",\"partDirty\":").append(part.isDirty()); //$NON-NLS-1$
+                        live.append(",\"bslDirty\":").append(bsl.isDirty()); //$NON-NLS-1$
+                        live.append(",\"part\":\"").append(part.getClass().getSimpleName()).append('"'); //$NON-NLS-1$
+                        live.append(",\"canSave\":").append(canSave); //$NON-NLS-1$
+                        live.append(",\"pdoc\":").append(pdoc); //$NON-NLS-1$
+                        live.append(",\"pdocInspect\":").append(pdocInspect); //$NON-NLS-1$
+                        live.append(",\"pdocLive\":").append(pdocLive); //$NON-NLS-1$
+                        live.append(",\"doc\":").append(System.identityHashCode(liveDoc)); //$NON-NLS-1$
+                        live.append(",\"len\":").append(liveDoc == null ? -1 : liveDoc.getLength()); //$NON-NLS-1$
+                        live.append(",\"visOff\":").append(vis == null ? -1 : vis.getOffset()); //$NON-NLS-1$
+                        live.append(",\"visLen\":").append(vis == null ? -1 : vis.getLength()); //$NON-NLS-1$
+                        live.append(",\"viewer\":").append(System.identityHashCode(sv)); //$NON-NLS-1$
+                        live.append(",\"xtext\":").append(dumpXtextState(liveDoc)); //$NON-NLS-1$
+                        if (part instanceof ISaveablesSource src)
+                        {
+                            live.append(",\"saveables\":["); //$NON-NLS-1$
+                            Saveable[] all = src.getSaveables();
+                            for (int i = 0; i < all.length; i++)
+                            {
+                                if (i > 0)
+                                    live.append(',');
+                                live.append("{\"n\":\"") //$NON-NLS-1$
+                                    .append(ContentAssistDebug.jsonEscapeForLog(all[i].getName()))
+                                    .append("\",\"dirty\":").append(all[i].isDirty()).append('}'); //$NON-NLS-1$
+                            }
+                            live.append(']');
+                        }
+                        live.append('}');
+                        n++;
+                    }
+                }
+            }
+            catch (Exception ignored)
+            {
+            }
+            live.append(']');
+            dirtyParts.append(']');
+            String payload = "{\"inspectDoc\":" + System.identityHashCode(inspectDoc) //$NON-NLS-1$
+                + ",\"inspectLen\":" + (inspectDoc == null ? -1 : inspectDoc.getLength()) //$NON-NLS-1$
+                + ",\"inspectVisOff\":" + (inspectVis == null ? -1 : inspectVis.getOffset()) //$NON-NLS-1$
+                + ",\"inspectVisLen\":" + (inspectVis == null ? -1 : inspectVis.getLength()) //$NON-NLS-1$
+                + ",\"inspectViewer\":" + System.identityHashCode(inspectViewer) //$NON-NLS-1$
+                + ",\"inspectXtext\":" + dumpXtextState(inspectDoc) //$NON-NLS-1$
+                + ",\"fileBuffer\":" + dumpFileBuffer(file, inspectDoc) //$NON-NLS-1$
+                + ",\"dirtyParts\":" + dirtyParts //$NON-NLS-1$
+                + ",\"uri\":\"" + ContentAssistDebug.jsonEscapeForLog(String.valueOf(sourceUri)) //$NON-NLS-1$
+                + "\",\"live\":" + live + "}"; //$NON-NLS-1$
+            ContentAssistDebug.debugSessionLog("F", "inspect.dirty", phase, payload); //$NON-NLS-1$ //$NON-NLS-2$
+            Global.tempLog("inspect-dirty", phase + " " + payload); //$NON-NLS-1$
+        }
+
+        private static BslXtextEditor findOpenBslEditor(IEditorPart part)
+        {
+            if (part instanceof BslXtextEditor bsl)
+                return bsl;
+            if (part instanceof DtGranularEditor<?> granular)
+            {
+                IFormPage activePage = granular.getActivePageInstance();
+                if (activePage instanceof DtGranularEditorXtextEditorPage<?> xtextPage)
+                {
+                    IEditorPart embedded = xtextPage.getEmbeddedEditor();
+                    if (embedded instanceof BslXtextEditor bsl)
+                        return bsl;
+                }
+                Object countObj = Global.invoke(granular, "getPageCount"); //$NON-NLS-1$
+                if (countObj instanceof Integer count)
+                {
+                    for (int i = 0; i < count.intValue(); i++)
+                    {
+                        Object editor = Global.invoke(granular, "getEditor", Integer.valueOf(i)); //$NON-NLS-1$
+                        if (editor instanceof BslXtextEditor bsl)
+                            return bsl;
+                    }
+                }
+            }
+            return null;
+        }
+        // #endregion
 
         private static IResourceServiceProvider bslServiceProvider(URI sourceUri)
         {
@@ -2873,11 +3400,32 @@ public final class DebugInspectorHook implements IStartup
                 if (content == null || content.isEmpty())
                     return new String[] { "", editable, "" }; //$NON-NLS-1$ //$NON-NLS-2$
                 int safe = Math.max(0, Math.min(offset, content.length()));
-                return new String[] {
-                    content.substring(0, safe) + EDITOR_PREFIX,
-                    editable,
-                    EDITOR_SUFFIX + content.substring(safe)
-                };
+                String[] wrap = wrapAtStackOffset(content, safe, editable);
+                // #region agent log
+                int aroundAt = Math.max(0, Math.min(safe, content.length()));
+                int from = Math.max(0, aroundAt - 24);
+                int to = Math.min(content.length(), aroundAt + 24);
+                String around = content.substring(from, to).replace('\r', ' ').replace('\n', ' ');
+                char before = aroundAt > 0 ? content.charAt(aroundAt - 1) : 0;
+                boolean header = isMethodHeaderLine(content, lineStartOffset(content, safe));
+                String prefixTail = wrap[0].length() <= 48
+                    ? wrap[0]
+                    : wrap[0].substring(wrap[0].length() - 48);
+                ContentAssistDebug.debugSessionLog("D", "inspect.wrap", "splice", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    "{\"line\":" + line //$NON-NLS-1$
+                        + ",\"safe\":" + safe //$NON-NLS-1$
+                        + ",\"header\":" + header //$NON-NLS-1$
+                        + ",\"before\":\"" + ContentAssistDebug.jsonEscapeForLog(String.valueOf(before)) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                        + ",\"around\":\"" + ContentAssistDebug.jsonEscapeForLog(around) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                        + ",\"prefixTail\":\"" + ContentAssistDebug.jsonEscapeForLog(prefixTail.replace('\r', ' ').replace('\n', '|')) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                        + ",\"hypothesisId\":\"D\"}"); //$NON-NLS-1$
+                log("wrap line=" + line //$NON-NLS-1$
+                    + " safe=" + safe //$NON-NLS-1$
+                    + " header=" + header //$NON-NLS-1$
+                    + " around=[" + around + "]" //$NON-NLS-1$ //$NON-NLS-2$
+                    + " prefixTail=[" + prefixTail.replace('\r', ' ').replace('\n', '|') + "]"); //$NON-NLS-1$ //$NON-NLS-2$
+                // #endregion
+                return wrap;
             }
             catch (DebugException e)
             {
@@ -2889,6 +3437,146 @@ public final class DebugInspectorHook implements IStartup
                 DebugInspectorDebug.problem("expression assist wrap: " + e.getMessage()); //$NON-NLS-1$
                 return new String[] { "", editable, "" }; //$NON-NLS-1$ //$NON-NLS-2$
             }
+        }
+
+        /**
+         * {@code Строка();} — отдельный оператор в теле метода. В заголовке
+         * {@code Процедура/Функция} после {@code )}, иначе в начало строки кадра.
+         */
+        private static String[] wrapAtStackOffset(String content, int safe, String editable)
+        {
+            int lineStart = lineStartOffset(content, safe);
+            String nl = lineDelimiterOf(content);
+            if (isMethodHeaderLine(content, lineStart))
+            {
+                int splice = methodBodyInsertOffset(content, lineStart, safe);
+                String indent = followingLineIndent(content, splice);
+                return new String[] {
+                    content.substring(0, splice) + nl + indent + EDITOR_PREFIX,
+                    editable,
+                    EDITOR_SUFFIX + nl + content.substring(splice)
+                };
+            }
+            String indent = lineIndent(content, lineStart, safe);
+            return new String[] {
+                content.substring(0, lineStart) + indent + EDITOR_PREFIX,
+                editable,
+                EDITOR_SUFFIX + nl + content.substring(lineStart)
+            };
+        }
+
+        private static int lineStartOffset(String content, int offset)
+        {
+            int at = Math.max(0, Math.min(offset, content.length()));
+            while (at > 0)
+            {
+                char c = content.charAt(at - 1);
+                if (c == '\n')
+                    break;
+                at--;
+            }
+            return at;
+        }
+
+        private static int lineEndOffset(String content, int lineStart)
+        {
+            int n = content.indexOf('\n', lineStart);
+            if (n < 0)
+                return content.length();
+            if (n > lineStart && content.charAt(n - 1) == '\r')
+                return n - 1;
+            return n;
+        }
+
+        private static boolean isMethodHeaderLine(String content, int lineStart)
+        {
+            int end = lineEndOffset(content, lineStart);
+            String line = content.substring(lineStart, end).trim();
+            return line.startsWith("Процедура ") //$NON-NLS-1$
+                || line.startsWith("Функция ") //$NON-NLS-1$
+                || line.startsWith("Procedure ") //$NON-NLS-1$
+                || line.startsWith("Function "); //$NON-NLS-1$
+        }
+
+        private static int methodBodyInsertOffset(String content, int lineStart, int safe)
+        {
+            if (safe > lineStart && safe <= content.length() && content.charAt(safe - 1) == ')')
+                return skipHeaderTrailer(content, safe);
+            int end = lineEndOffset(content, lineStart);
+            int close = content.lastIndexOf(')', end - 1);
+            if (close >= lineStart)
+                return skipHeaderTrailer(content, close + 1);
+            return safe;
+        }
+
+        private static int skipHeaderTrailer(String content, int at)
+        {
+            int i = at;
+            while (i < content.length())
+            {
+                char c = content.charAt(i);
+                if (c != ' ' && c != '\t')
+                    break;
+                i++;
+            }
+            if (startsAt(content, i, "Экспорт") || startsAt(content, i, "Export")) //$NON-NLS-1$ //$NON-NLS-2$
+            {
+                i += startsAt(content, i, "Экспорт") ? "Экспорт".length() : "Export".length(); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                while (i < content.length())
+                {
+                    char c = content.charAt(i);
+                    if (c != ' ' && c != '\t')
+                        break;
+                    i++;
+                }
+            }
+            return i;
+        }
+
+        private static boolean startsAt(String content, int at, String token)
+        {
+            return at >= 0 && at + token.length() <= content.length()
+                && content.regionMatches(true, at, token, 0, token.length());
+        }
+
+        private static String lineIndent(String content, int lineStart, int limit)
+        {
+            int end = Math.max(lineStart, Math.min(limit, content.length()));
+            int i = lineStart;
+            while (i < end)
+            {
+                char c = content.charAt(i);
+                if (c != ' ' && c != '\t')
+                    break;
+                i++;
+            }
+            return content.substring(lineStart, i);
+        }
+
+        private static String followingLineIndent(String content, int from)
+        {
+            int i = from;
+            if (i < content.length() && content.charAt(i) == '\r')
+                i++;
+            if (i < content.length() && content.charAt(i) == '\n')
+                i++;
+            int j = i;
+            while (j < content.length())
+            {
+                char c = content.charAt(j);
+                if (c != ' ' && c != '\t')
+                    break;
+                j++;
+            }
+            return j > i ? content.substring(i, j) : "\t"; //$NON-NLS-1$
+        }
+
+        private static String lineDelimiterOf(String content)
+        {
+            int n = content.indexOf('\n');
+            if (n > 0 && content.charAt(n - 1) == '\r')
+                return "\r\n"; //$NON-NLS-1$
+            return n >= 0 ? "\n" : "\r\n"; //$NON-NLS-1$ //$NON-NLS-2$
         }
 
         private static void wireEnter(StyledText text, SourceViewer sourceViewer, InspectExpressionAssist assist)
@@ -2918,10 +3606,8 @@ public final class DebugInspectorHook implements IStartup
                                 && (event.keyCode == SWT.HOME || event.keyCode == SWT.END)))
                     {
                         event.doit = false;
-                        assist.lockVisibleRegion("nav"); //$NON-NLS-1$
                         return;
                     }
-                    assist.lockVisibleRegion("key"); //$NON-NLS-1$
                     if (event.character == SWT.ESC)
                     {
                         restoreExpressionFocus(text, sourceViewer);
@@ -2953,70 +3639,11 @@ public final class DebugInspectorHook implements IStartup
                     restoreExpressionFocus(text, sourceViewer);
                 }
             });
-            wireAssistPopupEnterGuard(text, sourceViewer);
-        }
-
-        /**
-         * Поле выражения живёт в диалоге инспектора. Enter там сначала идёт как
-         * {@code SWT.TRAVERSE_RETURN} (кнопка по умолчанию / закрытие), до VerifyKey
-         * редактора не доходит — список гаснет без вставки. Перехватываем на Display
-         * и вставляем выбранный пункт сами.
-         */
-        private static void wireAssistPopupEnterGuard(StyledText text, SourceViewer viewer)
-        {
-            if (text == null || text.isDisposed())
-                return;
-            if (Boolean.TRUE.equals(text.getData(POPUP_ENTER_FILTER_KEY)))
-                return;
-            Display display = text.getDisplay();
-            if (display == null || display.isDisposed())
-                return;
-            Listener filter = event ->
-            {
-                if (event.detail != SWT.TRAVERSE_RETURN)
-                    return;
-                if (text.isDisposed() || !isAssistShowing(viewer))
-                    return;
-                event.doit = false;
-                boolean inserted = insertInspectAssistProposal(viewer);
-                log("enter-traverse inserted=" + inserted //$NON-NLS-1$
-                    + " focus=" + describeFocus(display.getFocusControl())); //$NON-NLS-1$
-            };
-            display.addFilter(SWT.Traverse, filter);
-            text.setData(POPUP_ENTER_FILTER_KEY, Boolean.TRUE);
-            text.addDisposeListener(e ->
-            {
-                if (!display.isDisposed())
-                    display.removeFilter(SWT.Traverse, filter);
-            });
-        }
-
-        private static boolean insertInspectAssistProposal(SourceViewer viewer)
-        {
-            ContentAssistant assistant = ContentAssistPatcher.getContentAssistant(viewer);
-            if (assistant == null)
-                return false;
-            Object popup = ContentAssistPopupSync.getPopupObject(assistant);
-            if (popup == null)
-                return false;
-            try
-            {
-                return Global.invokeVoid(popup, "insertSelectedProposalWithMask", 0); //$NON-NLS-1$
-            }
-            catch (RuntimeException e)
-            {
-                log("insertSelected failed " + e.getMessage()); //$NON-NLS-1$
-                return false;
-            }
         }
 
         private static String describeFocus(Control focus)
         {
-            if (focus == null)
-                return "null"; //$NON-NLS-1$
-            return focus.getClass().getSimpleName()
-                + (Boolean.TRUE.equals(focus.getData(INSPECT_EXPRESSION_EDITOR_KEY))
-                    ? "/expr" : ""); //$NON-NLS-1$ //$NON-NLS-2$
+            return BslExpressionField.describeFocus(focus);
         }
 
         private static boolean isAssistShowing(SourceViewer viewer)
@@ -3067,9 +3694,40 @@ public final class DebugInspectorHook implements IStartup
                 @Override
                 public void assistSessionEnded(ContentAssistEvent event)
                 {
+                    IDocument endedDoc = viewer.getDocument();
+                    boolean linked = endedDoc != null && LinkedModeModel.hasInstalledModel(endedDoc);
+                    boolean apply = SmartCompletionProposal.isAnyApplyInProgress();
+                    // #region agent log
+                    ContentAssistDebug.debugSessionLog("D", "inspect.assist-end", "beforeLock", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        "{\"linked\":" + linked //$NON-NLS-1$
+                            + ",\"apply\":" + apply //$NON-NLS-1$
+                            + ",\"doc\":" + BslDataEventGuard.debugDocJson(endedDoc) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+                    // #endregion
                     restoreExpressionFocus(text, viewer);
                     log("assist-end " + dumpViewer(viewer, assist.prefix)); //$NON-NLS-1$
-                    assist.lockVisibleRegion("assist-end"); //$NON-NLS-1$
+                    // apply() у JFace идёт после assistSessionEnded, поэтому фокус
+                    // возвращаем отложенно и только когда вставка уже закончилась.
+                    Display display = text.getDisplay();
+                    if (display != null && !display.isDisposed())
+                    {
+                        display.timerExec(0, () ->
+                        {
+                            if (text.isDisposed())
+                                return;
+                            IDocument laterDoc = viewer.getDocument();
+                            boolean linkedLater = laterDoc != null
+                                && LinkedModeModel.hasInstalledModel(laterDoc);
+                            boolean applyLater = SmartCompletionProposal.isAnyApplyInProgress();
+                            // #region agent log
+                            ContentAssistDebug.debugSessionLog("D", "inspect.assist-end", "deferred", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                                "{\"linked\":" + linkedLater //$NON-NLS-1$
+                                    + ",\"apply\":" + applyLater //$NON-NLS-1$
+                                    + ",\"hypothesisId\":\"A\"}"); //$NON-NLS-1$
+                            // #endregion
+                            if (!applyLater && !text.isDisposed() && !text.isFocusControl())
+                                text.setFocus();
+                        });
+                    }
                 }
 
                 @Override
@@ -3082,24 +3740,7 @@ public final class DebugInspectorHook implements IStartup
 
         private static void restoreExpressionFocus(StyledText text, SourceViewer viewer)
         {
-            if (text == null || text.isDisposed())
-                return;
-            Display display = text.getDisplay();
-            if (display == null || display.isDisposed())
-                return;
-            display.asyncExec(() ->
-            {
-                if (text.isDisposed())
-                    return;
-                if (isAssistShowing(viewer))
-                {
-                    log("restore-focus skip popup"); //$NON-NLS-1$
-                    return;
-                }
-                boolean ok = text.setFocus();
-                log("restore-focus ok=" + ok + " focus=" //$NON-NLS-1$ //$NON-NLS-2$
-                    + describeFocus(display.getFocusControl()));
-            });
+            BslExpressionField.restoreFocus(text, viewer, LOG);
         }
 
         private void evaluateTyped()
@@ -3117,7 +3758,6 @@ public final class DebugInspectorHook implements IStartup
             key.character = SWT.CR;
             combo.notifyListeners(SWT.KeyUp, key);
             log("evaluate after " + dumpViewer(sourceViewer, prefix)); //$NON-NLS-1$
-            lockVisibleRegion("evaluate"); //$NON-NLS-1$
             Display display = combo.getDisplay();
             if (display == null || display.isDisposed())
                 return;
@@ -3196,8 +3836,10 @@ public final class DebugInspectorHook implements IStartup
                 modelAccess.updateModel(prefix, item, suffix);
             }
             String now = editableText();
+            // Если правка не легла — повторяем через модель EDT, а не своим
+            // document.replace + setVisibleRegion: регион держит модель.
             if (!item.trim().equals(now))
-                replaceVisible(item);
+                modelAccess.updateModel(prefix, item, suffix);
             combo.setText(item);
             Event selection = new Event();
             selection.type = SWT.Selection;
@@ -3206,31 +3848,10 @@ public final class DebugInspectorHook implements IStartup
             StyledText text = sourceViewer.getTextWidget();
             if (text != null && !text.isDisposed())
                 text.setFocus();
-            lockVisibleRegion("history"); //$NON-NLS-1$
             placeCaretAtExpressionEnd("history"); //$NON-NLS-1$
             log("history item=[" + snippet(item, 80) + "] viaCustom=" + viaCustom //$NON-NLS-1$ //$NON-NLS-2$
                 + " now=[" + snippet(editableText(), 80) + "] " //$NON-NLS-1$ //$NON-NLS-2$
                 + dumpViewer(sourceViewer, prefix));
-        }
-
-        private void replaceVisible(String item)
-        {
-            IDocument document = sourceViewer.getDocument();
-            IRegion visible = sourceViewer.getVisibleRegion();
-            if (document == null || visible == null)
-            {
-                modelAccess.updateModel(prefix, item, suffix);
-                return;
-            }
-            try
-            {
-                document.replace(visible.getOffset(), visible.getLength(), item);
-                sourceViewer.setVisibleRegion(visible.getOffset(), item.length());
-            }
-            catch (BadLocationException e)
-            {
-                modelAccess.updateModel(prefix, item, suffix);
-            }
         }
 
         private String editableText()

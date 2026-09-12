@@ -9,12 +9,15 @@ import org.eclipse.core.resources.IResource;
 import org.eclipse.core.runtime.CoreException;
 import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.jface.preference.PreferenceDialog;
+import org.eclipse.jface.text.DocumentEvent;
 import org.eclipse.jface.text.IDocument;
+import org.eclipse.jface.text.IDocumentListener;
 import org.eclipse.jface.text.ITextSelection;
 import org.eclipse.jface.text.source.ISourceViewer;
 import org.eclipse.jface.text.source.SourceViewer;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.ScrolledComposite;
+import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.graphics.Rectangle;
 import org.eclipse.swt.layout.GridData;
@@ -24,9 +27,11 @@ import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Layout;
 import org.eclipse.swt.widgets.Display;
+import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Label;
 import org.eclipse.swt.widgets.Link;
 import org.eclipse.swt.widgets.Listener;
+import org.eclipse.swt.widgets.ScrollBar;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Combo;
 import org.eclipse.ui.IEditorPart;
@@ -44,9 +49,10 @@ import com._1c.g5.v8.dt.core.platform.IDtProject;
 import com._1c.g5.v8.dt.debug.core.model.breakpoints.IBslLineBreakpoint;
 
 /**
- * Гиперссылка «Выводить ИР» в диалоге «Свойства для …» (точка останова):
- * генерация выражения — порт RDT {@code КнопкаВставитьВыражениеИзМодуля};
- * вставка — в поле «Значение выражения».
+ * Доработки диалога «Свойства для …» (точка останова):
+ * гиперссылка «Выводить ИР» (порт RDT {@code КнопкаВставитьВыражениеИзМодуля});
+ * поля условия и значения выражения всегда доступны, флажок включается при вводе;
+ * прокрутка диалога колесом мыши.
  */
 public final class BreakpointPropertiesHook implements IStartup
 {
@@ -57,6 +63,10 @@ public final class BreakpointPropertiesHook implements IStartup
     private static final String RESIZE_LISTENER_KEY = "tormozit.breakpointResizeListener"; //$NON-NLS-1$
     private static final String SIZE_MEMORY_KEY = "tormozit.breakpointSizeMemory"; //$NON-NLS-1$
     private static final String CONTENT_ASSIST_KEY = "tormozit.breakpointContentAssistPatched"; //$NON-NLS-1$
+    private static final String ALWAYS_ENABLED_KEY = "tormozit.breakpointAlwaysEnabled"; //$NON-NLS-1$
+    private static final String AUTO_CONTINUE_KEY = "tormozit.breakpointAutoContinue"; //$NON-NLS-1$
+    private static final String WHEEL_SCROLL_KEY = "tormozit.breakpointWheelScroll"; //$NON-NLS-1$
+    private static final String BP_FIELD_ROLE_KEY = "tormozit.bpFieldRole"; //$NON-NLS-1$
     private static final String SETTINGS_SECTION = "tormozit.breakpointPropertiesDialog"; //$NON-NLS-1$
     private static final String KEY_DIALOG_WIDTH = "DIALOG_WIDTH"; //$NON-NLS-1$
     private static final String KEY_DIALOG_HEIGHT = "DIALOG_HEIGHT"; //$NON-NLS-1$
@@ -184,9 +194,32 @@ public final class BreakpointPropertiesHook implements IStartup
             ok = false;
         if (expressionViewer != null && !mgr.applyPatchToEmbeddedBslViewer(expressionViewer))
             ok = false;
+        // Общее поведение поля кода BSL — то же, что в поле «Выражение» инспектора:
+        // вставка по Enter из списка, Ctrl+Shift+Space, жизнь LinkedMode при всплывающих
+        // окнах, возврат фокуса в поле.
+        if (conditionViewer != null)
+        {
+            markBreakpointField(conditionViewer, "condition"); //$NON-NLS-1$
+            BslExpressionField.attach(conditionViewer, null);
+        }
+        if (expressionViewer != null)
+        {
+            markBreakpointField(expressionViewer, "expression"); //$NON-NLS-1$
+            BslExpressionField.attach(expressionViewer, null);
+        }
         if (conditionViewer == null || expressionViewer == null)
             ok = false;
         return ok;
+    }
+
+    private static void markBreakpointField(SourceViewer viewer, String role)
+    {
+        if (viewer == null)
+            return;
+        StyledText text = viewer.getTextWidget();
+        if (text == null || text.isDisposed())
+            return;
+        text.setData(BP_FIELD_ROLE_KEY, role);
     }
 
     private static SourceViewer resolveEmbeddedViewer(Object pane)
@@ -281,17 +314,362 @@ public final class BreakpointPropertiesHook implements IStartup
         if (Boolean.TRUE.equals(evaluateButton.getData(LINK_ROW_KEY)))
         {
             installEditorPanesVerticalStretch(shell, actionsEditor);
+            installAlwaysEnabledPanes(shell, actionsEditor);
+            installMouseWheelScroll(shell);
             shell.setData(PATCHED_KEY, Boolean.TRUE);
             return true;
         }
 
         installEditorPanesVerticalStretch(shell, actionsEditor);
         expandGroupsWithCheckedOptions(shell, actionsEditor);
+        installAlwaysEnabledPanes(shell, actionsEditor);
+        installMouseWheelScroll(shell);
         if (!installIrOutputLink(actionsEditor, evaluateButton))
             return false;
 
         shell.setData(PATCHED_KEY, Boolean.TRUE);
         return true;
+    }
+
+    /**
+     * Поля условия и значения выражения всегда доступны для ввода (не зависят от флажков).
+     * При появлении непустого текста связанный флажок включается сразу.
+     */
+    /**
+     * Штатная обёртка поля: {@code if (true and …) then endif;} вокруг выражения
+     * ({@code BslBreakpointTextAndHistoryEditorPane.EDITOR_PREFIX/SUFFIX}). Без неё
+     * документ — тело модуля, и {@code строка() + x} даёт «ожидается ';'».
+     */
+    private static final String BP_EDITOR_WRAP_PREFIX = " if (true and "; //$NON-NLS-1$
+    private static final String BP_EDITOR_WRAP_SUFFIX = ") then endif;"; //$NON-NLS-1$
+
+    private static void installAlwaysEnabledPanes(Shell shell, Object actionsEditor)
+    {
+        Object conditionEditor = resolveBreakpointSubEditor(shell, CONDITION_EDITOR);
+        if (conditionEditor != null)
+        {
+            Button conditionButton = (Button) Global.getField(conditionEditor, "conditionButton"); //$NON-NLS-1$
+            Object conditionPane = Global.getField(conditionEditor, "conditionPane"); //$NON-NLS-1$
+            wireAlwaysEnabledPane(conditionButton, conditionPane, conditionEditor, true);
+        }
+
+        Button evaluateButton = (Button) Global.getField(actionsEditor, "evaluateExpressionButton"); //$NON-NLS-1$
+        Object expressionPane = Global.getField(actionsEditor, "expressionPane"); //$NON-NLS-1$
+        wireAlwaysEnabledPane(evaluateButton, expressionPane, actionsEditor, false);
+        wireAutoContinueOnConsoleActions(actionsEditor);
+    }
+
+    /**
+     * Группа «Вывести в консоль»: при включении любого флажка включается
+     * «Продолжить выполнение». Для «Значение выражения» — также при автофлажке
+     * по вводу и при вставке «Выводить ИР».
+     */
+    private static void wireAutoContinueOnConsoleActions(Object actionsEditor)
+    {
+        String[] fieldNames = {
+            "enablementDescriptionButton", //$NON-NLS-1$
+            "evaluateExpressionButton", //$NON-NLS-1$
+            "putStackButton", //$NON-NLS-1$
+            "putCurrentHitCountButton" //$NON-NLS-1$
+        };
+        for (String fieldName : fieldNames)
+        {
+            Button button = (Button) Global.getField(actionsEditor, fieldName);
+            if (button == null || button.isDisposed())
+                continue;
+            if (Boolean.TRUE.equals(button.getData(AUTO_CONTINUE_KEY)))
+                continue;
+            button.setData(AUTO_CONTINUE_KEY, Boolean.TRUE);
+            button.addListener(SWT.Selection, e ->
+            {
+                if (button.getSelection())
+                    ensureContinueExecutionChecked(actionsEditor);
+            });
+        }
+    }
+
+    private static void ensureContinueExecutionChecked(Object actionsEditor)
+    {
+        if (actionsEditor == null)
+            return;
+        Button continueButton = (Button) Global.getField(actionsEditor, "continueExecutionButton"); //$NON-NLS-1$
+        if (continueButton == null || continueButton.isDisposed())
+            return;
+        if (!continueButton.isEnabled())
+            continueButton.setEnabled(true);
+        if (continueButton.getSelection())
+            return;
+        continueButton.setSelection(true);
+        Event event = new Event();
+        event.type = SWT.Selection;
+        event.widget = continueButton;
+        continueButton.notifyListeners(SWT.Selection, event);
+    }
+
+    private static void wireAlwaysEnabledPane(Button checkbox, Object pane, Object breakpointHolder,
+            boolean conditionField)
+    {
+        if (checkbox == null || checkbox.isDisposed() || pane == null)
+            return;
+        if (Boolean.TRUE.equals(checkbox.getData(ALWAYS_ENABLED_KEY)))
+            return;
+        checkbox.setData(ALWAYS_ENABLED_KEY, Boolean.TRUE);
+
+        forcePaneEnabled(pane);
+        // Пустое условие/выражение: EDT делает initializeEmptyModel без обёртки.
+        // Поле уже доступно — нужна ensureInitialized до ввода, иначе синтаксис как у инструкций.
+        ensureBreakpointExpressionWrap(pane, breakpointHolder, conditionField, null);
+        Display display = checkbox.getDisplay();
+        if (display == null || display.isDisposed())
+            return;
+        // setInput иногда после нашего патча: повторить, когда breakpoint уже на месте.
+        display.timerExec(0,
+                () -> ensureBreakpointExpressionWrap(pane, breakpointHolder, conditionField, null));
+        display.timerExec(120,
+                () -> ensureBreakpointExpressionWrap(pane, breakpointHolder, conditionField, null));
+
+        // Штатный Selection: setEnabled(selection) и при включении ensureInitialized(…,
+        // breakpoint.getXxx()), что при initialized=false подставляет сохранённое
+        // (часто пустое) значение поверх уже набранного текста. Фильтр Display идёт
+        // до слушателей виджета — успеваем запомнить текст и вернуть после EDT.
+        String[] textBeforeCheck = { null };
+        Listener captureBeforeEdt = event ->
+        {
+            if (event.widget != checkbox)
+                return;
+            if (!checkbox.getSelection())
+            {
+                textBeforeCheck[0] = null;
+                return;
+            }
+            Object text = Global.invoke(pane, "getText"); //$NON-NLS-1$
+            textBeforeCheck[0] = text instanceof String s ? s : null;
+        };
+        display.addFilter(SWT.Selection, captureBeforeEdt);
+        checkbox.addDisposeListener(e ->
+        {
+            if (!display.isDisposed())
+                display.removeFilter(SWT.Selection, captureBeforeEdt);
+        });
+        checkbox.addListener(SWT.Selection, e ->
+        {
+            forcePaneEnabled(pane);
+            restorePaneTextIfWiped(pane, textBeforeCheck[0]);
+            textBeforeCheck[0] = null;
+        });
+
+        Object documentObj = Global.getField(pane, "document"); //$NON-NLS-1$
+        if (!(documentObj instanceof IDocument document))
+            return;
+        // Не вызывать pane.addDocumentListener — там только один слот, затрём слушатель EDT.
+        document.addDocumentListener(new IDocumentListener()
+        {
+            @Override
+            public void documentAboutToBeChanged(DocumentEvent event)
+            {
+            }
+
+            @Override
+            public void documentChanged(DocumentEvent event)
+            {
+                if (checkbox.isDisposed())
+                    return;
+                Object text = Global.invoke(pane, "getText"); //$NON-NLS-1$
+                if (!(text instanceof String s) || s.isBlank())
+                    return;
+                // setSelection не шлёт Selection — штатный ensureInitialized не вызывается.
+                // Обёртку — только async: updateModel внутри documentChanged реентрантен.
+                if (!documentHasBreakpointExpressionWrap(pane))
+                {
+                    String typed = s;
+                    display.asyncExec(() -> ensureBreakpointExpressionWrap(
+                            pane, breakpointHolder, conditionField, typed));
+                }
+                if (!checkbox.getSelection())
+                {
+                    checkbox.setSelection(true);
+                    if (!conditionField)
+                        ensureContinueExecutionChecked(breakpointHolder);
+                }
+            }
+        });
+    }
+
+    /**
+     * Вставляет штатную обёртку выражения вокруг редактируемой части, если её ещё нет.
+     * {@code preferEditable} — уже набранный текст (не затирать сохранённым пустым).
+     */
+    private static void ensureBreakpointExpressionWrap(Object pane, Object breakpointHolder,
+            boolean conditionField, String preferEditable)
+    {
+        if (pane == null || breakpointHolder == null)
+            return;
+        Object bpObj = Global.getField(breakpointHolder, "breakpoint"); //$NON-NLS-1$
+        if (!(bpObj instanceof IBslLineBreakpoint breakpoint))
+            return;
+        if (documentHasBreakpointExpressionWrap(pane))
+            return;
+
+        String editable = preferEditable;
+        if (editable == null || editable.isBlank())
+        {
+            Object text = Global.invoke(pane, "getText"); //$NON-NLS-1$
+            if (text instanceof String s && !s.isBlank())
+                editable = s;
+        }
+        if (editable == null || editable.isBlank())
+        {
+            try
+            {
+                String stored = conditionField
+                        ? breakpoint.getCondition()
+                        : breakpoint.getExpressionForEvaluation();
+                editable = stored != null ? stored : ""; //$NON-NLS-1$
+            }
+            catch (CoreException e)
+            {
+                editable = ""; //$NON-NLS-1$
+            }
+        }
+
+        // initializeEmptyModel мог оставить initialized=true без обёртки — сбросить флаг.
+        Object initialized = Global.getField(pane, "initialized"); //$NON-NLS-1$
+        if (Boolean.TRUE.equals(initialized))
+            Global.invoke(pane, "setNotInitialized"); //$NON-NLS-1$
+
+        Global.invoke(pane, "ensureInitialized", breakpoint, editable); //$NON-NLS-1$
+    }
+
+    private static boolean documentHasBreakpointExpressionWrap(Object pane)
+    {
+        Object documentObj = Global.getField(pane, "document"); //$NON-NLS-1$
+        if (!(documentObj instanceof IDocument document))
+            return false;
+        try
+        {
+            String full = document.get();
+            return full != null
+                    && full.contains(BP_EDITOR_WRAP_PREFIX)
+                    && full.contains(BP_EDITOR_WRAP_SUFFIX);
+        }
+        catch (Exception e)
+        {
+            return false;
+        }
+    }
+
+    /** Вернуть текст поля, если штатный ensureInitialized подставил пустое значение. */
+    private static void restorePaneTextIfWiped(Object pane, String preserved)
+    {
+        if (preserved == null || preserved.isBlank())
+            return;
+        Object text = Global.invoke(pane, "getText"); //$NON-NLS-1$
+        String current = text instanceof String s ? s : ""; //$NON-NLS-1$
+        if (preserved.equals(current))
+            return;
+        Object modelAccess = Global.invoke(pane, "getModelAccess"); //$NON-NLS-1$
+        if (modelAccess == null)
+            return;
+        Global.invoke(modelAccess, "updateEditablePart", preserved); //$NON-NLS-1$
+    }
+
+    private static void forcePaneEnabled(Object pane)
+    {
+        if (pane == null)
+            return;
+        SourceViewer viewer = resolveEmbeddedViewer(pane);
+        if (viewer != null)
+        {
+            Control control = viewer.getControl();
+            Object comboObj = Global.getField(pane, "historyCombo"); //$NON-NLS-1$
+            boolean comboOk = !(comboObj instanceof Combo combo) || combo.isDisposed()
+                    || combo.isEnabled();
+            if (control != null && !control.isDisposed() && control.isEnabled()
+                    && viewer.isEditable() && comboOk)
+                return;
+        }
+        Global.invoke(pane, "setEnabled", Boolean.TRUE); //$NON-NLS-1$
+    }
+
+    /**
+     * Колесо мыши прокручивает {@link ScrolledComposite} диалога, когда виджет под курсором
+     * (в т.ч. {@link StyledText} полей условия/выражения) сам прокручиваться не может.
+     */
+    private static void installMouseWheelScroll(Shell shell)
+    {
+        if (Boolean.TRUE.equals(shell.getData(WHEEL_SCROLL_KEY)))
+            return;
+        shell.setData(WHEEL_SCROLL_KEY, Boolean.TRUE);
+
+        Display display = shell.getDisplay();
+        Listener filter = event ->
+        {
+            if (shell.isDisposed())
+                return;
+            if (!(event.widget instanceof Control control) || control.isDisposed())
+                return;
+            if (control.getShell() != shell)
+                return;
+            if (!shouldForwardWheelToDialog(control))
+                return;
+            ScrolledComposite scrolled = enclosingScrolled(control);
+            if (scrolled == null || scrolled.isDisposed())
+                return;
+            if (!scrollScrolledComposite(scrolled, control, event.count))
+                return;
+            event.doit = false;
+        };
+        display.addFilter(SWT.MouseWheel, filter);
+        shell.addDisposeListener(e ->
+        {
+            if (!display.isDisposed())
+                display.removeFilter(SWT.MouseWheel, filter);
+        });
+    }
+
+    private static boolean shouldForwardWheelToDialog(Control control)
+    {
+        if (control instanceof StyledText styled)
+            return !canScrollStyledTextItself(styled);
+        // Combo — штатная смена пунктов истории колесом.
+        if (control instanceof Combo)
+            return false;
+        return true;
+    }
+
+    private static boolean canScrollStyledTextItself(StyledText styled)
+    {
+        ScrollBar bar = styled.getVerticalBar();
+        return bar != null && bar.getMaximum() - bar.getMinimum() > bar.getThumb();
+    }
+
+    private static boolean scrollScrolledComposite(ScrolledComposite scrolled, Control source, int count)
+    {
+        ScrollBar bar = scrolled.getVerticalBar();
+        if (bar == null)
+            return false;
+        int max = bar.getMaximum() - bar.getThumb();
+        if (max <= bar.getMinimum())
+            return false;
+        int step = 16;
+        if (source instanceof StyledText styled && styled.getLineHeight() > 0)
+            step = styled.getLineHeight();
+        Point origin = scrolled.getOrigin();
+        int y = Math.max(bar.getMinimum(), Math.min(max, origin.y - count * step));
+        if (y == origin.y)
+            return false;
+        scrolled.setOrigin(origin.x, y);
+        return true;
+    }
+
+    private static ScrolledComposite enclosingScrolled(Control control)
+    {
+        for (Control current = control.getParent(); current != null; current = current.getParent())
+        {
+            if (current instanceof ScrolledComposite scrolled)
+                return scrolled;
+        }
+        return null;
     }
 
     /** Гиперссылка «Выводить ИР» справа от флажка «Значение выражения» (вторая колонка строки EDT). */
@@ -864,6 +1242,8 @@ public final class BreakpointPropertiesHook implements IStartup
         Global.invoke(pane, "setEnabled", enabled); //$NON-NLS-1$
         if (!enabled)
             return;
+
+        ensureContinueExecutionChecked(actionsEditor);
 
         String existing = ""; //$NON-NLS-1$
         try

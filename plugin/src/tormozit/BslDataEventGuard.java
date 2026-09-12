@@ -5,6 +5,7 @@ import java.util.Collection;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.eclipse.jface.text.AbstractDocument;
 import org.eclipse.jface.text.IDocument;
@@ -38,6 +39,8 @@ import org.eclipse.core.runtime.ListenerList;
 final class BslDataEventGuard
 {
     private static final String BSL_DOCUMENT_LISTENER_SIMPLE = "BslDocumentListener"; //$NON-NLS-1$
+
+    private static final AtomicInteger DEBUG_CLEAR_N = new AtomicInteger();
 
     /** Документы, на которых обёртка уже стоит, и сама обёртка. */
     private static final Map<IDocument, IsolatingMap> installed = new java.util.WeakHashMap<>();
@@ -76,9 +79,13 @@ final class BslDataEventGuard
                 return false;
             @SuppressWarnings("unchecked")
             Map<Object, Object> real = (Map<Object, Object>)current;
-            IsolatingMap guard = new IsolatingMap(real);
+            IsolatingMap guard = new IsolatingMap(real, System.identityHashCode(doc));
             mapField.set(listener, guard);
             installed.put(doc, guard);
+            // #region agent log
+            ContentAssistDebug.debugSessionLog("C", "BslDataEventGuard.install", "ok", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                debugDocJson(doc));
+            // #endregion
             return true;
         }
         catch (Exception e)
@@ -117,6 +124,23 @@ final class BslDataEventGuard
     {
         IsolatingMap guard = doc == null ? null : installed.get(doc);
         return guard == null ? java.util.Collections.emptyMap() : guard.drainShadow();
+    }
+
+    static String debugDocJson(IDocument doc)
+    {
+        IsolatingMap guard = doc == null ? null : installed.get(doc);
+        Object listener = findBslDocumentListener(doc);
+        StringBuilder sb = new StringBuilder(160);
+        sb.append("{\"doc\":").append(System.identityHashCode(doc)); //$NON-NLS-1$
+        sb.append(",\"len\":").append(doc == null ? -1 : doc.getLength()); //$NON-NLS-1$
+        sb.append(",\"listener\":").append(System.identityHashCode(listener)); //$NON-NLS-1$
+        sb.append(",\"guard\":").append(guard != null); //$NON-NLS-1$
+        if (guard != null)
+        {
+            sb.append(",\"map\":").append(System.identityHashCode(guard.real)); //$NON-NLS-1$
+            sb.append(",\"mapSize\":").append(guard.real.size()); //$NON-NLS-1$
+        }
+        return sb.append('}').toString();
     }
 
     /**
@@ -216,12 +240,14 @@ final class BslDataEventGuard
     private static final class IsolatingMap implements Map<Object, Object>
     {
         private final Map<Object, Object> real;
+        private final int docId;
         private final ThreadLocal<Map<Object, Object>> shadow =
             ThreadLocal.withInitial(ConcurrentHashMap::new);
 
-        IsolatingMap(Map<Object, Object> real)
+        IsolatingMap(Map<Object, Object> real, int docId)
         {
             this.real = real;
+            this.docId = docId;
         }
 
         private Map<Object, Object> target()
@@ -253,7 +279,28 @@ final class BslDataEventGuard
         @Override public Object put(Object key, Object value) { return target().put(key, value); }
         @Override public Object remove(Object key) { return target().remove(key); }
         @Override public void putAll(Map<?, ?> m) { target().putAll(m); }
-        @Override public void clear() { target().clear(); }
+        @Override public void clear()
+        {
+            Map<Object, Object> t = target();
+            boolean skipApply = !isIsolatedThread() && SmartCompletionProposal.isAnyApplyInProgress();
+            // #region agent log
+            if (!isIsolatedThread() && DEBUG_CLEAR_N.incrementAndGet() <= 80)
+            {
+                ContentAssistDebug.debugSessionLog("C", "IsolatingMap.clear", //$NON-NLS-1$ //$NON-NLS-2$
+                    skipApply ? "skipApply" : "real", //$NON-NLS-1$ //$NON-NLS-2$
+                    "{\"doc\":" + docId //$NON-NLS-1$
+                        + ",\"size\":" + t.size() //$NON-NLS-1$
+                        + ",\"skip\":" + skipApply //$NON-NLS-1$
+                        + ",\"hypothesisId\":\"B\"" //$NON-NLS-1$
+                        + ",\"thread\":\"" //$NON-NLS-1$
+                        + ContentAssistDebug.jsonEscapeForLog(Thread.currentThread().getName())
+                        + "\"}"); //$NON-NLS-1$
+            }
+            // #endregion
+            if (skipApply)
+                return;
+            t.clear();
+        }
         @Override public Set<Object> keySet() { return target().keySet(); }
         @Override public Collection<Object> values() { return target().values(); }
         @Override public Set<Entry<Object, Object>> entrySet() { return target().entrySet(); }
