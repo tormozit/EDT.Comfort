@@ -291,6 +291,20 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
      */
     private ICompletionProposal[] ctorTypeCatalog = EMPTY;
     private String ctorTypeCatalogPrefix;
+    /**
+     * Место, для которого посчитан каталог ({@link #computeFullListContextKey}). Нужно,
+     * только пока неизвестен набор контекстов компиляции: без него каталог не должен
+     * переезжать в другое место, там может быть другой состав типов.
+     */
+    private int ctorTypeCatalogAnchor = Integer.MIN_VALUE;
+    /** Набор контекстов компиляции, для которого посчитан каталог; {@code null} — неизвестен. */
+    private String ctorTypeCatalogEnvKey;
+    /** Разбор модуля, которому принадлежат предложения каталога (см. {@code ctorCatalogModelGen}). */
+    private int ctorTypeCatalogGen = -1;
+    /** Снимок диапазонов с контекстами компиляции; собирает {@link #rebuildEnvRanges}. */
+    private volatile EnvRanges envRanges;
+    private org.eclipse.xtext.ui.editor.model.IXtextModelListener envRangesListener;
+    private IDocument envRangesDoc;
     /** {@link #restoreCtorTypeCatalog} → {@link #assignFullListCache} не должен звать restore снова. */
     private boolean restoringCtorCatalog;
 
@@ -324,15 +338,13 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         return switch (where)
         {
             case "autoOpen.verify.skip", "autoOpen.doc.skip", "doc.chg", "doc.chg.exit", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-                "wordList.paint.arm", "wordList.paint.timer", "wordList.paint.install", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "wordList.pending", "wordList.pending.skip", "wordList.asyncArm", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "wordList.uiFlush", "wordList.uiFlush.skip", "wordList.kickDoc.skip", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "wordList.kickDoc.skip", //$NON-NLS-1$
                 "filterAndSort.enter", "filterAndSort.progress", "filterAndSort.item", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "recomputePopupList.enter", "probeDelegateOnce", "resolveExit", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "recomputePopupList.enter", "resolveExit", //$NON-NLS-1$ //$NON-NLS-2$
                 "resolveProposalList", "resolveDelegateOrderedList.fetch", //$NON-NLS-1$ //$NON-NLS-2$
                 "resolveDelegateOrderedList.skipFetch", "prepareWordListAutoOpen", //$NON-NLS-1$ //$NON-NLS-2$
                 "scheduleWordListInBackground", "wordListBackground.run", //$NON-NLS-1$ //$NON-NLS-2$
-                "memberStock.bg.run", "fetchDelegateList", "computeLiteralPassthrough.enter", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "fetchDelegateList", "computeLiteralPassthrough.enter", //$NON-NLS-1$ //$NON-NLS-2$
                 "computeLiteralPassthrough.exit" -> true; //$NON-NLS-1$
             default -> false;
         };
@@ -441,16 +453,25 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     private Job wordListBackgroundJob;
     private volatile int wordListBackgroundKey = Integer.MIN_VALUE;
     /**
-     * Показ после фона: не инъекция клавиши (F20 → SOE). Слушатель {@code SWT.Paint}
-     * на {@code StyledText} модуля (после кадра текста, не {@code Display.addFilter})
-     * ставит {@code timerExec(1)} — после конца кадра модуля, не внутри {@code WM_PAINT}.
+     * Ключ контекста, чей готовый список уже отдан воротам показа
+     * ({@link ContentAssistSessionReloader#requestGatedShow}) и ждёт правильного скелета
+     * текста. {@link Integer#MIN_VALUE} — ничего не ждёт.
+     *
+     * <p>Раньше здесь был {@code pendingWordListUi} + {@code Display.asyncExec} + слушатель
+     * {@code SWT.Paint}. SWT берёт asyncExec по одному и только при пустой очереди сообщений,
+     * поэтому показ стоял в FIFO за раскраской большого модуля (лог 11.09.2026: готов в
+     * 23:03:59.877, показан в 23:04:06.965).
      */
-    private volatile Runnable pendingWordListUi;
-    private org.eclipse.swt.widgets.Listener wordListUiKickFilter;
-    private org.eclipse.swt.custom.StyledText wordListUiKickWidget;
-    private volatile boolean wordListFlushArmed;
-    private boolean wordListFlushRunning;
-    private volatile long pendingWordListAtNano;
+    private volatile int pendingPublishKey = Integer.MIN_VALUE;
+    /**
+     * Модельная каретка последнего такта ввода. Воркеру SWT недоступен:
+     * {@code resolveWidgetCaret} на фоновом потоке всегда возвращал -1 (SWTException внутри
+     * гасился), поэтому все проверки «живой каретки» в Job были мёртвыми, а фильтр окна —
+     * всегда пустым.
+     */
+    private volatile int liveAssistCaret = -1;
+    /** Причина последнего отказа от фона: нужна вызывающему на UI. */
+    private static volatile String lastWordListSkip = ""; //$NON-NLS-1$
     private int wordListFailedKey = Integer.MIN_VALUE;
     private int wordListOpenedKey = Integer.MIN_VALUE;
     /** Сколько раз перезапускали фон после пустого результата для {@link #wordListEmptyRestartKey}. */
@@ -1661,6 +1682,7 @@ return;
             return false;
         if (hasMemberListForDot(dot))
         {
+            mergeKeptMemberEvents(doc);
             repairPopupListFromMemberStock(doc, caret);
             if (fullListCache.length == 0)
                 assignFullListCache(memberStockFullList);
@@ -1698,6 +1720,8 @@ return;
             uiBlockLog("wordList.kickDoc.skip", "why=noDoc caret=" + caret); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
+        liveAssistCaret = caret;
+        ensureEnvRangesListener(viewer);
         if (isStringLiteralAssistContext(doc, caret))
         {
             uiBlockLog("wordList.kickDoc.skip", "why=literal caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
@@ -1713,7 +1737,6 @@ return;
                 + " dot=" + memberDot + " stock=" + memberStockFullList.length); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
-        flushPendingWordListUi();
         onAssistSessionContextReady(viewer, caret);
         // #region agent log
         uiBlockLog("wordList.kickDoc", "caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
@@ -1724,7 +1747,13 @@ return;
         // в той же очереди, что и подсветка большого модуля (~20 с, лог 10.09.2026
         // 22:28: kickDoc → seedUi). Иконки SWT сеет {@link #warmAssistImages} в
         // {@link #warmBslDocumentListener} — это миллисекунды, не полный список.
-        scheduleWordListInBackground(viewer, doc, caret, caret);
+        if (scheduleWordListInBackground(viewer, doc, caret, caret))
+            return;
+        // Изоляция DataEvent ещё не встала: первый расчёт в этом редакторе обязан идти
+        // на UI (иначе штатный расчёт затрёт DataEvent и сломает LinkedMode). Но и он —
+        // только через ворота показа, то есть после правильного скелета текста.
+        if ("noGuard".equals(lastWordListSkip)) //$NON-NLS-1$
+            ContentAssistSessionReloader.requestGatedFirstUiOpen(viewer, caret);
     }
 
     /**
@@ -1738,6 +1767,7 @@ return;
         {
             IDocument doc = viewer != null ? viewer.getDocument() : null;
             int caret = resolveWidgetCaret(viewer);
+            mergeKeptMemberEvents(doc);
             if (doc != null && caret >= 0)
                 repairPopupListFromMemberStock(doc, caret);
             if (fullListCache.length == 0)
@@ -1749,7 +1779,8 @@ return;
             if (isPopupVisible())
                 ContentAssistSessionReloader.refreshPopupIfOpen();
             else
-                ContentAssistSessionReloader.openPopupForBackgroundMemberList(viewer);
+                runWordListOnUi(viewer, null, "member", //$NON-NLS-1$
+                    () -> ContentAssistSessionReloader.openPopupForBackgroundMemberList(viewer));
             return;
         }
         scheduleMemberStockCapture(viewer, dot);
@@ -2709,7 +2740,7 @@ return;
                 + " caret=" + caret); //$NON-NLS-1$
             return true;
         }
-        if (pendingWordListUi != null && wordListBackgroundKey == key)
+        if (pendingPublishKey == key)
         {
             uiBlockLog("scheduleWordListInBackground", "reuse pendingUi key=" + key //$NON-NLS-1$ //$NON-NLS-2$
                 + " caret=" + caret); //$NON-NLS-1$
@@ -2719,9 +2750,14 @@ return;
         // createProposals. С Job это NPE/SWTException (лог 17:13/17:17). Прогрев — на UI,
         // без самого compute.
         warmBslDocumentListener(viewer);
+        // Без изоляции фоновый расчёт затирает DataEvent (ломается LinkedMode), поэтому
+        // первый расчёт в редакторе идёт на UI — его закажет вызывающий.
         if (!BslDataEventGuard.install(doc))
+        {
             ContentAssistDebug.perfMark("wordListDefer.bootstrap", //$NON-NLS-1$
                 "{\"why\":\"noGuard\"}"); //$NON-NLS-1$
+            return wordListSkip("noGuard"); //$NON-NLS-1$
+        }
         if (wordListBackgroundJob != null)
         {
             wordListBackgroundJob.cancel();
@@ -2733,7 +2769,7 @@ return;
         org.eclipse.swt.widgets.Display display = text != null ? text.getDisplay() : null;
         if (display == null)
             return wordListSkip("noDisplay"); //$NON-NLS-1$
-        installWordListUiKick(display, text);
+        ContentAssistSessionReloader.armShowGate(viewer);
         wordListBackgroundKey = key;
         final int gen = memberStockContextGen;
         final int epoch = wordListEpoch;
@@ -2745,6 +2781,13 @@ return;
                 uiBlockLog("wordListBackground.run", "key=" + key //$NON-NLS-1$ //$NON-NLS-2$
                     + " canceled=" + monitor.isCanceled() //$NON-NLS-1$
                     + " seeded=" + wordListSeededOnUi); //$NON-NLS-1$
+                Thread worker = Thread.currentThread();
+                int workerPriority = worker.getPriority();
+                raiseAssistWorkerPriority(worker);
+                BslXtextDocumentHook.markAssistBackground(true);
+                // Дождавшись замка, считать уже незачем, если контекст сменился (точка).
+                DELEGATE_STALE_CHECK.set(() -> epoch != wordListEpoch
+                    || gen != memberStockContextGen);
                 try
                 {
                 long t0 = System.nanoTime();
@@ -2752,6 +2795,10 @@ return;
                 java.util.Map<Object, Object> events = java.util.Collections.emptyMap();
                 int attempts = 0;
                 int lastProbe = offset;
+                // «Новый <тип>»: список типов зависит только от контекстов компиляции,
+                // поэтому он считается один раз на набор и лежит в общем каталоге.
+                boolean ctorProbe = false;
+                String ctorKey = null;
                 // Сначала compute без waitResource: readOnlyForContentAssist на воркере
                 // давал StackOverflow (лог 23:01 и раньше). Пустой ответ — короткий sleep.
                 while (attempts < MEMBER_STOCK_BG_ATTEMPTS)
@@ -2760,7 +2807,7 @@ return;
                         || gen != memberStockContextGen)
                         return Status.CANCEL_STATUS;
                     IDocument liveNow = viewer.getDocument();
-                    int liveNowCaret = resolveWidgetCaret(viewer);
+                    int liveNowCaret = liveAssistCaret;
                     if (isOrdinaryWordListStaleForLiveCaret(liveNow, liveNowCaret))
                     {
                         uiBlockLog("wordListBackground.abort", "why=liveMemberDot"); //$NON-NLS-1$ //$NON-NLS-2$
@@ -2774,25 +2821,60 @@ return;
                         int anchor = -key - 1;
                         if (anchor < 0)
                             anchor = 0;
-                        // Обычный словарь: зонд в НАЧАЛЕ идентификатора (пустой префикс EDT)
-                        // — полный глобальный список. Зонд на последней букве («мет») отдаёт
-                        // 2–30 пунктов; они попадали в кэш, Backspace помечал базу stale.
-                        // После «Новый» по-прежнему последний символ имени типа, не «;».
-                        int liveCaretForProbe = liveNowCaret >= 0 ? liveNowCaret : offset;
-                        probe = isAfterNewKeyword(live, liveCaretForProbe)
-                            ? computeTypeNameProbeOffset(live, liveCaretForProbe)
-                            : anchor;
+                        // Зонд в НАЧАЛЕ идентификатора: у EDT пустой префикс, а при пустом
+                        // префиксе Xtext (isValidProposal) пропускает всё — приходит полный
+                        // список. Зонд на последней букве («мет») отдаёт 2–30 пунктов.
+                        //
+                        // Каретка — та, с которой задание запущено, а не живая: от зонда
+                        // зависит, для какого префикса EDT посчитает список. Живая каретка
+                        // уезжает, пока задание считает, и список получался для одного
+                        // места, а показывался для другого.
+                        probe = anchor;
+                        ctorProbe = isAfterNewKeyword(live, offset);
                     }
                     lastProbe = probe;
+                    // Полный список типов для этого набора контекстов компиляции уже
+                    // посчитан — к EDT не ходим вовсе.
+                    if (ctorProbe && ctorKey == null)
+                        ctorKey = ctorCatalogContextKey(offset);
+                    CachedProposals cached = ctorCatalogGet(ctorKey);
+                    if (cached != null && cached.list().length > 0)
+                    {
+                        uiBlockLog("ctorCatalog.hit", "key=" + ctorKey //$NON-NLS-1$ //$NON-NLS-2$
+                            + " n=" + cached.list().length //$NON-NLS-1$
+                            + " events=" + cached.dataEvents().size()); //$NON-NLS-1$
+                        raw = cached.list();
+                        // Записи DataEvent идут вместе со списком: без них EDT при вставке
+                        // не поднимет LinkedMode (каретка не встанет между скобок).
+                        events = cached.dataEvents();
+                        break;
+                    }
                     try
                     {
                         final int probeOffset = probe;
                         raw = BslDataEventGuard.runIsolated(
                             () -> computeMemberStockViaSelectionProxy(viewer, probeOffset));
                         events = BslDataEventGuard.drainIsolated(doc);
+                        if (ctorKey != null && raw != null && countNoLinkModelProposals(raw) > 0)
+                        {
+                            ctorCatalogPut(ctorKey, unwrapProposals(raw), events);
+                            uiBlockLog("ctorCatalog.fill", "key=" + ctorKey //$NON-NLS-1$ //$NON-NLS-2$
+                                + " n=" + raw.length //$NON-NLS-1$
+                                + " types=" + countNoLinkModelProposals(raw)); //$NON-NLS-1$
+                        }
                     }
                     catch (Exception | LinkageError e)
                     {
+                        // Отмена от EDT: новый расчёт пометил документ устаревшим
+                        // (cancelReaders → setOutdated), и наш расчёт бросил отмену на
+                        // ближайшей проверке. Повторять НЕЛЬЗЯ: повтор снова отменит
+                        // чужой расчёт, и ожидания копятся друг на друге.
+                        if (isCanceledByNewerRequest(e))
+                        {
+                            uiBlockLog("wordListBackground.canceled", "key=" + key //$NON-NLS-1$ //$NON-NLS-2$
+                                + " attempt=" + attempts); //$NON-NLS-1$
+                            return Status.CANCEL_STATUS;
+                        }
                         ContentAssistDebug.perfMark("wordListBackground.err", //$NON-NLS-1$
                             "{\"err\":\"" + e.getClass().getSimpleName() //$NON-NLS-1$
                                 + "\",\"msg\":\"" //$NON-NLS-1$
@@ -2826,15 +2908,14 @@ return;
                 ICompletionProposal[] popup = result;
                 String popupFilter = ""; //$NON-NLS-1$
                 IDocument liveDoc = viewer.getDocument();
-                int liveCaretForFilter = resolveWidgetCaret(viewer);
                 if (result.length > 0 && liveDoc != null)
                 {
-                    popupFilter = liveCaretForFilter >= 0
-                        ? computeIdentifierFilter(liveDoc, liveCaretForFilter)
-                        : computeIdentifierFilter(liveDoc, lastProbe);
+                    // Фильтр и ghost-каретка — по зонду задания. По живой каретке список
+                    // выходил «почти правильным»: на UI он проходил сверку префикса и
+                    // попадал в окно вместе с позициями замены для другого места.
+                    popupFilter = computeIdentifierFilter(liveDoc, lastProbe);
                     GHOST_DOC.set(liveDoc);
-                    GHOST_CARET.set(Integer.valueOf(
-                        liveCaretForFilter >= 0 ? liveCaretForFilter : lastProbe));
+                    GHOST_CARET.set(Integer.valueOf(lastProbe));
                     try
                     {
                         long tFilter = System.nanoTime();
@@ -2858,21 +2939,32 @@ return;
                     + " key=" + key + " epoch=" + epoch //$NON-NLS-1$ //$NON-NLS-2$
                     + " probe=" + lastProbe); //$NON-NLS-1$
                 IDocument liveAfter = viewer.getDocument();
-                int liveAfterCaret = resolveWidgetCaret(viewer);
+                int liveAfterCaret = liveAssistCaret;
                 if (monitor.isCanceled() || epoch != wordListEpoch
                     || isOrdinaryWordListStaleForLiveCaret(liveAfter, liveAfterCaret))
                 {
                     uiBlockLog("wordListBackground.abort", "why=staleBeforePublish"); //$NON-NLS-1$ //$NON-NLS-2$
                     return Status.CANCEL_STATUS;
                 }
-                runWordListOnUi(display, () -> publishWordList(viewer, key, gen, epoch, result,
-                    dataEvents, popupList, popupFilterFinal, probeOffset));
+                pendingPublishKey = key;
+                // Пустой префикс + известный набор контекстов = список годен любому слову
+                // в этом наборе, а не только набранному.
+                final String ctorEnvKey = ctorKey;
+                runWordListOnUi(viewer, display, "word", //$NON-NLS-1$
+                    () -> publishWordList(viewer, key, gen, epoch, result,
+                    dataEvents, popupList, popupFilterFinal, probeOffset, ctorEnvKey));
                 return Status.OK_STATUS;
                 }
                 catch (StackOverflowError e)
                 {
                     uiBlockLog("wordListBackground.soe", "key=" + key); //$NON-NLS-1$ //$NON-NLS-2$
                     return Status.CANCEL_STATUS;
+                }
+                finally
+                {
+                    DELEGATE_STALE_CHECK.remove();
+                    BslXtextDocumentHook.markAssistBackground(false);
+                    restoreAssistWorkerPriority(worker, workerPriority);
                 }
             }
         };
@@ -2888,90 +2980,93 @@ return;
     }
 
     /**
-     * Воркер только кладёт результат. UI будит ближайшая отрисовка (подсветка),
-     * не {@code Display.post} клавиши.
+     * Воркер только кладёт результат. Показывают ворота скелета
+     * ({@link ContentAssistSessionReloader#requestGatedShow}): UI-таймер, который ждёт,
+     * пока свёртки применены, а кадр текста дорисован.
+     *
+     * <p>{@code Display.asyncExec} тут был неверным приёмом: SWT выполняет асинхронные
+     * задачи по одной и только когда очередь сообщений пуста, поэтому показ стоял в FIFO
+     * за раскраской большого модуля — 7 с в логе 11.09.2026 (готов 23:03:59.877, показан
+     * 23:04:06.965). Слушатель {@code SWT.Paint} той же болезнью болел с другой стороны:
+     * пока модуль не перерисовывался, показывать было некому.
      */
-    private void runWordListOnUi(org.eclipse.swt.widgets.Display display, Runnable action)
+    private void runWordListOnUi(ITextViewer viewer, org.eclipse.swt.widgets.Display display,
+        String kind, Runnable action)
     {
-        if (action == null || display == null)
-        {
-            uiBlockLog("wordList.pending.skip", "action=" + (action != null) //$NON-NLS-1$ //$NON-NLS-2$
-                + " display=" + (display != null)); //$NON-NLS-1$
+        if (action == null)
             return;
-        }
-        boolean onUi = display.getThread() == Thread.currentThread();
-        uiBlockLog("wordList.pending", "onUi=" + onUi); //$NON-NLS-1$ //$NON-NLS-2$
+        if (ContentAssistSessionReloader.requestGatedShow(viewer, kind, action))
+            return;
+        // Вьюер без сессии Комфорта (не редактор модуля) — прежний путь.
+        boolean onUi = display != null
+            ? display.getThread() == Thread.currentThread()
+            : org.eclipse.swt.widgets.Display.getCurrent() != null;
         if (onUi)
-        {
             action.run();
-            return;
-        }
-        pendingWordListAtNano = System.nanoTime();
-        pendingWordListUi = action;
-        uiBlockLog("wordList.asyncArm", ""); //$NON-NLS-1$ //$NON-NLS-2$
-        display.asyncExec(() -> flushPendingWordListUi());
+        else if (display != null && !display.isDisposed())
+            display.asyncExec(action);
     }
 
-    private void installWordListUiKick(org.eclipse.swt.widgets.Display display,
-        org.eclipse.swt.custom.StyledText text)
+    /** Идёт ли фоновый расчёт списка: ворота показа держат таймер, пока он не кончился. */
+    boolean isAssistBackgroundInFlight()
     {
-        if (text == null || text.isDisposed())
-            return;
-        if (wordListUiKickFilter != null)
-            return;
-        wordListUiKickFilter = event -> {
-            if (event.widget != text)
-                return;
-            if (pendingWordListUi == null)
-                return;
-            if (wordListFlushArmed)
-                return;
-            wordListFlushArmed = true;
-            uiBlockLog("wordList.paint.arm", "type=" + event.type //$NON-NLS-1$ //$NON-NLS-2$
-                + " caller=" + uiBlockCaller()); //$NON-NLS-1$
-            display.timerExec(1, () -> {
-                uiBlockLog("wordList.paint.timer", "caller=" + uiBlockCaller()); //$NON-NLS-1$ //$NON-NLS-2$
-                wordListFlushArmed = false;
-                flushPendingWordListUi();
-            });
-        };
-        text.addListener(org.eclipse.swt.SWT.Paint, wordListUiKickFilter);
-        wordListUiKickWidget = text;
-        text.addDisposeListener(e -> {
-            if (wordListUiKickWidget == text)
-            {
-                wordListUiKickWidget = null;
-                wordListUiKickFilter = null;
-            }
-        });
-        uiBlockLog("wordList.paint.install", "widget=styledText"); //$NON-NLS-1$ //$NON-NLS-2$
+        if (pendingPublishKey != Integer.MIN_VALUE)
+            return true;
+        if (wordListBackgroundJob != null && wordListBackgroundJob.getState() != Job.NONE)
+            return true;
+        return memberStockBackgroundJob != null
+            && memberStockBackgroundJob.getState() != Job.NONE;
     }
 
-    void flushPendingWordListUi()
+    /**
+     * Расчёт отменён более новым запросом.
+     *
+     * <p>Токен отмены у EDT свой: {@code readOnlyForContentAssist} начинается с
+     * {@code BslXtextDocument.cancelReaders} → {@code setOutdated(true)}, а это
+     * {@code CancelIndicator} Xtext — идущий расчёт на ближайшей проверке бросает
+     * {@code OperationCanceledException}. Такой ответ нельзя путать с «список пуст»:
+     * повтор после отмены снова отменит чужой расчёт, и ожидания лягут друг на друга.
+     */
+    private static boolean isCanceledByNewerRequest(Throwable error)
     {
-        if (wordListFlushRunning)
+        for (Throwable t = error; t != null; t = t.getCause())
         {
-            uiBlockLog("wordList.uiFlush.skip", "why=running caller=" + uiBlockCaller()); //$NON-NLS-1$ //$NON-NLS-2$
-            return;
+            if (t instanceof org.eclipse.core.runtime.OperationCanceledException
+                || t instanceof InterruptedException)
+                return true;
+            String name = t.getClass().getName();
+            if (name.endsWith("OperationCanceledException") //$NON-NLS-1$
+                || name.endsWith("CancellationException")) //$NON-NLS-1$
+                return true;
+            if (t.getCause() == t)
+                break;
         }
-        Runnable r = pendingWordListUi;
-        if (r == null)
-            return;
-        pendingWordListUi = null;
-        long waitMs = pendingWordListAtNano == 0L ? -1L
-            : (System.nanoTime() - pendingWordListAtNano) / 1_000_000L;
-        pendingWordListAtNano = 0L;
-        wordListFlushRunning = true;
+        return false;
+    }
+
+    /** Расчёт для набираемого символа — самый срочный счёт в системе. */
+    private static void raiseAssistWorkerPriority(Thread worker)
+    {
         try
         {
-            uiBlockLog("wordList.uiFlush", "waitMs=" + waitMs //$NON-NLS-1$ //$NON-NLS-2$
-                + " popup=" + isPopupVisible() //$NON-NLS-1$
-                + " caller=" + uiBlockCaller()); //$NON-NLS-1$
-            r.run();
+            worker.setPriority(Thread.MAX_PRIORITY);
         }
-        finally
+        catch (RuntimeException ignored)
         {
-            wordListFlushRunning = false;
+            // приоритет — лишь пожелание планировщику, отказ не влияет на результат
+        }
+    }
+
+    /** Поток из общего пула Jobs: приоритет вернуть, иначе он утечёт в чужие задания. */
+    private static void restoreAssistWorkerPriority(Thread worker, int priority)
+    {
+        try
+        {
+            worker.setPriority(priority);
+        }
+        catch (RuntimeException ignored)
+        {
+            // см. raiseAssistWorkerPriority
         }
     }
 
@@ -2992,6 +3087,7 @@ return;
     /** Отказ от переноса в фон с указанием причины — чтобы не гадать по пустому логу. */
     private static boolean wordListSkip(String reason)
     {
+        lastWordListSkip = reason;
         ContentAssistDebug.perfMark("wordListDefer.skip", //$NON-NLS-1$
             "{\"why\":\"" + reason + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
         // #region agent log
@@ -3029,8 +3125,8 @@ return;
     void abortWordListBackground(String why)
     {
         boolean hadJob = wordListBackgroundJob != null;
-        boolean hadPending = pendingWordListUi != null;
-        pendingWordListUi = null;
+        boolean hadPending = pendingPublishKey != Integer.MIN_VALUE;
+        pendingPublishKey = Integer.MIN_VALUE;
         wordListBackgroundKey = Integer.MIN_VALUE;
         if (wordListBackgroundJob != null)
         {
@@ -3052,6 +3148,7 @@ return;
         wordListOpenedKey = Integer.MIN_VALUE;
         wordListFailedKey = Integer.MIN_VALUE;
         wordListBackgroundKey = Integer.MIN_VALUE;
+        pendingPublishKey = Integer.MIN_VALUE;
         if (wordListBackgroundJob != null)
         {
             wordListBackgroundJob.cancel();
@@ -3121,7 +3218,7 @@ return;
                                  ICompletionProposal[] result,
                                  java.util.Map<Object, Object> dataEvents)
     {
-        publishWordList(viewer, key, gen, epoch, result, dataEvents, null, "", -1); //$NON-NLS-1$
+        publishWordList(viewer, key, gen, epoch, result, dataEvents, null, "", -1, null); //$NON-NLS-1$
     }
 
     /** Публикация словарного списка из фона — только на UI-потоке. */
@@ -3130,16 +3227,24 @@ return;
                                  java.util.Map<Object, Object> dataEvents,
                                  ICompletionProposal[] popupList, String popupFilter)
     {
-        publishWordList(viewer, key, gen, epoch, result, dataEvents, popupList, popupFilter, -1);
+        publishWordList(viewer, key, gen, epoch, result, dataEvents, popupList, popupFilter, -1,
+            null);
     }
 
-    /** Публикация словарного списка из фона — только на UI-потоке. */
+    /**
+     * Публикация словарного списка из фона — только на UI-потоке.
+     *
+     * @param ctorEnvKey набор контекстов компиляции, для которого посчитан полный список
+     *     типов; {@code null} — набор неизвестен, список годен только своему месту
+     */
     private void publishWordList(ITextViewer viewer, int key, int gen, int epoch,
                                  ICompletionProposal[] result,
                                  java.util.Map<Object, Object> dataEvents,
                                  ICompletionProposal[] popupList, String popupFilter,
-                                 int probeOffset)
+                                 int probeOffset, String ctorEnvKey)
     {
+        if (pendingPublishKey == key)
+            pendingPublishKey = Integer.MIN_VALUE;
         int publishN = result == null ? -1 : result.length;
         uiBlockLog("wordListBackground.publish.enter", "key=" + key //$NON-NLS-1$ //$NON-NLS-2$
             + " n=" + publishN //$NON-NLS-1$
@@ -3230,6 +3335,11 @@ return;
             }
             return;
         }
+        // Список мог прийти из кэша типов (посчитан в другом месте) — позиции замены
+        // переносим на набранное сейчас слово, иначе штатная вставка уходит в откат
+        // документа целиком (см. rebaseProposalsToWord).
+        if (ctorEnvKey != null)
+            rebaseProposalsToWord(liveDoc, liveCaret, list);
         assignFullListCache(unwrapProposals(list));
         fullListReady = true;
         fullListContextKey = key;
@@ -3239,7 +3349,7 @@ return;
         fullListCachePrefix = computeIdentifierFilter(liveDoc, prefixAt);
         clearDelegateSyncProbe();
         rememberInterimDelegateList(list);
-        rememberCtorTypeCatalog(liveDoc, liveCaret, list);
+        rememberCtorTypeCatalog(liveDoc, liveCaret, list, ctorEnvKey);
         ContentAssistDebug.perfMark("wordListBackground.publish", //$NON-NLS-1$
             "{\"key\":" + key + ",\"cache\":" + fullListCache.length //$NON-NLS-1$ //$NON-NLS-2$
                 + ",\"events\":" + dataEvents.size() + "}"); //$NON-NLS-1$ //$NON-NLS-2$
@@ -5267,11 +5377,295 @@ return result;
     }
 
     /**
-     * Запоминает каталог типов после «Новый». Срез по префиксу (n=11 при 453 типах)
-     * не затирает полный список: типы не зависят от тела модуля.
+     * Полный список предложений конструктора «Новый» по наборам контекстов компиляции —
+     * <b>в пределах своего редактора</b>.
+     *
+     * <p>Список типов от набранных букв не зависит: EDT перебирает весь scope типов
+     * ({@code BslProposalProvider.createProposalsForCtors} → {@code ISlicedScope.getAllElements}),
+     * а по префиксу отсеивает уже Xtext ({@code isValidProposal}: при пустом префиксе
+     * проходит всё). Поэтому считаем один раз на набор контекстов и фильтруем у себя.
+     *
+     * <p>Общим на все редакторы этот кэш быть не может: предложения EDT держат ссылки на
+     * модель своего ресурса, и в чужом редакторе их разрешение уходит в рекурсию
+     * {@code BslDerivedStateComputer.installProxiesForBlock} → {@code BslLazyUriEncoder}
+     * → {@code EcoreUtil.resolve} → {@code StackOverflowError} (замер 12.09.2026 11:22).
+     */
+    private final java.util.LinkedHashMap<String, CachedProposals> ctorCatalogByEnv =
+        new java.util.LinkedHashMap<>(8, 0.75f, true)
+        {
+            private static final long serialVersionUID = 1L;
+
+            @Override
+            protected boolean removeEldestEntry(
+                java.util.Map.Entry<String, CachedProposals> eldest)
+            {
+                return size() > 8;
+            }
+        };
+
+    /**
+     * Список вместе с записями {@code DataEvent}, которые создал считавший его расчёт.
+     *
+     * <p>Записи хранить обязательно: по ним EDT при вставке поднимает LinkedMode (каретка
+     * между скобок у {@code Метод()}). Расчёт создаёт их побочно, поэтому список, отданный
+     * из кэша без расчёта, оставляет карту пустой — ключ по вставленному тексту не
+     * находится, и каретка встаёт в конец.
+     */
+    private record CachedProposals(ICompletionProposal[] list,
+                                   java.util.Map<Object, Object> dataEvents)
+    {}
+
+    /**
+     * Разбор модуля, для которого посчитаны лежащие в кэше предложения.
+     *
+     * <p>Предложение EDT держит ссылки на модель своего разбора. После перепарсинга они
+     * становятся прокси в исчезнувшее состояние, и любое обращение к предложению уходит в
+     * рекурсию EDT: {@code BslResource.getEObject} → {@code installProxiesForBlock} →
+     * {@code BslLazyUriEncoder.appendShortFragment} → {@code eResolveProxy} → снова
+     * {@code getEObject}. В журнале это {@code StackOverflowError} на 1024 кадра одного
+     * цикла (12.09.2026 11:22 и 11:36). Поэтому кэш живёт ровно до следующего разбора.
+     */
+    private volatile int ctorCatalogModelGen;
+    private int ctorCatalogGenOfEntries = -1;
+
+    private CachedProposals ctorCatalogGet(String key)
+    {
+        if (key == null)
+            return null;
+        if (ctorCatalogGenOfEntries != ctorCatalogModelGen)
+        {
+            if (!ctorCatalogByEnv.isEmpty())
+            {
+                uiBlockLog("ctorCatalog.expire", "gen=" + ctorCatalogGenOfEntries //$NON-NLS-1$ //$NON-NLS-2$
+                    + " now=" + ctorCatalogModelGen + " n=" + ctorCatalogByEnv.size()); //$NON-NLS-1$ //$NON-NLS-2$
+                ctorCatalogByEnv.clear();
+            }
+            ctorCatalogGenOfEntries = ctorCatalogModelGen;
+            return null;
+        }
+        return ctorCatalogByEnv.get(key);
+    }
+
+    /**
+     * Переносит позиции замены кэшированных предложений на набранное сейчас слово.
+     *
+     * <p>Предложение EDT несёт смещения того места, где посчитано. Из кэша оно приходит в
+     * другое место, и штатная вставка получает недопустимый диапазон. Дальше Xtext в
+     * {@code ConfigurableCompletionProposal.apply} ловит {@code BadLocationException} и
+     * откатывает документ целиком через {@code IDocument.set} — на модуле 1.4 МБ это
+     * разворот всех свёрток и перерисовка всего текста: дамп 12.09.2026 11:33, UI-поток
+     * 106 с процессорного времени внутри {@code ProjectionAnnotationModel.expandAll}.
+     */
+    private static void rebaseProposalsToWord(IDocument document, int caret,
+                                              ICompletionProposal[] list)
+    {
+        if (document == null || caret < 0 || list == null || list.length == 0)
+            return;
+        if (caret > document.getLength())
+            return;
+        String prefix = computeIdentifierFilter(document, caret);
+        int identStart = caret - (prefix == null ? 0 : prefix.length());
+        if (identStart < 0)
+            return;
+        int length = caret - identStart;
+        int rebased = 0;
+        for (ICompletionProposal proposal : list)
+        {
+            ICompletionProposal raw = unwrapProposal(proposal);
+            if (!(raw instanceof org.eclipse.xtext.ui.editor.contentassist.ConfigurableCompletionProposal cp))
+                continue;
+            try
+            {
+                if (cp.getReplacementOffset() == identStart && cp.getReplacementLength() == length)
+                    continue;
+                cp.setReplacementOffset(identStart);
+                cp.setReplacementLength(length);
+                rebased++;
+            }
+            catch (Exception | StackOverflowError e)
+            {
+                uiBlockLogThrowable("ctorCatalog.rebase.err", e); //$NON-NLS-1$
+                return;
+            }
+        }
+        if (rebased > 0)
+        {
+            uiBlockLog("ctorCatalog.rebase", "n=" + rebased //$NON-NLS-1$ //$NON-NLS-2$
+                + " offset=" + identStart + " length=" + length); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    private void ctorCatalogPut(String key, ICompletionProposal[] list,
+                                java.util.Map<Object, Object> dataEvents)
+    {
+        if (key == null || list == null || list.length == 0)
+            return;
+        if (ctorCatalogGenOfEntries != ctorCatalogModelGen)
+        {
+            ctorCatalogByEnv.clear();
+            ctorCatalogGenOfEntries = ctorCatalogModelGen;
+        }
+        CachedProposals saved = ctorCatalogByEnv.get(key);
+        // Полнее — значит правильнее: усечённый ответ (разбор не догнал текст) не должен
+        // вытеснять уже посчитанный полный список.
+        if (saved != null && saved.list().length >= list.length)
+            return;
+        ctorCatalogByEnv.put(key, new CachedProposals(list,
+            dataEvents == null ? java.util.Collections.emptyMap()
+                : new java.util.LinkedHashMap<>(dataEvents)));
+    }
+
+    /**
+     * Диапазоны текста с эффективным набором контекстов компиляции — снимок, собранный
+     * из уведомления EDT о модели.
+     *
+     * <p>Своего чтения ресурса тут нет и быть не может: чтение рядом с расчётом
+     * автодополнения — второй захват того же {@code ReentrantReadWriteLock}, и EDT
+     * зависает (замер 12.09.2026 10:59). Снимок строится в {@code modelChanged}, где
+     * замок уже держит сама EDT, а поиск по позиции идёт по массивам без блокировок.
+     */
+    private static final class EnvRanges
+    {
+        private final int[] starts;
+        private final int[] ends;
+        private final String[] keys;
+
+        EnvRanges(int[] starts, int[] ends, String[] keys)
+        {
+            this.starts = starts;
+            this.ends = ends;
+            this.keys = keys;
+        }
+
+        /** Самый узкий диапазон, накрывающий позицию (метод), иначе модуль. */
+        String keyAt(int offset)
+        {
+            String best = null;
+            int bestLen = Integer.MAX_VALUE;
+            for (int i = 0; i < starts.length; i++)
+            {
+                if (offset < starts[i] || offset > ends[i])
+                    continue;
+                int len = ends[i] - starts[i];
+                if (len < bestLen)
+                {
+                    bestLen = len;
+                    best = keys[i];
+                }
+            }
+            return best;
+        }
+    }
+
+    /**
+     * Слушатель модели EDT: после каждого разбора пересобирает {@link EnvRanges}.
+     * Ставится один раз на документ.
+     */
+    private void ensureEnvRangesListener(ITextViewer viewer)
+    {
+        IDocument doc = viewer != null ? viewer.getDocument() : null;
+        if (!(doc instanceof IXtextDocument xdoc) || doc == envRangesDoc)
+            return;
+        if (envRangesDoc instanceof IXtextDocument old && envRangesListener != null)
+            old.removeModelListener(envRangesListener);
+        envRangesListener = resource -> rebuildEnvRanges(resource);
+        envRangesDoc = doc;
+        xdoc.addModelListener(envRangesListener);
+        uiBlockLog("envRanges.install", "doc=" + System.identityHashCode(doc)); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /**
+     * Вызывается EDT после разбора, с её замком. Только чтение уже готовых значений:
+     * {@code environments()} у метода — это сумма контекстов модуля, директивы компиляции
+     * и {@code #Если}, которую EDT сама сложила в {@code BslUtil.installModuleEnvironments}.
+     */
+    private void rebuildEnvRanges(org.eclipse.xtext.resource.XtextResource resource)
+    {
+        try
+        {
+            if (resource == null || resource.getContents().isEmpty())
+                return;
+            EObject root = resource.getContents().get(0);
+            if (!(root instanceof com._1c.g5.v8.dt.bsl.model.Module module))
+                return;
+            String project = resource.getURI() != null && resource.getURI().segmentCount() > 1
+                ? resource.getURI().segment(1) : ""; //$NON-NLS-1$
+            java.util.List<int[]> bounds = new java.util.ArrayList<>();
+            java.util.List<String> keys = new java.util.ArrayList<>();
+            addEnvRange(bounds, keys, project, module);
+            for (com._1c.g5.v8.dt.bsl.model.Method method : module.allMethods())
+                addEnvRange(bounds, keys, project, method);
+            int n = bounds.size();
+            int[] starts = new int[n];
+            int[] ends = new int[n];
+            for (int i = 0; i < n; i++)
+            {
+                starts[i] = bounds.get(i)[0];
+                ends[i] = bounds.get(i)[1];
+            }
+            envRanges = new EnvRanges(starts, ends, keys.toArray(new String[0]));
+            // Новый разбор — прежние предложения в кэше стали ссылками в исчезнувшее
+            // состояние модели (см. ctorCatalogModelGen).
+            ctorCatalogModelGen++;
+            uiBlockLog("envRanges.build", "n=" + n //$NON-NLS-1$ //$NON-NLS-2$
+                + " project=" + project + " gen=" + ctorCatalogModelGen); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        catch (Exception | LinkageError e)
+        {
+            uiBlockLogThrowable("envRanges.build.err", e); //$NON-NLS-1$
+        }
+    }
+
+    private static void addEnvRange(java.util.List<int[]> bounds, java.util.List<String> keys,
+                                    String project, EObject element)
+    {
+        if (!(element instanceof com._1c.g5.v8.dt.mcore.Environmental environmental))
+            return;
+        com._1c.g5.v8.dt.mcore.util.Environments environments = environmental.environments();
+        if (environments == null)
+            return;
+        org.eclipse.xtext.nodemodel.INode node =
+            org.eclipse.xtext.nodemodel.util.NodeModelUtils.findActualNodeFor(element);
+        if (node == null)
+            return;
+        java.util.List<String> names = new java.util.ArrayList<>();
+        for (Object environment : environments.toArray())
+            names.add(String.valueOf(environment));
+        java.util.Collections.sort(names);
+        bounds.add(new int[] {node.getOffset(), node.getOffset() + node.getLength()});
+        keys.add(project + "|" + String.join(",", names)); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /** Эффективный набор контекстов компиляции для позиции — по снимку, без блокировок. */
+    private String ctorCatalogContextKey(int offset)
+    {
+        EnvRanges ranges = envRanges;
+        return ranges == null || offset < 0 ? null : ranges.keyAt(offset);
+    }
+
+    /**
+     * Запоминает каталог типов после «Новый» вместе с префиксом, на котором его посчитали.
+     *
+     * <p>Список от EDT — это <b>срез по набранному префиксу</b>, а не полный перечень типов.
+     * Пока каталог хранился с пустым префиксом («тот же каталог на любую букву»), срез на
+     * «с» отдавался слову «табли»: в списке было 143 типа, все с буквой «с» внутри, и не
+     * было «ТаблицаЗначений» (замер 12.09.2026 10:42, {@code in=304 … NoLinkModel:143}).
+     *
+     * <p>Сравнение «шире/уже» имеет смысл только для одного и того же слова: срез по более
+     * длинному префиксу того же слова не затирает более широкий.
      */
     private void rememberCtorTypeCatalog(IDocument document, int offset,
                                          ICompletionProposal[] result)
+    {
+        rememberCtorTypeCatalog(document, offset, result, null);
+    }
+
+    /**
+     * @param envKey набор контекстов компиляции, для которого посчитан полный список;
+     *     {@code null} — набор неизвестен, каталог остаётся срезом по своему префиксу
+     */
+    private void rememberCtorTypeCatalog(IDocument document, int offset,
+                                         ICompletionProposal[] result, String envKey)
     {
         if (result == null || result.length == 0 || document == null || offset < 0)
             return;
@@ -5280,26 +5674,39 @@ return result;
         int newTypes = countNoLinkModelProposals(result);
         if (newTypes <= 0)
             return;
+        String newPrefix = envKey != null ? "" : computeIdentifierFilter(document, offset); //$NON-NLS-1$
+        if (newPrefix == null)
+            newPrefix = ""; //$NON-NLS-1$
+        String savedPrefix = ctorTypeCatalogPrefix == null ? "" : ctorTypeCatalogPrefix; //$NON-NLS-1$
         int savedTypes = countNoLinkModelProposals(ctorTypeCatalog);
-        if (savedTypes > 0 && newTypes < savedTypes)
+        boolean sameWord = savedTypes > 0
+            && newPrefix.regionMatches(true, 0, savedPrefix, 0, savedPrefix.length());
+        if (sameWord && savedPrefix.length() <= newPrefix.length())
         {
-            uiBlockLog("ctorCatalog.keepBroader", "savedTypes=" + savedTypes //$NON-NLS-1$ //$NON-NLS-2$
-                + " newTypes=" + newTypes + " n=" + ctorTypeCatalog.length); //$NON-NLS-1$ //$NON-NLS-2$
-            return;
-        }
-        if (savedTypes > 0 && newTypes == savedTypes
-            && result.length < ctorTypeCatalog.length)
-        {
-            uiBlockLog("ctorCatalog.keepBroader", "savedN=" + ctorTypeCatalog.length //$NON-NLS-1$ //$NON-NLS-2$
-                + " newN=" + result.length); //$NON-NLS-1$
-            return;
+            if (newTypes < savedTypes)
+            {
+                uiBlockLog("ctorCatalog.keepBroader", "savedTypes=" + savedTypes //$NON-NLS-1$ //$NON-NLS-2$
+                    + " newTypes=" + newTypes + " n=" + ctorTypeCatalog.length //$NON-NLS-1$ //$NON-NLS-2$
+                    + " saved=\"" + savedPrefix + "\" new=\"" + newPrefix + "\""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                return;
+            }
+            if (newTypes == savedTypes && result.length < ctorTypeCatalog.length)
+            {
+                uiBlockLog("ctorCatalog.keepBroader", "savedN=" + ctorTypeCatalog.length //$NON-NLS-1$ //$NON-NLS-2$
+                    + " newN=" + result.length //$NON-NLS-1$
+                    + " saved=\"" + savedPrefix + "\" new=\"" + newPrefix + "\""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                return;
+            }
         }
         ctorTypeCatalog = unwrapProposals(result);
-        // Пустой префикс: тот же каталог на любую букву после «Новый».
-        ctorTypeCatalogPrefix = ""; //$NON-NLS-1$
+        ctorTypeCatalogPrefix = newPrefix;
+        ctorTypeCatalogEnvKey = envKey;
+        ctorTypeCatalogGen = ctorCatalogModelGen;
+        ctorTypeCatalogAnchor = computeFullListContextKey(document, offset);
         fullListComplete = true;
         uiBlockLog("ctorCatalog.remember", "n=" + ctorTypeCatalog.length //$NON-NLS-1$ //$NON-NLS-2$
-            + " types=" + newTypes); //$NON-NLS-1$
+            + " types=" + newTypes + " prefix=\"" + newPrefix + "\"" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " anchor=" + ctorTypeCatalogAnchor); //$NON-NLS-1$
     }
 
     /**
@@ -5312,19 +5719,73 @@ return result;
         if (restoringCtorCatalog)
             return isCacheValidForCaret(document, offset)
                 && countNoLinkModelProposals(fullListCache) > 0;
-        if (ctorTypeCatalog.length == 0 || document == null || offset < 0)
+        if (document == null || offset < 0)
             return false;
         if (!isAfterNewKeyword(document, offset))
             return false;
+        // Полный список для этого набора контекстов компиляции мог посчитать другой метод
+        // этого же редактора: состав типов зависит от набора, а не от места.
+        String liveEnvKey = ctorCatalogContextKey(offset);
+        if (liveEnvKey != null)
+        {
+            CachedProposals shared = ctorCatalogGet(liveEnvKey);
+            if (shared != null && shared.list().length > 0
+                && (!liveEnvKey.equals(ctorTypeCatalogEnvKey)
+                    || ctorTypeCatalog.length < shared.list().length))
+            {
+                ctorTypeCatalog = shared.list();
+                ctorTypeCatalogPrefix = ""; //$NON-NLS-1$
+                ctorTypeCatalogEnvKey = liveEnvKey;
+                ctorTypeCatalogGen = ctorCatalogModelGen;
+                ctorTypeCatalogAnchor = computeFullListContextKey(document, offset);
+                // Вместе со списком возвращаем его записи DataEvent — иначе вставка из
+                // этого списка не поднимет LinkedMode.
+                if (!shared.dataEvents().isEmpty())
+                    BslDataEventGuard.mergeIntoReal(document, shared.dataEvents());
+                uiBlockLog("ctorCatalog.shared", "key=" + liveEnvKey //$NON-NLS-1$ //$NON-NLS-2$
+                    + " n=" + shared.list().length //$NON-NLS-1$
+                    + " events=" + shared.dataEvents().size()); //$NON-NLS-1$
+            }
+        }
+        if (ctorTypeCatalog.length == 0)
+            return false;
+        // Предложения из прошлого разбора — ссылки в исчезнувшее состояние модели.
+        if (ctorTypeCatalogGen != ctorCatalogModelGen)
+        {
+            uiBlockLog("ctorCatalog.skip", "why=otherParse saved=" + ctorTypeCatalogGen //$NON-NLS-1$ //$NON-NLS-2$
+                + " now=" + ctorCatalogModelGen); //$NON-NLS-1$
+            ctorTypeCatalog = EMPTY;
+            ctorTypeCatalogEnvKey = null;
+            return false;
+        }
         String prefix = computeIdentifierFilter(document, offset);
         if (prefix == null)
             prefix = ""; //$NON-NLS-1$
         String saved = ctorTypeCatalogPrefix == null ? "" : ctorTypeCatalogPrefix; //$NON-NLS-1$
-        // Пустой префикс после «Новый » — тот же каталог, не новый compute.
-        // Другая буква («д» при каталоге на «с») — каталог не подходит.
-        if (!prefix.isEmpty() && !saved.isEmpty()
-            && !prefix.regionMatches(true, 0, saved, 0, saved.length()))
+        // Набор контекстов известен — каталог годится любому месту с тем же набором.
+        // Неизвестен (модель ещё не разобрана) — только своему месту: в другом методе
+        // может быть другая директива компиляции и другой состав типов.
+        if (ctorTypeCatalogEnvKey == null || !ctorTypeCatalogEnvKey.equals(liveEnvKey))
+        {
+            int liveAnchor = computeFullListContextKey(document, offset);
+            if (ctorTypeCatalogAnchor != liveAnchor)
+            {
+                uiBlockLog("ctorCatalog.skip", "why=otherPlace saved=" + ctorTypeCatalogAnchor //$NON-NLS-1$ //$NON-NLS-2$
+                    + " live=" + liveAnchor + " env=" + ctorTypeCatalogEnvKey //$NON-NLS-1$ //$NON-NLS-2$
+                    + " liveEnv=" + liveEnvKey); //$NON-NLS-1$
+                return false;
+            }
+        }
+        // Каталог — срез EDT по тому префиксу, на котором его посчитали. Он годится только
+        // слову, которое с этого префикса начинается. Пустой префикс у каталога — полный
+        // список, годится всем. Слову «табли» каталог на «с» отдавал 143 типа без
+        // «ТаблицаЗначений» (замер 12.09.2026 10:42).
+        if (!saved.isEmpty() && !prefix.regionMatches(true, 0, saved, 0, saved.length()))
+        {
+            uiBlockLog("ctorCatalog.skip", "why=otherWord saved=\"" + saved //$NON-NLS-1$ //$NON-NLS-2$
+                + "\" prefix=\"" + prefix + "\""); //$NON-NLS-1$ //$NON-NLS-2$
             return false;
+        }
         if (isCacheValidForCaret(document, offset) && countNoLinkModelProposals(fullListCache) > 0)
             return true;
         restoringCtorCatalog = true;
@@ -5334,6 +5795,8 @@ return result;
             fullListContextKey = key;
             fullListReady = true;
             fullListComplete = true;
+            // Каталог пришёл из другого места — позиции замены переносим на это слово.
+            rebaseProposalsToWord(document, offset, ctorTypeCatalog);
             assignFullListCache(ctorTypeCatalog);
             fullListCachePrefix = saved;
             uiBlockLog("ctorCatalog.restore", "n=" + ctorTypeCatalog.length //$NON-NLS-1$ //$NON-NLS-2$
@@ -5907,6 +6370,21 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
     /** Сколько фоновый расчёт ждёт освобождения замка, прежде чем сдаться до следующей попытки. */
     private static final long DELEGATE_LOCK_BG_WAIT_MS = 300;
 
+    /** Шаг ожидания замка расчётом членов: между шагами проверяется, нужен ли он ещё. */
+    private static final long DELEGATE_LOCK_BG_STEP_MS = 50;
+
+    /**
+     * Проверка «расчёт ещё нужен», которую спрашивают сразу после захвата замка.
+     *
+     * <p>Пока задание стоит в очереди за замком, контекст успевает смениться: замер
+     * 12.09.2026 — словарное задание для буквы «ф» считалось 1.45 с, а точка пришла через
+     * 182 мс после его старта, и расчёт членов всё это время ждал замок. Обратный случай
+     * такой же: устаревшее задание, дождавшись замка, занимало его ещё на один разбор
+     * большого модуля перед нужным расчётом. Устаревший расчёт замок отпускает не считая.
+     */
+    private static final ThreadLocal<java.util.function.BooleanSupplier> DELEGATE_STALE_CHECK =
+        new ThreadLocal<>();
+
     /**
      * С какого ожидания замка на UI-потоке пишем строку в лог. Это порог наблюдения, а не
      * задержка: ко времени расчёта он не добавляет ничего.
@@ -5935,8 +6413,27 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
             }
             else if (Boolean.TRUE.equals(DELEGATE_LOCK_WAIT_BG.get()))
             {
-                DELEGATE_LOCK.lock();
-                locked = true;
+                // Ждём замок шагами и на каждом проверяем, нужен ли ещё этот расчёт.
+                // Прервать сам compute EDT нечем (монитор туда не передаётся), но держать
+                // место в очереди для ненужного расчёта — чистая потеря: в логе 12.09.2026
+                // 11:39 это waitMs=651 и waitMs=1035 перед вычислением, которое затем
+                // выбрасывалось.
+                java.util.function.BooleanSupplier staleWhileWaiting = DELEGATE_STALE_CHECK.get();
+                locked = false;
+                while (!locked)
+                {
+                    locked = DELEGATE_LOCK.tryLock(DELEGATE_LOCK_BG_STEP_MS,
+                        java.util.concurrent.TimeUnit.MILLISECONDS);
+                    if (locked || (staleWhileWaiting != null && staleWhileWaiting.getAsBoolean()))
+                        break;
+                }
+                if (!locked)
+                {
+                    uiBlockLog("probeDelegateOnce", "off=" + off //$NON-NLS-1$ //$NON-NLS-2$
+                        + " staleWhileWaiting waitMs=" //$NON-NLS-1$
+                        + ((System.nanoTime() - tLock) / 1_000_000L));
+                    return null;
+                }
             }
             else
             {
@@ -5963,6 +6460,14 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
             return null;
         }
         long waitMs = (System.nanoTime() - tLock) / 1_000_000L;
+        java.util.function.BooleanSupplier staleCheck = DELEGATE_STALE_CHECK.get();
+        if (staleCheck != null && staleCheck.getAsBoolean())
+        {
+            DELEGATE_LOCK.unlock();
+            uiBlockLog("probeDelegateOnce", "off=" + off //$NON-NLS-1$ //$NON-NLS-2$
+                + " staleAfterLock waitMs=" + waitMs); //$NON-NLS-1$
+            return null;
+        }
         if (onUi && waitMs >= DELEGATE_LOCK_UI_REPORT_MS)
         {
             ContentAssistDebug.perfMark("delegate.lockWaitUi", //$NON-NLS-1$
@@ -6145,6 +6650,89 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         return dot >= 0 && memberStockFullListDot == dot && memberStockFullList.length > 0;
     }
 
+    /**
+     * Запас членов по точке, переживающий закрытие окна и сброс кэша сессии.
+     *
+     * <p>Каждое обращение к EDT за членами на большом модуле стоит около секунды, причём
+     * первое после набранной точки штатно возвращает пусто (разбор не догнал текст) —
+     * замер 12.09.2026 11:39: 1119 мс на пустой ответ плюс 1065 мс на повтор. Раньше этот
+     * результат выбрасывался при закрытии окна, и следующий такт платил те же две секунды
+     * заново. Срок жизни — до следующего разбора модуля: дальше предложения EDT становятся
+     * ссылками в исчезнувшее состояние модели (см. {@code ctorCatalogModelGen}).
+     */
+    private final java.util.LinkedHashMap<Integer, CachedProposals> memberStockKeep =
+        new java.util.LinkedHashMap<>(8, 0.75f, true)
+        {
+            private static final long serialVersionUID = 1L;
+
+            @Override
+            protected boolean removeEldestEntry(
+                java.util.Map.Entry<Integer, CachedProposals> eldest)
+            {
+                return size() > 8;
+            }
+        };
+
+    private int memberStockKeepGen = -1;
+    /** Записи {@code DataEvent} восстановленного из запаса списка — вернуть в настоящую карту. */
+    private java.util.Map<Object, Object> keptMemberEvents;
+
+    private void keepMemberStockForDot(int dot, ICompletionProposal[] list,
+                                       java.util.Map<Object, Object> dataEvents)
+    {
+        if (dot < 0 || list == null || list.length == 0)
+            return;
+        if (memberStockKeepGen != ctorCatalogModelGen)
+        {
+            memberStockKeep.clear();
+            memberStockKeepGen = ctorCatalogModelGen;
+        }
+        CachedProposals saved = memberStockKeep.get(Integer.valueOf(dot));
+        if (saved != null && saved.list().length >= list.length
+            && !saved.dataEvents().isEmpty())
+            return;
+        memberStockKeep.put(Integer.valueOf(dot), new CachedProposals(list,
+            dataEvents == null || dataEvents.isEmpty() ? java.util.Collections.emptyMap()
+                : new java.util.LinkedHashMap<>(dataEvents)));
+    }
+
+    private boolean restoreMemberStockFromKeep(int dot)
+    {
+        if (memberStockKeepGen != ctorCatalogModelGen)
+        {
+            if (!memberStockKeep.isEmpty())
+                memberStockKeep.clear();
+            memberStockKeepGen = ctorCatalogModelGen;
+            return false;
+        }
+        CachedProposals kept = memberStockKeep.get(Integer.valueOf(dot));
+        if (kept == null || kept.list().length == 0)
+            return false;
+        memberStockFullList = kept.list();
+        memberStockFullListDot = dot;
+        memberStockFullListComplete = true;
+        keptMemberEvents = kept.dataEvents().isEmpty() ? null : kept.dataEvents();
+        uiBlockLog("memberStock.keepHit", "dot=" + dot + " n=" + kept.list().length //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " events=" + kept.dataEvents().size()); //$NON-NLS-1$
+        return true;
+    }
+
+    /**
+     * Возвращает в настоящую карту записи {@code DataEvent} списка, взятого из запаса.
+     *
+     * <p>Без них штатная вставка не находит ключ по вставленному тексту и LinkedMode не
+     * поднимается: каретка не встаёт между скобок у {@code Метод()}.
+     */
+    private void mergeKeptMemberEvents(IDocument document)
+    {
+        java.util.Map<Object, Object> events = keptMemberEvents;
+        if (events == null || events.isEmpty() || document == null)
+            return;
+        keptMemberEvents = null;
+        BslDataEventGuard.mergeIntoReal(document, events);
+        uiBlockLog("memberStock.keepEvents", "n=" + events.size()); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
     private ICompletionProposal[] preferMemberFullList(ITextViewer viewer, int dot,
                                                        ICompletionProposal[] raw)
     {
@@ -6236,7 +6824,10 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
             ContentAssistDebug.perfMark("memberStockDefer.uiFallback", //$NON-NLS-1$
                 "{\"dot\":" + dotContextKey + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             final int captureGen = memberStockCaptureGen;
-            display.asyncExec(() -> runMemberStockCapture(viewer, dotContextKey, 0, captureGen));
+            // Расчёт на UI — только через ворота показа: иначе он занимает UI на сотни
+            // миллисекунд в произвольный момент, в том числе на недорисованном кадре.
+            runWordListOnUi(viewer, display, "memberUi", //$NON-NLS-1$
+                () -> runMemberStockCapture(viewer, dotContextKey, 0, captureGen));
         }
         catch (Exception ignored) {}
     }
@@ -6277,15 +6868,18 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         // заход рождался ещё один поток: замер 05.09.2026 — ПЯТЬ параллельных «SCAP member
         // stock» на один и тот же offset, каждый по ~2030 мс и все с пустым результатом.
         // Они просто ждали друг друга на блокировке ресурса, отсюда и 3-4 секунды.
-        if (memberStockBackgroundDot == dotContextKey && memberStockBackgroundGen == contextGen)
+        // Только точка, без поколения: поколение контекста успевает смениться между
+        // такта́ми «.» и автооткрытия, и на ту же точку заводилось второе задание. Замер
+        // 12.09.2026 11:29 для «Метаданные.Справочники.»: первое задание посчитало за
+        // 1.06 с и его результат выбросили по поколению, второе ждало замок 1.03 с и
+        // считало то же самое ещё 0.68 с.
+        if (memberStockBackgroundDot == dotContextKey)
             return true;
         if (memberStockBackgroundJob != null)
             memberStockBackgroundJob.cancel();
         memberStockBackgroundDot = dotContextKey;
         memberStockBackgroundGen = contextGen;
-        org.eclipse.swt.custom.StyledText text = viewer.getTextWidget() instanceof org.eclipse.swt.custom.StyledText st
-            && !st.isDisposed() ? st : null;
-        installWordListUiKick(display, text);
+        ContentAssistSessionReloader.armShowGate(viewer);
         final int probeOffset = dotContextKey + 1;
         Job job = new Job("SCAP member stock") { //$NON-NLS-1$
             @Override
@@ -6295,6 +6889,12 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                 // 1.4 млн ждёт reconciler 0.2–1.3 с (лог 11.09.2026 00:33: точка → probe).
                 // Штатный compute и так берёт тот же readOnly; для объекта это двойная пауза.
                 DELEGATE_LOCK_WAIT_BG.set(Boolean.TRUE);
+                Thread worker = Thread.currentThread();
+                int workerPriority = worker.getPriority();
+                raiseAssistWorkerPriority(worker);
+                BslXtextDocumentHook.markAssistBackground(true);
+                // Дождавшись замка, считать уже незачем, если контекст сменился.
+                DELEGATE_STALE_CHECK.set(() -> contextGen != memberStockContextGen);
                 try
                 {
                     uiBlockLog("memberStock.bg.run", "dot=" + dotContextKey); //$NON-NLS-1$ //$NON-NLS-2$
@@ -6304,7 +6904,9 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                     long t0 = System.nanoTime();
                     while (attempts < MEMBER_STOCK_BG_ATTEMPTS)
                     {
-                        if (monitor.isCanceled() || contextGen != memberStockContextGen)
+                        // Бросаем расчёт, только если место ввода действительно сменилось
+                        // (новое задание на другую точку), а не по смене поколения.
+                        if (monitor.isCanceled() || memberStockBackgroundDot != dotContextKey)
                             return Status.CANCEL_STATUS;
                         attempts++;
                         try
@@ -6322,6 +6924,14 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                         }
                         catch (Exception | LinkageError e)
                         {
+                            // Отмена от EDT (новый расчёт пометил документ устаревшим) —
+                            // это не «пусто», повторять нечего: расчёт уже не нужен.
+                            if (isCanceledByNewerRequest(e))
+                            {
+                                uiBlockLog("memberStock.bg.canceled", "dot=" + dotContextKey //$NON-NLS-1$ //$NON-NLS-2$
+                                    + " attempt=" + attempts); //$NON-NLS-1$
+                                return Status.CANCEL_STATUS;
+                            }
                             raw = EMPTY;
                         }
                         if (raw != null && raw.length > 0)
@@ -6361,7 +6971,7 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                     }
                     if (raw.length == 0)
                     {
-                        runWordListOnUi(display,
+                        runWordListOnUi(viewer, display, "member", //$NON-NLS-1$
                             () -> dropStalePopupForEmptyMemberStock(viewer, dotContextKey, contextGen,
                                 contextReceiver));
                         return Status.CANCEL_STATUS;
@@ -6373,12 +6983,16 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                     // show в 00:19:10). Показ — тот же Paint+timerExec(0), что у списка слов.
                     backgroundStock = new BackgroundStock(dotContextKey, contextGen, contextReceiver,
                         result, events);
-                    runWordListOnUi(display, () -> publishMemberStock(viewer, dotContextKey, contextGen,
+                    runWordListOnUi(viewer, display, "member", //$NON-NLS-1$
+                        () -> publishMemberStock(viewer, dotContextKey, contextGen,
                         contextReceiver, result, events));
                     return Status.OK_STATUS;
                 }
                 finally
                 {
+                    DELEGATE_STALE_CHECK.remove();
+                    BslXtextDocumentHook.markAssistBackground(false);
+                    restoreAssistWorkerPriority(worker, workerPriority);
                     DELEGATE_LOCK_WAIT_BG.remove();
                 }
             }
@@ -6451,13 +7065,15 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                                     String contextReceiver, ICompletionProposal[] result,
                                     java.util.Map<Object, Object> dataEvents)
     {
+        // Поколение контекста результат больше не бракует: годность решает живой контекст
+        // (точка и получатель проверяются ниже). По поколению выбрасывался уже посчитанный
+        // список, и второе задание считало то же самое заново — замер 12.09.2026 11:29 для
+        // «Метаданные.Справочники.»: 1.06 с в мусор, потом 1.03 с ожидания замка и ещё
+        // 0.68 с расчёта.
         if (contextGen != memberStockContextGen)
         {
-            uiBlockLog("memberStock.publish.drop", "why=gen dot=" + dotContextKey); //$NON-NLS-1$ //$NON-NLS-2$
-            ContentAssistDebug.perfMark("memberStockBackground.dropGen", //$NON-NLS-1$
-                "{\"dot\":" + dotContextKey + ",\"was\":" + contextGen //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"now\":" + memberStockContextGen + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            return;
+            uiBlockLog("memberStock.publish.genChanged", "dot=" + dotContextKey //$NON-NLS-1$ //$NON-NLS-2$
+                + " was=" + contextGen + " now=" + memberStockContextGen); //$NON-NLS-1$ //$NON-NLS-2$
         }
         // Пока считали, текст мог измениться — например, набранное удалили. Публиковать
         // результат для исчезнувшего контекста нельзя: он не только показал бы чужие члены,
@@ -6526,6 +7142,9 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         captureMemberStockFullList(result, dotContextKey);
         if (memberStockFullListDot == dotContextKey)
             memberStockFullListComplete = true;
+        // Запас держим вместе с записями DataEvent: показ из запаса без них ломает
+        // LinkedMode (каретка не встаёт между скобок).
+        keepMemberStockForDot(dotContextKey, memberStockFullList, dataEvents);
         // Положить список в поле мало — его никто не спросит. Расчёт, уже сходивший к делегату
         // в этом контексте, помечен `markDelegateSyncProbed` и на следующем заходе выходит по
         // «delegateProbed» → EMPTY, не заглянув в список членов вовсе. Именно поэтому Ctrl+Space

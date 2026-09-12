@@ -12,7 +12,7 @@ plugin/target/
 feature/target/
 target/target/
 
-# JDT/PDE: выход компиляции (plugin/.classpath → bin/)
+# JDT output (plugin/.classpath → bin/) — производные от *.java
 plugin/bin/
 *.class
 

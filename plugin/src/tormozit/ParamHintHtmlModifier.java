@@ -40,9 +40,12 @@ import org.eclipse.swt.events.DisposeListener;
 import org.eclipse.swt.events.KeyAdapter;
 import org.eclipse.swt.events.KeyEvent;
 import org.eclipse.swt.graphics.Color;
+import org.eclipse.swt.graphics.Point;
+import org.eclipse.swt.graphics.Rectangle;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Listener;
+import org.eclipse.swt.widgets.Monitor;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.ToolBar;
 import org.eclipse.ui.IEditorPart;
@@ -123,6 +126,13 @@ public final class ParamHintHtmlModifier
     /** Маркер ProgressListener основного SWT.Show фильтра (один на browser). */
     private static final String SHOW_COMFORT_PROGRESS =
         "tormozit.paramHintShowProgress"; //$NON-NLS-1$
+    /**
+     * Дедлайн (epoch ms) повторной посадки размера после Show: холодный Edge
+     * игнорирует {@code setSize} до готовности WebView2 и раздувает SWT.RESIZE-шелл.
+     */
+    private static final String SIZE_GUARD_MARK = "tormozit.paramHintSizeGuard"; //$NON-NLS-1$
+    private static final int SIZE_GUARD_MS = 800;
+    private static final int SIZE_TOLERANCE_PX = 24;
     /** Маркер кнопки закрытия на нижней панели ParametersHoverInfoControl. */
     private static final String CLOSE_TOOLBAR_MARK = "tormozit.paramHintClose"; //$NON-NLS-1$
     /** Автовыбор сигнатуры: только при открытии (не на каждый Progress). */
@@ -183,6 +193,7 @@ public final class ParamHintHtmlModifier
                     public void completed(ProgressEvent event)
                     {
                         tryModifyBrowserHtml(browser);
+                        constrainParamHintSizeIfGuarding(browser);
                     }
 
                     @Override
@@ -194,6 +205,7 @@ public final class ParamHintHtmlModifier
             }
 
             tryModifyBrowserHtml(browser);
+            ensureParamHintSizeGuard(browser);
         });
 
         installParamHoverCommandProbe(display);
@@ -1198,6 +1210,7 @@ public final class ParamHintHtmlModifier
                 public void completed(ProgressEvent event)
                 {
                     tryModifyBrowserHtml(browser);
+                    constrainParamHintSizeIfGuarding(browser);
                 }
 
                 @Override
@@ -1207,6 +1220,178 @@ public final class ParamHintHtmlModifier
             });
         }
         tryModifyBrowserHtml(browser);
+        ensureParamHintSizeGuard(browser);
+    }
+
+    /**
+     * Первое открытие после старта EDT: холодный Edge/WebView2 и таймаут 100 мс
+     * в {@code BrowserInformationControl.setVisible} оставляют SWT.RESIZE-шелл
+     * дефолтного (гигантского) размера. Штатный {@code updateSize} уже вызывался
+     * до Show и к этому моменту не удерживается. Сажаем размер повторно, пока
+     * движок не готов; сохранённый гигант из прошлого сеанса тоже отбрасываем.
+     */
+    private static void ensureParamHintSizeGuard(Browser browser)
+    {
+        if (browser == null || browser.isDisposed())
+            return;
+        if (!looksLikeParamHintBrowser(browser))
+            return;
+        long deadline = System.currentTimeMillis() + SIZE_GUARD_MS;
+        browser.setData(SIZE_GUARD_MARK, Long.valueOf(deadline));
+        constrainParamHintSize(browser);
+        Display display = browser.getDisplay();
+        if (display == null || display.isDisposed())
+            return;
+        int[] delays = { 50, 150, 300, 500, 800 };
+        for (int delay : delays)
+        {
+            display.timerExec(delay, () -> constrainParamHintSizeIfGuarding(browser));
+        }
+    }
+
+    private static void constrainParamHintSizeIfGuarding(Browser browser)
+    {
+        if (browser == null || browser.isDisposed())
+            return;
+        Object mark = browser.getData(SIZE_GUARD_MARK);
+        if (!(mark instanceof Long deadline)
+            || System.currentTimeMillis() > deadline.longValue())
+            return;
+        constrainParamHintSize(browser);
+    }
+
+    private static boolean looksLikeParamHintBrowser(Browser browser)
+    {
+        if (findParametersHover(browser) != null)
+            return true;
+        try
+        {
+            String html = browser.getText();
+            return html != null && html.indexOf(HEADING_CLASS) >= 0;
+        }
+        catch (Exception ignored)
+        {
+            return false;
+        }
+    }
+
+    private static void constrainParamHintSize(Browser browser)
+    {
+        if (browser == null || browser.isDisposed())
+            return;
+        Object hover = findParametersHover(browser);
+        if (hover == null)
+            return;
+        Object infoControl = Global.invoke(hover, "getControl"); //$NON-NLS-1$
+        if (infoControl == null)
+            return;
+        Object shellObj = Global.invoke(infoControl, "getShell"); //$NON-NLS-1$
+        if (!(shellObj instanceof Shell shell) || shell.isDisposed())
+            return;
+        Point intended = resolveParamHintIntendedSize(hover, infoControl, shell);
+        if (intended == null || intended.x <= 0 || intended.y <= 0)
+            return;
+        Rectangle current;
+        Object boundsObj = Global.invoke(infoControl, "getBounds"); //$NON-NLS-1$
+        if (boundsObj instanceof Rectangle rect)
+            current = rect;
+        else
+            current = shell.getBounds();
+        if (current.width <= intended.x + SIZE_TOLERANCE_PX
+            && current.height <= intended.y + SIZE_TOLERANCE_PX)
+            return;
+        Global.invokeVoid(infoControl, "setSize", //$NON-NLS-1$
+            Integer.valueOf(intended.x), Integer.valueOf(intended.y));
+    }
+
+    private static Point resolveParamHintIntendedSize(Object hover, Object infoControl,
+        Shell shell)
+    {
+        Point def = computeParamHintDefaultSize(infoControl);
+        Point saved = null;
+        Object loaded = Global.invoke(hover, "loadBounds"); //$NON-NLS-1$
+        if (loaded instanceof Point point && point.x > 0 && point.y > 0)
+            saved = point;
+        Rectangle monitor = paramHintMonitorClient(shell);
+        Point intended = saved != null ? saved : def;
+        if (intended != null && isGiantParamHintSize(intended, def, monitor))
+            intended = def;
+        if (intended != null && isGiantParamHintSize(intended, def, monitor))
+            intended = clampParamHintToMonitor(intended, monitor);
+        return intended;
+    }
+
+    private static Point computeParamHintDefaultSize(Object infoControl)
+    {
+        int widthChars = 60;
+        int heightChars = 7;
+        try
+        {
+            Class<?> type = Class.forName(PARAMETERS_HOVER_CLASS);
+            Object widthObj = type.getField("WIDTH_IN_CHAR").get(null); //$NON-NLS-1$
+            Object heightObj = type.getField("HEIGHT_IN_CHAR").get(null); //$NON-NLS-1$
+            if (widthObj instanceof Integer width)
+                widthChars = width.intValue();
+            if (heightObj instanceof Integer height)
+                heightChars = height.intValue();
+        }
+        catch (Exception ignored)
+        {
+        }
+        Object computed = Global.invoke(infoControl, "computeSizeConstraints", //$NON-NLS-1$
+            Integer.valueOf(widthChars), Integer.valueOf(heightChars));
+        if (computed instanceof Point point && point.x > 0 && point.y > 0)
+            return point;
+        return new Point(Math.max(80, widthChars * 8), Math.max(50, heightChars * 18));
+    }
+
+    private static boolean isGiantParamHintSize(Point size, Point def, Rectangle monitor)
+    {
+        if (size == null)
+            return false;
+        int maxW = 900;
+        int maxH = 500;
+        if (def != null)
+        {
+            maxW = def.x * 3;
+            maxH = def.y * 5;
+        }
+        if (monitor != null && monitor.width > 0 && monitor.height > 0)
+        {
+            maxW = Math.min(maxW, monitor.width / 2);
+            maxH = Math.min(maxH, monitor.height * 2 / 5);
+        }
+        if (def != null)
+        {
+            maxW = Math.max(maxW, def.x);
+            maxH = Math.max(maxH, def.y);
+        }
+        return size.x > maxW || size.y > maxH;
+    }
+
+    private static Point clampParamHintToMonitor(Point size, Rectangle monitor)
+    {
+        if (size == null)
+            return null;
+        if (monitor == null || monitor.width <= 0 || monitor.height <= 0)
+            return new Point(Math.min(size.x, 900), Math.min(size.y, 500));
+        return new Point(
+            Math.min(size.x, Math.max(80, monitor.width / 2)),
+            Math.min(size.y, Math.max(50, monitor.height * 2 / 5)));
+    }
+
+    private static Rectangle paramHintMonitorClient(Shell shell)
+    {
+        if (shell == null || shell.isDisposed())
+            return null;
+        Monitor monitor = shell.getMonitor();
+        if (monitor == null)
+        {
+            Display display = shell.getDisplay();
+            if (display != null && !display.isDisposed())
+                monitor = display.getPrimaryMonitor();
+        }
+        return monitor != null ? monitor.getClientArea() : null;
     }
 
     private static Browser findFindMissBrowser(Object parametersHover)
@@ -1979,6 +2164,7 @@ public final class ParamHintHtmlModifier
         try
         {
             browser.setText(updated);
+            scheduleScrollParamNameIntoView(browser);
         }
         finally
         {
@@ -2085,7 +2271,8 @@ public final class ParamHintHtmlModifier
 
     /**
      * Необязательные параметры в сигнатуре: {@code (Колонки, Строки?)} вместо
-     * штатных {@code [Строки]}.
+     * штатных {@code [Строки]}. Слоты за последним формальным до каретки —
+     * как {@code ?}, текущий из них жирный (прокрутка к {@code <b>}).
      */
     private static String rewriteHeadingOptionalParams(String html, HoverContext ctx)
     {
@@ -2102,9 +2289,12 @@ public final class ParamHintHtmlModifier
             return null;
         Object page = ctx.pages.get(ctx.pageIndex);
         Object paramsObj = Global.getField(page, "params"); //$NON-NLS-1$
-        if (!(paramsObj instanceof List<?> params) || params.isEmpty())
+        List<?> params = paramsObj instanceof List<?> typed ? typed : Collections.emptyList();
+        int formalCount = params.size();
+        int highlight = currentParamHighlightIndex(ctx, formalCount);
+        int extraUnknown = extraUnknownParamCount(ctx, formalCount);
+        if (params.isEmpty() && extraUnknown == 0)
             return null;
-        int highlight = currentParamHighlightIndex(ctx, params.size());
         StringBuilder list = new StringBuilder();
         for (int i = 0; i < params.size(); i++)
         {
@@ -2125,14 +2315,25 @@ public final class ParamHintHtmlModifier
             if (current)
                 list.append("</b>"); //$NON-NLS-1$
         }
+        for (int e = 0; e < extraUnknown; e++)
+        {
+            if (list.length() > 0)
+                list.append(", "); //$NON-NLS-1$
+            boolean current = highlight < 0 && e == extraUnknown - 1;
+            if (current)
+                list.append("<b>"); //$NON-NLS-1$
+            list.append('?');
+            if (current)
+                list.append("</b>"); //$NON-NLS-1$
+        }
         if (list.length() == 0)
             return null;
         return html.substring(0, open + 1) + list + html.substring(close);
     }
 
     /**
-     * Индекс жирного параметра в сигнатуре. {@code -1} — ни один: каретка за
-     * последним формальным (штатный EDT зажимает {@code paramIndex} на нём).
+     * Индекс жирного формального параметра. {@code -1} — каретка за последним
+     * (EDT зажимает {@code paramIndex}): в заголовке жирный слот {@code ?}.
      */
     private static int currentParamHighlightIndex(HoverContext ctx, int formalCount)
     {
@@ -2149,6 +2350,21 @@ public final class ParamHintHtmlModifier
             return ctx.currentArgIndex;
         }
         return ctx.paramIndex;
+    }
+
+    /**
+     * Несуществующие слоты от первого сверх формальных до каретки включительно.
+     * Для сигнатуры с неограниченным хвостом ({@code maxParams < 0}) — 0.
+     */
+    private static int extraUnknownParamCount(HoverContext ctx, int formalCount)
+    {
+        if (ctx == null || ctx.currentArgIndex < 0 || formalCount < 0)
+            return 0;
+        if (ctx.currentArgIndex < formalCount)
+            return 0;
+        if (formalCount > 0 && signatureAllowsExtraArgs(ctx, formalCount))
+            return 0;
+        return ctx.currentArgIndex - formalCount + 1;
     }
 
     private static boolean signatureAllowsExtraArgs(HoverContext ctx, int formalCount)

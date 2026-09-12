@@ -2,6 +2,7 @@ package tormozit;
 
 import org.eclipse.core.runtime.ListenerList;
 import org.eclipse.jface.text.AbstractDocument;
+import org.eclipse.jface.text.BadLocationException;
 import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.IDocumentExtension;
 import org.eclipse.jface.text.IDocumentExtension4;
@@ -11,6 +12,7 @@ import org.eclipse.jface.text.IInformationControlCreator;
 import org.eclipse.jface.text.ITextViewer;
 import org.eclipse.jface.text.ITextViewerExtension5;
 import org.eclipse.jface.text.IViewportListener;
+import org.eclipse.jface.text.TextViewer;
 import org.eclipse.jface.text.link.LinkedModeModel;
 import org.eclipse.jface.text.link.ProposalPosition;
 import org.eclipse.jface.text.contentassist.ContentAssistant;
@@ -24,7 +26,9 @@ import org.eclipse.jface.text.contentassist.ICompletionListener;
 import org.eclipse.jface.text.contentassist.ICompletionListenerExtension;
 import org.eclipse.jface.text.contentassist.ICompletionProposal;
 import org.eclipse.jface.text.contentassist.IContentAssistProcessor;
+import org.eclipse.jface.text.source.AnnotationModelEvent;
 import org.eclipse.jface.text.source.SourceViewer;
+import org.eclipse.jface.text.source.projection.ProjectionViewer;
 import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.resource.Resource;
@@ -218,6 +222,8 @@ public final class ContentAssistSessionReloader
     private IDocumentListener completionAutoOpenDocumentListener;
     private volatile boolean completionAutoOpenAwaitingLogged;
     private InputJumpProbe inputJumpProbe;
+    /** Ворота показа: готовый список ждёт в них правильный скелет текста. */
+    private final BackgroundShowGate showGate = new BackgroundShowGate(this);
 
     private static final int WORDS_TABLE_DEBOUNCE_MS = 200;
     /** Задержка flush pending recompute после literal-open (fix10). */
@@ -611,6 +617,7 @@ boolean inLiteral = endCaret >= 0
         cancelIrEvaluationIfConnected();
         uninstallCtrlSpaceFilter();
         uninstallStyledTextKeyListener();
+        showGate.dispose();
         uninstallInputJumpProbe();
         uninstallCompletionAutoOpenVerifyListener();
         uninstallCompletionAutoOpenDocumentListener();
@@ -893,6 +900,7 @@ boolean inLiteral = endCaret >= 0
                     maybeShowParamHintOnChar();
                     onDocumentChangedForCompletionAutoOpen(event);
                     closePopupIfMemberContextGone(event);
+                    kickPopupFilterIfVisible();
                 }
                 finally
                 {
@@ -916,6 +924,22 @@ boolean inLiteral = endCaret >= 0
             }
         };
         doc.addDocumentListener(completionAutoOpenDocumentListener);
+    }
+
+    /**
+     * Ввод при открытом окне: перефильтровку списка планирует JFace через
+     * {@code Display.asyncExec}, и на большом модуле она ждёт очередь секундами (замер
+     * 12.09.2026: буква «й» обновила список через 10 с). Запускаем ту же перефильтровку
+     * таймером, не дожидаясь очереди.
+     */
+    private void kickPopupFilterIfVisible()
+    {
+        if (!ContentAssistPopupSync.isPopupVisible(assistant))
+            return;
+        if (Boolean.TRUE.equals(SmartCompletionProposal.PROPOSAL_APPLY_IN_PROGRESS.get())
+            || Boolean.TRUE.equals(SmartCompletionProposal.IR_PROPOSAL_APPLY_IN_PROGRESS.get()))
+            return;
+        ContentAssistPopupSync.kickPopupFilter(assistant, viewer);
     }
 
     /**
@@ -3178,7 +3202,6 @@ boolean inLiteral = endCaret >= 0
             {
                 SmartContentAssistProcessor.uiBlockLog("autoOpen.begin.memberRefresh", //$NON-NLS-1$
                     "caret=" + caret); //$NON-NLS-1$
-                processor.flushPendingWordListUi();
                 processor.onAssistSessionContextReady(viewer, caret);
                 if (!processor.shouldDeferMemberAccessAutoOpen(viewer, caret))
                     ContentAssistSessionReloader.refreshPopupIfOpen();
@@ -3196,7 +3219,6 @@ boolean inLiteral = endCaret >= 0
         completionAutoOpenIrScheduled = false;
         completionAutoOpenAwaitingLogged = false;
         ContentAssistPopupSync.ensureEmptyListAllowed(assistant, false);
-        processor.flushPendingWordListUi();
         processor.onAssistSessionContextReady(viewer, caret);
         IRSession session = IrBslExpressionHtmlSupport.resolveIrSessionForAssist(facade, viewer);
         boolean memberAccess = isMemberAccessAtCaret(caret);
@@ -3276,9 +3298,15 @@ boolean inLiteral = endCaret >= 0
                 + " irScheduled=" + irScheduled //$NON-NLS-1$
                 + " around=\"" + SmartContentAssistProcessor.uiBlockAround(doc, caret) + "\""); //$NON-NLS-1$ //$NON-NLS-2$
         // #endregion
-        warmupAssistBrowserCreator(caret);
         completionAutoOpenEdtOpened = true;
-        openCompletionAutoEdtPopup(caret, autoOpenSeq, true);
+        // Показ занимает UI на 60–120 мс на большом модуле. Пускаем его через ворота:
+        // сначала правильный скелет текста, потом окно.
+        showGate.request("autoOpen", () -> { //$NON-NLS-1$
+            if (ContentAssistPopupSync.isPopupVisible(assistant))
+                return;
+            warmupAssistBrowserCreator(caret);
+            openCompletionAutoEdtPopup(caret, autoOpenSeq, true);
+        });
         if (!irScheduled)
             completionAutoOpenPending = false;
     }
@@ -3578,6 +3606,72 @@ if (!inLiteral)
     public static ContentAssistSessionReloader forViewer(SourceViewer viewer)
     {
         return viewer != null ? INSTALLED.get(viewer) : null;
+    }
+
+    /**
+     * Взвести ворота показа (только с UI): таймер живёт, пока идёт фоновый расчёт, и
+     * забирает результат сразу, как только скелет текста правильный. Ставится в такте
+     * нажатия, когда задание уходит в фон.
+     */
+    static void armShowGate(ITextViewer viewer)
+    {
+        ContentAssistSessionReloader reloader = gateHost(viewer);
+        if (reloader != null)
+            reloader.showGate.arm();
+    }
+
+    /**
+     * Отдать показ воротам. {@code false} — у вьюера нет сессии Комфорта, вызывающий
+     * показывает сам.
+     */
+    static boolean requestGatedShow(ITextViewer viewer, String kind, Runnable action)
+    {
+        ContentAssistSessionReloader reloader = gateHost(viewer);
+        if (reloader == null || action == null)
+            return false;
+        reloader.showGate.request(kind, action);
+        return true;
+    }
+
+    /**
+     * Первый расчёт в экземпляре редактора, когда изоляция {@code DataEvent} ещё не
+     * встала: он обязан идти на UI-потоке (иначе штатный расчёт чистит {@code DataEvent}
+     * и ломает LinkedMode), но и он — только после правильного скелета текста.
+     */
+    static void requestGatedFirstUiOpen(ITextViewer viewer, int caret)
+    {
+        ContentAssistSessionReloader reloader = gateHost(viewer);
+        if (reloader == null || caret < 0)
+            return;
+        int seq = reloader.completionAutoOpenSeq.incrementAndGet();
+        reloader.showGate.request("firstUi", () -> reloader.openFirstListOnUi(caret, seq)); //$NON-NLS-1$
+    }
+
+    private static ContentAssistSessionReloader gateHost(ITextViewer viewer)
+    {
+        return viewer instanceof SourceViewer sv ? forViewer(sv) : null;
+    }
+
+    /** Штатный расчёт на UI: только первое открытие в редакторе, дальше всё считает фон. */
+    private void openFirstListOnUi(int caret, int autoOpenSeq)
+    {
+        if (ContentAssistPopupSync.isPopupVisible(assistant))
+            return;
+        int live = modelCaretOffset();
+        if (live != caret)
+        {
+            SmartContentAssistProcessor.uiBlockLog("show.firstUi.skip", //$NON-NLS-1$
+                "caret=" + caret + " live=" + live); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        }
+        SmartContentAssistProcessor.uiBlockLog("show.firstUi", "caret=" + caret); //$NON-NLS-1$ //$NON-NLS-2$
+        openCompletionAutoEdtPopup(caret, autoOpenSeq, false);
+    }
+
+    private StyledText gateWidget()
+    {
+        return viewer != null && viewer.getTextWidget() instanceof StyledText st && !st.isDisposed()
+            ? st : null;
     }
 
     public static ContentAssistant getActiveAssistant()
@@ -4615,7 +4709,10 @@ if (isCompletionAutoOpenCaretMatch(caret)
                     : ""; //$NON-NLS-1$
                 if (!popupVisible && !filter.isEmpty()
                     && cachedListOnlyForAutoOpen(viewer, caret))
-                    openCompletionAutoEdtPopup(caret, autoOpenSeq, true);
+                    showGate.request("autoOpenIr", () -> { //$NON-NLS-1$
+                        if (!ContentAssistPopupSync.isPopupVisible(assistant))
+                            openCompletionAutoEdtPopup(caret, autoOpenSeq, true);
+                    });
                 clearCompletionAutoOpenState(decision, autoOpenSeq);
             }
             else if (edtOpened && popupVisible)
@@ -4758,8 +4855,6 @@ processor.applyIrCompletion(snapshot);
             && SmartContentAssistProcessor.ReceiverTypeLabel.findMemberAccessDot(doc, caret) >= 0)
             return false;
         boolean ok = ContentAssistPopupSync.showPossibleCompletions(ca, true);
-        if (ok)
-            redrawEditorAfterBackgroundPopup(widget);
         return ok;
     }
 
@@ -4804,29 +4899,9 @@ processor.applyIrCompletion(snapshot);
             return false;
         }
         boolean ok = ContentAssistPopupSync.showPossibleCompletions(ca, true);
-        if (ok)
-            redrawEditorAfterBackgroundPopup(widget);
         SmartContentAssistProcessor.uiBlockLog("openPopup.memberBg", "ok=" + ok); //$NON-NLS-1$ //$NON-NLS-2$
         ContentAssistDebug.perfMark("openPopup.memberBg", "{\"ok\":" + ok + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         return ok;
-    }
-
-    /**
-     * Показ попапа из фона поднимает layout и catchup свёрток ({@code setRedraw}/
-     * {@code fireTextSet}) — кадр модуля остаётся с пустыми строками, пока не придёт
-     * следующая полная отрисовка. Принудительный {@code redraw} после показа.
-     */
-    private static void redrawEditorAfterBackgroundPopup(StyledText widget)
-    {
-        if (widget == null || widget.isDisposed())
-            return;
-        Display display = widget.getDisplay();
-        if (display == null || display.isDisposed())
-            return;
-        display.timerExec(1, () -> {
-            if (!widget.isDisposed())
-                widget.redraw();
-        });
     }
 
     /** Обновление popup после прихода слов ИР (сразу или в очередь при recompute). */
@@ -5238,23 +5313,310 @@ return;
     }
 
     /**
+     * Ворота показа списка автодополнения: держат готовый список, пока в виджете не
+     * окажется правильный скелет текста (применены свёртки) и кадр не будет дорисован.
+     *
+     * <p>Будильник — {@code Display.timerExec}, а не {@code asyncExec}. SWT выполняет
+     * асинхронные задачи по одной и только когда очередь сообщений пуста
+     * ({@code Display.readAndDispatch}), поэтому показ стоял в FIFO за раскраской большого
+     * модуля: лог 11.09.2026 — список готов в 23:03:59.877, показан в 23:04:06.965.
+     * Сообщение таймера Windows выдаёт после ввода и после всех ожидающих {@code WM_PAINT},
+     * то есть тик приходит по дорисованному кадру и очереди не ждёт.
+     */
+    private static final class BackgroundShowGate
+    {
+        /** Шаг опроса: реже — заметная задержка окна, чаще — тики без пользы. */
+        private static final int TICK_MS = 15;
+        /** Сколько ждём правильного скелета, прежде чем показать как есть. */
+        private static final long GATE_WAIT_CAP_MS = 2000;
+        /** Потолок жизни таймера, пока нечего показывать. */
+        private static final long IDLE_CAP_MS = 15_000;
+
+        private final ContentAssistSessionReloader host;
+        /** Действия показа по видам: новое того же вида вытесняет прежнее. */
+        private final java.util.LinkedHashMap<String, Runnable> actions = new java.util.LinkedHashMap<>();
+        private volatile boolean armed;
+        private volatile long firstPendingNs;
+        private long armedAtNs;
+        private String lastGateWhy = ""; //$NON-NLS-1$
+
+        BackgroundShowGate(ContentAssistSessionReloader host)
+        {
+            this.host = host;
+        }
+
+        /** С любого потока. Таймер уже тикает с такта нажатия ({@link #arm()}). */
+        void request(String kind, Runnable action)
+        {
+            synchronized (actions)
+            {
+                actions.remove(kind);
+                actions.put(kind, action);
+                if (firstPendingNs == 0L)
+                    firstPendingNs = System.nanoTime();
+            }
+            SmartContentAssistProcessor.uiBlockLog("show.req", "kind=" + kind); //$NON-NLS-1$ //$NON-NLS-2$
+            StyledText text = host.gateWidget();
+            Display display = text != null ? text.getDisplay() : null;
+            if (display == null || display.isDisposed())
+                return;
+            if (display.getThread() == Thread.currentThread())
+                arm();
+            else if (!armed)
+                display.asyncExec(this::arm);
+        }
+
+        /** Только UI: {@code timerExec} с чужого потока — «Invalid thread access». */
+        void arm()
+        {
+            if (armed)
+                return;
+            StyledText text = host.gateWidget();
+            Display display = text != null ? text.getDisplay() : null;
+            if (display == null || display.isDisposed())
+                return;
+            if (display.getThread() != Thread.currentThread())
+            {
+                display.asyncExec(this::arm);
+                return;
+            }
+            armed = true;
+            if (armedAtNs == 0L)
+                armedAtNs = System.nanoTime();
+            display.timerExec(TICK_MS, this::tick);
+        }
+
+        void dispose()
+        {
+            synchronized (actions)
+            {
+                actions.clear();
+                firstPendingNs = 0L;
+            }
+            armed = false;
+            armedAtNs = 0L;
+        }
+
+        private void tick()
+        {
+            armed = false;
+            StyledText text = host.gateWidget();
+            if (text == null)
+            {
+                dispose();
+                return;
+            }
+            boolean hasActions;
+            synchronized (actions)
+            {
+                hasActions = !actions.isEmpty();
+            }
+            if (!hasActions)
+            {
+                boolean inFlight = host.processor != null
+                    && host.processor.isAssistBackgroundInFlight();
+                long idleMs = armedAtNs == 0L ? 0L : (System.nanoTime() - armedAtNs) / 1_000_000L;
+                if (inFlight && idleMs < IDLE_CAP_MS)
+                {
+                    arm();
+                    return;
+                }
+                if (inFlight)
+                    SmartContentAssistProcessor.uiBlockLog("show.stop", "why=idleCap"); //$NON-NLS-1$ //$NON-NLS-2$
+                armedAtNs = 0L;
+                return;
+            }
+            long waitMs = firstPendingNs == 0L ? 0L
+                : (System.nanoTime() - firstPendingNs) / 1_000_000L;
+            String why = ProjectionSkeleton.blockReason(host.viewer);
+            if (why != null && waitMs < GATE_WAIT_CAP_MS)
+            {
+                if (!why.equals(lastGateWhy))
+                {
+                    lastGateWhy = why;
+                    SmartContentAssistProcessor.uiBlockLog("show.gate", //$NON-NLS-1$
+                        "why=" + why + " waitMs=" + waitMs); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+                arm();
+                return;
+            }
+            lastGateWhy = ""; //$NON-NLS-1$
+            // Таймер Windows приходит после WM_PAINT, но на GTK порядок другой: добираем
+            // недорисованное синхронно, чтобы показ не замер на неполном кадре.
+            text.update();
+            java.util.List<java.util.Map.Entry<String, Runnable>> batch;
+            synchronized (actions)
+            {
+                batch = new ArrayList<>(actions.entrySet());
+                actions.clear();
+                firstPendingNs = 0L;
+            }
+            StringBuilder kinds = new StringBuilder();
+            long t0 = System.nanoTime();
+            for (java.util.Map.Entry<String, Runnable> entry : batch)
+            {
+                if (kinds.length() > 0)
+                    kinds.append(',');
+                kinds.append(entry.getKey());
+                try
+                {
+                    entry.getValue().run();
+                }
+                catch (Exception | LinkageError e)
+                {
+                    SmartContentAssistProcessor.uiBlockLogThrowable("show.action.err", e); //$NON-NLS-1$
+                }
+            }
+            if (!text.isDisposed())
+                text.update();
+            SmartContentAssistProcessor.uiBlockLog("show.open", "kinds=" + kinds //$NON-NLS-1$ //$NON-NLS-2$
+                + " waitMs=" + waitMs //$NON-NLS-1$
+                + " gate=" + (why == null ? "ok" : "capRun:" + why) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " runMs=" + ((System.nanoTime() - t0) / 1_000_000L) //$NON-NLS-1$
+                + " popup=" + ContentAssistPopupSync.isPopupVisible(host.assistant)); //$NON-NLS-1$
+            arm();
+        }
+    }
+
+    /**
+     * Скелет текста в виджете: применены ли свёртки.
+     *
+     * <p>EDT применяет их в {@code ProjectionViewer.catchupWithProjectionAnnotationModel},
+     * поставленном в очередь {@code asyncExec} ({@code postCatchupRequest}). При более чем
+     * 15 командах он идёт через {@code setRedraw(false)} → {@code fireTextSet} →
+     * {@code setRedraw(true)}, и кадр между этими стадиями неполный. Ждать очередь нельзя —
+     * она бывает занята раскраской на секунды, поэтому ожидающий catch-up выполняем сами:
+     * тем же приватным методом, под тем же {@code fLock} и в том же порядке, что штатный
+     * runnable (он потом найдёт список пустым и сразу вернётся).
+     */
+    private static final class ProjectionSkeleton
+    {
+        private static boolean initDone;
+        private static boolean initOk;
+        private static Field pendingRequestsField;
+        private static Field lockField;
+        private static java.lang.reflect.Method catchupMethod;
+        private static java.lang.reflect.Method redrawsMethod;
+
+        private ProjectionSkeleton()
+        {
+        }
+
+        /** @return причина, по которой показывать рано, либо {@code null} */
+        static String blockReason(ITextViewer viewer)
+        {
+            if (!(viewer instanceof ProjectionViewer projection))
+                return null;
+            if (!init())
+                return null;
+            try
+            {
+                Object redraws = redrawsMethod.invoke(projection);
+                if (Boolean.FALSE.equals(redraws))
+                    return "redrawOff"; //$NON-NLS-1$
+                if (runPendingCatchups(projection) > 0)
+                    return "catchup"; //$NON-NLS-1$
+            }
+            catch (Exception | LinkageError e)
+            {
+                initOk = false;
+                SmartContentAssistProcessor.uiBlockLogThrowable("show.skeleton.err", e); //$NON-NLS-1$
+            }
+            return null;
+        }
+
+        private static int runPendingCatchups(ProjectionViewer projection) throws Exception
+        {
+            Object lock = lockField.get(projection);
+            Object pending = pendingRequestsField.get(projection);
+            if (lock == null || !(pending instanceof List<?> list))
+                return 0;
+            long t0 = System.nanoTime();
+            int n = 0;
+            while (true)
+            {
+                Object event;
+                synchronized (lock)
+                {
+                    if (list.isEmpty())
+                        break;
+                    event = list.remove(0);
+                }
+                n++;
+                try
+                {
+                    catchupMethod.invoke(projection, event);
+                }
+                catch (java.lang.reflect.InvocationTargetException ite)
+                {
+                    if (!(ite.getCause() instanceof BadLocationException))
+                        throw ite;
+                    // Как штатный runnable: полная переинициализация проекции и очистка.
+                    try
+                    {
+                        catchupMethod.invoke(projection, (Object)null);
+                    }
+                    finally
+                    {
+                        synchronized (lock)
+                        {
+                            list.clear();
+                        }
+                    }
+                    break;
+                }
+            }
+            if (n > 0)
+            {
+                SmartContentAssistProcessor.uiBlockLog("show.catchup", "n=" + n //$NON-NLS-1$ //$NON-NLS-2$
+                    + " ms=" + ((System.nanoTime() - t0) / 1_000_000L)); //$NON-NLS-1$
+            }
+            return n;
+        }
+
+        private static boolean init()
+        {
+            if (initDone)
+                return initOk;
+            initDone = true;
+            try
+            {
+                pendingRequestsField = ProjectionViewer.class.getDeclaredField("fPendingRequests"); //$NON-NLS-1$
+                pendingRequestsField.setAccessible(true);
+                lockField = ProjectionViewer.class.getDeclaredField("fLock"); //$NON-NLS-1$
+                lockField.setAccessible(true);
+                catchupMethod = ProjectionViewer.class.getDeclaredMethod(
+                    "catchupWithProjectionAnnotationModel", AnnotationModelEvent.class); //$NON-NLS-1$
+                catchupMethod.setAccessible(true);
+                redrawsMethod = TextViewer.class.getDeclaredMethod("redraws"); //$NON-NLS-1$
+                redrawsMethod.setAccessible(true);
+                initOk = true;
+            }
+            catch (Exception | LinkageError e)
+            {
+                initOk = false;
+                // Определить момент применения свёрток нечем: показываем по готовности.
+                SmartContentAssistProcessor.uiBlockLogThrowable("show.skeleton.noReflect", e); //$NON-NLS-1$
+            }
+            return initOk;
+        }
+    }
+
+    /**
      * Временный зонд: в лог {@code assist-ui-block} резкий необъяснённый
-     * скачок модельной каретки или верхней строки вьюпорта, плюс высота строк
-     * {@code StyledText} после ввода (удвоение межстрочного интервала на экране).
+     * скачок модельной каретки или верхней строки вьюпорта.
      */
     private static final class InputJumpProbe
     {
         private static final int CARET_JUMP_CHARS = 80;
         private static final int VIEWPORT_JUMP_LINES = 4;
         private static final int TYPING_WINDOW_MS = 800;
-        private static final int LINE_WATCH_MS = 8000;
         private static final int EXPLAIN_PAD = 8;
 
         private final ContentAssistSessionReloader host;
         private CaretListener caretListener;
         private IViewportListener viewportListener;
         private long typingUntilNs;
-        private long lineWatchUntilNs;
         private int lastModel = -1;
         private int lastWidget = -1;
         private int lastTop = -1;
@@ -5263,14 +5625,6 @@ return;
         private int lastDocInserted;
         private int lastDocNewlines;
         private long lastDocNs;
-        private int lastDefH = Integer.MIN_VALUE;
-        private int lastSpacing = Integer.MIN_VALUE;
-        private int lastStep = Integer.MIN_VALUE;
-        private int lastH0 = Integer.MIN_VALUE;
-        private int lastH1 = Integer.MIN_VALUE;
-        private int lastClientH = Integer.MIN_VALUE;
-        private boolean lastWide;
-        private String lastLineFrom = ""; //$NON-NLS-1$
 
         InputJumpProbe(ContentAssistSessionReloader host)
         {
@@ -5298,9 +5652,7 @@ return;
 
         void noteTyping()
         {
-            long now = System.nanoTime();
-            typingUntilNs = now + TYPING_WINDOW_MS * 1_000_000L;
-            lineWatchUntilNs = now + LINE_WATCH_MS * 1_000_000L;
+            typingUntilNs = System.nanoTime() + TYPING_WINDOW_MS * 1_000_000L;
         }
 
         void aboutToChange(DocumentEvent event)
@@ -5341,7 +5693,6 @@ return;
             if (lastModel < 0)
             {
                 remember(model, widgetOff, top);
-                sampleLineMetrics(text, "caret"); //$NON-NLS-1$
                 return;
             }
             int dModel = model - lastModel;
@@ -5358,7 +5709,6 @@ return;
                 log("inputJump", model, widgetOff, top, dModel, dWidget, dTop, "why=" + why); //$NON-NLS-1$ //$NON-NLS-2$
             }
             remember(model, widgetOff, top);
-            sampleLineMetrics(text, "caret"); //$NON-NLS-1$
         }
 
         private boolean explainedByDoc(int model, int absDelta)
@@ -5387,68 +5737,6 @@ return;
         private boolean inTypingWindow()
         {
             return System.nanoTime() <= typingUntilNs;
-        }
-
-        private boolean inLineWatch()
-        {
-            return System.nanoTime() <= lineWatchUntilNs;
-        }
-
-        /**
-         * Высота строк виджета. Только с каретки/вьюпорта — не из {@code SWT.Paint}:
-         * {@code getLinePixel} во время кадра портит отрисовку.
-         */
-        private void sampleLineMetrics(StyledText text, String from)
-        {
-            if (text == null || text.isDisposed() || !inLineWatch())
-                return;
-            int defH = text.getLineHeight();
-            int spacing = text.getLineSpacing();
-            int top = text.getTopIndex();
-            int lines = text.getLineCount();
-            int h0 = top >= 0 && top < lines ? text.getLineHeight(top) : -1;
-            int h1 = top >= 0 && top + 1 < lines ? text.getLineHeight(top + 1) : -1;
-            int step = -1;
-            if (top >= 0 && top + 1 < lines)
-                step = text.getLinePixel(top + 1) - text.getLinePixel(top);
-            int clientH = text.getClientArea().height;
-            boolean wide = defH > 0
-                && (spacing >= defH / 2
-                    || h0 >= defH + defH / 2
-                    || step >= defH + defH / 2);
-            boolean changed = defH != lastDefH || spacing != lastSpacing || step != lastStep
-                || h0 != lastH0 || h1 != lastH1 || clientH != lastClientH || wide != lastWide;
-            if (!changed)
-                return;
-            lastDefH = defH;
-            lastSpacing = spacing;
-            lastStep = step;
-            lastH0 = h0;
-            lastH1 = h1;
-            lastClientH = clientH;
-            lastWide = wide;
-            lastLineFrom = from;
-            if (wide)
-            {
-                long hold = System.nanoTime() + LINE_WATCH_MS * 1_000_000L;
-                if (hold > lineWatchUntilNs)
-                    lineWatchUntilNs = hold;
-            }
-            emitLineMetrics();
-        }
-
-        private void emitLineMetrics()
-        {
-            int visDef = lastDefH > 0 ? lastClientH / lastDefH : -1;
-            int visStep = lastStep > 0 ? lastClientH / lastStep : -1;
-            String where = lastWide ? "lineMetrics.wide" : "lineMetrics"; //$NON-NLS-1$ //$NON-NLS-2$
-            SmartContentAssistProcessor.uiBlockLog(where, "from=" + lastLineFrom //$NON-NLS-1$
-                + " defH=" + lastDefH + " spacing=" + lastSpacing //$NON-NLS-1$ //$NON-NLS-2$
-                + " step=" + lastStep + " h0=" + lastH0 + " h1=" + lastH1 //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " clientH=" + lastClientH + " visDef=" + visDef //$NON-NLS-1$ //$NON-NLS-2$
-                + " visStep=" + visStep //$NON-NLS-1$
-                + " top=" + lastTop //$NON-NLS-1$
-                + " popup=" + ContentAssistPopupSync.isPopupVisible(host.assistant)); //$NON-NLS-1$
         }
 
         private void remember(int model, int widgetOff, int top)
@@ -5535,8 +5823,7 @@ return;
                     continue;
                 String mn = st[i].getMethodName();
                 if ("getStackTrace".equals(mn) || "jumpTrace".equals(mn) || "log".equals(mn)
-                    || "check".equals(mn) || "onCaret".equals(mn) || "onViewport".equals(mn)
-                    || "sampleLineMetrics".equals(mn) || "emitLineMetrics".equals(mn))
+                    || "check".equals(mn) || "onCaret".equals(mn) || "onViewport".equals(mn))
                     continue;
                 int dot = cn.lastIndexOf('.');
                 String shortName = dot >= 0 ? cn.substring(dot + 1) : cn;
