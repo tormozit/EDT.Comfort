@@ -12,6 +12,10 @@ plugin/target/
 feature/target/
 target/target/
 
+# JDT output (plugin/.classpath → bin/) — производные от *.java
+plugin/bin/
+*.class
+
 # P2 update site (site/features/, plugins/, *.jar) — коммитить для publish.yml
 
 # Локальное зеркало gh-pages (site/sync-deploy.ps1)

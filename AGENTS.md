@@ -337,11 +337,16 @@ EDT 2026.1 (бандлы `23.0.1`, API местами несовместим): J
 
 ## Автодополнение BSL: первое открытие попапа — только UI
 
-**Первое** открытие попапа автодополнения в **экземпляре редактора** (`SmartContentAssistProcessor`) — только на UI-потоке, штатным `delegate.compute` / `showPossibleCompletions`. Так создаются слушатель DataEvent, dispose-слушатель виджета и сам попап. **Запрещено** уносить это первое открытие в Job / `scheduleWordListInBackground` / `prepareWordListAutoOpen` (`wordDefer`).
+Правило про UI существует ради одного: штатный расчёт побочно чистит `DataEvent` у `BslDocumentListener`, и без изоляции фоновый расчёт ломает LinkedMode (каретка не встаёт между скобок). Решает не поток, а изоляция.
 
-Флаг: `wordListSeededOnUi`. Пока `false` — только UI. После успешного первого UI-compute в этом экземпляре повторные открытия, `delegate.compute` и `filterAndSort` для автооткрытия — в фоне; показ уже готового списка — `cachedListOnly`.
+Порядок: `warmBslDocumentListener` создаёт слушатель `DataEvent` без самого расчёта. Дальше `BslDataEventGuard.install(doc)`:
 
-Не путать с другими исключениями: Ctrl+Space — UI (пользователь ждал список); список **членов после «.»** можно считать в фоне.
+- вернул `true` — расчёт идёт в фон с первого же символа (`scheduleWordListInBackground`);
+- вернул `false` — фон **запрещён** (`wordListSkip("noGuard")`), первый расчёт делает UI, но **только через ворота показа** (`ContentAssistSessionReloader.requestGatedFirstUiOpen` → `openCompletionAutoEdtPopup(..., cachedListOnly=false)`).
+
+**Показ окна из фона — только через ворота** `ContentAssistSessionReloader.requestGatedShow`. Прямой `Display.asyncExec` и слушатель `SWT.Paint` для показа запрещены: SWT берёт асинхронные задачи по одной и только при пустой очереди сообщений, поэтому показ вставал в очередь за раскраской большого модуля (7 с в логе 11.09.2026). Ворота работают на `Display.timerExec`, ждут применения свёрток (`ProjectionViewer`) и дорисовки кадра.
+
+Не путать с другими исключениями: Ctrl+Space — UI (пользователь ждал список); список **членов после «.»** считается в фоне.
 
 ## OpenHelper.openEditor(EObject, EStructuralFeature) — feature не «активировать свойство»
 

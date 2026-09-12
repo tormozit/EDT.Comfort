@@ -849,6 +849,11 @@ if (viewer != null && isPopupVisible(assistant))
             fFilteredProposalsField.get(popup);
         if (fComputedProposalsField != null && applied != null)
             fComputedProposalsField.set(popup, applied);
+        if (viewer != null)
+        {
+            alignReplacementToTypedPrefix(applied, viewer.getDocument(),
+                SmartContentAssistProcessor.resolveWidgetCaret(viewer));
+        }
 installPopupScrollWatcher(popup, assistant, viewer, processor);
 
         int tableRows = tableItemCount(popup);
@@ -2620,6 +2625,42 @@ return creatorResolved && creatorPatched;
         display.timerExec(FILTER_DEBOUNCE_MS, task);
     }
 
+    /**
+     * Ввод при открытом окне: запустить перефильтровку списка сразу, не дожидаясь очереди.
+     *
+     * <p>Штатный {@code CompletionProposalPopup.filterProposals} ставит
+     * {@code fFilterRunnable} через {@code Display.asyncExec}, а наш prepend только там и
+     * оживает. SWT берёт асинхронные задачи по одной и лишь при пустой очереди сообщений,
+     * поэтому на большом модуле список обновлялся спустя секунды (замер 12.09.2026: буква
+     * «й» — 10 с). Планируем ту же самую задачу ({@link #scheduleDebouncedNativeFilter})
+     * таймером: он идёт вне общей очереди.
+     *
+     * <p>Штатную постановку не трогаем: когда очередь дойдёт, задача просто увидит уже
+     * применённый фильтр и выйдет.
+     */
+    public static void kickPopupFilter(ContentAssistant assistant, SourceViewer viewer)
+    {
+        if (!ComfortSettings.isReplaceListFiltersEnabled() || assistant == null || viewer == null)
+            return;
+        if (!isPopupVisible(assistant))
+            return;
+        try
+        {
+            Object popup = getPopup(assistant);
+            if (popup == null)
+                return;
+            initPopupReflection(popup);
+            Runnable original = ORIGINAL_FILTER_RUNNABLES.get(popup);
+            if (original == null)
+                return; // нашего prepend нет — механику окна не подменяем
+            scheduleDebouncedNativeFilter(popup, viewer, original);
+        }
+        catch (Exception e)
+        {
+            ContentAssistDebug.log("kickPopupFilter ERROR: " + e.getMessage()); //$NON-NLS-1$
+        }
+    }
+
     private static void cancelDebouncedNativeFilter(Object popup)
     {
         if (popup == null)
@@ -3902,6 +3943,127 @@ ensureFilterPending(popup);
         }
     }
 
+    /**
+     * Начало замены — на начале набранного слова, а не там, где стоял зонд расчёта.
+     *
+     * <p>Список живёт дольше одного такта: он кэшируется (в том числе каталогом типов
+     * после «Новый») и переживает следующие буквы. Штатный
+     * {@code ConfigurableCompletionProposal.apply(viewer,…)} заменяет
+     * {@code [replacementOffset, каретка)}, поэтому предложение, посчитанное для зонда в
+     * конце слова, оставляло начало набранного слова на экране: вставка
+     * {@code СхемаЗапроса} на слово {@code схем} давала {@code сСхемаЗапроса}.
+     * Замер 12.09.2026: каталог типов собран в 10:05:41 при {@code probe=1111347}, а слово
+     * при вставке в 10:08:39 начиналось с 1111346 — ровно один символ разницы.
+     *
+     * <p>Правим сами предложения popup, а не нашу обёртку {@link SmartCompletionProposal}:
+     * popup часто держит штатные необёрнутые предложения EDT и зовёт их {@code apply}
+     * напрямую (см. {@link #keepWhitespaceBeforeCaret}); в логе такого списка
+     * {@code wrapped=0}.
+     */
+    private static void alignReplacementToTypedPrefix(List<ICompletionProposal> list,
+                                                      IDocument document, int caret)
+    {
+        if (list == null || list.isEmpty() || document == null || caret < 0)
+            return;
+        String prefix = SmartContentAssistProcessor.computeIdentifierFilter(document, caret);
+        if (prefix.isEmpty())
+            return;
+        int identStart = caret - prefix.length();
+        if (identStart < 0)
+            return;
+        for (ICompletionProposal proposal : list)
+        {
+            ICompletionProposal raw = SmartContentAssistProcessor.unwrapProposal(proposal);
+            if (!(raw instanceof ConfigurableCompletionProposal cp))
+                continue;
+            try
+            {
+                int start = cp.getReplacementOffset();
+                // Смещение вне документа или правее каретки — штатная вставка бросит
+                // BadLocationException, а Xtext откатит документ целиком через
+                // IDocument.set (на большом модуле это минуты). Переносим на слово.
+                if (start < 0 || start > caret || start > document.getLength())
+                {
+                    cp.setReplacementOffset(identStart);
+                    cp.setReplacementLength(Math.max(0, caret - identStart));
+                    continue;
+                }
+                // Только внутри набранного слова. Начало замены левее префикса не трогаем:
+                // там своя механика (пробел у «=», member-access, шаблоны).
+                if (start <= identStart)
+                    continue;
+                // Расширяем замену назад только по символам, которые предложение вставит
+                // заново. Иначе на «#Обл» с предложением «Область …» потерялась бы решётка.
+                if (!insertsBack(cp, document, identStart, start))
+                    continue;
+                cp.setReplacementOffset(identStart);
+                cp.setReplacementLength(Math.max(0, caret - identStart));
+            }
+            catch (Exception | StackOverflowError e)
+            {
+                // Чтение текста предложения может потянуть разрешение ссылок модели EDT
+                // (в логе 12.09.2026 11:22 оно ушло в рекурсию installProxiesForBlock).
+                // Это не повод ронять цикл событий: пункт остаётся как есть.
+                SmartContentAssistProcessor.uiBlockLogThrowable("align.replacement.err", e); //$NON-NLS-1$
+                return;
+            }
+        }
+    }
+
+    /**
+     * Начинается ли вставляемый текст с того куска слова, который окажется в замене при
+     * сдвиге её начала с {@code start} на {@code identStart}.
+     */
+    private static boolean insertsBack(ConfigurableCompletionProposal cp, IDocument document,
+                                       int identStart, int start)
+    {
+        String insert = SmartCompletionProposal.EqualsSpacePad.readInsertText(cp);
+        if (insert == null || insert.isEmpty())
+            insert = cp.getReplacementString();
+        if (insert == null || insert.length() < start - identStart)
+            return false;
+        try
+        {
+            String typed = document.get(identStart, start - identStart);
+            return insert.regionMatches(true, 0, typed, 0, typed.length());
+        }
+        catch (BadLocationException e)
+        {
+            return false;
+        }
+    }
+
+    /** См. {@link #alignReplacementToTypedPrefix(List, IDocument, int)}: оба списка popup. */
+    static void alignReplacementToTypedPrefix(ContentAssistant assistant, IDocument document,
+                                              int caret)
+    {
+        try
+        {
+            Object popup = getPopup(assistant);
+            if (popup == null || document == null || caret < 0)
+                return;
+            initPopupReflection(popup);
+            if (fFilteredProposalsField != null)
+            {
+                @SuppressWarnings("unchecked")
+                List<ICompletionProposal> filtered =
+                    (List<ICompletionProposal>) fFilteredProposalsField.get(popup);
+                alignReplacementToTypedPrefix(filtered, document, caret);
+            }
+            if (fComputedProposalsField != null)
+            {
+                @SuppressWarnings("unchecked")
+                List<ICompletionProposal> computed =
+                    (List<ICompletionProposal>) fComputedProposalsField.get(popup);
+                alignReplacementToTypedPrefix(computed, document, caret);
+            }
+        }
+        catch (Exception ignored)
+        {
+            // список попапа — не наша структура: её отсутствие не должно ломать показ
+        }
+    }
+
     private static boolean isSpacesOnly(String text)
     {
         if (text == null || text.isEmpty())
@@ -4238,6 +4400,17 @@ ensureFilterPending(popup);
             else
                 show.run();
             visible = isPopupVisible(assistant);
+            if (visible)
+            {
+                // Список мог прийти из кэша или каталога типов: начало замены у его
+                // предложений — от зонда того расчёта, а не от набранного сейчас слова.
+                SourceViewer active = ContentAssistSessionReloader.getActiveViewer();
+                if (active != null)
+                {
+                    alignReplacementToTypedPrefix(assistant, active.getDocument(),
+                        SmartContentAssistProcessor.resolveWidgetCaret(active));
+                }
+            }
             return visible;
         }
         catch (Exception e)

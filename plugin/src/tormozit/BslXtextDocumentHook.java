@@ -101,12 +101,29 @@ public final class BslXtextDocumentHook implements IStartup
     }
 
     /**
+     * Поток фонового расчёта автодополнения. Ctrl+Space считает список на UI и это
+     * ожидание пропускает; фоновый расчёт того же списка должен вести себя так же,
+     * иначе он отсиживает до 1000 мс там, где эталон не ждёт ничего.
+     */
+    private static final ThreadLocal<Boolean> ASSIST_BACKGROUND = new ThreadLocal<>();
+
+    /** Метка на время фонового расчёта автодополнения. Снимать в {@code finally}. */
+    public static void markAssistBackground(boolean on)
+    {
+        if (on)
+            ASSIST_BACKGROUND.set(Boolean.TRUE);
+        else
+            ASSIST_BACKGROUND.remove();
+    }
+
+    /**
      * Вызов из инструментированного {@code waitUpdatingDataModel}: {@code true} —
      * сразу выйти, не ждать смены parse result.
      */
     public static boolean skipWaitUpdatingDataModel()
     {
-        boolean ui = Display.getCurrent() != null;
+        boolean ui = Display.getCurrent() != null
+            || Boolean.TRUE.equals(ASSIST_BACKGROUND.get());
         if (saveActive && SaveDebug.isEnabled())
         {
             int n = ui ? SAVE_SKIP.incrementAndGet() : SAVE_WAIT.incrementAndGet();
