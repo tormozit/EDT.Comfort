@@ -66,8 +66,9 @@ import com._1c.g5.v8.dt.mcore.TypeItem;
  */
 public final class BslDocCommentComputedTypes
 {
-    /** Флажок проекта: «Объединять рассчитанный тип с документирующим». */
-    public static final String PREF_MERGE_COMPUTED_TYPE = "comfort.bsl.mergeComputedType"; //$NON-NLS-1$
+    /** Флажок проекта: «Расширенный расчет типов». */
+    public static final String PREF_EXTENDED_TYPE_COMPUTATION =
+        "comfort.bsl.extendedTypeComputation"; //$NON-NLS-1$
 
     /** Узел проектных параметров EDT со штатным флажком замещения типов. */
     private static final String EDT_BSL_NODE = "com._1c.g5.v8.dt.bsl"; //$NON-NLS-1$
@@ -75,8 +76,6 @@ public final class BslDocCommentComputedTypes
     private static final String EDT_REPLACE_KEY = "replaceTypesByDocumentationComment"; //$NON-NLS-1$
 
     private static final String TAG = "BslDocComputedTypes"; //$NON-NLS-1$
-    /** Тема временного лога: {@code .tmp/temp-logs/issue509.log}. Снять после подтверждения. */
-    private static final String LOG_TOPIC = "issue509"; //$NON-NLS-1$
 
     private static final String TARGET_UTILS =
         "com._1c.g5.v8.dt.bsl.documentation.comment.BslCommentUtils"; //$NON-NLS-1$
@@ -120,17 +119,6 @@ public final class BslDocCommentComputedTypes
     private static final AtomicBoolean installed = new AtomicBoolean();
 
     /**
-     * Состояние подмены для отложенного вывода. В пути загрузки классов нельзя ни логировать,
-     * ни делать что-либо, тянущее загрузку классов и ввод-вывод: при сбое Equinox молча
-     * отбрасывает хук, и получается пустой лог при неработающей подмене. Поэтому здесь только
-     * присваивание строки, а вывод делает {@link #logWeaveStatus()} с обычного потока.
-     */
-    static volatile String weaveStatus = "weave не вызывался"; //$NON-NLS-1$
-
-    /** То же для {@code CreatorTreeState} — подмены две, и отказать может любая. */
-    static volatile String creatorWeaveStatus = "weave не вызывался"; //$NON-NLS-1$
-
-    /**
      * Методы, для которых расчёт типов уже идёт в этом потоке. Досчёт целевой функции
      * запускается изнутри разбора, поэтому без такого списка взаимные ссылки
      * ({@code Кодол} → {@code Конструктор} → {@code Кодол}) дают бесконечную рекурсию.
@@ -151,9 +139,9 @@ public final class BslDocCommentComputedTypes
      * Флажок проекта по имени проекта. Чтение проектных параметров идёт через службу
      * параметров Eclipse с блокировками, а спрашивать флажок приходится на каждый разбор
      * комментария каждого метода — это заметная доля нагрузки при сборке. Пишет сюда только
-     * {@link #setMergeEnabled}, других источников изменения нет.
+     * {@link #setExtendedTypesEnabled}, других источников изменения нет.
      */
-    private static final java.util.Map<String, Boolean> mergeEnabledCache =
+    private static final java.util.Map<String, Boolean> extendedTypesCache =
         new java.util.concurrent.ConcurrentHashMap<>();
 
     /**
@@ -166,10 +154,6 @@ public final class BslDocCommentComputedTypes
      * замещать» ещё до нашей вставки.
      */
     private static final ThreadLocal<Integer> sideCommentMark = new ThreadLocal<>();
-
-    /** Методы, по которым итог уже записан в лог: строку лога тоже не строим на каждый вызов. */
-    private static final java.util.Set<String> loggedMethods =
-        java.util.concurrent.ConcurrentHashMap.newKeySet();
 
     /**
      * Результат расчёта на метод. {@code parseTemplateComment} зовётся десятки раз за сессию,
@@ -195,54 +179,20 @@ public final class BslDocCommentComputedTypes
         BundleContext context = bundle != null ? bundle.getBundleContext() : null;
         if (context != null)
             context.registerService(WeavingHook.class, new ParseWeavingHook(), null);
-        Global.tempLog(LOG_TOPIC, "installWeavingHook: зарегистрирован=" //$NON-NLS-1$
-            + (context != null));
-    }
-
-    /** Вывод состояния подмены — зовётся отложенным заданием из активатора. */
-    public static void logWeaveStatus()
-    {
-        Global.tempLog(LOG_TOPIC, "состояние подмены: комментарий — " + weaveStatus //$NON-NLS-1$
-            + ", боковой комментарий — " + creatorWeaveStatus); //$NON-NLS-1$
-    }
-
-    /**
-     * Временная диагностика issue 509: каждый вызов, без порогов и счётчиков. Ограничение
-     * числа записей уже один раз стоило прогона вслепую — флажок включили в середине сессии,
-     * а диагностика к тому времени замолчала. Безопасно: путь выполнения, а не загрузки классов.
-     */
-    /**
-     * Уже записанные строки лога: разбор комментария идёт для каждого метода десятки раз за
-     * проход, и без отсечения повторов файл раздувается до мегабайтов, теряя полезное.
-     */
-    private static final java.util.Set<String> loggedOnce =
-        java.util.Collections.synchronizedSet(new java.util.HashSet<>());
-
-    private static void traceFirstCalls(String detail)
-    {
-        if (loggedOnce.add(detail))
-            Global.tempLog(LOG_TOPIC, "aPTC: " + detail); //$NON-NLS-1$
-    }
-
-    /** Исключение пишем по одному на место — стек повторяется тысячи раз. */
-    private static void logExceptionOnce(String label, Throwable t)
-    {
-        if (loggedOnce.add(label + '|' + t))
-            Global.tempLogException(LOG_TOPIC, label, t);
     }
 
     // === Настройка проекта ===
 
-    /** Флажок «Объединять рассчитанный тип с документирующим» для проекта. */
-    public static boolean isMergeEnabled(IProject project)
+    /** Флажок «Расширенный расчет типов» для проекта. */
+    public static boolean isExtendedTypesEnabled(IProject project)
     {
         if (project == null || !project.isAccessible())
             return false;
-        Boolean cached = mergeEnabledCache.get(project.getName());
+        Boolean cached = extendedTypesCache.get(project.getName());
         if (cached != null)
             return cached.booleanValue();
         boolean value = readMergeEnabled(project);
-        mergeEnabledCache.put(project.getName(), Boolean.valueOf(value));
+        extendedTypesCache.put(project.getName(), Boolean.valueOf(value));
         return value;
     }
 
@@ -251,7 +201,7 @@ public final class BslDocCommentComputedTypes
         try
         {
             return new ProjectScope(project).getNode(Activator.PLUGIN_ID)
-                .getBoolean(PREF_MERGE_COMPUTED_TYPE, false);
+                .getBoolean(PREF_EXTENDED_TYPE_COMPUTATION, false);
         }
         catch (Throwable t)
         {
@@ -265,16 +215,16 @@ public final class BslDocCommentComputedTypes
      * комментария у присваивания, и включённый даёт там «заменять», как требует постановка.
      * При выключении нашего флажка штатный не трогаем — его значение принадлежит пользователю.
      */
-    public static boolean setMergeEnabled(IProject project, boolean enabled)
+    public static boolean setExtendedTypesEnabled(IProject project, boolean enabled)
     {
         if (project == null || !project.isAccessible())
             return false;
         try
         {
             IEclipsePreferences own = new ProjectScope(project).getNode(Activator.PLUGIN_ID);
-            own.putBoolean(PREF_MERGE_COMPUTED_TYPE, enabled);
+            own.putBoolean(PREF_EXTENDED_TYPE_COMPUTATION, enabled);
             own.flush();
-            mergeEnabledCache.put(project.getName(), Boolean.valueOf(enabled));
+            extendedTypesCache.put(project.getName(), Boolean.valueOf(enabled));
             if (enabled)
             {
                 IEclipsePreferences edt = new ProjectScope(project).getNode(EDT_BSL_NODE);
@@ -285,7 +235,7 @@ public final class BslDocCommentComputedTypes
         }
         catch (Throwable t)
         {
-            Global.logError(TAG, "setMergeEnabled", t); //$NON-NLS-1$
+            Global.logError(TAG, "setExtendedTypesEnabled", t); //$NON-NLS-1$
             return false;
         }
     }
@@ -339,36 +289,21 @@ public final class BslDocCommentComputedTypes
         try
         {
             if (comment == null || !(method instanceof EObject methodObject))
-            {
-                traceFirstCalls("метод не EObject"); //$NON-NLS-1$
                 return comment;
-            }
             // Порядок проверок — от дешёвых к дорогим: разбор комментария идёт для каждого
             // метода каждого модуля, и всё, что здесь делается, множится на их число.
             if (!isFunction(methodObject))
                 return comment;
             if (returnMark(comment) == MARK_BAN)
                 return comment;
-            IProject project = resolveProject(methodObject);
-            boolean enabled = isMergeEnabled(project);
-            String name = methodName(methodObject);
-            if (loggedMethods.add(name))
-            {
-                traceFirstCalls("метод=" + name //$NON-NLS-1$
-                    + " проект=" + (project == null ? "null" : project.getName()) //$NON-NLS-1$ //$NON-NLS-2$
-                    + " флажок=" + enabled); //$NON-NLS-1$
-            }
-            if (!enabled)
+            if (!isExtendedTypesEnabled(resolveProject(methodObject)))
                 return comment;
             List<?> computed = typeCache.get(methodObject);
             if (computed == null)
             {
                 java.util.Set<Object> guard = computing.get();
                 if (!guard.add(methodObject))
-                {
-                    traceFirstCalls(name + ": повторный вход — отсечено"); //$NON-NLS-1$
                     return comment;
-                }
                 try
                 {
                     List<?> result = computeTypes(methodObject);
@@ -377,13 +312,10 @@ public final class BslDocCommentComputedTypes
                         // Расчёт не состоялся (нет сервиса, досчёт не сработал). Пустоту не
                         // кэшируем: иначе первый же неудачный момент закрыл бы методу дорогу
                         // к настоящему расчёту при следующем обращении.
-                        traceFirstCalls(name + ": расчёт не состоялся — без кэша"); //$NON-NLS-1$
                         return comment;
                     }
                     computed = result;
                     typeCache.put(methodObject, computed);
-                    traceFirstCalls(name + ": рассчитано впервые: типов=" //$NON-NLS-1$
-                        + computed.size());
                 }
                 finally
                 {
@@ -393,12 +325,9 @@ public final class BslDocCommentComputedTypes
             if (computed.isEmpty())
                 return comment;
             fillReturnSection(comment, computed);
-            Global.tempLog(LOG_TOPIC, "дописана секция возврата: типов=" //$NON-NLS-1$
-                + computed.size());
         }
-        catch (Throwable t)
+        catch (Throwable ignored)
         {
-            logExceptionOnce("afterParseTemplateComment", t); //$NON-NLS-1$
         }
         return comment;
     }
@@ -419,9 +348,8 @@ public final class BslDocCommentComputedTypes
         {
             sideCommentMark.set(Integer.valueOf(comment == null ? MARK_NONE : returnMark(comment)));
         }
-        catch (Throwable t)
+        catch (Throwable ignored)
         {
-            logExceptionOnce("afterParseSideComment", t); //$NON-NLS-1$
         }
         return comment;
     }
@@ -446,14 +374,12 @@ public final class BslDocCommentComputedTypes
             Integer mark = sideCommentMark.get();
             if (mark == null || mark.intValue() != MARK_FORCE)
                 return replace;
-            if (!isMergeEnabled(resolveProject(eObject)))
+            if (!isExtendedTypesEnabled(resolveProject(eObject)))
                 return replace;
-            traceFirstCalls("боковой комментарий: знак ^ — объединяем"); //$NON-NLS-1$
             return false;
         }
-        catch (Throwable t)
+        catch (Throwable ignored)
         {
-            logExceptionOnce("afterIsReplaceTypes", t); //$NON-NLS-1$
         }
         return replace;
     }
@@ -547,7 +473,6 @@ public final class BslDocCommentComputedTypes
             fill.invoke(typeSection, items, "", Boolean.FALSE, context); //$NON-NLS-1$
             count = definitionCount(typeSection);
         }
-        traceFirstCalls("секция собрана: определений=" + count); //$NON-NLS-1$
         if (count == 0)
             return;
         Global.invoke(returnSection, "addTypeSection", typeSection); //$NON-NLS-1$
@@ -560,13 +485,6 @@ public final class BslDocCommentComputedTypes
     {
         Object defs = Global.invoke(typeSection, "getTypeDefinitions"); //$NON-NLS-1$
         return defs instanceof List<?> list ? list.size() : 0;
-    }
-
-    /** Имя метода для диагностики (может отсутствовать у неполной модели). */
-    private static String methodName(EObject method)
-    {
-        Object name = Global.invoke(method, "getName"); //$NON-NLS-1$
-        return name instanceof String value ? value : "?"; //$NON-NLS-1$
     }
 
     /**
@@ -588,32 +506,20 @@ public final class BslDocCommentComputedTypes
     {
         Resource resource = target.eResource();
         if (resource == null || resource.getURI() == null)
-        {
-            traceFirstCalls(methodName(target) + ": computeTypes: нет ресурса"); //$NON-NLS-1$
             return null;
-        }
         IResourceServiceProvider rsp = IResourceServiceProvider.Registry.INSTANCE
             .getResourceServiceProvider(resource.getURI());
         if (rsp == null)
-        {
-            traceFirstCalls(methodName(target) + ": computeTypes: нет IResourceServiceProvider"); //$NON-NLS-1$
             return null;
-        }
         try
         {
             Class<?> computerClass = Class.forName(TYPES_COMPUTER, true, bslClassLoader());
             Object computer = rsp.get(computerClass);
             if (computer == null)
-            {
-                traceFirstCalls(methodName(target) + ": computeTypes: TypesComputer не получен"); //$NON-NLS-1$
                 return null;
-            }
             Object envs = Global.invoke(target, "environments"); //$NON-NLS-1$
             if (envs == null)
-            {
-                traceFirstCalls(methodName(target) + ": computeTypes: environments пусты"); //$NON-NLS-1$
                 return null;
-            }
             Object result = Global.invoke(computer, "computeTypes", target, envs); //$NON-NLS-1$
             if (result instanceof List<?> list && !list.isEmpty())
                 return list;
@@ -625,9 +531,8 @@ public final class BslDocCommentComputedTypes
             result = Global.invoke(computer, "computeTypes", target, envs); //$NON-NLS-1$
             return result instanceof List<?> list ? list : null;
         }
-        catch (Throwable t)
+        catch (Throwable ignored)
         {
-            logExceptionOnce("computeTypes", t); //$NON-NLS-1$
             return null;
         }
     }
@@ -668,7 +573,6 @@ public final class BslDocCommentComputedTypes
             // Досчёт сам разбирает комментарии всех методов модуля, и каждый такой разбор
             // просился бы досчитать себя: вложенность множится на число методов. Защита по
             // одному методу (computing) этого не ловит — методы каждый раз разные.
-            traceFirstCalls(methodName(target) + ": досчёт уже идёт — пропуск"); //$NON-NLS-1$
             return false;
         }
         lightInstalling.set(Boolean.TRUE);
@@ -681,16 +585,10 @@ public final class BslDocCommentComputedTypes
             Object typeSystem = provider == null ? null
                 : Global.invoke(provider, "getTypeSystem", treeTypeSystemKind()); //$NON-NLS-1$
             if (typeSystem == null)
-            {
-                traceFirstCalls(methodName(target) + ": досчёт: ITypeSystem не получен"); //$NON-NLS-1$
                 return false;
-            }
             Object module = containerOfType(target, "com._1c.g5.v8.dt.bsl.model.Module"); //$NON-NLS-1$
             if (module == null)
-            {
-                traceFirstCalls(methodName(target) + ": досчёт: модуль не найден"); //$NON-NLS-1$
                 return false;
-            }
             Variable gate = BslFactory.eINSTANCE.createImplicitVariable();
             gate.setTypeStateProvider(new VariableTypeStateProviderCollector());
             for (java.lang.reflect.Method m : typeSystem.getClass().getMethods())
@@ -699,15 +597,11 @@ public final class BslDocCommentComputedTypes
                     || m.getParameterCount() != 6)
                     continue;
                 m.invoke(typeSystem, module, target, gate, null, Integer.valueOf(0), null);
-                traceFirstCalls(methodName(target) + ": досчёт выполнен"); //$NON-NLS-1$
                 return true;
             }
-            traceFirstCalls(methodName(target) + ": досчёт: метод не найден в " //$NON-NLS-1$
-                + typeSystem.getClass().getName());
         }
-        catch (Throwable t)
+        catch (Throwable ignored)
         {
-            logExceptionOnce("lightInstallTypeSystem", t); //$NON-NLS-1$
         }
         finally
         {
@@ -788,7 +682,6 @@ public final class BslDocCommentComputedTypes
 
     static byte[] transformClass(byte[] classfileBuffer)
     {
-        weaveStatus = "transformClass начат"; //$NON-NLS-1$
         ClassReader reader = new ClassReader(classfileBuffer);
         ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
         final AtomicBoolean touched = new AtomicBoolean();
@@ -806,7 +699,6 @@ public final class BslDocCommentComputedTypes
                 {
                     // Боковой комментарий: метода тут нет, считать по телу нечего — только
                     // запоминаем знак управления слиянием для следующего вопроса EDT.
-                    weaveStatus = "метод найден: боковой комментарий"; //$NON-NLS-1$
                     return new MethodVisitor(Opcodes.ASM9, mv)
                     {
                         @Override
@@ -826,7 +718,6 @@ public final class BslDocCommentComputedTypes
                 final int methodSlot = bslMethodSlot(descriptor, (access & Opcodes.ACC_STATIC) != 0);
                 if (methodSlot < 0)
                     return mv;
-                weaveStatus = "метод найден: " + name + descriptor; //$NON-NLS-1$
                 return new MethodVisitor(Opcodes.ASM9, mv)
                 {
                     @Override
@@ -845,7 +736,6 @@ public final class BslDocCommentComputedTypes
                 };
             }
         }, 0);
-        weaveStatus = touched.get() ? "вставка сделана" : weaveStatus + " (вставки нет)"; //$NON-NLS-1$ //$NON-NLS-2$
         return touched.get() ? writer.toByteArray() : null;
     }
 
@@ -858,7 +748,6 @@ public final class BslDocCommentComputedTypes
      */
     static byte[] transformCreatorClass(byte[] classfileBuffer)
     {
-        creatorWeaveStatus = "transformClass начат"; //$NON-NLS-1$
         ClassReader reader = new ClassReader(classfileBuffer);
         ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
         final AtomicBoolean touched = new AtomicBoolean();
@@ -872,7 +761,6 @@ public final class BslDocCommentComputedTypes
                 if (mv == null || !REPLACE_METHOD.equals(name) || !descriptor.endsWith(")Z")) //$NON-NLS-1$
                     return mv;
                 final int contextSlot = (access & Opcodes.ACC_STATIC) != 0 ? 0 : 1;
-                creatorWeaveStatus = "метод найден: " + name + descriptor; //$NON-NLS-1$
                 return new MethodVisitor(Opcodes.ASM9, mv)
                 {
                     @Override
@@ -890,8 +778,6 @@ public final class BslDocCommentComputedTypes
                 };
             }
         }, 0);
-        creatorWeaveStatus =
-            touched.get() ? "вставка сделана" : creatorWeaveStatus + " (вставки нет)"; //$NON-NLS-1$ //$NON-NLS-2$
         return touched.get() ? writer.toByteArray() : null;
     }
 
@@ -929,7 +815,6 @@ public final class BslDocCommentComputedTypes
             }
             if (!TARGET_UTILS.equals(wovenClass.getClassName()))
                 return;
-            weaveStatus = "weave вызван"; //$NON-NLS-1$
             try
             {
                 byte[] transformed = transformClass(wovenClass.getBytes());
@@ -945,13 +830,11 @@ public final class BslDocCommentComputedTypes
             }
             catch (Throwable t)
             {
-                weaveStatus = "weave: исключение " + t.getClass().getSimpleName(); //$NON-NLS-1$
             }
         }
 
         private void weaveCreator(WovenClass wovenClass)
         {
-            creatorWeaveStatus = "weave вызван"; //$NON-NLS-1$
             try
             {
                 byte[] transformed = transformCreatorClass(wovenClass.getBytes());
@@ -963,7 +846,6 @@ public final class BslDocCommentComputedTypes
             }
             catch (Throwable t)
             {
-                creatorWeaveStatus = "weave: исключение " + t.getClass().getSimpleName(); //$NON-NLS-1$
             }
         }
     }

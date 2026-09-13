@@ -333,6 +333,20 @@ public final class ContentAssistPopupSync
                     installFilterTrackerPrepend(assistant, viewer);
                     if (isPopupVisible(assistant))
                     {
+                        // Комментарий: список наш (процессор стоит и на партиции
+                        // __sl_comment), но контекст плоский — ни member-access, ни
+                        // literal/ИР-веток здесь нет, и «устаревший префикс» не про него:
+                        // база кэша в комментарии префиксом не сужена.
+                        if (SmartContentAssistProcessor.isCommentAssistContext(viewer, caret))
+                        {
+                            if (caret >= 0)
+                                SmartContentAssistProcessor.primeFilterTrackerOnly(viewer, caret);
+                            beginRecomputeTrigger("comment"); //$NON-NLS-1$
+                            runStockFilterRunnable(assistant);
+                            if (recomputePopupList(assistant, viewer, processor, caret))
+                                refreshAdditionalInfo(assistant);
+                            return;
+                        }
                         IDocument doc = viewer.getDocument();
                         boolean inLiteral = caret >= 0
                             && SmartContentAssistProcessor.isStringLiteralAssistContext(viewer, caret);
@@ -985,6 +999,18 @@ if (processor != null && processor.isIrWordsResolvedForContext()
                 String previousFilter = SmartFilterTracker.getCurrentFilter();
                 if (caret >= 0)
                     SmartContentAssistProcessor.primeFilterTrackerOnly(viewer, caret);
+                // Комментарий: контекст плоский — ни скобок, ни member-access, ни устаревшего
+                // префикса (база кэша там не сужена). Только фильтрация списка.
+                if (SmartContentAssistProcessor.isCommentAssistContext(doc, caret))
+                {
+                    runStockFilterRunnable(assistant);
+                    if (SmartAssistFilterState.isSmartFilterEnabled())
+                    {
+                        beginRecomputeTrigger("comment"); //$NON-NLS-1$
+                        recomputePopupList(assistant, viewer, processor);
+                    }
+                    return;
+                }
                 if (shouldClosePopupAtCaret(viewer, caret))
                 {
                     SmartContentAssistProcessor.uiBlockLog("hidePopup.paren", "caret=" + caret); //$NON-NLS-1$ //$NON-NLS-2$
@@ -2587,6 +2613,19 @@ return creatorResolved && creatorPatched;
                 // уже применил тот же фильтр: shouldRecomputePopupList вернёт false, и
                 // повторный validate() по 1000+ proposals на UI-потоке бессмысленен.
                 String currentFilter = SmartFilterTracker.getCurrentFilter();
+                // Комментарий: плоский контекст, см. такую же ветку в caret-debounce.
+                if (SmartContentAssistProcessor.isCommentAssistContext(doc, caret))
+                {
+                    if (assistant == null)
+                        return;
+                    runStockFilterRunnable(assistant);
+                    if (SmartAssistFilterState.isSmartFilterEnabled() && processor != null)
+                    {
+                        beginRecomputeTrigger("comment"); //$NON-NLS-1$
+                        recomputePopupList(assistant, viewer, processor);
+                    }
+                    return;
+                }
                 boolean memberAccess = isMemberAccessAtCaret(doc, caret);
                 if (hideIfPrefixStale(assistant, viewer, processor, caret))
                     return;

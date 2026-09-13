@@ -21,6 +21,7 @@
     <startup class="tormozit.MoxelEditorHook"/>
     <startup class="tormozit.BSLEditorMenuHook"/>
     <startup class="tormozit.BslXtextDocumentHook"/>
+    <startup class="tormozit.BslStructureInsertCommentTypes"/>
     <startup class="tormozit.BslHandlerBlankLineHook"/>
     <startup class="tormozit.NaparnikManualModeHook"/>
     <startup class="tormozit.NaparnikPasteCompareHook"/>

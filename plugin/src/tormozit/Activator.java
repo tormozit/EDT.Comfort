@@ -147,21 +147,6 @@ public class Activator extends AbstractUIPlugin
         // Как можно раньше: WeavingHook до первой загрузки BslDocumentationComment
         BslDocCommentDescriptionFix.install();
         BslDocCommentTypeMerge.install();
-        // Временно (issue 509): состояние подмены нельзя писать из пути загрузки классов —
-        // выводим отложенно, когда класс комментария уже точно загружен.
-        org.eclipse.core.runtime.jobs.Job statusJob =
-            new org.eclipse.core.runtime.jobs.Job("Comfort: состояние подмены") //$NON-NLS-1$
-            {
-                @Override
-                protected org.eclipse.core.runtime.IStatus run(
-                    org.eclipse.core.runtime.IProgressMonitor monitor)
-                {
-                    BslDocCommentComputedTypes.logWeaveStatus();
-                    return org.eclipse.core.runtime.Status.OK_STATUS;
-                }
-            };
-        statusJob.setSystem(true);
-        statusJob.schedule(15_000);
         BslXtextDocumentHook.install();
     }
 

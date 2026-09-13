@@ -75,6 +75,16 @@ public final class ContentAssistPatcher
             contentAssist.setContentAssistProcessor(wrapper, IDocument.DEFAULT_CONTENT_TYPE);
             forceReplaceProcessor(contentAssist, IDocument.DEFAULT_CONTENT_TYPE, wrapper);
         }
+        // Комментарий — отдельная партиция (__sl_comment), и Xtext ставит туда тот же самый
+        // процессор (DefaultContentAssistantFactory.setContentAssistProcessor — цикл по всем
+        // типам содержимого). Без этой строки список типов в комментарии остаётся штатным:
+        // без многословного фильтра, сортировки и подсветки. Партицию строки (__string) не
+        // трогаем — там у нас свой конвейер поверх штатного списка.
+        for (String contentType : commentContentTypes(contentAssist))
+        {
+            contentAssist.setContentAssistProcessor(wrapper, contentType);
+            forceReplaceProcessor(contentAssist, contentType, wrapper);
+        }
 
         contentAssist.setSorter(new SmartCodeProposalSorter());
         ContentAssistSessionReloader.install(sourceViewer, contentAssist, wrapper, facade);
@@ -115,6 +125,11 @@ return true;
             contentAssist.setContentAssistProcessor(nativeProc, IDocument.DEFAULT_CONTENT_TYPE);
             forceReplaceProcessor(contentAssist, IDocument.DEFAULT_CONTENT_TYPE, nativeProc);
         }
+        for (String contentType : commentContentTypes(contentAssist))
+        {
+            contentAssist.setContentAssistProcessor(nativeProc, contentType);
+            forceReplaceProcessor(contentAssist, contentType, nativeProc);
+        }
         contentAssist.setSorter(null);
         ContentAssistSessionReloader.uninstall(sourceViewer, contentAssist);
     }
@@ -133,6 +148,37 @@ return true;
         while (p instanceof SmartContentAssistProcessor)
             p = ((SmartContentAssistProcessor) p).getDelegate();
         return p;
+    }
+
+    /**
+     * Типы содержимого комментария, зарегистрированные у ассистента ({@code __sl_comment}).
+     * Читаем реальную карту процессоров, а не константу бандла EDT: карта — то, по чему
+     * ассистент и выбирает процессор.
+     */
+    private static java.util.List<String> commentContentTypes(ContentAssistant ca)
+    {
+        java.util.List<String> types = new java.util.ArrayList<>(2);
+        try
+        {
+            if (fProcessorsField == null)
+            {
+                fProcessorsField = ContentAssistant.class.getDeclaredField("fProcessors"); //$NON-NLS-1$
+                fProcessorsField.setAccessible(true);
+            }
+            Object map = fProcessorsField.get(ca);
+            if (!(map instanceof java.util.Map))
+                return types;
+            for (Object key : ((java.util.Map<?, ?>) map).keySet())
+            {
+                if (key instanceof String type && type.endsWith("_comment")) //$NON-NLS-1$
+                    types.add(type);
+            }
+        }
+        catch (Exception e)
+        {
+            Global.log("ContentAssistPatcher: commentContentTypes failed: " + e.getMessage()); //$NON-NLS-1$
+        }
+        return types;
     }
 
     private static void forceReplaceProcessor(ContentAssistant ca,

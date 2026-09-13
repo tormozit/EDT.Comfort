@@ -23,8 +23,8 @@ import org.eclipse.ui.IStartup;
  * ({@code com._1c.g5.v8.dt.bsl.ui.editor.BslLanguageRootPreferencePage}).
  *
  * <p><b>Флажок «Перезаписывать типы документирующим комментарием».</b> Пока в параметрах
- * проекта («Комфорт») установлено «Объединять рассчитанный тип с документирующим», плагин
- * держит этот штатный флажок включённым: объединение строится поверх него. Менять его при этом
+ * проекта («Комфорт») установлен «Расширенный расчет типов», плагин
+ * держит этот штатный флажок включённым: расширенный расчёт строится поверх него. Менять его при этом
  * бессмысленно — значение вернётся, — поэтому флажок делается недоступным, а причина выводится
  * меткой под ним. Подсказка при наведении тут не годится: недоступный виджет в Windows мышиных
  * событий не получает. Состояние пересчитывается при каждом заходе на страницу, иначе после
@@ -50,8 +50,8 @@ public final class BslLanguageRootPageHook
     private static final String PATCHED_KEY = "tormozit.bslLanguageRootPagePatched"; //$NON-NLS-1$
 
     private static final String REASON_FORCED =
-        "Удерживается включённым, пока в параметрах «Комфорт» проекта установлено «Объединять"
-            + " рассчитанный тип с документирующим»: объединение строится поверх этого режима."
+        "Удерживается включённым, пока в параметрах «Комфорт» проекта установлен «Расширенный"
+            + " расчет типов»: расширенный расчёт строится поверх этого режима."
             + " Снимите ту пометку, и флажок снова станет доступен.";
 
     private static final int MAX_ATTEMPTS = 30;
@@ -86,7 +86,6 @@ public final class BslLanguageRootPageHook
 
         display.addFilter(SWT.Show, listener);
         display.addFilter(SWT.Activate, listener);
-        trace("хук установлен"); //$NON-NLS-1$
     }
 
     /** Окно свойств проекта — тоже {@link PreferenceDialog}, лежит в {@code getData()} оболочки. */
@@ -133,48 +132,27 @@ public final class BslLanguageRootPageHook
     private static boolean tryPatchSelected(Object selected)
     {
         if (!(selected instanceof IPreferencePage page))
-        {
-            trace("страница не IPreferencePage: " //$NON-NLS-1$
-                + (selected == null ? "null" : selected.getClass().getName())); //$NON-NLS-1$
             return true;
-        }
         if (!PAGE_CLASS_NAME.equals(page.getClass().getName()))
-        {
-            trace("другая страница: " + page.getClass().getName()); //$NON-NLS-1$
             return true;
-        }
 
         Control control = page.getControl();
         if (!(control instanceof Composite composite) || composite.isDisposed())
-        {
-            trace("виджеты страницы ещё не созданы"); //$NON-NLS-1$
             return false;
-        }
 
         String label = stockLabel(page.getClass().getClassLoader());
         if (label == null || label.isBlank())
-        {
-            StringBuilder found = new StringBuilder();
-            collectChecks(composite, found);
-            trace("надпись флажка не получена, пометки на странице: " + found); //$NON-NLS-1$
             return true;
-        }
 
         Button check = findCheck(composite, label);
         if (check == null)
-        {
-            trace("флажок не найден по надписи «" + label + "»"); //$NON-NLS-1$ //$NON-NLS-2$
             return false;
-        }
         Object project = Global.invoke(page, "getProject"); //$NON-NLS-1$
         boolean forced = project instanceof IProject iProject
-            && BslDocCommentComputedTypes.isMergeEnabled(iProject);
+            && BslDocCommentComputedTypes.isExtendedTypesEnabled(iProject);
         if (Boolean.valueOf(forced).equals(check.getData(PATCHED_KEY)))
             return true;
         check.setData(PATCHED_KEY, Boolean.valueOf(forced));
-        trace("флажок найден, проект=" //$NON-NLS-1$
-            + (project instanceof IProject iProject ? iProject.getName() : String.valueOf(project))
-            + " нашФлажок=" + forced); //$NON-NLS-1$
 
         // Состояние пересчитывается при каждом заходе на страницу: нашу пометку могли снять,
         // и тогда штатный флажок обязан снова стать доступным, а пояснение — исчезнуть.
@@ -264,24 +242,6 @@ public final class BslLanguageRootPageHook
             shell.setSize(size.x, wanted.y);
     }
 
-    /** Временная диагностика (issue 509): какие пометки вообще есть на странице. */
-    private static void collectChecks(Composite parent, StringBuilder out)
-    {
-        for (Control child : parent.getChildren())
-        {
-            if (child instanceof Button button && (button.getStyle() & SWT.CHECK) != 0)
-                out.append('«').append(button.getText()).append("» "); //$NON-NLS-1$
-            if (child instanceof Composite nested)
-                collectChecks(nested, out);
-        }
-    }
-
-    /** Временная диагностика (issue 509): снять после подтверждения. */
-    private static void trace(String text)
-    {
-        Global.tempLog("issue509", "страница ВстроенныйЯзык: " + text); //$NON-NLS-1$ //$NON-NLS-2$
-    }
-
     /** Надпись флажка берём у самой EDT: при другом языке интерфейса она другая. */
     private static String stockLabel(ClassLoader loader)
     {
@@ -295,9 +255,8 @@ public final class BslLanguageRootPageHook
             Object value = field.get(null);
             return value instanceof String text ? text : null;
         }
-        catch (Throwable t)
+        catch (Throwable ignored)
         {
-            trace("надпись: " + t); //$NON-NLS-1$
             return null;
         }
     }

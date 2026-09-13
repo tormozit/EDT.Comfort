@@ -107,8 +107,6 @@ public final class BslDocCommentDescriptionFix
         {
             context.registerService(WeavingHook.class, new ParseWeavingHook(), null);
         }
-        Global.tempLog("issue509", "DescriptionFix.installWeavingHook: зарегистрирован=" //$NON-NLS-1$ //$NON-NLS-2$
-            + (context != null));
     }
 
     public static void install()
@@ -329,18 +327,12 @@ public final class BslDocCommentDescriptionFix
             }
             catch (Throwable t)
             {
-                // Временная диагностика issue 509: Global.logError молчит при выключенном
-                // флажке «Вести журнал», и причина отказа терялась. Стек не пишем — это
-                // известный отказ присоединения агента, повторяемый десятки раз за старт.
-                Global.tempLog("issue509", "ensureInstrumentation: " + t); //$NON-NLS-1$ //$NON-NLS-2$
                 Global.logError("BslDocComment", "ensureInstrumentation", t); //$NON-NLS-1$ //$NON-NLS-2$
                 return false;
             }
         }
         if (instrumentation == null)
         {
-            Global.tempLog("issue509", //$NON-NLS-1$
-                "registerExtraTransformer: Instrumentation is null"); //$NON-NLS-1$
             Global.logError("BslDocComment", "registerExtraTransformer: Instrumentation is null", //$NON-NLS-1$ //$NON-NLS-2$
                 null);
             return false;
@@ -367,7 +359,6 @@ public final class BslDocCommentDescriptionFix
         }
         catch (Throwable t)
         {
-            Global.tempLogException("issue509", "addTransformer", t); //$NON-NLS-1$ //$NON-NLS-2$
             Global.logError("BslDocComment", "addTransformer", t); //$NON-NLS-1$ //$NON-NLS-2$
             return false;
         }
@@ -491,9 +482,6 @@ public final class BslDocCommentDescriptionFix
         catch (Throwable t)
         {
             instrumentationUnavailable = true;
-            // Временная диагностика issue 509: одна строка на сессию — дальше попыток нет.
-            Global.tempLog("issue509", //$NON-NLS-1$
-                "агент недоступен, дальнейшие попытки отсечены: " + t); //$NON-NLS-1$
             if (t instanceof Exception e)
                 throw e;
             throw new IllegalStateException(t);

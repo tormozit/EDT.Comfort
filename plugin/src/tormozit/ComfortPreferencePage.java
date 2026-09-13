@@ -66,8 +66,8 @@ public class ComfortPreferencePage
         implements IWorkbenchPreferencePage, IWorkbenchPropertyPage
 {
     private IAdaptable element;
-    /** Флажок «Объединять рассчитанный тип с документирующим» (только страница проекта). */
-    private Button mergeComputedTypeCheck;
+    /** Флажок «Расширенный расчет типов» (только страница проекта). */
+    private Button extendedTypesCheck;
 
     private Text installedVersionText;
     private Text installedDateText;
@@ -79,6 +79,9 @@ public class ComfortPreferencePage
 
     private static final String REPLACE_LIST_FILTERS_DOC_URL =
             "https://tormozit.github.io/EDT.Comfort/help#/uluchshenie-spiskov"; //$NON-NLS-1$
+
+    private static final String EXTENDED_TYPES_DOC_URL =
+            "https://tormozit.github.io/EDT.Comfort/help#/avtodopolnenie?id=extended-types"; //$NON-NLS-1$
 
     private static final String REPLACE_LIST_FILTERS_TOOLTIP =
             "Текст фильтра будет дробиться на фрагменты пробелами и будет требоваться и подсвечиваться вхождение каждого фрагмента с мягким учетом порядка.\n"
@@ -200,7 +203,7 @@ public class ComfortPreferencePage
             area.setLayout(new GridLayout(1, false));
             area.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));
             createHeader(area, PROJECT_DESCRIPTION, 1);
-            createProjectTypeMergeSection(area);
+            createProjectExtendedTypesSection(area);
             createProjectDictionarySection(area);
             return area;
         }
@@ -468,28 +471,44 @@ public class ComfortPreferencePage
 
     /** Режим «По проекту»: только ссылка на словарь проекта. */
     /**
-     * Флажок «Объединять рассчитанный тип с документирующим» (issue 509).
+     * Флажок «Расширенный расчет типов» (issue 509).
      * <p>
      * Включённый флажок форсирует штатный флажок EDT «Перезаписывать типы документирующим
-     * комментарием» (Свойства проекта → Встроенный язык), поэтому причина названа прямо в
-     * подписи под флажком: иначе пользователь не поймёт, почему штатный стал недоступен.
-     * Выключенный — не меняет в поведении EDT ничего.
+     * комментарием» (Свойства проекта → Встроенный язык). Причина этого выводится там же, на
+     * странице «Встроенный язык» ({@link BslLanguageRootPageHook}), а не здесь: пользователь
+     * видит её в тот момент, когда упирается в недоступный флажок. Здесь подпись перечисляет
+     * возможности, а подробности — по ссылке «Подробнее». Выключенный флажок не меняет в
+     * поведении EDT ничего.
      */
-    private void createProjectTypeMergeSection(Composite parent)
+    private void createProjectExtendedTypesSection(Composite parent)
     {
         Composite area = new Composite(parent, SWT.NONE);
         area.setLayout(new GridLayout(1, false));
         area.setLayoutData(new GridData(SWT.FILL, SWT.TOP, true, false));
 
-        mergeComputedTypeCheck = new Button(area, SWT.CHECK);
-        mergeComputedTypeCheck.setText("Объединять рассчитанный тип с документирующим"); //$NON-NLS-1$
-        mergeComputedTypeCheck.setSelection(
-            BslDocCommentComputedTypes.isMergeEnabled(getProject()));
+        Composite row = new Composite(area, SWT.NONE);
+        GridLayout rowLayout = new GridLayout(2, false);
+        rowLayout.marginWidth = 0;
+        rowLayout.marginHeight = 0;
+        row.setLayout(rowLayout);
+        row.setLayoutData(new GridData(SWT.FILL, SWT.TOP, true, false));
+
+        extendedTypesCheck = new Button(row, SWT.CHECK);
+        extendedTypesCheck.setText("Расширенный расчет типов"); //$NON-NLS-1$
+        extendedTypesCheck.setSelection(
+            BslDocCommentComputedTypes.isExtendedTypesEnabled(getProject()));
+
+        Link docLink = new Link(row, SWT.NONE);
+        docLink.setText("<a>Подробнее</a>"); //$NON-NLS-1$
+        docLink.setLayoutData(new GridData(SWT.LEFT, SWT.CENTER, false, false));
+        docLink.addListener(SWT.Selection,
+            e -> ComfortPreferences.openChangesUrl(EXTENDED_TYPES_DOC_URL));
 
         Label hint = new Label(area, SWT.WRAP);
         hint.setText(
-            "Ссылка «см. Метод» объединяет документирующий и рассчитанный типы (без этого берется только документирующий тип). Удерживает включённым штатный флажок "
-            + "«Перезаписывать типы документирующим комментарием» на странице «Встроенный язык». Запрет влития рассчитанного типа - %, а приказ - ^. Например - ^, Массив."); //$NON-NLS-1$
+            "Объединяет документирующий тип с рассчитанным по коду, в том числе по ссылке «см. Метод»; "
+            + "типизирует свойство структуры и колонку таблицы значений боковым комментарием. "
+            + "Знаки в комментарии: % — запрет влития рассчитанного типа, ^ — приказ. Например - ^, Массив."); //$NON-NLS-1$
         GridData hintGd = new GridData(SWT.FILL, SWT.TOP, true, false);
         hintGd.widthHint = 420;
         hint.setLayoutData(hintGd);
@@ -1233,12 +1252,12 @@ public class ComfortPreferencePage
     public boolean performOk()
     {
         boolean result = super.performOk();
-        if (result && mergeComputedTypeCheck != null && !mergeComputedTypeCheck.isDisposed())
+        if (result && extendedTypesCheck != null && !extendedTypesCheck.isDisposed())
         {
             IProject project = getProject();
-            boolean wanted = mergeComputedTypeCheck.getSelection();
-            if (wanted != BslDocCommentComputedTypes.isMergeEnabled(project)
-                && BslDocCommentComputedTypes.setMergeEnabled(project, wanted))
+            boolean wanted = extendedTypesCheck.getSelection();
+            if (wanted != BslDocCommentComputedTypes.isExtendedTypesEnabled(project)
+                && BslDocCommentComputedTypes.setExtendedTypesEnabled(project, wanted))
             {
                 BslDocCommentComputedTypes.promptRebuild(getShell(), project);
             }

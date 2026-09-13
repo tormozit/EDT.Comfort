@@ -26,10 +26,12 @@ import org.eclipse.emf.ecore.util.EcoreUtil;
 import org.eclipse.jface.text.AbstractDocument;
 import org.eclipse.jface.text.DocumentEvent;
 import org.eclipse.jface.text.IDocument;
+import org.eclipse.jface.text.IDocumentExtension3;
 import org.eclipse.jface.text.IDocumentExtension4;
 import org.eclipse.jface.text.IDocumentListener;
 import org.eclipse.jface.text.ITextViewer;
 import org.eclipse.jface.text.ITextViewerExtension5;
+import org.eclipse.jface.text.TextUtilities;
 import org.eclipse.jface.text.link.LinkedModeModel;
 import org.eclipse.jface.text.link.LinkedPosition;
 import org.eclipse.jface.text.link.LinkedPositionGroup;
@@ -1977,6 +1979,37 @@ return result;
         return false;
     }
 
+    /**
+     * Каретка в комментарии BSL — отдельная партиция ({@code __sl_comment}), куда
+     * {@link ContentAssistPatcher} ставит наш процессор наравне с кодом. Контекст там плоский:
+     * список даёт делегат, а member-access, литерал и ИР-ветки к нему неприменимы — каждая
+     * из них обходится по этой проверке.
+     */
+    static boolean isCommentAssistContext(ITextViewer viewer, int caret)
+    {
+        return isCommentAssistContext(viewer != null ? viewer.getDocument() : null, caret);
+    }
+
+    static boolean isCommentAssistContext(IDocument doc, int caret)
+    {
+        if (caret < 0 || !(doc instanceof IDocumentExtension3 ext3))
+            return false;
+        for (String partitioning : ext3.getPartitionings())
+        {
+            try
+            {
+                String type = TextUtilities.getContentType(doc, partitioning, caret, false);
+                if (type != null && type.endsWith("_comment")) //$NON-NLS-1$
+                    return true;
+            }
+            catch (Exception e)
+            {
+                // партиционирование не настроено на этот документ — пробуем следующее
+            }
+        }
+        return false;
+    }
+
     /** Бывший NDJSON-диагностический выход literal-контекста — no-op. */
     static void debugLiteralContext(ITextViewer viewer, int caret)
     {
@@ -2492,7 +2525,11 @@ return;
         try
         {
             result = computeCompletionProposalsImpl(viewer, offset);
-            if (result == null || result.length == 0)
+            // В комментарии пустой список — это просто «нет подходящих типов»: ни ИР,
+            // ни ожидания фонового списка членов (точка в тексте комментария — не
+            // member-access, ждать там нечего, а ожидание держит UI до 1,5 с).
+            if ((result == null || result.length == 0)
+                && !isCommentAssistContext(viewer, resolveInvocationCaret(viewer, offset)))
             {
                 if (hasIrProposalsForCurrentContext())
                     result = popupListWithIr(EMPTY);
@@ -3659,6 +3696,8 @@ return probeDelegateOnce(viewer, offset);
             return cached;
         }
         int literalCaret = resolveInvocationCaret(viewer, offset);
+        if (isCommentAssistContext(viewer, literalCaret))
+            return computeCommentProposals(viewer, offset, literalCaret);
         boolean inLiteral = isStringLiteralAssistContext(viewer, literalCaret);
         String delegateName = delegate != null ? delegate.getClass().getSimpleName() : "null"; //$NON-NLS-1$
 ContentAssistSessionReloader reloader = viewer instanceof SourceViewer sv
@@ -3774,6 +3813,8 @@ if (RepeatedInvocationDetect.isActive())
 
         int caret = offset >= 0 ? clampCaret(viewer != null ? viewer.getDocument() : null, offset)
             : resolveWidgetCaret(viewer);
+        if (isCommentAssistContext(viewer, caret))
+            return computeCommentProposals(viewer, offset, caret);
         if (isStringLiteralAssistContext(viewer, caret))
         {
             if (irOnlyManualMode)
@@ -3849,6 +3890,63 @@ return EMPTY;
     boolean probeLiteralDelegateEmpty(ITextViewer viewer, int caret)
     {
         return probeLiteralDelegateBest(viewer, caret, caret).length == 0;
+    }
+
+    /**
+     * Комментарий BSL: список типов даёт штатный процессор EDT (у нас там нет своего
+     * источника), но фильтр, сортировка и подсветка — наши, как в коде. База кэшируется
+     * <b>не сужённой</b> префиксом: делегат опрашивается с начала набранного слова, иначе
+     * многословному фильтру нечего было бы искать — делегат отдаёт только элементы с этим
+     * префиксом. Позиции замены переносит на текущее слово {@code fetchDelegateList}.
+     */
+    private ICompletionProposal[] computeCommentProposals(ITextViewer viewer, int offset, int caret)
+    {
+        IDocument doc = viewer != null ? viewer.getDocument() : null;
+        // Повторный Ctrl+Space при открытом окне — тот же смысл, что в коде: переключить
+        // флажок «Фильтр», а не пересобрать список заново.
+        if (RepeatedInvocationDetect.isActive())
+            applyRepeatedFilterToggleOnce();
+        updateFilterTracker(viewer, caret);
+        String filter = SmartFilterTracker.getCurrentFilter();
+        ICompletionProposal[] base = ensureCommentBaseList(viewer, doc, offset, caret);
+        ICompletionProposal[] result;
+        if (filter.isEmpty())
+            result = unwrapProposals(base);
+        else if (SmartAssistFilterState.isSmartFilterEnabled())
+            result = filterAndSort(base, filter);
+        else
+            result = prefixFilterCtorCatalog(base, filter);
+        // #region agent log
+        uiBlockLog("compute.comment", "caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
+            + " filter=" + filter //$NON-NLS-1$
+            + " base=" + base.length //$NON-NLS-1$
+            + " n=" + result.length //$NON-NLS-1$
+            + " smart=" + SmartAssistFilterState.isSmartFilterEnabled()); //$NON-NLS-1$
+        // #endregion
+        return result;
+    }
+
+    /**
+     * Полный список делегата для текущего слова комментария. Живёт в тех же полях кэша,
+     * что и список для кода, — поэтому попап, догрузка и {@code cacheOnly}-расчёт работают
+     * без отдельной ветки. Пересчитывается при смене контекста (слова), а не на каждую букву.
+     */
+    private ICompletionProposal[] ensureCommentBaseList(ITextViewer viewer, IDocument doc,
+                                                        int offset, int caret)
+    {
+        int key = computeFullListContextKey(doc, caret);
+        if (fullListReady && fullListCache.length > 0 && key == fullListContextKey
+            && fullListCachePrefix.isEmpty())
+            return fullListCache;
+        int probe = computeIdentifierWordStart(doc, caret);
+        ICompletionProposal[] raw =
+            unwrapProposals(fetchDelegateList(viewer, probe >= 0 ? probe : offset, caret));
+        fullListContextKey = key;
+        fullListReady = raw.length > 0;
+        // Список делегата на начале слова — уже полный: догружать в комментарии нечего.
+        fullListComplete = raw.length > 0;
+        assignFullListCache(raw);
+        return fullListCache;
     }
 
     /** В литерале — delegate + merge ИР; EDT пуст + ИР in-flight → EMPTY без beep. */

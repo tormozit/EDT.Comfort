@@ -99,8 +99,6 @@ public final class BslDocCommentTypeMerge
         BundleContext context = bundle != null ? bundle.getBundleContext() : null;
         if (context != null)
             context.registerService(WeavingHook.class, new ComputeTypesWeavingHook(), null);
-        Global.tempLog("issue509", "TypeMerge.installWeavingHook: зарегистрирован=" //$NON-NLS-1$ //$NON-NLS-2$
-            + (context != null));
     }
 
     public static void install()
