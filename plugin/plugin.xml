@@ -182,6 +182,7 @@
     <startup class="tormozit.FindReplaceDialogHook"/>
     <startup class="tormozit.AnnotationsPreferenceHook"/>
     <startup class="tormozit.CheckDevelopmentPageHook"/>
+    <startup class="tormozit.BslLanguageRootPageHook"/>
     <startup class="tormozit.MassiveChecksExemptionHook"/>
   </extension>
 

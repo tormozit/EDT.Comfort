@@ -70,28 +70,42 @@ public final class BslDocCommentTypeMerge
 
     private BslDocCommentTypeMerge() {}
 
+    /**
+     * Обработчик разбора и {@link WeavingHook} — отдельно и как можно раньше, по той же
+     * причине, что и {@link BslDocCommentDescriptionFix#installWeavingHook()}: иначе
+     * {@code BslDocumentationComment} успевает загрузиться до старта бандла.
+     * <p>
+     * Зовётся из {@link ComfortEarlyStart} строго после {@code BslDocCommentDescriptionFix}:
+     * обработчик разбора навешивается поверх прежнего, порядок цепочки важен.
+     */
+    public static void installWeavingHook()
+    {
+        if (!installed.compareAndSet(false, true))
+            return;
+
+        Object prev = System.getProperties().get(BslDocCommentDescriptionFix.PROP_AFTER_PARSE);
+        @SuppressWarnings("unchecked")
+        Consumer<Object> previous = prev instanceof Consumer<?>
+            ? (Consumer<Object>) prev
+            : null;
+        System.getProperties().put(BslDocCommentDescriptionFix.PROP_AFTER_PARSE,
+            (Consumer<Object>) comment -> {
+                if (previous != null)
+                    previous.accept(comment);
+                afterParse(comment);
+            });
+
+        Bundle bundle = FrameworkUtil.getBundle(BslDocCommentTypeMerge.class);
+        BundleContext context = bundle != null ? bundle.getBundleContext() : null;
+        if (context != null)
+            context.registerService(WeavingHook.class, new ComputeTypesWeavingHook(), null);
+        Global.tempLog("issue509", "TypeMerge.installWeavingHook: зарегистрирован=" //$NON-NLS-1$ //$NON-NLS-2$
+            + (context != null));
+    }
+
     public static void install()
     {
-        boolean first = installed.compareAndSet(false, true);
-        if (first)
-        {
-            Object prev = System.getProperties().get(BslDocCommentDescriptionFix.PROP_AFTER_PARSE);
-            @SuppressWarnings("unchecked")
-            Consumer<Object> previous = prev instanceof Consumer<?>
-                ? (Consumer<Object>) prev
-                : null;
-            System.getProperties().put(BslDocCommentDescriptionFix.PROP_AFTER_PARSE,
-                (Consumer<Object>) comment -> {
-                    if (previous != null)
-                        previous.accept(comment);
-                    afterParse(comment);
-                });
-
-            Bundle bundle = FrameworkUtil.getBundle(BslDocCommentTypeMerge.class);
-            BundleContext context = bundle != null ? bundle.getBundleContext() : null;
-            if (context != null)
-                context.registerService(WeavingHook.class, new ComputeTypesWeavingHook(), null);
-        }
+        installWeavingHook();
 
         if (transformerOk.get())
             return;

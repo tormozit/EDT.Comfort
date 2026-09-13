@@ -67,6 +67,15 @@ public final class BslExpressionField
     private static volatile boolean callProposalApplied;
 
     /**
+     * Момент последнего щелчка мимо поля. Проверяется не только при планировании возврата
+     * фокуса, но и в момент самого возврата: всплывающее окно гаснет по деактивации, то
+     * есть ДО того, как SWT доставит {@code MouseDown} нажатой кнопке диалога. Возврат
+     * фокуса, посчитанный по старой отметке, отбирал фокус у кнопки прямо в момент нажатия
+     * — «Применить и Закрыть» и «Отмена» при открытой подсказке не срабатывали.
+     */
+    private static volatile long lastForeignClickAt;
+
+    /**
      * Поле, в котором пользователь работал последним. В диалоге точки останова два поля
      * с общим {@code wirePopupFocusReturn}: Dispose попапа автодополнения видят оба и без
      * этого якоря оба зовут {@link #restoreFocus} — фокус прыгает в «чужое» поле.
@@ -220,6 +229,15 @@ public final class BslExpressionField
         {
             if (text.isDisposed())
                 return;
+            // Щелчок мимо поля мог прийти уже после планирования возврата: окно подсказки
+            // гаснет по деактивации, а MouseDown кнопки диалога SWT доставляет следом.
+            long sinceClick = System.currentTimeMillis() - lastForeignClickAt;
+            if (sinceClick < FOREIGN_CLICK_GRACE_MS)
+            {
+                log(logTopic, "restore-focus skip foreignClick-async role=" + role //$NON-NLS-1$
+                        + " sinceClick=" + sinceClick); //$NON-NLS-1$
+                return;
+            }
             if (isAssistShowing(viewer))
             {
                 log(logTopic, "restore-focus skip popup role=" + role); //$NON-NLS-1$
@@ -271,8 +289,8 @@ public final class BslExpressionField
             @Override
             public void documentChanged(DocumentEvent event)
             {
-                ParamHintHtmlModifier.adjustParamHintBounds(text, event.getOffset(),
-                    event.getLength(), event.getText());
+                ParamHintHtmlModifier.adjustParamHintBounds(text, event.getDocument(),
+                    event.getOffset(), event.getLength(), event.getText());
             }
         };
         IDocument document = viewer.getDocument();
@@ -503,7 +521,10 @@ public final class BslExpressionField
         Listener mouse = event ->
         {
             if (event.widget != text)
+            {
                 foreignClickAt[0] = System.currentTimeMillis();
+                lastForeignClickAt = foreignClickAt[0];
+            }
         };
         Listener popupGone = event ->
         {

@@ -1363,9 +1363,25 @@ public final class DebugInspectorHook implements IStartup
 
         void requestClose()
         {
+            requestClose(null);
+        }
+
+        /**
+         * @param source нажатый крестик, если закрытие пришло от него: окно ищем по нему,
+         *            а не по сессии
+         */
+        void requestClose(ToolItem source)
+        {
             logClose("click", describeCloseState("enter")); //$NON-NLS-1$ //$NON-NLS-2$
             if (shell.isDisposed())
             {
+                // Попап инспектора EDT может закрыться и открыться заново (pending →
+                // окончательный): объект диалога тот же, shell новый. Сессия при этом
+                // остаётся от прежнего окна, и крестик ЖИВОГО окна упирался в «shell
+                // already disposed» — окно не закрывалось (лог inspect-close 10:14:25…27:
+                // sessionDispose прежнего shell при visible=false, потом три клика).
+                if (closeLiveShellOf(source))
+                    return;
                 logClose("abort", "shell already disposed"); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
             }
@@ -1473,13 +1489,46 @@ public final class DebugInspectorHook implements IStartup
                 + " active=" + (s.getDisplay().getActiveShell() == s); //$NON-NLS-1$
         }
 
+        /**
+         * Закрывает окно, которому принадлежит нажатый крестик. Нужно, когда сессия
+         * осталась от прежнего shell того же диалога.
+         *
+         * @return {@code true}, если окно нашли и закрыли
+         */
+        private boolean closeLiveShellOf(ToolItem source)
+        {
+            if (source == null || source.isDisposed() || source.getParent() == null
+                || source.getParent().isDisposed())
+                return false;
+            Shell live = source.getParent().getShell();
+            if (live == null || live.isDisposed() || live == shell)
+                return false;
+            Object liveDialog = resolveTargets(live).dialog;
+            logClose("stale", "session shell disposed → close live shell dialog=" //$NON-NLS-1$ //$NON-NLS-2$
+                + DebugInspectorDebug.cn(liveDialog));
+            try
+            {
+                if (isElementDialog(liveDialog))
+                    Global.invoke(liveDialog, "close"); //$NON-NLS-1$
+                else
+                    live.dispose();
+                logClose("stale", "done disposed=" + live.isDisposed()); //$NON-NLS-1$ //$NON-NLS-2$
+                return true;
+            }
+            catch (RuntimeException ex)
+            {
+                Global.tempLogException(CLOSE_TEMP_LOG, "stale close failed", ex); //$NON-NLS-1$
+                return false;
+            }
+        }
+
         private void wireCloseItem(ToolItem closeItem, String kind)
         {
             closeItem.addListener(SWT.Selection, e ->
             {
                 logClose("selection", kind + " itemDisposed=" + closeItem.isDisposed() //$NON-NLS-1$ //$NON-NLS-2$
                     + " " + describeCloseState("beforeRequest")); //$NON-NLS-1$ //$NON-NLS-2$
-                requestClose();
+                requestClose(closeItem);
             });
             if (closeToolBar != null && !closeToolBar.isDisposed())
             {

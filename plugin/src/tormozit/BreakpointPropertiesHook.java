@@ -86,6 +86,8 @@ public final class BreakpointPropertiesHook implements IStartup
             "com._1c.g5.v8.dt.internal.debug.ui.breakpoints.BslBreakpointConditionEditor"; //$NON-NLS-1$
     private static final String EXPRESSION_PANE =
             "com._1c.g5.v8.dt.internal.debug.ui.breakpoints.BslBreakpointTextAndHistoryEditorPane"; //$NON-NLS-1$
+    /** Тема временного лога поля кода BSL этого диалога ({@code .tmp/temp-logs}). */
+    private static final String FIELD_LOG_TOPIC = "bp-field"; //$NON-NLS-1$
     private static final String JOIN_SEPARATOR = ", " + "\n"; //$NON-NLS-1$ //$NON-NLS-2$
 
     @Override
@@ -201,12 +203,12 @@ public final class BreakpointPropertiesHook implements IStartup
         if (conditionViewer != null)
         {
             markBreakpointField(conditionViewer, "condition"); //$NON-NLS-1$
-            BslExpressionField.attach(conditionViewer, null);
+            BslExpressionField.attach(conditionViewer, FIELD_LOG_TOPIC);
         }
         if (expressionViewer != null)
         {
             markBreakpointField(expressionViewer, "expression"); //$NON-NLS-1$
-            BslExpressionField.attach(expressionViewer, null);
+            BslExpressionField.attach(expressionViewer, FIELD_LOG_TOPIC);
         }
         if (conditionViewer == null || expressionViewer == null)
             ok = false;

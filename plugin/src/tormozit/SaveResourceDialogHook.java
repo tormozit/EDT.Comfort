@@ -1,6 +1,8 @@
 package tormozit;
 
 import java.lang.reflect.Field;
+import java.util.Collection;
+import java.util.Map;
 
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.widgets.Composite;
@@ -9,7 +11,12 @@ import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Label;
 import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Shell;
+import org.eclipse.ui.IEditorPart;
+import org.eclipse.ui.ISaveablesLifecycleListener;
 import org.eclipse.ui.IStartup;
+import org.eclipse.ui.IWorkbenchPart;
+import org.eclipse.ui.PlatformUI;
+import org.eclipse.ui.Saveable;
 
 /**
  * Диалог Eclipse «Сохранить ресурс» при закрытии редактора, который ещё открыт
@@ -128,6 +135,7 @@ public final class SaveResourceDialogHook implements IStartup
         catch (Exception ignored)
         {
         }
+        appendSaveablesState(sb);
         sb.append("\nstack:"); //$NON-NLS-1$
         for (StackTraceElement frame : new Throwable().getStackTrace())
         {
@@ -140,6 +148,124 @@ public final class SaveResourceDialogHook implements IStartup
                 .append(':').append(frame.getLineNumber());
         }
         Global.tempLog("save-resource", sb.toString()); //$NON-NLS-1$
+    }
+
+    /**
+     * Кто держит изменённые {@code Saveable} в момент показа диалога.
+     * <p>
+     * Текст «изменён, но всё ещё открыт в другом месте» штатный
+     * {@code SaveablesList.promptForSavingIfNecessary} показывает ровно для тех
+     * изменённых моделей, чей счётчик ссылок не обнуляется закрываемыми частями. Значит,
+     * держатель есть ещё один — вторая часть в {@code modelMap} или регистрация в
+     * {@code nonPartSources}. По самому диалогу этого не видно, поэтому печатаем карту
+     * целиком: имя модели, счётчик и все источники (класс части, заголовок, класс входа).
+     */
+    private static void appendSaveablesState(StringBuilder sb)
+    {
+        try
+        {
+            Object list = PlatformUI.getWorkbench().getService(ISaveablesLifecycleListener.class);
+            if (list == null)
+            {
+                sb.append("\nsaveables: сервис недоступен"); //$NON-NLS-1$
+                return;
+            }
+            sb.append("\nsaveables: ").append(list.getClass().getName()); //$NON-NLS-1$
+            appendRefCounts(sb, Global.getField(list, "modelRefCounts")); //$NON-NLS-1$
+            appendModelMap(sb, Global.getField(list, "modelMap")); //$NON-NLS-1$
+            appendNonPartSources(sb, Global.getField(list, "nonPartSources")); //$NON-NLS-1$
+        }
+        catch (Exception | LinkageError ex)
+        {
+            sb.append("\nsaveables: ошибка дампа ").append(ex); //$NON-NLS-1$
+        }
+    }
+
+    private static void appendRefCounts(StringBuilder sb, Object refCounts)
+    {
+        if (!(refCounts instanceof Map<?, ?> map))
+        {
+            sb.append("\n  modelRefCounts: недоступно"); //$NON-NLS-1$
+            return;
+        }
+        for (Map.Entry<?, ?> entry : map.entrySet())
+        {
+            sb.append("\n  refCount=").append(entry.getValue()) //$NON-NLS-1$
+                .append(' ').append(describeSaveable(entry.getKey()));
+        }
+    }
+
+    private static void appendModelMap(StringBuilder sb, Object modelMap)
+    {
+        if (!(modelMap instanceof Map<?, ?> map))
+        {
+            sb.append("\n  modelMap: недоступно"); //$NON-NLS-1$
+            return;
+        }
+        for (Map.Entry<?, ?> entry : map.entrySet())
+        {
+            sb.append("\n  источник ").append(describeSource(entry.getKey())); //$NON-NLS-1$
+            if (entry.getValue() instanceof Collection<?> models)
+            {
+                for (Object model : models)
+                    sb.append("\n    держит ").append(describeSaveable(model)); //$NON-NLS-1$
+            }
+        }
+    }
+
+    private static void appendNonPartSources(StringBuilder sb, Object sources)
+    {
+        if (!(sources instanceof Collection<?> collection))
+        {
+            sb.append("\n  nonPartSources: недоступно"); //$NON-NLS-1$
+            return;
+        }
+        if (collection.isEmpty())
+        {
+            sb.append("\n  nonPartSources: нет"); //$NON-NLS-1$
+            return;
+        }
+        for (Object source : collection)
+            sb.append("\n  nonPartSource ").append(describeSource(source)); //$NON-NLS-1$
+    }
+
+    private static String describeSaveable(Object model)
+    {
+        if (!(model instanceof Saveable saveable))
+            return String.valueOf(model);
+        StringBuilder sb = new StringBuilder();
+        sb.append('\'').append(saveable.getName()).append('\'');
+        try
+        {
+            sb.append(" dirty=").append(saveable.isDirty()); //$NON-NLS-1$
+        }
+        catch (Exception | LinkageError ex)
+        {
+            sb.append(" dirty=?"); //$NON-NLS-1$
+        }
+        sb.append(" [").append(saveable.getClass().getName()) //$NON-NLS-1$
+            .append('@').append(Integer.toHexString(System.identityHashCode(saveable))).append(']');
+        return sb.toString();
+    }
+
+    private static String describeSource(Object source)
+    {
+        if (source == null)
+            return "null"; //$NON-NLS-1$
+        StringBuilder sb = new StringBuilder(source.getClass().getName());
+        sb.append('@').append(Integer.toHexString(System.identityHashCode(source)));
+        if (source instanceof IWorkbenchPart part)
+        {
+            sb.append(" title='").append(part.getTitle()).append('\''); //$NON-NLS-1$
+            if (part instanceof IEditorPart editor)
+            {
+                Object input = editor.getEditorInput();
+                sb.append(" input=").append(input == null ? "null" : input.getClass().getName()); //$NON-NLS-1$ //$NON-NLS-2$
+                if (input != null)
+                    sb.append(" inputName='").append(editor.getEditorInput().getName()).append('\''); //$NON-NLS-1$
+            }
+        }
+        return sb.toString();
     }
 
     /** Первый непустой текст {@link Label} в диалоге — его сообщение. */

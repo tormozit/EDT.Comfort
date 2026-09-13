@@ -1521,6 +1521,12 @@ public final class ParamHintHtmlModifier
     static void adjustParamHintBounds(org.eclipse.swt.custom.StyledText widget, int offset,
         int removed, String inserted)
     {
+        adjustParamHintBounds(widget, null, offset, removed, inserted);
+    }
+
+    static void adjustParamHintBounds(org.eclipse.swt.custom.StyledText widget, IDocument document,
+        int offset, int removed, String inserted)
+    {
         int adjusted = 0;
         try
         {
@@ -1535,8 +1541,14 @@ public final class ParamHintHtmlModifier
                         || !typed.getClass().getName().endsWith("CustomCaretListener")) //$NON-NLS-1$
                         continue;
                     Object info = Global.getField(typed, "info"); //$NON-NLS-1$
+                    // #region agent log
+                    logCaretListenerCensus(typed, info, offset);
+                    // #endregion
                     if (shiftParamInfoBounds(info, offset, removed, inserted))
+                    {
                         adjusted++;
+                        includeClosingParen(info, document);
+                    }
                 }
             }
         }
@@ -1546,6 +1558,140 @@ public final class ParamHintHtmlModifier
         if (adjusted == 0)
             adjustParamHintBounds(offset, removed, inserted);
     }
+
+    /**
+     * Приводит {@code lastAvailablePosition} к позиции сразу ЗА закрывающей скобкой.
+     *
+     * <p>Штатный {@code CustomCaretListener} держит подсказку, пока
+     * {@code first <= каретка < last}. Значит последняя допустимая позиция каретки —
+     * ровно перед {@code )}, и граница-исключение должна быть на единицу больше, чем
+     * смещение самой {@code )}. Показанная подсказка приходит с границей, указывающей
+     * НА скобку: в логе 13.09 для {@code Добавить("сол",)} было {@code [209,215)} при
+     * {@code )} на 215 — то есть каретка между {@code ,} и {@code )} уже считалась
+     * вышедшей за вызов, и подсказка закрывалась на первом же движении каретки.
+     * Удаление запятой этот случай и ловило: границы уезжали на 214, каретка вставала
+     * ровно на 214, и {@code caretMoved} звал {@code dispose} (стек в
+     * {@code param-hint-close.log}).
+     *
+     * @param info штатный {@code ParameterInfo} показанной подсказки
+     * @param document модельный документ редактора или {@code null}, если он недоступен
+     */
+    private static void includeClosingParen(Object info, IDocument document)
+    {
+        if (info == null || document == null)
+            return;
+        try
+        {
+            if (!(Global.getField(info, "lastAvailablePosition") instanceof Integer last)) //$NON-NLS-1$
+                return;
+            int at = last.intValue();
+            if (at < 0 || at >= document.getLength() || document.getChar(at) != ')')
+                return;
+            Global.setFieldForce(info, "lastAvailablePosition", Integer.valueOf(at + 1)); //$NON-NLS-1$
+            Global.tempLog("param-hint", "bounds.closingParen last=" + at //$NON-NLS-1$ //$NON-NLS-2$
+                + " -> " + (at + 1)); //$NON-NLS-1$
+        }
+        catch (Exception | LinkageError ignored)
+        {
+        }
+    }
+
+    /**
+     * То же для только что показанной подсказки: границы считает EDT, и каретка сразу
+     * после показа может стоять ровно на {@code lastAvailablePosition}.
+     */
+    static void includeClosingParen(org.eclipse.swt.custom.StyledText widget, IDocument document)
+    {
+        if (widget == null || widget.isDisposed() || document == null)
+            return;
+        try
+        {
+            for (org.eclipse.swt.widgets.Listener listener
+                : widget.getListeners(org.eclipse.swt.custom.ST.CaretMoved))
+            {
+                Object typed = listener instanceof org.eclipse.swt.widgets.TypedListener wrapper
+                    ? wrapper.getEventListener() : listener;
+                if (typed == null
+                    || !typed.getClass().getName().endsWith("CustomCaretListener")) //$NON-NLS-1$
+                    continue;
+                includeClosingParen(Global.getField(typed, "info"), document); //$NON-NLS-1$
+            }
+        }
+        catch (Exception | LinkageError ignored)
+        {
+        }
+    }
+
+    // #region agent log
+    /**
+     * Кто именно сейчас ведёт подсказку: сколько на виджете живых
+     * {@code CustomCaretListener}, чей {@code ParameterInfo} мы правим, жив ли его
+     * контрол. Нужно, чтобы отличить «правим границы не того (уже закрытого) экземпляра»
+     * от «границы верные, закрывает кто-то другой».
+     */
+    private static void logCaretListenerCensus(Object listener, Object info, int offset)
+    {
+        try
+        {
+            Object control = Global.getField(listener, "infoControl"); //$NON-NLS-1$
+            Object swtControl = control == null ? null : Global.invoke(control, "getControl"); //$NON-NLS-1$
+            String alive = "noControl"; //$NON-NLS-1$
+            if (swtControl instanceof org.eclipse.swt.widgets.Control c)
+                alive = c.isDisposed() ? "disposed" //$NON-NLS-1$
+                    : (c.isVisible() ? "visible" : "hidden"); //$NON-NLS-1$ //$NON-NLS-2$
+            Object commas = info == null ? null : Global.getField(info, "commaPosition"); //$NON-NLS-1$
+            Global.tempLog("param-hint", "census offset=" + offset //$NON-NLS-1$ //$NON-NLS-2$
+                + " listener=" + System.identityHashCode(listener) //$NON-NLS-1$
+                + " info=" + System.identityHashCode(info) //$NON-NLS-1$
+                + " first=" + Global.getField(info, "firstAvailablePosition") //$NON-NLS-1$ //$NON-NLS-2$
+                + " last=" + Global.getField(info, "lastAvailablePosition") //$NON-NLS-1$ //$NON-NLS-2$
+                + " paramNumber=" + Global.getField(info, "paramNumber") //$NON-NLS-1$ //$NON-NLS-2$
+                + " commas=" + commas //$NON-NLS-1$
+                + " lastOffset=" + Global.getField(listener, "lastOffset") //$NON-NLS-1$ //$NON-NLS-2$
+                + " lastCaretPos=" + Global.getField(listener, "lastCaretPos") //$NON-NLS-1$ //$NON-NLS-2$
+                + " control=" + alive //$NON-NLS-1$
+                + " stockUpdaterOwns=" + stockPositionUpdaterOwns(info)); //$NON-NLS-1$
+        }
+        catch (Exception | LinkageError ignored)
+        {
+        }
+    }
+
+    /**
+     * Ставит на окно подсказки безусловный лог закрытия со стеком: подсказку закрывают
+     * минимум четыре механизма (штатные {@code CustomCaretListener},
+     * {@code CustomPositionUpdater}, {@code CustomFocusListener}/{@code CustomKeyAdapter}
+     * и наши закрыватели), и без стека невозможно понять, чей это dispose.
+     */
+    static void watchParamHintClose(org.eclipse.swt.widgets.Shell shell)
+    {
+        if (shell == null || shell.isDisposed())
+            return;
+        if (Boolean.TRUE.equals(shell.getData(PARAM_HINT_CLOSE_WATCH)))
+            return;
+        shell.setData(PARAM_HINT_CLOSE_WATCH, Boolean.TRUE);
+        org.eclipse.swt.widgets.Listener logger = event ->
+        {
+            StringBuilder stack = new StringBuilder();
+            StackTraceElement[] trace = Thread.currentThread().getStackTrace();
+            for (int i = 0; i < trace.length && stack.length() < 2200; i++)
+            {
+                String line = trace[i].toString();
+                if (line.startsWith("java.lang.Thread.getStackTrace")) //$NON-NLS-1$
+                    continue;
+                stack.append("\n    ").append(line); //$NON-NLS-1$
+            }
+            Global.tempLog("param-hint-close", //$NON-NLS-1$
+                (event.type == org.eclipse.swt.SWT.Dispose ? "dispose" : "hide") //$NON-NLS-1$ //$NON-NLS-2$
+                    + " shell=" + System.identityHashCode(shell) //$NON-NLS-1$
+                    + " stack:" + stack); //$NON-NLS-1$
+        };
+        shell.addListener(org.eclipse.swt.SWT.Dispose, logger);
+        shell.addListener(org.eclipse.swt.SWT.Hide, logger);
+    }
+
+    private static final String PARAM_HINT_CLOSE_WATCH = "tormozit.paramHint.closeWatch"; //$NON-NLS-1$
+    // #endregion
 
     static void adjustParamHintBounds(int offset, int removed, String inserted)
     {

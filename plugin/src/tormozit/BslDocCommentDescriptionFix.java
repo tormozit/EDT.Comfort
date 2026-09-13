@@ -68,14 +68,32 @@ public final class BslDocCommentDescriptionFix
         "C:\\Program Files\\1C\\1CE\\components\\axiom-jdk-full-17.0.16+12-x86_64\\bin\\javac.exe"; //$NON-NLS-1$
 
     private static final AtomicBoolean installed = new AtomicBoolean();
+    private static final AtomicBoolean weavingHookInstalled = new AtomicBoolean();
     private static volatile Instrumentation instrumentation;
+    /**
+     * Самоприсоединение агента в EDT запрещено (нет {@code -Djdk.attach.allowAttachSelf=true}),
+     * отказ детерминированный и в пределах сессии не изменится. Каждая попытка стоит около
+     * 0,35 с (компиляция агента штатным {@code javac} в отдельном процессе плюс attach), а
+     * потребителей {@link #registerExtraTransformer} больше десятка — на старте они давали
+     * несколько секунд ожидания впустую. Помним первый отказ и дальше сразу отдаём
+     * {@code null}: подмена работает через {@code WeavingHook}, агент ей не нужен.
+     */
+    private static volatile boolean instrumentationUnavailable;
     private static volatile boolean transformerRegistered;
 
     private BslDocCommentDescriptionFix() {}
 
-    public static void install()
+    /**
+     * Обработчик разбора и {@link WeavingHook} — отдельно от остального и как можно раньше.
+     * <p>
+     * Хук видит только классы, загруженные после его регистрации, а бандл активируется
+     * лениво: {@code BslDocumentationComment} успевал загрузиться до {@code Activator.start},
+     * и тогда подмена не применялась вовсе. Зовётся из {@link ComfortEarlyStart} (DS,
+     * {@code immediate="true"}) и из {@link #install()}.
+     */
+    public static void installWeavingHook()
     {
-        if (!installed.compareAndSet(false, true))
+        if (!weavingHookInstalled.compareAndSet(false, true))
         {
             return;
         }
@@ -89,6 +107,18 @@ public final class BslDocCommentDescriptionFix
         {
             context.registerService(WeavingHook.class, new ParseWeavingHook(), null);
         }
+        Global.tempLog("issue509", "DescriptionFix.installWeavingHook: зарегистрирован=" //$NON-NLS-1$ //$NON-NLS-2$
+            + (context != null));
+    }
+
+    public static void install()
+    {
+        if (!installed.compareAndSet(false, true))
+        {
+            return;
+        }
+
+        installWeavingHook();
 
         try
         {
@@ -289,6 +319,8 @@ public final class BslDocCommentDescriptionFix
     {
         if (transformer == null)
             return false;
+        if (instrumentation == null && instrumentationUnavailable)
+            return false;
         if (instrumentation == null)
         {
             try
@@ -297,12 +329,18 @@ public final class BslDocCommentDescriptionFix
             }
             catch (Throwable t)
             {
+                // Временная диагностика issue 509: Global.logError молчит при выключенном
+                // флажке «Вести журнал», и причина отказа терялась. Стек не пишем — это
+                // известный отказ присоединения агента, повторяемый десятки раз за старт.
+                Global.tempLog("issue509", "ensureInstrumentation: " + t); //$NON-NLS-1$ //$NON-NLS-2$
                 Global.logError("BslDocComment", "ensureInstrumentation", t); //$NON-NLS-1$ //$NON-NLS-2$
                 return false;
             }
         }
         if (instrumentation == null)
         {
+            Global.tempLog("issue509", //$NON-NLS-1$
+                "registerExtraTransformer: Instrumentation is null"); //$NON-NLS-1$
             Global.logError("BslDocComment", "registerExtraTransformer: Instrumentation is null", //$NON-NLS-1$ //$NON-NLS-2$
                 null);
             return false;
@@ -329,6 +367,7 @@ public final class BslDocCommentDescriptionFix
         }
         catch (Throwable t)
         {
+            Global.tempLogException("issue509", "addTransformer", t); //$NON-NLS-1$ //$NON-NLS-2$
             Global.logError("BslDocComment", "addTransformer", t); //$NON-NLS-1$ //$NON-NLS-2$
             return false;
         }
@@ -426,24 +465,41 @@ public final class BslDocCommentDescriptionFix
     {
         if (instrumentation != null)
             return instrumentation;
+        if (instrumentationUnavailable)
+            return null;
 
-        Path agentJar = writeAgentJar();
-        String pid = Long.toString(ProcessHandle.current().pid());
-        Class<?> vmClass = Class.forName("com.sun.tools.attach.VirtualMachine"); //$NON-NLS-1$
-        Object vm = vmClass.getMethod("attach", String.class).invoke(null, pid); //$NON-NLS-1$
         try
         {
-            vmClass.getMethod("loadAgent", String.class).invoke(vm, //$NON-NLS-1$
-                agentJar.toAbsolutePath().toString());
-        }
-        finally
-        {
-            vmClass.getMethod("detach").invoke(vm); //$NON-NLS-1$
-        }
+            Path agentJar = writeAgentJar();
+            String pid = Long.toString(ProcessHandle.current().pid());
+            Class<?> vmClass = Class.forName("com.sun.tools.attach.VirtualMachine"); //$NON-NLS-1$
+            Object vm = vmClass.getMethod("attach", String.class).invoke(null, pid); //$NON-NLS-1$
+            try
+            {
+                vmClass.getMethod("loadAgent", String.class).invoke(vm, //$NON-NLS-1$
+                    agentJar.toAbsolutePath().toString());
+            }
+            finally
+            {
+                vmClass.getMethod("detach").invoke(vm); //$NON-NLS-1$
+            }
 
-        long deadline = System.nanoTime() + 5_000_000_000L;
-        while (instrumentation == null && System.nanoTime() < deadline)
-            Thread.sleep(20);
+            long deadline = System.nanoTime() + 5_000_000_000L;
+            while (instrumentation == null && System.nanoTime() < deadline)
+                Thread.sleep(20);
+        }
+        catch (Throwable t)
+        {
+            instrumentationUnavailable = true;
+            // Временная диагностика issue 509: одна строка на сессию — дальше попыток нет.
+            Global.tempLog("issue509", //$NON-NLS-1$
+                "агент недоступен, дальнейшие попытки отсечены: " + t); //$NON-NLS-1$
+            if (t instanceof Exception e)
+                throw e;
+            throw new IllegalStateException(t);
+        }
+        if (instrumentation == null)
+            instrumentationUnavailable = true;
         return instrumentation;
     }
 

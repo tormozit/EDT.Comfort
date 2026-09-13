@@ -38,6 +38,7 @@ import org.eclipse.swt.graphics.RGB;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.layout.GridLayout;
 import org.eclipse.swt.layout.RowLayout;
+import org.eclipse.swt.widgets.Button;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
@@ -65,6 +66,8 @@ public class ComfortPreferencePage
         implements IWorkbenchPreferencePage, IWorkbenchPropertyPage
 {
     private IAdaptable element;
+    /** Флажок «Объединять рассчитанный тип с документирующим» (только страница проекта). */
+    private Button mergeComputedTypeCheck;
 
     private Text installedVersionText;
     private Text installedDateText;
@@ -119,6 +122,9 @@ public class ComfortPreferencePage
     private static final String WORKSPACE_DESCRIPTION =
             "Настройки плагина Комфорт (Tormozit)."; //$NON-NLS-1$
 
+    private static final String PROJECT_DESCRIPTION =
+            "Настройки Комфорт для проекта."; //$NON-NLS-1$
+
     public ComfortPreferencePage()
     {
         super(GRID);
@@ -128,8 +134,6 @@ public class ComfortPreferencePage
     public void init(IWorkbench workbench)
     {
         ensurePreferenceStore();
-        if (isProjectPreferencePage())
-            setDescription("Настройки Комфорт для проекта."); //$NON-NLS-1$
     }
 
     @Override
@@ -137,8 +141,6 @@ public class ComfortPreferencePage
     {
         this.element = element;
         ensurePreferenceStore();
-        if (isProjectPreferencePage())
-            setDescription("Настройки Комфорт для проекта."); //$NON-NLS-1$
     }
 
     @Override
@@ -194,11 +196,11 @@ public class ComfortPreferencePage
         ensurePreferenceStore();
         if (isProjectPreferencePage())
         {
-            if (getDescription() == null || getDescription().isBlank())
-                setDescription("Настройки Комфорт для проекта."); //$NON-NLS-1$
             Composite area = new Composite(parent, SWT.NONE);
             area.setLayout(new GridLayout(1, false));
             area.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));
+            createHeader(area, PROJECT_DESCRIPTION, 1);
+            createProjectTypeMergeSection(area);
             createProjectDictionarySection(area);
             return area;
         }
@@ -212,7 +214,7 @@ public class ComfortPreferencePage
         if (isProjectPreferencePage())
             return;
 
-        createHeader();
+        createHeader(getFieldEditorParent(), WORKSPACE_DESCRIPTION, 2);
         createVersionSection();
         createKeysLink();
 
@@ -388,17 +390,15 @@ public class ComfortPreferencePage
     }
 
     /**
-     * Шапка страницы: фирменная иконка слева от надписи «Настройки плагина…».
+     * Шапка страницы: фирменная иконка слева от описания.
      * Описание не отдаётся в {@code setDescription} — иначе фреймворк нарисует
      * тот же текст вторым, отдельной строкой над содержимым.
      */
-    private void createHeader()
+    private void createHeader(Composite parent, String description, int horizontalSpan)
     {
-        Composite parent = getFieldEditorParent();
-
         Composite row = new Composite(parent, SWT.NONE);
         GridData rowGd = new GridData(SWT.LEFT, SWT.CENTER, false, false);
-        rowGd.horizontalSpan = 2;
+        rowGd.horizontalSpan = horizontalSpan;
         row.setLayoutData(rowGd);
         RowLayout rowLayout = new RowLayout(SWT.HORIZONTAL);
         rowLayout.spacing = 8;
@@ -416,7 +416,7 @@ public class ComfortPreferencePage
             new Label(row, SWT.NONE).setImage(comfortIcon);
 
         Label descriptionLabel = new Label(row, SWT.NONE);
-        descriptionLabel.setText(WORKSPACE_DESCRIPTION);
+        descriptionLabel.setText(description);
     }
 
     /** Ссылка установки Eclipse JDT — без него орфография Comfort недоступна. */
@@ -467,6 +467,36 @@ public class ComfortPreferencePage
     }
 
     /** Режим «По проекту»: только ссылка на словарь проекта. */
+    /**
+     * Флажок «Объединять рассчитанный тип с документирующим» (issue 509).
+     * <p>
+     * Включённый флажок форсирует штатный флажок EDT «Перезаписывать типы документирующим
+     * комментарием» (Свойства проекта → Встроенный язык), поэтому причина названа прямо в
+     * подписи под флажком: иначе пользователь не поймёт, почему штатный стал недоступен.
+     * Выключенный — не меняет в поведении EDT ничего.
+     */
+    private void createProjectTypeMergeSection(Composite parent)
+    {
+        Composite area = new Composite(parent, SWT.NONE);
+        area.setLayout(new GridLayout(1, false));
+        area.setLayoutData(new GridData(SWT.FILL, SWT.TOP, true, false));
+
+        mergeComputedTypeCheck = new Button(area, SWT.CHECK);
+        mergeComputedTypeCheck.setText("Объединять рассчитанный тип с документирующим"); //$NON-NLS-1$
+        mergeComputedTypeCheck.setSelection(
+            BslDocCommentComputedTypes.isMergeEnabled(getProject()));
+
+        Label hint = new Label(area, SWT.WRAP);
+        hint.setText(
+            "Ссылка «см. Метод» объединяет документирующий и рассчитанный типы (без этого берется только документирующий тип). Удерживает включённым штатный флажок "
+            + "«Перезаписывать типы документирующим комментарием» на странице «Встроенный язык». Запрет влития рассчитанного типа - %, а приказ - ^. Например - ^, Массив."); //$NON-NLS-1$
+        GridData hintGd = new GridData(SWT.FILL, SWT.TOP, true, false);
+        hintGd.widthHint = 420;
+        hint.setLayoutData(hintGd);
+        hint.setForeground(ThemeAwareColors.effectiveSystemColor(
+            area.getDisplay(), SWT.COLOR_DARK_GRAY));
+    }
+
     private void createProjectDictionarySection(Composite parent)
     {
         if (!ComfortJdtAvailability.isJdtUiAvailable())
@@ -486,8 +516,7 @@ public class ComfortPreferencePage
         Label hint = new Label(parent, SWT.WRAP);
         hint.setText(
             "Пользовательский словарь орфографии этого проекта "
-            + "(.comfort/spelling-comfort-project.dic). Коммитьте файл в git — "
-            + "при merge строки сливаются; Comfort пересчитывает счётчик при загрузке."); //$NON-NLS-1$
+            + "(.comfort/spelling-comfort-project.dic)."); //$NON-NLS-1$
         GridData hintGd = new GridData(SWT.FILL, SWT.TOP, true, false);
         hintGd.widthHint = 420;
         hint.setLayoutData(hintGd);
@@ -1204,6 +1233,16 @@ public class ComfortPreferencePage
     public boolean performOk()
     {
         boolean result = super.performOk();
+        if (result && mergeComputedTypeCheck != null && !mergeComputedTypeCheck.isDisposed())
+        {
+            IProject project = getProject();
+            boolean wanted = mergeComputedTypeCheck.getSelection();
+            if (wanted != BslDocCommentComputedTypes.isMergeEnabled(project)
+                && BslDocCommentComputedTypes.setMergeEnabled(project, wanted))
+            {
+                BslDocCommentComputedTypes.promptRebuild(getShell(), project);
+            }
+        }
         if (result)
         {
             SmartMatchHighlight.clearColorCache();
