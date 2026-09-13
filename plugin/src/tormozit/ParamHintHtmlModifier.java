@@ -173,7 +173,7 @@ public final class ParamHintHtmlModifier
 
         // Гигант, сохранённый в настройках EDT прошлым сеансом, раздувает окно подсказки
         // при каждом штатном updateSize. Убираем его до первого показа.
-        SavedBounds.repair(null, "startup"); //$NON-NLS-1$
+        SavedBounds.repair(null);
 
         display.addFilter(SWT.Show, event ->
         {
@@ -187,17 +187,12 @@ public final class ParamHintHtmlModifier
                 return;
 
             LinkedModeParamHintCloser.ensureInstalled();
-            GeometryTrace.attach(shell);
-            GeometryTrace.log("show.filter", shell, //$NON-NLS-1$
-                "giant=" + isGiantParamHintSize(shell.getSize(), HOVER_FALLBACK_SIZE, //$NON-NLS-1$
-                    paramHintMonitorClient(shell))
-                    + " intended=" + GeometryTrace.describeIntended(browser)); //$NON-NLS-1$
 
             // Точная починка сохранённого размера: здесь EDT уже может посчитать его сам
             // по шрифту подсказки. И тот же размер запишем при закрытии окна — иначе
             // штатный saveBounds() вернёт гигант в настройки.
             Object hoverForBounds = findParametersHover(browser);
-            SavedBounds.repair(hoverForBounds, "show"); //$NON-NLS-1$
+            SavedBounds.repair(hoverForBounds);
             ensureSavedBoundsRepairOnClose(shell);
 
             // BrowserInformationControl.setVisible крутит readAndDispatch до Progress.
@@ -1864,9 +1859,6 @@ public final class ParamHintHtmlModifier
             Browser browser = findParamHintBrowser(control);
             if (browser != null && !browser.isDisposed())
             {
-                GeometryTrace.attach(browser.getShell());
-                GeometryTrace.log("reposition.arm", browser.getShell(), //$NON-NLS-1$
-                    GeometryTrace.describeIntended(browser));
                 browser.addProgressListener(org.eclipse.swt.browser.ProgressListener
                     .completedAdapter(event -> updateParamHintSize(control)));
             }
@@ -1924,9 +1916,6 @@ public final class ParamHintHtmlModifier
                 if (Math.abs(current.x - intended.x) > SIZE_TOLERANCE_PX
                     || Math.abs(current.y - intended.y) > SIZE_TOLERANCE_PX)
                 {
-                    GeometryTrace.log("updateSize.apply", shell, "current=" //$NON-NLS-1$ //$NON-NLS-2$
-                        + GeometryTrace.size(current)
-                        + " intended=" + GeometryTrace.size(intended)); //$NON-NLS-1$
                     Global.invokeVoid(infoControl, "setSize", //$NON-NLS-1$
                         Integer.valueOf(intended.x), Integer.valueOf(intended.y));
                     resized = true;
@@ -2198,7 +2187,6 @@ public final class ParamHintHtmlModifier
             });
         }
         tryModifyBrowserHtml(browser);
-        GeometryTrace.attach(browser.getShell());
     }
 
     /**
@@ -2216,7 +2204,7 @@ public final class ParamHintHtmlModifier
         shell.addListener(SWT.Dispose, event ->
         {
             if (display != null && !display.isDisposed())
-                display.asyncExec(() -> SavedBounds.repair(null, "close")); //$NON-NLS-1$
+                display.asyncExec(() -> SavedBounds.repair(null));
         });
     }
 
@@ -2246,14 +2234,8 @@ public final class ParamHintHtmlModifier
         if (current.width <= intended.x + SIZE_TOLERANCE_PX
             && current.height <= intended.y + SIZE_TOLERANCE_PX)
         {
-            GeometryTrace.log("constrain.skip", shell, "current=" //$NON-NLS-1$ //$NON-NLS-2$
-                + current.width + "x" + current.height //$NON-NLS-1$
-                + " intended=" + GeometryTrace.size(intended)); //$NON-NLS-1$
             return false;
         }
-        GeometryTrace.log("constrain.apply", shell, "current=" //$NON-NLS-1$ //$NON-NLS-2$
-            + current.width + "x" + current.height //$NON-NLS-1$
-            + " intended=" + GeometryTrace.size(intended)); //$NON-NLS-1$
         Global.invokeVoid(infoControl, "setSize", //$NON-NLS-1$
             Integer.valueOf(intended.x), Integer.valueOf(intended.y));
         return true;
@@ -3006,8 +2988,6 @@ public final class ParamHintHtmlModifier
         Point now = shell.getLocation();
         if (Math.abs(now.x - target.x) <= 8 && Math.abs(now.y - target.y) <= 8)
         {
-            GeometryTrace.log("relocate.atTarget", shell, "caret=" //$NON-NLS-1$ //$NON-NLS-2$
-                + GeometryTrace.point(caret) + " target=" + GeometryTrace.point(target)); //$NON-NLS-1$
             return false;
         }
         boolean far = Math.abs(now.x - caret.x) > 200 || Math.abs(now.y - caret.y) > 200
@@ -3015,16 +2995,10 @@ public final class ParamHintHtmlModifier
         // Окно под кареткой, хотя место над ней есть: так штатный computeLocation сажает
         // подсказку, когда считает положение по ещё гигантскому размеру Browser.
         boolean wrongSide = now.y > caret.y && target.y + size.y <= caret.y;
-        String decision = "caret=" + GeometryTrace.point(caret) //$NON-NLS-1$
-            + " target=" + GeometryTrace.point(target) //$NON-NLS-1$
-            + " sizeUsed=" + GeometryTrace.size(size) //$NON-NLS-1$
-            + " far=" + far + " wrongSide=" + wrongSide + " force=" + force; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         if (!far && !wrongSide && !force)
         {
-            GeometryTrace.log("relocate.skip", shell, decision); //$NON-NLS-1$
             return false;
         }
-        GeometryTrace.log("relocate.apply", shell, decision); //$NON-NLS-1$
         shell.setLocation(target);
         return true;
     }
@@ -3373,11 +3347,8 @@ public final class ParamHintHtmlModifier
         // без повторного updateSize (см. setBrowserTextKeepGeometry).
         // Геометрию здесь не трогаем вовсе: смена активного параметра — самая частая
         // операция, любое наше вмешательство (сжатие, перенос, alpha) видно как вспышка.
-        // Но записываем: внутри showPage штатный updateSize меняет и размер, и место.
-        GeometryTrace.log("showPage.before", browser.getShell(), "arg=" + showIdx); //$NON-NLS-1$ //$NON-NLS-2$
         Global.invokeVoid(ctx.parametersHover, "showPage", ctx.pages, //$NON-NLS-1$
             Integer.valueOf(ctx.pageIndex), Integer.valueOf(showIdx));
-        GeometryTrace.log("showPage.after", browser.getShell(), "arg=" + showIdx); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     /**
@@ -6497,7 +6468,7 @@ public final class ParamHintHtmlModifier
          *            ({@code computeSizeConstraints}); при {@code null} — последние
          *            известные или запасные
          */
-        static void repair(Object hover, String reason)
+        static void repair(Object hover)
         {
             try
             {
@@ -6521,9 +6492,6 @@ public final class ParamHintHtmlModifier
                     fixed = sane;
                 Global.invoke(section, "put", HOVER_BOUNDS_WIDTH, String.valueOf(fixed.x)); //$NON-NLS-1$
                 Global.invoke(section, "put", HOVER_BOUNDS_HEIGHT, String.valueOf(fixed.y)); //$NON-NLS-1$
-                Global.tempLog("param-hint-geom", "savedBounds.repair reason=" + reason //$NON-NLS-1$ //$NON-NLS-2$
-                    + " stored=" + stored.x + "x" + stored.y //$NON-NLS-1$ //$NON-NLS-2$
-                    + " written=" + fixed.x + "x" + fixed.y); //$NON-NLS-1$ //$NON-NLS-2$
             }
             catch (Exception | LinkageError ignored)
             {
@@ -6590,144 +6558,6 @@ public final class ParamHintHtmlModifier
                 return null;
             Monitor monitor = display.getPrimaryMonitor();
             return monitor != null ? monitor.getClientArea() : null;
-        }
-    }
-
-    /**
-     * Безусловная трассировка геометрии окна подсказки параметров.
-     * <p>
-     * Гигантское окно и прыжок к левому краю монитора (в навигатор) — один из главных
-     * дефектов этого места, а меняют размер и положение сразу несколько сторон: штатный
-     * {@code ParametersHoverInfoControl.updateSize}, {@code BrowserInformationControl}
-     * при готовности движка, наш size-guard и наш перенос к каретке. Разбирать это без
-     * записи <b>каждого</b> изменения и того, кто его сделал, нечем — поэтому слушаем
-     * {@code SWT.Resize}/{@code SWT.Move} самого shell: в стеке события виден вызывающий.
-     * <p>
-     * Канал временный и безусловный: {@code .tmp/temp-logs/param-hint-geom.log}, мимо
-     * флажка «Вести журнал» и мимо журнала «Комфорт».
-     */
-    private static final class GeometryTrace
-    {
-        private static final String TOPIC = "param-hint-geom"; //$NON-NLS-1$
-        private static final String MARK = "tormozit.paramHintGeomTrace"; //$NON-NLS-1$
-
-        private GeometryTrace()
-        {
-        }
-
-        static void attach(Shell shell)
-        {
-            if (shell == null || shell.isDisposed() || shell.getData(MARK) != null)
-                return;
-            shell.setData(MARK, Boolean.TRUE);
-            Listener listener = event -> log(eventName(event.type), shell, ""); //$NON-NLS-1$
-            shell.addListener(SWT.Resize, listener);
-            shell.addListener(SWT.Move, listener);
-            shell.addListener(SWT.Show, listener);
-            shell.addListener(SWT.Hide, listener);
-            shell.addListener(SWT.Dispose, listener);
-            log("attach", shell, ""); //$NON-NLS-1$ //$NON-NLS-2$
-        }
-
-        static void log(String event, Shell shell, String extra)
-        {
-            try
-            {
-                StringBuilder sb = new StringBuilder(event);
-                if (shell != null && !shell.isDisposed())
-                {
-                    Rectangle bounds = shell.getBounds();
-                    sb.append(" loc=").append(bounds.x).append(',').append(bounds.y) //$NON-NLS-1$
-                        .append(" size=").append(bounds.width).append('x').append(bounds.height) //$NON-NLS-1$
-                        .append(" visible=").append(shell.isVisible()); //$NON-NLS-1$
-                }
-                if (extra != null && !extra.isEmpty())
-                    sb.append(' ').append(extra);
-                sb.append(" at ").append(stack(8)); //$NON-NLS-1$
-                Global.tempLog(TOPIC, sb.toString());
-            }
-            catch (Exception ignored)
-            {
-            }
-        }
-
-        /** Размеры, из которых штатный расчёт выбирает: сохранённый, дефолтный, итоговый. */
-        static String describeIntended(Browser browser)
-        {
-            try
-            {
-                Object hover = findParametersHover(browser);
-                if (hover == null)
-                    return "hover=null"; //$NON-NLS-1$
-                Object infoControl = Global.invoke(hover, "getControl"); //$NON-NLS-1$
-                if (infoControl == null)
-                    return "control=null"; //$NON-NLS-1$
-                Object shellObj = Global.invoke(infoControl, "getShell"); //$NON-NLS-1$
-                Shell shell = shellObj instanceof Shell hintShell ? hintShell : null;
-                Object saved = Global.invoke(hover, "loadBounds"); //$NON-NLS-1$
-                Point def = computeParamHintDefaultSize(infoControl);
-                Point intended = shell != null
-                    ? resolveParamHintIntendedSize(hover, infoControl, shell) : null;
-                return "saved=" + size(saved) + " def=" + size(def) //$NON-NLS-1$ //$NON-NLS-2$
-                    + " intended=" + size(intended); //$NON-NLS-1$
-            }
-            catch (Exception ex)
-            {
-                return "intended.err=" + ex; //$NON-NLS-1$
-            }
-        }
-
-        static String size(Object point)
-        {
-            return point instanceof Point p ? p.x + "x" + p.y : "null"; //$NON-NLS-1$ //$NON-NLS-2$
-        }
-
-        static String point(Point p)
-        {
-            return p == null ? "null" : p.x + "," + p.y; //$NON-NLS-1$ //$NON-NLS-2$
-        }
-
-        private static String eventName(int type)
-        {
-            switch (type)
-            {
-            case SWT.Resize:
-                return "resize"; //$NON-NLS-1$
-            case SWT.Move:
-                return "move"; //$NON-NLS-1$
-            case SWT.Show:
-                return "show"; //$NON-NLS-1$
-            case SWT.Hide:
-                return "hide"; //$NON-NLS-1$
-            case SWT.Dispose:
-                return "dispose"; //$NON-NLS-1$
-            default:
-                return "event" + type; //$NON-NLS-1$
-            }
-        }
-
-        private static String stack(int frames)
-        {
-            StackTraceElement[] all = new Throwable().getStackTrace();
-            StringBuilder sb = new StringBuilder();
-            int taken = 0;
-            for (StackTraceElement frame : all)
-            {
-                String className = frame.getClassName();
-                if (className.contains("GeometryTrace") //$NON-NLS-1$
-                    || className.startsWith("java.") //$NON-NLS-1$
-                    || className.startsWith("jdk.") //$NON-NLS-1$
-                    || className.startsWith("sun.")) //$NON-NLS-1$
-                    continue;
-                if (sb.length() > 0)
-                    sb.append(" <- "); //$NON-NLS-1$
-                int dot = className.lastIndexOf('.');
-                sb.append(dot >= 0 ? className.substring(dot + 1) : className).append('.')
-                    .append(frame.getMethodName()).append(':').append(frame.getLineNumber());
-                if (++taken >= frames)
-                    break;
-            }
-            return sb.length() == 0 ? "-" : sb.toString(); //$NON-NLS-1$
         }
     }
 
