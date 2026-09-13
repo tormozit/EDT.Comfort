@@ -13,6 +13,7 @@ import org.eclipse.jface.text.DocumentEvent;
 import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.IDocumentListener;
 import org.eclipse.jface.text.ITextSelection;
+import org.eclipse.jface.text.TextSelection;
 import org.eclipse.jface.text.source.ISourceViewer;
 import org.eclipse.jface.text.source.SourceViewer;
 import org.eclipse.swt.SWT;
@@ -34,12 +35,12 @@ import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.ScrollBar;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Combo;
+import org.eclipse.jface.viewers.ISelection;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.IStartup;
-import org.eclipse.ui.ide.IDE;
 import org.eclipse.ui.part.FileEditorInput;
 import org.eclipse.ui.forms.widgets.ExpandableComposite;
 import org.eclipse.ui.texteditor.ITextEditor;
@@ -1291,7 +1292,16 @@ public final class BreakpointPropertiesHook implements IStartup
 
             IEditorPart part = page.findEditor(new FileEditorInput(file));
             if (part == null)
-                part = IDE.openEditor(page, file, true);
+            {
+                // Модуль формы уже открыт внутри редактора формы, но его вход —
+                // не FileEditorInput, поэтому findEditor его не находит.
+                // IDE.openEditor по .bsl открывал ВТОРОЙ редактор на тот же файл: оба
+                // становились изменёнными, и при закрытии EDT спрашивал «изменён, но
+                // всё ещё открыт в другом месте с теми же изменениями». Штатный
+                // OpenHelper сам находит нужный редактор объекта и активирует в нём
+                // страницу модуля (тот же вызов, что в openObjectEditorForFile).
+                part = openModuleEditorViaOpenHelper(page, file);
+            }
             if (part == null)
                 return null;
 
@@ -1311,6 +1321,39 @@ public final class BreakpointPropertiesHook implements IStartup
         catch (Exception e)
         {
             BreakpointPropertiesDebug.problem("resolveModuleEditor: " + e.getMessage()); //$NON-NLS-1$
+        }
+        return null;
+    }
+
+    /**
+     * Открывает модуль штатным {@code OpenHelper.openEditor(IFile, ISelection)} — так же,
+     * как это делает поиск по файлам ({@code FileSearchResultsHook.openObjectEditorForFile}).
+     * Он открывает именно редактор объекта, а не второй редактор на тот же файл.
+     */
+    private static IEditorPart openModuleEditorViaOpenHelper(IWorkbenchPage page, IFile file)
+    {
+        try
+        {
+            Class<?> cls = Class.forName("com._1c.g5.v8.dt.ui.util.OpenHelper"); //$NON-NLS-1$
+            Object helper = cls.getConstructor(IWorkbenchPage.class).newInstance(page);
+            for (java.lang.reflect.Method m : cls.getMethods())
+            {
+                if (!"openEditor".equals(m.getName()) || m.getParameterCount() != 2) //$NON-NLS-1$
+                    continue;
+                if (m.getParameterTypes()[0].equals(IFile.class)
+                    && m.getParameterTypes()[1].equals(ISelection.class))
+                {
+                    // Пустое выделение вместо null: строку показываем сами (revealLine).
+                    Object opened = m.invoke(helper, file, TextSelection.emptySelection());
+                    BreakpointPropertiesDebug.log("openModuleEditor: OpenHelper → " //$NON-NLS-1$
+                        + (opened == null ? "null" : opened.getClass().getSimpleName())); //$NON-NLS-1$
+                    return opened instanceof IEditorPart editor ? editor : null;
+                }
+            }
+        }
+        catch (Exception e)
+        {
+            BreakpointPropertiesDebug.problem("openModuleEditor: " + e); //$NON-NLS-1$
         }
         return null;
     }

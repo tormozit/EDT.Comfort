@@ -566,18 +566,11 @@ public final class ParamHintHtmlModifier
             if (!realHandler)
                 return tryOpenParamHintAfterEdtMiss();
             ensureFirstActualArgTypesComputed();
-            Class<?> workClass = Class.forName(PARAM_HOVER_HANDLER_CLASS + "$1"); //$NON-NLS-1$
-            java.lang.reflect.Constructor<?> ctor = workClass.getDeclaredConstructors()[0];
-            ctor.setAccessible(true);
-            Object unit = ctor.newInstance(handler, Integer.valueOf(caret));
-            if (!(unit instanceof IUnitOfWork<?, ?>))
-                return false;
-            @SuppressWarnings("unchecked")
-            IUnitOfWork<Object, XtextResource> work =
-                (IUnitOfWork<Object, XtextResource>) unit;
             // Синхронизированное чтение (то же, которым EDT считает список
             // автодополнения): без него модель не знает только что вставленного вызова.
-            Object info = ContentAssistSessionReloader.readOnlyForContentAssist(xdoc, work);
+            Object info = ContentAssistSessionReloader.readOnlyForContentAssist(xdoc,
+                (IUnitOfWork<Object, XtextResource>) resource -> stockParameterInfo(handler,
+                    resource, caret));
             if (info == null)
             {
                 ContentAssistSessionReloader.logLinkedMode("openFast.skip", //$NON-NLS-1$
@@ -593,10 +586,7 @@ public final class ParamHintHtmlModifier
             if (window != null && window.getActivePage() != null
                 && window.getActivePage().getActivePart() != null)
                 site = window.getActivePage().getActivePart().getSite();
-            boolean shownFast = Global.invokeVoid(handler, "showControlInfo", //$NON-NLS-1$
-                viewer, info, Integer.valueOf(0), site);
-            if (shownFast)
-                repositionParamHintWhenReady(handler);
+            boolean shownFast = showParamInfoViaHandler(handler, viewer, info, site, true, false);
             // #region agent log
             Global.tempLog("inspect-hint-cmd", "openFast shown=" + shownFast //$NON-NLS-1$ //$NON-NLS-2$
                 + " caret=" + caret + " handler=" + handlerCls); //$NON-NLS-1$ //$NON-NLS-2$
@@ -839,6 +829,16 @@ public final class ParamHintHtmlModifier
         catch (Exception ignored)
         {
         }
+        return isParamHintShellVisible();
+    }
+
+    /**
+     * Видимое окно подсказки параметров — по самим shell, а не по полю обработчика:
+     * штатный {@code dispose} поле {@code infoControl} не обнуляет, и проверка по нему
+     * «залипает» на всю жизнь обработчика.
+     */
+    static boolean isParamHintShellVisible()
+    {
         try
         {
             Display display = Display.getCurrent();
@@ -862,6 +862,160 @@ public final class ParamHintHtmlModifier
         {
         }
         return false;
+    }
+
+    /**
+     * Штатный разбор вызова: {@code InvocationParametersHoverHandler$1} — обычный
+     * {@code IUnitOfWork}, ему не нужны ни команда, ни редактор, только ресурс и
+     * смещение. Поэтому и в поле выражения (инспектор, точка останова) считать вызов
+     * самим не надо: вложенные вызовы, {@code Новый Тип(…)}, границы и позиции запятых
+     * он разбирает сам.
+     *
+     * @param handler реальный {@code InvocationParametersHoverHandler} (с инъекцией)
+     * @return штатный {@code ParameterInfo} или {@code null}
+     */
+    private static Object stockParameterInfo(Object handler, XtextResource resource, int caret)
+    {
+        if (handler == null || resource == null
+            || !PARAM_HOVER_HANDLER_CLASS.equals(handler.getClass().getName()))
+            return null;
+        try
+        {
+            ensureHandlerInjections(handler, resource);
+            Class<?> workClass = Class.forName(PARAM_HOVER_HANDLER_CLASS + "$1"); //$NON-NLS-1$
+            java.lang.reflect.Constructor<?> ctor = workClass.getDeclaredConstructors()[0];
+            ctor.setAccessible(true);
+            Object unit = ctor.newInstance(handler, Integer.valueOf(caret));
+            // exec(XtextResource) — чтение ресурса уже открыто вызывающим.
+            return Global.invoke(unit, "exec", resource); //$NON-NLS-1$
+        }
+        catch (Exception | LinkageError ex)
+        {
+            ContentAssistSessionReloader.logLinkedMode("stockInfo.err", "{\"ex\":\"" //$NON-NLS-1$ //$NON-NLS-2$
+                + ContentAssistDebug.jsonEscapeForLog(String.valueOf(ex)) + "\"}"); //$NON-NLS-1$
+            return null;
+        }
+    }
+
+    /**
+     * Заполняет инъекции обработчика, если он создан не контейнером EDT: наш экземпляр
+     * приходит из {@code ContextInjectionFactory} (e4), а {@code helper} и
+     * {@code dynamicComputer} у EDT инъектируются Guice и остаются {@code null} —
+     * штатный расчёт падал на них с NPE (лог 08:28:21).
+     */
+    private static void ensureHandlerInjections(Object handler, XtextResource resource)
+    {
+        IResourceServiceProvider rsp = resource.getURI() != null
+            ? IResourceServiceProvider.Registry.INSTANCE.getResourceServiceProvider(
+                resource.getURI())
+            : null;
+        StringBuilder filled = new StringBuilder();
+        if (Global.getField(handler, "helper") == null) //$NON-NLS-1$
+        {
+            Object helper = rsp != null ? rsp.get(EObjectAtOffsetHelper.class) : null;
+            if (helper == null)
+                helper = new EObjectAtOffsetHelper();
+            Global.setFieldForce(handler, "helper", helper); //$NON-NLS-1$
+            filled.append("helper "); //$NON-NLS-1$
+        }
+        if (rsp == null)
+            return;
+        if (Global.getField(handler, "dynamicComputer") == null) //$NON-NLS-1$
+        {
+            Object computer = rsp.get(DynamicFeatureAccessComputer.class);
+            if (computer != null)
+            {
+                Global.setFieldForce(handler, "dynamicComputer", computer); //$NON-NLS-1$
+                filled.append("dynamicComputer "); //$NON-NLS-1$
+            }
+        }
+        fillHandlerService(handler, rsp, "documentation", //$NON-NLS-1$
+            "com._1c.g5.v8.dt.internal.bsl.ui.documentation.BslDocumentationProvider", filled); //$NON-NLS-1$
+        fillHandlerService(handler, rsp, "languageProvider", //$NON-NLS-1$
+            "com._1c.g5.v8.dt.internal.bsl.ui.syntaxassist.SyntaxAssistLanguageProvider", filled); //$NON-NLS-1$
+        if (filled.length() > 0)
+            ContentAssistSessionReloader.logLinkedMode("stockInfo.inject", "{\"filled\":\"" //$NON-NLS-1$ //$NON-NLS-2$
+                + filled.toString().trim() + "\"}"); //$NON-NLS-1$
+    }
+
+    private static void fillHandlerService(Object handler, IResourceServiceProvider rsp,
+        String field, String className, StringBuilder filled)
+    {
+        if (Global.getField(handler, field) != null)
+            return;
+        try
+        {
+            Object service = rsp.get(Class.forName(className));
+            if (service != null)
+            {
+                Global.setFieldForce(handler, field, service);
+                filled.append(field).append(' ');
+            }
+        }
+        catch (Exception | LinkageError ignored)
+        {
+        }
+    }
+
+    /** Есть ли в {@code ParameterInfo} страницы: без них показывать нечего. */
+    private static boolean hasParamInfoPages(Object info)
+    {
+        Object pages = Global.getField(info, "pages"); //$NON-NLS-1$
+        return pages instanceof List<?> list && !list.isEmpty();
+    }
+
+    /**
+     * Показ штатным {@code showControlInfo}. Только этот путь ставит
+     * {@code CustomCaretListener} штатного handler: от него зависят подсветка текущего
+     * параметра и автозакрытие подсказки при уходе каретки из вызова.
+     */
+    private static boolean showParamInfoViaHandler(Object handler, ITextViewer viewer, Object info,
+        org.eclipse.ui.IWorkbenchSite site, boolean realHandlerClass, boolean findMissHtml)
+    {
+        boolean shown = false;
+        String showErr = ""; //$NON-NLS-1$
+        if (realHandlerClass)
+        {
+            try
+            {
+                java.lang.reflect.Method show = null;
+                for (java.lang.reflect.Method m : handler.getClass().getDeclaredMethods())
+                {
+                    if ("showControlInfo".equals(m.getName()) && m.getParameterCount() == 4) //$NON-NLS-1$
+                    {
+                        show = m;
+                        break;
+                    }
+                }
+                if (show == null)
+                    showErr = "noMethod"; //$NON-NLS-1$
+                else
+                {
+                    show.setAccessible(true);
+                    show.invoke(handler, viewer, info, Integer.valueOf(0), site);
+                    shown = true;
+                }
+            }
+            catch (Exception | LinkageError ex)
+            {
+                Throwable cause = ex instanceof java.lang.reflect.InvocationTargetException ite
+                    && ite.getCause() != null ? ite.getCause() : ex;
+                showErr = cause.getClass().getSimpleName() + ": " + cause.getMessage(); //$NON-NLS-1$
+            }
+            if (shown)
+            {
+                // Патч HTML этого browser нужен только пути промаха: в основном режиме
+                // его ставит фильтр SWT.Show, два слушателя дают гонку.
+                if (findMissHtml)
+                    tryModifyFindMissBrowser(Global.getField(handler, "infoControl")); //$NON-NLS-1$
+                repositionParamHintWhenReady(handler);
+            }
+        }
+        Global.tempLog("inspect-hint-cmd", "showControlInfo real=" + realHandlerClass //$NON-NLS-1$ //$NON-NLS-2$
+            + " shown=" + shown //$NON-NLS-1$
+            + " handler=" + handler.getClass().getName() //$NON-NLS-1$
+            + (showErr.isEmpty() ? "" : " err=" + showErr)); //$NON-NLS-1$ //$NON-NLS-2$
+        return shown;
     }
 
     /**
@@ -968,6 +1122,43 @@ public final class ParamHintHtmlModifier
                 (IUnitOfWork<Boolean, XtextResource>) resource -> {
                 if (resource == null)
                     return Boolean.FALSE;
+                // Разбор вызова — штатный: тот же UnitOfWork, которым EDT считает
+                // подсказку в редакторе модуля. Он знает и вложенные вызовы, и
+                // «Новый Тип(…)» (OperatorStyleCreator), и позиции запятых с учётом
+                // вложенности, строк и комментариев. Свой сбор ниже — только для промаха
+                // EDT (Error-страницы вместо страниц автодополнения, напр. Найти()).
+                Object stockInfo = stockParameterInfo(handlerRef, resource, caret);
+                if (stockInfo != null)
+                {
+                    // Поле «Выражение» инспектора: текст обёрнут искусственным вызовом
+                    // Строка(…). Проверяем по границам самого показа, а не по своему
+                    // разбору — показывать собираемся именно его.
+                    Object firstPos = Global.getField(stockInfo, "firstAvailablePosition"); //$NON-NLS-1$
+                    if (expressionStart >= 0 && firstPos instanceof Integer first
+                        && first.intValue() < expressionStart)
+                    {
+                        ContentAssistSessionReloader.logLinkedMode("miss.skip", //$NON-NLS-1$
+                            "{\"reason\":\"wrapperCall\",\"path\":\"stock\",\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                                + ",\"methodEnd\":" + first //$NON-NLS-1$
+                                + ",\"exprStart\":" + expressionStart + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+                        return Boolean.FALSE;
+                    }
+                    if (hasParamInfoPages(stockInfo))
+                    {
+                        boolean stockShown = showParamInfoViaHandler(handlerRef, viewer, stockInfo,
+                            site, true, true);
+                        ContentAssistSessionReloader.logLinkedMode("miss.stock", "{\"shown\":" //$NON-NLS-1$ //$NON-NLS-2$
+                            + stockShown + ",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+                        if (stockShown)
+                            return Boolean.TRUE;
+                    }
+                }
+                ContentAssistSessionReloader.logLinkedMode("miss.stock", //$NON-NLS-1$
+                    "{\"shown\":false,\"reason\":\"" //$NON-NLS-1$
+                        + (stockInfo == null ? "noInfo" : "noPages") //$NON-NLS-1$ //$NON-NLS-2$
+                        + "\",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+
+                // Дальше — запасной сбор при промахе EDT.
                 CallSiteInfo siteInfo = findCallSiteAt(resource, caret);
                 if (siteInfo == null)
                 {
@@ -986,18 +1177,31 @@ public final class ParamHintHtmlModifier
                         + " exprStart=" + expressionStart); //$NON-NLS-1$
                     return Boolean.FALSE;
                 }
+                ContentAssistSessionReloader.logLinkedMode("miss.site", "{\"owner\":\"" //$NON-NLS-1$ //$NON-NLS-2$
+                    + (siteInfo.owner != null && siteInfo.owner.eClass() != null
+                        ? siteInfo.owner.eClass().getName() : "null") + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"caret\":" + caret //$NON-NLS-1$
+                    + ",\"first\":" + siteInfo.methodAccessEnd //$NON-NLS-1$
+                    + ",\"last\":" + siteInfo.callEnd //$NON-NLS-1$
+                    + ",\"seps\":" + siteInfo.separatorOffsets + "}"); //$NON-NLS-1$ //$NON-NLS-2$
                 // Вызов берём тот же, чьи границы посчитаны в siteInfo: отдельный
                 // поиск по каретке давал вложенный вызов, начинающийся ровно у неё,
                 // и подсказка расходилась с границами.
                 Invocation invocation = siteInfo.owner instanceof Invocation own ? own : null;
+                // «Новый Тип(…)» — это OperatorStyleCreator, а не Invocation. Без
+                // отдельной ветки для него findInvocationNear уходил вверх по дереву и
+                // подсказка показывалась по ВНЕШНЕМУ вызову: для
+                // «ВнешнийМетод(Новый Массив(|))» — по ВнешнийМетод.
+                OperatorStyleCreator ctorOwner =
+                    siteInfo.owner instanceof OperatorStyleCreator osc ? osc : null;
                 EObject resolved = siteInfo.owner;
-                if (invocation == null)
+                if (invocation == null && ctorOwner == null)
                 {
                     EObjectAtOffsetHelper helper = new EObjectAtOffsetHelper();
                     resolved = helper.resolveContainedElementAt(resource, caret);
                     invocation = findInvocationNear(resolved);
                 }
-                if (invocation == null || invocation.getMethodAccess() == null)
+                if (ctorOwner == null && (invocation == null || invocation.getMethodAccess() == null))
                 {
                     String resolvedName = resolved != null && resolved.eClass() != null
                         ? resolved.eClass().getName() : "null"; //$NON-NLS-1$
@@ -1006,7 +1210,7 @@ public final class ParamHintHtmlModifier
                             + ",\"resolved\":\"" + ContentAssistDebug.jsonEscapeForLog(resolvedName) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
                     return Boolean.FALSE;
                 }
-                FeatureAccess methodAccess = invocation.getMethodAccess();
+                FeatureAccess methodAccess = invocation != null ? invocation.getMethodAccess() : null;
                 IResourceServiceProvider rsp = resource.getURI() != null
                     ? IResourceServiceProvider.Registry.INSTANCE.getResourceServiceProvider(
                         resource.getURI())
@@ -1015,7 +1219,9 @@ public final class ParamHintHtmlModifier
                 Environmental envOwner = EcoreUtil2.getContainerOfType(methodAccess,
                     Environmental.class);
                 Object environments = envOwner != null ? envOwner.environments() : null;
-                if (computer == null || environments == null)
+                // Конструктору ни computer, ни environments не нужны: сигнатуры лежат
+                // прямо в типе (Type.getCtors), как и у штатного обработчика.
+                if (ctorOwner == null && (computer == null || environments == null))
                 {
                     ContentAssistSessionReloader.logLinkedMode("miss.skip", //$NON-NLS-1$
                         "{\"reason\":\"noComputer\"}"); //$NON-NLS-1$
@@ -1058,18 +1264,54 @@ public final class ParamHintHtmlModifier
                 if (lang == null || lang.isBlank())
                     lang = "ru"; //$NON-NLS-1$
 
-                Object plain = Global.invoke(computer, "resolveObject", //$NON-NLS-1$
-                    methodAccess, environments);
-                if (!(plain instanceof List<?> entries) || entries.isEmpty())
-                {
-                    ContentAssistSessionReloader.logLinkedMode("miss.skip", //$NON-NLS-1$
-                        "{\"reason\":\"noEntries\"}"); //$NON-NLS-1$
-                    return Boolean.FALSE;
-                }
-
                 List<Object> caPages = new ArrayList<>();
                 int paramSize = 0;
                 int maxParam = 0;
+                List<?> entries;
+                if (ctorOwner != null)
+                {
+                    // Как штатный computeDocumentationInformation для feature типа Type:
+                    // страницы берутся у каждого Ctor типа, размеры — из его параметров.
+                    Type ctorType = ctorOwner.getType();
+                    EList<Ctor> ctors = ctorType != null ? ctorType.getCtors() : null;
+                    if (ctors == null || ctors.isEmpty())
+                    {
+                        ContentAssistSessionReloader.logLinkedMode("miss.skip", //$NON-NLS-1$
+                            "{\"reason\":\"noCtors\",\"type\":\"" //$NON-NLS-1$ //$NON-NLS-2$
+                                + ContentAssistDebug.jsonEscapeForLog(String.valueOf(
+                                    ctorType != null ? Global.invoke(ctorType, "getName") : null)) //$NON-NLS-1$
+                                + "\"}"); //$NON-NLS-1$
+                        return Boolean.FALSE;
+                    }
+                    for (Ctor ctorDef : ctors)
+                    {
+                        if (ctorDef == null)
+                            continue;
+                        int n = ctorDef.getParams() != null ? ctorDef.getParams().size() : 0;
+                        if (n > paramSize)
+                            paramSize = n;
+                        if (n > maxParam)
+                            maxParam = n;
+                        if (ctorDef.getMaxParams() > maxParam)
+                            maxParam = ctorDef.getMaxParams();
+                        Object group = Global.invoke(documentationLocal,
+                            "getHoverDocumentationPages", ctorDef, lang); //$NON-NLS-1$
+                        FindMissSupport.collectContentAssistPages(group, caPages);
+                    }
+                    entries = Collections.emptyList();
+                }
+                else
+                {
+                    Object plain = Global.invoke(computer, "resolveObject", //$NON-NLS-1$
+                        methodAccess, environments);
+                    if (!(plain instanceof List<?> resolvedEntries) || resolvedEntries.isEmpty())
+                    {
+                        ContentAssistSessionReloader.logLinkedMode("miss.skip", //$NON-NLS-1$
+                            "{\"reason\":\"noEntries\"}"); //$NON-NLS-1$
+                        return Boolean.FALSE;
+                    }
+                    entries = resolvedEntries;
+                }
                 for (Object entry : entries)
                 {
                     Object feature = entry instanceof FeatureEntry fe
@@ -1157,59 +1399,16 @@ public final class ParamHintHtmlModifier
                 Global.setFieldForce(info, "commaPosition", //$NON-NLS-1$
                     new ArrayList<>(siteInfo.separatorOffsets));
                 Global.setFieldForce(info, "initialOffset", //$NON-NLS-1$
-                    Integer.valueOf(siteInfo.methodAccessEnd - 1));
+                    Integer.valueOf(siteInfo.initialOffset));
                 Global.setFieldForce(info, "firstAvailablePosition", //$NON-NLS-1$
                     Integer.valueOf(siteInfo.methodAccessEnd));
                 Global.setFieldForce(info, "lastAvailablePosition", //$NON-NLS-1$
                     Integer.valueOf(siteInfo.callEnd));
 
-                boolean shown = false;
                 boolean realHandlerClass = PARAM_HOVER_HANDLER_CLASS.equals(
                     handlerRef.getClass().getName());
-                String showErr = ""; //$NON-NLS-1$
-                if (realHandlerClass)
-                {
-                    // Только этот путь ставит CustomCaretListener штатного handler:
-                    // от него зависят подсветка текущего параметра и автозакрытие
-                    // подсказки при уходе каретки из вызова.
-                    try
-                    {
-                        java.lang.reflect.Method show = null;
-                        for (java.lang.reflect.Method m : handlerRef.getClass().getDeclaredMethods())
-                        {
-                            if ("showControlInfo".equals(m.getName()) //$NON-NLS-1$
-                                && m.getParameterCount() == 4)
-                            {
-                                show = m;
-                                break;
-                            }
-                        }
-                        if (show == null)
-                            showErr = "noMethod"; //$NON-NLS-1$
-                        else
-                        {
-                            show.setAccessible(true);
-                            show.invoke(handlerRef, viewer, info, Integer.valueOf(0), site);
-                            shown = true;
-                        }
-                    }
-                    catch (Exception | LinkageError ex)
-                    {
-                        Throwable cause = ex instanceof java.lang.reflect.InvocationTargetException ite
-                            && ite.getCause() != null ? ite.getCause() : ex;
-                        showErr = cause.getClass().getSimpleName() + ": " + cause.getMessage(); //$NON-NLS-1$
-                    }
-                    if (shown)
-                    {
-                        Object control = Global.getField(handlerRef, "infoControl"); //$NON-NLS-1$
-                        tryModifyFindMissBrowser(control);
-                        repositionParamHintWhenReady(handlerRef);
-                    }
-                }
-                Global.tempLog("inspect-hint-cmd", "showControlInfo real=" + realHandlerClass //$NON-NLS-1$ //$NON-NLS-2$
-                    + " shown=" + shown //$NON-NLS-1$
-                    + " handler=" + handlerRef.getClass().getName() //$NON-NLS-1$
-                    + (showErr.isEmpty() ? "" : " err=" + showErr)); //$NON-NLS-1$ //$NON-NLS-2$
+                boolean shown = showParamInfoViaHandler(handlerRef, viewer, info, site,
+                    realHandlerClass, true);
                 boolean viaHandler = shown;
                 if (!shown)
                 {
@@ -1377,6 +1576,18 @@ public final class ParamHintHtmlModifier
     {
         if (info == null)
             return false;
+        if (stockPositionUpdaterOwns(info))
+        {
+            // Штатный CustomPositionUpdater (его ставит showControlInfo на документ)
+            // уже сдвинул lastAvailablePosition и пересчитал commaPosition по тексту.
+            // Свой сдвиг поверх давал двойной: при вставке границы расползались, при
+            // удалении сжимались вдвое — каретка попадала ровно в lastAvailablePosition,
+            // и штатный CustomCaretListener закрывал подсказку.
+            Global.tempLog("param-hint", "bounds.stockUpdater offset=" + offset //$NON-NLS-1$ //$NON-NLS-2$
+                + " removed=" + removed //$NON-NLS-1$
+                + " added=" + (inserted == null ? 0 : inserted.length())); //$NON-NLS-1$
+            return true;
+        }
         if (!(Global.getField(info, "firstAvailablePosition") instanceof Integer first) //$NON-NLS-1$
             || !(Global.getField(info, "lastAvailablePosition") instanceof Integer last)) //$NON-NLS-1$
             return false;
@@ -1389,9 +1600,54 @@ public final class ParamHintHtmlModifier
         Global.setFieldForce(info, "firstAvailablePosition", Integer.valueOf(newFirst)); //$NON-NLS-1$
         Global.setFieldForce(info, "lastAvailablePosition", Integer.valueOf(newLast)); //$NON-NLS-1$
         shiftCommaPositions(info, offset, removed, inserted, delta);
+        // Штатный CustomCaretListener закрывает подсказку, как только каретка выходит из
+        // [first, last). Поэтому пишем и «до», и каретку: закрытие при удалении символа —
+        // это ровно попадание каретки в last.
         Global.tempLog("param-hint", "bounds.adjust offset=" + offset //$NON-NLS-1$ //$NON-NLS-2$
-            + " delta=" + delta + " first=" + newFirst + " last=" + newLast); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " removed=" + removed //$NON-NLS-1$
+            + " added=" + added //$NON-NLS-1$
+            + " delta=" + delta //$NON-NLS-1$
+            + " before=[" + first + "," + last + ")" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " after=[" + newFirst + "," + newLast + ")" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " caret=" + paramHintCaretForLog()); //$NON-NLS-1$
         return true;
+    }
+
+    /**
+     * Есть ли у этого {@code ParameterInfo} штатный {@code CustomPositionUpdater}.
+     * Он зарегистрирован на документе и сам ведёт границы вызова, поэтому наш сдвиг для
+     * такой подсказки не нужен — он был бы вторым.
+     */
+    private static boolean stockPositionUpdaterOwns(Object info)
+    {
+        if (info == null)
+            return false;
+        Object handler = madeParamHoverHandler;
+        if (stockUpdaterInfo(handler) == info)
+            return true;
+        return stockUpdaterInfo(resolveParamHoverHandlerForMiss()) == info;
+    }
+
+    private static Object stockUpdaterInfo(Object handler)
+    {
+        if (!isRealParamHoverHandler(handler))
+            return null;
+        Object updater = Global.getField(handler, "updater"); //$NON-NLS-1$
+        return updater == null ? null : Global.getField(updater, "info"); //$NON-NLS-1$
+    }
+
+    /** Модельная каретка активного поля/редактора — только для строки лога. */
+    private static String paramHintCaretForLog()
+    {
+        try
+        {
+            ActiveEditor active = resolveParamHintEditor();
+            return active == null ? "-" : String.valueOf(active.caret); //$NON-NLS-1$
+        }
+        catch (Exception | LinkageError ignored)
+        {
+            return "-"; //$NON-NLS-1$
+        }
     }
 
     private static void shiftCommaPositions(Object info, int offset, int removed, String inserted,
@@ -2257,8 +2513,10 @@ public final class ParamHintHtmlModifier
         ICompositeNode invNode = NodeModelUtils.findActualNodeFor(invocation);
         if (invNode == null)
             return null;
+        // initialOffset как у штатного обработчика: смещение «(» самого вызова.
         return new CallSiteInfo(invocation, methodNodes.get(0).getTotalEndOffset(),
-            invNode.getTotalEndOffset(), argSeparatorOffsets(invocation));
+            invNode.getTotalEndOffset(), argSeparatorOffsets(invocation),
+            methodNodes.get(0).getTotalEndOffset() - 1);
     }
 
     private static CallSiteInfo callSiteForOperatorCtor(OperatorStyleCreator ctor)
@@ -2272,8 +2530,10 @@ public final class ParamHintHtmlModifier
         ICompositeNode ctorNode = NodeModelUtils.findActualNodeFor(ctor);
         if (ctorNode == null)
             return null;
+        // У конструктора штатный обработчик берёт начало всего «Новый Тип(…)».
         return new CallSiteInfo(ctor, typeNodes.get(0).getTotalEndOffset(),
-            ctorNode.getTotalEndOffset(), argSeparatorOffsets(ctor));
+            ctorNode.getTotalEndOffset(), argSeparatorOffsets(ctor),
+            ctorNode.getTotalOffset());
     }
 
     private static final class CallSiteInfo
@@ -2284,13 +2544,16 @@ public final class ParamHintHtmlModifier
         final List<Integer> separatorOffsets;
         /** Сам вызов: подсказку строим по нему же, а не по отдельному поиску. */
         final EObject owner;
+        /** {@code ParameterInfo.initialOffset}: у вызова «(», у конструктора — «Новый». */
+        final int initialOffset;
 
         CallSiteInfo(EObject owner, int methodAccessEnd, int callEnd,
-            List<Integer> separatorOffsets)
+            List<Integer> separatorOffsets, int initialOffset)
         {
             this.owner = owner;
             this.methodAccessEnd = methodAccessEnd;
             this.callEnd = callEnd;
+            this.initialOffset = initialOffset;
             this.separatorOffsets = separatorOffsets != null
                 ? separatorOffsets : Collections.emptyList();
         }
@@ -3592,11 +3855,13 @@ public final class ParamHintHtmlModifier
         String paramName = null;
         Object paramContent = null;
         boolean currentParam = false;
+        boolean virtualParam = false;
 
         if (ctx != null && ctx.pages != null && !ctx.pages.isEmpty()
             && ctx.pageIndex >= 0 && ctx.pageIndex < ctx.pages.size())
         {
             Object page = ctx.pages.get(ctx.pageIndex);
+            virtualParam = extraUnknownParamCount(ctx, countPageParams(page)) > 0;
             int highlight = currentParamHighlightIndex(ctx, countPageParams(page));
             currentParam = highlight >= 0;
             paramContent = currentParam ? Global.invoke(page, "getParameter", //$NON-NLS-1$
@@ -3627,12 +3892,25 @@ public final class ParamHintHtmlModifier
         if (currentParam && (description == null || description.isEmpty()))
             description = normalizeDescription(extractExpandedDescription(html));
 
+        if (virtualParam)
+        {
+            // Каретка стоит на несуществующем параметре (в заголовке он показан как «?»).
+            // Тип и описание в штатном HTML — от последнего формального параметра: EDT
+            // прижимает номер параметра к paramSize-1. К введённому значению они
+            // отношения не имеют, поэтому гасим их, а не оставляем как есть.
+            typeBase = ""; //$NON-NLS-1$
+            description = null;
+            defaultDescription = null;
+            isOut = null;
+        }
+
         String directionPrefix = buildDirectionPrefix(isOut);
         String suffix = buildMetaSuffix(defaultDescription, description);
         String newTypeInner = directionPrefix + typeBase + suffix;
-        if (newTypeInner == null || newTypeInner.isEmpty())
+        if (!virtualParam && (newTypeInner == null || newTypeInner.isEmpty()))
             return null;
-        boolean hasEnrichment = !stripHtml(typeBase).isEmpty()
+        boolean hasEnrichment = virtualParam
+            || !stripHtml(typeBase).isEmpty()
             || isOut != null
             || (defaultDescription != null && !defaultDescription.isBlank())
             || (description != null && !description.isBlank());
@@ -3664,8 +3942,10 @@ public final class ParamHintHtmlModifier
         int afterTypeDiv = typeInnerEnd + "</div>".length(); //$NON-NLS-1$
         // Убирать блок «Описание» только если текст уже в строке типа —
         // иначе остаётся штатный ►/▼ (платформенные методы).
+        // На виртуальном параметре блок «Описание» тоже от последнего формального —
+        // убираем вместе с типом.
         boolean inlinedDescription = description != null && !description.isBlank();
-        int descClassPos = inlinedDescription
+        int descClassPos = inlinedDescription || virtualParam
             ? indexOfClassAttribute(html, DESC_CLASS, afterTypeDiv)
             : -1;
         if (descClassPos >= 0)

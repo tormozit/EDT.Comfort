@@ -408,12 +408,16 @@ public final class BslExpressionField
         Shell active = text.getDisplay().getActiveShell();
 
         boolean assist = isAssistShowing(viewer);
+        // Подсказка параметров живёт в своём shell и списком предложений не является:
+        // без этой проверки Esc при открытой подсказке уходил дальше и закрывал
+        // родительское окно (диалог свойств точки останова, окно инспектора).
+        boolean paramHint = ParamHintHtmlModifier.isParamHintShellVisible();
         boolean onOwnPopup = isOwnPopupShell(text, eventShell) && eventShell != fieldShell
                 || isOwnPopupShell(text, active) && active != fieldShell;
         boolean inFieldDialog = eventShell == fieldShell
                 || event.widget == text
                 || isFieldWidget(event.widget instanceof Control c ? c : null);
-        if (!assist && !onOwnPopup)
+        if (!assist && !paramHint && !onOwnPopup)
             return;
         if (!inFieldDialog && !onOwnPopup)
             return;
@@ -433,7 +437,13 @@ public final class BslExpressionField
             ContentAssistant assistant = ContentAssistPatcher.getContentAssistant(viewer);
             ContentAssistPopupSync.hideProposalPopup(assistant);
         }
-        log(logTopic, "esc-guard assist=" + assist + " popup=" + onOwnPopup //$NON-NLS-1$ //$NON-NLS-2$
+        // Событие клавиши мы гасим целиком, поэтому штатный CustomKeyAdapter подсказки
+        // до неё не дойдёт — закрываем сами. Список предложений имеет приоритет: пока он
+        // открыт, Esc убирает только его.
+        else if (paramHint)
+            ParamHintHtmlModifier.dismissAllVisible();
+        log(logTopic, "esc-guard assist=" + assist + " hint=" + paramHint //$NON-NLS-1$ //$NON-NLS-2$
+                + " popup=" + onOwnPopup //$NON-NLS-1$
                 + " traverse=" + escapeTraverse); //$NON-NLS-1$
         restoreFocus(text, viewer, logTopic);
     }

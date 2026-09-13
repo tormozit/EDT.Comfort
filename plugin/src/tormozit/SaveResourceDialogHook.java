@@ -105,7 +105,64 @@ public final class SaveResourceDialogHook implements IStartup
         String title = shell.getText();
         if (!TITLE_RU.equals(title) && !TITLE_EN.equals(title))
             return;
+        logWhoAsks(shell);
         schedulePatch(display, shell, 0);
+    }
+
+    /**
+     * Безусловная запись: кто и почему показывает этот диалог. «Двойная
+     * модифицированность» после работы в диалоге точки останова воспроизводится не всегда,
+     * а по стеку показа видно и инициатора (закрытие редактора, сохранение перед запуском,
+     * страница свойств), и имя ресурса.
+     */
+    private static void logWhoAsks(Shell shell)
+    {
+        StringBuilder sb = new StringBuilder("show"); //$NON-NLS-1$
+        try
+        {
+            sb.append(" title=").append(shell.getText()); //$NON-NLS-1$
+            String message = findMessageText(shell);
+            if (message != null)
+                sb.append(" message=").append(message.replace('\n', ' ')); //$NON-NLS-1$
+        }
+        catch (Exception ignored)
+        {
+        }
+        sb.append("\nstack:"); //$NON-NLS-1$
+        for (StackTraceElement frame : new Throwable().getStackTrace())
+        {
+            String className = frame.getClassName();
+            if (className.startsWith("java.") || className.startsWith("jdk.") //$NON-NLS-1$ //$NON-NLS-2$
+                || className.startsWith("sun.") //$NON-NLS-1$
+                || className.startsWith("tormozit.SaveResourceDialogHook")) //$NON-NLS-1$
+                continue;
+            sb.append("\n  ").append(className).append('.').append(frame.getMethodName()) //$NON-NLS-1$
+                .append(':').append(frame.getLineNumber());
+        }
+        Global.tempLog("save-resource", sb.toString()); //$NON-NLS-1$
+    }
+
+    /** Первый непустой текст {@link Label} в диалоге — его сообщение. */
+    private static String findMessageText(Composite parent)
+    {
+        for (Control child : parent.getChildren())
+        {
+            if (child.isDisposed())
+                continue;
+            if (child instanceof Label label)
+            {
+                String text = label.getText();
+                if (text != null && !text.isBlank())
+                    return text;
+            }
+            if (child instanceof Composite composite)
+            {
+                String nested = findMessageText(composite);
+                if (nested != null)
+                    return nested;
+            }
+        }
+        return null;
     }
 
     private static void schedulePatch(Display display, Shell shell, int attempt)

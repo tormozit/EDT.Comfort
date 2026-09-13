@@ -103,6 +103,8 @@ public final class DebugInspectorHook implements IStartup
     private static final String COMFORT_HEADER_KEY = "tormozit.inspectorComfortHeader"; //$NON-NLS-1$
     private static final String COMFORT_MENU_LAYOUT_KEY = "tormozit.inspectorMenuBarOriginalLayout"; //$NON-NLS-1$
     private static final String DETECT_LOG_KEY = "tormozit.debugInspectorDetectLog"; //$NON-NLS-1$
+    /** Временный лог закрытия крестиком: {@code .tmp/temp-logs/inspect-close.log}. */
+    private static final String CLOSE_TEMP_LOG = "inspect-close"; //$NON-NLS-1$
     static final String INSPECT_EXPRESSION_EDITOR_KEY = "tormozit.inspectExpressionEditor"; //$NON-NLS-1$
     static final String INSPECT_EXPRESSION_WRAP_PREFIX = "Строка("; //$NON-NLS-1$
     private static boolean inspectExpressionProposalApplied;
@@ -1278,7 +1280,10 @@ public final class DebugInspectorHook implements IStartup
             if (shell.isDisposed())
                 return;
             if (hoverPinDisposeAllowed)
+            {
+                logClose("refreshOrMaintain", "skip pinDisposeAllowed " + describeShellAlive(shell)); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
+            }
             if (!Boolean.TRUE.equals(shell.getData(PATCHED_KEY)))
             {
                 DebugInspectorDebug.step("hover", "patch aborted zombie shell=" + shell); //$NON-NLS-1$ //$NON-NLS-2$
@@ -1307,7 +1312,10 @@ public final class DebugInspectorHook implements IStartup
             if (shell.isDisposed())
                 return;
             if (hoverPinDisposeAllowed)
+            {
+                logClose("refresh", "skip pinDisposeAllowed " + describeShellAlive(shell)); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
+            }
             if (!Boolean.TRUE.equals(shell.getData(PATCHED_KEY)))
             {
                 DebugInspectorDebug.step("hover", "patch aborted zombie shell=" + shell); //$NON-NLS-1$ //$NON-NLS-2$
@@ -1355,27 +1363,136 @@ public final class DebugInspectorHook implements IStartup
 
         void requestClose()
         {
+            logClose("click", describeCloseState("enter")); //$NON-NLS-1$ //$NON-NLS-2$
             if (shell.isDisposed())
+            {
+                logClose("abort", "shell already disposed"); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
+            }
             hoverPinDisposeAllowed = true;
             restoreHoverReplacerSuppressGuard();
             removeKeepDeactivateOffListener();
             removeShellPinMaintenance();
+            logClose("guards", describeCloseState("afterGuards pinAllowed=" + hoverPinDisposeAllowed //$NON-NLS-1$
+                + " pinOnTop=" + shellPinnedOnTop)); //$NON-NLS-1$
 
             if (isHoverMode())
             {
                 Object ic = targets.infoControl;
-                if (isHoverInspectControl(ic))
-                    Global.invoke(ic, "dispose"); //$NON-NLS-1$
-                else if (!shell.isDisposed())
-                    shell.dispose();
+                boolean hoverIc = isHoverInspectControl(ic);
+                logClose("hover", "ic=" + DebugInspectorDebug.cn(ic) //$NON-NLS-1$ //$NON-NLS-2$
+                    + " hoverIc=" + hoverIc); //$NON-NLS-1$
+                try
+                {
+                    if (hoverIc)
+                    {
+                        Global.invoke(ic, "dispose"); //$NON-NLS-1$
+                        logClose("hover", "infoControl.dispose() done " + describeCloseState("afterIcDispose")); //$NON-NLS-1$ //$NON-NLS-2$
+                    }
+                    else if (!shell.isDisposed())
+                    {
+                        shell.dispose();
+                        logClose("hover", "shell.dispose() done disposed=" + shell.isDisposed()); //$NON-NLS-1$ //$NON-NLS-2$
+                    }
+                    else
+                        logClose("hover", "no dispose path " + describeCloseState("skip")); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+                catch (RuntimeException ex)
+                {
+                    Global.tempLogException(CLOSE_TEMP_LOG, "hover dispose failed", ex); //$NON-NLS-1$
+                }
+                scheduleCloseVerify("hover"); //$NON-NLS-1$
                 return;
             }
 
-            if (isElementDialog(targets.dialog))
-                Global.invoke(targets.dialog, "close"); //$NON-NLS-1$
-            else if (!shell.isDisposed())
-                shell.dispose();
+            try
+            {
+                if (isElementDialog(targets.dialog))
+                {
+                    logClose("dialog", "invoke close on " + DebugInspectorDebug.cn(targets.dialog)); //$NON-NLS-1$ //$NON-NLS-2$
+                    Global.invoke(targets.dialog, "close"); //$NON-NLS-1$
+                    logClose("dialog", "close() returned " + describeCloseState("afterDialogClose")); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+                else if (!shell.isDisposed())
+                {
+                    logClose("dialog", "shell.dispose() fallback dialog=" //$NON-NLS-1$ //$NON-NLS-2$
+                        + DebugInspectorDebug.cn(targets != null ? targets.dialog : null));
+                    shell.dispose();
+                    logClose("dialog", "shell.dispose() done disposed=" + shell.isDisposed()); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+                else
+                    logClose("dialog", "no close path " + describeCloseState("skip")); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            catch (RuntimeException ex)
+            {
+                Global.tempLogException(CLOSE_TEMP_LOG, "dialog close failed", ex); //$NON-NLS-1$
+            }
+            scheduleCloseVerify("dialog"); //$NON-NLS-1$
+        }
+
+        private void scheduleCloseVerify(String path)
+        {
+            Display display = shell.isDisposed() ? Display.getCurrent() : shell.getDisplay();
+            if (display == null || display.isDisposed())
+            {
+                logClose("verify", path + " no display"); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            }
+            Shell target = shell;
+            for (int delay : new int[] { 0, 50, 200, 500, 1500 })
+            {
+                int d = delay;
+                display.timerExec(d, () -> logClose("verify+" + d + "ms", //$NON-NLS-1$ //$NON-NLS-2$
+                    path + " " + describeShellAlive(target))); //$NON-NLS-1$
+            }
+        }
+
+        private String describeCloseState(String phase)
+        {
+            StringBuilder sb = new StringBuilder(phase);
+            sb.append(" shell=").append(describeShellAlive(shell)); //$NON-NLS-1$
+            sb.append(" hover=").append(targets != null && isHoverMode()); //$NON-NLS-1$
+            sb.append(" dialog=").append(DebugInspectorDebug.cn(targets != null ? targets.dialog : null)); //$NON-NLS-1$
+            sb.append(" ic=").append(DebugInspectorDebug.cn(targets != null ? targets.infoControl : null)); //$NON-NLS-1$
+            sb.append(" elementDialog=").append(targets != null && isElementDialog(targets.dialog)); //$NON-NLS-1$
+            sb.append(" popup=").append(targets != null && isPopupInspectDialog(targets.dialog)); //$NON-NLS-1$
+            sb.append(" pinAllowed=").append(hoverPinDisposeAllowed); //$NON-NLS-1$
+            sb.append(" pinOnTop=").append(shellPinnedOnTop); //$NON-NLS-1$
+            sb.append(" closeBar=").append(describeToolBar(closeToolBar)); //$NON-NLS-1$
+            return sb.toString();
+        }
+
+        private static String describeShellAlive(Shell s)
+        {
+            if (s == null)
+                return "null"; //$NON-NLS-1$
+            if (s.isDisposed())
+                return "disposed@" + System.identityHashCode(s); //$NON-NLS-1$
+            return "alive@" + System.identityHashCode(s) //$NON-NLS-1$
+                + " visible=" + s.isVisible() //$NON-NLS-1$
+                + " active=" + (s.getDisplay().getActiveShell() == s); //$NON-NLS-1$
+        }
+
+        private void wireCloseItem(ToolItem closeItem, String kind)
+        {
+            closeItem.addListener(SWT.Selection, e ->
+            {
+                logClose("selection", kind + " itemDisposed=" + closeItem.isDisposed() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " " + describeCloseState("beforeRequest")); //$NON-NLS-1$ //$NON-NLS-2$
+                requestClose();
+            });
+            if (closeToolBar != null && !closeToolBar.isDisposed())
+            {
+                closeToolBar.addListener(SWT.MouseDown, e -> logClose("mouseDown", //$NON-NLS-1$
+                    kind + " btn=" + e.button + " @" + e.x + "," + e.y //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        + " barVisible=" + closeToolBar.getVisible() //$NON-NLS-1$
+                        + " barEnabled=" + closeToolBar.getEnabled())); //$NON-NLS-1$
+            }
+        }
+
+        private static void logClose(String phase, String detail)
+        {
+            Global.tempLog(CLOSE_TEMP_LOG, phase + " " + detail); //$NON-NLS-1$
         }
 
         private void invalidateSession()
@@ -1607,7 +1724,7 @@ public final class DebugInspectorHook implements IStartup
                 closeItem.setToolTipText(
                     "Закрыть окно инспектора" //$NON-NLS-1$
                         + Global.pluginSignForTooltip());
-                closeItem.addListener(SWT.Selection, e -> requestClose());
+                wireCloseItem(closeItem, "hover"); //$NON-NLS-1$
 
                 layoutHoverHeader(titleArea, menuBar, menuBarLayout);
             }
@@ -1624,7 +1741,7 @@ public final class DebugInspectorHook implements IStartup
                 closeItem.setToolTipText(
                     "Закрыть окно инспектора" //$NON-NLS-1$
                         + Global.pluginSignForTooltip());
-                closeItem.addListener(SWT.Selection, e -> requestClose());
+                wireCloseItem(closeItem, "standalone"); //$NON-NLS-1$
 
                 if (menuBar.getParent() == titleArea)
                     closeToolBar.moveBelow(menuBar);
@@ -2064,6 +2181,7 @@ public final class DebugInspectorHook implements IStartup
 
         void dispose()
         {
+            logClose("sessionDispose", describeCloseState("enter")); //$NON-NLS-1$ //$NON-NLS-2$
             restoreHoverReplacerSuppressGuard();
             removeHeaderGuard();
             removeKeepDeactivateOffListener();
