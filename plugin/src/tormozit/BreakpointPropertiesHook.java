@@ -88,8 +88,6 @@ public final class BreakpointPropertiesHook implements IStartup
             "com._1c.g5.v8.dt.internal.debug.ui.breakpoints.BslBreakpointTextAndHistoryEditorPane"; //$NON-NLS-1$
     /** Тема временного лога поля кода BSL этого диалога ({@code .tmp/temp-logs}). */
     private static final String FIELD_LOG_TOPIC = "bp-field"; //$NON-NLS-1$
-    /** Тема временного лога момента перестроения диалога ({@code .tmp/temp-logs}). */
-    private static final String PATCH_LOG_TOPIC = "bp-patch"; //$NON-NLS-1$
     private static final String JOIN_SEPARATOR = ", " + "\n"; //$NON-NLS-1$ //$NON-NLS-2$
 
     @Override
@@ -109,15 +107,7 @@ public final class BreakpointPropertiesHook implements IStartup
                 return;
             if (shell.isDisposed())
                 return;
-            String title = shell.getText();
-            if (title == null || !title.startsWith(DIALOG_TITLE_PREFIX))
-                return;
-            boolean ours = isBreakpointPropertiesShell(shell);
-            Global.tempLog(PATCH_LOG_TOPIC,
-                (event.type == SWT.Show ? "Show" : "Activate") + ": ours=" + ours //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + ", visible=" + shell.isVisible() + ", patched=" //$NON-NLS-1$ //$NON-NLS-2$
-                    + (shell.getData(PATCHED_KEY) != null));
-            if (!ours)
+            if (!isBreakpointPropertiesShell(shell))
                 return;
             installShellSizeMemory(shell);
             if (shell.getData(PATCHED_KEY) == null)
@@ -151,12 +141,7 @@ public final class BreakpointPropertiesHook implements IStartup
      */
     private static void startPatch(Display display, Shell shell)
     {
-        long started = System.nanoTime();
-        boolean patched = tryPatch(shell);
-        Global.tempLog(PATCH_LOG_TOPIC, "sync attempt: " + (patched ? "ok" : "fail") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + ", visible=" + shell.isVisible() //$NON-NLS-1$
-            + ", " + ((System.nanoTime() - started) / 1_000_000L) + " ms"); //$NON-NLS-1$ //$NON-NLS-2$
-        if (!patched)
+        if (!tryPatch(shell))
             schedulePatchAttempt(display, shell, 1);
     }
 
@@ -169,10 +154,7 @@ public final class BreakpointPropertiesHook implements IStartup
         {
             if (shell.isDisposed() || shell.getData(PATCHED_KEY) != null)
                 return;
-            boolean patched = tryPatch(shell);
-            Global.tempLog(PATCH_LOG_TOPIC,
-                "attempt " + attempt + ": " + (patched ? "ok" : "fail")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-            if (patched)
+            if (tryPatch(shell))
                 return;
             if (attempt < 12)
                 schedulePatchAttempt(display, shell, attempt + 1);

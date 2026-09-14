@@ -4,6 +4,7 @@ import java.io.InputStream;
 import java.lang.reflect.Method;
 import java.net.URL;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
@@ -12,10 +13,12 @@ import java.util.Properties;
 
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.IResource;
+import org.eclipse.core.resources.ProjectScope;
 import org.eclipse.core.runtime.IAdaptable;
 import org.eclipse.core.runtime.IProduct;
 import org.eclipse.core.runtime.NullProgressMonitor;
 import org.eclipse.core.runtime.Platform;
+import org.eclipse.core.runtime.preferences.IEclipsePreferences;
 import org.eclipse.jface.dialogs.IDialogConstants;
 import org.eclipse.jface.preference.BooleanFieldEditor;
 import org.eclipse.jface.preference.ColorFieldEditor;
@@ -47,12 +50,16 @@ import org.eclipse.swt.widgets.Label;
 import org.eclipse.swt.widgets.Link;
 import org.eclipse.swt.widgets.Text;
 import org.eclipse.ui.IWorkbench;
+import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.IWorkbenchPreferencePage;
 import org.eclipse.ui.IWorkbenchPropertyPage;
+import org.eclipse.ui.IWorkbenchWindow;
+import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.preferences.IWorkbenchPreferenceContainer;
 import org.osgi.framework.Bundle;
 import org.osgi.framework.BundleContext;
 import org.osgi.framework.ServiceReference;
+import org.osgi.service.prefs.BackingStoreException;
 
 /**
  * Страница настроек плагина Comfort:
@@ -1359,6 +1366,17 @@ public class ComfortPreferencePage
             Global.log(LOG_TAG, "флажки Комфорт: " + flags.length() + " симв."); //$NON-NLS-1$ //$NON-NLS-2$
             appendCollapsed(body, "Флажки Комфорт", flags); //$NON-NLS-1$
 
+            IProject project = activeProject();
+            Global.log(LOG_TAG, "активный проект: " //$NON-NLS-1$
+                + (project == null ? "не определён" : project.getName())); //$NON-NLS-1$
+            String projectSettings = projectSettingsText(project);
+            Global.log(LOG_TAG,
+                "настройки проекта: " + projectSettings.length() + " симв."); //$NON-NLS-1$ //$NON-NLS-2$
+            appendCollapsed(body, project == null
+                ? "Настройки активного проекта" //$NON-NLS-1$
+                : "Настройки проекта «" + project.getName() + "»", //$NON-NLS-1$ //$NON-NLS-2$
+                projectSettings);
+
             body.append("\n"); //$NON-NLS-1$
             Global.log(LOG_TAG, "сборка тела: готово, " + body.length() + " симв."); //$NON-NLS-1$ //$NON-NLS-2$
             return body.toString();
@@ -1721,6 +1739,67 @@ public class ComfortPreferencePage
             appendFlag(sb, "Игнорировать сокращения в CamelCase", //$NON-NLS-1$
                 ComfortSettings.isSpellingIgnoreCamelCaseAbbreviations());
             return sb.toString();
+        }
+
+        /**
+         * Проект, к которому относится заявка: контекстный проект страницы
+         * ({@link ActiveProjectTracker}), а если трекер ничего не знает — активный проект
+         * IDE. Диалог параметров открыт поверх окна, части за ним не переключались,
+         * поэтому кэш трекера здесь актуален.
+         */
+        private static IProject activeProject()
+        {
+            try
+            {
+                IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+                IWorkbenchPage page = window != null ? window.getActivePage() : null;
+                IProject project = ActiveProjectTracker.peek(page);
+                if (project == null)
+                    project = Global.getActiveProject(page, false);
+                return project != null && project.isAccessible() ? project : null;
+            }
+            catch (RuntimeException e)
+            {
+                Global.logError(LOG_TAG, "активный проект недоступен", e); //$NON-NLS-1$
+                return null;
+            }
+        }
+
+        /**
+         * Настройки Комфорт активного проекта: известные — с подписями, как на странице
+         * «Свойства проекта → Комфорт»; остальные ключи проектного узла — как есть,
+         * чтобы новая настройка попадала в заявку без правки этого метода.
+         */
+        private static String projectSettingsText(IProject project)
+        {
+            if (project == null)
+                return "— (активный проект не определён)"; //$NON-NLS-1$
+            StringBuilder sb = new StringBuilder();
+            appendFlag(sb, "Расширенный расчет типов", //$NON-NLS-1$
+                BslDocCommentComputedTypes.isExtendedTypesEnabled(project));
+            appendOtherProjectKeys(sb, project);
+            return sb.toString();
+        }
+
+        private static void appendOtherProjectKeys(StringBuilder sb, IProject project)
+        {
+            try
+            {
+                IEclipsePreferences node =
+                    new ProjectScope(project).getNode(Activator.PLUGIN_ID);
+                String[] keys = node.keys();
+                Arrays.sort(keys, String.CASE_INSENSITIVE_ORDER);
+                for (String key : keys)
+                {
+                    if (BslDocCommentComputedTypes.PREF_EXTENDED_TYPE_COMPUTATION.equals(key))
+                        continue;
+                    sb.append(key).append(" = ").append(node.get(key, "")).append('\n'); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+            }
+            catch (BackingStoreException | RuntimeException e)
+            {
+                Global.logError(LOG_TAG, "чтение настроек проекта не удалось", e); //$NON-NLS-1$
+            }
         }
 
         private static boolean isContentAssistAutoOpen()

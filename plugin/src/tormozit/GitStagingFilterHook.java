@@ -190,53 +190,99 @@ public final class GitStagingFilterHook implements IStartup
     @Override
     public void earlyStartup()
     {
+        AttachLog.log("earlyStartup: вызван (поток " + Thread.currentThread().getName() + ")"); //$NON-NLS-1$ //$NON-NLS-2$
         Display.getDefault().asyncExec(() ->
         {
-            IWorkbench wb = PlatformUI.getWorkbench();
-            if (wb == null)
-                return;
-            for (IWorkbenchWindow window : wb.getWorkbenchWindows())
-                hookWindow(window);
-            wb.addWindowListener(new org.eclipse.ui.IWindowListener()
+            try
             {
-                @Override public void windowOpened(IWorkbenchWindow w) { hookWindow(w); }
-                @Override public void windowActivated(IWorkbenchWindow w) {}
-                @Override public void windowDeactivated(IWorkbenchWindow w) {}
-                @Override public void windowClosed(IWorkbenchWindow w) {}
-            });
-            Debug.log("earlyStartup: installed"); //$NON-NLS-1$
+                IWorkbench wb = PlatformUI.getWorkbench();
+                if (wb == null)
+                {
+                    AttachLog.log("earlyStartup: workbench=null — окна и части не отслеживаются"); //$NON-NLS-1$
+                    return;
+                }
+                IWorkbenchWindow[] windows = wb.getWorkbenchWindows();
+                AttachLog.log("earlyStartup: окон в момент asyncExec — " + windows.length); //$NON-NLS-1$
+                for (IWorkbenchWindow window : windows)
+                    hookWindow(window, "earlyStartup"); //$NON-NLS-1$
+                wb.addWindowListener(new org.eclipse.ui.IWindowListener()
+                {
+                    @Override public void windowOpened(IWorkbenchWindow w) { hookWindow(w, "windowOpened"); } //$NON-NLS-1$
+                    @Override public void windowActivated(IWorkbenchWindow w) {}
+                    @Override public void windowDeactivated(IWorkbenchWindow w) {}
+                    @Override public void windowClosed(IWorkbenchWindow w) {}
+                });
+                Debug.logAttach("earlyStartup: installed"); //$NON-NLS-1$
+            }
+            catch (RuntimeException | Error t)
+            {
+                AttachLog.exception("earlyStartup: исключение в asyncExec", t); //$NON-NLS-1$
+                throw t;
+            }
         });
     }
 
-    private static void hookWindow(IWorkbenchWindow window)
+    private static void hookWindow(IWorkbenchWindow window, String source)
     {
-        for (IWorkbenchPage page : window.getPages())
+        IWorkbenchPage[] pages = window.getPages();
+        AttachLog.log("hookWindow(" + source + "): страниц — " + pages.length); //$NON-NLS-1$ //$NON-NLS-2$
+        for (IWorkbenchPage page : pages)
         {
-            for (IViewReference ref : page.getViewReferences())
+            IViewReference[] refs = page.getViewReferences();
+            int stagingRefs = 0;
+            for (IViewReference ref : refs)
             {
                 IViewPart view = ref.getView(false);
+                if (AttachLog.looksLikeStaging(ref.getId(), view))
+                {
+                    stagingRefs++;
+                    AttachLog.log("  hookWindow: ref id=" + ref.getId() //$NON-NLS-1$
+                        + " создана=" + (view != null) //$NON-NLS-1$
+                        + " класс=" + AttachLog.className(view) //$NON-NLS-1$
+                        + " siteId=" + AttachLog.siteId(view) //$NON-NLS-1$
+                        + " наша=" + isGitStagingView(view)); //$NON-NLS-1$
+                }
                 if (isGitStagingView(view))
                     schedulePatch(view, 0);
             }
+            AttachLog.log("  hookWindow: всего ref — " + refs.length //$NON-NLS-1$
+                + ", похожих на панель индексирования — " + stagingRefs); //$NON-NLS-1$
         }
         window.getPartService().addPartListener(new IPartListener2()
         {
-            @Override public void partOpened(IWorkbenchPartReference ref) { tryFromRef(ref); }
-            @Override public void partVisible(IWorkbenchPartReference ref) { tryFromRef(ref); }
-            @Override public void partActivated(IWorkbenchPartReference ref) { tryFromRef(ref); }
+            @Override public void partOpened(IWorkbenchPartReference ref) { tryFromRef(ref, "partOpened"); } //$NON-NLS-1$
+            @Override public void partVisible(IWorkbenchPartReference ref) { tryFromRef(ref, "partVisible"); } //$NON-NLS-1$
+            @Override public void partActivated(IWorkbenchPartReference ref) { tryFromRef(ref, "partActivated"); } //$NON-NLS-1$
             @Override public void partBroughtToTop(IWorkbenchPartReference r) {}
-            @Override public void partClosed(IWorkbenchPartReference r) {}
+            @Override public void partClosed(IWorkbenchPartReference r) { traceOnly(r, "partClosed"); } //$NON-NLS-1$
             @Override public void partDeactivated(IWorkbenchPartReference r) {}
             @Override public void partHidden(IWorkbenchPartReference r) {}
             @Override public void partInputChanged(IWorkbenchPartReference r) {}
 
-            private void tryFromRef(IWorkbenchPartReference ref)
+            private void tryFromRef(IWorkbenchPartReference ref, String event)
             {
                 IWorkbenchPart part = ref != null ? ref.getPart(false) : null;
+                traceOnly(ref, event);
                 if (isGitStagingView(part))
                     schedulePatch((IViewPart) part, 0);
             }
+
+            /** Только запись в лог: поведение не меняет, нужна на случай «часть пришла, но не наша». */
+            private void traceOnly(IWorkbenchPartReference ref, String event)
+            {
+                if (ref == null)
+                    return;
+                IWorkbenchPart part = ref.getPart(false);
+                if (!AttachLog.looksLikeStaging(ref.getId(), part))
+                    return;
+                AttachLog.log(event + ": id=" + ref.getId() //$NON-NLS-1$
+                    + " создана=" + (part != null) //$NON-NLS-1$
+                    + " класс=" + AttachLog.className(part) //$NON-NLS-1$
+                    + " siteId=" + AttachLog.siteId(part) //$NON-NLS-1$
+                    + " наша=" + isGitStagingView(part)); //$NON-NLS-1$
+            }
         });
+        AttachLog.log("hookWindow(" + source + "): слушатель частей установлен"); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private static boolean isGitStagingView(Object part)
@@ -522,37 +568,55 @@ public final class GitStagingFilterHook implements IStartup
         if (!ComfortSettings.isReplaceListFiltersEnabled())
         {
             pendingRetries.remove(view);
+            AttachLog.log("schedulePatch: «Улучшать списки» выключено — патч не ставится"); //$NON-NLS-1$
             return;
         }
         if (attempt == 0 && !pendingRetries.add(view))
+        {
+            AttachLog.log("schedulePatch: цепочка для этого вида уже идёт — событие пропущено"); //$NON-NLS-1$
             return;
+        }
+        if (attempt == 0)
+            AttachLog.log("schedulePatch: старт цепочки, siteId=" + AttachLog.siteId(view)); //$NON-NLS-1$
         Display display = Display.getDefault();
         int delay = attempt == 0 ? 0 : attempt < 30 ? 100 : 500;
         display.timerExec(delay, () ->
         {
-            if (!ComfortSettings.isReplaceListFiltersEnabled())
+            try
             {
-                pendingRetries.remove(view);
-                return;
+                if (!ComfortSettings.isReplaceListFiltersEnabled())
+                {
+                    pendingRetries.remove(view);
+                    AttachLog.log("schedulePatch STOP: «Улучшать списки» выключено"); //$NON-NLS-1$
+                    return;
+                }
+                if (isViewGone(view))
+                {
+                    pendingRetries.remove(view);
+                    Debug.logAttach("tryPatch STOP: вид закрыт"); //$NON-NLS-1$
+                    return;
+                }
+                if (tryPatch(view))
+                {
+                    pendingRetries.remove(view);
+                    return;
+                }
+                if (attempt >= MAX_PATCH_ATTEMPTS)
+                {
+                    pendingRetries.remove(view);
+                    Debug.logAttach("tryPatch GIVE UP after " + MAX_PATCH_ATTEMPTS + " attempts"); //$NON-NLS-1$ //$NON-NLS-2$
+                    return;
+                }
+                schedulePatch(view, attempt + 1);
             }
-            if (isViewGone(view))
+            catch (RuntimeException | Error t)
             {
-                pendingRetries.remove(view);
-                Debug.log("tryPatch STOP: вид закрыт"); //$NON-NLS-1$
-                return;
+                // Без этого падение цепочки было бы молчаливым: вид остаётся в pendingRetries,
+                // и любое следующее событие части отбрасывается по attempt == 0 — до конца сеанса.
+                // Исключение пробрасываем дальше: поведение не меняем, только фиксируем факт.
+                AttachLog.exception("schedulePatch: исключение на попытке " + attempt, t); //$NON-NLS-1$
+                throw t;
             }
-            if (tryPatch(view))
-            {
-                pendingRetries.remove(view);
-                return;
-            }
-            if (attempt >= MAX_PATCH_ATTEMPTS)
-            {
-                pendingRetries.remove(view);
-                Debug.log("tryPatch GIVE UP after " + MAX_PATCH_ATTEMPTS + " attempts"); //$NON-NLS-1$ //$NON-NLS-2$
-                return;
-            }
-            schedulePatch(view, attempt + 1);
         });
     }
 
@@ -579,7 +643,7 @@ public final class GitStagingFilterHook implements IStartup
             Object filterTextObj = Global.getField(view, "filterText"); //$NON-NLS-1$
             if (!(filterTextObj instanceof Text filterText) || filterText.isDisposed())
             {
-                Debug.log("tryPatch WAIT: filterText=" //$NON-NLS-1$
+                Debug.logAttach("tryPatch WAIT: filterText=" //$NON-NLS-1$
                     + (filterTextObj == null ? "null" : filterTextObj.getClass().getName())); //$NON-NLS-1$
                 return false;
             }
@@ -594,7 +658,7 @@ public final class GitStagingFilterHook implements IStartup
             // дерево на следующей попытке вернёт свой существующий фильтр.
             if (stagedFilter == null || unstagedFilter == null)
             {
-                Debug.log("tryPatch WAIT: viewers staged=" + (stagedFilter != null) //$NON-NLS-1$
+                Debug.logAttach("tryPatch WAIT: viewers staged=" + (stagedFilter != null) //$NON-NLS-1$
                     + " unstaged=" + (unstagedFilter != null)); //$NON-NLS-1$
                 return false;
             }
@@ -619,12 +683,13 @@ public final class GitStagingFilterHook implements IStartup
 
             session.onModify();
 
-            Debug.log("tryPatch PATCH OK"); //$NON-NLS-1$
+            Debug.logAttach("tryPatch PATCH OK"); //$NON-NLS-1$
             return true;
         }
         catch (Exception e)
         {
-            Debug.log("tryPatch EXCEPTION: " + e); //$NON-NLS-1$
+            Debug.logAttach("tryPatch EXCEPTION: " + e); //$NON-NLS-1$
+            AttachLog.exception("tryPatch EXCEPTION (стек)", e); //$NON-NLS-1$
             return false;
         }
     }
@@ -675,7 +740,7 @@ public final class GitStagingFilterHook implements IStartup
         }
         if (!(current instanceof CellLabelProvider cellLp))
         {
-            Debug.log("installViewer " + viewerField + ": lp=" //$NON-NLS-1$ //$NON-NLS-2$
+            Debug.logAttach("installViewer " + viewerField + ": lp=" //$NON-NLS-1$ //$NON-NLS-2$
                 + (current != null ? current.getClass().getName() : "null")); //$NON-NLS-1$
             return null;
         }
@@ -705,7 +770,7 @@ public final class GitStagingFilterHook implements IStartup
         new TreeColumnValueFilterSupport(viewer, tree, textResolver,
             interaction::activeElement, interaction::activeColumnIndex).install();
 
-        Debug.log("installColumnsAndInteraction " + viewerField + ": columns=" //$NON-NLS-1$ //$NON-NLS-2$
+        Debug.logAttach("installColumnsAndInteraction " + viewerField + ": columns=" //$NON-NLS-1$ //$NON-NLS-2$
             + tree.getColumnCount());
     }
 
@@ -2163,6 +2228,83 @@ public final class GitStagingFilterHook implements IStartup
         {
             if (Global.isLogEnabled())
                 Global.log(TAG, msg);
+        }
+
+        /**
+         * Журнал «Комфорт» плюс безусловная запись в {@link AttachLog} — только для сообщений
+         * о подключении к панели. В журнал фильтрации (нажатия клавиш, фоновый расчёт) это
+         * подмешивать нельзя: там {@link Debug#log} зовётся на каждый символ, а AttachLog пишет
+         * файл синхронно.
+         */
+        static void logAttach(String msg)
+        {
+            AttachLog.log(msg);
+            log(msg);
+        }
+    }
+
+    /**
+     * ВРЕМЕННОЕ (диагностика «в ~10% стартов EDT хук не подключается к уже открытой панели»).
+     * Пишет <b>безусловно</b>, независимо от флажка «Вести журнал»: отказ проявляется редко,
+     * и выключенный журнал означал бы потерянный случай.
+     *
+     * <p>Приёмник — накопительный файл {@code .tmp/git-staging-attach.log}, а не
+     * {@code .tmp/temp-logs/}: последний очищается при каждом старте плагина, а перезапуск EDT —
+     * первое, что делает пользователь после «панель без фильтра», и запись о плохом старте
+     * пропала бы. Файл растёт между сеансами; снять вместе с остальной инструментализацией
+     * после подтверждения фикса.
+     */
+    private static final class AttachLog
+    {
+        private static final java.nio.file.Path FILE =
+            java.nio.file.Path.of("C:\\VC\\EDT.Comfort\\.tmp\\git-staging-attach.log"); //$NON-NLS-1$
+
+        private AttachLog() {}
+
+        static void log(String msg)
+        {
+            try
+            {
+                java.nio.file.Files.createDirectories(FILE.getParent());
+                java.nio.file.Files.writeString(FILE,
+                    java.time.LocalDateTime.now() + " " + msg + System.lineSeparator(), //$NON-NLS-1$
+                    java.nio.charset.StandardCharsets.UTF_8,
+                    java.nio.file.StandardOpenOption.CREATE,
+                    java.nio.file.StandardOpenOption.APPEND);
+            }
+            catch (Exception ignore)
+            {
+                // Диагностика не должна влиять на работу хука.
+            }
+        }
+
+        static void exception(String context, Throwable t)
+        {
+            java.io.StringWriter sw = new java.io.StringWriter();
+            if (t != null)
+                t.printStackTrace(new java.io.PrintWriter(sw));
+            log(context + System.lineSeparator() + sw);
+        }
+
+        /** Часть, похожая на панель индексирования, — по идентификатору ИЛИ по классу (id может отличаться). */
+        static boolean looksLikeStaging(String refId, Object part)
+        {
+            if (refId != null && refId.contains("Staging")) //$NON-NLS-1$
+                return true;
+            return part != null && part.getClass().getName().contains("Staging"); //$NON-NLS-1$
+        }
+
+        static String className(Object part)
+        {
+            return part == null ? "null" : part.getClass().getName(); //$NON-NLS-1$
+        }
+
+        static String siteId(Object part)
+        {
+            if (!(part instanceof IViewPart view))
+                return "нет части"; //$NON-NLS-1$
+            IWorkbenchPartSite site = view.getSite();
+            return site == null ? "нет site" : site.getId(); //$NON-NLS-1$
         }
     }
 }
