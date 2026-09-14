@@ -1,4 +1,4 @@
-package tormozit;
+package tormozit.checks;
 
 import java.util.List;
 
@@ -35,6 +35,11 @@ import com.e1c.g5.v8.dt.check.settings.ICheckRepository;
 import com.e1c.g5.v8.dt.check.settings.IssueSeverity;
 import com.e1c.g5.v8.dt.check.settings.IssueType;
 
+import tormozit.BslAstCompleteness;
+import tormozit.ComfortCheckIds;
+import tormozit.GitBaselineFilterHook;
+import tormozit.Global;
+
 /**
  * Проверка «Обрыв разбора модуля»: синтаксическая ошибка, после которой разбор не восстановился
  * и остаток текста в синтаксическое дерево не попал.
@@ -42,7 +47,7 @@ import com.e1c.g5.v8.dt.check.settings.IssueType;
  * <p>Такая ошибка качественно отличается от обычной синтаксической: после неё методов ниже места
  * обрыва в модели нет, поэтому по ним не работает ни одна другая проверка, а «чисто» в панели
  * «Проблемы» означает лишь то, что проверять было нечего. Признак обрыва считает
- * {@link BslAstCompleteness} — тот же, по которому {@link BslParseTruncationMarkHook} метит
+ * {@link BslAstCompleteness} — тот же, по которому {@code BslParseTruncationMarkHook} метит
  * место обрыва в самом редакторе.
  *
  * <p>Своя проверка нужна не только ради текста проблемы: у неё есть <b>идентификатор</b>, и по
@@ -63,7 +68,7 @@ public class BslAstTruncationCheck
      * Идентификатор проверки. У маркера в панели {@code checkId} — короткий UID проекта
      * ({@code SU…}); {@link GitBaselineFilterHook} распознаёт и его, и этот длинный идентификатор.
      */
-    public static final String CHECK_ID = "comfort-bsl-ast-truncation"; //$NON-NLS-1$
+    public static final String CHECK_ID = ComfortCheckIds.BSL_AST_TRUNCATION;
 
     private static final String TITLE = "Обрыв разбора модуля"; //$NON-NLS-1$
 

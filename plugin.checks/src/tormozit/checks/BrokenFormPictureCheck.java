@@ -1,4 +1,4 @@
-package tormozit;
+package tormozit.checks;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -23,6 +23,9 @@ import com.e1c.g5.v8.dt.check.components.BasicCheck.ResultAcceptor;
 import com.e1c.g5.v8.dt.check.settings.IssueSeverity;
 import com.e1c.g5.v8.dt.check.settings.IssueType;
 
+import tormozit.ComfortCheckIds;
+import tormozit.MdTypeMapping;
+
 /**
  * Проверка форм на битые ссылки на картинки (PictureRef, чья ссылка не резолвится,
  * например на удалённую/переименованную общую картинку).
@@ -30,8 +33,12 @@ import com.e1c.g5.v8.dt.check.settings.IssueType;
  */
 public class BrokenFormPictureCheck extends BasicCheck<Void>
 {
-    /** Идентификатор проверки — для фильтрации маркеров в панели «Ошибки конфигурации». */
-    public static final String CHECK_ID = "tormozit.comfort.check.brokenFormPicture";
+    /**
+     * Идентификатор проверки — для фильтрации маркеров в панели «Ошибки конфигурации».
+     * Значение живёт в основном бандле ({@link ComfortCheckIds}): на него ссылаются хуки, а
+     * зависеть от бандла проверок основной бандл не может — получилось бы кольцо.
+     */
+    public static final String CHECK_ID = ComfortCheckIds.BROKEN_FORM_PICTURE;
 
     private static final FeatureNameLocalizationProvider FEATURE_NAMES = new FeatureNameLocalizationProvider();
 

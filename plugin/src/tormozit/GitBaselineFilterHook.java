@@ -54,7 +54,7 @@ import com.e1c.g5.v8.dt.check.settings.ICheckRepository;
  * для проблем плагина, которые скрывать нельзя. Штатная подсказка кнопки говорит «ошибки»;
  * плагин ставит «языковые проблемы»: скрываются не только ошибки.
  *
- * <p>Сейчас исключение одно — {@link BslAstTruncationCheck#CHECK_ID}. Обрыв разбора модуля
+ * <p>Сейчас исключение одно — {@link ComfortCheckIds#BSL_AST_TRUNCATION}. Обрыв разбора модуля
  * обесценивает результаты проверок всего модуля: ниже места обрыва кода в дереве нет, поэтому
  * «чисто» в панели «Проблемы» означает лишь то, что проверять было нечего. Спрятать такую
  * проблему как «унаследованную от базовой ветки» — оставить пользователя с молчаливым модулем.
@@ -86,9 +86,9 @@ import com.e1c.g5.v8.dt.check.settings.ICheckRepository;
  * регистрация ломает штатный поиск службы. Этот путь закрыт.
  *
  * <p><b>Как узнаётся исключённая проблема.</b> В пути маркеров у маркера {@code checkId} —
- * короткий UID проекта ({@code SU…}) или длинный {@link BslAstTruncationCheck#CHECK_ID};
+ * короткий UID проекта ({@code SU…}) или длинный {@link ComfortCheckIds#BSL_AST_TRUNCATION};
  * резолв короткого — {@code ICheckRepository.getUidForShortUid}. В пути Issue на входе только
- * файл и строка, поэтому {@link BslAstTruncationCheck} перед публикацией отмечает пару
+ * файл и строка, поэтому {@code BslAstTruncationCheck} перед публикацией отмечает пару
  * «модуль → строка» ({@link #exemptIssue}), а при целом дереве — снимает отметку
  * ({@link #forgetIssue}). Проверка и отбор идут в одном вызове валидации, так что отметка живёт
  * доли секунды и заводится не больше одной на модуль.
@@ -503,7 +503,7 @@ public class GitBaselineFilterHook
                 .getProjects())
             {
                 if (project.isAccessible())
-                    markerManager.removeMarkersByCheckId(project, BslAstTruncationCheck.CHECK_ID);
+                    markerManager.removeMarkersByCheckId(project, ComfortCheckIds.BSL_AST_TRUNCATION);
             }
             preferences.putBoolean(TRUNCATION_MARKERS_PURGED, true);
             preferences.flush();
@@ -577,21 +577,21 @@ public class GitBaselineFilterHook
 
     /**
      * В маркере проверки {@link Marker#getCheckId()} — короткий UID проекта ({@code SU…}),
-     * а не {@link BslAstTruncationCheck#CHECK_ID}. Хвосты прошлой записи несут длинный идентификатор.
+     * а не {@link ComfortCheckIds#BSL_AST_TRUNCATION}. Хвосты прошлой записи несут длинный идентификатор.
      */
     private static boolean isTruncationCheck(Marker marker)
     {
         String id = marker.getCheckId();
         if (id == null || id.isBlank())
             return false;
-        if (BslAstTruncationCheck.CHECK_ID.equals(id))
+        if (ComfortCheckIds.BSL_AST_TRUNCATION.equals(id))
             return true;
         ICheckRepository repository = Global.getOsgiService(ICheckRepository.class);
         org.eclipse.core.resources.IProject project = marker.getProject();
         if (repository == null || project == null)
             return false;
         CheckUid uid = repository.getUidForShortUid(id, project);
-        return uid != null && BslAstTruncationCheck.CHECK_ID.equals(uid.getCheckId());
+        return uid != null && ComfortCheckIds.BSL_AST_TRUNCATION.equals(uid.getCheckId());
     }
 
     /** Делегирует настоящей службе всё, кроме решения о скрытии исключённых проблем. */

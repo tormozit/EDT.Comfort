@@ -7,6 +7,7 @@ import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IMarker;
 import org.eclipse.core.resources.IResource;
 import org.eclipse.core.runtime.CoreException;
+import org.eclipse.jface.dialogs.IDialogConstants;
 import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.jface.preference.PreferenceDialog;
 import org.eclipse.jface.text.DocumentEvent;
@@ -67,6 +68,15 @@ public final class BreakpointPropertiesHook implements IStartup
     private static final String ALWAYS_ENABLED_KEY = "tormozit.breakpointAlwaysEnabled"; //$NON-NLS-1$
     private static final String AUTO_CONTINUE_KEY = "tormozit.breakpointAutoContinue"; //$NON-NLS-1$
     private static final String WHEEL_SCROLL_KEY = "tormozit.breakpointWheelScroll"; //$NON-NLS-1$
+    private static final String PERSIST_KEY = "tormozit.breakpointPersistUnchecked"; //$NON-NLS-1$
+    /**
+     * Текст условия при снятом флажке «Условный». Штатный {@code doSave} пишет в этом
+     * случае пустую строку, а признака «условие выключено» у точки останова нет
+     * (условной её делает сама непустая строка) — поэтому текст храним отдельно.
+     */
+    private static final String MARKER_SAVED_CONDITION = "tormozit.savedCondition"; //$NON-NLS-1$
+    /** Текст выражения при снятом флажке «Значение выражения» — см. {@link #MARKER_SAVED_CONDITION}. */
+    private static final String MARKER_SAVED_EXPRESSION = "tormozit.savedExpression"; //$NON-NLS-1$
     private static final String BP_FIELD_ROLE_KEY = "tormozit.bpFieldRole"; //$NON-NLS-1$
     private static final String SETTINGS_SECTION = "tormozit.breakpointPropertiesDialog"; //$NON-NLS-1$
     private static final String KEY_DIALOG_WIDTH = "DIALOG_WIDTH"; //$NON-NLS-1$
@@ -332,19 +342,120 @@ public final class BreakpointPropertiesHook implements IStartup
             installEditorPanesVerticalStretch(shell, actionsEditor);
             installAlwaysEnabledPanes(shell, actionsEditor);
             installMouseWheelScroll(shell);
+            installUncheckedTextPersistence(shell);
             shell.setData(PATCHED_KEY, Boolean.TRUE);
             return true;
         }
 
         installEditorPanesVerticalStretch(shell, actionsEditor);
-        expandGroupsWithCheckedOptions(shell, actionsEditor);
+        // Только после installAlwaysEnabledPanes: там в поля подставляется текст,
+        // запомненный при снятом флажке, и он тоже должен раскрыть свою группу.
         installAlwaysEnabledPanes(shell, actionsEditor);
+        expandGroupsWithContent(shell, actionsEditor);
         installMouseWheelScroll(shell);
+        installUncheckedTextPersistence(shell);
         if (!installIrOutputLink(actionsEditor, evaluateButton))
             return false;
 
         shell.setData(PATCHED_KEY, Boolean.TRUE);
         return true;
+    }
+
+    /**
+     * Запоминание текста условия и выражения при снятом флажке.
+     * <p>
+     * Штатный {@code doSave} обоих редакторов при снятом флажке пишет в точку останова
+     * пустую строку, и набранный текст пропадает. Пишем его в свой атрибут маркера
+     * <b>до</b> штатного обработчика: фильтр {@link Display} получает {@link SWT#Selection}
+     * раньше слушателей кнопки, поэтому окно ещё не закрыто и поля живы. «Отмена» кнопку
+     * OK не нажимает — там ничего не запоминается, как и ожидается.
+     */
+    private static void installUncheckedTextPersistence(Shell shell)
+    {
+        if (Boolean.TRUE.equals(shell.getData(PERSIST_KEY)))
+            return;
+        PreferenceDialog dialog = findPreferenceDialog(shell);
+        if (dialog == null)
+            return;
+        Object okObject = Global.invoke(dialog, "getButton", Integer.valueOf(IDialogConstants.OK_ID)); //$NON-NLS-1$
+        if (!(okObject instanceof Button okButton) || okButton.isDisposed())
+            return;
+        shell.setData(PERSIST_KEY, Boolean.TRUE);
+
+        Display display = shell.getDisplay();
+        Listener beforeOk = event ->
+        {
+            if (event.widget != okButton || shell.isDisposed())
+                return;
+            saveUncheckedFieldText(resolveBreakpointSubEditor(shell, CONDITION_EDITOR),
+                "conditionButton", "conditionPane", true); //$NON-NLS-1$ //$NON-NLS-2$
+            saveUncheckedFieldText(resolveActionsEditor(shell),
+                "evaluateExpressionButton", "expressionPane", false); //$NON-NLS-1$ //$NON-NLS-2$
+        };
+        display.addFilter(SWT.Selection, beforeOk);
+        shell.addDisposeListener(e ->
+        {
+            if (!display.isDisposed())
+                display.removeFilter(SWT.Selection, beforeOk);
+        });
+    }
+
+    /**
+     * При снятом флажке — текст в свой атрибут маркера, при включённом — атрибут убираем
+     * (текст сохранит сама EDT в штатном свойстве точки останова).
+     */
+    private static void saveUncheckedFieldText(Object editor, String checkboxField, String paneField,
+            boolean conditionField)
+    {
+        if (editor == null)
+            return;
+        Button checkbox = (Button)Global.getField(editor, checkboxField);
+        Object pane = Global.getField(editor, paneField);
+        Object bpObject = Global.getField(editor, "breakpoint"); //$NON-NLS-1$
+        if (checkbox == null || checkbox.isDisposed() || pane == null
+                || !(bpObject instanceof IBslLineBreakpoint breakpoint))
+            return;
+        IMarker marker = breakpoint.getMarker();
+        if (marker == null || !marker.exists())
+            return;
+
+        String value = null;
+        if (!checkbox.getSelection())
+        {
+            Object text = Global.invoke(pane, "getText"); //$NON-NLS-1$
+            if (text instanceof String s && !s.isBlank())
+                value = s;
+        }
+        try
+        {
+            marker.setAttribute(savedTextAttribute(conditionField), value);
+        }
+        catch (CoreException e)
+        {
+            BreakpointPropertiesDebug.problem("сохранение текста при снятом флажке: " + e.getMessage()); //$NON-NLS-1$
+        }
+    }
+
+    private static String savedTextAttribute(boolean conditionField)
+    {
+        return conditionField ? MARKER_SAVED_CONDITION : MARKER_SAVED_EXPRESSION;
+    }
+
+    /** Текст, запомненный при снятом флажке, или {@code null}. */
+    private static String readSavedText(IBslLineBreakpoint breakpoint, boolean conditionField)
+    {
+        IMarker marker = breakpoint.getMarker();
+        if (marker == null || !marker.exists())
+            return null;
+        try
+        {
+            Object value = marker.getAttribute(savedTextAttribute(conditionField));
+            return value instanceof String s && !s.isBlank() ? s : null;
+        }
+        catch (CoreException e)
+        {
+            return null;
+        }
     }
 
     /**
@@ -358,6 +469,13 @@ public final class BreakpointPropertiesHook implements IStartup
      */
     private static final String BP_EDITOR_WRAP_PREFIX = " if (true and "; //$NON-NLS-1$
     private static final String BP_EDITOR_WRAP_SUFFIX = ") then endif;"; //$NON-NLS-1$
+
+    /**
+     * Идёт подстановка текста, запомненного при снятом флажке: изменение документа в это
+     * время не должно включать флажок — пользователь снял его намеренно. UI-поток, поэтому
+     * обычного поля достаточно.
+     */
+    private static boolean restoringSavedText;
 
     private static void installAlwaysEnabledPanes(Shell shell, Object actionsEditor)
     {
@@ -400,8 +518,34 @@ public final class BreakpointPropertiesHook implements IStartup
             {
                 if (button.getSelection())
                     ensureContinueExecutionChecked(actionsEditor);
+                else
+                    uncheckContinueExecutionIfDisabled(actionsEditor);
             });
         }
+        uncheckContinueExecutionIfDisabled(actionsEditor);
+    }
+
+    /**
+     * «Продолжить выполнение» недоступно, пока в консоль ничего не выводится. Включённая
+     * пометка в этом состоянии ни на что не влияет и только вводит в заблуждение (серая
+     * галочка) — снимаем её. Уведомление слушателей нужно, чтобы редактор счёл себя
+     * изменённым и снятое состояние ушло в точку останова.
+     */
+    private static void uncheckContinueExecutionIfDisabled(Object actionsEditor)
+    {
+        if (actionsEditor == null)
+            return;
+        Button continueButton = (Button) Global.getField(actionsEditor, "continueExecutionButton"); //$NON-NLS-1$
+        if (continueButton == null || continueButton.isDisposed())
+            return;
+        if (continueButton.isEnabled() || !continueButton.getSelection())
+            return;
+
+        continueButton.setSelection(false);
+        Event event = new Event();
+        event.type = SWT.Selection;
+        event.widget = continueButton;
+        continueButton.notifyListeners(SWT.Selection, event);
     }
 
     private static void ensureContinueExecutionChecked(Object actionsEditor)
@@ -439,10 +583,14 @@ public final class BreakpointPropertiesHook implements IStartup
         if (display == null || display.isDisposed())
             return;
         // setInput иногда после нашего патча: повторить, когда breakpoint уже на месте.
-        display.timerExec(0,
-                () -> ensureBreakpointExpressionWrap(pane, breakpointHolder, conditionField, null));
-        display.timerExec(120,
-                () -> ensureBreakpointExpressionWrap(pane, breakpointHolder, conditionField, null));
+        // Текст мог появиться только сейчас — тогда и группу раскрывать здесь.
+        Runnable retry = () ->
+        {
+            ensureBreakpointExpressionWrap(pane, breakpointHolder, conditionField, null);
+            expandGroupIfHasContent(pane);
+        };
+        display.timerExec(0, retry);
+        display.timerExec(120, retry);
 
         // Штатный Selection: setEnabled(selection) и при включении ensureInitialized(…,
         // breakpoint.getXxx()), что при initialized=false подставляет сохранённое
@@ -488,7 +636,7 @@ public final class BreakpointPropertiesHook implements IStartup
             @Override
             public void documentChanged(DocumentEvent event)
             {
-                if (checkbox.isDisposed())
+                if (checkbox.isDisposed() || restoringSavedText)
                     return;
                 Object text = Global.invoke(pane, "getText"); //$NON-NLS-1$
                 if (!(text instanceof String s) || s.isBlank())
@@ -548,12 +696,38 @@ public final class BreakpointPropertiesHook implements IStartup
             }
         }
 
+        // Штатное свойство пустое — значит флажок был снят; возвращаем текст, запомненный
+        // при закрытии окна, и следим, чтобы он не включил флажок обратно.
+        boolean fromSaved = false;
+        if (editable.isBlank())
+        {
+            String saved = readSavedText(breakpoint, conditionField);
+            if (saved != null)
+            {
+                editable = saved;
+                fromSaved = true;
+            }
+        }
+
         // initializeEmptyModel мог оставить initialized=true без обёртки — сбросить флаг.
         Object initialized = Global.getField(pane, "initialized"); //$NON-NLS-1$
         if (Boolean.TRUE.equals(initialized))
             Global.invoke(pane, "setNotInitialized"); //$NON-NLS-1$
 
-        Global.invoke(pane, "ensureInitialized", breakpoint, editable); //$NON-NLS-1$
+        if (!fromSaved)
+        {
+            Global.invoke(pane, "ensureInitialized", breakpoint, editable); //$NON-NLS-1$
+            return;
+        }
+        restoringSavedText = true;
+        try
+        {
+            Global.invoke(pane, "ensureInitialized", breakpoint, editable); //$NON-NLS-1$
+        }
+        finally
+        {
+            restoringSavedText = false;
+        }
     }
 
     private static boolean documentHasBreakpointExpressionWrap(Object pane)
@@ -781,24 +955,37 @@ public final class BreakpointPropertiesHook implements IStartup
      * Группы «Условия» и «Действия» — автоматическое разворачивание при открытии диалога,
      * если внутри группы включена хотя бы одна пометка.
      */
-    private static void expandGroupsWithCheckedOptions(Shell shell, Object actionsEditor)
+    private static void expandGroupsWithContent(Shell shell, Object actionsEditor)
     {
         Object conditionEditor = resolveBreakpointSubEditor(shell, CONDITION_EDITOR);
         if (conditionEditor != null)
-            expandGroupIfHasCheckedOption((Control) Global.getField(conditionEditor, "conditionPane")); //$NON-NLS-1$
-        expandGroupIfHasCheckedOption((Control) Global.getField(actionsEditor, "expressionPane")); //$NON-NLS-1$
+            expandGroupIfHasContent(Global.getField(conditionEditor, "conditionPane")); //$NON-NLS-1$
+        expandGroupIfHasContent(Global.getField(actionsEditor, "expressionPane")); //$NON-NLS-1$
     }
 
-    private static void expandGroupIfHasCheckedOption(Control insideGroup)
+    /**
+     * Группа раскрывается, если в ней есть включённый флажок <b>или</b> непустой текст поля:
+     * при снятом флажке текст всё равно восстанавливается (см. {@link #MARKER_SAVED_CONDITION}),
+     * и прятать его в свёрнутой группе нельзя — пользователь не увидит, что там что-то есть.
+     */
+    private static void expandGroupIfHasContent(Object pane)
     {
+        if (!(pane instanceof Control insideGroup) || insideGroup.isDisposed())
+            return;
         ExpandableComposite group = findExpandableAncestor(insideGroup);
         if (group == null || group.isDisposed() || group.isExpanded())
             return;
-        if (!hasCheckedOption(group.getClient()))
+        if (!hasCheckedOption(group.getClient()) && !hasPaneText(pane))
             return;
 
         group.setExpanded(true);
         relayoutPaneHierarchy(group);
+    }
+
+    private static boolean hasPaneText(Object pane)
+    {
+        Object text = Global.invoke(pane, "getText"); //$NON-NLS-1$
+        return text instanceof String s && !s.isBlank();
     }
 
     private static ExpandableComposite findExpandableAncestor(Control control)

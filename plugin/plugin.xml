@@ -1490,17 +1490,12 @@
     <bslHoverContributor class="tormozit.BslCheckSettingsHoverContributor"/>
   </extension>
 
-  <extension point="com.e1c.g5.v8.dt.check.checks">
-    <category
-        id="tormozit.comfort.check.category"
-        title="%check.category.comfort"
-        category="com.e1c.g5.v8.dt.check.edt.checks">
-    </category>
-    <check
-        category="tormozit.comfort.check.category"
-        class="tormozit.BrokenFormPictureCheck">
-    </check>
-  </extension>
+  <!--
+  Проверки (extension point com.e1c.g5.v8.dt.check.checks) живут в отдельном бандле
+  tormozit.comfort.checks. Сюда их возвращать нельзя: EDT запоминает версию бандла-поставщика
+  проверок и при её смене перепроверяет весь проект — а версия этого бандла меняется каждой
+  сборкой. Подробности — в plugin.checks/README.md.
+  -->
 
   <!--
   <extension point="com._1c.g5.v8.dt.bsl.ui.bslUiModuleExtension">
@@ -1638,15 +1633,5 @@
         name="Метод"/>
   </extension>
 
-  <extension point="com.e1c.g5.v8.dt.check.checks">
-    <category
-        id="tormozit.comfort.checks"
-        title="Комфорт"
-        description="Проверки, добавленные плагином «Комфорт»."
-        category="com.e1c.g5.v8.dt.check.edt.checks"/>
-    <check
-        category="tormozit.comfort.checks"
-        class="tormozit.BslAstTruncationCheck"/>
-  </extension>
 
 </plugin>

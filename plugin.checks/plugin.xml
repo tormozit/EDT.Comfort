@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?eclipse version="3.4"?>
+<plugin>
+
+  <!--
+  Проверки живут здесь, а не в основном бандле, потому что EDT перепроверяет весь проект при
+  смене версии бандла-поставщика проверок. Версия этого бандла фиксированная и поднимается
+  вручную при изменении логики проверки — см. README.md рядом.
+  -->
+
+  <!--
+  Категория ровно одна. Раньше их было две с одинаковым названием «Комфорт»
+  (tormozit.comfort.check.category и tormozit.comfort.checks) — в дереве проверок EDT это
+  выглядело как два одинаковых узла. Новые проверки добавлять сюда же.
+  -->
+  <extension point="com.e1c.g5.v8.dt.check.checks">
+    <category
+        id="tormozit.comfort.checks"
+        title="Комфорт"
+        description="Проверки, добавленные плагином «Комфорт»."
+        category="com.e1c.g5.v8.dt.check.edt.checks"/>
+    <check
+        category="tormozit.comfort.checks"
+        class="tormozit.checks.BslAstTruncationCheck"/>
+    <check
+        category="tormozit.comfort.checks"
+        class="tormozit.checks.BrokenFormPictureCheck"/>
+  </extension>
+
+</plugin>

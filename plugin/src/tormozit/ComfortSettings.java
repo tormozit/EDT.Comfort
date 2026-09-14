@@ -148,6 +148,18 @@ public final class ComfortSettings
     /** Подавление требования минимальной сборки выключено по умолчанию. */
     public static final boolean DEFAULT_SUPPRESS_MIN_PLATFORM_BUILD = false;
 
+    // ---- Вопрос о проблемах конфигурации перед запуском клиента ----
+
+    /**
+     * Ключ: минимальная критичность проблемы, о которой спрашивают перед запуском клиента
+     * (см. {@link LaunchSaveDirtyEditorsHook}). Значение — имя элемента
+     * {@code MarkerSeverity}; учитываются эта критичность и все более серьёзные.
+     */
+    public static final String PREF_LAUNCH_ERRORS_MIN_SEVERITY = "comfort.launch.errorsMinSeverity"; //$NON-NLS-1$
+
+    /** По умолчанию спрашиваем о проблемах критичности «Критическая» и серьёзнее. */
+    public static final String DEFAULT_LAUNCH_ERRORS_MIN_SEVERITY = "CRITICAL"; //$NON-NLS-1$
+
     // ---- Server call highlighting ----
 
     /** Ключ: включена ли подсветка серверных вызовов в редакторе BSL. */
@@ -946,6 +958,34 @@ public final class ComfortSettings
         if (store instanceof ScopedPreferenceStore scoped)
             return scoped.contains(key);
         return store.getString(key) != null;
+    }
+
+    // ---- Вопрос о проблемах конфигурации перед запуском клиента ----
+
+    /** @return имя элемента {@code MarkerSeverity} — минимальная учитываемая критичность */
+    public static String getLaunchErrorsMinSeverity()
+    {
+        ComfortSettings settings = instance;
+        String value = settings == null ? null
+            : settings.preferenceStore.getString(PREF_LAUNCH_ERRORS_MIN_SEVERITY);
+        return value == null || value.isBlank() ? DEFAULT_LAUNCH_ERRORS_MIN_SEVERITY : value;
+    }
+
+    /** @param severityName имя элемента {@code MarkerSeverity} */
+    public static void saveLaunchErrorsMinSeverity(String severityName)
+    {
+        ComfortSettings settings = instance;
+        if (settings == null || severityName == null || severityName.isBlank())
+            return;
+        settings.preferenceStore.setValue(PREF_LAUNCH_ERRORS_MIN_SEVERITY, severityName);
+        try
+        {
+            settings.preferenceStore.save();
+        }
+        catch (Exception ex)
+        {
+            Global.log("ComfortSettings save error (launchErrorsMinSeverity): " + ex); //$NON-NLS-1$
+        }
     }
 
     // ---- Server call highlighting accessors ----

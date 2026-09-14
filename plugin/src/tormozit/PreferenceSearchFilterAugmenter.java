@@ -32,6 +32,7 @@ import org.eclipse.swt.widgets.Button;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
+import org.eclipse.swt.widgets.Group;
 import org.eclipse.swt.widgets.Label;
 import org.eclipse.swt.widgets.Link;
 import org.eclipse.swt.widgets.Listener;
@@ -475,6 +476,15 @@ final class PreferenceSearchFilterAugmenter
             String rawText = null;
             if (child instanceof Label label)
                 rawText = label.getText();
+            else if (child instanceof Group group)
+                // Заголовок группы индекс учитывает наравне с подписями
+                // (PreferenceSearchIndex.collectTexts), поэтому страница по
+                // нему находится — красим и его, иначе найденная надпись
+                // остаётся единственной неподсвеченной на странице. SWT Win32
+                // при заданном foreground перерисовывает заголовок сам
+                // (Group.WM_PAINT), но одним DrawText на всю строку — отсюда
+                // окраска целиком, без диапазонов вхождений.
+                rawText = group.getText();
             else if (child instanceof Button button)
                 rawText = button.getText();
             else if (child instanceof CLabel clabel)

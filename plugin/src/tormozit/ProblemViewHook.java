@@ -1192,7 +1192,11 @@ public final class ProblemViewHook implements IStartup
                 if (verdict.skip())
                 {
                     swallowedInRow++;
-                    String msg = "заслонка обновлений: событие " + eventCount + " (проекты " //$NON-NLS-1$ //$NON-NLS-2$
+                    // Изменения не касаются объектов отбора — списку меняться не с чего, ждать
+                    // нечего. Раньше индикатор снимался только по общему isIdle() проекта, и на
+                    // расширенной проверке всей конфигурации он висел минутами при полном списке
+                    applySourceWait(false);
+                    String msg ="заслонка обновлений: событие " + eventCount + " (проекты " //$NON-NLS-1$ //$NON-NLS-2$
                         + changedProjectNames(event) + ") не передано — " + verdict.reason() //$NON-NLS-1$
                         + ", подряд не передано " + swallowedInRow //$NON-NLS-1$
                         + ", отбор снят " + sinceText(filterSnapshotAt) + ": " + filterDescription; //$NON-NLS-1$
@@ -2481,13 +2485,36 @@ public final class ProblemViewHook implements IStartup
         Map<String, Object> data = new HashMap<>();
         data.put(CHECK_ID_DATA_KEY, shortUid);
         Debug.log("openCheckSettings: " + shortUid); //$NON-NLS-1$
-        Shell target = shell != null ? shell : Display.getDefault().getActiveShell();
+        Shell target = normalizeParentShell(shell != null ? shell : Display.getDefault().getActiveShell());
         PreferenceDialog dialog =
             PreferencesUtil.createPropertyDialogOn(target, project, CHECKS_PAGE_ID, null, data);
         if (dialog == null)
             return;
         CheckDescriptionRefresh.install(dialog);
         dialog.open();
+    }
+
+    /**
+     * Родитель окна параметров — только полноценное окно, не всплывающая подсказка.
+     * <p>
+     * Подсказка предупреждения в редакторе модуля ({@code BslCheckSettingsHoverContributor})
+     * зовёт открытие из своего {@code Shell} без рамки ({@code SWT.ON_TOP} / без
+     * {@link SWT#TITLE}), и он же в этот момент активный. Подсказка закрывается сразу по
+     * нажатию кнопки, поэтому к моменту закрытия окна параметров владелец уже уничтожен:
+     * Windows активировать некого и переводит фокус на другое приложение. Поднимаемся по
+     * цепочке владельцев до окна с рамкой, а если такого нет — берём окно EDT.
+     */
+    private static Shell normalizeParentShell(Shell shell)
+    {
+        Shell current = shell;
+        while (current != null && !current.isDisposed())
+        {
+            if ((current.getStyle() & SWT.TITLE) != 0 && (current.getStyle() & SWT.ON_TOP) == 0)
+                return current;
+            current = current.getParent() instanceof Shell parent ? parent : null;
+        }
+        IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+        return window != null ? window.getShell() : shell;
     }
 
     /**
@@ -2605,7 +2632,6 @@ public final class ProblemViewHook implements IStartup
                 status.setText(wantedBase + extra);
             }
             applySpinner(status, state, waiting);
-            applyCursor(view, waiting);
         }
 
         private static void applyAll()
@@ -2633,18 +2659,6 @@ public final class ProblemViewHook implements IStartup
                 state.spinner = WaitSpinner.attach(status, "Список проблем ещё обновляется"); //$NON-NLS-1$
             if (state.spinner != null)
                 state.spinner.setActive(waiting);
-        }
-
-        private static void applyCursor(IViewPart view, boolean waiting)
-        {
-            TreeViewer viewer = view.getAdapter(TreeViewer.class);
-            Tree tree = viewer != null ? viewer.getTree() : null;
-            if (tree == null || tree.isDisposed())
-                return;
-            if (waiting)
-                tree.setCursor(tree.getDisplay().getSystemCursor(SWT.CURSOR_WAIT));
-            else if (tree.getCursor() != null)
-                tree.setCursor(null);
         }
 
         private static Label statusLabel(IViewPart view)

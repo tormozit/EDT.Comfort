@@ -11,8 +11,8 @@ import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.WeakHashMap;
 
-import org.eclipse.core.resources.IContainer;
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IMarker;
 import org.eclipse.core.resources.IProject;
@@ -32,18 +32,28 @@ import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.dialogs.Dialog;
 import org.eclipse.jface.dialogs.IDialogConstants;
+import org.eclipse.jface.preference.FieldEditor;
+import org.eclipse.jface.preference.IPreferencePage;
+import org.eclipse.jface.preference.PreferenceDialog;
+import org.eclipse.jface.resource.ImageDescriptor;
 import org.eclipse.jface.text.Position;
 import org.eclipse.jface.text.source.Annotation;
 import org.eclipse.jface.text.source.IAnnotationModel;
 import org.eclipse.jface.text.source.ISourceViewer;
+import org.eclipse.nebula.widgets.tablecombo.TableCombo;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.events.SelectionListener;
+import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.layout.GridData;
+import org.eclipse.swt.layout.GridLayout;
+import org.eclipse.swt.widgets.Button;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Label;
+import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Shell;
+import org.eclipse.swt.widgets.TableItem;
 import org.eclipse.ui.IEditorInput;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IEditorReference;
@@ -51,6 +61,8 @@ import org.eclipse.ui.IStartup;
 import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
+import org.eclipse.ui.dialogs.PreferencesUtil;
+import org.eclipse.ui.plugin.AbstractUIPlugin;
 import org.eclipse.ui.preferences.ScopedPreferenceStore;
 import org.eclipse.ui.texteditor.IDocumentProvider;
 import org.eclipse.ui.texteditor.ITextEditor;
@@ -63,14 +75,18 @@ import org.eclipse.xtext.util.concurrent.IUnitOfWork;
 import com._1c.g5.v8.bm.core.IBmObject;
 import com._1c.g5.v8.derived.IDerivedDataManager;
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
+import com._1c.g5.v8.dt.common.localization.LocalizedEnumProvider;
 import com._1c.g5.v8.dt.core.platform.IDerivedDataManagerProvider;
 import com._1c.g5.v8.dt.core.platform.IResourceLookup;
+import com._1c.g5.v8.dt.ui.DtUiUtil;
 import com._1c.g5.v8.dt.ui.editor.IDtEditor;
 import com._1c.g5.v8.dt.ui.editor.input.IDtEditorInput;
+import com._1c.g5.v8.dt.validation.git.IGitMarkerFilterManager;
 import com._1c.g5.v8.dt.validation.marker.IMarkerManager;
 import com._1c.g5.v8.dt.validation.marker.Marker;
 import com._1c.g5.v8.dt.validation.marker.MarkerFilter;
 import com._1c.g5.v8.dt.validation.marker.MarkerSeverity;
+import com.e1c.g5.v8.dt.check.settings.IssueSeverity;
 
 /**
  * Перед запуском клиентского приложения 1С предлагает сохранить несохранённые
@@ -97,11 +113,20 @@ import com._1c.g5.v8.dt.validation.marker.MarkerSeverity;
  *   <li>при значении параметра «prompt» показывает {@link SaveAndLaunchDialog}
  *       со списком и кнопками «Сохранить и запустить» / «Не сохранять и запустить» / «Отмена»
  *       (при «always» — сохраняет молча, при «never» — не вмешивается);</li>
- *   <li>если в открытых редакторах того же проекта есть ошибки конфигурации
- *       ({@link MarkerSeverity#ERRORS}, в том числе у вложенных объектов — как значок
- *       на вкладке), показывает {@link ErrorsAndLaunchDialog} со списком и кнопками
+ *   <li>если штатный параметр «Продолжать выполнение в случае обнаружения ошибок проекта»
+ *       стоит в «Предлагать» и у объектов открытых редакторов того же проекта есть проблемы
+ *       конфигурации выбранной критичности ({@link #minSeverity()}) и серьёзнее,
+ *       показывает {@link ErrorsAndLaunchDialog} с кнопками
  *       «Запустить» / «Отмена»
- *       (<a href="https://github.com/tormozit/EDT.Comfort/issues/500">issue 500</a>);</li>
+ *       (<a href="https://github.com/tormozit/EDT.Comfort/issues/500">issue 500</a>).
+ *       Маркеры, скрытые штатным отбором «Скрыть языковые проблемы из базовой ветки git»
+ *       ({@link IGitMarkerFilterManager}), в расчёт не идут: их на экране не видно, и
+ *       предупреждение о них выглядит ложным
+ *       (<a href="https://github.com/tormozit/EDT.Comfort/issues/514">issue 514</a>);</li>
+ *   <li>в обоих окнах есть кнопка «Настройки…» — открывает страницу штатного параметра
+ *       («Запуск/Отладка → Запуск»), не закрывая само окно; там же {@link LaunchPageAugmenter}
+ *       добавляет выбор минимальной критичности, а в окне ошибок она названа под списком
+ *       (<a href="https://github.com/tormozit/EDT.Comfort/issues/516">issue 516</a>);</li>
  *   <li>затем вызывает настоящий {@code preLaunchCheck}, временно выставив параметр
  *       в «never», чтобы штатное сохранение по всему рабочему пространству не спросило
  *       второй раз.</li>
@@ -111,7 +136,6 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
 {
     private static final String TAG = "LaunchSaveDirtyEditors"; //$NON-NLS-1$
     private static final String ERROR_LOG = "launch-errors"; //$NON-NLS-1$
-    private static final String BSL_EXTENSION = "bsl"; //$NON-NLS-1$
     /** После сохранения ждём догоняющий пересчёт маркеров, но не дольше этого. */
     private static final long CHECKS_WAIT_MS = 2_000;
 
@@ -120,6 +144,15 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
 
     private static final String PREF_NODE = "org.eclipse.debug.ui"; //$NON-NLS-1$
     private static final String PREF_SAVE_DIRTY = "org.eclipse.debug.ui.save_dirty_editors_before_launch"; //$NON-NLS-1$
+    /** «Продолжать выполнение в случае обнаружения ошибок проекта»: {@code always} / {@code prompt}. */
+    private static final String PREF_CONTINUE_WITH_ERRORS = "org.eclipse.debug.ui.cancel_launch_with_compile_errors"; //$NON-NLS-1$
+    /**
+     * Минимальная критичность проблемы, о которой спрашиваем, если параметр не задан:
+     * учитываются она и все более серьёзные. Более мягкие проблемы запуску не мешают.
+     */
+    private static final MarkerSeverity DEFAULT_MIN_SEVERITY = MarkerSeverity.CRITICAL;
+    /** Штатная страница «Запуск/Отладка → Запуск»: там живут оба параметра запуска. */
+    private static final String LAUNCH_PREF_PAGE_ID = "org.eclipse.debug.ui.LaunchingPreferencePage"; //$NON-NLS-1$
     private static final String ALWAYS = "always"; //$NON-NLS-1$
     private static final String NEVER = "never"; //$NON-NLS-1$
     private static final String PROMPT = "prompt"; //$NON-NLS-1$
@@ -130,6 +163,7 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
     private static final int SAVE_AND_LAUNCH_ID = IDialogConstants.CLIENT_ID + 1;
     private static final int LAUNCH_WITHOUT_SAVE_ID = IDialogConstants.CLIENT_ID + 2;
     private static final int LAUNCH_WITH_ERRORS_ID = IDialogConstants.CLIENT_ID + 3;
+    private static final int OPEN_PREFERENCES_ID = IDialogConstants.CLIENT_ID + 4;
 
     private static volatile boolean patched;
 
@@ -138,8 +172,11 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
     {
         // earlyStartup идёт в рабочем потоке — timerExec требует UI-поток.
         Display.getDefault().asyncExec(() ->
+        {
+            LaunchPageAugmenter.install(Display.getDefault());
             Display.getDefault().timerExec(STARTUP_PATCH_DELAY_MS,
-                LaunchSaveDirtyEditorsHook::installDelegateProxy));
+                LaunchSaveDirtyEditorsHook::installDelegateProxy);
+        });
     }
 
     private static void installDelegateProxy()
@@ -337,11 +374,19 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
          */
         private Boolean decideErrors(IProject project, boolean savedNow)
         {
+            if (!errorsPromptEnabled())
+            {
+                Global.tempLog(ERROR_LOG, "skip: continueWithErrors=" //$NON-NLS-1$
+                    + debugUiStore().getString(PREF_CONTINUE_WITH_ERRORS));
+                return null;
+            }
             try
             {
                 IMarkerManager markerManager = Global.getOsgiService(IMarkerManager.class);
+                IGitMarkerFilterManager baseline = gitBaselineFilter();
                 Global.tempLog(ERROR_LOG, "start project=" + project.getName() //$NON-NLS-1$
                     + " markerManager=" + (markerManager != null) //$NON-NLS-1$
+                    + " baseline=" + baselineState(baseline, project) //$NON-NLS-1$
                     + " savedNow=" + savedNow); //$NON-NLS-1$
                 if (markerManager == null)
                     return null;
@@ -353,9 +398,9 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
                         open.add(rowOf(editor));
                 });
 
-                List<Row> rows = collectErrorRows(markerManager, project, open, savedNow);
+                List<Row> rows = collectErrorRows(markerManager, baseline, project, open, savedNow);
                 if (savedNow)
-                    rows = waitAndRecheck(markerManager, project, open, rows.isEmpty(), rows);
+                    rows = waitAndRecheck(markerManager, baseline, project, open, rows.isEmpty(), rows);
                 Global.tempLog(ERROR_LOG, "open=" + open.size() + " hits=" + rows.size()); //$NON-NLS-1$ //$NON-NLS-2$
                 if (rows.isEmpty())
                     return null;
@@ -382,8 +427,8 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
          * @param appearing {@code true} — в первом проходе ошибок не было, ждём появления;
          *     {@code false} — ошибки уже были, ждём, пока устаревшие пропадут.
          */
-        private List<Row> waitAndRecheck(IMarkerManager markerManager, IProject project, List<Row> open,
-            boolean appearing, List<Row> rows)
+        private List<Row> waitAndRecheck(IMarkerManager markerManager, IGitMarkerFilterManager baseline,
+            IProject project, List<Row> open, boolean appearing, List<Row> rows)
         {
             long deadline = System.currentTimeMillis() + CHECKS_WAIT_MS;
             int attempt = 0;
@@ -401,7 +446,7 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
                     for (IEditorPart editor : scopedOpenEditors(project))
                         open.add(rowOf(editor));
                 });
-                rows = collectErrorRows(markerManager, project, open, true);
+                rows = collectErrorRows(markerManager, baseline, project, open, true);
                 Global.tempLog(ERROR_LOG, "afterWait attempt=" + attempt //$NON-NLS-1$
                     + " hits=" + rows.size() //$NON-NLS-1$
                     + " appearing=" + appearing); //$NON-NLS-1$
@@ -425,8 +470,8 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
             return rows;
         }
 
-        private List<Row> collectErrorRows(IMarkerManager markerManager, IProject project, List<Row> open,
-            boolean afterSave)
+        private List<Row> collectErrorRows(IMarkerManager markerManager, IGitMarkerFilterManager baseline,
+            IProject project, List<Row> open, boolean afterSave)
         {
             List<Row> rows = new ArrayList<>();
             for (Row row : open)
@@ -434,7 +479,7 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
                 String hit = "none"; //$NON-NLS-1$
                 try
                 {
-                    hit = configErrorHit(markerManager, project, row, afterSave);
+                    hit = configErrorHit(markerManager, baseline, project, row, afterSave);
                     if (!"none".equals(hit)) //$NON-NLS-1$
                         rows.add(row);
                 }
@@ -575,7 +620,6 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
         if (model instanceof IBmObject bm)
             ids.add(Long.valueOf(bm.bmGetId()));
         addFileTarget(editorResource(editor), ids, files);
-        addModuleFiles(model, ids, files);
 
         BslXtextEditor bsl = GetRef.getActiveBslEditor(editor);
         if (bsl != null)
@@ -613,27 +657,6 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
             ids.add(encoded);
         ids.add(uri.toString());
         ids.add(uri.trimFragment().toString());
-    }
-
-    /** {@code *.bsl} папки объекта — языковые проверки живут на пути файла, не на BM-id родителя. */
-    private static void addModuleFiles(EObject model, LinkedHashSet<Object> ids, LinkedHashSet<IFile> files)
-    {
-        IFile objectFile = platformFile(model);
-        IContainer folder = objectFile != null ? objectFile.getParent() : null;
-        if (folder == null || !folder.isAccessible())
-            return;
-        try
-        {
-            folder.accept(resource ->
-            {
-                if (resource instanceof IFile file && BSL_EXTENSION.equalsIgnoreCase(file.getFileExtension()))
-                    addFileTarget(file, ids, files);
-                return true;
-            });
-        }
-        catch (CoreException ignored)
-        {
-        }
     }
 
     private static IFile platformFile(EObject model)
@@ -707,28 +730,20 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
         return null;
     }
 
-    /**
-     * @return причина попадания или {@code none}: живые аннотации редактора,
-     *     языковые маркеры по пути файла, вложенные модельные, либо {@code IMarker.PROBLEM}
-     */
-    private static String configErrorHit(IMarkerManager markers, IProject project, Row row, boolean afterSave)
+    /** @return причина попадания ({@code markers}) или {@code none} */
+    private static String configErrorHit(IMarkerManager markers, IGitMarkerFilterManager baseline, IProject project,
+        Row row, boolean afterSave)
     {
-        if (hasLiveError(row.liveHit))
-            return "live"; //$NON-NLS-1$
-        // Сразу после сохранения маркеры EDT ещё держат уже исправленную ошибку.
-        // Если живые аннотации модуля уже пустые — им верим.
+        // Считаем только проблемы конфигурации самого объекта редактора: у них известна
+        // критичность. Подчёркивания в тексте модуля и маркеры рабочего пространства на его
+        // файлах поводом не являются — критичности у них нет, а ошибкой в модуле EDT рисует
+        // и предупреждения критичности «Значительная».
+        // Сразу после сохранения маркеры EDT ещё держат уже исправленную проблему:
+        // если живые аннотации модуля уже пустые — им верим.
         if (afterSave && row.liveTrusted && "none".equals(row.liveHit)) //$NON-NLS-1$
             return "none"; //$NON-NLS-1$
-        if (hasMarkerErrors(markers, project, row.ids))
-            return "markers"; //$NON-NLS-1$
-        for (Object id : row.ids)
-        {
-            if (id instanceof Long && containsConfigError(markers.getNestedMarkers(project, id)))
-                return "nested"; //$NON-NLS-1$
-        }
-        if (hasProblemErrors(row.files))
-            return "problem"; //$NON-NLS-1$
-        return "none"; //$NON-NLS-1$
+        return hasMarkerErrors(markers, baseline, project, row.ids, minSeverity())
+            ? "markers" : "none"; //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private static boolean hasLiveError(String liveHit)
@@ -844,7 +859,36 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
             + " idle=" + idle); //$NON-NLS-1$
     }
 
-    private static boolean hasMarkerErrors(IMarkerManager markers, IProject project, List<Object> objectIds)
+    /**
+     * @return минимальная учитываемая критичность; учитываются она и все более серьёзные
+     *     ({@link MarkerSeverity#moreSevere} считает серьёзнее ту, что объявлена в перечислении раньше)
+     */
+    static MarkerSeverity minSeverity()
+    {
+        String name = ComfortSettings.getLaunchErrorsMinSeverity();
+        for (MarkerSeverity severity : MarkerSeverity.values())
+        {
+            if (severity.name().equals(name))
+                return severity;
+        }
+        return DEFAULT_MIN_SEVERITY;
+    }
+
+    /** @return штатное название критичности («Ошибка», «Критическая», …) */
+    static String localizedSeverity(MarkerSeverity severity)
+    {
+        String name = LocalizedEnumProvider.getLocalizedString(severity);
+        return name == null || name.isBlank() ? severity.name() : name;
+    }
+
+    /** @return {@code true}, если критичность маркера не мягче выбранного минимума */
+    private static boolean severityAccepted(MarkerSeverity severity, MarkerSeverity min)
+    {
+        return severity != null && severity != MarkerSeverity.NONE && severity.ordinal() <= min.ordinal();
+    }
+
+    private static boolean hasMarkerErrors(IMarkerManager markers, IGitMarkerFilterManager baseline,
+        IProject project, List<Object> objectIds, MarkerSeverity minSeverity)
     {
         List<Object> bmIds = new ArrayList<>();
         List<Object> pathIds = new ArrayList<>();
@@ -855,49 +899,94 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
             else if (id != null)
                 pathIds.add(id);
         }
-        return queryMarkerErrors(markers, project, bmIds) || queryMarkerErrors(markers, project, pathIds);
+        return queryMarkerErrors(markers, baseline, project, bmIds, minSeverity)
+            || queryMarkerErrors(markers, baseline, project, pathIds, minSeverity);
     }
 
-    private static boolean queryMarkerErrors(IMarkerManager markers, IProject project, List<Object> ids)
+    /**
+     * Критичность проверяется здесь, а не штатным {@code createSeverityFilter}: тот отбирает
+     * маркеры ровно одной критичности, а нам нужны все не мягче выбранной.
+     */
+    private static boolean queryMarkerErrors(IMarkerManager markers, IGitMarkerFilterManager baseline,
+        IProject project, List<Object> ids, MarkerSeverity minSeverity)
     {
         if (ids == null || ids.isEmpty())
             return false;
-        MarkerFilter filter = MarkerFilter.createObjectFilter(project, ids)
-            .combine(MarkerFilter.createSeverityFilter(MarkerSeverity.ERRORS));
-        return markers.markers(filter).findAny().isPresent();
-    }
-
-    private static boolean hasProblemErrors(List<IFile> files)
-    {
-        for (IFile file : files)
+        MarkerFilter filter = MarkerFilter.createObjectFilter(project, ids);
+        int[] hidden = { 0 };
+        boolean found = markers.markers(filter).anyMatch(marker ->
         {
-            if (file == null || !file.exists())
-                continue;
-            try
-            {
-                for (IMarker marker : file.findMarkers(IMarker.PROBLEM, true, IResource.DEPTH_ZERO))
-                {
-                    if (marker.getAttribute(IMarker.SEVERITY, -1) == IMarker.SEVERITY_ERROR)
-                        return true;
-                }
-            }
-            catch (CoreException ignored)
-            {
-            }
-        }
-        return false;
-    }
-
-    private static boolean containsConfigError(Marker[] batch)
-    {
-        if (batch == null)
-            return false;
-        for (Marker marker : batch)
-        {
-            if (marker != null && marker.getSeverity() == MarkerSeverity.ERRORS)
+            if (!severityAccepted(marker.getSeverity(), minSeverity))
+                return false;
+            if (!hiddenByGitBaseline(baseline, project, marker))
                 return true;
+            hidden[0]++;
+            Global.tempLog(ERROR_LOG, "baseline hides severity=" + marker.getSeverity() //$NON-NLS-1$
+                + " check=" + marker.getCheckId() //$NON-NLS-1$
+                + " msg=" + marker.getMessage()); //$NON-NLS-1$
+            return false;
+        });
+        if (hidden[0] > 0)
+            Global.tempLog(ERROR_LOG, "baseline hidden markers=" + hidden[0] + " found=" + found); //$NON-NLS-1$ //$NON-NLS-2$
+        return found;
+    }
+
+    /** @return служба штатного отбора проблем базовой ветки git или {@code null}, если недоступна */
+    private static IGitMarkerFilterManager gitBaselineFilter()
+    {
+        try
+        {
+            return Global.getOsgiService(IGitMarkerFilterManager.class);
         }
-        return false;
+        catch (RuntimeException | LinkageError e)
+        {
+            Global.tempLog(ERROR_LOG, "baseline service ex=" + e.getClass().getSimpleName()); //$NON-NLS-1$
+            return null;
+        }
+    }
+
+    /**
+     * Ошибка, скрытая штатным отбором «Скрыть языковые проблемы из базовой ветки git»,
+     * пользователю не видна ни в панели «Проблемы», ни значком на вкладке редактора —
+     * предупреждать о ней перед запуском нельзя (issue 514).
+     *
+     * <p>{@code shouldSkipMarker} отвечает лишь на вопрос «маркер пришёл из базовой ветки»:
+     * по этому признаку {@code BranchChangesIndexProvider} строит отбор панели «Проблемы»
+     * (см. {@link GitBaselineFilterHook}). Скрыт маркер на самом деле или нет, говорит
+     * {@code isFilterApplied}: пока отбор не применён, проблемы видны, и подавлять вопрос
+     * из-за них нельзя — иначе отсеиваются все проблемы проекта с базовой веткой.
+     */
+    private static boolean hiddenByGitBaseline(IGitMarkerFilterManager baseline, IProject project, Marker marker)
+    {
+        if (baseline == null || marker == null)
+            return false;
+        try
+        {
+            return baseline.isFilterApplied() && baseline.shouldSkipMarker(marker, project);
+        }
+        catch (RuntimeException | LinkageError e)
+        {
+            Global.tempLog(ERROR_LOG, "baseline skip ex=" + e.getClass().getSimpleName()); //$NON-NLS-1$
+            return false;
+        }
+    }
+
+    /** Состояние отбора базовой ветки для журнала диагностики. */
+    private static String baselineState(IGitMarkerFilterManager baseline, IProject project)
+    {
+        if (baseline == null)
+            return "none"; //$NON-NLS-1$
+        try
+        {
+            return "enabled=" + baseline.isFiltrationEnabled() //$NON-NLS-1$
+                + ",project=" + baseline.isFiltrationEnabledForProject(project) //$NON-NLS-1$
+                + ",hide=" + baseline.isHideGitBasedCheckResults(project) //$NON-NLS-1$
+                + ",applied=" + baseline.isFilterApplied(); //$NON-NLS-1$
+        }
+        catch (RuntimeException | LinkageError e)
+        {
+            return "ex:" + e.getClass().getSimpleName(); //$NON-NLS-1$
+        }
     }
 
     private static String fileNames(List<IFile> files)
@@ -1029,6 +1118,16 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
     }
 
     /**
+     * @return {@code true}, если штатный параметр «Продолжать выполнение в случае обнаружения
+     *     ошибок проекта» стоит в «Предлагать» — только тогда спрашиваем про ошибки
+     */
+    private static boolean errorsPromptEnabled()
+    {
+        String value = debugUiStore().getString(PREF_CONTINUE_WITH_ERRORS);
+        return PROMPT.equals(value);
+    }
+
+    /**
      * На время вызова настоящего {@code preLaunchCheck} держит параметр
      * «Сохранять изменённые редакторы перед запуском» в значении «never», затем
      * возвращает прежнее (или сбрасывает в значение по умолчанию, если оно не было задано).
@@ -1080,6 +1179,194 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
 
     // -----------------------------------------------------------------------
 
+    /**
+     * Дополняет штатную страницу параметров «Запуск/Отладка → Запуск»: рядом с переключателем
+     * «Продолжать выполнение в случае обнаружения ошибок проекта» добавляет выбор минимальной
+     * критичности проблемы, о которой спрашивать
+     * (<a href="https://github.com/tormozit/EDT.Comfort/issues/516">issue 516</a>).
+     *
+     * <p>Страница штатная и не наша: контрол вставляется в группу самого переключателя, найденную
+     * через {@code FieldEditorPreferencePage.fields} по имени параметра, — так вставка не зависит
+     * ни от порядка групп на странице, ни от перевода их подписей.
+     */
+    private static final class LaunchPageAugmenter
+    {
+        private static final String PAGE_CLASS_NAME =
+            "org.eclipse.debug.internal.ui.preferences.LaunchingPreferencePage"; //$NON-NLS-1$
+        private static final String PATCHED_KEY = "tormozit.launchMinSeverity"; //$NON-NLS-1$
+        private static final int MAX_ATTEMPTS = 30;
+        private static final int RETRY_MS = 100;
+
+        private static final String LABEL = "Минимальная критичность:"; //$NON-NLS-1$
+        private static final String TOOLTIP =
+            "Перед запуском клиента проверяются проблемы конфигурации объектов открытых редакторов"
+                + " запускаемого проекта, и при значении «Предлагать» задаётся вопрос. Учитываются"
+                + " проблемы этой критичности и серьёзнее — более мягкие запуску не мешают."
+                + " В списке только те критичности, которые EDT показывает в модуле ошибкой.";
+
+        private static final WeakHashMap<Shell, Boolean> wired = new WeakHashMap<>();
+
+        private LaunchPageAugmenter()
+        {
+        }
+
+        static void install(Display display)
+        {
+            if (display == null || display.isDisposed())
+                return;
+            Listener listener = event ->
+            {
+                if (!(event.widget instanceof Shell shell) || shell.isDisposed())
+                    return;
+                PreferenceDialog dialog = findPreferenceDialog(shell);
+                if (dialog != null)
+                    scheduleWireOnce(display, shell, dialog);
+            };
+            display.addFilter(SWT.Show, listener);
+            display.addFilter(SWT.Activate, listener);
+        }
+
+        private static PreferenceDialog findPreferenceDialog(Shell shell)
+        {
+            Shell current = shell;
+            while (current != null && !current.isDisposed())
+            {
+                if (current.getData() instanceof PreferenceDialog dialog)
+                    return dialog;
+                current = current.getParent() instanceof Shell parent ? parent : null;
+            }
+            return null;
+        }
+
+        private static void scheduleWireOnce(Display display, Shell shell, PreferenceDialog dialog)
+        {
+            synchronized (wired)
+            {
+                if (Boolean.TRUE.equals(wired.get(shell)))
+                    return;
+                wired.put(shell, Boolean.TRUE);
+            }
+            dialog.addPageChangedListener(event -> tryPatch(dialog.getSelectedPage()));
+            scheduleRetry(display, shell, dialog, 0);
+        }
+
+        /** Страница создаётся не мгновенно: пробуем, пока переключатель не найден. */
+        private static void scheduleRetry(Display display, Shell shell, PreferenceDialog dialog, int attempt)
+        {
+            if (shell.isDisposed())
+                return;
+            if (tryPatch(dialog.getSelectedPage()) || attempt >= MAX_ATTEMPTS)
+                return;
+            display.timerExec(RETRY_MS, () -> scheduleRetry(display, shell, dialog, attempt + 1));
+        }
+
+        /** @return {@code true}, если страница не наша, уже дополнена или дополнена сейчас */
+        private static boolean tryPatch(Object selected)
+        {
+            if (!(selected instanceof IPreferencePage page) || !PAGE_CLASS_NAME.equals(page.getClass().getName()))
+                return true;
+            Composite radioBox = findRadioBox(page);
+            if (radioBox == null || radioBox.isDisposed())
+                return false;
+            if (Boolean.TRUE.equals(radioBox.getData(PATCHED_KEY)))
+                return true;
+
+            addSeverityChooser(radioBox);
+            radioBox.setData(PATCHED_KEY, Boolean.TRUE);
+            radioBox.layout(true, true);
+            if (radioBox.getParent() != null)
+                radioBox.getParent().layout(true, true);
+            return true;
+        }
+
+        /** @return группа переключателя «Продолжать выполнение…» или {@code null}, если ещё не создана */
+        private static Composite findRadioBox(IPreferencePage page)
+        {
+            if (!(Global.getField(page, "fields") instanceof List<?> fields)) //$NON-NLS-1$
+                return null;
+            for (Object field : fields)
+            {
+                if (!(field instanceof FieldEditor editor)
+                    || !PREF_CONTINUE_WITH_ERRORS.equals(editor.getPreferenceName()))
+                    continue;
+                return Global.getField(editor, "radioBox") instanceof Composite box ? box : null; //$NON-NLS-1$
+            }
+            return null;
+        }
+
+        private static void addSeverityChooser(Composite radioBox)
+        {
+            Label label = new Label(radioBox, SWT.NONE);
+            label.setText(LABEL);
+            label.setToolTipText(TooltipText.wrap(label, TOOLTIP + Global.pluginSignForTooltip()));
+
+            // Combo в SWT картинок не показывает, поэтому берём TableCombo: в выпадающем
+            // списке у каждой строки штатный значок критичности.
+            TableCombo combo = new TableCombo(radioBox, SWT.BORDER | SWT.READ_ONLY);
+            combo.setToolTipText(TooltipText.wrap(combo, TOOLTIP + Global.pluginSignForTooltip()));
+            combo.setShowTableLines(false);
+            combo.setShowTableHeader(false);
+
+            List<MarkerSeverity> severities = choosableSeverities();
+            for (MarkerSeverity severity : severities)
+            {
+                TableItem item = new TableItem(combo.getTable(), SWT.NONE);
+                item.setText(localizedSeverity(severity));
+                Image image = severityImage(severity);
+                if (image != null)
+                    item.setImage(image);
+            }
+            combo.select(Math.max(0, severities.indexOf(minSeverity())));
+            combo.addSelectionListener(SelectionListener.widgetSelectedAdapter(event ->
+            {
+                int index = combo.getSelectionIndex();
+                if (index >= 0 && index < severities.size())
+                    ComfortSettings.saveLaunchErrorsMinSeverity(severities.get(index).name());
+            }));
+        }
+
+        /**
+         * Только «красные» критичности — те, которые EDT показывает в модуле ошибкой
+         * ({@link ValidationChecksFilterHook#moduleAnnotation}). Остальные ({@code MINOR},
+         * {@code TRIVIAL}) запуску не мешают в любом случае, выбирать их незачем.
+         */
+        private static List<MarkerSeverity> choosableSeverities()
+        {
+            List<MarkerSeverity> result = new ArrayList<>();
+            for (MarkerSeverity severity : MarkerSeverity.values())
+            {
+                if (severity == MarkerSeverity.ERRORS || isModuleError(severity))
+                    result.add(severity);
+            }
+            return result;
+        }
+
+        /** @return штатный значок критичности или {@code null}, если его нет */
+        private static Image severityImage(MarkerSeverity severity)
+        {
+            try
+            {
+                return DtUiUtil.getImageByMarkerSeverity(severity);
+            }
+            catch (RuntimeException | LinkageError ignored)
+            {
+                return null;
+            }
+        }
+
+        /** @return {@code true}, если проблема такой критичности подчёркивается в модуле как ошибка */
+        private static boolean isModuleError(MarkerSeverity severity)
+        {
+            for (IssueSeverity issue : IssueSeverity.values())
+            {
+                if (issue.name().equals(severity.name()))
+                    return ValidationChecksFilterHook.moduleAnnotation(
+                        issue) == ValidationChecksFilterHook.ModuleAnnotation.ERROR;
+            }
+            return false;
+        }
+    }
+
     /** Общий список редакторов перед запуском: двойной клик отменяет запуск и открывает строку. */
     private abstract static class EditorListDialog extends Dialog
     {
@@ -1108,6 +1395,12 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
         }
 
         protected abstract String headerText();
+
+        /** @return пояснение под списком или {@code null}, если пояснения нет */
+        protected String footerText()
+        {
+            return null;
+        }
 
         @Override
         protected Control createDialogArea(Composite parent)
@@ -1138,15 +1431,136 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
                 activateEditor(rows.get(index).editor);
             }));
 
+            String footer = footerText();
+            if (footer != null)
+            {
+                Label label = new Label(area, SWT.WRAP);
+                label.setText(footer);
+                GridData footerData = new GridData(SWT.FILL, SWT.TOP, true, false);
+                footerData.widthHint = gd.widthHint;
+                label.setLayoutData(footerData);
+            }
+
             applyDialogFont(area);
             return area;
+        }
+
+        /**
+         * Кнопка перехода к штатному параметру, управляющему этим вопросом
+         * (<a href="https://github.com/tormozit/EDT.Comfort/issues/516">issue 516</a>).
+         */
+        protected void createPreferencesButton(Composite parent)
+        {
+            Button button = createButton(parent, OPEN_PREFERENCES_ID, "", false); //$NON-NLS-1$
+            Image gear = gearImage(button);
+            if (gear != null)
+                button.setImage(gear);
+            else
+                button.setText("Настройки…"); //$NON-NLS-1$
+            button.setToolTipText(TooltipText.wrap(button,
+                "Открыть страницу параметров «Запуск/Отладка → Запуск»: там задаётся, сохранять ли " //$NON-NLS-1$
+                    + "изменённые редакторы перед запуском и продолжать ли запуск при ошибках проекта.")); //$NON-NLS-1$
+            shrinkToContent(button);
+        }
+
+        /**
+         * {@code Dialog.createButton} тянет кнопку до штатной ширины
+         * ({@link IDialogConstants#BUTTON_WIDTH}) — кнопке со значком столько места не нужно.
+         */
+        private static void shrinkToContent(Button button)
+        {
+            if (button.getLayoutData() instanceof GridData data)
+            {
+                data.widthHint = button.computeSize(SWT.DEFAULT, SWT.DEFAULT, true).x;
+                data.horizontalAlignment = SWT.BEGINNING;
+                data.grabExcessHorizontalSpace = false;
+            }
+        }
+
+        /**
+         * Кнопка со значком — у левого края окна, в своей панели. Штатную панель кнопок
+         * не трогаем: у неё {@code makeColumnsEqualWidth}, и любое её растягивание разносит
+         * ширину остальных кнопок.
+         */
+        @Override
+        protected Control createButtonBar(Composite parent)
+        {
+            Composite host = new Composite(parent, SWT.NONE);
+            GridLayout hostLayout = new GridLayout(2, false);
+            // Поля окна держит host: у вложенной штатной панели они обнуляются, иначе двойные.
+            hostLayout.marginWidth = convertHorizontalDLUsToPixels(IDialogConstants.HORIZONTAL_MARGIN);
+            hostLayout.marginHeight = convertVerticalDLUsToPixels(IDialogConstants.VERTICAL_MARGIN);
+            hostLayout.horizontalSpacing = 0;
+            host.setLayout(hostLayout);
+            host.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
+            host.setFont(parent.getFont());
+
+            Composite left = new Composite(host, SWT.NONE);
+            GridLayout leftLayout = new GridLayout(0, false);
+            leftLayout.marginWidth = 0;
+            leftLayout.marginHeight = 0;
+            left.setLayout(leftLayout);
+            left.setLayoutData(new GridData(SWT.BEGINNING, SWT.CENTER, false, false));
+            left.setFont(parent.getFont());
+            createPreferencesButton(left);
+
+            Control bar = super.createButtonBar(host);
+            if (bar.getLayoutData() instanceof GridData barData)
+            {
+                barData.horizontalAlignment = SWT.END;
+                barData.grabExcessHorizontalSpace = true;
+            }
+            if (bar instanceof Composite barComposite && barComposite.getLayout() instanceof GridLayout barLayout)
+            {
+                barLayout.marginWidth = 0;
+                barLayout.marginHeight = 0;
+            }
+            return host;
+        }
+
+        /**
+         * Значок шестерёнки берём штатный ({@code org.eclipse.egit.ui}): своей иконки настроек
+         * у плагина нет, а у EDT в {@code icons} её тоже нет.
+         *
+         * @return значок, снимаемый вместе с кнопкой, или {@code null}, если загрузить не вышло
+         */
+        private static Image gearImage(Button button)
+        {
+            ImageDescriptor descriptor = AbstractUIPlugin.imageDescriptorFromPlugin(
+                "org.eclipse.egit.ui", "icons/obj16/settings.png"); //$NON-NLS-1$ //$NON-NLS-2$
+            if (descriptor == null)
+                return null;
+            Image image = descriptor.createImage(false, button.getDisplay());
+            if (image != null)
+                button.addDisposeListener(event -> image.dispose());
+            return image;
         }
 
         @Override
         protected void buttonPressed(int buttonId)
         {
+            if (buttonId == OPEN_PREFERENCES_ID)
+            {
+                openLaunchPreferences(getShell());
+                return;
+            }
             setReturnCode(buttonId);
             close();
+        }
+
+        /** Окно запуска остаётся открытым: параметры показываются поверх него. */
+        private static void openLaunchPreferences(Shell parent)
+        {
+            try
+            {
+                PreferencesUtil
+                    .createPreferenceDialogOn(parent, LAUNCH_PREF_PAGE_ID, new String[] { LAUNCH_PREF_PAGE_ID }, null)
+                    .open();
+            }
+            catch (RuntimeException e)
+            {
+                Global.logError(TAG, "не удалось открыть параметры запуска", e); //$NON-NLS-1$
+            }
         }
     }
 
@@ -1194,6 +1608,13 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
         {
             return "В открытых редакторах проекта «" + projectName //$NON-NLS-1$
                 + "» есть ошибки конфигурации (двойной клик — открыть редактор):"; //$NON-NLS-1$
+        }
+
+        @Override
+        protected String footerText()
+        {
+            return "Учитываются проблемы критичности «" //$NON-NLS-1$
+                + localizedSeverity(minSeverity()) + "» и серьёзнее, кроме скрытых отбором «Скрыть языковые проблемы из базовой ветки git»"; //$NON-NLS-1$
         }
 
         @Override

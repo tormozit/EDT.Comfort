@@ -25,6 +25,8 @@
   <modules>
     <module>target</module>
     <module>plugin</module>
+    <!-- Бандл проверок: своя фиксированная версия, см. plugin.checks/README.md -->
+    <module>plugin.checks</module>
     <module>feature</module>
     <module>site</module>
   </modules>

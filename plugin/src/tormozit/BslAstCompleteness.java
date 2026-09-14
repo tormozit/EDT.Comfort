@@ -82,7 +82,8 @@ public final class BslAstCompleteness
      *
      * <p>Обход стоит O(лексем) и повторяется на каждый пересчёт в модуле с синтаксической
      * ошибкой — а пересчётов по одному и тому же разбору несколько: пометка обрыва в редакторе,
-     * проверка {@link BslAstTruncationCheck}, панель «Структура».
+     * проверка {@code BslAstTruncationCheck} (бандл {@code tormozit.comfort.checks}), панель
+ * «Структура».
      */
     private static final Map<IParseResult, Boolean> ANALYSIS_CACHE =
         Collections.synchronizedMap(new WeakHashMap<>());

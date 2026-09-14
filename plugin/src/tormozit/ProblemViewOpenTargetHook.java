@@ -336,7 +336,7 @@ public final class ProblemViewOpenTargetHook implements IStartup
 
     /**
      * В маркере {@link Marker#getCheckId()} — короткий UID проекта ({@code SU47}), а не
-     * {@link BrokenFormPictureCheck#CHECK_ID}. Резолв через
+     * {@link ComfortCheckIds#BROKEN_FORM_PICTURE}. Резолв через
      * {@link ICheckRepository#getUidForShortUid(String, IProject)}.
      */
     private static boolean isBrokenFormPictureMarker(Marker marker)
@@ -344,14 +344,14 @@ public final class ProblemViewOpenTargetHook implements IStartup
         String id = marker.getCheckId();
         if (id == null || id.isBlank())
             return false;
-        if (BrokenFormPictureCheck.CHECK_ID.equals(id))
+        if (ComfortCheckIds.BROKEN_FORM_PICTURE.equals(id))
             return true;
         ICheckRepository repository = Global.getOsgiService(ICheckRepository.class);
         IProject project = marker.getProject();
         if (repository == null || project == null)
             return false;
         CheckUid uid = repository.getUidForShortUid(id, project);
-        return uid != null && BrokenFormPictureCheck.CHECK_ID.equals(uid.getCheckId());
+        return uid != null && ComfortCheckIds.BROKEN_FORM_PICTURE.equals(uid.getCheckId());
     }
 
     private static Marker resolveMarker(Object element)

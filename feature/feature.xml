@@ -23,4 +23,10 @@
          version="0.0.0"
          unpack="false"/>
 
+   <!-- Бандл проверок: версия фиксированная и со сборками не меняется, см. plugin.checks/README.md -->
+   <plugin
+         id="tormozit.comfort.checks"
+         version="0.0.0"
+         unpack="false"/>
+
 </feature>
