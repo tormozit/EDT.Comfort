@@ -2913,7 +2913,14 @@ return;
                         // зависит, для какого префикса EDT посчитает список. Живая каретка
                         // уезжает, пока задание считает, и список получался для одного
                         // места, а показывался для другого.
-                        probe = anchor;
+                        //
+                        // Исключение — «&…» (директива компиляции): зонд на начале & отдаёт
+                        // общий словарь модуля, а не НаКлиенте/НаСервере. Нужна каретка
+                        // задания (offset), где EDT уже отдаёт аннотации.
+                        if (isAmpersandAnnotationFilter(live, offset))
+                            probe = offset;
+                        else
+                            probe = anchor;
                         ctorProbe = isAfterNewKeyword(live, offset);
                     }
                     lastProbe = probe;
@@ -5375,7 +5382,9 @@ int probe = -1;
             if (memberStockFullListDot == dot && memberStockFullList.length > raw.length)
                 raw = memberStockFullList;
         }
-        else if (isCacheValidForCaret(doc, caret) && fullListCache.length > raw.length)
+        // При «&…» полный кэш словаря длиннее списка аннотаций с каретки — не подменять.
+        else if (!isAmpersandAnnotationFilter(doc, caret)
+            && isCacheValidForCaret(doc, caret) && fullListCache.length > raw.length)
             raw = fullListCache;
         ICompletionProposal[] result = finalizeListForIrAssistDisplay(raw);
 return result;
@@ -5389,6 +5398,11 @@ return result;
             return memberAccessProbeOffsets(caret, dot, assistant, doc);
         java.util.LinkedHashSet<Integer> set = new java.util.LinkedHashSet<>();
         addProbeOffset(set, caret);
+        // «&На…»: EDT на начале & и на filterOffset (= начало слова) отдаёт общий словарь
+        // (~тысячи имён), а директивы — только зонд на каретке. Лишние офсеты + «кто
+        // длиннее» в probeDelegateAtOffsets затирали НаКлиенте/НаСервере.
+        if (isAmpersandAnnotationFilter(doc, caret))
+            return toProbeOffsetArray(set);
         if (assistant != null)
         {
             addProbeOffset(set, ContentAssistPopupSync.getInvocationOffset(assistant));
@@ -5400,6 +5414,11 @@ return result;
             if (!prefix.isEmpty())
                 addProbeOffset(set, Math.max(0, caret - prefix.length()));
         }
+        return toProbeOffsetArray(set);
+    }
+
+    private static int[] toProbeOffsetArray(java.util.LinkedHashSet<Integer> set)
+    {
         int[] a = new int[set.size()];
         int i = 0;
         for (Integer o : set)
@@ -6114,6 +6133,9 @@ return result;
     {
         int at = caret >= 0 ? caret : invocationOffset;
         IDocument doc = viewer != null ? viewer.getDocument() : null;
+        // «&На…»: зонд на начале слова — общий словарь, не директивы (см. stockProbeOffsets).
+        if (isAmpersandAnnotationFilter(doc, at))
+            return at;
         // Ctrl+Space: зонд в начале идентификатора. Зонд на каретке (последняя буква)
         // даёт префикс-срез EDT (лог 12.09.2026 13:44: n=122 → filterAndSort n=2
         // «Окр,РежимОкругления» при Окр|()). Фон словаря уже так делает.
@@ -9025,6 +9047,20 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
         {
             return ""; //$NON-NLS-1$
         }
+    }
+
+    /**
+     * Ввод директивы компиляции ({@code &НаКлиенте} и т.п.). Зонд EDT на символе {@code &}
+     * возвращает общий словарь модуля, а не аннотации — их даёт только зонд на каретке.
+     */
+    static boolean isAmpersandAnnotationFilter(IDocument doc, int caret)
+    {
+        return isAmpersandAnnotationFilter(computeIdentifierFilter(doc, caret));
+    }
+
+    static boolean isAmpersandAnnotationFilter(String filter)
+    {
+        return filter != null && !filter.isEmpty() && filter.charAt(0) == '&';
     }
 
     static String computeActiveFilter(IDocument doc, int offset, DocumentEvent event)
