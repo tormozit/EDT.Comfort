@@ -199,7 +199,15 @@ function Assert-PdeSiteArtifacts {
     if ($pluginJar.LastWriteTime -lt $NotBefore) {
         Write-Error "Plugin jar not updated: $($pluginJar.Name)"
     }
-    Write-Host "PDE site artifacts OK: $($featureJar.Name), $($pluginJar.Name)"
+    # Бандл проверок: версия фиксированная, поэтому на свежесть его не проверяем — только на
+    # наличие. Без него плагин теряет свои проверки EDT (см. plugin.checks/README.md).
+    $checksJar = Get-ChildItem -LiteralPath $pluginsDir -Filter 'tormozit.comfort.checks_*.jar' -File -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime |
+        Select-Object -Last 1
+    if (-not $checksJar) {
+        Write-Error "No checks plugin jar (tormozit.comfort.checks_*.jar) in $pluginsDir"
+    }
+    Write-Host "PDE site artifacts OK: $($featureJar.Name), $($pluginJar.Name), $($checksJar.Name)"
 }
 
 function Invoke-PdeBuild {

@@ -196,6 +196,15 @@ public final class BslDocCommentComputedTypes
         return value;
     }
 
+    /**
+     * Тот же флажок, но по объекту модели (метод, модуль) — проект берётся из URI ресурса.
+     * Нужен потребителям, у которых на руках только разобранный комментарий.
+     */
+    public static boolean isExtendedTypesEnabled(EObject object)
+    {
+        return object != null && isExtendedTypesEnabled(resolveProject(object));
+    }
+
     private static boolean readMergeEnabled(IProject project)
     {
         try

@@ -55,6 +55,10 @@ function Set-BundleVersion {
 
 Set-BundleVersion -ManifestPath (Join-Path $Root 'plugin\META-INF\MANIFEST.MF')
 
+# plugin.checks сюда добавлять НЕЛЬЗЯ: его версия умышленно фиксированная. EDT при смене версии
+# бандла-поставщика проверок перепроверяет весь проект (десятки минут), поэтому версия проверок
+# поднимается вручную и только при изменении их логики. См. plugin.checks/README.md.
+
 $featurePath = Join-Path $Root 'feature\feature.xml'
 $featureText = [System.IO.File]::ReadAllText($featurePath, [System.Text.Encoding]::UTF8)
 $featurePattern = '(<feature\b[\s\S]*?\sversion=")[^"]+(")'

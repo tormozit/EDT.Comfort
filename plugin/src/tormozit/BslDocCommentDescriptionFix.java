@@ -10,6 +10,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.ProtectionDomain;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
@@ -156,6 +157,13 @@ public final class BslDocCommentDescriptionFix
         catch (Throwable t)
         {
         }
+        try
+        {
+            TypeSectionLinkRepair.repair(commentObj);
+        }
+        catch (Throwable t)
+        {
+        }
     }
 
     /** @return число параметров, у которых перенесли описание */
@@ -208,6 +216,294 @@ public final class BslDocCommentDescriptionFix
                 moved++;
         }
         return moved;
+    }
+
+    /**
+     * Дефект EDT: ссылка «см. …» внутри секции типов превращается в имя несуществующего типа.
+     * <p>
+     * Секция типов появляется, как только в строке параметра есть второй «-»
+     * ({@code Имя - см. Обработка… - описание}). {@code createTypeSection} разбирает текст
+     * секции штатным {@code createTextDescriptionParts}, но, если частей получилось не ровно
+     * одна, выбрасывает их и кладёт весь текст одним {@code TextPart}. А
+     * {@code TypeSection.computeTypeDefinitions} распознаёт ссылку только в случае
+     * «единственная часть, и она {@code LinkPart}». Ссылка плюс пробелы или соседний тип —
+     * это всегда больше одной части, поэтому тип получает имя
+     * «см. Обработка.Обработка1.Форма.Форма1»: такого типа нет, тип параметра не вычисляется,
+     * и подсказки при вводе имени типа после «см.» тоже нет — искать нечего, {@code LinkPart}
+     * не создан. Без второго «-» секции типов не возникает вовсе, типы берутся из описания
+     * параметра, где {@code LinkPart} сохраняется, — поэтому там всё работает.
+     * <p>
+     * Чиним после разбора: пересобираем части секции тем же самым
+     * {@code createTextDescriptionParts} (результат которого EDT выбросил) и подменяем в уже
+     * посчитанном списке типов фиктивные «см. …» на {@code LinkContainsTypeDefinition}.
+     * Имена остальных типов считает сам EDT — его логика («Массив из …», расширения в
+     * квадратных скобках) не дублируется.
+     * <p>
+     * Подчинено флажку проекта «Расширенный расчет типов»
+     * ({@link BslDocCommentComputedTypes#isExtendedTypesEnabled(org.eclipse.emf.ecore.EObject)}):
+     * при выключенном флажке не меняется ничего.
+     */
+    private static final class TypeSectionLinkRepair
+    {
+        private static final String PKG =
+            "com._1c.g5.v8.dt.bsl.documentation.comment."; //$NON-NLS-1$
+        private static final String TYPE_SECTION = PKG + "TypeSection"; //$NON-NLS-1$
+        private static final String LINK_CONTAINS_TYPE =
+            PKG + "TypeSection$LinkContainsTypeDefinition"; //$NON-NLS-1$
+        private static final String DESCRIPTION_PART = PKG + "IDescriptionPart"; //$NON-NLS-1$
+        private static final String SEE_RU = "см."; //$NON-NLS-1$
+        private static final String SEE_EN = "see"; //$NON-NLS-1$
+
+        static void repair(Object comment)
+        {
+            // Флажок первым: разбор комментария идёт для каждого метода каждого модуля, и при
+            // выключенном флажке здесь не должно тратиться вообще ничего.
+            if (!isEnabled(comment))
+                return;
+            for (Object section : collectTypeSections(comment))
+            {
+                if (isBrokenLinkSection(section))
+                    repairSection(comment, section);
+            }
+            boundLinks(comment);
+        }
+
+        /**
+         * Ограничение зоны ссылки «см. …» её собственным текстом.
+         * <p>
+         * Штатный {@code LinkPart.match} берёт правую границу из
+         * {@code initialContent.indexOf(')')}: у ссылки со скобками — её закрывающая скобка, а у
+         * «см. …» скобки нет, и тогда {@code match} отвечает «да» на <b>любое</b> смещение правее
+         * начала ссылки, то есть до конца строки. Из-за этого после запятой за ссылкой
+         * ({@code Форма - см. Обработка…, РасширениеФормы}) под кареткой оказывается
+         * {@code LinkPart}, а {@code BslProposalProvider.createProposalsForTypeSectionComment}
+         * первой же строкой выходит по {@code part instanceof LinkPart} — имён типов не
+         * предлагает никто.
+         * <p>
+         * Подменять сам {@code match} нельзя: {@code WeavingHook} видит только классы,
+         * загружаемые после его регистрации, а {@code LinkPart} к этому моменту уже загружен
+         * (бандл {@code com._1c.g5.v8.dt.bsl.comment} активен раньше нашего). Поэтому
+         * ограничиваем не код, а данные: дописываем {@code ")"} в конец {@code initialContent},
+         * и штатная формула сама даёт границу {@code getOffset() + initialContent.length() + 1} —
+         * последний символ ссылки плюс один. Имя типа за «, » оказывается уже вне ссылки.
+         */
+        private static void boundLinks(Object comment)
+        {
+            List<Object> queue = new ArrayList<>();
+            queue.add(Global.invoke(comment, "getDescription")); //$NON-NLS-1$
+            Object parameters = Global.invoke(comment, "getParametersSection"); //$NON-NLS-1$
+            if (parameters != null)
+            {
+                queue.add(Global.invoke(parameters, "getSourceDescription")); //$NON-NLS-1$
+                queue.add(Global.invoke(parameters, "getDescription")); //$NON-NLS-1$
+                if (Global.invoke(parameters, "getParameterDefinitions") instanceof List<?> fields) //$NON-NLS-1$
+                {
+                    for (Object field : fields)
+                    {
+                        if (field == null)
+                            continue;
+                        queue.add(Global.invoke(field, "getDescription")); //$NON-NLS-1$
+                        if (Global.invoke(field, "getTypeSections") instanceof List<?> sections) //$NON-NLS-1$
+                            for (Object section : sections)
+                                addTypeSection(section, queue);
+                    }
+                }
+            }
+            Object returnSection = Global.invoke(comment, "getReturnSection"); //$NON-NLS-1$
+            if (returnSection != null)
+            {
+                queue.add(Global.invoke(returnSection, "getDescription")); //$NON-NLS-1$
+                if (Global.invoke(returnSection, "getReturnTypes") instanceof List<?> sections) //$NON-NLS-1$
+                    for (Object section : sections)
+                        addTypeSection(section, queue);
+            }
+            // Обход списком, а не рекурсией: секция типов сама лежит частью описания и может
+            // содержать вложенные секции, глубину заранее не знаем.
+            for (int i = 0; i < queue.size() && i < 512; i++)
+            {
+                Object description = queue.get(i);
+                if (description == null
+                    || !(Global.invoke(description, "getParts") instanceof List<?> parts)) //$NON-NLS-1$
+                    continue;
+                for (Object part : parts)
+                {
+                    if (part == null)
+                        continue;
+                    String className = part.getClass().getName();
+                    if (LINK_PART.equals(className))
+                        boundLink(part);
+                    else if (TYPE_SECTION.equals(className))
+                        addTypeSection(part, queue);
+                }
+            }
+        }
+
+        private static void addTypeSection(Object section, List<Object> queue)
+        {
+            if (section == null)
+                return;
+            queue.add(Global.invoke(section, "getSourceDescription")); //$NON-NLS-1$
+            queue.add(Global.invoke(section, "getSourceExtensionDescription")); //$NON-NLS-1$
+            queue.add(Global.invoke(section, "getDescription")); //$NON-NLS-1$
+        }
+
+        private static void boundLink(Object link)
+        {
+            try
+            {
+                String initial = asString(Global.invoke(link, "getInitialContent")); //$NON-NLS-1$
+                if (initial == null || initial.isEmpty() || initial.indexOf(')') >= 0)
+                    return;
+                java.lang.reflect.Field field =
+                    link.getClass().getDeclaredField("initialContent"); //$NON-NLS-1$
+                field.setAccessible(true);
+                field.set(link, initial + ")"); //$NON-NLS-1$
+            }
+            catch (Throwable t)
+            {
+                Global.logError("BslDocComment", "boundLink", t); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+
+        /**
+         * Флажок проекта. Комментарий, разобранный через
+         * {@code BslCommentUtils.parseTemplateComment}, собран конструктором без аргументов:
+         * ни модуля, ни метода в нём нет, и проект взять неоткуда. Так комментарий разбирает
+         * подсказка ввода — там флажок не проверяем и чиним всегда, иначе ссылка «см. …»
+         * осталась бы нераспознанной при любом состоянии флажка.
+         */
+        private static boolean isEnabled(Object comment)
+        {
+            Object owner = Global.invoke(comment, "getMethod"); //$NON-NLS-1$
+            if (!(owner instanceof EObject))
+                owner = Global.invoke(comment, "getModule"); //$NON-NLS-1$
+            if (!(owner instanceof EObject eObject))
+                return true;
+            return BslDocCommentComputedTypes.isExtendedTypesEnabled(eObject);
+        }
+
+        private static List<Object> collectTypeSections(Object comment)
+        {
+            List<Object> result = new ArrayList<>();
+            Object parameters = Global.invoke(comment, "getParametersSection"); //$NON-NLS-1$
+            if (parameters != null
+                && Global.invoke(parameters, "getParameterDefinitions") instanceof List<?> fields) //$NON-NLS-1$
+            {
+                for (Object field : fields)
+                {
+                    if (field != null
+                        && Global.invoke(field, "getTypeSections") instanceof List<?> sections) //$NON-NLS-1$
+                        result.addAll(sections);
+                }
+            }
+            Object returnSection = Global.invoke(comment, "getReturnSection"); //$NON-NLS-1$
+            if (returnSection != null
+                && Global.invoke(returnSection, "getReturnTypes") instanceof List<?> sections) //$NON-NLS-1$
+                result.addAll(sections);
+            return result;
+        }
+
+        /** Секция из единственного {@code TextPart}, в тексте которого есть «см.» или «see». */
+        private static boolean isBrokenLinkSection(Object section)
+        {
+            Object source = section == null
+                ? null : Global.invoke(section, "getSourceDescription"); //$NON-NLS-1$
+            if (source == null
+                || !(Global.invoke(source, "getParts") instanceof List<?> parts) //$NON-NLS-1$
+                || parts.size() != 1)
+                return false;
+            Object only = parts.get(0);
+            if (only == null || !TEXT_PART.equals(only.getClass().getName()))
+                return false;
+            return hasSeeToken(asString(Global.invoke(only, "getText"))); //$NON-NLS-1$
+        }
+
+        private static boolean hasSeeToken(String text)
+        {
+            if (text == null)
+                return false;
+            String lower = text.toLowerCase();
+            return lower.contains(SEE_RU) || lower.contains(SEE_EN + " "); //$NON-NLS-1$
+        }
+
+        private static boolean startsWithSee(String name)
+        {
+            if (name == null)
+                return false;
+            String trimmed = name.trim();
+            return trimmed.regionMatches(true, 0, SEE_RU, 0, SEE_RU.length())
+                || trimmed.regionMatches(true, 0, SEE_EN, 0, SEE_EN.length());
+        }
+
+        private static void repairSection(Object comment, Object section)
+        {
+            try
+            {
+                Object source = Global.invoke(section, "getSourceDescription"); //$NON-NLS-1$
+                if (!(Global.invoke(source, "getParts") instanceof List<?> parts) //$NON-NLS-1$
+                    || parts.size() != 1)
+                    return;
+                Object only = parts.get(0);
+                String text = asString(Global.invoke(only, "getText")); //$NON-NLS-1$
+                if (text == null)
+                    return;
+
+                // Штатный расчёт по сырому тексту — до подмены частей, чтобы имена типов
+                // посчитал сам EDT со всеми своими правилами.
+                if (!(Global.invoke(section, "getTypeDefinitions") instanceof List<?> stockTypes)) //$NON-NLS-1$
+                    return;
+
+                ClassLoader loader = comment.getClass().getClassLoader();
+                java.lang.reflect.Method builder = comment.getClass().getDeclaredMethod(
+                    "createTextDescriptionParts", //$NON-NLS-1$
+                    Class.forName(DESCRIPTION_PART, false, loader), int.class, int.class,
+                    String.class);
+                builder.setAccessible(true);
+                Object built = builder.invoke(comment, source,
+                    Integer.valueOf(intValue(Global.invoke(only, "getLineNumber"))), //$NON-NLS-1$
+                    Integer.valueOf(intValue(Global.invoke(only, "getOffset"))), text); //$NON-NLS-1$
+                if (!(built instanceof Collection<?> newParts))
+                    return;
+
+                List<Object> links = new ArrayList<>();
+                for (Object part : newParts)
+                {
+                    if (part != null && LINK_PART.equals(part.getClass().getName()))
+                        links.add(part);
+                }
+                if (links.isEmpty())
+                    return;
+
+                Class<?> linkType = Class.forName(LINK_CONTAINS_TYPE, false, loader);
+                java.lang.reflect.Constructor<?> ctor = linkType.getConstructor(
+                    Class.forName(DESCRIPTION_PART, false, loader),
+                    Class.forName(LINK_PART, false, loader));
+                List<Object> types = new ArrayList<>();
+                int next = 0;
+                for (Object type : stockTypes)
+                {
+                    String name = asString(Global.invoke(type, "getTypeName")); //$NON-NLS-1$
+                    if (startsWithSee(name) && next < links.size())
+                        types.add(ctor.newInstance(section, links.get(next++)));
+                    else
+                        types.add(type);
+                }
+
+                @SuppressWarnings({ "unchecked", "rawtypes" }) //$NON-NLS-1$ //$NON-NLS-2$
+                List rawParts = (List)parts;
+                rawParts.clear();
+                Global.invoke(source, "addParts", new ArrayList<>(newParts)); //$NON-NLS-1$
+
+                java.lang.reflect.Field cache =
+                    Class.forName(TYPE_SECTION, false, loader).getDeclaredField("types"); //$NON-NLS-1$
+                cache.setAccessible(true);
+                cache.set(section, types);
+            }
+            catch (Throwable t)
+            {
+                Global.logError("BslDocComment", "repairSection", t); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
     }
 
     /**
@@ -576,6 +872,11 @@ public final class BslDocCommentDescriptionFix
         if (TARGET_UTILS_INTERNAL.equals(internalName))
             return transformUtilsClass(classfileBuffer);
         return null;
+    }
+
+    private static int intValue(Object value)
+    {
+        return value instanceof Number number ? number.intValue() : 0;
     }
 
     private static byte[] transformCommentClass(byte[] classfileBuffer)

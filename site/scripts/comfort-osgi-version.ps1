@@ -8,6 +8,10 @@ $script:ComfortBackupOsgi = Join-Path $script:ComfortRepoRoot 'launch\backup\osg
 $script:ComfortWsOsgi = 'C:\VC\EDT-plugin-WS\.metadata\.plugins\org.eclipse.pde.core\Eclipse Application'
 $script:ComfortBundlesInfoRel = 'org.eclipse.equinox.simpleconfigurator\bundles.info'
 $script:ComfortPluginLocation = 'file:/C:/VC/EDT.Comfort/plugin/'
+# Бандл проверок: версия своя и со сборками не меняется (см. plugin.checks/README.md),
+# но в OSGi-профиле PDE он должен быть, иначе проверки «Комфорта» в запуске просто отсутствуют.
+$script:ComfortChecksManifestPath = Join-Path $script:ComfortRepoRoot 'plugin.checks\META-INF\MANIFEST.MF'
+$script:ComfortChecksLocation = 'file:/C:/VC/EDT.Comfort/plugin.checks/'
 
 function Get-ComfortReleaseFromVersionFile {
     param([string]$VersionFile = $script:ComfortVersionFile)
@@ -85,6 +89,19 @@ function Get-ComfortDevPropertiesStaleLines {
     return $stale.ToArray()
 }
 
+function Get-ComfortChecksVersion {
+    param([string]$ManifestPath = $script:ComfortChecksManifestPath)
+    if (-not (Test-Path -LiteralPath $ManifestPath)) {
+        throw "MANIFEST.MF not found: $ManifestPath"
+    }
+    foreach ($line in [System.IO.File]::ReadAllLines($ManifestPath)) {
+        if ($line -match '^Bundle-Version:\s*(.+)$') {
+            return $Matches[1].Trim()
+        }
+    }
+    throw "Bundle-Version not found in $ManifestPath"
+}
+
 function Update-PdeOsgiComfortVersion {
     param(
         [string]$BundlesInfoPath,
@@ -107,13 +124,39 @@ function Update-PdeOsgiComfortVersion {
     if (-not $bundleUpdated) {
         throw "tormozit.comfort entry not found in $BundlesInfoPath"
     }
-    [System.IO.File]::WriteAllLines($BundlesInfoPath, $bundleLines, $utf8NoBom)
+    # Бандл проверок в этом файле обязателен: без записи Equinox его не ставит, и проверки
+    # «Комфорта» пропадают из дерева доступных проверок EDT.
+    $checksVersion = Get-ComfortChecksVersion
+    $checksLine = "tormozit.comfort.checks,$checksVersion,$($script:ComfortChecksLocation),4,false"
+    $checksIndex = -1
+    for ($i = 0; $i -lt $bundleLines.Count; $i++) {
+        if ($bundleLines[$i] -match '^tormozit\.comfort\.checks,') {
+            $checksIndex = $i
+            break
+        }
+    }
+    if ($checksIndex -ge 0) {
+        $bundleLines[$checksIndex] = $checksLine
+        [System.IO.File]::WriteAllLines($BundlesInfoPath, $bundleLines, $utf8NoBom)
+    }
+    else {
+        $withChecks = New-Object System.Collections.Generic.List[string]
+        foreach ($line in $bundleLines) {
+            $withChecks.Add($line)
+            if ($line -match '^tormozit\.comfort,') {
+                $withChecks.Add($checksLine)
+            }
+        }
+        [System.IO.File]::WriteAllLines($BundlesInfoPath, $withChecks, $utf8NoBom)
+    }
     $devLines = @(
         '#',
         "#$(Get-Date -Format 'ddd MMM dd HH:mm:ss ''MSK'' yyyy')",
         "tormozit.comfort;$Qualifier=bin,lib/jacob.jar",
+        "tormozit.comfort.checks;$checksVersion=bin",
         '@ignoredot@=true',
-        'tormozit.comfort=bin,lib/jacob.jar'
+        'tormozit.comfort=bin,lib/jacob.jar',
+        'tormozit.comfort.checks=bin'
     )
     [System.IO.File]::WriteAllLines($DevPropertiesPath, $devLines, $utf8NoBom)
 }
