@@ -88,6 +88,8 @@ public final class BreakpointPropertiesHook implements IStartup
             "com._1c.g5.v8.dt.internal.debug.ui.breakpoints.BslBreakpointTextAndHistoryEditorPane"; //$NON-NLS-1$
     /** Тема временного лога поля кода BSL этого диалога ({@code .tmp/temp-logs}). */
     private static final String FIELD_LOG_TOPIC = "bp-field"; //$NON-NLS-1$
+    /** Тема временного лога момента перестроения диалога ({@code .tmp/temp-logs}). */
+    private static final String PATCH_LOG_TOPIC = "bp-patch"; //$NON-NLS-1$
     private static final String JOIN_SEPARATOR = ", " + "\n"; //$NON-NLS-1$ //$NON-NLS-2$
 
     @Override
@@ -107,11 +109,19 @@ public final class BreakpointPropertiesHook implements IStartup
                 return;
             if (shell.isDisposed())
                 return;
-            if (!isBreakpointPropertiesShell(shell))
+            String title = shell.getText();
+            if (title == null || !title.startsWith(DIALOG_TITLE_PREFIX))
+                return;
+            boolean ours = isBreakpointPropertiesShell(shell);
+            Global.tempLog(PATCH_LOG_TOPIC,
+                (event.type == SWT.Show ? "Show" : "Activate") + ": ours=" + ours //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + ", visible=" + shell.isVisible() + ", patched=" //$NON-NLS-1$ //$NON-NLS-2$
+                    + (shell.getData(PATCHED_KEY) != null));
+            if (!ours)
                 return;
             installShellSizeMemory(shell);
             if (shell.getData(PATCHED_KEY) == null)
-                schedulePatchAttempt(display, shell, 0);
+                startPatch(display, shell);
             if (shell.getData(CONTENT_ASSIST_KEY) == null)
                 scheduleContentAssistAttempt(display, shell, 0);
         };
@@ -132,6 +142,24 @@ public final class BreakpointPropertiesHook implements IStartup
         return page != null && BSL_BREAKPOINT_PAGE.equals(page.getClass().getName());
     }
 
+    /**
+     * Первая попытка — синхронно в обработчике {@link SWT#Show}: это событие SWT шлёт
+     * до показа окна средствами ОС ({@code Shell.setVisible} → {@code sendEvent(SWT.Show)}
+     * → {@code ShowWindow}), поэтому перестроение страницы попадает уже в первый кадр
+     * и пользователь не видит двухшаговости «сначала штатный вид, через миг наш».
+     * Отложенные попытки остаются запасным путём, если поля страницы ещё не готовы.
+     */
+    private static void startPatch(Display display, Shell shell)
+    {
+        long started = System.nanoTime();
+        boolean patched = tryPatch(shell);
+        Global.tempLog(PATCH_LOG_TOPIC, "sync attempt: " + (patched ? "ok" : "fail") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + ", visible=" + shell.isVisible() //$NON-NLS-1$
+            + ", " + ((System.nanoTime() - started) / 1_000_000L) + " ms"); //$NON-NLS-1$ //$NON-NLS-2$
+        if (!patched)
+            schedulePatchAttempt(display, shell, 1);
+    }
+
     private static void schedulePatchAttempt(Display display, Shell shell, int attempt)
     {
         if (shell.isDisposed() || shell.getData(PATCHED_KEY) != null)
@@ -141,7 +169,10 @@ public final class BreakpointPropertiesHook implements IStartup
         {
             if (shell.isDisposed() || shell.getData(PATCHED_KEY) != null)
                 return;
-            if (tryPatch(shell))
+            boolean patched = tryPatch(shell);
+            Global.tempLog(PATCH_LOG_TOPIC,
+                "attempt " + attempt + ": " + (patched ? "ok" : "fail")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            if (patched)
                 return;
             if (attempt < 12)
                 schedulePatchAttempt(display, shell, attempt + 1);
