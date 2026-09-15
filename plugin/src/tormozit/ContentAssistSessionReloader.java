@@ -3741,6 +3741,24 @@ boolean inLiteral = endCaret >= 0
                     "caret=" + caret + " inFlight=true literal=true"); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
             }
+            // ПолучитьФорму/ОткрытьФорму: имя формы даёт штатный EDT без ИР.
+            if (doc != null && BslAssistSourceHeuristics.isGetOrOpenFormNameLiteral(doc, caret))
+            {
+                logAssistOpen("autoOpen.begin", "{\"path\":\"formLiteralEdt\",\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"docLen\":" + docLen + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+                SmartContentAssistProcessor.uiBlockLog("autoOpen.begin.formLiteralEdt", //$NON-NLS-1$
+                    "caret=" + caret + " docLen=" + docLen //$NON-NLS-1$ //$NON-NLS-2$
+                        + " around=\"" + SmartContentAssistProcessor.uiBlockAround(doc, caret) + "\""); //$NON-NLS-1$ //$NON-NLS-2$
+                completionAutoOpenEdtOpened = true;
+                showGate.request("autoOpenFormLiteral", () -> { //$NON-NLS-1$
+                    if (ContentAssistPopupSync.isPopupVisible(assistant))
+                        return;
+                    warmupAssistBrowserCreator(caret);
+                    // false: кэша слов в литерале нет — нужен зонд делегата EDT.
+                    openCompletionAutoEdtPopup(caret, autoOpenSeq, false);
+                });
+                return;
+            }
             logAssistOpen("autoOpen.begin.skip", "{\"reason\":\"literalNoIr\",\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
                 + ",\"docLen\":" + docLen + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             SmartContentAssistProcessor.uiBlockLog("autoOpen.begin.skipLiteralNoIr", //$NON-NLS-1$

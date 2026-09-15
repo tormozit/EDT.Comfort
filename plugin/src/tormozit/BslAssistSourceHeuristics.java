@@ -33,6 +33,64 @@ public final class BslAssistSourceHeuristics
     }
 
     /**
+     * Каретка в строковом аргументе имени формы {@code ПолучитьФорму}/{@code ОткрытьФорму}
+     * (и англ. {@code GetForm}/{@code OpenForm}). Без кавычек между {@code (} и текущим
+     * литералом — обычно первый строковый аргумент вызова.
+     */
+    public static boolean isGetOrOpenFormNameLiteral(IDocument doc, int caret)
+    {
+        if (doc == null || caret < 0)
+            return false;
+        try
+        {
+            int line = doc.getLineOfOffset(Math.min(caret, doc.getLength()));
+            int lineStart = doc.getLineOffset(line);
+            int end = Math.min(caret, lineStart + doc.getLineLength(line));
+            if (end < lineStart)
+                return false;
+            String prefix = doc.get(lineStart, end - lineStart);
+            if (!isInsideStringLiteral(prefix))
+                return false;
+            int openQuote = -1;
+            int quotes = 0;
+            for (int i = 0; i < prefix.length(); i++)
+            {
+                if (prefix.charAt(i) != '"')
+                    continue;
+                quotes++;
+                openQuote = (quotes % 2 == 1) ? i : -1;
+            }
+            if (openQuote < 0)
+                return false;
+            String before = prefix.substring(0, openQuote);
+            int paren = before.lastIndexOf('(');
+            if (paren < 0)
+                return false;
+            if (before.indexOf('"', paren) >= 0)
+                return false;
+            int nameEnd = paren;
+            while (nameEnd > 0 && Character.isWhitespace(before.charAt(nameEnd - 1)))
+                nameEnd--;
+            int nameStart = nameEnd;
+            while (nameStart > 0)
+            {
+                char c = before.charAt(nameStart - 1);
+                if (!(Character.isLetterOrDigit(c) || c == '_'))
+                    break;
+                nameStart--;
+            }
+            if (nameStart >= nameEnd)
+                return false;
+            String name = before.substring(nameStart, nameEnd);
+            return BslFormTypeContextEnrichment.isStaticGetOrOpenFormMethod(name);
+        }
+        catch (BadLocationException e)
+        {
+            return false;
+        }
+    }
+
+    /**
      * Порт {@code ирОбщий.ЛиВнутриКомментарияЛкс}: {@code //} в префиксе строки,
      * если фрагмент до {@code //} не внутри строкового литерала.
      */

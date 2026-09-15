@@ -147,15 +147,24 @@ public final class BslDocCommentTypeMerge
             List<Type> contexts = new ArrayList<>();
             List<TypeItem> rest = new ArrayList<>();
             collectContextAndRest(expanded, contexts, rest);
+            Collection<?> result;
             if (contexts.size() < 2)
-                return expanded == null ? types : expanded;
-            Type merged = mergeContexts(contexts);
-            if (merged == null)
-                return expanded;
-            List<TypeItem> out = new ArrayList<>();
-            out.add(merged);
-            out.addAll(rest);
-            return out;
+                result = expanded == null ? types : expanded;
+            else
+            {
+                Type merged = mergeContexts(contexts);
+                if (merged == null)
+                    result = expanded;
+                else
+                {
+                    List<TypeItem> out = new ArrayList<>();
+                    out.add(merged);
+                    out.addAll(rest);
+                    result = out;
+                }
+            }
+            BslFormTypeContextEnrichment.enrichTypes(result);
+            return result;
         }
         catch (Throwable t)
         {
@@ -742,7 +751,10 @@ public final class BslDocCommentTypeMerge
             {
                 byte[] transformed = transformClass(wovenClass.getBytes());
                 if (transformed != null)
+                {
+                    wovenClass.getDynamicImports().add("tormozit"); //$NON-NLS-1$
                     wovenClass.setBytes(transformed);
+                }
             }
             catch (Throwable t)
             {

@@ -471,6 +471,8 @@ public final class BslStructureInsertCommentTypes
         public void installTypeSystem(Module module, CancelIndicator cancelIndicator)
         {
             super.installTypeSystem(module, cancelIndicator);
+            // см. ОбщаяФорма.…: экспорт модуля в тип параметра (BslTreeTypeSystem не ткётся).
+            BslFormTypeContextEnrichment.enrichModule(module);
             enrich(this, module, null);
         }
 
@@ -483,6 +485,7 @@ public final class BslStructureInsertCommentTypes
             Statement statement, int offset, BmOperationContext context)
         {
             super.lightInstallingTypeSystem(module, method, variable, statement, offset, context);
+            BslFormTypeContextEnrichment.enrichMethod(method);
             enrich(this, module, method);
         }
     }

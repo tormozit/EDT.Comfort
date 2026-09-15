@@ -345,22 +345,35 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             + body);
     }
 
-    /** Служебный шум: модификаторы, каждый символ документа, Paint, прогресс фильтра. */
+    /**
+     * Служебный шум (каждый символ / пересчёт / зонд). Решения автооткрытия
+     * ({@code autoOpen.begin.*}, {@code show.open}, сбои) остаются слышны.
+     */
     private static boolean uiBlockLogQuiet(String where)
     {
         if (where == null || where.isEmpty())
             return true;
         return switch (where)
         {
-            case "autoOpen.verify.skip", "autoOpen.doc.skip", "doc.chg", "doc.chg.exit", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-                "wordList.kickDoc.skip", //$NON-NLS-1$
-                "filterAndSort.enter", "filterAndSort.progress", "filterAndSort.item", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "recomputePopupList.enter", "resolveExit", //$NON-NLS-1$ //$NON-NLS-2$
-                "resolveProposalList", "resolveDelegateOrderedList.fetch", //$NON-NLS-1$ //$NON-NLS-2$
+            case "autoOpen.verify", "autoOpen.verify.skip", "autoOpen.doc", "autoOpen.doc.skip", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+                "autoOpen.schedule", "autoOpen.suppress.clear", "autoOpen.timer.skip", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "doc.chg", "doc.chg.exit", "wordList.kickDoc", "wordList.kickDoc.skip", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+                "filterAndSort", "filterAndSort.enter", "filterAndSort.progress", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "filterAndSort.item", "filterAndSort.empty", //$NON-NLS-1$ //$NON-NLS-2$
+                "recomputePopupList", "recomputePopupList.enter", "applyPopupListSync", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "resolveExit", "resolveProposalList", "resolveDelegateOrderedList.fetch", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 "resolveDelegateOrderedList.skipFetch", "prepareWordListAutoOpen", //$NON-NLS-1$ //$NON-NLS-2$
                 "scheduleWordListInBackground", "wordListBackground.run", //$NON-NLS-1$ //$NON-NLS-2$
-                "fetchDelegateList", "computeLiteralPassthrough.enter", //$NON-NLS-1$ //$NON-NLS-2$
-                "computeLiteralPassthrough.exit" -> true; //$NON-NLS-1$
+                "wordListBackground.filter", "wordListBackground.publish.enter", //$NON-NLS-1$ //$NON-NLS-2$
+                "fetchDelegateList", "probeDelegateOnce", "computeCompletionProposals", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "compute.literal", "computeLiteralPassthrough.enter", //$NON-NLS-1$ //$NON-NLS-2$
+                "computeLiteralPassthrough.exit", "computeLiteralPassthrough.noDelegateUi", //$NON-NLS-1$ //$NON-NLS-2$
+                "computeLiteralPassthrough.formLiteralProbe", //$NON-NLS-1$
+                "cacheOnly.ready", "show.req", "showPossibleCompletions", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "openCompletionAutoEdtPopup.beforeShow", "openCompletionAutoEdtPopup.afterShow", //$NON-NLS-1$ //$NON-NLS-2$
+                "envRanges.build", "envRanges.install", "memberStock.bg.run", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "memberAccessDefer", "memberStock.publish.open", "openPopup.memberBg", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "assistImages.warm", "contextRestore.keepBg" -> true; //$NON-NLS-1$ //$NON-NLS-2$
             default -> false;
         };
     }
@@ -3983,6 +3996,19 @@ return EMPTY;
         ICompletionProposal[] edtClean = resolveStockLiteralProposalSource(viewer, caret);
         if (edtClean.length == 0 && delegateListCache.length > 0)
             edtClean = stripIrProposals(unwrapProposals(delegateListCache));
+        // Холодный литерал ПолучитьФорму/ОткрытьФорму: stock пуст (фон слов в литерале
+        // не строится) — разовый зонд делегата EDT даёт имена форм без ИР.
+        if (edtClean.length == 0
+            && BslAssistSourceHeuristics.isGetOrOpenFormNameLiteral(doc, caret))
+        {
+            ICompletionProposal[] probed = unwrapProposals(
+                probeLiteralDelegateBest(viewer, offset, caret));
+            edtClean = stripIrProposals(probed);
+            if (edtClean.length > 0)
+                rememberInterimDelegateList(edtClean);
+            uiBlockLog("computeLiteralPassthrough.formLiteralProbe", "off=" + offset //$NON-NLS-1$ //$NON-NLS-2$
+                + " caret=" + caret + " n=" + edtClean.length); //$NON-NLS-1$ //$NON-NLS-2$
+        }
         int edtN = edtClean.length;
         int irN = isIrWordsResolvedForContext() ? irProposals.length : 0;
         uiBlockLog("computeLiteralPassthrough.noDelegateUi", "off=" + offset //$NON-NLS-1$ //$NON-NLS-2$
