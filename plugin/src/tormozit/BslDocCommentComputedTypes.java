@@ -670,16 +670,40 @@ public final class BslDocCommentComputedTypes
         }
     }
 
-    /** Проект по URI ресурса модуля: {@code platform:/resource/<проект>/…}. */
+    /**
+     * Проект по URI ресурса: {@code platform:/resource/<проект>/…} или
+     * {@code bm://<проект>/…} (форма/МД в BM — authority = имя проекта).
+     */
     private static IProject resolveProject(EObject object)
     {
+        if (object == null)
+            return null;
         Resource resource = object.eResource();
         URI uri = resource != null ? resource.getURI() : null;
-        if (uri == null || uri.segmentCount() < 2 || !uri.isPlatformResource())
+        if (uri == null)
             return null;
         try
         {
-            return ResourcesPlugin.getWorkspace().getRoot().getProject(uri.segment(1));
+            String projectName = null;
+            if (uri.isPlatformResource())
+            {
+                if (uri.segmentCount() >= 2)
+                    projectName = uri.segment(1);
+            }
+            else if ("bm".equals(uri.scheme())) //$NON-NLS-1$
+            {
+                // bm://Конфигурация/CommonForm.… — проект в authority
+                projectName = uri.authority();
+                if (projectName == null || projectName.isEmpty())
+                {
+                    // bm:/Конфигурация/… без authority
+                    if (uri.segmentCount() >= 1)
+                        projectName = uri.segment(0);
+                }
+            }
+            if (projectName == null || projectName.isEmpty())
+                return null;
+            return ResourcesPlugin.getWorkspace().getRoot().getProject(projectName);
         }
         catch (Throwable t)
         {
