@@ -2,6 +2,7 @@
 package tormozit;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -36,6 +37,7 @@ import org.osgi.framework.hooks.weaving.WovenClass;
 import com._1c.g5.v8.dt.bsl.model.BslFactory;
 import com._1c.g5.v8.dt.bsl.model.Variable;
 import com._1c.g5.v8.dt.bsl.model.typesytem.VariableTypeStateProviderCollector;
+import com._1c.g5.v8.dt.mcore.ContextDef;
 import com._1c.g5.v8.dt.mcore.TypeItem;
 
 /**
@@ -115,6 +117,13 @@ public final class BslDocCommentComputedTypes
         "(Ljava/util/List;Z)L" + COMMENT_INTERNAL + ";"; //$NON-NLS-1$ //$NON-NLS-2$
     private static final String AFTER_SIDE_DESC =
         "(Ljava/lang/Object;)Ljava/lang/Object;"; //$NON-NLS-1$
+    /** {@code parseTemplateComment(BslContextDefMethod, boolean)} — путь {@code см.} через экспорт. */
+    private static final String CTX_METHOD_DESC =
+        "com._1c.g5.v8.dt.bsl.model.BslContextDefMethod"; //$NON-NLS-1$
+    private static final String CTX_PARSE_DESC =
+        "(L" + CTX_METHOD_DESC.replace('.', '/') + ";Z)L" + COMMENT_INTERNAL + ";"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+    private static final String AFTER_CTX_DESC =
+        "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;"; //$NON-NLS-1$
 
     private static final AtomicBoolean installed = new AtomicBoolean();
 
@@ -134,6 +143,9 @@ public final class BslDocCommentComputedTypes
      * досчётов, сколько в модуле методов, и сборка проекта упирается в процессор.
      */
     private static final ThreadLocal<Boolean> lightInstalling = new ThreadLocal<>();
+
+    /** Досчёт целевого метода {@code см. …} вне стека {@code computeTypesByLinkPart}. */
+    private static final ThreadLocal<Boolean> forceLightInstall = new ThreadLocal<>();
 
     /**
      * Флажок проекта по имени проекта. Чтение проектных параметров идёт через службу
@@ -156,17 +168,66 @@ public final class BslDocCommentComputedTypes
     private static final ThreadLocal<Integer> sideCommentMark = new ThreadLocal<>();
 
     /**
-     * Результат расчёта на метод. {@code parseTemplateComment} зовётся десятки раз за сессию,
-     * а досчёт типов через {@code lightInstallingTypeSystem} дорогой — считаем один раз на
-     * метод. Пустой результат кэшируется тоже, иначе повторные попытки досчёта съедят больше,
-     * чем даст слияние.
-     * <p>
-     * Ключ — сам объект метода, ссылки слабые: при повторном разборе модуля EDT создаёт новые
-     * объекты модели, старые записи уходят вместе с ними, и кэш обновляется сам. Отдельной
-     * инвалидации не нужно.
+     * Результат расчёта на метод. Ключ — {@code имя@URI}, не сам {@code EObject}:
+     * EDT при повторном разборе модуля подставляет новые объекты метода, и кэш по
+     * ссылке промахивался (лог: {@code afterLight Конструктор size=1}, затем
+     * {@code stillEmpty} на другом инстансе → {@code commentTypes=0} у {@code КэшАФВ}).
+     * Пустой результат не кэшируем.
      */
-    private static final java.util.Map<EObject, List<?>> typeCache =
-        java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
+    private static final java.util.Map<String, List<?>> typeCacheByKey =
+        new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * Живые типы возврата метода из кэша (после {@code afterLight}/{@code afterParse}).
+     * Нужны для {@code Перем … Экспорт; // см. …}: штатный {@code computeCommentTypes}
+     * гоняет типы через документирующий комментарий и теряет свойства структуры.
+     */
+    public static List<TypeItem> peekCachedReturnTypes(String methodName)
+    {
+        if (methodName == null || methodName.isEmpty())
+            return List.of();
+        String needle = methodName + "@"; //$NON-NLS-1$
+        for (java.util.Map.Entry<String, List<?>> entry : typeCacheByKey.entrySet())
+        {
+            String key = entry.getKey();
+            if (key == null || entry.getValue() == null || entry.getValue().isEmpty())
+                continue;
+            if (!key.regionMatches(true, 0, needle, 0, needle.length()))
+                continue;
+            List<TypeItem> types = new ArrayList<>();
+            for (Object item : entry.getValue())
+            {
+                if (item instanceof TypeItem typeItem)
+                    types.add(typeItem);
+            }
+            if (!types.isEmpty())
+                return types;
+        }
+        return List.of();
+    }
+
+    /** Сколько свойств в {@code ContextDef} у типов (для сравнения «живых» и из комментария). */
+    public static int contextPropertyCount(Collection<?> types)
+    {
+        if (types == null || types.isEmpty())
+            return 0;
+        int count = 0;
+        for (Object item : types)
+        {
+            if (!(item instanceof com._1c.g5.v8.dt.mcore.Type type) || type.eIsProxy())
+                continue;
+            ContextDef contextDef = type.getContextDef();
+            if (contextDef == null || contextDef.eIsProxy())
+                continue;
+            if (contextDef.getProperties() != null)
+                count += contextDef.getProperties().size();
+        }
+        return count;
+    }
+
+    /** Защита от рекурсии полного {@code installTypeSystem} целевого модуля из {@code см.}. */
+    private static final java.util.Set<EObject> INSTALLING_TARGET_MODULE =
+        java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
 
     private BslDocCommentComputedTypes() {}
 
@@ -307,31 +368,38 @@ public final class BslDocCommentComputedTypes
                 return comment;
             if (!isExtendedTypesEnabled(resolveProject(methodObject)))
                 return comment;
-            List<?> computed = typeCache.get(methodObject);
-            if (computed == null)
+            String cacheKey = methodLabel(methodObject);
+            List<?> computed = typeCacheByKey.get(cacheKey);
+            if (computed != null && !computed.isEmpty())
             {
-                java.util.Set<Object> guard = computing.get();
-                if (!guard.add(methodObject))
-                    return comment;
-                try
+                fillReturnSection(comment, computed);
+                return comment;
+            }
+            java.util.Set<Object> guard = computing.get();
+            if (!guard.add(methodObject))
+                return comment;
+            try
+            {
+                List<?> result = computeTypes(methodObject);
+                if (result == null || result.isEmpty())
                 {
-                    List<?> result = computeTypes(methodObject);
-                    if (result == null)
+                    // Повторный промах: вдруг другой инстанс уже посчитал тот же метод.
+                    computed = typeCacheByKey.get(cacheKey);
+                    if (computed != null && !computed.isEmpty())
                     {
-                        // Расчёт не состоялся (нет сервиса, досчёт не сработал). Пустоту не
-                        // кэшируем: иначе первый же неудачный момент закрыл бы методу дорогу
-                        // к настоящему расчёту при следующем обращении.
+                        fillReturnSection(comment, computed);
                         return comment;
                     }
-                    computed = result;
-                    typeCache.put(methodObject, computed);
+                    return comment;
                 }
-                finally
-                {
-                    guard.remove(methodObject);
-                }
+                computed = result;
+                typeCacheByKey.put(cacheKey, computed);
             }
-            if (computed.isEmpty())
+            finally
+            {
+                guard.remove(methodObject);
+            }
+            if (computed == null || computed.isEmpty())
                 return comment;
             fillReturnSection(comment, computed);
         }
@@ -339,6 +407,65 @@ public final class BslDocCommentComputedTypes
         {
         }
         return comment;
+    }
+
+    private static String methodLabel(EObject method)
+    {
+        try
+        {
+            Object name = Global.invoke(method, "getName"); //$NON-NLS-1$
+            Resource resource = method.eResource();
+            return String.valueOf(name) + "@" //$NON-NLS-1$
+                + (resource != null ? resource.getURI() : method.eClass().getName());
+        }
+        catch (Throwable ignored)
+        {
+            return method.eClass().getName();
+        }
+    }
+
+    /**
+     * Хвост {@code parseTemplateComment(BslContextDefMethod, …)}.
+     * {@code см. ОбщийМодуль.Функция} часто резолвится в экспортный {@code BslContextDefMethod},
+     * а не в {@code bsl.model.Method}: без досчёта по исходному методу секция возврата пуста
+     * и {@code computeTypesByLinkPart} отдаёт 0 типов (цепочка {@code Форма.КэшАФВ.}).
+     */
+    public static Object afterParseContextDefMethodComment(Object comment, Object contextDefMethod)
+    {
+        try
+        {
+            if (comment == null || !(contextDefMethod instanceof EObject contextMethod))
+                return comment;
+            EObject source = resolveContextDefSourceMethod(contextMethod);
+            if (source == null)
+                return comment;
+            return afterParseTemplateComment(comment, source);
+        }
+        catch (Throwable ignored)
+        {
+            return comment;
+        }
+    }
+
+    /** Как EDT в {@code computeTypesByLinkPart}: proxy по {@code getSourceUri} → resolve. */
+    private static EObject resolveContextDefSourceMethod(EObject contextDefMethod)
+    {
+        try
+        {
+            Object uriObj = Global.invoke(contextDefMethod, "getSourceUri"); //$NON-NLS-1$
+            if (!(uriObj instanceof URI uri) || uri.toString().isEmpty())
+                return null;
+            EObject proxy = org.eclipse.emf.ecore.EcoreFactory.eINSTANCE.createEObject();
+            ((org.eclipse.emf.ecore.InternalEObject)proxy).eSetProxyURI(uri);
+            EObject resolved = org.eclipse.emf.ecore.util.EcoreUtil.resolve(proxy, contextDefMethod);
+            if (resolved == null || resolved.eIsProxy())
+                return null;
+            return resolved;
+        }
+        catch (Throwable ignored)
+        {
+            return null;
+        }
     }
 
     /** Объявленный возврат имеет приоритет: если он есть, ничего не трогаем. */
@@ -529,20 +656,168 @@ public final class BslDocCommentComputedTypes
             Object envs = Global.invoke(target, "environments"); //$NON-NLS-1$
             if (envs == null)
                 return null;
-            Object result = Global.invoke(computer, "computeTypes", target, envs); //$NON-NLS-1$
-            if (result instanceof List<?> list && !list.isEmpty())
-                return list;
-            // Пусто — состояние возврата функции ещё не построено: мы вызваны изнутри
-            // построения типовой системы модуля, а тела методов обходятся позже.
-            // Просим EDT досчитать этот метод отдельно.
-            if (!lightInstallTypeSystem(rsp, target))
-                return null;
-            result = Global.invoke(computer, "computeTypes", target, envs); //$NON-NLS-1$
-            return result instanceof List<?> list ? list : null;
+            List<?> result = asTypeList(Global.invoke(computer, "computeTypes", target, envs)); //$NON-NLS-1$
+            if (result != null && !result.isEmpty())
+                return result;
+            // Пусто — FinalReturnState ещё нет. lightInstall пишет в LIGHT; TypesComputer
+            // при !isLinkedBatch предпочитает LIGHT даже пустой — NORMAL после полного
+            // installTypeSystem тогда не виден. Поэтому после досчёта читаем NORMAL сами.
+            boolean lit = lightInstallTypeSystem(rsp, target);
+            if (!lit)
+                return finalReturnTypes(target, envs);
+            result = finalReturnTypes(target, envs);
+            if (result != null && !result.isEmpty())
+                return result;
+            if (installTargetModuleTypeSystem(target))
+            {
+                result = finalReturnTypes(target, envs);
+                if (result != null && !result.isEmpty())
+                    return result;
+                result = asTypeList(Global.invoke(computer, "computeTypes", target, envs)); //$NON-NLS-1$
+                if (result != null && !result.isEmpty())
+                    return result;
+            }
+            return result;
         }
         catch (Throwable ignored)
         {
             return null;
+        }
+    }
+
+    private static List<?> asTypeList(Object result)
+    {
+        return result instanceof List<?> list ? list : null;
+    }
+
+    /**
+     * Типы возврата функции из {@code getFinalReturnState}: сначала NORMAL (полный
+     * {@code installTypeSystem}), затем LIGHT. Обход бага TypesComputer: пустой LIGHT
+     * перекрывает непустой NORMAL при {@code !isLinkedBatch}.
+     */
+    private static List<?> finalReturnTypes(EObject target, Object envs)
+    {
+        try
+        {
+            Object collector = Global.invoke(target, "getFinalReturnState"); //$NON-NLS-1$
+            if (collector == null)
+                return null;
+            List<?> normal = typesFromReturnProvider(collector, "NORMAL", envs); //$NON-NLS-1$
+            if (normal != null && !normal.isEmpty())
+                return normal;
+            return typesFromReturnProvider(collector, "LIGHT", envs); //$NON-NLS-1$
+        }
+        catch (Throwable ignored)
+        {
+            return null;
+        }
+    }
+
+    private static List<?> typesFromReturnProvider(Object collector, String modeName, Object envs)
+        throws Exception
+    {
+        Class<?> modeClass = Class.forName(
+            "com._1c.g5.v8.dt.bsl.model.typesytem.TypeSystemMode", true, bslClassLoader()); //$NON-NLS-1$
+        @SuppressWarnings({ "unchecked", "rawtypes" })
+        Object mode = Enum.valueOf((Class<Enum>)modeClass.asSubclass(Enum.class), modeName);
+        Object provider = Global.invoke(collector, "get", mode); //$NON-NLS-1$
+        if (provider == null)
+            return null;
+        Object last = Global.invoke(provider, "getLastState", envs); //$NON-NLS-1$
+        if (last == null)
+        {
+            // Перегрузка без Environments (как в syncExportPropertyTypes).
+            Object all = Global.invoke(provider, "getLastState"); //$NON-NLS-1$
+            if (all instanceof List<?> states && !states.isEmpty())
+            {
+                List<Object> types = new ArrayList<>();
+                for (Object state : states)
+                {
+                    Object iterable = state == null ? null : Global.invoke(state, "getTypes"); //$NON-NLS-1$
+                    if (iterable instanceof Iterable<?> it)
+                    {
+                        for (Object item : it)
+                        {
+                            if (item instanceof TypeItem)
+                                types.add(item);
+                        }
+                    }
+                }
+                return types.isEmpty() ? null : types;
+            }
+            return null;
+        }
+        // VariableTreeTypeStateWithSubStates.getSubStates(envs) — как TypesComputer._compute
+        Object subStates = null;
+        try
+        {
+            subStates = Global.invoke(last, "getSubStates", envs); //$NON-NLS-1$
+        }
+        catch (Throwable ignored)
+        {
+        }
+        if (subStates instanceof List<?> list && !list.isEmpty())
+        {
+            List<Object> types = new ArrayList<>();
+            for (Object state : list)
+            {
+                Object iterable = state == null ? null : Global.invoke(state, "getTypes"); //$NON-NLS-1$
+                if (iterable instanceof Iterable<?> it)
+                {
+                    for (Object item : it)
+                    {
+                        if (item instanceof TypeItem)
+                            types.add(item);
+                    }
+                }
+            }
+            if (!types.isEmpty())
+                return types;
+        }
+        Object typesObj = Global.invoke(last, "getTypes"); //$NON-NLS-1$
+        if (typesObj instanceof Iterable<?> it)
+        {
+            List<Object> types = new ArrayList<>();
+            for (Object item : it)
+            {
+                if (item instanceof TypeItem)
+                    types.add(item);
+            }
+            return types;
+        }
+        return null;
+    }
+
+    /**
+     * Полный {@code installTypeSystem} модуля цели {@code см. …}, если light-проход
+     * не дал типов возврата (типично: ссылка из модуля формы на общий модуль).
+     */
+    private static boolean installTargetModuleTypeSystem(EObject target)
+    {
+        if (!resolvingDocLink() && !Boolean.TRUE.equals(forceLightInstall.get()))
+            return false;
+        Object moduleObj = containerOfType(target, "com._1c.g5.v8.dt.bsl.model.Module"); //$NON-NLS-1$
+        if (!(moduleObj instanceof EObject module) || module.eIsProxy())
+            return false;
+        if (!INSTALLING_TARGET_MODULE.add(module))
+            return false;
+        try
+        {
+            com._1c.g5.v8.dt.bsl.typesystem.BslTreeTypeSystem tree =
+                BslStructureInsertCommentTypes.peekTreeTypeSystem();
+            if (tree == null)
+                return false;
+            tree.installTypeSystem((com._1c.g5.v8.dt.bsl.model.Module)module,
+                org.eclipse.xtext.util.CancelIndicator.NullImpl);
+            return true;
+        }
+        catch (Throwable ignored)
+        {
+            return false;
+        }
+        finally
+        {
+            INSTALLING_TARGET_MODULE.remove(module);
         }
     }
 
@@ -567,9 +842,19 @@ public final class BslDocCommentComputedTypes
      *
      * @return {@code true}, если досчёт выполнен
      */
+    static void enableForceLightInstall()
+    {
+        forceLightInstall.set(Boolean.TRUE);
+    }
+
+    static void disableForceLightInstall()
+    {
+        forceLightInstall.remove();
+    }
+
     private static boolean lightInstallTypeSystem(IResourceServiceProvider rsp, EObject target)
     {
-        if (!resolvingDocLink())
+        if (!resolvingDocLink() && !Boolean.TRUE.equals(forceLightInstall.get()))
         {
             // Рассчитанный тип нужен только там, где EDT разрешает ссылку «см. Метод»: именно
             // там документирующий комментарий целевого метода пуст. Разбор комментария самого
@@ -748,6 +1033,26 @@ public final class BslDocCommentComputedTypes
                         }
                     };
                 }
+                if (CTX_PARSE_DESC.equals(descriptor))
+                {
+                    // см. ОбщийМодуль.Метод → BslContextDefMethod: досчёт по исходному Method.
+                    return new MethodVisitor(Opcodes.ASM9, mv)
+                    {
+                        @Override
+                        public void visitInsn(int opcode)
+                        {
+                            if (opcode == Opcodes.ARETURN)
+                            {
+                                visitVarInsn(Opcodes.ALOAD, 0);
+                                visitMethodInsn(Opcodes.INVOKESTATIC, SELF_INTERNAL,
+                                    "afterParseContextDefMethodComment", AFTER_CTX_DESC, false); //$NON-NLS-1$
+                                visitTypeInsn(Opcodes.CHECKCAST, COMMENT_INTERNAL);
+                                touched.set(true);
+                            }
+                            super.visitInsn(opcode);
+                        }
+                    };
+                }
                 final int methodSlot = bslMethodSlot(descriptor, (access & Opcodes.ACC_STATIC) != 0);
                 if (methodSlot < 0)
                     return mv;
@@ -815,9 +1120,9 @@ public final class BslDocCommentComputedTypes
     }
 
     /**
-     * Номер локальной переменной с {@code com._1c.g5.v8.dt.bsl.model.Method}. Перегрузки
-     * {@code parseTemplateComment} без метода (по списку строк, по {@code BslContextDefMethod})
-     * пропускаем: из них не вычислить тип по телу функции.
+     * Номер локальной переменной с {@code com._1c.g5.v8.dt.bsl.model.Method}.
+     * Перегрузка по списку строк без метода пропускается; {@code BslContextDefMethod}
+     * обрабатывается отдельно ({@link #afterParseContextDefMethodComment}).
      *
      * @return номер слота либо -1
      */

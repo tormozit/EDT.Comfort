@@ -30,10 +30,12 @@ import com._1c.g5.v8.dt.bsl.model.BslFactory;
 import com._1c.g5.v8.dt.bsl.model.ExtendedType;
 import com._1c.g5.v8.dt.mcore.ContextDef;
 import com._1c.g5.v8.dt.mcore.ContextDefWithRefItem;
+import com._1c.g5.v8.dt.mcore.DerivedProperty;
 import com._1c.g5.v8.dt.mcore.McoreFactory;
 import com._1c.g5.v8.dt.mcore.Method;
 import com._1c.g5.v8.dt.mcore.Property;
 import com._1c.g5.v8.dt.mcore.Type;
+import com._1c.g5.v8.dt.mcore.TypeContainerRef;
 import com._1c.g5.v8.dt.mcore.TypeItem;
 import com._1c.g5.v8.dt.mcore.TypeSet;
 import com._1c.g5.v8.dt.mcore.util.Environments;
@@ -635,19 +637,104 @@ public final class BslDocCommentTypeMerge
         LinkedHashSet<Method> methods = new LinkedHashSet<>();
         LinkedHashSet<Property> properties = new LinkedHashSet<>();
         for (Type type : contexts)
-        {
-            ContextDef def = type.getContextDef();
-            if (def == null)
-                continue;
-            if (def.allMethods() != null)
-                methods.addAll(def.allMethods());
-            if (def.allProperties() != null)
-                properties.addAll(def.allProperties());
-        }
+            collectRefContext(type, methods, properties, false);
         ctx.getRefMethods().addAll(methods);
         ctx.getRefProperties().addAll(properties);
         extended.setContextDef(ctx);
         return extended;
+    }
+
+    /**
+     * Переносимый тип с {@link ContextDefWithRefItem}: методы в {@code refMethods},
+     * свойства — ссылки или собственные {@link DerivedProperty} (экспорт чужого модуля).
+     * Без плейсхолдера {@code ИмяКлюча}/{@code KeyName}.
+     */
+    static Type copyWithRefContext(Type source, Environments environments, boolean ownProperties)
+    {
+        if (source == null || source.eIsProxy())
+            return source;
+        ExtendedType copy = BslFactory.eINSTANCE.createExtendedType();
+        String en = McoreUtil.getTypeName(source);
+        String ru = McoreUtil.getTypeNameRu(source);
+        copy.setName(en != null ? en : "Structure"); //$NON-NLS-1$
+        copy.setNameRu(ru != null && !ru.isBlank() ? ru : copy.getName());
+        if (environments != null)
+            copy.setEnvironments(environments);
+        else if (source.getEnvironments() != null)
+            copy.setEnvironments(new Environments(source.getEnvironments().toArray()));
+        copy.setCreatedByNewOperator(source.isCreatedByNewOperator());
+        ContextDefWithRefItem ctx = McoreFactory.eINSTANCE.createContextDefWithRefItem();
+        LinkedHashSet<Method> methods = new LinkedHashSet<>();
+        LinkedHashSet<Property> properties = new LinkedHashSet<>();
+        collectRefContext(source, methods, properties, true);
+        ctx.getRefMethods().addAll(methods);
+        if (ownProperties)
+        {
+            for (Property property : properties)
+                ctx.getProperties().add(copyDerivedProperty(property));
+        }
+        else
+            ctx.getRefProperties().addAll(properties);
+        copy.setContextDef(ctx);
+        return copy;
+    }
+
+    private static void collectRefContext(Type type, Set<Method> methods, Set<Property> properties,
+        boolean skipStructureKeyPlaceholder)
+    {
+        ContextDef def = type.getContextDef();
+        if (def == null)
+            return;
+        if (def.allMethods() != null)
+            methods.addAll(def.allMethods());
+        org.eclipse.emf.common.util.EList<Property> props = def.allProperties() != null
+            ? def.allProperties()
+            : def.getProperties();
+        if (props == null)
+            return;
+        for (Property property : props)
+        {
+            if (property == null)
+                continue;
+            if (skipStructureKeyPlaceholder && isStructureKeyPlaceholder(property))
+                continue;
+            properties.add(property);
+        }
+    }
+
+    /** Плейсхолдер ключа структуры в EDT — не член значения. */
+    static boolean isStructureKeyPlaceholder(Property property)
+    {
+        String name = property.getName();
+        if (name == null || name.isEmpty())
+            return true;
+        return "KeyName".equalsIgnoreCase(name) //$NON-NLS-1$
+            || "ИмяКлюча".equalsIgnoreCase(name); //$NON-NLS-1$
+    }
+
+    private static DerivedProperty copyDerivedProperty(Property sourceProp)
+    {
+        DerivedProperty derived = McoreFactory.eINSTANCE.createDerivedProperty();
+        derived.setName(sourceProp.getName());
+        String nameRu = sourceProp.getNameRu();
+        derived.setNameRu(nameRu != null && !nameRu.isBlank() ? nameRu : sourceProp.getName());
+        derived.setReadable(true);
+        derived.setWritable(true);
+        derived.setEnvironments(Environments.ALL);
+        TypeContainerRef propTypes = McoreFactory.eINSTANCE.createTypeContainerRef();
+        Collection<TypeItem> sourceTypes = sourceProp.getTypeContainer() instanceof TypeContainerRef ref
+            ? ref.getTypes()
+            : sourceProp.getTypes();
+        if (sourceTypes != null)
+        {
+            for (TypeItem propType : sourceTypes)
+            {
+                if (propType instanceof EObject eObject)
+                    propTypes.getTypes().add((TypeItem)EcoreUtil.copy(eObject));
+            }
+        }
+        derived.setTypeContainer(propTypes);
+        return derived;
     }
 
     private static Type pickPrimary(List<Type> contexts)

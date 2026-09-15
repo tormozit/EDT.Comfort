@@ -144,6 +144,13 @@ import org.eclipse.ui.PlatformUI;
 public final class GitStagingFilterHook implements IStartup
 {
     private static final String VIEW_ID = "com._1c.g5.v8.dt.internal.team.ui.views.DtStagingView"; //$NON-NLS-1$
+
+    /**
+     * Идентификатор штатной панели EGit. Панель EDT показывается под ним же: EDT подменяет
+     * дескриптор в реестре видов. Здесь используется только диагностикой ({@link AttachLog}),
+     * опознавание панели по-прежнему идёт по {@link #VIEW_ID}.
+     */
+    private static final String EGIT_VIEW_ID = "org.eclipse.egit.ui.StagingView"; //$NON-NLS-1$
     private static final String PATCHED_KEY = "tormozit.gitStagingFilterPatched"; //$NON-NLS-1$
     private static final String HISTORY_SCOPE_ID = "gitStagingFilter"; //$NON-NLS-1$
 
@@ -213,6 +220,7 @@ public final class GitStagingFilterHook implements IStartup
                     @Override public void windowClosed(IWorkbenchWindow w) {}
                 });
                 Debug.logAttach("earlyStartup: installed"); //$NON-NLS-1$
+                AttachLog.dumpRegistry("старт"); //$NON-NLS-1$
             }
             catch (RuntimeException | Error t)
             {
@@ -275,11 +283,16 @@ public final class GitStagingFilterHook implements IStartup
                 IWorkbenchPart part = ref.getPart(false);
                 if (!AttachLog.looksLikeStaging(ref.getId(), part))
                     return;
+                boolean ours = isGitStagingView(part);
                 AttachLog.log(event + ": id=" + ref.getId() //$NON-NLS-1$
                     + " создана=" + (part != null) //$NON-NLS-1$
                     + " класс=" + AttachLog.className(part) //$NON-NLS-1$
                     + " siteId=" + AttachLog.siteId(part) //$NON-NLS-1$
-                    + " наша=" + isGitStagingView(part)); //$NON-NLS-1$
+                    + " наша=" + ours); //$NON-NLS-1$
+                // Панель создана чужим классом — снимок реестра сразу, пока сеанс жив: он
+                // показывает, чей дескриптор лежал под egit-ключом в момент создания части.
+                if (part != null && !ours)
+                    AttachLog.dumpRegistry("чужая панель, " + event); //$NON-NLS-1$
             }
         });
         AttachLog.log("hookWindow(" + source + "): слушатель частей установлен"); //$NON-NLS-1$ //$NON-NLS-2$
@@ -2284,6 +2297,49 @@ public final class GitStagingFilterHook implements IStartup
             if (t != null)
                 t.printStackTrace(new java.io.PrintWriter(sw));
             log(context + System.lineSeparator() + sw);
+        }
+
+        /**
+         * Снимок реестра видов по обоим идентификаторам панели индексирования.
+         *
+         * <p>EDT (`StagingViewReplacementService`) кладёт дескриптор `DtStagingView` под ключ
+         * `org.eclipse.egit.ui.StagingView` и убирает собственный ключ. `ViewRegistry.find` —
+         * чтение из приватной карты `descriptors` без ленивого достраивания, а
+         * `WorkbenchPage` создаёт `ViewReference` именно через `getViewRegistry().find(id)`,
+         * и класс части берётся из `IConfigurationElement` найденного дескриптора. Поэтому
+         * `pluginId` дескриптора однозначно говорит, чей класс будет создан:
+         * `com._1c.g5.v8.dt.team.ui` — EDT-шный, `org.eclipse.egit.ui` — штатный EGit.
+         *
+         * <p>`identityHashCode` самого реестра пишем, чтобы различить две гипотезы: подмена не
+         * состоялась вовсе и подмена легла в другой экземпляр реестра (EDT зовёт
+         * `getViewRegistry()` из потока ранних стартов, а `IEclipseContext` не потокобезопасен).
+         */
+        static void dumpRegistry(String when)
+        {
+            try
+            {
+                org.eclipse.ui.views.IViewRegistry reg = PlatformUI.getWorkbench().getViewRegistry();
+                log("реестр видов (" + when + "): экземпляр=" + className(reg) //$NON-NLS-1$ //$NON-NLS-2$
+                    + "@" + System.identityHashCode(reg)); //$NON-NLS-1$
+                log("  по ключу " + EGIT_VIEW_ID + " → " + describeDescriptor(reg, EGIT_VIEW_ID)); //$NON-NLS-1$ //$NON-NLS-2$
+                log("  по ключу " + VIEW_ID + " → " + describeDescriptor(reg, VIEW_ID)); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            catch (RuntimeException e)
+            {
+                exception("реестр видов (" + when + "): исключение", e); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+
+        private static String describeDescriptor(org.eclipse.ui.views.IViewRegistry reg, String id)
+        {
+            org.eclipse.ui.views.IViewDescriptor desc = reg.find(id);
+            if (desc == null)
+                return "нет дескриптора"; //$NON-NLS-1$
+            Object pluginId = Global.invoke(desc, "getPluginId"); //$NON-NLS-1$
+            return "id=" + desc.getId() //$NON-NLS-1$
+                + " бандл=" + pluginId //$NON-NLS-1$
+                + " подпись=" + desc.getLabel() //$NON-NLS-1$
+                + " класс дескриптора=" + className(desc); //$NON-NLS-1$
         }
 
         /** Часть, похожая на панель индексирования, — по идентификатору ИЛИ по классу (id может отличаться). */

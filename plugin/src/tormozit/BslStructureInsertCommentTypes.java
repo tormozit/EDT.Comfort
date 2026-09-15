@@ -19,6 +19,8 @@ import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.resource.Resource;
+import org.eclipse.emf.ecore.resource.ResourceSet;
+import org.eclipse.emf.ecore.util.EcoreUtil;
 import org.eclipse.ui.IStartup;
 import org.eclipse.xtext.EcoreUtil2;
 import org.eclipse.xtext.naming.IQualifiedNameConverter;
@@ -35,8 +37,13 @@ import com._1c.g5.v8.bm.integration.AbstractBmTask;
 import com._1c.g5.v8.bm.integration.IBmModel;
 import com._1c.g5.v8.dt.bsl.documentation.comment.BslCommentUtils;
 import com._1c.g5.v8.dt.bsl.documentation.comment.BslMultiLineCommentDocumentationProvider;
+import com._1c.g5.v8.dt.bsl.model.Block;
+import com._1c.g5.v8.dt.bsl.model.BslContextDefMockProperty;
+import com._1c.g5.v8.dt.bsl.model.DeclareStatement;
 import com._1c.g5.v8.dt.bsl.model.DynamicFeatureAccess;
+import com._1c.g5.v8.dt.bsl.model.ExplicitVariable;
 import com._1c.g5.v8.dt.bsl.model.Expression;
+import com._1c.g5.v8.dt.bsl.model.ExtendedType;
 import com._1c.g5.v8.dt.bsl.model.FeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.FeatureEntry;
 import com._1c.g5.v8.dt.bsl.model.Invocation;
@@ -46,6 +53,8 @@ import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.Statement;
 import com._1c.g5.v8.dt.bsl.model.StringLiteral;
 import com._1c.g5.v8.dt.bsl.model.Variable;
+import com._1c.g5.v8.dt.bsl.resource.DynamicFeatureAccessComputer;
+import com._1c.g5.v8.dt.bsl.resource.TypesComputer;
 import com._1c.g5.v8.dt.bsl.typesystem.BslTreeTypeSystem;
 import com._1c.g5.v8.dt.bsl.typesystem.BslTypeSystemProvider;
 import com._1c.g5.v8.dt.bsl.typesystem.util.TypeSystemUtil;
@@ -54,11 +63,13 @@ import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
 import com._1c.g5.v8.dt.mcore.ContextDef;
 import com._1c.g5.v8.dt.mcore.DerivedProperty;
 import com._1c.g5.v8.dt.mcore.Environmental;
+import com._1c.g5.v8.dt.mcore.McoreFactory;
 import com._1c.g5.v8.dt.mcore.McorePackage;
 import com._1c.g5.v8.dt.mcore.Property;
 import com._1c.g5.v8.dt.mcore.Type;
 import com._1c.g5.v8.dt.mcore.TypeContainerRef;
 import com._1c.g5.v8.dt.mcore.TypeItem;
+import com._1c.g5.v8.dt.mcore.util.Environments;
 import com._1c.g5.v8.dt.mcore.util.McoreUtil;
 import com.e1c.g5.dt.core.api.naming.INamingService;
 import com.e1c.g5.dt.core.api.platform.BmOperationContext;
@@ -86,6 +97,10 @@ import com.e1c.g5.dt.core.api.platform.BmOperationContext;
  * сначала штатный расчёт, потом наш проход. Типы попадают в саму модель, поэтому работают
  * везде — автодополнение, подсказка при наведении, валидация, «Найти ссылки», — а не только
  * там, где успел отработать наш код.
+ * <p>
+ * Отдельно: экспорт внешнего модуля в CA идёт через {@link BslContextDefMockProperty} без
+ * типов. Подменяем {@code DynamicFeatureAccessComputer.computerTypes} на
+ * {@link ComfortTypesComputer}, чтобы перед расчётом скопировать типы с живого Property.
  * <p>
  * Поля подкласса — копия полей исходного экземпляра (рефлексия): те же сервисы и кэши, тот же
  * объект по поведению, только с довеском.
@@ -138,20 +153,139 @@ public final class BslStructureInsertCommentTypes
             Field field = BslTypeSystemProvider.class.getDeclaredField(TREE_FIELD);
             field.setAccessible(true);
             Object current = field.get(provider);
-            if (current instanceof ComfortTreeTypeSystem)
+            if (!(current instanceof ComfortTreeTypeSystem))
             {
-                installed.set(true);
-                return;
+                if (!(current instanceof BslTreeTypeSystem original))
+                    return;
+                ComfortTreeTypeSystem ours = new ComfortTreeTypeSystem();
+                copyFields(original, ours);
+                field.set(provider, ours);
             }
-            if (!(current instanceof BslTreeTypeSystem original))
-                return;
-            ComfortTreeTypeSystem ours = new ComfortTreeTypeSystem();
-            copyFields(original, ours);
-            field.set(provider, ours);
+            installTypesComputerWrap(rsp);
             installed.set(true);
         }
         catch (Throwable ignored)
         {
+        }
+    }
+
+    /**
+     * Внешний модуль формы: EDT для экспорта подставляет {@link BslContextDefMockProperty}
+     * без типов (только имя). {@code Форма.КэшАФВ} видно, {@code Форма.КэшАФВ.} — пусто.
+     * Типы лежат на живом {@code Module.getContextDef()} Property — копируем на mock
+     * перед {@link TypesComputer#computeTypes}.
+     */
+    private static void installTypesComputerWrap(IResourceServiceProvider rsp) throws Exception
+    {
+        DynamicFeatureAccessComputer dfa = rsp.get(DynamicFeatureAccessComputer.class);
+        TypesComputer current = rsp.get(TypesComputer.class);
+        if (dfa == null || current == null)
+            return;
+        Field field = DynamicFeatureAccessComputer.class.getDeclaredField("computerTypes"); //$NON-NLS-1$
+        field.setAccessible(true);
+        Object onDfa = field.get(dfa);
+        if (onDfa instanceof ComfortTypesComputer)
+            return;
+        TypesComputer source = onDfa instanceof TypesComputer typed ? typed : current;
+        if (source instanceof ComfortTypesComputer)
+        {
+            field.set(dfa, source);
+            return;
+        }
+        ComfortTypesComputer ours = new ComfortTypesComputer();
+        copyTypesComputerFields(source, ours);
+        field.set(dfa, ours);
+    }
+
+    private static void copyTypesComputerFields(TypesComputer from, TypesComputer to)
+        throws Exception
+    {
+        for (Field field : TypesComputer.class.getDeclaredFields())
+        {
+            if (Modifier.isStatic(field.getModifiers()) || Modifier.isFinal(field.getModifiers()))
+                continue;
+            field.setAccessible(true);
+            field.set(to, field.get(from));
+        }
+    }
+
+    /**
+     * Mock экспортного свойства внешнего модуля — без {@code typeContainer}. Берём типы
+     * с живого Property того же имени в модуле {@code sourceUri}.
+     */
+    static void fillMockExportPropertyTypes(EObject object)
+    {
+        if (!(object instanceof BslContextDefMockProperty mock))
+            return;
+        try
+        {
+            if (mock.getTypeContainer() instanceof TypeContainerRef ref
+                && ref.getTypes() != null && !ref.getTypes().isEmpty())
+                return;
+            if (mock.getTypes() != null && !mock.getTypes().isEmpty())
+                return;
+            String name = mock.getName();
+            URI sourceUri = mock.getSourceUri();
+            if (name == null || name.isEmpty() || sourceUri == null)
+                return;
+            Module module = moduleFromSourceUri(sourceUri, mock.getContext());
+            if (module == null || module.eIsProxy())
+                return;
+            enrichExportModuleVariables(module);
+            Property live = liveExportProperty(module, name);
+            if (live == null)
+                return;
+            Collection<TypeItem> liveTypes = live.getTypeContainer() instanceof TypeContainerRef ref
+                ? ref.getTypes()
+                : live.getTypes();
+            if (liveTypes == null || liveTypes.isEmpty())
+                return;
+            TypeContainerRef container = McoreFactory.eINSTANCE.createTypeContainerRef();
+            for (TypeItem item : liveTypes)
+            {
+                if (item instanceof EObject eObject)
+                    container.getTypes().add((TypeItem)EcoreUtil.copy(eObject));
+            }
+            mock.setTypeContainer(container);
+        }
+        catch (Throwable ignored)
+        {
+        }
+    }
+
+    private static Property liveExportProperty(Module module, String name)
+    {
+        ContextDef contextDef = module.getContextDef();
+        if (contextDef == null || name == null)
+            return null;
+        for (Property property : contextDef.getProperties())
+        {
+            if (property != null && name.equalsIgnoreCase(property.getName()))
+                return property;
+        }
+        return null;
+    }
+
+    private static Module moduleFromSourceUri(URI sourceUri, EObject context)
+    {
+        if (sourceUri == null)
+            return null;
+        try
+        {
+            ResourceSet resourceSet = null;
+            if (context != null && context.eResource() != null)
+                resourceSet = context.eResource().getResourceSet();
+            if (resourceSet == null)
+                return null;
+            Resource resource = resourceSet.getResource(sourceUri.trimFragment(), true);
+            if (resource == null || resource.getContents().isEmpty())
+                return null;
+            EObject root = resource.getContents().get(0);
+            return root instanceof Module module ? module : null;
+        }
+        catch (Throwable ignored)
+        {
+            return null;
         }
     }
 
@@ -183,6 +317,165 @@ public final class BslStructureInsertCommentTypes
         {
             return null;
         }
+    }
+
+    /**
+     * Типы экспортных {@code Перем …; // см. …} модуля формы → {@code Property.typeContainer}
+     * в {@code Module.getContextDef()}. Без этого после {@code Форма.КэшАФВ.} пусто: EDT
+     * копирует снимок при сборке контекста, а из чужого модуля расчёт формы не идёт.
+     */
+    static void enrichExportModuleVariables(Module module)
+    {
+        if (module == null || module.eIsProxy())
+            return;
+        try
+        {
+            if (!BslDocCommentComputedTypes.isExtendedTypesEnabled(module))
+                return;
+            IProject project = projectOf(module);
+            if (project == null)
+                return;
+            BslTreeTypeSystem tree = peekTreeTypeSystem();
+            if (tree == null)
+                return;
+            // Повтор, пока нет переносимого ExtendedType с свойствами.
+            if (EXPORT_VARS_DONE.contains(module) && exportVarsArePortable(module))
+                return;
+            enrichExportModuleVariables(tree, module);
+            if (exportVarsArePortable(module))
+                EXPORT_VARS_DONE.add(module);
+            else
+                EXPORT_VARS_DONE.remove(module);
+        }
+        catch (Throwable ignored)
+        {
+        }
+    }
+
+    private static boolean exportVarsArePortable(Module module)
+    {
+        ContextDef contextDef = module.getContextDef();
+        if (contextDef == null)
+            return false;
+        for (Property property : contextDef.getProperties())
+        {
+            if (property == null)
+                continue;
+            Collection<TypeItem> types = property.getTypeContainer() instanceof TypeContainerRef ref
+                ? ref.getTypes()
+                : property.getTypes();
+            if (types == null)
+                continue;
+            for (TypeItem item : types)
+            {
+                if (!(item instanceof ExtendedType)
+                    || BslDocCommentComputedTypes.contextPropertyCount(List.of(item)) <= 0)
+                    continue;
+                // Только ключи без методов Structure — ещё не готово (как у Предок. с Количество).
+                if (item instanceof Type type && type.getContextDef() != null
+                    && type.getContextDef().allMethods() != null
+                    && !type.getContextDef().allMethods().isEmpty())
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    /** Один успешный проход (переносимый ExtendedType) на экземпляр модуля за сессию. */
+    private static final java.util.Set<Module> EXPORT_VARS_DONE =
+        java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+
+    static BslTreeTypeSystem peekTreeTypeSystem()
+    {
+        install();
+        try
+        {
+            IResourceServiceProvider rsp = IResourceServiceProvider.Registry.INSTANCE
+                .getResourceServiceProvider(URI.createURI("comfort.bsl")); //$NON-NLS-1$
+            if (rsp == null)
+                return null;
+            BslTypeSystemProvider provider = rsp.get(BslTypeSystemProvider.class);
+            if (provider == null)
+                return null;
+            Field field = BslTypeSystemProvider.class.getDeclaredField(TREE_FIELD);
+            field.setAccessible(true);
+            Object current = field.get(provider);
+            return current instanceof BslTreeTypeSystem tree ? tree : null;
+        }
+        catch (Throwable ignored)
+        {
+            return null;
+        }
+    }
+
+    private static void enrichExportModuleVariables(BslTreeTypeSystem self, Module module)
+    {
+        List<DeclareStatement> declares = new ArrayList<>();
+        for (DeclareStatement declare : module.allDeclareStatements())
+        {
+            if (declare == null)
+                continue;
+            org.eclipse.emf.common.util.EList<ExplicitVariable> variables = declare.getVariables();
+            if (variables == null || variables.isEmpty())
+                continue;
+            for (ExplicitVariable variable : variables)
+            {
+                if (variable != null && variable.isExport())
+                {
+                    declares.add(declare);
+                    break;
+                }
+            }
+        }
+        if (declares.isEmpty())
+            return;
+
+        IProject project = projectOf(module);
+        if (project == null)
+            return;
+        IScopeProvider scopeProvider = (IScopeProvider)service(self, "scopeProvider"); //$NON-NLS-1$
+        IQualifiedNameConverter nameConverter =
+            (IQualifiedNameConverter)service(self, "qualifiedNameConverter"); //$NON-NLS-1$
+        BslMultiLineCommentDocumentationProvider commentProvider =
+            (BslMultiLineCommentDocumentationProvider)service(self, "commentProvider"); //$NON-NLS-1$
+        IV8ProjectManager v8ProjectManager =
+            (IV8ProjectManager)service(self, "v8ProjectManager"); //$NON-NLS-1$
+        if (scopeProvider == null || nameConverter == null || commentProvider == null
+            || v8ProjectManager == null)
+            return;
+
+        IScope typeScope = scopeProvider.getScope(module,
+            McorePackage.Literals.ABSTRACT_METHOD__RET_VAL_TYPE);
+        boolean oldFormat = isOldCommentFormat(self, project);
+        ExportModuleVariablesPass pass = new ExportModuleVariablesPass(module, declares,
+            typeScope, scopeProvider, nameConverter, commentProvider, v8ProjectManager,
+            oldFormat);
+        runInTransaction(self, project, pass);
+    }
+
+    /**
+     * Боковой {@code // …} на {@code DeclareStatement}: штатный {@code computeCommentTypes}
+     * без узла берёт узел {@link Block} (модуль тоже {@code Block}).
+     */
+    private static Collection<TypeItem> computeDeclareSideCommentTypes(DeclareStatement declare,
+        IScope typeScope, IScopeProvider scopeProvider, IQualifiedNameConverter nameConverter,
+        BslMultiLineCommentDocumentationProvider commentProvider,
+        IV8ProjectManager v8ProjectManager, boolean oldFormat, BmOperationContext context)
+    {
+        Block block = EcoreUtil2.getContainerOfType(declare, Block.class);
+        ICompositeNode blockNode = block != null ? NodeModelUtils.findActualNodeFor(block) : null;
+        Collection<TypeItem> types = TypeSystemUtil.computeCommentTypes(declare, typeScope,
+            scopeProvider, nameConverter, commentProvider, v8ProjectManager, oldFormat, context);
+        if (types != null && !types.isEmpty())
+            return types;
+        if (blockNode != null)
+        {
+            types = TypeSystemUtil.computeCommentTypes(declare, blockNode, typeScope, scopeProvider,
+                nameConverter, commentProvider, v8ProjectManager, oldFormat, context);
+            if (types != null && !types.isEmpty())
+                return types;
+        }
+        return types != null ? types : List.of();
     }
 
     /**
@@ -371,6 +664,22 @@ public final class BslStructureInsertCommentTypes
      */
     private static void runInTransaction(BslTreeTypeSystem self, IProject project, Pass pass)
     {
+        runInTransaction(self, project, context -> pass.run(context));
+    }
+
+    private static void runInTransaction(BslTreeTypeSystem self, IProject project,
+        ExportModuleVariablesPass pass)
+    {
+        runInTransaction(self, project, context -> pass.run(context));
+    }
+
+    private interface BmPass
+    {
+        void run(BmOperationContext context);
+    }
+
+    private static void runInTransaction(BslTreeTypeSystem self, IProject project, BmPass pass)
+    {
         INamingService naming = (INamingService)service(self, "namingService"); //$NON-NLS-1$
         IBmModelManager models = (IBmModelManager)service(self, "bmModelManager"); //$NON-NLS-1$
         if (naming == null || models == null)
@@ -394,6 +703,201 @@ public final class BslStructureInsertCommentTypes
                 return null;
             }
         }, true);
+    }
+
+    /** {@code Перем … Экспорт; // см. …} → тип в export {@code Property} модуля. */
+    private static final class ExportModuleVariablesPass
+    {
+        private final Module module;
+        private final List<DeclareStatement> declares;
+        private final IScope typeScope;
+        private final IScopeProvider scopeProvider;
+        private final IQualifiedNameConverter nameConverter;
+        private final BslMultiLineCommentDocumentationProvider commentProvider;
+        private final IV8ProjectManager v8ProjectManager;
+        private final boolean oldFormat;
+
+        ExportModuleVariablesPass(Module module, List<DeclareStatement> declares,
+            IScope typeScope, IScopeProvider scopeProvider,
+            IQualifiedNameConverter nameConverter,
+            BslMultiLineCommentDocumentationProvider commentProvider,
+            IV8ProjectManager v8ProjectManager, boolean oldFormat)
+        {
+            this.module = module;
+            this.declares = declares;
+            this.typeScope = typeScope;
+            this.scopeProvider = scopeProvider;
+            this.nameConverter = nameConverter;
+            this.commentProvider = commentProvider;
+            this.v8ProjectManager = v8ProjectManager;
+            this.oldFormat = oldFormat;
+        }
+
+        void run(BmOperationContext context)
+        {
+            ContextDef contextDef = module.getContextDef();
+            if (contextDef == null || contextDef.eIsProxy())
+                return;
+            for (DeclareStatement declare : declares)
+            {
+                try
+                {
+                    BslDocCommentComputedTypes.enableForceLightInstall();
+                    Collection<TypeItem> commentTypes;
+                    try
+                    {
+                        commentTypes = computeDeclareSideCommentTypes(declare, typeScope,
+                            scopeProvider, nameConverter, commentProvider, v8ProjectManager,
+                            oldFormat, context);
+                    }
+                    finally
+                    {
+                        BslDocCommentComputedTypes.disableForceLightInstall();
+                    }
+                    Environments envs = declare.environments();
+                    for (ExplicitVariable variable : declare.getVariables())
+                    {
+                        if (variable == null || !variable.isExport())
+                            continue;
+                        List<TypeItem> live = liveTypesFromSeeComment(declare, oldFormat);
+                        Collection<TypeItem> types = live;
+                        if (types == null || types.isEmpty())
+                        {
+                            types = commentTypes;
+                        }
+                        else
+                        {
+                            int commentProps =
+                                BslDocCommentComputedTypes.contextPropertyCount(commentTypes);
+                            int liveProps =
+                                BslDocCommentComputedTypes.contextPropertyCount(live);
+                            if (commentProps > liveProps && commentTypes != null
+                                && !commentTypes.isEmpty())
+                                types = commentTypes;
+                        }
+                        if (types == null || types.isEmpty())
+                            continue;
+                        BslFormTypeContextEnrichment.enrichTypes(types);
+                        List<TypeItem> portable = portableStructureTypes(types, envs);
+                        replaceAllExportProperties(contextDef, variable.getName(), portable);
+                    }
+                }
+                catch (Throwable ignored)
+                {
+                }
+            }
+        }
+
+        /** Все одноимённые Property (Client/Server) — иначе UI читает «чужой» environment. */
+        private static void replaceAllExportProperties(ContextDef contextDef, String name,
+            Collection<TypeItem> types)
+        {
+            if (name == null || name.isEmpty())
+                return;
+            for (Property property : contextDef.getProperties())
+            {
+                if (property == null || !name.equalsIgnoreCase(property.getName()))
+                    continue;
+                TypeContainerRef container = McoreFactory.eINSTANCE.createTypeContainerRef();
+                if (types != null)
+                    container.getTypes().addAll(types);
+                property.setTypeContainer(container);
+            }
+        }
+
+        /**
+         * Копия структуры для чужого модуля через
+         * {@link BslDocCommentTypeMerge#copyWithRefContext}.
+         */
+        private static List<TypeItem> portableStructureTypes(Collection<TypeItem> source,
+            Environments environments)
+        {
+            if (source == null || source.isEmpty())
+                return List.of();
+            List<TypeItem> result = new ArrayList<>();
+            for (TypeItem item : source)
+            {
+                if (!(item instanceof Type type) || type.eIsProxy())
+                {
+                    if (item != null)
+                        result.add(item);
+                    continue;
+                }
+                ContextDef sourceCtx = type.getContextDef();
+                org.eclipse.emf.common.util.EList<Property> sourceProps = sourceCtx != null
+                    ? (sourceCtx.allProperties() != null ? sourceCtx.allProperties()
+                        : sourceCtx.getProperties())
+                    : null;
+                if (sourceProps == null || sourceProps.isEmpty())
+                {
+                    result.add(item);
+                    continue;
+                }
+                Environments envs = environments != null ? environments : Environments.ALL;
+                result.add(BslDocCommentTypeMerge.copyWithRefContext(type, envs, true));
+            }
+            return result;
+        }
+
+        /** Имя метода из бокового {@code // см. Модуль.Метод} → живые типы из кэша. */
+        private static List<TypeItem> liveTypesFromSeeComment(DeclareStatement declare,
+            boolean oldFormat)
+        {
+            try
+            {
+                Block block = EcoreUtil2.getContainerOfType(declare, Block.class);
+                ICompositeNode blockNode =
+                    block != null ? NodeModelUtils.findActualNodeFor(block) : null;
+                if (blockNode == null)
+                    return List.of();
+                List<String> raw =
+                    TypeSystemUtil.getCommentAfterObject(declare, blockNode, oldFormat);
+                if (raw == null || raw.isEmpty())
+                    return List.of();
+                String methodName = seeAlsoMethodName(raw);
+                if (methodName == null)
+                    return List.of();
+                return BslDocCommentComputedTypes.peekCachedReturnTypes(methodName);
+            }
+            catch (Throwable ignored)
+            {
+                return List.of();
+            }
+        }
+
+        private static String seeAlsoMethodName(List<String> raw)
+        {
+            for (String line : raw)
+            {
+                if (line == null)
+                    continue;
+                String lower = line.toLowerCase(Locale.ROOT);
+                int see = lower.indexOf("см."); //$NON-NLS-1$
+                if (see < 0)
+                    see = lower.indexOf("see"); //$NON-NLS-1$
+                if (see < 0)
+                    continue;
+                String rest = line.substring(see).replaceFirst("(?iu)^(?:см\\.|see)\\s*", ""); //$NON-NLS-1$ //$NON-NLS-2$
+                rest = rest.trim();
+                if (rest.isEmpty())
+                    continue;
+                int end = rest.length();
+                for (int i = 0; i < rest.length(); i++)
+                {
+                    char c = rest.charAt(i);
+                    if (Character.isWhitespace(c) || c == ',' || c == ';' || c == '/')
+                    {
+                        end = i;
+                        break;
+                    }
+                }
+                String path = rest.substring(0, end).trim();
+                int dot = path.lastIndexOf('.');
+                String name = dot >= 0 ? path.substring(dot + 1) : path;
+                return name.isEmpty() ? null : name;
+            }
+            return null;
+        }
     }
 
     /**
@@ -452,12 +956,53 @@ public final class BslStructureInsertCommentTypes
 
     private static IProject projectOf(Module module)
     {
+        if (module == null)
+            return null;
         Resource resource = module.eResource();
         URI uri = resource != null ? resource.getURI() : null;
-        if (uri == null || !uri.isPlatformResource() || uri.segmentCount() < 2)
+        if (uri == null)
             return null;
-        return org.eclipse.core.resources.ResourcesPlugin.getWorkspace().getRoot()
-            .getProject(uri.segment(1));
+        try
+        {
+            String projectName = null;
+            if (uri.isPlatformResource())
+            {
+                if (uri.segmentCount() >= 2)
+                    projectName = uri.segment(1);
+            }
+            else if ("bm".equals(uri.scheme())) //$NON-NLS-1$
+            {
+                projectName = uri.authority();
+                if (projectName == null || projectName.isEmpty())
+                {
+                    if (uri.segmentCount() >= 1)
+                        projectName = uri.segment(0);
+                }
+            }
+            if (projectName == null || projectName.isEmpty())
+                return null;
+            return org.eclipse.core.resources.ResourcesPlugin.getWorkspace().getRoot()
+                .getProject(projectName);
+        }
+        catch (Throwable ignored)
+        {
+            return null;
+        }
+    }
+
+    /**
+     * {@link TypesComputer} плюс заполнение типов у mock-экспорта внешнего модуля.
+     * Единственный потребитель — {@link #installTypesComputerWrap}.
+     */
+    private static final class ComfortTypesComputer
+        extends TypesComputer
+    {
+        @Override
+        public java.util.List<TypeItem> computeTypes(EObject object, Environments environments)
+        {
+            fillMockExportPropertyTypes(object);
+            return super.computeTypes(object, environments);
+        }
     }
 
     /**

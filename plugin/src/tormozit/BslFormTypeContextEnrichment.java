@@ -3,11 +3,18 @@ package tormozit;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.eclipse.emf.common.util.EList;
+
 import org.eclipse.emf.ecore.EObject;
+import org.eclipse.xtext.util.CancelIndicator;
+
+import com._1c.g5.v8.dt.bsl.typesystem.BslTreeTypeSystem;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.ClassWriter;
@@ -23,13 +30,12 @@ import org.osgi.framework.hooks.weaving.WovenClass;
 import com._1c.g5.v8.dt.bsl.model.FormalParam;
 import com._1c.g5.v8.dt.bsl.model.Method;
 import com._1c.g5.v8.dt.bsl.model.Module;
-import com._1c.g5.v8.dt.bsl.model.Variable;
 import com._1c.g5.v8.dt.bsl.model.typesytem.TypeSystemMode;
 import com._1c.g5.v8.dt.bsl.model.typesytem.VariableTypeState;
 import com._1c.g5.v8.dt.bsl.model.typesytem.VariableTypeStateProvider;
 import com._1c.g5.v8.dt.bsl.model.typesytem.VariableTypeStateProviderCollector;
-import com._1c.g5.v8.dt.bsl.typesystem.util.TypeSystemUtil;
 import com._1c.g5.v8.dt.mcore.ContextDef;
+import com._1c.g5.v8.dt.mcore.Property;
 import com._1c.g5.v8.dt.mcore.Type;
 import com._1c.g5.v8.dt.metadata.mdclass.AbstractForm;
 
@@ -52,6 +58,14 @@ import com._1c.g5.v8.dt.metadata.mdclass.AbstractForm;
  */
 public final class BslFormTypeContextEnrichment
 {
+    /** Защита от рекурсии {@code installTypeSystem} модуля формы из чужого модуля. */
+    private static final Set<Module> INSTALLING_FORM_MODULE =
+        Collections.newSetFromMap(new IdentityHashMap<>());
+
+    /** Модули формы, для которых полный расчёт уже делали в этой сессии JVM. */
+    private static final Set<Module> FORM_MODULE_INSTALLED =
+        Collections.newSetFromMap(new IdentityHashMap<>());
+
     private static final String TARGET_GET_OR_OPEN =
         "com._1c.g5.v8.dt.bsl.typesystem.GetOrOpenFormInvocationTypesComputer"; //$NON-NLS-1$
     private static final String TARGET_TYPE_SYSTEM_UTIL =
@@ -133,14 +147,9 @@ public final class BslFormTypeContextEnrichment
             return;
         try
         {
+            BslStructureInsertCommentTypes.enrichExportModuleVariables(module);
             for (Method method : module.allMethods())
                 enrichMethodUnchecked(method);
-            Collection<Variable> variables = TypeSystemUtil.getAllVariableForBlock(module);
-            if (variables != null)
-            {
-                for (Variable variable : variables)
-                    enrichStateCollector(variable.getTypeStateProvider());
-            }
         }
         catch (Throwable ignored)
         {
@@ -247,6 +256,7 @@ public final class BslFormTypeContextEnrichment
             Module module = form.getModule();
             if (module == null || module.eIsProxy())
                 continue;
+            prepareFormModuleExportContext(module);
             ContextDef moduleCtx = module.getContextDef();
             if (moduleCtx == null || moduleCtx.eIsProxy())
                 continue;
@@ -256,6 +266,53 @@ public final class BslFormTypeContextEnrichment
         }
         if (!toAdd.isEmpty())
             refs.addAll(toAdd);
+    }
+
+    /**
+     * Модуль формы из {@code см. …} в чужом модуле: состояния переменных уже могли
+     * обогатиться, но {@code ContextDef} экспорта — снимок {@code ContextDefTypesBuilder}.
+     */
+    private static void prepareFormModuleExportContext(Module module)
+    {
+        try
+        {
+            ensureFormModuleTypesInstalled(module);
+            BslStructureInsertCommentTypes.enrichExportModuleVariables(module);
+        }
+        catch (Throwable ignored)
+        {
+        }
+    }
+
+    /**
+     * Модуль формы из {@code см. …} в чужом модуле: без полного расчёта типов
+     * {@code Перем … Экспорт; // см. …} не попадает в {@code ContextDef}.
+     */
+    private static void ensureFormModuleTypesInstalled(Module module)
+    {
+        if (module == null || module.eIsProxy())
+            return;
+        if (!BslDocCommentComputedTypes.isExtendedTypesEnabled(module))
+            return;
+        if (FORM_MODULE_INSTALLED.contains(module))
+            return;
+        if (!INSTALLING_FORM_MODULE.add(module))
+            return;
+        try
+        {
+            BslTreeTypeSystem tree = BslStructureInsertCommentTypes.peekTreeTypeSystem();
+            if (tree == null)
+                return;
+            tree.installTypeSystem(module, CancelIndicator.NullImpl);
+            FORM_MODULE_INSTALLED.add(module);
+        }
+        catch (Throwable ignored)
+        {
+        }
+        finally
+        {
+            INSTALLING_FORM_MODULE.remove(module);
+        }
     }
 
     static byte[] transformGetOrOpenForm(byte[] classfileBuffer)
