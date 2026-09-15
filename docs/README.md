@@ -56,6 +56,7 @@
 - [Журнал Комфорт](zhurnal-komfort.md)
 - [Настройки](nastroyki.md)
 - [Орфография](orfografiya.md)
+- [Расчет типов](raschet-tipov.md)
 - [Улучшать списки](uluchshenie-spiskov.md)
 
 ## Прочее
