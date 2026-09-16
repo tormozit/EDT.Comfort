@@ -32,6 +32,7 @@ import org.eclipse.xtext.scoping.IScopeProvider;
 import org.eclipse.xtext.util.CancelIndicator;
 import org.eclipse.xtext.util.Triple;
 
+import com._1c.g5.v8.bm.core.BmPlatform;
 import com._1c.g5.v8.bm.core.IBmTransaction;
 import com._1c.g5.v8.bm.integration.AbstractBmTask;
 import com._1c.g5.v8.bm.integration.IBmModel;
@@ -346,7 +347,15 @@ public final class BslStructureInsertCommentTypes
             // Повтор, пока нет переносимого ExtendedType с свойствами.
             if (EXPORT_VARS_DONE.contains(module) && exportVarsArePortable(module))
                 return;
+            // Внутри одного внешнего расчёта — один проход на модуль: обогащение зовётся на
+            // каждый тип формы в каждом состоянии, и повтор до «переносимого» типа давал сотни
+            // тысяч проходов за расчёт (issue 530).
+            Set<Module> scope = EXPORT_VARS_SCOPE.get();
+            if (scope != null && !scope.add(module))
+                return;
+            long t0 = System.nanoTime(); // agent log
             enrichExportModuleVariables(tree, module);
+            diag("exportVars", module, t0, null); // agent log
             if (exportVarsArePortable(module))
                 EXPORT_VARS_DONE.add(module);
             else
@@ -387,8 +396,30 @@ public final class BslStructureInsertCommentTypes
     }
 
     /** Один успешный проход (переносимый ExtendedType) на экземпляр модуля за сессию. */
-    private static final java.util.Set<Module> EXPORT_VARS_DONE =
-        java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+    private static final java.util.Set<Module> EXPORT_VARS_DONE = java.util.Collections
+        .synchronizedSet(java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>()));
+
+    /**
+     * Модули, у которых проход экспортных переменных уже сделан в текущем внешнем расчёте
+     * потока ({@code installTypeSystem}, {@code lightInstallingTypeSystem},
+     * {@link BslFormTypeContextEnrichment#enrichTypes}); вне расчёта — {@code null}.
+     */
+    private static final ThreadLocal<Set<Module>> EXPORT_VARS_SCOPE = new ThreadLocal<>();
+
+    /** @return {@code true}, если расчёт внешний и область заведена им — передать в {@link #endExportVarsScope}. */
+    static boolean beginExportVarsScope()
+    {
+        if (EXPORT_VARS_SCOPE.get() != null)
+            return false;
+        EXPORT_VARS_SCOPE.set(java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>()));
+        return true;
+    }
+
+    static void endExportVarsScope(boolean owner)
+    {
+        if (owner)
+            EXPORT_VARS_SCOPE.remove();
+    }
 
     static BslTreeTypeSystem peekTreeTypeSystem()
     {
@@ -412,6 +443,76 @@ public final class BslStructureInsertCommentTypes
             return null;
         }
     }
+
+    /**
+     * Полный {@code installTypeSystem} чужого модуля из нашего прохода (модуль формы из
+     * {@code см. …}, модуль цели ссылки).
+     * <p>
+     * Штатный расчёт параллельный: каждый поток ForkJoin открывает свою транзакцию BM, а
+     * вызывающий поток держит свою и ждёт их. Если в это время запрошена служебная операция
+     * (деактивация проекта при закрытии EDT), новые транзакции ждут её, а она ждёт нашу —
+     * взаимоблокировка (issue 530). Непрерываемая операция платформы не даёт служебной
+     * операции начаться и пропускает новые транзакции без ожидания; закрытие дождётся конца
+     * расчёта. Берём её, только если поток уже в транзакции: тогда служебная операция точно
+     * не идёт, и транзакции ForkJoin не попадут внутрь неё.
+     */
+    static void installTypeSystemNonInterruptable(BslTreeTypeSystem tree, Module module)
+    {
+        BmPlatform platform = null;
+        Object token = null;
+        IBmModelManager models = (IBmModelManager)service(tree, "bmModelManager"); //$NON-NLS-1$
+        IProject project = projectOf(module);
+        IBmModel model = models != null && project != null ? models.getModel(project) : null;
+        Object engine = model != null ? Global.invoke(model, "getEngine") : null; //$NON-NLS-1$
+        if (engine != null && Global.invoke(engine, "getCurrentTransaction") instanceof IBmTransaction) //$NON-NLS-1$
+        {
+            platform = models.getBmPlatform();
+            if (platform != null)
+                token = platform.beginNonInterruptableOperation();
+        }
+        long t0 = System.nanoTime(); // agent log
+        try
+        {
+            tree.installTypeSystem(module, CancelIndicator.NullImpl);
+        }
+        finally
+        {
+            if (token != null)
+                platform.finishNonInterruptableOperation(token);
+            diag("nested", module, t0, "nonInterruptable=" + (token != null) //$NON-NLS-1$
+                + " caller=" + StackWalker.getInstance().walk(s -> s.skip(1).findFirst() //$NON-NLS-1$
+                    .map(f -> f.getClassName() + '.' + f.getMethodName()).orElse("?"))); //$NON-NLS-1$
+        }
+    }
+
+    // #region agent log — временный замер «calculating highlighting» (issue 530)
+    private static final ThreadLocal<int[]> DIAG_DEPTH = ThreadLocal.withInitial(() -> new int[1]);
+
+    private static long ms(long from, long to)
+    {
+        return (to - from) / 1_000_000L;
+    }
+
+    private static void diag(String what, EObject module, long startNanos, String extra)
+    {
+        try
+        {
+            org.eclipse.emf.ecore.resource.Resource resource =
+                module != null ? module.eResource() : null;
+            String name = resource != null && resource.getURI() != null
+                ? resource.getURI().path() : String.valueOf(module);
+            Global.tempLog("type-install", what //$NON-NLS-1$
+                + " depth=" + DIAG_DEPTH.get()[0] //$NON-NLS-1$
+                + " ms=" + ms(startNanos, System.nanoTime()) //$NON-NLS-1$
+                + " thread=" + Thread.currentThread().getName() //$NON-NLS-1$
+                + " module=" + name //$NON-NLS-1$
+                + (extra != null ? " " + extra : "")); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        catch (Throwable ignored)
+        {
+        }
+    }
+    // #endregion
 
     private static void enrichExportModuleVariables(BslTreeTypeSystem self, Module module)
     {
@@ -1186,11 +1287,44 @@ public final class BslStructureInsertCommentTypes
         @Override
         public void installTypeSystem(Module module, CancelIndicator cancelIndicator)
         {
+            boolean scopeOwner = beginExportVarsScope();
+            try
+            {
+                installTypeSystemInScope(module, cancelIndicator);
+            }
+            finally
+            {
+                endExportVarsScope(scopeOwner);
+            }
+        }
+
+        private void installTypeSystemInScope(Module module, CancelIndicator cancelIndicator)
+        {
+            // #region agent log
+            int[] depth = DIAG_DEPTH.get();
+            depth[0]++;
+            diag("install-begin", module, System.nanoTime(), null);
+            long t0 = System.nanoTime();
+            try
+            {
+            // #endregion
             super.installTypeSystem(module, cancelIndicator);
+            long t1 = System.nanoTime(); // agent log
             ModuleVariableStates.fix(module);
+            long t2 = System.nanoTime(); // agent log
             // см. ОбщаяФорма.…: экспорт модуля в тип параметра (BslTreeTypeSystem не ткётся).
             BslFormTypeContextEnrichment.enrichModule(module);
+            long t3 = System.nanoTime(); // agent log
             enrich(this, module, null);
+            // #region agent log
+            diag("install-end", module, t0, "super=" + ms(t0, t1) + " fix=" + ms(t1, t2) //$NON-NLS-1$ //$NON-NLS-2$
+                + " formEnrich=" + ms(t2, t3) + " insertEnrich=" + ms(t3, System.nanoTime())); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            finally
+            {
+                depth[0]--;
+            }
+            // #endregion
         }
 
         /**
@@ -1201,10 +1335,44 @@ public final class BslStructureInsertCommentTypes
         public void lightInstallingTypeSystem(Module module, Method method, Variable variable,
             Statement statement, int offset, BmOperationContext context)
         {
+            boolean scopeOwner = beginExportVarsScope();
+            try
+            {
+                lightInstallingTypeSystemInScope(module, method, variable, statement, offset, context);
+            }
+            finally
+            {
+                endExportVarsScope(scopeOwner);
+            }
+        }
+
+        private void lightInstallingTypeSystemInScope(Module module, Method method,
+            Variable variable, Statement statement, int offset, BmOperationContext context)
+        {
+            // #region agent log
+            int[] depth = DIAG_DEPTH.get();
+            depth[0]++;
+            long t0 = System.nanoTime();
+            try
+            {
+            // #endregion
             super.lightInstallingTypeSystem(module, method, variable, statement, offset, context);
+            long t1 = System.nanoTime(); // agent log
             ModuleVariableStates.fix(module);
+            long t2 = System.nanoTime(); // agent log
             BslFormTypeContextEnrichment.enrichMethod(method);
+            long t3 = System.nanoTime(); // agent log
             enrich(this, module, method);
+            // #region agent log
+            diag("light", module, t0, "method=" + (method != null ? method.getName() : null) //$NON-NLS-1$
+                + " super=" + ms(t0, t1) + " fix=" + ms(t1, t2) //$NON-NLS-1$ //$NON-NLS-2$
+                + " formEnrich=" + ms(t2, t3) + " insertEnrich=" + ms(t3, System.nanoTime())); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            finally
+            {
+                depth[0]--;
+            }
+            // #endregion
         }
     }
 }

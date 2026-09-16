@@ -226,8 +226,8 @@ public final class BslDocCommentComputedTypes
     }
 
     /** Защита от рекурсии полного {@code installTypeSystem} целевого модуля из {@code см.}. */
-    private static final java.util.Set<EObject> INSTALLING_TARGET_MODULE =
-        java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+    private static final java.util.Set<EObject> INSTALLING_TARGET_MODULE = java.util.Collections
+        .synchronizedSet(java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>()));
 
     private BslDocCommentComputedTypes() {}
 
@@ -807,8 +807,8 @@ public final class BslDocCommentComputedTypes
                 BslStructureInsertCommentTypes.peekTreeTypeSystem();
             if (tree == null)
                 return false;
-            tree.installTypeSystem((com._1c.g5.v8.dt.bsl.model.Module)module,
-                org.eclipse.xtext.util.CancelIndicator.NullImpl);
+            BslStructureInsertCommentTypes.installTypeSystemNonInterruptable(tree,
+                (com._1c.g5.v8.dt.bsl.model.Module)module);
             return true;
         }
         catch (Throwable ignored)

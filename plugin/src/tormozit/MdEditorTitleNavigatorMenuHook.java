@@ -500,6 +500,10 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
         {
             if (editor.getSite() == null)
                 return;
+            // Подсказка формы читает BM. При закрытии EDT деактивация проекта держит новые
+            // транзакции, и UI-поток встал бы в ожидание (issue 530); обновлять вкладку незачем.
+            if (PlatformUI.getWorkbench().isClosing())
+                return;
             String nowTitle;
             Image nowImage;
             try

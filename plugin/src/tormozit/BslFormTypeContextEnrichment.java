@@ -12,7 +12,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import org.eclipse.emf.common.util.EList;
 
 import org.eclipse.emf.ecore.EObject;
-import org.eclipse.xtext.util.CancelIndicator;
 
 import com._1c.g5.v8.dt.bsl.typesystem.BslTreeTypeSystem;
 import org.objectweb.asm.ClassReader;
@@ -60,11 +59,11 @@ public final class BslFormTypeContextEnrichment
 {
     /** Защита от рекурсии {@code installTypeSystem} модуля формы из чужого модуля. */
     private static final Set<Module> INSTALLING_FORM_MODULE =
-        Collections.newSetFromMap(new IdentityHashMap<>());
+        Collections.synchronizedSet(Collections.newSetFromMap(new IdentityHashMap<>()));
 
     /** Модули формы, для которых полный расчёт уже делали в этой сессии JVM. */
     private static final Set<Module> FORM_MODULE_INSTALLED =
-        Collections.newSetFromMap(new IdentityHashMap<>());
+        Collections.synchronizedSet(Collections.newSetFromMap(new IdentityHashMap<>()));
 
     private static final String TARGET_GET_OR_OPEN =
         "com._1c.g5.v8.dt.bsl.typesystem.GetOrOpenFormInvocationTypesComputer"; //$NON-NLS-1$
@@ -191,6 +190,7 @@ public final class BslFormTypeContextEnrichment
     {
         if (types == null || types.isEmpty())
             return;
+        boolean scopeOwner = BslStructureInsertCommentTypes.beginExportVarsScope();
         try
         {
             for (Object item : types)
@@ -198,6 +198,10 @@ public final class BslFormTypeContextEnrichment
         }
         catch (Throwable ignored)
         {
+        }
+        finally
+        {
+            BslStructureInsertCommentTypes.endExportVarsScope(scopeOwner);
         }
     }
 
@@ -303,7 +307,7 @@ public final class BslFormTypeContextEnrichment
             BslTreeTypeSystem tree = BslStructureInsertCommentTypes.peekTreeTypeSystem();
             if (tree == null)
                 return;
-            tree.installTypeSystem(module, CancelIndicator.NullImpl);
+            BslStructureInsertCommentTypes.installTypeSystemNonInterruptable(tree, module);
             FORM_MODULE_INSTALLED.add(module);
         }
         catch (Throwable ignored)
