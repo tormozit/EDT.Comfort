@@ -172,6 +172,7 @@
     <startup class="tormozit.PropertyNameIdentifierHook"/>
     <startup class="tormozit.PropertySheetActivePropertyHook"/>
     <startup class="tormozit.PropertySheetNonDefaultHighlightHook"/>
+    <startup class="tormozit.PropertySheetHandlerRenameHook"/>
     <startup class="tormozit.BslEditorHighlightingHook"/>
     <startup class="tormozit.BracketContentHintHook"/>
     <startup class="tormozit.IndentGuideHook"/>
