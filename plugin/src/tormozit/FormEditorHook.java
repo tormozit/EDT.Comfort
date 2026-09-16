@@ -47,8 +47,10 @@ import org.eclipse.jface.action.MenuManager;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.viewers.ColumnViewer;
 import org.eclipse.jface.resource.ImageDescriptor;
+import org.eclipse.jface.viewers.CellLabelProvider;
 import org.eclipse.jface.viewers.ColumnLabelProvider;
 import org.eclipse.jface.viewers.ITreeContentProvider;
+import org.eclipse.jface.viewers.TableViewer;
 import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.jface.viewers.TreeViewerColumn;
 import org.eclipse.emf.common.notify.Adapter;
@@ -83,6 +85,7 @@ import org.eclipse.swt.events.MenuEvent;
 import org.eclipse.swt.graphics.Color;
 import org.eclipse.swt.graphics.GC;
 import org.eclipse.swt.graphics.Image;
+import org.eclipse.swt.graphics.ImageData;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.graphics.Rectangle;
 import org.eclipse.swt.layout.FillLayout;
@@ -171,6 +174,7 @@ import com._1c.g5.v8.dt.form.model.Button;
 import com._1c.g5.v8.dt.form.model.ContextMenu;
 import com._1c.g5.v8.dt.form.model.DataItem;
 import com._1c.g5.v8.dt.form.model.DataPathReferredObject;
+import com._1c.g5.v8.dt.form.model.Decoration;
 import com._1c.g5.v8.dt.form.model.EventHandler;
 import com._1c.g5.v8.dt.form.model.EventHandlerContainer;
 import com._1c.g5.v8.dt.form.model.DynamicListExtInfo;
@@ -184,6 +188,7 @@ import com._1c.g5.v8.dt.form.model.FormItemContainer;
 import com._1c.g5.v8.dt.form.model.FormVisualEntity;
 import com._1c.g5.v8.dt.form.model.FormField;
 import com._1c.g5.v8.dt.form.model.ManagedFormGroupType;
+import com._1c.g5.v8.dt.form.model.PictureDecorationExtInfo;
 import com._1c.g5.v8.dt.form.model.Table;
 import com._1c.g5.v8.dt.form.model.TableHolder;
 import com._1c.g5.v8.dt.form.model.Titled;
@@ -207,9 +212,13 @@ import com._1c.g5.v8.dt.form.ui.editor.item.FormItemActionsGroup;
 import com._1c.g5.v8.dt.platform.version.IRuntimeVersionSupport;
 import com._1c.g5.v8.dt.platform.version.Version;
 import com._1c.g5.wiring.ServiceAccess;
+import com._1c.g5.v8.dt.mcore.Picture;
+import com._1c.g5.v8.dt.mcore.PictureRef;
 import com._1c.g5.v8.dt.mcore.TypeDescription;
 import com._1c.g5.v8.dt.mcore.TypeItem;
 import com._1c.g5.v8.dt.mcore.util.McoreUtil;
+import com._1c.g5.v8.dt.platform.pictures.IPictureManifestQueryComputer;
+import com._1c.g5.v8.dt.platform.pictures.IPictureManager;
 import com._1c.g5.v8.dt.metadata.dbview.DbViewFieldDef;
 import com._1c.g5.v8.dt.metadata.mdclass.AdjustableBoolean;
 import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
@@ -227,6 +236,7 @@ import org.eclipse.emf.common.util.EMap;
 import org.eclipse.emf.common.util.URI;
 import com._1c.g5.v8.dt.ui.commands.ShowPropertiesHandler;
 import com._1c.g5.v8.dt.ui.util.ContentUtil;
+import com._1c.g5.v8.dt.ui.util.DtImageDataRenderer;
 import com._1c.g5.v8.dt.ui.util.OpenHelper;
 
 /**
@@ -277,8 +287,10 @@ import com._1c.g5.v8.dt.ui.util.OpenHelper;
  *   <li><b>Число элементов в заголовках вкладок «Реквизиты», «Команды», «Параметры».</b>
  *       Как в редакторе объекта метаданных — см. {@link TabCounts}.
  *
- *   <li><b>Колонки дерева элементов формы.</b> Обработчики, условное оформление, эффективные
- *       «Невидимость» и «ТолькоПросмотр», вид группы в подписи — см. {@link ItemsTree}.
+ *   <li><b>Колонки дерева элементов формы.</b> Эффективный заголовок и иконка, обработчики,
+ *       условное оформление, «Невидимость» и «ТолькоПросмотр», вид группы в подписи —
+ *       см. {@link ItemsTree}. Иконки команд формы в списке «Команды формы» —
+ *       {@link FormCommandsIcons}.
  *
  *   <li><b>Страница «Условное оформление».</b> Штатный редактор условного оформления прямо в
  *       редакторе формы, с отбором по текущему элементу — см. {@link AppearancePage}.
@@ -398,6 +410,7 @@ public class FormEditorHook implements IStartup
         AttributeHeaderTooltips.install();
         AttributesExtraColumns.install();
         ItemsTree.install();
+        FormCommandsIcons.install();
         AppearancePage.install();
         ConditionalAppearanceCellStyle.install(display);
     }
@@ -2285,6 +2298,531 @@ public class FormEditorHook implements IStartup
         }
 
         private InheritedTitles()
+        {
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Эффективные иконки элементов и команд формы (EffectiveIcons)
+    // -----------------------------------------------------------------------
+
+    /**
+     * Картинка элемента или команды формы → {@link Image} для списков редактора формы.
+     *
+     * <p>Загрузка содержимого ({@link DtImageDataRenderer} + {@link IPictureManager}) может
+     * ходить в BM за общей картинкой — в отрисовке строки этому не место. Поэтому:
+     * <ul>
+     *   <li>в ячейку ставится уже готовый {@link Image} из кеша;</li>
+     *   <li>промах кеша ставит картинку в очередь фонового джоба и возвращает {@code null};</li>
+     *   <li>очередь наполняется только из провайдеров подписи видимых строк — невидимые
+     *       элементы и команды не грузятся, пока до них не дойдёт прокрутка или раскрытие.</li>
+     * </ul>
+     *
+     * <p>Кеш общий на страницу редактора: одна и та же {@link Picture} (кнопка и её команда,
+     * несколько кнопок с одной командой) даёт один {@link Image}. Образы освобождаются при
+     * закрытии страницы.
+     */
+    private static final class EffectiveIcons
+    {
+        private static final int BATCH = 20;
+
+        private static final int SCHEDULE_DELAY_MS = 100;
+
+        /** Сторона значка в списках — как у штатных иконок дерева элементов. */
+        private static final int ICON_SIZE = 16;
+
+        private static final Map<FormEditorPage, PageState> STATES = new WeakHashMap<>();
+
+        /** Состояние одной страницы: кеш образов, очередь, просмотрщики для обновления. */
+        private static final class PageState
+        {
+            final Map<Picture, Image> images = new HashMap<>();
+
+            /** Уже пробовали грузить — пусто или ошибка; повторно не ставим в очередь. */
+            final Set<Picture> empty = new HashSet<>();
+
+            final LinkedHashSet<Picture> pending = new LinkedHashSet<>();
+
+            TreeViewer itemsViewer;
+
+            Tree itemsTree;
+
+            TableViewer commandsViewer;
+
+            Job job;
+
+            boolean scheduled;
+        }
+
+        /**
+         * Эффективная картинка элемента: своя, а у кнопки без своей — картинка команды формы.
+         * {@code null} — показывать нечего (и ставить в очередь нечего).
+         */
+        static Picture pictureOf(FormItem item)
+        {
+            if (item instanceof Button button)
+            {
+                Picture own = present(button.getPicture());
+                if (own != null)
+                    return own;
+                return button.getCommandName() instanceof FormCommand command
+                    ? present(command.getPicture()) : null;
+            }
+            if (item instanceof Decoration decoration
+                && decoration.getExtInfo() instanceof PictureDecorationExtInfo info)
+                return present(info.getPicture());
+            return null;
+        }
+
+        /** Картинка команды формы, если задана. */
+        static Picture pictureOf(FormCommand command)
+        {
+            return command == null ? null : present(command.getPicture());
+        }
+
+        /**
+         * Образ из кеша; при промахе картинка встаёт в очередь. Вызывать только из отрисовки
+         * видимой строки — иначе очередь разрастётся на всё дерево.
+         */
+        static Image cached(FormEditorPage page, Picture picture)
+        {
+            if (page == null || picture == null)
+                return null;
+            PageState state = state(page);
+            Image image = state.images.get(picture);
+            if (image != null)
+                return image.isDisposed() ? null : image;
+            if (state.empty.contains(picture))
+                return null;
+            if (state.pending.add(picture))
+                schedule(page, state);
+            return null;
+        }
+
+        /** Подключение дерева элементов: обновлять его строки после загрузки. */
+        static void installItems(FormEditorPage page, TreeViewer viewer, Tree tree)
+        {
+            if (page == null || viewer == null || tree == null || tree.isDisposed())
+                return;
+            PageState state = state(page);
+            state.itemsViewer = viewer;
+            state.itemsTree = tree;
+            tree.addListener(SWT.Dispose, event -> {
+                PageState current = STATES.get(page);
+                if (current == null)
+                    return;
+                current.itemsViewer = null;
+                current.itemsTree = null;
+                disposeIfIdle(page, current);
+            });
+        }
+
+        /** Подключение списка команд формы. */
+        static void installCommands(FormEditorPage page, TableViewer viewer)
+        {
+            if (page == null || viewer == null)
+                return;
+            org.eclipse.swt.widgets.Table table = viewer.getTable();
+            if (table == null || table.isDisposed())
+                return;
+            PageState state = state(page);
+            state.commandsViewer = viewer;
+            table.addListener(SWT.Dispose, event -> {
+                PageState current = STATES.get(page);
+                if (current == null)
+                    return;
+                current.commandsViewer = null;
+                disposeIfIdle(page, current);
+            });
+        }
+
+        private static Picture present(Picture picture)
+        {
+            if (picture == null || picture.eIsProxy())
+                return null;
+            if (picture instanceof PictureRef ref)
+            {
+                Picture target = ref.getPicture();
+                if (target == null || target.eIsProxy())
+                    return null;
+            }
+            return picture;
+        }
+
+        private static PageState state(FormEditorPage page)
+        {
+            return STATES.computeIfAbsent(page, key -> new PageState());
+        }
+
+        private static void disposeIfIdle(FormEditorPage page, PageState state)
+        {
+            if (state.itemsTree != null || state.commandsViewer != null)
+                return;
+            STATES.remove(page);
+            if (state.job != null)
+                state.job.cancel();
+            for (Image image : state.images.values())
+            {
+                if (image != null && !image.isDisposed())
+                    image.dispose();
+            }
+            state.images.clear();
+            state.empty.clear();
+            state.pending.clear();
+        }
+
+        private static void schedule(FormEditorPage page, PageState state)
+        {
+            if (state.scheduled || state.pending.isEmpty())
+                return;
+            state.scheduled = true;
+            if (state.job == null)
+                state.job = createJob(page, state);
+            state.job.schedule(SCHEDULE_DELAY_MS);
+        }
+
+        private static Job createJob(FormEditorPage page, PageState state)
+        {
+            Job job = new Job("Комфорт: иконки элементов формы") //$NON-NLS-1$
+            {
+                @Override
+                protected IStatus run(IProgressMonitor monitor)
+                {
+                    runBatch(page, state, monitor);
+                    return Status.OK_STATUS;
+                }
+            };
+            job.setSystem(true);
+            job.setPriority(Job.DECORATE);
+            return job;
+        }
+
+        private static void runBatch(FormEditorPage page, PageState state, IProgressMonitor monitor)
+        {
+            List<Picture> batch = new ArrayList<>(BATCH);
+            Display display = Display.getDefault();
+            if (display == null || display.isDisposed())
+                return;
+            try
+            {
+                display.syncExec(() -> {
+                    for (Picture picture : state.pending)
+                    {
+                        batch.add(picture);
+                        if (batch.size() >= BATCH)
+                            break;
+                    }
+                });
+            }
+            catch (SWTException e)
+            {
+                return;
+            }
+            if (batch.isEmpty())
+            {
+                display.asyncExec(() -> state.scheduled = false);
+                return;
+            }
+            IPictureManager manager = pictureManager();
+            Map<Picture, ImageData> loaded = new HashMap<>();
+            for (Picture picture : batch)
+            {
+                if (monitor != null && monitor.isCanceled())
+                    break;
+                loaded.put(picture, loadImageData(picture, manager));
+            }
+            display.asyncExec(() -> apply(page, state, batch, loaded));
+        }
+
+        private static IPictureManager pictureManager()
+        {
+            try
+            {
+                return ServiceAccess.get(IPictureManager.class);
+            }
+            catch (RuntimeException e)
+            {
+                return null;
+            }
+        }
+
+        /**
+         * Данные картинки в фоне. {@link Image} из них создаётся уже в UI-потоке.
+         * Размер — {@link #ICON_SIZE}, как у колонки картинок в диалоге выбора.
+         */
+        private static ImageData loadImageData(Picture picture, IPictureManager manager)
+        {
+            if (picture == null || manager == null)
+                return null;
+            try
+            {
+                ImageData data = DtImageDataRenderer.getImageDataByPicture(picture, manager,
+                    IPictureManifestQueryComputer.DEFAULT);
+                if (data == null)
+                {
+                    manager.skipCacheValues();
+                    return null;
+                }
+                if (data.width == ICON_SIZE && data.height == ICON_SIZE)
+                    return data;
+                return data.scaledTo(ICON_SIZE, ICON_SIZE);
+            }
+            catch (RuntimeException | LinkageError e)
+            {
+                Global.logError("FormEditorHook.EffectiveIcons", "loadImageData", e); //$NON-NLS-1$ //$NON-NLS-2$
+                return null;
+            }
+        }
+
+        private static void apply(FormEditorPage page, PageState state, List<Picture> batch,
+            Map<Picture, ImageData> loaded)
+        {
+            state.scheduled = false;
+            Display display = Display.getCurrent();
+            for (Picture picture : batch)
+            {
+                state.pending.remove(picture);
+                ImageData data = loaded.get(picture);
+                if (data == null || display == null || display.isDisposed())
+                {
+                    state.empty.add(picture);
+                    continue;
+                }
+                Image image = new Image(display, data);
+                Image previous = state.images.put(picture, image);
+                if (previous != null && previous != image && !previous.isDisposed())
+                    previous.dispose();
+            }
+            refresh(state, batch);
+            schedule(page, state);
+        }
+
+        private static void refresh(PageState state, List<Picture> batch)
+        {
+            Set<Picture> updated = new HashSet<>(batch);
+            refreshItems(state, updated);
+            refreshCommands(state, updated);
+        }
+
+        private static void refreshItems(PageState state, Set<Picture> updated)
+        {
+            TreeViewer viewer = state.itemsViewer;
+            Tree tree = state.itemsTree;
+            if (viewer == null || tree == null || tree.isDisposed()
+                || viewer.getControl().isDisposed())
+                return;
+            for (TreeItem row : ItemsTree.visibleRows(tree))
+            {
+                if (row.isDisposed() || row.getData() == null)
+                    continue;
+                FormItem item = ItemsTree.domainItem(row.getData());
+                Picture picture = pictureOf(item);
+                if (picture != null && updated.contains(picture))
+                    viewer.update(row.getData(), null);
+            }
+        }
+
+        private static void refreshCommands(PageState state, Set<Picture> updated)
+        {
+            TableViewer viewer = state.commandsViewer;
+            if (viewer == null || viewer.getControl() == null || viewer.getControl().isDisposed())
+                return;
+            org.eclipse.swt.widgets.Table table = viewer.getTable();
+            if (table.isDisposed())
+                return;
+            int top = table.getTopIndex();
+            int bottom = Math.min(table.getItemCount(), top + visibleCommandLimit(table));
+            for (int i = top; i < bottom; i++)
+            {
+                org.eclipse.swt.widgets.TableItem row = table.getItem(i);
+                if (row.isDisposed())
+                    continue;
+                Object element = row.getData();
+                if (!(element instanceof FormCommand command))
+                    continue;
+                Picture picture = pictureOf(command);
+                if (picture != null && updated.contains(picture))
+                    viewer.update(element, null);
+            }
+        }
+
+        static int visibleCommandLimit(org.eclipse.swt.widgets.Table table)
+        {
+            int height = Math.max(table.getItemHeight(), 1);
+            return table.getClientArea().height / height + 2;
+        }
+
+        private EffectiveIcons()
+        {
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Иконки списка «Команды формы» (FormCommandsIcons)
+    // -----------------------------------------------------------------------
+
+    /**
+     * В списке «Команды формы» вместо единой штатной иконки показывает собственную картинку
+     * команды, если она задана. Загрузка — через {@link EffectiveIcons}, только для видимых
+     * строк.
+     */
+    private static final class FormCommandsIcons
+    {
+        private static final String KEY_HOOKED = "tormozit.formCommandsIcons.hooked"; //$NON-NLS-1$
+
+        private static final int RETRY_DELAY_MS = 200;
+
+        private static final int MAX_ATTEMPTS = 100;
+
+        static void install()
+        {
+            trackFormEditors(editor -> attach(editor, 0));
+        }
+
+        private static void attach(FormEditor editor, int attempt)
+        {
+            try
+            {
+                FormEditorPage page = findFormPage(editor);
+                Object viewerObj = page != null
+                    ? Global.getField(page, "formCommandsViewer") : null; //$NON-NLS-1$
+                if (!(viewerObj instanceof TableViewer viewer))
+                {
+                    scheduleRetry(editor, attempt);
+                    return;
+                }
+                org.eclipse.swt.widgets.Table table = viewer.getTable();
+                if (table == null || table.isDisposed() || table.getColumnCount() == 0)
+                {
+                    scheduleRetry(editor, attempt);
+                    return;
+                }
+                if (Boolean.TRUE.equals(table.getData(KEY_HOOKED)))
+                    return;
+                Object columnObj = Global.invoke(viewer, "getViewerColumn", Integer.valueOf(0)); //$NON-NLS-1$
+                if (!(columnObj instanceof org.eclipse.jface.viewers.ViewerColumn column))
+                {
+                    scheduleRetry(editor, attempt);
+                    return;
+                }
+                CellLabelProvider current = viewer.getLabelProvider(0);
+                if (!(current instanceof ColumnLabelProvider base))
+                {
+                    scheduleRetry(editor, attempt);
+                    return;
+                }
+                table.setData(KEY_HOOKED, Boolean.TRUE);
+                column.setLabelProvider(new CommandIconLabelProvider(page, base));
+                EffectiveIcons.installCommands(page, viewer);
+                table.addListener(SWT.Paint, event -> refreshVisibleIcons(page, viewer, table));
+            }
+            catch (Exception e)
+            {
+                Global.logError("FormEditorHook.FormCommandsIcons", "attach", e); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+
+        private static final String KEY_REFRESH_STAMP = "tormozit.formCommandsIcons.refreshed"; //$NON-NLS-1$
+
+        private static final int REFRESH_INTERVAL_MS = 1000;
+
+        /** Сверяет иконки видимых строк с моделью — смена картинки в «Свойствах» доходит без F5. */
+        private static void refreshVisibleIcons(FormEditorPage page, TableViewer viewer,
+            org.eclipse.swt.widgets.Table table)
+        {
+            if (table.isDisposed() || page == null)
+                return;
+            long now = System.currentTimeMillis();
+            if (table.getData(KEY_REFRESH_STAMP) instanceof Long last
+                && now - last.longValue() < REFRESH_INTERVAL_MS)
+                return;
+            table.setData(KEY_REFRESH_STAMP, Long.valueOf(now));
+            if (!(viewer.getLabelProvider(0) instanceof CommandIconLabelProvider provider))
+                return;
+            int top = table.getTopIndex();
+            int bottom = Math.min(table.getItemCount(),
+                top + EffectiveIcons.visibleCommandLimit(table));
+            List<Object> stale = new ArrayList<>();
+            for (int i = top; i < bottom; i++)
+            {
+                org.eclipse.swt.widgets.TableItem row = table.getItem(i);
+                if (row.isDisposed() || !(row.getData() instanceof FormCommand command))
+                    continue;
+                if (provider.getImage(command) != row.getImage(0))
+                    stale.add(command);
+            }
+            if (stale.isEmpty())
+                return;
+            table.getDisplay().asyncExec(() -> {
+                if (table.isDisposed())
+                    return;
+                for (Object element : stale)
+                    viewer.update(element, null);
+            });
+        }
+
+        private static void scheduleRetry(FormEditor editor, int attempt)
+        {
+            if (attempt >= MAX_ATTEMPTS || editor.getSite() == null)
+                return;
+            Display.getDefault().timerExec(RETRY_DELAY_MS, () -> attach(editor, attempt + 1));
+        }
+
+        private static final class CommandIconLabelProvider extends ColumnLabelProvider
+        {
+            private final FormEditorPage page;
+
+            private final ColumnLabelProvider base;
+
+            CommandIconLabelProvider(FormEditorPage page, ColumnLabelProvider base)
+            {
+                this.page = page;
+                this.base = base;
+            }
+
+            @Override
+            public String getText(Object element)
+            {
+                return base.getText(element);
+            }
+
+            @Override
+            public Image getImage(Object element)
+            {
+                if (element instanceof FormCommand command)
+                {
+                    Picture picture = EffectiveIcons.pictureOf(command);
+                    if (picture != null)
+                    {
+                        Image image = EffectiveIcons.cached(page, picture);
+                        if (image != null)
+                            return image;
+                        // Ещё грузится — временно штатная, чтобы строка не мигала пустотой.
+                    }
+                }
+                return base.getImage(element);
+            }
+
+            @Override
+            public Color getForeground(Object element)
+            {
+                return base.getForeground(element);
+            }
+
+            @Override
+            public Color getBackground(Object element)
+            {
+                return base.getBackground(element);
+            }
+
+            @Override
+            public String getToolTipText(Object element)
+            {
+                return base.getToolTipText(element);
+            }
+        }
+
+        private FormCommandsIcons()
         {
         }
     }
@@ -4275,9 +4813,11 @@ public class FormEditorHook implements IStartup
      *
      *   <li><b>Колонка «Заголовок»</b> — эффективный заголовок элемента ({@link EffectiveTitle}):
      *       собственный — обычным цветом, взятый у реквизита формы, команды или поля метаданных —
-     *       серым. Двойной клик переходит к месту, где заголовок задан. Наследуемые заголовки
-     *       требуют похода в другой объект метаданных, поэтому их источники разрешает фоновый
-     *       джоб ({@link InheritedTitles}), а не отрисовка строки.
+     *       серым. Слева — эффективная иконка ({@link EffectiveIcons}): своя картинка элемента
+     *       или, у кнопки без своей, картинка команды формы; подгружается лениво только для
+     *       видимых строк. Двойной клик переходит к месту, где заголовок задан. Наследуемые
+     *       заголовки требуют похода в другой объект метаданных, поэтому их источники разрешает
+     *       фоновый джоб ({@link InheritedTitles}), а не отрисовка строки.
      *
      *   <li><b>Отбор по заголовку и подсказке.</b> Поле фильтра ищет не только по имени элемента,
      *       но и по его эффективному заголовку и подсказке; найденный фрагмент дописывается серым
@@ -4522,6 +5062,7 @@ public class FormEditorHook implements IStartup
                 Global.tempLog(SelectionMemory.LOG, "attach: колонки созданы, попытка " + attempt); //$NON-NLS-1$
                 SelectionMemory.install(page, viewer, tree);
                 InheritedTitles.install(page, viewer, tree);
+                EffectiveIcons.installItems(page, viewer, tree);
             }
             catch (Exception e)
             {
@@ -4569,6 +5110,8 @@ public class FormEditorHook implements IStartup
                 TITLE_TITLE + ": эффективный заголовок элемента — тот, который увидит" //$NON-NLS-1$
                     + " пользователь. Собственный заголовок показан обычным цветом," //$NON-NLS-1$
                     + " взятый у реквизита формы, команды или поля метаданных — серым." //$NON-NLS-1$
+                    + " Слева — эффективная иконка: своя картинка элемента или, у кнопки," //$NON-NLS-1$
+                    + " картинка команды формы." //$NON-NLS-1$
                     + " Двойной клик переходит к месту, где заголовок задан." //$NON-NLS-1$
                     + Global.pluginSignForTooltip()));
             titleColumn.setLabelProvider(new TitleLabelProvider(page, tree));
@@ -5161,10 +5704,12 @@ public class FormEditorHook implements IStartup
             Object element = row.getData();
             for (int column = COLUMN_TITLE; column <= COLUMN_LAST; column++)
             {
-                // «Заголовок» рисуется своим стилевым провайдером — у него текст берётся отдельно.
+                // «Заголовок» рисуется своим стилевым провайдером — у него текст и иконка отдельно.
                 if (viewer.getLabelProvider(column) instanceof TitleLabelProvider titleProvider)
                 {
                     if (!titleProvider.getText(element).equals(row.getText(column)))
+                        return true;
+                    if (titleProvider.getImage(element) != row.getImage(column))
                         return true;
                     continue;
                 }
@@ -6561,7 +7106,9 @@ public class FormEditorHook implements IStartup
         /**
          * Эффективный заголовок элемента. Собственный — обычным цветом, взятый у реквизита,
          * команды или поля метаданных — серым (та же договорённость, что у колонок
-         * «Невидимость» и «ТолькоПросмотр»: унаследованное значение приглушено).
+         * «Невидимость» и «ТолькоПросмотр»: унаследованное значение приглушено). Слева —
+         * эффективная иконка ({@link EffectiveIcons}): своя картинка элемента или, у кнопки,
+         * картинка команды формы.
          *
          * <p>Свой {@link StyledCellLabelProvider} с {@code COLORS_ON_SELECTION}, а не
          * {@code DelegatingStyledCellLabelProvider}: иначе на выделенной строке JFace выбрасывает
@@ -6588,6 +7135,13 @@ public class FormEditorHook implements IStartup
                 return info == null ? "" : info.text; //$NON-NLS-1$
             }
 
+            /** Иконка ячейки — для сверки {@link #isStale} и для {@link #update}. */
+            Image getImage(Object element)
+            {
+                Picture picture = EffectiveIcons.pictureOf(domainItem(element));
+                return picture == null ? null : EffectiveIcons.cached(page, picture);
+            }
+
             @Override
             public void update(ViewerCell cell)
             {
@@ -6602,6 +7156,7 @@ public class FormEditorHook implements IStartup
                     SmartMatchHighlight.applyRanges(styled, matcher.getHighlightRanges(text), tree);
                 cell.setText(styled.toString());
                 cell.setStyleRanges(styled.getStyleRanges());
+                cell.setImage(getImage(element));
                 super.update(cell);
             }
         }

@@ -318,12 +318,22 @@ public final class Global
     /**
      * Вызывает публичный метод {@code methodName} без аргументов на объекте {@code obj}.
      *
+     * <p>Публичный метод, переопределённый в непубличном классе (напр. EGit
+     * {@code FileDiff$FileDiffForMerges} для коммита слияния), без {@code setAccessible}
+     * даёт {@code IllegalAccessException} — поэтому доступ открывается явно.
+     *
      * @return результат вызова, или {@code null} при любой ошибке / отсутствии метода
      */
     public static Object call(Object obj, String methodName)
     {
         if (obj == null || methodName == null) return null;
-        try { return obj.getClass().getMethod(methodName).invoke(obj); }
+        try
+        {
+            java.lang.reflect.Method m = obj.getClass().getMethod(methodName);
+            if (!java.lang.reflect.Modifier.isPublic(m.getDeclaringClass().getModifiers()))
+                m.setAccessible(true);
+            return m.invoke(obj);
+        }
         catch (Exception ignored) { return null; }
     }
 

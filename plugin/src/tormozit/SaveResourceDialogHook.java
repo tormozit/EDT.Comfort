@@ -2,8 +2,12 @@ package tormozit;
 
 import java.lang.reflect.Field;
 import java.util.Collection;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
+import org.eclipse.core.runtime.IProgressMonitor;
+import org.eclipse.core.runtime.IStatus;
+import org.eclipse.core.runtime.Status;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
@@ -17,6 +21,7 @@ import org.eclipse.ui.IStartup;
 import org.eclipse.ui.IWorkbenchPart;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.Saveable;
+import org.eclipse.ui.progress.UIJob;
 
 /**
  * Диалог Eclipse «Сохранить ресурс» при закрытии редактора, который ещё открыт
@@ -103,6 +108,224 @@ public final class SaveResourceDialogHook implements IStartup
         };
         display.addFilter(SWT.Show, listener);
         display.addFilter(SWT.Activate, listener);
+        installSaveablesTrap();
+    }
+
+    /**
+     * Временная ловушка: кто регистрирует модель редактора от имени чужой части.
+     * <p>
+     * Дамп при показе диалога (16.09.2026) показал второго держателя формы —
+     * {@code ProjectExplorer} («Структура проекта») с {@code DefaultSaveable}, обёрнутым
+     * вокруг самого {@code FormEditor}. Сам навигатор такую модель вернуть не может
+     * ({@code SaveablesProvider} нет ни у EDT, ни у нас), значит её регистрирует кто-то
+     * третий.
+     * <p>
+     * Слушатель {@code addModelLifecycleListener} для этого слеп: {@code addModel} шлёт
+     * событие, только когда счётчик ссылок растёт с 0 до 1, а вторая ссылка на ту же
+     * модель проходит молча (лог 16.09.2026 16:13 — ни одного события). Поэтому
+     * подменяем саму карту {@code modelMap} наследником {@link LinkedHashMap}, который
+     * пишет стек, когда источник регистрируется впервые ({@code addModel} кладёт
+     * источнику новый набор через {@code put}, а модель добавляет сразу после).
+     * <p>
+     * Значения карты подменять нельзя: {@code addModel} держит свою ссылку на только что
+     * созданный набор и добавляет модель в неё. Копия в карте оставалась пустой, и учёт
+     * моделей ломался (лог 16.09.2026 16:19 — у новых источников пустые наборы, вместо
+     * «открыт в другом месте» спрашивалось «Сохранить 'Форма1'?»).
+     * <p>
+     * При установке пишем и текущее содержимое карты — чтобы видеть, не появилась ли
+     * лишняя ссылка ещё до установки.
+     */
+    private static void installSaveablesTrap()
+    {
+        try
+        {
+            Object list = PlatformUI.getWorkbench().getService(ISaveablesLifecycleListener.class);
+            if (list == null)
+            {
+                Global.tempLog("save-resource", "trap: сервис недоступен"); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            }
+            Object current = Global.getField(list, "modelMap"); //$NON-NLS-1$
+            if (current instanceof TrapMap)
+                return;
+            if (!(current instanceof Map<?, ?> map))
+            {
+                Global.tempLog("save-resource", "trap: modelMap не карта " + current); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            }
+            TrapMap trap = new TrapMap(map);
+            boolean set = Global.setFieldForce(list, "modelMap", trap); //$NON-NLS-1$
+            StringBuilder sb = new StringBuilder("trap: установлена=").append(set); //$NON-NLS-1$
+            // Тихий режим: до установки пишем только держателей с чужой моделью.
+            for (Map.Entry<?, ?> entry : map.entrySet())
+            {
+                if (hasForeignModel(entry.getKey(), entry.getValue()))
+                {
+                    sb.append("\n  чужая модель уже до установки у ") //$NON-NLS-1$
+                        .append(describeSource(entry.getKey()));
+                    appendModels(sb, entry.getValue(), "держит"); //$NON-NLS-1$
+                }
+            }
+            Global.tempLog("save-resource", sb.toString()); //$NON-NLS-1$
+        }
+        catch (Exception | LinkageError ex)
+        {
+            Global.tempLog("save-resource", "trap: ошибка установки " + ex); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    /**
+     * Ранняя установка ловушки из {@link Activator#start}: из {@code earlyStartup} она
+     * вставала уже после восстановления редакторов, и лишняя ссылка навигатора была
+     * в карте раньше неё (лог 16.09.2026 16:14:58).
+     */
+    public static void bootTrap()
+    {
+        new UIJob("Comfort save resource trap") //$NON-NLS-1$
+        {
+            @Override
+            public IStatus runInUIThread(IProgressMonitor monitor)
+            {
+                installTrapWhenReady();
+                return Status.OK_STATUS;
+            }
+        }.schedule();
+    }
+
+    private static void installTrapWhenReady()
+    {
+        if (!PlatformUI.isWorkbenchRunning())
+        {
+            Display display = Display.getDefault();
+            if (display != null && !display.isDisposed())
+                display.timerExec(20, SaveResourceDialogHook::installTrapWhenReady);
+            return;
+        }
+        installSaveablesTrap();
+    }
+
+    /**
+     * Первая регистрация источника в {@code SaveablesList}. Модель в набор добавляется
+     * сразу после {@code put}, поэтому проверяем её отложенно. Тихий режим (по просьбе
+     * пользователя): пишем только если источнику досталась чужая модель — со стеком и
+     * активным редактором на момент регистрации (у навигатора держатель совпадал с
+     * активным на тот момент редактором: форма в 16:13, картинка в 16:19).
+     */
+    private static void onSourceRegistered(Object source, Object models)
+    {
+        try
+        {
+            Display display = Display.getCurrent();
+            if (display == null)
+                return;
+            Throwable where = new Throwable();
+            String active = describeSource(activeEditor());
+            display.asyncExec(() ->
+            {
+                if (!hasForeignModel(source, models))
+                    return;
+                StringBuilder sb = new StringBuilder("register foreign"); //$NON-NLS-1$
+                sb.append("\n  источник ").append(describeSource(source)); //$NON-NLS-1$
+                appendModels(sb, models, "держит"); //$NON-NLS-1$
+                sb.append("\n  активный редактор ").append(active); //$NON-NLS-1$
+                appendStack(sb, where);
+                Global.tempLog("save-resource", sb.toString()); //$NON-NLS-1$
+            });
+        }
+        catch (Exception | LinkageError ex)
+        {
+            Global.tempLog("save-resource", "trap: ошибка записи " + ex); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    /** Держит ли источник модель, обёрнутую вокруг другой части. */
+    private static boolean hasForeignModel(Object source, Object models)
+    {
+        if (!(models instanceof Collection<?> set))
+            return false;
+        for (Object model : set.toArray())
+        {
+            if (model != null
+                && "org.eclipse.ui.internal.DefaultSaveable".equals(model.getClass().getName())) //$NON-NLS-1$
+            {
+                Object wrapped = Global.getField(model, "part"); //$NON-NLS-1$
+                if (wrapped != null && wrapped != source)
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    private static void appendModels(StringBuilder sb, Object models, String verb)
+    {
+        if (!(models instanceof Collection<?> set))
+            return;
+        for (Object model : set.toArray())
+            sb.append("\n    ").append(verb).append(' ').append(describeSaveable(model)); //$NON-NLS-1$
+    }
+
+    /** Снятие источника с учёта — пишем только если он держал чужую модель. */
+    private static void onSourceUnregistered(Object source, Object models)
+    {
+        try
+        {
+            if (!hasForeignModel(source, models))
+                return;
+            StringBuilder sb = new StringBuilder("unregister foreign"); //$NON-NLS-1$
+            sb.append("\n  источник ").append(describeSource(source)); //$NON-NLS-1$
+            appendModels(sb, models, "держал"); //$NON-NLS-1$
+            Global.tempLog("save-resource", sb.toString()); //$NON-NLS-1$
+        }
+        catch (Exception | LinkageError ex)
+        {
+            Global.tempLog("save-resource", "trap: ошибка записи " + ex); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    private static Object activeEditor()
+    {
+        try
+        {
+            var window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+            var page = window != null ? window.getActivePage() : null;
+            return page != null ? page.getActiveEditor() : null;
+        }
+        catch (Exception | LinkageError ex)
+        {
+            return null;
+        }
+    }
+
+    /**
+     * Карта «источник → модели» {@code SaveablesList}: пишет первую регистрацию источника.
+     * Значения не подменяет — {@code addModel} добавляет модель в свою ссылку на набор.
+     */
+    private static final class TrapMap extends LinkedHashMap<Object, Object>
+    {
+        private static final long serialVersionUID = 1L;
+
+        TrapMap(Map<?, ?> source)
+        {
+            super(source);
+        }
+
+        @Override
+        public Object put(Object key, Object value)
+        {
+            Object previous = super.put(key, value);
+            if (previous == null && key != null)
+                onSourceRegistered(key, value);
+            return previous;
+        }
+
+        @Override
+        public Object remove(Object key)
+        {
+            Object removed = super.remove(key);
+            if (removed != null)
+                onSourceUnregistered(key, removed);
+            return removed;
+        }
     }
 
     private static void onShellEvent(Display display, Shell shell)
@@ -136,8 +359,19 @@ public final class SaveResourceDialogHook implements IStartup
         {
         }
         appendSaveablesState(sb);
+        appendStack(sb);
+        Global.tempLog("save-resource", sb.toString()); //$NON-NLS-1$
+    }
+
+    private static void appendStack(StringBuilder sb)
+    {
+        appendStack(sb, new Throwable());
+    }
+
+    private static void appendStack(StringBuilder sb, Throwable where)
+    {
         sb.append("\nstack:"); //$NON-NLS-1$
-        for (StackTraceElement frame : new Throwable().getStackTrace())
+        for (StackTraceElement frame : where.getStackTrace())
         {
             String className = frame.getClassName();
             if (className.startsWith("java.") || className.startsWith("jdk.") //$NON-NLS-1$ //$NON-NLS-2$
@@ -147,7 +381,6 @@ public final class SaveResourceDialogHook implements IStartup
             sb.append("\n  ").append(className).append('.').append(frame.getMethodName()) //$NON-NLS-1$
                 .append(':').append(frame.getLineNumber());
         }
-        Global.tempLog("save-resource", sb.toString()); //$NON-NLS-1$
     }
 
     /**
@@ -245,6 +478,12 @@ public final class SaveResourceDialogHook implements IStartup
         }
         sb.append(" [").append(saveable.getClass().getName()) //$NON-NLS-1$
             .append('@').append(Integer.toHexString(System.identityHashCode(saveable))).append(']');
+        if ("org.eclipse.ui.internal.DefaultSaveable".equals(saveable.getClass().getName())) //$NON-NLS-1$
+        {
+            Object wrapped = Global.getField(saveable, "part"); //$NON-NLS-1$
+            sb.append(" part=").append(wrapped == null ? "null" //$NON-NLS-1$ //$NON-NLS-2$
+                : wrapped.getClass().getName() + '@' + Integer.toHexString(System.identityHashCode(wrapped)));
+        }
         return sb.toString();
     }
 

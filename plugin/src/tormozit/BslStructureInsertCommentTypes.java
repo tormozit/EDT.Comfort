@@ -53,6 +53,11 @@ import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.Statement;
 import com._1c.g5.v8.dt.bsl.model.StringLiteral;
 import com._1c.g5.v8.dt.bsl.model.Variable;
+import com._1c.g5.v8.dt.bsl.model.typesytem.ThreadSafeVariableTypeStateProvider;
+import com._1c.g5.v8.dt.bsl.model.typesytem.TypeSystemMode;
+import com._1c.g5.v8.dt.bsl.model.typesytem.VariableTypeState;
+import com._1c.g5.v8.dt.bsl.model.typesytem.VariableTypeStateProvider;
+import com._1c.g5.v8.dt.bsl.model.typesytem.VariableTypeStateProviderCollector;
 import com._1c.g5.v8.dt.bsl.resource.DynamicFeatureAccessComputer;
 import com._1c.g5.v8.dt.bsl.resource.TypesComputer;
 import com._1c.g5.v8.dt.bsl.typesystem.BslTreeTypeSystem;
@@ -1006,6 +1011,172 @@ public final class BslStructureInsertCommentTypes
     }
 
     /**
+     * Обход дефекта EDT: тип переменной модуля терялся в методе, перед которым стоит метод
+     * с другой директивой ({@code &НаКлиентеНаСервереБезКонтекста} перед {@code &НаКлиенте}).
+     * <p>
+     * Состояние типа переменной модуля заводится на каждый метод, смещение в нём —
+     * <b>относительно начала метода</b> (абсолютное = {@code getOffset() + getBlockOffset()}).
+     * {@code VariableTypeStateProvider.getNearestByOffset(int)} берёт по ближайшему состоянию
+     * из каждой группы сред, а затем {@code getBestStates} при пересекающихся средах оставляет
+     * состояние с большим смещением, сравнивая <b>относительные</b> смещения. Более длинная
+     * директива верхнего метода даёт большее относительное смещение — остаётся его состояние,
+     * и {@code TypesComputer} отсекает его как лежащее вне текущего метода: типов нет.
+     * <p>
+     * Исправление — группа состояний с тем же отбором, но по абсолютным смещениям. Ставится
+     * вместо штатной после каждого расчёта; флажок проекта не нужен — это ошибка самой EDT.
+     * <p>
+     * Когда EDT исправит дефект, подмена не нужна: один раз за сессию смотрим байткод штатного
+     * {@code getBestStates} — если он уже учитывает {@code getBlockOffset} (или устроен иначе),
+     * ничего не делаем.
+     */
+    private static final class ModuleVariableStates
+        extends ThreadSafeVariableTypeStateProvider
+    {
+        /** Нужна ли подмена в этой версии EDT; считается один раз. */
+        private static volatile Boolean needed;
+
+        static void fix(Module module)
+        {
+            if (module == null || module.eIsProxy() || !isNeeded())
+                return;
+            try
+            {
+                for (DeclareStatement declare : module.allDeclareStatements())
+                {
+                    for (ExplicitVariable variable : declare.getVariables())
+                    {
+                        VariableTypeStateProviderCollector collector =
+                            variable != null ? variable.getTypeStateProvider() : null;
+                        if (collector == null)
+                            continue;
+                        for (TypeSystemMode mode : TypeSystemMode.values())
+                        {
+                            VariableTypeStateProvider provider = collector.get(mode);
+                            if (provider == null || provider instanceof ModuleVariableStates)
+                                continue;
+                            ModuleVariableStates fixed = new ModuleVariableStates();
+                            fixed.addStates(provider.getAll());
+                            collector.add(mode, fixed);
+                        }
+                    }
+                }
+            }
+            catch (Throwable t)
+            {
+                Global.logError("ModuleVariableStates", "fix", t); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+
+        @Override
+        public List<VariableTypeState> getNearestByOffset(int offset)
+        {
+            // Ближайшее не дальше offset в каждой группе сред — как InnerProvider.getNearestByOffset.
+            List<Environments> groups = new ArrayList<>();
+            List<VariableTypeState> nearest = new ArrayList<>();
+            for (VariableTypeState state : getAll())
+            {
+                if (state == null)
+                    continue;
+                int position = absoluteOffset(state);
+                if (position > offset)
+                    continue;
+                int group = groups.indexOf(state.getEnvironments());
+                if (group < 0)
+                {
+                    groups.add(state.getEnvironments());
+                    nearest.add(state);
+                }
+                else if (position >= absoluteOffset(nearest.get(group)))
+                {
+                    nearest.set(group, state);
+                }
+            }
+            if (nearest.size() <= 1)
+                return nearest;
+            // Как getBestStates, но по абсолютным смещениям.
+            List<VariableTypeState> best = new ArrayList<>();
+            for (VariableTypeState state : nearest)
+            {
+                boolean keep = true;
+                for (VariableTypeState other : nearest)
+                {
+                    if (other != state
+                        && state.getEnvironments().containsAny(other.getEnvironments())
+                        && absoluteOffset(state) < absoluteOffset(other))
+                    {
+                        keep = false;
+                        break;
+                    }
+                }
+                if (keep)
+                    best.add(state);
+            }
+            return best;
+        }
+
+        private static int absoluteOffset(VariableTypeState state)
+        {
+            return state.getOffset() + state.getBlockOffset();
+        }
+
+        private static boolean isNeeded()
+        {
+            Boolean value = needed;
+            if (value == null)
+            {
+                value = Boolean.valueOf(hasDefect());
+                needed = value;            }
+            return value.booleanValue();
+        }
+
+        /**
+         * Дефект на месте, если штатный {@code getBestStates} есть и не зовёт
+         * {@code getBlockOffset}. Метод пропал или класс не читается — считаем, что EDT
+         * переделала отбор, и не вмешиваемся.
+         */
+        private static boolean hasDefect()
+        {
+            Class<?> target = VariableTypeStateProvider.class;
+            String resource = target.getName().replace('.', '/') + ".class"; //$NON-NLS-1$
+            ClassLoader loader = target.getClassLoader();
+            try (java.io.InputStream in = loader != null ? loader.getResourceAsStream(resource) : null)
+            {
+                if (in == null)
+                    return false;
+                boolean[] found = new boolean[2]; // [0] метод есть, [1] зовёт getBlockOffset
+                new org.objectweb.asm.ClassReader(in.readAllBytes()).accept(
+                    new org.objectweb.asm.ClassVisitor(org.objectweb.asm.Opcodes.ASM9)
+                    {
+                        @Override
+                        public org.objectweb.asm.MethodVisitor visitMethod(int access, String name,
+                            String descriptor, String signature, String[] exceptions)
+                        {
+                            if (!"getBestStates".equals(name)) //$NON-NLS-1$
+                                return null;
+                            found[0] = true;
+                            return new org.objectweb.asm.MethodVisitor(org.objectweb.asm.Opcodes.ASM9)
+                            {
+                                @Override
+                                public void visitMethodInsn(int opcode, String owner, String method,
+                                    String methodDescriptor, boolean isInterface)
+                                {
+                                    if ("getBlockOffset".equals(method)) //$NON-NLS-1$
+                                        found[1] = true;
+                                }
+                            };
+                        }
+                    }, org.objectweb.asm.ClassReader.SKIP_DEBUG | org.objectweb.asm.ClassReader.SKIP_FRAMES);
+                return found[0] && !found[1];
+            }
+            catch (Throwable t)
+            {
+                Global.logError("ModuleVariableStates", "hasDefect", t); //$NON-NLS-1$ //$NON-NLS-2$
+                return false;
+            }
+        }
+    }
+
+    /**
      * Система типов EDT плюс наш проход. Единственный потребитель — {@link #install()},
      * поэтому вложенный класс, а не отдельный файл.
      */
@@ -1016,6 +1187,7 @@ public final class BslStructureInsertCommentTypes
         public void installTypeSystem(Module module, CancelIndicator cancelIndicator)
         {
             super.installTypeSystem(module, cancelIndicator);
+            ModuleVariableStates.fix(module);
             // см. ОбщаяФорма.…: экспорт модуля в тип параметра (BslTreeTypeSystem не ткётся).
             BslFormTypeContextEnrichment.enrichModule(module);
             enrich(this, module, null);
@@ -1030,6 +1202,7 @@ public final class BslStructureInsertCommentTypes
             Statement statement, int offset, BmOperationContext context)
         {
             super.lightInstallingTypeSystem(module, method, variable, statement, offset, context);
+            ModuleVariableStates.fix(module);
             BslFormTypeContextEnrichment.enrichMethod(method);
             enrich(this, module, method);
         }

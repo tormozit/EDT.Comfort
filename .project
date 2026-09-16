@@ -54,5 +54,50 @@
 				<arguments>1.0-name-matches-false-false-.tmp</arguments>
 			</matcher>
 		</filter>
+		<filter>
+			<id>1789560000001</id>
+			<name></name>
+			<type>10</type>
+			<matcher>
+				<id>org.eclipse.ui.ide.multiFilter</id>
+				<arguments>1.0-name-matches-false-false-META-INF</arguments>
+			</matcher>
+		</filter>
+		<filter>
+			<id>1789560000002</id>
+			<name></name>
+			<type>10</type>
+			<matcher>
+				<id>org.eclipse.ui.ide.multiFilter</id>
+				<arguments>1.0-name-matches-false-false-com</arguments>
+			</matcher>
+		</filter>
+		<filter>
+			<id>1789560000003</id>
+			<name></name>
+			<type>10</type>
+			<matcher>
+				<id>org.eclipse.ui.ide.multiFilter</id>
+				<arguments>1.0-name-matches-false-false-org</arguments>
+			</matcher>
+		</filter>
+		<filter>
+			<id>1789560000004</id>
+			<name></name>
+			<type>6</type>
+			<matcher>
+				<id>org.eclipse.ui.ide.multiFilter</id>
+				<arguments>1.0-name-matches-false-false-plugin.xml</arguments>
+			</matcher>
+		</filter>
+		<filter>
+			<id>1789560000005</id>
+			<name></name>
+			<type>6</type>
+			<matcher>
+				<id>org.eclipse.ui.ide.multiFilter</id>
+				<arguments>1.0-name-matches-false-false-fragment.xml</arguments>
+			</matcher>
+		</filter>
 	</filteredResources>
 </projectDescription>

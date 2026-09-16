@@ -276,6 +276,7 @@ public final class BslEditorHighlightingHook implements IStartup
                 if (presenter.isCanceled() || (monitor != null && monitor.isCanceled()))
                     return;
 
+                resetDelegateStamp(hr);
                 reconcileMethod.invoke(hr, resource, CancelIndicator.NullImpl);
                 if (presenter.isCanceled() || (monitor != null && monitor.isCanceled()))
                     return;
@@ -316,6 +317,46 @@ public final class BslEditorHighlightingHook implements IStartup
                 + cause.getClass().getSimpleName() + " " + cause.getMessage()); //$NON-NLS-1$
         }
     }
+
+    /**
+     * Штатный {@code BslSemanticHighlightingCalculator} ничего не отдаёт, если
+     * {@code modificationStamp} ресурса не изменился с прошлого расчёта. При
+     * принудительном пересчёте без правки модуля реконсилер тогда снимает его
+     * позиции (директивы, встроенные функции, запросы в строках, препроцессор) —
+     * директивы окрашиваются как ключевые слова. Сбрасываем запомненную метку.
+     */
+    private static void resetDelegateStamp(HighlightingReconciler hr)
+    {
+        try
+        {
+            Field newCalcField = findField(HighlightingReconciler.class, "newCalculator"); //$NON-NLS-1$
+            if (newCalcField == null)
+                return;
+            newCalcField.setAccessible(true);
+            if (!(newCalcField.get(hr) instanceof DelegatingCalculator calculator) || calculator.delegate == null)
+                return;
+            Field stampField = findField(calculator.delegate.getClass(), "modificationStamp"); //$NON-NLS-1$
+            if (stampField == null || stampField.getType() != long.class)
+            {
+                if (!stampFieldMissingLogged)
+                {
+                    stampFieldMissingLogged = true;
+                    Global.log(TAG, "resetDelegateStamp: modificationStamp not found in " //$NON-NLS-1$
+                        + calculator.delegate.getClass().getName());
+                }
+                return;
+            }
+            stampField.setAccessible(true);
+            stampField.setLong(calculator.delegate, Long.MIN_VALUE);
+        }
+        catch (Exception e)
+        {
+            Global.log(TAG, "resetDelegateStamp failed: " + e.getClass().getSimpleName() //$NON-NLS-1$
+                + " " + e.getMessage()); //$NON-NLS-1$
+        }
+    }
+
+    private static volatile boolean stampFieldMissingLogged;
 
     private static void registerWindow(IWorkbenchWindow window)
     {

@@ -67,6 +67,15 @@ public class Activator extends AbstractUIPlugin
         catch (Throwable ignored)
         {
         }
+        // Временная диагностика: лишний держатель модели формы («Структура проекта»)
+        // появляется при восстановлении редакторов — ловушку ставим до него.
+        try
+        {
+            SaveResourceDialogHook.bootTrap();
+        }
+        catch (Throwable ignored)
+        {
+        }
 
         // Только инициализация синглтонов — никакого UI и обращений к Workbench.
         // manager.start() будет вызван из earlyStartup() после запуска Workbench.

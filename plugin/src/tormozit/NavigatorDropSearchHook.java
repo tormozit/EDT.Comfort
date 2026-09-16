@@ -722,7 +722,7 @@ public final class NavigatorDropSearchHook implements IStartup
         {
             for (IWorkbenchPage page : window.getPages())
             {
-                IWorkbenchPart view = page.findView(Global.NAVIGATOR_VIEW_ID);
+                IWorkbenchPart view = createdView(page, Global.NAVIGATOR_VIEW_ID);
                 if (view == null)
                     continue;
                 Object raw = Global.invoke(view, "getCommonViewer"); //$NON-NLS-1$
@@ -742,7 +742,7 @@ public final class NavigatorDropSearchHook implements IStartup
         {
             for (IWorkbenchPage page : window.getPages())
             {
-                IWorkbenchPart view = page.findView(viewId);
+                IWorkbenchPart view = createdView(page, viewId);
                 if (view == null)
                     continue;
                 Object parent = Global.getField(view, "parent"); //$NON-NLS-1$
@@ -751,6 +751,20 @@ public final class NavigatorDropSearchHook implements IStartup
             }
         }
         return false;
+    }
+
+    /**
+     * Уже созданное представление, без восстановления. {@code IWorkbenchPage.findView}
+     * создаёт отложенное представление прямо из сканирования контролов: на старте так
+     * создавалась «Структура проекта», и Workbench записывал ей в держатели модель
+     * активного в тот момент редактора. Эта лишняя ссылка не снималась, и при закрытии
+     * изменённой формы EDT спрашивал «изменён, но всё ещё открыт в другом месте».
+     * Несозданному представлению проверяемый контрол принадлежать и не может.
+     */
+    private static IWorkbenchPart createdView(IWorkbenchPage page, String viewId)
+    {
+        IViewReference reference = page.findViewReference(viewId);
+        return reference != null ? reference.getView(false) : null;
     }
 
     private static boolean isUnder(Control root, Control child)
