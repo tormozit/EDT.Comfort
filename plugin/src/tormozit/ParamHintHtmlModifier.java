@@ -28,6 +28,7 @@ import org.eclipse.jface.text.BadLocationException;
 import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.ITextViewer;
 import org.eclipse.jface.text.Position;
+import org.eclipse.jface.text.contentassist.ICompletionProposal;
 import org.eclipse.jface.text.link.LinkedModeModel;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.browser.Browser;
@@ -64,6 +65,7 @@ import org.eclipse.xtext.resource.EObjectAtOffsetHelper;
 import org.eclipse.xtext.resource.IResourceServiceProvider;
 import org.eclipse.xtext.resource.XtextResource;
 import org.eclipse.xtext.ui.editor.model.IXtextDocument;
+import org.eclipse.xtext.ui.editor.contentassist.ConfigurableCompletionProposal;
 import org.eclipse.xtext.util.concurrent.IUnitOfWork;
 
 import com._1c.g5.v8.dt.bsl.model.BooleanLiteral;
@@ -86,6 +88,8 @@ import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.mcore.Ctor;
 import com._1c.g5.v8.dt.mcore.DuallyNamedElement;
 import com._1c.g5.v8.dt.mcore.Environmental;
+import com._1c.g5.v8.dt.mcore.FakeCtor;
+import com._1c.g5.v8.dt.mcore.FakeParameter;
 import com._1c.g5.v8.dt.mcore.Method;
 import com._1c.g5.v8.dt.mcore.ParamSet;
 import com._1c.g5.v8.dt.mcore.Parameter;
@@ -104,6 +108,7 @@ public final class ParamHintHtmlModifier
     private static final String HEADING_CLASS = "contentassist-heading-content"; //$NON-NLS-1$
     /** Маркер окрашенной части заголовка до списка параметров. */
     private static final String HEADING_PREFIX_CLASS = "comfort-heading-prefix"; //$NON-NLS-1$
+    private static final String OVERFLOW_STYLE_ID = "comfort-param-hint-overflow"; //$NON-NLS-1$
     /** Доля цвета текста в приглушённом цвете заголовка (остальное — фон). */
     private static final double HEADING_PREFIX_TEXT_WEIGHT = 0.55;
     /** Макс. число типов возврата в заголовке (через запятую); дальше — "...". */
@@ -145,9 +150,15 @@ public final class ParamHintHtmlModifier
     private static final String HTML_PATCHED_MARK = "tormozit.paramHintHtmlPatched"; //$NON-NLS-1$
     /** CaretListener на редакторе, пока открыт этот Browser подсказки. */
     private static final String CURRENT_PARAM_CARET_MARK = "tormozit.paramHintCaretSync"; //$NON-NLS-1$
+    /** Точный слот после изменения документа, рассчитанный по ParameterInfo EDT. */
+    private static final String PENDING_PARAM_INDEX_MARK = "tormozit.paramHintPendingIndex"; //$NON-NLS-1$
+    /** Точный слот для ближайшей перегенерации HTML через showPage. */
+    private static final String CURRENT_PARAM_INDEX_MARK = "tormozit.paramHintCurrentIndex"; //$NON-NLS-1$
     /** Пачка setText за короткий интервал: стоп цикла Progress → modify. */
     private static final String MODIFY_BURST_MARK = "tormozit.paramHintModifyBurst"; //$NON-NLS-1$
     private static final AtomicBoolean sigPickOnOpenPending = new AtomicBoolean(false);
+    private static final long SELECTED_CTOR_MAX_AGE_MS = 5_000L;
+    private static volatile SelectedConstructorSignature selectedConstructorSignature;
     /** Реентрабельность tryModifyBrowserHtml (setText → Progress → снова modify). */
     private static final ThreadLocal<Boolean> MODIFY_IN_PROGRESS =
         ThreadLocal.withInitial(() -> Boolean.FALSE);
@@ -959,6 +970,27 @@ public final class ParamHintHtmlModifier
         return pages instanceof List<?> list && !list.isEmpty();
     }
 
+    /** Передаёт выбранный в completion {@link FakeCtor} в наше повторное открытие подсказки. */
+    static void rememberSelectedConstructorSignature(ICompletionProposal proposal,
+        IDocument document, int caret)
+    {
+        selectedConstructorSignature = null;
+        ICompletionProposal raw = SmartContentAssistProcessor.unwrapProposal(proposal);
+        if (!(raw instanceof ConfigurableCompletionProposal configurable))
+            return;
+        Object additional = Global.getField(configurable, "additionalProposalInfo"); //$NON-NLS-1$
+        if (!(additional instanceof FakeCtor fake) || fake.getParams() == null)
+            return;
+        List<String> names = new ArrayList<>(fake.getParams().size());
+        for (FakeParameter parameter : fake.getParams())
+        {
+            String name = parameter != null ? parameter.getName() : null;
+            names.add(name != null ? name : ""); //$NON-NLS-1$
+        }
+        selectedConstructorSignature = new SelectedConstructorSignature(document, caret,
+            names, System.currentTimeMillis());
+    }
+
     /**
      * Показ штатным {@code showControlInfo}. Только этот путь ставит
      * {@code CustomCaretListener} штатного handler: от него зависят подсветка текущего
@@ -1543,6 +1575,8 @@ public final class ParamHintHtmlModifier
                     {
                         adjusted++;
                         includeClosingParen(info, document);
+                        rememberParamIndexAfterEdit(widget, info,
+                            offset + (inserted != null ? inserted.length() : 0));
                     }
                 }
             }
@@ -1552,6 +1586,22 @@ public final class ParamHintHtmlModifier
         }
         if (adjusted == 0)
             adjustParamHintBounds(offset, removed, inserted);
+    }
+
+    private static void rememberParamIndexAfterEdit(StyledText widget, Object info, int caret)
+    {
+        if (widget == null || widget.isDisposed() || info == null)
+            return;
+        Object commasObj = Global.getField(info, "commaPosition"); //$NON-NLS-1$
+        if (!(commasObj instanceof List<?> commas))
+            return;
+        int index = 0;
+        for (Object value : commas)
+        {
+            if (value instanceof Integer comma && comma.intValue() < caret)
+                index++;
+        }
+        widget.setData(PENDING_PARAM_INDEX_MARK, Integer.valueOf(index));
     }
 
     /**
@@ -3095,6 +3145,10 @@ public final class ParamHintHtmlModifier
                 return;
 
             HoverContext ctx = resolveHoverContext(browser);
+            Object exactParamIndex = browser.getData(CURRENT_PARAM_INDEX_MARK);
+            if (ctx != null && exactParamIndex instanceof Integer exact)
+                ctx.currentArgIndex = exact.intValue();
+            browser.setData(CURRENT_PARAM_INDEX_MARK, null);
 
             // Автовыбор сигнатуры — ТОЛЬКО при реальном открытии команды, не на Progress.
             // strongChanged на Progress давал цикл: setInput → Progress → showPage → …
@@ -3105,14 +3159,28 @@ public final class ParamHintHtmlModifier
                 browser.setData(SIG_PICK_DONE_MARK, Boolean.TRUE);
                 if (ctx.pages.size() <= 50)
                 {
-                    SigPickResult pick = pickBestSignature(ctx);
+                    SelectedConstructorSignature selected = consumeSelectedConstructorSignature();
+                    int selectedIndex = selectedConstructorPageIndex(ctx.pages, selected);
+                    SigPickResult pick = selectedIndex >= 0
+                        ? new SigPickResult(selectedIndex, SIG_PICK_STRONG_SCORE)
+                        : pickBestSignature(ctx);
                     if (pick.index >= 0 && pick.index != ctx.pageIndex)
                     {
                         boolean shown = Global.invokeVoid(ctx.parametersHover, "showPage", //$NON-NLS-1$
                             ctx.pages, Integer.valueOf(pick.index),
                             Integer.valueOf(ctx.paramIndex));
                         if (shown)
+                        {
+                            Display display = browser.getDisplay();
+                            if (display != null && !display.isDisposed())
+                            {
+                                display.asyncExec(() -> {
+                                    if (!browser.isDisposed())
+                                        tryModifyBrowserHtml(browser);
+                                });
+                            }
                             return;
+                        }
                     }
                 }
             }
@@ -3301,7 +3369,7 @@ public final class ParamHintHtmlModifier
                 if (display == null || display.isDisposed())
                     return;
                 // После штатного CustomCaretListener EDT.
-                display.asyncExec(() -> refreshParamHintViaShowPage(browser));
+                display.asyncExec(() -> refreshParamHintViaShowPage(browser, widget));
             }
         };
         widget.addCaretListener(listener);
@@ -3318,18 +3386,23 @@ public final class ParamHintHtmlModifier
      * Смена активного параметра — только {@code showPage} → {@code setInput} →
      * {@code updateSize}, как у LinkedMode. Без прямого {@code Browser.setText}.
      */
-    private static void refreshParamHintViaShowPage(Browser browser)
+    private static void refreshParamHintViaShowPage(Browser browser, StyledText widget)
     {
         if (browser == null || browser.isDisposed())
             return;
         if (Boolean.TRUE.equals(MODIFY_IN_PROGRESS.get()))
             return;
+        Object pending = widget != null && !widget.isDisposed()
+            ? widget.getData(PENDING_PARAM_INDEX_MARK) : null;
+        if (pending instanceof Integer && widget != null && !widget.isDisposed())
+            widget.setData(PENDING_PARAM_INDEX_MARK, null);
         HoverContext ctx = resolveHoverContext(browser);
         if (ctx == null || ctx.parametersHover == null || ctx.pages == null || ctx.pages.isEmpty())
             return;
         if (ctx.pageIndex < 0 || ctx.pageIndex >= ctx.pages.size())
             return;
-        int desired = ctx.currentArgIndex >= 0 ? ctx.currentArgIndex : ctx.paramIndex;
+        int desired = pending instanceof Integer exact ? exact.intValue()
+            : (ctx.currentArgIndex >= 0 ? ctx.currentArgIndex : ctx.paramIndex);
         if (desired < 0)
             desired = 0;
         Object prev = browser.getData(LAST_SHOW_ARG_MARK);
@@ -3343,6 +3416,7 @@ public final class ParamHintHtmlModifier
         if (formalCount > 0 && showIdx >= formalCount)
             showIdx = formalCount - 1;
         browser.setData(LAST_SHOW_ARG_MARK, Integer.valueOf(desired));
+        browser.setData(CURRENT_PARAM_INDEX_MARK, Integer.valueOf(desired));
         // showPage уже вызвал updateSize. Comfort-патч HTML — только setText,
         // без повторного updateSize (см. setBrowserTextKeepGeometry).
         // Геометрию здесь не трогаем вовсе: смена активного параметра — самая частая
@@ -3378,6 +3452,10 @@ public final class ParamHintHtmlModifier
         if (withParen != null)
             result = withParen;
 
+        String withAutomaticOverflow = useAutomaticHorizontalOverflow(result);
+        if (withAutomaticOverflow != null)
+            result = withAutomaticOverflow;
+
         if (result.contains(COMFORT_META_MARKER) || result.contains("data-comfort=\"1\"")) //$NON-NLS-1$
             return result.equals(html) ? null : result;
 
@@ -3386,6 +3464,23 @@ public final class ParamHintHtmlModifier
             result = withContent;
 
         return result.equals(html) ? null : result;
+    }
+
+    /**
+     * Штатная страница задаёт {@code overflow-x: scroll} и рисует неактивную
+     * горизонтальную полосу даже без переполнения. {@code auto} сохраняет полосу,
+     * когда содержимое действительно не помещается.
+     */
+    private static String useAutomaticHorizontalOverflow(String html)
+    {
+        if (html == null || html.contains("id=\"" + OVERFLOW_STYLE_ID + "\"")) //$NON-NLS-1$ //$NON-NLS-2$
+            return null;
+        int headEnd = html.indexOf("</head>"); //$NON-NLS-1$
+        if (headEnd < 0)
+            return null;
+        String style = "<style id=\"" + OVERFLOW_STYLE_ID //$NON-NLS-1$
+            + "\">body{overflow-x:auto!important;}</style>"; //$NON-NLS-1$
+        return html.substring(0, headEnd) + style + html.substring(headEnd);
     }
 
     /**
@@ -4924,7 +5019,7 @@ public final class ParamHintHtmlModifier
         try
         {
             String hintName = hintMethodName(ctx);
-            InvocationSnapshot snap = ContentAssistSessionReloader.readOnlyForContentAssist(xdoc,
+            InvocationSnapshot snap = ContentAssistSessionReloader.readOnlyPeekAst(xdoc,
                 (IUnitOfWork<InvocationSnapshot, XtextResource>) resource -> {
                     if (resource == null)
                         return null;
@@ -4939,11 +5034,6 @@ public final class ParamHintHtmlModifier
             ctx.constructorType = snap.constructorType;
             ctx.directive = snap.directive;
             ctx.currentArgIndex = snap.currentArgIndex;
-            Global.tempLog("bp-param-hint", "fillInvocation argIndex=" //$NON-NLS-1$ //$NON-NLS-2$
-                    + snap.currentArgIndex + " formalHint=" + hintName //$NON-NLS-1$
-                    + " caret=" + active.caret //$NON-NLS-1$
-                    + " ctor=" + (snap.constructorType != null) //$NON-NLS-1$
-                    + " field=" + (active.fromExpressionField ? "expr" : "module")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         }
         catch (Exception ignored)
         {
@@ -5316,6 +5406,50 @@ public final class ParamHintHtmlModifier
         return count;
     }
 
+    private static SelectedConstructorSignature consumeSelectedConstructorSignature()
+    {
+        SelectedConstructorSignature selected = selectedConstructorSignature;
+        selectedConstructorSignature = null;
+        if (selected == null
+            || System.currentTimeMillis() - selected.createdAt > SELECTED_CTOR_MAX_AGE_MS)
+            return null;
+        ActiveEditor active = resolveParamHintEditor();
+        if (active == null || active.document != selected.document || active.caret != selected.caret)
+            return null;
+        return selected;
+    }
+
+    private static int selectedConstructorPageIndex(List<Object> pages,
+        SelectedConstructorSignature selected)
+    {
+        if (pages == null || selected == null)
+            return -1;
+        for (int pageIndex = 0; pageIndex < pages.size(); pageIndex++)
+        {
+            Object page = pages.get(pageIndex);
+            if (countPageParams(page) != selected.paramNames.size())
+                continue;
+            boolean matches = true;
+            for (int paramIndex = 0; paramIndex < selected.paramNames.size(); paramIndex++)
+            {
+                String expected = selected.paramNames.get(paramIndex);
+                if (expected == null || expected.isBlank())
+                    continue;
+                Object parameter = Global.invoke(page, "getParameter", //$NON-NLS-1$
+                    Integer.valueOf(paramIndex));
+                String actual = asString(Global.invoke(parameter, "getName")); //$NON-NLS-1$
+                if (actual == null || !expected.equalsIgnoreCase(actual))
+                {
+                    matches = false;
+                    break;
+                }
+            }
+            if (matches)
+                return pageIndex;
+        }
+        return -1;
+    }
+
     private static Set<String> resolveParamTypeNames(Object page, int paramIndex)
     {
         Object paramContent = Global.invoke(page, "getParameter", Integer.valueOf(paramIndex)); //$NON-NLS-1$
@@ -5641,6 +5775,23 @@ public final class ParamHintHtmlModifier
         /** Тип {@code Новый Тип(...)} — для maxParams сигнатуры конструктора. */
         Type constructorType;
         String directive;
+    }
+
+    private static final class SelectedConstructorSignature
+    {
+        final IDocument document;
+        final int caret;
+        final List<String> paramNames;
+        final long createdAt;
+
+        SelectedConstructorSignature(IDocument document, int caret, List<String> paramNames,
+            long createdAt)
+        {
+            this.document = document;
+            this.caret = caret;
+            this.paramNames = List.copyOf(paramNames);
+            this.createdAt = createdAt;
+        }
     }
 
     private static final class InvocationSnapshot

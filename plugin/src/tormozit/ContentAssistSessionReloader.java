@@ -1732,10 +1732,9 @@ boolean inLiteral = endCaret >= 0
                         .append("|nodeEnd:").append(nodeEnd) //$NON-NLS-1$
                         .append("|open:").append(openParen).toString(); //$NON-NLS-1$
                 };
-            // Скорость: «peek»-чтение (readOnlyDataModelWithoutSync) отдаёт модель без
-            // синхронизации с текстом, и показ ждал чужой синхронизации по 0.5–1.1 с
-            // (лог 22:08:28 и 00:59:18). Берём чтение, которым EDT считает сам список
-            // автодополнения — оно синхронизирует модель, но без переподсветки модуля.
+            // В модуле нужна немедленная синхронизация: peek оставляет позицию текущего
+            // параметра протухшей до фонового reconciler. Обёртка ниже после быстрого
+            // чтения восстанавливает отменённую этим чтением живую проверку.
             String described = syncRead ? xdoc.readOnly(astWork)
                 : readOnlyForContentAssist(xdoc, astWork);
             return described != null ? described : "none"; //$NON-NLS-1$
@@ -2255,6 +2254,11 @@ boolean inLiteral = endCaret >= 0
                 // Сносим синхронно до возврата в цикл сообщений, иначе мелькнет кадр.
                 if (pendingShowParamHintAfterInsert)
                 {
+                    ICompletionProposal selected = lastAssistSelection;
+                    if (selected == null)
+                        selected = ContentAssistPopupSync.peekSelectedProposal(assistant);
+                    ParamHintHtmlModifier.rememberSelectedConstructorSignature(selected, d,
+                        pendingParamHintDesiredCaret);
                     forceRemoveLinkedModeParamHintListeners("postDoIt"); //$NON-NLS-1$
                     ParamHintHtmlModifier.dismissAllVisible();
                 }
@@ -2549,13 +2553,18 @@ boolean inLiteral = endCaret >= 0
      * Чтение AST без переподсветки модуля. Штатный {@code IXtextDocument.readOnly}
      * после работы вызывает {@code notifyModelListenersOnUiThread}; на файле
      * ~590 тыс. символов это ~3.7 с на каждый проход (три прохода при {@code ,} → ~11 с).
-     * {@code BslXtextDocument.readOnlyForContentAssist} ту же модель читает без notify.
+     * {@code BslXtextDocument.readOnlyForContentAssist} ту же модель читает без notify,
+     * но отменяет текущую validation job. После чтения заново планируем штатное обновление
+     * аннотаций: иначе старый маркер остаётся до следующей правки документа.
      */
     static <T> T readOnlyForContentAssist(IXtextDocument doc, IUnitOfWork<T, XtextResource> work)
     {
         Object result = invokeBslRead(doc, "readOnlyForContentAssist", work); //$NON-NLS-1$
         if (result != BSL_READ_MISSING)
         {
+            // Прямой тип BslXtextDocument тянет отсутствующий в build path
+            // HandlyXtextDocument; сам публичный метод подтверждён в EDT-бандле.
+            Global.invokeVoid(doc, "checkAndUpdateAnnotations"); //$NON-NLS-1$
             @SuppressWarnings("unchecked")
             T typed = (T) result;
             return typed;
@@ -2566,18 +2575,12 @@ boolean inLiteral = endCaret >= 0
     /**
      * Только заглянуть в модель: без notify и без отмены {@code XtextReconciler}.
      * {@code readOnlyForContentAssist} отменяет reconciler — после этого штатный
-     * hover не находит FeatureEntry и молча не открывается.
+     * hover не находит FeatureEntry и молча не открывается. При отсутствии безопасного
+     * API возвращает {@code null}, но не откатывается к отменяющему проверку чтению.
      */
     static <T> T readOnlyPeekAst(IXtextDocument doc, IUnitOfWork<T, XtextResource> work)
     {
         Object result = invokeBslRead(doc, "readOnlyDataModelWithoutSync", work); //$NON-NLS-1$
-        if (result != BSL_READ_MISSING)
-        {
-            @SuppressWarnings("unchecked")
-            T typed = (T) result;
-            return typed;
-        }
-        result = invokeBslRead(doc, "readOnlyForContentAssist", work); //$NON-NLS-1$
         if (result != BSL_READ_MISSING)
         {
             @SuppressWarnings("unchecked")
