@@ -72,7 +72,6 @@ import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
  */
 public class PropertySheetActivePropertyHook implements IStartup
 {
-    private static final String TEMP_TOPIC = "свойства-активное"; //$NON-NLS-1$
     private static final String LABEL_VIEW_MODEL = "LabelViewModel"; //$NON-NLS-1$
     private static final String SECTION_VIEW_MODEL = "SectionViewModel"; //$NON-NLS-1$
     /** Пауза дебаунса пересинхронизации после перерисовки палитры. */
@@ -206,7 +205,6 @@ public class PropertySheetActivePropertyHook implements IStartup
             @Override public void windowDeactivated(IWorkbenchWindow w) {}
             @Override public void windowClosed(IWorkbenchWindow w) {}
         });
-        Global.tempLog(TEMP_TOPIC, "установлен"); //$NON-NLS-1$
     }
 
     private static void hookWindow(IWorkbenchWindow window)
@@ -445,12 +443,8 @@ public class PropertySheetActivePropertyHook implements IStartup
             if (fromField != null && !fromField.isEmpty())
             {
                 setActiveProperty(page, fromField);
-                return;
             }
         }
-        Control focusControl = Display.getDefault().getFocusControl();
-        Global.tempLog(TEMP_TOPIC, "клик в палитре: поле свойства не определено, ввод в " //$NON-NLS-1$
-            + (focusControl == null ? "<null>" : focusControl.getClass().getName())); //$NON-NLS-1$
     }
 
     private static String propertyNameForClickedRow(Object page, Control clicked, Point click)
@@ -484,12 +478,7 @@ public class PropertySheetActivePropertyHook implements IStartup
                 best = labelText(key);
             }
         }
-        if (best != null && !best.isEmpty())
-        {
-            Global.tempLog(TEMP_TOPIC, "свойство определено по строке клика: " + best); //$NON-NLS-1$
-            return best;
-        }
-        return null;
+        return best != null && !best.isEmpty() ? best : null;
     }
 
     /** {@code SwtLightComposite}, на котором рисуется light-контрол. */
@@ -564,11 +553,7 @@ public class PropertySheetActivePropertyHook implements IStartup
     {
         Object hit = lightControlAt(clicked, click);
         if (hit == null)
-        {
-            Global.tempLog(TEMP_TOPIC, "клик " + click.x + "," + click.y //$NON-NLS-1$ //$NON-NLS-2$
-                + ": LWT-контрол не найден (виджет " + clicked.getClass().getName() + ")"); //$NON-NLS-1$ //$NON-NLS-2$
             return false;
-        }
 
         String hitLabel = null;
         boolean rowStarted = false;
@@ -601,24 +586,15 @@ public class PropertySheetActivePropertyHook implements IStartup
                 editors.add(nativeControl);
         }
         if (hitLabel == null || hitLabel.isEmpty())
-        {
-            Global.tempLog(TEMP_TOPIC, "клик: под точкой " + click.x + "," + click.y //$NON-NLS-1$ //$NON-NLS-2$
-                + " не подпись, а " + hit.getClass().getName()); //$NON-NLS-1$
             return false;
-        }
 
         setActiveProperty(page, hitLabel);
         editors.addAll(actionBars);
         for (Object editor : editors)
         {
             if (AefFieldFocus.focusNativeControl(editor))
-            {
-                Global.tempLog(TEMP_TOPIC, "клик по имени «" + hitLabel + "»: фокус в поле"); //$NON-NLS-1$ //$NON-NLS-2$
-                return true;
-            }
+                break;
         }
-        Global.tempLog(TEMP_TOPIC, "клик по имени «" + hitLabel //$NON-NLS-1$
-            + "»: фокусируемого поля нет (редакторов " + editors.size() + ")"); //$NON-NLS-1$ //$NON-NLS-2$
         return true;
     }
 
@@ -669,7 +645,6 @@ public class PropertySheetActivePropertyHook implements IStartup
         }
         catch (ClassNotFoundException e)
         {
-            Global.tempLog(TEMP_TOPIC, "SwtLightComposite не найден в classloader'е LWT"); //$NON-NLS-1$
             return null;
         }
     }
@@ -703,7 +678,6 @@ public class PropertySheetActivePropertyHook implements IStartup
             consumeBlinkRequest(page, labelText);
             return;
         }
-        Global.tempLog(TEMP_TOPIC, "текущее свойство: " + labelText); //$NON-NLS-1$
         activePropertyName = normalizePropertyDisplayName(labelText);
         clearHighlight();
         applyHighlight(page, false);
@@ -942,11 +916,7 @@ public class PropertySheetActivePropertyHook implements IStartup
 
         Object label = PropertySheetControlInterop.lightControlFromView(labelView);
         if (label == null || !label.getClass().getName().contains("LightLabel")) //$NON-NLS-1$
-        {
-            Global.tempLog(TEMP_TOPIC, "подпись не LightLabel: " //$NON-NLS-1$
-                + (label == null ? "<null>" : label.getClass().getName())); //$NON-NLS-1$
             return;
-        }
         if (label == highlightedLabel)
         {
             if (afterRebuild)
@@ -968,8 +938,6 @@ public class PropertySheetActivePropertyHook implements IStartup
         if (!focusedNow && !blinkActive && !activationInProgress)
             applyBold(label);
         Global.invokeVoid(label, "setTextColor", accentColor()); //$NON-NLS-1$
-        Global.tempLog(TEMP_TOPIC, "окрашено «" + activePropertyName + "»" //$NON-NLS-1$ //$NON-NLS-2$
-            + (afterRebuild ? " (после перезаполнения)" : "")); //$NON-NLS-1$ //$NON-NLS-2$
         if (afterRebuild)
             revealLabel(page, 0);
     }
@@ -1295,11 +1263,7 @@ public class PropertySheetActivePropertyHook implements IStartup
 
         int room = Math.max(bounds.width, freeWidth(label, bounds));
         if (needed > room)
-        {
-            Global.tempLog(TEMP_TOPIC, "жирный пропущен: нужно " + needed + ", есть " + room //$NON-NLS-1$ //$NON-NLS-2$
-                + " (" + activePropertyName + ")"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
-        }
         originalExtent = Global.getField(label, "cachedExtent"); //$NON-NLS-1$
         if (needed > bounds.width)
         {
@@ -1695,15 +1659,12 @@ public class PropertySheetActivePropertyHook implements IStartup
         }
         catch (Exception e)
         {
-            Global.tempLogException(TEMP_TOPIC, "копирование «" + hit.name + "»", e); //$NON-NLS-1$ //$NON-NLS-2$
             text = english;
             if (text == null || text.isEmpty())
                 text = hit.name;
         }
         PropertySheetUiContext.copyToClipboard(control, text);
         ToastNotification.show("Скопировано", text, 2_500); //$NON-NLS-1$
-        Global.tempLog(TEMP_TOPIC, "копирование «" + hit.name + "»: признак=" + english //$NON-NLS-1$ //$NON-NLS-2$
-            + ", в буфер=" + text); //$NON-NLS-1$
     }
 
     /**
@@ -1730,7 +1691,6 @@ public class PropertySheetActivePropertyHook implements IStartup
         }
         catch (RuntimeException e)
         {
-            Global.tempLogException(TEMP_TOPIC, "подсказка «" + hit.name + "»", e); //$NON-NLS-1$ //$NON-NLS-2$
             text = null;
         }
         if (text == null || text.isEmpty())
@@ -1938,7 +1898,6 @@ public class PropertySheetActivePropertyHook implements IStartup
                 return cached == NOTHING ? null : cached;
 
             PropertyDoc found = null;
-            long started = System.currentTimeMillis();
             try
             {
                 if (PropertySheetPlatformPropertyResolver.supportsBslSyntaxHelp(resolved, feature))
@@ -1947,25 +1906,12 @@ public class PropertySheetActivePropertyHook implements IStartup
                     found = new PropertyDoc(resolved.russianName(), viewPage, key);
                 }
                 else
-                {
                     found = new PropertyDoc(resolved.russianName(), null, key);
-                    Global.tempLog(TEMP_TOPIC, "документация «" + key //$NON-NLS-1$
-                        + "»: свойство метаданных-перечисления, синтакс-помощник пропущен"); //$NON-NLS-1$
-                }
-            }
-            catch (RuntimeException e)
-            {
-                Global.tempLogException(TEMP_TOPIC, "документация: " + key, e); //$NON-NLS-1$
             }
             catch (Exception e)
             {
-                Global.tempLogException(TEMP_TOPIC, "документация: " + key, e); //$NON-NLS-1$
             }
             RESOLVED.put(key, found != null ? found : NOTHING);
-            Global.tempLog(TEMP_TOPIC, "документация «" + key + "»: " //$NON-NLS-1$ //$NON-NLS-2$
-                + (found != null ? "имя=" + found.russianName + ", страница=" + (found.viewPage != null) //$NON-NLS-1$ //$NON-NLS-2$
-                    : "не найдено") //$NON-NLS-1$
-                + ", " + (System.currentTimeMillis() - started) + " мс"); //$NON-NLS-1$ //$NON-NLS-2$
             return found;
         }
 
@@ -1983,7 +1929,6 @@ public class PropertySheetActivePropertyHook implements IStartup
                 return cached == NOTHING ? null : cached;
 
             PropertyDoc found = null;
-            long started = System.currentTimeMillis();
             try
             {
                 Object viewPage = eventPage(resolved.event);
@@ -1991,13 +1936,8 @@ public class PropertySheetActivePropertyHook implements IStartup
             }
             catch (Exception e)
             {
-                Global.tempLogException(TEMP_TOPIC, "документация события: " + key, e); //$NON-NLS-1$
             }
             RESOLVED.put(key, found != null ? found : NOTHING);
-            Global.tempLog(TEMP_TOPIC, "документация события «" + key + "»: " //$NON-NLS-1$ //$NON-NLS-2$
-                + (found != null ? "имя=" + found.russianName + ", страница=" + (found.viewPage != null) //$NON-NLS-1$ //$NON-NLS-2$
-                    : "не найдено") //$NON-NLS-1$
-                + ", " + (System.currentTimeMillis() - started) + " мс"); //$NON-NLS-1$ //$NON-NLS-2$
             return found;
         }
 
@@ -2042,11 +1982,7 @@ public class PropertySheetActivePropertyHook implements IStartup
 
                 PropertyDoc doc = resolve(page, scene, lwtView, displayName);
                 if (doc != null && doc.viewPage != null && openInSyntaxAssist(doc.viewPage))
-                {
-                    Global.tempLog(TEMP_TOPIC, "синтакс-помощник: открыто описание «" //$NON-NLS-1$
-                        + (doc.russianName != null ? doc.russianName : displayName) + "»"); //$NON-NLS-1$
                     return;
-                }
                 String englishHint = PropertySheetControlInterop.resolveModelPropertyName(page,
                     scene, lwtView, displayName);
                 PropertySheetPlatformPropertyResolver.ResolvedEvent eventResolved =
@@ -2061,12 +1997,9 @@ public class PropertySheetActivePropertyHook implements IStartup
                         ? propertyResolved.syntaxHelpSearchQuery()
                         : doc != null && doc.russianName != null ? doc.russianName : displayName;
                 BslSyntaxAssist.showSearch(search);
-                Global.tempLog(TEMP_TOPIC, "синтакс-помощник: страницы нет, поиск по «" //$NON-NLS-1$
-                    + search + "»"); //$NON-NLS-1$
             }
             catch (Exception e)
             {
-                Global.tempLogException(TEMP_TOPIC, "синтакс-помощник: " + displayName, e); //$NON-NLS-1$
             }
         }
 
@@ -2087,13 +2020,10 @@ public class PropertySheetActivePropertyHook implements IStartup
                 if (text.length() > MAX_TOOLTIP_CHARS)
                     text = text.substring(0, MAX_TOOLTIP_CHARS) + "…"; //$NON-NLS-1$
                 DESCRIPTIONS.put(key, text);
-                Global.tempLog(TEMP_TOPIC, "описание «" + key + "»: " //$NON-NLS-1$ //$NON-NLS-2$
-                    + (text.isEmpty() ? "нет" : text.length() + " симв.")); //$NON-NLS-1$ //$NON-NLS-2$
                 return text.isEmpty() ? null : text;
             }
             catch (RuntimeException e)
             {
-                Global.tempLogException(TEMP_TOPIC, "описание «" + displayName + "»", e); //$NON-NLS-1$ //$NON-NLS-2$
                 return null;
             }
         }

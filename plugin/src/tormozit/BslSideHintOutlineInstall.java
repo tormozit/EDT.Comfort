@@ -486,6 +486,11 @@ public final class BslSideHintOutlineInstall
             }
 
         };
+        private static final Anchor[] SIDE_ANCHORS = { ANCHOR_RIGHT, ANCHOR_LEFT };
+        /** Без {@code ANCHOR_TOP}: сверху подсказка перекрывает поле фильтра окна схемы. */
+        private static final Anchor[] ALL_ANCHORS = { ANCHOR_RIGHT, ANCHOR_LEFT, ANCHOR_BOTTOM };
+        /** Уже этой ширины сбоку подсказка нечитаема — тогда допускается место снизу. */
+        private static final int MIN_SIDE_WIDTH_PX = 280;
         private volatile BslItemSideHint pendingHint;
         private int shownSourceOffset = -1;
         private int shownAreaX = Integer.MIN_VALUE;
@@ -497,7 +502,7 @@ public final class BslSideHintOutlineInstall
 
             super(PLACEHOLDER_CREATOR);
             setAnchor(ANCHOR_RIGHT);
-            setFallbackAnchors(new Anchor[] { ANCHOR_LEFT, ANCHOR_TOP, ANCHOR_BOTTOM });
+            setFallbackAnchors(SIDE_ANCHORS);
             setSizeConstraints(280, 120, true, true);
             takesFocusWhenVisible(false);
             InformationControlReplacer replacer = new InformationControlReplacer(PLACEHOLDER_CREATOR);
@@ -747,8 +752,72 @@ public final class BslSideHintOutlineInstall
             if (size == null)
                 return;
             Point location = computeInformationControlLocation(area, size);
+            control.setSize(size.x, size.y);
             control.setLocation(location);
             control.setVisible(true);
+        }
+
+        /**
+         * Штатный перебор якорей берёт первый, где подсказка помещается целиком: широкая подсказка
+         * не влезает ни справа, ни слева от окна схемы и уезжает наверх ({@code ANCHOR_TOP} сдвигает x
+         * до края экрана). Поэтому сначала только бока — с сужением до свободного места и пересчётом
+         * высоты под новую ширину; низ — только если сбоку места меньше {@link #MIN_SIDE_WIDTH_PX}.
+         * Верх исключён всегда: там поле фильтра окна схемы.
+         * {@code controlSize} меняется на месте, как в штатном методе.
+         */
+        @Override
+        protected Point computeInformationControlLocation(Rectangle subjectArea, Point controlSize)
+        {
+
+            Point sideSize = new Point(controlSize.x, controlSize.y);
+            Point location = super.computeInformationControlLocation(subjectArea, sideSize);
+            if (sideSize.x == controlSize.x)
+            {
+
+                controlSize.y = sideSize.y;
+                return location;
+            }
+
+            if (sideSize.x >= MIN_SIDE_WIDTH_PX)
+            {
+
+                IInformationControl control = getInformationControl();
+                if (control != null)
+                {
+
+                    Control subject = getSubjectControl();
+                    int maxHeight = subject != null && !subject.isDisposed()
+                            ? subject.getMonitor().getClientArea().height
+                            : sideSize.y;
+                    control.setSizeConstraints(sideSize.x, maxHeight);
+                    Point hint = control.computeSizeHint();
+                    if (hint != null)
+                    {
+
+                        sideSize = new Point(Math.min(hint.x, sideSize.x), Math.min(hint.y, maxHeight));
+                        location = super.computeInformationControlLocation(subjectArea, sideSize);
+                    }
+
+                }
+
+                controlSize.x = sideSize.x;
+                controlSize.y = sideSize.y;
+                return location;
+            }
+
+            setFallbackAnchors(ALL_ANCHORS);
+            try
+            {
+
+                return super.computeInformationControlLocation(subjectArea, controlSize);
+            }
+
+            finally
+            {
+
+                setFallbackAnchors(SIDE_ANCHORS);
+            }
+
         }
 
         @Override

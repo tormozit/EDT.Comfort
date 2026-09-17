@@ -2017,10 +2017,6 @@ boolean inLiteral = endCaret >= 0
                 boolean opened = ParamHintHtmlModifier.tryOpenParamHintForViewer(viewer);
                 probe.execOk = opened;
                 probe.popupShown = opened || isParamHoverShellVisible();
-                ContentAssistDebug.debugSessionLog("F", "paramHint", "inspect", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"opened\":" + opened //$NON-NLS-1$
-                        + ",\"caret\":" + caret //$NON-NLS-1$
-                        + ",\"hypothesisId\":\"F\"}"); //$NON-NLS-1$
             }
             else
                 probe = executeInvocationParametersHoverCommand();
@@ -2345,23 +2341,8 @@ boolean inLiteral = endCaret >= 0
                     + ",\"objects\":" + mapDiag.objectsSize //$NON-NLS-1$
                     + ",\"text\":\"" + ContentAssistDebug.jsonEscapeForLog(
                         text != null && text.length() > 80 ? text.substring(0, 80) : text) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #region agent log
-            SourceViewer active = getActiveViewer();
             boolean expressionField = isExpressionFieldViewer();
             boolean inspect = DebugInspectorHook.isInspectExpressionViewer(viewer);
-            ContentAssistDebug.debugSessionLog("F", "linkedModeDiag", phase, //$NON-NLS-1$ //$NON-NLS-2$
-                "{\"inspect\":" + inspect //$NON-NLS-1$
-                    + ",\"expressionField\":" + expressionField //$NON-NLS-1$
-                    + ",\"sameActive\":" + (active == viewer) //$NON-NLS-1$
-                    + ",\"hasModel\":" + hasModel //$NON-NLS-1$
-                    + ",\"hasKey\":" + mapDiag.hasKey //$NON-NLS-1$
-                    + ",\"mapSize\":" + mapDiag.mapSize //$NON-NLS-1$
-                    + ",\"caret\":" + caret //$NON-NLS-1$
-                    + ",\"modelCaret\":" + modelCaret //$NON-NLS-1$
-                    + ",\"desired\":" + desired //$NON-NLS-1$
-                    + ",\"text\":\"" + ContentAssistDebug.jsonEscapeForLog(clipLogText(text)) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"doc\":" + BslDataEventGuard.debugDocJson(doc) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
             logLinkedMode("diag." + phase, "{\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
                 + ",\"modelCaret\":" + modelCaret //$NON-NLS-1$
                 + ",\"desired\":" + desired //$NON-NLS-1$
@@ -2389,14 +2370,6 @@ boolean inLiteral = endCaret >= 0
             {
                 viewer.setSelectedRange(desired, 0);
                 int after = modelCaretOffset();
-                ContentAssistDebug.debugSessionLog("F", "linkedModeDiag", "restoreCaret", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"phase\":\"" + phase + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                        + ",\"from\":" + modelCaret //$NON-NLS-1$
-                        + ",\"desired\":" + desired //$NON-NLS-1$
-                        + ",\"after\":" + after //$NON-NLS-1$
-                        + ",\"hasModel\":" + hasModel //$NON-NLS-1$
-                        + ",\"expressionField\":" + expressionField //$NON-NLS-1$
-                        + ",\"hypothesisId\":\"F\"}"); //$NON-NLS-1$
                 logLinkedMode("restoreCaret", "{\"phase\":\"" + phase + "\"" //$NON-NLS-1$ //$NON-NLS-2$
                     + ",\"from\":" + modelCaret + ",\"desired\":" + desired //$NON-NLS-1$ //$NON-NLS-2$
                     + ",\"after\":" + after + ",\"hasModel\":" + hasModel + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
@@ -2419,8 +2392,6 @@ boolean inLiteral = endCaret >= 0
             if (model == null)
                 return;
             new LinkedModeUI(model, viewer).enter();
-            ContentAssistDebug.debugSessionLog("F", "linkedModeDiag", "bindUi", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"desired\":" + desired + ",\"hypothesisId\":\"F\"}"); //$NON-NLS-1$ //$NON-NLS-2$
         }
         catch (RuntimeException ignored)
         {

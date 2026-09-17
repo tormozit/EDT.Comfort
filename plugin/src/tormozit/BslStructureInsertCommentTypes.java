@@ -353,9 +353,7 @@ public final class BslStructureInsertCommentTypes
             Set<Module> scope = EXPORT_VARS_SCOPE.get();
             if (scope != null && !scope.add(module))
                 return;
-            long t0 = System.nanoTime(); // agent log
             enrichExportModuleVariables(tree, module);
-            diag("exportVars", module, t0, null); // agent log
             if (exportVarsArePortable(module))
                 EXPORT_VARS_DONE.add(module);
             else
@@ -470,7 +468,6 @@ public final class BslStructureInsertCommentTypes
             if (platform != null)
                 token = platform.beginNonInterruptableOperation();
         }
-        long t0 = System.nanoTime(); // agent log
         try
         {
             tree.installTypeSystem(module, CancelIndicator.NullImpl);
@@ -479,40 +476,8 @@ public final class BslStructureInsertCommentTypes
         {
             if (token != null)
                 platform.finishNonInterruptableOperation(token);
-            diag("nested", module, t0, "nonInterruptable=" + (token != null) //$NON-NLS-1$
-                + " caller=" + StackWalker.getInstance().walk(s -> s.skip(1).findFirst() //$NON-NLS-1$
-                    .map(f -> f.getClassName() + '.' + f.getMethodName()).orElse("?"))); //$NON-NLS-1$
         }
     }
-
-    // #region agent log — временный замер «calculating highlighting» (issue 530)
-    private static final ThreadLocal<int[]> DIAG_DEPTH = ThreadLocal.withInitial(() -> new int[1]);
-
-    private static long ms(long from, long to)
-    {
-        return (to - from) / 1_000_000L;
-    }
-
-    private static void diag(String what, EObject module, long startNanos, String extra)
-    {
-        try
-        {
-            org.eclipse.emf.ecore.resource.Resource resource =
-                module != null ? module.eResource() : null;
-            String name = resource != null && resource.getURI() != null
-                ? resource.getURI().path() : String.valueOf(module);
-            Global.tempLog("type-install", what //$NON-NLS-1$
-                + " depth=" + DIAG_DEPTH.get()[0] //$NON-NLS-1$
-                + " ms=" + ms(startNanos, System.nanoTime()) //$NON-NLS-1$
-                + " thread=" + Thread.currentThread().getName() //$NON-NLS-1$
-                + " module=" + name //$NON-NLS-1$
-                + (extra != null ? " " + extra : "")); //$NON-NLS-1$ //$NON-NLS-2$
-        }
-        catch (Throwable ignored)
-        {
-        }
-    }
-    // #endregion
 
     private static void enrichExportModuleVariables(BslTreeTypeSystem self, Module module)
     {
@@ -1300,31 +1265,11 @@ public final class BslStructureInsertCommentTypes
 
         private void installTypeSystemInScope(Module module, CancelIndicator cancelIndicator)
         {
-            // #region agent log
-            int[] depth = DIAG_DEPTH.get();
-            depth[0]++;
-            diag("install-begin", module, System.nanoTime(), null);
-            long t0 = System.nanoTime();
-            try
-            {
-            // #endregion
             super.installTypeSystem(module, cancelIndicator);
-            long t1 = System.nanoTime(); // agent log
             ModuleVariableStates.fix(module);
-            long t2 = System.nanoTime(); // agent log
             // см. ОбщаяФорма.…: экспорт модуля в тип параметра (BslTreeTypeSystem не ткётся).
             BslFormTypeContextEnrichment.enrichModule(module);
-            long t3 = System.nanoTime(); // agent log
             enrich(this, module, null);
-            // #region agent log
-            diag("install-end", module, t0, "super=" + ms(t0, t1) + " fix=" + ms(t1, t2) //$NON-NLS-1$ //$NON-NLS-2$
-                + " formEnrich=" + ms(t2, t3) + " insertEnrich=" + ms(t3, System.nanoTime())); //$NON-NLS-1$ //$NON-NLS-2$
-            }
-            finally
-            {
-                depth[0]--;
-            }
-            // #endregion
         }
 
         /**
@@ -1349,30 +1294,10 @@ public final class BslStructureInsertCommentTypes
         private void lightInstallingTypeSystemInScope(Module module, Method method,
             Variable variable, Statement statement, int offset, BmOperationContext context)
         {
-            // #region agent log
-            int[] depth = DIAG_DEPTH.get();
-            depth[0]++;
-            long t0 = System.nanoTime();
-            try
-            {
-            // #endregion
             super.lightInstallingTypeSystem(module, method, variable, statement, offset, context);
-            long t1 = System.nanoTime(); // agent log
             ModuleVariableStates.fix(module);
-            long t2 = System.nanoTime(); // agent log
             BslFormTypeContextEnrichment.enrichMethod(method);
-            long t3 = System.nanoTime(); // agent log
             enrich(this, module, method);
-            // #region agent log
-            diag("light", module, t0, "method=" + (method != null ? method.getName() : null) //$NON-NLS-1$
-                + " super=" + ms(t0, t1) + " fix=" + ms(t1, t2) //$NON-NLS-1$ //$NON-NLS-2$
-                + " formEnrich=" + ms(t2, t3) + " insertEnrich=" + ms(t3, System.nanoTime())); //$NON-NLS-1$ //$NON-NLS-2$
-            }
-            finally
-            {
-                depth[0]--;
-            }
-            // #endregion
         }
     }
 }

@@ -53,6 +53,8 @@ public class Activator extends AbstractUIPlugin
         BslDocCommentDescriptionFix.installWeavingHook();
         BslDocCommentTypeMerge.installWeavingHook();
         BslFormTypeContextEnrichment.installWeavingHook();
+        BslHandlerBlankLineHook.installWeavingHook();
+        OpenHelperAttributePropertiesHook.installWeavingHook();
         try
         {
             NaparnikManualModeHook.bootFromActivator();

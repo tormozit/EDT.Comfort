@@ -3481,7 +3481,6 @@ public final class DebugInspectorHook implements IStartup
                 + ",\"dirtyParts\":" + dirtyParts //$NON-NLS-1$
                 + ",\"uri\":\"" + ContentAssistDebug.jsonEscapeForLog(String.valueOf(sourceUri)) //$NON-NLS-1$
                 + "\",\"live\":" + live + "}"; //$NON-NLS-1$
-            ContentAssistDebug.debugSessionLog("F", "inspect.dirty", phase, payload); //$NON-NLS-1$ //$NON-NLS-2$
             Global.tempLog("inspect-dirty", phase + " " + payload); //$NON-NLS-1$
         }
 
@@ -3578,14 +3577,6 @@ public final class DebugInspectorHook implements IStartup
                 String prefixTail = wrap[0].length() <= 48
                     ? wrap[0]
                     : wrap[0].substring(wrap[0].length() - 48);
-                ContentAssistDebug.debugSessionLog("D", "inspect.wrap", "splice", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"line\":" + line //$NON-NLS-1$
-                        + ",\"safe\":" + safe //$NON-NLS-1$
-                        + ",\"header\":" + header //$NON-NLS-1$
-                        + ",\"before\":\"" + ContentAssistDebug.jsonEscapeForLog(String.valueOf(before)) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                        + ",\"around\":\"" + ContentAssistDebug.jsonEscapeForLog(around) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                        + ",\"prefixTail\":\"" + ContentAssistDebug.jsonEscapeForLog(prefixTail.replace('\r', ' ').replace('\n', '|')) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                        + ",\"hypothesisId\":\"D\"}"); //$NON-NLS-1$
                 log("wrap line=" + line //$NON-NLS-1$
                     + " safe=" + safe //$NON-NLS-1$
                     + " header=" + header //$NON-NLS-1$
@@ -3861,15 +3852,6 @@ public final class DebugInspectorHook implements IStartup
                 @Override
                 public void assistSessionEnded(ContentAssistEvent event)
                 {
-                    IDocument endedDoc = viewer.getDocument();
-                    boolean linked = endedDoc != null && LinkedModeModel.hasInstalledModel(endedDoc);
-                    boolean apply = SmartCompletionProposal.isAnyApplyInProgress();
-                    // #region agent log
-                    ContentAssistDebug.debugSessionLog("D", "inspect.assist-end", "beforeLock", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        "{\"linked\":" + linked //$NON-NLS-1$
-                            + ",\"apply\":" + apply //$NON-NLS-1$
-                            + ",\"doc\":" + BslDataEventGuard.debugDocJson(endedDoc) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-                    // #endregion
                     restoreExpressionFocus(text, viewer);
                     log("assist-end " + dumpViewer(viewer, assist.prefix)); //$NON-NLS-1$
                     // apply() у JFace идёт после assistSessionEnded, поэтому фокус
@@ -3881,16 +3863,7 @@ public final class DebugInspectorHook implements IStartup
                         {
                             if (text.isDisposed())
                                 return;
-                            IDocument laterDoc = viewer.getDocument();
-                            boolean linkedLater = laterDoc != null
-                                && LinkedModeModel.hasInstalledModel(laterDoc);
                             boolean applyLater = SmartCompletionProposal.isAnyApplyInProgress();
-                            // #region agent log
-                            ContentAssistDebug.debugSessionLog("D", "inspect.assist-end", "deferred", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                                "{\"linked\":" + linkedLater //$NON-NLS-1$
-                                    + ",\"apply\":" + applyLater //$NON-NLS-1$
-                                    + ",\"hypothesisId\":\"A\"}"); //$NON-NLS-1$
-                            // #endregion
                             if (!applyLater && !text.isDisposed() && !text.isFocusControl())
                                 text.setFocus();
                         });

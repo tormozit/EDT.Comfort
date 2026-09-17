@@ -46,6 +46,7 @@ import com._1c.g5.v8.dt.platform.pictures.IPictureManager;
 import com._1c.g5.v8.dt.platform.pictures.IPictureManifest;
 import com._1c.g5.v8.dt.platform.pictures.IPictureManifestQueryComputer;
 import com._1c.g5.v8.dt.platform.pictures.zip.IZipPictureContent;
+import com._1c.g5.v8.dt.platform.pictures.zip.IZipPictureManifest;
 import com._1c.g5.v8.dt.platform.pictures.zip.ZipPictureContentStore;
 
 public class PictureDialogHook implements IStartup {
@@ -592,18 +593,13 @@ public class PictureDialogHook implements IStartup {
      * Исходные байты картинки вкладки «Из библиотеки» — так же, как их берёт сам диалог
      * ({@code IPictureManager.getPictureManifest(picture).getInputStream(query)}).
      */
-    private static byte[] libraryBytes(Object dialog)
+    private static PictureFieldEnhance.SourceBytes libraryBytes(Object dialog)
     {
         String viewerField = isConfigTab(dialog) ? "commonPictureViewer" : "standartPictureViewer"; //$NON-NLS-1$ //$NON-NLS-2$
         Object viewerObj = Global.getField(dialog, viewerField);
         Object first = viewerObj instanceof TableViewer v ? v.getStructuredSelection().getFirstElement() : null;
         Object managerObj = Global.getField(dialog, "pictureManager"); //$NON-NLS-1$
         Object queryObj = Global.getField(dialog, "pictureManifestQueryComputer"); //$NON-NLS-1$
-        // #region agent log
-        Global.tempLog(PictureFieldEnhance.DIAG, "libraryFormat viewer=" + viewerField //$NON-NLS-1$
-            + " viewerObj=" + cls(viewerObj) + " first=" + cls(first) //$NON-NLS-1$ //$NON-NLS-2$
-            + " manager=" + cls(managerObj) + " query=" + cls(queryObj)); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
         if (!(first instanceof Picture picture))
             return null;
         if (!(managerObj instanceof IPictureManager manager)
@@ -612,16 +608,28 @@ public class PictureDialogHook implements IStartup {
         try
         {
             IPictureManifest manifest = manager.getPictureManifest(picture);
-            Global.tempLog(PictureFieldEnhance.DIAG, "libraryFormat manifest=" + cls(manifest)); //$NON-NLS-1$ // agent log
             if (manifest == null)
                 return null;
             Optional<ByteArrayInputStream> in = manifest.getInputStream(queryComputer.compute());
-            Global.tempLog(PictureFieldEnhance.DIAG, "libraryFormat stream present=" + in.isPresent()); //$NON-NLS-1$ // agent log
-            return in.map(ByteArrayInputStream::readAllBytes).orElse(null);
+            byte[] bytes = in.map(ByteArrayInputStream::readAllBytes).orElse(null);
+            if (bytes == null)
+                return null;
+            int variants = 0;
+            if (manifest instanceof IZipPictureManifest zipManifest)
+            {
+                try
+                {
+                    variants = PictureFieldEnhance.countSetVariants(zipManifest.getZipPictureContent());
+                }
+                catch (IOException | RuntimeException e)
+                {
+                    Global.logError("PictureDialog", "librarySet", e); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+            }
+            return new PictureFieldEnhance.SourceBytes(bytes, variants);
         }
         catch (IOException | RuntimeException e)
         {
-            Global.tempLogException(PictureFieldEnhance.DIAG, "libraryFormat", e); //$NON-NLS-1$ // agent log
             Global.logError("PictureDialog", "libraryBytes", e); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
         }
@@ -631,37 +639,31 @@ public class PictureDialogHook implements IStartup {
      * Исходные байты картинки вкладки «Из файла». Архив набора картинок ({@code .zip}) —
      * байты показанного варианта из архива, как его выбирает сам диалог.
      */
-    private static byte[] fileBytes(Object dialog)
+    private static PictureFieldEnhance.SourceBytes fileBytes(Object dialog)
     {
         Object viewerObj = Global.getField(dialog, "fileListViewer"); //$NON-NLS-1$
         Object first = viewerObj instanceof TableViewer v ? v.getStructuredSelection().getFirstElement() : null;
-        Global.tempLog(PictureFieldEnhance.DIAG, "fileFormat viewerObj=" + cls(viewerObj) //$NON-NLS-1$
-            + " first=" + cls(first) + " value=" + first); //$NON-NLS-1$ //$NON-NLS-2$ // agent log
         if (!(first instanceof String path))
             return null;
         try (InputStream file = new FileInputStream(path))
         {
             if (!path.trim().endsWith(".zip")) //$NON-NLS-1$
-                return file.readAllBytes();
+                return PictureFieldEnhance.SourceBytes.single(file.readAllBytes());
             if (!(Global.getField(dialog, "pictureManifestQueryComputer") //$NON-NLS-1$
                 instanceof IPictureManifestQueryComputer queryComputer))
                 return null;
             IZipPictureContent zip = ZipPictureContentStore.INSTANCE.read(file);
-            return zip.getInputStreamByQuery(queryComputer.compute())
+            byte[] bytes = zip.getInputStreamByQuery(queryComputer.compute())
                 .map(ByteArrayInputStream::readAllBytes).orElse(null);
+            return bytes != null
+                ? new PictureFieldEnhance.SourceBytes(bytes, PictureFieldEnhance.countSetVariants(zip))
+                : null;
         }
         catch (IOException | RuntimeException e)
         {
-            Global.tempLogException(PictureFieldEnhance.DIAG, "fileFormat", e); //$NON-NLS-1$ // agent log
             Global.logError("PictureDialog", "fileBytes", e); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
         }
-    }
-
-    // agent log
-    private static String cls(Object o)
-    {
-        return o == null ? "null" : o.getClass().getName(); //$NON-NLS-1$
     }
 
     private static void notifyPreviewImageChanged(Object dialog)

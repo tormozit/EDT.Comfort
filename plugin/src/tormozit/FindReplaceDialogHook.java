@@ -179,6 +179,10 @@ public final class FindReplaceDialogHook implements IStartup
             addSettingsListener(caseCheckBox);
             addSettingsListener(wholeWordCheckBox);
             addSettingsListener(regExCheckBox);
+            addIncrementalResearchListener(caseCheckBox);
+            addIncrementalResearchListener(wholeWordCheckBox);
+            addIncrementalResearchListener(regExCheckBox);
+            addIncrementalResearchListener((Button)Global.getField(dialog, "fIncrementalCheckBox")); //$NON-NLS-1$
             shell.addDisposeListener(e -> cancelJob());
 
             /*
@@ -219,6 +223,52 @@ public final class FindReplaceDialogHook implements IStartup
                 return;
             button.addSelectionListener(
                 SelectionListener.widgetSelectedAdapter(e -> applyWholeWordAlwaysEnabled()));
+        }
+
+        /**
+         * Штатный диалог при переключении параметров поиска (регистр, «Слово целиком»,
+         * «Регулярные выражения», «Инкрементный») не сдвигает базу инкрементального поиска на
+         * текущее выделение и не ищет заново — поиск запускается лишь при вводе текста. Поэтому после
+         * смены параметра выделенное вхождение могло перестать подходить, а переход к
+         * подходящему не выполнялся. Повторяем штатный инкрементальный поиск от базы: если
+         * текущее вхождение подходит — оно и остаётся, иначе выделяется следующее.
+         */
+        private void addIncrementalResearchListener(Button checkBox)
+        {
+            if (checkBox == null || checkBox.isDisposed())
+                return;
+            checkBox.addSelectionListener(
+                SelectionListener.widgetSelectedAdapter(e -> researchIncrementally()));
+        }
+
+        private void researchIncrementally()
+        {
+            // До поиска: штатный isWholeWordSearch() учитывает isEnabled() флажка.
+            applyWholeWordAlwaysEnabled();
+            if (!Boolean.TRUE.equals(Global.invoke(dialog, "isIncrementalSearch")) //$NON-NLS-1$
+                || Boolean.TRUE.equals(Global.invoke(dialog, "isRegExSearchAvailableAndChecked")) //$NON-NLS-1$
+                || findField.isDisposed() || findField.getText().isEmpty())
+                return;
+            boolean forward = !Boolean.FALSE.equals(Global.invoke(dialog, "isForwardSearch")); //$NON-NLS-1$
+            // База инкрементального поиска штатно не сдвигается при смене флажка — остаётся там,
+            // где начался ввод, и поиск возвращался бы к первому вхождению. Берём текущее выделение.
+            if (!Global.invokeVoid(dialog, "initIncrementalBaseLocation")) //$NON-NLS-1$
+                FindReplaceLiveCountDebug.problem("researchIncrementally: initIncrementalBaseLocation не вызван"); //$NON-NLS-1$
+            /*
+             * Штатный findNext() начинает не с начала базы, а с её конца (x + y), если только не
+             * взведён fNeedsInitialFindBeforeReplace (при поиске назад — наоборот). Без этого
+             * подходящее текущее вхождение пропускалось бы. findNext() сам сбрасывает флаг.
+             */
+            if (!Global.setFieldForce(dialog, "fNeedsInitialFindBeforeReplace", forward)) //$NON-NLS-1$
+                FindReplaceLiveCountDebug.problem("researchIncrementally: fNeedsInitialFindBeforeReplace не записан"); //$NON-NLS-1$
+            boolean done = Global.invokeVoid(dialog, "performSearch", false, false, forward); //$NON-NLS-1$
+            if (!done)
+            {
+                FindReplaceLiveCountDebug.problem("researchIncrementally: performSearch не вызван"); //$NON-NLS-1$
+                Global.setFieldForce(dialog, "fNeedsInitialFindBeforeReplace", false); //$NON-NLS-1$
+            }
+            // performSearch() в конце зовёт updateButtonState() — он снова гасит флажок.
+            applyWholeWordAlwaysEnabled();
         }
 
         /**

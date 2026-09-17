@@ -356,17 +356,14 @@ final class AefFieldFocus
             if (!keptFocus)
             {
                 replayingHold = true;
-                boolean again;
                 try
                 {
-                    again = activation.getAsBoolean();
+                    activation.getAsBoolean();
                 }
                 finally
                 {
                     replayingHold = false;
                 }
-                Global.tempLog("свойства-активное", //$NON-NLS-1$
-                    "удержание: повтор активации #" + attempt + " → " + again); //$NON-NLS-1$ //$NON-NLS-2$
             }
             holdActivation(activation, attempt + 1, token, shell, activatedAt);
         });

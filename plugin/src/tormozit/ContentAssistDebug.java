@@ -23,34 +23,6 @@ public final class ContentAssistDebug
     {
     }
 
-    // #region agent log
-    public static void debugSessionLog(String hypothesisId, String location, String message,
-        String dataJson)
-    {
-        try
-        {
-            String data = dataJson != null && !dataJson.isEmpty() ? dataJson : "{}"; //$NON-NLS-1$
-            if (data.charAt(0) != '{')
-                data = "{\"v\":\"" + jsonEscape(data) + "\"}"; //$NON-NLS-1$ //$NON-NLS-2$
-            String line = "{\"sessionId\":\"4576d0\",\"timestamp\":" //$NON-NLS-1$
-                + System.currentTimeMillis()
-                + ",\"hypothesisId\":\"" + jsonEscape(hypothesisId) //$NON-NLS-1$
-                + "\",\"location\":\"" + jsonEscape(location) //$NON-NLS-1$
-                + "\",\"message\":\"" + jsonEscape(message) //$NON-NLS-1$
-                + "\",\"data\":" + data + "}\n"; //$NON-NLS-1$
-            java.nio.file.Files.writeString(
-                java.nio.file.Path.of("C:\\VC\\EDT.Comfort\\debug-4576d0.log"), //$NON-NLS-1$
-                line,
-                java.nio.charset.StandardCharsets.UTF_8,
-                java.nio.file.StandardOpenOption.CREATE,
-                java.nio.file.StandardOpenOption.APPEND);
-        }
-        catch (Exception ignored)
-        {
-        }
-    }
-    // #endregion
-
     /** No-op: раньше session NDJSON. */
     public static void sessionLog(String hypothesisId, String location, String message, String dataJson)
     {

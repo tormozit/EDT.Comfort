@@ -14,6 +14,11 @@ import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.Label;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
+import org.osgi.framework.Bundle;
+import org.osgi.framework.BundleContext;
+import org.osgi.framework.FrameworkUtil;
+import org.osgi.framework.hooks.weaving.WeavingHook;
+import org.osgi.framework.hooks.weaving.WovenClass;
 
 import com._1c.g5.v8.dt.bsl.common.IBslModuleTextInsertInfo;
 
@@ -24,16 +29,15 @@ import com._1c.g5.v8.dt.bsl.common.IBslModuleTextInsertInfo;
  * <p>Штатная EDT вставляет процедуру вплотную к предыдущему методу. Общая точка —
  * {@code BslModuleRegionsInfoServiceProvider.wrap}: лупа в панели «Свойства», подписка,
  * схема модуля. Подмена поля сервиса не срабатывает (Guice отдаёт другой экземпляр, чем
- * уже внедрён в lookup) — поэтому {@code wrap} инструментируется ASM, как
- * {@link BslDocCommentDescriptionFix}: вызов через {@code System.getProperties}, без
- * зависимости {@code bsl.ui} → Комфорт.
+ * уже внедрён в lookup) — поэтому {@code wrap} инструментируется ASM через {@code WeavingHook}
+ * (агент — только запасной путь, если класс загрузился раньше): вызов через
+ * {@code System.getProperties}, без зависимости {@code bsl.ui} → Комфорт.
  *
  * @see <a href="https://github.com/tormozit/EDT.Comfort/issues/394">issue 394</a>
  */
 public final class BslHandlerBlankLineHook implements IStartup
 {
     static final String PROP_AFTER_WRAP = "tormozit.bslHandler.afterWrap"; //$NON-NLS-1$
-    private static final String TAG = "BslHandlerBlankLine"; //$NON-NLS-1$
     private static final String TARGET =
         "com._1c.g5.v8.dt.bsl.ui.event.BslModuleRegionsInfoServiceProvider"; //$NON-NLS-1$
     private static final String TARGET_INTERNAL =
@@ -41,14 +45,34 @@ public final class BslHandlerBlankLineHook implements IStartup
     private static final String WRAP_DESC =
         "(Lcom/_1c/g5/v8/dt/bsl/common/IBslModuleTextInsertInfo;Ljava/lang/String;)Ljava/lang/String;"; //$NON-NLS-1$
 
+    private static final AtomicBoolean weavingHookInstalled = new AtomicBoolean();
+    private static volatile boolean woven;
+
+    /**
+     * Регистрация {@link WeavingHook}; как можно раньше из {@code Activator.start}.
+     * Instrumentation в EDT обычно недоступен (самоприсоединение агента запрещено),
+     * поэтому основной путь — {@code WeavingHook}.
+     */
+    public static void installWeavingHook()
+    {
+        if (!weavingHookInstalled.compareAndSet(false, true))
+            return;
+        System.getProperties().put(PROP_AFTER_WRAP,
+            (BiFunction<Object, Object, Object>) BslHandlerBlankLineHook::afterWrap);
+        Bundle bundle = FrameworkUtil.getBundle(BslHandlerBlankLineHook.class);
+        BundleContext context = bundle != null ? bundle.getBundleContext() : null;
+        if (context != null)
+            context.registerService(WeavingHook.class, new WrapWeavingHook(), null);
+    }
+
     @Override
     public void earlyStartup()
     {
-        System.getProperties().put(PROP_AFTER_WRAP,
-            (BiFunction<Object, Object, Object>) BslHandlerBlankLineHook::afterWrap);
-        boolean ok = BslDocCommentDescriptionFix.registerExtraTransformer(new WrapTransformer(), TARGET);
-        if (!ok)
-            Global.logError(TAG, "ASM transformer for wrap() not registered", null); //$NON-NLS-1$
+        installWeavingHook();
+        if (woven)
+            return;
+        // Класс мог загрузиться до регистрации WeavingHook — тогда остаётся только агент.
+        BslDocCommentDescriptionFix.registerExtraTransformer(new WrapTransformer(), TARGET);
     }
 
     /** Вызов из инструментированного {@code wrap}: {@code (insertInfo, content) → content}. */
@@ -189,6 +213,28 @@ public final class BslHandlerBlankLineHook implements IStartup
             catch (Throwable t)
             {
                 return null;
+            }
+        }
+    }
+
+    private static final class WrapWeavingHook implements WeavingHook
+    {
+        @Override
+        public void weave(WovenClass wovenClass)
+        {
+            if (wovenClass.getState() != WovenClass.TRANSFORMING || !TARGET.equals(wovenClass.getClassName()))
+                return;
+            try
+            {
+                byte[] transformed = transformWrap(wovenClass.getBytes());
+                if (transformed != null)
+                {
+                    wovenClass.setBytes(transformed);
+                    woven = true;
+                }
+            }
+            catch (Throwable ignored)
+            {
             }
         }
     }

@@ -2,8 +2,10 @@ package tormozit;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import org.eclipse.core.resources.IProject;
@@ -18,9 +20,7 @@ import org.eclipse.jface.action.IMenuCreator;
 import org.eclipse.jface.action.IToolBarManager;
 import org.eclipse.jface.resource.ImageDescriptor;
 import org.eclipse.jface.text.source.Annotation;
-import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
-import org.eclipse.swt.widgets.Menu;
 import org.eclipse.swt.widgets.Shell;
 import org.osgi.framework.Bundle;
 
@@ -34,7 +34,9 @@ import org.eclipse.xtext.ui.editor.validation.XtextAnnotation;
  * проверку...» ({@code CheckDescriptionHoverContributor} бандла
  * {@code com._1c.g5.v8.dt.ui.validation}). Открывает страницу «Проверки»
  * параметров проекта с выделенной строкой проверки — как двойной щелчок в
- * колонке «Код проверки» панели (см. {@link ProblemViewHook}).
+ * колонке «Код проверки» панели (см. {@link ProblemViewHook}). Штатный дропдаун
+ * «Открыть проверку...» заменяется кнопкой без меню: обе кнопки работают с
+ * проверкой текущей страницы подсказки.
  *
  * <p>Регистрируется extension point'ом EDT
  * {@code com._1c.g5.v8.dt.bsl.ui.bslHoverContributor}. Предупреждения проверок
@@ -49,6 +51,8 @@ public final class BslCheckSettingsHoverContributor implements IBslHoverContribu
     private static final String CHECK_ISSUE_PREFIX = "SU"; //$NON-NLS-1$
 
     private static final String ACTION_TEXT = "Открыть настройку проверки"; //$NON-NLS-1$
+    private static final String DESCRIPTION_TEXT = "Открыть описание проверки"; //$NON-NLS-1$
+    private static final String EDT_DESCRIPTION_DROPDOWN_CLASS = "CheckDescriptionHoverContributor$ToolbarDropdownAction"; //$NON-NLS-1$
 
     private static final String ICON_BUNDLE = "com._1c.g5.v8.dt.ui"; //$NON-NLS-1$
     private static final String ICON_PATH = "icons/etool16/show_properties.png"; //$NON-NLS-1$
@@ -66,12 +70,112 @@ public final class BslCheckSettingsHoverContributor implements IBslHoverContribu
         IProject project = resolveProject(annotations);
         if (project == null)
             return;
-        List<OpenCheckSettingsAction> actions = new ArrayList<>();
-        for (String code : codes)
-            actions.add(new OpenCheckSettingsAction(code, project,
-                codes.size() == 1 ? ACTION_TEXT : ACTION_TEXT + " (" + code + ")")); //$NON-NLS-1$ //$NON-NLS-2$
-        addToToolBar(manager, actions.size() == 1 ? actions.get(0) : new CheckSettingsDropdownAction(actions));
+        addToToolBar(manager, new OpenCheckSettingsAction(new ArrayList<>(codes), annotations, project));
+        replaceDescriptionDropdown(manager, annotations);
         Debug.log("fillToolBar: " + codes); //$NON-NLS-1$
+    }
+
+    /**
+     * Штатный дропдаун EDT «Открыть проверку...» ({@code CheckDescriptionHoverContributor$ToolbarDropdownAction},
+     * пункты — {@code ValidationPreferencesAction} с полем {@code shortCheckUid}) заменяется
+     * кнопкой без меню, открывающей описание проверки текущей страницы подсказки.
+     */
+    private static void replaceDescriptionDropdown(IToolBarManager manager, Collection<Annotation> annotations)
+    {
+        if (!(manager instanceof ContributionManager contributionManager))
+            return;
+        IContributionItem[] items = contributionManager.getItems();
+        for (int i = 0; i < items.length; i++)
+        {
+            if (!(items[i] instanceof ActionContributionItem item)
+                || !(item.getAction() instanceof IMenuCreator)
+                || !item.getAction().getClass().getName().endsWith(EDT_DESCRIPTION_DROPDOWN_CLASS))
+                continue;
+            Map<String, IAction> byCode = new LinkedHashMap<>();
+            if (Global.getField(item.getAction(), "items") instanceof List<?> inner) //$NON-NLS-1$
+            {
+                for (Object o : inner)
+                {
+                    IAction action = o instanceof ActionContributionItem aci ? aci.getAction() : null;
+                    if (action != null && Global.getField(action, "shortCheckUid") instanceof String code) //$NON-NLS-1$
+                        byCode.putIfAbsent(code, action);
+                }
+            }
+            if (byCode.isEmpty())
+            {
+                Debug.log("replaceDescriptionDropdown: нет пунктов"); //$NON-NLS-1$
+                return;
+            }
+            contributionManager.remove(item);
+            contributionManager.insert(i, new ActionContributionItem(
+                new OpenCheckDescriptionAction(byCode, annotations, item.getAction().getImageDescriptor())));
+            return;
+        }
+    }
+
+    /**
+     * Код проверки текущей страницы подсказки. {@code pageKnown=false} — страницу
+     * определить не удалось (тогда кнопки берут первую проверку).
+     */
+    private record CurrentPage(boolean pageKnown, String code)
+    {
+        static CurrentPage resolve(Collection<Annotation> annotations)
+        {
+            Annotation current = BslModuleSpellCheckHook.currentAnnotationHoverAnnotation(annotations);
+            return new CurrentPage(current != null, checkCode(current));
+        }
+
+        boolean isCheck()
+        {
+            return !pageKnown || code != null;
+        }
+    }
+
+    /** Открыть описание проверки текущей страницы — вместо штатного дропдауна EDT. */
+    private static final class OpenCheckDescriptionAction extends Action
+    {
+        private final Map<String, IAction> byCode;
+        private final Collection<Annotation> annotations;
+
+        OpenCheckDescriptionAction(Map<String, IAction> byCode, Collection<Annotation> annotations,
+            ImageDescriptor image)
+        {
+            super(DESCRIPTION_TEXT, AS_PUSH_BUTTON);
+            this.byCode = byCode;
+            this.annotations = new ArrayList<>(annotations);
+            if (image != null)
+                setImageDescriptor(image);
+            CurrentPage page = CurrentPage.resolve(annotations);
+            IAction target = page.code() != null ? byCode.get(page.code()) : null;
+            boolean enabled = page.isCheck() && (!page.pageKnown() || target != null);
+            setEnabled(enabled);
+            String text = target != null ? target.getText() : DESCRIPTION_TEXT;
+            setToolTipText(TooltipText.wrap(Display.getCurrent(), null, (enabled
+                ? text
+                : DESCRIPTION_TEXT + ".\nНедоступно: на текущей странице подсказки не проверка конфигурации") //$NON-NLS-1$
+                + Global.pluginSignForTooltip()));
+        }
+
+        @Override
+        public void run()
+        {
+            CurrentPage page = CurrentPage.resolve(annotations);
+            Debug.log("description run: current=" + page.code() + " codes=" + byCode.keySet()); //$NON-NLS-1$ //$NON-NLS-2$
+            IAction target = page.pageKnown()
+                ? (page.code() != null ? byCode.get(page.code()) : null)
+                : byCode.values().iterator().next();
+            if (target != null)
+                target.run();
+        }
+    }
+
+    /** Код проверки аннотации ({@code SU...}) или {@code null}. */
+    private static String checkCode(Annotation annotation)
+    {
+        if (!(annotation instanceof XtextAnnotation xtext) || xtext.getUriToProblem() == null)
+            return null;
+        String code = xtext.getIssueCode();
+        return code != null && !code.isBlank() && code.startsWith(CHECK_ISSUE_PREFIX) ? code : null;
     }
 
     /**
@@ -107,10 +211,8 @@ public final class BslCheckSettingsHoverContributor implements IBslHoverContribu
         Set<String> codes = new LinkedHashSet<>();
         for (Annotation annotation : annotations)
         {
-            if (!(annotation instanceof XtextAnnotation xtext) || xtext.getUriToProblem() == null)
-                continue;
-            String code = xtext.getIssueCode();
-            if (code != null && !code.isBlank() && code.startsWith(CHECK_ISSUE_PREFIX))
+            String code = checkCode(annotation);
+            if (code != null)
                 codes.add(code);
         }
         return codes;
@@ -160,96 +262,46 @@ public final class BslCheckSettingsHoverContributor implements IBslHoverContribu
     /**
      * Как {@code ValidationPreferencesAction.Mode.OPEN_PREFERENCES} EDT: страница
      * «Проверки» параметров проекта с выделенной строкой проверки.
+     *
+     * <p>Если в точке наведения несколько проверок, открывается та, чью страницу
+     * («◀ n/m ▶») подсказка показывает в момент нажатия — без списка выбора. На
+     * странице без проверки (например, орфография) кнопка недоступна.
      */
     private static final class OpenCheckSettingsAction extends Action
     {
         private final IProject project;
-        private final String shortUid;
+        private final List<String> codes;
+        private final Collection<Annotation> annotations;
 
-        OpenCheckSettingsAction(String shortUid, IProject project, String text)
+        OpenCheckSettingsAction(List<String> codes, Collection<Annotation> annotations, IProject project)
         {
-            super(text, AS_PUSH_BUTTON);
-            this.shortUid = shortUid;
+            super(ACTION_TEXT, AS_PUSH_BUTTON);
+            this.codes = codes;
+            this.annotations = new ArrayList<>(annotations);
             this.project = project;
             ImageDescriptor descriptor = iconDescriptor();
             if (descriptor != null)
                 setImageDescriptor(descriptor);
-            setToolTipText(TooltipText.wrap(Display.getCurrent(), null,
-                "Открыть настройку этой проверки на странице «Проверки» параметров проекта" //$NON-NLS-1$
-                    + Global.pluginSignForTooltip()));
+            // Тулбар перезаполняется при каждом листании страниц — доступность по текущей странице.
+            boolean enabled = CurrentPage.resolve(annotations).isCheck();
+            setEnabled(enabled);
+            setToolTipText(TooltipText.wrap(Display.getCurrent(), null, (enabled
+                ? "Открыть настройку этой проверки на странице «Проверки» параметров проекта" //$NON-NLS-1$
+                : "Открыть настройку проверки.\nНедоступно: на текущей странице подсказки не проверка конфигурации") //$NON-NLS-1$
+                + Global.pluginSignForTooltip()));
         }
 
         @Override
         public void run()
         {
+            CurrentPage page = CurrentPage.resolve(annotations);
+            Debug.log("run: current=" + page.code() + " codes=" + codes); //$NON-NLS-1$ //$NON-NLS-2$
+            // Страница определена, но это не проверка — открывать нечего.
+            if (!page.isCheck())
+                return;
+            String code = page.code() != null ? page.code() : codes.get(0);
             Shell shell = Display.getCurrent() != null ? Display.getCurrent().getActiveShell() : null;
-            ProblemViewHook.openCheckSettings(shell, project, shortUid);
-        }
-    }
-
-    /**
-     * Несколько разных проверок в одной точке наведения — дропдаун, по пункту на
-     * проверку (как {@code CheckDescriptionHoverContributor$ToolbarDropdownAction} EDT).
-     */
-    private static final class CheckSettingsDropdownAction extends Action implements IMenuCreator
-    {
-        private final List<OpenCheckSettingsAction> actions;
-        private Menu menu;
-
-        CheckSettingsDropdownAction(List<OpenCheckSettingsAction> actions)
-        {
-            super(ACTION_TEXT, AS_DROP_DOWN_MENU);
-            this.actions = actions;
-            ImageDescriptor descriptor = actions.get(0).getImageDescriptor();
-            if (descriptor != null)
-                setImageDescriptor(descriptor);
-            setToolTipText(TooltipText.wrap(Display.getCurrent(), null,
-                "Открыть настройку одной из этих проверок на странице «Проверки» параметров проекта" //$NON-NLS-1$
-                    + Global.pluginSignForTooltip()));
-            setMenuCreator(this);
-        }
-
-        @Override
-        public void run()
-        {
-            actions.get(0).run();
-        }
-
-        @Override
-        public Menu getMenu(Control parent)
-        {
-            disposeMenu();
-            menu = new Menu(parent);
-            fillMenu();
-            return menu;
-        }
-
-        @Override
-        public Menu getMenu(Menu parent)
-        {
-            disposeMenu();
-            menu = new Menu(parent);
-            fillMenu();
-            return menu;
-        }
-
-        @Override
-        public void dispose()
-        {
-            disposeMenu();
-        }
-
-        private void fillMenu()
-        {
-            for (OpenCheckSettingsAction action : actions)
-                new ActionContributionItem(action).fill(menu, -1);
-        }
-
-        private void disposeMenu()
-        {
-            if (menu != null && !menu.isDisposed())
-                menu.dispose();
-            menu = null;
+            ProblemViewHook.openCheckSettings(shell, project, code);
         }
     }
 

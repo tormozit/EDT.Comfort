@@ -2090,16 +2090,6 @@ return result;
         return assistant != null && ContentAssistPopupSync.isPopupVisible(assistant);
     }
 
-    private static String firstDisplayOf(ICompletionProposal[] list)
-    {
-        if (list == null || list.length == 0)
-            return ""; //$NON-NLS-1$
-        String disp = displayString(unwrapProposal(list[0]));
-        if (disp == null)
-            return ""; //$NON-NLS-1$
-        return disp.length() > 40 ? disp.substring(0, 40) : disp;
-    }
-
     /**
      * Поле выражения: EDT иногда отдаёт только локальные имена ({@code n=9},
      * {@code events=0}) до готовности ресурса. Это не корневой словарь.
@@ -2605,20 +2595,6 @@ return;
                     + " cacheOnly=" + Boolean.TRUE.equals(CACHE_ONLY_COMPUTE.get()) //$NON-NLS-1$
                     + " firstPopup=" + firstPopup //$NON-NLS-1$
                     + " caller=" + uiBlockCaller()); //$NON-NLS-1$
-            if (DebugInspectorHook.isInspectExpressionViewer(viewer))
-            {
-                ContentAssistDebug.debugSessionLog("B", "computeCompletionProposals", "inspect", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"n\":" + (result == null ? -1 : result.length) //$NON-NLS-1$
-                        + ",\"cache\":" + fullListCache.length //$NON-NLS-1$
-                        + ",\"irN\":" + irProposals.length //$NON-NLS-1$
-                        + ",\"cacheOnly\":" + Boolean.TRUE.equals(CACHE_ONLY_COMPUTE.get()) //$NON-NLS-1$
-                        + ",\"irOnly\":" + (irOnlyManualMode || selectionIrOnlyActive()) //$NON-NLS-1$
-                        + ",\"filter\":\"" + ContentAssistDebug.jsonEscapeForLog(
-                            logDoc != null ? computeIdentifierFilter(logDoc, offset) : "") + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                        + ",\"first\":\"" + ContentAssistDebug.jsonEscapeForLog(firstDisplayOf(result)) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                        + ",\"around\":\"" + ContentAssistDebug.jsonEscapeForLog(uiBlockAround(logDoc, offset)) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                        + ",\"hypothesisId\":\"B\"}"); //$NON-NLS-1$
-            }
             // #endregion
             // В каталог — полный кэш, не отфильтрованный return (лог 10:40:09 n=11).
             IDocument rememberDoc = viewer != null ? viewer.getDocument() : null;
@@ -3363,18 +3339,7 @@ return;
         if (pendingPublishKey == key)
             pendingPublishKey = Integer.MIN_VALUE;
         int publishN = result == null ? -1 : result.length;
-        // #region agent log
         boolean inspectPublish = DebugInspectorHook.isInspectExpressionViewer(viewer);
-        IDocument publishDoc = viewer != null ? viewer.getDocument() : null;
-        ContentAssistDebug.debugSessionLog("B", "publishWordList", inspectPublish ? "inspect" : "module", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-            "{\"n\":" + publishN //$NON-NLS-1$
-                + ",\"events\":" + (dataEvents == null ? -1 : dataEvents.size()) //$NON-NLS-1$
-                + ",\"inspect\":" + inspectPublish //$NON-NLS-1$
-                + ",\"probe\":" + probeOffset //$NON-NLS-1$
-                + ",\"around\":\"" + ContentAssistDebug.jsonEscapeForLog(uiBlockAround(publishDoc, probeOffset)) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"hypothesisId\":\"D\"" //$NON-NLS-1$
-                + ",\"doc\":" + BslDataEventGuard.debugDocJson(publishDoc) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
         uiBlockLog("wordListBackground.publish.enter", "key=" + key //$NON-NLS-1$ //$NON-NLS-2$
             + " n=" + publishN //$NON-NLS-1$
             + " epoch=" + epoch + "/" + wordListEpoch); //$NON-NLS-1$ //$NON-NLS-2$
@@ -3405,18 +3370,6 @@ return;
         ContentAssistant thisCa = viewer instanceof SourceViewer sv
             ? ContentAssistPatcher.getContentAssistant(sv) : null;
         boolean thisPopup = thisCa != null && ContentAssistPopupSync.isPopupVisible(thisCa);
-        boolean activePopup = isPopupVisible();
-        // #region agent log
-        ContentAssistDebug.debugSessionLog("B", "publishWordList", "gate", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"n\":" + publishN //$NON-NLS-1$
-                + ",\"key\":" + key //$NON-NLS-1$
-                + ",\"liveKey\":" + liveKey //$NON-NLS-1$
-                + ",\"liveCaret\":" + liveCaret //$NON-NLS-1$
-                + ",\"thisPopup\":" + thisPopup //$NON-NLS-1$
-                + ",\"activePopup\":" + activePopup //$NON-NLS-1$
-                + ",\"inspect\":" + inspectPublish //$NON-NLS-1$
-                + ",\"hypothesisId\":\"B\"}"); //$NON-NLS-1$
-        // #endregion
         if (liveDoc == null || liveCaret < 0 || liveKey != key)
         {
             boolean keepCtor = liveDoc != null && liveCaret >= 0
@@ -3429,13 +3382,6 @@ return;
             {
                 ContentAssistDebug.perfMark("wordListBackground.dropKey", //$NON-NLS-1$
                     "{\"key\":" + key + ",\"caret\":" + liveCaret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                // #region agent log
-                ContentAssistDebug.debugSessionLog("B", "publishWordList", "dropKey", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"key\":" + key + ",\"liveKey\":" + liveKey //$NON-NLS-1$ //$NON-NLS-2$
-                        + ",\"liveCaret\":" + liveCaret //$NON-NLS-1$
-                        + ",\"inspect\":" + inspectPublish //$NON-NLS-1$
-                        + ",\"hypothesisId\":\"B\"}"); //$NON-NLS-1$
-                // #endregion
                 return;
             }
             key = liveKey;
@@ -3462,13 +3408,6 @@ return;
         }
         if (isTruncatedInspectRootList(inspectPublish, list, dataEvents))
         {
-            // #region agent log
-            ContentAssistDebug.debugSessionLog("B", "publishWordList", "dropTruncated", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"n\":" + list.length //$NON-NLS-1$
-                    + ",\"events\":" + (dataEvents == null ? -1 : dataEvents.size()) //$NON-NLS-1$
-                    + ",\"inspect\":true" //$NON-NLS-1$
-                    + ",\"hypothesisId\":\"B\"}"); //$NON-NLS-1$
-            // #endregion
             uiBlockLog("wordList.dropTruncatedInspect", "n=" + list.length //$NON-NLS-1$ //$NON-NLS-2$
                 + " events=" + (dataEvents == null ? -1 : dataEvents.size())); //$NON-NLS-1$
             rescheduleWordListAfterEmpty(viewer, liveDoc, liveCaret, key);
@@ -3522,7 +3461,6 @@ return;
         // расчёт, и при неудаче получился бы цикл.
         wordListOpenedKey = key;
         boolean opened = false;
-        boolean refreshed = false;
         if (!thisPopup)
         {
             String liveFilter = computeIdentifierFilter(liveDoc, liveCaret);
@@ -3549,20 +3487,8 @@ return;
         }
         else if (viewer instanceof SourceViewer sv && thisCa != null)
         {
-            refreshed = ContentAssistPopupSync.recomputePopupList(thisCa, sv, this);
+            ContentAssistPopupSync.recomputePopupList(thisCa, sv, this);
         }
-        // #region agent log
-        ContentAssistDebug.debugSessionLog("B", "publishWordList", "shown", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"n\":" + publishN //$NON-NLS-1$
-                + ",\"cache\":" + fullListCache.length //$NON-NLS-1$
-                + ",\"thisPopup\":" + thisPopup //$NON-NLS-1$
-                + ",\"activePopup\":" + activePopup //$NON-NLS-1$
-                + ",\"opened\":" + opened //$NON-NLS-1$
-                + ",\"refreshed\":" + refreshed //$NON-NLS-1$
-                + ",\"inspect\":" + inspectPublish //$NON-NLS-1$
-                + ",\"first\":\"" + ContentAssistDebug.jsonEscapeForLog(firstDisplayOf(list)) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"hypothesisId\":\"B\"}"); //$NON-NLS-1$
-        // #endregion
     }
 
     /**

@@ -2537,8 +2537,7 @@ public final class BslModuleSpellCheckHook implements IStartup
             if (offset < 0 || end <= offset || !(viewer.getDocument() instanceof IXtextDocument document))
                 return null;
             int length = end - offset;
-            return document.readOnly(
-                resource -> buildSimilarNameProposal(resource, viewer, offset, length, icon, marker));
+            return buildSimilarNameProposal(document, viewer, offset, length, icon, marker);
         }
         catch (Exception e)
         {
@@ -2584,9 +2583,7 @@ public final class BslModuleSpellCheckHook implements IStartup
             IXtextDocument document = xa.getDocument();
             if (offset == null || length == null || document == null)
                 return null;
-            return document.readOnly(
-                (IUnitOfWork<ICompletionProposal, XtextResource>) resource -> buildSimilarNameProposal(
-                    resource, viewer, offset, length, icon, null));
+            return buildSimilarNameProposal(document, viewer, offset, length, icon, null);
         }
         catch (Exception e)
         {
@@ -2601,9 +2598,61 @@ public final class BslModuleSpellCheckHook implements IStartup
      * API + объекты метаданных), и в последнюю очередь - тот же движок, что у штатного Ctrl+Space
      * ({@link #matchFromContentAssist}), для случаев вроде членов конкретного типа объекта
      * после точки, которых нет в плоской общей таблице.
+     *
+     * <p>{@link #matchFromContentAssist} вызывается только после выхода из
+     * {@code document.readOnly}: он ждёт UI-поток через {@code syncExec}, а UI-поток сам берёт
+     * блокировку того же документа ({@code readOnly}/{@code modify} у
+     * {@code BslXtextDocument.CustomXtextDocumentLocker} - общий монитор). Вызов изнутри
+     * {@code readOnly} давал вечную взаимную блокировку (UI висел в {@code disposeInput}, поток
+     * подсказки при наведении - в {@code syncExec}).
      */
-    private static ICompletionProposal buildSimilarNameProposal(XtextResource resource,
+    private static ICompletionProposal buildSimilarNameProposal(IXtextDocument document,
         ISourceViewer viewer, int offset, int length, Image icon, IMarker markerToClear)
+    {
+        LockedNameLookup found = document.readOnly(
+            (IUnitOfWork<LockedNameLookup, XtextResource>) resource -> lookupNameUnderLock(resource, offset));
+        if (found == null)
+            return null;
+        String typed = found.typed;
+        NameMatch match = found.match;
+        if (match == null)
+            match = matchFromContentAssist(viewer, offset, typed);
+        if (match == null)
+            return null;
+        if (match.exact)
+        {
+            // issue #176: слово реально существует (анализатор ИР может не знать о нём - своя,
+            // отдельная от EDT метаданных база) - показать информационную строку без действия,
+            // а не "Заменить на 'X'" на то же самое слово.
+            return new WordFoundInfoProposal(offset, length, markerToClear);
+        }
+        if (match.name.equals(typed))
+            return null;
+        if (markerToClear != null)
+            return new MarkerClearingReplaceProposal(match.name, offset, length, icon, markerToClear);
+        return new CompletionProposal(match.name, offset, length, match.name.length(), icon,
+            ISSUE176_PROPOSAL_PREFIX + match.name + "'", null, null); //$NON-NLS-1$
+    }
+
+    /** Результат части поиска, выполняемой под блокировкой документа. */
+    private static final class LockedNameLookup
+    {
+        final String typed;
+        final NameMatch match;
+
+        LockedNameLookup(String typed, NameMatch match)
+        {
+            this.typed = typed;
+            this.match = match;
+        }
+    }
+
+    /**
+     * Часть {@link #buildSimilarNameProposal}, которой нужна модель документа: слово под офсетом и
+     * кандидаты из {@link IScope} и общей таблицы. {@code null} - слова нет, предлагать нечего.
+     * Не ждать здесь UI-поток: вызывается под {@code document.readOnly}.
+     */
+    private static LockedNameLookup lookupNameUnderLock(XtextResource resource, int offset)
     {
         ILeafNode leaf = NodeModelUtils.findLeafNodeAtOffset(resource.getParseResult().getRootNode(),
             offset);
@@ -2625,23 +2674,7 @@ public final class BslModuleSpellCheckHook implements IStartup
         NameMatch match = matchFromScope(resource, leaf, typed);
         if (match == null)
             match = matchFromTable(resource, typed);
-        if (match == null)
-            match = matchFromContentAssist(viewer, offset, typed);
-        if (match == null)
-            return null;
-        if (match.exact)
-        {
-            // issue #176: слово реально существует (анализатор ИР может не знать о нём - своя,
-            // отдельная от EDT метаданных база) - показать информационную строку без действия,
-            // а не "Заменить на 'X'" на то же самое слово.
-            return new WordFoundInfoProposal(offset, length, markerToClear);
-        }
-        if (match.name.equals(typed))
-            return null;
-        if (markerToClear != null)
-            return new MarkerClearingReplaceProposal(match.name, offset, length, icon, markerToClear);
-        return new CompletionProposal(match.name, offset, length, match.name.length(), icon,
-            ISSUE176_PROPOSAL_PREFIX + match.name + "'", null, null); //$NON-NLS-1$
+        return new LockedNameLookup(typed, match);
     }
 
     /**
@@ -2791,10 +2824,10 @@ public final class BslModuleSpellCheckHook implements IStartup
     /**
      * Тот же список, что даёт штатный Ctrl+Space в этой позиции - через delegate
      * {@link IContentAssistProcessor} BSL-редактора. Вызывается на UI-потоке через
-     * {@link Display#syncExec} - hover сам по себе считается на фоновом потоке, а не в живом
-     * SWT-вызове синхронно из UI, поэтому дедлока тут не возникает (в отличие от прямого вызова
-     * без syncExec, который падал {@code SWTException: Invalid thread access} - см. лог issue176
-     * от 2026-07-19).
+     * {@link Display#syncExec} - hover считается на фоновом потоке (прямой вызов без syncExec
+     * падал {@code SWTException: Invalid thread access} - см. лог issue176 от 2026-07-19).
+     * <b>Никогда не вызывать под блокировкой документа</b> ({@code readOnly}/{@code modify}):
+     * UI-поток ждёт тот же монитор - вечная взаимная блокировка.
      */
     private static NameMatch matchFromContentAssist(ISourceViewer viewer, int offset, String typed)
     {
@@ -4152,6 +4185,27 @@ public final class BslModuleSpellCheckHook implements IStartup
         {
             navigateAnnotationHover(forward, annotations, viewer);
         }
+    }
+
+    /**
+     * Аннотация, которую сейчас показывает подсказка маркеров ({@code fInput} окна) —
+     * текущая страница навигации «◀ n/m ▶». {@code null}, если окно не найдено.
+     */
+    static Annotation currentAnnotationHoverAnnotation(Collection<Annotation> annotations)
+    {
+        ISourceViewer viewer = annotations != null && !annotations.isEmpty()
+            ? findViewerForAnnotations(new ArrayList<>(annotations)) : null;
+        if (viewer == null)
+            viewer = resolveActiveBslViewer();
+        HoverControlRef hover = findHoverControlRef(viewer, false);
+        if (hover == null)
+            return null;
+        Object info = Global.getField(hover.control, "fInput"); //$NON-NLS-1$
+        if (info == null && hover.manager != null)
+            info = Global.getField(hover.manager, "fInformation"); //$NON-NLS-1$
+        if (!isAnnotationInfo(info))
+            return null;
+        return Global.getField(info, "annotation") instanceof Annotation a ? a : null; //$NON-NLS-1$
     }
 
     private static void navigateAnnotationHover(boolean forward, List<Annotation> annotations,

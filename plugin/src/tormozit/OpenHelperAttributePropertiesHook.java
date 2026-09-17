@@ -19,6 +19,11 @@ import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.Label;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
+import org.osgi.framework.Bundle;
+import org.osgi.framework.BundleContext;
+import org.osgi.framework.FrameworkUtil;
+import org.osgi.framework.hooks.weaving.WeavingHook;
+import org.osgi.framework.hooks.weaving.WovenClass;
 
 import com._1c.g5.v8.dt.metadata.mdclass.BasicFeature;
 import com._1c.g5.v8.dt.metadata.mdclass.EnumValue;
@@ -30,14 +35,13 @@ import com._1c.g5.v8.dt.ui.commands.ShowPropertiesHandler;
  * (диалог «Открыть объект метаданных», переход к определению, навигатор, поиск и т.п.).
  * После успешного открытия панель «Свойства» активируется последней.
  *
- * <p>Инструментирование {@link com._1c.g5.v8.dt.ui.util.OpenHelper}, как
+ * <p>Инструментирование {@link com._1c.g5.v8.dt.ui.util.OpenHelper} через {@code WeavingHook}, как
  * {@link BslHandlerBlankLineHook}: вызов через {@code System.getProperties}, без зависимости
  * {@code dt.ui} → Комфорт.
  */
 public final class OpenHelperAttributePropertiesHook implements IStartup
 {
     static final String PROP_AFTER_OPENED = "tormozit.openHelper.afterOpened"; //$NON-NLS-1$
-    private static final String TAG = "OpenHelperAttributeProperties"; //$NON-NLS-1$
     private static final String TARGET = "com._1c.g5.v8.dt.ui.util.OpenHelper"; //$NON-NLS-1$
     private static final String TARGET_INTERNAL = "com/_1c/g5/v8/dt/ui/util/OpenHelper"; //$NON-NLS-1$
     private static final String OPEN_DESC =
@@ -47,14 +51,44 @@ public final class OpenHelperAttributePropertiesHook implements IStartup
         "(Lorg/eclipse/emf/ecore/EObject;Lorg/eclipse/emf/ecore/EStructuralFeature;" //$NON-NLS-1$
             + "Lorg/eclipse/jface/viewers/ISelection;)Z"; //$NON-NLS-1$
 
+    private static final AtomicBoolean weavingHookInstalled = new AtomicBoolean();
+    private static volatile boolean woven;
+
+    /**
+     * Регистрация {@link WeavingHook}; как можно раньше из {@code Activator.start}.
+     * Instrumentation в EDT обычно недоступен (самоприсоединение агента запрещено).
+     */
+    public static void installWeavingHook()
+    {
+        if (!weavingHookInstalled.compareAndSet(false, true))
+            return;
+        System.getProperties().put(PROP_AFTER_OPENED,
+            (BiConsumer<Object, Object>) OpenHelperAttributePropertiesHook::afterOpened);
+        Bundle bundle = FrameworkUtil.getBundle(OpenHelperAttributePropertiesHook.class);
+        BundleContext context = bundle != null ? bundle.getBundleContext() : null;
+        if (context != null)
+            context.registerService(WeavingHook.class, new OpenWeavingHook(), null);
+    }
+
     @Override
     public void earlyStartup()
     {
-        System.getProperties().put(PROP_AFTER_OPENED,
-            (BiConsumer<Object, Object>) OpenHelperAttributePropertiesHook::afterOpened);
+        installWeavingHook();
+        // #region agent log
+        Global.tempLog("openhelper-weaving", "earlyStartup woven=" + woven + " " + diagState() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " alreadyLoaded=" + probeLoaded()); //$NON-NLS-1$
+        Display diagDisplay = Display.getDefault();
+        for (int delay : new int[] {5000, 30000, 120000})
+            diagDisplay.asyncExec(() -> diagDisplay.timerExec(delay, () -> Global.tempLog("openhelper-weaving", //$NON-NLS-1$
+                "timer " + delay + " woven=" + woven + " " + diagState()))); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        // #endregion
+        if (woven)
+            return;
+        // Класс мог загрузиться до регистрации WeavingHook — тогда остаётся только агент.
         boolean ok = BslDocCommentDescriptionFix.registerExtraTransformer(new OpenTransformer(), TARGET);
-        if (!ok)
-            Global.logError(TAG, "ASM transformer for OpenHelper not registered", null); //$NON-NLS-1$
+        // #region agent log
+        Global.tempLog("openhelper-weaving", "earlyStartup transformer registered=" + ok); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
     }
 
     /**
@@ -63,6 +97,11 @@ public final class OpenHelperAttributePropertiesHook implements IStartup
      */
     public static void afterOpened(Object obj, Object selection)
     {
+        // #region agent log
+        Global.tempLog("openhelper-weaving", "afterOpened obj=" //$NON-NLS-1$ //$NON-NLS-2$
+            + (obj == null ? "null" : obj.getClass().getSimpleName()) //$NON-NLS-1$
+            + " sel=" + (selection == null ? "null" : selection.getClass().getSimpleName())); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
         if (!isMdObjectAttribute(asEObject(obj)) && !isMdObjectAttribute(selectionFirst(selection)))
             return;
         scheduleActivateProperties();
@@ -133,6 +172,66 @@ public final class OpenHelperAttributePropertiesHook implements IStartup
             catch (Throwable t)
             {
                 return null;
+            }
+        }
+    }
+
+    // #region agent log
+    private static volatile boolean diagSeen;
+    private static volatile String diagSeenState;
+    private static volatile boolean diagNullResult;
+    private static volatile String diagError;
+
+    private static String diagState()
+    {
+        return "seen=" + diagSeen + " state=" + diagSeenState + " nullResult=" + diagNullResult //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " error=" + diagError; //$NON-NLS-1$
+    }
+
+    private static String probeLoaded()
+    {
+        try
+        {
+            Bundle dtUi = org.eclipse.core.runtime.Platform.getBundle("com._1c.g5.v8.dt.ui"); //$NON-NLS-1$
+            if (dtUi == null)
+                return "noBundle"; //$NON-NLS-1$
+            ClassLoader loader = dtUi.adapt(org.osgi.framework.wiring.BundleWiring.class).getClassLoader();
+            java.lang.reflect.Method m = ClassLoader.class.getDeclaredMethod("findLoadedClass", String.class); //$NON-NLS-1$
+            m.setAccessible(true);
+            return String.valueOf(m.invoke(loader, TARGET) != null) + " dtUiState=" + dtUi.getState(); //$NON-NLS-1$
+        }
+        catch (Throwable t)
+        {
+            return "probeFailed:" + t; //$NON-NLS-1$
+        }
+    }
+    // #endregion
+
+    private static final class OpenWeavingHook implements WeavingHook
+    {
+        @Override
+        public void weave(WovenClass wovenClass)
+        {
+            if (!TARGET.equals(wovenClass.getClassName()))
+                return;
+            diagSeen = true; // agent log
+            diagSeenState = String.valueOf(wovenClass.getState()); // agent log
+            if (wovenClass.getState() != WovenClass.TRANSFORMING)
+                return;
+            try
+            {
+                byte[] transformed = transformOpenHelper(wovenClass.getBytes());
+                if (transformed != null)
+                {
+                    wovenClass.setBytes(transformed);
+                    woven = true;
+                }
+                else
+                    diagNullResult = true; // agent log
+            }
+            catch (Throwable t)
+            {
+                diagError = String.valueOf(t); // agent log
             }
         }
     }
