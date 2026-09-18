@@ -816,25 +816,11 @@ public final class ParamHintHtmlModifier
     }
 
     /**
-     * Gate Find-miss: popup уже виден (реальный infoControl или Browser с heading).
-     * Не трогает resolve ctx основного пути.
+     * Gate Find-miss: popup уже виден как реальный Shell с Browser подсказки.
+     * Поле handler.infoControl после dispose остаётся ненулевым и здесь непригодно.
      */
     private static boolean isParamHintAlreadyVisible()
     {
-        try
-        {
-            // e4 lookUp только здесь/в Find-miss — общий resolve не трогаем.
-            Object handler = resolveParamHoverHandlerForMiss();
-            if (handler != null)
-            {
-                Object infoControl = Global.getField(handler, "infoControl"); //$NON-NLS-1$
-                if (infoControl != null)
-                    return true;
-            }
-        }
-        catch (Exception ignored)
-        {
-        }
         return isParamHintShellVisible();
     }
 
@@ -1601,7 +1587,7 @@ public final class ParamHintHtmlModifier
             if (value instanceof Integer comma && comma.intValue() < caret)
                 index++;
         }
-        widget.setData(PENDING_PARAM_INDEX_MARK, Integer.valueOf(index));
+        widget.setData(PENDING_PARAM_INDEX_MARK, new ParamIndexAtCaret(caret, index));
     }
 
     /**
@@ -3365,11 +3351,8 @@ public final class ParamHintHtmlModifier
                         widget.removeCaretListener(this);
                     return;
                 }
-                Display display = widget.getDisplay();
-                if (display == null || display.isDisposed())
-                    return;
                 // После штатного CustomCaretListener EDT.
-                display.asyncExec(() -> refreshParamHintViaShowPage(browser, widget));
+                refreshParamHintViaShowPage(browser, widget, event.caretOffset);
             }
         };
         widget.addCaretListener(listener);
@@ -3386,7 +3369,8 @@ public final class ParamHintHtmlModifier
      * Смена активного параметра — только {@code showPage} → {@code setInput} →
      * {@code updateSize}, как у LinkedMode. Без прямого {@code Browser.setText}.
      */
-    private static void refreshParamHintViaShowPage(Browser browser, StyledText widget)
+    private static void refreshParamHintViaShowPage(Browser browser, StyledText widget,
+        int eventCaret)
     {
         if (browser == null || browser.isDisposed())
             return;
@@ -3394,14 +3378,15 @@ public final class ParamHintHtmlModifier
             return;
         Object pending = widget != null && !widget.isDisposed()
             ? widget.getData(PENDING_PARAM_INDEX_MARK) : null;
-        if (pending instanceof Integer && widget != null && !widget.isDisposed())
-            widget.setData(PENDING_PARAM_INDEX_MARK, null);
+        Integer exactIndex = pending instanceof ParamIndexAtCaret exact
+            && exact.caret == eventCaret
+                ? Integer.valueOf(exact.index) : null;
         HoverContext ctx = resolveHoverContext(browser);
         if (ctx == null || ctx.parametersHover == null || ctx.pages == null || ctx.pages.isEmpty())
             return;
         if (ctx.pageIndex < 0 || ctx.pageIndex >= ctx.pages.size())
             return;
-        int desired = pending instanceof Integer exact ? exact.intValue()
+        int desired = exactIndex != null ? exactIndex.intValue()
             : (ctx.currentArgIndex >= 0 ? ctx.currentArgIndex : ctx.paramIndex);
         if (desired < 0)
             desired = 0;
@@ -3412,6 +3397,13 @@ public final class ParamHintHtmlModifier
         Object paramsObj = Global.getField(page, "params"); //$NON-NLS-1$
         List<?> params = paramsObj instanceof List<?> typed ? typed : Collections.emptyList();
         int formalCount = params.size();
+        if (desired >= formalCount)
+        {
+            browser.setData(LAST_SHOW_ARG_MARK, Integer.valueOf(desired));
+            ctx.currentArgIndex = desired;
+            refreshVirtualParamHtml(browser, ctx);
+            return;
+        }
         int showIdx = desired;
         if (formalCount > 0 && showIdx >= formalCount)
             showIdx = formalCount - 1;
@@ -3423,6 +3415,21 @@ public final class ParamHintHtmlModifier
         // операция, любое наше вмешательство (сжатие, перенос, alpha) видно как вспышка.
         Global.invokeVoid(ctx.parametersHover, "showPage", ctx.pages, //$NON-NLS-1$
             Integer.valueOf(ctx.pageIndex), Integer.valueOf(showIdx));
+    }
+
+    private static void refreshVirtualParamHtml(Browser browser, HoverContext ctx)
+    {
+        String html = browser.getText();
+        String heading = rewriteHeadingOptionalParams(html, ctx);
+        if (heading == null)
+            heading = html;
+        String content = modifyContentHtml(heading, ctx);
+        String modified = content != null ? content : heading;
+        if (!modified.equals(html))
+        {
+            setBrowserTextKeepGeometry(browser, modified);
+            scheduleScrollParamNameIntoView(browser);
+        }
     }
 
     /**
@@ -5775,6 +5782,18 @@ public final class ParamHintHtmlModifier
         /** Тип {@code Новый Тип(...)} — для maxParams сигнатуры конструктора. */
         Type constructorType;
         String directive;
+    }
+
+    private static final class ParamIndexAtCaret
+    {
+        final int caret;
+        final int index;
+
+        ParamIndexAtCaret(int caret, int index)
+        {
+            this.caret = caret;
+            this.index = index;
+        }
     }
 
     private static final class SelectedConstructorSignature

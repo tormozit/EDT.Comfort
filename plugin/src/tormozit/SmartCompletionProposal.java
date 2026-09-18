@@ -76,6 +76,9 @@ public class SmartCompletionProposal implements
     /** Каретка после overlap-вставки ИР; {@code -1} — не задана. */
     private int overlapIrCaret = -1;
 
+    /** Каретка внутри сохранённых скобок после вставки только имени метода. */
+    private int wordOnlyCaret = -1;
+
     public SmartCompletionProposal(ICompletionProposal delegate)
     {
         this(delegate, -1);
@@ -199,6 +202,12 @@ public class SmartCompletionProposal implements
     @Override
     public Point getSelection(IDocument document)
     {
+        if (wordOnlyCaret >= 0)
+        {
+            int caret = wordOnlyCaret;
+            wordOnlyCaret = -1;
+            return new Point(caret, 0);
+        }
         if (overlapIrCaret >= 0)
         {
             int caret = overlapIrCaret;
@@ -1027,7 +1036,7 @@ public class SmartCompletionProposal implements
     }
 
     /**
-     * Каретка непосредственно перед {@code (} — вставка без хвоста {@code ()} у replacement.
+     * Каретка непосредственно перед {@code (} — вставка без хвоста вызова {@code (...)}.
      *
      * @return {@code true}, если выполнен fallback вместо штатного delegate.apply
      */
@@ -1035,15 +1044,26 @@ public class SmartCompletionProposal implements
         int completionOffset, Integer stateMask)
     {
         ConfigurableCompletionProposal cp = asConfigurable(delegate);
-        if (cp == null || document == null)
-            return false;
         int caret = completionOffset >= 0
             ? completionOffset
             : resolveApplyCaretOffset(document);
-        if (caret < 0 || !needsWordOnlyInsert(cp, document, caret))
+        boolean wordOnly = cp != null && document != null && caret >= 0
+            && needsWordOnlyInsert(cp, document, caret);
+        if (!wordOnly)
             return false;
         int effectiveOffset = completionOffset >= 0 ? completionOffset : caret;
-        applyWordOnly(cp, document, viewer, effectiveOffset, stateMask);
+        // Полный replacement не вставляем, поэтому его DataEvent/LinkedMode неприменим:
+        // позиции рассчитаны для новых скобок, а мы сохраняем уже существующие.
+        SmartContentAssistProcessor.clearCtorPendingApplyState();
+        int desiredCaret = applyWordOnly(cp, document, viewer, effectiveOffset, stateMask);
+        // CompletionProposalPopup после любого apply всегда вызывает getSelection()
+        // и выставляет полученный диапазон, поэтому позицию нужно вернуть именно там.
+        wordOnlyCaret = desiredCaret;
+        ContentAssistSessionReloader reloader = viewer instanceof SourceViewer sourceViewer
+            ? ContentAssistSessionReloader.forViewer(sourceViewer)
+            : ContentAssistSessionReloader.getActiveReloader();
+        if (reloader != null)
+            reloader.scheduleParamHintForExistingCall(desiredCaret);
         return true;
     }
 
@@ -1219,14 +1239,13 @@ public class SmartCompletionProposal implements
     private static boolean needsWordOnlyInsert(ConfigurableCompletionProposal cp,
         IDocument document, int caretOffset)
     {
-        // Конструктор/метод с LinkedMode: DataEvent завязан на вставку со скобками.
+        // Конструктор с LinkedMode: DataEvent завязан на вставку со скобками.
         Object additional = Global.getField(cp, "additionalProposalInfo"); //$NON-NLS-1$
         if (additional instanceof com._1c.g5.v8.dt.mcore.FakeCtor
-            || additional instanceof com._1c.g5.v8.dt.mcore.ParamSet
-            || additional instanceof com._1c.g5.v8.dt.bsl.model.ProposalElement)
+            || additional instanceof com._1c.g5.v8.dt.mcore.ParamSet)
             return false;
         String repl = cp.getReplacementString();
-        if (repl == null || !repl.endsWith("()")) //$NON-NLS-1$
+        if (callSuffixStart(repl) < 0)
             return false;
         try
         {
@@ -1240,21 +1259,42 @@ public class SmartCompletionProposal implements
         }
     }
 
-    private static String stripTrailingEmptyCallParens(String replacement)
+    /** Начало хвоста вызова {@code (...)} с допустимыми пробелами/точкой с запятой после него. */
+    private static int callSuffixStart(String replacement)
     {
-        if (replacement != null && replacement.endsWith("()")) //$NON-NLS-1$
-            return replacement.substring(0, replacement.length() - 2);
+        if (replacement == null)
+            return -1;
+        int open = replacement.indexOf('(');
+        int close = replacement.lastIndexOf(')');
+        if (open <= 0 || close <= open)
+            return -1;
+        for (int i = close + 1; i < replacement.length(); i++)
+        {
+            char ch = replacement.charAt(i);
+            if (ch != ';' && !Character.isWhitespace(ch))
+                return -1;
+        }
+        return open;
+    }
+
+    private static String stripTrailingCall(String replacement)
+    {
+        int open = callSuffixStart(replacement);
+        if (open >= 0)
+            return replacement.substring(0, open);
         return replacement;
     }
 
-    private static void applyWordOnly(ConfigurableCompletionProposal cp, IDocument document,
+    private static int applyWordOnly(ConfigurableCompletionProposal cp, IDocument document,
         ITextViewer viewer, int completionOffset, Integer stateMask)
     {
         String savedRepl = cp.getReplacementString();
         int savedLen = cp.getReplacementLength();
+        String wordOnly = stripTrailingCall(savedRepl);
+        int desiredCaret = cp.getReplacementOffset() + wordOnly.length() + 1;
         try
         {
-            cp.setReplacementString(stripTrailingEmptyCallParens(savedRepl));
+            cp.setReplacementString(wordOnly);
             int newLen = completionOffset - cp.getReplacementOffset();
             Point sel = viewer != null ? viewer.getSelectedRange() : null;
             if (sel != null)
@@ -1269,6 +1309,7 @@ public class SmartCompletionProposal implements
             cp.setReplacementString(savedRepl);
             cp.setReplacementLength(savedLen);
         }
+        return desiredCaret;
     }
 
     private SmartCodeMatcher resolveHighlightMatcher()

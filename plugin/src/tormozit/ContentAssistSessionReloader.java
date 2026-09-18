@@ -988,7 +988,7 @@ boolean inLiteral = endCaret >= 0
                 int open = text.indexOf('(');
                 pendingShowParamHintAfterInsert = true;
                 pendingParamHintDesiredCaret = open >= 0 ? event.getOffset() + open + 1 : -1;
-                scheduleParamHintAfterIrReplaceParent();
+                scheduleParamHintAfterInsert();
             }
             logLinkedMode("prepare.skip", "{\"reason\":\"irApply\"" //$NON-NLS-1$ //$NON-NLS-2$
                 + ",\"replaceParent\":" + replaceParent //$NON-NLS-1$
@@ -1042,11 +1042,16 @@ boolean inLiteral = endCaret >= 0
         schedulePostDoItLinkedModeDiag(doc, event.getOffset(), text);
     }
 
-    /**
-     * После вставки ИР с заменой родителя {@code Method()}: подсказка параметров
-     * (штатный LinkedMode/DataEvent для ИР-вставки не поднимается).
-     */
-    private void scheduleParamHintAfterIrReplaceParent()
+    /** Подсказка параметров после вставки, для которой штатный DataEvent не поднимается. */
+    void scheduleParamHintForExistingCall(int desiredCaret)
+    {
+        pendingShowParamHintAfterInsert = true;
+        pendingParamHintDesiredCaret = desiredCaret;
+        pendingParamHintKind = 0;
+        scheduleParamHintAfterInsert();
+    }
+
+    private void scheduleParamHintAfterInsert()
     {
         if (!pendingShowParamHintAfterInsert || pendingParamHintDesiredCaret < 0)
             return;
