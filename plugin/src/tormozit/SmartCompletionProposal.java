@@ -1239,11 +1239,6 @@ public class SmartCompletionProposal implements
     private static boolean needsWordOnlyInsert(ConfigurableCompletionProposal cp,
         IDocument document, int caretOffset)
     {
-        // Конструктор с LinkedMode: DataEvent завязан на вставку со скобками.
-        Object additional = Global.getField(cp, "additionalProposalInfo"); //$NON-NLS-1$
-        if (additional instanceof com._1c.g5.v8.dt.mcore.FakeCtor
-            || additional instanceof com._1c.g5.v8.dt.mcore.ParamSet)
-            return false;
         String repl = cp.getReplacementString();
         if (callSuffixStart(repl) < 0)
             return false;

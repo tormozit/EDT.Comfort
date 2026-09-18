@@ -32,6 +32,7 @@ import org.eclipse.jface.text.contentassist.ICompletionProposal;
 import org.eclipse.jface.text.link.LinkedModeModel;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.browser.Browser;
+import org.eclipse.swt.browser.BrowserFunction;
 import org.eclipse.swt.browser.ProgressEvent;
 import org.eclipse.swt.browser.ProgressListener;
 import org.eclipse.swt.custom.CaretEvent;
@@ -109,6 +110,20 @@ public final class ParamHintHtmlModifier
     /** Маркер окрашенной части заголовка до списка параметров. */
     private static final String HEADING_PREFIX_CLASS = "comfort-heading-prefix"; //$NON-NLS-1$
     private static final String OVERFLOW_STYLE_ID = "comfort-param-hint-overflow"; //$NON-NLS-1$
+    /** Оформление кликабельных имён параметров без изменения их обычного вида. */
+    private static final String PARAM_LINK_STYLE_ID = "comfort-param-hint-links"; //$NON-NLS-1$
+    private static final String PARAM_LINK_CLASS = "comfort-param-link"; //$NON-NLS-1$
+    private static final String PARAM_ENTRY_CLASS = "comfort-param-entry"; //$NON-NLS-1$
+    private static final String PARAM_MENU_CLASS = "comfort-param-menu"; //$NON-NLS-1$
+    private static final String PARAM_MENU_ITEM_CLASS = "comfort-param-menu-item"; //$NON-NLS-1$
+    private static final String PARAM_BROWSER_FUNCTION_NAME = "comfortParamAction"; //$NON-NLS-1$
+    private static final int PARAM_MENU_TEXT_MAX_LENGTH = 50;
+    /** Границы перестраиваемого списка: содержимое меню тоже может содержать ')'. */
+    private static final String PARAM_LIST_START_MARK = "<!--comfort-param-list-start-->"; //$NON-NLS-1$
+    private static final String PARAM_LIST_END_MARK = "<!--comfort-param-list-end-->"; //$NON-NLS-1$
+    /** BrowserFunction действий параметра (одна на Browser). */
+    private static final String PARAM_BROWSER_FUNCTION_MARK =
+        "tormozit.paramHintBrowserFunction"; //$NON-NLS-1$
     /** Доля цвета текста в приглушённом цвете заголовка (остальное — фон). */
     private static final double HEADING_PREFIX_TEXT_WEIGHT = 0.55;
     /** Макс. число типов возврата в заголовке (через запятую); дальше — "...". */
@@ -3123,6 +3138,7 @@ public final class ParamHintHtmlModifier
                 return;
 
             ensureCurrentParamCaretSync(browser);
+            ensureParameterBrowserFunction(browser);
 
             boolean hasMeta = html.indexOf(COMFORT_META_MARKER) >= 0
                 || html.indexOf("data-comfort=\"1\"") >= 0; //$NON-NLS-1$
@@ -3324,6 +3340,381 @@ public final class ParamHintHtmlModifier
     }
 
     /**
+     * Прямой мост JavaScript → Java для кликов в подсказке. В отличие от {@code href}
+     * он не создаёт навигацию, поэтому штатный обработчик ссылок Xtext не открывает
+     * несуществующую страницу синтакс-помощника.
+     */
+    private static void ensureParameterBrowserFunction(Browser browser)
+    {
+        if (browser == null || browser.isDisposed())
+            return;
+        if (browser.getData(PARAM_BROWSER_FUNCTION_MARK) != null)
+            return;
+        Object parametersHover = findParametersHover(browser);
+        Object viewerObj = parametersHover != null
+            ? Global.getField(parametersHover, "textViewer") : null; //$NON-NLS-1$
+        if (!(viewerObj instanceof ITextViewer viewer))
+            return;
+        BrowserFunction function = new BrowserFunction(browser, PARAM_BROWSER_FUNCTION_NAME)
+        {
+            @Override
+            public Object function(Object[] arguments)
+            {
+                String action = arguments != null && arguments.length > 0
+                    ? String.valueOf(arguments[0]) : ""; //$NON-NLS-1$
+                int paramIndex = browserFunctionParamIndex(arguments);
+                if (paramIndex < 0)
+                    return Boolean.FALSE;
+                Display display = browser.getDisplay();
+                if (display == null || display.isDisposed())
+                    return Boolean.FALSE;
+                display.asyncExec(() ->
+                {
+                    if ("activate".equals(action)) //$NON-NLS-1$
+                        activateParameter(browser, paramIndex);
+                    else if ("copy".equals(action)) //$NON-NLS-1$
+                        copyParameterName(browser, paramIndex);
+                    else if ("actual".equals(action)) //$NON-NLS-1$
+                        jumpToActualParameter(browser, viewer, paramIndex, false);
+                    else if ("actualSelect".equals(action)) //$NON-NLS-1$
+                        jumpToActualParameter(browser, viewer, paramIndex, true);
+                });
+                return Boolean.TRUE;
+            }
+        };
+        browser.setData(PARAM_BROWSER_FUNCTION_MARK, function);
+    }
+
+    private static int browserFunctionParamIndex(Object[] arguments)
+    {
+        if (arguments == null || arguments.length < 2)
+            return -1;
+        Object raw = arguments[1];
+        if (raw instanceof Number number)
+            return number.intValue();
+        try
+        {
+            return Integer.parseInt(String.valueOf(raw));
+        }
+        catch (NumberFormatException ignored)
+        {
+            return -1;
+        }
+    }
+
+    /** Делает формальный параметр активным, не перемещая каретку редактора. */
+    private static void activateParameter(Browser browser, int paramIndex)
+    {
+        if (browser == null || browser.isDisposed() || paramIndex < 0)
+            return;
+        HoverContext ctx = resolveHoverContext(browser);
+        if (ctx == null || ctx.parametersHover == null || ctx.pages == null
+            || ctx.pages.isEmpty() || ctx.pageIndex < 0 || ctx.pageIndex >= ctx.pages.size())
+            return;
+        int formalCount = countPageParams(ctx.pages.get(ctx.pageIndex));
+        if (paramIndex >= formalCount)
+            return;
+        browser.setData(LAST_SHOW_ARG_MARK, Integer.valueOf(paramIndex));
+        browser.setData(CURRENT_PARAM_INDEX_MARK, Integer.valueOf(paramIndex));
+        showPageKeepingCurrentBounds(ctx.parametersHover, ctx.pages,
+            ctx.pageIndex, paramIndex);
+    }
+
+    /**
+     * EDT {@code showPage()} вызывает {@code updateSize()}, который загружает последние
+     * сохранённые границы. Синхронизируем их с текущими до обновления, чтобы окно не
+     * сужалось на промежуточный кадр и Browser не оставлял следы полосы прокрутки.
+     */
+    private static boolean showPageKeepingCurrentBounds(Object parametersHover,
+        List<?> pages, int pageIndex, int paramIndex)
+    {
+        if (parametersHover == null || pages == null)
+            return false;
+        Global.invokeVoid(parametersHover, "saveBounds"); //$NON-NLS-1$
+        return Global.invokeVoid(parametersHover, "showPage", pages, //$NON-NLS-1$
+            Integer.valueOf(pageIndex), Integer.valueOf(paramIndex));
+    }
+
+    private static void copyParameterName(Browser browser, int paramIndex)
+    {
+        if (browser == null || browser.isDisposed() || paramIndex < 0)
+            return;
+        HoverContext ctx = resolveHoverContext(browser);
+        if (ctx == null || ctx.pages == null || ctx.pageIndex < 0
+            || ctx.pageIndex >= ctx.pages.size())
+            return;
+        Object paramsObj = Global.getField(ctx.pages.get(ctx.pageIndex), "params"); //$NON-NLS-1$
+        if (!(paramsObj instanceof List<?> params) || paramIndex >= params.size())
+            return;
+        Object param = params.get(paramIndex);
+        String name = param != null ? asString(Global.invoke(param, "getName")) : null; //$NON-NLS-1$
+        if (name == null || name.isBlank())
+            return;
+        name = name.trim();
+        org.eclipse.swt.dnd.Clipboard clipboard =
+            new org.eclipse.swt.dnd.Clipboard(browser.getDisplay());
+        try
+        {
+            clipboard.setContents(new Object[] { name },
+                new org.eclipse.swt.dnd.Transfer[] { org.eclipse.swt.dnd.TextTransfer.getInstance() });
+        }
+        finally
+        {
+            clipboard.dispose();
+        }
+        ToastNotification.show("Скопировано в буфер обмена", name, 3_000); //$NON-NLS-1$
+    }
+
+    /** Переносит каретку в фактический аргумент или создаёт отсутствующий слот. */
+    private static void jumpToActualParameter(Browser browser, ITextViewer viewer, int paramIndex,
+        boolean selectActual)
+    {
+        if (viewer == null || paramIndex < 0)
+            return;
+        IDocument document = viewer.getDocument();
+        StyledText widget = viewer.getTextWidget();
+        if (!(document instanceof IXtextDocument xdoc) || widget == null || widget.isDisposed())
+            return;
+        try
+        {
+            int caret = SmartContentAssistProcessor.resolveWidgetCaret(viewer);
+            ParameterJumpTarget target = ContentAssistSessionReloader.readOnlyPeekAst(xdoc,
+                (IUnitOfWork<ParameterJumpTarget, XtextResource>) resource -> {
+                    if (resource == null)
+                        return null;
+                    CallSiteInfo site = findCallSiteAt(resource, caret);
+                    return parameterJumpTarget(site, paramIndex);
+                });
+            if (target == null)
+                return;
+
+            int targetOffset;
+            if (target.missingCommas > 0)
+            {
+                int close = closingParenOffset(document, target.callEnd,
+                    target.minimumOffset);
+                if (close < 0)
+                    return;
+                String commas = ",".repeat(target.missingCommas); //$NON-NLS-1$
+                document.replace(close, 0, commas);
+                targetOffset = close + commas.length();
+            }
+            else
+            {
+                targetOffset = target.argumentOffset >= 0
+                    ? target.argumentOffset
+                    : skipWhitespace(document, target.slotStart, target.slotEnd);
+            }
+
+            targetOffset = Math.max(0, Math.min(targetOffset, document.getLength()));
+            Point selection = selectActual && target.argumentOffset >= 0
+                ? printableRange(document, target.argumentOffset, target.argumentEndOffset)
+                : null;
+            int selectionOffset = selection != null ? selection.x : targetOffset;
+            int selectionLength = selection != null ? selection.y : 0;
+            int caretOffset = selectionOffset + selectionLength;
+            widget.setData(PENDING_PARAM_INDEX_MARK,
+                new ParamIndexAtCaret(caretOffset, paramIndex));
+            synchronizeStockCaretListener(browser, viewer, widget, caretOffset, paramIndex);
+            removeStockPopupFocusClose(browser);
+            widget.setFocus();
+            viewer.setSelectedRange(selectionOffset, selectionLength);
+            viewer.revealRange(selectionOffset, selectionLength);
+            restoreViewerFocusAfterParamHint(widget);
+        }
+        catch (Exception | LinkageError ignored)
+        {
+        }
+    }
+
+    /** Диапазон без крайних пробельных, управляющих и форматирующих символов. */
+    private static Point printableRange(IDocument document, int start, int end)
+        throws BadLocationException
+    {
+        int limit = document != null ? document.getLength() : 0;
+        int left = Math.max(0, Math.min(start, limit));
+        int right = Math.max(left, Math.min(end, limit));
+        while (left < right && isNonPrintingEdgeChar(document.getChar(left)))
+            left++;
+        while (right > left && isNonPrintingEdgeChar(document.getChar(right - 1)))
+            right--;
+        return new Point(left, right - left);
+    }
+
+    private static boolean isNonPrintingEdgeChar(char ch)
+    {
+        int type = Character.getType(ch);
+        return Character.isWhitespace(ch) || Character.isSpaceChar(ch)
+            || Character.isISOControl(ch) || type == Character.FORMAT;
+    }
+
+    /**
+     * Штатный {@code CustomCaretListener} при смене номера параметра вызывает новый
+     * {@code showControlInfo} и уничтожает текущее окно. Переход по нашей команде уже
+     * знает точный слот, поэтому заранее синхронизируем состояние listener: его
+     * событие перемещения только проверит границы, а содержимое обновит наш listener
+     * через {@code showPage}.
+     */
+    private static void synchronizeStockCaretListener(Browser browser, ITextViewer viewer,
+        StyledText widget, int targetOffset, int paramIndex)
+    {
+        if (widget == null || widget.isDisposed())
+            return;
+        int targetWidgetOffset = targetOffset;
+        if (viewer instanceof org.eclipse.jface.text.ITextViewerExtension5 extension)
+        {
+            int mapped = extension.modelOffset2WidgetOffset(targetOffset);
+            if (mapped >= 0)
+                targetWidgetOffset = mapped;
+        }
+        try
+        {
+            for (org.eclipse.swt.widgets.Listener listener
+                : widget.getListeners(org.eclipse.swt.custom.ST.CaretMoved))
+            {
+                Object typed = listener instanceof org.eclipse.swt.widgets.TypedListener wrapper
+                    ? wrapper.getEventListener() : listener;
+                if (typed == null
+                    || !typed.getClass().getName().endsWith("CustomCaretListener")) //$NON-NLS-1$
+                    continue;
+                Object infoControl = Global.getField(typed, "infoControl"); //$NON-NLS-1$
+                if (browser != null && !browser.isDisposed()
+                    && !browserMatches(infoControl, browser))
+                    continue;
+                Object info = Global.getField(typed, "info"); //$NON-NLS-1$
+                if (info == null)
+                    continue;
+                Global.setFieldForce(typed, "lastCaretPos", //$NON-NLS-1$
+                    Integer.valueOf(targetWidgetOffset));
+                Global.setFieldForce(typed, "lastOffset", Integer.valueOf(targetOffset)); //$NON-NLS-1$
+                Global.setFieldForce(info, "paramNumber", Integer.valueOf(paramIndex)); //$NON-NLS-1$
+            }
+        }
+        catch (Exception | LinkageError ignored)
+        {
+        }
+    }
+
+    /**
+     * Когда редактор потерял фокус в пользу подсказки, EDT добавляет на её
+     * {@code AbstractInformationControl} одноразовый {@code CustomFocusListener$1}.
+     * При возврате фокуса в редактор он уничтожает окно. Для перехода к фактическому
+     * параметру снимаем только этот экземпляр; основной listener редактора остаётся и
+     * снова поставит штатное закрытие при следующем самостоятельном входе в popup.
+     */
+    private static void removeStockPopupFocusClose(Browser browser)
+    {
+        try
+        {
+            Object hover = findParametersHover(browser);
+            Object control = hover != null ? Global.invoke(hover, "getControl") : null; //$NON-NLS-1$
+            if (control instanceof org.eclipse.jface.text.AbstractInformationControl information)
+            {
+                Iterable<?> listeners = asIterable(Global.getField(information,
+                    "fFocusListeners")); //$NON-NLS-1$
+                if (listeners != null)
+                {
+                    List<org.eclipse.swt.events.FocusListener> toRemove = new ArrayList<>();
+                    for (Object listener : listeners)
+                    {
+                        if (listener instanceof org.eclipse.swt.events.FocusListener focus
+                            && listener.getClass().getName().endsWith("CustomFocusListener$1")) //$NON-NLS-1$
+                            toRemove.add(focus);
+                    }
+                    for (org.eclipse.swt.events.FocusListener focus : toRemove)
+                        information.removeFocusListener(focus);
+                }
+            }
+        }
+        catch (Exception | LinkageError ignored)
+        {
+        }
+    }
+
+    /**
+     * Передача фокуса из popup заканчивается уже после первого {@code setFocus()} и
+     * может оставить workbench без сфокусированного контрола. Повторяем фокус в
+     * следующем UI-такте, когда обработка клика в подсказке завершена.
+     */
+    private static void restoreViewerFocusAfterParamHint(StyledText widget)
+    {
+        if (widget == null || widget.isDisposed())
+            return;
+        Display display = widget.getDisplay();
+        if (display == null || display.isDisposed())
+            return;
+        display.asyncExec(() ->
+        {
+            if (widget.isDisposed())
+                return;
+            widget.forceFocus();
+        });
+    }
+
+    private static ParameterJumpTarget parameterJumpTarget(CallSiteInfo site, int paramIndex)
+    {
+        if (site == null || paramIndex < 0)
+            return null;
+        List<Integer> separators = site.separatorOffsets;
+        int separatorCount = separators.size();
+        if (paramIndex > separatorCount)
+        {
+            return new ParameterJumpTarget(-1, -1, -1, -1, site.callEnd,
+                site.methodAccessEnd, paramIndex - separatorCount);
+        }
+
+        int slotStart = paramIndex == 0
+            ? site.methodAccessEnd : separators.get(paramIndex - 1).intValue() + 1;
+        int slotEnd = paramIndex < separatorCount
+            ? separators.get(paramIndex).intValue() : site.callEnd;
+        Point argumentRange = actualArgumentRange(site.owner, slotStart, slotEnd);
+        int argumentOffset = argumentRange != null ? argumentRange.x : -1;
+        int argumentEndOffset = argumentRange != null ? argumentRange.x + argumentRange.y : -1;
+        return new ParameterJumpTarget(argumentOffset, argumentEndOffset,
+            slotStart, slotEnd, site.callEnd,
+            site.methodAccessEnd, 0);
+    }
+
+    /** Диапазон выражения именно в нужном слоте; пустой слот возвращает {@code null}. */
+    private static Point actualArgumentRange(EObject invocationLike, int slotStart, int slotEnd)
+    {
+        EList<Expression> params = paramsOfInvocationLike(invocationLike);
+        if (params == null)
+            return null;
+        for (Expression param : params)
+        {
+            ICompositeNode node = param != null ? NodeModelUtils.findActualNodeFor(param) : null;
+            if (node == null)
+                continue;
+            int offset = node.getTotalOffset();
+            if (offset >= slotStart && offset < slotEnd)
+                return new Point(node.getOffset(), node.getLength());
+        }
+        return null;
+    }
+
+    private static int closingParenOffset(IDocument document, int callEnd, int minimumOffset)
+        throws BadLocationException
+    {
+        if (document == null || document.getLength() == 0)
+            return -1;
+        int offset = Math.min(callEnd - 1, document.getLength() - 1);
+        while (offset >= minimumOffset && Character.isWhitespace(document.getChar(offset)))
+            offset--;
+        return offset >= minimumOffset && document.getChar(offset) == ')' ? offset : -1;
+    }
+
+    private static int skipWhitespace(IDocument document, int start, int end)
+        throws BadLocationException
+    {
+        int limit = Math.min(Math.max(start, end), document.getLength());
+        int offset = Math.max(0, Math.min(start, limit));
+        while (offset < limit && Character.isWhitespace(document.getChar(offset)))
+            offset++;
+        return offset;
+    }
+
+    /**
      * Пока подсказка открыта — при движении каретки обновлять параметр через штатный
      * {@code ParametersHoverInfoControl.showPage} (как LinkedMode), а не через
      * {@code Browser.setText}. EDT после последнего формального зажимает индекс и
@@ -3331,15 +3722,25 @@ public final class ParamHintHtmlModifier
      */
     private static void ensureCurrentParamCaretSync(Browser browser)
     {
+        Global.tempLog("param-hint-caret", "ensure browser=" //$NON-NLS-1$ //$NON-NLS-2$
+            + (browser == null ? "null" : browser.isDisposed() ? "disposed" : "alive")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         if (browser == null || browser.isDisposed())
             return;
         if (Boolean.TRUE.equals(browser.getData(CURRENT_PARAM_CARET_MARK)))
+        {
+            Global.tempLog("param-hint-caret", "ensure already-installed"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
+        }
         ActiveEditor active = resolveParamHintEditor();
         if (active == null || active.widget == null || active.widget.isDisposed())
+        {
+            Global.tempLog("param-hint-caret", "ensure no-active-editor"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
+        }
         StyledText widget = active.widget;
         browser.setData(CURRENT_PARAM_CARET_MARK, Boolean.TRUE);
+        Global.tempLog("param-hint-caret", //$NON-NLS-1$
+            "ensure installed caret=" + widget.getCaretOffset()); //$NON-NLS-1$
         CaretListener listener = new CaretListener()
         {
             @Override
@@ -3347,10 +3748,13 @@ public final class ParamHintHtmlModifier
             {
                 if (browser.isDisposed())
                 {
+                    Global.tempLog("param-hint-caret", "event browser-disposed"); //$NON-NLS-1$ //$NON-NLS-2$
                     if (!widget.isDisposed())
                         widget.removeCaretListener(this);
                     return;
                 }
+                Global.tempLog("param-hint-caret", //$NON-NLS-1$
+                    "event caret=" + event.caretOffset); //$NON-NLS-1$
                 // После штатного CustomCaretListener EDT.
                 refreshParamHintViaShowPage(browser, widget, event.caretOffset);
             }
@@ -3372,10 +3776,15 @@ public final class ParamHintHtmlModifier
     private static void refreshParamHintViaShowPage(Browser browser, StyledText widget,
         int eventCaret)
     {
+        Global.tempLog("param-hint-caret", //$NON-NLS-1$
+            "refresh start caret=" + eventCaret + " modifying=" + MODIFY_IN_PROGRESS.get()); //$NON-NLS-1$ //$NON-NLS-2$
         if (browser == null || browser.isDisposed())
             return;
         if (Boolean.TRUE.equals(MODIFY_IN_PROGRESS.get()))
+        {
+            Global.tempLog("param-hint-caret", "refresh skipped modifying"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
+        }
         Object pending = widget != null && !widget.isDisposed()
             ? widget.getData(PENDING_PARAM_INDEX_MARK) : null;
         Integer exactIndex = pending instanceof ParamIndexAtCaret exact
@@ -3383,22 +3792,37 @@ public final class ParamHintHtmlModifier
                 ? Integer.valueOf(exact.index) : null;
         HoverContext ctx = resolveHoverContext(browser);
         if (ctx == null || ctx.parametersHover == null || ctx.pages == null || ctx.pages.isEmpty())
+        {
+            Global.tempLog("param-hint-caret", "refresh no-context"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
+        }
         if (ctx.pageIndex < 0 || ctx.pageIndex >= ctx.pages.size())
+        {
+            Global.tempLog("param-hint-caret", //$NON-NLS-1$
+                "refresh bad-page page=" + ctx.pageIndex + " pages=" + ctx.pages.size()); //$NON-NLS-1$ //$NON-NLS-2$
             return;
+        }
         int desired = exactIndex != null ? exactIndex.intValue()
             : (ctx.currentArgIndex >= 0 ? ctx.currentArgIndex : ctx.paramIndex);
         if (desired < 0)
             desired = 0;
         Object prev = browser.getData(LAST_SHOW_ARG_MARK);
+        Global.tempLog("param-hint-caret", "refresh resolved desired=" + desired //$NON-NLS-1$ //$NON-NLS-2$
+            + " current=" + ctx.currentArgIndex + " stock=" + ctx.paramIndex //$NON-NLS-1$ //$NON-NLS-2$
+            + " exact=" + exactIndex + " prev=" + prev); //$NON-NLS-1$ //$NON-NLS-2$
         if (prev instanceof Integer last && last.intValue() == desired)
+        {
+            Global.tempLog("param-hint-caret", "refresh skipped same-index"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
+        }
         Object page = ctx.pages.get(ctx.pageIndex);
         Object paramsObj = Global.getField(page, "params"); //$NON-NLS-1$
         List<?> params = paramsObj instanceof List<?> typed ? typed : Collections.emptyList();
         int formalCount = params.size();
         if (desired >= formalCount)
         {
+            Global.tempLog("param-hint-caret", //$NON-NLS-1$
+                "refresh virtual formal=" + formalCount); //$NON-NLS-1$
             browser.setData(LAST_SHOW_ARG_MARK, Integer.valueOf(desired));
             ctx.currentArgIndex = desired;
             refreshVirtualParamHtml(browser, ctx);
@@ -3409,12 +3833,10 @@ public final class ParamHintHtmlModifier
             showIdx = formalCount - 1;
         browser.setData(LAST_SHOW_ARG_MARK, Integer.valueOf(desired));
         browser.setData(CURRENT_PARAM_INDEX_MARK, Integer.valueOf(desired));
-        // showPage уже вызвал updateSize. Comfort-патч HTML — только setText,
-        // без повторного updateSize (см. setBrowserTextKeepGeometry).
-        // Геометрию здесь не трогаем вовсе: смена активного параметра — самая частая
-        // операция, любое наше вмешательство (сжатие, перенос, alpha) видно как вспышка.
-        Global.invokeVoid(ctx.parametersHover, "showPage", ctx.pages, //$NON-NLS-1$
-            Integer.valueOf(ctx.pageIndex), Integer.valueOf(showIdx));
+        boolean shown = showPageKeepingCurrentBounds(ctx.parametersHover, ctx.pages,
+            ctx.pageIndex, showIdx);
+        Global.tempLog("param-hint-caret", "refresh showPage=" + shown //$NON-NLS-1$ //$NON-NLS-2$
+            + " showIdx=" + showIdx); //$NON-NLS-1$
     }
 
     private static void refreshVirtualParamHtml(Browser browser, HoverContext ctx)
@@ -3463,6 +3885,10 @@ public final class ParamHintHtmlModifier
         if (withAutomaticOverflow != null)
             result = withAutomaticOverflow;
 
+        String withParameterLinks = useClickableParameterStyle(result);
+        if (withParameterLinks != null)
+            result = withParameterLinks;
+
         if (result.contains(COMFORT_META_MARKER) || result.contains("data-comfort=\"1\"")) //$NON-NLS-1$
             return result.equals(html) ? null : result;
 
@@ -3488,6 +3914,60 @@ public final class ParamHintHtmlModifier
         String style = "<style id=\"" + OVERFLOW_STYLE_ID //$NON-NLS-1$
             + "\">body{overflow-x:auto!important;}</style>"; //$NON-NLS-1$
         return html.substring(0, headEnd) + style + html.substring(headEnd);
+    }
+
+    /** Имена параметров и появляющееся при наведении меню действий. */
+    private static String useClickableParameterStyle(String html)
+    {
+        if (html == null || html.contains("id=\"" + PARAM_LINK_STYLE_ID + "\"")) //$NON-NLS-1$ //$NON-NLS-2$
+            return null;
+        int headEnd = html.indexOf("</head>"); //$NON-NLS-1$
+        if (headEnd < 0)
+            return null;
+        String background = systemColorHex(SWT.COLOR_LIST_BACKGROUND);
+        String foreground = systemColorHex(SWT.COLOR_LIST_FOREGROUND);
+        String selectedBackground = systemColorHex(SWT.COLOR_LIST_SELECTION);
+        String selectedForeground = systemColorHex(SWT.COLOR_LIST_SELECTION_TEXT);
+        String style = "<style id=\"" + PARAM_LINK_STYLE_ID + "\">" //$NON-NLS-1$ //$NON-NLS-2$
+            + "span." + PARAM_ENTRY_CLASS + "{position:relative;}" //$NON-NLS-1$ //$NON-NLS-2$
+            + "span." + PARAM_LINK_CLASS //$NON-NLS-1$
+            + "{color:inherit;text-decoration:none;cursor:pointer;}" //$NON-NLS-1$
+            + "span." + PARAM_LINK_CLASS + ":hover,span." + PARAM_LINK_CLASS //$NON-NLS-1$ //$NON-NLS-2$
+            + ":active{text-decoration:underline;}" //$NON-NLS-1$
+            + "span." + PARAM_MENU_CLASS //$NON-NLS-1$
+            + "{display:none;position:fixed;z-index:2147483647;width:max-content;" //$NON-NLS-1$
+            + "max-width:calc(100vw - 8px);box-sizing:border-box;overflow:hidden;" //$NON-NLS-1$
+            + "padding:2px 0;white-space:nowrap;" //$NON-NLS-1$
+            + "font-weight:normal;color:" + foreground + ";background:" + background //$NON-NLS-1$ //$NON-NLS-2$
+            + ";border:1px solid " + headingPrefixColorHex() //$NON-NLS-1$
+            + ";box-shadow:1px 2px 4px rgba(0,0,0,.25);}" //$NON-NLS-1$
+            + "span." + PARAM_ENTRY_CLASS + ":hover>span." + PARAM_MENU_CLASS //$NON-NLS-1$ //$NON-NLS-2$
+            + "{display:block;}" //$NON-NLS-1$
+            + "span." + PARAM_MENU_ITEM_CLASS //$NON-NLS-1$
+            + "{display:block;max-width:100%;box-sizing:border-box;overflow:hidden;" //$NON-NLS-1$
+            + "text-overflow:ellipsis;padding:2px 7px;cursor:pointer;text-decoration:none;}" //$NON-NLS-1$
+            + "span." + PARAM_MENU_ITEM_CLASS + ":hover" //$NON-NLS-1$ //$NON-NLS-2$
+            + "{color:" + selectedForeground + ";background:" + selectedBackground + ";}" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + "</style>"; //$NON-NLS-1$
+        String script = "<script>" //$NON-NLS-1$
+            + "function comfortShowParamMenu(e){var m=e.lastElementChild,g=4;" //$NON-NLS-1$
+            + "m.style.display='block';m.style.left='0px';m.style.top='0px';" //$NON-NLS-1$
+            + "var r=e.getBoundingClientRect(),w=m.offsetWidth,h=m.offsetHeight;" //$NON-NLS-1$
+            + "m.style.left=Math.max(g,Math.min(r.left,window.innerWidth-w-g))+'px';" //$NON-NLS-1$
+            + "m.style.top=Math.max(g,Math.min(r.bottom,window.innerHeight-h-g))+'px';}" //$NON-NLS-1$
+            + "function comfortHideParamMenu(e){var m=e.lastElementChild;" //$NON-NLS-1$
+            + "m.style.display='';m.style.left='';m.style.top='';}" //$NON-NLS-1$
+            + "</script>"; //$NON-NLS-1$
+        return html.substring(0, headEnd) + style + script + html.substring(headEnd);
+    }
+
+    private static String systemColorHex(int colorId)
+    {
+        Display display = Display.getCurrent() != null ? Display.getCurrent() : Display.getDefault();
+        Color color = display.getSystemColor(colorId);
+        return String.format(Locale.ROOT, "#%02X%02X%02X", //$NON-NLS-1$
+            Integer.valueOf(color.getRed()), Integer.valueOf(color.getGreen()),
+            Integer.valueOf(color.getBlue()));
     }
 
     /**
@@ -3578,8 +4058,11 @@ public final class ParamHintHtmlModifier
             return null;
         open += "<br>".length(); //$NON-NLS-1$
         // open указывает на '('
-        int close = html.indexOf(')', open + 1);
-        if (close < 0)
+        int markedStart = html.indexOf(PARAM_LIST_START_MARK, open + 1);
+        int markedEnd = markedStart >= 0
+            ? html.indexOf(PARAM_LIST_END_MARK, markedStart + PARAM_LIST_START_MARK.length()) : -1;
+        int close = markedStart < 0 ? html.indexOf(')', open + 1) : -1;
+        if ((markedStart < 0 && close < 0) || (markedStart >= 0 && markedEnd < 0))
             return null;
         Object page = ctx.pages.get(ctx.pageIndex);
         Object paramsObj = Global.getField(page, "params"); //$NON-NLS-1$
@@ -3603,9 +4086,20 @@ public final class ParamHintHtmlModifier
             boolean current = i == highlight;
             if (current)
                 list.append("<b>"); //$NON-NLS-1$
+            list.append("<span class=\"").append(PARAM_ENTRY_CLASS) //$NON-NLS-1$
+                .append("\" onmouseenter=\"comfortShowParamMenu(this)\"") //$NON-NLS-1$
+                .append(" onmouseleave=\"comfortHideParamMenu(this)\">"); //$NON-NLS-1$
+            list.append("<span class=\"").append(PARAM_LINK_CLASS) //$NON-NLS-1$
+                .append("\" onmousedown=\"if(event.ctrlKey)event.preventDefault();\"") //$NON-NLS-1$
+                .append(" onclick=\"").append(PARAM_BROWSER_FUNCTION_NAME) //$NON-NLS-1$
+                .append("(event.ctrlKey?'copy':'activate',").append(i) //$NON-NLS-1$
+                .append(");return false;\">"); //$NON-NLS-1$
             list.append(escapeHtml(name.trim()));
             if (isParamOptional(paramContent))
                 list.append('?');
+            list.append("</span>"); //$NON-NLS-1$
+            appendParameterMenu(list, ctx, i);
+            list.append("</span>"); //$NON-NLS-1$
             if (current)
                 list.append("</b>"); //$NON-NLS-1$
         }
@@ -3622,7 +4116,47 @@ public final class ParamHintHtmlModifier
         }
         if (list.length() == 0)
             return null;
-        return html.substring(0, open + 1) + list + html.substring(close);
+        if (markedStart >= 0)
+            return html.substring(0, markedStart + PARAM_LIST_START_MARK.length()) + list
+                + html.substring(markedEnd);
+        return html.substring(0, open + 1) + PARAM_LIST_START_MARK + list
+            + PARAM_LIST_END_MARK + html.substring(close);
+    }
+
+    private static void appendParameterMenu(StringBuilder html, HoverContext ctx, int paramIndex)
+    {
+        String actual = paramIndex >= 0 && paramIndex < ctx.actualArgTexts.size()
+            ? ctx.actualArgTexts.get(paramIndex) : ""; //$NON-NLS-1$
+        html.append("<span class=\"").append(PARAM_MENU_CLASS).append("\">"); //$NON-NLS-1$ //$NON-NLS-2$
+        appendParameterMenuItem(html, "actual", paramIndex, //$NON-NLS-1$
+            abbreviateParameterMenuText("Факт=" + (actual != null ? actual : "")), true); //$NON-NLS-1$ //$NON-NLS-2$
+        html.append("</span>"); //$NON-NLS-1$
+    }
+
+    private static String abbreviateParameterMenuText(String text)
+    {
+        if (text == null)
+            return ""; //$NON-NLS-1$
+        int codePoints = text.codePointCount(0, text.length());
+        if (codePoints <= PARAM_MENU_TEXT_MAX_LENGTH)
+            return text;
+        int prefixLength = PARAM_MENU_TEXT_MAX_LENGTH - 3;
+        int end = text.offsetByCodePoints(0, prefixLength);
+        return text.substring(0, end) + "..."; //$NON-NLS-1$
+    }
+
+    private static void appendParameterMenuItem(StringBuilder html, String action,
+        int paramIndex, String text, boolean selectWithCtrl)
+    {
+        html.append("<span class=\"").append(PARAM_MENU_ITEM_CLASS) //$NON-NLS-1$
+            .append("\" onmousedown=\"if(event.ctrlKey)event.preventDefault();\"") //$NON-NLS-1$
+            .append(" onclick=\"").append(PARAM_BROWSER_FUNCTION_NAME); //$NON-NLS-1$
+        if (selectWithCtrl)
+            html.append("(event.ctrlKey?'actualSelect':'").append(action).append("',"); //$NON-NLS-1$ //$NON-NLS-2$
+        else
+            html.append("('").append(action).append("',"); //$NON-NLS-1$ //$NON-NLS-2$
+        html.append(paramIndex).append(");return false;\">") //$NON-NLS-1$
+            .append(escapeHtml(text)).append("</span>"); //$NON-NLS-1$
     }
 
     /**
@@ -5035,6 +5569,7 @@ public final class ParamHintHtmlModifier
             if (snap == null)
                 return;
             ctx.actualArgCount = snap.actualArgCount;
+            ctx.actualArgTexts = snap.actualArgTexts;
             ctx.actualArgTypes = snap.actualArgTypes;
             ctx.actualArgTypeNames = snap.actualArgTypeNames;
             ctx.method = snap.method;
@@ -5073,6 +5608,7 @@ public final class ParamHintHtmlModifier
             snap.constructorType = ctor.getType();
         }
         snap.actualArgCount = params != null ? params.size() : 0;
+        snap.actualArgTexts = actualArgumentTexts(invocationLike);
         snap.currentArgIndex = resolveCurrentArgIndex(invocationLike, caret);
         Set<String> typeNames = new LinkedHashSet<>();
         boolean multiSig = callSiteHasMultipleSignatures(resource, invocationLike);
@@ -5105,6 +5641,30 @@ public final class ParamHintHtmlModifier
             snap.actualArgTypes = Collections.emptyList();
         snap.actualArgTypeNames = typeNames;
         return snap;
+    }
+
+    /** Текст фактических аргументов, выровненный по слотам между запятыми вызова. */
+    private static List<String> actualArgumentTexts(EObject invocationLike)
+    {
+        List<Integer> separators = argSeparatorOffsets(invocationLike);
+        List<String> result = new ArrayList<>(separators.size() + 1);
+        for (int i = 0; i <= separators.size(); i++)
+            result.add(""); //$NON-NLS-1$
+        EList<Expression> params = paramsOfInvocationLike(invocationLike);
+        if (params == null)
+            return result;
+        for (Expression param : params)
+        {
+            ICompositeNode node = param != null ? NodeModelUtils.findActualNodeFor(param) : null;
+            if (node == null)
+                continue;
+            int index = paramNumberAt(separators, node.getTotalOffset());
+            if (index < 0 || index >= result.size())
+                continue;
+            String text = node.getText();
+            result.set(index, text != null ? text.trim() : ""); //$NON-NLS-1$
+        }
+        return result;
     }
 
     /**
@@ -5774,6 +6334,7 @@ public final class ParamHintHtmlModifier
         int pageIndex;
         int paramIndex;
         int actualArgCount;
+        List<String> actualArgTexts = Collections.emptyList();
         /** Слот аргумента у каретки (число запятых до неё); {@code -1} если неизвестен. */
         int currentArgIndex = -1;
         List<TypeItem> actualArgTypes = Collections.emptyList();
@@ -5793,6 +6354,29 @@ public final class ParamHintHtmlModifier
         {
             this.caret = caret;
             this.index = index;
+        }
+    }
+
+    private static final class ParameterJumpTarget
+    {
+        final int argumentOffset;
+        final int argumentEndOffset;
+        final int slotStart;
+        final int slotEnd;
+        final int callEnd;
+        final int minimumOffset;
+        final int missingCommas;
+
+        ParameterJumpTarget(int argumentOffset, int argumentEndOffset, int slotStart, int slotEnd,
+            int callEnd, int minimumOffset, int missingCommas)
+        {
+            this.argumentOffset = argumentOffset;
+            this.argumentEndOffset = argumentEndOffset;
+            this.slotStart = slotStart;
+            this.slotEnd = slotEnd;
+            this.callEnd = callEnd;
+            this.minimumOffset = minimumOffset;
+            this.missingCommas = missingCommas;
         }
     }
 
@@ -5817,6 +6401,7 @@ public final class ParamHintHtmlModifier
     {
         int actualArgCount;
         int currentArgIndex = -1;
+        List<String> actualArgTexts = Collections.emptyList();
         List<TypeItem> actualArgTypes = Collections.emptyList();
         Set<String> actualArgTypeNames = Collections.emptySet();
         Method method;

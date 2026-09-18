@@ -2,6 +2,8 @@ package tormozit;
 
 import java.util.function.Supplier;
 
+import org.eclipse.jface.text.BadLocationException;
+import org.eclipse.jface.text.IDocument;
 import org.eclipse.swt.custom.MovementEvent;
 import org.eclipse.swt.custom.MovementListener;
 import org.eclipse.swt.custom.StyledText;
@@ -33,25 +35,66 @@ final class IdentifierSelectionSupport
     }
 
     /**
-     * Граница слова в позиции {@code pos} (между символами {@code pos - 1} и {@code pos}):
-     * символы разных категорий (идентификатор / не идентификатор) по разные стороны, начало и
-     * конец текста — как отсутствующий (не идентификатор) символ снаружи. Семантика как у
-     * {@code \b} в regex, а не «оба соседних символа не идентификатор» — иначе поиск «целое
-     * слово» для фрагмента, кончающегося на неидентификатор (например {@code "Найти."}), не
-     * находит вообще ни одного вхождения, если сразу после точки идёт идентификатор
-     * ({@code "Найти.Метод"}): справа от границы стоит идентификатор, а не отсутствие символа.
+     * Совпадение {@code [matchStart, matchEnd)} — «целое слово».
+     * <p>
+     * Левая граница проверяется, только если фрагмент начинается с идентификатора: тогда
+     * левый сосед (или край текста) не должен быть идентификатором. Если первый символ
+     * фрагмента — не идентификатор (например {@code "// TODO"}), фрагмент не может быть
+     * частью большего слова слева — граница считается выполненной. Аналогично справа:
+     * проверяется только при последнем символе-идентификаторе. Край текста — как
+     * не идентификатор.
+     * <p>
+     * Отличие от {@code \b}-семантики (символы разных категорий по разные стороны границы):
+     * фрагмент, начинающийся с не-идентификатора (например {@code "// TODO оптимизировать"}),
+     * находится и в начале, и в середине текста; при этом {@code "фЭлементы Цикл"} для
+     * искомого {@code "Элементы Цикл"} — не целое слово, а {@code "Найти."} в
+     * {@code "Найти.Метод"} — целое слово.
      */
-    static boolean isWordBoundaryAt(String text, int pos)
-    {
-        boolean before = pos > 0 && isIdentifierChar(text.charAt(pos - 1));
-        boolean after = pos < text.length() && isIdentifierChar(text.charAt(pos));
-        return before != after;
-    }
-
-    /** Совпадение {@code [matchStart, matchEnd)} — целое слово: граница с обеих сторон. */
     static boolean isWholeWordMatch(String text, int matchStart, int matchEnd)
     {
-        return isWordBoundaryAt(text, matchStart) && isWordBoundaryAt(text, matchEnd);
+        if (text == null || matchStart < 0 || matchEnd > text.length() || matchStart >= matchEnd)
+            return false;
+
+        if (isIdentifierChar(text.charAt(matchStart))
+            && matchStart > 0 && isIdentifierChar(text.charAt(matchStart - 1)))
+            return false;
+
+        if (isIdentifierChar(text.charAt(matchEnd - 1))
+            && matchEnd < text.length() && isIdentifierChar(text.charAt(matchEnd)))
+            return false;
+
+        return true;
+    }
+
+    /**
+     * Выделение {@code [selection.x, selection.x + selection.y)} — целое слово по
+     * {@link #isWholeWordMatch} для строки {@code needle} (учёт регистра по {@code caseSensitive}).
+     * Проверка результата штатного поиска F3 и кнопки «Найти далее» диалога «Найти/Заменить»:
+     * их {@code \b}-граница в Java — только ASCII и не совпадает с нашими границами слова.
+     */
+    static boolean isWholeWordSelection(IDocument document, Point selection, String needle, boolean caseSensitive)
+    {
+        if (document == null || selection == null || needle == null || needle.isEmpty()
+            || selection.y != needle.length())
+            return false;
+        try
+        {
+            String found = document.get(selection.x, selection.y);
+            if (caseSensitive ? !found.equals(needle) : !found.equalsIgnoreCase(needle))
+                return false;
+            if (isIdentifierChar(found.charAt(0))
+                && selection.x > 0 && isIdentifierChar(document.getChar(selection.x - 1)))
+                return false;
+            if (isIdentifierChar(found.charAt(found.length() - 1))
+                && selection.x + selection.y < document.getLength()
+                && isIdentifierChar(document.getChar(selection.x + selection.y)))
+                return false;
+            return true;
+        }
+        catch (BadLocationException e)
+        {
+            return false;
+        }
     }
 
     /**

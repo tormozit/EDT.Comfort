@@ -17,6 +17,8 @@ import org.eclipse.jface.bindings.Scheme;
 import org.eclipse.jface.bindings.keys.KeySequence;
 import org.eclipse.jface.bindings.keys.KeyBinding;
 import org.eclipse.jface.bindings.keys.ParseException;
+import org.eclipse.jface.text.IDocument;
+import org.eclipse.jface.text.source.ISourceViewer;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.graphics.Point;
@@ -53,6 +55,14 @@ import com._1c.g5.v8.dt.compare.ui.mergeviewer.ThreeSideTextMergeViewerPanel;
  * как команда, но не ищет: {@code FindNextAction} берёт {@code IFindReplaceTarget} у активной
  * workbench-части, а не у сфокусированной панели merge-вьюера. После срабатывания команды
  * (или по KeyDown, если команда не дошла) выполняется переход по буферу диалога «Найти/Заменить».
+ * <p>
+ * Штатный {@code F3}/{@code Shift+F3}: когда включён флажок «Только слово целиком» без
+ * регулярного выражения, {@code FindNextAction} применяет whole-word только если строка поиска
+ * целиком состоит из идентификаторов иначе теряет флаг — поиск «Элементы Цикл» находит
+ * «ф<em>Элементы Цикл</em>». Перехват: перед командой запоминаем выделение, после — если
+ * выделение ушло на вхождение, которое по нашим границам целым словом не является (или совсем
+ * не сдвинулось), восстанавливаем исходную позицию и ищем сами через
+ * {@link TextEditorFastSearchHandler} с теми же границами.
  */
 public final class TextEditorFastSearchKeyBindingHook implements IStartup
 {
@@ -65,6 +75,10 @@ public final class TextEditorFastSearchKeyBindingHook implements IStartup
 
     private static StyledText pendingCompareFindWidget;
     private static Point pendingCompareFindSelection;
+
+    private static StyledText pendingWholeWordFindWidget;
+    private static Point pendingWholeWordFindSelection;
+    private static Boolean pendingWholeWordFindForward;
 
     @Override
     public void earlyStartup()
@@ -159,24 +173,28 @@ public final class TextEditorFastSearchKeyBindingHook implements IStartup
             public void preExecute(String commandId, ExecutionEvent event)
             {
                 rememberCompareFind(commandId);
+                rememberWholeWordFind(commandId);
             }
 
             @Override
             public void postExecuteSuccess(String commandId, Object returnValue)
             {
                 completeCompareFind(commandId);
+                completeWholeWordFind(commandId);
             }
 
             @Override
             public void notHandled(String commandId, NotHandledException exception)
             {
                 completeCompareFind(commandId);
+                completeWholeWordFind(commandId);
             }
 
             @Override
             public void postExecuteFailure(String commandId, ExecutionException exception)
             {
                 completeCompareFind(commandId);
+                completeWholeWordFind(commandId);
             }
         });
     }
@@ -263,6 +281,78 @@ public final class TextEditorFastSearchKeyBindingHook implements IStartup
         if (before != null && after != null && (after.x != before.x || after.y != before.y))
             return;
         TextEditorFastSearchHandler.executeFindNextFromBuffer(textWidget, forward.booleanValue());
+    }
+
+    /**
+     * Перед штатным {@code F3}/{@code Shift+F3}: при включённом «Слово целиком» (без
+     * регулярного выражения) и фокусе в обычном текстовом редакторе (не панель сравнения —
+     * у той своя логика) запоминаем позицию старта, чтобы найти корректное вхождение,
+     * если {@code FindNextAction} увело выделение на целую часть.
+     */
+    private static void rememberWholeWordFind(String commandId)
+    {
+        pendingWholeWordFindWidget = null;
+        pendingWholeWordFindSelection = null;
+        pendingWholeWordFindForward = null;
+        if (!TextEditorFastSearchHandler.isWholeWordPlainSearch())
+            return;
+        Boolean forward = findNextForward(commandId);
+        if (forward == null)
+            return;
+        Display display = Display.getCurrent();
+        if (display == null)
+            return;
+        Control focus = display.getFocusControl();
+        if (!(focus instanceof StyledText textWidget) || textWidget.isDisposed()
+            || isTextCompareWidget(textWidget))
+            return;
+        ISourceViewer viewer = TextEditor.resolveViewerFromFocus(textWidget);
+        if (viewer == null || viewer.getDocument() == null)
+            return;
+        pendingWholeWordFindWidget = textWidget;
+        pendingWholeWordFindSelection = viewer.getSelectedRange();
+        pendingWholeWordFindForward = forward;
+    }
+
+    /**
+     * Штатная {@code FindNextAction} уже отработала. Если с флажком «Слово целиком» она ушла
+     * на вхождение, которое целым словом по нашим границам не является (а поиск вроде «Элементы
+     * Цикл» ловит «фЭлементы Цикл») — либо вовсе не сдвинула выделение — восстанавливаем
+     * исходную позицию и ищем сами с теми же границами.
+     */
+    private static void completeWholeWordFind(String commandId)
+    {
+        StyledText textWidget = pendingWholeWordFindWidget;
+        Point before = pendingWholeWordFindSelection;
+        Boolean forward = pendingWholeWordFindForward;
+        pendingWholeWordFindWidget = null;
+        pendingWholeWordFindSelection = null;
+        pendingWholeWordFindForward = null;
+        if (!TextEditorFastSearchHandler.isWholeWordPlainSearch())
+            return;
+        if (textWidget == null || textWidget.isDisposed() || before == null)
+            return;
+        ISourceViewer viewer = TextEditor.resolveViewerFromFocus(textWidget);
+        if (viewer == null || viewer.getDocument() == null)
+            return;
+        IDocument document = viewer.getDocument();
+        Point after = viewer.getSelectedRange();
+        if (after != null && !before.equals(after) && isWholeWordSelection(document, after))
+            return;
+        int fromOffset = before.y > 0
+            ? (forward.booleanValue() ? before.x + before.y : before.x)
+            : before.x;
+        int searchFrom = forward.booleanValue() ? fromOffset : fromOffset - 1;
+        TextEditorFastSearchHandler.executeFindNextFromBuffer(
+            textWidget, forward.booleanValue(), searchFrom);
+    }
+
+    /** Вхождение {@code sel} — целое слово по строке диалога и нашим границам слова. */
+    private static boolean isWholeWordSelection(IDocument document, Point sel)
+    {
+        return IdentifierSelectionSupport.isWholeWordSelection(document, sel,
+            TextEditorFastSearchHandler.getFindBufferNeedle(),
+            TextEditorFastSearchHandler.isCaseSensitiveSearch());
     }
 
     /** Есть ли уже пользовательская (в т.ч. «не привязано») привязка на это сочетание в этом контексте. */

@@ -11,6 +11,7 @@ import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.ITextViewer;
 import org.eclipse.swt.SWT;
+import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.events.SelectionListener;
 import org.eclipse.swt.events.ShellAdapter;
 import org.eclipse.swt.events.ShellEvent;
@@ -30,7 +31,9 @@ import org.eclipse.ui.texteditor.ITextEditor;
 
 /**
  * Доработки стандартного диалога «Найти/Заменить»: живой счётчик совпадений, переименование
- * кнопки «Выбрать всё» и работающее Ctrl+C в полях ввода (см. {@code wireCopy}).
+ * кнопки «Выбрать всё», работающее Ctrl+C в полях ввода (см. {@code wireCopy}) и переход
+ * «Найти далее» с флажком «Слово целиком» по нашим границам слова (штатный поиск в этом
+ * режиме — regex {@code \b…\b} с ASCII-границами, см. {@link Session#correctFindNextNavigation}).
  *
  * <p>Живой счётчик совпадений в стандартном диалоге «Найти/Заменить» ({@code org.eclipse.ui.texteditor.FindReplaceDialog},
  * пакетный класс, поэтому доступ только через {@link Global#getField}) — подсчёт идёт в фоне
@@ -58,8 +61,13 @@ import org.eclipse.ui.texteditor.ITextEditor;
  * учитывает не только отметку флажка, но и его {@code isEnabled()} — отключённый флажок штатный
  * поиск молча трактует как выключенный, даже если он визуально остаётся отмеченным. С учётом
  * {@link IdentifierSelectionSupport#isWholeWordMatch} (граница слова корректна и для строк,
- * кончающихся не на идентификатор) это ограничение больше не нужно — флажок принудительно
- * держится доступным (кроме режима «Регулярное выражение», где «целое слово» не имеет смысла),
+ * кончающихся не на идентификатор) это ограничение больше не нуждается в штатном отключении,
+ * но «Найти далее» перехватывается: на время штатного поиска доступность флажка временно
+ * снимается ({@code isWholeWordSearch()} учитывает {@code isEnabled()}) — штатный поиск идёт
+ * как подстрочный и не играет «дзынь» на отсутствии ASCII-границ, после чего
+ * {@link Session#correctFindNextNavigation()} восстанавливает флажок и переходит к вхождению
+ * по нашим границам слова. Сам флажок принудительно держится доступным (кроме режима
+ * «Регулярное выражение», где «целое слово» не имеет смысла),
  * см. {@link Session#applyWholeWordAlwaysEnabled()}.
  *
  * https://github.com/1C-Company/1c-edt-issues/issues/1500
@@ -91,6 +99,24 @@ public final class FindReplaceDialogHook implements IStartup
         if (display == null || display.isDisposed())
             return;
         display.addFilter(SWT.Show, FindReplaceDialogHook::handleShow);
+        display.addFilter(SWT.Selection, FindReplaceDialogHook::handleFindSelection);
+    }
+
+    /**
+     * Фильтр кнопки «Найти далее»: выполняется до штатного обработчика диалога, поэтому
+     * запоминаем выделение до поиска — после штатного {@code \b}-поиска нужно знать исходную
+     * позицию, чтобы найти правильное вхождение, если штатный не нашёл (или нашёл не целое слово).
+     */
+    private static void handleFindSelection(Event event)
+    {
+        if (!(event.widget instanceof Button button) || button.isDisposed())
+            return;
+        Shell shell = button.getShell();
+        if (shell == null || shell.isDisposed())
+            return;
+        Object existing = shell.getData(SESSION_KEY);
+        if (existing instanceof Session session && button == session.findNextButton)
+            session.onFindBeforeSelection();
     }
 
     /**
@@ -137,6 +163,11 @@ public final class FindReplaceDialogHook implements IStartup
         private Button replaceAllButton;
 
         private ITextViewer viewer;
+
+        private Point findBeforeSelection;
+
+        /** В этом клике «Найти далее» «Слово целиком» временно глушилось (чтобы не было бипа). */
+        private boolean wholeWordDelegated;
 
         private Job job;
         private volatile long generation;
@@ -426,6 +457,17 @@ public final class FindReplaceDialogHook implements IStartup
             if (findString.isEmpty() || viewer == null)
                 return;
 
+            boolean caseSensitive = caseCheckBox != null && !caseCheckBox.isDisposed()
+                && caseCheckBox.getSelection();
+            boolean wholeWord = wholeWordCheckBox != null && !wholeWordCheckBox.isDisposed()
+                && wholeWordCheckBox.getSelection();
+            boolean regEx = regExCheckBox != null && !regExCheckBox.isDisposed()
+                && regExCheckBox.getSelection();
+
+            if (wholeWord && !regEx)
+                correctFindNextNavigation(caseSensitive);
+            findBeforeSelection = null;
+
             IDocument document = viewer.getDocument();
             String fullText;
             Point selection;
@@ -440,13 +482,6 @@ public final class FindReplaceDialogHook implements IStartup
             }
             if (fullText == null || selection == null || selection.y <= 0)
                 return;
-
-            boolean caseSensitive = caseCheckBox != null && !caseCheckBox.isDisposed()
-                && caseCheckBox.getSelection();
-            boolean wholeWord = wholeWordCheckBox != null && !wholeWordCheckBox.isDisposed()
-                && wholeWordCheckBox.getSelection();
-            boolean regEx = regExCheckBox != null && !regExCheckBox.isDisposed()
-                && regExCheckBox.getSelection();
 
             cancelJob();
             long myGeneration = ++generation;
@@ -463,6 +498,94 @@ public final class FindReplaceDialogHook implements IStartup
             };
             job.setSystem(true);
             job.schedule();
+        }
+
+        /** Модельное выделение до штатного поиска (вызывается фильтром раньше штатного обработчика). */
+        void onFindBeforeSelection()
+        {
+            if (viewer == null)
+            {
+                findBeforeSelection = null;
+                return;
+            }
+            StyledText textWidget = viewer.getTextWidget();
+            if (textWidget == null || textWidget.isDisposed())
+            {
+                findBeforeSelection = null;
+                return;
+            }
+            findBeforeSelection = viewer.getSelectedRange();
+            Global.tempLog("findreplace-wholeword", "filter before=" + findBeforeSelection); //$NON-NLS-1$ //$NON-NLS-2$
+            /*
+             * Причина «дзынь»: штатный поиск с «Слово целиком» идёт через regex \b (ASCII) — для
+             * «// …» он не находит, для «Элементы Цикл» цепляет «xЭлементы Цикл», но бип играет
+             * именно не-найдено. На время штатного поиска выключаем доступность флажка: isWholeWordSearch()
+             * учитывает isEnabled(), и штатный поиск идёт как подстрока — без бипа. Чекбокс остаётся
+             * отмеченным, восстановление доступности и наш переход в correctFindNextNavigation.
+             */
+            wholeWordDelegated = wholeWordCheckBox != null && !wholeWordCheckBox.isDisposed()
+                && wholeWordCheckBox.getSelection()
+                && (regExCheckBox == null || regExCheckBox.isDisposed() || !regExCheckBox.getSelection());
+            if (wholeWordDelegated && wholeWordCheckBox.isEnabled())
+                wholeWordCheckBox.setEnabled(false);
+        }
+
+        /**
+         * Штатный «Найти далее» с флажком «Слово целиком» ищет через regex {@code \b…\b} — в Java
+         * его границы только ASCII: «// Параметры» не находится (перед «//» нет словесной границы),
+         * а для поиска «Элементы Цикл» находится «xЭлементы Цикл» (x — латинская буква и граница
+         * {@code \b} перед «Э» срабатывает). Если штатный поиск не сдвинул выделение или увёл его
+         * на не-целое слово по нашим границам — ищем сами от исходной позиции, иначе берём результат
+         * штатного.
+         */
+        private void correctFindNextNavigation(boolean caseSensitive)
+        {
+            IDocument document = viewer.getDocument();
+            Point before = findBeforeSelection;
+            if (wholeWordDelegated && wholeWordCheckBox != null && !wholeWordCheckBox.isDisposed())
+                wholeWordCheckBox.setEnabled(true);
+            wholeWordDelegated = false;
+            if (document == null || before == null)
+                return;
+            /*
+             * В режиме «В выделенном фрагменте» наш полный обход документа не нужен — там поиск
+             * ограничен выделением и работает штатно.
+             */
+            Button selectedRangeButton = (Button)Global.getField(dialog, "fSelectedRangeRadioButton"); //$NON-NLS-1$
+            if (selectedRangeButton != null && !selectedRangeButton.isDisposed()
+                && selectedRangeButton.getSelection())
+                return;
+            String findString = findField.getText();
+            Point after = viewer.getSelectedRange();
+            if (after != null && !before.equals(after)
+                && IdentifierSelectionSupport.isWholeWordSelection(document, after, findString, caseSensitive))
+            {
+                Global.tempLog("findreplace-wholeword", "keep edt result after=" + after); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            }
+            boolean forward = !Boolean.FALSE.equals(Global.invoke(dialog, "isForwardSearch")); //$NON-NLS-1$
+            int fromOffset = before.y > 0
+                ? (forward ? before.x + before.y : before.x)
+                : before.x;
+            int searchFrom = forward ? fromOffset : fromOffset - 1;
+            Global.tempLog("findreplace-wholeword", //$NON-NLS-1$
+                "research before=" + before + " after=" + after //$NON-NLS-1$ //$NON-NLS-2$
+                    + " forward=" + forward + " searchFrom=" + searchFrom); //$NON-NLS-1$ //$NON-NLS-2$
+            StyledText textWidget = viewer.getTextWidget();
+            if (textWidget == null || textWidget.isDisposed())
+                return;
+            /*
+             * Следующий поиск штатный диалог начинает с fTarget.getSelection() — нашего выделения,
+             * поэтому переход самим поиском корректно сдвигает базу без дополнительных записей.
+             */
+            TextEditorFastSearchHandler.executeFindNextFromBuffer(viewer, textWidget, forward, searchFrom);
+            Point moved = viewer.getSelectedRange();
+            /*
+             * Ложный результат штатного подстрочного поиска не трогали (целых слов не оказалось) —
+             * возвращаем исходное выделение, чтобы не оставлять не-целое вхождение выбранным.
+             */
+            if (moved != null && moved.equals(after))
+                viewer.setSelectedRange(before.x, before.y);
         }
 
         /**

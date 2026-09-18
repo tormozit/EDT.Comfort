@@ -146,6 +146,52 @@ public final class TextEditorFastSearchHandler extends AbstractHandler
             true, isWrapSearch());
     }
 
+    /**
+     * Следующее/предыдущее вхождение строки из буфера диалога «Найти/Заменить» от явной
+     * стартовой позиции {@code searchFrom} (модельный офсет). Для перехвата штатного
+     * F3/Shift+F3 при «Слово целиком», когда EDT уже увела выделение на не-целое слово.
+     */
+    public static Object executeFindNextFromBuffer(StyledText textWidget, boolean forward, int searchFrom)
+    {
+        return executeFindNextFromBuffer(
+            TextEditor.resolveViewerFromFocus(textWidget), textWidget, forward, searchFrom);
+    }
+
+    /**
+     * То же с явным {@link ITextViewer}: используется диалогом «Найти/Заменить», где фокус
+     * на кнопках диалога и резолв вьюера по виджету избыточен (вьюер известен заранее).
+     */
+    public static Object executeFindNextFromBuffer(
+        ITextViewer viewer, StyledText textWidget, boolean forward, int searchFrom)
+    {
+        if (textWidget == null || textWidget.isDisposed())
+            return null;
+        String searchString = readFindBufferNeedle();
+        if (searchString == null || searchString.isEmpty())
+        {
+            if (Global.isLogEnabled())
+                Global.log(TAG, "executeFindNextFromBuffer: empty find buffer"); //$NON-NLS-1$
+            return null;
+        }
+        return executeSearchWithStringFrom(viewer, textWidget, searchString, forward,
+            true, isWrapSearch(), searchFrom);
+    }
+
+    /**
+     * Строка поиска последнего вхождения из буфера диалога «Найти/Заменить»
+     * (для перехвата F3/Shift+F3).
+     */
+    static String getFindBufferNeedle()
+    {
+        return readFindBufferNeedle();
+    }
+
+    /** «Слово целиком» без регулярного выражения — случай, где штатный F3 срабатывает неверно. */
+    static boolean isWholeWordPlainSearch()
+    {
+        return isWholeWordSearch() && !isRegExSearch();
+    }
+
     private static Object executeSearchWithString(ITextViewer viewer, StyledText textWidget,
         String searchString, boolean forward, boolean fromFindBuffer, boolean wrap)
     {
@@ -156,12 +202,9 @@ public final class TextEditorFastSearchHandler extends AbstractHandler
         Point widgetSelRange = textWidget.getSelectionRange();
         String selectionText = textWidget.getSelectionText();
 
-        IDocument document = viewer != null ? viewer.getDocument() : null;
-        String fullText;
         int offset;
-        if (document != null)
+        if (viewer != null && viewer.getDocument() != null)
         {
-            fullText = document.get();
             Point modelSelRange = viewer.getSelectedRange();
             offset = selectionText != null && !selectionText.isEmpty()
                 ? (forward ? modelSelRange.x + modelSelRange.y : modelSelRange.x)
@@ -169,11 +212,29 @@ public final class TextEditorFastSearchHandler extends AbstractHandler
         }
         else
         {
-            fullText = textWidget.getText();
             offset = selectionText != null && !selectionText.isEmpty()
                 ? (forward ? widgetSelRange.x + widgetSelRange.y : widgetSelRange.x)
                 : widgetSelRange.x;
         }
+
+        int searchFrom = forward ? (fromFindBuffer ? offset : offset + 1) : offset - 1;
+        return executeSearchWithStringFrom(viewer, textWidget, searchString, forward,
+            fromFindBuffer, wrap, searchFrom);
+    }
+
+    /**
+     * Поиск от явной стартовой позиции {@code searchFrom} (при наличии документа — модельные
+     * офсеты, иначе виджетные).
+     */
+    private static Object executeSearchWithStringFrom(ITextViewer viewer, StyledText textWidget,
+        String searchString, boolean forward, boolean fromFindBuffer, boolean wrap, int searchFrom)
+    {
+        if (textWidget == null || textWidget.isDisposed()
+            || searchString == null || searchString.isEmpty())
+            return null;
+
+        IDocument document = viewer != null ? viewer.getDocument() : null;
+        String fullText = document != null ? document.get() : textWidget.getText();
 
         boolean caseSensitive = isCaseSensitiveSearch();
         boolean wholeWord = isWholeWordSearch();
@@ -190,7 +251,6 @@ public final class TextEditorFastSearchHandler extends AbstractHandler
          */
         if (!fromFindBuffer)
             publishSearchTarget(searchString);
-        int searchFrom = forward ? (fromFindBuffer ? offset : offset + 1) : offset - 1;
 
         if (Global.isLogEnabled())
             Global.log(TAG, "executeSearchWithString: search='" + searchString //$NON-NLS-1$

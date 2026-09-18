@@ -298,6 +298,12 @@ import com._1c.g5.v8.dt.ui.util.OpenHelper;
  */
 public class FormEditorHook implements IStartup
 {
+    private static final int EXTERNAL_GO_TO_RETRY_MS = 100;
+
+    private static final int EXTERNAL_GO_TO_MAX_ATTEMPTS = 40;
+
+    private static int externalGoToGeneration;
+
     /** Команда «Показать в навигаторе» для дерева реквизитов формы. */
     public static final String SHOW_IN_NAVIGATOR_COMMAND_ID =
             "tormozit.formAttributes.showInNavigator"; //$NON-NLS-1$
@@ -595,6 +601,111 @@ public class FormEditorHook implements IStartup
                 return formPage;
         }
         return null;
+    }
+
+    /**
+     * Открывает форму, выделяет текущий объект метаданных в дереве реквизитов тем же способом,
+     * что и перетаскивание из навигатора, и выполняет штатную команду «Перейти». Вызывается
+     * двойным кликом по колонке основной формы в редакторе объекта метаданных.
+     */
+    static void openFormAttributeAndGoTo(IWorkbenchPage workbenchPage,
+        com._1c.g5.v8.dt.metadata.mdclass.BasicForm basicForm, EObject sourceAttribute)
+    {
+        if (workbenchPage == null || basicForm == null || sourceAttribute == null)
+            return;
+        int generation = ++externalGoToGeneration;
+        try
+        {
+            new OpenHelper(workbenchPage).openEditor(basicForm);
+        }
+        catch (RuntimeException ignored)
+        {
+            return;
+        }
+        awaitFormAttributeAndGoTo(workbenchPage, basicForm, sourceAttribute, generation, 0);
+    }
+
+    /** Редактор, модель и ленивое дерево реквизитов создаются после открытия формы; ждём их. */
+    private static void awaitFormAttributeAndGoTo(IWorkbenchPage workbenchPage,
+        com._1c.g5.v8.dt.metadata.mdclass.BasicForm basicForm, EObject sourceAttribute,
+        int generation, int attempt)
+    {
+        if (generation != externalGoToGeneration)
+            return;
+        IEditorPart activeEditor = workbenchPage.getActiveEditor();
+        FormEditorPage page = activeEditor instanceof FormEditor editor ? findFormPage(editor) : null;
+        Form model = page != null ? page.getModel() : null;
+        Tree tree = page != null && isRequestedForm(model, basicForm) ? getAttributesTree(page) : null;
+        EObject actualSource = ContentUtil.getActualObject(sourceAttribute);
+        MdObject metadata = actualSource instanceof MdObject mdObject ? mdObject : null;
+        if (page != null && tree != null && !tree.isDisposed() && tree.getItemCount() > 0
+            && metadata != null)
+        {
+            PropertyInfo attribute = AttributesDrop.reveal(page, tree, metadata);
+            if (attribute != null)
+            {
+                Display display = page.getSite() != null ? page.getSite().getShell().getDisplay()
+                    : Display.getDefault();
+                display.asyncExec(() -> runExternalAttributeGoTo(page, generation, 0));
+                return;
+            }
+            return;
+        }
+        if (attempt >= EXTERNAL_GO_TO_MAX_ATTEMPTS)
+        {
+            return;
+        }
+        Display.getDefault().timerExec(EXTERNAL_GO_TO_RETRY_MS,
+            () -> awaitFormAttributeAndGoTo(workbenchPage, basicForm, sourceAttribute,
+                generation, attempt + 1));
+    }
+
+    private static boolean isRequestedForm(Form model,
+        com._1c.g5.v8.dt.metadata.mdclass.BasicForm basicForm)
+    {
+        if (model == null || basicForm == null)
+            return false;
+        com._1c.g5.v8.dt.metadata.mdclass.AbstractForm expected = basicForm.getForm();
+        if (expected != null && expected.eIsProxy())
+            expected = (com._1c.g5.v8.dt.metadata.mdclass.AbstractForm)EcoreUtil.resolve(expected,
+                basicForm);
+        return expected instanceof Form form && sameEObject(model, form);
+    }
+
+    private static boolean sameEObject(EObject first, EObject second)
+    {
+        if (first == null || second == null)
+            return false;
+        if (first == second)
+            return true;
+        try
+        {
+            return EcoreUtil.getURI(first).equals(EcoreUtil.getURI(second));
+        }
+        catch (RuntimeException e)
+        {
+            return false;
+        }
+    }
+
+    /** Выделение доходит до группы действий асинхронно; вызываем «Перейти» реквизита формы. */
+    private static void runExternalAttributeGoTo(FormEditorPage page, int generation, int attempt)
+    {
+        if (generation != externalGoToGeneration || page == null || page.getSite() == null)
+            return;
+        Object group = Global.getField(page, "attributeActionsGroup"); //$NON-NLS-1$
+        if (group != null)
+        {
+            Global.invoke(group, "calculateAvailablesGoToTtems"); //$NON-NLS-1$
+            Global.invokeVoid(group, "runGoToAction"); //$NON-NLS-1$
+            return;
+        }
+        if (attempt >= EXTERNAL_GO_TO_MAX_ATTEMPTS)
+        {
+            return;
+        }
+        page.getSite().getShell().getDisplay().timerExec(EXTERNAL_GO_TO_RETRY_MS,
+            () -> runExternalAttributeGoTo(page, generation, attempt + 1));
     }
 
     // -----------------------------------------------------------------------
@@ -1501,6 +1612,21 @@ public class FormEditorHook implements IStartup
             return ContentUtil.getActualObject(mdObject);
 
         return null;
+    }
+
+    /**
+     * Объект, на который ссылается путь данных элемента формы. Для обычной формы это сразу
+     * объект метаданных, а для поля динамического списка EDT хранит промежуточный
+     * {@link DbViewFieldDef}.
+     */
+    static EObject resolveMetadataFormReference(EObject referredObject)
+    {
+        if (referredObject instanceof DbViewFieldDef fieldDef)
+        {
+            EObject metadata = resolveMetadataFromDbViewFieldDef(fieldDef);
+            return metadata != null ? metadata : referredObject;
+        }
+        return referredObject != null ? ContentUtil.getActualObject(referredObject) : null;
     }
 
     /** {@code DbViewFieldDef} — EMF {@code EObject}, но штатный {@code runEditAction} свойства не загружает. */
@@ -3125,25 +3251,39 @@ public class FormEditorHook implements IStartup
             return actual instanceof MdObject mdObject ? mdObject : null;
         }
 
-        private static void reveal(FormEditorPage page, Tree tree, MdObject dragged)
+        private static PropertyInfo reveal(FormEditorPage page, Tree tree, MdObject dragged)
         {
             if (tree.isDisposed())
-                return;
+                return null;
             Object viewerObj = Global.getField(page, "attributesViewer"); //$NON-NLS-1$
             if (!(viewerObj instanceof TreeViewer viewer))
-                return;
+                return null;
 
             List<MdObject> chain = ownerChain(dragged);
             if (chain.isEmpty())
-                return;
+                return null;
             MdObject owner = chain.get(0);
+
+            TreeItem mainItem = findMainAttributeItem(tree);
+            if (isDynamicListAttributeItem(mainItem))
+            {
+                TreeItem fieldItem = findMetadataItem(viewer, mainItem, dragged);
+                if (fieldItem != null)
+                {
+                    selectItem(viewer, tree, fieldItem);
+                    return fieldItem.getData() instanceof PropertyInfo info ? info : null;
+                }
+                ToastNotification.show("Реквизиты формы", //$NON-NLS-1$
+                    "В основном реквизите формы не найдено поле «" + dragged.getName() + "»", 4_000); //$NON-NLS-1$ //$NON-NLS-2$
+                return null;
+            }
 
             TreeItem item = findObjectAttributeItem(tree, owner);
             if (item == null)
             {
                 ToastNotification.show("Реквизиты формы", //$NON-NLS-1$
-                    "Нет реквизита формы с типом «*Объект." + owner.getName() + "»", 4_000); //$NON-NLS-1$ //$NON-NLS-2$
-                return;
+                    "Не найден основной реквизит формы для объекта «" + owner.getName() + "»", 4_000); //$NON-NLS-1$ //$NON-NLS-2$
+                return null;
             }
 
             for (int i = 1; i < chain.size(); i++)
@@ -3154,6 +3294,50 @@ public class FormEditorHook implements IStartup
                 item = child;
             }
             selectItem(viewer, tree, item);
+            return item.getData() instanceof PropertyInfo info ? info : null;
+        }
+
+        /** Корневая строка основного реквизита формы. */
+        private static TreeItem findMainAttributeItem(Tree tree)
+        {
+            for (TreeItem item : tree.getItems())
+            {
+                if (!item.isDisposed() && item.getData() instanceof PropertyInfo info
+                    && info.getSource() instanceof FormAttribute attribute && attribute.isMain())
+                    return item;
+            }
+            return null;
+        }
+
+        private static boolean isDynamicListAttributeItem(TreeItem item)
+        {
+            return item != null && !item.isDisposed()
+                && item.getData() instanceof PropertyInfo info
+                && info.getSource() instanceof FormAttribute attribute
+                && attribute.getExtInfo() instanceof DynamicListExtInfo;
+        }
+
+        /** Ищет поле метаданных только внутри основного динамического списка формы. */
+        private static TreeItem findMetadataItem(TreeViewer viewer, TreeItem parent, EObject metadata)
+        {
+            Object parentData = parent.getData();
+            if (parentData != null)
+                viewer.setExpandedState(parentData, true);
+            for (TreeItem item : parent.getItems())
+            {
+                if (item.isDisposed())
+                    continue;
+                if (item.getData() instanceof PropertyInfo info)
+                {
+                    EObject resolved = resolveMetadataPropertyEObject(info);
+                    if (sameEObject(resolved, metadata))
+                        return item;
+                }
+                TreeItem nested = findMetadataItem(viewer, item, metadata);
+                if (nested != null)
+                    return nested;
+            }
+            return null;
         }
 
         /**

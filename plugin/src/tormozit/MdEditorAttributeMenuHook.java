@@ -486,7 +486,7 @@ public final class MdEditorAttributeMenuHook implements IStartup
         return resolveContextMenu(tree);
     }
 
-    private static boolean isDataPageAttributesTree(Tree tree)
+    static boolean isDataPageAttributesTree(Tree tree)
     {
         DtGranularEditor<?> editor = editorOf(tree);
         if (editor == null)
@@ -498,7 +498,7 @@ public final class MdEditorAttributeMenuHook implements IStartup
         return root != null && isUnder(root, tree);
     }
 
-    private static DtGranularEditor<?> editorOf(Control control)
+    static DtGranularEditor<?> editorOf(Control control)
     {
         if (!PlatformUI.isWorkbenchRunning())
             return null;
@@ -553,7 +553,7 @@ public final class MdEditorAttributeMenuHook implements IStartup
         return isDataMember(mapped) ? mapped : null;
     }
 
-    private static EObject mapViewModelToEObject(Control control, Object viewModel)
+    static EObject mapViewModelToEObject(Control control, Object viewModel)
     {
         if (viewModel == null)
             return null;
@@ -1084,7 +1084,7 @@ public final class MdEditorAttributeMenuHook implements IStartup
         return null;
     }
 
-    private static boolean sameObject(EObject first, EObject second)
+    static boolean sameObject(EObject first, EObject second)
     {
         if (first == null || second == null)
             return false;
