@@ -3332,6 +3332,8 @@ public class FormEditorHook implements IStartup
                     EObject resolved = resolveMetadataPropertyEObject(info);
                     if (sameEObject(resolved, metadata))
                         return item;
+                    if (isFormAttributeReferenceNode(info))
+                        continue;
                 }
                 TreeItem nested = findMetadataItem(viewer, item, metadata);
                 if (nested != null)

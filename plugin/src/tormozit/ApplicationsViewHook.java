@@ -25,12 +25,16 @@ import org.eclipse.jface.action.Separator;
 import org.eclipse.jface.viewers.CellLabelProvider;
 import org.eclipse.jface.viewers.CheckboxCellEditor;
 import org.eclipse.jface.viewers.ColumnViewer;
+import org.eclipse.jface.viewers.ComboViewer;
 import org.eclipse.jface.viewers.EditingSupport;
 import org.eclipse.jface.viewers.IBaseLabelProvider;
 import org.eclipse.jface.viewers.ILabelProvider;
 import org.eclipse.jface.dialogs.MessageDialog;
+import org.eclipse.jface.preference.PreferenceDialog;
 import org.eclipse.jface.resource.JFaceResources;
 import org.eclipse.jface.viewers.IStructuredSelection;
+import org.eclipse.jface.viewers.StructuredSelection;
+import org.eclipse.jface.viewers.TableViewer;
 import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.jface.viewers.TreeViewerColumn;
 import org.eclipse.jface.viewers.ViewerCell;
@@ -48,13 +52,21 @@ import org.eclipse.swt.events.SelectionEvent;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.graphics.Rectangle;
+import org.eclipse.swt.layout.GridData;
+import org.eclipse.swt.layout.GridLayout;
+import org.eclipse.swt.widgets.Button;
+import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
+import org.eclipse.swt.widgets.Label;
+import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Menu;
 import org.eclipse.swt.widgets.MenuItem;
+import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.ToolBar;
 import org.eclipse.swt.widgets.ToolItem;
+import org.eclipse.swt.widgets.TableItem;
 import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.TreeItem;
 import org.eclipse.ui.IActionBars;
@@ -70,6 +82,7 @@ import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.commands.ICommandService;
+import org.eclipse.ui.dialogs.PreferencesUtil;
 import org.osgi.framework.BundleContext;
 import org.osgi.framework.ServiceReference;
 
@@ -79,10 +92,13 @@ import com._1c.g5.v8.dt.platform.services.core.runtimes.environments.IResolvable
 import com._1c.g5.v8.dt.platform.services.model.AppArch;
 import com._1c.g5.v8.dt.platform.services.model.InfobaseReference;
 import com._1c.g5.v8.dt.platform.services.model.RuntimeInstallation;
+import com._1c.g5.v8.dt.platform.services.ui.PlatformServicesUiFactory;
+import com._1c.g5.v8.dt.platform.services.ui.PlatformServicesUiPlugin;
 import com.e1c.g5.dt.applications.IApplicationEvent;
 import com.e1c.g5.dt.applications.IApplicationListener;
 import com.e1c.g5.dt.applications.IApplicationManager;
 import com.e1c.g5.dt.applications.infobases.IInfobaseApplication;
+import com.google.inject.Injector;
 
 /**
  * Хук панели «Приложения» EDT.
@@ -110,7 +126,8 @@ public class ApplicationsViewHook implements IStartup
     private enum Column
     {
         DB      ("Инфобаза",         null,                                                   200, true,  SWT.NONE  ),
-        PLATFORM("Версия платформы", "Версия платформы для взаимодействия EDT с базой",       80, true,  SWT.NONE  ),
+        PLATFORM("Версия платформы", "Версия платформы для взаимодействия EDT с базой. Клик — настроить доступ к базе.",
+                                                                                                80, true,  SWT.NONE  ),
         SSH     ("Конфигуратор SSH",  "Дата сеанса конфигуратора SSH. Клик — отключить.",    165, true,  SWT.NONE  ),
         IR      ("Приложение ИР",    "Версия платформы и дата сеанса ИР. Клик — подключить или отключить.", 165, true,  SWT.NONE  ),
         AUTO    ("Авто ИР",             "Автоматически подключать приложение ИР при обращениях к нему", CHECKBOX_COLUMN_WIDTH, true, SWT.CENTER),
@@ -178,6 +195,10 @@ public class ApplicationsViewHook implements IStartup
 
     private static boolean copyExecutionListenerInstalled;
 
+    private static boolean platformListButtonHookInstalled;
+
+    private static final String PLATFORM_LIST_BUTTON_KEY = "tormozit.infobaseAccess.platformListButton"; //$NON-NLS-1$
+
     private static final DateTimeFormatter DATE_FMT =
         DateTimeFormatter.ofPattern("dd'д'HH:mm:ss"); //$NON-NLS-1$
 
@@ -191,6 +212,7 @@ public class ApplicationsViewHook implements IStartup
         Display.getDefault().asyncExec(() ->
         {
 //          Activator.getDefault().getInjector().injectMembers(this); // Слишком рано?
+            installPlatformListButtonHook();
             IWorkbench wb = PlatformUI.getWorkbench();
             for (IWorkbenchWindow w : wb.getWorkbenchWindows())
                 hookWindow(w);
@@ -964,6 +986,354 @@ public class ApplicationsViewHook implements IStartup
         };
     }
 
+    /**
+     * Открывает штатный диалог «Сконфигурируйте доступ к информационной базе» (тот же,
+     * что открывает двойной клик в {@code ApplicationsTreeViewer}) и сразу переставляет
+     * фокус на поле «Платформа». Сам диалог и его открытие — публичный API EDT
+     * ({@link PlatformServicesUiFactory#openInfobaseAccessSettingsDialog}); фокус на поле
+     * приходится переставлять снаружи через {@link SWT#Show}, так как combo-бокс — приватное
+     * поле диалога, а сам метод открытия блокирует поток модальным циклом.
+     */
+    private static void openInfobaseAccessSettingsAndFocusPlatform(
+        Shell shell, InfobaseReference infobase, IProject project)
+    {
+        PlatformServicesUiFactory uiFactory = resolvePlatformServicesUiFactory();
+        if (uiFactory == null)
+            return;
+        Display display = shell.getDisplay();
+        watchForAccessSettingsDialog(display);
+        uiFactory.openInfobaseAccessSettingsDialog(shell, infobase, project);
+    }
+
+    private static PlatformServicesUiFactory resolvePlatformServicesUiFactory()
+    {
+        try
+        {
+            Injector injector = PlatformServicesUiPlugin.getDefault().getInjector();
+            return injector == null ? null : injector.getInstance(PlatformServicesUiFactory.class);
+        }
+        catch (Exception e)
+        {
+            Global.log("ApplicationsViewHook: resolvePlatformServicesUiFactory: " + e); //$NON-NLS-1$
+            return null;
+        }
+    }
+
+    private static final String INFOBASE_ACCESS_DIALOG_TITLE_PREFIX =
+        "Сконфигурируйте доступ к информационной базе"; //$NON-NLS-1$
+
+    private static final String INFOBASE_ACCESS_PLATFORM_LABEL = "Платформа:"; //$NON-NLS-1$
+
+    private static void watchForAccessSettingsDialog(Display display)
+    {
+        if (display == null || display.isDisposed())
+            return;
+        Listener[] holder = new Listener[1];
+        holder[0] = event ->
+        {
+            if (!(event.widget instanceof Shell dialogShell) || dialogShell.isDisposed())
+                return;
+            String title = dialogShell.getText();
+            if (title == null || !title.startsWith(INFOBASE_ACCESS_DIALOG_TITLE_PREFIX))
+                return;
+            display.removeFilter(SWT.Show, holder[0]);
+            display.asyncExec(() -> focusPlatformField(dialogShell));
+        };
+        display.addFilter(SWT.Show, holder[0]);
+        display.timerExec(8000, () ->
+        {
+            if (!display.isDisposed())
+                display.removeFilter(SWT.Show, holder[0]);
+        });
+    }
+
+    private static void focusPlatformField(Shell dialogShell)
+    {
+        if (dialogShell.isDisposed())
+            return;
+        Control field = findControlAfterLabel(dialogShell, INFOBASE_ACCESS_PLATFORM_LABEL);
+        if (field != null && !field.isDisposed())
+            field.setFocus();
+    }
+
+    /** Ищет контрол, стоящий в форме сразу после {@link Label} с заданным текстом. */
+    private static Control findControlAfterLabel(Composite parent, String labelText)
+    {
+        Control[] children = parent.getChildren();
+        for (int i = 0; i < children.length - 1; i++)
+        {
+            if (children[i] instanceof Label label && labelText.equals(label.getText()))
+                return children[i + 1];
+        }
+        for (Control child : children)
+        {
+            if (child instanceof Composite composite && !composite.isDisposed())
+            {
+                Control found = findControlAfterLabel(composite, labelText);
+                if (found != null)
+                    return found;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Устанавливает постоянный (не снимаемый) фильтр {@code SWT.Show}, который добавляет
+     * кнопку «Список» рядом с полем «Платформа» в любом появлении диалога «Сконфигурируйте
+     * доступ к информационной базе» — не только при открытии через колонку «Платформа»
+     * панели «Приложения» (issue #546).
+     */
+    private static void installPlatformListButtonHook()
+    {
+        if (platformListButtonHookInstalled)
+            return;
+        platformListButtonHookInstalled = true;
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        display.addFilter(SWT.Show, event ->
+        {
+            if (!(event.widget instanceof Shell dialogShell) || dialogShell.isDisposed())
+                return;
+            String title = dialogShell.getText();
+            if (title == null || !title.startsWith(INFOBASE_ACCESS_DIALOG_TITLE_PREFIX))
+                return;
+            addPlatformListButton(dialogShell);
+        });
+    }
+
+    private static final String PLATFORM_LIST_BUTTON_TEXT = "Список"; //$NON-NLS-1$
+
+    private static final String PLATFORM_INSTALLATIONS_PREFERENCE_PAGE_ID =
+        "com._1c.g5.v8.dt.platform.services.ui.runtimeTypePreferences.EnterprisePlatform"; //$NON-NLS-1$
+
+    /**
+     * Добавляет кнопку «Список» рядом с кнопкой «Добавить...» в строке «Платформа».
+     *
+     * <p>Строка «Платформа:»/комбобокс/«Добавить...» — ровно 3 ячейки строки {@code GridLayout}
+     * диалога ({@code numColumns=3}), без запасной ячейки под четвёртый виджет. Увеличение
+     * {@code numColumns} на диалоге целиком (первая попытка, issue #546) переразбивает {@code
+     * GridLayout} по всем children заново и разваливает остальные строки — подтверждено логом
+     * {@code .tmp/temp-logs/platform-list-button.log} 19.09.2026. Поэтому кнопка «Добавить...»
+     * репэрентится в новый саб-{@link Composite} вместе с нашей кнопкой (тот же приём, что
+     * {@code control.setParent(...)} — общий для SWT), а саб-composite встаёт на место старой
+     * кнопки в layout родителя через {@link Control#moveAbove}: число колонок и остальные строки
+     * не меняются.
+     *
+     * <p>Кнопка не использует штатный {@link PlatformServicesUiFactory#createOpenPlatformInstallationsButton}
+     * (вторая попытка, тот же issue): его текст — «Открыть настройки...» (жёстко в {@code Messages}),
+     * а обновление комбобокса после закрытия страницы настроек он делает через {@code
+     * findUsefulForProjectAndInfobase(runtimeType, null, null, UPDATE)} — без project/infobase,
+     * то есть глобальным списком всех версий, и после этого выбирает из него «лучшую» произвольную,
+     * а не эффективную для конкретной базы — отсюда сброс поля «Платформа» и неверная активация.
+     * {@link PlatformServicesUiFactory#selectInfobaseAccessSettings} (третья попытка) обновляет
+     * список уже правильно, с project/infobase этой базы, но всегда переустанавливает выбор на
+     * «эффективную» версию через {@code resolveByProjectAndInfobase} — из-за этого терялся ручной
+     * выбор пользователя в комбобоксе, если он отличался от «эффективной». Поэтому обновление
+     * списка — своё, {@link #refreshInstallationsPreservingSelection}: прежний выбор сохраняется,
+     * если он всё ещё есть в обновлённом списке, и только при его отсутствии подставляется
+     * «эффективная» версия.
+     *
+     * <p>{@code composite}, {@code installationViewer}, {@code project}, {@code infobase} —
+     * приватные поля {@code InfobaseAccessSettingsDialog}, публичного доступа к ним нет; сам
+     * диалог достаётся из {@code dialogShell.getData()} — туда его кладёт {@code Window.create()}.
+     */
+    private static void addPlatformListButton(Shell dialogShell)
+    {
+        if (dialogShell.getData(PLATFORM_LIST_BUTTON_KEY) != null)
+            return;
+        Control platformCombo = findControlAfterLabel(dialogShell, INFOBASE_ACCESS_PLATFORM_LABEL);
+        if (platformCombo == null || platformCombo.isDisposed())
+            return;
+        Composite row = platformCombo.getParent();
+        Control[] children = row.getChildren();
+        int comboIndex = -1;
+        for (int i = 0; i < children.length; i++)
+        {
+            if (children[i] == platformCombo)
+            {
+                comboIndex = i;
+                break;
+            }
+        }
+        if (comboIndex < 0 || comboIndex + 1 >= children.length)
+            return;
+        Control addButton = children[comboIndex + 1];
+        if (!(addButton instanceof Button) || addButton.isDisposed())
+            return;
+
+        Object dialog = dialogShell.getData();
+        Object installationViewer = Global.getField(dialog, "installationViewer"); //$NON-NLS-1$
+        Object uiFactory = Global.getField(dialog, "uiFactory"); //$NON-NLS-1$
+        Object projectField = Global.getField(dialog, "project"); //$NON-NLS-1$
+        Object infobaseField = Global.getField(dialog, "infobase"); //$NON-NLS-1$
+        if (!(installationViewer instanceof ComboViewer viewer) || !(uiFactory instanceof PlatformServicesUiFactory factory))
+            return;
+        IProject project = projectField instanceof IProject p ? p : null;
+        InfobaseReference infobase = infobaseField instanceof InfobaseReference ib ? ib : null;
+
+        Global.tempLog("platform-list-button", "project=" + project + " infobase=" + infobase //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " selectionBefore=" + viewer.getStructuredSelection().getFirstElement()); //$NON-NLS-1$
+
+        dialogShell.setData(PLATFORM_LIST_BUTTON_KEY, Boolean.TRUE);
+
+        Composite buttonsHost = new Composite(row, SWT.NONE);
+        GridLayout hostLayout = new GridLayout(2, false);
+        hostLayout.marginWidth = 0;
+        hostLayout.marginHeight = 0;
+        buttonsHost.setLayout(hostLayout);
+        buttonsHost.setLayoutData(new GridData(SWT.FILL, SWT.FILL, false, false));
+        buttonsHost.moveAbove(addButton);
+
+        addButton.setParent(buttonsHost);
+        addButton.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, false, false));
+
+        Button listButton = new Button(buttonsHost, SWT.PUSH);
+        listButton.setText(PLATFORM_LIST_BUTTON_TEXT);
+        listButton.setToolTipText(TooltipText.wrap(listButton,
+            "Список установленных версий платформы и активация эффективной версии." //$NON-NLS-1$
+                + Global.pluginSignForTooltip()));
+        listButton.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, false, false));
+        listButton.addListener(SWT.Selection, e ->
+        {
+            Object previousSelection = viewer.getStructuredSelection().getFirstElement();
+            PreferenceDialog installationsDialog = PreferencesUtil.createPreferenceDialogOn(
+                dialogShell, PLATFORM_INSTALLATIONS_PREFERENCE_PAGE_ID, null, null);
+            Display display = dialogShell.getDisplay();
+            Listener[] holder = new Listener[1];
+            holder[0] = showEvent ->
+            {
+                if (!(showEvent.widget instanceof Shell installationsShell)
+                    || installationsShell.getData() != installationsDialog)
+                    return;
+                display.removeFilter(SWT.Show, holder[0]);
+                activateEffectiveInstallationRow(installationsDialog, viewer, infobase);
+            };
+            display.addFilter(SWT.Show, holder[0]);
+            try
+            {
+                installationsDialog.open();
+            }
+            finally
+            {
+                display.removeFilter(SWT.Show, holder[0]);
+            }
+            refreshInstallationsPreservingSelection(factory, viewer, project, infobase, previousSelection);
+            Global.tempLog("platform-list-button", //$NON-NLS-1$
+                "selectionAfter=" + viewer.getStructuredSelection().getFirstElement()); //$NON-NLS-1$
+        });
+
+        row.layout(true, true);
+        dialogShell.layout(true, true);
+    }
+
+    /**
+     * Выделяет в открытой (но ещё не показанной) странице настроек версий платформы строку,
+     * соответствующую версии, которая прямо сейчас показана в комбобоксе «Платформа»
+     * ({@code installationViewer}), — а не независимо вычисленную «эффективную для базы»
+     * через {@link #getRuntimeInstallation} (первая попытка, тот же issue): если пользователь
+     * уже поменял версию в комбобоксе, но ещё не нажал «ОК» в диалоге доступа, {@code
+     * getRuntimeInstallation} всё равно резолвит версию, реально прописанную в синхронизации
+     * проекта, — независимо от несохранённого выбора в комбобоксе, и подсвечивала не ту строку.
+     * Комбобокс хранит {@link IResolvableRuntimeInstallation} — символическую ссылку на версию
+     * (маска/тип), а сама страница показывает конкретные {@link RuntimeInstallation} (uuid);
+     * {@link IResolvableRuntimeInstallation#resolve} переводит одно в другое.
+     *
+     * <p>Страница — {@code EnterprisePlatformInstallationsPreferencePage} → {@code
+     * AbstractRuntimeInstallationPreferencePage}, у неё нет ни {@code applyData}, ни другого
+     * публичного способа задать начальное выделение, поэтому берём её {@code protected
+     * TableViewer viewer} рефлексией и сравниваем строки по {@code RuntimeInstallation.getUuid()}
+     * — стабильный идентификатор EMF-объекта модели, тем же способом плагин сверяет {@code
+     * InfobaseReference} в других хуках.
+     *
+     * <p>Вызывается из фильтра {@code SWT.Show} на шелле диалога настроек версий (после того как
+     * {@link PreferenceDialog#open()} сам вызвал {@code create()} и построил виджеты текущей
+     * страницы, включая {@code viewer}, но до показа диалога на экране) — тем же приёмом, что и
+     * добавление кнопки «Список» в {@link #addPlatformListButton}. Явный вызов {@code create()}
+     * извне (вторая попытка) ломал наполнение таблицы страницы (фон-job внутри {@code
+     * AbstractRuntimeInstallationPreferencePage.refresh}, вызванный не из-под {@code open()}, —
+     * страница оставалась пустой), поэтому порядок вызовов JFace трогать нельзя.
+     */
+    private static void activateEffectiveInstallationRow(
+        PreferenceDialog dialog, ComboViewer installationViewer, InfobaseReference infobase)
+    {
+        Object page = Global.invoke(dialog, "getCurrentPage"); //$NON-NLS-1$
+        Object viewerField = Global.getField(page, "viewer"); //$NON-NLS-1$
+        if (!(viewerField instanceof TableViewer tableViewer) || tableViewer.getTable().isDisposed())
+            return;
+        Object selected = installationViewer.getStructuredSelection().getFirstElement();
+        if (!(selected instanceof IResolvableRuntimeInstallation resolvable))
+            return;
+        RuntimeInstallation resolved = resolveForRowHighlight(resolvable, infobase);
+        if (resolved == null)
+            return;
+        for (TableItem item : tableViewer.getTable().getItems())
+        {
+            if (item.getData() instanceof RuntimeInstallation ri
+                && resolved.getUuid() != null && resolved.getUuid().equals(ri.getUuid()))
+            {
+                tableViewer.setSelection(new StructuredSelection(ri), true);
+                return;
+            }
+        }
+    }
+
+    /** {@link IResolvableRuntimeInstallation#resolve} — сперва под толстый клиент, потом под автономный сервер. */
+    private static RuntimeInstallation resolveForRowHighlight(
+        IResolvableRuntimeInstallation resolvable, InfobaseReference infobase)
+    {
+        AppArch arch = infobase != null ? infobase.getAppArch() : null;
+        try
+        {
+            return resolvable.resolve(List.of(COMPONENT_THICK_CLIENT), arch);
+        }
+        catch (Exception thickClientFailed)
+        {
+            try
+            {
+                return resolvable.resolve(List.of(COMPONENT_STANDALONE_SERVER), arch);
+            }
+            catch (Exception standaloneServerFailed)
+            {
+                return null;
+            }
+        }
+    }
+
+    /**
+     * Обновляет {@code installationViewer} после закрытия страницы настроек версий, сохраняя
+     * ручной выбор пользователя. Заново запрашивает список через {@code
+     * resolvableRuntimeInstallationManager} (приватное поле {@code factory}) с project/infobase
+     * этой базы — тем же публичным {@code IResolvableRuntimeInstallationManager}, которым сам
+     * диалог наполняет комбобокс. Прежний выбор ({@code previousSelection}) остаётся выбранным,
+     * если он всё ещё есть в обновлённом списке; «эффективная» версия ({@code
+     * resolveByProjectAndInfobase}) подставляется только когда прежней там больше нет.
+     */
+    private static void refreshInstallationsPreservingSelection(PlatformServicesUiFactory factory,
+        ComboViewer viewer, IProject project, InfobaseReference infobase, Object previousSelection)
+    {
+        Object managerField = Global.getField(factory, "resolvableRuntimeInstallationManager"); //$NON-NLS-1$
+        if (!(managerField instanceof IResolvableRuntimeInstallationManager manager))
+            return;
+        List<IResolvableRuntimeInstallation> installations = manager.findUsefulForProjectAndInfobase(
+            RUNTIME_TYPE_ENTERPRISE, project, infobase, InfobaseAccessType.UPDATE);
+        viewer.setInput(installations);
+        Object toSelect = installations.contains(previousSelection) ? previousSelection : null;
+        if (toSelect == null)
+        {
+            try
+            {
+                toSelect = manager.resolveByProjectAndInfobase(
+                    RUNTIME_TYPE_ENTERPRISE, project, infobase, InfobaseAccessType.UPDATE);
+            }
+            catch (Exception ex)
+            {
+                toSelect = installations.isEmpty() ? null : installations.get(0);
+            }
+        }
+        viewer.setSelection(new StructuredSelection(toSelect));
+    }
+
     // =======================================================================
     // RuntimeInstallation
     // =======================================================================
@@ -1270,9 +1640,10 @@ public class ApplicationsViewHook implements IStartup
         if (col == null || ib == null) return false;
         switch (col)
         {
-            case SSH:     return DesignerSessionPoolAccessor.getInstance().isConnected(ib);
-            case IR:      return true;
-            default:      return false;
+            case PLATFORM: return true;
+            case SSH:      return DesignerSessionPoolAccessor.getInstance().isConnected(ib);
+            case IR:       return true;
+            default:       return false;
         }
     }
 
@@ -1308,6 +1679,14 @@ public class ApplicationsViewHook implements IStartup
     {
         switch (col)
         {
+            case PLATFORM:
+            {
+                InfobaseReference ib = getInfobase(element);
+                if (ib == null) return;
+                openInfobaseAccessSettingsAndFocusPlatform(
+                    viewer.getControl().getShell(), ib, applicationProject(element));
+                return;
+            }
             case SSH:
             {
                 DesignerSessionPoolAccessor acc = DesignerSessionPoolAccessor.getInstance();

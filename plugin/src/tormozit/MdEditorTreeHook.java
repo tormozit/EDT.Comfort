@@ -472,7 +472,8 @@ public final class MdEditorTreeHook
                 public String getText(Object element)
                 {
                     EObject object = elementObject(tree, element);
-                    return form.textFor(object, viewer);
+                    return MdEditorAttributeMenuHook.isDataMember(object)
+                        ? form.textFor(object, viewer) : ""; //$NON-NLS-1$
                 }
             });
         }
@@ -1349,7 +1350,9 @@ public final class MdEditorTreeHook
                 if (!(event.item instanceof TreeItem row) || column == null || column.isDisposed()
                     || event.index != tree.indexOf(column))
                     return;
-                request(elementObject(tree, row.getData()), newViewer);
+                EObject object = elementObject(tree, row.getData());
+                if (MdEditorAttributeMenuHook.isDataMember(object))
+                    request(object, newViewer);
             });
         }
 

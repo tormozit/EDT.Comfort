@@ -13,10 +13,13 @@
     <startup class="tormozit.LwtComboPopupFixHook"/>
     <startup class="tormozit.FormWysiwygScrollHook"/>
     <startup class="tormozit.ActiveProjectTracker"/>
+    <startup class="tormozit.PreferencesDialogTransferHook"/>
+    <startup class="tormozit.PropertyPagesDiag"/>
     <startup class="tormozit.CompareConfigMenuHook"/>
     <startup class="tormozit.NavigatorDropSearchHook"/>
     <startup class="tormozit.ApplicationsViewHook"/>
     <startup class="tormozit.ApplicationEditorHook"/>
+    <startup class="tormozit.InfobaseEditorTitleMenuHook"/>
     <startup class="tormozit.DataCompositionSchemaEditorHook"/> 
     <startup class="tormozit.MoxelEditorHook"/>
     <startup class="tormozit.BSLEditorMenuHook"/>
@@ -1634,6 +1637,132 @@
         id="tormozit.comfort.bookmarkMethodField"
         class="tormozit.MarkersListViewsHook$MethodField"
         name="Метод"/>
+  </extension>
+
+  <!-- Категории для окон "Экспортировать/импортировать параметры" (ComfortPreferences*Page),
+       которых нет среди штатных: шрифты/цвета интерфейса, тема, текстовые редакторы
+       (непечатаемые символы, свёртка), настройки редактора BSL (подсветка, автодополнение,
+       автосвёртка). Суффикс "(Общие)"/"(Проект)" к name добавляет ComfortPreferenceTransferFilter
+       по scope мэппинга — здесь его в name дублировать не нужно. -->
+  <extension point="org.eclipse.ui.preferenceTransfer">
+    <transfer
+        id="tormozit.prefTransfer.fontsAndColors"
+        icon="platform:/plugin/org.eclipse.ui/icons/full/obj16/font.png"
+        name="Шрифты и цвета">
+      <mapping scope="instance">
+        <entry node="org.eclipse.ui.workbench"/>
+      </mapping>
+      <description>Шрифты и цвета интерфейса (страница "Общие → Внешний вид → Цвета и шрифты").</description>
+    </transfer>
+    <transfer
+        id="tormozit.prefTransfer.theme"
+        icon="platform:/plugin/org.eclipse.ui/icons/full/obj16/theme_category.png"
+        name="Тема оформления">
+      <mapping scope="instance">
+        <entry node="org.eclipse.e4.ui.css.swt.theme"/>
+      </mapping>
+      <description>Тёмная/светлая тема EDT.</description>
+    </transfer>
+    <transfer
+        id="tormozit.prefTransfer.textEditors"
+        icon="platform:/plugin/org.eclipse.ui.workbench.texteditor/icons/full/etool16/show_whitespace_chars.png"
+        name="Текстовые редакторы">
+      <mapping scope="instance">
+        <entry node="org.eclipse.ui.editors"/>
+      </mapping>
+      <description>Отображение непечатаемых символов, свёртка и прочие настройки текстовых редакторов.</description>
+    </transfer>
+    <transfer
+        id="tormozit.prefTransfer.bslUi"
+        icon="platform:/plugin/com._1c.g5.v8.dt.bsl.ui/icons/eview/syntax_help.png"
+        name="BSL: цвета, автодополнение, свёртка">
+      <mapping scope="instance">
+        <entry node="com._1c.g5.v8.dt.bsl.ui"/>
+      </mapping>
+      <description>Настройки редактора модулей BSL: подсветка синтаксиса, автодополнение, автосвёртка.</description>
+    </transfer>
+    <transfer
+        id="tormozit.prefTransfer.comfortGeneral"
+        icon="icons/etool16/comfort.png"
+        name="Комфорт">
+      <mapping scope="instance">
+        <entry node="tormozit"/>
+      </mapping>
+      <description>Общие (workspace) настройки плагина Комфорт.</description>
+    </transfer>
+    <!-- scope="project" здесь номинальный: узел ProjectScope реально лежит по пути
+         /project/<ИмяПроекта>/tormozit (с именем проекта посередине), а <entry node="tormozit">
+         матчит только буквальный "/project/tormozit" — никогда не совпадёт с реальным путём.
+         Рабочий фильтр для этой категории ComfortPreferenceTransferFilter подменяет в рантайме
+         (см. withProjectFilter/COMFORT_PROJECT_TRANSFER_ID) на конкретное имя проекта:
+         на экспорте — из поля "Проект", на импорте — из "Проект из файла". Мэппинг ниже нужен
+         только чтобы транзит прошёл валидацию схемы расширения. -->
+    <transfer
+        id="tormozit.prefTransfer.comfortProject"
+        icon="icons/etool16/comfort.png"
+        name="Комфорт">
+      <mapping scope="project">
+        <entry node="tormozit"/>
+      </mapping>
+      <description>Настройки плагина Комфорт для конкретного проекта.</description>
+    </transfer>
+    <!-- Тот же номинальный mapping, что у comfortProject выше: реальный путь ProjectScope —
+         /project/<ИмяПроекта>/com._1c.g5.v8.dt.bsl.Bsl (id Xtext-языка BSL, bsl-ui/plugin.xml),
+         фильтр подменяет ComfortPreferenceTransferFilter.BSL_PROJECT_TRANSFER_ID. Соответствует
+         разделу "Свойства проекта → V8 → Встроенный язык → Форматирование". -->
+    <transfer
+        id="tormozit.prefTransfer.bslProject"
+        icon="platform:/plugin/com._1c.g5.v8.dt.bsl.ui/icons/eview/syntax_help.png"
+        name="BSL: форматирование">
+      <mapping scope="project">
+        <entry node="com._1c.g5.v8.dt.bsl.Bsl"/>
+      </mapping>
+      <description>Настройки форматирования кода BSL для конкретного проекта ("Включить настройки для проекта").</description>
+    </transfer>
+    <!-- Тот же номинальный mapping: реальные данные — гибрид. Активный профиль и флаг
+         "Отключить массовые проверки" лежат в ProjectScope-узле com.e1c.g5.v8.dt.check
+         (декомпилированный JSONCheckSettingsProfileStore), сами профили проверок — JSON-файлы
+         <проект>/.settings/<профиль>.cset, preferences их не касаются. Файлы переносит отдельно
+         ComfortCheckProfileTransfer (вызывается из страниц рядом с обычным preferences-переносом,
+         как только он определит, что эта категория отмечена — ComfortPreferenceTransferFilter#
+         projectNameForQualifier). Соответствует разделу "Свойства проекта → V8 → Проверки". -->
+    <transfer
+        id="tormozit.prefTransfer.checksProject"
+        icon="platform:/plugin/com._1c.g5.v8.dt.ui/icons/obj16/check.png"
+        name="Проверки">
+      <mapping scope="project">
+        <entry node="com.e1c.g5.v8.dt.check"/>
+      </mapping>
+      <description>Профиль проверок проекта (активный профиль и файлы .settings/*.cset с настройками проверок).</description>
+    </transfer>
+    <!-- Настройки, ссылающиеся на имена объектов конфигурации (issue #520): наборы объектов,
+         недавние места, позиция каретки в модулях, выбор элемента дерева формы, фильтр панели
+         проблем "по подсистемам" (включая историю его поиска), пресеты фильтра по подсистемам.
+         Обычная рабочая категория — выгружается/загружается как есть, для родной рабочей
+         области. На импорте в чужую рабочую область ComfortPreferencesImportPage не даёт её
+         включить (getFilters()/ComfortPreferenceTransferFilter#stripMetadataReferences) —
+         иначе в неё попадут ссылки на объекты чужой конфигурации. -->
+    <transfer
+        id="tormozit.prefTransfer.metadataReferences"
+        icon="icons/etool16/object_set_filter_star.png"
+        name="Параметры для метаданных">
+      <mapping scope="instance">
+        <entry node="tormozit">
+          <key name="objectSets.data"/>
+          <key name="objectSets.addTargetByProject"/>
+          <key name="recentPlaces.entries"/>
+          <key name="bslModulePosition.entries"/>
+          <key name="formItemsSelection.entries"/>
+        </entry>
+        <entry node="com._1c.g5.v8.dt.ui.validation">
+          <key name="com._1c.g5.v8.dt.internal.ui.validation.ProblemView.filters"/>
+        </entry>
+        <entry node="tormozit.comfort">
+          <key name="comfort.filterBySubsystems.presets." match="prefix"/>
+        </entry>
+      </mapping>
+      <description>Наборы объектов, недавние места, позиция каретки в модулях, выбор элемента дерева формы, фильтр панели проблем "по подсистемам" и его история, пресеты фильтра по подсистемам. Ссылаются на имена объектов конфигурации — загрузить в другую рабочую область нельзя.</description>
+    </transfer>
   </extension>
 
 

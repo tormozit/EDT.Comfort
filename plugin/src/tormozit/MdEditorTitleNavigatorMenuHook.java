@@ -110,8 +110,6 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
     /** Ключ пометки шапки формы: ссылка уже встроена. */
     private static final String KEY_INSTALLED = "tormozit.mdTitleNavigatorMenu"; //$NON-NLS-1$
 
-    private static final String TITLE_REGION_CLASS = "TitleRegion"; //$NON-NLS-1$
-
     /** Внутренние классы {@code DtGranularEditor} — среди них слушатель декоратора ({@code $5}). */
     private static final String GRANULAR_EDITOR_CLASS =
         "com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor$"; //$NON-NLS-1$
@@ -642,25 +640,13 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
     /** Область заголовка формы — {@code org.eclipse.ui.internal.forms.widgets.TitleRegion}. */
     private static Control findTitleRegion(Composite head)
     {
-        for (Control child : head.getChildren())
-        {
-            if (TITLE_REGION_CLASS.equals(child.getClass().getSimpleName()))
-                return child;
-        }
-        return null;
+        return FormHeaderTitleText.findTitleRegion(head);
     }
 
     /** Выделяемый вариант текста заголовка внутри области заголовка. */
     private static StyledText findTitleText(Control titleRegion)
     {
-        if (!(titleRegion instanceof Composite region))
-            return null;
-        for (Control child : region.getChildren())
-        {
-            if (child instanceof StyledText styledText && !styledText.isDisposed())
-                return styledText;
-        }
-        return null;
+        return FormHeaderTitleText.findTitleText(titleRegion);
     }
 
     // =========================================================================

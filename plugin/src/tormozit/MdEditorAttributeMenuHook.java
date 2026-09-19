@@ -623,7 +623,7 @@ public final class MdEditorAttributeMenuHook implements IStartup
         return mappedModels instanceof Collection<?> models && models.contains(viewModel);
     }
 
-    private static boolean isDataMember(EObject object)
+    static boolean isDataMember(EObject object)
     {
         if (object == null)
             return false;

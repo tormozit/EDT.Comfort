@@ -93,6 +93,40 @@ public final class ComfortSettings
      */
     public static final String PREF_MD_EDITOR_VERTICAL_TABS = "comfort.mdEditor.verticalTabs"; //$NON-NLS-1$
 
+    /**
+     * Ключ: запоминаемый проект в поле «Проект» окна «Экспортировать параметры»
+     * ({@code ComfortPreferencesExportPage}).
+     */
+    public static final String PREF_PREFERENCES_EXPORT_LAST_PROJECT = "comfort.preferencesExport.lastProject"; //$NON-NLS-1$
+
+    /**
+     * Ключ: запоминаемые пометки списка «Проекты приёмники» окна «Импортировать параметры»
+     * ({@code ComfortPreferencesImportPage}) — имена проектов через запятую.
+     */
+    public static final String PREF_PREFERENCES_IMPORT_TARGET_PROJECTS = "comfort.preferencesImport.targetProjects"; //$NON-NLS-1$
+
+    /**
+     * Ключ: запоминаемое положение перетаскиваемого разделителя между списком «Проекты
+     * приёмники» и деревом категорий в окне «Импортировать параметры» — вес верхней части
+     * (0–100, {@code SashForm.getWeights()}/{@code setWeights()} нормализует сами).
+     */
+    public static final String PREF_PREFERENCES_IMPORT_SASH_WEIGHT = "comfort.preferencesImport.sashWeight"; //$NON-NLS-1$
+
+    public static final int DEFAULT_PREFERENCES_IMPORT_SASH_WEIGHT = 30;
+
+    /**
+     * Ключи: запоминаемые пометки категорий (id через запятую) и флажка «Экспортировать/
+     * импортировать всё» в окнах «Экспортировать/импортировать параметры»
+     * ({@code ComfortPreferencesExportPage}/{@code ComfortPreferencesImportPage}).
+     */
+    public static final String PREF_PREFERENCES_EXPORT_CHECKED_CATEGORIES = "comfort.preferencesExport.checkedCategories"; //$NON-NLS-1$
+
+    public static final String PREF_PREFERENCES_EXPORT_TRANSFER_ALL = "comfort.preferencesExport.transferAll"; //$NON-NLS-1$
+
+    public static final String PREF_PREFERENCES_IMPORT_CHECKED_CATEGORIES = "comfort.preferencesImport.checkedCategories"; //$NON-NLS-1$
+
+    public static final String PREF_PREFERENCES_IMPORT_TRANSFER_ALL = "comfort.preferencesImport.transferAll"; //$NON-NLS-1$
+
     /** Вертикальные вкладки выключены по умолчанию. */
     public static final boolean DEFAULT_MD_EDITOR_VERTICAL_TABS = false;
 
@@ -483,6 +517,53 @@ public final class ComfortSettings
     public ScopedPreferenceStore getPreferenceStore()
     {
         return preferenceStore;
+    }
+
+    /**
+     * {@code IPreferenceStore.setValue()} у {@link ScopedPreferenceStore} без {@code save()}
+     * не переживает перезапуск EDT — обновляет только значение в памяти. Использовать вместо
+     * голого {@code getPreferenceStore().setValue(...)} для всего, что должно запоминаться
+     * между сеансами (а не только в рамках текущего).
+     */
+    public static void setAndSave(String key, String value)
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return;
+        settings.preferenceStore.setValue(key, value);
+        saveQuietly(settings.preferenceStore, key);
+    }
+
+    /** См. {@link #setAndSave(String, String)}. */
+    public static void setAndSave(String key, boolean value)
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return;
+        settings.preferenceStore.setValue(key, value);
+        saveQuietly(settings.preferenceStore, key);
+    }
+
+    /** См. {@link #setAndSave(String, String)}. */
+    public static void setAndSave(String key, int value)
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return;
+        settings.preferenceStore.setValue(key, value);
+        saveQuietly(settings.preferenceStore, key);
+    }
+
+    private static void saveQuietly(ScopedPreferenceStore store, String key)
+    {
+        try
+        {
+            store.save();
+        }
+        catch (java.io.IOException e)
+        {
+            Global.tempLogException("ComfortSettings", "setAndSave " + key, e); //$NON-NLS-1$ //$NON-NLS-2$
+        }
     }
 
     /** Читает актуальное значение из хранилища (без кэша). */
