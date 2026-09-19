@@ -124,6 +124,9 @@ public final class ParamHintHtmlModifier
     /** BrowserFunction действий параметра (одна на Browser). */
     private static final String PARAM_BROWSER_FUNCTION_MARK =
         "tormozit.paramHintBrowserFunction"; //$NON-NLS-1$
+    /** Наш LocationListener вместо закрывающего {@code CustomLocationListener} EDT. */
+    private static final String PARAM_LINK_LOCATION_MARK =
+        "tormozit.paramHintLinkLocationListener"; //$NON-NLS-1$
     /** Доля цвета текста в приглушённом цвете заголовка (остальное — фон). */
     private static final double HEADING_PREFIX_TEXT_WEIGHT = 0.55;
     /** Макс. число типов возврата в заголовке (через запятую); дальше — "...". */
@@ -3139,17 +3142,36 @@ public final class ParamHintHtmlModifier
 
             ensureCurrentParamCaretSync(browser);
             ensureParameterBrowserFunction(browser);
+            ensureParamHintLinkLocationListener(browser);
 
             boolean hasMeta = html.indexOf(COMFORT_META_MARKER) >= 0
                 || html.indexOf("data-comfort=\"1\"") >= 0; //$NON-NLS-1$
             boolean headingDone = isHeadingAlreadyRewritten(html);
             if (hasMeta || headingDone)
+            {
+                // showPage уже поставил новый точный индекс, но Browser может ещё
+                // показывать предыдущее размеченное HTML. Его нельзя просто пропустить:
+                // обновляем выбранный параметр непосредственно в этом документе.
+                Object exactParamIndex = browser.getData(CURRENT_PARAM_INDEX_MARK);
+                if (exactParamIndex instanceof Integer exact)
+                {
+                    HoverContext ctx = resolveHoverContext(browser);
+                    if (ctx != null)
+                    {
+                        ctx.currentArgIndex = exact.intValue();
+                        browser.setData(CURRENT_PARAM_INDEX_MARK, null);
+                        refreshVirtualParamHtml(browser, ctx);
+                    }
+                }
                 return;
+            }
 
             HoverContext ctx = resolveHoverContext(browser);
             Object exactParamIndex = browser.getData(CURRENT_PARAM_INDEX_MARK);
             if (ctx != null && exactParamIndex instanceof Integer exact)
+            {
                 ctx.currentArgIndex = exact.intValue();
+            }
             browser.setData(CURRENT_PARAM_INDEX_MARK, null);
 
             // Автовыбор сигнатуры — ТОЛЬКО при реальном открытии команды, не на Progress.
@@ -3383,6 +3405,171 @@ public final class ParamHintHtmlModifier
             }
         };
         browser.setData(PARAM_BROWSER_FUNCTION_MARK, function);
+    }
+
+    /**
+     * Заменяет штатный listener EDT: он открывает страницу синтакс-помощника и сразу
+     * уничтожает popup. Наш открывает ту же страницу, но оставляет popup на месте.
+     */
+    private static void ensureParamHintLinkLocationListener(Browser browser)
+    {
+        if (browser == null || browser.isDisposed()
+            || browser.getData(PARAM_LINK_LOCATION_MARK) != null)
+            return;
+        try
+        {
+            Object webBrowser = Global.getField(browser, "webBrowser"); //$NON-NLS-1$
+            Object listeners = Global.getField(webBrowser, "locationListeners"); //$NON-NLS-1$
+            if (listeners instanceof org.eclipse.swt.browser.LocationListener[] array)
+            {
+                for (org.eclipse.swt.browser.LocationListener listener : array)
+                {
+                    if (listener != null && listener.getClass().getName().endsWith(
+                        "ParametersHoverInfoControl$CustomLocationListener")) //$NON-NLS-1$
+                        browser.removeLocationListener(listener);
+                    else if (listener != null && listener.getClass().getName().endsWith(
+                        "BslLocationListener")) //$NON-NLS-1$
+                    {
+                        browser.removeLocationListener(listener);
+                        browser.addLocationListener(new org.eclipse.swt.browser.LocationListener()
+                        {
+                            @Override
+                            public void changing(org.eclipse.swt.browser.LocationEvent event)
+                            {
+                                forwardNormalizedBslLocation(listener, event);
+                            }
+
+                            @Override
+                            public void changed(org.eclipse.swt.browser.LocationEvent event)
+                            {
+                                listener.changed(event);
+                            }
+                        });
+                    }
+                }
+            }
+            org.eclipse.swt.browser.LocationListener listener =
+                new org.eclipse.swt.browser.LocationListener()
+                {
+                    @Override
+                    public void changing(org.eclipse.swt.browser.LocationEvent event)
+                    {
+                        openParamHintLink(browser, event);
+                    }
+
+                    @Override
+                    public void changed(org.eclipse.swt.browser.LocationEvent event)
+                    {
+                    }
+            };
+            browser.addLocationListener(listener);
+            browser.setData(PARAM_LINK_LOCATION_MARK, listener);
+        }
+        catch (Exception | LinkageError ignored)
+        {
+        }
+    }
+
+    private static void openParamHintLink(Browser browser,
+        org.eclipse.swt.browser.LocationEvent event)
+    {
+        try
+        {
+            String location = event != null ? event.location : null;
+            int marker = location != null ? location.lastIndexOf("?u=") : -1; //$NON-NLS-1$
+            if (marker < 0)
+                return;
+            String link = java.net.URLDecoder.decode(location.substring(marker + 3),
+                java.nio.charset.StandardCharsets.UTF_8);
+            link = normalizeNestedBrowserLink(link);
+            Object parametersHover = findParametersHover(browser);
+            if (parametersHover == null)
+                return;
+            Object infoControl = parametersHover != null
+                ? Global.invoke(parametersHover, "getControl") : null; //$NON-NLS-1$
+            Object input = infoControl != null ? Global.invoke(infoControl, "getInput") : null; //$NON-NLS-1$
+            if (Global.invoke(input, "getVersion") == null) //$NON-NLS-1$
+                return;
+            event.doit = false;
+            // Открытие панели описания переводит фокус из popup. Снимаем ровно
+            // штатный одноразовый закрыватель этого popup до перевода фокуса.
+            removeStockPopupFocusClose(browser);
+            Object page = Global.invoke(input, "getViewPage"); //$NON-NLS-1$
+            Object provider = Global.getField(parametersHover, "documentationProvider"); //$NON-NLS-1$
+            Object languageProvider = Global.getField(parametersHover, "languageProvider"); //$NON-NLS-1$
+            Object language = Global.invoke(languageProvider, "getLanguage"); //$NON-NLS-1$
+            Object targetPage = Global.invoke(provider, "resolveViewDocumentationPage", //$NON-NLS-1$
+                page, link, language);
+            if (targetPage == null)
+                return;
+            ClassLoader loader = parametersHover.getClass().getClassLoader();
+            Class<?> viewUtil = Class.forName(
+                "com._1c.g5.v8.dt.internal.bsl.ui.syntaxassist.SyntaxAssistViewUtil", //$NON-NLS-1$
+                true, loader);
+            Object view = Global.invoke(viewUtil, "showOrGetShowedView"); //$NON-NLS-1$
+            Object panel = Global.invoke(view, "getDescriptionPanel"); //$NON-NLS-1$
+            Object descriptionBrowser = Global.invoke(panel, "getBrowser"); //$NON-NLS-1$
+            Object descriptor = Global.newInstance(
+                "com._1c.g5.v8.dt.internal.bsl.ui.syntaxassist.description.DocumentationPageDescriptor", //$NON-NLS-1$
+                loader, targetPage, provider);
+            Global.invokeVoid(descriptionBrowser, "openPage", descriptor); //$NON-NLS-1$
+        }
+        catch (Exception | LinkageError ignored)
+        {
+            if (event != null)
+                event.doit = false;
+        }
+    }
+
+    /**
+     * EDT оборачивает href в {@code ?u=}. Ссылки {@code IPageReference} уже содержат
+     * такую оболочку, поэтому Browser передаёт {@code ?u=?u=…}; для resolver'а
+     * внутренний префикс не является частью пути документации.
+     */
+    private static String normalizeNestedBrowserLink(String link)
+    {
+        String result = link;
+        for (int i = 0; result != null && i < 3; i++)
+        {
+            while (result.startsWith("?u=")) //$NON-NLS-1$
+                result = result.substring(3);
+            String decoded = java.net.URLDecoder.decode(result,
+                java.nio.charset.StandardCharsets.UTF_8);
+            if (decoded.equals(result))
+                break;
+            result = decoded;
+        }
+        while (result != null && result.startsWith("?u=")) //$NON-NLS-1$
+            result = result.substring(3);
+        return result;
+    }
+
+    /** Передаёт ссылку боковой подсказки штатному EDT listener после снятия лишнего {@code ?u=}. */
+    private static void forwardNormalizedBslLocation(
+        org.eclipse.swt.browser.LocationListener listener,
+        org.eclipse.swt.browser.LocationEvent event)
+    {
+        if (event == null || event.location == null)
+        {
+            listener.changing(event);
+            return;
+        }
+        int marker = event.location.lastIndexOf("?u="); //$NON-NLS-1$
+        if (marker < 0)
+        {
+            listener.changing(event);
+            return;
+        }
+        String decoded = java.net.URLDecoder.decode(event.location.substring(marker + 3),
+            java.nio.charset.StandardCharsets.UTF_8);
+        String normalized = normalizeNestedBrowserLink(decoded);
+        if (!normalized.equals(decoded))
+        {
+            event.location = event.location.substring(0, marker + 3)
+                + java.net.URLEncoder.encode(normalized,
+                    java.nio.charset.StandardCharsets.UTF_8);
+        }
+        listener.changing(event);
     }
 
     private static int browserFunctionParamIndex(Object[] arguments)
@@ -3722,25 +3909,15 @@ public final class ParamHintHtmlModifier
      */
     private static void ensureCurrentParamCaretSync(Browser browser)
     {
-        Global.tempLog("param-hint-caret", "ensure browser=" //$NON-NLS-1$ //$NON-NLS-2$
-            + (browser == null ? "null" : browser.isDisposed() ? "disposed" : "alive")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         if (browser == null || browser.isDisposed())
             return;
         if (Boolean.TRUE.equals(browser.getData(CURRENT_PARAM_CARET_MARK)))
-        {
-            Global.tempLog("param-hint-caret", "ensure already-installed"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
-        }
         ActiveEditor active = resolveParamHintEditor();
         if (active == null || active.widget == null || active.widget.isDisposed())
-        {
-            Global.tempLog("param-hint-caret", "ensure no-active-editor"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
-        }
         StyledText widget = active.widget;
         browser.setData(CURRENT_PARAM_CARET_MARK, Boolean.TRUE);
-        Global.tempLog("param-hint-caret", //$NON-NLS-1$
-            "ensure installed caret=" + widget.getCaretOffset()); //$NON-NLS-1$
         CaretListener listener = new CaretListener()
         {
             @Override
@@ -3748,15 +3925,24 @@ public final class ParamHintHtmlModifier
             {
                 if (browser.isDisposed())
                 {
-                    Global.tempLog("param-hint-caret", "event browser-disposed"); //$NON-NLS-1$ //$NON-NLS-2$
                     if (!widget.isDisposed())
                         widget.removeCaretListener(this);
                     return;
                 }
-                Global.tempLog("param-hint-caret", //$NON-NLS-1$
-                    "event caret=" + event.caretOffset); //$NON-NLS-1$
-                // После штатного CustomCaretListener EDT.
-                refreshParamHintViaShowPage(browser, widget, event.caretOffset);
+                int caretOffset = event.caretOffset;
+                Display display = widget.getDisplay();
+                if (display == null || display.isDisposed())
+                    return;
+                // EDT может вызвать свой listener после нашего и затереть страницу.
+                // Выполняемся следующим UI-тактом, когда все listener этого движения
+                // уже закончили работу.
+                display.asyncExec(() -> {
+                    if (!browser.isDisposed() && !widget.isDisposed()
+                        && widget.getCaretOffset() == caretOffset)
+                    {
+                        refreshParamHintViaShowPage(browser, widget, caretOffset);
+                    }
+                });
             }
         };
         widget.addCaretListener(listener);
@@ -3776,15 +3962,10 @@ public final class ParamHintHtmlModifier
     private static void refreshParamHintViaShowPage(Browser browser, StyledText widget,
         int eventCaret)
     {
-        Global.tempLog("param-hint-caret", //$NON-NLS-1$
-            "refresh start caret=" + eventCaret + " modifying=" + MODIFY_IN_PROGRESS.get()); //$NON-NLS-1$ //$NON-NLS-2$
         if (browser == null || browser.isDisposed())
             return;
         if (Boolean.TRUE.equals(MODIFY_IN_PROGRESS.get()))
-        {
-            Global.tempLog("param-hint-caret", "refresh skipped modifying"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
-        }
         Object pending = widget != null && !widget.isDisposed()
             ? widget.getData(PENDING_PARAM_INDEX_MARK) : null;
         Integer exactIndex = pending instanceof ParamIndexAtCaret exact
@@ -3792,37 +3973,22 @@ public final class ParamHintHtmlModifier
                 ? Integer.valueOf(exact.index) : null;
         HoverContext ctx = resolveHoverContext(browser);
         if (ctx == null || ctx.parametersHover == null || ctx.pages == null || ctx.pages.isEmpty())
-        {
-            Global.tempLog("param-hint-caret", "refresh no-context"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
-        }
         if (ctx.pageIndex < 0 || ctx.pageIndex >= ctx.pages.size())
-        {
-            Global.tempLog("param-hint-caret", //$NON-NLS-1$
-                "refresh bad-page page=" + ctx.pageIndex + " pages=" + ctx.pages.size()); //$NON-NLS-1$ //$NON-NLS-2$
             return;
-        }
         int desired = exactIndex != null ? exactIndex.intValue()
             : (ctx.currentArgIndex >= 0 ? ctx.currentArgIndex : ctx.paramIndex);
         if (desired < 0)
             desired = 0;
         Object prev = browser.getData(LAST_SHOW_ARG_MARK);
-        Global.tempLog("param-hint-caret", "refresh resolved desired=" + desired //$NON-NLS-1$ //$NON-NLS-2$
-            + " current=" + ctx.currentArgIndex + " stock=" + ctx.paramIndex //$NON-NLS-1$ //$NON-NLS-2$
-            + " exact=" + exactIndex + " prev=" + prev); //$NON-NLS-1$ //$NON-NLS-2$
         if (prev instanceof Integer last && last.intValue() == desired)
-        {
-            Global.tempLog("param-hint-caret", "refresh skipped same-index"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
-        }
         Object page = ctx.pages.get(ctx.pageIndex);
         Object paramsObj = Global.getField(page, "params"); //$NON-NLS-1$
         List<?> params = paramsObj instanceof List<?> typed ? typed : Collections.emptyList();
         int formalCount = params.size();
         if (desired >= formalCount)
         {
-            Global.tempLog("param-hint-caret", //$NON-NLS-1$
-                "refresh virtual formal=" + formalCount); //$NON-NLS-1$
             browser.setData(LAST_SHOW_ARG_MARK, Integer.valueOf(desired));
             ctx.currentArgIndex = desired;
             refreshVirtualParamHtml(browser, ctx);
@@ -3833,10 +3999,8 @@ public final class ParamHintHtmlModifier
             showIdx = formalCount - 1;
         browser.setData(LAST_SHOW_ARG_MARK, Integer.valueOf(desired));
         browser.setData(CURRENT_PARAM_INDEX_MARK, Integer.valueOf(desired));
-        boolean shown = showPageKeepingCurrentBounds(ctx.parametersHover, ctx.pages,
+        showPageKeepingCurrentBounds(ctx.parametersHover, ctx.pages,
             ctx.pageIndex, showIdx);
-        Global.tempLog("param-hint-caret", "refresh showPage=" + shown //$NON-NLS-1$ //$NON-NLS-2$
-            + " showIdx=" + showIdx); //$NON-NLS-1$
     }
 
     private static void refreshVirtualParamHtml(Browser browser, HoverContext ctx)
@@ -5191,6 +5355,10 @@ public final class ParamHintHtmlModifier
                 String href = asString(Global.invoke(typeRef, "getHref")); //$NON-NLS-1$
                 if (href != null && !href.isBlank())
                 {
+                    // IPageReference уже возвращает адрес для обработчика EDT в
+                    // виде ?u=… . Вставка его в href даёт Browser второй ?u=…
+                    // и превращает путь в несуществующий. В HTML нужна сама ссылка.
+                    href = normalizeNestedBrowserLink(href);
                     sb.append("<a href=\""); //$NON-NLS-1$
                     sb.append(escapeHtmlAttr(href));
                     sb.append("\">"); //$NON-NLS-1$

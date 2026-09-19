@@ -23,6 +23,7 @@ import org.eclipse.xtext.ui.editor.contentassist.ConfigurableCompletionProposal;
 import org.eclipse.xtext.ui.editor.hover.html.IXtextBrowserInformationControl;
 import org.eclipse.jface.text.source.SourceViewer;
 import org.eclipse.swt.SWT;
+import org.eclipse.swt.browser.Browser;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Label;
@@ -112,6 +113,9 @@ public final class ContentAssistPopupSync
     /** Dedupe browser HTML reload (fix10b). */
     private static final IdentityHashMap<ContentAssistant, String> LAST_APPLIED_HTML_DIGEST =
         new IdentityHashMap<>();
+    /** Наш listener ссылок бокового браузера автодополнения. */
+    private static final String ASSIST_LINK_LOCATION_MARK =
+        "tormozit.contentAssistLinkLocationListener"; //$NON-NLS-1$
 
     private static final class PendingDebouncedFilter
     {
@@ -1123,8 +1127,11 @@ if (processor != null && processor.isIrWordsResolvedForContext()
                 }
                 return;
             }
-            Listener listener = event -> maybeLoadMoreOnScroll(popup, assistant, viewer,
-                processor, table);
+            Listener listener = event ->
+            {
+                maybeLoadMoreOnScroll(popup, assistant, viewer, processor, table);
+                installAssistBrowserLinkLocationListenerAsync(assistant);
+            };
             table.addListener(SWT.Selection, listener);
             POPUP_SCROLL_LISTENERS.put(popup, listener);
             FilterListMouseCurrentSync.installForTable(table,
@@ -1766,7 +1773,10 @@ if (processor != null && processor.isIrWordsResolvedForContext()
                 return;
             Object controller = fAdditionalInfoControllerField.get(popup);
             if (controller != null)
+            {
                 handleTableSelectionChangedMethod.invoke(controller);
+                installAssistBrowserLinkLocationListenerAsync(assistant);
+            }
         }
         catch (Exception e)
         {
@@ -2314,7 +2324,9 @@ IInformationControlCreator creator = trace.creator;
             if (creatorPatched && !hasBrowserAfterRefresh)
                 hasBrowserAfterRefresh = recreateAssistBrowserSidePanelIfNeeded(assistant, viewer);
         }
-return creatorResolved && creatorPatched;
+        if (hasBrowserAfterRefresh)
+            installAssistBrowserLinkLocationListenerAsync(assistant);
+        return creatorResolved && creatorPatched;
     }
 
     /** H20/H22: FQN side control или {@code null}. */
@@ -2466,7 +2478,158 @@ return creatorResolved && creatorPatched;
             LAST_APPLIED_HTML_DIGEST.put(assistant, digest);
             logBrowserContentLoad("htmlApply", false); //$NON-NLS-1$
         }
+        if (applied)
+            installAssistBrowserLinkLocationListenerAsync(assistant);
         return applied;
+    }
+
+    /** Browser может создаваться самим контроллером после смены строки списка. */
+    private static void installAssistBrowserLinkLocationListenerAsync(ContentAssistant assistant)
+    {
+        Display display = Display.getDefault();
+        if (assistant == null || display == null || display.isDisposed())
+            return;
+        display.asyncExec(() ->
+        {
+            IInformationControl control = resolveAnyInformationControl(assistant);
+            ensureAssistBrowserLinkLocationListener(assistant,
+                IrBslHoverHtml.findControlBrowser(control));
+        });
+    }
+
+    /**
+     * Ссылка в боковой подсказке автодополнения должна открывать страницу прямо в панели
+     * «Синтакс-помощник», как ссылка подсказки параметров, а не активировать дочерний Shell
+     * и переходить внутри него.
+     */
+    private static void ensureAssistBrowserLinkLocationListener(ContentAssistant assistant,
+        Browser browser)
+    {
+        if (assistant == null || browser == null || browser.isDisposed()
+            || browser.getData(ASSIST_LINK_LOCATION_MARK) != null)
+            return;
+        try
+        {
+            Object webBrowser = Global.getField(browser, "webBrowser"); //$NON-NLS-1$
+            Object listeners = Global.getField(webBrowser, "locationListeners"); //$NON-NLS-1$
+            IInformationControl linkedControl = null;
+            org.eclipse.swt.browser.LocationListener bslForwardingListener = null;
+            boolean hasBslLocationListener = false;
+            if (listeners instanceof org.eclipse.swt.browser.LocationListener[] array)
+            {
+                for (org.eclipse.swt.browser.LocationListener listener : array)
+                {
+                    Object bslLocationListener = listener;
+                    if (listener != null && !listener.getClass().getName().endsWith(
+                        "BslLocationListener")) //$NON-NLS-1$
+                        bslLocationListener = Global.getField(listener, "val$listener"); //$NON-NLS-1$
+                    if (bslLocationListener instanceof org.eclipse.swt.browser.LocationListener bsl
+                        && bsl.getClass().getName().endsWith("BslLocationListener")) //$NON-NLS-1$
+                    {
+                        hasBslLocationListener = true;
+                        Object candidate = Global.getField(bsl, "control"); //$NON-NLS-1$
+                        if (candidate instanceof IInformationControl information)
+                            linkedControl = information;
+                        if (bslLocationListener != listener)
+                            bslForwardingListener = listener;
+                    }
+                }
+            }
+            if (!hasBslLocationListener || linkedControl == null)
+                return;
+            if (linkedControl.getClass().getName().endsWith("XtextBrowserInformationControl") //$NON-NLS-1$
+                && bslForwardingListener != null)
+                browser.removeLocationListener(bslForwardingListener);
+            final IInformationControl targetControl = linkedControl;
+            org.eclipse.swt.browser.LocationListener listener =
+                new org.eclipse.swt.browser.LocationListener()
+                {
+                    @Override
+                    public void changing(org.eclipse.swt.browser.LocationEvent event)
+                    {
+                        openAssistBrowserLink(assistant, browser, targetControl, event);
+                    }
+
+                    @Override
+                    public void changed(org.eclipse.swt.browser.LocationEvent event)
+                    {
+                    }
+                };
+            browser.addLocationListener(listener);
+            browser.setData(ASSIST_LINK_LOCATION_MARK, listener);
+        }
+        catch (Exception | LinkageError ignored)
+        {
+        }
+    }
+
+    private static void openAssistBrowserLink(ContentAssistant assistant, Browser browser,
+        IInformationControl control, org.eclipse.swt.browser.LocationEvent event)
+    {
+        try
+        {
+            String location = event != null ? event.location : null;
+            int marker = location != null ? location.lastIndexOf("?u=") : -1; //$NON-NLS-1$
+            if (marker < 0)
+                return;
+            if (control == null || IrBslHoverHtml.findControlBrowser(control) != browser)
+                return;
+            Object input = Global.invoke(control, "getInput"); //$NON-NLS-1$
+            Object version = Global.invoke(input, "getVersion"); //$NON-NLS-1$
+            if (version == null)
+                return;
+            event.doit = false;
+            String link = java.net.URLDecoder.decode(location.substring(marker + 3),
+                java.nio.charset.StandardCharsets.UTF_8);
+            while (link.startsWith("?u=")) //$NON-NLS-1$
+                link = java.net.URLDecoder.decode(link.substring(3),
+                    java.nio.charset.StandardCharsets.UTF_8);
+            Object targetPage = Global.invoke(BslSyntaxAssist.documentationProvider(),
+                "resolveViewDocumentationPage", Global.invoke(input, "getViewPage"), link, //$NON-NLS-1$ //$NON-NLS-2$
+                BslSyntaxAssist.language());
+            if (targetPage != null)
+            {
+                Object finalTargetPage = targetPage;
+                withPopupCloserSuppressed(assistant,
+                    () -> BslSyntaxAssist.openViewPage(finalTargetPage));
+            }
+        }
+        catch (Exception | LinkageError ignored)
+        {
+            if (event != null)
+                event.doit = false;
+        }
+    }
+
+    /**
+     * Активация «Синтакс-помощника» переводит фокус из уже раскрытого клавишей/кликом
+     * плавающего {@code IInformationControl} боковой подсказки автодополнения. Штатный
+     * {@code PopupCloser} (см. {@code jface-text}) на {@code SWT.Deactivate} этого control
+     * закрывает весь {@code ContentAssistant}, если фокус ушёл не в таблицу предложений —
+     * второй клик по ссылке из уже раскрытой панели из-за этого гасит всё окно
+     * автодополнения. На время перехода в другую часть workbench эта проверка не нужна:
+     * снимаем ссылку {@code PopupCloser.fContentAssistant}, чтобы он временно ничего
+     * не закрывал, и сразу восстанавливаем.
+     */
+    private static void withPopupCloserSuppressed(ContentAssistant assistant, Runnable action)
+    {
+        Object popup = assistant != null ? Global.getField(assistant, "fProposalPopup") : null; //$NON-NLS-1$
+        Object closer = popup != null ? Global.getField(popup, "fPopupCloser") : null; //$NON-NLS-1$
+        if (closer == null)
+        {
+            action.run();
+            return;
+        }
+        Object savedContentAssistant = Global.getField(closer, "fContentAssistant"); //$NON-NLS-1$
+        Global.setFieldForce(closer, "fContentAssistant", null); //$NON-NLS-1$
+        try
+        {
+            action.run();
+        }
+        finally
+        {
+            Global.setFieldForce(closer, "fContentAssistant", savedContentAssistant); //$NON-NLS-1$
+        }
     }
 
     private static ICompletionProposal resolveWrappedProposalForIr(

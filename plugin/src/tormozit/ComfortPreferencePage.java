@@ -970,6 +970,21 @@ public class ComfortPreferencePage
         "https://github.com/tormozit/EDT.Comfort/issues/new"; //$NON-NLS-1$
     private static final String TELEGRAM_CHAT_URL = "https://t.me/EdtComfort"; //$NON-NLS-1$
 
+    private static final String NEW_ISSUE_GUIDELINES_URL =
+        "https://github.com/tormozit/EDT.Comfort/issues/306"; //$NON-NLS-1$
+
+    /**
+     * Тело заявки в URL — короткая фиксированная фраза со ссылкой на рекомендации
+     * (issue #306, закреплённая), не сама техническая информация: полная техинформация
+     * кладётся в буфер обмена ({@link #openNewIssue}). Так URL остаётся коротким и не
+     * превышает лимит GitHub даже после удвоения при редиректе
+     * {@code /login?return_to=...} для неавторизованного пользователя
+     * (см. https://github.com/tormozit/EDT.Comfort/issues/540).
+     */
+    private static final String NEW_ISSUE_BODY_PLACEHOLDER =
+        "Перед созданием заявки прочитайте рекомендации: " + NEW_ISSUE_GUIDELINES_URL //$NON-NLS-1$
+            + "\n\nВставьте из буфера обмена техническую информацию"; //$NON-NLS-1$
+
     /**
      * Ссылки «Клавиши», «Создать заявку», «Телеграм чат», «Домашняя страница»
      * (каждая со своей иконкой слева) на одной строке.
@@ -1043,20 +1058,16 @@ public class ComfortPreferencePage
                 return;
             }
             String body;
-            String url;
             try
             {
                 body = NewIssueReport.buildBody();
-                url = buildNewIssueUrl(body);
             }
             catch (Throwable error)
             {
-                Global.logError(NewIssueReport.LOG_TAG, "сбой сборки URL заявки", error); //$NON-NLS-1$
+                Global.logError(NewIssueReport.LOG_TAG, "сбой сборки тела заявки", error); //$NON-NLS-1$
                 throw error;
             }
-            Global.log(NewIssueReport.LOG_TAG,
-                "URL заявки готов, длина " + url.length() + " симв."); //$NON-NLS-1$ //$NON-NLS-2$
-            ComfortPreferences.openChangesUrl(url, () -> openIssueWithoutBody(body));
+            openNewIssue(body);
         });
 
         Image telegramIcon = loadBundleImage("icons/obj16/telegram.png"); //$NON-NLS-1$
@@ -1099,31 +1110,32 @@ public class ComfortPreferencePage
     }
 
     /**
-     * URL «Создать заявку» с предзаполненным телом — версии, ОС, тема, ИР,
-     * дополнительные плагины и флажки Комфорт.
+     * Открывает форму новой заявки с коротким телом-подсказкой
+     * ({@link #NEW_ISSUE_BODY_PLACEHOLDER}) вместо самой технической информации —
+     * длинное тело в URL GitHub при неавторизованном пользователе заворачивает в
+     * редирект {@code /login?return_to=...}, из-за чего закодированное тело
+     * удваивается и суммарная длина URL превышает лимит GitHub: сервер вместо формы
+     * отдаёт страницу «Whoops, something went wrong!»,
+     * см. https://github.com/tormozit/EDT.Comfort/issues/540. Полная техническая
+     * информация сразу кладётся в буфер обмена, уведомление — обычное, не липкое
+     * (без гиперссылки): страница «Параметры» модальная, тост из-за этого
+     * усыновляется ею ({@link ToastNotification#adoptActiveToasts}), и клик по любой
+     * ссылке внутри такого owned-тоста активирует окно-владельца (диалог
+     * «Параметры», а с ним и главное окно EDT) поверх уже открытого браузера.
      */
-    private static String buildNewIssueUrl(String body)
-    {
-        String encodedBody = java.net.URLEncoder.encode(
-                body, java.nio.charset.StandardCharsets.UTF_8)
-            .replace("+", "%20"); //$NON-NLS-1$ //$NON-NLS-2$
-        return NEW_ISSUE_URL + "?body=" + encodedBody; //$NON-NLS-1$
-    }
-
-    /**
-     * Запасной путь, когда браузер не удалось открыть со ссылкой с телом заявки:
-     * открывается обычная форма новой заявки, а техническая информация показывается
-     * липким тостом — по клику на тост открывается окно с полным текстом, ссылка
-     * «Копировать» кладёт его в буфер обмена.
-     */
-    private static void openIssueWithoutBody(String body)
+    private static void openNewIssue(String body)
     {
         Global.log(NewIssueReport.LOG_TAG,
-            "запасной путь: обычная ссылка на заявку и тост с техинформацией"); //$NON-NLS-1$
-        ComfortPreferences.openChangesUrl(NEW_ISSUE_URL);
-        ToastNotification.showStickyUntilToastHover(
-            "Вставьте техническую информацию в заявку", //$NON-NLS-1$
-            body, () -> copyIssueBody(body), "Копировать"); //$NON-NLS-1$
+            "ссылка на заявку с телом-подсказкой, техинформация скопирована в буфер"); //$NON-NLS-1$
+        copyIssueBody(body);
+        String encodedPlaceholder = java.net.URLEncoder.encode(
+                NEW_ISSUE_BODY_PLACEHOLDER, java.nio.charset.StandardCharsets.UTF_8)
+            .replace("+", "%20"); //$NON-NLS-1$ //$NON-NLS-2$
+        String url = NEW_ISSUE_URL + "?body=" + encodedPlaceholder; //$NON-NLS-1$
+        ComfortPreferences.openChangesUrl(url, () -> ComfortPreferences.openChangesUrl(NEW_ISSUE_URL));
+        ToastNotification.show(
+            "Техническая информация скопирована в буфер обмена", //$NON-NLS-1$
+            "Вставьте её (Ctrl+V) в текст заявки на GitHub"); //$NON-NLS-1$
     }
 
     private static void copyIssueBody(String body)

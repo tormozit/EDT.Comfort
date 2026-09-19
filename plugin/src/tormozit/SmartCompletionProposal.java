@@ -1382,43 +1382,26 @@ public class SmartCompletionProposal implements
 
     /**
      * Штатный hover EDT ({@code ConfigurableCompletionProposal.getAdditionalProposalInfo(monitor)})
-     * для {@code EObject} без ресурса падает в
+     * для {@code EObject} без ресурса иногда падает в
      * {@code BslDocumentationProvider.getDocByNotFormalParamVariable}:
-     * {@code eResource().getURI()} без проверки. Не звать hover в этом случае.
+     * {@code eResource().getURI()} без проверки. Не подавляем подсказку заранее:
+     * EDT успешно строит её для части таких объектов; исключение перехватываем локально.
      */
     private Object readDelegateEdtAdditionalInfo(IProgressMonitor monitor)
     {
         if (delegate instanceof ICompletionProposalExtension5 ext5)
         {
-            if (isEdtAssistHoverUnsafe())
+            try
+            {
+                return ext5.getAdditionalProposalInfo(
+                    monitor != null ? monitor : new NullProgressMonitor());
+            }
+            catch (RuntimeException e)
+            {
                 return null;
-            return ext5.getAdditionalProposalInfo(
-                monitor != null ? monitor : new NullProgressMonitor());
+            }
         }
         return delegate.getAdditionalProposalInfo();
-    }
-
-    private boolean isEdtAssistHoverUnsafe()
-    {
-        ICompletionProposal raw = SmartContentAssistProcessor.unwrapProposal(delegate);
-        if (!(raw instanceof ConfigurableCompletionProposal configurable))
-            return false;
-        Object additional = Global.getField(configurable, "additionalProposalInfo"); //$NON-NLS-1$
-        EObject object = eObjectFromProposalAdditionalInfo(additional);
-        return object != null && object.eResource() == null;
-    }
-
-    private static EObject eObjectFromProposalAdditionalInfo(Object additional)
-    {
-        if (additional instanceof EObject eObject)
-            return eObject;
-        if (additional instanceof com.google.inject.Provider<?> provider)
-        {
-            Object value = provider.get();
-            if (value instanceof EObject eObject)
-                return eObject;
-        }
-        return null;
     }
 
     /**
