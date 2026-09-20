@@ -3502,6 +3502,15 @@ public class CompareConfigMenuHook implements IStartup
                 ArrayList<IPartialModelNode> sessionRefused = new ArrayList<>();
                 for (IPartialModelNode t : targets)
                 {
+                    // Агрегат с видимыми checkable-потомками (проект/папка/«Конфигурация») не
+                    // пишет BM на себе — его состояние вычисляется из детей. setMustBeMerged на
+                    // самой «Конфигурации» у EDT означает «слить весь объект целиком» и каскадом
+                    // внутри BM восстанавливает ВСЕ дочерние MergeSettings, а не только
+                    // отфильтрованные — то же условие `ownUi`, что уже определяет UI-пометку
+                    // ниже (см. {@link #applyFilterAwareCheckCascade}).
+                    boolean ownUi = isCollectionOwnMarkTarget(ctv, t) || !isFilterAwareAggregateUi(t);
+                    if (!ownUi)
+                        continue;
                     if (!setMustBeMergedViaSession(session, t, want))
                         sessionRefused.add(t);
                 }
@@ -4164,15 +4173,31 @@ public class CompareConfigMenuHook implements IStartup
                 return isVisibleForCheckUncached(viewer, parent, element);
             }
 
+            /**
+             * Для «прямых» узлов — тот же обход, что у «Найти нижние настраиваемые»
+             * ({@link CompareConfigLowestCheckableFinder#collectLeaves}): прямой вызов
+             * {@code filter.select(...)} по каждому фильтру
+             * ({@link CompareConfigSearchDialogHook#isNodeMatchFilters}).
+             *
+             * <p>Для папки/коллекции ({@code VirtualFolderPartialModelNode}/{@code ICollectionPartialNode})
+             * прямой {@code select()} не годится: его ветка для {@code ICollectionPartialNode} при ещё
+             * не материализованных partial-model-детях ({@code hasChildren()==false} из-за ленивой
+             * загрузки) уходит в {@code fcn.getChildren()} + {@code isComparisonNodeVisible}, а та для
+             * двусторонних объектов в режиме белого списка безусловно возвращает {@code true}
+             * («штатный EDT-фильтр уже скрыл») — для лениво загруженной коллекции это неверно.
+             * Поэтому для папки/коллекции видимость считаем как «Найти нижние настраиваемые» — есть
+             * ли видимый checkable-потомок через реальный content provider
+             * ({@link #hasFilteredCheckableDescendants}), а не через {@code select()} самого узла.
+             */
             private boolean isVisibleForCheckUncached(Viewer viewer, Object parent, Object element)
             {
-                if (viewer instanceof CheckboxTreeViewer ctv && element != null)
-                {
-                    Widget w = ctv.testFindItem(element);
-                    if (w instanceof TreeItem item && !item.isDisposed())
-                        return true;
-                }
-                return isVisibleInViewer(viewer, parent, element);
+                if ((element instanceof VirtualFolderPartialModelNode
+                        || element instanceof ICollectionPartialNode)
+                        && viewer instanceof CheckboxTreeViewer ctv)
+                    return hasFilteredCheckableDescendants(ctv, (IPartialModelNode) element);
+                return viewer instanceof AbstractTreeViewer treeViewer
+                        ? CompareConfigSearchDialogHook.isNodeMatchFilters(element, treeViewer)
+                        : isVisibleInViewer(viewer, parent, element);
             }
 
 

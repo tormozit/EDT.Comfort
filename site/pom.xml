@@ -4,10 +4,10 @@
   <parent>
     <groupId>tormozit</groupId>
     <artifactId>comfort.parent</artifactId>
-    <version>1.0.1.3-SNAPSHOT</version>
+    <version>1.0.1.4-SNAPSHOT</version>
     <relativePath>../pom.xml</relativePath>
   </parent>
   <artifactId>comfort.site</artifactId>
-  <version>1.0.1.3</version>
+  <version>1.0.1.4</version>
   <packaging>eclipse-repository</packaging>
 </project>

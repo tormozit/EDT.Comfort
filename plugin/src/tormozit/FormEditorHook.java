@@ -8010,8 +8010,7 @@ public class FormEditorHook implements IStartup
          */
         private static final class SelectionMemory
         {
-            /** Тема временного лога (см. {@code .tmp/temp-logs/}) — снять после подтверждения фикса. */
-            static final String LOG = "form-selection"; //$NON-NLS-1$
+            private static final String LOG = "formItemsSelection"; //$NON-NLS-1$
 
             /** Пустое значение (корень «Форма» от прежних сеансов): восстанавливать нечего. */
             private static final String ROOT = ""; //$NON-NLS-1$
@@ -8030,11 +8029,9 @@ public class FormEditorHook implements IStartup
             static void install(FormEditorPage page, TreeViewer viewer, Tree tree)
             {
                 String key = formKey(page);
-                Global.tempLog(LOG, "install: key=" + key); //$NON-NLS-1$
                 if (key == null)
                     return;
                 String remembered = STORE.load(key);
-                Global.tempLog(LOG, "install: remembered=" + remembered); //$NON-NLS-1$
                 // Пока не отработало восстановление — корень не запоминаем (см. remember):
                 // это или ещё не наша целевая строка, или транзитный корень EDT при открытии.
                 AtomicBoolean restoring = new AtomicBoolean(remembered != null && !ROOT.equals(remembered));
@@ -8042,16 +8039,8 @@ public class FormEditorHook implements IStartup
                     Display.getDefault().asyncExec(() -> restore(remembered, viewer, tree, 0, restoring));
 
                 viewer.addSelectionChangedListener(event -> remember(key, viewer, restoring));
-                tree.addListener(SWT.FocusOut, event ->
-                {
-                    Global.tempLog(LOG, "flush: focusOut"); //$NON-NLS-1$
-                    STORE.flush();
-                });
-                tree.addListener(SWT.Dispose, event ->
-                {
-                    Global.tempLog(LOG, "flush: dispose"); //$NON-NLS-1$
-                    STORE.flush();
-                });
+                tree.addListener(SWT.FocusOut, event -> STORE.flush());
+                tree.addListener(SWT.Dispose, event -> STORE.flush());
             }
 
             private static void remember(String key, TreeViewer viewer, AtomicBoolean restoring)
@@ -8060,14 +8049,9 @@ public class FormEditorHook implements IStartup
                 // такого «мигания» нельзя, поэтому пустое выделение просто игнорируется.
                 if (!(viewer.getSelection() instanceof IStructuredSelection structured)
                     || structured.isEmpty())
-                {
-                    Global.tempLog(LOG, "remember: пустое выделение — пропуск"); //$NON-NLS-1$
                     return;
-                }
                 FormItem item = domainItem(structured.getFirstElement());
                 String name = item != null ? item.getName() : null;
-                Global.tempLog(LOG, "remember: name=" + name //$NON-NLS-1$
-                    + " row=" + className(structured.getFirstElement()) + " key=" + key); //$NON-NLS-1$ //$NON-NLS-2$
                 if (name == null || name.isBlank())
                 {
                     // Пока идёт восстановление, корень — транзитное состояние EDT при открытии,
@@ -8088,25 +8072,13 @@ public class FormEditorHook implements IStartup
                 AtomicBoolean restoring)
             {
                 if (tree.isDisposed())
-                {
-                    Global.tempLog(LOG, "restore: дерево уничтожено, попытка " + attempt); //$NON-NLS-1$
                     return;
-                }
                 if (!isRootSelected(viewer))
-                {
-                    Global.tempLog(LOG, "restore: выделение уже не корневое (" //$NON-NLS-1$
-                        + selectionText(viewer) + "), попытка " + attempt); //$NON-NLS-1$
                     return;
-                }
                 Object row = findRow(viewer, item -> name.equals(item.getName()));
-                Global.tempLog(LOG, "restore: попытка " + attempt + " name=" + name //$NON-NLS-1$ //$NON-NLS-2$
-                    + " input=" + className(viewer.getInput()) //$NON-NLS-1$
-                    + " provider=" + className(viewer.getContentProvider()) //$NON-NLS-1$
-                    + " row=" + className(row)); //$NON-NLS-1$
                 if (row != null)
                 {
                     viewer.setSelection(new StructuredSelection(row), true);
-                    Global.tempLog(LOG, "restore: применено, выделение=" + selectionText(viewer)); //$NON-NLS-1$
                     restoring.set(false);
                     return;
                 }
@@ -8115,20 +8087,6 @@ public class FormEditorHook implements IStartup
                         () -> restore(name, viewer, tree, attempt + 1, restoring));
                 else
                     restoring.set(false);
-            }
-
-            private static String className(Object o)
-            {
-                return o == null ? "null" : o.getClass().getSimpleName(); //$NON-NLS-1$
-            }
-
-            private static String selectionText(TreeViewer viewer)
-            {
-                if (!(viewer.getSelection() instanceof IStructuredSelection structured)
-                    || structured.isEmpty())
-                    return "пусто"; //$NON-NLS-1$
-                FormItem item = domainItem(structured.getFirstElement());
-                return item != null ? item.getName() : "корень/" + className(structured.getFirstElement()); //$NON-NLS-1$
             }
 
             /** {@code true}, пока выбран корень «Форма» или не выбрано ничего. */
@@ -8147,8 +8105,6 @@ public class FormEditorHook implements IStartup
                 {
                     Object lookup = Global.getField(page, "resourceLookup"); //$NON-NLS-1$
                     Form model = page.getModel();
-                    Global.tempLog(LOG, "formKey: lookup=" + className(lookup) //$NON-NLS-1$
-                        + " model=" + className(model)); //$NON-NLS-1$
                     if (model == null)
                         return null;
                     if (lookup instanceof IResourceLookup resourceLookup)
@@ -8160,12 +8116,10 @@ public class FormEditorHook implements IStartup
                     // Запасной ключ: URI ресурса формы. Он тоже уникален для формы и отличается
                     // у разных проектов, просто менее нагляден в настройках.
                     URI uri = EcoreUtil.getURI(model);
-                    Global.tempLog(LOG, "formKey: запасной ключ по URI=" + uri); //$NON-NLS-1$
                     return uri != null ? uri.toString() : null;
                 }
-                catch (Exception e)
+                catch (Exception ignored)
                 {
-                    Global.tempLog(LOG, "formKey: исключение " + e); //$NON-NLS-1$
                     return null;
                 }
             }
