@@ -228,6 +228,7 @@ import com._1c.g5.v8.dt.metadata.mdclass.StandardAttribute;
 import com._1c.g5.v8.dt.metadata.mdclass.StandardTabularSectionDescription;
 import com._1c.g5.v8.dt.md.ui.sattribute.SAttributeFactory;
 import com._1c.g5.v8.dt.md.ui.sattribute.StandardAttributeProxy;
+import com._1c.g5.v8.dt.md.ui.shared.MdUiSharedImages;
 import org.eclipse.xtext.EcoreUtil2;
 import org.eclipse.emf.ecore.EEnumLiteral;
 import org.eclipse.emf.ecore.EStructuralFeature;
@@ -3268,14 +3269,15 @@ public class FormEditorHook implements IStartup
             if (isDynamicListAttributeItem(mainItem))
             {
                 TreeItem fieldItem = findMetadataItem(viewer, mainItem, dragged);
-                if (fieldItem != null)
+                TreeItem target = fieldItem != null ? fieldItem : mainItem;
+                selectItem(viewer, tree, target);
+                if (fieldItem == null)
                 {
-                    selectItem(viewer, tree, fieldItem);
-                    return fieldItem.getData() instanceof PropertyInfo info ? info : null;
+                    ToastNotification.show("Реквизиты формы", //$NON-NLS-1$
+                        "В основном реквизите формы не найдено поле «" + dragged.getName() + "»", //$NON-NLS-1$ //$NON-NLS-2$
+                        4_000);
                 }
-                ToastNotification.show("Реквизиты формы", //$NON-NLS-1$
-                    "В основном реквизите формы не найдено поле «" + dragged.getName() + "»", 4_000); //$NON-NLS-1$ //$NON-NLS-2$
-                return null;
+                return target.getData() instanceof PropertyInfo info ? info : null;
             }
 
             TreeItem item = findObjectAttributeItem(tree, owner);
@@ -3334,12 +3336,41 @@ public class FormEditorHook implements IStartup
                         return item;
                     if (isFormAttributeReferenceNode(info))
                         continue;
+                    if (isDataCompositionSettingsNode(info))
+                        continue;
                 }
                 TreeItem nested = findMetadataItem(viewer, item, metadata);
                 if (nested != null)
                     return nested;
             }
             return null;
+        }
+
+        /**
+         * Служебная ветка схемы компоновки данных динамического списка (Порядок, Отбор,
+         * Группировка, УсловноеОформление, Параметры, КомпоновщикНастроек). Метаданные в неё
+         * никогда не резолвятся ({@link #resolveMetadataPropertyEObject}), а КомпоновщикНастроек
+         * рекурсивно содержит копии остальных веток — спускаться в неё при поиске реквизита
+         * заведомо бесполезно и на форме с настроенной СКД может быть очень дорого.
+         */
+        private static boolean isDataCompositionSettingsNode(PropertyInfo info)
+        {
+            TypeDescription valueType = info.getValueType();
+            if (valueType == null)
+                return false;
+            for (TypeItem typeItem : valueType.getTypes())
+            {
+                if (typeItem == null)
+                    continue;
+                TypeItem resolved = typeItem;
+                if (typeItem.eIsProxy() && info.getForm() != null)
+                    resolved = (TypeItem)EcoreUtil.resolve(typeItem, info.getForm());
+                String typeName = McoreUtil.getTypeName(resolved);
+                if (typeName != null
+                    && (typeName.contains("КомпоновкиДанных") || typeName.contains("DataComposition"))) //$NON-NLS-1$ //$NON-NLS-2$
+                    return true;
+            }
+            return false;
         }
 
         /**
@@ -3525,6 +3556,11 @@ public class FormEditorHook implements IStartup
         private static String tooltipFor(TreeColumn column)
         {
             String text = column.getText();
+            if (Boolean.TRUE.equals(column.getData(AttributesExtraColumns.KEY_FUNCTIONAL_OPTIONS_COLUMN)))
+                return AttributesExtraColumns.TITLE_FUNCTIONAL_OPTIONS + ".\n" //$NON-NLS-1$
+                    + "Число функциональных опций, в состав которых включён реквизит." //$NON-NLS-1$
+                    + " Двойной клик активирует список опций в панели «Свойства»." //$NON-NLS-1$
+                    + Global.pluginSignForTooltip();
             if (text.isEmpty())
                 return TITLE_USAGE + ".\n" //$NON-NLS-1$
                     + "Значок показывается, если реквизит используется хотя бы" //$NON-NLS-1$
@@ -3642,6 +3678,15 @@ public class FormEditorHook implements IStartup
 
         static final String TITLE_SAVED_DATA = "Сохраняемые данные"; //$NON-NLS-1$
 
+        /**
+         * Метка колонки «Функциональные опции» в шапке которой вместо текста — значок
+         * ({@link MdUiSharedImages#OBJS_FUNCTIONAL_OPTION}, тот же, что у вкладки «Функц. опции»
+         * редактора объекта). Ставится на {@link TreeColumn#setData}, чтобы
+         * {@link AttributeHeaderTooltips#tooltipFor} отличал эту колонку от штатной «Использование» —
+         * у обеих текст заголовка пустой.
+         */
+        static final String KEY_FUNCTIONAL_OPTIONS_COLUMN = "tormozit.formAttributesExtraColumns.functionalOptionsIcon"; //$NON-NLS-1$
+
         private static final int WIDTH_TITLE = 140;
 
         private static final int WIDTH_FUNCTIONAL_OPTIONS = 40;
@@ -3695,10 +3740,21 @@ public class FormEditorHook implements IStartup
             }
 
             TreeViewerColumn functionalOptionsColumn = new TreeViewerColumn(viewer, SWT.RIGHT);
-            functionalOptionsColumn.getColumn().setText(TITLE_FUNCTIONAL_OPTIONS);
-            functionalOptionsColumn.getColumn().setWidth(WIDTH_FUNCTIONAL_OPTIONS);
-            functionalOptionsColumn.getColumn().setMoveable(false);
+            Image functionalOptionsIcon = functionalOptionsHeaderIcon();
             functionalOptionsColumn.setLabelProvider(new FunctionalOptionsLabelProvider());
+            if (functionalOptionsIcon != null)
+            {
+                functionalOptionsColumn.getColumn().setImage(functionalOptionsIcon);
+                functionalOptionsColumn.getColumn().setData(KEY_FUNCTIONAL_OPTIONS_COLUMN, Boolean.TRUE);
+                functionalOptionsColumn.getColumn()
+                    .setWidth(ColumnWidthFit.headerIconColumnWidth(functionalOptionsIcon));
+            }
+            else
+            {
+                functionalOptionsColumn.getColumn().setText(TITLE_FUNCTIONAL_OPTIONS);
+                functionalOptionsColumn.getColumn().setWidth(WIDTH_FUNCTIONAL_OPTIONS);
+            }
+            functionalOptionsColumn.getColumn().setMoveable(false);
 
             TreeViewerColumn savedDataColumn = new TreeViewerColumn(viewer, SWT.CENTER);
             savedDataColumn.getColumn().setText(TITLE_SAVED_DATA);
@@ -3716,6 +3772,23 @@ public class FormEditorHook implements IStartup
             if (editingContextObj instanceof IBmEditingContext editingContext)
                 tree.addListener(SWT.MouseDown,
                     event -> onSavedDataClick(viewer, tree, event, savedDataSwtColumn, editingContext));
+        }
+
+        /**
+         * Тот же значок, что у вкладки «Функц. опции» редактора объекта. {@code null}, если картинка
+         * не нашлась (другая версия EDT) — тогда колонка остаётся с текстовым заголовком.
+         */
+        private static Image functionalOptionsHeaderIcon()
+        {
+            try
+            {
+                Image image = MdUiSharedImages.getImage(MdUiSharedImages.OBJS_FUNCTIONAL_OPTION);
+                return image != null && !image.isDisposed() ? image : null;
+            }
+            catch (Exception e)
+            {
+                return null;
+            }
         }
 
         /**
@@ -5138,8 +5211,6 @@ public class FormEditorHook implements IStartup
 
         private static final int CELL_PADDING_PX = 8;
 
-        private static final int HEADER_ICON_PX = 16;
-
         private static final int MIN_WIDTH = 16;
 
         /** Ниже этого поле фильтра не сужается — иначе в нём не видно и одного символа. */
@@ -5789,7 +5860,8 @@ public class FormEditorHook implements IStartup
             try
             {
                 gc.setFont(tree.getFont());
-                return Math.max(gc.textExtent(WIDTH_SAMPLE).x, HEADER_ICON_PX) + CELL_PADDING_PX;
+                int textWidth = gc.textExtent(WIDTH_SAMPLE).x + CELL_PADDING_PX;
+                return Math.max(textWidth, ColumnWidthFit.headerIconColumnWidth());
             }
             finally
             {

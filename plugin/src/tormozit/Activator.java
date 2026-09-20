@@ -134,6 +134,9 @@ public class Activator extends AbstractUIPlugin
             ComfortSettings.PREF_GROUP_COMMON_MODULES_SUFFIXES_2,
             ComfortSettings.DEFAULT_GROUP_COMMON_MODULES_SUFFIXES_2);
         settings.getPreferenceStore().setDefault(
+            ComfortSettings.PREF_ALPHABETIC_COMMON_NODE_ENABLED,
+            ComfortSettings.DEFAULT_ALPHABETIC_COMMON_NODE_ENABLED);
+        settings.getPreferenceStore().setDefault(
             ComfortSettings.PREF_MD_EDITOR_VERTICAL_TABS,
             ComfortSettings.DEFAULT_MD_EDITOR_VERTICAL_TABS);
         ContentAssistManager.init(settings);

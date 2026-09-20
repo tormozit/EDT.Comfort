@@ -358,6 +358,7 @@ public final class NavigatorFilterHook implements IStartup
 
         storeNavigatorHookState(tree, viewer, highlight, rawLp);
         FolderItemCountDecoration.installExpandRefresh(viewer, tree);
+        CommonNodeAlphabeticSorter.installOn(viewer);
         tree.setData(PATCHED_KEY, Boolean.TRUE);
         tree.setData(SEARCH_CACHE_KEY, searchCache);
         tree.setData(HIGHLIGHT_KEY, highlight);

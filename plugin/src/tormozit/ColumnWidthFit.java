@@ -7,6 +7,7 @@ import org.eclipse.jface.layout.TreeColumnLayout;
 import org.eclipse.jface.viewers.ColumnPixelData;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.graphics.GC;
+import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Listener;
@@ -41,6 +42,15 @@ final class ColumnWidthFit
     private static final int ICON_SIZE_PX = 16;
     /** Горизонтальные отступы текста в ячейке Win32 (слева+справа) — прибавляются к минимуму в символах. */
     private static final int CELL_TEXT_INSET_PX = 8;
+    /**
+     * Отступы вокруг картинки в ШАПКЕ колонки (Windows-тема) — больше, чем {@link #CELL_TEXT_INSET_PX}
+     * у обычной ячейки: нативная шапка Win32 добавляет свою рамку/чувствительную область кнопки.
+     * Подобран и проверен на колонке «ФО» дерева реквизитов редактора объекта метаданных
+     * ({@code MdEditorTreeHook.installFunctionalOptionsCountColumn}: значок 16×16, рабочая
+     * ширина 30) — единственном на момент подбора месте плагина, где ширина такой колонки заведомо
+     * не обрезает значок в шапке.
+     */
+    private static final int HEADER_ICON_INSET_PX = 14;
 
     private ColumnWidthFit()
     {
@@ -146,6 +156,28 @@ final class ColumnWidthFit
     static int iconColumnWidth()
     {
         return ICON_SIZE_PX + CELL_TEXT_INSET_PX;
+    }
+
+    /**
+     * Минимальная ширина колонки, в ШАПКЕ которой картинка вместо текста ({@code column.setImage},
+     * {@code setText("")}) — чтобы значок не обрезался. Не путать с {@link #iconColumnWidth()}: там
+     * картинка рисуется в каждой строке, а шапка пустая, здесь — наоборот, картинка только в шапке.
+     */
+    static int headerIconColumnWidth(int iconWidthPx)
+    {
+        return iconWidthPx + HEADER_ICON_INSET_PX;
+    }
+
+    /** То же, но ширина значка берётся из самой картинки. */
+    static int headerIconColumnWidth(Image icon)
+    {
+        return headerIconColumnWidth(icon.getBounds().width);
+    }
+
+    /** Минимальная ширина под шапку со стандартным значком EDT ({@link #ICON_SIZE_PX}). */
+    static int headerIconColumnWidth()
+    {
+        return headerIconColumnWidth(ICON_SIZE_PX);
     }
 
     /** Колонки {@link Table}. */

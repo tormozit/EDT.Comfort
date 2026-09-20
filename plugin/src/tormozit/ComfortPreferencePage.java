@@ -245,14 +245,14 @@ public class ComfortPreferencePage
         addField(suppressMinBuildField);
         setFieldTooltip(suppressMinBuildField, SUPPRESS_MIN_PLATFORM_BUILD_TOOLTIP);
 
-        createGroupCommonModulesFields();
-
         BooleanFieldEditor verticalTabsField = new BooleanFieldEditor(
             ComfortSettings.PREF_MD_EDITOR_VERTICAL_TABS,
             "Вертикальные вкладки в редакторе объекта", //$NON-NLS-1$
             getFieldEditorParent());
         addField(verticalTabsField);
         setFieldTooltip(verticalTabsField, MD_EDITOR_VERTICAL_TABS_TOOLTIP);
+
+        createNavigatorGroup();
 
         // === Группа «Редактор кода» ===
         Group codeEditorGroup = new Group(getFieldEditorParent(), SWT.NONE);
@@ -606,38 +606,74 @@ public class ComfortPreferencePage
         });
     }
 
-    /** Флажок + два набора суффиксов для динамической группировки общих модулей (issue #117). */
-    private void createGroupCommonModulesFields()
+    /**
+     * Группа «Навигатор»: динамическая группировка общих модулей (issue #117) и алфавитный
+     * порядок узла «Общие» (issue #550). Оформление — как у {@code codeEditorGroup}.
+     */
+    private void createNavigatorGroup()
     {
+        Group navigatorGroup = new Group(getFieldEditorParent(), SWT.NONE);
+        navigatorGroup.setText("Навигатор"); //$NON-NLS-1$
+        GridData groupData = new GridData(SWT.FILL, SWT.TOP, true, false);
+        groupData.horizontalSpan = 2;
+        groupData.verticalIndent = 8;
+        navigatorGroup.setLayoutData(groupData);
+
+        GridLayout groupLayout = new GridLayout(2, false);
+        groupLayout.marginWidth = 10;
+        groupLayout.marginHeight = 8;
+        groupLayout.marginTop = 6;
+        groupLayout.horizontalSpacing = 8;
+        groupLayout.verticalSpacing = 4;
+        navigatorGroup.setLayout(groupLayout);
+
         BooleanFieldEditor groupCommonModulesField = new BooleanFieldEditor(
             ComfortSettings.PREF_GROUP_COMMON_MODULES_ENABLED,
             "Группировать общие модули в навигаторе по имени", //$NON-NLS-1$
-            getFieldEditorParent());
+            navigatorGroup);
         addField(groupCommonModulesField);
         setFieldTooltip(groupCommonModulesField,
             "Чисто визуально сворачивает семейства общих модулей с одинаковой основой имени\n"
             + "(например ВариантыОтветов / ВариантыОтветовКлиент / ВариантыОтветовКлиентСервер)\n"
-            + "в одну группу в дереве навигатора. Структура конфигурации не меняется."); //$NON-NLS-1$
+            + "в одну группу в дереве навигатора. Структура конфигурации не меняется.", //$NON-NLS-1$
+            navigatorGroup);
 
         StringFieldEditor suffixes1Field = new StringFieldEditor(
             ComfortSettings.PREF_GROUP_COMMON_MODULES_SUFFIXES_1,
             "Суффиксы набора 1 (через запятую):", //$NON-NLS-1$
             50,
-            getFieldEditorParent());
+            navigatorGroup);
         addField(suffixes1Field);
         setFieldTooltip(suffixes1Field,
             "Комбинируемые суффиксы хвоста имени. Могут идти цепочкой в любом количестве\n"
-            + "(например Клиент + Сервер → …КлиентСервер, Клиент + ПовтИсп → …КлиентПовтИсп)."); //$NON-NLS-1$
+            + "(например Клиент + Сервер → …КлиентСервер, Клиент + ПовтИсп → …КлиентПовтИсп).", //$NON-NLS-1$
+            navigatorGroup);
 
         StringFieldEditor suffixes2Field = new StringFieldEditor(
             ComfortSettings.PREF_GROUP_COMMON_MODULES_SUFFIXES_2,
             "Суффиксы набора 2 (через запятую):", //$NON-NLS-1$
             50,
-            getFieldEditorParent());
+            navigatorGroup);
         addField(suffixes2Field);
         setFieldTooltip(suffixes2Field,
             "Не более одного суффикса из набора в хвосте имени — в любой позиции относительно\n"
-            + "элементов набора 1 (до, между или после): …СлужебныйКлиент, …КлиентСлужебныйСервер."); //$NON-NLS-1$
+            + "элементов набора 1 (до, между или после): …СлужебныйКлиент, …КлиентСлужебныйСервер.", //$NON-NLS-1$
+            navigatorGroup);
+
+        BooleanFieldEditor alphabeticCommonNodeField = new BooleanFieldEditor(
+            ComfortSettings.PREF_ALPHABETIC_COMMON_NODE_ENABLED,
+            "Сортировать по алфавиту ветку «Общие» в навигаторе", //$NON-NLS-1$
+            navigatorGroup);
+        addField(alphabeticCommonNodeField);
+        setFieldTooltip(alphabeticCommonNodeField,
+            "Общие модули, Общие реквизиты, Роли, Подсистемы и другие папки внутри верхнего узла\n"
+            + "«Общие» показываются по алфавиту вместо фиксированного порядка EDT.\n"
+            + "Требует включённого флажка «Улучшать списки».", //$NON-NLS-1$
+            navigatorGroup);
+
+        // FieldEditor в конструкторе обнуляет margin* группы — вернуть отступ
+        // под заголовком «Навигатор», иначе первое поле слипается с рамкой.
+        restoreGroupContentInsets(navigatorGroup);
     }
 
     /** «Цвет фильтра» сразу под строкой «Улучшать списки». */

@@ -1516,7 +1516,7 @@ public final class MdEditorTreeHook
             "Число функциональных опций, в состав которых входит свойство данных, либо сам объект." //$NON-NLS-1$
                 + " Опции редактируются в таблице снизу." //$NON-NLS-1$
                 + Global.pluginSignForTooltip()));
-        setFixedColumnWidth(tree, swtColumn, 30);
+        setFixedColumnWidth(tree, swtColumn, ColumnWidthFit.headerIconColumnWidth());
         swtColumn.setResizable(false);
         swtColumn.setMoveable(false);
         column.setLabelProvider(new ColumnLabelProvider()

@@ -88,6 +88,18 @@ public final class ComfortSettings
             "Переопределяемый,Изменяемый,Служебный,Локализация"; //$NON-NLS-1$
 
     /**
+     * Ключ: алфавитный порядок непосредственных детей верхнего узла «Общие» конфигурации
+     * в навигаторе (Общие модули, Общие реквизиты, Роли и т.п.; issue #550), вместо
+     * захардкоженного в EDT порядка. Подчинён {@link #PREF_REPLACE_LIST_FILTERS} —
+     * см. {@link CommonNodeAlphabeticSorter}.
+     */
+    public static final String PREF_ALPHABETIC_COMMON_NODE_ENABLED =
+            "comfort.navigator.alphabeticCommonNode.enabled"; //$NON-NLS-1$
+
+    /** Алфавитный порядок узла «Общие» выключен по умолчанию (opt-in). */
+    public static final boolean DEFAULT_ALPHABETIC_COMMON_NODE_ENABLED = false;
+
+    /**
      * Ключ: вкладки редактора объекта метаданных списком слева,
      * если вкладок больше 10 ({@link MdEditorListTabCountHook}).
      */
@@ -610,6 +622,15 @@ public final class ComfortSettings
         if (settings == null)
             return DEFAULT_GROUP_COMMON_MODULES_ENABLED;
         return settings.preferenceStore.getBoolean(PREF_GROUP_COMMON_MODULES_ENABLED);
+    }
+
+    /** Читает актуальное значение из хранилища (без кэша). */
+    public static boolean isAlphabeticCommonNodeEnabled()
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return DEFAULT_ALPHABETIC_COMMON_NODE_ENABLED;
+        return settings.preferenceStore.getBoolean(PREF_ALPHABETIC_COMMON_NODE_ENABLED);
     }
 
     /** Вкладки редактора объекта метаданных списком слева. */
