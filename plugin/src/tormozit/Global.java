@@ -1145,6 +1145,81 @@ public final class Global
         catch (Exception ignored) {}
     }
 
+    /**
+     * Префиксы temp-папок нативного визуализатора макета формы (EDT), см.
+     * {@link #cleanOrphanedFormNativeTempDirs()}.
+     */
+    private static final String[] FORM_NATIVE_TEMP_PREFIXES = {
+        "com._1c.g5.v8.dt.formnative.render.FormNativeVisualizerLoader_", //$NON-NLS-1$
+        "com._1c.g5.v8.dt.formnative.common.FormNativeTransformatorLoader_", //$NON-NLS-1$
+    };
+
+    /** Папка нативного визуализатора считается осиротевшей, если не менялась дольше этого срока. */
+    private static final long FORM_NATIVE_TEMP_MAX_AGE_MS = 2 * 60 * 60 * 1000L;
+
+    /**
+     * Чистит осиротевшие temp-папки нативного визуализатора макета формы
+     * ({@code com._1c.g5.v8.dt.formnative.render.FormNativeVisualizerLoader_*},
+     * {@code com._1c.g5.v8.dt.formnative.common.FormNativeTransformatorLoader_*} в
+     * {@code java.io.tmpdir}) — баг EDT: {@code FormNativeVisualizerLoader.dispose()} штатно
+     * удаляет свою папку через {@code MmfProcessLauncher.clean()}, но при аварийном завершении
+     * EDT (падение, принудительное закрытие) {@code dispose()} не вызывается, и папка остаётся
+     * навсегда (1C-Company/1c-edt-issues#2289). Вызывать при старте плагина ({@code Activator.start}).
+     *
+     * <p>Папку активного (текущего) процесса не тронет по двум причинам: во-первых, отбор идёт
+     * по возрасту ({@link #FORM_NATIVE_TEMP_MAX_AGE_MS}), во-вторых, часть файлов внутри неё
+     * (mmf-буферы обмена) в момент работы процесса открыта им без {@code FILE_SHARE_DELETE} —
+     * Windows не даст такой файл удалить, {@code File.delete()} просто вернёт {@code false} и
+     * будет проигнорирован, остальное содержимое папки не пострадает.
+     */
+    public static void cleanOrphanedFormNativeTempDirs()
+    {
+        try
+        {
+            File tmpDir = new File(System.getProperty("java.io.tmpdir")); //$NON-NLS-1$
+            File[] entries = tmpDir.listFiles();
+            if (entries == null)
+                return;
+            long threshold = System.currentTimeMillis() - FORM_NATIVE_TEMP_MAX_AGE_MS;
+            for (File dir : entries)
+            {
+                if (!dir.isDirectory() || !hasFormNativeTempPrefix(dir.getName()))
+                    continue;
+                if (newestModified(dir) < threshold)
+                    deleteRecursively(dir);
+            }
+        }
+        catch (Exception ignored) {}
+    }
+
+    private static boolean hasFormNativeTempPrefix(String name)
+    {
+        for (String prefix : FORM_NATIVE_TEMP_PREFIXES)
+            if (name.startsWith(prefix))
+                return true;
+        return false;
+    }
+
+    /** Самое позднее время изменения папки или любого файла непосредственно в ней. */
+    private static long newestModified(File dir)
+    {
+        long newest = dir.lastModified();
+        File[] children = dir.listFiles();
+        if (children != null)
+            for (File child : children)
+                newest = Math.max(newest, child.lastModified());
+        return newest;
+    }
+
+    private static void deleteRecursively(File file)
+    {
+        File[] children = file.listFiles();
+        if (children != null)
+            for (File child : children)
+                deleteRecursively(child);
+        file.delete();
+    }
+
     // =========================================================================
     // Логирование (журнал «Журнал Комфорт», {@link GlobalLogView})
     // =========================================================================
