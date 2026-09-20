@@ -277,6 +277,10 @@ public final class IrKeyBindingHook implements org.eclipse.ui.IStartup
         {
             if (!isIrCommandBinding(binding))
                 continue;
+            // Временными зеркалами владеет PriorityGlobalKeyBindingHook:
+            // он снимет их сам. В архив настроек команд ИР они попадать не должны.
+            if (PriorityGlobalKeyBindingHook.isAppliedOverride(binding))
+                continue;
             IrBindingDescriptor descriptor = IrBindingDescriptor.from(binding);
             String sig = descriptor.signature();
             if (suppressedSigs.contains(sig))
@@ -305,7 +309,8 @@ public final class IrKeyBindingHook implements org.eclipse.ui.IStartup
         if (bindingServiceInternal == null || commandService == null)
             return;
 
-        List<IrBindingDescriptor> source = !suppressedDescriptors.isEmpty()
+        boolean restoringSuppressed = !suppressedDescriptors.isEmpty();
+        List<IrBindingDescriptor> source = restoringSuppressed
                 ? new ArrayList<>(suppressedDescriptors)
                 : new ArrayList<>(irBindingArchive);
         if (source.isEmpty())
@@ -316,12 +321,14 @@ public final class IrKeyBindingHook implements org.eclipse.ui.IStartup
         for (IrBindingDescriptor descriptor : source)
         {
             String sig = descriptor.signature();
-            if (activeSigs.contains(sig))
+            // getBindings() сохраняет SYSTEM-запись после removeBinding:
+            // наличие сигнатуры не отменяет восстановления снятой нами привязки.
+            if (!restoringSuppressed && activeSigs.contains(sig))
                 continue;
             KeyBinding binding = descriptor.createBinding(commandService);
             if (binding == null)
                 continue;
-            bindingServiceInternal.addBinding(binding);
+            RuntimeKeyBindingSupport.restore(bindingServiceInternal, binding);
             activeSigs.add(sig);
             restored++;
         }

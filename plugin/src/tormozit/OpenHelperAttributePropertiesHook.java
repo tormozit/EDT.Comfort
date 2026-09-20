@@ -74,21 +74,10 @@ public final class OpenHelperAttributePropertiesHook implements IStartup
     public void earlyStartup()
     {
         installWeavingHook();
-        // #region agent log
-        Global.tempLog("openhelper-weaving", "earlyStartup woven=" + woven + " " + diagState() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " alreadyLoaded=" + probeLoaded()); //$NON-NLS-1$
-        Display diagDisplay = Display.getDefault();
-        for (int delay : new int[] {5000, 30000, 120000})
-            diagDisplay.asyncExec(() -> diagDisplay.timerExec(delay, () -> Global.tempLog("openhelper-weaving", //$NON-NLS-1$
-                "timer " + delay + " woven=" + woven + " " + diagState()))); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        // #endregion
         if (woven)
             return;
         // Класс мог загрузиться до регистрации WeavingHook — тогда остаётся только агент.
-        boolean ok = BslDocCommentDescriptionFix.registerExtraTransformer(new OpenTransformer(), TARGET);
-        // #region agent log
-        Global.tempLog("openhelper-weaving", "earlyStartup transformer registered=" + ok); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
+        BslDocCommentDescriptionFix.registerExtraTransformer(new OpenTransformer(), TARGET);
     }
 
     /**
@@ -97,11 +86,6 @@ public final class OpenHelperAttributePropertiesHook implements IStartup
      */
     public static void afterOpened(Object obj, Object selection)
     {
-        // #region agent log
-        Global.tempLog("openhelper-weaving", "afterOpened obj=" //$NON-NLS-1$ //$NON-NLS-2$
-            + (obj == null ? "null" : obj.getClass().getSimpleName()) //$NON-NLS-1$
-            + " sel=" + (selection == null ? "null" : selection.getClass().getSimpleName())); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
         if (!isMdObjectAttribute(asEObject(obj)) && !isMdObjectAttribute(selectionFirst(selection)))
             return;
         scheduleActivateProperties();
@@ -176,47 +160,12 @@ public final class OpenHelperAttributePropertiesHook implements IStartup
         }
     }
 
-    // #region agent log
-    private static volatile boolean diagSeen;
-    private static volatile String diagSeenState;
-    private static volatile boolean diagNullResult;
-    private static volatile String diagError;
-
-    private static String diagState()
-    {
-        return "seen=" + diagSeen + " state=" + diagSeenState + " nullResult=" + diagNullResult //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " error=" + diagError; //$NON-NLS-1$
-    }
-
-    private static String probeLoaded()
-    {
-        try
-        {
-            Bundle dtUi = org.eclipse.core.runtime.Platform.getBundle("com._1c.g5.v8.dt.ui"); //$NON-NLS-1$
-            if (dtUi == null)
-                return "noBundle"; //$NON-NLS-1$
-            ClassLoader loader = dtUi.adapt(org.osgi.framework.wiring.BundleWiring.class).getClassLoader();
-            java.lang.reflect.Method m = ClassLoader.class.getDeclaredMethod("findLoadedClass", String.class); //$NON-NLS-1$
-            m.setAccessible(true);
-            return String.valueOf(m.invoke(loader, TARGET) != null) + " dtUiState=" + dtUi.getState(); //$NON-NLS-1$
-        }
-        catch (Throwable t)
-        {
-            return "probeFailed:" + t; //$NON-NLS-1$
-        }
-    }
-    // #endregion
-
     private static final class OpenWeavingHook implements WeavingHook
     {
         @Override
         public void weave(WovenClass wovenClass)
         {
-            if (!TARGET.equals(wovenClass.getClassName()))
-                return;
-            diagSeen = true; // agent log
-            diagSeenState = String.valueOf(wovenClass.getState()); // agent log
-            if (wovenClass.getState() != WovenClass.TRANSFORMING)
+            if (wovenClass.getState() != WovenClass.TRANSFORMING || !TARGET.equals(wovenClass.getClassName()))
                 return;
             try
             {
@@ -226,12 +175,9 @@ public final class OpenHelperAttributePropertiesHook implements IStartup
                     wovenClass.setBytes(transformed);
                     woven = true;
                 }
-                else
-                    diagNullResult = true; // agent log
             }
-            catch (Throwable t)
+            catch (Throwable ignored)
             {
-                diagError = String.valueOf(t); // agent log
             }
         }
     }

@@ -73,6 +73,10 @@ public class PriorityGlobalKeyBindingHook implements IStartup
     private static final String XTEXT_EDITOR_CONTEXT_ID =
             "org.eclipse.xtext.ui.XtextEditorScope"; //$NON-NLS-1$
 
+    /** Дочерний контекст XtextEditorScope, объявленный в бандле bsl.ui. */
+    private static final String BSL_EDITOR_CONTEXT_ID =
+            "com._1c.g5.v8.dt.bsl.ui.editor.BslEditorScope"; //$NON-NLS-1$
+
     private static final String XTEXT_EMBEDDED_EDITOR_CONTEXT_ID =
             "org.eclipse.xtext.ui.embeddedTextEditorScope"; //$NON-NLS-1$
 
@@ -213,9 +217,6 @@ public class PriorityGlobalKeyBindingHook implements IStartup
         applyingOverrides = true;
         try
         {
-            if (!irActive)
-                ensureFormatActionDefaults(Set.of());
-
             // реактивно — переустановит persisted USER-оверрайд, если «Восстановить команду» её сняла;
             // readRegistryAndPreferences() внутри пересобирает живую модель и сбрасывает наши
             // непersist-нутые LOCAL_OVERRIDE_CONTEXT_IDS-привязки — форсируем их пересборку ниже.
@@ -224,9 +225,12 @@ public class PriorityGlobalKeyBindingHook implements IStartup
 
             if (overridesNeedUpdate)
             {
-                restoreSuppressedBindings();
                 removeAppliedOverrides();
+                restoreSuppressedBindings();
             }
+
+            if (!irActive)
+                ensureFormatActionDefaults(Set.of());
 
             if (irActive && !irFormatSequences.isEmpty())
                 reconcileFormatActionSuppression(irFormatSequences);
@@ -308,6 +312,8 @@ public class PriorityGlobalKeyBindingHook implements IStartup
                 {
                     for (String mirrorContextId : IR_MIRROR_CONTEXT_IDS)
                         result.add(createOverride(sequence, parameterized, schemeId, mirrorContextId));
+                    if (IrFormatTextCommandHandler.COMMAND_ID.equals(commandId))
+                        result.add(createOverride(sequence, parameterized, schemeId, BSL_EDITOR_CONTEXT_ID));
                 }
             }
         }
@@ -317,6 +323,11 @@ public class PriorityGlobalKeyBindingHook implements IStartup
     static boolean isApplyingOverrides()
     {
         return applyingOverrides;
+    }
+
+    static boolean isAppliedOverride(Binding binding)
+    {
+        return appliedOverrides.contains(binding);
     }
 
     /**
@@ -509,7 +520,7 @@ public class PriorityGlobalKeyBindingHook implements IStartup
         if (bindingServiceInternal == null)
             return;
         for (Binding binding : suppressedCompetingBindings)
-            bindingServiceInternal.addBinding(binding);
+            RuntimeKeyBindingSupport.restore(bindingServiceInternal, binding);
         suppressedCompetingBindings.clear();
     }
 
@@ -629,6 +640,8 @@ public class PriorityGlobalKeyBindingHook implements IStartup
      */
     private static boolean isOwnEphemeralOverride(Binding binding)
     {
+        if (isAppliedOverride(binding))
+            return true;
         ParameterizedCommand pc = binding.getParameterizedCommand();
         String commandId = pc != null ? pc.getId() : null;
         if (commandId == null || !GLOBAL_COMMAND_ID_SET.contains(commandId))
@@ -689,7 +702,7 @@ public class PriorityGlobalKeyBindingHook implements IStartup
                     DESIGNER_SCHEME_ID, designerFormatSequence, contextId);
             if (existing != null)
             {
-                bindingServiceInternal.addBinding(existing);
+                RuntimeKeyBindingSupport.restore(bindingServiceInternal, existing);
                 continue;
             }
 
@@ -702,7 +715,7 @@ public class PriorityGlobalKeyBindingHook implements IStartup
                     null,
                     null,
                     Binding.SYSTEM);
-            bindingServiceInternal.addBinding(binding);
+            RuntimeKeyBindingSupport.restore(bindingServiceInternal, binding);
         }
     }
 
