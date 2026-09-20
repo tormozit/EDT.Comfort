@@ -2,6 +2,7 @@ package tormozit;
 
 import java.util.List;
 
+import org.eclipse.jface.viewers.CheckboxTableViewer;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider.IStyledLabelProvider;
 import org.eclipse.jface.viewers.IBaseLabelProvider;
 import org.eclipse.jface.viewers.ILabelProvider;
@@ -18,12 +19,14 @@ import org.eclipse.swt.events.ModifyListener;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.layout.GridLayout;
+import org.eclipse.swt.widgets.Button;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Table;
+import org.eclipse.swt.widgets.TableItem;
 import org.eclipse.swt.widgets.Text;
 import org.eclipse.swt.widgets.ToolItem;
 import org.eclipse.ui.IStartup;
@@ -122,6 +125,8 @@ public final class ListItemSelectionDialogFilterHook implements IStartup
 
         FilterState state = new FilterState();
 
+        Object[] priorSelection = captureTableSelection(table);
+
         for (ViewerFilter filter : viewer.getFilters())
         {
             if (filter != null && filter.getClass().getName().contains("TextListViewerFilter")) //$NON-NLS-1$
@@ -152,7 +157,8 @@ public final class ListItemSelectionDialogFilterHook implements IStartup
 
         FilterInputBoxListNavigation.installTableNavigation(fc, table, null);
 
-        alignWithToolbar(dialog, table, filterInput.widget());
+        CheckboxTableViewer checkboxViewer = viewer instanceof CheckboxTableViewer c ? c : null;
+        alignWithToolbar(dialog, table, filterInput.widget(), checkboxViewer);
 
         filterInput.scheduleFocusWhenReady();
 
@@ -163,19 +169,94 @@ public final class ListItemSelectionDialogFilterHook implements IStartup
             viewer.refresh();
         }
 
+        restoreTableSelection(table, priorSelection);
+
         return true;
     }
 
+    private static Object[] captureTableSelection(Table table)
+    {
+        TableItem[] items = table.getSelection();
+        Object[] data = new Object[items.length];
+        for (int i = 0; i < items.length; i++)
+            data[i] = items[i].getData();
+        return data;
+    }
+
     /**
-     * Ставит поле фильтра и тулбар «отметить все / снять все» ({@code checkAllToolItem} /
-     * {@code uncheckAllToolItem}) в одну строку вместо штатных двух ({@code dialogArea} —
-     * однoколоночный {@code GridLayout}: поле — своя строка, тулбар — следующая, под ним, с пустым
-     * местом слева от иконок). Порядок детей {@code dialogArea} не меняется (поле уже перед
-     * тулбаром), поэтому достаточно расширить layout до двух колонок и растянуть список на обе.
-     * Только для множественного выбора — при одиночном тулбара нет ({@code checkAllToolItem == null}),
-     * поле остаётся на всю ширину само по себе.
+     * Выделение переживает наши {@code refresh()} (проверено логом: {@code selectionCount} не
+     * падает до 0) — но строка, которую нативно выбрал и прокрутил в видимую область
+     * {@code selectTopElementInMultiSelection} при создании диалога, после наших {@code refresh()}
+     * заново не прокручивается: {@code topIndex} к этому моменту может указывать уже не туда.
+     * Прокручиваем выделение в видимую область в любом случае; на данные (data) опираемся только
+     * если само выделение почему-то всё же пропало (устойчивость к будущим изменениям штатного
+     * диалога).
      */
-    private static void alignWithToolbar(ListItemSelectionDialog dialog, Table table, Control filterWidget)
+    private static void restoreTableSelection(Table table, Object[] data)
+    {
+        if (table.isDisposed())
+            return;
+        if (table.getSelectionCount() > 0)
+        {
+            table.showSelection();
+            reclaimFocusFromFilter(table);
+            return;
+        }
+        if (data == null || data.length == 0)
+            return;
+        List<Integer> indices = new java.util.ArrayList<>();
+        TableItem[] items = table.getItems();
+        for (int i = 0; i < items.length; i++)
+        {
+            for (Object element : data)
+            {
+                if (java.util.Objects.equals(items[i].getData(), element))
+                {
+                    indices.add(i);
+                    break;
+                }
+            }
+        }
+        if (indices.isEmpty())
+            return;
+        int[] indexArray = new int[indices.size()];
+        for (int i = 0; i < indexArray.length; i++)
+            indexArray[i] = indices.get(i);
+        table.setSelection(indexArray);
+        table.showSelection();
+        reclaimFocusFromFilter(table);
+    }
+
+    /**
+     * ВРЕМЕННОЕ: нативный {@code ListItemSelectionDialog} ставит фокус на таблицу
+     * ({@code table.setFocus()}) синхронно при создании — но наш {@code scheduleFocusWhenReady()}
+     * перехватывает его на поле фильтра через {@code asyncExec}, и выделенная строка визуально
+     * гаснет (неактивная серая подсветка вместо синей). Планируем свой {@code asyncExec} — он
+     * встаёт в очередь позже, чем уже запланированный фильтром, и выполняется после него.
+     */
+    private static void reclaimFocusFromFilter(Table table)
+    {
+        Display display = table.getDisplay();
+        if (display == null || display.isDisposed())
+            return;
+        display.asyncExec(() -> {
+            if (!table.isDisposed())
+                table.setFocus();
+        });
+    }
+
+    /**
+     * Ставит поле фильтра, тулбар «отметить все / снять все» ({@code checkAllToolItem} /
+     * {@code uncheckAllToolItem}) и, для множественного выбора, флажок «Только помеченные» в одну
+     * строку вместо штатных двух ({@code dialogArea} — однoколоночный {@code GridLayout}: поле —
+     * своя строка, тулбар — следующая, под ним, с пустым местом слева от иконок). Порядок детей
+     * {@code dialogArea} не меняется (поле уже перед тулбаром), поэтому достаточно расширить layout
+     * до нужного числа колонок и растянуть список на все. Только для множественного выбора — при
+     * одиночном тулбара нет ({@code checkAllToolItem == null}), поле остаётся на всю ширину само
+     * по себе, «Только помеченные» тоже не ставится (нечего фильтровать по пометке).
+     */
+    private static void alignWithToolbar(ListItemSelectionDialog dialog, Table table, Control filterWidget,
+        CheckboxTableViewer checkboxViewer)
     {
         if (filterWidget == null || filterWidget.isDisposed())
             return;
@@ -191,10 +272,58 @@ public final class ListItemSelectionDialogFilterHook implements IStartup
         if (toolBar == null || toolBar.isDisposed())
             return;
 
-        gridLayout.numColumns = 2;
+        int columns = 2;
+        if (checkboxViewer != null)
+        {
+            columns = 3;
+            installCheckedOnlyToggle(dialogArea, table, checkboxViewer);
+        }
+
+        gridLayout.numColumns = columns;
         if (table.getLayoutData() instanceof GridData tableGd)
-            tableGd.horizontalSpan = 2;
+            tableGd.horizontalSpan = columns;
         dialogArea.layout(true, true);
+    }
+
+    /**
+     * «Только помеченные (N)» — своя доработка (в оригинальном штатном диалоге такого флажка нет
+     * ни у {@code ListItemSelectionDialog}, ни у {@code BipartiteElementsSelectionDialog}; сам
+     * диалог со флажком и сортировкой/группировкой строит другой, AEF2-движок
+     * {@code com._1c.g5.aef2.lwt.LwtDialogRenderer} из view-model — воспроизвести его вне штатной
+     * страницы редактора практически нереально, см. обсуждение). Живёт в одной строке с полем
+     * фильтра — сразу после тулбара «отметить все / снять все», чтобы порядок детей
+     * {@code dialogArea} остался «поле → тулбар → флажок → список».
+     */
+    private static void installCheckedOnlyToggle(Composite dialogArea, Table table,
+        CheckboxTableViewer checkboxViewer)
+    {
+        Button onlyChecked = new Button(dialogArea, SWT.CHECK);
+        onlyChecked.moveAbove(table);
+        updateCheckedOnlyText(onlyChecked, checkboxViewer);
+        ViewerFilter checkedOnlyFilter = new ViewerFilter()
+        {
+            @Override
+            public boolean select(Viewer viewer, Object parentElement, Object element)
+            {
+                return checkboxViewer.getChecked(element);
+            }
+        };
+        onlyChecked.addListener(SWT.Selection, event -> {
+            if (onlyChecked.getSelection())
+                checkboxViewer.addFilter(checkedOnlyFilter);
+            else
+                checkboxViewer.removeFilter(checkedOnlyFilter);
+        });
+        checkboxViewer.addCheckStateListener(event -> updateCheckedOnlyText(onlyChecked, checkboxViewer));
+    }
+
+    private static void updateCheckedOnlyText(Button button, CheckboxTableViewer viewer)
+    {
+        if (button.isDisposed())
+            return;
+        button.setText("Только помеченные (" + viewer.getCheckedElements().length + ")"); //$NON-NLS-1$ //$NON-NLS-2$
+        if (button.getParent() != null && !button.getParent().isDisposed())
+            button.getParent().layout(true, true);
     }
 
     private static void installHighlight(TableViewer viewer, Table table, FilterState state)

@@ -104,7 +104,7 @@ public final class MdTypeMapping
         add("ОбщийМакет",                   "CommonTemplate",               "CommonTemplates");
         add("ОбщаяКартинка",                "CommonPicture",                "CommonPictures");
         add("ОбщаяКоманда",                 "CommonCommand",                "CommonCommands");
-        add("ОбщийАтрибут",                 "CommonAttribute",              "CommonAttributes");
+        add("ОбщийРеквизит",                "CommonAttribute",              "CommonAttributes");
 
         add("Константа",                    "Constant",                     "Constants");
         add("ОпределяемыйТип",              "DefinedType",                  "DefinedTypes");
@@ -221,7 +221,7 @@ public final class MdTypeMapping
         TREE_GROUP_LABEL_TO_RU.put("Общие макеты",                       "ОбщийМакет");
         TREE_GROUP_LABEL_TO_RU.put("Общие картинки",                     "ОбщаяКартинка");
         TREE_GROUP_LABEL_TO_RU.put("Общие команды",                      "ОбщаяКоманда");
-        TREE_GROUP_LABEL_TO_RU.put("Общие реквизиты",                    "ОбщийАтрибут");
+        TREE_GROUP_LABEL_TO_RU.put("Общие реквизиты",                    "ОбщийРеквизит");
         TREE_GROUP_LABEL_TO_RU.put("Роли",                               "Роль");
         TREE_GROUP_LABEL_TO_RU.put("Подсистемы",                         "Подсистема");
         TREE_GROUP_LABEL_TO_RU.put("Функциональные опции",               "ФункциональнаяОпция");

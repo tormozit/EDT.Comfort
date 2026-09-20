@@ -70,6 +70,7 @@ import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorXtextEditorPage;
 import com._1c.g5.v8.dt.md.ui.shared.MdUiSharedImages;
 import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
 import com._1c.g5.v8.dt.metadata.mdclass.EventSubscription;
+import com._1c.g5.v8.dt.metadata.mdclass.FunctionalOption;
 import com._1c.g5.v8.dt.metadata.mdclass.MdClassPackage;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com._1c.g5.v8.dt.metadata.mdclass.Predefined;
@@ -1005,6 +1006,20 @@ public final class MdEditorListTabCountHook implements IStartup
             return;
         }
 
+        if (isFunctionalOptionContentPage(page))
+        {
+            Integer count = countFunctionalOptionContent(editor);
+            if (count != null)
+            {
+                applyTitle(item, baseTitle, Integer.toString(count.intValue()));
+                return;
+            }
+            applyTitle(item, baseTitle, "?"); //$NON-NLS-1$
+            if (created && attempt < COUNT_MAX_ATTEMPTS)
+                scheduleCountRetry(editor, item, page, attempt);
+            return;
+        }
+
         if (isSubsystemsPage(page, baseTitle))
         {
             Integer marked = created ? countMarkedSubsystems(editor) : null;
@@ -1494,14 +1509,38 @@ public final class MdEditorListTabCountHook implements IStartup
     {
         if (page != null)
         {
-            String id = page.getId();
-            if (id != null && id.toLowerCase(Locale.ROOT).contains("functionaloption")) //$NON-NLS-1$
-                return true;
-            if (page.getClass().getName().toLowerCase(Locale.ROOT).contains("functionaloption")) //$NON-NLS-1$
+            if ("editors.functionalOption.pages.content".equals(page.getId())) //$NON-NLS-1$
+                return false;
+            if (page.getClass().getName().contains("FunctionalOptionsPage")) //$NON-NLS-1$
                 return true;
         }
         return "Функциональные опции".equals(base) //$NON-NLS-1$
             || "Functional options".equals(base); //$NON-NLS-1$
+    }
+
+    private static boolean isFunctionalOptionContentPage(IFormPage page)
+    {
+        if (page == null)
+            return false;
+        if ("editors.functionalOption.pages.content".equals(page.getId())) //$NON-NLS-1$
+            return true;
+        return page.getClass().getName().contains("FunctionalOptionEditorContentPage"); //$NON-NLS-1$
+    }
+
+    /**
+     * Число элементов состава — {@code FunctionalOption.content}, не число строк дерева:
+     * дерево этой страницы (см. {@code FunctionalOptionEditorContentPageComponent}) — это
+     * навигатор проекта, отфильтрованный до путей к элементам состава, без {@code getCheckState()}
+     * у узлов (в отличие от вкладки «Подсистемы»), а его корни — категории типов метаданных
+     * («Справочники», «Общие» и т.п.), не сами элементы. Подсчёт строк дерева поэтому даёт
+     * число категорий, а не число реальных элементов состава.
+     */
+    private static Integer countFunctionalOptionContent(DtGranularEditor<?> editor)
+    {
+        EObject model = editor != null ? editor.getModel() : null;
+        if (!(model instanceof FunctionalOption option) || option.eIsProxy())
+            return null;
+        return Integer.valueOf(option.getContent().size());
     }
 
     private static boolean isSubsystemsPage(IFormPage page, String base)

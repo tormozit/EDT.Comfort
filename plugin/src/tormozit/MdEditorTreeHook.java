@@ -3,13 +3,16 @@ package tormozit;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Predicate;
 
 import org.eclipse.core.commands.Command;
 import org.eclipse.core.commands.ExecutionEvent;
@@ -21,6 +24,7 @@ import org.eclipse.core.runtime.IStatus;
 import org.eclipse.core.runtime.Platform;
 import org.eclipse.core.runtime.Status;
 import org.eclipse.core.runtime.jobs.Job;
+import org.eclipse.core.runtime.preferences.InstanceScope;
 import org.eclipse.emf.common.notify.Notification;
 import org.eclipse.emf.common.util.TreeIterator;
 import org.eclipse.emf.ecore.EObject;
@@ -28,9 +32,16 @@ import org.eclipse.emf.ecore.EReference;
 import org.eclipse.emf.ecore.EStructuralFeature;
 import org.eclipse.emf.ecore.util.EContentAdapter;
 import org.eclipse.emf.ecore.util.EcoreUtil;
+import org.eclipse.jface.dialogs.IDialogSettings;
+import org.eclipse.jface.layout.TreeColumnLayout;
+import org.eclipse.jface.viewers.ArrayContentProvider;
+import org.eclipse.jface.viewers.ColumnPixelData;
 import org.eclipse.jface.viewers.ColumnLabelProvider;
+import org.eclipse.jface.viewers.ILabelProvider;
+import org.eclipse.jface.viewers.LabelProvider;
 import org.eclipse.jface.viewers.ISelection;
 import org.eclipse.jface.viewers.ISelectionChangedListener;
+import org.eclipse.jface.viewers.ISelectionProvider;
 import org.eclipse.jface.viewers.SelectionChangedEvent;
 import org.eclipse.jface.viewers.StructuredSelection;
 import org.eclipse.jface.viewers.TreePath;
@@ -38,6 +49,7 @@ import org.eclipse.jface.viewers.TreeSelection;
 import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.jface.viewers.TreeViewerColumn;
 import org.eclipse.jface.util.LocalSelectionTransfer;
+import org.eclipse.jface.window.Window;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.SWTError;
 import org.eclipse.swt.dnd.DND;
@@ -49,10 +61,25 @@ import org.eclipse.swt.dnd.DropTargetAdapter;
 import org.eclipse.swt.dnd.DropTargetEvent;
 import org.eclipse.swt.dnd.Transfer;
 import org.eclipse.swt.dnd.TransferData;
+import org.eclipse.swt.events.MenuAdapter;
+import org.eclipse.swt.events.MenuEvent;
+import org.eclipse.swt.graphics.Color;
+import org.eclipse.swt.graphics.GC;
+import org.eclipse.swt.graphics.Image;
+import org.eclipse.swt.layout.GridData;
+import org.eclipse.swt.layout.GridLayout;
+import org.eclipse.swt.widgets.Button;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
+import org.eclipse.swt.widgets.Label;
+import org.eclipse.swt.widgets.Layout;
+import org.eclipse.swt.widgets.Listener;
+import org.eclipse.swt.widgets.Menu;
 import org.eclipse.swt.widgets.MenuItem;
+import org.eclipse.swt.widgets.Sash;
+import org.eclipse.swt.widgets.Table;
+import org.eclipse.swt.widgets.TableItem;
 import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.TreeColumn;
 import org.eclipse.swt.widgets.TreeItem;
@@ -68,9 +95,12 @@ import org.eclipse.ui.IWorkbenchPart;
 import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.IWindowListener;
+import org.eclipse.ui.PartInitException;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.commands.ICommandService;
+import org.eclipse.ui.forms.editor.IFormPage;
 import org.eclipse.ui.navigator.CommonViewer;
+import org.eclipse.ui.preferences.ScopedPreferenceStore;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.ClassWriter;
@@ -81,7 +111,14 @@ import org.osgi.framework.FrameworkUtil;
 import org.osgi.framework.hooks.weaving.WeavingHook;
 import org.osgi.framework.hooks.weaving.WovenClass;
 
+import com._1c.g5.v8.bm.core.IBmTransaction;
+import com._1c.g5.v8.bm.integration.AbstractBmTask;
+import com._1c.g5.v8.bm.integration.IBmEditingContext;
+import com._1c.g5.v8.dt.core.platform.IConfigurationProject;
+import com._1c.g5.v8.dt.core.platform.IV8Project;
+import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
+import com._1c.g5.v8.dt.md.ui.shared.MdUiSharedImages;
 import com._1c.g5.v8.dt.form.model.AbstractDataPath;
 import com._1c.g5.v8.dt.form.model.DataItem;
 import com._1c.g5.v8.dt.form.model.DataPathReferredObject;
@@ -89,6 +126,11 @@ import com._1c.g5.v8.dt.form.model.Form;
 import com._1c.g5.v8.dt.form.model.FormItem;
 import com._1c.g5.v8.dt.metadata.mdclass.AbstractForm;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicForm;
+import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
+import com._1c.g5.v8.dt.metadata.mdclass.FunctionalOption;
+import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
+import com._1c.g5.v8.dt.ui.dialog.ListItemSelectionDialog;
+import com._1c.g5.v8.dt.ui.util.OpenHelper;
 
 /**
  * Доработки деревьев ({@code DtTreeView}) в редакторах объектов метаданных.
@@ -142,6 +184,15 @@ public final class MdEditorTreeHook
     private static final String FORM_NAME_COLUMN_MARKER =
         "tormozit.mdEditorFormNameColumn"; //$NON-NLS-1$
 
+    private static final String FORM_FILLER_COLUMN_MARKER =
+        "tormozit.mdEditorFormFillerColumn"; //$NON-NLS-1$
+
+    private static final String NATIVE_STRETCH_REMOVED_MARKER =
+        "tormozit.mdEditorNativeStretchRemoved"; //$NON-NLS-1$
+
+    private static final String NATIVE_STRETCH_LISTENER_CLASS =
+        "com._1c.g5.v8.dt.common.ui.ControlWithColumnUtils$1"; //$NON-NLS-1$
+
     private static final String FORM_COLUMNS_GUARD_MARKER =
         "tormozit.mdEditorFormColumnsGuard"; //$NON-NLS-1$
 
@@ -158,6 +209,38 @@ public final class MdEditorTreeHook
 
     private static final String MODEL_ADD_OBSERVER_KEY =
         "tormozit.mdEditorModelAddObserver"; //$NON-NLS-1$
+
+    private static final String FO_PANEL_GUARD_MARKER = "tormozit.mdEditorFoPanelGuard"; //$NON-NLS-1$
+
+    private static final String FO_PANEL_RECHECK_MARKER = "tormozit.mdEditorFoPanelRecheck"; //$NON-NLS-1$
+
+    private static final String FO_COUNT_COLUMN_MARKER = "tormozit.mdEditorFoCountColumn"; //$NON-NLS-1$
+
+    private static final String FO_COUNT_INDEX_KEY = "tormozit.mdEditorFoCountIndex"; //$NON-NLS-1$
+
+    private static final String FO_COUNT_JOB_KEY = "tormozit.mdEditorFoCountJob"; //$NON-NLS-1$
+
+    private static final String FO_PICKER_SETTINGS_SECTION = "MdEditorTreeHook.foPickerDialog"; //$NON-NLS-1$
+
+    private static final String PROPERTY_SHEET_VIEW_ID = "org.eclipse.ui.views.PropertySheet"; //$NON-NLS-1$
+
+    private static final String FO_PANEL_MARKER = "tormozit.mdEditorFoPanelInstalled"; //$NON-NLS-1$
+
+    private static final String FO_PANEL_TABLE_KEY = "tormozit.mdEditorFoPanelTable"; //$NON-NLS-1$
+
+    private static final String FO_PANEL_TITLE_KEY = "tormozit.mdEditorFoPanelTitle"; //$NON-NLS-1$
+
+    private static final String FO_PANEL_LOG_TOPIC = "fo-data-panel"; //$NON-NLS-1$
+
+    private static final int FO_PANEL_HEIGHT = 110;
+
+    private static final int FO_PANEL_MIN_HEIGHT = 60;
+
+    private static final int FO_PANEL_MAX_HEIGHT = 400;
+
+    private static final String FO_PANEL_SETTINGS_SECTION = "MdEditorTreeHook.foPanel"; //$NON-NLS-1$
+
+    private static final String FO_PANEL_HEIGHT_KEY = "height"; //$NON-NLS-1$
 
     private static final String PASTE_COMMAND_ID = "org.eclipse.ui.edit.paste"; //$NON-NLS-1$
 
@@ -389,6 +472,7 @@ public final class MdEditorTreeHook
             installAttributeDrop(viewer);
             installFormColumns(viewer);
             installModelAddObserver(viewer);
+            installFunctionalOptionsPanel(viewer);
         }
         ISelectionChangedListener stock = findListener(viewer, STOCK_LISTENER_CLASS);
         if (stock == null)
@@ -409,9 +493,13 @@ public final class MdEditorTreeHook
             return;
         installFormColumnsGuard(viewer);
         if (!hasClassifiableRow(tree))
+        {
+            Global.tempLog("form-columns-width", "installFormColumns: нет классифицируемой строки, выход"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
+        }
         if (isStandardAttributesTree(tree))
         {
+            Global.tempLog("form-columns-width", "installFormColumns: дерево стандартных реквизитов, колонки не создаём"); //$NON-NLS-1$ //$NON-NLS-2$
             tree.setData(FORM_COLUMNS_CLASSIFIED_MARKER, Boolean.TRUE);
             removeFormColumns(tree);
             return;
@@ -420,9 +508,15 @@ public final class MdEditorTreeHook
         DtGranularEditor<?> editor = MdEditorAttributeMenuHook.editorOf(tree);
         EObject owner = editor != null ? editor.getModel() : null;
         if (owner == null)
+        {
+            Global.tempLog("form-columns-width", "installFormColumns: owner == null, выход"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
+        }
         List<FormColumn> forms = mainForms(owner);
         String signature = formColumnsSignature(forms);
+        Global.tempLog("form-columns-width", "installFormColumns: forms.size()=" + forms.size() //$NON-NLS-1$ //$NON-NLS-2$
+            + ", signature=" + signature + ", cached=" + tree.getData(FORM_COLUMNS_SIGNATURE_KEY) //$NON-NLS-1$ //$NON-NLS-2$
+            + ", columnCount=" + tree.getColumnCount()); //$NON-NLS-1$
         if (signature.equals(tree.getData(FORM_COLUMNS_SIGNATURE_KEY)))
         {
             if (tree.getData(FORM_COLUMNS_KEY) instanceof List<?> installed)
@@ -430,7 +524,10 @@ public final class MdEditorTreeHook
                     if (value instanceof FormColumn form)
                         form.attach(viewer);
             FormTreeInteraction.install(tree, viewer);
-            ColumnAutoFit.install(tree, null, index -> index != 0);
+            disableNativeColumnStretch(tree);
+            if (tree.getColumnCount() > 0)
+                installNameColumnWidthPersistence(tree.getColumn(0));
+            Global.tempLog("form-columns-width", "installFormColumns: сигнатура совпала, колонки переиспользованы"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
 
@@ -439,20 +536,28 @@ public final class MdEditorTreeHook
                 column.dispose();
         if (forms.isEmpty())
         {
+            Global.tempLog("form-columns-width", "installFormColumns: forms.isEmpty(), колонки форм не создаём"); //$NON-NLS-1$ //$NON-NLS-2$
             tree.setData(FORM_COLUMNS_KEY, List.of());
             tree.setData(FORM_COLUMNS_SIGNATURE_KEY, signature);
             return;
         }
 
+        TreeColumn name;
         if (tree.getColumnCount() == 0)
         {
-            TreeColumn name = new TreeColumn(tree, SWT.LEFT);
+            name = new TreeColumn(tree, SWT.LEFT);
             name.setData(FORM_NAME_COLUMN_MARKER, Boolean.TRUE);
-            name.setText("Реквизит"); //$NON-NLS-1$
-            name.setWidth(Math.max(220, tree.getClientArea().width / 2));
         }
-        else if (tree.getColumn(0).getText().isBlank())
-            tree.getColumn(0).setText("Реквизит"); //$NON-NLS-1$
+        else
+        {
+            // Штатный DtTreeView создаёт единственную стартовую колонку сам, ДО нас, и регистрирует
+            // для неё в TreeColumnLayout родителя ColumnWeightData (растягивать на всю ширину) — без
+            // явной перерегистрации на ColumnPixelData любой наш setWidth() был бы переписан обратно
+            // при первом же layout() (issue: колонка «Реквизиты» всегда 100% ширины панели).
+            name = tree.getColumn(0);
+        }
+        setFixedColumnWidth(tree, name, NameColumnWidthStore.load(tree));
+        installNameColumnWidthPersistence(name);
 
         for (FormColumn form : forms)
         {
@@ -465,7 +570,7 @@ public final class MdEditorTreeHook
                 "Наличие реквизита на основной форме «" + form.title() //$NON-NLS-1$
                     + "». Двойной клик открывает элемент формы.")); //$NON-NLS-1$
             column.setMoveable(true);
-            column.setWidth(100);
+            setFixedColumnWidth(tree, column, 90);
             viewerColumn.setLabelProvider(new ColumnLabelProvider()
             {
                 @Override
@@ -477,17 +582,187 @@ public final class MdEditorTreeHook
                 }
             });
         }
+        // Свободное место справа остаётся пустым местом панели, а не растягивает видимые колонки:
+        // штатный com._1c.g5.v8.dt.common.ui.ControlWithColumnUtils.addStretchLastColumn (слушатель
+        // SWT.Resize, вешается на дерево ещё в DtTreeView.createColumns) иначе сам находит «последнюю
+        // resizable колонку с шириной больше 0» и растягивает её — без затычки на эту роль попадала бы
+        // видимая колонка формы; сам штатный слушатель снимается отдельно (disableNativeColumnStretch).
+        // Ширина 0 (не 1): слушатель уже снят, а лишний 1px давал вторую линию сетки сразу после
+        // границы последней видимой колонки — визуально «двойная» разделительная линия.
+        TreeViewerColumn fillerViewerColumn = new TreeViewerColumn(viewer, SWT.LEFT);
+        TreeColumn filler = fillerViewerColumn.getColumn();
+        filler.setData(FORM_COLUMN_MARKER, Boolean.TRUE);
+        filler.setData(FORM_FILLER_COLUMN_MARKER, Boolean.TRUE);
+        filler.setMoveable(false);
+        setFixedColumnWidth(tree, filler, 0);
+        // Голая TreeColumn без своего label provider'а показала бы в ячейках toString() элемента
+        // JFace-модели (issue: "com._1c.g5.aef2...TreeItemViewModel..." в каждой строке) — у затычки
+        // должен быть пустой provider, как у остальных наших колонок.
+        fillerViewerColumn.setLabelProvider(new ColumnLabelProvider()
+        {
+            @Override
+            public String getText(Object element)
+            {
+                return ""; //$NON-NLS-1$
+            }
+        });
         tree.setHeaderVisible(true);
+        ThemeAwareColors.applyGridLines(tree);
         tree.setData(FORM_COLUMNS_KEY, forms);
         tree.setData(FORM_COLUMNS_SIGNATURE_KEY, signature);
         for (FormColumn form : forms)
             form.attach(viewer);
         installFormColumnDoubleClick(tree);
         FormTreeInteraction.install(tree, viewer);
-        ColumnAutoFit.install(tree, null, index -> index != 0);
+        disableNativeColumnStretch(tree);
+        Global.tempLog("form-columns-width", "installFormColumns: колонки созданы, columnCount=" //$NON-NLS-1$ //$NON-NLS-2$
+            + tree.getColumnCount() + ", headerVisible=" + tree.getHeaderVisible()); //$NON-NLS-1$
         Composite parent = tree.getParent();
         if (parent != null && !parent.isDisposed())
             parent.layout(true, true);
+        tree.getDisplay().timerExec(2000, () -> logSettledWidths(tree));
+    }
+
+    /** Снимок ширин колонок через 2с после установки — видно, к чему пришла подгонка на самом деле. */
+    private static void logSettledWidths(Tree tree)
+    {
+        if (tree.isDisposed())
+            return;
+        StringBuilder widths = new StringBuilder();
+        for (TreeColumn column : tree.getColumns())
+            widths.append(column.getWidth()).append(','); //$NON-NLS-1$
+        Global.tempLog("form-columns-width", "logSettledWidths: clientWidth=" + tree.getClientArea().width //$NON-NLS-1$ //$NON-NLS-2$
+            + ", widths=" + widths); //$NON-NLS-1$
+    }
+
+    /**
+     * Задать колонке фиксированную ширину в пикселях, переживающую {@code layout()} родителя. Голого
+     * {@link TreeColumn#setWidth} недостаточно для колонки, которой уже управляет {@link TreeColumnLayout}
+     * родительской панели (штатная стартовая колонка {@code DtTreeView} зарегистрирована в нём с
+     * {@code ColumnWeightData} — растягивать на всю ширину клиентской области; без перерегистрации на
+     * {@link ColumnPixelData} эта ширина восстанавливается при первом же {@code layout()}).
+     */
+    private static void setFixedColumnWidth(Tree tree, TreeColumn column, int width)
+    {
+        column.setWidth(width);
+        Composite host = tree.getParent();
+        if (host != null && !host.isDisposed() && host.getLayout() instanceof TreeColumnLayout layout)
+            layout.setColumnData(column, new ColumnPixelData(width, true, false));
+    }
+
+    /** Метка «слушатель ресайза для сохранения ширины уже стоит» — на самой колонке, идемпотентно. */
+    private static final String NAME_COLUMN_WIDTH_LISTENER_MARKER =
+        "tormozit.mdEditorNameColumnWidthListener"; //$NON-NLS-1$
+
+    /** Запоминает ширину колонки-дерева («Реквизиты»), которую пользователь потянул мышью. */
+    private static void installNameColumnWidthPersistence(TreeColumn name)
+    {
+        if (name == null || name.isDisposed()
+            || Boolean.TRUE.equals(name.getData(NAME_COLUMN_WIDTH_LISTENER_MARKER)))
+            return;
+        name.setData(NAME_COLUMN_WIDTH_LISTENER_MARKER, Boolean.TRUE);
+        name.addListener(SWT.Resize, event -> NameColumnWidthStore.save(name.getWidth()));
+    }
+
+    /** Ширина колонки-дерева («Реквизиты») на вкладке «Данные» — между сеансами EDT. */
+    private static final class NameColumnWidthStore
+    {
+        private static final String PREF_WIDTH = "tormozit.mdEditor.attributesNameColumn.width"; //$NON-NLS-1$
+        /** Ширина по умолчанию (нет сохранённого значения) — 30 символов текущего шрифта дерева. */
+        private static final int DEFAULT_WIDTH_CHARS = 30;
+        private static final int FALLBACK_WIDTH_PX = 300;
+        private static final int MIN_WIDTH = 100;
+        private static final int MAX_WIDTH = 1000;
+
+        private static ScopedPreferenceStore prefs;
+
+        private NameColumnWidthStore()
+        {
+        }
+
+        /** @param control контрол, чьим шрифтом мерить 50 символов по умолчанию (обычно само дерево). */
+        static int load(Control control)
+        {
+            ScopedPreferenceStore store = prefs();
+            if (store == null || !store.contains(PREF_WIDTH))
+                return clamp(defaultWidth(control));
+            return clamp(store.getInt(PREF_WIDTH));
+        }
+
+        private static int defaultWidth(Control control)
+        {
+            if (control == null || control.isDisposed())
+                return FALLBACK_WIDTH_PX;
+            GC gc = new GC(control);
+            try
+            {
+                int charWidth = gc.textExtent("00").x / 2; //$NON-NLS-1$
+                return DEFAULT_WIDTH_CHARS * charWidth;
+            }
+            finally
+            {
+                gc.dispose();
+            }
+        }
+
+        static void save(int width)
+        {
+            ScopedPreferenceStore store = prefs();
+            if (store == null)
+                return;
+            store.setValue(PREF_WIDTH, clamp(width));
+            try
+            {
+                store.save();
+            }
+            catch (Exception ignored)
+            {
+                // настройки необязательны
+            }
+        }
+
+        private static int clamp(int width)
+        {
+            if (width < MIN_WIDTH)
+                return MIN_WIDTH;
+            if (width > MAX_WIDTH)
+                return MAX_WIDTH;
+            return width;
+        }
+
+        private static ScopedPreferenceStore prefs()
+        {
+            if (prefs != null)
+                return prefs;
+            try
+            {
+                String pluginId = FrameworkUtil.getBundle(NameColumnWidthStore.class).getSymbolicName();
+                prefs = new ScopedPreferenceStore(InstanceScope.INSTANCE, pluginId);
+            }
+            catch (RuntimeException ignored)
+            {
+                return null;
+            }
+            return prefs;
+        }
+    }
+
+    /**
+     * Снимает штатный {@code SWT.Resize}-слушатель {@code ControlWithColumnUtils.addStretchLastColumn}
+     * (вешается на дерево ещё в {@code DtTreeView.createColumns}, до наших колонок): он растягивает
+     * «последнюю resizable колонку с шириной больше 0» на весь остаток при каждом ресайзе. Ширины у
+     * плагина статичные (см. {@link #setFixedColumnWidth}), лишнее место после затычки остаётся
+     * пустым местом панели — без него нативный слушатель забирал этот остаток себе, дёргая то одну,
+     * то другую видимую колонку формы (issue: перетаскивание границы колонки роняло их ширины).
+     */
+    private static void disableNativeColumnStretch(Tree tree)
+    {
+        if (Boolean.TRUE.equals(tree.getData(NATIVE_STRETCH_REMOVED_MARKER)))
+            return;
+        tree.setData(NATIVE_STRETCH_REMOVED_MARKER, Boolean.TRUE);
+        for (Listener listener : tree.getListeners(SWT.Resize))
+            if (NATIVE_STRETCH_LISTENER_CLASS.equals(listener.getClass().getName()))
+                tree.removeListener(SWT.Resize, listener);
     }
 
     /** Отдельное дерево стандартных реквизитов на вкладке «Данные». */
@@ -555,6 +830,845 @@ public final class MdEditorTreeHook
                 installFormColumns(viewer);
             });
         });
+    }
+
+    /**
+     * Колонка «ФО» в дереве реквизитов вкладки «Данные» — число функциональных опций,
+     * в состав которых входит реквизит (как на вкладке «Функц. опции», см.
+     * {@code MdEditorFunctionalOptionsCountHook}). В дерево «Стандартные реквизиты» не
+     * встраивается.
+     */
+    private static void installFunctionalOptionsPanel(TreeViewer viewer)
+    {
+        Tree tree = viewer.getTree();
+        if (!MdEditorAttributeMenuHook.isDataPageAttributesTree(tree))
+            return;
+        installFoColumnGuard(viewer);
+        if (!hasClassifiableRow(tree) || isStandardAttributesTree(tree))
+            return;
+        DtGranularEditor<?> editor = MdEditorAttributeMenuHook.editorOf(tree);
+        if (editor == null)
+            return;
+        installFunctionalOptionsCountColumn(viewer, tree, editor);
+        installIncludedOptionsList(viewer, tree, editor);
+    }
+
+    /**
+     * Под деревом реквизитов — список функциональных опций, в состав которых УЖЕ включён
+     * выделенный элемент (или сам объект метаданных, если выделение не подходит — тот же
+     * запасной вариант, что и у колонки «ФО», см. {@link #functionalOptionsTargetFor}). Без
+     * фильтра (в оригинале на вкладке «Функц. опции» он есть, здесь не нужен). «Изменить»
+     * открывает выбранную опцию; «Удалить» исключает текущий элемент из её состава (не удаляет
+     * саму опцию). Контекстное меню и горячие клавиши (Свойства, Сфокусировать в Навигаторе,
+     * Найти ссылки на объект и т.п.) — штатные объектные команды EDT, полученные регистрацией
+     * списка как поставщика выделения страницы, а не переписанные вручную.
+     */
+    private static void installIncludedOptionsList(TreeViewer viewer, Tree tree, DtGranularEditor<?> editor)
+    {
+        if (Boolean.TRUE.equals(tree.getData(FO_PANEL_MARKER)))
+            return;
+        Composite parent = tree.getParent();
+        if (parent == null || parent.isDisposed())
+            return;
+        Layout layout = parent.getLayout();
+        if (!(layout instanceof GridLayout gridLayout))
+        {
+            Global.tempLog(FO_PANEL_LOG_TOPIC, "родитель дерева реквизитов не GridLayout: " //$NON-NLS-1$
+                + (layout == null ? "null" : layout.getClass().getName())); //$NON-NLS-1$
+            tree.setData(FO_PANEL_MARKER, Boolean.TRUE);
+            return;
+        }
+        tree.setData(FO_PANEL_MARKER, Boolean.TRUE);
+
+        Sash sash = new Sash(parent, SWT.HORIZONTAL);
+        sash.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false, gridLayout.numColumns, 1));
+        sash.setToolTipText(TooltipText.wrap(sash,
+            "Перетащите, чтобы изменить высоту панели функциональных опций." //$NON-NLS-1$
+                + Global.pluginSignForTooltip()));
+
+        Composite panel = new Composite(parent, SWT.NONE);
+        GridData panelData = new GridData(SWT.FILL, SWT.FILL, true, false, gridLayout.numColumns, 1);
+        panelData.heightHint = loadFoPanelHeight();
+        panel.setLayoutData(panelData);
+        sash.addListener(SWT.Selection, event ->
+        {
+            if (event.detail == SWT.DRAG)
+                return;
+            int diff = event.y - sash.getBounds().y;
+            int newHeight = Math.max(FO_PANEL_MIN_HEIGHT, Math.min(FO_PANEL_MAX_HEIGHT, panelData.heightHint - diff));
+            if (newHeight == panelData.heightHint)
+                return;
+            panelData.heightHint = newHeight;
+            saveFoPanelHeight(newHeight);
+            parent.layout(true, true);
+        });
+        GridLayout panelLayout = new GridLayout(1, false);
+        panelLayout.marginWidth = 0;
+        panelLayout.marginHeight = 1;
+        panelLayout.verticalSpacing = 2;
+        panel.setLayout(panelLayout);
+
+        Table table = new Table(panel, SWT.BORDER | SWT.V_SCROLL | SWT.MULTI);
+        table.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));
+        table.setHeaderVisible(false);
+        ThemeAwareColors.applyGridLines(table);
+        CopyCommandSupport.wireCopyOverride(table);
+        table.addListener(SWT.MouseDoubleClick, event -> openSelectedFunctionalOption(editor, table, viewer));
+        table.addListener(SWT.KeyDown, event ->
+        {
+            if (event.keyCode == SWT.DEL)
+                unassignSelectedOption(editor, table, tree, viewer);
+        });
+
+        Composite header = new Composite(panel, SWT.NONE);
+        header.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
+        GridLayout headerLayout = new GridLayout(4, false);
+        headerLayout.marginWidth = 0;
+        headerLayout.marginHeight = 0;
+        header.setLayout(headerLayout);
+        header.moveAbove(table);
+
+        Label icon = new Label(header, SWT.NONE);
+        icon.setImage(foSectionImage());
+
+        Label title = new Label(header, SWT.NONE);
+        title.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
+        title.setToolTipText(TooltipText.wrap(title,
+            "Функциональные опции, в состав которых уже включён выделенный в дереве элемент" //$NON-NLS-1$
+                + " (или сам объект метаданных, если выделение не подходит)." //$NON-NLS-1$
+                + Global.pluginSignForTooltip()));
+
+        Button editButton = new Button(header, SWT.PUSH);
+        editButton.setText("Изменить"); //$NON-NLS-1$
+        editButton.setToolTipText(TooltipText.wrap(editButton,
+            "Выбрать функциональные опции для текущего элемента." //$NON-NLS-1$
+                + Global.pluginSignForTooltip()));
+        editButton.addListener(SWT.Selection, event -> openFunctionalOptionsPicker(editor, tree, viewer, table));
+
+        Button deleteButton = new Button(header, SWT.PUSH);
+        deleteButton.setText("Удалить"); //$NON-NLS-1$
+        deleteButton.setToolTipText(TooltipText.wrap(deleteButton,
+            "Исключить выделенный в дереве элемент из состава выбранных функциональных опций" //$NON-NLS-1$
+                + ". Клавиша Delete делает то же самое." //$NON-NLS-1$
+                + Global.pluginSignForTooltip()));
+        deleteButton.addListener(SWT.Selection, event -> unassignSelectedOption(editor, table, tree, viewer));
+
+        installFoPanelObjectCommands(table, editor, tree, viewer);
+
+        tree.setData(FO_PANEL_TABLE_KEY, table);
+        tree.setData(FO_PANEL_TITLE_KEY, title);
+        viewer.addSelectionChangedListener(event -> updateIncludedOptionsList(tree, viewer, editor));
+        tree.addListener(SWT.FocusIn, event -> updateIncludedOptionsList(tree, viewer, editor));
+        tree.addDisposeListener(event ->
+        {
+            if (!sash.isDisposed())
+                sash.dispose();
+            if (!panel.isDisposed())
+                panel.dispose();
+        });
+
+        parent.layout(true, true);
+        updateIncludedOptionsList(tree, viewer, editor);
+    }
+
+    /** Та же картинка, что у пункта меню «Функциональные опции» на этой же вкладке. */
+    private static Image foSectionImage()
+    {
+        try
+        {
+            Image image = MdUiSharedImages.getImage(MdUiSharedImages.OBJS_FUNCTIONAL_OPTION);
+            return image != null && !image.isDisposed() ? image : null;
+        }
+        catch (RuntimeException e)
+        {
+            return null;
+        }
+    }
+
+    /**
+     * Попытка получить контекстное меню «бесплатно» через {@code registerContextMenu} провалилась:
+     * подтягивается меню общего охвата {@code popup:org.eclipse.ui.popup.any} (Групповая
+     * разработка / Сравнить / Заменить на / Вывести список — команды для объектов конфигурации
+     * вообще), а не то более узкое меню списка, что видно на скриншоте оригинала. Поэтому пункты
+     * меню — вручную, но только те, для которых нашлось подтверждённое действие:
+     * <ul>
+     *   <li>«Перейти в редактор объекта» — открыть саму функциональную опцию;</li>
+     *   <li>«Удалить» — исключить текущий элемент из её состава (саму опцию не удаляет);</li>
+     *   <li>«Сфокусировать в Навигаторе» — {@link NavigatorReveal#revealAndActivateIfHidden},
+     *       тот же путь, что и у штатной команды {@code com._1c.g5.v8.dt.ui.commands.focusNavigator}
+     *       (см. {@code ProjectStructureViewHook});</li>
+     *   <li>«Свойства» — панель «Свойства» по текущему выделению списка.</li>
+     * </ul>
+     * «Добавить в расширение» и «Найти ссылки на объект» из оригинала не перенесены: не нашёл
+     * подтверждённого id этих команд в разобранных бандлах, гадать не стал.
+     */
+    private static void installFoPanelObjectCommands(Table table, DtGranularEditor<?> editor, Tree tree,
+        TreeViewer viewer)
+    {
+        if (editor.getSite() != null)
+        {
+            TableRowSelectionProvider provider = new TableRowSelectionProvider(table);
+            ISelectionProvider[] previous = new ISelectionProvider[1];
+            table.addListener(SWT.FocusIn, event ->
+            {
+                previous[0] = editor.getSite().getSelectionProvider();
+                editor.getSite().setSelectionProvider(provider);
+            });
+            table.addListener(SWT.FocusOut, event ->
+            {
+                if (previous[0] != null)
+                    editor.getSite().setSelectionProvider(previous[0]);
+            });
+        }
+
+        Menu menu = new Menu(table);
+        table.setMenu(menu);
+        menu.addMenuListener(new MenuAdapter()
+        {
+            @Override
+            public void menuShown(MenuEvent event)
+            {
+                for (MenuItem item : menu.getItems())
+                    item.dispose();
+                fillFoPanelMenu(menu, table, editor, tree, viewer);
+            }
+        });
+    }
+
+    private static void fillFoPanelMenu(Menu menu, Table table, DtGranularEditor<?> editor, Tree tree,
+        TreeViewer viewer)
+    {
+        boolean hasSelection = table.getSelectionCount() > 0;
+
+        MenuItem open = new MenuItem(menu, SWT.PUSH);
+        open.setText("Перейти в редактор объекта"); //$NON-NLS-1$
+        open.setEnabled(hasSelection);
+        open.addListener(SWT.Selection, event -> openSelectedFunctionalOption(editor, table, viewer));
+
+        MenuItem delete = new MenuItem(menu, SWT.PUSH);
+        delete.setText("Удалить"); //$NON-NLS-1$
+        delete.setEnabled(hasSelection);
+        delete.addListener(SWT.Selection, event -> unassignSelectedOption(editor, table, tree, viewer));
+
+        new MenuItem(menu, SWT.SEPARATOR);
+
+        MenuItem reveal = new MenuItem(menu, SWT.PUSH);
+        reveal.setText("Сфокусировать в Навигаторе"); //$NON-NLS-1$
+        reveal.setEnabled(hasSelection);
+        reveal.addListener(SWT.Selection, event -> revealSelectedOption(table));
+
+        MenuItem properties = new MenuItem(menu, SWT.PUSH);
+        properties.setText("Свойства"); //$NON-NLS-1$
+        properties.setEnabled(hasSelection);
+        properties.addListener(SWT.Selection, event -> bringFoPanelPropertiesToFront(editor));
+    }
+
+    private static void revealSelectedOption(Table table)
+    {
+        TableItem[] selection = table.getSelection();
+        if (selection.length > 0 && selection[0].getData() instanceof FunctionalOption option)
+            NavigatorReveal.revealAndActivateIfHidden(option);
+    }
+
+    private static void bringFoPanelPropertiesToFront(DtGranularEditor<?> editor)
+    {
+        if (editor.getSite() == null)
+            return;
+        IWorkbenchPage page = editor.getSite().getPage();
+        if (page == null)
+            return;
+        IViewPart view = page.findView(PROPERTY_SHEET_VIEW_ID);
+        if (view == null)
+        {
+            try
+            {
+                view = page.showView(PROPERTY_SHEET_VIEW_ID, null, IWorkbenchPage.VIEW_VISIBLE);
+            }
+            catch (PartInitException e)
+            {
+                Global.logError("MdEditorTreeFo", "showView PropertySheet", e); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            }
+        }
+        page.bringToTop(view);
+    }
+
+    private static void updateIncludedOptionsList(Tree tree, TreeViewer viewer, DtGranularEditor<?> editor)
+    {
+        if (tree.isDisposed())
+            return;
+        Label title = tree.getData(FO_PANEL_TITLE_KEY) instanceof Label l ? l : null;
+        Table table = tree.getData(FO_PANEL_TABLE_KEY) instanceof Table t ? t : null;
+        if (title == null || table == null || title.isDisposed() || table.isDisposed())
+            return;
+        MdObject target = resolveFunctionalOptionsTarget(viewer, editor);
+        table.removeAll();
+        if (target == null)
+        {
+            title.setText("Функциональные опции"); //$NON-NLS-1$
+            return;
+        }
+        title.setText("Функциональные опции: " + foDisplayName(target)); //$NON-NLS-1$
+        Configuration configuration = foConfigurationOf(editor);
+        if (configuration == null)
+            return;
+        for (FunctionalOption option : configuration.getFunctionalOptions())
+        {
+            if (option == null || !option.getContent().contains(target))
+                continue;
+            TableItem item = new TableItem(table, SWT.NONE);
+            item.setText(foDisplayName(option));
+            item.setData(option);
+        }
+    }
+
+    /**
+     * Цель для колонки «ФО» и для списка внизу — общая: реквизит/табличная часть и т.п., если
+     * выделен именно он, иначе сам объект метаданных. Одна и та же функция для обоих мест —
+     * иначе число в колонке и состав списка разойдутся на строках-«не реквизитах».
+     */
+    private static MdObject functionalOptionsTargetFor(EObject object, DtGranularEditor<?> editor)
+    {
+        if (object instanceof MdObject member && MdEditorAttributeMenuHook.isDataMember(object))
+            return member;
+        return editor.getModel() instanceof MdObject owner ? owner : null;
+    }
+
+    /**
+     * По выделению JFace-вьювера, не по сырому {@code Tree.getSelection()}: у этого дерева
+     * (обёртка {@code DtTreeView}) нативное SWT-выделение при клике по строке не всегда успевает
+     * обновиться к моменту срабатывания {@code SWT.Selection} — вьювер синхронизирован надёжнее
+     * (тот же канал использует {@code KeepSelectionListener} рядом).
+     */
+    private static MdObject resolveFunctionalOptionsTarget(TreeViewer viewer, DtGranularEditor<?> editor)
+    {
+        Object selected = viewer.getStructuredSelection().getFirstElement();
+        EObject resolved = selected != null ? elementObject(viewer.getTree(), selected) : null;
+        return functionalOptionsTargetFor(resolved, editor);
+    }
+
+    /**
+     * Открывает выбранную функциональную опцию и сразу выделяет в её «Составе» текущий элемент —
+     * ту же строку, что активна в дереве реквизитов родительского окна.
+     */
+    private static void openSelectedFunctionalOption(DtGranularEditor<?> editor, Table table, TreeViewer viewer)
+    {
+        TableItem[] selection = table.getSelection();
+        if (selection.length == 0 || !(selection[0].getData() instanceof FunctionalOption option))
+            return;
+        IWorkbenchPage page = editor.getSite() != null ? editor.getSite().getPage() : null;
+        if (page == null)
+            return;
+        MdObject target = resolveFunctionalOptionsTarget(viewer, editor);
+        IEditorPart opened;
+        try
+        {
+            opened = new OpenHelper(page).openEditor(option);
+        }
+        catch (RuntimeException e)
+        {
+            Global.logError("MdEditorTreeFo", "openSelectedFunctionalOption", e); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        }
+        if (target != null && opened instanceof DtGranularEditor<?> foEditor)
+            scheduleRevealInFunctionalOptionEditor(foEditor, target, 0);
+    }
+
+    private static void scheduleRevealInFunctionalOptionEditor(DtGranularEditor<?> foEditor, MdObject target,
+        int attempt)
+    {
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed() || attempt >= 40)
+            return;
+        display.timerExec(attempt == 0 ? 0 : 100, () ->
+        {
+            if (!revealInFunctionalOptionEditor(foEditor, target))
+                scheduleRevealInFunctionalOptionEditor(foEditor, target, attempt + 1);
+        });
+    }
+
+    /** «Состав» ({@code editors.functionalOption.pages.content}) — то же дерево, что у левой части вкладки «Функц. опции» объекта, только у самой опции. */
+    private static boolean revealInFunctionalOptionEditor(DtGranularEditor<?> foEditor, MdObject target)
+    {
+        IFormPage page = findFormPage(foEditor, MdEditorTreeHook::isFunctionalOptionContentPage);
+        if (page == null)
+            return false;
+        foEditor.setActivePage(page.getId());
+        IFormPage active = foEditor.getActivePageInstance();
+        if (!isFunctionalOptionContentPage(active))
+            return false;
+        Object root = Global.getField(active, "pageComponent"); //$NON-NLS-1$
+        Object component = findFunctionalOptionContentComponent(root, 0);
+        if (component == null)
+            return false;
+        try
+        {
+            return Global.invokeVoid(component, "setSelection", List.of(target)); //$NON-NLS-1$
+        }
+        catch (RuntimeException e)
+        {
+            return false;
+        }
+    }
+
+    private static boolean isFunctionalOptionContentPage(IFormPage page)
+    {
+        if (page == null)
+            return false;
+        if ("editors.functionalOption.pages.content".equals(page.getId())) //$NON-NLS-1$
+            return true;
+        return page.getClass().getName().contains("FunctionalOptionEditorContentPage"); //$NON-NLS-1$
+    }
+
+    private static Object findFunctionalOptionContentComponent(Object component, int depth)
+    {
+        if (component == null || depth > 20)
+            return null;
+        if (component.getClass().getName().contains("FunctionalOptionEditorContentPageComponent")) //$NON-NLS-1$
+            return component;
+        for (Object child : AefFieldFocus.childComponents(component))
+        {
+            Object found = findFunctionalOptionContentComponent(child, depth + 1);
+            if (found != null)
+                return found;
+        }
+        return null;
+    }
+
+    private static IFormPage findFormPage(DtGranularEditor<?> editor, Predicate<IFormPage> match)
+    {
+        Object pagesObj = Global.getField(editor, "pages"); //$NON-NLS-1$
+        if (!(pagesObj instanceof List<?> pages))
+            return null;
+        for (Object pageObj : pages)
+            if (pageObj instanceof IFormPage page && match.test(page))
+                return page;
+        return null;
+    }
+
+    /** «Удалить» в панели — исключает текущий элемент из состава опции, саму опцию не трогает. */
+    /** «Удалить» и клавиша Delete — исключают ВСЕ выделенные опции из состава текущего элемента. */
+    private static void unassignSelectedOption(DtGranularEditor<?> editor, Table table, Tree tree,
+        TreeViewer viewer)
+    {
+        TableItem[] selection = table.getSelection();
+        if (selection.length == 0)
+            return;
+        List<FunctionalOption> toRemove = new ArrayList<>();
+        for (TableItem item : selection)
+            if (item.getData() instanceof FunctionalOption option)
+                toRemove.add(option);
+        if (toRemove.isEmpty())
+            return;
+        MdObject target = resolveFunctionalOptionsTarget(viewer, editor);
+        if (target == null)
+            return;
+        IBmEditingContext editingContext = editor.getEditingContext();
+        if (editingContext == null)
+            return;
+        try
+        {
+            editingContext.execute(new AbstractBmTask<Void>("Комфорт: функциональная опция") //$NON-NLS-1$
+            {
+                @Override
+                public Void execute(IBmTransaction transaction, IProgressMonitor monitor)
+                {
+                    if (!(transaction.toTransactionObject(target) instanceof MdObject txTarget))
+                        return null;
+                    for (FunctionalOption option : toRemove)
+                    {
+                        if (transaction.toTransactionObject(option) instanceof FunctionalOption txOption)
+                            txOption.getContent().remove(txTarget);
+                    }
+                    return null;
+                }
+            });
+        }
+        catch (RuntimeException e)
+        {
+            Global.logError("MdEditorTreeFo", "unassignSelectedOption", e); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        }
+        updateIncludedOptionsList(tree, viewer, editor);
+        refreshFunctionalOptionsCount(tree, viewer, editor);
+    }
+
+    /**
+     * «Изменить» в панели — тот же штатный диалог EDT «Выбор объектов»
+     * ({@link ListItemSelectionDialog}), что и в панели «Свойства» для функциональных опций (см.
+     * javadoc {@link ListItemSelectionDialogFilterHook}): фильтр с историей, подсветка совпадений
+     * и тулбар «отметить все / снять все» достаются бесплатно — тот хук патчит любой показанный
+     * экземпляр этого класса, отдельно ничего строить не нужно. Пометки — функциональные опции,
+     * в состав которых уже входит текущий элемент; изменения после «ОК» — одной BM-транзакцией.
+     */
+    private static void openFunctionalOptionsPicker(DtGranularEditor<?> editor, Tree tree, TreeViewer viewer,
+        Table panelTable)
+    {
+        MdObject target = resolveFunctionalOptionsTarget(viewer, editor);
+        if (target == null)
+            return;
+        Configuration configuration = foConfigurationOf(editor);
+        if (configuration == null)
+            return;
+        List<FunctionalOption> options = new ArrayList<>(configuration.getFunctionalOptions());
+        options.sort(Comparator.comparing(MdEditorTreeHook::foDisplayName, String.CASE_INSENSITIVE_ORDER));
+        List<FunctionalOption> initiallyChecked = new ArrayList<>();
+        for (FunctionalOption option : options)
+            if (option.getContent().contains(target))
+                initiallyChecked.add(option);
+        TableItem[] panelSelection = panelTable.getSelection();
+        FunctionalOption activeInParent = panelSelection.length > 0
+            && panelSelection[0].getData() instanceof FunctionalOption selected ? selected : null;
+
+        ILabelProvider labelProvider = new LabelProvider()
+        {
+            @Override
+            public String getText(Object element)
+            {
+                return element instanceof FunctionalOption option ? foDisplayName(option) : super.getText(element);
+            }
+        };
+        ListItemSelectionDialog dialog = new ListItemSelectionDialog(tree.getShell(), options,
+            new StructuredSelection(initiallyChecked), labelProvider, ArrayContentProvider.getInstance(),
+            "Выбор объектов", true, true) //$NON-NLS-1$
+        {
+            @Override
+            protected IDialogSettings getDialogBoundsSettings()
+            {
+                return foPickerDialogSettings();
+            }
+
+            @Override
+            protected int getDialogBoundsStrategy()
+            {
+                return DIALOG_PERSISTSIZE | DIALOG_PERSISTLOCATION;
+            }
+
+            @Override
+            protected Control createDialogArea(Composite parent)
+            {
+                Control area = super.createDialogArea(parent);
+                if (activeInParent != null && elementsTableViewer != null)
+                    elementsTableViewer.setSelection(new StructuredSelection(activeInParent), false);
+                return area;
+            }
+        };
+        if (dialog.open() != Window.OK)
+            return;
+        Set<FunctionalOption> checked = new HashSet<>();
+        for (Object element : dialog.getResult())
+            if (element instanceof FunctionalOption option)
+                checked.add(option);
+
+        List<FunctionalOption> toAdd = new ArrayList<>();
+        List<FunctionalOption> toRemove = new ArrayList<>();
+        for (FunctionalOption option : options)
+        {
+            boolean was = initiallyChecked.contains(option);
+            boolean now = checked.contains(option);
+            if (now && !was)
+                toAdd.add(option);
+            else if (!now && was)
+                toRemove.add(option);
+        }
+        if (toAdd.isEmpty() && toRemove.isEmpty())
+            return;
+
+        IBmEditingContext editingContext = editor.getEditingContext();
+        if (editingContext == null)
+            return;
+        try
+        {
+            editingContext.execute(new AbstractBmTask<Void>("Комфорт: функциональные опции") //$NON-NLS-1$
+            {
+                @Override
+                public Void execute(IBmTransaction transaction, IProgressMonitor monitor)
+                {
+                    if (!(transaction.toTransactionObject(target) instanceof MdObject txTarget))
+                        return null;
+                    for (FunctionalOption option : toAdd)
+                    {
+                        if (transaction.toTransactionObject(option) instanceof FunctionalOption txOption
+                            && !txOption.getContent().contains(txTarget))
+                            txOption.getContent().add(txTarget);
+                    }
+                    for (FunctionalOption option : toRemove)
+                    {
+                        if (transaction.toTransactionObject(option) instanceof FunctionalOption txOption)
+                            txOption.getContent().remove(txTarget);
+                    }
+                    return null;
+                }
+            });
+        }
+        catch (RuntimeException e)
+        {
+            Global.logError("MdEditorTreeFo", "openFunctionalOptionsPicker", e); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        }
+        updateIncludedOptionsList(tree, viewer, editor);
+        refreshFunctionalOptionsCount(tree, viewer, editor);
+    }
+
+    /**
+     * {@link ISelectionProvider} по выделению строки списка ФО — подставляется в
+     * {@code editor.getSite()} на время фокуса, чтобы панель «Свойства» показывала выбранную
+     * функциональную опцию.
+     */
+    private static final class TableRowSelectionProvider implements ISelectionProvider
+    {
+        private final Table table;
+
+        private final List<ISelectionChangedListener> listeners = new ArrayList<>();
+
+        TableRowSelectionProvider(Table table)
+        {
+            this.table = table;
+            table.addListener(SWT.Selection, event -> fireSelectionChanged());
+        }
+
+        private void fireSelectionChanged()
+        {
+            SelectionChangedEvent event = new SelectionChangedEvent(this, getSelection());
+            for (ISelectionChangedListener listener : new ArrayList<>(listeners))
+                listener.selectionChanged(event);
+        }
+
+        @Override
+        public void addSelectionChangedListener(ISelectionChangedListener listener)
+        {
+            listeners.add(listener);
+        }
+
+        @Override
+        public void removeSelectionChangedListener(ISelectionChangedListener listener)
+        {
+            listeners.remove(listener);
+        }
+
+        @Override
+        public ISelection getSelection()
+        {
+            if (table.isDisposed())
+                return StructuredSelection.EMPTY;
+            List<FunctionalOption> options = new ArrayList<>();
+            for (TableItem item : table.getSelection())
+                if (item.getData() instanceof FunctionalOption option)
+                    options.add(option);
+            return options.isEmpty() ? StructuredSelection.EMPTY : new StructuredSelection(options);
+        }
+
+        @Override
+        public void setSelection(ISelection selection)
+        {
+            // Выделение задаётся кликом пользователя по строке; программно не требуется.
+        }
+    }
+
+    private static String foDisplayName(EObject object)
+    {
+        Object nameRu = Global.invoke(object, "getNameRu"); //$NON-NLS-1$
+        if (nameRu instanceof String ru && !ru.isBlank())
+            return ru;
+        Object name = Global.invoke(object, "getName"); //$NON-NLS-1$
+        return name instanceof String text && !text.isBlank() ? text : object.eClass().getName();
+    }
+
+    /** Перепроверяет тип дерева, когда ленивый viewer впервые отрисовал содержательную строку. */
+    private static void installFoColumnGuard(TreeViewer viewer)
+    {
+        Tree tree = viewer.getTree();
+        if (Boolean.TRUE.equals(tree.getData(FO_PANEL_GUARD_MARKER)))
+            return;
+        tree.setData(FO_PANEL_GUARD_MARKER, Boolean.TRUE);
+        tree.addListener(SWT.PaintItem, event ->
+        {
+            if (Boolean.TRUE.equals(tree.getData(FO_COUNT_COLUMN_MARKER))
+                || Boolean.TRUE.equals(tree.getData(FO_PANEL_RECHECK_MARKER)))
+                return;
+            tree.setData(FO_PANEL_RECHECK_MARKER, Boolean.TRUE);
+            tree.getDisplay().asyncExec(() ->
+            {
+                if (tree.isDisposed())
+                    return;
+                tree.setData(FO_PANEL_RECHECK_MARKER, null);
+                installFunctionalOptionsPanel(viewer);
+            });
+        });
+    }
+
+    /** Колонка «ФО» — число функциональных опций, в состав которых входит реквизит. */
+    private static void installFunctionalOptionsCountColumn(TreeViewer viewer, Tree tree,
+        DtGranularEditor<?> editor)
+    {
+        if (Boolean.TRUE.equals(tree.getData(FO_COUNT_COLUMN_MARKER)))
+            return;
+        tree.setData(FO_COUNT_COLUMN_MARKER, Boolean.TRUE);
+        TreeColumn name = tree.getColumnCount() == 0 ? new TreeColumn(tree, SWT.LEFT) : tree.getColumn(0);
+        setFixedColumnWidth(tree, name, NameColumnWidthStore.load(tree));
+        installNameColumnWidthPersistence(name);
+
+        TreeViewerColumn column = new TreeViewerColumn(viewer, SWT.RIGHT, 1);
+        TreeColumn swtColumn = column.getColumn();
+//        swtColumn.setText("ФО"); //$NON-NLS-1$
+        swtColumn.setImage(foSectionImage());
+        swtColumn.setToolTipText(TooltipText.wrap(tree,
+            "Число функциональных опций, в состав которых входит свойство данных, либо сам объект." //$NON-NLS-1$
+                + " Опции редактируются в таблице снизу." //$NON-NLS-1$
+                + Global.pluginSignForTooltip()));
+        setFixedColumnWidth(tree, swtColumn, 30);
+        swtColumn.setResizable(false);
+        swtColumn.setMoveable(false);
+        column.setLabelProvider(new ColumnLabelProvider()
+        {
+            @Override
+            public String getText(Object element)
+            {
+                Integer count = functionalOptionsCountFor(tree, editor, element);
+                return count == null ? "" : count.toString(); //$NON-NLS-1$
+            }
+
+            @Override
+            public Color getForeground(Object element)
+            {
+                Integer count = functionalOptionsCountFor(tree, editor, element);
+                return count != null && count.intValue() == 0
+                    ? tree.getDisplay().getSystemColor(SWT.COLOR_DARK_GRAY) : null;
+            }
+        });
+        tree.setHeaderVisible(true);
+        ThemeAwareColors.applyGridLines(tree);
+        disableNativeColumnStretch(tree);
+        tree.addListener(SWT.FocusIn, event -> refreshFunctionalOptionsCount(tree, viewer, editor));
+        refreshFunctionalOptionsCount(tree, viewer, editor);
+    }
+
+    /** Как {@code MdEditorFunctionalOptionsCountHook.countForElement} — та же цель, что у панели. */
+    private static Integer functionalOptionsCountFor(Tree tree, DtGranularEditor<?> editor, Object element)
+    {
+        EObject object = elementObject(tree, element);
+        MdObject target = functionalOptionsTargetFor(object, editor);
+        return target == null ? null : functionalOptionsCount(tree, target);
+    }
+
+    /** Как в {@code MdEditorFunctionalOptionsCountHook}: счёт в фоне, применение — через asyncExec. */
+    private static void refreshFunctionalOptionsCount(Tree tree, TreeViewer viewer, DtGranularEditor<?> editor)
+    {
+        if (tree.isDisposed())
+            return;
+        if (tree.getData(FO_COUNT_JOB_KEY) instanceof Job previous)
+            previous.cancel();
+        Configuration configuration = foConfigurationOf(editor);
+        Job job = new Job("Комфорт: число функциональных опций") //$NON-NLS-1$
+        {
+            @Override
+            protected IStatus run(IProgressMonitor monitor)
+            {
+                if (monitor.isCanceled())
+                    return Status.CANCEL_STATUS;
+                Map<EObject, Integer> counts = computeFunctionalOptionsCounts(configuration);
+                Display display = Display.getDefault();
+                if (display == null || display.isDisposed())
+                    return Status.CANCEL_STATUS;
+                display.asyncExec(() ->
+                {
+                    if (monitor.isCanceled() || tree.isDisposed())
+                        return;
+                    tree.setData(FO_COUNT_INDEX_KEY, counts);
+                    if (!viewer.getTree().isDisposed())
+                        viewer.refresh();
+                });
+                return Status.OK_STATUS;
+            }
+        };
+        job.setSystem(true);
+        job.setPriority(Job.DECORATE);
+        tree.setData(FO_COUNT_JOB_KEY, job);
+        job.schedule();
+    }
+
+    private static Map<EObject, Integer> computeFunctionalOptionsCounts(Configuration configuration)
+    {
+        Map<EObject, Integer> counts = new HashMap<>();
+        if (configuration != null)
+        {
+            for (FunctionalOption option : configuration.getFunctionalOptions())
+            {
+                if (option == null)
+                    continue;
+                for (MdObject item : option.getContent())
+                    if (item != null)
+                        counts.merge(item, Integer.valueOf(1), Integer::sum);
+            }
+        }
+        return counts;
+    }
+
+    private static Integer functionalOptionsCount(Tree tree, EObject object)
+    {
+        if (!(tree.getData(FO_COUNT_INDEX_KEY) instanceof Map<?, ?> map))
+            return null;
+        Object value = map.get(object);
+        return value instanceof Integer count ? count : Integer.valueOf(0);
+    }
+
+    private static Configuration foConfigurationOf(DtGranularEditor<?> editor)
+    {
+        EObject model = editor != null ? editor.getModel() : null;
+        for (EObject current = model; current != null; current = current.eContainer())
+        {
+            if (current instanceof Configuration configuration)
+                return configuration;
+        }
+        if (!(model instanceof MdObject mdObject))
+            return null;
+        IV8ProjectManager projectManager =
+            (IV8ProjectManager)Global.getServiceByClass(IV8ProjectManager.class);
+        if (projectManager == null)
+            return null;
+        IV8Project project = projectManager.getProject(mdObject);
+        if (project instanceof IConfigurationProject configurationProject)
+            return configurationProject.getConfiguration();
+        Object configuration = Global.invoke(project, "getConfiguration"); //$NON-NLS-1$
+        return configuration instanceof Configuration conf ? conf : null;
+    }
+
+    private static IDialogSettings foPickerDialogSettings()
+    {
+        IDialogSettings top = Activator.getDefault().getDialogSettings();
+        IDialogSettings section = top.getSection(FO_PICKER_SETTINGS_SECTION);
+        if (section == null)
+            section = top.addNewSection(FO_PICKER_SETTINGS_SECTION);
+        return section;
+    }
+
+    private static IDialogSettings foPanelSettings()
+    {
+        IDialogSettings top = Activator.getDefault().getDialogSettings();
+        IDialogSettings section = top.getSection(FO_PANEL_SETTINGS_SECTION);
+        if (section == null)
+            section = top.addNewSection(FO_PANEL_SETTINGS_SECTION);
+        return section;
+    }
+
+    private static int loadFoPanelHeight()
+    {
+        String stored = foPanelSettings().get(FO_PANEL_HEIGHT_KEY);
+        if (stored == null)
+            return FO_PANEL_HEIGHT;
+        try
+        {
+            return Math.max(FO_PANEL_MIN_HEIGHT, Math.min(FO_PANEL_MAX_HEIGHT, Integer.parseInt(stored)));
+        }
+        catch (NumberFormatException e)
+        {
+            return FO_PANEL_HEIGHT;
+        }
+    }
+
+    private static void saveFoPanelHeight(int height)
+    {
+        foPanelSettings().put(FO_PANEL_HEIGHT_KEY, height);
     }
 
     private static void removeFormColumns(Tree tree)
