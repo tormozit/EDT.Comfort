@@ -161,6 +161,9 @@ final class FilterInputBox
         FORM_ITEMS(
             "comfort.formItems.filter.history.count", //$NON-NLS-1$
             "comfort.formItems.filter.history."), //$NON-NLS-1$
+        GLOBAL_COMMANDS(
+            "comfort.formGlobalCommands.filter.history.count", //$NON-NLS-1$
+            "comfort.formGlobalCommands.filter.history."), //$NON-NLS-1$
         SYNTAX_CONTENTS(
             "comfort.syntaxAssistContents.filter.history.count", //$NON-NLS-1$
             "comfort.syntaxAssistContents.filter.history."), //$NON-NLS-1$
@@ -258,6 +261,17 @@ final class FilterInputBox
     {
         Options opts = new Options();
         opts.scope = Scope.FORM_ITEMS;
+        opts.layoutData = compactLayoutData();
+        opts.message = "Фильтр..."; //$NON-NLS-1$
+        opts.tooltip = FLAT_FILTER_TOOLTIP;
+        return create(parent, opts, onSearch);
+    }
+
+    /** Дерево «Глобальные команды» (вкладка «Команды формы»): независимые и параметризуемые. */
+    static FilterInputBox forGlobalCommands(Composite parent, Runnable onSearch)
+    {
+        Options opts = new Options();
+        opts.scope = Scope.GLOBAL_COMMANDS;
         opts.layoutData = compactLayoutData();
         opts.message = "Фильтр..."; //$NON-NLS-1$
         opts.tooltip = FLAT_FILTER_TOOLTIP;
@@ -498,6 +512,7 @@ final class FilterInputBox
             case FILTERED_LIST_DIALOG -> forFilteredListDialog(parent, onSearch);
             case LIST_ITEM_SELECTION_DIALOG -> forListItemSelectionDialog(parent, onSearch);
             case FORM_ITEMS -> forFormItems(parent, onSearch);
+            case GLOBAL_COMMANDS -> forGlobalCommands(parent, onSearch);
             case RIGHTS_DIALOG -> throw new IllegalStateException("RIGHTS_DIALOG: use attachHistory(SearchBox, Scope.RIGHTS_DIALOG)"); //$NON-NLS-1$
             case RIGHTS_EDITOR -> throw new IllegalStateException("RIGHTS_EDITOR: use attachHistory(SearchBox, Scope.RIGHTS_EDITOR)"); //$NON-NLS-1$
             case RIGHTS_EDITOR_LEAVES -> throw new IllegalStateException("RIGHTS_EDITOR_LEAVES: use attachHistory(SearchBox, Scope.RIGHTS_EDITOR_LEAVES)"); //$NON-NLS-1$

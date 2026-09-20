@@ -70,7 +70,6 @@ import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorXtextEditorPage;
 import com._1c.g5.v8.dt.md.ui.shared.MdUiSharedImages;
 import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
 import com._1c.g5.v8.dt.metadata.mdclass.EventSubscription;
-import com._1c.g5.v8.dt.metadata.mdclass.FunctionalOption;
 import com._1c.g5.v8.dt.metadata.mdclass.MdClassPackage;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com._1c.g5.v8.dt.metadata.mdclass.Predefined;
@@ -1006,9 +1005,9 @@ public final class MdEditorListTabCountHook implements IStartup
             return;
         }
 
-        if (isFunctionalOptionContentPage(page))
+        if (isTypedMdContentPage(page))
         {
-            Integer count = countFunctionalOptionContent(editor);
+            Integer count = countTypedMdContent(editor, page);
             if (count != null)
             {
                 applyTitle(item, baseTitle, Integer.toString(count.intValue()));
@@ -1518,29 +1517,50 @@ public final class MdEditorListTabCountHook implements IStartup
             || "Functional options".equals(base); //$NON-NLS-1$
     }
 
-    private static boolean isFunctionalOptionContentPage(IFormPage page)
+    /**
+     * Вкладка «Состав» у функциональной опции, подсистемы, общего реквизита, плана
+     * обмена, отбора критерия — {@code editors.*.pages.content}, все с одним и тем же
+     * заголовком «Состав» ({@code *EditorContentPage_Title=Состав}).
+     */
+    private static final Set<String> TYPED_CONTENT_PAGE_IDS = Set.of(
+        "editors.functionalOption.pages.content", //$NON-NLS-1$
+        "editors.subsystem.pages.content", //$NON-NLS-1$
+        "editors.commonattributes.pages.content", //$NON-NLS-1$
+        "editors.exchangeplan.pages.content", //$NON-NLS-1$
+        "editors.filtercriterion.pages.content"); //$NON-NLS-1$
+
+    private static boolean isTypedMdContentPage(IFormPage page)
     {
-        if (page == null)
-            return false;
-        if ("editors.functionalOption.pages.content".equals(page.getId())) //$NON-NLS-1$
-            return true;
-        return page.getClass().getName().contains("FunctionalOptionEditorContentPage"); //$NON-NLS-1$
+        return page != null && TYPED_CONTENT_PAGE_IDS.contains(page.getId());
     }
 
     /**
-     * Число элементов состава — {@code FunctionalOption.content}, не число строк дерева:
-     * дерево этой страницы (см. {@code FunctionalOptionEditorContentPageComponent}) — это
-     * навигатор проекта, отфильтрованный до путей к элементам состава, без {@code getCheckState()}
-     * у узлов (в отличие от вкладки «Подсистемы»), а его корни — категории типов метаданных
+     * Число элементов состава — по many-ссылке {@code getDefaultFeature()} страницы
+     * ({@code FunctionalOption.content}, {@code Subsystem.content} и т.п.), не число строк
+     * дерева: дерево этих страниц (см. {@code FunctionalOptionEditorContentPageComponent},
+     * {@code SubsystemEditorContentPageComponent} и т.п.) — это навигатор проекта,
+     * отфильтрованный до путей к элементам состава, без {@code getCheckState()} у узлов
+     * (в отличие от вкладки «Подсистемы»), а его корни — категории типов метаданных
      * («Справочники», «Общие» и т.п.), не сами элементы. Подсчёт строк дерева поэтому даёт
      * число категорий, а не число реальных элементов состава.
      */
-    private static Integer countFunctionalOptionContent(DtGranularEditor<?> editor)
+    private static Integer countTypedMdContent(DtGranularEditor<?> editor, IFormPage page)
     {
         EObject model = editor != null ? editor.getModel() : null;
-        if (!(model instanceof FunctionalOption option) || option.eIsProxy())
+        if (model == null || model.eIsProxy())
             return null;
-        return Integer.valueOf(option.getContent().size());
+        Object feature = Global.invoke(page, "getDefaultFeature"); //$NON-NLS-1$
+        if (!(feature instanceof EReference reference) || !reference.isMany())
+            return null;
+        try
+        {
+            Object value = model.eGet(reference, false);
+            return value instanceof Collection<?> collection ? Integer.valueOf(collection.size()) : null;
+        }
+        catch (RuntimeException e)
+        {
+            return null;
+        }
     }
 
     private static boolean isSubsystemsPage(IFormPage page, String base)

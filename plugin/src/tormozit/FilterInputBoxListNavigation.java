@@ -17,6 +17,7 @@ import org.eclipse.swt.widgets.TreeItem;
 import com._1c.g5.v8.dt.common.ui.controls.search.SearchBox;
 
 import java.util.List;
+import java.util.function.Supplier;
 
 /**
  * Клавиатура полей фильтра {@link com._1c.g5.v8.dt.common.ui.controls.search.SearchBox} (Комфорт):
@@ -49,7 +50,8 @@ public final class FilterInputBoxListNavigation
     {
         Table table;
         TableIndexListener tableListener;
-        Tree tree;
+        /** Дерево-цель навигации; для нескольких деревьев под одним полем — {@link #treeSupplier}. */
+        Supplier<Tree> treeSupplier;
         EnterListener enterListener;
         boolean focusListOnEnter = false;
     }
@@ -327,13 +329,31 @@ public final class FilterInputBoxListNavigation
 
     public static void installTreeNavigation(Control filterControl, Tree tree, EnterListener onEnter)
     {
-        if (filterControl == null || tree == null)
+        if (tree == null)
+            return;
+        installTreeNavigation(filterControl, () -> tree, onEnter);
+    }
+
+    /**
+     * Как {@link #installTreeNavigation(Control, Tree)}, но дерево-цель выбирается заново на
+     * каждое нажатие — для нескольких деревьев под одним полем фильтра (см.
+     * {@code GlobalCommandsFilter}: независимые и параметризуемые команды).
+     */
+    public static void installTreeNavigation(Control filterControl, Supplier<Tree> treeSupplier)
+    {
+        installTreeNavigation(filterControl, treeSupplier,
+            () -> fireTreeDefaultSelection(resolveTree(treeSupplier)));
+    }
+
+    public static void installTreeNavigation(Control filterControl, Supplier<Tree> treeSupplier, EnterListener onEnter)
+    {
+        if (filterControl == null || treeSupplier == null)
             return;
         SearchBox searchBox = resolveSearchBox(filterControl);
         if (searchBox != null)
         {
             NavContext ctx = new NavContext();
-            ctx.tree = tree;
+            ctx.treeSupplier = treeSupplier;
             ctx.enterListener = onEnter;
             searchBox.setData(NAV_CONTEXT_KEY, ctx);
             installSearchBoxKeyGuard(searchBox);
@@ -361,7 +381,7 @@ public final class FilterInputBoxListNavigation
             }
             if (!isNavigationKey(event.keyCode))
                 return;
-            navigateTree(tree, event.keyCode);
+            navigateTree(resolveTree(treeSupplier), event.keyCode);
             event.doit = false;
             keepFilterFocus(filterControl);
         });
@@ -383,6 +403,12 @@ public final class FilterInputBoxListNavigation
             event.doit = false;
             event.detail = SWT.TRAVERSE_NONE;
         });
+    }
+
+    private static Tree resolveTree(Supplier<Tree> treeSupplier)
+    {
+        Tree tree = treeSupplier != null ? treeSupplier.get() : null;
+        return tree != null && !tree.isDisposed() ? tree : null;
     }
 
     /** Ctrl+↓ — выпадающий список истории {@link SearchBox}, первый пункт выделен. */
@@ -574,9 +600,9 @@ public final class FilterInputBoxListNavigation
                     navigateTable(ctx.table, event.keyCode);
             }
         }
-        else if (ctx.tree != null)
+        else if (ctx.treeSupplier != null)
         {
-            navigateTree(ctx.tree, event.keyCode);
+            navigateTree(resolveTree(ctx.treeSupplier), event.keyCode);
         }
         keepFilterFocus(box);
         event.doit = false;
