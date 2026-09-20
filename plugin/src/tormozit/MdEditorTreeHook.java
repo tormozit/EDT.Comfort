@@ -14,6 +14,7 @@ import java.util.WeakHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Predicate;
 
+import org.eclipse.core.commands.AbstractHandler;
 import org.eclipse.core.commands.Command;
 import org.eclipse.core.commands.ExecutionEvent;
 import org.eclipse.core.commands.ExecutionException;
@@ -34,6 +35,7 @@ import org.eclipse.emf.ecore.util.EContentAdapter;
 import org.eclipse.emf.ecore.util.EcoreUtil;
 import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.jface.layout.TreeColumnLayout;
+import org.eclipse.jface.resource.ImageDescriptor;
 import org.eclipse.jface.viewers.ArrayContentProvider;
 import org.eclipse.jface.viewers.ColumnPixelData;
 import org.eclipse.jface.viewers.ColumnLabelProvider;
@@ -97,8 +99,11 @@ import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.IWindowListener;
 import org.eclipse.ui.PartInitException;
 import org.eclipse.ui.PlatformUI;
+import org.eclipse.ui.commands.ICommandImageService;
 import org.eclipse.ui.commands.ICommandService;
 import org.eclipse.ui.forms.editor.IFormPage;
+import org.eclipse.ui.handlers.IHandlerActivation;
+import org.eclipse.ui.handlers.IHandlerService;
 import org.eclipse.ui.navigator.CommonViewer;
 import org.eclipse.ui.preferences.ScopedPreferenceStore;
 import org.objectweb.asm.ClassReader;
@@ -223,6 +228,9 @@ public final class MdEditorTreeHook
     private static final String FO_PICKER_SETTINGS_SECTION = "MdEditorTreeHook.foPickerDialog"; //$NON-NLS-1$
 
     private static final String PROPERTY_SHEET_VIEW_ID = "org.eclipse.ui.views.PropertySheet"; //$NON-NLS-1$
+
+    /** Штатная команда EDT «Показать свойства» — тот же id, что и её accelerator в dt-ui: Alt+Shift+Enter. */
+    private static final String SHOW_PROPERTIES_COMMAND_ID = "com._1c.g5.v8.dt.ui.commands.showProperties"; //$NON-NLS-1$
 
     private static final String FO_PANEL_MARKER = "tormozit.mdEditorFoPanelInstalled"; //$NON-NLS-1$
 
@@ -669,7 +677,7 @@ public final class MdEditorTreeHook
     {
         private static final String PREF_WIDTH = "tormozit.mdEditor.attributesNameColumn.width"; //$NON-NLS-1$
         /** Ширина по умолчанию (нет сохранённого значения) — 30 символов текущего шрифта дерева. */
-        private static final int DEFAULT_WIDTH_CHARS = 30;
+        private static final int DEFAULT_WIDTH_CHARS = 50;
         private static final int FALLBACK_WIDTH_PX = 300;
         private static final int MIN_WIDTH = 100;
         private static final int MAX_WIDTH = 1000;
@@ -918,7 +926,10 @@ public final class MdEditorTreeHook
         {
             if (event.keyCode == SWT.DEL)
                 unassignSelectedOption(editor, table, tree, viewer);
+            else if ((event.keyCode == SWT.CR || event.keyCode == SWT.KEYPAD_CR) && event.stateMask == 0)
+                openSelectedFunctionalOption(editor, table, viewer);
         });
+        installShowPropertiesHandlerOverride(table, editor);
 
         Composite header = new Composite(panel, SWT.NONE);
         header.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
@@ -997,7 +1008,8 @@ public final class MdEditorTreeHook
      *   <li>«Сфокусировать в Навигаторе» — {@link NavigatorReveal#revealAndActivateIfHidden},
      *       тот же путь, что и у штатной команды {@code com._1c.g5.v8.dt.ui.commands.focusNavigator}
      *       (см. {@code ProjectStructureViewHook});</li>
-     *   <li>«Свойства» — панель «Свойства» по текущему выделению списка.</li>
+     *   <li>«Свойства» — панель «Свойства» по текущему выделению списка; Alt+Shift+Enter и
+     *       пиктограмма — те же, что у штатной команды EDT {@code showProperties}.</li>
      * </ul>
      * «Добавить в расширение» и «Найти ссылки на объект» из оригинала не перенесены: не нашёл
      * подтверждённого id этих команд в разобранных бандлах, гадать не стал.
@@ -1005,22 +1017,6 @@ public final class MdEditorTreeHook
     private static void installFoPanelObjectCommands(Table table, DtGranularEditor<?> editor, Tree tree,
         TreeViewer viewer)
     {
-        if (editor.getSite() != null)
-        {
-            TableRowSelectionProvider provider = new TableRowSelectionProvider(table);
-            ISelectionProvider[] previous = new ISelectionProvider[1];
-            table.addListener(SWT.FocusIn, event ->
-            {
-                previous[0] = editor.getSite().getSelectionProvider();
-                editor.getSite().setSelectionProvider(provider);
-            });
-            table.addListener(SWT.FocusOut, event ->
-            {
-                if (previous[0] != null)
-                    editor.getSite().setSelectionProvider(previous[0]);
-            });
-        }
-
         Menu menu = new Menu(table);
         table.setMenu(menu);
         menu.addMenuListener(new MenuAdapter()
@@ -1058,9 +1054,19 @@ public final class MdEditorTreeHook
         reveal.addListener(SWT.Selection, event -> revealSelectedOption(table));
 
         MenuItem properties = new MenuItem(menu, SWT.PUSH);
-        properties.setText("Свойства"); //$NON-NLS-1$
+        // MenuItem.setAccelerator ничего не даёт для всплывающего (POP_UP) меню — таблицу
+        // акселераторов Windows строит только Decorations.createAccelerators() и только для
+        // пунктов, висящих на menuBar шелла (см. .tmp/bundles/swt-src/.../Decorations.java).
+        // Подсказка клавиши — только текстом; саму клавишу обрабатывает не KeyDown (Alt+Enter —
+        // WM_SYSKEYDOWN, который до фокусного контрола не доходит вовсе: перехватывается
+        // диспетчером горячих клавиш Eclipse раньше — см. installShowPropertiesHandlerOverride),
+        // а переопределение обработчика штатной команды showProperties.
+        properties.setText("Свойства\tAlt+Shift+Enter"); //$NON-NLS-1$
+        Image propertiesIcon = showPropertiesIcon();
+        if (propertiesIcon != null)
+            properties.setImage(propertiesIcon);
         properties.setEnabled(hasSelection);
-        properties.addListener(SWT.Selection, event -> bringFoPanelPropertiesToFront(editor));
+        properties.addListener(SWT.Selection, event -> bringFoPanelPropertiesToFront(editor, table));
     }
 
     private static void revealSelectedOption(Table table)
@@ -1070,10 +1076,26 @@ public final class MdEditorTreeHook
             NavigatorReveal.revealAndActivateIfHidden(option);
     }
 
-    private static void bringFoPanelPropertiesToFront(DtGranularEditor<?> editor)
+    /**
+     * Панель «Свойства» подписана на {@link ISelectionProvider}, зарегистрированный в
+     * {@code editor.getSite()} при активации редактора, и не замечает подмену этого провайдера
+     * на другой объект — только {@code setSelection} на уже отслеживаемом. Поэтому выделение
+     * опции толкается в штатный провайдер страницы (как для «Глобальные команды», issue541),
+     * а не через отдельный {@link ISelectionProvider} для таблицы ФО.
+     */
+    private static void bringFoPanelPropertiesToFront(DtGranularEditor<?> editor, Table table)
     {
         if (editor.getSite() == null)
             return;
+        List<FunctionalOption> selected = new ArrayList<>();
+        for (TableItem item : table.getSelection())
+            if (item.getData() instanceof FunctionalOption option)
+                selected.add(option);
+        if (selected.isEmpty())
+            return;
+        ISelectionProvider provider = editor.getSite().getSelectionProvider();
+        if (provider != null)
+            provider.setSelection(new StructuredSelection(selected));
         IWorkbenchPage page = editor.getSite().getPage();
         if (page == null)
             return;
@@ -1091,6 +1113,78 @@ public final class MdEditorTreeHook
             }
         }
         page.bringToTop(view);
+    }
+
+    /**
+     * Alt+Shift+Enter — реальная привязка штатной команды EDT {@link #SHOW_PROPERTIES_COMMAND_ID}
+     * (dt-ui: {@code M3+M2+CR}, т.е. Alt+Shift+Enter), а не наша клавиша: диспетчер горячих
+     * клавиш Eclipse ({@code WorkbenchKeyboard}) перехватывает WM_SYSKEYDOWN и по совпадению с
+     * этой привязкой вызывает ТЕКУЩИЙ обработчик команды раньше, чем событие вообще доходит до
+     * {@code SWT.KeyDown} фокусного контрола (подтверждено безусловным логом: приходят только
+     * KeyDown для самих Alt/Shift, Enter не долетает вовсе ни до таблицы, ни до display-фильтра).
+     * Обойти это можно только тем же путём, каким сама EDT слушает эту клавишу — переопределить
+     * обработчик команды локально для {@code editor.getSite()} на время фокуса в таблице ФО
+     * ({@link IHandlerService#activateHandler}, тот же приём, что и для Ctrl+C в
+     * {@code StacktracesViewInteractionHook.tryInstallCopy}). Вне фокуса таблицы обработчик
+     * деактивируется — Alt+Shift+Enter в остальной части редактора продолжает работать штатно.
+     */
+    private static void installShowPropertiesHandlerOverride(Table table, DtGranularEditor<?> editor)
+    {
+        if (editor.getSite() == null)
+            return;
+        IHandlerService handlerService = editor.getSite().getService(IHandlerService.class);
+        if (handlerService == null)
+            return;
+        IHandlerActivation[] activation = new IHandlerActivation[1];
+        table.addListener(SWT.FocusIn, event -> activation[0] =
+            handlerService.activateHandler(SHOW_PROPERTIES_COMMAND_ID, new AbstractHandler()
+            {
+                @Override
+                public Object execute(ExecutionEvent event)
+                {
+                    bringFoPanelPropertiesToFront(editor, table);
+                    return null;
+                }
+            }));
+        table.addListener(SWT.FocusOut, event ->
+        {
+            if (activation[0] != null)
+            {
+                handlerService.deactivateHandler(activation[0]);
+                activation[0] = null;
+            }
+        });
+        table.addListener(SWT.Dispose, event ->
+        {
+            if (activation[0] != null)
+                handlerService.deactivateHandler(activation[0]);
+        });
+    }
+
+    private static Image showPropertiesIconCache;
+
+    /**
+     * Та же пиктограмма, что у штатной команды EDT {@link #SHOW_PROPERTIES_COMMAND_ID}
+     * (Alt+Shift+Enter). Меню пересоздаётся при каждом показе ({@code menuShown}) — картинка
+     * кэшируется статически один раз, а не через {@code ImageDescriptor.createImage()} на каждый
+     * показ (иначе не освобождаемая утечка {@code Image}).
+     */
+    private static Image showPropertiesIcon()
+    {
+        if (showPropertiesIconCache != null)
+            return !showPropertiesIconCache.isDisposed() ? showPropertiesIconCache : null;
+        try
+        {
+            ICommandImageService imageService = PlatformUI.getWorkbench().getService(ICommandImageService.class);
+            ImageDescriptor descriptor =
+                imageService != null ? imageService.getImageDescriptor(SHOW_PROPERTIES_COMMAND_ID) : null;
+            showPropertiesIconCache = descriptor != null ? descriptor.createImage() : null;
+            return showPropertiesIconCache;
+        }
+        catch (RuntimeException e)
+        {
+            return null;
+        }
     }
 
     private static void updateIncludedOptionsList(Tree tree, TreeViewer viewer, DtGranularEditor<?> editor)
@@ -1408,61 +1502,6 @@ public final class MdEditorTreeHook
         }
         updateIncludedOptionsList(tree, viewer, editor);
         refreshFunctionalOptionsCount(tree, viewer, editor);
-    }
-
-    /**
-     * {@link ISelectionProvider} по выделению строки списка ФО — подставляется в
-     * {@code editor.getSite()} на время фокуса, чтобы панель «Свойства» показывала выбранную
-     * функциональную опцию.
-     */
-    private static final class TableRowSelectionProvider implements ISelectionProvider
-    {
-        private final Table table;
-
-        private final List<ISelectionChangedListener> listeners = new ArrayList<>();
-
-        TableRowSelectionProvider(Table table)
-        {
-            this.table = table;
-            table.addListener(SWT.Selection, event -> fireSelectionChanged());
-        }
-
-        private void fireSelectionChanged()
-        {
-            SelectionChangedEvent event = new SelectionChangedEvent(this, getSelection());
-            for (ISelectionChangedListener listener : new ArrayList<>(listeners))
-                listener.selectionChanged(event);
-        }
-
-        @Override
-        public void addSelectionChangedListener(ISelectionChangedListener listener)
-        {
-            listeners.add(listener);
-        }
-
-        @Override
-        public void removeSelectionChangedListener(ISelectionChangedListener listener)
-        {
-            listeners.remove(listener);
-        }
-
-        @Override
-        public ISelection getSelection()
-        {
-            if (table.isDisposed())
-                return StructuredSelection.EMPTY;
-            List<FunctionalOption> options = new ArrayList<>();
-            for (TableItem item : table.getSelection())
-                if (item.getData() instanceof FunctionalOption option)
-                    options.add(option);
-            return options.isEmpty() ? StructuredSelection.EMPTY : new StructuredSelection(options);
-        }
-
-        @Override
-        public void setSelection(ISelection selection)
-        {
-            // Выделение задаётся кликом пользователя по строке; программно не требуется.
-        }
     }
 
     private static String foDisplayName(EObject object)

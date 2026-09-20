@@ -14,6 +14,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.WeakHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Predicate;
@@ -7981,7 +7982,31 @@ public class FormEditorHook implements IStartup
          * <p>Попытки повторяются {@link #MAX_RESTORE_ATTEMPTS} раз: на момент подключения к дереву
          * вход просмотрщика ещё может быть не задан, а выделение корня EDT ставит сама и может
          * сделать это позже нашей первой попытки. Дерево активируется сразу, как только строка
-         * найдена; на эскиз формы выделение досылается отдельно — см. {@link #syncSketch}.
+         * найдена.
+         *
+         * <p><b>Досылка на эскиз формы убрана (issue #543).</b> Раньше выделение досылалось ещё и
+         * в нативный визуализатор макета ({@code setDomainSelection}), чтобы там тоже появилась
+         * рамка вокруг восстановленного элемента. От этого отказались: рамка не появлялась
+         * нестабильно даже при обычном ручном клике по дереву (без всякого участия этого кода) —
+         * то есть причина не в тайминге досылки, а в самом нативном визуализаторе/провайдере
+         * выделения EDT, вне досягаемости плагина. Попытки нащупать рабочий момент для досылки
+         * (ждать {@code hippoSession}, ждать первый {@code SWT.Paint}, толкать раз/повторно)
+         * только добавляли лишние полные {@code rebuild()} макета (см.
+         * {@code .tmp/temp-logs/макет-превью-rebuild.log} разбор issue #543), не решая проблему.
+         * Активации строки в дереве достаточно — так минимум откуда плагин может влиять.
+         *
+         * <p><b>Не браться за это заново без полной картины.</b> Перепробованы и не помогли:
+         * ожидание {@code hippoSession} (готовность сессии раскладки — не значит «нарисовано»);
+         * ожидание первого {@code SWT.Paint} на {@code formNativeComposite} (тоже не помогло —
+         * баг не в моменте досылки); толчок раз, толчок повторно с разным интервалом (issue #543,
+         * несколько итераций в чате) — ни один вариант не убрал нестабильность. Рабочая гипотеза,
+         * так и не проверенная: {@code FormMultiControlSelectionProvider.isNewSelection} сверяет
+         * новое выделение с уже известным ему и не передаёт дальше, если совпало — похоже, именно
+         * поэтому первый клик по строке после открытия формы иногда не подсвечивается (клик на
+         * соседнюю и обратно — подсвечивается всегда). Это воспроизводится и БЕЗ участия плагина,
+         * чистым ручным кликом — то есть чинить пришлось бы поведение EDT, а не порядок вызовов
+         * здесь. Прежде чем возвращаться: подтвердить (или опровергнуть) эту гипотезу — иначе
+         * следующая попытка с высокой вероятностью повторит тот же тупик другим способом.
          */
         private static final class SelectionMemory
         {
@@ -8010,10 +8035,13 @@ public class FormEditorHook implements IStartup
                     return;
                 String remembered = STORE.load(key);
                 Global.tempLog(LOG, "install: remembered=" + remembered); //$NON-NLS-1$
-                if (remembered != null && !ROOT.equals(remembered))
-                    Display.getDefault().asyncExec(() -> restore(page, remembered, viewer, tree, 0));
+                // Пока не отработало восстановление — корень не запоминаем (см. remember):
+                // это или ещё не наша целевая строка, или транзитный корень EDT при открытии.
+                AtomicBoolean restoring = new AtomicBoolean(remembered != null && !ROOT.equals(remembered));
+                if (restoring.get())
+                    Display.getDefault().asyncExec(() -> restore(remembered, viewer, tree, 0, restoring));
 
-                viewer.addSelectionChangedListener(event -> remember(key, viewer));
+                viewer.addSelectionChangedListener(event -> remember(key, viewer, restoring));
                 tree.addListener(SWT.FocusOut, event ->
                 {
                     Global.tempLog(LOG, "flush: focusOut"); //$NON-NLS-1$
@@ -8026,7 +8054,7 @@ public class FormEditorHook implements IStartup
                 });
             }
 
-            private static void remember(String key, TreeViewer viewer)
+            private static void remember(String key, TreeViewer viewer, AtomicBoolean restoring)
             {
                 // Пустое выделение бывает и при перестроении дерева — забывать элемент из-за
                 // такого «мигания» нельзя, поэтому пустое выделение просто игнорируется.
@@ -8040,15 +8068,24 @@ public class FormEditorHook implements IStartup
                 String name = item != null ? item.getName() : null;
                 Global.tempLog(LOG, "remember: name=" + name //$NON-NLS-1$
                     + " row=" + className(structured.getFirstElement()) + " key=" + key); //$NON-NLS-1$ //$NON-NLS-2$
-                // Корень «Форма» не запоминается: EDT сама выбирает его при открытии формы,
-                // и запись затирала бы запомненный элемент раньше, чем тот успеет восстановиться.
                 if (name == null || name.isBlank())
+                {
+                    // Пока идёт восстановление, корень — транзитное состояние EDT при открытии,
+                    // а не осознанный выбор пользователя: запись затёрла бы запомненный элемент
+                    // раньше, чем тот успеет восстановиться (см. install/restore).
+                    if (restoring.get())
+                        return;
+                    // Иначе пользователь сам вернулся к корню — это и есть его выбор, запоминаем
+                    // как ROOT, а не оставляем прежний (некорневой) элемент в памяти навсегда.
+                    STORE.updateMemory(key, ROOT);
                     return;
+                }
+                restoring.set(false);
                 STORE.updateMemory(key, name);
             }
 
-            private static void restore(FormEditorPage page, String name, TreeViewer viewer, Tree tree,
-                int attempt)
+            private static void restore(String name, TreeViewer viewer, Tree tree, int attempt,
+                AtomicBoolean restoring)
             {
                 if (tree.isDisposed())
                 {
@@ -8070,100 +8107,14 @@ public class FormEditorHook implements IStartup
                 {
                     viewer.setSelection(new StructuredSelection(row), true);
                     Global.tempLog(LOG, "restore: применено, выделение=" + selectionText(viewer)); //$NON-NLS-1$
-                    syncSketch(page, viewer, tree, row, 0);
+                    restoring.set(false);
                     return;
                 }
                 if (attempt < MAX_RESTORE_ATTEMPTS)
                     Display.getDefault().timerExec(RESTORE_DELAY_MS,
-                        () -> restore(page, name, viewer, tree, attempt + 1));
-            }
-
-            /**
-             * Досылает восстановленное выделение на эскиз формы, когда тот отрисуется.
-             *
-             * <p>Дерево активируется сразу, не дожидаясь эскиза, — иначе строка «оживает» с
-             * заметной задержкой. Но рамку элемента рисует нативный визуализатор, который
-             * поднимается позже дерева: событие выделения, случившееся до его готовности,
-             * пропадает впустую, и на макете рамки нет.
-             *
-             * <p>Признак готовности — сессия раскладки представления
-             * ({@code FormWysiwygRepresentation.hippoSession}): пока она не создана,
-             * {@code manageSelectionFromFormElement} выходит первой же строкой и выделение
-             * теряется молча. Проверять «элемент отрисован» через {@code getRelatedControl}
-             * бесполезно: в нативном режиме LWT-дерево эскиза пустое, и этот вызов не даёт
-             * контрол никогда (проверено — восстановление упиралось в него все 8 секунд).
-             *
-             * <p>В нативном режиме выделение доходит до эскиза как {@code SELECT_BY_ID}:
-             * представление кладёт идентификатор элемента в {@code ILayoutRenderService} и
-             * перестраивает макет. По этому же идентификатору проверяется, что выделение
-             * действительно принято ({@link #sketchSelectedId}).
-             *
-             * <p>Повторная установка того же выделения в дерево здесь не помогла бы:
-             * {@code FormMultiControlSelectionProvider} сверяет новое выделение с прежним
-             * ({@code isNewSelection}) и одинаковое в связанные представления не передаёт.
-             * Поэтому выделение кладётся прямо в эскиз — тем же вызовом
-             * ({@code setDomainSelection}), которым его передал бы сам провайдер синхронизации.
-             *
-             * <p>Ожидание ограничено {@link #MAX_RESTORE_ATTEMPTS} и прекращается, как только
-             * выделение в дереве сменилось — пользователь выбрал своё.
-             */
-            private static void syncSketch(FormEditorPage page, TreeViewer viewer, Tree tree, Object row,
-                int attempt)
-            {
-                if (tree.isDisposed() || !isSelected(viewer, row))
-                    return;
-                FormItem item = domainItem(row);
-                Object representation = WysiwygHeaderClick.getRepresentation(page);
-                Object session =
-                    representation == null ? null : Global.getField(representation, "hippoSession"); //$NON-NLS-1$
-                boolean applied = item != null && sketchSelectedId(representation) == item.getId();
-                if (session == null || !applied)
-                {
-                    if (session != null)
-                    {
-                        Object wysiwyg = Global.getField(page, "wysiwygViewer"); //$NON-NLS-1$
-                        Object domainSelection = Global.invoke(viewer, "getDomainSelection"); //$NON-NLS-1$
-                        boolean pushed = wysiwyg != null && domainSelection != null
-                            && Global.invokeVoid(wysiwyg, "setDomainSelection", domainSelection); //$NON-NLS-1$
-                        Global.tempLog(LOG, "syncSketch: попытка " + attempt + " передано=" + pushed //$NON-NLS-1$ //$NON-NLS-2$
-                            + " выделение=" + className(domainSelection) //$NON-NLS-1$
-                            + " id эскиза=" + sketchSelectedId(representation) //$NON-NLS-1$
-                            + " id элемента=" + (item != null ? item.getId() : -1)); //$NON-NLS-1$
-                    }
-                    else if (attempt % 5 == 0)
-                    {
-                        Global.tempLog(LOG, "syncSketch: попытка " + attempt + " эскиз не готов" //$NON-NLS-1$ //$NON-NLS-2$
-                            + " (представление=" + className(representation) + ")"); //$NON-NLS-1$ //$NON-NLS-2$
-                    }
-                    if (attempt < MAX_RESTORE_ATTEMPTS)
-                        Display.getDefault().timerExec(RESTORE_DELAY_MS,
-                            () -> syncSketch(page, viewer, tree, row, attempt + 1));
-                    else
-                        Global.tempLog(LOG, "syncSketch: эскиз так и не принял выделение"); //$NON-NLS-1$
-                    return;
-                }
-                Global.tempLog(LOG, "syncSketch: принято эскизом на попытке " + attempt //$NON-NLS-1$
-                    + ", id=" + item.getId()); //$NON-NLS-1$
-            }
-
-            /**
-             * Идентификатор элемента, выбранного сейчас на эскизе, или {@code -1}. В нативном
-             * режиме именно он — единственный достоверный признак: {@code getSelection}
-             * представления читает пустое в этом режиме LWT-дерево и всегда даёт пусто.
-             */
-            private static int sketchSelectedId(Object representation)
-            {
-                Object renderService =
-                    representation == null ? null : Global.getField(representation, "renderService"); //$NON-NLS-1$
-                Object id = renderService == null ? null : Global.invoke(renderService, "getSelectedId"); //$NON-NLS-1$
-                return id instanceof Integer value ? value : -1;
-            }
-
-            /** Выбрана ли в дереве именно строка {@code row}. */
-            private static boolean isSelected(TreeViewer viewer, Object row)
-            {
-                return viewer.getSelection() instanceof IStructuredSelection structured
-                    && structured.getFirstElement() == row;
+                        () -> restore(name, viewer, tree, attempt + 1, restoring));
+                else
+                    restoring.set(false);
             }
 
             private static String className(Object o)
