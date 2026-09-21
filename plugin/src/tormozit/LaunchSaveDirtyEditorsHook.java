@@ -135,7 +135,6 @@ import com.e1c.g5.v8.dt.check.settings.IssueSeverity;
 public final class LaunchSaveDirtyEditorsHook implements IStartup
 {
     private static final String TAG = "LaunchSaveDirtyEditors"; //$NON-NLS-1$
-    private static final String ERROR_LOG = "launch-errors"; //$NON-NLS-1$
     /** После сохранения ждём догоняющий пересчёт маркеров, но не дольше этого. */
     private static final long CHECKS_WAIT_MS = 2_000;
 
@@ -318,9 +317,6 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
         private Boolean decide(ILaunchConfiguration config) throws CoreException
         {
             IProject project = resolveProject(config);
-            Global.tempLog(ERROR_LOG, "decide project=" //$NON-NLS-1$
-                + (project == null ? "null" : project.getName()) //$NON-NLS-1$
-                + " config=" + config.getName()); //$NON-NLS-1$
             if (project == null)
                 return null;
 
@@ -375,19 +371,11 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
         private Boolean decideErrors(IProject project, boolean savedNow)
         {
             if (!errorsPromptEnabled())
-            {
-                Global.tempLog(ERROR_LOG, "skip: continueWithErrors=" //$NON-NLS-1$
-                    + debugUiStore().getString(PREF_CONTINUE_WITH_ERRORS));
                 return null;
-            }
             try
             {
                 IMarkerManager markerManager = Global.getOsgiService(IMarkerManager.class);
                 IGitMarkerFilterManager baseline = gitBaselineFilter();
-                Global.tempLog(ERROR_LOG, "start project=" + project.getName() //$NON-NLS-1$
-                    + " markerManager=" + (markerManager != null) //$NON-NLS-1$
-                    + " baseline=" + baselineState(baseline, project) //$NON-NLS-1$
-                    + " savedNow=" + savedNow); //$NON-NLS-1$
                 if (markerManager == null)
                     return null;
 
@@ -401,7 +389,6 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
                 List<Row> rows = collectErrorRows(markerManager, baseline, project, open, savedNow);
                 if (savedNow)
                     rows = waitAndRecheck(markerManager, baseline, project, open, rows.isEmpty(), rows);
-                Global.tempLog(ERROR_LOG, "open=" + open.size() + " hits=" + rows.size()); //$NON-NLS-1$ //$NON-NLS-2$
                 if (rows.isEmpty())
                     return null;
 
@@ -409,13 +396,11 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
                 List<Row> errorRows = rows;
                 int[] answer = { IDialogConstants.CANCEL_ID };
                 Display.getDefault().syncExec(() -> answer[0] = openErrorsDialog(project.getName(), errorRows));
-                Global.tempLog(ERROR_LOG, "dialog=" + answer[0]); //$NON-NLS-1$
                 return answer[0] == LAUNCH_WITH_ERRORS_ID ? Boolean.TRUE : Boolean.FALSE;
             }
             catch (Throwable t)
             {
                 Global.logError(TAG, "ошибка проверки ошибок конфигурации", t); //$NON-NLS-1$
-                Global.tempLogException(ERROR_LOG, "decideErrors", t); //$NON-NLS-1$
                 return null;
             }
         }
@@ -431,11 +416,8 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
             IProject project, List<Row> open, boolean appearing, List<Row> rows)
         {
             long deadline = System.currentTimeMillis() + CHECKS_WAIT_MS;
-            int attempt = 0;
-            Global.tempLog(ERROR_LOG, "wait appearing=" + appearing + " startHits=" + rows.size()); //$NON-NLS-1$ //$NON-NLS-2$
             while (System.currentTimeMillis() < deadline)
             {
-                attempt++;
                 long remaining = deadline - System.currentTimeMillis();
                 if (remaining <= 0)
                     break;
@@ -447,9 +429,6 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
                         open.add(rowOf(editor));
                 });
                 rows = collectErrorRows(markerManager, baseline, project, open, true);
-                Global.tempLog(ERROR_LOG, "afterWait attempt=" + attempt //$NON-NLS-1$
-                    + " hits=" + rows.size() //$NON-NLS-1$
-                    + " appearing=" + appearing); //$NON-NLS-1$
                 if (appearing && !rows.isEmpty())
                     return rows;
                 if (!appearing && rows.isEmpty())
@@ -476,27 +455,15 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
             List<Row> rows = new ArrayList<>();
             for (Row row : open)
             {
-                String hit = "none"; //$NON-NLS-1$
                 try
                 {
-                    hit = configErrorHit(markerManager, baseline, project, row, afterSave);
-                    if (!"none".equals(hit)) //$NON-NLS-1$
+                    if (!"none".equals(configErrorHit(markerManager, baseline, project, row, afterSave))) //$NON-NLS-1$
                         rows.add(row);
                 }
                 catch (RuntimeException e)
                 {
-                    hit = "ex:" + e.getClass().getSimpleName(); //$NON-NLS-1$
                     Global.logError(TAG, "не удалось проверить редактор " + row.text, e); //$NON-NLS-1$
-                    Global.tempLogException(ERROR_LOG, "editor " + row.text, e); //$NON-NLS-1$
                 }
-                Global.tempLog(ERROR_LOG, "editor text=" + row.text //$NON-NLS-1$
-                    + " class=" + row.editor.getClass().getSimpleName() //$NON-NLS-1$
-                    + " ids=" + row.ids //$NON-NLS-1$
-                    + " files=" + fileNames(row.files) //$NON-NLS-1$
-                    + " live=" + row.liveHit //$NON-NLS-1$
-                    + " trusted=" + row.liveTrusted //$NON-NLS-1$
-                    + " afterSave=" + afterSave //$NON-NLS-1$
-                    + " hit=" + hit); //$NON-NLS-1$
             }
             return rows;
         }
@@ -742,8 +709,29 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
         // если живые аннотации модуля уже пустые — им верим.
         if (afterSave && row.liveTrusted && "none".equals(row.liveHit)) //$NON-NLS-1$
             return "none"; //$NON-NLS-1$
-        return hasMarkerErrors(markers, baseline, project, row.ids, minSeverity())
-            ? "markers" : "none"; //$NON-NLS-1$ //$NON-NLS-2$
+        if (hasMarkerErrors(markers, baseline, project, row.ids, minSeverity()))
+            return "markers"; //$NON-NLS-1$
+        // IMarkerManager обновляется волнами с периодом порядка 20–30 с (issue 564, замерено
+        // логом) — ждать эту волну на каждом запуске отладки нельзя. Живая ошибочная аннотация
+        // Xtext доступна сразу, но несёт только бинарный признак «красная» критичность — какая
+        // именно из BLOCKER/CRITICAL/MAJOR сработала, не известно. Доверяем ей напрямую только
+        // когда выбранный порог не строже MAJOR (самой слабой из «красных»): тогда любая красная
+        // ошибка модуля заведомо проходит фильтр критичности, и IMarkerManager не нужен.
+        if (row.liveTrusted && hasLiveError(row.liveHit) && liveConfirmsSeverity())
+            return "live"; //$NON-NLS-1$
+        return "none"; //$NON-NLS-1$
+    }
+
+    /**
+     * @return {@code true}, если выбранный минимум критичности не строже {@link MarkerSeverity#MAJOR}
+     *     — самой слабой из критичностей, которые EDT показывает в модуле ошибкой
+     *     ({@link LaunchPageAugmenter#choosableSeverities}). В этом случае любая живая ошибочная
+     *     аннотация модуля гарантированно проходит порог, какая бы из «красных» критичностей за
+     *     ней ни стояла.
+     */
+    private static boolean liveConfirmsSeverity()
+    {
+        return minSeverity().ordinal() >= MarkerSeverity.MAJOR.ordinal();
     }
 
     private static boolean hasLiveError(String liveHit)
@@ -836,15 +824,13 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
 
     private static void waitForChecks(IProject project, long timeoutMs)
     {
-        long started = System.currentTimeMillis();
         IDerivedDataManagerProvider provider = Global.getOsgiService(IDerivedDataManagerProvider.class);
         IDerivedDataManager manager = provider != null ? provider.get(project) : null;
-        boolean idle = manager == null;
         if (manager != null && timeoutMs > 0)
         {
             try
             {
-                idle = manager.waitAllComputations(timeoutMs);
+                manager.waitAllComputations(timeoutMs);
             }
             catch (InterruptedException e)
             {
@@ -852,11 +838,8 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
             }
             catch (RuntimeException e)
             {
-                Global.tempLog(ERROR_LOG, "waitChecks ex=" + e.getClass().getSimpleName()); //$NON-NLS-1$
             }
         }
-        Global.tempLog(ERROR_LOG, "waitChecks ms=" + (System.currentTimeMillis() - started) //$NON-NLS-1$
-            + " idle=" + idle); //$NON-NLS-1$
     }
 
     /**
@@ -913,22 +896,9 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
         if (ids == null || ids.isEmpty())
             return false;
         MarkerFilter filter = MarkerFilter.createObjectFilter(project, ids);
-        int[] hidden = { 0 };
-        boolean found = markers.markers(filter).anyMatch(marker ->
-        {
-            if (!severityAccepted(marker.getSeverity(), minSeverity))
-                return false;
-            if (!hiddenByGitBaseline(baseline, project, marker))
-                return true;
-            hidden[0]++;
-            Global.tempLog(ERROR_LOG, "baseline hides severity=" + marker.getSeverity() //$NON-NLS-1$
-                + " check=" + marker.getCheckId() //$NON-NLS-1$
-                + " msg=" + marker.getMessage()); //$NON-NLS-1$
-            return false;
-        });
-        if (hidden[0] > 0)
-            Global.tempLog(ERROR_LOG, "baseline hidden markers=" + hidden[0] + " found=" + found); //$NON-NLS-1$ //$NON-NLS-2$
-        return found;
+        return markers.markers(filter).anyMatch(marker ->
+            severityAccepted(marker.getSeverity(), minSeverity)
+                && !hiddenByGitBaseline(baseline, project, marker));
     }
 
     /** @return служба штатного отбора проблем базовой ветки git или {@code null}, если недоступна */
@@ -940,7 +910,6 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
         }
         catch (RuntimeException | LinkageError e)
         {
-            Global.tempLog(ERROR_LOG, "baseline service ex=" + e.getClass().getSimpleName()); //$NON-NLS-1$
             return null;
         }
     }
@@ -966,36 +935,10 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
         }
         catch (RuntimeException | LinkageError e)
         {
-            Global.tempLog(ERROR_LOG, "baseline skip ex=" + e.getClass().getSimpleName()); //$NON-NLS-1$
             return false;
         }
     }
 
-    /** Состояние отбора базовой ветки для журнала диагностики. */
-    private static String baselineState(IGitMarkerFilterManager baseline, IProject project)
-    {
-        if (baseline == null)
-            return "none"; //$NON-NLS-1$
-        try
-        {
-            return "enabled=" + baseline.isFiltrationEnabled() //$NON-NLS-1$
-                + ",project=" + baseline.isFiltrationEnabledForProject(project) //$NON-NLS-1$
-                + ",hide=" + baseline.isHideGitBasedCheckResults(project) //$NON-NLS-1$
-                + ",applied=" + baseline.isFilterApplied(); //$NON-NLS-1$
-        }
-        catch (RuntimeException | LinkageError e)
-        {
-            return "ex:" + e.getClass().getSimpleName(); //$NON-NLS-1$
-        }
-    }
-
-    private static String fileNames(List<IFile> files)
-    {
-        List<String> names = new ArrayList<>();
-        for (IFile file : files)
-            names.add(file.getProjectRelativePath().toString());
-        return names.toString();
-    }
 
     /**
      * Сохраняет редакторы поштучно ({@code IEditorPart.doSave}), а не через
@@ -1199,10 +1142,9 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
 
         private static final String LABEL = "Минимальная критичность:"; //$NON-NLS-1$
         private static final String TOOLTIP =
-            "Перед запуском клиента проверяются проблемы конфигурации объектов открытых редакторов"
-                + " запускаемого проекта, и при значении «Предлагать» задаётся вопрос. Учитываются"
-                + " проблемы этой критичности и серьёзнее — более мягкие запуску не мешают."
-                + " В списке только те критичности, которые EDT показывает в модуле ошибкой.";
+            "Минимальная критичность проблемы открытых редакторов, о которой спрашивать при"
+                + " значении «Предлагать». «Значительная» — предупреждение без задержки, строже —"
+                + " точнее, но может сработать не сразу, а на следующем запуске.";
 
         private static final WeakHashMap<Shell, Boolean> wired = new WeakHashMap<>();
 

@@ -10,6 +10,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.emf.common.util.EList;
@@ -571,8 +573,94 @@ public final class CallHierarchyViewHook implements IStartup
                 return;
             }
             if (isResultEvent(event, "Finish")) //$NON-NLS-1$
+            {
                 searchFinished = true;
+                // Временная диагностика issue "иерархия вызовов игнорирует локальные вызовы":
+                // сверяем число текстовых вхождений имени метода в его собственном модуле
+                // с числом ссылок, которые штатный поиск реально принял (CallHierarchyResult.accept
+                // молча дедуплицирует по sourceEObjectUri — подозрение на протухший локальный индекс).
+                verifyLocalOccurrences();
+            }
+            if (isResultEvent(event, "Added")) //$NON-NLS-1$
+                logAddedReference(event);
             queueFill(display);
+        }
+
+        void logAddedReference(Object event)
+        {
+            try
+            {
+                Object description = Global.invoke(event, "getReferenceDescription"); //$NON-NLS-1$
+                if (!(description instanceof IReferenceDescription ref))
+                    return;
+                Global.tempLog("callHierarchy", "added source=" + ref.getSourceEObjectUri() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " target=" + ref.getTargetEObjectUri() + " index=" + ref.getIndexInList()); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            catch (RuntimeException ignored)
+            {
+            }
+        }
+
+        void verifyLocalOccurrences()
+        {
+            try
+            {
+                if (!isCallersMode(view) || hookedResult == null)
+                    return;
+                Object query = Global.invoke(hookedResult, "getQuery"); //$NON-NLS-1$
+                Object targetUrisRaw = Global.invoke(query, "getTargetUris"); //$NON-NLS-1$
+                if (!(targetUrisRaw instanceof Iterable<?> uris))
+                    return;
+                java.util.Iterator<?> it = uris.iterator();
+                if (!it.hasNext())
+                    return;
+                Object firstUri = it.next();
+                if (!(firstUri instanceof URI targetUri))
+                    return;
+                EObject target = resolveEObject(targetUri);
+                if (!(target instanceof Method method))
+                    return;
+                Module module = EcoreUtil2.getContainerOfType(method, Module.class);
+                if (module == null || module.eResource() == null)
+                    return;
+                String name = method.getName();
+                if (name == null || name.isEmpty())
+                    return;
+                ICompositeNode node = NodeModelUtils.findActualNodeFor(module);
+                String text = node != null ? node.getText() : null;
+                if (text == null)
+                    return;
+                int textCount = countWholeWordOccurrences(text, name);
+                URI moduleUri = module.eResource().getURI();
+                int acceptedCount = 0;
+                for (IReferenceDescription d : matchingReferences())
+                {
+                    URI source = sourceUri(d);
+                    if (source != null && source.trimFragment().equals(moduleUri))
+                        acceptedCount++;
+                }
+                // Одно вхождение — собственное объявление метода (не вызов).
+                if (textCount > acceptedCount + 1)
+                {
+                    Global.tempLog("callHierarchy", //$NON-NLS-1$
+                        "MISMATCH module=" + moduleUri + " method=" + name //$NON-NLS-1$ //$NON-NLS-2$
+                            + " textOccurrences=" + textCount + " acceptedFromModule=" + acceptedCount); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+            }
+            catch (RuntimeException ignored)
+            {
+            }
+        }
+
+        static int countWholeWordOccurrences(String text, String word)
+        {
+            Pattern pattern = Pattern.compile("\\b" + Pattern.quote(word) + "\\b", //$NON-NLS-1$ //$NON-NLS-2$
+                Pattern.CASE_INSENSITIVE);
+            Matcher matcher = pattern.matcher(text);
+            int count = 0;
+            while (matcher.find())
+                count++;
+            return count;
         }
 
         void queueFill(Display display)

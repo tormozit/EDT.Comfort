@@ -1544,6 +1544,12 @@ String baseKind;
         ICompletionProposal[] delegateBaseSnapshot = delegateBase;
         String baseKindFinal = baseKind;
         boolean clearProbeOnEmptyBaseFinal = clearProbeOnEmptyBase;
+        // #region issue562 diag
+        Global.tempLog("assist-ir-race", "schedule gen=" + gen + " ctxKey=" + ctxKeyAtSchedule //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " irN=" + irProposalsSnapshot.length + " delegateN=" + delegateBaseSnapshot.length //$NON-NLS-1$ //$NON-NLS-2$
+            + " baseKind=" + baseKindFinal); //$NON-NLS-1$
+        logIrRaceSnapshot("schedule.delegateBase", delegateBaseSnapshot); //$NON-NLS-1$
+        // #endregion issue562 diag
         IR_MERGE_EXECUTOR.execute(() -> {
             ICompletionProposal[] merged;
             try
@@ -1574,6 +1580,14 @@ String baseKind;
         ICompletionProposal[] merged, String baseKind, boolean clearProbeOnEmptyBase,
         int beforeIrN, int beforeFullN, int incomingIrN, boolean scheduleRefresh)
     {
+        // #region issue562 diag
+        boolean discarded = gen != mergeGeneration.get() || ctxKeyAtSchedule != fullListContextKey;
+        Global.tempLog("assist-ir-race", "apply gen=" + gen + " curGen=" + mergeGeneration.get() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " ctxKeyAtSchedule=" + ctxKeyAtSchedule + " curCtxKey=" + fullListContextKey //$NON-NLS-1$ //$NON-NLS-2$
+            + " mergedN=" + merged.length + " discarded=" + discarded); //$NON-NLS-1$ //$NON-NLS-2$
+        if (!discarded)
+            logIrRaceSnapshot("apply.merged", merged); //$NON-NLS-1$
+        // #endregion issue562 diag
         if (gen != mergeGeneration.get() || ctxKeyAtSchedule != fullListContextKey)
         {
 return;
@@ -2226,7 +2240,23 @@ return result;
     /**
      * Быстрый пересчёт popup по тёплому кэшу; {@code null} — нужен полный {@link #computeForPopupRefresh}.
      */
+    /**
+     * Обёртка {@link #filterCachedProposalsForPopupImpl}: тем же критерием, что и
+     * {@link #computeCompletionProposals}, добавляет бесскобочный {@code Тип} для
+     * {@code Новый <Тип>}, когда среди перегрузок есть {@code Тип()} — issue 558. Этот путь
+     * обновляет УЖЕ открытый попап (набор букв без пересчёта через computeCompletionProposals),
+     * поэтому синтез нужен и здесь отдельно, тем же {@link #synthesizeBareConstructorProposals}.
+     */
     ICompletionProposal[] filterCachedProposalsForPopup(ITextViewer viewer, int caret, String filter)
+    {
+        ICompletionProposal[] result = filterCachedProposalsForPopupImpl(viewer, caret, filter);
+        if (result == null || result.length == 0)
+            return result;
+        return synthesizeBareConstructorProposals(result,
+            viewer != null ? viewer.getDocument() : null, caret);
+    }
+
+    private ICompletionProposal[] filterCachedProposalsForPopupImpl(ITextViewer viewer, int caret, String filter)
     {
         if (irOnlyManualMode || selectionIrOnlyActive())
         {
@@ -2539,6 +2569,8 @@ return;
                 else
                     result = awaitMemberStockWhenEmpty(viewer, offset, result);
             }
+            result = synthesizeBareConstructorProposals(result,
+                viewer != null ? viewer.getDocument() : null, offset);
             return result;
         }
         finally
@@ -4418,8 +4450,51 @@ return EMPTY;
         if (irProposals.length > 0 && irSnapshotContextKey == fullListContextKey)
             stock = stripEmptyPlaceholderProposals(stock);
         delegateListCache = stock;
+        // Откачено: bump mergeGeneration здесь ломал список ("нет вариантов") — промежуточные
+        // синхронные assignFullListCache(EMPTY) (их несколько по коду, штатная очистка перед
+        // пересчётом) обнуляли generation и глушили последующий фоновый merge ИР, который как
+        // раз и должен был список починить. Гипотеза о гонке была верна не полностью — тот же
+        // счётчик нельзя использовать для инвалидации синхронного пути без разбора каждого
+        // caller'а assignFullListCache(EMPTY). Не повторять без раздельного счётчика/анализа.
+        // #region issue562 diag
+        Global.tempLog("assist-ir-race", "syncAssign curGen=" + mergeGeneration.get() //$NON-NLS-1$ //$NON-NLS-2$
+            + " ctxKey=" + fullListContextKey + " rawN=" + (cache != null ? cache.length : 0) //$NON-NLS-1$ //$NON-NLS-2$
+            + " stockN=" + stock.length); //$NON-NLS-1$
+        logIrRaceSnapshot("syncAssign.stock", stock); //$NON-NLS-1$
+        // #endregion issue562 diag
         rebuildMergedFullListCache();
+        // #region issue562 diag
+        logIrRaceSnapshot("syncAssign.fullListCache", fullListCache); //$NON-NLS-1$
+        // #endregion issue562 diag
     }
+
+    /**
+     * #region issue562 diag — временная диагностика гонки (issue 562): логирует пункты
+     * списка, чьё имя начинает(ся) на "нстр" (без учёта регистра), с полным текстом строки.
+     * Снять после подтверждения/опровержения гипотезы о гонке merge-путей.
+     */
+    private static void logIrRaceSnapshot(String phase, ICompletionProposal[] list)
+    {
+        if (list == null || list.length == 0)
+            return;
+        int shown = 0;
+        for (ICompletionProposal p : list)
+        {
+            if (p == null)
+                continue;
+            String display = p.getDisplayString();
+            if (display == null)
+                continue;
+            String lower = display.toLowerCase(java.util.Locale.ROOT);
+            if (!lower.startsWith("нстр")) //$NON-NLS-1$
+                continue;
+            Global.tempLog("assist-ir-race", phase + " [" + p.getClass().getSimpleName() + "] " //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + display);
+            if (++shown >= 6)
+                break;
+        }
+    }
+    // #endregion issue562 diag
 
     private void rebuildMergedFullListCache()
     {
@@ -4990,29 +5065,57 @@ return stripEmptyPlaceholderProposals(result);
     }
 
     /**
-     * Типы, для которых {@code Новый Тип} без скобок — валидный отдельный синтаксис 1С.
-     * Ни ИР (не считает параметры конструкторов при заполнении таблицы слов — дорого),
-     * ни EDT (не даёт этого дёшево) не позволяют определить это динамически — список
-     * поддерживается вручную.
+     * Кэш {@link #isBareConstructorTypeName} на сеанс EDT (не на окно модуля — минимум
+     * параметров платформенного конструктора от конкретного редактора не зависит, пересчитывать
+     * его для каждого окна незачем). Issue 558: раньше — хардкод-список имён, теперь — модель
+     * типов EDT ({@link CtorMinParamsInsert#resolveType}/{@code Ctor.getMinParams()}).
      */
-    private static final Set<String> BARE_CONSTRUCTOR_TYPE_NAMES_LC = Set.of(
-        "структура", "массив"); //$NON-NLS-1$ //$NON-NLS-2$
+    private static final Map<String, Boolean> BARE_CTOR_TYPE_CACHE =
+        new java.util.concurrent.ConcurrentHashMap<>();
 
-    /** Имя типа из {@link #BARE_CONSTRUCTOR_TYPE_NAMES_LC} (бесскобочный конструктор после {@code Новый}). */
+    /**
+     * {@code Новый Тип} без скобок валиден, если хотя бы у одного конструктора типа
+     * {@code getMinParams()==0} — источник модель типов EDT, не хардкод-список (issue 558).
+     * Результат кэшируется по имени типа на весь сеанс EDT: первый запрос под конкретное имя
+     * резолвит {@link Type} через scope Xtext-ресурса (read-lock), дальше — из кэша.
+     */
     static boolean isBareConstructorTypeName(String name)
     {
         if (name == null || name.isEmpty())
             return false;
-        return BARE_CONSTRUCTOR_TYPE_NAMES_LC.contains(name.toLowerCase(java.util.Locale.ROOT));
+        String key = name.toLowerCase(java.util.Locale.ROOT);
+        Boolean cached = BARE_CTOR_TYPE_CACHE.get(key);
+        if (cached != null)
+            return cached.booleanValue();
+        boolean result = computeHasZeroMinParamsConstructor(name);
+        BARE_CTOR_TYPE_CACHE.put(key, Boolean.valueOf(result));
+        return result;
+    }
+
+    private static boolean computeHasZeroMinParamsConstructor(String typeName)
+    {
+        Type type = CtorMinParamsInsert.resolveType(typeName);
+        if (type == null)
+            return false;
+        EList<Ctor> ctors = type.getCtors();
+        if (ctors == null)
+            return false;
+        for (Ctor ctor : ctors)
+        {
+            if (ctor != null && ctor.getMinParams() == 0)
+                return true;
+        }
+        return false;
     }
 
     /**
      * Разрешено ли добавить в merged ИР-предложение, не совпавшее по {@link #mergeMatchKey}
      * ни с одной EDT-очередью. Для не-бесскобочных (метод/скобочный шаблон) — не наша забота,
      * всегда {@code true}. Для бесскобочных — только если EDT либо вообще не знает такого
-     * имени (нет конфликта), либо имя есть в {@link #BARE_CONSTRUCTOR_TYPE_NAMES_LC} (иначе
-     * конструктор может требовать обязательные аргументы, и «Тип» без скобок рискует быть
-     * невалидным синтаксисом).
+     * имени (нет конфликта), либо {@link #isBareConstructorTypeName} подтверждает через модель
+     * типов, что у конструктора есть перегрузка с {@code getMinParams()==0} (иначе конструктор
+     * может требовать обязательные аргументы, и «Тип» без скобок рискует быть невалидным
+     * синтаксисом).
      */
     private static boolean isBareUnmatchedIrProposalAllowed(ICompletionProposal irP,
         Map<String, Deque<ICompletionProposal>> delegateByKey)
@@ -5036,8 +5139,8 @@ return stripEmptyPlaceholderProposals(result);
                 return true;
         }
         // У EDT для этого имени нет явной 0-параметровой перегрузки (как у «Структура»/
-        // «Массив» — обе перегрузки с 1+ параметрами) — используем ручной список исключений.
-        return BARE_CONSTRUCTOR_TYPE_NAMES_LC.contains(base.toLowerCase(java.util.Locale.ROOT));
+        // «Массив»/«Запрос» — все перегрузки с 1+ параметрами) — проверяем через модель типов.
+        return isBareConstructorTypeName(base);
     }
 
     /**
@@ -5088,6 +5191,264 @@ return stripEmptyPlaceholderProposals(result);
             return irProposalHasParens(ir);
         return edtProposalHasParens(raw)
             && parseProposalParamNames(displayString(raw)).isEmpty();
+    }
+
+    /**
+     * Синтезирует бесскобочный {@code Тип} — issue 558/156. Два источника: (1) среди перегрузок
+     * есть штатный EDT-вариант {@code Тип()} (0 параметров) — раньше бесскобочный вариант
+     * зависел от того, вернёт ли ИР соответствующее слово, и пропадал целиком, если ИР в моменте
+     * слово не отдавал (гонка, отключен); (2) явного {@code Тип()} у EDT нет (все перегрузки
+     * с параметрами, как у «Структура»/«Массив»/«Запрос» — параметры опциональные, EDT их не
+     * разворачивает в отдельный 0-параметровый пункт) — тогда через модель типов EDT
+     * ({@link #isBareConstructorTypeName}, {@code Ctor.getMinParams()==0}).
+     * <p>Только в контексте {@code Новый <Тип>} ({@link #isAfterNewKeyword}) — вне его бесскобочная
+     * форма для метода/функции была бы невалидным синтаксисом.
+     */
+    private static ICompletionProposal[] synthesizeBareConstructorProposals(
+        ICompletionProposal[] list, IDocument doc, int caret)
+    {
+        if (list == null || list.length == 0 || doc == null || !isAfterNewKeyword(doc, caret))
+            return list;
+        Set<String> bareKeysPresent = new HashSet<>();
+        Map<String, ICompletionProposal> zeroArgByKey = new LinkedHashMap<>();
+        Map<String, ICompletionProposal> firstByKey = new LinkedHashMap<>();
+        for (ICompletionProposal p : list)
+        {
+            String key = dedupKey(p);
+            if (key.isEmpty())
+                continue;
+            String lower = key.toLowerCase(java.util.Locale.ROOT);
+            firstByKey.putIfAbsent(lower, p);
+            if (isEffectivelyBare(p))
+                bareKeysPresent.add(lower);
+            else if (isEffectivelyZeroArgWithParens(p) && !zeroArgByKey.containsKey(lower))
+                zeroArgByKey.put(lower, p);
+        }
+        Map<String, ICompletionProposal> toInsert = new LinkedHashMap<>();
+        for (Map.Entry<String, ICompletionProposal> e : zeroArgByKey.entrySet())
+        {
+            if (bareKeysPresent.contains(e.getKey()))
+                continue; // бесскобочный уже есть (обычно от ИР) — preferBareOverEmptyParens уберёт "()"
+            ICompletionProposal raw = unwrapProposal(e.getValue());
+            String typeName = parseProposalListName(displayString(raw));
+            if (typeName.isEmpty())
+                continue;
+            // +1 — чтобы при равном имени сортировщик (SmartCodeProposalSorter →
+            // compareProposals → resolveNativePriority) ставил бесскобочный НАД перегрузками
+            // своей же группы, а не наравне/ниже (issue 558: без этого тонет в общем списке,
+            // т.к. у синтезированного predlozhenия нет "родного" приоритета EDT).
+            toInsert.put(e.getKey(),
+                new BareConstructorProposal(typeName, raw.getImage(), resolveNativePriority(raw) + 1, raw));
+        }
+        // Структура/Массив/Запрос и подобные: EDT не выдаёт отдельную перегрузку "Тип()" — все
+        // параметры опциональные, EDT показывает одну перегрузку "Тип(Ключи, Значения)" без
+        // нулевой (issue 558: залогировано — "Структура()" не приходит никогда). Синтезировать
+        // не из чего напрямую — спрашиваем модель типов EDT (isBareConstructorTypeName).
+        for (Map.Entry<String, ICompletionProposal> e : firstByKey.entrySet())
+        {
+            String key = e.getKey();
+            if (toInsert.containsKey(key) || bareKeysPresent.contains(key))
+                continue;
+            ICompletionProposal raw = unwrapProposal(e.getValue());
+            String typeName = parseProposalListName(displayString(raw));
+            // Оригинальный регистр — точнее для QualifiedName-поиска в isBareConstructorTypeName
+            // (кэш промахнётся один раз мимо, дальше по-любому из кэша).
+            if (typeName.isEmpty() || !isBareConstructorTypeName(typeName))
+                continue;
+            toInsert.put(key,
+                new BareConstructorProposal(typeName, raw.getImage(), resolveNativePriority(raw) + 1, raw));
+        }
+        if (toInsert.isEmpty())
+            return list;
+        // Бесскобочный вариант — самый частый выбор (issue 156), вставляем ПЕРЕД первым
+        // предложением своей группы, а не в конец всего списка (issue 558: иначе тонет внизу
+        // среди совсем других типов).
+        List<ICompletionProposal> merged = new ArrayList<>(list.length + toInsert.size());
+        Set<String> insertedKeys = new HashSet<>();
+        for (ICompletionProposal p : list)
+        {
+            String lower = dedupKey(p).toLowerCase(java.util.Locale.ROOT);
+            ICompletionProposal bare = !lower.isEmpty() && insertedKeys.add(lower)
+                ? toInsert.get(lower) : null;
+            if (bare != null)
+                merged.add(bare);
+            merged.add(p);
+        }
+        List<ICompletionProposal> deduped = preferBareOverEmptyParens(merged);
+        return deduped.toArray(new ICompletionProposal[deduped.size()]);
+    }
+
+    /**
+     * Proposal для {@link #synthesizeBareConstructorProposals} — не оборачивается в
+     * {@link SmartCompletionProposal} (не нужно: своя, уже корректная apply-логика для
+     * простой вставки имени типа, без пересечения с IR-специфичным диспетчером обёртки).
+     */
+    private static final class BareConstructorProposal implements ICompletionProposal,
+        ICompletionProposalExtension2, org.eclipse.jface.text.contentassist.ICompletionProposalExtension3,
+        org.eclipse.jface.text.contentassist.ICompletionProposalExtension5
+    {
+        private final String typeName;
+        private final org.eclipse.swt.graphics.Image image;
+        /** Приоритет для {@link #resolveNativePriority} — issue 558, см. вызовы конструктора. */
+        private final int priority;
+        /** Источник (перегрузка того же типа) — для бокового попапа с описанием (issue 558). */
+        private final ICompletionProposal source;
+        private Point selection;
+
+        BareConstructorProposal(String typeName, org.eclipse.swt.graphics.Image image, int priority,
+            ICompletionProposal source)
+        {
+            this.typeName = typeName;
+            this.image = image;
+            this.priority = priority;
+            this.source = source;
+        }
+
+        int getPriority()
+        {
+            return priority;
+        }
+
+        @Override
+        public Object getAdditionalProposalInfo(IProgressMonitor monitor)
+        {
+            if (source == null)
+                return null;
+            // Как SmartCompletionProposal.readDelegateEdtAdditionalInfo: штатный hover EDT
+            // для EObject без ресурса иногда падает — не подавляем заранее, ловим локально.
+            if (source instanceof org.eclipse.jface.text.contentassist.ICompletionProposalExtension5 ext5)
+            {
+                try
+                {
+                    return ext5.getAdditionalProposalInfo(
+                        monitor != null ? monitor : new org.eclipse.core.runtime.NullProgressMonitor());
+                }
+                catch (RuntimeException e)
+                {
+                    return null;
+                }
+            }
+            return source.getAdditionalProposalInfo();
+        }
+
+        /**
+         * Без этого боковой попап рисует штатный текстовый control JFace, а не HTML-браузер
+         * EDT — HTML из {@link #getAdditionalProposalInfo(IProgressMonitor)} показывается сырым
+         * текстом (issue 558, давняя тема — см. issue 545). Источник сигнатуры уже умеет это
+         * (обычно {@code ConfigurableCompletionProposal}) — переиспользуем его creator.
+         */
+        @Override
+        public org.eclipse.jface.text.IInformationControlCreator getInformationControlCreator()
+        {
+            if (source instanceof org.eclipse.jface.text.contentassist.ICompletionProposalExtension3 ext3)
+                return ext3.getInformationControlCreator();
+            return null;
+        }
+
+        @Override
+        public CharSequence getPrefixCompletionText(IDocument document, int completionOffset)
+        {
+            return null;
+        }
+
+        @Override
+        public int getPrefixCompletionStart(IDocument document, int completionOffset)
+        {
+            return completionOffset;
+        }
+
+        private void doApply(IDocument document, int offset)
+        {
+            if (document == null)
+                return;
+            int caret = offset >= 0 ? offset : document.getLength();
+            int from = computeIdentifierWordStart(document, caret);
+            int len = Math.max(0, caret - from);
+            // Штатный EDT-конструктор сам решает, нужен ли завершающий ";" (законченный
+            // оператор присваивания и т.п.) — переносим то же решение на бесскобочную вставку
+            // по replacementString ИСТОЧНИКА (issue 558): он посчитан EDT для текущего места.
+            String insertText = shouldAppendSemicolon() ? typeName + ";" : typeName; //$NON-NLS-1$
+            try
+            {
+                document.replace(from, len, insertText);
+                // В конце, после ";" — скобок для параметров нет, останавливать каретку
+                // перед ";" незачем (в отличие от "Тип(|)", где внутри есть что печатать).
+                selection = new Point(from + insertText.length(), 0);
+            }
+            catch (org.eclipse.jface.text.BadLocationException e)
+            {
+                selection = new Point(caret, 0);
+            }
+        }
+
+        private boolean shouldAppendSemicolon()
+        {
+            if (!(source instanceof ConfigurableCompletionProposal cp))
+                return false;
+            String repl = cp.getReplacementString();
+            return repl != null && repl.trim().endsWith(";"); //$NON-NLS-1$
+        }
+
+        @Override
+        public void apply(IDocument document)
+        {
+            doApply(document, document != null ? document.getLength() : -1);
+        }
+
+        @Override
+        public void apply(ITextViewer viewer, char trigger, int stateMask, int offset)
+        {
+            doApply(viewer != null ? viewer.getDocument() : null, offset);
+        }
+
+        @Override
+        public void selected(ITextViewer viewer, boolean smartToggle)
+        {
+        }
+
+        @Override
+        public void unselected(ITextViewer viewer)
+        {
+        }
+
+        @Override
+        public boolean validate(IDocument document, int offset, DocumentEvent event)
+        {
+            int caret = resolveFilterCaret(document, offset, event);
+            String prefix = document != null && caret >= 0
+                ? computeIdentifierFilter(document, caret) : ""; //$NON-NLS-1$
+            return prefix.isEmpty() || typeName.regionMatches(true, 0, prefix, 0, prefix.length());
+        }
+
+        @Override
+        public Point getSelection(IDocument document)
+        {
+            return selection;
+        }
+
+        @Override
+        public String getAdditionalProposalInfo()
+        {
+            return source != null ? source.getAdditionalProposalInfo() : null;
+        }
+
+        @Override
+        public String getDisplayString()
+        {
+            return typeName;
+        }
+
+        @Override
+        public org.eclipse.swt.graphics.Image getImage()
+        {
+            return image;
+        }
+
+        @Override
+        public IContextInformation getContextInformation()
+        {
+            return null;
+        }
     }
 
     static String dedupKeyForMerge(ICompletionProposal proposal)
@@ -8930,6 +9291,8 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
     static int resolveNativePriority(ICompletionProposal proposal)
     {
         ICompletionProposal p = unwrapProposal(proposal);
+        if (p instanceof BareConstructorProposal bare)
+            return bare.getPriority();
         if (p instanceof IrCompletionProposal ir)
             return ir.getIrPriority();
         if (p instanceof ConfigurableCompletionProposal)

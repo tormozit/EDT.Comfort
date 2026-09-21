@@ -1021,7 +1021,12 @@ boolean inLiteral = endCaret >= 0
         // слушателя и на запятой гаснет, после чего показ ждёт готовности AST (в логе
         // 21:55:20 — 512 мс) и пользователь видит дыру. Наша встаёт один раз, дальше
         // параметры переключает штатный CustomCaretListener, мгновенно.
-        if (desiredCaret >= 0)
+        // allInfo — список LinkedPosition, которые сам EDT формирует под редактируемые
+        // параметры вызова (BslProposalProvider$DataEvent.doIt заводит слушателя только
+        // при allInfo непустом). Пуст — значит редактировать нечего (вызов без параметров,
+        // напр. ТекущаяДата()) — своей подсказкой это не подменять, иначе показывается
+        // виртуальный параметр там, где параметров нет вовсе (issue 557).
+        if (desiredCaret >= 0 && after.allInfoSize > 0)
         {
             pendingShowParamHintAfterInsert = true;
             pendingParamHintDesiredCaret = desiredCaret;
@@ -2370,9 +2375,14 @@ boolean inLiteral = endCaret >= 0
             // Без restore опрос подсказки ждёт совпадения и падает с caretMismatch.
             // Раньше только поля выражений; то же бывает в модуле, когда LinkedMode
             // не вошёл или JFace переставил каретку после doIt.
+            // allInfo пуст (или ключа вовсе нет, как у NoLinkModelCompletionProposal
+            // без параметров, напр. ТекущаяДата()) — редактировать нечего, каретку внутрь
+            // скобок не тащим, иначе штатное «после )» подменяется на «внутри ()» даже
+            // без единого параметра (issue 557).
             boolean needRestore = ("async0".equals(phase) || "async1".equals(phase) //$NON-NLS-1$ //$NON-NLS-2$
                 || "async10".equals(phase)) //$NON-NLS-1$
                 && desired >= 0 && modelCaret != desired && viewer != null
+                && mapDiag.allInfoSize > 0
                 && (expressionField || pendingShowParamHintAfterInsert
                     || insertEnd >= 0 && modelCaret == insertEnd);
             if (needRestore)

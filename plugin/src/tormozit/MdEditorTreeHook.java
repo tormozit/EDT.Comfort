@@ -501,13 +501,9 @@ public final class MdEditorTreeHook
             return;
         installFormColumnsGuard(viewer);
         if (!hasClassifiableRow(tree))
-        {
-            Global.tempLog("form-columns-width", "installFormColumns: нет классифицируемой строки, выход"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
-        }
         if (isStandardAttributesTree(tree))
         {
-            Global.tempLog("form-columns-width", "installFormColumns: дерево стандартных реквизитов, колонки не создаём"); //$NON-NLS-1$ //$NON-NLS-2$
             tree.setData(FORM_COLUMNS_CLASSIFIED_MARKER, Boolean.TRUE);
             removeFormColumns(tree);
             return;
@@ -516,15 +512,9 @@ public final class MdEditorTreeHook
         DtGranularEditor<?> editor = MdEditorAttributeMenuHook.editorOf(tree);
         EObject owner = editor != null ? editor.getModel() : null;
         if (owner == null)
-        {
-            Global.tempLog("form-columns-width", "installFormColumns: owner == null, выход"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
-        }
         List<FormColumn> forms = mainForms(owner);
         String signature = formColumnsSignature(forms);
-        Global.tempLog("form-columns-width", "installFormColumns: forms.size()=" + forms.size() //$NON-NLS-1$ //$NON-NLS-2$
-            + ", signature=" + signature + ", cached=" + tree.getData(FORM_COLUMNS_SIGNATURE_KEY) //$NON-NLS-1$ //$NON-NLS-2$
-            + ", columnCount=" + tree.getColumnCount()); //$NON-NLS-1$
         if (signature.equals(tree.getData(FORM_COLUMNS_SIGNATURE_KEY)))
         {
             if (tree.getData(FORM_COLUMNS_KEY) instanceof List<?> installed)
@@ -535,7 +525,6 @@ public final class MdEditorTreeHook
             disableNativeColumnStretch(tree);
             if (tree.getColumnCount() > 0)
                 installNameColumnWidthPersistence(tree.getColumn(0));
-            Global.tempLog("form-columns-width", "installFormColumns: сигнатура совпала, колонки переиспользованы"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
 
@@ -544,7 +533,6 @@ public final class MdEditorTreeHook
                 column.dispose();
         if (forms.isEmpty())
         {
-            Global.tempLog("form-columns-width", "installFormColumns: forms.isEmpty(), колонки форм не создаём"); //$NON-NLS-1$ //$NON-NLS-2$
             tree.setData(FORM_COLUMNS_KEY, List.of());
             tree.setData(FORM_COLUMNS_SIGNATURE_KEY, signature);
             return;
@@ -623,24 +611,9 @@ public final class MdEditorTreeHook
         installFormColumnDoubleClick(tree);
         FormTreeInteraction.install(tree, viewer);
         disableNativeColumnStretch(tree);
-        Global.tempLog("form-columns-width", "installFormColumns: колонки созданы, columnCount=" //$NON-NLS-1$ //$NON-NLS-2$
-            + tree.getColumnCount() + ", headerVisible=" + tree.getHeaderVisible()); //$NON-NLS-1$
         Composite parent = tree.getParent();
         if (parent != null && !parent.isDisposed())
             parent.layout(true, true);
-        tree.getDisplay().timerExec(2000, () -> logSettledWidths(tree));
-    }
-
-    /** Снимок ширин колонок через 2с после установки — видно, к чему пришла подгонка на самом деле. */
-    private static void logSettledWidths(Tree tree)
-    {
-        if (tree.isDisposed())
-            return;
-        StringBuilder widths = new StringBuilder();
-        for (TreeColumn column : tree.getColumns())
-            widths.append(column.getWidth()).append(','); //$NON-NLS-1$
-        Global.tempLog("form-columns-width", "logSettledWidths: clientWidth=" + tree.getClientArea().width //$NON-NLS-1$ //$NON-NLS-2$
-            + ", widths=" + widths); //$NON-NLS-1$
     }
 
     /**

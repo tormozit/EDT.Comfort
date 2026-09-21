@@ -68,10 +68,13 @@ public class SmartCompletionProposal implements
     static final ThreadLocal<Boolean> IR_REPLACE_PARENT_APPLY = new ThreadLocal<>();
 
     /**
-     * ИР-слово с заменой родителя для overlap EDT, запомненное в {@link #selected}
-     * до {@code assistSessionEnded} (там {@code irProposals} уже пуст).
+     * ИР-слово overlap для EDT-строки (issue 562), запомненное в {@link #selected}
+     * до {@code assistSessionEnded}: тот зовётся ДО {@code apply()} и чистит
+     * {@code ACTIVE_PROCESSOR}/{@code openSessionReloader}, поэтому повторный
+     * {@code findIrOverlapForEdt(delegate)} в момент apply уже не находит ничего
+     * ({@code getActiveProcessor()} вернёт {@code null}) — использовать только этот кэш.
      */
-    private IrCompletionProposal overlapReplaceParentIr;
+    private IrCompletionProposal overlapIr;
 
     /** Каретка после overlap-вставки ИР; {@code -1} — не задана. */
     private int overlapIrCaret = -1;
@@ -326,6 +329,12 @@ public class SmartCompletionProposal implements
         EqualsSpacePad pad = EqualsSpacePad.install(document, caret, delegate);
         boolean irApply = delegate instanceof IrCompletionProposal;
         boolean replaceParentOverlap = isEdtOverlapReplaceParent();
+        // #region issue562 diag
+        Global.tempLog("assist-ir-adapter", "apply.viewer delegate=" //$NON-NLS-1$ //$NON-NLS-2$
+            + SmartContentAssistProcessor.unwrapProposal(delegate).getClass().getSimpleName()
+            + " display=" + delegate.getDisplayString() + " irApply=" + irApply //$NON-NLS-1$ //$NON-NLS-2$
+            + " replaceParentOverlap=" + replaceParentOverlap); //$NON-NLS-1$
+        // #endregion issue562 diag
         beginProposalApply(document, irApply, replaceParentOverlap);
         try
         {
@@ -336,6 +345,9 @@ public class SmartCompletionProposal implements
             if (viewer != null && tryApplyWordOnly(document, viewer, offset, stateMask))
             {
                 logApplyWordOnly("viewer"); //$NON-NLS-1$
+                // #region issue562 diag
+                Global.tempLog("assist-ir-adapter", "apply.viewer wordOnly=true - adapter skipped"); //$NON-NLS-1$ //$NON-NLS-2$
+                // #endregion issue562 diag
                 return;
             }
             if (irApply
@@ -346,6 +358,8 @@ public class SmartCompletionProposal implements
                 applyIrBareCtorOrDelegate(document, viewer, trigger, stateMask, caret);
                 return;
             }
+            if (viewer != null && tryApplyGeneralIrOverlapAdapter(viewer, offset))
+                return;
             if (delegate instanceof ICompletionProposalExtension2)
                 ((ICompletionProposalExtension2) delegate).apply(viewer, trigger, stateMask, offset);
             else if (document != null)
@@ -356,6 +370,41 @@ public class SmartCompletionProposal implements
             endProposalApply();
             pad.scheduleRestore();
         }
+    }
+
+    /**
+     * Issue 562: EDT-строка, заместившая при merge слово ИР с тем же ключом (напр. одна из
+     * перегрузок {@code НСтр(...)} вместо общей строки ИР), обязана так же вызвать
+     * {@code Адаптер_ПриВыбореСтрокиАвтодополнения} — иначе внешние инструменты ИР не видят
+     * событие выбора для отображённых по факту слов. Текст вставляет EDT {@code delegate.apply}
+     * как обычно (сигнатура/LinkedMode перегрузки — ценность, ради которой merge оставил именно
+     * эту строку); адаптер переопределяет вставку сам, только если это решил он
+     * ({@link #tryApplyWithIrAdapter}).
+     */
+    private boolean tryApplyGeneralIrOverlapAdapter(ITextViewer viewer, int offset)
+    {
+        // issue 562: findIrOverlapForEdt(delegate) здесь напрямую не годится — apply()
+        // выполняется уже после assistSessionEnded (см. javadoc у #overlapIr), поэтому
+        // используем то, что resolveOverlapIr взял из кэша #selected.
+        IrCompletionProposal ir = resolveOverlapIr();
+        // #region issue562 diag
+        Global.tempLog("assist-ir-adapter", "tryApplyGeneralIrOverlapAdapter dedupKey=" //$NON-NLS-1$ //$NON-NLS-2$
+            + SmartContentAssistProcessor.dedupKeyForMerge(delegate)
+            + " irFound=" + (ir != null) //$NON-NLS-1$
+            + (ir != null ? " irWord=" + ir.getWordValue() : "")); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion issue562 diag
+        if (ir == null)
+            return false;
+        IR_PROPOSAL_APPLY_IN_PROGRESS.set(Boolean.TRUE);
+        boolean handled = tryApplyWithIrAdapter(ir, viewer, offset);
+        if (handled)
+            captureOverlapIrCaret(ir);
+        else
+            IR_PROPOSAL_APPLY_IN_PROGRESS.remove();
+        // #region issue562 diag
+        Global.tempLog("assist-ir-adapter", "tryApplyGeneralIrOverlapAdapter handled=" + handled); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion issue562 diag
+        return handled;
     }
 
     /** Активация строки assist (Eclipse {@code selected}), не подтверждение {@code apply}. */
@@ -429,20 +478,25 @@ public class SmartCompletionProposal implements
     {
         if (delegate instanceof IrCompletionProposal)
             return null;
-        if (overlapReplaceParentIr != null && overlapReplaceParentIr.isReplaceParentOnInsert())
-            return overlapReplaceParentIr;
-        IrCompletionProposal ir = findIrOverlapForEdt(delegate);
-        if (ir != null && ir.isReplaceParentOnInsert())
-            return ir;
-        return null;
+        IrCompletionProposal ir = resolveOverlapIr();
+        return ir != null && ir.isReplaceParentOnInsert() ? ir : null;
+    }
+
+    /** ИР-слово overlap для текущей EDT-строки: сперва кэш из {@link #selected}, иначе live-поиск. */
+    private IrCompletionProposal resolveOverlapIr()
+    {
+        if (delegate instanceof IrCompletionProposal)
+            return null;
+        if (overlapIr != null)
+            return overlapIr;
+        return findIrOverlapForEdt(delegate);
     }
 
     private void stashOverlapReplaceParentIr()
     {
         if (delegate instanceof IrCompletionProposal)
             return;
-        IrCompletionProposal ir = findIrOverlapForEdt(delegate);
-        overlapReplaceParentIr = ir != null && ir.isReplaceParentOnInsert() ? ir : null;
+        overlapIr = findIrOverlapForEdt(delegate);
     }
 
     private boolean tryApplyEdtOverlapReplaceParent(IDocument document, ITextViewer viewer,
@@ -483,10 +537,19 @@ public class SmartCompletionProposal implements
     {
         // Bare-ctor ИР (Структура/Массив): не через адаптер — только имя, без ()/("").
         if (isBareCtorIrWord(ir))
+        {
+            // #region issue562 diag
+            Global.tempLog("assist-ir-adapter", "tryApplyWithIrAdapter bareCtor=true - skip"); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion issue562 diag
             return false;
+        }
 
         BslXtextEditor activeBslEditor = GetRef.getActiveBslEditor(PlatformUI.getWorkbench().getActiveWorkbenchWindow().getActivePage().getActivePart());
-        IRSession session = IrBslExpressionHtmlSupport.resolveConnectedSession(activeBslEditor); 
+        IRSession session = IrBslExpressionHtmlSupport.resolveConnectedSession(activeBslEditor);
+        // #region issue562 diag
+        Global.tempLog("assist-ir-adapter", "tryApplyWithIrAdapter session=" + (session != null) //$NON-NLS-1$ //$NON-NLS-2$
+            + " ir.word=" + ir.getWordValue()); //$NON-NLS-1$
+        // #endregion issue562 diag
         if (session == null)
             return false;
 
@@ -506,10 +569,19 @@ public class SmartCompletionProposal implements
         catch (Exception e)
         {
             IrCompletionDebug.problem("адаптер apply: " + e.getMessage()); //$NON-NLS-1$
+            // #region issue562 diag
+            Global.tempLog("assist-ir-adapter", "tryApplyWithIrAdapter EXCEPTION " + e); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion issue562 diag
             return false;
         }
         IrCompletionDebug.timing("Адаптер_ПриВыбореСтрокиАвтодополнения", started); //$NON-NLS-1$
 
+        // #region issue562 diag
+        Global.tempLog("assist-ir-adapter", "tryApplyWithIrAdapter result=" + (result != null) //$NON-NLS-1$ //$NON-NLS-2$
+            + (result != null ? " newTemplate=" + (result.newTemplate != null) //$NON-NLS-1$
+                + " formatText=" + result.formatText //$NON-NLS-1$
+                + " isGeneratorWithLineStart=" + result.isGeneratorWithLineStart : "")); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion issue562 diag
         if (result == null)
             return false;
 

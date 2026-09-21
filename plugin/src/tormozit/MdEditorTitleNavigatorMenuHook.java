@@ -78,13 +78,13 @@ import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
  * становится гиперссылкой, открывающей контекстное меню навигатора для строки этого
  * объекта.
  *
- * <p>Заголовок страницы («Справочник._ДемоКассы.Основные») — это заголовок формы
+ * <p>Заголовок страницы («БСП.Справочник._ДемоКассы.Основные») — это заголовок формы
  * Eclipse Forms: {@code DtGranularEditorPage.createFormContentInternal} вызывает
  * {@code ScrolledForm.setText(getPageTitle())}. Комфорт приводит штатный путь
- * («Справочники → … → Основные») к полному имени: префикс — полное имя объекта
- * из модели редактора (системные слова в единственном числе, имена объектов без
- * изменений — форма «Команды» не превращается в «Команда»), сегменты через точку;
- * имя текущей страницы (последнее звено) не меняется.
+ * («Справочники → … → Основные») к полному имени: спереди — имя проекта редактора,
+ * дальше полное имя объекта из модели редактора (системные слова в единственном числе,
+ * имена объектов без изменений — форма «Команды» не превращается в «Команда»), сегменты
+ * через точку; имя текущей страницы (последнее звено) не меняется.
  * Область заголовка ({@code TitleRegion})
  * всегда содержит два контрола — {@code Label} и {@code StyledText}, видим ровно один;
  * переключение — {@link Form#setTitleTextSelectable(boolean)}. Ссылку можно оформить только на
@@ -247,7 +247,7 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
             if (scrolledForm == null || scrolledForm.isDisposed())
                 return;
 
-            applyPageTitleFormat(scrolledForm, mdObject);
+            applyPageTitleFormat(scrolledForm, mdObject, editor);
             install(scrolledForm.getForm(), mdObject, editor);
         }
         catch (Exception e)
@@ -289,14 +289,15 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
 
     /**
      * Штатный заголовок EDT — «Справочники → Валюты → Формы → …». Комфорт приводит
-     * его к полному имени: «Справочник.Валюты.Форма.…».
+     * его к полному имени с именем проекта спереди: «БСП.Справочник.Валюты.Форма.…».
      */
-    private static void applyPageTitleFormat(ScrolledForm scrolledForm, MdObject mdObject)
+    private static void applyPageTitleFormat(ScrolledForm scrolledForm, MdObject mdObject,
+        IEditorPart editor)
     {
         if (scrolledForm == null || scrolledForm.isDisposed())
             return;
         String text = scrolledForm.getText();
-        String formatted = formatPageTitle(text, mdObject);
+        String formatted = formatPageTitle(text, mdObject, editor);
         if (formatted != null && !formatted.equals(text))
             scrolledForm.setText(formatted);
     }
@@ -309,10 +310,10 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
      * (вкладки), его не трогаем: «Функциональные опции» это заголовок страницы,
      * а не тип МД «ФункциональнаяОпция». Если полное имя модели недоступно или
      * число сегментов не сходится — конвертация системных слов по одному, кроме
-     * сегмента, равного имени объекта. Уже отформатированный заголовок (без
-     * стрелки) не меняет.
+     * сегмента, равного имени объекта. Спереди добавляется имя проекта ({@code editor}),
+     * если его удалось определить. Уже отформатированный заголовок (без стрелки) не меняет.
      */
-    private static String formatPageTitle(String title, MdObject mdObject)
+    private static String formatPageTitle(String title, MdObject mdObject, IEditorPart editor)
     {
         if (title == null || title.isEmpty() || title.indexOf('→') < 0)
             return title;
@@ -331,10 +332,11 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
             return title;
 
         String pageName = parts[lastNonEmpty].strip();
+        String projectPrefix = projectNamePrefix(editor);
 
         String configTitle = formatConfigurationPageTitle(parts, lastNonEmpty, mdObject);
         if (configTitle != null)
-            return configTitle;
+            return projectPrefix + configTitle;
 
         String fullName = mdObject == null ? null : GetRef.eObjectToFullName(mdObject);
         if (fullName != null && !fullName.isBlank())
@@ -346,7 +348,7 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
                     prefixSegments++;
             }
             if (prefixSegments == fullName.split("\\.", -1).length) //$NON-NLS-1$
-                return fullName + '.' + pageName;
+                return projectPrefix + fullName + '.' + pageName;
         }
 
         String objectName = mdObject == null ? null : mdObject.getName();
@@ -366,7 +368,15 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
             else
                 formatted.append(segment);
         }
-        return formatted.length() == 0 ? title : formatted.toString();
+        return formatted.length() == 0 ? title : projectPrefix + formatted;
+    }
+
+    /** Имя проекта редактора с точкой-разделителем, либо пустая строка, если оно недоступно. */
+    private static String projectNamePrefix(IEditorPart editor)
+    {
+        IProject project = Global.getActiveProject(editor, false);
+        String name = project == null ? null : project.getName();
+        return name == null || name.isBlank() ? "" : name + '.'; //$NON-NLS-1$
     }
 
     /**
@@ -736,7 +746,7 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
                 return;
 
             String text = titleText.getText();
-            String formatted = formatPageTitle(text, mdObject);
+            String formatted = formatPageTitle(text, mdObject, editor);
             if (formatted != null && !formatted.equals(text))
             {
                 applyingTitle = true;
