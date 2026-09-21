@@ -14,7 +14,6 @@
     <startup class="tormozit.FormWysiwygScrollHook"/>
     <startup class="tormozit.ActiveProjectTracker"/>
     <startup class="tormozit.PreferencesDialogTransferHook"/>
-    <startup class="tormozit.PropertyPagesDiag"/>
     <startup class="tormozit.CompareConfigMenuHook"/>
     <startup class="tormozit.NavigatorDropSearchHook"/>
     <startup class="tormozit.ApplicationsViewHook"/>

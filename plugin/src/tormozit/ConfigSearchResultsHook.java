@@ -2600,8 +2600,14 @@ public final class ConfigSearchResultsHook implements IStartup
      * Смещение {@link MatchRow#directOffset} — от начала файла модуля, ровно того текста, по
      * которому вхождение и нашлось, поэтому годится для {@code selectAndReveal} без пересчёта.
      *
+     * <p>Для BSL-модуля — не generic {@code IDE.openEditor} (issue 556: открывал урезанный/
+     * рассинхронизированный с документом редактор, тот же класс проблемы, что и «задвоение
+     * видимых строк» у {@link ShowInModuleHandler#openBslModule}), а granular-редактор через
+     * {@link GoToDefinition#openBslModuleAtOffset}. Для остальных файлов (не модуль) — как раньше.
+     *
      * <p>Xtext-редактор после открытия ещё догоняет разбор и успевает сбросить выделение —
-     * поэтому выделяем повторно с задержкой.
+     * поэтому для не-модульных файлов выделяем повторно с задержкой; у granular-редактора модуля
+     * это уже учтено внутри {@code openBslModuleAtOffset}.
      */
     private static void openSyntheticMatch(MatchRow row, IWorkbenchPage page)
     {
@@ -2609,6 +2615,14 @@ public final class ConfigSearchResultsHook implements IStartup
             return;
         try
         {
+            if (BslModuleMethodResolver.isBslModule(row.file))
+            {
+                Shell shell = page.getWorkbenchWindow() != null ? page.getWorkbenchWindow().getShell() : null;
+                if (GoToDefinition.openBslModuleAtOffset(row.file, row.directOffset, row.directLength, page,
+                    shell))
+                    return;
+                log("openSyntheticMatch: openBslModuleAtOffset не удалось, откат к IDE.openEditor"); //$NON-NLS-1$
+            }
             IEditorPart editor = org.eclipse.ui.ide.IDE.openEditor(page, row.file, true);
             if (editor == null)
                 return;

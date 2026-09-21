@@ -3180,16 +3180,10 @@ public class FormEditorHook implements IStartup
                 }
                 hook(page, independentTree, "independentCommandActionsGroup"); //$NON-NLS-1$
                 hook(page, parameterizedTree, "parametrizedCommandActionGroup"); //$NON-NLS-1$
-                // #region agent log
-                Global.tempLog("issue541", "attach: hooked both trees"); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
             }
             catch (Exception e)
             {
                 Global.logError("FormEditorHook.GlobalCommandsProperties", "attach", e); //$NON-NLS-1$ //$NON-NLS-2$
-                // #region agent log
-                Global.tempLogException("issue541", "attach", e); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
             }
         }
 
@@ -3211,10 +3205,6 @@ public class FormEditorHook implements IStartup
             try
             {
                 EObject target = resolveSelectedDomain(tree);
-                // #region agent log
-                Global.tempLog("issue541", "onSelection field=" + actionsGroupField //$NON-NLS-1$ //$NON-NLS-2$
-                    + " target=" + (target == null ? "null" : target.eClass().getName())); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
                 if (target == null)
                     return;
                 updatePropertiesContentQuietly(page, target);
@@ -3222,9 +3212,6 @@ public class FormEditorHook implements IStartup
             catch (Exception e)
             {
                 Global.logError("FormEditorHook.GlobalCommandsProperties", "onSelection", e); //$NON-NLS-1$ //$NON-NLS-2$
-                // #region agent log
-                Global.tempLogException("issue541", "onSelection", e); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
             }
         }
 
@@ -3280,17 +3267,9 @@ public class FormEditorHook implements IStartup
             if (selection.length != 1)
                 return null;
             Object data = selection[0].getData();
-            // #region agent log
-            Global.tempLog("issue541", "resolveSelectedDomain data=" //$NON-NLS-1$ //$NON-NLS-2$
-                + (data == null ? "null" : data.getClass().getName())); //$NON-NLS-1$
-            // #endregion
             if (!(data instanceof IMappingModel<?> mapping))
                 return null;
             Object domain = mapping.getDomain();
-            // #region agent log
-            Global.tempLog("issue541", "resolveSelectedDomain domain=" //$NON-NLS-1$ //$NON-NLS-2$
-                + (domain == null ? "null" : domain.getClass().getName())); //$NON-NLS-1$
-            // #endregion
             return domain instanceof EObject eObject ? eObject : null;
         }
     }

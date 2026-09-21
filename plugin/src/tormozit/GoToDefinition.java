@@ -1318,32 +1318,59 @@ public class GoToDefinition extends AbstractHandler
      */
     static boolean openBslModuleAtLine(IFile file, int line1Based, IWorkbenchPage page, Shell shell)
     {
-        if (file == null)
+        XtextEditor xtextEditor = openBslModuleGranularEditor(file);
+        if (xtextEditor == null)
             return false;
+        IXtextDocument document = (IXtextDocument) xtextEditor.getDocument();
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return true;
+        display.asyncExec(() -> revealXtextLine(xtextEditor, document, line1Based));
+        return true;
+    }
+
+    /**
+     * Тот же granular-редактор модуля, но переход по точному смещению/длине в тексте (не по
+     * номеру строки) — для полнотекстовых вхождений ({@code directOffset}/{@code directLength}
+     * из {@link ConfigSearchResultsHook}), у которых нет надёжного номера строки, зато есть точный
+     * диапазон, которым и так нашлось совпадение.
+     */
+    static boolean openBslModuleAtOffset(IFile file, int offset, int length, IWorkbenchPage page, Shell shell)
+    {
+        XtextEditor xtextEditor = openBslModuleGranularEditor(file);
+        if (xtextEditor == null)
+            return false;
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return true;
+        display.asyncExec(() -> revealXtextOffset(xtextEditor, offset, length));
+        return true;
+    }
+
+    /**
+     * Открывает BSL-модуль тем же путём, что и «Перейти к определению» ({@link #openModuleRefViaUri})
+     * — через {@code OpenHelper}/platform-URI, а не generic {@code IDE.openEditor}: модуль в EDT —
+     * это granular-редактор ({@code DtGranularEditor}), и открытие его как обычного файла (как
+     * делает {@link #openFileAtLine}) может рассинхронизировать редактор с документом — на практике
+     * это проявлялось как задвоение видимых строк / урезанное содержимое в открывшемся редакторе
+     * (issue 556: то же самое через {@code IDE.openEditor} в {@code ConfigSearchResultsHook}).
+     *
+     * @return {@code null}, если открыть не удалось
+     */
+    private static XtextEditor openBslModuleGranularEditor(IFile file)
+    {
+        if (file == null)
+            return null;
         try
         {
             URI moduleUri = URI.createPlatformResourceURI(file.getFullPath().toString(), true)
                                .appendFragment("/0"); //$NON-NLS-1$
             IEditorPart editorPart = new OpenHelper().openEditor(moduleUri, (ISelection) null);
-            if (editorPart == null)
-            {
-                return false;
-            }
-            XtextEditor xtextEditor = BslHandlerUtil.extractXtextEditor(editorPart);
-            if (xtextEditor == null)
-            {
-                return false;
-            }
-            IXtextDocument document = (IXtextDocument) xtextEditor.getDocument();
-            Display display = Display.getDefault();
-            if (display == null || display.isDisposed())
-                return true;
-            display.asyncExec(() -> revealXtextLine(xtextEditor, document, line1Based));
-            return true;
+            return editorPart != null ? BslHandlerUtil.extractXtextEditor(editorPart) : null;
         }
         catch (Exception e)
         {
-            return false;
+            return null;
         }
     }
 
@@ -1353,6 +1380,21 @@ public class GoToDefinition extends AbstractHandler
         {
             int line0 = Math.max(0, Math.min(line1Based - 1, document.getNumberOfLines() - 1));
             xtextEditor.selectAndReveal(document.getLineOffset(line0), 0);
+        }
+        catch (Exception e)
+        {
+        }
+    }
+
+    private static void revealXtextOffset(XtextEditor xtextEditor, int offset, int length)
+    {
+        try
+        {
+            IXtextDocument document = (IXtextDocument) xtextEditor.getDocument();
+            int max = document.getLength();
+            int safeOffset = Math.max(0, Math.min(offset, max));
+            int safeLength = Math.max(0, Math.min(length, max - safeOffset));
+            xtextEditor.selectAndReveal(safeOffset, safeLength);
         }
         catch (Exception e)
         {

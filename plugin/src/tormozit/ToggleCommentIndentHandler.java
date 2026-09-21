@@ -36,10 +36,8 @@ public class ToggleCommentIndentHandler extends AbstractHandler {
 
 	@Override
 	public Object execute(ExecutionEvent event) throws ExecutionException {
-		Global.tempLog("toggle-comment", "execute() called");
 		IEditorPart editorPart = HandlerUtil.getActiveEditor(event);
 		BslXtextEditor bslEditor = GetRef.getActiveBslEditor(editorPart);
-		Global.tempLog("toggle-comment", "bslEditor=" + bslEditor);
 		if (bslEditor == null)
 			return null;
 		ITextEditor editor = bslEditor;
@@ -60,15 +58,11 @@ public class ToggleCommentIndentHandler extends AbstractHandler {
 			return null;
 
 		ITextOperationTarget operationTarget = editor.getAdapter(ITextOperationTarget.class);
-		if (operationTarget == null) {
-			Global.tempLog("toggle-comment", "no ITextOperationTarget, exit");
+		if (operationTarget == null)
 			return null;
-		}
 
 		try {
-			boolean commented = isRangeCommented(document, startLine, endLine);
-			Global.tempLog("toggle-comment", "commented=" + commented);
-			if (commented) {
+			if (isRangeCommented(document, startLine, endLine)) {
 				// штатное снятие комментария уже учитывает отступ каждой строки индивидуально —
 				// используем ту же реализацию, что и оригинальная команда, а не свою копию.
 				if (operationTarget.canDoOperation(ITextOperationTarget.STRIP_PREFIX))
@@ -76,9 +70,8 @@ public class ToggleCommentIndentHandler extends AbstractHandler {
 			} else {
 				commentWithMinIndent(editor, document, textSelection, startLine, endLine);
 			}
-			Global.tempLog("toggle-comment", "done");
 		} catch (BadLocationException e) {
-			Global.tempLog("toggle-comment", "BadLocationException: " + e.getMessage());
+			// не должно происходить: диапазон строк взят из актуального выделения
 		}
 		return null;
 	}

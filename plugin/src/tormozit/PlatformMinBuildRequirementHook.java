@@ -50,8 +50,6 @@ public class PlatformMinBuildRequirementHook implements IStartup
     private static final String MIN_BUILD_MESSAGE_FIELD =
         "Restrictions_Version__0__1__is_not_supported_DT_supports_installation_of_version__0__with_build_greated_than__2"; //$NON-NLS-1$
 
-    private static final String LOG_TOPIC = "platformMinBuild"; //$NON-NLS-1$
-
     @Override
     public void earlyStartup()
     {
@@ -59,10 +57,8 @@ public class PlatformMinBuildRequirementHook implements IStartup
         {
             patch();
         }
-        catch (Exception e)
+        catch (Exception ignored)
         {
-            Global.tempLogException(LOG_TOPIC,
-                "не удалось подключиться к валидатору минимальной сборки платформы", e); //$NON-NLS-1$
         }
     }
 
@@ -71,30 +67,17 @@ public class PlatformMinBuildRequirementHook implements IStartup
         IRuntimeInstallationManager manager = ServiceAccess.get(
             IRuntimeInstallationManager.class, ServiceProperties.named(ENTERPRISE_PLATFORM_TYPE_ID));
         if (manager == null)
-        {
-            Global.tempLog(LOG_TOPIC, "менеджер инсталляций EnterprisePlatform не найден"); //$NON-NLS-1$
             return;
-        }
 
         IRuntimeInstallationValidator original = manager.getRuntimeInstallationValidator();
         if (original == null)
-        {
-            Global.tempLog(LOG_TOPIC, "у менеджера EnterprisePlatform нет валидатора"); //$NON-NLS-1$
             return;
-        }
         if (Proxy.isProxyClass(original.getClass()))
-        {
-            Global.tempLog(LOG_TOPIC, "валидатор уже подменён (повторный earlyStartup?)"); //$NON-NLS-1$
             return;
-        }
 
         Field field = findField(manager.getClass(), VALIDATOR_FIELD_NAME);
         if (field == null)
-        {
-            Global.tempLog(LOG_TOPIC,
-                "поле " + VALIDATOR_FIELD_NAME + " не найдено в " + manager.getClass()); //$NON-NLS-1$ //$NON-NLS-2$
             return;
-        }
 
         Pattern minBuildPattern = buildMinBuildPattern(original);
 
@@ -105,8 +88,6 @@ public class PlatformMinBuildRequirementHook implements IStartup
 
         field.setAccessible(true);
         field.set(manager, proxy);
-        Global.tempLog(LOG_TOPIC,
-            "валидатор подменён, шаблон минимальной сборки распознан: " + (minBuildPattern != null)); //$NON-NLS-1$
     }
 
     /**
@@ -135,10 +116,8 @@ public class PlatformMinBuildRequirementHook implements IStartup
             }
             return Pattern.compile(regex.toString(), Pattern.DOTALL);
         }
-        catch (Exception e)
+        catch (Exception ignored)
         {
-            Global.tempLogException(LOG_TOPIC,
-                "не удалось получить шаблон сообщения минимальной сборки", e); //$NON-NLS-1$
             return null;
         }
     }
