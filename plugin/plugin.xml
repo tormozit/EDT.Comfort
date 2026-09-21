@@ -715,6 +715,30 @@
         </with>
       </activeWhen>
     </handler>
+    <!-- Перехват штатной команды Xtext «Переключить комментарий» (org.eclipse.xtext.ui.ToggleCommentAction):
+         при включении комментария "//" вставляется в колонку минимального отступа среди выделенных
+         строк, а не в 0-ю колонку, как в штатной реализации (TextViewer.shiftRight). activePartId
+         добавлен на случай, если штатная активация обработчика редактора несёт свой sourcePriority,
+         чтобы наш обработчик выигрывал детерминированно, а не по случайному порядку регистрации. -->
+    <handler
+        class="tormozit.ToggleCommentIndentHandler"
+        commandId="org.eclipse.xtext.ui.ToggleCommentAction">
+      <activeWhen>
+        <and>
+          <with variable="activePartId">
+            <instanceof value="java.lang.String"/>
+          </with>
+          <with variable="activeContexts">
+            <iterate operator="or">
+              <equals value="com._1c.g5.v8.dt.bsl.ui.editor.BslEditorScope"/>
+            </iterate>
+          </with>
+          <with variable="activePart">
+            <instanceof value="org.eclipse.ui.IEditorPart"/>
+          </with>
+        </and>
+      </activeWhen>
+    </handler>
     <!-- Перехват штатных команд EDT «Перейти по операторным скобкам вперёд/назад» (в том числе
          с выделением): внутри многострочного текстового литерала переход выполняется к его
          границам, в остальных случаях работает штатная реализация.
