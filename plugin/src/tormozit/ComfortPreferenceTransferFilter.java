@@ -27,8 +27,6 @@ import org.eclipse.ui.internal.preferences.PreferenceTransferElement;
  */
 final class ComfortPreferenceTransferFilter
 {
-    private static final String TAG = "ComfortPreferenceTransferFilter"; //$NON-NLS-1$
-
     private static final String PREFERENCE_TRANSFER_EXTENSION_POINT = "org.eclipse.ui.preferenceTransfer"; //$NON-NLS-1$
 
     private static final String SUFFIX_COMMON = " (Общие)"; //$NON-NLS-1$
@@ -93,21 +91,12 @@ final class ComfortPreferenceTransferFilter
         if (source == null)
             return new PreferenceTransferElement[0];
         List<PreferenceTransferElement> result = new ArrayList<>(source.length);
-        StringBuilder hidden = new StringBuilder();
         for (PreferenceTransferElement element : source)
         {
             if (isJavaCategory(element))
-            {
-                hidden.append(hidden.isEmpty() ? "" : ", ").append(element.getID()); //$NON-NLS-1$ //$NON-NLS-2$
                 continue;
-            }
             result.add(wrap(element, null, null));
         }
-        StringBuilder shown = new StringBuilder();
-        for (PreferenceTransferElement element : result)
-            shown.append(shown.isEmpty() ? "" : "; ").append(element.getLabel(null)); //$NON-NLS-1$ //$NON-NLS-2$
-        Global.tempLog(TAG, "filterAndLabel: source=" + source.length + " shown=" + result.size() //$NON-NLS-1$ //$NON-NLS-2$
-                + " [" + shown + "] hiddenJdt=[" + hidden + "]"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         return result.toArray(new PreferenceTransferElement[0]);
     }
 
@@ -130,10 +119,7 @@ final class ComfortPreferenceTransferFilter
 
         PreferenceTransferElement raw = findRawElement(transferId);
         if (raw == null)
-        {
-            Global.tempLog(TAG, "appendProjectCategory: id не найден в реестре расширений: " + transferId); //$NON-NLS-1$
             return elements;
-        }
         PreferenceTransferElement[] result = Arrays.copyOf(elements, elements.length + 1);
         result[elements.length] = wrap(raw, projectNamesSupplier, preferenceNodeQualifier);
         return result;
@@ -260,7 +246,6 @@ final class ComfortPreferenceTransferFilter
         if (filters == null)
             return filters;
         List<IPreferenceFilter> kept = new ArrayList<>(filters.length);
-        int removed = 0;
         for (IPreferenceFilter filter : filters)
         {
             Map<String, PreferenceFilterEntry[]> mapping = filter == null ? null : filter.getMapping("instance"); //$NON-NLS-1$
@@ -270,14 +255,9 @@ final class ComfortPreferenceTransferFilter
                 for (PreferenceFilterEntry entry : entries)
                     if (entry != null && METADATA_REFERENCES_MARKER_KEY.equals(entry.getKey()))
                         isMetadataReferences = true;
-            if (isMetadataReferences)
-                removed++;
-            else
+            if (!isMetadataReferences)
                 kept.add(filter);
         }
-        if (removed > 0)
-            Global.tempLog(TAG, "stripMetadataReferences: убрано " + removed //$NON-NLS-1$
-                    + " фильтр(ов) — импорт в чужую рабочую область"); //$NON-NLS-1$
         return kept.toArray(new IPreferenceFilter[0]);
     }
 
@@ -305,11 +285,7 @@ final class ComfortPreferenceTransferFilter
                 return;
             if (item.getData() instanceof PreferenceTransferElement element && transferId.equals(element.getID())
                     && blocked.getAsBoolean())
-            {
                 item.setChecked(false);
-                Global.tempLog(TAG, "vetoCheckingItem: сброшена попытка включить " + transferId //$NON-NLS-1$
-                        + " (чужая рабочая область)"); //$NON-NLS-1$
-            }
         });
     }
 
@@ -334,10 +310,7 @@ final class ComfortPreferenceTransferFilter
     {
         if (item.getChecked() && item.getData() instanceof PreferenceTransferElement element
                 && transferId.equals(element.getID()))
-        {
             item.setChecked(false);
-            Global.tempLog(TAG, "uncheckItem: снята пометка с " + transferId + " (чужая рабочая область)"); //$NON-NLS-1$ //$NON-NLS-2$
-        }
         for (org.eclipse.swt.widgets.TreeItem child : item.getItems())
             uncheckItemRecursive(child, transferId);
     }
@@ -395,6 +368,26 @@ final class ComfortPreferenceTransferFilter
         return null;
     }
 
+    /**
+     * {@code true}, если {@code filters} — тот самый служебный фильтр-«без ограничений»
+     * {@code WizardPreferencesPage$3}, которым {@code finish()} (по байткоду) заменяет
+     * {@code getFilters()}, когда отмечена галочка «Экспортировать/импортировать всё»:
+     * единственный элемент, {@code getMapping("instance") == null} (по семантике
+     * {@link IPreferenceFilter#getMapping} — «без ограничений», а не «пусто»). Различить иначе
+     * нельзя — {@code getTransferAll()} приватный, у страниц нет доступа к самому флажку.
+     * <p>
+     * Этот фильтр всегда {@code getScopes()={"instance","configuration"}} — project-scope
+     * («Комфорт (Проект)», «BSL: форматирование», «Проверки») он никогда не покрывает
+     * (ограничение самого Eclipse, не наше); {@link ComfortPreferencesExportPage} и
+     * {@link ComfortPreferencesImportPage} компенсируют это отдельно, напрямую через
+     * {@link IPreferencesService}.
+     */
+    static boolean isTransferAllFilter(IPreferenceFilter[] filters)
+    {
+        return filters != null && filters.length == 1 && filters[0] != null
+                && filters[0].getMapping("instance") == null; //$NON-NLS-1$
+    }
+
     private static boolean isJavaCategory(PreferenceTransferElement element)
     {
         String pluginId = element.getPluginId();
@@ -424,9 +417,8 @@ final class ComfortPreferenceTransferFilter
                 {
                     return super.getFilter();
                 }
-                catch (org.eclipse.core.runtime.CoreException e)
+                catch (org.eclipse.core.runtime.CoreException ignored)
                 {
-                    Global.tempLogException(TAG, "getFilter " + getID(), e); //$NON-NLS-1$
                     return null;
                 }
             }

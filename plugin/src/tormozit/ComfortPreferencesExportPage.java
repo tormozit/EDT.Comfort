@@ -48,8 +48,6 @@ import org.eclipse.ui.internal.wizards.preferences.WizardPreferencesExportPage1;
  */
 public class ComfortPreferencesExportPage extends WizardPreferencesExportPage1
 {
-    private static final String TAG = "ComfortPreferencesExportPage"; //$NON-NLS-1$
-
     /** Ключ в выгруженном .par с именем исходного проекта. Читается импортёром. */
     static final String SOURCE_PROJECT_KEY = "tormozit.comfort.sourceProject"; //$NON-NLS-1$
 
@@ -91,7 +89,6 @@ public class ComfortPreferencesExportPage extends WizardPreferencesExportPage1
         boolean remembered = ComfortSettings.getInstance().getPreferenceStore()
                 .getBoolean(ComfortSettings.PREF_PREFERENCES_EXPORT_TRANSFER_ALL);
         allButton.setSelection(remembered);
-        Global.tempLog(TAG, "restoreWidgetValues: штатное значение перебито на remembered=" + remembered); //$NON-NLS-1$
     }
 
     @Override
@@ -237,26 +234,12 @@ public class ComfortPreferencesExportPage extends WizardPreferencesExportPage1
             List<String> checksProjects = ComfortPreferenceTransferFilter.projectNamesForQualifier(filters,
                     ComfortPreferenceTransferFilter.CHECKS_PREFERENCE_QUALIFIER);
             String checksProject = checksProjects.isEmpty() ? null : checksProjects.get(0);
-            boolean exportAll = isTransferAllFilter(filters);
+            boolean exportAll = ComfortPreferenceTransferFilter.isTransferAllFilter(filters);
             boolean metadataReferencesChecked = ComfortPreferenceTransferFilter.isMetadataReferencesChecked(filters);
             postProcessExportedFile(new File(getDestinationValue()), projectName, checksProject,
                     exportAll, metadataReferencesChecked);
         }
         return ok;
-    }
-
-    /**
-     * {@code true}, если {@code filters} — тот самый служебный фильтр-«без ограничений»
-     * {@code WizardPreferencesPage$3}, которым {@code finish()} (по байткоду) заменяет
-     * {@code getFilters()}, когда отмечена галочка «Экспортировать всё»: единственный элемент,
-     * {@code getMapping("instance") == null} (по семантике {@link IPreferenceFilter#getMapping} —
-     * «без ограничений», а не «пусто»). Различить иначе нельзя — {@code getTransferAll()}
-     * приватный, у нас нет доступа к самому флажку.
-     */
-    private static boolean isTransferAllFilter(IPreferenceFilter[] filters)
-    {
-        return filters != null && filters.length == 1 && filters[0] != null
-                && filters[0].getMapping("instance") == null; //$NON-NLS-1$
     }
 
     /**
@@ -337,9 +320,8 @@ public class ComfortPreferencesExportPage extends WizardPreferencesExportPage1
         {
             props.load(in);
         }
-        catch (IOException e)
+        catch (IOException ignored)
         {
-            Global.tempLogException(TAG, "postProcessExportedFile: load " + file, e); //$NON-NLS-1$
             return;
         }
         List<String> toRemove = new ArrayList<>();
@@ -356,33 +338,24 @@ public class ComfortPreferencesExportPage extends WizardPreferencesExportPage1
         // getScopes()={"instance","configuration"} — НИКОГДА не покрывает project-scope (Комфорт/
         // BSL/Проверки для конкретного проекта), это ограничение самого Eclipse, не наше. Раз
         // штатный флажок этого не может — добавляем project-scope данные выбранного проекта сами.
-        int addedProjectScopeKeys = 0;
         if (exportAll && projectName != null && !projectName.isBlank())
         {
             Properties projectProps = exportProjectScopeData(projectName);
             for (String key : projectProps.stringPropertyNames())
                 props.setProperty(key, projectProps.getProperty(key));
-            addedProjectScopeKeys = projectProps.size();
             ComfortCheckProfileTransfer.embed(props, projectName);
-            Global.tempLog(TAG, "postProcessExportedFile: addedProjectScopeKeyNames=" //$NON-NLS-1$
-                    + projectProps.stringPropertyNames());
         }
         if (projectName != null && !projectName.isBlank())
             props.setProperty(SOURCE_PROJECT_KEY, projectName);
         props.setProperty(SOURCE_WORKSPACE_KEY, workspaceLocation());
         if (checksProject != null && !checksProject.isBlank())
             ComfortCheckProfileTransfer.embed(props, checksProject);
-        Global.tempLog(TAG, "postProcessExportedFile: file=" + file + " totalKeys=" + props.size() //$NON-NLS-1$ //$NON-NLS-2$
-                + " exportAll=" + exportAll + " metadataReferencesChecked=" + metadataReferencesChecked //$NON-NLS-1$ //$NON-NLS-2$
-                + " removedKeys=" + toRemove.size() + " addedProjectScopeKeys=" + addedProjectScopeKeys //$NON-NLS-1$ //$NON-NLS-2$
-                + " sourceProject=" + projectName + " checksProject=" + checksProject); //$NON-NLS-1$ //$NON-NLS-2$
         try (FileOutputStream out = new FileOutputStream(file))
         {
             props.store(out, "Eclipse Preferences"); //$NON-NLS-1$
         }
-        catch (IOException e)
+        catch (IOException ignored)
         {
-            Global.tempLogException(TAG, "postProcessExportedFile: store " + file, e); //$NON-NLS-1$
         }
     }
 
@@ -427,9 +400,8 @@ public class ComfortPreferencesExportPage extends WizardPreferencesExportPage1
             service.exportPreferences(service.getRootNode(), new IPreferenceFilter[] {filter}, buffer);
             props.load(new ByteArrayInputStream(buffer.toByteArray()));
         }
-        catch (Exception e)
+        catch (Exception ignored)
         {
-            Global.tempLogException(TAG, "exportProjectScopeData: " + projectName, e); //$NON-NLS-1$
         }
         return props;
     }

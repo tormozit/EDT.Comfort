@@ -6,17 +6,21 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
 import java.util.function.Supplier;
 
 import org.eclipse.core.resources.IProject;
-import org.eclipse.core.resources.ProjectScope;
 import org.eclipse.core.resources.ResourcesPlugin;
-import org.eclipse.core.runtime.preferences.IEclipsePreferences;
+import org.eclipse.core.runtime.Platform;
+import org.eclipse.core.runtime.preferences.IExportedPreferences;
 import org.eclipse.core.runtime.preferences.IPreferenceFilter;
+import org.eclipse.core.runtime.preferences.IPreferencesService;
+import org.eclipse.core.runtime.preferences.PreferenceFilterEntry;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.SashForm;
 import org.eclipse.swt.layout.GridData;
@@ -41,6 +45,11 @@ import org.eclipse.ui.internal.wizards.preferences.WizardPreferencesImportPage1;
  * путями {@code /project/<целевой>/...} — иначе фильтр («... (Проект)») просто не найдёт данных
  * под чужим именем проекта, штатный механизм копировать между разными именами не умеет.
  * <p>
+ * Флажок «Импортировать всё» сам по себе (штатный служебный фильтр Eclipse) project-scope
+ * категории не покрывает — {@link #importProjectScopeData} компенсирует это отдельным
+ * {@code IPreferencesService.applyPreferences(...)} для «Проекты приёмники», симметрично тому,
+ * как {@link ComfortPreferencesExportPage} докладывает их при "Экспортировать всё".
+ * <p>
  * Флажок «Импортировать всё», а также категория «Параметры для метаданных» (ссылается на имена
  * объектов конфигурации — {@code objectSets}, {@code recentPlaces}, ...) доступны только если
  * {@link ComfortPreferencesExportPage#SOURCE_WORKSPACE_KEY} выбранного файла совпадает с
@@ -50,8 +59,6 @@ import org.eclipse.ui.internal.wizards.preferences.WizardPreferencesImportPage1;
  */
 public class ComfortPreferencesImportPage extends WizardPreferencesImportPage1
 {
-    private static final String TAG = "ComfortPreferencesImportPage"; //$NON-NLS-1$
-
     private Label sourceProjectValue;
 
     private Button transferAllButtonRef;
@@ -107,7 +114,6 @@ public class ComfortPreferencesImportPage extends WizardPreferencesImportPage1
         boolean remembered = ComfortSettings.getInstance().getPreferenceStore()
                 .getBoolean(ComfortSettings.PREF_PREFERENCES_IMPORT_TRANSFER_ALL);
         allButton.setSelection(remembered);
-        Global.tempLog(TAG, "restoreWidgetValues: штатное значение перебито на remembered=" + remembered); //$NON-NLS-1$
     }
 
     @Override
@@ -167,8 +173,8 @@ public class ComfortPreferencesImportPage extends WizardPreferencesImportPage1
                 String.join(",", ComfortPreferenceTransferFilter.getCheckedCategoryIds(transfersTree))); //$NON-NLS-1$
         boolean transferAllToSave = transferAllButtonRef != null && transferAllButtonRef.getSelection();
         ComfortSettings.setAndSave(ComfortSettings.PREF_PREFERENCES_IMPORT_TRANSFER_ALL, transferAllToSave);
-        Global.tempLog(TAG, "transfer: сохранён PREF_PREFERENCES_IMPORT_TRANSFER_ALL=" + transferAllToSave); //$NON-NLS-1$
 
+        boolean importAll = ComfortPreferenceTransferFilter.isTransferAllFilter(filters);
         List<String> targets = checkedTargetProjects();
         if (!targets.isEmpty())
             saveRememberedTargetProjects(targets);
@@ -187,8 +193,13 @@ public class ComfortPreferencesImportPage extends WizardPreferencesImportPage1
             boolean ok = super.transfer(filters);
             if (ok)
             {
-                List<String> checksTargets = ComfortPreferenceTransferFilter.projectNamesForQualifier(filters,
-                        ComfortPreferenceTransferFilter.CHECKS_PREFERENCE_QUALIFIER);
+                // При "Импортировать всё" filters — служебный фильтр-«без ограничений»
+                // (см. ComfortPreferenceTransferFilter.isTransferAllFilter), в его mapping нет
+                // project-scope категорий — projectNamesForQualifier() тут всегда вернёт пусто,
+                // поэтому в этом случае берём "Проекты приёмники" напрямую.
+                List<String> checksTargets = importAll ? targets
+                        : ComfortPreferenceTransferFilter.projectNamesForQualifier(filters,
+                                ComfortPreferenceTransferFilter.CHECKS_PREFERENCE_QUALIFIER);
                 if (!checksTargets.isEmpty())
                 {
                     // .cset-файлы не привязаны к пути проекта внутри .par (см. ComfortCheckProfileTransfer) —
@@ -196,11 +207,10 @@ public class ComfortPreferencesImportPage extends WizardPreferencesImportPage1
                     Properties props = loadProperties(super.getDestinationValue());
                     if (props != null)
                         for (String target : checksTargets)
-                        {
                             ComfortCheckProfileTransfer.extract(props, target);
-                            logChecksState(target);
-                        }
                 }
+                if (importAll && !targets.isEmpty())
+                    importProjectScopeData(targets);
             }
             return ok;
         }
@@ -208,10 +218,62 @@ public class ComfortPreferencesImportPage extends WizardPreferencesImportPage1
         {
             if (tempRewrittenFilePath != null)
             {
-                if (!new File(tempRewrittenFilePath).delete())
-                    Global.tempLog(TAG, "transfer: не удалось удалить временный файл " + tempRewrittenFilePath); //$NON-NLS-1$
+                new File(tempRewrittenFilePath).delete();
                 tempRewrittenFilePath = null;
             }
+        }
+    }
+
+    /**
+     * Компенсация штатного ограничения Eclipse: служебный фильтр-«без ограничений» флажка
+     * «Импортировать всё» ({@code getScopes()={"instance","configuration"}}, см.
+     * {@link ComfortPreferenceTransferFilter#isTransferAllFilter}) никогда не покрывает
+     * project-scope — «Комфорт (Проект)», «BSL: форматирование», «Проверки» (сами preferences,
+     * не {@code .cset}-файлы — те переносит {@link ComfortCheckProfileTransfer} отдельно, см.
+     * вызывающий {@link #transfer}) для {@code targets} остались бы не импортированы, хотя
+     * {@link ComfortPreferencesExportPage} при "Экспортировать всё" их в файл кладёт (см.
+     * {@code ComfortPreferencesExportPage.postProcessExportedFile}). Читаем тот же файл, что
+     * использовал {@code super.transfer(...)} ({@link #getDestinationValue()} — переписанный, с
+     * продублированными путями под все {@code targets}, если рабочая область файла требовала
+     * переименования проекта, см. {@link #buildRewrittenFile}), и импортируем project-scope узлы
+     * этих трёх qualifier'ов для всех {@code targets} напрямую через {@link IPreferencesService}.
+     */
+    private void importProjectScopeData(List<String> targets)
+    {
+        File file = new File(getDestinationValue());
+        if (!file.isFile())
+            return;
+        IPreferenceFilter filter = new IPreferenceFilter()
+        {
+            @Override
+            public String[] getScopes()
+            {
+                return new String[] {"project"}; //$NON-NLS-1$
+            }
+
+            @Override
+            public Map<String, PreferenceFilterEntry[]> getMapping(String scope)
+            {
+                if (!"project".equals(scope)) //$NON-NLS-1$
+                    return Map.of();
+                Map<String, PreferenceFilterEntry[]> mapping = new HashMap<>();
+                for (String target : targets)
+                {
+                    mapping.put(target + '/' + Activator.PLUGIN_ID, null);
+                    mapping.put(target + "/com._1c.g5.v8.dt.bsl.Bsl", null); //$NON-NLS-1$
+                    mapping.put(target + '/' + ComfortPreferenceTransferFilter.CHECKS_PREFERENCE_QUALIFIER, null);
+                }
+                return mapping;
+            }
+        };
+        try (FileInputStream in = new FileInputStream(file))
+        {
+            IPreferencesService service = Platform.getPreferencesService();
+            IExportedPreferences exported = service.readPreferences(in);
+            service.applyPreferences(exported, new IPreferenceFilter[] {filter});
+        }
+        catch (Exception ignored)
+        {
         }
     }
 
@@ -229,8 +291,6 @@ public class ComfortPreferencesImportPage extends WizardPreferencesImportPage1
             return null;
         Properties rewritten = new Properties();
         String sourcePrefix = "/project/" + sourceProject + '/'; //$NON-NLS-1$
-        int added = 0;
-        StringBuilder addedSuffixes = new StringBuilder();
         for (String key : original.stringPropertyNames())
         {
             String value = original.getProperty(key);
@@ -243,8 +303,6 @@ public class ComfortPreferencesImportPage extends WizardPreferencesImportPage1
                 if (target.equals(sourceProject))
                     continue;
                 rewritten.setProperty("/project/" + target + '/' + suffix, value); //$NON-NLS-1$
-                added++;
-                addedSuffixes.append(suffix).append('=').append(value).append("; "); //$NON-NLS-1$
             }
         }
         try
@@ -255,13 +313,10 @@ public class ComfortPreferencesImportPage extends WizardPreferencesImportPage1
             {
                 rewritten.store(out, "Eclipse Preferences (rewritten for target projects)"); //$NON-NLS-1$
             }
-            Global.tempLog(TAG, "buildRewrittenFile: source=" + sourceProject + " targets=" + targets //$NON-NLS-1$ //$NON-NLS-2$
-                    + " addedKeys=" + added + " addedSuffixes=[" + addedSuffixes + "] tempFile=" + temp); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return temp.getAbsolutePath();
         }
-        catch (IOException e)
+        catch (IOException ignored)
         {
-            Global.tempLogException(TAG, "buildRewrittenFile", e); //$NON-NLS-1$
             return null;
         }
     }
@@ -278,9 +333,8 @@ public class ComfortPreferencesImportPage extends WizardPreferencesImportPage1
         {
             props.load(in);
         }
-        catch (IOException | IllegalArgumentException e)
+        catch (IOException | IllegalArgumentException ignored)
         {
-            Global.tempLogException(TAG, "loadProperties: " + path, e); //$NON-NLS-1$
             return null;
         }
         return props;
@@ -299,16 +353,6 @@ public class ComfortPreferencesImportPage extends WizardPreferencesImportPage1
         ComfortPreferenceTransferFilter.vetoCheckingItem(transfersTree,
                 ComfortPreferenceTransferFilter.METADATA_REFERENCES_TRANSFER_ID, () -> foreignWorkspace);
         ComfortPreferenceTransferFilter.activateRowOnCheck(transfersTree);
-        transfersTree.getViewer().getTree().addListener(SWT.Selection, event ->
-        {
-            if (event.detail != SWT.CHECK)
-                return;
-            int checkedCount = transfersTree.getViewer() instanceof org.eclipse.jface.viewers.CheckboxTreeViewer checkboxViewer
-                    ? checkboxViewer.getCheckedElements().length : -1;
-            Global.tempLog(TAG, "debug: после клика по флажку — checkedElements=" + checkedCount //$NON-NLS-1$
-                    + " isPageComplete=" + isPageComplete() + " validDestination=" + validDestination() //$NON-NLS-1$ //$NON-NLS-2$
-                    + " destinationValue=" + getDestinationValue()); //$NON-NLS-1$
-        });
 
         // Запоминаемые пометки категорий и флажка "Импортировать всё" — issue #520,
         // "Запоминать пометки категорий". Сохраняются в transfer(), восстанавливаются здесь;
@@ -325,8 +369,22 @@ public class ComfortPreferencesImportPage extends WizardPreferencesImportPage1
                 b -> getAllButtonText() != null && getAllButtonText().equals(b.getText()));
         pendingTransferAllRestore = transferAllButtonRef != null && ComfortSettings.getInstance()
                 .getPreferenceStore().getBoolean(ComfortSettings.PREF_PREFERENCES_IMPORT_TRANSFER_ALL);
-        Global.tempLog(TAG, "createControl: transferAllButtonRef найден=" + (transferAllButtonRef != null) //$NON-NLS-1$
-                + " pendingTransferAllRestore=" + pendingTransferAllRestore); //$NON-NLS-1$
+
+        // По байткоду WizardPreferencesPage.createTransfersList() кнопка "Импортировать всё" —
+        // прямой потомок pageComposite, создаётся РАНЬШЕ группы с деревом категорий (та же
+        // страница) — то есть штатно она висит отдельной строкой над всем остальным. Переносим
+        // её ВНУТРЬ строки со списком "Проекты приёмники" (createTargetProjectsField), сразу под
+        // таблицей — а не просто ниже всего sashForm целиком (там ещё и дерево категорий, это
+        // увело бы флажок далеко вниз, вообще не рядом со списком, о котором речь).
+        if (transferAllButtonRef != null && !transferAllButtonRef.isDisposed()
+                && targetProjectsRowRef != null && !targetProjectsRowRef.isDisposed())
+        {
+            transferAllButtonRef.setParent(targetProjectsRowRef);
+            GridData transferAllData = new GridData(SWT.FILL, SWT.CENTER, true, false);
+            transferAllButtonRef.setLayoutData(transferAllData);
+            transferAllButtonRef.moveBelow(null); // последним в row — сразу под таблицей проектов
+        }
+
         // destinationNameField — protected-поле WizardPreferencesPage, доступное
         // подклассу напрямую; штатный код обновляет его и по вводу текста,
         // и по выбору файла через "Обзор...".
@@ -346,36 +404,6 @@ public class ComfortPreferencesImportPage extends WizardPreferencesImportPage1
         // ConfigSearchResultsHook.installMatchTableSplitPane делает pageContainer.layout(true,true)
         // самым последним действием, а не сразу после setWeights внутри restructureWithSash).
         pageComposite.layout(true, true);
-        // Bounds сразу после layout() здесь всегда 0×0 — диалог ещё не досчитал реальный размер
-        // shell (это происходит позже, в Window.create()/open(), уже после createControl()).
-        // Логируем реальные bounds асинхронно, когда диалог фактически отрисован.
-        pageComposite.getDisplay().asyncExec(() ->
-        {
-            if (sashFormRef != null && !sashFormRef.isDisposed() && categoriesSectionRef != null
-                    && !categoriesSectionRef.isDisposed())
-            {
-                Global.tempLog(TAG, "createControl: (async, после показа) sashForm.bounds=" //$NON-NLS-1$
-                        + sashFormRef.getBounds() + " categoriesSection.bounds=" //$NON-NLS-1$
-                        + categoriesSectionRef.getBounds() + " pageComposite.bounds=" //$NON-NLS-1$
-                        + pageComposite.getBounds());
-                if (categoriesSectionRef instanceof Composite categoriesComposite)
-                {
-                    StringBuilder dump = new StringBuilder();
-                    for (Control c : categoriesComposite.getChildren())
-                        dump.append(dump.isEmpty() ? "" : "; ").append(c.getClass().getSimpleName()) //$NON-NLS-1$ //$NON-NLS-2$
-                                .append(c.getBounds());
-                    Global.tempLog(TAG, "createControl: (async) categoriesSection дети=[" + dump + "]"); //$NON-NLS-1$ //$NON-NLS-2$
-                }
-            }
-            // Красный прямоугольник на скриншоте — между низом страницы и кнопками "Готово"/
-            // "Отмена" (которые рисует сам WizardDialog, не наш код) — значит, это пространство
-            // ВЫШЕ pageComposite, в контейнере страницы самого диалога. Замеряем на уровень выше.
-            Composite ancestor = pageComposite.getParent();
-            StringBuilder ancestry = new StringBuilder();
-            for (int depth = 0; ancestor != null && depth < 4; depth++, ancestor = ancestor.getParent())
-                ancestry.append("; ").append(ancestor.getClass().getSimpleName()).append(ancestor.getBounds()); //$NON-NLS-1$
-            Global.tempLog(TAG, "createControl: (async) предки pageComposite=[" + ancestry + "]"); //$NON-NLS-1$ //$NON-NLS-2$
-        });
     }
 
     private Composite sourceProjectRow;
@@ -415,16 +443,11 @@ public class ComfortPreferencesImportPage extends WizardPreferencesImportPage1
         Control categoriesSection = findDirectChild(pageComposite, transfersTree);
         if (categoriesSection == null)
         {
-            Global.tempLog(TAG, "restructureWithSash: не нашли контейнер категорий, разделитель не добавлен"); //$NON-NLS-1$
             createTargetProjectsField(pageComposite);
             return;
         }
         // Не проверено эмпирически, что этот контейнер включает и кнопки "Выбрать всё"/
         // "Отменить всё" (не только дерево) — если нет, они останутся вне разделителя.
-        Global.tempLog(TAG, "restructureWithSash: categoriesSection=" + categoriesSection.getClass().getSimpleName() //$NON-NLS-1$
-                + (categoriesSection instanceof Composite composite
-                        ? " childrenCount=" + composite.getChildren().length //$NON-NLS-1$
-                        : "")); //$NON-NLS-1$
 
         SashForm sashForm = new SashForm(pageComposite, SWT.VERTICAL);
         GridData sashData = new GridData(SWT.FILL, SWT.FILL, true, true);
@@ -452,17 +475,9 @@ public class ComfortPreferencesImportPage extends WizardPreferencesImportPage1
         // показа (runtime-лог: "Unable... SashForm.setWeights" на каждом открытии). Раньше здесь
         // было жёстко "2" — считаем реально, вместо повторной догадки.
         int visibleNonSash = 0;
-        StringBuilder childrenDump = new StringBuilder();
         for (Control c : sashForm.getChildren())
-        {
-            boolean counted = c.getVisible();
-            if (counted)
+            if (c.getVisible())
                 visibleNonSash++;
-            childrenDump.append(childrenDump.isEmpty() ? "" : ", ") //$NON-NLS-1$ //$NON-NLS-2$
-                    .append(c.getClass().getSimpleName()).append("(visible=").append(c.getVisible()).append(')'); //$NON-NLS-1$
-        }
-        Global.tempLog(TAG, "restructureWithSash: перед setWeights — visibleNonSash=" + visibleNonSash //$NON-NLS-1$
-                + " children=[" + childrenDump + "]"); //$NON-NLS-1$ //$NON-NLS-2$
 
         // ВАЖНО: SashForm.getWeights()/setWeights() — НЕ проценты 0-100, а внутренняя шкала SWT
         // (по декомпиляции SashFormLayout.computeWeights: вес контрола без явного SashFormData —
@@ -478,13 +493,7 @@ public class ComfortPreferencesImportPage extends WizardPreferencesImportPage1
         if (weight < 1 || weight > 99)
             weight = ComfortSettings.DEFAULT_PREFERENCES_IMPORT_SASH_WEIGHT;
         if (visibleNonSash == 2)
-        {
             sashForm.setWeights(weight, 100 - weight);
-            Global.tempLog(TAG, "restructureWithSash: загруженный вес=" + weight); //$NON-NLS-1$
-        }
-        else
-            Global.tempLog(TAG, "restructureWithSash: пропущен setWeights — неожиданное число видимых потомков=" //$NON-NLS-1$
-                    + visibleNonSash + " (ожидалось 2), см. children выше"); //$NON-NLS-1$
 
         // Искать внутренний Sash-контрол и вешать на него слушатель — ненадёжно (создаётся лениво
         // во время layout(), см. предыдущие попытки). Рабочий паттерн уже есть в этом же плагине —
@@ -498,8 +507,6 @@ public class ComfortPreferencesImportPage extends WizardPreferencesImportPage1
                 // Нормализация во внутреннюю-шкалу-независимый процент — см. комментарий выше.
                 int pct = Math.max(1, Math.min(99, weights[0] * 100 / (weights[0] + weights[1])));
                 ComfortSettings.setAndSave(ComfortSettings.PREF_PREFERENCES_IMPORT_SASH_WEIGHT, pct);
-                Global.tempLog(TAG, "restructureWithSash: сохранён вес при закрытии=" + pct //$NON-NLS-1$
-                        + " (сырые веса SWT=" + weights[0] + "/" + weights[1] + ")"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             }
         });
         this.sashFormRef = sashForm;
@@ -510,6 +517,15 @@ public class ComfortPreferencesImportPage extends WizardPreferencesImportPage1
     private SashForm sashFormRef;
 
     private Control categoriesSectionRef;
+
+    /**
+     * Строка со списком «Проекты приёмники» — устанавливается в {@link #createTargetProjectsField}.
+     * {@link #createControl} переносит в неё (через {@code setParent}) штатную кнопку
+     * «Импортировать всё», чтобы та оказалась сразу под таблицей проектов, а не отдельной строкой
+     * над всем остальным (штатное место — прямой потомок {@code pageComposite} перед деревом
+     * категорий, см. байткод {@code WizardPreferencesPage.createTransfersList()}).
+     */
+    private Composite targetProjectsRowRef;
 
     /** Прямой потомок {@code root}, в поддереве которого лежит {@code descendant}. */
     private static Control findDirectChild(Composite root, Control descendant)
@@ -553,6 +569,8 @@ public class ComfortPreferencesImportPage extends WizardPreferencesImportPage1
             item.setText(name);
             item.setChecked(remembered.contains(name));
         }
+
+        targetProjectsRowRef = row;
     }
 
     private static List<String> openProjectNames()
@@ -587,36 +605,6 @@ public class ComfortPreferencesImportPage extends WizardPreferencesImportPage1
     private static void saveRememberedTargetProjects(List<String> targets)
     {
         ComfortSettings.setAndSave(ComfortSettings.PREF_PREFERENCES_IMPORT_TARGET_PROJECTS, String.join(",", targets)); //$NON-NLS-1$
-    }
-
-    /**
-     * Диагностика после {@link ComfortCheckProfileTransfer#extract}: чем реально стал узел
-     * {@code com.e1c.g5.v8.dt.check} проекта {@code target} и какие {@code .cset}-файлы лежат в
-     * {@code .settings} — нужно понять, применился ли перенос по факту (issue #520, п. «Проверки»
-     * не меняются в целевом проекте после импорта).
-     */
-    private void logChecksState(String target)
-    {
-        try
-        {
-            IProject project = ResourcesPlugin.getWorkspace().getRoot().getProject(target);
-            IEclipsePreferences node = new ProjectScope(project)
-                    .getNode(ComfortPreferenceTransferFilter.CHECKS_PREFERENCE_QUALIFIER);
-            StringBuilder kv = new StringBuilder();
-            for (String key : node.keys())
-                kv.append(key).append('=').append(node.get(key, null)).append("; "); //$NON-NLS-1$
-            StringBuilder files = new StringBuilder();
-            org.eclipse.core.resources.IFolder settings = project.getFolder(".settings"); //$NON-NLS-1$
-            if (settings.exists())
-                for (org.eclipse.core.resources.IResource member : settings.members())
-                    if (member.getName().endsWith(".cset")) //$NON-NLS-1$
-                        files.append(member.getName()).append("; "); //$NON-NLS-1$
-            Global.tempLog(TAG, "logChecksState: target=" + target + " prefs=[" + kv + "] csetFiles=[" + files + "]"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-        }
-        catch (Exception e)
-        {
-            Global.tempLogException(TAG, "logChecksState: " + target, e); //$NON-NLS-1$
-        }
     }
 
     /** Если ни один проект ещё не отмечен, а проект из файла есть среди открытых — отмечает его по умолчанию. */
@@ -683,12 +671,6 @@ public class ComfortPreferencesImportPage extends WizardPreferencesImportPage1
                 // setSelection() не поднимает SWT.Selection — штатный обработчик не сработает без него.
                 transferAllButtonRef.notifyListeners(SWT.Selection, new org.eclipse.swt.widgets.Event());
             }
-            Global.tempLog(TAG, "updateTransferAllAvailability: consumed pendingTransferAllRestore sameWorkspace=" //$NON-NLS-1$
-                    + sameWorkspace); //$NON-NLS-1$
         }
-
-        Global.tempLog(TAG, "updateTransferAllAvailability: sourceWorkspace=" + sourceWorkspace //$NON-NLS-1$
-                + " currentWorkspace=" + currentWorkspace + " sameWorkspace=" + sameWorkspace //$NON-NLS-1$ //$NON-NLS-2$
-                + " destinationKnown=" + destinationKnown + " pendingTransferAllRestore=" + pendingTransferAllRestore); //$NON-NLS-1$ //$NON-NLS-2$
     }
 }

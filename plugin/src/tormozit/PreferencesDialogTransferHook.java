@@ -1,6 +1,11 @@
 package tormozit;
 
+import org.eclipse.jface.preference.IPreferenceNode;
 import org.eclipse.jface.preference.PreferenceDialog;
+import org.eclipse.jface.viewers.ISelection;
+import org.eclipse.jface.viewers.IStructuredSelection;
+import org.eclipse.jface.viewers.TreeViewer;
+import org.eclipse.jface.window.Window;
 import org.eclipse.jface.wizard.WizardDialog;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.widgets.Composite;
@@ -14,6 +19,7 @@ import org.eclipse.swt.widgets.ToolItem;
 import org.eclipse.swt.widgets.Widget;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.PlatformUI;
+import org.eclipse.ui.dialogs.PreferencesUtil;
 import org.eclipse.ui.internal.WorkbenchMessages;
 
 /**
@@ -28,8 +34,6 @@ import org.eclipse.ui.internal.WorkbenchMessages;
  */
 public final class PreferencesDialogTransferHook implements IStartup
 {
-    private static final String TAG = "PreferencesDialogTransferHook"; //$NON-NLS-1$
-
     private static final int MAX_ATTEMPTS = 20;
 
     private static final int RETRY_MS = 150;
@@ -76,12 +80,6 @@ public final class PreferencesDialogTransferHook implements IStartup
 
         boolean found = importItem != null || exportItem != null || importLink != null || exportLink != null;
 
-        Global.tempLog(TAG, "rewire shell=" + shell.getText() //$NON-NLS-1$
-                + " importItem=" + (importItem != null) //$NON-NLS-1$
-                + " exportItem=" + (exportItem != null) //$NON-NLS-1$
-                + " importLink=" + (importLink != null) //$NON-NLS-1$
-                + " exportLink=" + (exportLink != null)); //$NON-NLS-1$
-
         if (importItem != null)
             rewireSelection(importItem, () -> openImport(dialog, shell));
         if (exportItem != null)
@@ -99,33 +97,66 @@ public final class PreferencesDialogTransferHook implements IStartup
         Listener[] existingListeners = widget.getListeners(SWT.Selection);
         for (Listener existing : existingListeners)
             widget.removeListener(SWT.Selection, existing);
-        widget.addListener(SWT.Selection, event ->
-        {
-            Global.tempLog(TAG, "click widget=" + widget.getClass().getSimpleName() //$NON-NLS-1$
-                    + " removedStockListeners=" + existingListeners.length); //$NON-NLS-1$
-            action.run();
-        });
-        Global.tempLog(TAG, "rewireSelection widget=" + widget.getClass().getSimpleName() //$NON-NLS-1$
-                + " removedStockListeners=" + existingListeners.length //$NON-NLS-1$
-                + " nowHasListeners=" + widget.getListeners(SWT.Selection).length); //$NON-NLS-1$
+        widget.addListener(SWT.Selection, event -> action.run());
     }
 
     private static void openImport(PreferenceDialog dialog, Shell shell)
     {
-        Global.tempLog(TAG, "openImport: creating ComfortPreferencesImportWizard"); //$NON-NLS-1$
         ComfortPreferencesImportWizard wizard = new ComfortPreferencesImportWizard();
         wizard.init(PlatformUI.getWorkbench(), null);
         WizardDialog wizardDialog = new WizardDialog(shell, wizard);
-        Global.tempLog(TAG, "openImport: opening, windowTitle=" + wizard.getWindowTitle()); //$NON-NLS-1$
         wizardDialog.open();
-        Global.tempLog(TAG, "openImport: closed, returnCode=" + wizardDialog.getReturnCode()); //$NON-NLS-1$
+        int returnCode = wizardDialog.getReturnCode();
         // Мастер — самостоятельный дочерний диалог; родительское окно "Параметры" закрывать
-        // не нужно ни при "Готово", ни при "Отмена" (штатный Import/Export родителя не закрывает).
+        // не нужно при "Отмена" (штатный Import/Export родителя не закрывает). При успешном
+        // "Готово" — переоткрываем его же на той же странице, см. javadoc reopenOnSamePage.
+        if (returnCode == Window.OK)
+            reopenOnSamePage(dialog, shell);
+    }
+
+    /**
+     * Переоткрывает окно "Параметры" на той же странице, где стоял пользователь до импорта —
+     * issue #566 (Напарник): {@code IPreferencesService.applyPreferences(...)} пишет новые
+     * значения в {@code IPreferenceStore} сразу и корректно, но уже созданная страница ЭТОГО
+     * экземпляра диалога (например {@code FieldEditorPreferencePage}) читает значения из стора
+     * только один раз при своём создании ({@code IPreferenceNode} кэширует {@code getPage()} на
+     * весь срок жизни диалога) и не подписана на изменения извне — на экране остаются старые
+     * значения до переоткрытия диалога вручную. Здесь делаем то же самое переоткрытие
+     * автоматически: {@link PreferencesUtil#createPreferenceDialogOn} строит новый
+     * {@code PreferenceManager} и новые страницы с нуля, ровно как ручное закрытие/открытие.
+     * <p>
+     * {@code owner} (родитель нового диалога) — Shell активного окна EDT, а не {@code shell}
+     * закрываемого {@code dialog} (он будет уничтожен в {@link PreferenceDialog#close()}).
+     */
+    private static void reopenOnSamePage(PreferenceDialog dialog, Shell shell)
+    {
+        String pageId = currentPageId(dialog);
+        Shell owner = PlatformUI.getWorkbench().getActiveWorkbenchWindow() != null
+                ? PlatformUI.getWorkbench().getActiveWorkbenchWindow().getShell()
+                : shell.getParent() instanceof Shell parentShell ? parentShell : null;
+        dialog.close();
+        if (owner == null || owner.isDisposed())
+            return;
+        PreferenceDialog reopened = PreferencesUtil.createPreferenceDialogOn(owner, pageId, null, null);
+        if (reopened != null)
+            reopened.open();
+    }
+
+    /** Id узла дерева "Параметры", выбранного сейчас (до закрытия {@code dialog}), либо {@code null}. */
+    private static String currentPageId(PreferenceDialog dialog)
+    {
+        TreeViewer tree = dialog.getTreeViewer();
+        if (tree == null)
+            return null;
+        ISelection selection = tree.getSelection();
+        if (selection instanceof IStructuredSelection structured
+                && structured.getFirstElement() instanceof IPreferenceNode node)
+            return node.getId();
+        return null;
     }
 
     private static void openExport(PreferenceDialog dialog, Shell shell)
     {
-        Global.tempLog(TAG, "openExport: creating ComfortPreferencesExportWizard"); //$NON-NLS-1$
         ComfortPreferencesExportWizard wizard = new ComfortPreferencesExportWizard();
         wizard.init(PlatformUI.getWorkbench(), null);
         WizardDialog wizardDialog = new WizardDialog(shell, wizard);
@@ -136,15 +167,12 @@ public final class PreferencesDialogTransferHook implements IStartup
                 WorkbenchMessages.PreferenceExportWarning_message, SWT.NONE,
                 WorkbenchMessages.PreferenceExportWarning_applyAndContinue,
                 WorkbenchMessages.PreferenceExportWarning_continue);
-        Global.tempLog(TAG, "openExport: confirm response=" + response); //$NON-NLS-1$
         if (response == -1)
             return;
         if (response == 0)
             Global.invokeVoid(dialog, "okPressed"); //$NON-NLS-1$
 
-        Global.tempLog(TAG, "openExport: opening, windowTitle=" + wizard.getWindowTitle()); //$NON-NLS-1$
         wizardDialog.open();
-        Global.tempLog(TAG, "openExport: closed, returnCode=" + wizardDialog.getReturnCode()); //$NON-NLS-1$
         // В штатном коде (FilteredPreferenceDialog.openExportWizard) тут стояло
         // "if (dialogResponse == 1) close();" — родительское окно закрывалось при выборе
         // "Продолжить" ДАЖЕ если в самом мастере нажали "Отмена". Родителя не закрываем вовсе:

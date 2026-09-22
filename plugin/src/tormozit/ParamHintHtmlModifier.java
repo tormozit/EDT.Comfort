@@ -67,8 +67,11 @@ import org.eclipse.xtext.resource.IResourceServiceProvider;
 import org.eclipse.xtext.resource.XtextResource;
 import org.eclipse.xtext.ui.editor.model.IXtextDocument;
 import org.eclipse.xtext.ui.editor.contentassist.ConfigurableCompletionProposal;
+import org.eclipse.xtext.util.Pair;
+import org.eclipse.xtext.util.Triple;
 import org.eclipse.xtext.util.concurrent.IUnitOfWork;
 
+import com._1c.g5.v8.dt.bsl.documentation.comment.BslCommentUtils;
 import com._1c.g5.v8.dt.bsl.model.BooleanLiteral;
 import com._1c.g5.v8.dt.bsl.model.BslPackage;
 import com._1c.g5.v8.dt.bsl.model.DateLiteral;
@@ -164,6 +167,10 @@ public final class ParamHintHtmlModifier
     /** Автовыбор сигнатуры: только при открытии (не на каждый Progress). */
     private static final int SIG_PICK_STRONG_SCORE = 10;
     private static final String SIG_PICK_DONE_MARK = "tormozit.sigPickDone"; //$NON-NLS-1$
+    /** Показанная сигнатура ({@link ShownSignature}) — вернуть после штатного сброса на 0. */
+    private static final String SHOWN_SIGNATURE_MARK = "tormozit.paramHintShownSignature"; //$NON-NLS-1$
+    /** Ключи {@code Новый Структура("а,б", …)} ({@link StructureKeysOfHint}) — на время сломанного AST. */
+    private static final String STRUCTURE_KEYS_MARK = "tormozit.paramHintStructureKeys"; //$NON-NLS-1$
     /** Уже патчили HTML этого browser — не трогать до смены документа EDT. */
     private static final String HTML_PATCHED_MARK = "tormozit.paramHintHtmlPatched"; //$NON-NLS-1$
     /** CaretListener на редакторе, пока открыт этот Browser подсказки. */
@@ -216,6 +223,7 @@ public final class ParamHintHtmlModifier
                 return;
 
             LinkedModeParamHintCloser.ensureInstalled();
+            StockParamNumberClampFix.ensureInstalled();
 
             // Точная починка сохранённого размера: здесь EDT уже может посчитать его сам
             // по шрифту подсказки. И тот же размер запишем при закрытии окна — иначе
@@ -529,6 +537,128 @@ public final class ParamHintHtmlModifier
                     return listener;
             }
             return null;
+        }
+    }
+
+    /**
+     * Обход дефекта EDT (issue 560): штатный {@code CustomCaretListener} перерисовывает
+     * подсказку на каждое движение каретки, если она стоит в аргументе с номером
+     * {@code >= paramSize}.
+     * <p>
+     * Штатный {@code caretMoved} сравнивает номер параметра под кареткой
+     * ({@code computeParameterNumber}) с {@code info.paramNumber}, а при несовпадении
+     * записывает номер, зажатый до {@code paramSize - 1}, и зовёт {@code showControlInfo}.
+     * За последним формальным параметром (хвост с переменным числом параметров, лишние
+     * фактические аргументы) незажатый номер никогда не равен зажатому — {@code showPage}
+     * и полная перезагрузка {@code Browser} идут на каждый шаг каретки (20–30 раз в
+     * секунду при удержании стрелки). Сама перезагрузка дешёвая, но на каждую срабатывает
+     * наш {@code Progress.completed} с патчем HTML — вторая загрузка и синхронные обращения
+     * к браузеру, и каретка перестаёт успевать перерисовываться.
+     * <p>
+     * Здесь в {@code info.paramNumber} кладётся незажатый номер, пока каретка за последним
+     * параметром: при движении внутри одного аргумента штатное сравнение даёт равенство, и
+     * лишнего показа нет. Перед любым показом EDT зажимает номер заново, а кроме этого
+     * сравнения {@code paramNumber} читает только {@code showControlInfo}.
+     * <p>
+     * Переход в другой аргумент показ давать обязан: наша страница зависит от активного
+     * аргумента и числа фактических (виртуальные параметры). Порядок слушателей не
+     * гарантирован (штатный ставится на каждое новое окно подсказки, наш — один раз на
+     * виджет), поэтому номер считается для уже обработанного штатным смещения
+     * ({@code lastOffset}), а не для новой каретки — иначе, сработав раньше штатного, мы
+     * подставили бы ему номер нового аргумента и показ бы пропал.
+     */
+    private static final class StockParamNumberClampFix
+        implements CaretListener
+    {
+        /** Один слушатель на виджет — маркер, чтобы не вешать повторно. */
+        private static final String INSTALLED_MARK = "tormozit.paramHintClampFix"; //$NON-NLS-1$
+
+        private final StyledText widget;
+
+        private StockParamNumberClampFix(StyledText widget)
+        {
+            this.widget = widget;
+        }
+
+        static void ensureInstalled()
+        {
+            try
+            {
+                ActiveEditor active = resolveParamHintEditor();
+                if (active == null || active.widget == null || active.widget.isDisposed())
+                    return;
+                StyledText widget = active.widget;
+                if (widget.getData(INSTALLED_MARK) != null)
+                    return;
+                widget.setData(INSTALLED_MARK, Boolean.TRUE);
+                widget.addCaretListener(new StockParamNumberClampFix(widget));
+            }
+            catch (Exception | LinkageError ignored)
+            {
+                // без обхода подсказка работает, только перерисовывается чаще нужного
+            }
+        }
+
+        @Override
+        public void caretMoved(CaretEvent event)
+        {
+            try
+            {
+                for (org.eclipse.swt.widgets.Listener listener
+                    : widget.getListeners(org.eclipse.swt.custom.ST.CaretMoved))
+                {
+                    Object typed = listener instanceof org.eclipse.swt.widgets.TypedListener wrapper
+                        ? wrapper.getEventListener() : listener;
+                    if (typed == null
+                        || !typed.getClass().getName().endsWith("CustomCaretListener")) //$NON-NLS-1$
+                        continue;
+                    keepUnclampedParamNumber(typed);
+                }
+            }
+            catch (Exception | LinkageError ignored)
+            {
+                // см. ensureInstalled
+            }
+        }
+
+        private static void keepUnclampedParamNumber(Object stock)
+        {
+            Object info = Global.getField(stock, "info"); //$NON-NLS-1$
+            if (info == null
+                || !(Global.getField(info, "commaPosition") instanceof List<?> commas) //$NON-NLS-1$
+                || !(Global.getField(stock, "lastOffset") instanceof Integer lastOffset) //$NON-NLS-1$
+                ||!(Global.getField(info, "firstAvailablePosition") instanceof Integer first) //$NON-NLS-1$
+                || !(Global.getField(info, "lastAvailablePosition") instanceof Integer last) //$NON-NLS-1$
+                || !(Global.getField(info, "paramNumber") instanceof Integer paramNumber) //$NON-NLS-1$
+                || !(Global.getField(info, "paramSize") instanceof Integer paramSize)) //$NON-NLS-1$
+                return;
+            // Номер берётся для смещения, которое штатный уже обработал (его lastOffset), а не
+            // для новой каретки: отработал он на этом событии или ещё нет — сравнение пойдёт
+            // с номером прошлого шага. Внутри одного аргумента номера равны и показа нет;
+            // переход в другой аргумент (в т.ч. ввод «,») даёт показ — наша страница зависит
+            // от активного аргумента и числа фактических (виртуальные параметры).
+            int offset = lastOffset.intValue();
+            // Вне вызова штатный закрывает подсказку сам.
+            if (offset < first.intValue() || offset >= last.intValue())
+                return;
+            int raw = stockParameterNumber(commas, offset);
+            int size = paramSize.intValue();
+            int current = paramNumber.intValue();
+            // current >= size - 1: номер уже зажат (или это последний формальный параметр) —
+            // показанная страница та же, что будет после зажима raw.
+            if (raw >= size && current >= size - 1 && current != raw)
+                Global.setFieldForce(info, "paramNumber", Integer.valueOf(raw)); //$NON-NLS-1$
+        }
+
+        /** Копия штатного {@code computeParameterNumber}: первая запятая не левее смещения. */
+        private static int stockParameterNumber(List<?> commas, int offset)
+        {
+            for (int i = 0; i < commas.size(); i++)
+            {
+                if (commas.get(i) instanceof Integer comma && offset <= comma.intValue())
+                    return i;
+            }
+            return commas.size();
         }
     }
 
@@ -3209,6 +3339,9 @@ public final class ParamHintHtmlModifier
                 }
             }
 
+            if (restoreShownSignature(browser, ctx))
+                return;
+
             String modified = modifyHtml(html, ctx);
             if (modified == null || modified.equals(html))
             {
@@ -3600,7 +3733,15 @@ public final class ParamHintHtmlModifier
             return;
         int formalCount = countPageParams(ctx.pages.get(ctx.pageIndex));
         if (paramIndex >= formalCount)
+        {
+            // Ключ структуры за последним формальным — жирным его, описание остаётся от «Значения».
+            if (!isStructureKeysPage(ctx, ctx.pages.get(ctx.pageIndex)))
+                return;
+            browser.setData(LAST_SHOW_ARG_MARK, Integer.valueOf(paramIndex));
+            ctx.currentArgIndex = paramIndex;
+            refreshVirtualParamHtml(browser, ctx);
             return;
+        }
         browser.setData(LAST_SHOW_ARG_MARK, Integer.valueOf(paramIndex));
         browser.setData(CURRENT_PARAM_INDEX_MARK, Integer.valueOf(paramIndex));
         showPageKeepingCurrentBounds(ctx.parametersHover, ctx.pages,
@@ -3630,11 +3771,21 @@ public final class ParamHintHtmlModifier
         if (ctx == null || ctx.pages == null || ctx.pageIndex < 0
             || ctx.pageIndex >= ctx.pages.size())
             return;
-        Object paramsObj = Global.getField(ctx.pages.get(ctx.pageIndex), "params"); //$NON-NLS-1$
-        if (!(paramsObj instanceof List<?> params) || paramIndex >= params.size())
-            return;
-        Object param = params.get(paramIndex);
-        String name = param != null ? asString(Global.invoke(param, "getName")) : null; //$NON-NLS-1$
+        Object page = ctx.pages.get(ctx.pageIndex);
+        String name;
+        if (paramIndex >= 1 && isStructureKeysPage(ctx, page))
+        {
+            name = paramIndex - 1 < ctx.structureKeys.size()
+                ? ctx.structureKeys.get(paramIndex - 1) : null;
+        }
+        else
+        {
+            Object paramsObj = Global.getField(page, "params"); //$NON-NLS-1$
+            if (!(paramsObj instanceof List<?> params) || paramIndex >= params.size())
+                return;
+            Object param = params.get(paramIndex);
+            name = param != null ? asString(Global.invoke(param, "getName")) : null; //$NON-NLS-1$
+        }
         if (name == null || name.isBlank())
             return;
         name = name.trim();
@@ -4237,35 +4388,24 @@ public final class ParamHintHtmlModifier
         if (params.isEmpty() && extraUnknown == 0)
             return null;
         StringBuilder list = new StringBuilder();
-        for (int i = 0; i < params.size(); i++)
+        if (!params.isEmpty() && isStructureKeysPage(ctx, page))
         {
-            Object paramContent = params.get(i);
-            if (paramContent == null)
-                continue;
-            String name = asString(Global.invoke(paramContent, "getName")); //$NON-NLS-1$
-            if (name == null || name.isBlank())
-                continue;
-            if (list.length() > 0)
-                list.append(", "); //$NON-NLS-1$
-            boolean current = i == highlight;
-            if (current)
-                list.append("<b>"); //$NON-NLS-1$
-            list.append("<span class=\"").append(PARAM_ENTRY_CLASS) //$NON-NLS-1$
-                .append("\" onmouseenter=\"comfortShowParamMenu(this)\"") //$NON-NLS-1$
-                .append(" onmouseleave=\"comfortHideParamMenu(this)\">"); //$NON-NLS-1$
-            list.append("<span class=\"").append(PARAM_LINK_CLASS) //$NON-NLS-1$
-                .append("\" onmousedown=\"if(event.ctrlKey)event.preventDefault();\"") //$NON-NLS-1$
-                .append(" onclick=\"").append(PARAM_BROWSER_FUNCTION_NAME) //$NON-NLS-1$
-                .append("(event.ctrlKey?'copy':'activate',").append(i) //$NON-NLS-1$
-                .append(");return false;\">"); //$NON-NLS-1$
-            list.append(escapeHtml(name.trim()));
-            if (isParamOptional(paramContent))
-                list.append('?');
-            list.append("</span>"); //$NON-NLS-1$
-            appendParameterMenu(list, ctx, i);
-            list.append("</span>"); //$NON-NLS-1$
-            if (current)
-                list.append("</b>"); //$NON-NLS-1$
+            appendStructureKeyParams(list, ctx, params.get(0));
+        }
+        else
+        {
+            for (int i = 0; i < params.size(); i++)
+            {
+                Object paramContent = params.get(i);
+                if (paramContent == null)
+                    continue;
+                String name = asString(Global.invoke(paramContent, "getName")); //$NON-NLS-1$
+                if (name == null || name.isBlank())
+                    continue;
+                appendParamEntry(list, ctx, i,
+                    name.trim() + (isParamOptional(paramContent) ? "?" : ""), //$NON-NLS-1$ //$NON-NLS-2$
+                    i == highlight);
+            }
         }
         for (int e = 0; e < extraUnknown; e++)
         {
@@ -4285,6 +4425,60 @@ public final class ParamHintHtmlModifier
                 + html.substring(markedEnd);
         return html.substring(0, open + 1) + PARAM_LIST_START_MARK + list
             + PARAM_LIST_END_MARK + html.substring(close);
+    }
+
+    /** Имя параметра с меню действий; {@code label} уже с признаком необязательности. */
+    private static void appendParamEntry(StringBuilder list, HoverContext ctx, int index,
+        String label, boolean current)
+    {
+        if (list.length() > 0)
+            list.append(", "); //$NON-NLS-1$
+        if (current)
+            list.append("<b>"); //$NON-NLS-1$
+        list.append("<span class=\"").append(PARAM_ENTRY_CLASS) //$NON-NLS-1$
+            .append("\" onmouseenter=\"comfortShowParamMenu(this)\"") //$NON-NLS-1$
+            .append(" onmouseleave=\"comfortHideParamMenu(this)\">"); //$NON-NLS-1$
+        list.append("<span class=\"").append(PARAM_LINK_CLASS) //$NON-NLS-1$
+            .append("\" onmousedown=\"if(event.ctrlKey)event.preventDefault();\"") //$NON-NLS-1$
+            .append(" onclick=\"").append(PARAM_BROWSER_FUNCTION_NAME) //$NON-NLS-1$
+            .append("(event.ctrlKey?'copy':'activate',").append(index) //$NON-NLS-1$
+            .append(");return false;\">"); //$NON-NLS-1$
+        list.append(escapeHtml(label));
+        list.append("</span>"); //$NON-NLS-1$
+        appendParameterMenu(list, ctx, index);
+        list.append("</span>"); //$NON-NLS-1$
+        if (current)
+            list.append("</b>"); //$NON-NLS-1$
+    }
+
+    /**
+     * {@code Новый Структура("а, б", …)}: {@code (Ключи, а?, б?)} вместо {@code (Ключи, Значения?)}.
+     * Аргументы сверх ключей до каретки — {@code ?}, как у прочих лишних слотов.
+     */
+    private static void appendStructureKeyParams(StringBuilder list, HoverContext ctx,
+        Object keysParam)
+    {
+        int current = ctx.currentArgIndex >= 0 ? ctx.currentArgIndex : ctx.paramIndex;
+        String keysName = keysParam != null
+            ? asString(Global.invoke(keysParam, "getName")) : null; //$NON-NLS-1$
+        if (keysName == null || keysName.isBlank())
+            keysName = "Ключи"; //$NON-NLS-1$
+        appendParamEntry(list, ctx, 0, keysName.trim(), current == 0);
+        List<String> keys = ctx.structureKeys;
+        for (int k = 0; k < keys.size(); k++)
+        {
+            String key = keys.get(k);
+            appendParamEntry(list, ctx, k + 1, key.isEmpty() ? "?" : key + "?", //$NON-NLS-1$ //$NON-NLS-2$
+                current == k + 1);
+        }
+        for (int slot = keys.size() + 1; slot <= current; slot++)
+        {
+            list.append(", "); //$NON-NLS-1$
+            if (slot == current)
+                list.append("<b>?</b>"); //$NON-NLS-1$
+            else
+                list.append('?');
+        }
     }
 
     private static void appendParameterMenu(StringBuilder html, HoverContext ctx, int paramIndex)
@@ -5528,7 +5722,86 @@ public final class ParamHintHtmlModifier
         ctx.paramIndex = paramIndex;
 
         fillInvocationContext(ctx);
+        keepStructureKeys(browser, ctx);
         return ctx;
+    }
+
+    /**
+     * Снимок вызова читается через {@code readOnlyPeekAst} ({@code readOnlyDataModelWithoutSync}) —
+     * модель без синхронизации с документом. Сразу после правки ({@code …, Новый Массив,)})
+     * модель ещё старая, а каретка уже в новых смещениях: в старой модели на её месте
+     * {@code ;} за вызовом, поиск по каретке уходит мимо {@code Новый Структура(…)}, и ключи
+     * пропали бы из подсказки до её переоткрытия. Ключи запоминаются на окне подсказки для её
+     * списка сигнатур (он живёт, пока подсказка этого вызова открыта) и подставляются, пока
+     * вызов не найден. Номер аргумента в это время — по запятым, которые EDT ведёт для открытой
+     * подсказки уже в новых смещениях.
+     */
+    private static void keepStructureKeys(Browser browser, HoverContext ctx)
+    {
+        if (browser == null || browser.isDisposed() || ctx == null || ctx.pages == null)
+            return;
+        if (ctx.invocationFound)
+        {
+            browser.setData(STRUCTURE_KEYS_MARK, ctx.structureKeys == null ? null
+                : new StructureKeysOfHint(ctx.pages, ctx.structureKeys, ctx.constructorType));
+            // Та же модель без синхронизации: сразу после ввода «,» вызов в ней найден, но
+            // запятой ещё нет — номер аргумента из AST на единицу меньше, и виртуальный
+            // параметр не дорисовывается до следующего показа. Запятые EDT — уже в новых смещениях.
+            int stockArg = stockArgIndexAtCaret();
+            Global.tempLog("param-hint", "argIndex ast=" + ctx.currentArgIndex //$NON-NLS-1$ //$NON-NLS-2$
+                + " stock=" + stockArg + " paramIndex=" + ctx.paramIndex); //$NON-NLS-1$ //$NON-NLS-2$
+            if (stockArg >= 0)
+                ctx.currentArgIndex = stockArg;
+            return;
+        }
+        if (!(browser.getData(STRUCTURE_KEYS_MARK) instanceof StructureKeysOfHint kept)
+            || kept.pages != ctx.pages)
+            return;
+        ctx.structureKeys = kept.keys;
+        // Без типа сигнатура считается без хвоста с переменным числом параметров,
+        // и за «Значения» дорисовывался бы «?» на каждый аргумент (extraUnknownParamCount).
+        ctx.constructorType = kept.constructorType;
+        int stockArg = stockArgIndexAtCaret();
+        if (stockArg >= 0)
+            ctx.currentArgIndex = stockArg;
+    }
+
+    /**
+     * Номер аргумента под кареткой по {@code ParameterInfo.commaPosition} штатного
+     * {@code CustomCaretListener} (как его {@code computeParameterNumber}); {@code -1} — нет данных.
+     */
+    private static int stockArgIndexAtCaret()
+    {
+        ActiveEditor active = resolveParamHintEditor();
+        if (active == null || active.widget == null || active.widget.isDisposed() || active.caret < 0)
+            return -1;
+        for (org.eclipse.swt.widgets.Listener listener
+            : active.widget.getListeners(org.eclipse.swt.custom.ST.CaretMoved))
+        {
+            Object typed = listener instanceof org.eclipse.swt.widgets.TypedListener wrapper
+                ? wrapper.getEventListener() : listener;
+            if (typed == null || !typed.getClass().getName().endsWith("CustomCaretListener")) //$NON-NLS-1$
+                continue;
+            Object info = Global.getField(typed, "info"); //$NON-NLS-1$
+            if (info != null && Global.getField(info, "commaPosition") instanceof List<?> commas) //$NON-NLS-1$
+                return StockParamNumberClampFix.stockParameterNumber(commas, active.caret);
+        }
+        return -1;
+    }
+
+    /** Ключи структуры, разобранные для открытой подсказки со списком сигнатур {@code pages}. */
+    private static final class StructureKeysOfHint
+    {
+        final List<Object> pages;
+        final List<String> keys;
+        final Type constructorType;
+
+        StructureKeysOfHint(List<Object> pages, List<String> keys, Type constructorType)
+        {
+            this.pages = pages;
+            this.keys = keys;
+            this.constructorType = constructorType;
+        }
     }
 
     private static Object findParametersHover(Browser browser)
@@ -5736,6 +6009,7 @@ public final class ParamHintHtmlModifier
                 });
             if (snap == null)
                 return;
+            ctx.invocationFound = true;
             ctx.actualArgCount = snap.actualArgCount;
             ctx.actualArgTexts = snap.actualArgTexts;
             ctx.actualArgTypes = snap.actualArgTypes;
@@ -5744,6 +6018,7 @@ public final class ParamHintHtmlModifier
             ctx.constructorType = snap.constructorType;
             ctx.directive = snap.directive;
             ctx.currentArgIndex = snap.currentArgIndex;
+            ctx.structureKeys = snap.structureKeys;
         }
         catch (Exception ignored)
         {
@@ -5774,6 +6049,7 @@ public final class ParamHintHtmlModifier
             OperatorStyleCreator ctor = (OperatorStyleCreator) invocationLike;
             params = ctor.getParams();
             snap.constructorType = ctor.getType();
+            snap.structureKeys = structureConstructorKeys(snap.constructorType, params);
         }
         snap.actualArgCount = params != null ? params.size() : 0;
         snap.actualArgTexts = actualArgumentTexts(invocationLike);
@@ -6054,8 +6330,13 @@ public final class ParamHintHtmlModifier
         }
         if (candidates.isEmpty())
         {
-            int fallback = ctx.pageIndex >= 0 ? ctx.pageIndex : 0;
-            return new SigPickResult(fallback, 0);
+            // Аргументов больше, чем параметров у любой сигнатуры (хвост с переменным
+            // числом параметров: Новый Структура("а,б", 1, 2)) — решает тип первого
+            // аргумента среди всех сигнатур; при равенстве — сигнатура с бОльшим числом параметров.
+            for (int i = 0; i < ctx.pages.size(); i++)
+                candidates.add(Integer.valueOf(i));
+            candidates.sort((a, b) -> Integer.compare(countPageParams(ctx.pages.get(b.intValue())),
+                countPageParams(ctx.pages.get(a.intValue()))));
         }
 
         List<TypeItem> actualTypes = ctx.actualArgTypes;
@@ -6081,6 +6362,66 @@ public final class ParamHintHtmlModifier
         int resultIdx = bestScore > 0 ? bestIdx : preferWildcardSignatureIndex(candidates, ctx.pages);
         int resultScore = bestScore > 0 ? bestScore : 1;
         return new SigPickResult(resultIdx, resultScore);
+    }
+
+    /**
+     * Обход дефекта EDT: штатный {@code CustomCaretListener} при смене номера параметра
+     * зовёт {@code showControlInfo(viewer, info, 0, null)}, а тот —
+     * {@code showPage(pages, 0, paramNumber)}: номер сигнатуры всегда 0. Подобранная при
+     * открытии (или выбранная стрелками) сигнатура сбрасывается на первую при любом
+     * перемещении каретки по аргументам.
+     * <p>
+     * Запоминаем показанную сигнатуру для этого списка страниц. Штатный сброс отличаем по
+     * объекту ввода: {@code showPage} каждый раз создаёт новый
+     * {@code BslContentAssistBrowserInput}, а стрелки сигнатур меняют индекс в прежнем
+     * ({@code setIndex} + {@code setInput} того же объекта) — это выбор пользователя, его и
+     * запоминаем. Номер параметра признаком быть не может: EDT зажимает его до числа
+     * параметров первой сигнатуры, и при переходе по хвосту аргументов он не меняется.
+     *
+     * @return {@code true}, если страница показана заново и патч HTML будет на её загрузке
+     */
+    private static boolean restoreShownSignature(Browser browser, HoverContext ctx)
+    {
+        if (ctx == null || ctx.pages == null || ctx.pages.size() < 2 || ctx.parametersHover == null
+            || ctx.input == null)
+            return false;
+        Object stored = browser.getData(SHOWN_SIGNATURE_MARK);
+        ShownSignature shown = stored instanceof ShownSignature s && s.pages == ctx.pages ? s : null;
+        boolean stockReset = shown != null && ctx.pageIndex == 0 && shown.pageIndex > 0
+            && shown.pageIndex < ctx.pages.size() && ctx.input != shown.input;
+        if (!stockReset)
+        {
+            browser.setData(SHOWN_SIGNATURE_MARK,
+                new ShownSignature(ctx.pages, ctx.input, ctx.pageIndex));
+            return false;
+        }
+        if (!Global.invokeVoid(ctx.parametersHover, "showPage", ctx.pages, //$NON-NLS-1$
+            Integer.valueOf(shown.pageIndex), Integer.valueOf(ctx.paramIndex)))
+            return false;
+        Display display = browser.getDisplay();
+        if (display != null && !display.isDisposed())
+        {
+            display.asyncExec(() -> {
+                if (!browser.isDisposed())
+                    tryModifyBrowserHtml(browser);
+            });
+        }
+        return true;
+    }
+
+    /** Сигнатура, показанная в окне подсказки, для списка страниц одного вызова. */
+    private static final class ShownSignature
+    {
+        final List<Object> pages;
+        final Object input;
+        final int pageIndex;
+
+        ShownSignature(List<Object> pages, Object input, int pageIndex)
+        {
+            this.pages = pages;
+            this.input = input;
+            this.pageIndex = pageIndex;
+        }
     }
 
     private static final class SigPickResult
@@ -6231,6 +6572,63 @@ public final class ParamHintHtmlModifier
                 addTypeMatchName(names, type.getName());
         }
         return names;
+    }
+
+    /**
+     * Ключи {@code Новый Структура("а, б", …)} — для имён параметров со второго.
+     * Разбор литерала — как у EDT в {@code BslTreeTypeSystem.fillColumnType}:
+     * {@code lines(false)}, {@link BslCommentUtils#split} по запятой, {@link BslCommentUtils#trim}.
+     *
+     * @return ключи по порядку (пустой ключ между запятыми — пустая строка, слот сохраняется)
+     *         или {@code null}, если это не конструктор структуры с литералом ключей
+     */
+    private static List<String> structureConstructorKeys(Type type, EList<Expression> params)
+    {
+        if (type == null || params == null || params.isEmpty()
+            || !(params.get(0) instanceof StringLiteral literal))
+            return null;
+        Set<String> typeNames = typeItemNames(Collections.singletonList(type));
+        if (!typeNames.contains("структура") && !typeNames.contains("structure")) //$NON-NLS-1$ //$NON-NLS-2$
+            return null;
+        List<String> keys = new ArrayList<>();
+        try
+        {
+            for (String line : literal.lines(false))
+            {
+                if (line == null)
+                    continue;
+                for (Object part : BslCommentUtils.split(line, ",")) //$NON-NLS-1$
+                {
+                    String raw = part instanceof Pair<?, ?> pair
+                        && pair.getFirst() instanceof String text ? text : null;
+                    Triple<String, Integer, Integer> trimmed =
+                        raw != null ? BslCommentUtils.trim(raw) : null;
+                    String key = trimmed != null ? trimmed.getFirst() : null;
+                    keys.add(key != null ? key : ""); //$NON-NLS-1$
+                }
+            }
+        }
+        catch (RuntimeException | LinkageError e)
+        {
+            return null;
+        }
+        boolean any = false;
+        for (String key : keys)
+            any |= !key.isEmpty();
+        return any ? keys : null;
+    }
+
+    /**
+     * Страница «По ключу и значениям»: ключи известны, у страницы есть параметр «Значения»
+     * (не меньше двух формальных) и первый параметр — не {@code ФиксированнаяСтруктура}.
+     * Тип первого параметра этой сигнатуры EDT в документации не отдаёт («Произвольный»),
+     * поэтому проверять его на «Строка» нельзя.
+     */
+    private static boolean isStructureKeysPage(HoverContext ctx, Object page)
+    {
+        if (ctx == null || ctx.structureKeys == null || page == null || countPageParams(page) < 2)
+            return false;
+        return !resolveParamTypeNames(page, 0).contains("фиксированнаяструктура"); //$NON-NLS-1$
     }
 
     /** Имена типов литерала, если {@code Expression#getTypes()} ещё пуст. */
@@ -6511,6 +6909,10 @@ public final class ParamHintHtmlModifier
         /** Тип {@code Новый Тип(...)} — для maxParams сигнатуры конструктора. */
         Type constructorType;
         String directive;
+        /** Ключи из литерала {@code Новый Структура("а,б", …)}; {@code null} — не этот случай. */
+        List<String> structureKeys;
+        /** Вызов под кареткой найден в AST (поля выше заполнены из него). */
+        boolean invocationFound;
     }
 
     private static final class ParamIndexAtCaret
@@ -6575,6 +6977,7 @@ public final class ParamHintHtmlModifier
         Method method;
         Type constructorType;
         String directive;
+        List<String> structureKeys;
     }
 
     private static final class FindMissSupport

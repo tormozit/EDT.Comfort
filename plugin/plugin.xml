@@ -1705,6 +1705,19 @@
       </mapping>
       <description>Настройки редактора модулей BSL: подсветка синтаксиса, автодополнение, автосвёртка.</description>
     </transfer>
+    <!-- issue #566: у бандла com.e1c.edt.ai.ui нет собственного расширения preferenceTransfer,
+         поэтому его instance-scope настройки (Общие/Внешний вид/Завершение кода/Фоновый
+         анализ/Чат — все хранятся в одном узле, обычный ScopedPreferenceStore) не показывались
+         отдельной категорией и переносились только флажком "Экспортировать/импортировать всё". -->
+    <transfer
+        id="tormozit.prefTransfer.aiCompanion"
+        icon="platform:/plugin/com.e1c.edt.ai.ui/icons/obj16/ai.png"
+        name="1С:Напарник">
+      <mapping scope="instance">
+        <entry node="com.e1c.edt.ai.ui"/>
+      </mapping>
+      <description>Настройки "1С:Напарник" (Общие, Внешний вид, Завершение кода, Фоновый анализ, Чат).</description>
+    </transfer>
     <transfer
         id="tormozit.prefTransfer.comfortGeneral"
         icon="icons/etool16/comfort.png"
