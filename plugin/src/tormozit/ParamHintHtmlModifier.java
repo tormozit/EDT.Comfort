@@ -5283,12 +5283,7 @@ public final class ParamHintHtmlModifier
     private static Boolean resolveIsOutForTooltip(Method method, int paramIndex, String paramName,
         Object paramContent)
     {
-        if (method != null && paramName != null && !paramName.isBlank())
-        {
-            Parameter matched = findParameter(method, 0, paramIndex, paramName);
-            if (matched != null)
-                return Boolean.valueOf(matched.isOut());
-        }
+        // Платформенные методы: признак Вх/Вых не документирован — префикс не показываем.
         return resolveIsOut(null, paramName, paramContent);
     }
 
@@ -5702,14 +5697,7 @@ public final class ParamHintHtmlModifier
 
     private static Boolean resolveIsOut(HoverContext ctx, String paramName, Object paramContent)
     {
-        // Платформенные методы: mcore.Parameter.isOut()
-        if (ctx != null && ctx.method != null && ctx.paramIndex >= 0
-            && paramName != null && !paramName.isBlank())
-        {
-            Parameter matched = findParameter(ctx.method, ctx.pageIndex, ctx.paramIndex, paramName);
-            if (matched != null)
-                return Boolean.valueOf(matched.isOut());
-        }
+        // Платформенные методы: признак Вх/Вых не документирован — префикс не показываем.
         // Методы модуля: FormalParam.isByValue() → ParamContent.getPassing()
         // Знач (byValue=true) = Вх; без Знач (byValue=false) = Вых
         if (paramContent != null)
@@ -5719,61 +5707,6 @@ public final class ParamHintHtmlModifier
                 return Boolean.valueOf(!byValue.booleanValue());
         }
         return null;
-    }
-
-    private static Parameter findParameter(Method method, int pageIndex, int paramIndex,
-        String paramName)
-    {
-        if (method == null || paramName == null || paramName.isBlank())
-            return null;
-        EList<ParamSet> sets = method.getParamSet();
-        if (sets == null || sets.isEmpty())
-            return null;
-
-        if (pageIndex >= 0 && pageIndex < sets.size())
-        {
-            Parameter byIndex = parameterAt(sets.get(pageIndex), paramIndex);
-            if (byIndex != null && parameterNameMatches(byIndex, paramName))
-                return byIndex;
-        }
-
-        for (ParamSet set : sets)
-        {
-            Parameter candidate = parameterAt(set, paramIndex);
-            if (candidate != null && parameterNameMatches(candidate, paramName))
-                return candidate;
-        }
-        // Имя есть, индекс не совпал — искать по имени в любом ParamSet
-        for (ParamSet set : sets)
-        {
-            if (set == null || set.getParams() == null)
-                continue;
-            for (Parameter candidate : set.getParams())
-            {
-                if (candidate != null && parameterNameMatches(candidate, paramName))
-                    return candidate;
-            }
-        }
-        return null;
-    }
-
-    private static Parameter parameterAt(ParamSet set, int paramIndex)
-    {
-        if (set == null || set.getParams() == null || paramIndex < 0
-            || paramIndex >= set.getParams().size())
-            return null;
-        return set.getParams().get(paramIndex);
-    }
-
-    private static boolean parameterNameMatches(Parameter parameter, String paramName)
-    {
-        if (parameter == null || paramName == null)
-            return false;
-        String name = parameter.getName();
-        if (paramName.equalsIgnoreCase(name))
-            return true;
-        String ru = parameter.getNameRu();
-        return paramName.equalsIgnoreCase(ru);
     }
 
     private static int findMatchingDivEnd(String html, int divStart)
