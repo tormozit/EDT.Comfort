@@ -119,6 +119,8 @@ public final class ParamHintHtmlModifier
     private static final String PARAM_ENTRY_CLASS = "comfort-param-entry"; //$NON-NLS-1$
     private static final String PARAM_MENU_CLASS = "comfort-param-menu"; //$NON-NLS-1$
     private static final String PARAM_MENU_ITEM_CLASS = "comfort-param-menu-item"; //$NON-NLS-1$
+    /** Фиолетовый цвет текста параметра с пустым фактическим аргументом (фон слишком броский). */
+    private static final String PARAM_EMPTY_ACTUAL_CLASS = "comfort-param-empty-actual"; //$NON-NLS-1$
     private static final String PARAM_BROWSER_FUNCTION_NAME = "comfortParamAction"; //$NON-NLS-1$
     private static final int PARAM_MENU_TEXT_MAX_LENGTH = 50;
     /** Границы перестраиваемого списка: содержимое меню тоже может содержать ')'. */
@@ -3734,12 +3736,20 @@ public final class ParamHintHtmlModifier
         int formalCount = countPageParams(ctx.pages.get(ctx.pageIndex));
         if (paramIndex >= formalCount)
         {
-            // Ключ структуры за последним формальным — жирным его, описание остаётся от «Значения».
-            if (!isStructureKeysPage(ctx, ctx.pages.get(ctx.pageIndex)))
+            if (isStructureKeysPage(ctx, ctx.pages.get(ctx.pageIndex)))
+            {
+                // Ключ структуры за последним формальным — жирным его, описание остаётся от «Значения».
+                browser.setData(LAST_SHOW_ARG_MARK, Integer.valueOf(paramIndex));
+                ctx.currentArgIndex = paramIndex;
+                refreshVirtualParamHtml(browser, ctx);
                 return;
-            browser.setData(LAST_SHOW_ARG_MARK, Integer.valueOf(paramIndex));
-            ctx.currentArgIndex = paramIndex;
-            refreshVirtualParamHtml(browser, ctx);
+            }
+            // Виртуальный слот за последним формальным — переход к соответствующему
+            // фактическому аргументу, как команда «Факт=…» его подменю.
+            Object viewerObj = ctx.parametersHover != null
+                ? Global.getField(ctx.parametersHover, "textViewer") : null; //$NON-NLS-1$
+            if (viewerObj instanceof ITextViewer viewer)
+                jumpToActualParameter(browser, viewer, paramIndex, false);
             return;
         }
         browser.setData(LAST_SHOW_ARG_MARK, Integer.valueOf(paramIndex));
@@ -3773,7 +3783,11 @@ public final class ParamHintHtmlModifier
             return;
         Object page = ctx.pages.get(ctx.pageIndex);
         String name;
-        if (paramIndex >= 1 && isStructureKeysPage(ctx, page))
+        if (paramIndex >= 1 && isStrTemplatePage(ctx))
+        {
+            name = String.valueOf(paramIndex);
+        }
+        else if (paramIndex >= 1 && isStructureKeysPage(ctx, page))
         {
             name = paramIndex - 1 < ctx.structureKeys.size()
                 ? ctx.structureKeys.get(paramIndex - 1) : null;
@@ -4133,7 +4147,14 @@ public final class ParamHintHtmlModifier
             desired = 0;
         Object prev = browser.getData(LAST_SHOW_ARG_MARK);
         if (prev instanceof Integer last && last.intValue() == desired)
+        {
+            // Ввод в тот же параметр подсказку не обновляет: снимок AST отстаёт на шаг,
+            // и его пересборка в переходном состоянии ломает описание и мигает. Подсказка
+            // перерисуется штатным showPage при переходе каретки в другой параметр.
             return;
+        }
+        Global.tempLog("param-hint-prefix", "branch=change prev=" + prev //$NON-NLS-1$ //$NON-NLS-2$
+            + " desired=" + desired); //$NON-NLS-1$
         Object page = ctx.pages.get(ctx.pageIndex);
         Object paramsObj = Global.getField(page, "params"); //$NON-NLS-1$
         List<?> params = paramsObj instanceof List<?> typed ? typed : Collections.emptyList();
@@ -4245,6 +4266,8 @@ public final class ParamHintHtmlModifier
         String selectedForeground = systemColorHex(SWT.COLOR_LIST_SELECTION_TEXT);
         String style = "<style id=\"" + PARAM_LINK_STYLE_ID + "\">" //$NON-NLS-1$ //$NON-NLS-2$
             + "span." + PARAM_ENTRY_CLASS + "{position:relative;}" //$NON-NLS-1$ //$NON-NLS-2$
+            + "span." + PARAM_EMPTY_ACTUAL_CLASS //$NON-NLS-1$
+            + "{color:" + paramEmptyActualTextColorHex() + ";}" //$NON-NLS-1$
             + "span." + PARAM_LINK_CLASS //$NON-NLS-1$
             + "{color:inherit;text-decoration:none;cursor:pointer;}" //$NON-NLS-1$
             + "span." + PARAM_LINK_CLASS + ":hover,span." + PARAM_LINK_CLASS //$NON-NLS-1$ //$NON-NLS-2$
@@ -4283,6 +4306,12 @@ public final class ParamHintHtmlModifier
         return String.format(Locale.ROOT, "#%02X%02X%02X", //$NON-NLS-1$
             Integer.valueOf(color.getRed()), Integer.valueOf(color.getGreen()),
             Integer.valueOf(color.getBlue()));
+    }
+
+    /** Цвет текста слота без заполненного фактического аргумента: фиолетовый, читаемый и в тёмной теме. */
+    private static String paramEmptyActualTextColorHex()
+    {
+        return ThemeAwareColors.isDarkTheme() ? "#B39DDB" : "#7E57C2"; //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     /**
@@ -4360,8 +4389,12 @@ public final class ParamHintHtmlModifier
 
     /**
      * Необязательные параметры в сигнатуре: {@code (Колонки, Строки?)} вместо
-     * штатных {@code [Строки]}. Слоты за последним формальным до каретки —
-     * как {@code ?}, текущий из них жирный (прокрутка к {@code <b>}).
+     * штатных {@code [Строки]}. Виртуальные слоты за последним формальным — как {@code ?}:
+     * и уже присутствующие в тексте вызова {@link #extraSlotsAlreadyTyped} (запятая после
+     * формальных, независимо от каретки), и до каретки. Текущий из них жирный
+     * (прокрутка к {@code <b>}). Слот несёт подменю «Факт=…» и переход к аргументу вызова,
+     * как реальный параметр, а при пустом фактическом аргументе — фиолетовый цвет текста
+     * (фон слишком броский).
      */
     private static String rewriteHeadingOptionalParams(String html, HoverContext ctx)
     {
@@ -4384,12 +4417,23 @@ public final class ParamHintHtmlModifier
         List<?> params = paramsObj instanceof List<?> typed ? typed : Collections.emptyList();
         int formalCount = params.size();
         int highlight = currentParamHighlightIndex(ctx, formalCount);
-        int extraUnknown = extraUnknownParamCount(ctx, formalCount);
+        int extraByCaret = extraUnknownParamCount(ctx, formalCount);
+        int extraUnknown = Math.max(extraByCaret, extraSlotsAlreadyTyped(ctx, formalCount));
         if (params.isEmpty() && extraUnknown == 0)
             return null;
         StringBuilder list = new StringBuilder();
-        if (!params.isEmpty() && isStructureKeysPage(ctx, page))
+        if (isStrTemplatePage(ctx))
         {
+            // СтрШаблон: со второго параметра слоты — номера «1», «2», … (по плейсхолдерам
+            // %1, %2 в шаблоне), вместо формального «Значение1-Значение10». Вся сигнатура
+            // рисуется здесь, хвостовой цикл ниже для неё не запускается.
+            appendStrTemplateParams(list, ctx, params);
+        }
+        else if (!params.isEmpty() && isStructureKeysPage(ctx, page))
+        {
+            // Страница «По ключу и значениям» сама рисует и все ключи, и виртуальные слоты
+            // (до каретки и по факту вызова) — хвостовой цикл ниже для неё не запускается,
+            // иначе слот за последним ключом выходил бы дважды.
             appendStructureKeyParams(list, ctx, params.get(0));
         }
         else
@@ -4404,19 +4448,17 @@ public final class ParamHintHtmlModifier
                     continue;
                 appendParamEntry(list, ctx, i,
                     name.trim() + (isParamOptional(paramContent) ? "?" : ""), //$NON-NLS-1$ //$NON-NLS-2$
-                    i == highlight);
+                    i == highlight, true);
             }
-        }
-        for (int e = 0; e < extraUnknown; e++)
-        {
-            if (list.length() > 0)
-                list.append(", "); //$NON-NLS-1$
-            boolean current = highlight < 0 && e == extraUnknown - 1;
-            if (current)
-                list.append("<b>"); //$NON-NLS-1$
-            list.append('?');
-            if (current)
-                list.append("</b>"); //$NON-NLS-1$
+            for (int e = 0; e < extraUnknown; e++)
+            {
+                // Слоты за кареточным здесь только докручиваются: жирный всегда на слоте каретки,
+                // а не на последнем из уже набранных (запятые после каретки). Как у реального
+                // параметра — подменю «Факт=…», ссылка перехода к аргументу и фиолетовый цвет
+                // текста пустого фактического аргумента.
+                boolean current = highlight < 0 && e == extraByCaret - 1;
+                appendParamEntry(list, ctx, formalCount + e, "?", current, true); //$NON-NLS-1$
+            }
         }
         if (list.length() == 0)
             return null;
@@ -4429,14 +4471,16 @@ public final class ParamHintHtmlModifier
 
     /** Имя параметра с меню действий; {@code label} уже с признаком необязательности. */
     private static void appendParamEntry(StringBuilder list, HoverContext ctx, int index,
-        String label, boolean current)
+        String label, boolean current, boolean tintWhenEmptyActual)
     {
         if (list.length() > 0)
             list.append(", "); //$NON-NLS-1$
         if (current)
             list.append("<b>"); //$NON-NLS-1$
-        list.append("<span class=\"").append(PARAM_ENTRY_CLASS) //$NON-NLS-1$
-            .append("\" onmouseenter=\"comfortShowParamMenu(this)\"") //$NON-NLS-1$
+        list.append("<span class=\"").append(PARAM_ENTRY_CLASS); //$NON-NLS-1$
+        if (tintWhenEmptyActual && actualArgTextBlank(ctx, index))
+            list.append(' ').append(PARAM_EMPTY_ACTUAL_CLASS);
+        list.append("\" onmouseenter=\"comfortShowParamMenu(this)\"") //$NON-NLS-1$
             .append(" onmouseleave=\"comfortHideParamMenu(this)\">"); //$NON-NLS-1$
         list.append("<span class=\"").append(PARAM_LINK_CLASS) //$NON-NLS-1$
             .append("\" onmousedown=\"if(event.ctrlKey)event.preventDefault();\"") //$NON-NLS-1$
@@ -4451,9 +4495,20 @@ public final class ParamHintHtmlModifier
             list.append("</b>"); //$NON-NLS-1$
     }
 
+    /** {@code true} — фактический аргумент слота отсутствует или пуст (формальный параметр не заполнен). */
+    private static boolean actualArgTextBlank(HoverContext ctx, int index)
+    {
+        if (ctx == null || ctx.actualArgTexts == null || index < 0
+            || index >= ctx.actualArgTexts.size())
+            return true;
+        String actual = ctx.actualArgTexts.get(index);
+        return actual == null || actual.isBlank();
+    }
+
     /**
      * {@code Новый Структура("а, б", …)}: {@code (Ключи, а?, б?)} вместо {@code (Ключи, Значения?)}.
-     * Аргументы сверх ключей до каретки — {@code ?}, как у прочих лишних слотов.
+     * Аргументы сверх ключей, уже набранные в вызове или до каретки, — {@code ?},
+     * как у прочих лишних слотов, с подменю «Факт=…» и переходом к аргументу.
      */
     private static void appendStructureKeyParams(StringBuilder list, HoverContext ctx,
         Object keysParam)
@@ -4463,21 +4518,47 @@ public final class ParamHintHtmlModifier
             ? asString(Global.invoke(keysParam, "getName")) : null; //$NON-NLS-1$
         if (keysName == null || keysName.isBlank())
             keysName = "Ключи"; //$NON-NLS-1$
-        appendParamEntry(list, ctx, 0, keysName.trim(), current == 0);
+        appendParamEntry(list, ctx, 0, keysName.trim(), current == 0, false);
         List<String> keys = ctx.structureKeys;
         for (int k = 0; k < keys.size(); k++)
         {
             String key = keys.get(k);
             appendParamEntry(list, ctx, k + 1, key.isEmpty() ? "?" : key + "?", //$NON-NLS-1$ //$NON-NLS-2$
-                current == k + 1);
+                current == k + 1, true);
         }
-        for (int slot = keys.size() + 1; slot <= current; slot++)
+        // Слоты за последним ключом — показывать сразу по факту вызова (запятые),
+        // а не только до каретки; жирный остаётся на слоте каретки. Как у прочих слотов
+        // с пустым фактическим аргументом — фиолетовый цвет текста.
+        int lastSlot = Math.max(current, actualSlotsInCall(ctx) - 1);
+        for (int slot = keys.size() + 1; slot <= lastSlot; slot++)
         {
-            list.append(", "); //$NON-NLS-1$
-            if (slot == current)
-                list.append("<b>?</b>"); //$NON-NLS-1$
-            else
-                list.append('?');
+            appendParamEntry(list, ctx, slot, "?", slot == current, true); //$NON-NLS-1$
+        }
+    }
+
+    /**
+     * {@code СтрШаблон(Шаблон, 1, 2, …)}: значение параметра 1 — плейсхолдер {@code %1},
+     * параметра 2 — {@code %2} и т.д. Одинаковая строка в обоих синтаксисах (устаревшем
+     * 1С:Предприятие 8.3 и двойном именовании).
+     */
+    private static void appendStrTemplateParams(StringBuilder list, HoverContext ctx,
+        List<?> params)
+    {
+        int current = ctx.currentArgIndex >= 0 ? ctx.currentArgIndex : ctx.paramIndex;
+        Object templateParam = params.isEmpty() ? null : params.get(0);
+        String templateName = templateParam != null
+            ? asString(Global.invoke(templateParam, "getName")) : null; //$NON-NLS-1$
+        if (templateName == null || templateName.isBlank())
+            templateName = "Шаблон"; //$NON-NLS-1$
+        appendParamEntry(list, ctx, 0, templateName.trim(), current == 0, false);
+        // Слоты с 1-й позиции — номера значений: первый параметр — %1, второй — %2 и т.д.
+        // Показывать и по факту вызова (запятые), а не только до каретки; жирный — на слоте
+        // каретки. Пустой фактический аргумент — фиолетовым цветом текста, как у прочих
+        // лишних слотов.
+        int lastSlot = Math.max(current, actualSlotsInCall(ctx) - 1);
+        for (int slot = 1; slot <= lastSlot; slot++)
+        {
+            appendParamEntry(list, ctx, slot, String.valueOf(slot), slot == current, true);
         }
     }
 
@@ -5015,6 +5096,16 @@ public final class ParamHintHtmlModifier
             isOut = null;
         }
 
+        // #region agent log
+        Global.tempLog("param-hint-prefix", "page=" + ctxPageIndex(ctx) //$NON-NLS-1$
+            + " hl=" + highlightSafe(ctx) //$NON-NLS-1$
+            + " name=" + (paramName == null ? "-" : paramName) //$NON-NLS-1$
+            + " virt=" + virtualParam //$NON-NLS-1$
+            + " method=" + (ctx == null || ctx.method == null) //$NON-NLS-1$
+            + " pidx=" + (ctx == null ? -1 : ctx.paramIndex) //$NON-NLS-1$
+            + " isOut=" + isOut + " prefix=\"" + buildDirectionPrefix(isOut) + "\"" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " caller=" + modifyContentCaller()); //$NON-NLS-1$
+        // #endregion
         String directionPrefix = buildDirectionPrefix(isOut);
         String suffix = buildMetaSuffix(defaultDescription, description);
         String newTypeInner = directionPrefix + typeBase + suffix;
@@ -5340,6 +5431,39 @@ public final class ParamHintHtmlModifier
         if (isOut == null)
             return ""; //$NON-NLS-1$
         return isOut.booleanValue() ? "Вых. - " : "Вх. - "; //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    private static int ctxPageIndex(HoverContext ctx)
+    {
+        return ctx == null || ctx.pageIndex < 0 ? -1 : ctx.pageIndex;
+    }
+
+    private static int highlightSafe(HoverContext ctx)
+    {
+        try
+        {
+            if (ctx == null || ctx.pages == null || ctx.pages.isEmpty()
+                || ctx.pageIndex < 0 || ctx.pageIndex >= ctx.pages.size())
+                return -1;
+            return currentParamHighlightIndex(ctx, countPageParams(ctx.pages.get(ctx.pageIndex)));
+        }
+        catch (Exception | LinkageError ignored)
+        {
+            return -2;
+        }
+    }
+
+    private static String modifyContentCaller()
+    {
+        StackTraceElement[] stack = Thread.currentThread().getStackTrace();
+        for (int i = 1; i < stack.length; i++)
+        {
+            String name = stack[i].getMethodName();
+            if ("modifyContentHtml".equals(name) || "invoke0".equals(name)) //$NON-NLS-1$ //$NON-NLS-2$
+                continue;
+            return name;
+        }
+        return "?"; //$NON-NLS-1$
     }
 
     private static String buildMetaSuffix(String defaultDescription, String description)
@@ -5773,8 +5897,24 @@ public final class ParamHintHtmlModifier
     private static int stockArgIndexAtCaret()
     {
         ActiveEditor active = resolveParamHintEditor();
-        if (active == null || active.widget == null || active.widget.isDisposed() || active.caret < 0)
+        if (active == null || active.caret < 0)
             return -1;
+        List<?> commas = stockCommas();
+        return commas != null
+            ? StockParamNumberClampFix.stockParameterNumber(commas, active.caret)
+            : -1;
+    }
+
+    /**
+     * {@code commaPosition} штатного {@code CustomCaretListener} открытой подсказки —
+     * запятые вызова в текущем тексте документа, не зависят от позиции каретки.
+     * {@code null} — данных нет.
+     */
+    private static List<?> stockCommas()
+    {
+        ActiveEditor active = resolveParamHintEditor();
+        if (active == null || active.widget == null || active.widget.isDisposed())
+            return null;
         for (org.eclipse.swt.widgets.Listener listener
             : active.widget.getListeners(org.eclipse.swt.custom.ST.CaretMoved))
         {
@@ -5784,9 +5924,43 @@ public final class ParamHintHtmlModifier
                 continue;
             Object info = Global.getField(typed, "info"); //$NON-NLS-1$
             if (info != null && Global.getField(info, "commaPosition") instanceof List<?> commas) //$NON-NLS-1$
-                return StockParamNumberClampFix.stockParameterNumber(commas, active.caret);
+                return commas;
         }
-        return -1;
+        return null;
+    }
+
+    /**
+     * Число фактических слотов аргументов в вызове под кареткой, независимо от её
+     * позиции ({@code число запятых вызова + 1}, совпадает с {@code currentArgIndex}-нумерацией).
+     * Живой источник — {@link #stockCommas()} (модель AST после правки отстаёт на шаг);
+     * резерв — слоты снимка AST {@code actualArgTexts}. {@code 0} — данных нет.
+     */
+    private static int actualSlotsInCall(HoverContext ctx)
+    {
+        List<?> commas = stockCommas();
+        if (commas != null)
+            return commas.size() + 1;
+        if (ctx != null && ctx.actualArgTexts != null)
+            return ctx.actualArgTexts.size();
+        return 0;
+    }
+
+    /**
+     * Виртуальные слоты за последним формальным параметром, уже присутствующие в тексте
+     * вызова независимо от каретки: {@code Тип("ТаблицаФормы",)} при каретке внутри первого
+     * аргумента уже имеет лишний слот после запятой и показывает его как {@code ?}.
+     * Для сигнатур с неограниченным хвостом ({@code maxParams < 0}) — {@code 0}, как
+     * {@code extraUnknownParamCount}: их хвост не «?», а законные слоты.
+     */
+    private static int extraSlotsAlreadyTyped(HoverContext ctx, int formalCount)
+    {
+        if (ctx == null || formalCount < 0)
+            return 0;
+        if (signatureAllowsExtraArgs(ctx, formalCount))
+            return 0;
+        int slots = actualSlotsInCall(ctx);
+        int minSlots = Math.max(1, formalCount);
+        return slots > minSlots ? slots - formalCount : 0;
     }
 
     /** Ключи структуры, разобранные для открытой подсказки со списком сигнатур {@code pages}. */
@@ -6629,6 +6803,18 @@ public final class ParamHintHtmlModifier
         if (ctx == null || ctx.structureKeys == null || page == null || countPageParams(page) < 2)
             return false;
         return !resolveParamTypeNames(page, 0).contains("фиксированнаяструктура"); //$NON-NLS-1$
+    }
+
+    /**
+     * Страница глобальной функции {@code СтрШаблон} (объявлена в модели платформы как
+     * {@code minParams=1, maxParams=-1} с единственным формальным параметром «Шаблон» —
+     * значения в модель не входят, поэтому их имена «1», «2», … генерируются здесь).
+     */
+    private static boolean isStrTemplatePage(HoverContext ctx)
+    {
+        return ctx != null && ctx.method != null
+            && ("СтрШаблон".equals(ctx.method.getNameRu()) //$NON-NLS-1$ //$NON-NLS-2$
+                || "StrTemplate".equals(ctx.method.getName())); //$NON-NLS-1$
     }
 
     /** Имена типов литерала, если {@code Expression#getTypes()} ещё пуст. */
