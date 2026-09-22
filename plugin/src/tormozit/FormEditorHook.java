@@ -1723,8 +1723,10 @@ public class FormEditorHook implements IStartup
     }
 
     /**
-     * Узел реквизитов формы, чей тип значения подходит под {@code *Ссылка.*}
-     * (и английский {@code *Ref.*}: {@code CatalogRef.Номенклатура}).
+     * Узел реквизитов формы со ссылочным типом значения: категория оканчивается на «Ссылка»
+     * ({@code СправочникСсылка}, {@code ДокументСсылка}, {@code ЛюбаяСсылка}) или англ. {@code Ref}
+     * ({@code CatalogRef}, {@code AnyRef}). Рекурсивный обход дерева реквизитов в такие узлы не
+     * спускается: ссылка на тот же объект дала бы бесконечный спуск.
      */
     public static boolean isFormAttributeReferenceNode(Object element)
     {
@@ -1747,12 +1749,77 @@ public class FormEditorHook implements IStartup
         return false;
     }
 
-    /** Маска {@code *Ссылка.*}; для англоязычных имён типов — {@code *Ref.*}. */
+    /** Узел реквизитов формы с типом значения «Дата» — вложенных реквизитов у него нет. */
+    public static boolean isFormAttributeDateNode(Object element)
+    {
+        if (!(element instanceof PropertyInfo info))
+            return false;
+        TypeDescription valueType = info.getValueType();
+        if (valueType == null)
+            return false;
+        for (TypeItem typeItem : valueType.getTypes())
+        {
+            if (typeItem == null)
+                continue;
+            TypeItem resolved = typeItem;
+            if (typeItem.eIsProxy() && info.getForm() != null)
+                resolved = (TypeItem) EcoreUtil.resolve(typeItem, info.getForm());
+            if (isPrimitiveDateTypeName(McoreUtil.getTypeName(resolved)))
+                return true;
+        }
+        return false;
+    }
+
+    /** Узел реквизитов формы с категорией «ОпределяемыйТип»/«DefinedType». Объект определяемого
+     * типа содержит реквизит «Тип», который сам может быть ссылочным и дать бесконечный спуск —
+     * в такие узлы рекурсивный обход не спускается (как в ссылочные). */
+    public static boolean isFormAttributeDefinedTypeNode(Object element)
+    {
+        if (!(element instanceof PropertyInfo info))
+            return false;
+        TypeDescription valueType = info.getValueType();
+        if (valueType == null)
+            return false;
+        for (TypeItem typeItem : valueType.getTypes())
+        {
+            if (typeItem == null)
+                continue;
+            TypeItem resolved = typeItem;
+            if (typeItem.eIsProxy() && info.getForm() != null)
+                resolved = (TypeItem) EcoreUtil.resolve(typeItem, info.getForm());
+            if (matchesDefinedTypeCategory(McoreUtil.getTypeName(resolved)))
+                return true;
+        }
+        return false;
+    }
+
+    private static boolean matchesDefinedTypeCategory(String typeName)
+    {
+        if (typeName == null || typeName.isEmpty())
+            return false;
+        int dot = typeName.indexOf('.');
+        String category = dot < 0 ? typeName : typeName.substring(0, dot);
+        return "ОпределяемыйТип".equals(category) || "DefinedType".equals(category); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /** Имя примитивного типа «Дата»: русское {@code Дата} или английское {@code Date}
+     * ({@code McoreUtil.getTypeName} возвращает имя по имени реквизита, для примитивов — английское). */
+    private static boolean isPrimitiveDateTypeName(String typeName)
+    {
+        return "Дата".equals(typeName) || "Date".equals(typeName); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /** Ссылочная категория типа оканчивается на «Ссылка» ({@code СправочникСсылка},
+     * {@code ДокументСсылка}, {@code ЛюбаяСсылка}) или англ. {@code Ref}
+     * ({@code CatalogRef}, {@code AnyRef}). Имя объекта после точки не важно — спускаться в
+     * реквизиты ссылочного типа нельзя в любом случае. */
     private static boolean matchesReferenceTypeMask(String typeName)
     {
         if (typeName == null || typeName.isEmpty())
             return false;
-            return typeName.contains("Ссылка.") || typeName.contains("Ref."); //$NON-NLS-1$ //$NON-NLS-2$
+        int dot = typeName.indexOf('.');
+        String category = dot < 0 ? typeName : typeName.substring(0, dot);
+        return category.endsWith("Ссылка") || category.endsWith("Ref"); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private static List<PropertyInfo> buildPropertyInfoChain(PropertyInfo anchor, PropertyInfo leaf)
@@ -3771,9 +3838,21 @@ public class FormEditorHook implements IStartup
         /** Ищет поле метаданных только внутри основного динамического списка формы. */
         private static TreeItem findMetadataItem(TreeViewer viewer, TreeItem parent, EObject metadata)
         {
+            Set<Object> expandedBySearch = new LinkedHashSet<>();
+            TreeItem found = findMetadataItem(viewer, parent, metadata, expandedBySearch);
+            collapseUninteresting(viewer, found, expandedBySearch);
+            return found;
+        }
+
+        private static TreeItem findMetadataItem(TreeViewer viewer, TreeItem parent, EObject metadata,
+            Set<Object> expandedBySearch)
+        {
             Object parentData = parent.getData();
-            if (parentData != null)
+            if (parentData != null && !viewer.getExpandedState(parentData))
+            {
+                expandedBySearch.add(parentData);
                 viewer.setExpandedState(parentData, true);
+            }
             for (TreeItem item : parent.getItems())
             {
                 if (item.isDisposed())
@@ -3785,14 +3864,37 @@ public class FormEditorHook implements IStartup
                         return item;
                     if (isFormAttributeReferenceNode(info))
                         continue;
+                    if (isFormAttributeDateNode(info))
+                        continue;
+                    if (isFormAttributeDefinedTypeNode(info))
+                        continue;
                     if (isDataCompositionSettingsNode(info))
                         continue;
                 }
-                TreeItem nested = findMetadataItem(viewer, item, metadata);
+                TreeItem nested = findMetadataItem(viewer, item, metadata, expandedBySearch);
                 if (nested != null)
                     return nested;
             }
             return null;
+        }
+
+        /**
+         * Сворачивает узлы, раскрытые поиском, но не ведущие к найденному реквизиту: остаётся
+         * только путь {@code parent → … → found}.
+         */
+        private static void collapseUninteresting(TreeViewer viewer, TreeItem found,
+            Set<Object> expandedBySearch)
+        {
+            if (expandedBySearch.isEmpty())
+                return;
+            Set<Object> keepExpanded = new HashSet<>();
+            for (TreeItem cur = found; cur != null && !cur.isDisposed(); cur = cur.getParentItem())
+                keepExpanded.add(cur.getData());
+            for (Object data : expandedBySearch)
+            {
+                if (data != null && !keepExpanded.contains(data))
+                    viewer.setExpandedState(data, false);
+            }
         }
 
         /**
@@ -3853,7 +3955,9 @@ public class FormEditorHook implements IStartup
             return null;
         }
 
-        /** Тип реквизита формы — {@code *Объект.<имя владельца>} (или английское {@code *Object.…}). */
+        /** Тип реквизита формы — {@code *Объект.<имя владельца>} (или английское {@code *Object.…}),
+         * а также менеджер/набор записей регистра: {@code *МенеджерЗаписи.<имя>},
+         * {@code *НаборЗаписей.<имя>} и {@code *RecordManager.…}, {@code *RecordSet.…}. */
         private static boolean isObjectTypeOf(PropertyInfo info, MdObject owner)
         {
             TypeDescription valueType = info.getValueType();
@@ -3875,7 +3979,9 @@ public class FormEditorHook implements IStartup
                 if (dot < 0 || !typeName.substring(dot + 1).equals(ownerName))
                     continue;
                 String category = typeName.substring(0, dot);
-                if (category.endsWith("Object") || category.endsWith("Объект")) //$NON-NLS-1$ //$NON-NLS-2$
+                if (category.endsWith("Object") || category.endsWith("Объект") //$NON-NLS-1$ //$NON-NLS-2$
+                    || category.endsWith("RecordManager") || category.endsWith("МенеджерЗаписи") //$NON-NLS-1$ //$NON-NLS-2$
+                    || category.endsWith("RecordSet") || category.endsWith("НаборЗаписей")) //$NON-NLS-1$ //$NON-NLS-2$
                     return true;
             }
             return false;

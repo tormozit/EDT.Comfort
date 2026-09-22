@@ -762,6 +762,10 @@ public final class TreeExpander implements IStartup
                 continue;
             if (FormEditorHook.isFormAttributeReferenceNode(child))
                 continue;
+            if (FormEditorHook.isFormAttributeDateNode(child))
+                continue;
+            if (FormEditorHook.isFormAttributeDefinedTypeNode(child))
+                continue;
             if (!nodeHasChildren(viewer, cp, tree, child))
                 continue;
             remaining[0]--;
