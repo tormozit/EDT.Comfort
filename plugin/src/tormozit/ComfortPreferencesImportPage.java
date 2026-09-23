@@ -15,9 +15,11 @@ import java.util.Set;
 import java.util.function.Supplier;
 
 import org.eclipse.core.resources.IProject;
+import org.eclipse.core.resources.ProjectScope;
 import org.eclipse.core.resources.ResourcesPlugin;
 import org.eclipse.core.runtime.Platform;
 import org.eclipse.core.runtime.preferences.IExportedPreferences;
+import org.eclipse.core.runtime.preferences.IEclipsePreferences;
 import org.eclipse.core.runtime.preferences.IPreferenceFilter;
 import org.eclipse.core.runtime.preferences.IPreferencesService;
 import org.eclipse.core.runtime.preferences.PreferenceFilterEntry;
@@ -33,6 +35,7 @@ import org.eclipse.swt.widgets.Table;
 import org.eclipse.swt.widgets.TableItem;
 import org.eclipse.ui.internal.preferences.PreferenceTransferElement;
 import org.eclipse.ui.internal.wizards.preferences.WizardPreferencesImportPage1;
+import org.osgi.service.prefs.BackingStoreException;
 
 /**
  * Единственная страница {@link ComfortPreferencesImportWizard}. Список категорий —
@@ -124,7 +127,8 @@ public class ComfortPreferencesImportPage extends WizardPreferencesImportPage1
         filtered = ComfortPreferenceTransferFilter.appendProjectCategory(filtered,
                 ComfortPreferenceTransferFilter.COMFORT_PROJECT_TRANSFER_ID, Activator.PLUGIN_ID, targets);
         filtered = ComfortPreferenceTransferFilter.appendProjectCategory(filtered,
-                ComfortPreferenceTransferFilter.BSL_PROJECT_TRANSFER_ID, "com._1c.g5.v8.dt.bsl.Bsl", targets); //$NON-NLS-1$
+                ComfortPreferenceTransferFilter.BSL_PROJECT_TRANSFER_ID,
+                ComfortPreferenceTransferFilter.BSL_PREFERENCE_QUALIFIER, targets);
         filtered = ComfortPreferenceTransferFilter.appendProjectCategory(filtered,
                 ComfortPreferenceTransferFilter.CHECKS_PROJECT_TRANSFER_ID,
                 ComfortPreferenceTransferFilter.CHECKS_PREFERENCE_QUALIFIER, targets);
@@ -211,6 +215,16 @@ public class ComfortPreferencesImportPage extends WizardPreferencesImportPage1
                 }
                 if (importAll && !targets.isEmpty())
                     importProjectScopeData(targets);
+
+                // applyPreferences заменяет только присутствующие в файле ключи. Удаляем
+                // старые проектные настройки форматирования, отсутствующие в выгрузке,
+                // чтобы они снова наследовались от общих настроек EDT.
+                List<String> bslTargets = importAll ? targets
+                        : ComfortPreferenceTransferFilter.projectNamesForQualifier(filters,
+                                ComfortPreferenceTransferFilter.BSL_PREFERENCE_QUALIFIER);
+                if (!bslTargets.isEmpty() && sourceKnown
+                        && !removeAbsentBslPreferences(super.getDestinationValue(), sourceProject, bslTargets))
+                    return false;
             }
             return ok;
         }
@@ -221,6 +235,54 @@ public class ComfortPreferencesImportPage extends WizardPreferencesImportPage1
                 new File(tempRewrittenFilePath).delete();
                 tempRewrittenFilePath = null;
             }
+        }
+    }
+
+    /**
+     * В .par отсутствие ключа означает наследование значения из общих настроек. Штатный
+     * applyPreferences() такие ключи в проекте-приёмнике не удаляет, поэтому сверяем узел
+     * форматирования с исходным проектом после успешного импорта. Если исходный файл .prefs
+     * вообще не существовал, множество ключей пусто и проект снова наследует всё.
+     */
+    private static boolean removeAbsentBslPreferences(String filePath, String sourceProject, List<String> targets)
+    {
+        Properties props = loadProperties(filePath);
+        if (props == null)
+            return false;
+        String qualifier = ComfortPreferenceTransferFilter.BSL_PREFERENCE_QUALIFIER;
+        String prefix = "/project/" + sourceProject + '/' + qualifier + '/'; //$NON-NLS-1$
+        Set<String> exportedKeys = new HashSet<>();
+        for (String property : props.stringPropertyNames())
+        {
+            if (!property.startsWith(prefix))
+                continue;
+            String key = property.substring(prefix.length());
+            if (!key.isEmpty() && key.indexOf('/') < 0)
+                exportedKeys.add(key);
+        }
+
+        try
+        {
+            for (String target : targets)
+            {
+                IProject project = ResourcesPlugin.getWorkspace().getRoot().getProject(target);
+                IEclipsePreferences node = new ProjectScope(project).getNode(qualifier);
+                boolean changed = false;
+                for (String key : node.keys())
+                    if (!exportedKeys.contains(key))
+                    {
+                        node.remove(key);
+                        changed = true;
+                    }
+                if (changed)
+                    node.flush();
+            }
+            return true;
+        }
+        catch (BackingStoreException e)
+        {
+            Global.tempLog("preferences-import", "Не удалось удалить отсутствующие настройки BSL: " + e); //$NON-NLS-1$ //$NON-NLS-2$
+            return false;
         }
     }
 
@@ -260,7 +322,7 @@ public class ComfortPreferencesImportPage extends WizardPreferencesImportPage1
                 for (String target : targets)
                 {
                     mapping.put(target + '/' + Activator.PLUGIN_ID, null);
-                    mapping.put(target + "/com._1c.g5.v8.dt.bsl.Bsl", null); //$NON-NLS-1$
+                    mapping.put(target + '/' + ComfortPreferenceTransferFilter.BSL_PREFERENCE_QUALIFIER, null);
                     mapping.put(target + '/' + ComfortPreferenceTransferFilter.CHECKS_PREFERENCE_QUALIFIER, null);
                 }
                 return mapping;

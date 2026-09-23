@@ -106,7 +106,8 @@ public class ComfortPreferencesExportPage extends WizardPreferencesExportPage1
         filtered = ComfortPreferenceTransferFilter.appendProjectCategory(filtered,
                 ComfortPreferenceTransferFilter.COMFORT_PROJECT_TRANSFER_ID, Activator.PLUGIN_ID, project);
         filtered = ComfortPreferenceTransferFilter.appendProjectCategory(filtered,
-                ComfortPreferenceTransferFilter.BSL_PROJECT_TRANSFER_ID, "com._1c.g5.v8.dt.bsl.Bsl", project); //$NON-NLS-1$
+                ComfortPreferenceTransferFilter.BSL_PROJECT_TRANSFER_ID,
+                ComfortPreferenceTransferFilter.BSL_PREFERENCE_QUALIFIER, project);
         filtered = ComfortPreferenceTransferFilter.appendProjectCategory(filtered,
                 ComfortPreferenceTransferFilter.CHECKS_PROJECT_TRANSFER_ID,
                 ComfortPreferenceTransferFilter.CHECKS_PREFERENCE_QUALIFIER, project);
@@ -387,7 +388,7 @@ public class ComfortPreferencesExportPage extends WizardPreferencesExportPage1
                     return Map.of();
                 Map<String, PreferenceFilterEntry[]> mapping = new HashMap<>();
                 mapping.put(projectName + '/' + Activator.PLUGIN_ID, null);
-                mapping.put(projectName + "/com._1c.g5.v8.dt.bsl.Bsl", null); //$NON-NLS-1$
+                mapping.put(projectName + '/' + ComfortPreferenceTransferFilter.BSL_PREFERENCE_QUALIFIER, null);
                 mapping.put(projectName + '/' + ComfortPreferenceTransferFilter.CHECKS_PREFERENCE_QUALIFIER, null);
                 return mapping;
             }

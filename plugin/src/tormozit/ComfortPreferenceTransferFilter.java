@@ -50,8 +50,10 @@ final class ComfortPreferenceTransferFilter
      */
     static final String COMFORT_PROJECT_TRANSFER_ID = "tormozit.prefTransfer.comfortProject"; //$NON-NLS-1$
 
-    /** Узел ProjectScope — {@code com._1c.g5.v8.dt.bsl.Bsl} (id Xtext-языка BSL, см. bsl-ui/plugin.xml). */
+    /** Узел ProjectScope форматирования BSL — {@code com.e1c.g5.v8.dt.formatter.bsl}. */
     static final String BSL_PROJECT_TRANSFER_ID = "tormozit.prefTransfer.bslProject"; //$NON-NLS-1$
+
+    static final String BSL_PREFERENCE_QUALIFIER = "com.e1c.g5.v8.dt.formatter.bsl"; //$NON-NLS-1$
 
     /**
      * Узел ProjectScope с метаданными профиля проверок (активный профиль, отключение
@@ -104,7 +106,7 @@ final class ComfortPreferenceTransferFilter
      * Добавляет категорию «... (Проект)» {@code transferId} к {@code elements} (уже прошедшим
      * {@link #filterAndLabel}) в обход штатной фильтрации по instance-scope — см. javadoc
      * {@link #COMFORT_PROJECT_TRANSFER_ID}. {@code preferenceNodeQualifier} — узел ProjectScope
-     * (например {@code "tormozit"} или {@code "com._1c.g5.v8.dt.bsl.Bsl"}). {@code projectNamesSupplier}
+     * (например {@code "tormozit"} или {@code "com.e1c.g5.v8.dt.formatter.bsl"}). {@code projectNamesSupplier}
      * читается заново при каждом {@code getFilter()} (то есть на момент нажатия «Готово», а не на
      * момент построения списка) и может вернуть несколько имён — на экспорте один (текущий
      * проект), на импорте столько, сколько отмечено в «Проекты приёмники»

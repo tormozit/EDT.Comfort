@@ -149,6 +149,9 @@ final class FilterInputBox
         STACKTRACES(
             "comfort.stacktracesList.filter.history.count", //$NON-NLS-1$
             "comfort.stacktracesList.filter.history."), //$NON-NLS-1$
+        PROFILING_RESULTS(
+            "comfort.profilingResults.filter.history.count", //$NON-NLS-1$
+            "comfort.profilingResults.filter.history."), //$NON-NLS-1$
         COLUMN_VALUES(
             "comfort.formTableColumnValues.filter.history.count", //$NON-NLS-1$
             "comfort.formTableColumnValues.filter.history."), //$NON-NLS-1$
@@ -522,6 +525,7 @@ final class FilterInputBox
             case COMPARE_STRUCTURE -> forCompareStructure(parent, onSearch);
             case VALIDATION_CHECKS -> throw new IllegalStateException("VALIDATION_CHECKS: use attachHistory(SearchBox, Scope.VALIDATION_CHECKS)"); //$NON-NLS-1$
             case STACKTRACES -> forStacktraces(parent, onSearch);
+            case PROFILING_RESULTS -> throw new IllegalStateException("PROFILING_RESULTS: use attachHistoryKeepLayout(SearchBox, Scope.PROFILING_RESULTS)"); //$NON-NLS-1$
             case COLUMN_VALUES -> forColumnValues(parent, onSearch);
             case PROJECT_STRUCTURE -> forProjectStructure(parent, onSearch);
             case EVENT_HANDLERS -> throw new IllegalStateException("EVENT_HANDLERS: use attachHistory(SearchBox, Scope.EVENT_HANDLERS)"); //$NON-NLS-1$

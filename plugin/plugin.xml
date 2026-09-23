@@ -138,6 +138,7 @@
     <startup class="tormozit.ErrorDialogActivateHook"/>
     <startup class="tormozit.ErrorDialogLinksHook"/>
     <startup class="tormozit.StacktracesViewInteractionHook"/>
+    <startup class="tormozit.ProfilingViewHook"/>
     <startup class="tormozit.StacktraceCompileFormatHook"/>
     <startup class="tormozit.InfobaseSyncQuestionDialogHook"/>
     <startup class="tormozit.DeployConfigurationFixHook"/>
@@ -1744,7 +1745,7 @@
       <description>Настройки плагина Комфорт для конкретного проекта.</description>
     </transfer>
     <!-- Тот же номинальный mapping, что у comfortProject выше: реальный путь ProjectScope —
-         /project/<ИмяПроекта>/com._1c.g5.v8.dt.bsl.Bsl (id Xtext-языка BSL, bsl-ui/plugin.xml),
+         /project/<ИмяПроекта>/com.e1c.g5.v8.dt.formatter.bsl (id бандла форматирования BSL),
          фильтр подменяет ComfortPreferenceTransferFilter.BSL_PROJECT_TRANSFER_ID. Соответствует
          разделу "Свойства проекта → V8 → Встроенный язык → Форматирование". -->
     <transfer
@@ -1752,7 +1753,7 @@
         icon="platform:/plugin/com._1c.g5.v8.dt.bsl.ui/icons/eview/syntax_help.png"
         name="BSL: форматирование">
       <mapping scope="project">
-        <entry node="com._1c.g5.v8.dt.bsl.Bsl"/>
+        <entry node="com.e1c.g5.v8.dt.formatter.bsl"/>
       </mapping>
       <description>Настройки форматирования кода BSL для конкретного проекта ("Включить настройки для проекта").</description>
     </transfer>
