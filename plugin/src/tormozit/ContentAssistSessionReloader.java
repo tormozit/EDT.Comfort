@@ -1142,13 +1142,6 @@ boolean inLiteral = endCaret >= 0
         if (caret < 0 || applyInProgress || suppressDocumentAutoOpenAfterSession || hoverBlocks)
         {
             pendingParamHintKind = 0;
-            // #region agent log
-            if (isExpressionFieldViewer())
-                Global.tempLog("inspect-hint-cmd", "onChar.skip kind=" + hintKind //$NON-NLS-1$ //$NON-NLS-2$
-                    + " caret=" + caret + " apply=" + applyInProgress //$NON-NLS-1$ //$NON-NLS-2$
-                    + " suppress=" + suppressDocumentAutoOpenAfterSession //$NON-NLS-1$
-                    + " hover=" + hoverVisible); //$NON-NLS-1$
-            // #endregion
             logLinkedMode("hint.onChar.skip", "{\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
                 + ",\"modelCaret\":" + modelCaret //$NON-NLS-1$
                 + ",\"kind\":\"" + hintKind + "\"" //$NON-NLS-1$ //$NON-NLS-2$
@@ -1161,11 +1154,6 @@ boolean inLiteral = endCaret >= 0
         pendingParamHintDesiredCaret = caret;
         // Если LinkedMode успел показать свою — снимаем: показываем только нашу.
         forceRemoveLinkedModeParamHintListeners("onChar"); //$NON-NLS-1$
-        // #region agent log
-        if (isExpressionFieldViewer())
-            Global.tempLog("inspect-hint-cmd", "onChar kind=" + hintKind //$NON-NLS-1$ //$NON-NLS-2$
-                + " caret=" + caret + " hoverVisible=" + hoverVisible); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
         logLinkedMode("hint.onChar", "{\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
             + ",\"modelCaret\":" + modelCaret //$NON-NLS-1$
             + ",\"kind\":\"" + hintKind + "\"" //$NON-NLS-1$ //$NON-NLS-2$

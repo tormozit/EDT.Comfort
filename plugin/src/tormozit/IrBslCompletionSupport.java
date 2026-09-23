@@ -476,9 +476,12 @@ return null;
     {
         for (WordEntry entry : words)
         {
-            String key = normalizeFilterKey(entry.filterName);
-            if (key.isEmpty())
+            String filterKey = normalizeFilterKey(entry.filterName);
+            if (filterKey.isEmpty())
                 continue;
+            // ИР возвращает одноимённые оператор и функцию отдельными строками в нужном
+            // порядке. ЭтоМетод — часть их идентичности: схлопывать их по одному имени нельзя.
+            String key = filterKey + '\u0001' + (entry.method ? '1' : '0');
             IrCompletionProposal existing = seenMap.get(key);
             if (existing != null)
             {

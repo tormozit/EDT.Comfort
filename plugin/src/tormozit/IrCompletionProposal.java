@@ -65,7 +65,7 @@ public final class IrCompletionProposal implements
         this.returnsValue = returnsValue;
         this.replaceParentOnInsert = replaceParentOnInsert;
         this.irPriority = irPriority;
-        this.stableCacheKey = buildStableCacheKey(this.filterName, this.dictionaryKey);
+        this.stableCacheKey = buildStableCacheKey(this.filterName, this.dictionaryKey, this.method);
     }
 
     public void setIrPriority(int priority)
@@ -78,6 +78,13 @@ public final class IrCompletionProposal implements
         String filter = filterName != null ? filterName : ""; //$NON-NLS-1$
         String dict = dictionaryKey != null ? dictionaryKey : ""; //$NON-NLS-1$
         return filter + STABLE_KEY_SEP + dict;
+    }
+
+    public static String buildStableCacheKey(
+        String filterName, String dictionaryKey, boolean method)
+    {
+        return buildStableCacheKey(filterName, dictionaryKey)
+            + STABLE_KEY_SEP + (method ? '1' : '0');
     }
 
     public String getFilterName()

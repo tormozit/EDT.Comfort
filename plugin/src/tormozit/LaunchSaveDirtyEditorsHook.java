@@ -7,11 +7,15 @@ import java.lang.reflect.Modifier;
 import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
+import java.util.concurrent.ConcurrentHashMap;
 
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IMarker;
@@ -19,7 +23,12 @@ import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.IResource;
 import org.eclipse.core.resources.ResourcesPlugin;
 import org.eclipse.core.runtime.CoreException;
+import org.eclipse.core.runtime.IProgressMonitor;
+import org.eclipse.core.runtime.IStatus;
 import org.eclipse.core.runtime.NullProgressMonitor;
+import org.eclipse.core.runtime.Platform;
+import org.eclipse.core.runtime.Status;
+import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.core.runtime.preferences.InstanceScope;
 import org.eclipse.debug.core.DebugPlugin;
 import org.eclipse.debug.core.ILaunchConfiguration;
@@ -33,6 +42,7 @@ import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.dialogs.Dialog;
 import org.eclipse.jface.dialogs.IDialogConstants;
 import org.eclipse.jface.preference.FieldEditor;
+import org.eclipse.jface.preference.IPreferenceStore;
 import org.eclipse.jface.preference.IPreferencePage;
 import org.eclipse.jface.preference.PreferenceDialog;
 import org.eclipse.jface.resource.ImageDescriptor;
@@ -57,8 +67,14 @@ import org.eclipse.swt.widgets.TableItem;
 import org.eclipse.ui.IEditorInput;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IEditorReference;
+import org.eclipse.ui.IPartListener2;
+import org.eclipse.ui.IPropertyListener;
+import org.eclipse.ui.ISharedImages;
 import org.eclipse.ui.IStartup;
+import org.eclipse.ui.IWindowListener;
 import org.eclipse.ui.IWorkbenchPage;
+import org.eclipse.ui.IWorkbenchPart;
+import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.dialogs.PreferencesUtil;
@@ -78,6 +94,8 @@ import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.common.localization.LocalizedEnumProvider;
 import com._1c.g5.v8.dt.core.platform.IDerivedDataManagerProvider;
 import com._1c.g5.v8.dt.core.platform.IResourceLookup;
+import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
+import com._1c.g5.v8.dt.search.core.SearchUtils;
 import com._1c.g5.v8.dt.ui.DtUiUtil;
 import com._1c.g5.v8.dt.ui.editor.IDtEditor;
 import com._1c.g5.v8.dt.ui.editor.input.IDtEditorInput;
@@ -87,10 +105,15 @@ import com._1c.g5.v8.dt.validation.marker.Marker;
 import com._1c.g5.v8.dt.validation.marker.MarkerFilter;
 import com._1c.g5.v8.dt.validation.marker.MarkerSeverity;
 import com.e1c.g5.v8.dt.check.settings.IssueSeverity;
+import com.e1c.g5.dt.applications.ApplicationUpdateState;
+import com.e1c.g5.dt.applications.IApplication;
+import com.e1c.g5.dt.applications.IApplicationManager;
+import com.google.inject.Injector;
+import org.osgi.framework.Bundle;
 
 /**
- * Перед запуском клиентского приложения 1С предлагает сохранить несохранённые
- * редакторы того же проекта — по образцу штатного поведения при коммите
+ * Перед запуском клиентского приложения 1С и перед отдельной синхронизацией предлагает
+ * сохранить несохранённые редакторы того же проекта — по образцу штатного поведения при коммите
  * (<a href="https://github.com/tormozit/EDT.Comfort/issues/455">issue 455</a>).
  *
  * <h3>Почему хук, а не настройка</h3>
@@ -108,34 +131,27 @@ import com.e1c.g5.v8.dt.check.settings.IssueSeverity;
  * {@code ILaunchDelegate} подменяется приватное поле {@code fDelegate} на
  * {@link Proxy} ({@link DelegateHandler}), который в {@code preLaunchCheck}:
  * <ul>
- *   <li>находит проект запуска (атрибут {@code com._1c.g5.v8.dt.debug.core.ATTR_PROJECT_NAME});</li>
- *   <li>собирает несохранённые редакторы этого проекта;</li>
- *   <li>при значении параметра «prompt» показывает {@link SaveAndLaunchDialog}
- *       со списком и кнопками «Сохранить и запустить» / «Не сохранять и запустить» / «Отмена»
- *       (при «always» — сохраняет молча, при «never» — не вмешивается);</li>
- *   <li>если штатный параметр «Продолжать выполнение в случае обнаружения ошибок проекта»
- *       стоит в «Предлагать» и у объектов открытых редакторов того же проекта есть проблемы
- *       конфигурации выбранной критичности ({@link #minSeverity()}) и серьёзнее,
- *       показывает {@link ErrorsAndLaunchDialog} с кнопками
- *       «Запустить» / «Отмена»
- *       (<a href="https://github.com/tormozit/EDT.Comfort/issues/500">issue 500</a>).
- *       Маркеры, скрытые штатным отбором «Скрыть языковые проблемы из базовой ветки git»
- *       ({@link IGitMarkerFilterManager}), в расчёт не идут: их на экране не видно, и
- *       предупреждение о них выглядит ложным
- *       (<a href="https://github.com/tormozit/EDT.Comfort/issues/514">issue 514</a>);</li>
- *   <li>в обоих окнах есть кнопка «Настройки…» — открывает страницу штатного параметра
- *       («Запуск/Отладка → Запуск»), не закрывая само окно; там же {@link LaunchPageAugmenter}
- *       добавляет выбор минимальной критичности, а в окне ошибок она названа под списком
- *       (<a href="https://github.com/tormozit/EDT.Comfort/issues/516">issue 516</a>);</li>
- *   <li>затем вызывает настоящий {@code preLaunchCheck}, временно выставив параметр
- *       в «never», чтобы штатное сохранение по всему рабочему пространству не спросило
- *       второй раз.</li>
+ *   <li>показывает собственный вопрос о редакторах проекта, поэтому «Отмена» возвращает
+ *       {@code false} из {@code preLaunchCheck} и действительно прекращает запуск;</li>
+ *   <li>вызывает настоящий {@code preLaunchCheck}, временно выставив параметр сохранения
+ *       в «never» непосредственно в хранилище Debug UI, чтобы штатный вопрос не появился;</li>
+ *   <li>помечает выбор обработанным на время {@code launch}, чтобы перед последующей
+ *       синхронизацией не спрашивать второй раз.</li>
  * </ul>
+ * <p>Для синхронизации вне запуска вопрос о сохранении остаётся непосредственно перед
+ * вызовом менеджера обновления. После сохранения проверяются ошибки конфигурации у объектов
+ * открытых редакторов. При значении
+ * параметра «Предлагать» показывается
+ * {@link ErrorsAndLaunchDialog} (<a href="https://github.com/tormozit/EDT.Comfort/issues/500">issue 500</a>).
+ * Скрытые штатным отбором проблемы не учитываются
+ * (<a href="https://github.com/tormozit/EDT.Comfort/issues/514">issue 514</a>).
+ * Минимальная критичность задаётся на странице запуска через {@link LaunchPageAugmenter}
+ * (<a href="https://github.com/tormozit/EDT.Comfort/issues/516">issue 516</a>).
  */
 public final class LaunchSaveDirtyEditorsHook implements IStartup
 {
     private static final String TAG = "LaunchSaveDirtyEditors"; //$NON-NLS-1$
-    /** После сохранения ждём догоняющий пересчёт маркеров, но не дольше этого. */
+    /** После любого сохранения редактора ждём догоняющий пересчёт маркеров, но не дольше этого. */
     private static final long CHECKS_WAIT_MS = 2_000;
 
     private static final String RUNTIME_CLIENT_TYPE = "com._1c.g5.v8.dt.launching.core.RuntimeClient"; //$NON-NLS-1$
@@ -159,12 +175,17 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
     /** Через сколько после старта EDT подменять делегат: сервисы OSGi уже подняты. */
     private static final int STARTUP_PATCH_DELAY_MS = 10_000;
 
-    private static final int SAVE_AND_LAUNCH_ID = IDialogConstants.CLIENT_ID + 1;
-    private static final int LAUNCH_WITHOUT_SAVE_ID = IDialogConstants.CLIENT_ID + 2;
-    private static final int LAUNCH_WITH_ERRORS_ID = IDialogConstants.CLIENT_ID + 3;
+    private static final int SAVE_AND_CONTINUE_ID = IDialogConstants.CLIENT_ID + 1;
+    private static final int CONTINUE_WITHOUT_SAVE_ID = IDialogConstants.CLIENT_ID + 2;
+    private static final int CONTINUE_WITH_ERRORS_ID = IDialogConstants.CLIENT_ID + 3;
     private static final int OPEN_PREFERENCES_ID = IDialogConstants.CLIENT_ID + 4;
 
     private static volatile boolean patched;
+    /** Запуск, для которого собственный вопрос о сохранении уже обработан в {@code preLaunchCheck}. */
+    private static final Map<ILaunchConfiguration, IProject> PENDING_LAUNCH_SAVE =
+        Collections.synchronizedMap(new WeakHashMap<>());
+    /** Проекты внутри текущего вызова делегата {@code launch}: перед синхронизацией второй раз не спрашивать. */
+    private static final Map<IProject, Integer> ACTIVE_LAUNCH_SAVE = new ConcurrentHashMap<>();
 
     @Override
     public void earlyStartup()
@@ -173,9 +194,221 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
         Display.getDefault().asyncExec(() ->
         {
             LaunchPageAugmenter.install(Display.getDefault());
+            try
+            {
+                EditorSaveTracker.install();
+            }
+            catch (Throwable ignored)
+            {
+            }
+            ApplicationUpdateGuard.install(Display.getDefault());
             Display.getDefault().timerExec(STARTUP_PATCH_DELAY_MS,
                 LaunchSaveDirtyEditorsHook::installDelegateProxy);
         });
+    }
+
+    /** Время последнего сохранения любого редактора проекта, независимо от команды сохранения. */
+    private static final class EditorSaveTracker
+    {
+        private static final Map<IProject, Long> LAST_SAVE = new ConcurrentHashMap<>();
+        private static final Map<IEditorPart, IPropertyListener> LISTENERS = new IdentityHashMap<>();
+        private static final Set<IWorkbenchWindow> WINDOWS =
+            Collections.newSetFromMap(new IdentityHashMap<>());
+
+        static void install()
+        {
+            for (IWorkbenchWindow window : PlatformUI.getWorkbench().getWorkbenchWindows())
+                hookWindow(window);
+            PlatformUI.getWorkbench().addWindowListener(new IWindowListener()
+            {
+                @Override public void windowOpened(IWorkbenchWindow window) { hookWindow(window); }
+                @Override public void windowActivated(IWorkbenchWindow window) {}
+                @Override public void windowDeactivated(IWorkbenchWindow window) {}
+                @Override public void windowClosed(IWorkbenchWindow window) { WINDOWS.remove(window); }
+            });
+        }
+
+        private static void hookWindow(IWorkbenchWindow window)
+        {
+            if (window == null || !WINDOWS.add(window))
+                return;
+            for (IWorkbenchPage page : window.getPages())
+                for (IEditorReference ref : page.getEditorReferences())
+                    watch(ref);
+            window.getPartService().addPartListener(new IPartListener2()
+            {
+                @Override public void partOpened(IWorkbenchPartReference ref) { watch(ref); }
+                @Override public void partActivated(IWorkbenchPartReference ref) { watch(ref); }
+                @Override public void partClosed(IWorkbenchPartReference ref)
+                {
+                    IWorkbenchPart part = ref.getPart(false);
+                    if (part instanceof IEditorPart editor)
+                    {
+                        IPropertyListener listener = LISTENERS.remove(editor);
+                        if (listener != null)
+                            editor.removePropertyListener(listener);
+                    }
+                }
+                @Override public void partBroughtToTop(IWorkbenchPartReference ref) {}
+                @Override public void partDeactivated(IWorkbenchPartReference ref) {}
+                @Override public void partHidden(IWorkbenchPartReference ref) {}
+                @Override public void partVisible(IWorkbenchPartReference ref) {}
+                @Override public void partInputChanged(IWorkbenchPartReference ref) {}
+            });
+        }
+
+        private static void watch(IWorkbenchPartReference ref)
+        {
+            if (!(ref instanceof IEditorReference editorRef))
+                return;
+            IEditorPart editor = editorRef.getEditor(false);
+            if (editor == null || LISTENERS.containsKey(editor))
+                return;
+            boolean[] wasDirty = { editor.isDirty() };
+            IPropertyListener listener = (source, propertyId) ->
+            {
+                if (propertyId != IEditorPart.PROP_DIRTY)
+                    return;
+                boolean dirty;
+                try
+                {
+                    dirty = editor.isDirty();
+                    if (wasDirty[0] && !dirty)
+                    {
+                        IResource resource = editorResource(editor);
+                        IFile file = resource == null ? platformFile(editorModel(editor)) : null;
+                        IProject project = resource != null ? resource.getProject()
+                            : file == null ? null : file.getProject();
+                        if (project != null)
+                            LAST_SAVE.put(project, System.nanoTime());
+                    }
+                }
+                catch (RuntimeException ignored)
+                {
+                    return;
+                }
+                wasDirty[0] = dirty;
+            };
+            LISTENERS.put(editor, listener);
+            editor.addPropertyListener(listener);
+        }
+
+        static long remainingWaitMs(IProject project)
+        {
+            Long lastSave = LAST_SAVE.get(project);
+            if (lastSave == null)
+                return 0;
+            long remainingNs = CHECKS_WAIT_MS * 1_000_000L - (System.nanoTime() - lastSave);
+            return remainingNs <= 0 ? 0 : (remainingNs + 999_999L) / 1_000_000L;
+        }
+
+        static long remainingWaitMs(Set<IProject> projects)
+        {
+            long remaining = 0;
+            for (IProject project : projects)
+                remaining = Math.max(remaining, remainingWaitMs(project));
+            return remaining;
+        }
+
+        static boolean hasSaved(IProject project)
+        {
+            return LAST_SAVE.containsKey(project);
+        }
+
+        static boolean hasSaved(Set<IProject> projects)
+        {
+            for (IProject project : projects)
+                if (hasSaved(project))
+                    return true;
+            return false;
+        }
+    }
+
+    /**
+     * EDT вызывает {@code IApplicationManager.update} после выбора «Обновить и запустить».
+     * Подменяем менеджер только в singleton {@code ApplicationUiSupport}: остальные пути обновления
+     * остаются у настоящего менеджера, а у вызова есть {@link IApplication} с точным проектом.
+     */
+    private static final class ApplicationUpdateGuard
+    {
+        private static final String DIALOG_TITLE = "Обновление приложения"; //$NON-NLS-1$
+        private static final String BUNDLE_ID = "com.e1c.g5.dt.applications.ui"; //$NON-NLS-1$
+        private static final String PLUGIN_CLASS =
+            "com.e1c.g5.dt.internal.applications.ui.ApplicationsUiPlugin"; //$NON-NLS-1$
+        private static final String SUPPORT_CLASS =
+            "com.e1c.g5.dt.applications.ui.IApplicationUiSupport"; //$NON-NLS-1$
+        private static volatile boolean installed;
+
+        static void install(Display display)
+        {
+            Listener listener = event ->
+            {
+                if (!(event.widget instanceof Shell shell) || !DIALOG_TITLE.equals(shell.getText()))
+                    return;
+                ensureInstalled();
+            };
+            display.addFilter(SWT.Show, listener);
+            display.addFilter(SWT.Activate, listener);
+        }
+
+        private static void ensureInstalled()
+        {
+            if (installed)
+                return;
+            try
+            {
+                Bundle bundle = Platform.getBundle(BUNDLE_ID);
+                if (bundle == null)
+                    return;
+                Class<?> pluginClass = bundle.loadClass(PLUGIN_CLASS);
+                Object plugin = Global.invoke(pluginClass, "getDefault"); //$NON-NLS-1$
+                Object injectorValue = Global.invoke(plugin, "getInjector"); //$NON-NLS-1$
+                if (!(injectorValue instanceof Injector injector))
+                    return;
+                Object support = injector.getInstance(bundle.loadClass(SUPPORT_CLASS));
+                Object managerValue = Global.getField(support, "applicationManager"); //$NON-NLS-1$
+                if (!(managerValue instanceof IApplicationManager real))
+                    return;
+                IApplicationManager proxy = (IApplicationManager) Proxy.newProxyInstance(
+                    IApplicationManager.class.getClassLoader(), new Class<?>[] { IApplicationManager.class },
+                    (self, method, args) -> invokeManager(real, self, method, args));
+                installed = Global.setFieldForce(support, "applicationManager", proxy); //$NON-NLS-1$
+            }
+            catch (Throwable ignored)
+            {
+            }
+        }
+
+        private static Object invokeManager(IApplicationManager real, Object self, Method method, Object[] args)
+            throws Throwable
+        {
+            if (method.getDeclaringClass() == Object.class)
+            {
+                if ("equals".equals(method.getName())) //$NON-NLS-1$
+                    return self == (args == null ? null : args[0]);
+                if ("hashCode".equals(method.getName())) //$NON-NLS-1$
+                    return System.identityHashCode(self);
+                return "ComfortApplicationManagerProxy(" + real + ")"; //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            if ("update".equals(method.getName()) && args != null && args.length == 4 //$NON-NLS-1$
+                && args[0] instanceof IApplication application && args[3] instanceof IProgressMonitor monitor)
+            {
+                IProject project = application.getProject();
+                if (project != null && !approveInfobaseSynchronization(project))
+                {
+                    monitor.setCanceled(true);
+                    return ApplicationUpdateState.UPDATED;
+                }
+            }
+            try
+            {
+                return method.invoke(real, args);
+            }
+            catch (InvocationTargetException e)
+            {
+                throw e.getCause() != null ? e.getCause() : e;
+            }
+        }
     }
 
     private static void installDelegateProxy()
@@ -214,7 +447,6 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
         catch (Throwable t)
         {
             Global.logError(TAG, "не удалось подменить делегат запуска", t); //$NON-NLS-1$
-            Global.tempLogException("launch-save", "installDelegateProxy", t); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 
@@ -245,12 +477,11 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
         catch (Throwable t)
         {
             Global.logError(TAG, "не удалось подменить делегат " + delegate, t); //$NON-NLS-1$
-            Global.tempLogException("launch-save", "patchDelegate", t); //$NON-NLS-1$ //$NON-NLS-2$
             return false;
         }
     }
 
-    /** Проксирует делегат запуска, вклиниваясь только в {@code preLaunchCheck}. */
+    /** Проксирует делегат запуска, заменяя штатное сохранение собственным вопросом. */
     private static final class DelegateHandler implements InvocationHandler
     {
         private final Object real;
@@ -267,38 +498,48 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
                 return invokeObjectMethod(proxy, method, args);
 
             if ("preLaunchCheck".equals(method.getName()) && args != null && args.length == 3 //$NON-NLS-1$
-                && args[0] instanceof ILaunchConfiguration config)
+                && args[0] instanceof ILaunchConfiguration)
             {
-                return preLaunchCheck(config, method, args);
+                return preLaunchCheck(method, args);
             }
             if ("launch".equals(method.getName()) && args != null && args.length >= 1 //$NON-NLS-1$
                 && args[0] instanceof ILaunchConfiguration config)
             {
                 LaunchConfigurationHook.prepareCheckModal(config);
+                IProject handledProject = PENDING_LAUNCH_SAVE.remove(config);
+                if (handledProject != null)
+                    enterLaunchSave(handledProject);
+                try
+                {
+                    return forward(method, args);
+                }
+                finally
+                {
+                    if (handledProject != null)
+                        leaveLaunchSave(handledProject);
+                }
             }
             return forward(method, args);
         }
 
-        private Object preLaunchCheck(ILaunchConfiguration config, Method method, Object[] args)
+        private Object preLaunchCheck(Method method, Object[] args)
             throws Throwable
         {
-            Boolean decision;
-            try
-            {
-                decision = decide(config);
-            }
-            catch (Throwable t)
-            {
-                Global.logError(TAG, "ошибка подготовки списка редакторов", t); //$NON-NLS-1$
-                Global.tempLogException("launch-save", "decide", t); //$NON-NLS-1$ //$NON-NLS-2$
-                decision = null;
-            }
-            if (Boolean.FALSE.equals(decision))
-                return Boolean.FALSE;
-            if (decision == null)
+            ILaunchConfiguration config = (ILaunchConfiguration)args[0];
+            PENDING_LAUNCH_SAVE.remove(config);
+            if (NEVER.equals(readPrefEffective()))
                 return forward(method, args);
 
-            // Решение принято нами — глушим повторный штатный вопрос по всему рабочему пространству.
+            IProject project = resolveProject(config);
+            if (project != null)
+            {
+                Boolean decision = decideSave(project);
+                if (Boolean.FALSE.equals(decision))
+                    return Boolean.FALSE;
+                if (Boolean.TRUE.equals(decision))
+                    PENDING_LAUNCH_SAVE.put(config, project);
+            }
+
             PrefGuard guard = PrefGuard.suppress();
             try
             {
@@ -311,34 +552,14 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
         }
 
         /**
-         * @return {@code TRUE} — продолжать запуск (сохранение обработано нами);
-         *     {@code FALSE} — отменить запуск; {@code null} — мы не вмешиваемся, обычный ход.
-         */
-        private Boolean decide(ILaunchConfiguration config) throws CoreException
-        {
-            IProject project = resolveProject(config);
-            if (project == null)
-                return null;
-
-            Boolean saveDecision = decideSave(project);
-            if (Boolean.FALSE.equals(saveDecision))
-                return Boolean.FALSE;
-
-            Boolean errorDecision = decideErrors(project, Boolean.TRUE.equals(saveDecision));
-            if (Boolean.FALSE.equals(errorDecision))
-                return Boolean.FALSE;
-
-            // PrefGuard нужен, только если мы сами обработали сохранение.
-            return Boolean.TRUE.equals(saveDecision) ? Boolean.TRUE : null;
-        }
-
-        /**
          * @return {@code TRUE} — сохранение обработано нами; {@code FALSE} — отмена;
          *     {@code null} — несохранённых нет или параметр «never».
          */
-        private Boolean decideSave(IProject project)
+        private static Boolean decideSave(IProject project)
         {
-            List<IEditorPart> dirty = scopedDirtyEditors(project);
+            Set<IProject> projects = linkedProjects(project);
+            List<IEditorPart> dirty = new ArrayList<>();
+            Display.getDefault().syncExec(() -> dirty.addAll(scopedDirtyEditors(projects)));
             if (dirty.isEmpty())
                 return null;
 
@@ -354,12 +575,12 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
             int[] answer = { IDialogConstants.CANCEL_ID };
             String projectName = project.getName();
             Display.getDefault().syncExec(() -> answer[0] = openSaveDialog(projectName, dirty));
-            if (answer[0] == SAVE_AND_LAUNCH_ID)
+            if (answer[0] == SAVE_AND_CONTINUE_ID)
             {
                 saveEditors(dirty);
                 return Boolean.TRUE;
             }
-            if (answer[0] == LAUNCH_WITHOUT_SAVE_ID)
+            if (answer[0] == CONTINUE_WITHOUT_SAVE_ID)
                 return Boolean.TRUE;
             return Boolean.FALSE;
         }
@@ -368,10 +589,11 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
          * @return {@code TRUE} — пользователь подтвердил запуск при ошибках;
          *     {@code FALSE} — отмена; {@code null} — ошибок в открытых редакторах нет.
          */
-        private Boolean decideErrors(IProject project, boolean savedNow)
+        private static Boolean decideErrors(IProject project)
         {
             if (!errorsPromptEnabled())
                 return null;
+            Set<IProject> projects = linkedProjects(project);
             try
             {
                 IMarkerManager markerManager = Global.getOsgiService(IMarkerManager.class);
@@ -386,9 +608,11 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
                         open.add(rowOf(editor));
                 });
 
-                List<Row> rows = collectErrorRows(markerManager, baseline, project, open, savedNow);
-                if (savedNow)
-                    rows = waitAndRecheck(markerManager, baseline, project, open, rows.isEmpty(), rows);
+                List<Row> rows = collectErrorRows(markerManager, baseline, project, open,
+                    EditorSaveTracker.hasSaved(projects));
+                long remainingWait = EditorSaveTracker.remainingWaitMs(projects);
+                if (remainingWait > 0)
+                    rows = waitAndRecheck(markerManager, baseline, project, projects, open, rows.isEmpty(), rows);
                 if (rows.isEmpty())
                     return null;
 
@@ -396,7 +620,7 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
                 List<Row> errorRows = rows;
                 int[] answer = { IDialogConstants.CANCEL_ID };
                 Display.getDefault().syncExec(() -> answer[0] = openErrorsDialog(project.getName(), errorRows));
-                return answer[0] == LAUNCH_WITH_ERRORS_ID ? Boolean.TRUE : Boolean.FALSE;
+                return answer[0] == CONTINUE_WITH_ERRORS_ID ? Boolean.TRUE : Boolean.FALSE;
             }
             catch (Throwable t)
             {
@@ -412,15 +636,12 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
          * @param appearing {@code true} — в первом проходе ошибок не было, ждём появления;
          *     {@code false} — ошибки уже были, ждём, пока устаревшие пропадут.
          */
-        private List<Row> waitAndRecheck(IMarkerManager markerManager, IGitMarkerFilterManager baseline,
-            IProject project, List<Row> open, boolean appearing, List<Row> rows)
+        private static List<Row> waitAndRecheck(IMarkerManager markerManager, IGitMarkerFilterManager baseline,
+            IProject project, Set<IProject> projects, List<Row> open, boolean appearing, List<Row> rows)
         {
-            long deadline = System.currentTimeMillis() + CHECKS_WAIT_MS;
-            while (System.currentTimeMillis() < deadline)
+            long remaining;
+            while ((remaining = EditorSaveTracker.remainingWaitMs(projects)) > 0)
             {
-                long remaining = deadline - System.currentTimeMillis();
-                if (remaining <= 0)
-                    break;
                 waitForChecks(project, remaining);
                 open.clear();
                 Display.getDefault().syncExec(() ->
@@ -433,7 +654,7 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
                     return rows;
                 if (!appearing && rows.isEmpty())
                     return rows;
-                remaining = deadline - System.currentTimeMillis();
+                remaining = EditorSaveTracker.remainingWaitMs(projects);
                 if (remaining <= 0)
                     break;
                 try
@@ -449,7 +670,7 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
             return rows;
         }
 
-        private List<Row> collectErrorRows(IMarkerManager markerManager, IGitMarkerFilterManager baseline,
+        private static List<Row> collectErrorRows(IMarkerManager markerManager, IGitMarkerFilterManager baseline,
             IProject project, List<Row> open, boolean afterSave)
         {
             List<Row> rows = new ArrayList<>();
@@ -518,7 +739,33 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
         return null;
     }
 
-    private static List<IEditorPart> scopedDirtyEditors(IProject project)
+    private static void enterLaunchSave(IProject project)
+    {
+        ACTIVE_LAUNCH_SAVE.merge(project, Integer.valueOf(1), Integer::sum);
+    }
+
+    private static void leaveLaunchSave(IProject project)
+    {
+        ACTIVE_LAUNCH_SAVE.computeIfPresent(project,
+            (key, count) -> count.intValue() <= 1 ? null : Integer.valueOf(count.intValue() - 1));
+    }
+
+    private static boolean launchSaveAlreadyHandled(IProject project)
+    {
+        return ACTIVE_LAUNCH_SAVE.containsKey(project);
+    }
+
+    private static Set<IProject> linkedProjects(IProject project)
+    {
+        Set<IProject> projects = new LinkedHashSet<>();
+        projects.add(project);
+        IV8ProjectManager manager = Global.getOsgiService(IV8ProjectManager.class);
+        if (manager != null)
+            projects.addAll(SearchUtils.getLinkedProjects(project, manager));
+        return projects;
+    }
+
+    private static List<IEditorPart> scopedDirtyEditors(Set<IProject> projects)
     {
         List<IEditorPart> result = new ArrayList<>();
         for (IWorkbenchWindow window : PlatformUI.getWorkbench().getWorkbenchWindows())
@@ -527,9 +774,14 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
             {
                 for (IEditorPart editor : page.getDirtyEditors())
                 {
-                    IResource resource = editorResource(editor);
-                    if (resource != null && project.equals(resource.getProject()) && !result.contains(editor))
-                        result.add(editor);
+                    for (IProject project : projects)
+                    {
+                        if (belongsToProject(editor, project) && !result.contains(editor))
+                        {
+                            result.add(editor);
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -964,7 +1216,45 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
         for (IEditorPart editor : dirty)
             rows.add(new Row(editor, editorPresentation(editor)));
         rows.sort(Comparator.comparing(row -> row.text));
-        return new SaveAndLaunchDialog(dialogShell(), projectName, rows).open();
+        return new SaveEditorsDialog(dialogShell(), projectName, rows).open();
+    }
+
+    /** Проверка перед синхронизацией с ожиданием, если редактор проекта недавно сохраняли. */
+    static boolean approveInfobaseSynchronization(IProject project)
+    {
+        try
+        {
+            if (!launchSaveAlreadyHandled(project)
+                && Boolean.FALSE.equals(DelegateHandler.decideSave(project)))
+                return false;
+        }
+        catch (Throwable t)
+        {
+            return false;
+        }
+        return !Boolean.FALSE.equals(DelegateHandler.decideErrors(project));
+    }
+
+    /** Проверяет вне UI-потока, чтобы сохранённый модуль успел обновить живые маркеры. */
+    static void approveInfobaseSynchronizationAsync(IProject project, Runnable onApproved)
+    {
+        Display display = Display.getDefault();
+        Job job = new Job("Проверка ошибок перед синхронизацией") //$NON-NLS-1$
+        {
+            @Override
+            protected IStatus run(IProgressMonitor monitor)
+            {
+                if (approveInfobaseSynchronization(project) && !display.isDisposed())
+                    display.asyncExec(() ->
+                    {
+                        if (!display.isDisposed())
+                            onApproved.run();
+                    });
+                return Status.OK_STATUS;
+            }
+        };
+        job.setSystem(true);
+        job.schedule();
     }
 
     private static int openErrorsDialog(String projectName, List<Row> rows)
@@ -1048,8 +1338,21 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
     // Параметр «Сохранять изменённые редакторы перед запуском»
     // -----------------------------------------------------------------------
 
-    private static ScopedPreferenceStore debugUiStore()
+    private static IPreferenceStore debugUiStore()
     {
+        try
+        {
+            Bundle bundle = Platform.getBundle(PREF_NODE);
+            Class<?> pluginClass = bundle == null ? null
+                : bundle.loadClass("org.eclipse.debug.internal.ui.DebugUIPlugin"); //$NON-NLS-1$
+            Object plugin = pluginClass == null ? null : Global.invoke(pluginClass, "getDefault"); //$NON-NLS-1$
+            if (plugin instanceof AbstractUIPlugin uiPlugin)
+                return uiPlugin.getPreferenceStore();
+        }
+        catch (Exception | LinkageError e)
+        {
+            Global.tempLog("launch-save", "debugUiStore: " + e); //$NON-NLS-1$ //$NON-NLS-2$
+        }
         return new ScopedPreferenceStore(InstanceScope.INSTANCE, PREF_NODE);
     }
 
@@ -1077,11 +1380,11 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
      */
     private static final class PrefGuard
     {
-        private final ScopedPreferenceStore store;
+        private final IPreferenceStore store;
         private final boolean wasDefault;
         private final String previous;
 
-        private PrefGuard(ScopedPreferenceStore store, boolean wasDefault, String previous)
+        private PrefGuard(IPreferenceStore store, boolean wasDefault, String previous)
         {
             this.store = store;
             this.wasDefault = wasDefault;
@@ -1090,11 +1393,10 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
 
         static PrefGuard suppress()
         {
-            ScopedPreferenceStore store = debugUiStore();
+            IPreferenceStore store = debugUiStore();
             boolean wasDefault = store.isDefault(PREF_SAVE_DIRTY);
             String previous = store.getString(PREF_SAVE_DIRTY);
             store.setValue(PREF_SAVE_DIRTY, NEVER);
-            save(store);
             return new PrefGuard(store, wasDefault, previous);
         }
 
@@ -1104,19 +1406,6 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
                 store.setToDefault(PREF_SAVE_DIRTY);
             else
                 store.setValue(PREF_SAVE_DIRTY, previous);
-            save(store);
-        }
-
-        private static void save(ScopedPreferenceStore store)
-        {
-            try
-            {
-                store.save();
-            }
-            catch (Exception e)
-            {
-                Global.logError(TAG, "не удалось сохранить параметр сохранения редакторов", e); //$NON-NLS-1$
-            }
         }
     }
 
@@ -1401,7 +1690,8 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
                 button.setText("Настройки…"); //$NON-NLS-1$
             button.setToolTipText(TooltipText.wrap(button,
                 "Открыть страницу параметров «Запуск/Отладка → Запуск»: там задаётся, сохранять ли " //$NON-NLS-1$
-                    + "изменённые редакторы перед запуском и продолжать ли запуск при ошибках проекта.")); //$NON-NLS-1$
+                    + "изменённые редакторы и спрашивать ли об ошибках проекта " //$NON-NLS-1$
+                    + "перед запуском и синхронизацией с базой.")); //$NON-NLS-1$
             shrinkToContent(button);
         }
 
@@ -1490,7 +1780,7 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
             close();
         }
 
-        /** Окно запуска остаётся открытым: параметры показываются поверх него. */
+        /** Окно вопроса остаётся открытым: параметры показываются поверх него. */
         private static void openLaunchPreferences(Shell parent)
         {
             try
@@ -1506,26 +1796,35 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
         }
     }
 
-    /** Список несохранённых редакторов проекта и три кнопки выбора действия. */
-    private static final class SaveAndLaunchDialog extends EditorListDialog
+    /** Список несохранённых редакторов проекта перед запуском или отдельной синхронизацией. */
+    private static final class SaveEditorsDialog extends EditorListDialog
     {
-        SaveAndLaunchDialog(Shell parentShell, String projectName, List<Row> rows)
+        SaveEditorsDialog(Shell parentShell, String projectName, List<Row> rows)
         {
             super(parentShell, projectName, rows);
+        }
+
+        @Override
+        protected void configureShell(Shell shell)
+        {
+            super.configureShell(shell);
+            shell.setText(Global.withPluginWindowTitle("Сохранение редакторов")); //$NON-NLS-1$
+            shell.setImage(PlatformUI.getWorkbench().getSharedImages()
+                .getImage(ISharedImages.IMG_ETOOL_SAVE_EDIT));
         }
 
         @Override
         protected String headerText()
         {
             return "В проекте «" + projectName //$NON-NLS-1$
-                + "» есть несохранённые редакторы (двойной клик — открыть редактор):"; //$NON-NLS-1$
+                + "» и связанных проектах есть несохранённые редакторы (двойной клик — открыть редактор):"; //$NON-NLS-1$
         }
 
         @Override
         protected void createButtonsForButtonBar(Composite parent)
         {
-            createButton(parent, SAVE_AND_LAUNCH_ID, "Сохранить и запустить", true); //$NON-NLS-1$
-            createButton(parent, LAUNCH_WITHOUT_SAVE_ID, "Не сохранять и запустить", false); //$NON-NLS-1$
+            createButton(parent, SAVE_AND_CONTINUE_ID, "Сохранить и продолжить", true); //$NON-NLS-1$
+            createButton(parent, CONTINUE_WITHOUT_SAVE_ID, "Продолжить без сохранения", false); //$NON-NLS-1$
             createButton(parent, IDialogConstants.CANCEL_ID, "Отмена", false); //$NON-NLS-1$
         }
     }
@@ -1542,6 +1841,7 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
         protected void configureShell(Shell shell)
         {
             super.configureShell(shell);
+            shell.setText(Global.withPluginWindowTitle("Ошибки конфигурации")); //$NON-NLS-1$
             shell.setImage(shell.getDisplay().getSystemImage(SWT.ICON_ERROR));
         }
 
@@ -1562,7 +1862,7 @@ public final class LaunchSaveDirtyEditorsHook implements IStartup
         @Override
         protected void createButtonsForButtonBar(Composite parent)
         {
-            createButton(parent, LAUNCH_WITH_ERRORS_ID, "Запустить", true); //$NON-NLS-1$
+            createButton(parent, CONTINUE_WITH_ERRORS_ID, "Продолжить", true); //$NON-NLS-1$
             createButton(parent, IDialogConstants.CANCEL_ID, "Отмена", false); //$NON-NLS-1$
         }
     }

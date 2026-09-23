@@ -313,15 +313,28 @@ public final class InfobaseActiveProjectApplicationMenuHook implements IStartup
 
     private static void openDeployWizard(Shell shell, IProject project, InfobaseReference infobase)
     {
+        LaunchSaveDirtyEditorsHook.approveInfobaseSynchronizationAsync(project, () ->
+        {
+            if (shell.isDisposed())
+                return;
+            openDeployWizardAfterApproval(shell, project, infobase);
+        });
+    }
+
+    private static void openDeployWizardAfterApproval(Shell shell, IProject project, InfobaseReference infobase)
+    {
         Object flow = resolveDeployConfigurationFlow();
         if (flow == null)
         {
             Global.log("InfobaseActiveProjectApplication: DeployConfigurationFlow недоступен"); //$NON-NLS-1$
             return;
         }
-        Object statusObj = Global.invoke(flow, "deployProject", shell, project, infobase); //$NON-NLS-1$
-        if (statusObj instanceof IStatus status && status.getSeverity() == IStatus.ERROR)
-            ToastNotification.show("Комфорт", status.getMessage(), 6000); //$NON-NLS-1$
+        DeployConfigurationFixHook.runWithoutNativeSavePrompt(flow, () ->
+        {
+            Object statusObj = Global.invoke(flow, "deployProject", shell, project, infobase); //$NON-NLS-1$
+            if (statusObj instanceof IStatus status && status.getSeverity() == IStatus.ERROR)
+                ToastNotification.show("Комфорт", status.getMessage(), 6000); //$NON-NLS-1$
+        });
     }
 
     /** {@code DeployConfigurationFlow} — internal-класс бандла platform-services-ui, берём через его Guice-инжектор. */

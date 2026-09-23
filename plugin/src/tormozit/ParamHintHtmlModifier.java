@@ -325,9 +325,6 @@ public final class ParamHintHtmlModifier
                 {
                     if (!INVOCATION_PARAMETERS_HOVER_COMMAND.equals(commandId))
                         return;
-                    // #region agent log
-                    Global.tempLog("inspect-hint-cmd", "preExecute"); //$NON-NLS-1$ //$NON-NLS-2$
-                    // #endregion
                     sigPickOnOpenPending.set(true);
                     // TypesComputer — только при нескольких сигнатурах (иначе сразу выход).
                     ensureFirstActualArgTypesComputed();
@@ -336,20 +333,11 @@ public final class ParamHintHtmlModifier
                 @Override
                 public void notHandled(String commandId, NotHandledException exception)
                 {
-                    // #region agent log
-                    if (INVOCATION_PARAMETERS_HOVER_COMMAND.equals(commandId))
-                        Global.tempLog("inspect-hint-cmd", "notHandled"); //$NON-NLS-1$ //$NON-NLS-2$
-                    // #endregion
                 }
 
                 @Override
                 public void postExecuteFailure(String commandId, ExecutionException exception)
                 {
-                    // #region agent log
-                    if (INVOCATION_PARAMETERS_HOVER_COMMAND.equals(commandId))
-                        Global.tempLog("inspect-hint-cmd", "failure " //$NON-NLS-1$ //$NON-NLS-2$
-                            + String.valueOf(exception));
-                    // #endregion
                 }
 
                 @Override
@@ -743,10 +731,6 @@ public final class ParamHintHtmlModifier
                 && window.getActivePage().getActivePart() != null)
                 site = window.getActivePage().getActivePart().getSite();
             boolean shownFast = showParamInfoViaHandler(handler, viewer, info, site, true, false);
-            // #region agent log
-            Global.tempLog("inspect-hint-cmd", "openFast shown=" + shownFast //$NON-NLS-1$ //$NON-NLS-2$
-                + " caret=" + caret + " handler=" + handlerCls); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
             return shownFast;
         }
         catch (Exception ex)
@@ -1174,10 +1158,6 @@ public final class ParamHintHtmlModifier
                 repositionParamHintWhenReady(handler);
             }
         }
-        Global.tempLog("inspect-hint-cmd", "showControlInfo real=" + realHandlerClass //$NON-NLS-1$ //$NON-NLS-2$
-            + " shown=" + shown //$NON-NLS-1$
-            + " handler=" + handler.getClass().getName() //$NON-NLS-1$
-            + (showErr.isEmpty() ? "" : " err=" + showErr)); //$NON-NLS-1$ //$NON-NLS-2$
         return shown;
     }
 
@@ -1245,12 +1225,6 @@ public final class ParamHintHtmlModifier
         {
             if (isParamHintAlreadyVisible())
             {
-                // #region agent log
-                // Важно для инспектора: раз окно уже видно, наш показ (а с ним и
-                // CustomCaretListener штатного handler) не выполняется — подсказка
-                // остаётся статической, от BslSelectionChangedListener.
-                Global.tempLog("inspect-hint-cmd", "openForViewer skip: alreadyVisible"); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
                 return true;
             }
             if (viewer == null || viewer.getTextWidget() == null || viewer.getTextWidget().isDisposed())
@@ -1335,9 +1309,6 @@ public final class ParamHintHtmlModifier
                         "{\"reason\":\"wrapperCall\",\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
                             + ",\"methodEnd\":" + siteInfo.methodAccessEnd //$NON-NLS-1$
                             + ",\"exprStart\":" + expressionStart + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-                    Global.tempLog("inspect-hint-cmd", "skip wrapperCall caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
-                        + " methodEnd=" + siteInfo.methodAccessEnd //$NON-NLS-1$
-                        + " exprStart=" + expressionStart); //$NON-NLS-1$
                     return Boolean.FALSE;
                 }
                 ContentAssistSessionReloader.logLinkedMode("miss.site", "{\"owner\":\"" //$NON-NLS-1$ //$NON-NLS-2$
@@ -1578,12 +1549,6 @@ public final class ParamHintHtmlModifier
                     shown = showParamHintControlDirect(viewer, documentationLocal,
                         languageProviderLocal, site, caPages, paramNumber, siteInfo);
                 }
-                // #region agent log
-                // viaHandler=true — показ штатным handler, значит есть и его
-                // CustomCaretListener (динамическая связь с кареткой); direct — без него.
-                Global.tempLog("inspect-hint-cmd", "openForViewer shown=" + shown //$NON-NLS-1$ //$NON-NLS-2$
-                    + " viaHandler=" + viaHandler + " caret=" + caret); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
                 return Boolean.valueOf(shown);
             });
             ContentAssistSessionReloader.logLinkedMode("miss.open", "{\"opened\":" + opened //$NON-NLS-1$ //$NON-NLS-2$
@@ -2204,12 +2169,10 @@ public final class ParamHintHtmlModifier
             if (!isRealParamHoverHandler(handler))
                 return null;
             madeParamHoverHandler = handler;
-            Global.tempLog("inspect-hint-cmd", "handler created by ContextInjectionFactory"); //$NON-NLS-1$ //$NON-NLS-2$
             return handler;
         }
         catch (Exception | LinkageError e)
         {
-            Global.tempLog("inspect-hint-cmd", "handler create failed: " + e); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
         }
     }

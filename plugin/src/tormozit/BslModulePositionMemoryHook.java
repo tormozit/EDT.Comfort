@@ -54,6 +54,7 @@ import org.eclipse.jface.dialogs.PageChangedEvent;
 public class BslModulePositionMemoryHook implements IStartup
 {
     private static final String RESTORE_MARKER = "tormozit.bslModulePositionRestored"; //$NON-NLS-1$
+    private static final String CENTER_ON_RESIZE_MARKER = "tormozit.bslModulePositionCenterOnResize"; //$NON-NLS-1$
 
     /** Число повторов ожидания viewer через asyncExec (issue #130 — не бесконечно). */
     private static final int MAX_ATTACH_ATTEMPTS = 100;
@@ -359,15 +360,15 @@ public class BslModulePositionMemoryHook implements IStartup
                 }
                 int offset = clampToDocument(doc, pos[0], pos[1]);
                 editor.selectAndReveal(offset, 0);
-                // selectAndReveal сам скроллит к каретке — если отдельно был сохранён
-                // topIndex (пользователь листал, не двигая каретку), возвращаем именно его.
-                if (pos.length > 2 && viewer instanceof SourceViewer)
+                // Не восстанавливаем сохранённый topIndex: при старте EDT его возврат мог
+                // прокрутить область ниже строки каретки (issue #570). Вместо этого ставим
+                // каретку в середину области просмотра, а не первой строкой во viewport.
+                if (viewer instanceof SourceViewer)
                 {
-                    StyledText textWidget = ((SourceViewer) viewer).getTextWidget();
+                    StyledText textWidget = ((SourceViewer)viewer).getTextWidget();
                     if (textWidget != null && !textWidget.isDisposed())
                     {
-                        int lastLine = Math.max(0, textWidget.getLineCount() - 1);
-                        textWidget.setTopIndex(Math.max(0, Math.min(pos[2], lastLine)));
+                        centerCaretInViewport(textWidget, key);
                     }
                 }
             }
@@ -375,6 +376,43 @@ public class BslModulePositionMemoryHook implements IStartup
             {
             }
         });
+    }
+
+    /** Помещает строку каретки примерно в середину текущей видимой области. */
+    private static void centerCaretInViewport(StyledText textWidget, String key)
+    {
+        if (textWidget.getClientArea().height <= 0)
+        {
+            centerCaretOnFirstReadyResize(textWidget, key);
+            return;
+        }
+        int lineHeight = Math.max(1, textWidget.getLineHeight());
+        int visibleLines = Math.max(1, textWidget.getClientArea().height / lineHeight);
+        int caretLine = textWidget.getLineAtOffset(textWidget.getCaretOffset());
+        int topLine = Math.max(0, caretLine - visibleLines / 2);
+        textWidget.setTopIndex(topLine);
+    }
+
+    /** При startup размер поля ещё нулевой; центрирование откладывается до первой раскладки. */
+    private static void centerCaretOnFirstReadyResize(StyledText textWidget, String key)
+    {
+        if (Boolean.TRUE.equals(textWidget.getData(CENTER_ON_RESIZE_MARKER)))
+            return;
+        textWidget.setData(CENTER_ON_RESIZE_MARKER, Boolean.TRUE);
+        org.eclipse.swt.widgets.Listener listener = new org.eclipse.swt.widgets.Listener()
+        {
+            @Override
+            public void handleEvent(org.eclipse.swt.widgets.Event event)
+            {
+                if (textWidget.isDisposed() || textWidget.getClientArea().height <= 0)
+                    return;
+                textWidget.removeListener(SWT.Resize, this);
+                textWidget.setData(CENTER_ON_RESIZE_MARKER, null);
+                centerCaretInViewport(textWidget, key);
+            }
+        };
+        textWidget.addListener(SWT.Resize, listener);
+        textWidget.addDisposeListener(e -> textWidget.removeListener(SWT.Resize, listener));
     }
 
     /**

@@ -103,8 +103,6 @@ public final class DebugInspectorHook implements IStartup
     private static final String COMFORT_HEADER_KEY = "tormozit.inspectorComfortHeader"; //$NON-NLS-1$
     private static final String COMFORT_MENU_LAYOUT_KEY = "tormozit.inspectorMenuBarOriginalLayout"; //$NON-NLS-1$
     private static final String DETECT_LOG_KEY = "tormozit.debugInspectorDetectLog"; //$NON-NLS-1$
-    /** Временный лог закрытия крестиком: {@code .tmp/temp-logs/inspect-close.log}. */
-    private static final String CLOSE_TEMP_LOG = "inspect-close"; //$NON-NLS-1$
     static final String INSPECT_EXPRESSION_EDITOR_KEY = "tormozit.inspectExpressionEditor"; //$NON-NLS-1$
     static final String INSPECT_EXPRESSION_WRAP_PREFIX = "Строка("; //$NON-NLS-1$
     private static boolean inspectExpressionProposalApplied;
@@ -1281,7 +1279,6 @@ public final class DebugInspectorHook implements IStartup
                 return;
             if (hoverPinDisposeAllowed)
             {
-                logClose("refreshOrMaintain", "skip pinDisposeAllowed " + describeShellAlive(shell)); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
             }
             if (!Boolean.TRUE.equals(shell.getData(PATCHED_KEY)))
@@ -1313,7 +1310,6 @@ public final class DebugInspectorHook implements IStartup
                 return;
             if (hoverPinDisposeAllowed)
             {
-                logClose("refresh", "skip pinDisposeAllowed " + describeShellAlive(shell)); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
             }
             if (!Boolean.TRUE.equals(shell.getData(PATCHED_KEY)))
@@ -1372,52 +1368,38 @@ public final class DebugInspectorHook implements IStartup
          */
         void requestClose(ToolItem source)
         {
-            logClose("click", describeCloseState("enter")); //$NON-NLS-1$ //$NON-NLS-2$
             if (shell.isDisposed())
             {
                 // Попап инспектора EDT может закрыться и открыться заново (pending →
                 // окончательный): объект диалога тот же, shell новый. Сессия при этом
                 // остаётся от прежнего окна, и крестик ЖИВОГО окна упирался в «shell
-                // already disposed» — окно не закрывалось (лог inspect-close 10:14:25…27:
-                // sessionDispose прежнего shell при visible=false, потом три клика).
+                // already disposed» — окно не закрывалось.
                 if (closeLiveShellOf(source))
                     return;
-                logClose("abort", "shell already disposed"); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
             }
             hoverPinDisposeAllowed = true;
             restoreHoverReplacerSuppressGuard();
             removeKeepDeactivateOffListener();
             removeShellPinMaintenance();
-            logClose("guards", describeCloseState("afterGuards pinAllowed=" + hoverPinDisposeAllowed //$NON-NLS-1$
-                + " pinOnTop=" + shellPinnedOnTop)); //$NON-NLS-1$
-
             if (isHoverMode())
             {
                 Object ic = targets.infoControl;
                 boolean hoverIc = isHoverInspectControl(ic);
-                logClose("hover", "ic=" + DebugInspectorDebug.cn(ic) //$NON-NLS-1$ //$NON-NLS-2$
-                    + " hoverIc=" + hoverIc); //$NON-NLS-1$
                 try
                 {
                     if (hoverIc)
                     {
                         Global.invoke(ic, "dispose"); //$NON-NLS-1$
-                        logClose("hover", "infoControl.dispose() done " + describeCloseState("afterIcDispose")); //$NON-NLS-1$ //$NON-NLS-2$
                     }
                     else if (!shell.isDisposed())
                     {
                         shell.dispose();
-                        logClose("hover", "shell.dispose() done disposed=" + shell.isDisposed()); //$NON-NLS-1$ //$NON-NLS-2$
                     }
-                    else
-                        logClose("hover", "no dispose path " + describeCloseState("skip")); //$NON-NLS-1$ //$NON-NLS-2$
                 }
-                catch (RuntimeException ex)
+                catch (RuntimeException ignored)
                 {
-                    Global.tempLogException(CLOSE_TEMP_LOG, "hover dispose failed", ex); //$NON-NLS-1$
                 }
-                scheduleCloseVerify("hover"); //$NON-NLS-1$
                 return;
             }
 
@@ -1425,68 +1407,16 @@ public final class DebugInspectorHook implements IStartup
             {
                 if (isElementDialog(targets.dialog))
                 {
-                    logClose("dialog", "invoke close on " + DebugInspectorDebug.cn(targets.dialog)); //$NON-NLS-1$ //$NON-NLS-2$
                     Global.invoke(targets.dialog, "close"); //$NON-NLS-1$
-                    logClose("dialog", "close() returned " + describeCloseState("afterDialogClose")); //$NON-NLS-1$ //$NON-NLS-2$
                 }
                 else if (!shell.isDisposed())
                 {
-                    logClose("dialog", "shell.dispose() fallback dialog=" //$NON-NLS-1$ //$NON-NLS-2$
-                        + DebugInspectorDebug.cn(targets != null ? targets.dialog : null));
                     shell.dispose();
-                    logClose("dialog", "shell.dispose() done disposed=" + shell.isDisposed()); //$NON-NLS-1$ //$NON-NLS-2$
                 }
-                else
-                    logClose("dialog", "no close path " + describeCloseState("skip")); //$NON-NLS-1$ //$NON-NLS-2$
             }
-            catch (RuntimeException ex)
+            catch (RuntimeException ignored)
             {
-                Global.tempLogException(CLOSE_TEMP_LOG, "dialog close failed", ex); //$NON-NLS-1$
             }
-            scheduleCloseVerify("dialog"); //$NON-NLS-1$
-        }
-
-        private void scheduleCloseVerify(String path)
-        {
-            Display display = shell.isDisposed() ? Display.getCurrent() : shell.getDisplay();
-            if (display == null || display.isDisposed())
-            {
-                logClose("verify", path + " no display"); //$NON-NLS-1$ //$NON-NLS-2$
-                return;
-            }
-            Shell target = shell;
-            for (int delay : new int[] { 0, 50, 200, 500, 1500 })
-            {
-                int d = delay;
-                display.timerExec(d, () -> logClose("verify+" + d + "ms", //$NON-NLS-1$ //$NON-NLS-2$
-                    path + " " + describeShellAlive(target))); //$NON-NLS-1$
-            }
-        }
-
-        private String describeCloseState(String phase)
-        {
-            StringBuilder sb = new StringBuilder(phase);
-            sb.append(" shell=").append(describeShellAlive(shell)); //$NON-NLS-1$
-            sb.append(" hover=").append(targets != null && isHoverMode()); //$NON-NLS-1$
-            sb.append(" dialog=").append(DebugInspectorDebug.cn(targets != null ? targets.dialog : null)); //$NON-NLS-1$
-            sb.append(" ic=").append(DebugInspectorDebug.cn(targets != null ? targets.infoControl : null)); //$NON-NLS-1$
-            sb.append(" elementDialog=").append(targets != null && isElementDialog(targets.dialog)); //$NON-NLS-1$
-            sb.append(" popup=").append(targets != null && isPopupInspectDialog(targets.dialog)); //$NON-NLS-1$
-            sb.append(" pinAllowed=").append(hoverPinDisposeAllowed); //$NON-NLS-1$
-            sb.append(" pinOnTop=").append(shellPinnedOnTop); //$NON-NLS-1$
-            sb.append(" closeBar=").append(describeToolBar(closeToolBar)); //$NON-NLS-1$
-            return sb.toString();
-        }
-
-        private static String describeShellAlive(Shell s)
-        {
-            if (s == null)
-                return "null"; //$NON-NLS-1$
-            if (s.isDisposed())
-                return "disposed@" + System.identityHashCode(s); //$NON-NLS-1$
-            return "alive@" + System.identityHashCode(s) //$NON-NLS-1$
-                + " visible=" + s.isVisible() //$NON-NLS-1$
-                + " active=" + (s.getDisplay().getActiveShell() == s); //$NON-NLS-1$
         }
 
         /**
@@ -1504,44 +1434,23 @@ public final class DebugInspectorHook implements IStartup
             if (live == null || live.isDisposed() || live == shell)
                 return false;
             Object liveDialog = resolveTargets(live).dialog;
-            logClose("stale", "session shell disposed → close live shell dialog=" //$NON-NLS-1$ //$NON-NLS-2$
-                + DebugInspectorDebug.cn(liveDialog));
             try
             {
                 if (isElementDialog(liveDialog))
                     Global.invoke(liveDialog, "close"); //$NON-NLS-1$
                 else
                     live.dispose();
-                logClose("stale", "done disposed=" + live.isDisposed()); //$NON-NLS-1$ //$NON-NLS-2$
                 return true;
             }
-            catch (RuntimeException ex)
+            catch (RuntimeException ignored)
             {
-                Global.tempLogException(CLOSE_TEMP_LOG, "stale close failed", ex); //$NON-NLS-1$
                 return false;
             }
         }
 
         private void wireCloseItem(ToolItem closeItem, String kind)
         {
-            closeItem.addListener(SWT.Selection, e ->
-            {
-                logClose("selection", kind + " itemDisposed=" + closeItem.isDisposed() //$NON-NLS-1$ //$NON-NLS-2$
-                    + " " + describeCloseState("beforeRequest")); //$NON-NLS-1$ //$NON-NLS-2$
-                requestClose(closeItem);
-            });
-            if (closeToolBar != null && !closeToolBar.isDisposed())
-            {
-                closeToolBar.addListener(SWT.MouseDown, e -> logClose("mouseDown", //$NON-NLS-1$
-                    kind + " btn=" + e.button + " @" + e.x + "," + e.y //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        + " barVisible=" + closeToolBar.getVisible() //$NON-NLS-1$
-                        + " barEnabled=" + closeToolBar.getEnabled())); //$NON-NLS-1$
-            }
-        }
-
-        private static void logClose(String phase, String detail)
-        {
-            Global.tempLog(CLOSE_TEMP_LOG, phase + " " + detail); //$NON-NLS-1$
+            closeItem.addListener(SWT.Selection, e -> requestClose(closeItem));
         }
 
         private void invalidateSession()
@@ -2230,7 +2139,6 @@ public final class DebugInspectorHook implements IStartup
 
         void dispose()
         {
-            logClose("sessionDispose", describeCloseState("enter")); //$NON-NLS-1$ //$NON-NLS-2$
             restoreHoverReplacerSuppressGuard();
             removeHeaderGuard();
             removeKeepDeactivateOffListener();
@@ -2524,7 +2432,6 @@ public final class DebugInspectorHook implements IStartup
      */
     private static final class InspectExpressionAssist
     {
-        private static final String LOG = "inspect-expr"; //$NON-NLS-1$
         private static final String INSTALLED_KEY = "tormozit.inspectExpressionAssist"; //$NON-NLS-1$
         private static final String FOCUS_RESTORE_KEY = "tormozit.inspectExpressionAssistFocus"; //$NON-NLS-1$
         private static final String EDITOR_PREFIX = INSPECT_EXPRESSION_WRAP_PREFIX;
@@ -2592,11 +2499,6 @@ public final class DebugInspectorHook implements IStartup
             configureResource(resourceProvider, watch);
 
             Composite host = new Composite(parent, SWT.NONE);
-            // #region agent log
-            // Пробник свёрток — до создания встроенного редактора: иначе состояние
-            // проекции живого редактора уже измерено после возможной поломки.
-            wireLiveFoldingProbe(host, sourceUri(watch));
-            // #endregion
             if (layoutData instanceof GridData gd)
                 host.setLayoutData(copyGridData(gd));
             else
@@ -2640,9 +2542,6 @@ public final class DebugInspectorHook implements IStartup
             try
             {
                 wrap = wrapExpression(watch, combo.getText());
-                // #region agent log
-                logInspectVsLive("before-create", null, sourceUri(watch)); //$NON-NLS-1$
-                // #endregion
                 modelAccess = editor.createPartialEditor(wrap[0], wrap[1], wrap[2], true);
             }
             catch (RuntimeException e)
@@ -2697,11 +2596,10 @@ public final class DebugInspectorHook implements IStartup
                     text.setFocus();
             });
             wireEnter(text, sourceViewer, assist);
-            wireRegionDiag(text, sourceViewer, assist);
             // Общее поведение поля кода BSL (Enter из списка, Ctrl+Shift+Space, жизнь
             // LinkedMode при всплывающих окнах, возврат фокуса) — в BslExpressionField:
             // оно же подключается к полям окна точки останова.
-            BslExpressionField.attach(sourceViewer, LOG);
+            BslExpressionField.attach(sourceViewer, null);
             parent.layout(true, true);
             if (!text.isDisposed())
                 text.setFocus();
@@ -2716,18 +2614,6 @@ public final class DebugInspectorHook implements IStartup
                 });
             }
             scheduleComfortAssistPatch(sourceViewer, assist, 0);
-            // #region agent log
-            URI installUri = sourceUri(watch);
-            logInspectVsLive("after-create", sourceViewer, installUri); //$NON-NLS-1$
-            wireInspectDirtyProbe(sourceViewer, installUri);
-            wireHintDiag(text, sourceViewer);
-            logLiveFolding("after-create", installUri); //$NON-NLS-1$
-            host.addDisposeListener(e -> logInspectVsLive("host-dispose", sourceViewer, installUri)); //$NON-NLS-1$
-            // #endregion
-            log("installed prefixLen=" + wrap[0].length() //$NON-NLS-1$
-                + " suffixLen=" + wrap[2].length() //$NON-NLS-1$
-                + " expr=[" + snippet(wrap[1], 80) + "] " //$NON-NLS-1$ //$NON-NLS-2$
-                + dumpViewer(sourceViewer, wrap[0]));
             DebugInspectorDebug.step("expressionAssist", "installed h=" + editorHeight); //$NON-NLS-1$ //$NON-NLS-2$
         }
 
@@ -2740,7 +2626,6 @@ public final class DebugInspectorHook implements IStartup
 
         private static void log(String message)
         {
-            Global.tempLog(LOG, message);
         }
 
         private static String logStack()
@@ -2982,13 +2867,6 @@ public final class DebugInspectorHook implements IStartup
             return source.fragment() == null ? source.appendFragment("/0") : source; //$NON-NLS-1$
         }
 
-        // #region agent log
-        /**
-         * Временная диагностика: показ/скрытие всплывающих окон (список автодополнения,
-         * подсказка параметров) и переходы фокуса, пока живёт поле «Выражение».
-         * Пишет безусловно в {@code .tmp/temp-logs/inspect-hint.log} — нужна, чтобы
-         * увидеть, что именно гасит подсказку параметров сразу после вставки метода.
-         */
         private static void wireHintDiag(StyledText text, SourceViewer viewer)
         {
             if (text == null || text.isDisposed())
@@ -3052,7 +2930,6 @@ public final class DebugInspectorHook implements IStartup
                 sb.append(" widgetLines=").append(text.isDisposed() ? -1 : text.getLineCount()); //$NON-NLS-1$
                 if (withStack)
                     sb.append(logStack());
-                Global.tempLog("inspect-hint", sb.toString()); //$NON-NLS-1$
             }
             catch (Exception ignored)
             {
@@ -3128,27 +3005,21 @@ public final class DebugInspectorHook implements IStartup
                 }
                 if (model == null || !linkedProbeAttached.add(model))
                     return;
-                Global.tempLog("inspect-linked", "attach model=" //$NON-NLS-1$ //$NON-NLS-2$
-                    + Integer.toHexString(System.identityHashCode(model)) + " caret=" + caret); //$NON-NLS-1$
                 model.addLinkingListener(new ILinkedModeListener()
                 {
                     @Override
                     public void left(LinkedModeModel owner, int flags)
                     {
-                        Global.tempLog("inspect-linked", "left flags=" + flags //$NON-NLS-1$ //$NON-NLS-2$
-                            + logStack());
                     }
 
                     @Override
                     public void suspend(LinkedModeModel owner)
                     {
-                        Global.tempLog("inspect-linked", "suspend" + logStack()); //$NON-NLS-1$ //$NON-NLS-2$
                     }
 
                     @Override
                     public void resume(LinkedModeModel owner, int flags)
                     {
-                        Global.tempLog("inspect-linked", "resume flags=" + flags); //$NON-NLS-1$ //$NON-NLS-2$
                     }
                 });
             }
@@ -3157,11 +3028,6 @@ public final class DebugInspectorHook implements IStartup
             }
         }
 
-        /**
-         * Временная диагностика: гаснет ли projection (свёртки) у живого редактора модуля
-         * при открытии инспектора и кто её гасит. Пишет безусловно в
-         * {@code .tmp/temp-logs/inspect-fold.log}.
-         */
         /** Состояние свёрток живого редактора модуля в произвольный момент. */
         private static void logLiveFolding(String phase, URI sourceUri)
         {
@@ -3225,7 +3091,6 @@ public final class DebugInspectorHook implements IStartup
                     .append(Integer.toHexString(System.identityHashCode(projection)));
                 if (withStack)
                     sb.append(logStack());
-                Global.tempLog("inspect-fold", sb.toString()); //$NON-NLS-1$
             }
             catch (Exception ignored)
             {
@@ -3409,7 +3274,6 @@ public final class DebugInspectorHook implements IStartup
                         // disableProjection(), и в живом редакторе модуля гаснут свёртки —
                         // слушателя модели он снимает раньше, чем removeAllAnnotations,
                         // поэтому текст остаётся свёрнутым, а стрелки исчезают
-                        // (подтверждено стеком inspect-fold 12.09.2026 20:14:48).
                         IRegion vis = null;
                         IDocumentProvider dp = bsl.getDocumentProvider();
                         boolean canSave = false;
@@ -3481,7 +3345,6 @@ public final class DebugInspectorHook implements IStartup
                 + ",\"dirtyParts\":" + dirtyParts //$NON-NLS-1$
                 + ",\"uri\":\"" + ContentAssistDebug.jsonEscapeForLog(String.valueOf(sourceUri)) //$NON-NLS-1$
                 + "\",\"live\":" + live + "}"; //$NON-NLS-1$
-            Global.tempLog("inspect-dirty", phase + " " + payload); //$NON-NLS-1$
         }
 
         private static BslXtextEditor findOpenBslEditor(IEditorPart part)
@@ -3880,7 +3743,7 @@ public final class DebugInspectorHook implements IStartup
 
         private static void restoreExpressionFocus(StyledText text, SourceViewer viewer)
         {
-            BslExpressionField.restoreFocus(text, viewer, LOG);
+            BslExpressionField.restoreFocus(text, viewer, null);
         }
 
         private void evaluateTyped()

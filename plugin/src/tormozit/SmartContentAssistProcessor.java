@@ -1341,20 +1341,17 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         return isIrWordsResolvedForContext() ? irProposals.length : 0;
     }
 
-    /** Есть ИР-слово с тем же dedup-ключом (overlap ИР+EDT в литерале). */
-    boolean hasIrProposalForDedupKey(String key)
+    /** ИР-слово, которое мёрж действительно считает парой указанного EDT-предложения. */
+    IrCompletionProposal findIrProposalForMergeMatch(ICompletionProposal proposal)
     {
-        return findIrProposalForDedupKey(key) != null;
-    }
-
-    /** ИР-слово с тем же dedup-ключом (overlap при merge / активации EDT-строки). */
-    IrCompletionProposal findIrProposalForDedupKey(String key)
-    {
-        if (!hasIrProposalsForCurrentContext() || key == null || key.isEmpty())
+        if (!hasIrProposalsForCurrentContext() || proposal == null)
+            return null;
+        String key = mergeMatchKey(proposal);
+        if (key.isEmpty())
             return null;
         for (ICompletionProposal p : irProposals)
         {
-            if (!key.equalsIgnoreCase(dedupKey(p)))
+            if (!key.equalsIgnoreCase(mergeMatchKey(p)))
                 continue;
             ICompletionProposal raw = unwrapProposal(p);
             if (raw instanceof IrCompletionProposal ir)
@@ -1453,7 +1450,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             ICompletionProposal raw = unwrapProposal(p);
             if (!(raw instanceof IrCompletionProposal ir))
                 continue;
-            String key = dedupKey(p);
+            String key = mergeMatchKey(p);
             if (key.isEmpty())
                 continue;
             irByKey.putIfAbsent(key.toLowerCase(java.util.Locale.ROOT), ir);
@@ -1462,7 +1459,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         {
             if (unwrapProposal(p) instanceof IrCompletionProposal)
                 continue;
-            String key = dedupKey(p);
+            String key = mergeMatchKey(p);
             if (key.isEmpty())
                 continue;
             IrCompletionProposal ir = irByKey.get(key.toLowerCase(java.util.Locale.ROOT));
@@ -5019,6 +5016,7 @@ return stripEmptyPlaceholderProposals(result);
     }
 
     private static final char MERGE_MATCH_PAREN_SEP = '';
+    private static final char MERGE_MATCH_KIND_SEP = '';
 
     /**
      * Строгий ключ только для решения «заменить ИР-предложение EDT-очередью при мёрже»
@@ -5026,7 +5024,9 @@ return stripEmptyPlaceholderProposals(result);
      * В отличие от {@link #dedupKey} (сортировка/наследование приоритета/идентичность попапа —
      * не трогать) учитывает «скобочность» вставки, чтобы бесскобочное ИР-слово (например
      * «Структура» для {@code Новый Структура}) не подменялось EDT-очередью только скобочных
-     * перегрузок ({@code Структура()}, {@code Структура(параметры)}).
+     * перегрузок ({@code Структура()}, {@code Структура(параметры)}). Для бесскобочных слов
+     * также учитывает вид элемента: одноимённые функция ИР и оператор EDT (например «Новый»)
+     * должны остаться двумя самостоятельными предложениями.
      */
     private static String mergeMatchKey(ICompletionProposal proposal)
     {
@@ -5047,7 +5047,19 @@ return stripEmptyPlaceholderProposals(result);
         }
         if (base.isEmpty())
             return ""; //$NON-NLS-1$
-        return base + MERGE_MATCH_PAREN_SEP + (hasParens ? '1' : '0');
+        String key = base + MERGE_MATCH_PAREN_SEP + (hasParens ? '1' : '0');
+        if (!hasParens)
+            key += MERGE_MATCH_KIND_SEP + (proposalIsMethod(proposal) ? '1' : '0');
+        return key;
+    }
+
+    private static boolean proposalIsMethod(ICompletionProposal proposal)
+    {
+        ICompletionProposal raw = unwrapProposal(proposal);
+        if (raw instanceof IrCompletionProposal ir)
+            return ir.isMethod();
+        return IrBslExpressionHtmlSupport.KIND_METHOD.equals(
+            BslCompletionSideHintResolver.resolveElementKind(raw));
     }
 
     private static boolean irProposalHasParens(IrCompletionProposal ir)
@@ -5145,8 +5157,9 @@ return stripEmptyPlaceholderProposals(result);
 
     /**
      * «Имя» и «Имя()» (0 параметров) — семантически один и тот же вызов; если в списке есть
-     * бесскобочный вариант, скобочный «Имя()»-дубль (из EDT или ИР) убираем, оставляем только
-     * бесскобочный.
+     * бесскобочный вариант ИР либо синтезированный конструктор, скобочный «Имя()»-дубль
+     * (из EDT или ИР) убираем. Произвольное бесскобочное предложение EDT здесь не подходит:
+     * одноимённые оператор {@code Новый} и функция ИР {@code Новый()} — разные элементы.
      */
     private static List<ICompletionProposal> preferBareOverEmptyParens(
         List<ICompletionProposal> merged)
@@ -5154,7 +5167,9 @@ return stripEmptyPlaceholderProposals(result);
         Set<String> bareKeys = null;
         for (ICompletionProposal p : merged)
         {
-            if (!isEffectivelyBare(p))
+            ICompletionProposal raw = unwrapProposal(p);
+            if (!isEffectivelyBare(p)
+                || !(raw instanceof IrCompletionProposal || raw instanceof BareConstructorProposal))
                 continue;
             String key = dedupKey(p);
             if (key.isEmpty())

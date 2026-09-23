@@ -951,10 +951,7 @@ public class SmartCompletionProposal implements
         SmartContentAssistProcessor processor = ContentAssistSessionReloader.getActiveProcessor();
         if (processor == null || !processor.hasIrProposalsForCurrentContext())
             return false;
-        String key = SmartContentAssistProcessor.dedupKeyForMerge(delegate);
-        if (key.isEmpty())
-            return false;
-        if (processor.hasIrProposalForDedupKey(key))
+        if (processor.findIrProposalForMergeMatch(delegate) != null)
             return true;
         String cacheKey = BslCompletionSideHintResolver.resolveIrCacheKey(delegate);
         if (cacheKey != null && !cacheKey.isEmpty())
@@ -1284,12 +1281,6 @@ public class SmartCompletionProposal implements
         int len = cp.getReplacementLength();
         String filter = SmartContentAssistProcessor.computeIdentifierFilter(document, caret);
         int identStart = filter.isEmpty() ? caret : caret - filter.length();
-        String repl = cp.getReplacementString();
-        String replClip = repl == null ? "null" : (repl.length() > 40 ? repl.substring(0, 40) : repl); //$NON-NLS-1$
-        Global.tempLog("inspect-expr", //$NON-NLS-1$
-            "apply start=" + start + " len=" + len //$NON-NLS-1$ //$NON-NLS-2$
-                + " identStart=" + identStart + " caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
-                + " filter=[" + filter + "] repl=[" + replClip + "]"); //$NON-NLS-1$ //$NON-NLS-2$
         if (start >= identStart)
             return;
         try
@@ -1304,8 +1295,6 @@ public class SmartCompletionProposal implements
         int newLen = Math.max(0, caret - identStart);
         cp.setReplacementOffset(identStart);
         cp.setReplacementLength(newLen);
-        Global.tempLog("inspect-expr", //$NON-NLS-1$
-            "apply rebase " + start + "," + len + " -> " + identStart + "," + newLen); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
     }
 
     private static boolean needsWordOnlyInsert(ConfigurableCompletionProposal cp,
@@ -1882,7 +1871,7 @@ return pinned;
         if (processor == null)
             return;
         String key = SmartContentAssistProcessor.dedupKeyForMerge(edtDelegate);
-        IrCompletionProposal ir = processor.findIrProposalForDedupKey(key);
+        IrCompletionProposal ir = processor.findIrProposalForMergeMatch(edtDelegate);
         if (ir == null)
             return;
         String edtDisplay = edtDelegate.getDisplayString();
@@ -1965,7 +1954,6 @@ return pinned;
         SmartContentAssistProcessor processor = ContentAssistSessionReloader.getActiveProcessor();
         if (processor == null)
             return null;
-        return processor.findIrProposalForDedupKey(
-            SmartContentAssistProcessor.dedupKeyForMerge(edtDelegate));
+        return processor.findIrProposalForMergeMatch(edtDelegate);
     }
 }

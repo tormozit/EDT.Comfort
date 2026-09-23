@@ -1,6 +1,8 @@
 package tormozit;
 
 import java.io.IOException;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -8,12 +10,18 @@ import java.nio.file.StandardWatchEventKinds;
 import java.nio.file.WatchEvent;
 import java.nio.file.WatchKey;
 import java.nio.file.WatchService;
+import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import org.eclipse.core.resources.IProject;
+import org.eclipse.core.runtime.Adapters;
 import org.eclipse.core.runtime.jobs.IJobChangeEvent;
 import org.eclipse.core.runtime.jobs.IJobChangeListener;
 import org.eclipse.core.runtime.jobs.Job;
+import org.eclipse.jface.action.ActionContributionItem;
+import org.eclipse.jface.action.IAction;
+import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.layout.GridData;
@@ -21,9 +29,18 @@ import org.eclipse.swt.widgets.Button;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
+import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.ui.IStartup;
+import org.eclipse.ui.IWorkbench;
+
+import com._1c.g5.v8.dt.platform.services.core.infobases.IInfobaseAssociation;
+import com._1c.g5.v8.dt.platform.services.core.infobases.IInfobaseAssociationManager;
+import com._1c.g5.v8.dt.platform.services.model.InfobaseReference;
+import com._1c.g5.v8.dt.ui.editor.ISaveManager;
+import com.e1c.g5.dt.applications.IApplication;
+import com.e1c.g5.dt.applications.IApplicationManager;
 
 /**
  * Патч диалога EDT «Обновление конфигурации в приложениях»: добавляет флажок,
@@ -47,6 +64,8 @@ public final class DeployConfigurationFixHook implements IStartup
         "Убирает известный баг конвертации форм в формат конфигуратора 8.5: лишний ButtonImportance=Main " //$NON-NLS-1$
             + "у кнопок (issue 1C-Company/1c-edt-issues#2157)."; //$NON-NLS-1$
     private static final String CHECKBOX_KEY = "tormozit.deployConfigFixCheckbox"; //$NON-NLS-1$
+    private static final String DEPLOY_ACTION_CLASS =
+        "com._1c.g5.v8.dt.internal.platform.services.ui.infobases.actions.DeployConfigurationAction"; //$NON-NLS-1$
 
 private static final String TEMP_ROOT_NAME = "1cedt"; //$NON-NLS-1$
 private static final String FORM_XML_NAME = "Form.xml"; //$NON-NLS-1$
@@ -61,6 +80,36 @@ public void earlyStartup()
     {
         if (display == null || display.isDisposed())
             return;
+
+        // Штатная команда открывает мастер в runWithEvent. Фильтр вызывается до её SWT listener.
+        display.addFilter(SWT.Selection, event ->
+        {
+            if (event.widget == null)
+                return;
+            Object data = event.widget.getData();
+            if (!(data instanceof ActionContributionItem contribution))
+                return;
+            IAction action = contribution.getAction();
+            if (action == null || !DEPLOY_ACTION_CLASS.equals(action.getClass().getName()))
+                return;
+            IProject project = selectedDeployProject(action);
+            if (project != null)
+            {
+                Object selected = selectedDeployElement(action);
+                Display actionDisplay = event.display;
+                event.type = SWT.None;
+                LaunchSaveDirtyEditorsHook.approveInfobaseSynchronizationAsync(project, () ->
+                {
+                    if (actionDisplay.isDisposed() || !action.isEnabled()
+                        || !Objects.equals(selected, selectedDeployElement(action)))
+                        return;
+                    Event continuation = new Event();
+                    continuation.display = actionDisplay;
+                    runWithoutNativeSavePrompt(Global.getField(action, "deployConfigurationFlow"), //$NON-NLS-1$
+                        () -> action.runWithEvent(continuation));
+                });
+            }
+        });
 
         Listener listener = event ->
         {
@@ -77,6 +126,96 @@ public void earlyStartup()
 
         display.addFilter(SWT.Activate, listener);
         display.addFilter(SWT.Show, listener);
+    }
+
+    /** После нашей проверки штатный flow не должен снова предлагать сохранить весь workspace. */
+    static void runWithoutNativeSavePrompt(Object flow, Runnable continuation)
+    {
+        Object value = flow == null ? null : Global.getField(flow, "saveManager"); //$NON-NLS-1$
+        if (!(value instanceof ISaveManager original))
+        {
+            continuation.run();
+            return;
+        }
+        ISaveManager scoped = new ISaveManager()
+        {
+            private boolean consumed;
+
+            @Override
+            public boolean saveChangesBeforeBuild()
+            {
+                if (!consumed)
+                {
+                    consumed = true;
+                    return true;
+                }
+                return original.saveChangesBeforeBuild();
+            }
+
+            @Override
+            public boolean saveChangesBeforeLaunch()
+            {
+                return original.saveChangesBeforeLaunch();
+            }
+        };
+        if (!Global.setFieldForce(flow, "saveManager", scoped)) //$NON-NLS-1$
+        {
+            continuation.run();
+            return;
+        }
+        try
+        {
+            continuation.run();
+        }
+        finally
+        {
+            Global.setFieldForce(flow, "saveManager", original); //$NON-NLS-1$
+        }
+    }
+
+    private static IProject selectedDeployProject(IAction action)
+    {
+        try
+        {
+            Object selected = selectedDeployElement(action);
+            if (selected instanceof IProject project)
+                return project;
+            if (selected instanceof IApplication application)
+                return application.getProject();
+            if (!(selected instanceof InfobaseReference infobase))
+                return null;
+
+            IInfobaseAssociationManager associations = Global.getOsgiService(IInfobaseAssociationManager.class);
+            if (associations != null)
+            {
+                IInfobaseAssociation association = associations.getAssociation(infobase).orElse(null);
+                if (association != null)
+                    return association.getProject();
+            }
+            IProject adapted = Adapters.adapt(infobase, IProject.class);
+            if (adapted != null)
+                return adapted;
+            IApplicationManager applications = Global.getOsgiService(IApplicationManager.class);
+            return applications == null ? null : applications.findApplicationByInfobase(infobase)
+                .map(IApplication::getProject).orElse(null);
+        }
+        catch (Exception ignored)
+        {
+            return null;
+        }
+    }
+
+    private static Object selectedDeployElement(IAction action)
+    {
+        try
+        {
+            Object selection = Global.invoke(action, "getStructuredSelection"); //$NON-NLS-1$
+            return selection instanceof IStructuredSelection structured ? structured.getFirstElement() : null;
+        }
+        catch (RuntimeException ignored)
+        {
+            return null;
+        }
     }
 
     private static boolean isDeployDialogShell(Shell shell)
@@ -177,8 +316,11 @@ public void earlyStartup()
 
             // Оригинальные слушатели (реальная загрузка конфигурации) должны
             // отработать в любом случае, даже если наша логика выше упала.
-            for (Listener l : original)
-                l.handleEvent(event);
+            runWithoutWizardWorkspaceSave(finishButton.getShell(), () ->
+            {
+                for (Listener l : original)
+                    l.handleEvent(event);
+            });
 
             try
             {
@@ -189,6 +331,47 @@ public void earlyStartup()
             {
             }
         });
+    }
+
+    /** Мастер при «Готово» повторно вызывает saveAllEditors(true) для всего рабочего пространства. */
+    private static void runWithoutWizardWorkspaceSave(Shell shell, Runnable continuation)
+    {
+        Object dialog = shell.getData();
+        Object wizard = Global.getField(dialog, "wizard"); //$NON-NLS-1$
+        Object value = Global.getField(wizard, "workbench"); //$NON-NLS-1$
+        if (wizard == null || !wizard.getClass().getName().endsWith(".DeployConfigurationWizard") //$NON-NLS-1$
+            || !(value instanceof IWorkbench workbench))
+        {
+            continuation.run();
+            return;
+        }
+        IWorkbench scoped = (IWorkbench)Proxy.newProxyInstance(IWorkbench.class.getClassLoader(),
+            new Class<?>[] { IWorkbench.class }, (proxy, method, args) ->
+            {
+                if ("saveAllEditors".equals(method.getName()) && args != null && args.length == 1) //$NON-NLS-1$
+                    return Boolean.TRUE;
+                try
+                {
+                    return method.invoke(workbench, args);
+                }
+                catch (InvocationTargetException e)
+                {
+                    throw e.getCause() != null ? e.getCause() : e;
+                }
+            });
+        if (!Global.setFieldForce(wizard, "workbench", scoped)) //$NON-NLS-1$
+        {
+            continuation.run();
+            return;
+        }
+        try
+        {
+            continuation.run();
+        }
+        finally
+        {
+            Global.setFieldForce(wizard, "workbench", workbench); //$NON-NLS-1$
+        }
     }
 
     private static void stopWatcherAfterDeployJob(FormXmlFixWatcher watcher)
