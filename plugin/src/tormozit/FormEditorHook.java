@@ -88,6 +88,7 @@ import org.eclipse.swt.events.MenuAdapter;
 import org.eclipse.swt.events.MenuEvent;
 import org.eclipse.swt.graphics.Color;
 import org.eclipse.swt.graphics.GC;
+import org.eclipse.swt.graphics.Font;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.ImageData;
 import org.eclipse.swt.graphics.Point;
@@ -213,6 +214,7 @@ import com._1c.g5.v8.dt.form.model.Visible;
 import com._1c.g5.v8.dt.form.ui.editor.FormEditor;
 import com._1c.g5.v8.dt.form.ui.editor.FormEditorComponent;
 import com._1c.g5.v8.dt.form.ui.editor.FormEditorPage;
+import com._1c.g5.v8.dt.form.ui.editor.attribute.TypeColumnLabelProvider;
 import com._1c.g5.v8.dt.form.ui.editor.item.FormItemActionsGroup;
 import com._1c.g5.v8.dt.platform.version.IRuntimeVersionSupport;
 import com._1c.g5.v8.dt.platform.version.Version;
@@ -419,6 +421,7 @@ public class FormEditorHook implements IStartup
         WysiwygHeaderClick.install(display);
         TabCounts.install();
         AttributesDrop.install();
+        AttributesTypePresentation.install();
         AttributeHeaderTooltips.install();
         AttributesExtraColumns.install();
         ItemsTree.install();
@@ -631,6 +634,13 @@ public class FormEditorHook implements IStartup
             return;
         }
         awaitFormAttributeAndGoTo(workbenchPage, basicForm, sourceAttribute, generation, 0);
+    }
+
+    /** Общий переход к полю панели «Свойства» для колонок редакторов формы и метаданных. */
+    static void focusPropertyField(IWorkbenchPage workbenchPage, List<String> labels)
+    {
+        if (labels != null && !labels.isEmpty())
+            ItemsTree.schedulePropertyFocus(workbenchPage, labels, 0);
     }
 
     /** Редактор, модель и ленивое дерево реквизитов создаются после открытия формы; ждём их. */
@@ -4020,6 +4030,66 @@ public class FormEditorHook implements IStartup
             }
             tree.setFocus();
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Представление штатной колонки «Тип значения» дерева реквизитов формы
+    // -----------------------------------------------------------------------
+
+    private static final class AttributesTypePresentation
+    {
+        private static final String KEY_HOOKED = "tormozit.formAttributesTypeIcons.hooked"; //$NON-NLS-1$
+
+        private static final int RETRY_DELAY_MS = 200;
+
+        private static final int MAX_ATTEMPTS = 100;
+
+        static void install()
+        {
+            trackFormEditors(editor -> attach(editor, 0));
+        }
+
+        private static void attach(FormEditor editor, int attempt)
+        {
+            try
+            {
+                FormEditorPage page = findFormPage(editor);
+                Tree tree = getAttributesTree(page);
+                Object viewerObj = page != null ? Global.getField(page, "attributesViewer") : null; //$NON-NLS-1$
+                if (tree == null || tree.isDisposed() || !(viewerObj instanceof TreeViewer viewer))
+                {
+                    retry(editor, attempt);
+                    return;
+                }
+                if (Boolean.TRUE.equals(tree.getData(KEY_HOOKED)))
+                    return;
+                for (int i = 0; i < tree.getColumnCount(); i++)
+                {
+                    if (!(viewer.getLabelProvider(i) instanceof TypeColumnLabelProvider base))
+                        continue;
+                    new TreeViewerColumn(viewer, tree.getColumn(i))
+                        .setLabelProvider(new ValueTypeColumnLabelProvider(tree,
+                            element -> element instanceof PropertyInfo info ? info.getValueType() : null,
+                            element -> element instanceof PropertyInfo info ? info.getForm() : null,
+                            base));
+                    tree.setData(KEY_HOOKED, Boolean.TRUE);
+                    viewer.refresh();
+                    return;
+                }
+                retry(editor, attempt);
+            }
+            catch (Exception e)
+            {
+                Global.logError("FormEditorHook.AttributesTypePresentation", "attach", e); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+
+        private static void retry(FormEditor editor, int attempt)
+        {
+            if (attempt < MAX_ATTEMPTS && editor.getSite() != null)
+                Display.getDefault().timerExec(RETRY_DELAY_MS, () -> attach(editor, attempt + 1));
+        }
+
     }
 
     // -----------------------------------------------------------------------
@@ -7776,6 +7846,8 @@ public class FormEditorHook implements IStartup
                     ? Global.invoke(entry.getValue(), "getNativeControl") : null; //$NON-NLS-1$
                 boolean focused = nativeControl != null && AefFieldFocus.focusNativeControl(nativeControl);
                 if (focused)
+                    return true;
+                if (PropertySheetActivePropertyHook.focusPropertyByLabel(sheetPage, label))
                     return true;
             }
             return false;

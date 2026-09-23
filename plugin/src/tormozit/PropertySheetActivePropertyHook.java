@@ -599,6 +599,50 @@ public class PropertySheetActivePropertyHook implements IStartup
     }
 
     /**
+     * Активация свойства по подписи для внешнего перехода. Как и клик по подписи выше,
+     * сначала выбирает редактор значения, а кнопку «...» использует для составного типа.
+     */
+    static boolean focusPropertyByLabel(Object page, String label)
+    {
+        Map<?, ?> map = viewModelToView(page);
+        if (map == null || label == null)
+            return false;
+        boolean rowStarted = false;
+        List<Object> editors = new ArrayList<>();
+        List<Object> actionBars = new ArrayList<>();
+        for (Map.Entry<?, ?> entry : map.entrySet())
+        {
+            Object key = entry.getKey();
+            String keyClass = key == null ? "" : key.getClass().getName(); //$NON-NLS-1$
+            boolean boundary = keyClass.contains(LABEL_VIEW_MODEL) || keyClass.contains(SECTION_VIEW_MODEL);
+            if (boundary && rowStarted)
+                break;
+            if (keyClass.contains(LABEL_VIEW_MODEL))
+            {
+                rowStarted = label.equals(labelText(key));
+                continue;
+            }
+            if (!rowStarted)
+                continue;
+            Object nativeControl = Global.invoke(entry.getValue(), "getNativeControl"); //$NON-NLS-1$
+            if (nativeControl == null)
+                continue;
+            if (keyClass.contains("ActionBarViewModel")) //$NON-NLS-1$
+                actionBars.add(nativeControl);
+            else
+                editors.add(nativeControl);
+        }
+        if (editors.isEmpty() && actionBars.isEmpty())
+            return false;
+        setActiveProperty(page, label);
+        editors.addAll(actionBars);
+        for (Object editor : editors)
+            if (AefFieldFocus.focusNativeControl(editor))
+                return true;
+        return !actionBars.isEmpty();
+    }
+
+    /**
      * LWT-контрол под точкой клика. Своей геометрии не считаем (в июньской попытке именно на
      * ней всё и сломалось): у {@code SwtLightComposite} есть штатный хиттест
      * {@code controlFromPoint(x, y)} в координатах его SWT-композита. Клик мог прийти в

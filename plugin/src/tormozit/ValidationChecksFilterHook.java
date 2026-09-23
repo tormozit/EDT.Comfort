@@ -7,6 +7,8 @@ import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.WeakHashMap;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.util.function.Function;
 import java.util.function.Predicate;
 
@@ -175,6 +177,16 @@ public final class ValidationChecksFilterHook implements IStartup
     private static boolean checkExecutorResolved;
     private static final String EXCLUDED_NAMES_FRAGMENT = "исключаемых имен объектов"; //$NON-NLS-1$
     private static final String EXCLUDED_NAMES_SHORT = "исключаемых объектов"; //$NON-NLS-1$
+    /** Идентификатор встроенной проверки EDT, не входящий в {@link ComfortCheckIds}. */
+    private static final String STATIC_FEATURE_ACCESS_CHECK_ID =
+        "bsl-legacy-check-static-feature-access"; //$NON-NLS-1$
+    private static final String STATIC_FEATURE_ACCESS_DESCRIPTION =
+        "<p>Диагностики:</p><ul>" //$NON-NLS-1$
+            + "<li>Параметры вызова</li>" //$NON-NLS-1$
+            + "<li>Устаревшие методы и свойства</li>" //$NON-NLS-1$
+            + "<li>Режим совместимости</li>" //$NON-NLS-1$
+            + "<li>Доступ к переменной или свойству</li>" //$NON-NLS-1$
+            + "<li>Обработчик события</li></ul>"; //$NON-NLS-1$
     /** Название типа {@code IssueType.WARNING} в местах, которые перехватывает плагин (issue 401). */
     static final String OTHER_WARNING_TYPE_TITLE = "Прочее предупреждение"; //$NON-NLS-1$
     /**
@@ -360,6 +372,7 @@ public final class ValidationChecksFilterHook implements IStartup
             // в строке с тулбаром (fillDefaults + minSize 100 + grab).
             relaxBodyMinimumWidth(treeViewer);
             ChecksTablePane.install(control, treeViewer, filter, pageControl);
+            installStaticFeatureAccessDescription(control, pageControl);
             TreeExpander.installWhitelisted(TreeExpander.Target.VALIDATION_CHECKS, treeViewer);
             installAutoExpandOnReset(treeViewer, filter);
 
@@ -394,6 +407,58 @@ public final class ValidationChecksFilterHook implements IStartup
             Debug.temp(sb.toString());
             return false;
         }
+    }
+
+    /** Описание встроенной проверки в правой панели страницы «Валидация». */
+    private static void installStaticFeatureAccessDescription(ChecksViewerControl control, Control pageControl)
+    {
+        if (pageControl == null)
+            return;
+        Control checkViewer = findCheckViewer(pageControl);
+        if (checkViewer == null)
+            return;
+        Runnable update = () -> {
+            Object selected = control.getSelectedCheckObjects().getValue();
+            if (!(selected instanceof IChecksTreeNode node)
+                || !(node.getValue() instanceof ICheckSettings settings)
+                || settings.getId() == null
+                || !STATIC_FEATURE_ACCESS_CHECK_ID.equals(settings.getId().getCheckId()))
+                return;
+
+            ICheckSettings described = (ICheckSettings)Proxy.newProxyInstance(
+                ICheckSettings.class.getClassLoader(), new Class<?>[] { ICheckSettings.class },
+                (proxy, method, args) -> {
+                    if ("getDescription".equals(method.getName())) //$NON-NLS-1$
+                        return STATIC_FEATURE_ACCESS_DESCRIPTION;
+                    try
+                    {
+                        return method.invoke(settings, args);
+                    }
+                    catch (InvocationTargetException e)
+                    {
+                        throw e.getCause();
+                    }
+                });
+            Global.invoke(checkViewer, "setCheck", control.getChecksViewerProvider().getProject(), //$NON-NLS-1$
+                described);
+        };
+        control.getSelectedCheckObjects().addChangeListener(event -> update.run());
+        update.run();
+    }
+
+    private static Control findCheckViewer(Control root)
+    {
+        if ("com._1c.g5.v8.dt.internal.ui.validation.checkview.CheckViewer" //$NON-NLS-1$
+            .equals(root.getClass().getName()))
+            return root;
+        if (root instanceof Composite composite)
+            for (Control child : composite.getChildren())
+            {
+                Control found = findCheckViewer(child);
+                if (found != null)
+                    return found;
+            }
+        return null;
     }
 
     /**

@@ -1,5 +1,6 @@
 package tormozit;
 
+import java.lang.ref.WeakReference;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -40,12 +41,14 @@ import org.eclipse.jface.viewers.ArrayContentProvider;
 import org.eclipse.jface.viewers.ColumnPixelData;
 import org.eclipse.jface.viewers.ColumnLabelProvider;
 import org.eclipse.jface.viewers.ILabelProvider;
+import org.eclipse.jface.viewers.ITreeContentProvider;
 import org.eclipse.jface.viewers.LabelProvider;
 import org.eclipse.jface.viewers.ISelection;
 import org.eclipse.jface.viewers.ISelectionChangedListener;
 import org.eclipse.jface.viewers.ISelectionProvider;
 import org.eclipse.jface.viewers.SelectionChangedEvent;
 import org.eclipse.jface.viewers.StructuredSelection;
+import org.eclipse.jface.viewers.StyledString;
 import org.eclipse.jface.viewers.TreePath;
 import org.eclipse.jface.viewers.TreeSelection;
 import org.eclipse.jface.viewers.TreeViewer;
@@ -122,6 +125,7 @@ import com._1c.g5.v8.bm.integration.IBmEditingContext;
 import com._1c.g5.v8.dt.core.platform.IConfigurationProject;
 import com._1c.g5.v8.dt.core.platform.IV8Project;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
+import com._1c.g5.v8.dt.common.localization.FeatureNameLocalizationProvider;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
 import com._1c.g5.v8.dt.md.ui.shared.MdUiSharedImages;
 import com._1c.g5.v8.dt.form.model.AbstractDataPath;
@@ -131,10 +135,12 @@ import com._1c.g5.v8.dt.form.model.Form;
 import com._1c.g5.v8.dt.form.model.FormItem;
 import com._1c.g5.v8.dt.metadata.mdclass.AbstractForm;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicForm;
+import com._1c.g5.v8.dt.metadata.mdclass.BasicFeature;
 import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
 import com._1c.g5.v8.dt.metadata.mdclass.FunctionalOption;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com._1c.g5.v8.dt.ui.dialog.ListItemSelectionDialog;
+import com._1c.g5.v8.dt.ui.commands.ShowPropertiesHandler;
 import com._1c.g5.v8.dt.ui.util.OpenHelper;
 
 /**
@@ -180,6 +186,13 @@ public final class MdEditorTreeHook
     private static final String DRAG_MARKER = "tormozit.mdEditorAttributesDrag"; //$NON-NLS-1$
 
     private static final String FORM_COLUMNS_KEY = "tormozit.mdEditorFormColumns"; //$NON-NLS-1$
+
+    private static final String TYPE_COLUMN_MARKER = "tormozit.mdEditorTypeColumn"; //$NON-NLS-1$
+
+    private static final String TYPE_COLUMN_DOUBLE_CLICK_MARKER =
+        "tormozit.mdEditorTypeColumnDoubleClick"; //$NON-NLS-1$
+
+    private static final String CHILD_COUNT_ENABLED_MARKER = "tormozit.mdEditorChildCountEnabled"; //$NON-NLS-1$
 
     private static final String FORM_COLUMNS_SIGNATURE_KEY =
         "tormozit.mdEditorFormColumnsSignature"; //$NON-NLS-1$
@@ -260,6 +273,9 @@ public final class MdEditorTreeHook
     private static final String DT_TREE_VIEW_INTERNAL =
         "com/_1c/g5/v8/dt/ui/aef/swt/views/DtTreeView"; //$NON-NLS-1$
 
+    private static final String DT_TREE_VIEW_PROVIDER_INTERNAL =
+        "com/_1c/g5/v8/dt/ui/aef/swt/views/DtTreeViewProvider"; //$NON-NLS-1$
+
     private static final String MODEL_OBJECT_COPY_SUPPORT_INTERNAL =
         "com/_1c/g5/v8/dt/internal/md/copy/ModelObjectCopySupport"; //$NON-NLS-1$
 
@@ -282,6 +298,12 @@ public final class MdEditorTreeHook
     private static final long RESCHEDULE_PAUSE_MS = 1000;
 
     private static final Map<IEditorPart, Long> lastScheduled = new WeakHashMap<>();
+
+    /** Только деревья «Данные»: штатный провайдер используется и в других редакторах. */
+    private static final Map<Object, WeakReference<Tree>> dataTreeProviders = new WeakHashMap<>();
+
+    private static final FeatureNameLocalizationProvider featureNames =
+        new FeatureNameLocalizationProvider();
 
     /** Дерево, из которого началась команда или перетаскивание; нужно после закрытия progress. */
     private static volatile TreeViewer pendingSelectionViewer;
@@ -330,6 +352,21 @@ public final class MdEditorTreeHook
         boolean metadataEditor = page != null && page.getActiveEditor() instanceof DtGranularEditor<?>;
         int result = metadataEditor ? (style & ~SWT.SINGLE) | SWT.MULTI : style;
         return result;
+    }
+
+    /** Дополняет штатную подпись числом прямых потомков, сохраняя стили EDT. */
+    public static StyledString withDataTreeChildCount(Object provider, Object element, StyledString styled)
+    {
+        WeakReference<Tree> reference = dataTreeProviders.get(provider);
+        Tree tree = reference == null ? null : reference.get();
+        if (tree == null || tree.isDisposed() || styled == null
+            || !Boolean.TRUE.equals(tree.getData(CHILD_COUNT_ENABLED_MARKER))
+            || !(provider instanceof ITreeContentProvider content) || !content.hasChildren(element))
+            return styled;
+        Object[] children = content.getChildren(element);
+        if (children != null && children.length > 0)
+            styled.append(" " + children.length, StyledString.QUALIFIER_STYLER); //$NON-NLS-1$
+        return styled;
     }
 
     @Override
@@ -479,6 +516,8 @@ public final class MdEditorTreeHook
             installAttributeDrag(viewer);
             installAttributeDrop(viewer);
             installFormColumns(viewer);
+            installChildCounts(viewer);
+            installTypeColumn(viewer);
             installModelAddObserver(viewer);
             installFunctionalOptionsPanel(viewer);
         }
@@ -491,6 +530,92 @@ public final class MdEditorTreeHook
         viewer.removeSelectionChangedListener(stock);
         viewer.addSelectionChangedListener(new KeepSelectionListener(viewer, stock));
         Debug.log("перехват выделения установлен"); //$NON-NLS-1$
+    }
+
+    private static void installChildCounts(TreeViewer viewer)
+    {
+        Tree tree = viewer.getTree();
+        if (!hasClassifiableRow(tree) || isStandardAttributesTree(tree))
+        {
+            tree.setData(CHILD_COUNT_ENABLED_MARKER, Boolean.FALSE);
+            return;
+        }
+        tree.setData(CHILD_COUNT_ENABLED_MARKER, Boolean.TRUE);
+        Object provider = viewer.getContentProvider();
+        if (provider != null && !dataTreeProviders.containsKey(provider))
+        {
+            dataTreeProviders.put(provider, new WeakReference<>(tree));
+            viewer.refresh();
+        }
+    }
+
+    /** Узкая колонка с типом свойства данных и штатной иконкой типа EDT. */
+    private static void installTypeColumn(TreeViewer viewer)
+    {
+        Tree tree = viewer.getTree();
+        if (!hasClassifiableRow(tree) || isStandardAttributesTree(tree))
+            return;
+        for (TreeColumn existing : tree.getColumns())
+            if (Boolean.TRUE.equals(existing.getData(TYPE_COLUMN_MARKER)))
+                return;
+        if (tree.getColumnCount() == 0)
+            new TreeColumn(tree, SWT.LEFT);
+        TreeColumn name = tree.getColumn(0);
+        setFixedColumnWidth(tree, name, AttributesColumnWidthStore.loadName(tree));
+        installNameColumnWidthPersistence(name);
+
+        TreeViewerColumn typeColumn = new TreeViewerColumn(viewer, SWT.LEFT, 1);
+        TreeColumn column = typeColumn.getColumn();
+        column.setData(TYPE_COLUMN_MARKER, Boolean.TRUE);
+        column.setText("Тип"); //$NON-NLS-1$
+        column.setToolTipText(TooltipText.wrap(tree,
+            "Тип значения реквизита" + Global.pluginSignForTooltip())); //$NON-NLS-1$
+        column.setMoveable(true);
+        setFixedColumnWidth(tree, column, AttributesColumnWidthStore.loadType());
+        installTypeColumnWidthPersistence(column);
+        typeColumn.setLabelProvider(new ValueTypeColumnLabelProvider(tree,
+            element -> {
+                EObject object = elementObject(tree, element);
+                return object instanceof BasicFeature feature ? feature.getType() : null;
+            }, element -> elementObject(tree, element), null));
+        installTypeColumnDoubleClick(tree, viewer);
+        tree.setHeaderVisible(true);
+        ThemeAwareColors.applyGridLines(tree);
+        disableNativeColumnStretch(tree);
+        tree.getParent().layout(true, true);
+    }
+
+    /** Двойной щелчок по «Тип» открывает панель и активирует одноимённое свойство строки. */
+    private static void installTypeColumnDoubleClick(Tree tree, TreeViewer viewer)
+    {
+        if (Boolean.TRUE.equals(tree.getData(TYPE_COLUMN_DOUBLE_CLICK_MARKER)))
+            return;
+        tree.addListener(SWT.MouseDoubleClick, event ->
+        {
+            if (event.button != 1)
+                return;
+            int index = FormTreeInteraction.columnAtX(tree, event.x);
+            if (index < 0 || !Boolean.TRUE.equals(tree.getColumn(index).getData(TYPE_COLUMN_MARKER)))
+                return;
+            TreeItem row = FormTreeInteraction.rowAt(tree, event.x, event.y);
+            EObject object = row != null ? elementObject(tree, row.getData()) : null;
+            if (!(object instanceof BasicFeature) || row.getData() == null)
+                return;
+            DtGranularEditor<?> editor = MdEditorAttributeMenuHook.editorOf(tree);
+            if (editor == null || editor.getSite() == null)
+                return;
+            viewer.setSelection(new StructuredSelection(row.getData()), false);
+            ShowPropertiesHandler.run(editor.getSite());
+            List<String> labels = new ArrayList<>(2);
+            EStructuralFeature feature = object.eClass().getEStructuralFeature("type"); //$NON-NLS-1$
+            String localized = feature != null ? featureNames.getString(feature) : null;
+            if (localized != null && !localized.isBlank())
+                labels.add(localized);
+            if (!labels.contains("Тип")) //$NON-NLS-1$
+                labels.add("Тип"); //$NON-NLS-1$
+            FormEditorHook.focusPropertyField(editor.getSite().getPage(), labels);
+        });
+        tree.setData(TYPE_COLUMN_DOUBLE_CLICK_MARKER, Boolean.TRUE);
     }
 
     /** Колонки явно назначенных основных форм на вкладке «Данные». */
@@ -552,7 +677,7 @@ public final class MdEditorTreeHook
             // при первом же layout() (issue: колонка «Реквизиты» всегда 100% ширины панели).
             name = tree.getColumn(0);
         }
-        setFixedColumnWidth(tree, name, NameColumnWidthStore.load(tree));
+        setFixedColumnWidth(tree, name, AttributesColumnWidthStore.loadName(tree));
         installNameColumnWidthPersistence(name);
 
         for (FormColumn form : forms)
@@ -642,32 +767,56 @@ public final class MdEditorTreeHook
             || Boolean.TRUE.equals(name.getData(NAME_COLUMN_WIDTH_LISTENER_MARKER)))
             return;
         name.setData(NAME_COLUMN_WIDTH_LISTENER_MARKER, Boolean.TRUE);
-        name.addListener(SWT.Resize, event -> NameColumnWidthStore.save(name.getWidth()));
+        name.addListener(SWT.Resize, event -> AttributesColumnWidthStore.saveName(name.getWidth()));
     }
 
-    /** Ширина колонки-дерева («Реквизиты») на вкладке «Данные» — между сеансами EDT. */
-    private static final class NameColumnWidthStore
+    private static final String TYPE_COLUMN_WIDTH_LISTENER_MARKER =
+        "tormozit.mdEditorTypeColumnWidthListener"; //$NON-NLS-1$
+
+    /** Запоминает ширину колонки «Тип», которую пользователь потянул мышью. */
+    private static void installTypeColumnWidthPersistence(TreeColumn column)
     {
-        private static final String PREF_WIDTH = "tormozit.mdEditor.attributesNameColumn.width"; //$NON-NLS-1$
-        /** Ширина по умолчанию (нет сохранённого значения) — 30 символов текущего шрифта дерева. */
+        if (column == null || column.isDisposed()
+            || Boolean.TRUE.equals(column.getData(TYPE_COLUMN_WIDTH_LISTENER_MARKER)))
+            return;
+        column.setData(TYPE_COLUMN_WIDTH_LISTENER_MARKER, Boolean.TRUE);
+        column.addListener(SWT.Resize, event -> AttributesColumnWidthStore.saveType(column.getWidth()));
+    }
+
+    /** Ширины колонок «Реквизиты» и «Тип» на вкладке «Данные» — между сеансами EDT. */
+    private static final class AttributesColumnWidthStore
+    {
+        private static final String PREF_NAME_WIDTH = "tormozit.mdEditor.attributesNameColumn.width"; //$NON-NLS-1$
+        private static final String PREF_TYPE_WIDTH = "tormozit.mdEditor.attributesTypeColumn.width"; //$NON-NLS-1$
+        /** Ширина колонки «Реквизиты» по умолчанию — 50 символов текущего шрифта дерева. */
         private static final int DEFAULT_WIDTH_CHARS = 50;
         private static final int FALLBACK_WIDTH_PX = 300;
-        private static final int MIN_WIDTH = 100;
-        private static final int MAX_WIDTH = 1000;
+        private static final int MIN_NAME_WIDTH = 100;
+        private static final int MAX_NAME_WIDTH = 1000;
+        private static final int DEFAULT_TYPE_WIDTH = 96;
+        private static final int MIN_TYPE_WIDTH = 40;
+        private static final int MAX_TYPE_WIDTH = 1000;
 
         private static ScopedPreferenceStore prefs;
 
-        private NameColumnWidthStore()
+        private AttributesColumnWidthStore()
         {
         }
 
         /** @param control контрол, чьим шрифтом мерить 50 символов по умолчанию (обычно само дерево). */
-        static int load(Control control)
+        static int loadName(Control control)
         {
             ScopedPreferenceStore store = prefs();
-            if (store == null || !store.contains(PREF_WIDTH))
-                return clamp(defaultWidth(control));
-            return clamp(store.getInt(PREF_WIDTH));
+            if (store == null || !store.contains(PREF_NAME_WIDTH))
+                return clampName(defaultWidth(control));
+            return clampName(store.getInt(PREF_NAME_WIDTH));
+        }
+
+        static int loadType()
+        {
+            ScopedPreferenceStore store = prefs();
+            return store == null || !store.contains(PREF_TYPE_WIDTH)
+                ? DEFAULT_TYPE_WIDTH : clampType(store.getInt(PREF_TYPE_WIDTH));
         }
 
         private static int defaultWidth(Control control)
@@ -686,12 +835,22 @@ public final class MdEditorTreeHook
             }
         }
 
-        static void save(int width)
+        static void saveName(int width)
+        {
+            save(PREF_NAME_WIDTH, clampName(width));
+        }
+
+        static void saveType(int width)
+        {
+            save(PREF_TYPE_WIDTH, clampType(width));
+        }
+
+        private static void save(String key, int width)
         {
             ScopedPreferenceStore store = prefs();
             if (store == null)
                 return;
-            store.setValue(PREF_WIDTH, clamp(width));
+            store.setValue(key, width);
             try
             {
                 store.save();
@@ -702,12 +861,21 @@ public final class MdEditorTreeHook
             }
         }
 
-        private static int clamp(int width)
+        private static int clampName(int width)
         {
-            if (width < MIN_WIDTH)
-                return MIN_WIDTH;
-            if (width > MAX_WIDTH)
-                return MAX_WIDTH;
+            if (width < MIN_NAME_WIDTH)
+                return MIN_NAME_WIDTH;
+            if (width > MAX_NAME_WIDTH)
+                return MAX_NAME_WIDTH;
+            return width;
+        }
+
+        private static int clampType(int width)
+        {
+            if (width < MIN_TYPE_WIDTH)
+                return MIN_TYPE_WIDTH;
+            if (width > MAX_TYPE_WIDTH)
+                return MAX_TYPE_WIDTH;
             return width;
         }
 
@@ -717,7 +885,7 @@ public final class MdEditorTreeHook
                 return prefs;
             try
             {
-                String pluginId = FrameworkUtil.getBundle(NameColumnWidthStore.class).getSymbolicName();
+                String pluginId = FrameworkUtil.getBundle(AttributesColumnWidthStore.class).getSymbolicName();
                 prefs = new ScopedPreferenceStore(InstanceScope.INSTANCE, pluginId);
             }
             catch (RuntimeException ignored)
@@ -809,6 +977,8 @@ public final class MdEditorTreeHook
                     return;
                 tree.setData(FORM_COLUMNS_RECHECK_MARKER, null);
                 installFormColumns(viewer);
+                installChildCounts(viewer);
+                installTypeColumn(viewer);
             });
         });
     }
@@ -1517,10 +1687,12 @@ public final class MdEditorTreeHook
             return;
         tree.setData(FO_COUNT_COLUMN_MARKER, Boolean.TRUE);
         TreeColumn name = tree.getColumnCount() == 0 ? new TreeColumn(tree, SWT.LEFT) : tree.getColumn(0);
-        setFixedColumnWidth(tree, name, NameColumnWidthStore.load(tree));
+        setFixedColumnWidth(tree, name, AttributesColumnWidthStore.loadName(tree));
         installNameColumnWidthPersistence(name);
 
-        TreeViewerColumn column = new TreeViewerColumn(viewer, SWT.RIGHT, 1);
+        TreeViewerColumn column = new TreeViewerColumn(viewer, SWT.RIGHT,
+            tree.getColumnCount() > 1 && Boolean.TRUE.equals(tree.getColumn(1).getData(TYPE_COLUMN_MARKER))
+                ? 2 : 1);
         TreeColumn swtColumn = column.getColumn();
 //        swtColumn.setText("ФО"); //$NON-NLS-1$
         swtColumn.setImage(foSectionImage());
@@ -2662,12 +2834,15 @@ public final class MdEditorTreeHook
             boolean treeView = DT_TREE_VIEW_INTERNAL.replace('/', '.').equals(wovenClass.getClassName());
             boolean copySupport = MODEL_OBJECT_COPY_SUPPORT_INTERNAL.replace('/', '.')
                 .equals(wovenClass.getClassName());
-            if (!treeView && !copySupport)
+            boolean treeProvider = DT_TREE_VIEW_PROVIDER_INTERNAL.replace('/', '.')
+                .equals(wovenClass.getClassName());
+            if (!treeView && !copySupport && !treeProvider)
                 return;
             try
             {
                 byte[] transformed = treeView ? transformTreeStyle(wovenClass.getBytes())
-                    : transformCopyResult(wovenClass.getBytes());
+                    : copySupport ? transformCopyResult(wovenClass.getBytes())
+                        : transformTreeProvider(wovenClass.getBytes());
                 if (transformed == null)
                     return;
                 wovenClass.getDynamicImports().add("tormozit"); //$NON-NLS-1$
@@ -2677,6 +2852,46 @@ public final class MdEditorTreeHook
             {
             }
         }
+    }
+
+    private static byte[] transformTreeProvider(byte[] source)
+    {
+        ClassReader reader = new ClassReader(source);
+        ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+        AtomicBoolean touched = new AtomicBoolean();
+        reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+        {
+            @Override
+            public MethodVisitor visitMethod(int access, String name, String descriptor,
+                String signature, String[] exceptions)
+            {
+                MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                if (!"getStyledText".equals(name) //$NON-NLS-1$
+                    || !"(Ljava/lang/Object;)Lorg/eclipse/jface/viewers/StyledString;".equals(descriptor)) //$NON-NLS-1$
+                    return mv;
+                return new MethodVisitor(Opcodes.ASM9, mv)
+                {
+                    @Override
+                    public void visitInsn(int opcode)
+                    {
+                        if (opcode == Opcodes.ARETURN)
+                        {
+                            super.visitVarInsn(Opcodes.ALOAD, 0);
+                            super.visitInsn(Opcodes.SWAP);
+                            super.visitVarInsn(Opcodes.ALOAD, 1);
+                            super.visitInsn(Opcodes.SWAP);
+                            super.visitMethodInsn(Opcodes.INVOKESTATIC, "tormozit/MdEditorTreeHook", //$NON-NLS-1$
+                                "withDataTreeChildCount", //$NON-NLS-1$
+                                "(Ljava/lang/Object;Ljava/lang/Object;Lorg/eclipse/jface/viewers/StyledString;)" //$NON-NLS-1$
+                                    + "Lorg/eclipse/jface/viewers/StyledString;", false); //$NON-NLS-1$
+                            touched.set(true);
+                        }
+                        super.visitInsn(opcode);
+                    }
+                };
+            }
+        }, 0);
+        return touched.get() ? writer.toByteArray() : null;
     }
 
     private static byte[] transformCopyResult(byte[] source)
