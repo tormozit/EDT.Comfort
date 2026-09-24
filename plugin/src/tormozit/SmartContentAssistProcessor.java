@@ -1541,12 +1541,6 @@ String baseKind;
         ICompletionProposal[] delegateBaseSnapshot = delegateBase;
         String baseKindFinal = baseKind;
         boolean clearProbeOnEmptyBaseFinal = clearProbeOnEmptyBase;
-        // #region issue562 diag
-        Global.tempLog("assist-ir-race", "schedule gen=" + gen + " ctxKey=" + ctxKeyAtSchedule //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " irN=" + irProposalsSnapshot.length + " delegateN=" + delegateBaseSnapshot.length //$NON-NLS-1$ //$NON-NLS-2$
-            + " baseKind=" + baseKindFinal); //$NON-NLS-1$
-        logIrRaceSnapshot("schedule.delegateBase", delegateBaseSnapshot); //$NON-NLS-1$
-        // #endregion issue562 diag
         IR_MERGE_EXECUTOR.execute(() -> {
             ICompletionProposal[] merged;
             try
@@ -1577,14 +1571,6 @@ String baseKind;
         ICompletionProposal[] merged, String baseKind, boolean clearProbeOnEmptyBase,
         int beforeIrN, int beforeFullN, int incomingIrN, boolean scheduleRefresh)
     {
-        // #region issue562 diag
-        boolean discarded = gen != mergeGeneration.get() || ctxKeyAtSchedule != fullListContextKey;
-        Global.tempLog("assist-ir-race", "apply gen=" + gen + " curGen=" + mergeGeneration.get() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " ctxKeyAtSchedule=" + ctxKeyAtSchedule + " curCtxKey=" + fullListContextKey //$NON-NLS-1$ //$NON-NLS-2$
-            + " mergedN=" + merged.length + " discarded=" + discarded); //$NON-NLS-1$ //$NON-NLS-2$
-        if (!discarded)
-            logIrRaceSnapshot("apply.merged", merged); //$NON-NLS-1$
-        // #endregion issue562 diag
         if (gen != mergeGeneration.get() || ctxKeyAtSchedule != fullListContextKey)
         {
 return;
@@ -4453,45 +4439,8 @@ return EMPTY;
         // раз и должен был список починить. Гипотеза о гонке была верна не полностью — тот же
         // счётчик нельзя использовать для инвалидации синхронного пути без разбора каждого
         // caller'а assignFullListCache(EMPTY). Не повторять без раздельного счётчика/анализа.
-        // #region issue562 diag
-        Global.tempLog("assist-ir-race", "syncAssign curGen=" + mergeGeneration.get() //$NON-NLS-1$ //$NON-NLS-2$
-            + " ctxKey=" + fullListContextKey + " rawN=" + (cache != null ? cache.length : 0) //$NON-NLS-1$ //$NON-NLS-2$
-            + " stockN=" + stock.length); //$NON-NLS-1$
-        logIrRaceSnapshot("syncAssign.stock", stock); //$NON-NLS-1$
-        // #endregion issue562 diag
         rebuildMergedFullListCache();
-        // #region issue562 diag
-        logIrRaceSnapshot("syncAssign.fullListCache", fullListCache); //$NON-NLS-1$
-        // #endregion issue562 diag
     }
-
-    /**
-     * #region issue562 diag — временная диагностика гонки (issue 562): логирует пункты
-     * списка, чьё имя начинает(ся) на "нстр" (без учёта регистра), с полным текстом строки.
-     * Снять после подтверждения/опровержения гипотезы о гонке merge-путей.
-     */
-    private static void logIrRaceSnapshot(String phase, ICompletionProposal[] list)
-    {
-        if (list == null || list.length == 0)
-            return;
-        int shown = 0;
-        for (ICompletionProposal p : list)
-        {
-            if (p == null)
-                continue;
-            String display = p.getDisplayString();
-            if (display == null)
-                continue;
-            String lower = display.toLowerCase(java.util.Locale.ROOT);
-            if (!lower.startsWith("нстр")) //$NON-NLS-1$
-                continue;
-            Global.tempLog("assist-ir-race", phase + " [" + p.getClass().getSimpleName() + "] " //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + display);
-            if (++shown >= 6)
-                break;
-        }
-    }
-    // #endregion issue562 diag
 
     private void rebuildMergedFullListCache()
     {
@@ -7130,6 +7079,9 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                     + " msg=" + String.valueOf(npe.getMessage())); //$NON-NLS-1$
                 raw = EMPTY;
             }
+            logEdtPrioritySnapshot("delegate.before", raw, ""); //$NON-NLS-1$ //$NON-NLS-2$
+            adjustEdtLiteralPriorities(raw);
+            logEdtPrioritySnapshot("delegate.after", raw, ""); //$NON-NLS-1$ //$NON-NLS-2$
             if (onUi && raw != null && raw.length > 0)
                 wordListSeededOnUi = true;
             return raw;
@@ -7156,6 +7108,94 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                 + " caller=" + uiBlockCaller()); //$NON-NLS-1$
             // #endregion
         }
+    }
+
+    /** Литералы EDT непосредственно перед первым методом в списке автодополнения. */
+    private static void adjustEdtLiteralPriorities(ICompletionProposal[] proposals)
+    {
+        if (proposals == null || proposals.length == 0)
+            return;
+        int firstMethodIndex = -1;
+        int firstMethodPriority = Integer.MIN_VALUE;
+        boolean hasLiteral = false;
+        for (int i = 0; i < proposals.length; i++)
+        {
+            ICompletionProposal proposal = proposals[i];
+            if (proposal instanceof ConfigurableCompletionProposal edt
+                && isEdtPriorityLiteral(edt.getReplacementString()))
+                hasLiteral = true;
+            else if (firstMethodIndex < 0 && proposalIsMethod(proposal))
+            {
+                firstMethodIndex = i;
+                firstMethodPriority = resolveNativePriority(proposal);
+            }
+        }
+        if (!hasLiteral || firstMethodIndex < 0)
+            return;
+        int literalPriority = firstMethodPriority == Integer.MAX_VALUE
+            ? Integer.MAX_VALUE : firstMethodPriority + 1;
+        ICompletionProposal[] original = proposals.clone();
+        int next = 0;
+        for (int i = 0; i < firstMethodIndex; i++)
+            if (!isEdtPriorityLiteralProposal(original[i]))
+                proposals[next++] = original[i];
+        for (ICompletionProposal proposal : original)
+        {
+            if (proposal instanceof ConfigurableCompletionProposal edt
+                && isEdtPriorityLiteral(edt.getReplacementString()))
+            {
+                edt.setPriority(literalPriority);
+                proposals[next++] = proposal;
+            }
+        }
+        for (int i = firstMethodIndex; i < original.length; i++)
+            if (!isEdtPriorityLiteralProposal(original[i]))
+                proposals[next++] = original[i];
+    }
+
+    private static boolean isEdtPriorityLiteralProposal(ICompletionProposal proposal)
+    {
+        return proposal instanceof ConfigurableCompletionProposal edt
+            && isEdtPriorityLiteral(edt.getReplacementString());
+    }
+
+    private static boolean isEdtPriorityLiteral(String name)
+    {
+        return "Неопределено".equalsIgnoreCase(name) //$NON-NLS-1$
+            || "Истина".equalsIgnoreCase(name) //$NON-NLS-1$
+            || "Ложь".equalsIgnoreCase(name); //$NON-NLS-1$
+    }
+
+    /** Временная диагностика порядка и приоритетов EDT для issue 588. */
+    private static void logEdtPrioritySnapshot(String phase, ICompletionProposal[] proposals,
+                                               String filter)
+    {
+        SmartCodeMatcher matcher = new SmartCodeMatcher(filter);
+        StringBuilder selected = new StringBuilder();
+        StringBuilder first = new StringBuilder();
+        if (proposals != null)
+        {
+            for (int i = 0; i < proposals.length; i++)
+            {
+                ICompletionProposal proposal = proposals[i];
+                String name = filterMatchName(proposal);
+                int priority = resolveNativePriority(proposal);
+                if (i < 6)
+                    first.append('[').append(i).append(':').append(name)
+                        .append('/').append(priority).append(']');
+                if ("Не".equalsIgnoreCase(name) || "Неопределено".equalsIgnoreCase(name) //$NON-NLS-1$ //$NON-NLS-2$
+                    || "Неделя".equalsIgnoreCase(name) //$NON-NLS-1$
+                    || "НеобходимостьЗавершенияСоединения".equalsIgnoreCase(name) //$NON-NLS-1$
+                    || "НедопустимыеПодстановкиXS".equalsIgnoreCase(name) //$NON-NLS-1$
+                    || "Истина".equalsIgnoreCase(name) || "Ложь".equalsIgnoreCase(name)) //$NON-NLS-1$ //$NON-NLS-2$
+                    selected.append('[').append(i).append(':').append(name)
+                        .append(" priority=").append(priority) //$NON-NLS-1$
+                        .append(" score=").append(computeNameScore(matcher, proposal)).append(']'); //$NON-NLS-1$
+            }
+        }
+        Global.tempLog("assist-edt-priority", phase + " filter=" + filter //$NON-NLS-1$ //$NON-NLS-2$
+            + " count=" + (proposals == null ? -1 : proposals.length) //$NON-NLS-1$
+            + " first=" + first + " selected=" + selected); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     // ---- Асинхронная загрузка delegate (EDT compute) в фоновом Job -------------
@@ -8768,6 +8808,7 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
     /** Только для {@link #computeForPopupRefresh} — не для штатного keystroke path. */
     private ICompletionProposal[] filterAndSort(ICompletionProposal[] raw, String filter)
     {
+        logEdtPrioritySnapshot("filter.in", raw, filter); //$NON-NLS-1$
         if (raw == null || raw.length == 0)
             return EMPTY;
 
@@ -8918,6 +8959,7 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                 int order = delegateOrderOf(p);
                 result[i] = wrapProposal(p, order >= 0 ? order : idx[i]);
             }
+            logEdtPrioritySnapshot("filter.out", result, filter); //$NON-NLS-1$
             wrapMs = (System.nanoTime() - tWrap) / 1_000_000L;
             return result;
         }
@@ -9275,6 +9317,10 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         if (name.isEmpty())
             return 0;
         int nameScore = namePremium(matcher, proposal, name);
+        // Только сортировка автодополнения: точное имя и совпадение с начала слова
+        // равны. В других сценариях SmartCodeMatcher сохраняет премию 50.
+        if (nameScore == 50)
+            nameScore = 40;
         return nameScore <= 0 ? 0 : nameScore * NAME_WEIGHT;
     }
 

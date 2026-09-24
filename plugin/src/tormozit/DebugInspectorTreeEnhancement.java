@@ -126,6 +126,11 @@ final class DebugInspectorTreeEnhancement
         return tree != null && !tree.isDisposed() && tree.getData(ENHANCED_KEY) == this;
     }
 
+    boolean isAttachedToShell(Shell shell)
+    {
+        return isAttached() && tree.getShell() == shell;
+    }
+
     static DebugInspectorTreeEnhancement install(Object dialog, Shell shell)
     {
         if (!ComfortSettings.isImproveDebuggerWindowsEnabled())

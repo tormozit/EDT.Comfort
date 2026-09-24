@@ -1746,7 +1746,9 @@ public final class DebugInspectorHook implements IStartup
         {
             if (treeEnhancement != null)
             {
-                treeEnhancement.dispose();
+                boolean owned = treeEnhancement.isAttachedToShell(shell);
+                if (owned)
+                    treeEnhancement.dispose();
                 treeEnhancement = null;
             }
         }
@@ -2145,7 +2147,9 @@ public final class DebugInspectorHook implements IStartup
             removeShellPinMaintenance();
             if (treeEnhancement != null)
             {
-                treeEnhancement.dispose();
+                boolean owned = treeEnhancement.isAttachedToShell(shell);
+                if (owned)
+                    treeEnhancement.dispose();
                 treeEnhancement = null;
             }
             if (!shell.isDisposed())

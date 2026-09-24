@@ -10,6 +10,7 @@ import org.eclipse.debug.ui.IDebugUIConstants;
 import org.eclipse.jface.viewers.ISelection;
 import org.eclipse.jface.viewers.ISelectionProvider;
 import org.eclipse.jface.viewers.IStructuredSelection;
+import org.eclipse.jface.viewers.StructuredSelection;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.events.MenuAdapter;
 import org.eclipse.swt.events.MenuEvent;
@@ -20,6 +21,7 @@ import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Menu;
 import org.eclipse.swt.widgets.MenuItem;
 import org.eclipse.swt.widgets.Tree;
+import org.eclipse.swt.widgets.TreeItem;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.IWorkbenchPart;
@@ -48,7 +50,8 @@ public final class DebugViewsMenuHook implements IStartup
     private enum ViewKind
     {
         VARIABLES,
-        EXPRESSIONS
+        EXPRESSIONS,
+        INSPECTOR
     }
 
     @Override
@@ -83,11 +86,11 @@ public final class DebugViewsMenuHook implements IStartup
             return;
 
         menu.setData(hookMarker, Boolean.TRUE);
-        menu.addMenuListener(buildMenuListener(active.view, active.kind));
+        menu.addMenuListener(buildMenuListener(active.view, active.kind, tree));
         DebugViewsDebug.log("MenuDetect " + active.kind + ": MenuAdapter attached"); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
-    private static MenuAdapter buildMenuListener(AbstractDebugView view, ViewKind kind)
+    private static MenuAdapter buildMenuListener(AbstractDebugView view, ViewKind kind, Tree tree)
     {
         return new MenuAdapter()
         {
@@ -96,27 +99,23 @@ public final class DebugViewsMenuHook implements IStartup
             @Override
             public void menuShown(MenuEvent e)
             {
-                if (!DebugSessionHelper.isDebugSuspended(null))
-                    return;
-
-                ISelection selection = selectionOf(view);
+                boolean suspended = DebugSessionHelper.isDebugSuspended(null);
+                ISelection selection = selectionOf(view, kind, tree);
                 DebugViewsDebug.log("menuShown " + kind + " " + DebugViewsDebug.selectionBrief(selection)); //$NON-NLS-1$ //$NON-NLS-2$
 
-                if (!(selection instanceof IStructuredSelection structured) || structured.size() != 1)
-                    return;
-                if (!isSupportedSelection(kind, structured.getFirstElement()))
-                    return;
-
+                boolean supported = selection instanceof IStructuredSelection structured
+                    && structured.size() == 1 && isSupportedSelection(kind, structured.getFirstElement());
                 Menu menu = (Menu) e.widget;
                 MenuItem item = new MenuItem(menu, SWT.PUSH);
                 item.setText(ITEM_TEXT);
+                item.setEnabled(supported && suspended);
                 item.setToolTipText(ITEM_TOOLTIP);
                 item.addSelectionListener(new SelectionAdapter()
                 {
                     @Override
                     public void widgetSelected(SelectionEvent ev)
                     {
-                        runCommand(view, kind);
+                        runCommand(view, kind, tree);
                     }
                 });
                 addedItems.add(item);
@@ -139,20 +138,22 @@ public final class DebugViewsMenuHook implements IStartup
         };
     }
 
-    private static void runCommand(AbstractDebugView view, ViewKind kind)
+    private static void runCommand(AbstractDebugView view, ViewKind kind, Tree tree)
     {
-        ISelection selection = selectionOf(view);
+        ISelection selection = selectionOf(view, kind, tree);
         DebugViewsDebug.log("command run " + kind + " " + DebugViewsDebug.selectionBrief(selection)); //$NON-NLS-1$ //$NON-NLS-2$
         if (!(selection instanceof IStructuredSelection structured) || structured.size() != 1)
             return;
 
         Object element = structured.getFirstElement();
-        if (kind == ViewKind.VARIABLES && element instanceof IBslVariable variable)
+        if ((kind == ViewKind.VARIABLES || kind == ViewKind.INSPECTOR)
+            && element instanceof IBslVariable variable)
         {
             DebugIRHandler.debugVariable(variable);
             return;
         }
-        if (kind == ViewKind.EXPRESSIONS && element instanceof IWatchExpression watchExpr)
+        if ((kind == ViewKind.EXPRESSIONS || kind == ViewKind.INSPECTOR)
+            && element instanceof IWatchExpression watchExpr)
         {
             IBslStackFrame frame = DebugSessionHelper.findSuspendedStackFrame(null);
             IProject project = DebugIRHandler.getProjectFromStackFrame(frame);
@@ -162,12 +163,19 @@ public final class DebugViewsMenuHook implements IStartup
 
     private static boolean isSupportedSelection(ViewKind kind, Object element)
     {
-        return kind == ViewKind.VARIABLES && element instanceof IBslVariable
-            || kind == ViewKind.EXPRESSIONS && element instanceof IWatchExpression;
+        return (kind == ViewKind.VARIABLES || kind == ViewKind.INSPECTOR) && element instanceof IBslVariable
+            || (kind == ViewKind.EXPRESSIONS || kind == ViewKind.INSPECTOR)
+                && element instanceof IWatchExpression;
     }
 
-    private static ISelection selectionOf(AbstractDebugView view)
+    private static ISelection selectionOf(AbstractDebugView view, ViewKind kind, Tree tree)
     {
+        if (kind == ViewKind.INSPECTOR)
+        {
+            TreeItem[] items = tree.getSelection();
+            return items.length == 1 && items[0].getData() != null
+                ? new StructuredSelection(items[0].getData()) : StructuredSelection.EMPTY;
+        }
         ISelectionProvider provider = view.getSite().getSelectionProvider();
         return provider != null ? provider.getSelection() : null;
     }
@@ -190,6 +198,10 @@ public final class DebugViewsMenuHook implements IStartup
             IWorkbenchPage page = window.getActivePage();
             if (page == null)
                 return null;
+            if (tree.getShell() != window.getShell()
+                && DebugInspectorHook.isInspectorShell(tree.getShell())
+                && DebugInspectorTreeEnhancement.findInspectorTreeOnShell(tree.getShell()) == tree)
+                return new ActiveView(null, ViewKind.INSPECTOR);
             IWorkbenchPart part = page.getActivePart();
             if (!(part instanceof AbstractDebugView debugView))
                 return null;
