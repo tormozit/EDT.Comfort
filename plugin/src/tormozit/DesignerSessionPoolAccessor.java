@@ -131,6 +131,27 @@ public final class DesignerSessionPoolAccessor
         return Collections.unmodifiableSet(firstSeenTimes.keySet());
     }
 
+    /** Существующие соединения агента для базы; {@code find} не создаёт новый сеанс. */
+    public Collection<?> findExistingConnections(InfobaseReference infobase)
+    {
+        if (infobase == null)
+            return List.of();
+        ensurePool();
+        if (pool == null)
+            return List.of();
+        try
+        {
+            Object found = pool.getClass().getMethod("find", InfobaseReference.class) //$NON-NLS-1$
+                    .invoke(pool, infobase);
+            return found instanceof Collection<?> connections ? connections : List.of();
+        }
+        catch (Exception e)
+        {
+            Global.tempLog("profiling-view", "Поиск сеанса конфигуратора SSH: " + e); //$NON-NLS-1$ //$NON-NLS-2$
+            return List.of();
+        }
+    }
+
     // тип Object важен
     public boolean isConnected(Object infobase) {
         return findPoolKey((InfobaseReference)infobase) != null;

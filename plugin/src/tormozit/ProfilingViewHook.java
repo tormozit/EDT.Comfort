@@ -3,8 +3,17 @@ package tormozit;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Comparator;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.text.DecimalFormat;
 import java.text.DecimalFormatSymbols;
 import java.util.ArrayList;
@@ -19,7 +28,6 @@ import java.util.UUID;
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.ResourcesPlugin;
-import org.eclipse.core.runtime.Path;
 import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.util.EcoreUtil;
@@ -41,8 +49,12 @@ import org.eclipse.jface.viewers.TableViewerColumn;
 import org.eclipse.jface.viewers.Viewer;
 import org.eclipse.jface.viewers.ViewerFilter;
 import org.eclipse.swt.SWT;
+import org.eclipse.swt.dnd.Clipboard;
+import org.eclipse.swt.dnd.TextTransfer;
+import org.eclipse.swt.dnd.Transfer;
 import org.eclipse.swt.graphics.GC;
 import org.eclipse.swt.graphics.Image;
+import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.widgets.Canvas;
 import org.eclipse.swt.widgets.Composite;
@@ -64,11 +76,15 @@ import org.eclipse.ui.PlatformUI;
 
 import com._1c.g5.v8.dt.profiling.core.ILineProfilingResult;
 import com._1c.g5.v8.dt.profiling.core.IProfilingResult;
+import com._1c.g5.v8.dt.profiling.core.IProfilingService;
+import com._1c.g5.v8.dt.profiling.core.IResultsStore;
 import com._1c.g5.v8.dt.common.ui.controls.search.SearchBox;
 import com._1c.g5.v8.dt.debug.model.base.data.DebugTargetType;
 import com._1c.g5.v8.dt.debug.core.model.BslModuleReference;
 import com._1c.g5.v8.dt.debug.core.model.IBslModuleLocator;
 import com._1c.g5.v8.dt.bsl.model.Module;
+import com._1c.g5.v8.dt.platform.services.core.infobases.IInfobaseAssociationManager;
+import com._1c.g5.v8.dt.platform.services.model.InfobaseReference;
 
 /** Доработки штатной панели «Замер производительности» (issue 585). */
 public final class ProfilingViewHook implements IStartup
@@ -193,6 +209,7 @@ public final class ProfilingViewHook implements IStartup
             installSmartFilter(view, tablePart, viewer);
             installSelectionFooter(view, tablePart, viewer);
             installDoubleClickMessage(viewer);
+            installCellCopy(table);
             viewer.refresh();
             table.setData(INSTALLED_KEY, Boolean.TRUE);
         }
@@ -200,6 +217,42 @@ public final class ProfilingViewHook implements IStartup
         {
             Global.tempLog("profiling-view", "Установка доработок панели: " + e); //$NON-NLS-1$ //$NON-NLS-2$
         }
+    }
+
+    private static void installCellCopy(Table table)
+    {
+        final int[] activeColumn = { 0 };
+        table.addListener(SWT.MouseDown, event ->
+        {
+            TableItem item = table.getItem(new Point(event.x, event.y));
+            if (item == null)
+                return;
+            for (int column = 0; column < table.getColumnCount(); column++)
+                if (item.getBounds(column).contains(event.x, event.y))
+                {
+                    activeColumn[0] = column;
+                    return;
+                }
+        });
+        CopyCommandSupport.wireCopyOverride(table, () ->
+        {
+            if (table.getSelectionCount() == 0)
+                return false;
+            String value = table.getSelection()[0].getText(activeColumn[0]);
+            if (value == null || value.isEmpty())
+                return false;
+            Clipboard clipboard = new Clipboard(table.getDisplay());
+            try
+            {
+                clipboard.setContents(new Object[] { value },
+                        new Transfer[] { TextTransfer.getInstance() });
+            }
+            finally
+            {
+                clipboard.dispose();
+            }
+            return true;
+        });
     }
 
     private static void addCalculatedColumns(org.eclipse.swt.widgets.Composite tablePart,
@@ -373,6 +426,19 @@ public final class ProfilingViewHook implements IStartup
         if (settings == null)
             settings = root.addNewSection("profiling-view-columns"); //$NON-NLS-1$
         IDialogSettings saved = settings;
+        int sixDigits;
+        int tenDigits;
+        GC measure = new GC(table);
+        try
+        {
+            measure.setFont(table.getFont());
+            sixDigits = measure.textExtent("888888").x + 16; //$NON-NLS-1$
+            tenDigits = measure.textExtent("8888888888").x + 16; //$NON-NLS-1$
+        }
+        finally
+        {
+            measure.dispose();
+        }
         boolean[] ready = { false };
         Runnable apply = () ->
         {
@@ -387,7 +453,14 @@ public final class ProfilingViewHook implements IStartup
                     continue;
                 String value = saved.get("width." + i); //$NON-NLS-1$
                 if (value == null)
+                {
+                    int width = i == 1 || i == 3 ? sixDigits
+                            : i == 4 || i == 11 ? tenDigits : 0;
+                    if (width > 0)
+                        layout.setColumnData(table.getColumn(i),
+                                new ColumnPixelData(width, true, false));
                     continue;
+                }
                 try
                 {
                     int width = Integer.parseInt(value);
@@ -515,6 +588,8 @@ public final class ProfilingViewHook implements IStartup
                 Map<Object, Actuality> actuality = new IdentityHashMap<>();
                 Map<BslModuleReference, IFile> moduleFiles = new HashMap<>();
                 Map<IFile, List<String>> fileLines = new HashMap<>();
+                Map<ILineProfilingResult, ExtensionSource> extensionSources =
+                        loadExtensionSources(result, rows, monitor);
                 for (Object row : rows)
                 {
                     if (monitor.isCanceled())
@@ -523,8 +598,9 @@ public final class ProfilingViewHook implements IStartup
                     if (values.length > 0)
                     {
                         names.put(row, methodName(values[0]));
-                        actuality.put(row, checkActuality(locator, values[0], moduleFiles,
-                                fileLines));
+                        if (!extensionSources.containsKey(values[0]))
+                            actuality.put(row, checkActuality(locator, values[0], moduleFiles,
+                                    fileLines));
                     }
                 }
                 if (result != null && result.getTotalDurability() > 0
@@ -540,6 +616,18 @@ public final class ProfilingViewHook implements IStartup
                     if (!table.isDisposed() && table.getData("profiling.sourceInput") == input //$NON-NLS-1$
                             && table.getData("profiling.methodGeneration") == generation) //$NON-NLS-1$
                     {
+                        for (Map.Entry<ILineProfilingResult, ExtensionSource> entry :
+                                extensionSources.entrySet())
+                            applyExtensionSource(entry.getKey(), entry.getValue());
+                        boolean renamed = result != null && normalizeModuleNames(result);
+                        if ((!extensionSources.isEmpty() || renamed) && result != null)
+                            saveEnrichedResult(result);
+                        for (Object row : rows)
+                        {
+                            ILineProfilingResult[] values = lines(row);
+                            if (values.length > 0 && extensionSources.containsKey(values[0]))
+                                names.put(row, methodName(values[0]));
+                        }
                         table.setData("profiling.methodNames", names); //$NON-NLS-1$
                         table.setData("profiling.actuality", actuality); //$NON-NLS-1$
                         table.setData("profiling.labelsGeneration", generation); //$NON-NLS-1$
@@ -575,6 +663,502 @@ public final class ProfilingViewHook implements IStartup
                 viewer.update(item.getData(), null);
         }
     }
+
+    private static final Pattern EXPORTED_OBJECT = Pattern.compile(
+            "<([A-Za-z][A-Za-z0-9]*)\\s+uuid=\"([0-9a-fA-F-]{36})\""); //$NON-NLS-1$
+    private static final Pattern BSL_METHOD = Pattern.compile(
+            "^\\s*(?:Процедура|Функция)\\s+([\\p{L}_][\\p{L}\\p{N}_]*)", //$NON-NLS-1$
+            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
+    private static final Pattern BSL_METHOD_END = Pattern.compile(
+            "^\\s*Конец(?:Процедуры|Функции)\\b", //$NON-NLS-1$
+            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
+
+    private static Map<ILineProfilingResult, ExtensionSource> loadExtensionSources(
+            IProfilingResult result, List<Object> rows, IProgressMonitor monitor)
+    {
+        Map<ILineProfilingResult, ExtensionSource> found = new IdentityHashMap<>();
+        if (result == null)
+            return found;
+        Map<String, List<ILineProfilingResult>> byExtension = new HashMap<>();
+        for (Object row : rows)
+            for (ILineProfilingResult line : lines(row))
+            {
+                if (line.getModuleID() != null
+                        && line.getModuleID().getExtensionName() != null
+                        && line.getModuleName().contains("не найден")) //$NON-NLS-1$
+                    byExtension.computeIfAbsent(line.getModuleID().getExtensionName(),
+                            ignored -> new ArrayList<>()).add(line);
+            }
+        for (Map.Entry<String, List<ILineProfilingResult>> group : byExtension.entrySet())
+        {
+            if (monitor.isCanceled())
+                break;
+            Global.tempLog("profiling-view", "Расширение замера: " + group.getKey() //$NON-NLS-1$ //$NON-NLS-2$
+                    + ", строк=" + group.getValue().size()); //$NON-NLS-1$
+            Path directory = null;
+            try
+            {
+                org.eclipse.core.resources.IProject project = group.getValue().get(0).getProject();
+                if (project == null)
+                {
+                    Set<org.eclipse.core.resources.IProject> projects =
+                            new HashSet<>(result.getProjects().values());
+                    projects.remove(null);
+                    if (projects.size() == 1)
+                        project = projects.iterator().next();
+                }
+                if (project == null)
+                {
+                    Global.tempLog("profiling-view", "Не определён проект расширения " //$NON-NLS-1$ //$NON-NLS-2$
+                            + group.getKey());
+                    continue;
+                }
+                InfobaseReference infobase = profilingInfobase(project, result);
+                if (infobase == null)
+                {
+                    Global.tempLog("profiling-view", "Не определена база замера: " //$NON-NLS-1$ //$NON-NLS-2$
+                            + group.getKey() + ", проект=" + project.getName()); //$NON-NLS-1$
+                    continue;
+                }
+                Collection<?> connections = DesignerSessionPoolAccessor.getInstance()
+                        .findExistingConnections(infobase);
+                List<Object> active = new ArrayList<>();
+                for (Object connection : connections)
+                    if (Boolean.TRUE.equals(invokeDesignerMethod(connection, "isAlive", //$NON-NLS-1$
+                            new Class<?>[0])))
+                        active.add(connection);
+                Global.tempLog("profiling-view", "Найдено действующих соединений агента: " //$NON-NLS-1$ //$NON-NLS-2$
+                        + active.size() + ", расширение=" + group.getKey()); //$NON-NLS-1$
+                if (active.size() != 1)
+                    continue;
+                directory = Path.of("C:\\VC\\EDT.Comfort", ".tmp", "profiling-extensions", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        result.getUuid().toString(), UUID.randomUUID().toString()).toAbsolutePath();
+                Files.createDirectories(directory);
+                exportFromExistingAgent(active.get(0), group.getKey(), directory);
+                Map<String, List<String>> names = exportedMetadata(directory);
+                Path exportDirectory = directory;
+                Map<Path, List<String>> sourceCache = new HashMap<>();
+                Map<String, Path> sourcePaths = new HashMap<>();
+                Map<Path, List<MethodSpan>> methodsCache = new HashMap<>();
+                for (ILineProfilingResult line : group.getValue())
+                {
+                    if (monitor.isCanceled())
+                        break;
+                    String id = line.getModuleID().getObjectID();
+                    String metadataName = extensionModuleName(names.get(id),
+                            line.getModuleID().getPropertyID());
+                    if (metadataName == null && "d22e852a-cf8a-4f77-8ccb-3548e7792bea" //$NON-NLS-1$
+                            .equals(line.getModuleID().getPropertyID()))
+                        metadataName = "Configuration." + group.getKey() //$NON-NLS-1$
+                                + ".ManagedApplicationModule"; //$NON-NLS-1$
+                    Path source = metadataName != null ? sourcePaths.computeIfAbsent(metadataName,
+                            name ->
+                            {
+                                try { return exportedModule(exportDirectory, name); }
+                                catch (Exception e) { throw new IllegalStateException(e); }
+                            }) : null;
+                    if (source == null)
+                        continue;
+                    List<String> text = sourceCache.computeIfAbsent(source, path ->
+                    {
+                        try { return Files.readAllLines(path, StandardCharsets.UTF_8); }
+                        catch (Exception e) { throw new IllegalStateException(e); }
+                    });
+                    int index = line.getLineNo() - 1;
+                    if (index >= 0 && index < text.size())
+                    {
+                        List<MethodSpan> methods = methodsCache.computeIfAbsent(source,
+                                ignored -> methodsIn(text));
+                        MethodSpan method = methods.get(index);
+                        found.put(line, new ExtensionSource(
+                                extensionModuleDisplayName(group.getKey(), metadataName),
+                                method.name().isEmpty() ? "Раздел основной программы" //$NON-NLS-1$
+                                        : method.name(), method.start(), method.end(),
+                                text.get(index).strip()));
+                    }
+                }
+                Global.tempLog("profiling-view", "Загружено строк расширения " //$NON-NLS-1$ //$NON-NLS-2$
+                        + group.getKey() + ": " + group.getValue().stream() //$NON-NLS-1$
+                                .filter(found::containsKey).count());
+            }
+            catch (Exception e)
+            {
+                Throwable cause = e;
+                while (cause != null)
+                {
+                    Global.tempLog("profiling-view", "Выгрузка расширения " //$NON-NLS-1$ //$NON-NLS-2$
+                            + group.getKey() + ": " + cause.getClass().getName() //$NON-NLS-1$
+                            + ": " + cause.getMessage()); //$NON-NLS-1$
+                    cause = cause.getCause();
+                }
+            }
+            finally
+            {
+                if (directory != null)
+                    deleteTemporaryExport(directory);
+            }
+        }
+        return found;
+    }
+
+    private static void exportFromExistingAgent(Object connection, String extensionName,
+            Path directory) throws Exception
+    {
+        Method use = null;
+        for (Method method : connection.getClass().getMethods())
+            if ("use".equals(method.getName()) && method.getParameterCount() == 1) //$NON-NLS-1$
+            {
+                use = method;
+                break;
+            }
+        if (use == null)
+            throw new NoSuchMethodException("DesignerAgentConnection.use"); //$NON-NLS-1$
+        Class<?> actionType = use.getParameterTypes()[0];
+        Object action = Proxy.newProxyInstance(actionType.getClassLoader(),
+                new Class<?>[] { actionType }, (proxy, method, args) ->
+                {
+                    if (!"run".equals(method.getName())) //$NON-NLS-1$
+                    {
+                        if ("toString".equals(method.getName())) //$NON-NLS-1$
+                            return "Profiling extension export"; //$NON-NLS-1$
+                        if ("hashCode".equals(method.getName())) //$NON-NLS-1$
+                            return System.identityHashCode(proxy);
+                        if ("equals".equals(method.getName())) //$NON-NLS-1$
+                            return proxy == args[0];
+                        return null;
+                    }
+                    Object session = invokeDesignerMethod(connection, "getSession", //$NON-NLS-1$
+                            new Class<?>[0]);
+                    Object query = invokeDesignerMethod(session, "configure", new Class<?>[0]); //$NON-NLS-1$
+                    Object step = invokeDesignerMethod(query, "exportXmlFromInfobase", //$NON-NLS-1$
+                            new Class<?>[] { Path.class }, directory);
+                    step = invokeDesignerMethod(step, "extension", //$NON-NLS-1$
+                            new Class<?>[] { String.class }, extensionName);
+                    invokeDesignerMethod(step, "exec", new Class<?>[0]); //$NON-NLS-1$
+                    return null;
+                });
+        try
+        {
+            use.invoke(connection, action);
+        }
+        catch (InvocationTargetException e)
+        {
+            if (e.getCause() instanceof Exception failure)
+                throw failure;
+            throw e;
+        }
+    }
+
+    private static Object invokeDesignerMethod(Object target, String name, Class<?>[] parameters,
+            Object... arguments) throws Exception
+    {
+        try
+        {
+            return target.getClass().getMethod(name, parameters).invoke(target, arguments);
+        }
+        catch (InvocationTargetException e)
+        {
+            if (e.getCause() instanceof Exception failure)
+                throw failure;
+            throw e;
+        }
+    }
+
+    private static InfobaseReference profilingInfobase(
+            org.eclipse.core.resources.IProject project, IProfilingResult result) throws Exception
+    {
+        IInfobaseAssociationManager manager = Global.getOsgiService(IInfobaseAssociationManager.class);
+        if (manager == null)
+            return null;
+        var association = manager.getAssociation(project);
+        if (association.isEmpty())
+            return null;
+        Collection<InfobaseReference> bases = association.get().getInfobases();
+        if (bases == null || bases.isEmpty())
+            return null;
+        String expected = result.getConnectionString();
+        if (expected == null || expected.isBlank())
+            return bases.size() == 1 ? bases.iterator().next() : null;
+        InfobaseReference matched = null;
+        for (InfobaseReference base : bases)
+        {
+            if (base.getConnectionString() == null || !expected.equalsIgnoreCase(
+                    base.getConnectionString().asConnectionString()))
+                continue;
+            if (matched != null)
+                return null;
+            matched = base;
+        }
+        return matched;
+    }
+
+    private static Map<String, List<String>> exportedMetadata(Path directory) throws Exception
+    {
+        Map<String, List<String>> names = new HashMap<>();
+        try (var paths = Files.walk(directory))
+        {
+            for (Path xml : paths.filter(Files::isRegularFile)
+                    .filter(path -> path.getFileName().toString().endsWith(".xml")) //$NON-NLS-1$
+                    .toList())
+            {
+                Path relative = directory.relativize(xml);
+                if (relative.getNameCount() != 2)
+                    continue;
+                String collection = relative.getName(0).toString();
+                if (!collection.endsWith("s")) //$NON-NLS-1$
+                    continue;
+                String objectName = xml.getFileName().toString();
+                objectName = objectName.substring(0, objectName.length() - 4);
+                Matcher match = EXPORTED_OBJECT.matcher(Files.readString(xml, StandardCharsets.UTF_8));
+                if (!match.find())
+                    continue;
+                String prefix = collection.substring(0, collection.length() - 1)
+                        + "." + objectName; //$NON-NLS-1$
+                Path objectDirectory = xml.resolveSibling(objectName);
+                if (!Files.isDirectory(objectDirectory))
+                    continue;
+                try (var modules = Files.walk(objectDirectory))
+                {
+                    for (Path module : modules.filter(Files::isRegularFile)
+                            .filter(path -> path.getFileName().toString().endsWith(".bsl")) //$NON-NLS-1$
+                            .toList())
+                    {
+                        Path moduleRelative = objectDirectory.relativize(module);
+                        List<String> parts = new ArrayList<>();
+                        for (Path part : moduleRelative)
+                            if (!"Ext".equals(part.toString())) //$NON-NLS-1$
+                                parts.add(part.toString());
+                        String last = parts.remove(parts.size() - 1);
+                        parts.add(last.substring(0, last.length() - 4));
+                        names.computeIfAbsent(match.group(2), ignored -> new ArrayList<>())
+                                .add(prefix + "." + String.join(".", parts)); //$NON-NLS-1$ //$NON-NLS-2$
+                    }
+                }
+            }
+        }
+        return names;
+    }
+
+    private static String extensionModuleName(List<String> names, String propertyId)
+    {
+        if (names == null || names.isEmpty())
+            return null;
+        if (names.size() == 1)
+            return names.get(0);
+        String suffix = "d22e852a-cf8a-4f77-8ccb-3548e7792bea".equals(propertyId) //$NON-NLS-1$
+                ? ".ManagedApplicationModule" : null; //$NON-NLS-1$
+        if (suffix == null)
+            return null;
+        String matched = null;
+        for (String name : names)
+        {
+            if (!name.endsWith(suffix))
+                continue;
+            if (matched != null)
+                return null;
+            matched = name;
+        }
+        return matched;
+    }
+
+    private static String extensionModuleDisplayName(String extensionName, String metadataName)
+    {
+        String[] parts = metadataName.split("\\."); //$NON-NLS-1$
+        if (parts.length < 2)
+            return extensionName + "." + metadataName; //$NON-NLS-1$
+        String type = MdTypeMapping.anyToRu(parts[0]);
+        StringBuilder result = new StringBuilder(extensionName).append('.')
+                .append(type != null ? type : parts[0]);
+        for (int i = 1; i < parts.length; i++)
+        {
+            String part = parts[i];
+            if (i == parts.length - 1)
+            {
+                String module = MdTypeMapping.bslFilenameToModuleRu(part + ".bsl"); //$NON-NLS-1$
+                if (module != null)
+                    part = module;
+            }
+            else if (i > 1)
+            {
+                String nestedType = MdTypeMapping.anyToRu(part);
+                if (nestedType != null)
+                    part = nestedType;
+            }
+            result.append('.').append(part);
+        }
+        return result.toString();
+    }
+
+    private static Path exportedModule(Path directory, String metadataName) throws Exception
+    {
+        String[] parts = metadataName.split("\\."); //$NON-NLS-1$
+        if (parts.length < 2)
+            return null;
+        if ("Configuration".equals(parts[0])) //$NON-NLS-1$
+        {
+            Path module = directory.resolve("Ext").resolve( //$NON-NLS-1$
+                    parts[parts.length - 1] + ".bsl"); //$NON-NLS-1$
+            return Files.isRegularFile(module) ? module : null;
+        }
+        String owner = parts.length > 2 ? parts[1] : null;
+        String fileName = parts[parts.length - 1] + ".bsl"; //$NON-NLS-1$
+        List<Path> matches = new ArrayList<>();
+        try (var paths = Files.walk(directory))
+        {
+            paths.filter(Files::isRegularFile).filter(path ->
+                    path.getFileName().toString().equals(fileName)
+                    && (owner == null || path.toString().contains("\\" + owner + "\\"))) //$NON-NLS-1$ //$NON-NLS-2$
+                    .forEach(matches::add);
+        }
+        return matches.size() == 1 ? matches.get(0) : null;
+    }
+
+    private static List<MethodSpan> methodsIn(List<String> text)
+    {
+        List<MethodSpan> result = new ArrayList<>(
+                java.util.Collections.nCopies(text.size(), new MethodSpan("", 0, 0))); //$NON-NLS-1$
+        String method = ""; //$NON-NLS-1$
+        int methodStart = -1;
+        for (int i = 0; i < text.size(); i++)
+        {
+            Matcher start = BSL_METHOD.matcher(text.get(i));
+            if (start.find())
+            {
+                if (methodStart >= 0)
+                    fillMethodSpan(result, method, methodStart, i - 1);
+                method = start.group(1);
+                methodStart = i;
+            }
+            else if (methodStart >= 0 && BSL_METHOD_END.matcher(text.get(i)).find())
+            {
+                fillMethodSpan(result, method, methodStart, i);
+                method = ""; //$NON-NLS-1$
+                methodStart = -1;
+            }
+        }
+        if (methodStart >= 0)
+            fillMethodSpan(result, method, methodStart, text.size() - 1);
+        return result;
+    }
+
+    private static void fillMethodSpan(List<MethodSpan> methods, String name, int first, int last)
+    {
+        MethodSpan span = new MethodSpan(name, first + 1, last + 1);
+        for (int i = first; i <= last; i++)
+            methods.set(i, span);
+    }
+
+    private static void applyExtensionSource(ILineProfilingResult line, ExtensionSource source)
+    {
+        try
+        {
+            Class<?> type = line.getClass();
+            type.getMethod("setModuleName", String.class).invoke(line, source.moduleName); //$NON-NLS-1$
+            type.getMethod("setMethodSignature", String.class).invoke(line, source.method); //$NON-NLS-1$
+            if (source.methodStart > 0)
+            {
+                type.getMethod("setMethodStart", int.class).invoke(line, source.methodStart); //$NON-NLS-1$
+                type.getMethod("setMethodEnd", int.class).invoke(line, source.methodEnd); //$NON-NLS-1$
+            }
+            type.getMethod("setLine", String.class).invoke(line, source.line); //$NON-NLS-1$
+        }
+        catch (ReflectiveOperationException e)
+        {
+            Global.tempLog("profiling-view", "Заполнение строки расширения: " + e); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    private static boolean normalizeModuleNames(IProfilingResult result)
+    {
+        boolean changed = false;
+        for (ILineProfilingResult line : result.getProfilingResults())
+        {
+            String name = line.getModuleName();
+            int prefixEnd = name.indexOf('.');
+            if (prefixEnd < 0)
+                continue;
+            String prefix = name.substring(0, prefixEnd + 1);
+            int typeEnd = name.indexOf('.', prefix.length());
+            if (typeEnd < 0)
+                continue;
+            String type = MdTypeMapping.treeGroupLabelToRu(
+                    name.substring(prefix.length(), typeEnd));
+            if (type == null)
+                continue;
+            try
+            {
+                line.getClass().getMethod("setModuleName", String.class).invoke(line, //$NON-NLS-1$
+                        prefix + type + name.substring(typeEnd));
+                changed = true;
+            }
+            catch (ReflectiveOperationException e)
+            {
+                Global.tempLog("profiling-view", "Исправление имени модуля: " + e); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+        return changed;
+    }
+
+    private static void saveEnrichedResult(IProfilingResult result)
+    {
+        Job save = new Job("Сохранение замера производительности") //$NON-NLS-1$
+        {
+            @Override
+            protected org.eclipse.core.runtime.IStatus run(IProgressMonitor monitor)
+            {
+                Global.tempLog("profiling-view", "Сохранение дополненных строк замера " //$NON-NLS-1$ //$NON-NLS-2$
+                        + result.getUuid());
+                try
+                {
+                    Object service = Global.unwrapServiceProxy(
+                            Global.getOsgiService(IProfilingService.class));
+                    if (service == null)
+                        throw new IllegalStateException("Служба замеров недоступна"); //$NON-NLS-1$
+                    Field storeField = service.getClass().getDeclaredField("resultsStore"); //$NON-NLS-1$
+                    Field locationField = service.getClass().getDeclaredField("storeLocation"); //$NON-NLS-1$
+                    storeField.setAccessible(true);
+                    locationField.setAccessible(true);
+                    IResultsStore store = (IResultsStore) storeField.get(service);
+                    Path location = (Path) locationField.get(service);
+                    if (store == null || location == null || result.getName() == null
+                            || !Files.isDirectory(location.resolve(result.getName())))
+                        throw new IllegalStateException("Каталог замера недоступен"); //$NON-NLS-1$
+                    store.saveResult(result, location);
+                    Global.tempLog("profiling-view", "Дополненный замер сохранён: " //$NON-NLS-1$ //$NON-NLS-2$
+                            + result.getUuid());
+                }
+                catch (Exception e)
+                {
+                    Global.tempLogException("profiling-view", //$NON-NLS-1$
+                            "Не удалось сохранить дополненный замер " + result.getUuid(), e); //$NON-NLS-1$
+                }
+                return org.eclipse.core.runtime.Status.OK_STATUS;
+            }
+        };
+        save.setSystem(true);
+        save.schedule();
+    }
+
+    private static void deleteTemporaryExport(Path directory)
+    {
+        try (var paths = Files.walk(directory))
+        {
+            paths.sorted(Comparator.reverseOrder()).forEach(path ->
+            {
+                try { Files.deleteIfExists(path); }
+                catch (Exception e) { Global.tempLog("profiling-view", "Очистка выгрузки: " + e); } //$NON-NLS-1$ //$NON-NLS-2$
+            });
+        }
+        catch (Exception e)
+        {
+            Global.tempLog("profiling-view", "Очистка выгрузки: " + e); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    private record MethodSpan(String name, int start, int end) {}
+
+    private record ExtensionSource(String moduleName, String method, int methodStart,
+            int methodEnd, String line) {}
 
     private static Actuality checkActuality(IBslModuleLocator locator, ILineProfilingResult line,
             Map<BslModuleReference, IFile> moduleFiles, Map<IFile, List<String>> fileLines)
@@ -624,7 +1208,8 @@ public final class ProfilingViewHook implements IStartup
         if (uri == null || !uri.trimFragment().isPlatformResource())
             return null;
         String path = uri.trimFragment().toPlatformString(true);
-        return path != null ? ResourcesPlugin.getWorkspace().getRoot().getFile(new Path(path)) : null;
+        return path != null ? ResourcesPlugin.getWorkspace().getRoot()
+                .getFile(new org.eclipse.core.runtime.Path(path)) : null;
     }
 
     private static List<String> readLines(IFile file) throws Exception
