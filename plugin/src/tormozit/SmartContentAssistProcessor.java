@@ -7424,9 +7424,7 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
             }
             // Ключевые слова — в каретке, из контекстов этого же опроса.
             raw = mergeLiveKeywords(raw, keywordProbe);
-            logEdtPrioritySnapshot("delegate.before", raw, ""); //$NON-NLS-1$ //$NON-NLS-2$
             adjustEdtLiteralPriorities(raw);
-            logEdtPrioritySnapshot("delegate.after", raw, ""); //$NON-NLS-1$ //$NON-NLS-2$
             if (onUi && raw != null && raw.length > 0)
                 wordListSeededOnUi = true;
             return raw;
@@ -7509,38 +7507,6 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         return "Неопределено".equalsIgnoreCase(name) //$NON-NLS-1$
             || "Истина".equalsIgnoreCase(name) //$NON-NLS-1$
             || "Ложь".equalsIgnoreCase(name); //$NON-NLS-1$
-    }
-
-    /** Временная диагностика порядка и приоритетов EDT для issue 588. */
-    private static void logEdtPrioritySnapshot(String phase, ICompletionProposal[] proposals,
-                                               String filter)
-    {
-        SmartCodeMatcher matcher = new SmartCodeMatcher(filter);
-        StringBuilder selected = new StringBuilder();
-        StringBuilder first = new StringBuilder();
-        if (proposals != null)
-        {
-            for (int i = 0; i < proposals.length; i++)
-            {
-                ICompletionProposal proposal = proposals[i];
-                String name = filterMatchName(proposal);
-                int priority = resolveNativePriority(proposal);
-                if (i < 6)
-                    first.append('[').append(i).append(':').append(name)
-                        .append('/').append(priority).append(']');
-                if ("Не".equalsIgnoreCase(name) || "Неопределено".equalsIgnoreCase(name) //$NON-NLS-1$ //$NON-NLS-2$
-                    || "Неделя".equalsIgnoreCase(name) //$NON-NLS-1$
-                    || "НеобходимостьЗавершенияСоединения".equalsIgnoreCase(name) //$NON-NLS-1$
-                    || "НедопустимыеПодстановкиXS".equalsIgnoreCase(name) //$NON-NLS-1$
-                    || "Истина".equalsIgnoreCase(name) || "Ложь".equalsIgnoreCase(name)) //$NON-NLS-1$ //$NON-NLS-2$
-                    selected.append('[').append(i).append(':').append(name)
-                        .append(" priority=").append(priority) //$NON-NLS-1$
-                        .append(" score=").append(computeNameScore(matcher, proposal)).append(']'); //$NON-NLS-1$
-            }
-        }
-        Global.tempLog("assist-edt-priority", phase + " filter=" + filter //$NON-NLS-1$ //$NON-NLS-2$
-            + " count=" + (proposals == null ? -1 : proposals.length) //$NON-NLS-1$
-            + " first=" + first + " selected=" + selected); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     // ---- Асинхронная загрузка delegate (EDT compute) в фоновом Job -------------
@@ -9153,7 +9119,6 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
     /** Только для {@link #computeForPopupRefresh} — не для штатного keystroke path. */
     private ICompletionProposal[] filterAndSort(ICompletionProposal[] raw, String filter)
     {
-        logEdtPrioritySnapshot("filter.in", raw, filter); //$NON-NLS-1$
         if (raw == null || raw.length == 0)
             return EMPTY;
 
@@ -9304,7 +9269,6 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                 int order = delegateOrderOf(p);
                 result[i] = wrapProposal(p, order >= 0 ? order : idx[i]);
             }
-            logEdtPrioritySnapshot("filter.out", result, filter); //$NON-NLS-1$
             wrapMs = (System.nanoTime() - tWrap) / 1_000_000L;
             return result;
         }

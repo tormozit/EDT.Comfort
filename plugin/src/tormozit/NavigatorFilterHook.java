@@ -872,7 +872,7 @@ public final class NavigatorFilterHook implements IStartup
             {
                 if (matcher.hasMultipleSections())
                 {
-                    java.util.List<SmartMatcher.HighlightRange> ranges = matcher.getHighlightRanges(plainText);
+                    java.util.List<SmartMatcher.HighlightRange> ranges = matcher.getSectionHighlightRanges(plainText);
                     if (!ranges.isEmpty())
                         SmartMatchHighlight.applyRanges(styled, ranges);
                 }

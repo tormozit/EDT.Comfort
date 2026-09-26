@@ -53,6 +53,7 @@ import org.eclipse.jface.viewers.CellLabelProvider;
 import org.eclipse.jface.viewers.ColumnLabelProvider;
 import org.eclipse.jface.viewers.ITreeContentProvider;
 import org.eclipse.jface.viewers.TableViewer;
+import org.eclipse.jface.viewers.AbstractTreeViewer;
 import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.jface.viewers.TreeViewerColumn;
 import org.eclipse.emf.common.notify.Adapter;
@@ -145,6 +146,7 @@ import com._1c.g5.v8.bm.integration.event.IBmAsyncEventListener;
 import com._1c.g5.v8.dt.common.localization.EnumLiteralLocalizationProvider;
 import com._1c.g5.v8.dt.common.localization.FeatureNameLocalizationProvider;
 import com._1c.g5.v8.dt.core.naming.ITopObjectFqnGenerator;
+import com._1c.g5.v8.dt.core.platform.IConfigurationProject;
 import com._1c.g5.v8.dt.core.platform.IEditingLanguageManager;
 import com._1c.g5.v8.dt.core.platform.IResourceLookup;
 import com._1c.g5.v8.dt.core.platform.IV8Project;
@@ -169,6 +171,9 @@ import com._1c.g5.v8.dt.common.ui.CommonUI;
 import com._1c.g5.v8.dt.form.copypaste.FormElementTransfer;
 import com._1c.g5.v8.dt.form.mapping.model.IMappingModel;
 import com._1c.g5.v8.dt.form.mapping.model.Item;
+import com._1c.g5.v8.dt.form.mapping.model.ParameterizedAttributeItem;
+import com._1c.g5.v8.dt.form.mapping.model.ParameterizedCommandPath;
+import com._1c.g5.v8.dt.form.mapping.model.ParameterizedTableItem;
 import com._1c.g5.v8.dt.form.mapping.model.ItemType;
 import com._1c.g5.v8.dt.form.mapping.model.ItemsHolder;
 import com._1c.g5.v8.dt.form.model.AbstractDataPath;
@@ -229,6 +234,7 @@ import com._1c.g5.v8.dt.platform.pictures.IPictureManager;
 import com._1c.g5.v8.dt.metadata.dbview.DbViewFieldDef;
 import com._1c.g5.v8.dt.metadata.mdclass.AdjustableBoolean;
 import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
+import com._1c.g5.v8.dt.metadata.mdclass.FunctionalOption;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com._1c.g5.v8.dt.metadata.mdclass.ScriptVariant;
 import com._1c.g5.v8.dt.metadata.mdclass.StandardAttribute;
@@ -351,7 +357,14 @@ public class FormEditorHook implements IStartup
     /** Маркер: меню дерева реквизитов уже подключено. */
     private static final String ATTRIBUTES_HOOK_MARKER = "tormozit.formAttributesMenuHooked"; //$NON-NLS-1$
 
+    /** Маркер: контекстное меню дерева «Глобальные команды» уже подключено. */
+    private static final String GLOBAL_COMMANDS_HOOK_MARKER = "tormozit.formGlobalCommandsMenuHooked"; //$NON-NLS-1$
+
     private static final String ITEM_TEXT_SHOW_IN_NAVIGATOR = "Показать в навигаторе \tCTRL+T"; //$NON-NLS-1$
+
+    private static final String ITEM_TEXT_OPEN_OBJECT = "Открыть объект"; //$NON-NLS-1$
+
+    private static final String ITEM_TEXT_GLOBAL_COMMANDS = "Глобальные команды"; //$NON-NLS-1$
 
     /** Пункт EDT, перед которым вставляем «Показать в навигаторе». */
     private static final String PROPERTIES_MENU_TEXT = "Свойства"; //$NON-NLS-1$
@@ -1166,6 +1179,11 @@ public class FormEditorHook implements IStartup
                 hookAttributesMenu(tree, swtMenu);
                 return;
             }
+            if (tree.getData(GlobalCommandsProperties.KEY_HOOKED) != null)
+            {
+                hookGlobalCommandsMenu(tree, swtMenu);
+                return;
+            }
             hookEventsOrderOnMenu(swtMenu);
             if (tree.getData(ItemsTree.KEY_HOOKED) != null)
                 GroupItemsCommand.hookMenu(tree, swtMenu);
@@ -1316,33 +1334,305 @@ public class FormEditorHook implements IStartup
 
     private static void hookAttributesMenu(Tree tree, Menu menu)
     {
-        if (Boolean.TRUE.equals(menu.getData(ATTRIBUTES_HOOK_MARKER)))
+        hookNavigationMenu(tree, menu, ATTRIBUTES_HOOK_MARKER,
+                () -> resolveMetadataNavigatorTarget(getSelectedPropertyInfo(tree)),
+                () -> resolveMetadataOpenTarget(getSelectedPropertyInfo(tree)),
+                "Показать объект-владелец в дереве навигатора", //$NON-NLS-1$
+                "Открыть объект-владелец в редакторе", //$NON-NLS-1$
+                () -> {
+                    PropertyInfo selected = getSelectedPropertyInfo(tree);
+                    if (selected == null)
+                        return null;
+                    PropertyInfo root = selected;
+                    while (parentPropertyInfo(root) != null)
+                        root = parentPropertyInfo(root);
+                    boolean nested = root != selected;
+                    FormEditorPage page = FormEditor.getActiveFormEditorPage();
+                    // Коллекция/динамический список — реквизит, к которому привязана таблица формы.
+                    if (!(root.getSource() instanceof FormAttribute attribute)
+                        || (!nested && !isFormAttributeReferenceNode(selected)
+                            && findAttributeTable(page, selected) == null))
+                        return null;
+                    return () -> showAttributeInGlobalCommands(FormEditor.getActiveFormEditorPage(),
+                        attribute, selected);
+                });
+    }
+
+    /** Первая таблица формы, привязанная к реквизиту (коллекции/динамическому списку); иначе {@code null}. */
+    private static Table findAttributeTable(FormEditorPage page, PropertyInfo info)
+    {
+        Form form = page != null ? page.getModel() : null;
+        if (form == null || info == null)
+            return null;
+        return findFormTableByPath(form, List.of(dataPathSegments(info, ScriptVariant.RUSSIAN),
+            dataPathSegments(info, ScriptVariant.ENGLISH)));
+    }
+
+    /** Сегменты пути данных реквизита в заданном варианте языка; пусто, если пути нет. */
+    private static List<String> dataPathSegments(PropertyInfo info, ScriptVariant variant)
+    {
+        try
+        {
+            AbstractDataPath path = info.getDataPath(variant);
+            return path != null ? new ArrayList<>(path.getSegments()) : List.of();
+        }
+        catch (RuntimeException e)
+        {
+            Global.logError("FormEditorHook", "dataPathSegments", e); //$NON-NLS-1$ //$NON-NLS-2$
+            return List.of();
+        }
+    }
+
+    /**
+     * Первая таблица формы, привязанная к реквизиту с данным путём (сегменты сравниваются без
+     * учёта регистра, путь элемента может храниться в любом из двух вариантов языка).
+     */
+    private static Table findFormTableByPath(FormItemContainer container, List<List<String>> variants)
+    {
+        for (FormItem item : container.getItems())
+        {
+            if (item instanceof Table table && table.getDataPath() != null)
+            {
+                List<String> segments = table.getDataPath().getSegments();
+                for (List<String> variant : variants)
+                {
+                    if (variant.size() == segments.size() && !variant.isEmpty()
+                        && String.join(".", variant).equalsIgnoreCase(String.join(".", segments))) //$NON-NLS-1$ //$NON-NLS-2$
+                        return table;
+                }
+            }
+            if (item instanceof FormItemContainer child)
+            {
+                Table found = findFormTableByPath(child, variants);
+                if (found != null)
+                    return found;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Текст фильтра списка глобальных команд для вложенного реквизита. Если какой-то из его
+     * предков — реквизит-коллекция/список, с которым связана таблица формы, то
+     * {@code Элементы.<Таблица>.ТекущиеДанные.<путь внутри строки>}, иначе полное имя
+     * («Объект.Контрагент»). Язык — вариант встроенного языка проекта. Для самой коллекции/списка
+     * фильтр не строится — там активируется узел таблицы ({@link #selectElementsTableNode}).
+     */
+    private static String globalCommandsFilterText(FormEditorPage page, PropertyInfo nested)
+    {
+        ScriptVariant variant = formScriptVariant(page);
+        boolean russian = variant == ScriptVariant.RUSSIAN;
+        List<String> full = dataPathSegments(nested, variant);
+        if (full.isEmpty())
+            return null;
+        Form form = page.getModel();
+        for (PropertyInfo ancestor = parentPropertyInfo(nested); ancestor != null && form != null;
+                ancestor = parentPropertyInfo(ancestor))
+        {
+            List<String> ancestorRu = dataPathSegments(ancestor, ScriptVariant.RUSSIAN);
+            List<String> ancestorEn = dataPathSegments(ancestor, ScriptVariant.ENGLISH);
+            Table table = findFormTableByPath(form, List.of(ancestorRu, ancestorEn));
+            if (table == null)
+                continue;
+            List<String> ancestorOwn = russian ? ancestorRu : ancestorEn;
+            if (ancestorOwn.size() > full.size())
+                break;
+            return String.join(".", russian ? "Элементы" : "Items", table.getName(), //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                russian ? "ТекущиеДанные" : "CurrentData", //$NON-NLS-1$ //$NON-NLS-2$
+                String.join(".", full.subList(ancestorOwn.size(), full.size()))); //$NON-NLS-1$
+        }
+        return String.join(".", full); //$NON-NLS-1$
+    }
+
+    private static final int GLOBAL_COMMANDS_ATTEMPTS = 10;
+
+    /**
+     * Вкладка «Команды/Глобальные» и строка реквизита в дереве «Параметризуемые команды». Корневые
+     * строки этого дерева — {@link ParameterizedAttributeItem}, у которых {@code getDomain()} —
+     * сам реквизит формы. Дерево заполняется штатно, возможно после показа вкладки, поэтому
+     * строка ищется с короткими повторами.
+     */
+    private static void showAttributeInGlobalCommands(FormEditorPage page, FormAttribute attribute,
+        PropertyInfo selected)
+    {
+        Object viewerObj = page != null ? Global.getField(page, "parametrizedCommandsViewer") : null; //$NON-NLS-1$
+        if (!(viewerObj instanceof TreeViewer viewer) || viewer.getTree().isDisposed())
             return;
-        menu.setData(ATTRIBUTES_HOOK_MARKER, Boolean.TRUE);
+        Tree tree = viewer.getTree();
+        CTabItem attributesTab = formOwnerTab(formViewerControl(page, "attributesViewer"), null); //$NON-NLS-1$
+        CTabFolder outer = attributesTab != null ? attributesTab.getParent() : null;
+        activateTab(formOwnerTab(tree, outer)); // «Команды»
+        activateTab(formOwnerTab(tree, null)); // «Глобальные» — ближайшая к дереву
+        Table table = findAttributeTable(page, selected);
+        if (table != null)
+        {
+            // Коллекция/динамический список: узел «Элементы.<Таблица>» — активировать и раскрыть.
+            selectElementsTableNode(viewer, table.getName(), 0);
+            return;
+        }
+        if (parentPropertyInfo(selected) != null)
+        {
+            // Вложенный реквизит: вместо выбора строки — фильтр по его имени в списке команд.
+            String text = globalCommandsFilterText(page, selected);
+            if (text != null)
+                GlobalCommandsFilter.applyText(tree, text);
+            return;
+        }
+        selectGlobalCommandsAttribute(viewer, attribute, 0);
+    }
+
+    /**
+     * Узел таблицы формы в дереве «Параметризуемые» — дочерний узел группы «Элементы» (её строка —
+     * не {@link ParameterizedAttributeItem}; класс группы внутренний, поэтому опознаётся так).
+     * Группа раскрывается, чтобы созданы были дочерние строки, затем узел таблицы раскрывается и
+     * выделяется. Имя узла сверяется без учёта регистра как с именем таблицы, так и с
+     * {@code Элементы.<имя>}. Дерево может быть ещё не заполнено — повторы.
+     */
+    private static void selectElementsTableNode(TreeViewer viewer, String tableName, int attempt)
+    {
+        Tree tree = viewer.getTree();
+        if (tree.isDisposed() || tableName == null)
+            return;
+        for (TreeItem group : tree.getItems())
+        {
+            if (group.getData() == null || group.getData() instanceof ParameterizedAttributeItem)
+                continue;
+            viewer.setExpandedState(group.getData(), true);
+            for (TreeItem child : group.getItems())
+            {
+                if (!(child.getData() instanceof ParameterizedTableItem node))
+                    continue;
+                String name = node.getName();
+                if (name != null && (name.equalsIgnoreCase(tableName)
+                    || name.toLowerCase().endsWith("." + tableName.toLowerCase()))) //$NON-NLS-1$
+                {
+                    viewer.setExpandedState(node, true);
+                    viewer.setSelection(new StructuredSelection(node), true);
+                    tree.setFocus();
+                    return;
+                }
+            }
+        }
+        if (attempt < GLOBAL_COMMANDS_ATTEMPTS)
+            tree.getDisplay().timerExec(100, () -> selectElementsTableNode(viewer, tableName, attempt + 1));
+    }
+
+    private static void activateTab(CTabItem item)
+    {
+        if (item == null || item.isDisposed())
+            return;
+        CTabFolder folder = item.getParent();
+        if (folder.getSelection() == item)
+            return;
+        folder.setSelection(item);
+        // setSelection не рассылает SWT.Selection — сообщаем, как при клике по вкладке.
+        Event event = new Event();
+        event.item = item;
+        folder.notifyListeners(SWT.Selection, event);
+    }
+
+    private static void selectGlobalCommandsAttribute(TreeViewer viewer, FormAttribute attribute, int attempt)
+    {
+        Tree tree = viewer.getTree();
+        if (tree.isDisposed())
+            return;
+        for (TreeItem item : tree.getItems())
+        {
+            if (!(item.getData() instanceof ParameterizedAttributeItem row))
+                continue;
+            // domain у строк этого дерева не заполнен (null) — строка идентифицируется
+            // именем реквизита, оно в форме уникально.
+            if (attribute.getName() != null && attribute.getName().equals(row.getName()))
+            {
+                viewer.setExpandedState(row, true);
+                viewer.setSelection(new StructuredSelection(row), true);
+                tree.setFocus();
+                return;
+            }
+        }
+        if (attempt < GLOBAL_COMMANDS_ATTEMPTS)
+            tree.getDisplay().timerExec(100,
+                () -> selectGlobalCommandsAttribute(viewer, attribute, attempt + 1));
+    }
+
+    /** Объект для «Открыть объект»: само поле метаданных, иначе его владелец. */
+    private static EObject resolveMetadataOpenTarget(PropertyInfo selected)
+    {
+        EObject metadata = resolveMetadataPropertyEObject(selected);
+        return metadata != null ? metadata : resolveMetadataNavigatorTarget(selected);
+    }
+
+    /** Общая команда, выбранная в дереве вкладки «Глобальные команды»; {@code null} — не выбрана. */
+    private static EObject selectedGlobalCommand(Tree tree)
+    {
+        if (tree.isDisposed())
+            return null;
+        TreeItem[] selection = tree.getSelection();
+        if (selection.length != 1 || !(selection[0].getData() instanceof IMappingModel<?> mapping))
+            return null;
+        return mapping.getDomain() instanceof EObject eObject ? ContentUtil.getActualObject(eObject) : null;
+    }
+
+    private static void hookGlobalCommandsMenu(Tree tree, Menu menu)
+    {
+        hookNavigationMenu(tree, menu, GLOBAL_COMMANDS_HOOK_MARKER,
+                () -> selectedGlobalCommand(tree), () -> selectedGlobalCommand(tree),
+                "Показать общую команду в дереве навигатора", //$NON-NLS-1$
+                "Открыть общую команду в редакторе", //$NON-NLS-1$
+                null);
+    }
+
+    /**
+     * Добавляет в контекстное меню дерева пункты «Открыть объект» и «Показать в навигаторе».
+     * Цель считается при каждом показе меню — выделение уже другое.
+     */
+    private static void hookNavigationMenu(Tree tree, Menu menu, String marker,
+            Supplier<EObject> navTarget, Supplier<EObject> openTarget, String navTooltip, String openTooltip,
+            Supplier<Runnable> globalCommandsAction)
+    {
+        if (Boolean.TRUE.equals(menu.getData(marker)))
+            return;
+        menu.setData(marker, Boolean.TRUE);
 
         MenuAdapter listener = new MenuAdapter()
         {
-            private final List<MenuItem> addedItems = new ArrayList<>(2);
+            private final List<MenuItem> addedItems = new ArrayList<>(3);
 
             @Override
             public void menuShown(MenuEvent me)
             {
                 Menu swtMenu = (Menu) me.widget;
-                PropertyInfo selected = getSelectedPropertyInfo(tree);
-                EObject target = resolveMetadataNavigatorTarget(selected);
+                EObject nav = navTarget.get();
+                EObject open = openTarget.get();
                 int insertIndex = findMenuInsertIndex(swtMenu, PROPERTIES_MENU_TEXT);
 
                 MenuItem separator = new MenuItem(swtMenu, SWT.SEPARATOR, insertIndex);
                 addedItems.add(separator);
 
-                MenuItem showNav = new MenuItem(swtMenu, SWT.PUSH, insertIndex + 1);
+                MenuItem openItem = new MenuItem(swtMenu, SWT.PUSH, insertIndex + 1);
+                openItem.setText(ITEM_TEXT_OPEN_OBJECT);
+                ComfortSubmenuHelper.setMenuItemTooltip(openItem, openTooltip);
+                openItem.setEnabled(open != null);
+                openItem.addListener(SWT.Selection, ev -> openMetadataObject(open));
+                addedItems.add(openItem);
+
+                MenuItem showNav = new MenuItem(swtMenu, SWT.PUSH, insertIndex + 2);
                 showNav.setText(ITEM_TEXT_SHOW_IN_NAVIGATOR);
-                ComfortSubmenuHelper.setMenuItemTooltip(showNav,
-                        "Показать объект-владелец в дереве навигатора"); //$NON-NLS-1$
-                showNav.setEnabled(target != null);
-                showNav.addListener(SWT.Selection, ev ->
-                        showSelectedMetadataAttributeInNavigator(null));
+                ComfortSubmenuHelper.setMenuItemTooltip(showNav, navTooltip);
+                showNav.setEnabled(nav != null);
+                showNav.addListener(SWT.Selection, ev -> showMetadataInNavigator(nav));
                 addedItems.add(showNav);
+
+                Runnable globalCommands = globalCommandsAction != null ? globalCommandsAction.get() : null;
+                if (globalCommands != null)
+                {
+                    MenuItem globalItem = new MenuItem(swtMenu, SWT.PUSH, insertIndex + 3);
+                    globalItem.setText(ITEM_TEXT_GLOBAL_COMMANDS);
+                    ComfortSubmenuHelper.setMenuItemTooltip(globalItem,
+                            "Перейти к реквизиту на вкладке «Команды/Глобальные», в дерево «Параметризуемые»"); //$NON-NLS-1$
+                    globalItem.addListener(SWT.Selection, ev -> globalCommands.run());
+                    addedItems.add(globalItem);
+                }
             }
 
             @Override
@@ -1912,6 +2202,24 @@ public class FormEditorHook implements IStartup
      * {@link NavigatorReveal#revealAndActivateIfHidden}. Возврат фокуса в редактор через
      * {@code editorToReactivate} больше не нужен: видимую панель команда и так не активирует.
      */
+    private static void openMetadataObject(EObject eObject)
+    {
+        if (eObject == null || !PlatformUI.isWorkbenchRunning())
+            return;
+        IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+        IWorkbenchPage page = window != null ? window.getActivePage() : null;
+        if (page == null)
+            return;
+        try
+        {
+            new OpenHelper(page).openEditor(eObject);
+        }
+        catch (RuntimeException e)
+        {
+            Global.logError("FormEditorHook", "openMetadataObject", e); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
     private static void showMetadataInNavigator(EObject eObject)
     {
         if (!PlatformUI.isWorkbenchRunning())
@@ -3408,11 +3716,33 @@ public class FormEditorHook implements IStartup
      * {@code ColumnLabelProvider} (значок и цвета остаются штатными, как {@code NameLabelProvider}
      * у {@link ItemsTree}).
      */
-    private static final class GlobalCommandsFilter
+    static final class GlobalCommandsFilter
     {
         private static final String KEY_HOOKED = "tormozit.formGlobalCommandsFilter.hooked"; //$NON-NLS-1$
 
         private static final String KEY_MATCHER = "tormozit.formGlobalCommandsFilter.matcher"; //$NON-NLS-1$
+
+        private static final String KEY_BOX = "tormozit.formGlobalCommandsFilter.box"; //$NON-NLS-1$
+
+        /** Дерево ждёт применения отбора из {@link #applyText}, после него получит фокус. */
+        private static final String KEY_FOCUS_TREE = "tormozit.formGlobalCommandsFilter.focusTree"; //$NON-NLS-1$
+
+        /**
+         * Накладывает текст в поле фильтра деревьев «Глобальные команды» и запускает отбор — как
+         * если бы пользователь ввёл его сам (тот же {@code performSearch}, что при выборе строки
+         * из истории).
+         */
+        static void applyText(Tree tree, String text)
+        {
+            if (tree == null || tree.isDisposed() || !(tree.getData(KEY_BOX) instanceof FilterInputBox filter))
+                return;
+            // Фокус — дереву, не полю: отбор считается в фоне и применяется позже (applyToViewer),
+            // поэтому флаг гасится там, а не здесь.
+            tree.setData(KEY_FOCUS_TREE, Boolean.TRUE);
+            filter.setText(text);
+            Global.invoke(filter.widget(), "performSearch"); //$NON-NLS-1$
+            tree.setFocus();
+        }
 
         private static final int RETRY_DELAY_MS = 200;
 
@@ -3425,35 +3755,44 @@ public class FormEditorHook implements IStartup
 
         private static void attach(FormEditor editor, int attempt)
         {
+            FormEditorPage page = findFormPage(editor);
+            boolean done = page != null && attachViewers(
+                Global.getField(page, "independentCommandsViewer"), //$NON-NLS-1$
+                Global.getField(page, "parametrizedCommandsViewer"), //$NON-NLS-1$
+                Global.getField(page, "txtSearchGlobalCommand")); //$NON-NLS-1$
+            if (!done)
+                scheduleRetry(editor, attempt);
+        }
+
+        /**
+         * Подключает отбор к паре деревьев «Независимые»/«Параметризуемые» и штатному полю поиска
+         * — вкладки «Глобальные команды» редактора формы и окна «Выбор команды»
+         * ({@link CommandChooseDialogHook}: те же деревья и поле, поля другого класса).
+         *
+         * @return {@code false} — виджеты ещё не готовы, нужен повтор; {@code true} — подключено
+         *         (или подключать нечего/не удалось)
+         */
+        static boolean attachViewers(Object independentObj, Object parametrizedObj, Object searchObj)
+        {
             try
             {
-                FormEditorPage page = findFormPage(editor);
-                Object independentObj = page != null ? Global.getField(page, "independentCommandsViewer") : null; //$NON-NLS-1$
-                Object parametrizedObj = page != null ? Global.getField(page, "parametrizedCommandsViewer") : null; //$NON-NLS-1$
-                Object searchObj = page != null ? Global.getField(page, "txtSearchGlobalCommand") : null; //$NON-NLS-1$
                 if (!(independentObj instanceof TreeViewer independentViewer)
                     || !(parametrizedObj instanceof TreeViewer parametrizedViewer)
                     || !(searchObj instanceof StyledText searchText) || searchText.isDisposed())
-                {
-                    scheduleRetry(editor, attempt);
-                    return;
-                }
+                    return false;
                 Tree independentTree = independentViewer.getTree();
                 Tree parametrizedTree = parametrizedViewer.getTree();
                 if (independentTree == null || independentTree.isDisposed() || independentTree.getColumnCount() == 0
                     || parametrizedTree == null || parametrizedTree.isDisposed() || parametrizedTree.getColumnCount() == 0)
-                {
-                    scheduleRetry(editor, attempt);
-                    return;
-                }
+                    return false;
                 if (Boolean.TRUE.equals(searchText.getData(KEY_HOOKED)))
-                    return;
+                    return true;
                 searchText.setData(KEY_HOOKED, Boolean.TRUE);
 
                 ColumnLabelProvider independentBase = wrapColumnHighlight(independentViewer, independentTree);
                 ColumnLabelProvider parametrizedBase = wrapColumnHighlight(parametrizedViewer, parametrizedTree);
                 if (independentBase == null || parametrizedBase == null)
-                    return;
+                    return true;
 
                 // Штатные AefTreeViewerFilter читают то же поле — после его замены обращение
                 // к уже уничтоженному контролу бросило бы SWTException при каждой перерисовке.
@@ -3466,23 +3805,27 @@ public class FormEditorHook implements IStartup
                 FilterInputBox filter = FilterInputBox.replacePatternText(searchText,
                     FilterInputBox.Scope.GLOBAL_COMMANDS, () -> { /* см. ниже */ });
                 if (filter == null)
-                    return;
+                    return true;
                 // Многословный отбор ходит по всей модели обоих деревьев (getChildren на каждый
                 // узел) — на большой конфигурации это заметно на глаз при каждой букве. Штатный
                 // SearchBox сам умеет считать не в UI-потоке (см. Navigator — тот же приём).
                 filter.widget().setRunSearchOnUiThread(false);
                 filter.widget().setSearchListener((text, monitor) -> applyFilter(independentViewer,
                     independentTree, independentBase, parametrizedViewer, parametrizedTree,
-                    parametrizedBase, text));
+                    parametrizedBase, text, false));
 
                 // Стрелки/PgUp/PgDn/Enter из поля фильтра — по дереву с непустым результатом:
                 // сперва «Независимые», иначе «Параметризуемые» (второе бывает пустым чаще).
+                independentTree.setData(KEY_BOX, filter);
+                parametrizedTree.setData(KEY_BOX, filter);
                 FilterInputBoxListNavigation.installTreeNavigation(filter.widget(),
                     () -> independentTree.getItemCount() > 0 ? independentTree : parametrizedTree);
+                return true;
             }
             catch (Exception e)
             {
                 Global.logError("FormEditorHook.GlobalCommandsFilter", "attach", e); //$NON-NLS-1$ //$NON-NLS-2$
+                return true;
             }
         }
 
@@ -3519,7 +3862,7 @@ public class FormEditorHook implements IStartup
          */
         private static void applyFilter(TreeViewer independentViewer, Tree independentTree,
             ColumnLabelProvider independentBase, TreeViewer parametrizedViewer, Tree parametrizedTree,
-            ColumnLabelProvider parametrizedBase, String pattern)
+            ColumnLabelProvider parametrizedBase, String pattern, boolean restoreSelection)
         {
             try
             {
@@ -3528,16 +3871,39 @@ public class FormEditorHook implements IStartup
                 if (independentTree.isDisposed() || parametrizedTree.isDisposed())
                     return;
                 SmartMatcher matcher = new SmartMatcher(pattern != null ? pattern : ""); //$NON-NLS-1$
-                Set<Object> independentVisible = computeVisible(independentViewer, matcher, independentBase);
-                Set<Object> parametrizedVisible = computeVisible(parametrizedViewer, matcher, parametrizedBase);
+                Set<Object> independentAll = Collections.newSetFromMap(new IdentityHashMap<>());
+                Set<Object> parametrizedAll = Collections.newSetFromMap(new IdentityHashMap<>());
+                Set<Object> independentVisible =
+                    computeVisible(independentViewer, matcher, independentBase, independentAll);
+                Set<Object> parametrizedVisible =
+                    computeVisible(parametrizedViewer, matcher, parametrizedBase, parametrizedAll);
                 Display display = independentTree.getDisplay();
                 if (display == null || display.isDisposed())
                     return;
+                // Штатный пересчёт редактора (в т.ч. при активации) строит модель сопоставления
+                // заново — элементы становятся другими объектами, и набор по идентичности их не
+                // узнаёт: деревья пустели. Встретив незнакомый элемент, отбор пересчитывается.
+                Runnable rerun = () -> {
+                    Job job = new Job("Комфорт: отбор глобальных команд") //$NON-NLS-1$
+                    {
+                        @Override
+                        protected IStatus run(IProgressMonitor monitor)
+                        {
+                            applyFilter(independentViewer, independentTree, independentBase,
+                                parametrizedViewer, parametrizedTree, parametrizedBase, pattern, true);
+                            return Status.OK_STATUS;
+                        }
+                    };
+                    job.setSystem(true);
+                    job.schedule();
+                };
                 display.syncExec(() -> {
                     independentTree.setData(KEY_MATCHER, matcher);
                     parametrizedTree.setData(KEY_MATCHER, matcher);
-                    applyToViewer(independentViewer, independentVisible);
-                    applyToViewer(parametrizedViewer, parametrizedVisible);
+                    applyToViewer(independentViewer, independentVisible, independentAll, rerun,
+                        restoreSelection);
+                    applyToViewer(parametrizedViewer, parametrizedVisible, parametrizedAll, rerun,
+                        restoreSelection);
                 });
             }
             catch (Exception e)
@@ -3552,7 +3918,8 @@ public class FormEditorHook implements IStartup
          * Обход модели дерева вне UI-потока: набор узлов, которые останутся видимыми — совпало имя
          * своё или чьего-то потомка. {@code null} — фильтр пуст, отбора нет вовсе.
          */
-        private static Set<Object> computeVisible(TreeViewer viewer, SmartMatcher matcher, ColumnLabelProvider textSource)
+        private static Set<Object> computeVisible(TreeViewer viewer, SmartMatcher matcher,
+            ColumnLabelProvider textSource, Set<Object> all)
         {
             if (matcher.isEmpty)
                 return null;
@@ -3563,20 +3930,21 @@ public class FormEditorHook implements IStartup
             if (input != null)
             {
                 for (Object root : content.getElements(input))
-                    collectVisible(content, textSource, matcher, root, visible);
+                    collectVisible(content, textSource, matcher, root, visible, all);
             }
             return visible;
         }
 
         private static boolean collectVisible(ITreeContentProvider content, ColumnLabelProvider textSource,
-            SmartMatcher matcher, Object element, Set<Object> visible)
+            SmartMatcher matcher, Object element, Set<Object> visible, Set<Object> all)
         {
             if (element == null)
                 return false;
+            all.add(element);
             boolean childMatched = false;
             for (Object child : content.getChildren(element))
             {
-                if (collectVisible(content, textSource, matcher, child, visible))
+                if (collectVisible(content, textSource, matcher, child, visible, all))
                     childMatched = true;
             }
             String text = textSource.getText(element);
@@ -3589,7 +3957,8 @@ public class FormEditorHook implements IStartup
         }
 
         /** Только UI-поток (вызывается из {@code display.syncExec} в {@link #applyFilter}). */
-        private static void applyToViewer(TreeViewer viewer, Set<Object> visible)
+        private static void applyToViewer(TreeViewer viewer, Set<Object> visible, Set<Object> all,
+            Runnable rerun, boolean restoreSelection)
         {
             if (viewer.getControl().isDisposed())
                 return;
@@ -3599,7 +3968,7 @@ public class FormEditorHook implements IStartup
                     viewer.removeFilter(existing);
             }
             if (visible != null)
-                viewer.addFilter(new MatchFilter(visible));
+                viewer.addFilter(new MatchFilter(visible, all, rerun));
             // AutoSelectionFormTreeViewer.preservingSelection: если у дерева ДО refresh() было
             // выделение и его элемент пропал из отбора, он сам выбирает соседний узел — а это
             // ловит GlobalCommandsProperties и открывает панель «Свойства», забирая фокус у поля
@@ -3607,11 +3976,28 @@ public class FormEditorHook implements IStartup
             // (проверка getSelectionCount()==0 у самого AutoSelectionFormTreeViewer).
             viewer.getTree().deselectAll();
             viewer.refresh();
-            // Дерево разворачивается и при отборе, и при его сбросе — свёрнутое дерево после
-            // сброса прятало бы строку, которую пользователь только что нашёл фильтром.
+            // При отборе дерево разворачивается, при его очистке (visible == null) — сворачивается:
+            // после сброса фильтра пользователь ждёт компактный вид, а не все ветви сразу.
             // setAutoExpandLevel тут не помог бы: JFace применяет его только в internalInitializeTree
             // (populateInitial при setInput), а не в refresh() — проверено по исходнику AbstractTreeViewer.
-            viewer.expandAll();
+            if (visible != null)
+            {
+                viewer.expandAll();
+                // Пересчёт из-за пересборки модели (активация редактора): deselectAll выше снял
+                // выделение — возвращаем ту же строку по пути подписей. При вводе пользователем
+                // нового текста не восстанавливаем — выделение там снимается намеренно.
+                if (restoreSelection
+                    && viewer.getTree().getData(GlobalCommandsExpansion.KEY_STATE) instanceof GlobalCommandsExpansion state)
+                    state.restoreCurrent();
+            }
+            else
+            {
+                viewer.collapseAll();
+                // Запомненные раскрытые пути относились к прежнему виду — иначе следующий
+                // пересчёт редактора раскрыл бы их снова (см. GlobalCommandsExpansion).
+                if (viewer.getTree().getData(GlobalCommandsExpansion.KEY_STATE) instanceof GlobalCommandsExpansion state)
+                    state.expanded.clear();
+            }
             // Win32 после refresh()/expandAll() иногда не пересчитывает горизонтальную полосу
             // прокрутки под текущий набор строк — остаётся от прежнего, более широкого состояния.
             // Не прячем полосу, а форсируем пересчёт: layout() у TreeColumnLayout заново кладёт
@@ -3619,6 +4005,11 @@ public class FormEditorHook implements IStartup
             Composite columnHost = viewer.getControl().getParent();
             if (columnHost != null && !columnHost.isDisposed())
                 columnHost.layout(true, true);
+            if (Boolean.TRUE.equals(viewer.getTree().getData(KEY_FOCUS_TREE)))
+            {
+                viewer.getTree().setData(KEY_FOCUS_TREE, null);
+                viewer.getTree().setFocus();
+            }
         }
 
         private static SmartMatcher matcherOf(Tree tree)
@@ -3637,15 +4028,33 @@ public class FormEditorHook implements IStartup
         {
             private final Set<Object> visible;
 
-            MatchFilter(Set<Object> visible)
+            /** Все элементы, обойденные при расчёте, — чтобы отличить «не подошёл» от «новый объект». */
+            private final Set<Object> all;
+
+            private final Runnable rerun;
+
+            private boolean rerunRequested;
+
+            MatchFilter(Set<Object> visible, Set<Object> all, Runnable rerun)
             {
                 this.visible = visible;
+                this.all = all;
+                this.rerun = rerun;
             }
 
             @Override
             public boolean select(Viewer viewer, Object parentElement, Object element)
             {
-                return visible.contains(element);
+                if (all.contains(element))
+                    return visible.contains(element);
+                // Элемент не из того обхода, по которому считался отбор: модель пересобрана.
+                // Пока пересчёт идёт — показываем всё; новый MatchFilter заменит этот.
+                if (!rerunRequested)
+                {
+                    rerunRequested = true;
+                    rerun.run();
+                }
+                return true;
             }
         }
 
@@ -4616,6 +5025,10 @@ public class FormEditorHook implements IStartup
 
         private static final String FUNCTIONAL_OPTIONS_FEATURE = "functionalOptions"; //$NON-NLS-1$
 
+        private static final String KEY_FO_INDEX = "tormozit.formAttributesExtraColumns.foIndex"; //$NON-NLS-1$
+
+        private static final String KEY_FO_JOB = "tormozit.formAttributesExtraColumns.foJob"; //$NON-NLS-1$
+
         private static final String TITLE_FEATURE = "title"; //$NON-NLS-1$
 
         static void install()
@@ -4662,7 +5075,9 @@ public class FormEditorHook implements IStartup
 
             TreeViewerColumn functionalOptionsColumn = new TreeViewerColumn(viewer, SWT.RIGHT);
             Image functionalOptionsIcon = functionalOptionsHeaderIcon();
-            functionalOptionsColumn.setLabelProvider(new FunctionalOptionsLabelProvider());
+            functionalOptionsColumn.setLabelProvider(new FunctionalOptionsLabelProvider(tree));
+            tree.addListener(SWT.FocusIn, event -> refreshIndex(page, viewer, tree));
+            refreshIndex(page, viewer, tree);
             if (functionalOptionsIcon != null)
             {
                 functionalOptionsColumn.getColumn().setImage(functionalOptionsIcon);
@@ -4684,6 +5099,8 @@ public class FormEditorHook implements IStartup
             savedDataColumn.setLabelProvider(new SavedDataLabelProvider());
             TreeColumn savedDataSwtColumn = savedDataColumn.getColumn();
             tree.addListener(SWT.PaintItem, event -> paintSavedData(event, savedDataSwtColumn));
+
+            ThemeAwareColors.applyGridLines(tree);
 
             TreeColumn funcOptionsSwtColumn = functionalOptionsColumn.getColumn();
             tree.addListener(SWT.MouseDoubleClick,
@@ -4795,7 +5212,15 @@ public class FormEditorHook implements IStartup
                 return;
             TreeColumn column = tree.getColumn(index);
             if (column == funcOptionsColumn)
-                focusProperty(page, row.getData(), FUNCTIONAL_OPTIONS_FEATURE, TITLE_FUNCTIONAL_OPTIONS);
+            {
+                // Свойство «Функциональные опции» есть только у реквизитов формы; у полей
+                // метаданных двойной клик — та же команда, что «Открыть объект» в меню.
+                if (row.getData() instanceof PropertyInfo info
+                    && !(info.getSource() instanceof AbstractFormAttribute))
+                    openMetadataObject(resolveMetadataOpenTarget(info));
+                else
+                    focusProperty(page, row.getData(), FUNCTIONAL_OPTIONS_FEATURE, TITLE_FUNCTIONAL_OPTIONS);
+            }
             else if (titleColumn != null && !titleColumn.isDisposed() && column == titleColumn)
                 focusProperty(page, row.getData(), TITLE_FEATURE, TITLE_TITLE);
         }
@@ -4910,20 +5335,121 @@ public class FormEditorHook implements IStartup
             }
         }
 
-        /** Число; ноль (или реквизит без функциональных опций) — колонка остаётся пустой. */
+        /**
+         * Число; ноль (или реквизит без функциональных опций) — колонка остаётся пустой. Для
+         * собственных реквизитов формы — из модели сразу; для полей метаданных («Объект.*») — из
+         * индекса, который считается в фоне ({@link #refreshIndex}), пока индекса нет — пусто.
+         */
         private static final class FunctionalOptionsLabelProvider extends ColumnLabelProvider
         {
+            private final Tree tree;
+
+            FunctionalOptionsLabelProvider(Tree tree)
+            {
+                this.tree = tree;
+            }
+
             @Override
             public String getText(Object element)
             {
-                if (element instanceof PropertyInfo info
-                    && info.getSource() instanceof AbstractFormAttribute source)
+                if (!(element instanceof PropertyInfo info))
+                    return ""; //$NON-NLS-1$
+                int count = 0;
+                if (info.getSource() instanceof AbstractFormAttribute source)
+                    count = source.getFunctionalOptions().size();
+                else if (tree.getData(KEY_FO_INDEX) instanceof Map<?, ?> index)
                 {
-                    int count = source.getFunctionalOptions().size();
-                    return count > 0 ? String.valueOf(count) : ""; //$NON-NLS-1$
+                    EObject metadata = resolveMetadataPropertyEObject(info);
+                    Object value = metadata != null ? index.get(foKey(metadata)) : null;
+                    if (value instanceof Integer number)
+                        count = number.intValue();
                 }
-                return ""; //$NON-NLS-1$
+                return count > 0 ? String.valueOf(count) : ""; //$NON-NLS-1$
             }
+        }
+
+        private static String foKey(EObject object)
+        {
+            return EcoreUtil.getURI(object).toString();
+        }
+
+        /**
+         * Индекс «объект метаданных → число функциональных опций, в состав которых он входит» по
+         * всей конфигурации считается в фоне, как в {@code MdEditorTreeHook}; готовый — применяется
+         * только к видимым строкам ({@code viewer.update}), без полного {@code refresh}, который
+         * пересобирает дерево. Остальные строки получают число при создании — из готового индекса.
+         */
+        private static void refreshIndex(FormEditorPage page, TreeViewer viewer, Tree tree)
+        {
+            if (tree.isDisposed())
+                return;
+            if (tree.getData(KEY_FO_JOB) instanceof Job previous)
+                previous.cancel();
+            IV8Project project = formV8Project(page);
+            Configuration configuration = null;
+            if (project instanceof IConfigurationProject configurationProject)
+                configuration = configurationProject.getConfiguration();
+            else if (project != null && Global.invoke(project, "getConfiguration") instanceof Configuration found) //$NON-NLS-1$
+                configuration = found;
+            if (configuration == null)
+                return;
+            Configuration source = configuration;
+            Job job = new Job("Комфорт: число функциональных опций реквизитов формы") //$NON-NLS-1$
+            {
+                @Override
+                protected IStatus run(IProgressMonitor monitor)
+                {
+                    Map<String, Integer> index = new HashMap<>();
+                    for (FunctionalOption option : source.getFunctionalOptions())
+                    {
+                        if (monitor.isCanceled())
+                            return Status.CANCEL_STATUS;
+                        if (option == null)
+                            continue;
+                        for (MdObject item : option.getContent())
+                            if (item != null)
+                                index.merge(foKey(item), Integer.valueOf(1), Integer::sum);
+                    }
+                    Display display = Display.getDefault();
+                    if (display == null || display.isDisposed())
+                        return Status.CANCEL_STATUS;
+                    display.asyncExec(() ->
+                    {
+                        if (monitor.isCanceled() || tree.isDisposed())
+                            return;
+                        tree.setData(KEY_FO_INDEX, index);
+                        updateVisibleRows(viewer, tree);
+                    });
+                    return Status.OK_STATUS;
+                }
+            };
+            job.setSystem(true);
+            job.setPriority(Job.DECORATE);
+            tree.setData(KEY_FO_JOB, job);
+            job.schedule();
+        }
+
+        private static void updateVisibleRows(TreeViewer viewer, Tree tree)
+        {
+            List<Object> visible = new ArrayList<>();
+            collectVisible(tree.getItems(), tree.getClientArea().height, visible);
+            if (!visible.isEmpty())
+                viewer.update(visible.toArray(), null);
+        }
+
+        private static boolean collectVisible(TreeItem[] items, int height, List<Object> out)
+        {
+            for (TreeItem item : items)
+            {
+                Rectangle bounds = item.getBounds();
+                if (bounds.y >= height)
+                    return false;
+                if (bounds.y + bounds.height > 0 && item.getData() != null)
+                    out.add(item.getData());
+                if (item.getExpanded() && !collectVisible(item.getItems(), height, out))
+                    return false;
+            }
+            return true;
         }
 
         /**

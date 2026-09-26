@@ -94,7 +94,7 @@ public class SmartOutlineLabelProvider extends LabelProvider implements IStyledL
         {
             // Секционный фильтр: разные строки дерева несут разные секции (родитель/потомок) —
             // требовать совпадение ВСЕХ фрагментов на одной строке нельзя, красим то, что нашлось.
-            java.util.List<SmartMatcher.HighlightRange> ranges = highlightMatcher.getHighlightRanges(plainText);
+            java.util.List<SmartMatcher.HighlightRange> ranges = highlightMatcher.getSectionHighlightRanges(plainText);
             if (!ranges.isEmpty())
                 SmartMatchHighlight.applyRanges(styledString, ranges);
             return;

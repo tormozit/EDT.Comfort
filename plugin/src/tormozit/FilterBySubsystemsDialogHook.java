@@ -1256,7 +1256,7 @@ public final class FilterBySubsystemsDialogHook implements IStartup
 
         searchBox.setMessage("Фильтр"); //$NON-NLS-1$
         searchBox.setToolTipText(
-            FilterInputBox.SUBSYSTEMS_FILTER_TOOLTIP + "\nCtrl+↓ — история запросов."); //$NON-NLS-1$
+            FilterInputBox.FLAT_FILTER_TOOLTIP + "\nCtrl+↓ — история запросов."); //$NON-NLS-1$
         FilterInputBox.attachHistory(searchBox, FilterInputBox.Scope.FILTER_BY_SUBSYSTEMS);
         searchBox.setMinimumSearchTextLength(0);
         searchBox.setJobScheduleDelay(0);

@@ -21,20 +21,46 @@ public class SmartMatcher {
         } else {
             this.fullPattern = filterPattern.toLowerCase().trim();
             this.sections = parseSections(this.fullPattern);
-            // Фрагменты строим из уже распарсенных секций (учитывают кавычки: "их вал" — один
-            // фрагмент с пробелом внутри), а не наивным split по пробелу — иначе кавычки остаются
-            // приклеенными к словам (их / вал ) и matches() никогда не находит совпадение.
-            this.fragments = flattenSections(this.sections);
+            // Плоские фрагменты (многословный фильтр) — отдельный разбор: кавычки учитываются
+            // ("их вал" — один фрагмент с пробелом внутри), а точка НЕ разделитель — она часть
+            // слова («объект.контрагент» ищется как есть). Точка режет только секции
+            // (иерархический фильтр, matchesTree*).
+            this.fragments = parseFragments(this.fullPattern);
             this.isEmpty = false;
         }
     }
 
-    private static String[] flattenSections(List<List<String>> sections) {
-        List<String> all = new ArrayList<>();
-        for (List<String> sec : sections) {
-            all.addAll(sec);
+    /**
+     * Плоский разбор: пробел вне кавычек — разделитель фрагментов, кавычки группируют
+     * (и удаляются), точка — обычный символ.
+     */
+    private static String[] parseFragments(String filterText) {
+        List<String> result = new ArrayList<>();
+        StringBuilder word = new StringBuilder();
+        boolean inQuotes = false;
+        for (int i = 0; i < filterText.length(); i++) {
+            char c = filterText.charAt(i);
+            if (inQuotes) {
+                if (c == '"') {
+                    addFragment(result, word.toString());
+                    word.setLength(0);
+                    inQuotes = false;
+                } else {
+                    word.append(c);
+                }
+            } else if (c == '"') {
+                addFragment(result, word.toString().trim());
+                word.setLength(0);
+                inQuotes = true;
+            } else if (Character.isWhitespace(c)) {
+                addFragment(result, word.toString().trim());
+                word.setLength(0);
+            } else {
+                word.append(c);
+            }
         }
-        return all.toArray(new String[0]);
+        addFragment(result, inQuotes ? word.toString() : word.toString().trim());
+        return result.toArray(new String[0]);
     }
 
     public String[] getFragments()
@@ -444,12 +470,28 @@ public class SmartMatcher {
         return all;
     }
 
+    /**
+     * Подсветка многословного (плоского) фильтра — ровно те фрагменты, по которым работает
+     * {@link #matches}: точка внутри слова — его часть.
+     */
     public List<HighlightRange> getHighlightRanges(String text) {
+        return highlightFragments(text, java.util.Arrays.asList(fragments));
+    }
+
+    /**
+     * Подсветка иерархического фильтра, когда строка несёт лишь часть секций (родитель/потомок):
+     * фрагменты всех секций по отдельности, точка — разделитель секций.
+     */
+    public List<HighlightRange> getSectionHighlightRanges(String text) {
+        return highlightFragments(text, getAllSectionFragments());
+    }
+
+    private List<HighlightRange> highlightFragments(String text, List<String> frags) {
         List<HighlightRange> ranges = new ArrayList<>();
         if (isEmpty || text == null) return ranges;
 
         String lowerText = text.toLowerCase();
-        for (String frag : getAllSectionFragments()) {
+        for (String frag : frags) {
             int idx = lowerText.indexOf(frag);
             while (idx >= 0) {
                 ranges.add(new HighlightRange(idx, frag.length()));

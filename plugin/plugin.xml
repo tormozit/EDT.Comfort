@@ -168,6 +168,7 @@
     <startup class="tormozit.RightsDialogFilterHook"/>
     <startup class="tormozit.RightsEditorFilterHook"/>
     <startup class="tormozit.SetFilterDialogFilterHook"/>
+    <startup class="tormozit.CommandChooseDialogHook"/>
     <startup class="tormozit.ModuleMergeStructureFilterHook"/>
     <startup class="tormozit.FilteredListDialogFilterHook"/>
     <startup class="tormozit.ListItemSelectionDialogFilterHook"/>

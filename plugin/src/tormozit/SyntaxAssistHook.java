@@ -261,7 +261,7 @@ public final class SyntaxAssistHook implements IStartup
             });
 
             searchBox.setToolTipText(TooltipText.wrap(searchBox,
-                FilterInputBox.SYNTAX_CONTENTS_FILTER_TOOLTIP + "\nCtrl+↓ — история запросов.")); //$NON-NLS-1$
+                FilterInputBox.FLAT_FILTER_TOOLTIP + "\nCtrl+↓ — история запросов.")); //$NON-NLS-1$
             searchBox.setMinimumSearchTextLength(0);
             searchBox.setJobScheduleDelay(0);
             FilterInputBox.attachHistory(searchBox, FilterInputBox.Scope.SYNTAX_CONTENTS);

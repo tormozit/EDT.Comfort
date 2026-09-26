@@ -456,7 +456,7 @@ public final class ProjectStructureFilterHook implements IStartup
         int decoStart = searchable.indexOf(" <"); //$NON-NLS-1$
         if (decoStart < 0)
             return;
-        List<SmartMatcher.HighlightRange> all = matcher.getHighlightRanges(searchable);
+        List<SmartMatcher.HighlightRange> all = matcher.getSectionHighlightRanges(searchable);
         if (all.isEmpty())
             return;
         List<SmartMatcher.HighlightRange> suffix = new ArrayList<>();

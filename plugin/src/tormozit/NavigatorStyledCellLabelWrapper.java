@@ -80,7 +80,7 @@ public final class NavigatorStyledCellLabelWrapper extends StyledCellLabelProvid
         {
             if (matcher.hasMultipleSections())
             {
-                java.util.List<SmartMatcher.HighlightRange> ranges = matcher.getHighlightRanges(text);
+                java.util.List<SmartMatcher.HighlightRange> ranges = matcher.getSectionHighlightRanges(text);
                 if (!ranges.isEmpty())
                     SmartMatchHighlight.appendMatchRanges(cell, ranges);
             }
@@ -91,7 +91,7 @@ public final class NavigatorStyledCellLabelWrapper extends StyledCellLabelProvid
         {
             // Секционный фильтр ("справ.вал"): у родителя и потомка в дереве — разные секции,
             // ПОЛНОЕ совпадение всех слов на одной строке (как ниже) требовать нельзя.
-            java.util.List<SmartMatcher.HighlightRange> ranges = matcher.getHighlightRanges(text);
+            java.util.List<SmartMatcher.HighlightRange> ranges = matcher.getSectionHighlightRanges(text);
             if (!ranges.isEmpty())
                 SmartMatchHighlight.appendMatchRanges(cell, ranges);
             return;
