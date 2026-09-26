@@ -92,6 +92,8 @@ public final class ComfortSpellingEngine
     private static volatile Set<String> LOCALE_CODES;
     private static final int SUGGEST_CACHE_MAX = 512;
     private static final int MORPH_PREVIEW_MAX = 8;
+    /** Сколько форм строить для проверки покрытия исходного слова (показываем только первые {@link #MORPH_PREVIEW_MAX}). */
+    private static final int MORPH_COVERAGE_MAX = 1000;
 
     private static volatile List<HunspellDictionary> dictionaries;
     private static final Object USER_LOCK = new Object();
@@ -1744,7 +1746,7 @@ public final class ComfortSpellingEngine
         }
     }
 
-    private static List<String> previewMorphForms(String lemma, String flagOrNull)
+    private static List<String> previewMorphForms(String lemma, String flagOrNull, int max)
     {
         if (lemma == null || lemma.isBlank())
             return List.of();
@@ -1767,7 +1769,7 @@ public final class ComfortSpellingEngine
         }
         if (dict == null)
             return List.of(lemma.trim());
-        return dict.expandForms(lemma.trim(), flagOrNull, MORPH_PREVIEW_MAX);
+        return dict.expandForms(lemma.trim(), flagOrNull, max);
     }
 
     private static final class MorphLineParsed
@@ -2084,6 +2086,24 @@ public final class ComfortSpellingEngine
         g.pos = MorphPos.VERB;
         g.gender = MorphGender.MASC;
         g.number = MorphNumber.SING;
+        // действительные причастия наст. вр.: форма порождается флагом глагола (начинающийся ← начинаться)
+        String[][] participles = {
+            {"ающийся", "аться"}, {"ающий", "ать"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            {"ящийся", "иться"}, {"ящий", "ить"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            {"ющийся", "яться"}, {"ющий", "ять"}}; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+        for (String[] p : participles)
+        {
+            // «-ующий» — от глаголов на -овать (другой флаг), не угадываем
+            if (lower.endsWith(p[0]) && lower.length() > p[0].length() + 1
+                && !(p[0].startsWith("ющ") && lower.endsWith("у" + p[0]))) //$NON-NLS-1$ //$NON-NLS-2$
+            {
+                boolean tsya = p[1].endsWith("ся") || p[1].endsWith("ться"); //$NON-NLS-1$ //$NON-NLS-2$
+                g.lemma = raw.substring(0, raw.length() - p[0].length()) + p[1];
+                g.declension = tsya ? MorphDeclension.VERB_TSYA : MorphDeclension.VERB_T;
+                g.paradigmId = tsya ? "verb_tsya" : "verb_t"; //$NON-NLS-1$ //$NON-NLS-2$
+                return g;
+            }
+        }
         if (lower.endsWith("ться")) //$NON-NLS-1$
         {
             g.lemma = raw;
@@ -2832,8 +2852,26 @@ public final class ComfortSpellingEngine
             else
             {
                 MorphParadigm p = selectedParadigm();
-                List<String> forms = previewMorphForms(lemma, p.flag);
+                List<String> all = previewMorphForms(lemma, p.flag, MORPH_COVERAGE_MAX);
+                List<String> forms = all.size() > MORPH_PREVIEW_MAX ? all.subList(0, MORPH_PREVIEW_MAX) : all;
                 String formsText = forms.isEmpty() ? "—" : String.join(", ", forms); //$NON-NLS-1$ //$NON-NLS-2$
+                if (all.size() > forms.size())
+                    formsText += ", …"; //$NON-NLS-1$
+                String seed = seedWord.trim();
+                if (!seed.isEmpty() && !all.isEmpty())
+                {
+                    boolean covered = false;
+                    for (String f : all)
+                    {
+                        if (f.equalsIgnoreCase(seed))
+                        {
+                            covered = true;
+                            break;
+                        }
+                    }
+                    formsText += "\n«" + seed + (covered ? "» — входит в формы." //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        : "» — НЕ входит в формы.");  //$NON-NLS-1$
+                }
                 previewLabel.setText(formsText);
             }
             refreshReplaceWarning(lemma, selectedFlagOrNull());

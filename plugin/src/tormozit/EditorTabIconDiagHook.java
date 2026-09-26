@@ -426,13 +426,6 @@ public final class EditorTabIconDiagHook implements IStartup
                 return null;
             MarkerSeverity severity = maxSeverity(mdObject);
             Image withExtension = ADOPTED_DECORATOR.decorateImage(base, mdObject);
-            Global.tempLog("ext-overlay", "title='" + safeTitle(editor) + "' severity=" + severity //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " decorated=" + describeImage(decorated) + " base=" + describeImage(base) //$NON-NLS-1$ //$NON-NLS-2$
-                + " withExt=" + describeImage(withExtension) //$NON-NLS-1$
-                + " item=" + describeImage(safeImage(() -> { //$NON-NLS-1$
-                    CTabItem tab = itemOf(editor, folderOf(editor));
-                    return tab == null || tab.isDisposed() ? null : tab.getImage();
-                })));
             boolean critical = severity == MarkerSeverity.ERRORS || severity == MarkerSeverity.BLOCKER
                 || severity == MarkerSeverity.CRITICAL;
             return critical || !usableImage(withExtension) ? null : withExtension;
