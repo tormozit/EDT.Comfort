@@ -428,6 +428,7 @@ public class FormEditorHook implements IStartup
         ItemsTree.install();
         GlobalCommandsProperties.install();
         GlobalCommandsFilter.install();
+        GlobalCommandsExpansion.install();
         FormCommandsIcons.install();
         AppearancePage.install();
         ConditionalAppearanceCellStyle.install(display);
@@ -568,6 +569,7 @@ public class FormEditorHook implements IStartup
             }
         }
     }
+
 
     /** Ключ EDT: композит вкладки редактора формы хранит свой {@link CTabItem} ({@code FormEditorPage}). */
     private static final String DATA_TAB_ITEM = "tabItem"; //$NON-NLS-1$
@@ -3684,6 +3686,258 @@ public class FormEditorHook implements IStartup
             {
                 return base.getToolTipText(element);
             }
+        }
+    }
+
+    /**
+     * Раскрытие деревьев «Глобальные команды» (независимые и параметризуемые) при штатном
+     * пересчёте редактора формы. Отложенный пересчёт ({@code FormEditorRefresher} →
+     * {@code FormEditorPage.refresh} → {@code refresh()} деревьев) идёт в том числе при каждой
+     * активации редактора и строит модель сопоставления команд заново: JFace не узнаёт в новых
+     * объектах старые строки, пересоздаёт их свёрнутыми, а выделение уходит на соседа.
+     *
+     * <p>Каждое дерево помнит пути (цепочки подписей от корня) последних {@link #MAX_EXPANDED}
+     * раскрытых пользователем узлов и текущий узел. Уничтожение запомненной строки или её
+     * дочерней строки означает, что пересчёт пересоздал строки: после него ({@code asyncExec})
+     * пути раскрываются заново, текущий узел выделяется снова. При наложенном отборе
+     * ({@link GlobalCommandsFilter}) не восстанавливается — там дерево раскрывает сам отбор.
+     */
+    private static final class GlobalCommandsExpansion
+    {
+        private static final String KEY_STATE = "tormozit.formGlobalCommandsExpansion.state"; //$NON-NLS-1$
+
+        private static final String KEY_WATCHED = "tormozit.formGlobalCommandsExpansion.watched"; //$NON-NLS-1$
+
+        private static final int MAX_EXPANDED = 10;
+
+        private static final int RETRY_DELAY_MS = 200;
+
+        private static final int MAX_ATTEMPTS = 100;
+
+        private final TreeViewer viewer;
+
+        private final Tree tree;
+
+        /** Пути раскрытых узлов, последний раскрытый — первым. */
+        private final List<List<String>> expanded = new ArrayList<>();
+
+        private List<String> current;
+
+        private boolean restoreScheduled;
+
+        /** Число выполненных восстановлений — см. {@link #onSelection}. */
+        private int restoreCount;
+
+        private GlobalCommandsExpansion(TreeViewer viewer)
+        {
+            this.viewer = viewer;
+            this.tree = viewer.getTree();
+        }
+
+        static void install()
+        {
+            trackFormEditors(editor -> attach(editor, 0));
+        }
+
+        private static void attach(FormEditor editor, int attempt)
+        {
+            try
+            {
+                FormEditorPage page = findFormPage(editor);
+                Object independent = page != null ? Global.getField(page, "independentCommandsViewer") : null; //$NON-NLS-1$
+                Object parametrized = page != null ? Global.getField(page, "parametrizedCommandsViewer") : null; //$NON-NLS-1$
+                if (!(independent instanceof TreeViewer independentViewer)
+                    || !(parametrized instanceof TreeViewer parametrizedViewer)
+                    || independentViewer.getTree().isDisposed() || parametrizedViewer.getTree().isDisposed())
+                {
+                    if (attempt < MAX_ATTEMPTS && editor.getSite() != null)
+                        Display.getDefault().timerExec(RETRY_DELAY_MS, () -> attach(editor, attempt + 1));
+                    return;
+                }
+                hook(independentViewer);
+                hook(parametrizedViewer);
+            }
+            catch (Exception e)
+            {
+                Global.logError("FormEditorHook.GlobalCommandsExpansion", "attach", e); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+
+        private static void hook(TreeViewer viewer)
+        {
+            Tree tree = viewer.getTree();
+            if (tree.getData(KEY_STATE) != null)
+                return;
+            GlobalCommandsExpansion state = new GlobalCommandsExpansion(viewer);
+            tree.setData(KEY_STATE, state);
+            tree.addListener(SWT.Expand, event -> state.onExpand(event.item));
+            tree.addListener(SWT.Collapse, event -> state.onCollapse(event.item));
+            tree.addListener(SWT.Selection, event -> state.onSelection());
+        }
+
+        private void onExpand(Widget widget)
+        {
+            if (!(widget instanceof TreeItem item))
+                return;
+            List<String> path = pathOf(item);
+            expanded.remove(path);
+            expanded.add(0, path);
+            while (expanded.size() > MAX_EXPANDED)
+                expanded.remove(expanded.size() - 1);
+            // Дочерние строки к этому моменту уже созданы: слушатель JFace на SWT.Expand
+            // подключён при создании дерева, раньше этого.
+            watch(item);
+        }
+
+        private void onCollapse(Widget widget)
+        {
+            if (!(widget instanceof TreeItem item))
+                return;
+            List<String> path = pathOf(item);
+            // Вложенные узлы свёрнутого узла тоже забываются: иначе их восстановление
+            // раскрыло бы и его самого.
+            expanded.removeIf(candidate -> startsWith(candidate, path));
+        }
+
+        /**
+         * Win32 сам переносит выделение на соседа/родителя, когда пересчёт сворачивает или
+         * уничтожает выделенную строку, и SWT сообщает это обычным {@code SWT.Selection}. Такой
+         * выбор — не пользовательский и не должен перезаписать текущий узел до восстановления.
+         * Поэтому текущий узел запоминается отложенно и только если за это время пересчёт не
+         * начался ({@link #restoreScheduled}) и восстановление не прошло ({@link #restoreCount}):
+         * уничтожение выделенной строки (она всегда под наблюдением) случается либо до события,
+         * либо в том же пересчёте, раньше этого {@code asyncExec}.
+         */
+        private void onSelection()
+        {
+            TreeItem[] selection = tree.getSelection();
+            if (selection.length != 1 || restoreScheduled)
+                return;
+            TreeItem item = selection[0];
+            List<String> path = pathOf(item);
+            int countAtEvent = restoreCount;
+            tree.getDisplay().asyncExec(() -> {
+                if (tree.isDisposed() || item.isDisposed() || restoreScheduled || restoreCount != countAtEvent)
+                    return;
+                current = path;
+                watchItem(item);
+            });
+        }
+
+        /** Сама строка и её дочерние строки: при пересчёте JFace уничтожает хотя бы одну из них. */
+        private void watch(TreeItem item)
+        {
+            watchItem(item);
+            for (TreeItem child : item.getItems())
+                watchItem(child);
+        }
+
+        private void watchItem(TreeItem item)
+        {
+            if (item.getData(KEY_WATCHED) != null)
+                return;
+            item.setData(KEY_WATCHED, Boolean.TRUE);
+            item.addListener(SWT.Dispose, event -> scheduleRestore());
+        }
+
+        private void scheduleRestore()
+        {
+            if (restoreScheduled || tree.isDisposed())
+                return;
+            restoreScheduled = true;
+            tree.getDisplay().asyncExec(this::restore);
+        }
+
+        private void restore()
+        {
+            restoreScheduled = false;
+            restoreCount++;
+            try
+            {
+                if (tree.isDisposed())
+                    return;
+                SmartMatcher matcher = GlobalCommandsFilter.matcherOf(tree);
+                if (matcher != null && !matcher.isEmpty)
+                    return;
+                // Старые пути — первыми: так раскрытие вложенного узла не зависит от порядка.
+                for (int i = expanded.size() - 1; i >= 0; i--)
+                {
+                    TreeItem item = findItem(expanded.get(i), true);
+                    if (item == null)
+                        continue;
+                    if (!item.getExpanded() && item.getData() != null)
+                        viewer.setExpandedState(item.getData(), true);
+                    watch(item);
+                }
+                restoreCurrent();
+            }
+            catch (Exception e)
+            {
+                Global.logError("FormEditorHook.GlobalCommandsExpansion", "restore", e); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+
+        private void restoreCurrent()
+        {
+            if (current == null)
+                return;
+            // Текущий узел ищется только среди видимых строк: свёрнутого пользователем узла
+            // выделение раскрывать не должно.
+            TreeItem item = findItem(current, false);
+            if (item == null || item.getData() == null)
+                return;
+            TreeItem[] selection = tree.getSelection();
+            if (selection.length != 1 || selection[0] != item)
+                viewer.setSelection(new StructuredSelection(item.getData()), true);
+            watchItem(item);
+        }
+
+        /**
+         * Строка по пути подписей. {@code expandAncestors} — раскрывать по дороге свёрнутые узлы
+         * (JFace создаёт дочерние строки только при раскрытии); иначе свёрнутый предок = не найдено.
+         */
+        private TreeItem findItem(List<String> path, boolean expandAncestors)
+        {
+            TreeItem[] items = tree.getItems();
+            TreeItem found = null;
+            for (int i = 0; i < path.size(); i++)
+            {
+                found = null;
+                for (TreeItem candidate : items)
+                {
+                    if (path.get(i).equals(candidate.getText()))
+                    {
+                        found = candidate;
+                        break;
+                    }
+                }
+                if (found == null)
+                    return null;
+                if (i < path.size() - 1)
+                {
+                    if (!found.getExpanded())
+                    {
+                        if (!expandAncestors || found.getData() == null)
+                            return null;
+                        viewer.setExpandedState(found.getData(), true);
+                    }
+                    items = found.getItems();
+                }
+            }
+            return found;
+        }
+
+        private static List<String> pathOf(TreeItem item)
+        {
+            List<String> path = new ArrayList<>();
+            for (TreeItem cur = item; cur != null; cur = cur.getParentItem())
+                path.add(0, cur.getText());
+            return path;
+        }
+
+        private static boolean startsWith(List<String> path, List<String> prefix)
+        {
+            return path.size() >= prefix.size() && path.subList(0, prefix.size()).equals(prefix);
         }
     }
 
