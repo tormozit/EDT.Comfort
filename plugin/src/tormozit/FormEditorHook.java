@@ -550,9 +550,9 @@ public class FormEditorHook implements IStartup
 
         window.getPartService().addPartListener(new IPartListener2()
         {
-            @Override public void partOpened(IWorkbenchPartReference ref)       { hookFromRef(ref); }
-            @Override public void partActivated(IWorkbenchPartReference ref)    { hookFromRef(ref); }
-            @Override public void partBroughtToTop(IWorkbenchPartReference ref) { hookFromRef(ref); }
+            @Override public void partOpened(IWorkbenchPartReference ref)       { diag900("partOpened", ref); hookFromRef(ref); }
+            @Override public void partActivated(IWorkbenchPartReference ref)    { diag900("partActivated", ref); hookFromRef(ref); }
+            @Override public void partBroughtToTop(IWorkbenchPartReference ref) { diag900("partBroughtToTop", ref); hookFromRef(ref); }
             @Override public void partVisible(IWorkbenchPartReference ref)      { hookFromRef(ref); }
             @Override public void partClosed(IWorkbenchPartReference ref)       {}
             @Override public void partDeactivated(IWorkbenchPartReference ref)  {}
@@ -567,6 +567,30 @@ public class FormEditorHook implements IStartup
             }
         });
     }
+
+    // #region agent log (issue 600: временная диагностика открытия редактора формы из отлаживаемого приложения)
+    private static void diag900(String event, IWorkbenchPartReference ref)
+    {
+        if (!(ref instanceof IEditorReference))
+            return;
+        StringBuilder sb = new StringBuilder(event).append(" title=").append(ref.getTitle()) //$NON-NLS-1$
+                .append(" thread=").append(Thread.currentThread().getName()); //$NON-NLS-1$
+        try
+        {
+            org.eclipse.swt.widgets.Shell shell = ref.getPage().getWorkbenchWindow().getShell();
+            sb.append(" shellActive=").append(shell.getDisplay().getActiveShell() == shell) //$NON-NLS-1$
+                    .append(" minimized=").append(shell.getMinimized()); //$NON-NLS-1$
+        }
+        catch (Exception e)
+        {
+            sb.append(" shellErr=").append(e); //$NON-NLS-1$
+        }
+        StringBuilder stack = new StringBuilder();
+        for (StackTraceElement el : new Throwable().getStackTrace())
+            stack.append("\n    at ").append(el); //$NON-NLS-1$
+        Global.tempLog("issue600-form-open", sb.append(stack).toString()); //$NON-NLS-1$
+    }
+    // #endregion
 
     private static void notifyFormEditor(FormEditor editor)
     {
