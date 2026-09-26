@@ -1669,10 +1669,7 @@ public final class ParamHintHtmlModifier
                         || !typed.getClass().getName().endsWith("CustomCaretListener")) //$NON-NLS-1$
                         continue;
                     Object info = Global.getField(typed, "info"); //$NON-NLS-1$
-                    // #region agent log
-                    logCaretListenerCensus(typed, info, offset);
-                    // #endregion
-                    if (shiftParamInfoBounds(info, offset, removed, inserted))
+                    if (shiftParamInfoBounds(info, document, offset, removed, inserted))
                     {
                         adjusted++;
                         includeClosingParen(info, document);
@@ -1716,8 +1713,7 @@ public final class ParamHintHtmlModifier
      * {@code )} на 215 — то есть каретка между {@code ,} и {@code )} уже считалась
      * вышедшей за вызов, и подсказка закрывалась на первом же движении каретки.
      * Удаление запятой этот случай и ловило: границы уезжали на 214, каретка вставала
-     * ровно на 214, и {@code caretMoved} звал {@code dispose} (стек в
-     * {@code param-hint-close.log}).
+     * ровно на 214, и {@code caretMoved} звал {@code dispose}.
      *
      * @param info штатный {@code ParameterInfo} показанной подсказки
      * @param document модельный документ редактора или {@code null}, если он недоступен
@@ -1768,77 +1764,6 @@ public final class ParamHintHtmlModifier
         }
     }
 
-    // #region agent log
-    /**
-     * Кто именно сейчас ведёт подсказку: сколько на виджете живых
-     * {@code CustomCaretListener}, чей {@code ParameterInfo} мы правим, жив ли его
-     * контрол. Нужно, чтобы отличить «правим границы не того (уже закрытого) экземпляра»
-     * от «границы верные, закрывает кто-то другой».
-     */
-    private static void logCaretListenerCensus(Object listener, Object info, int offset)
-    {
-        try
-        {
-            Object control = Global.getField(listener, "infoControl"); //$NON-NLS-1$
-            Object swtControl = control == null ? null : Global.invoke(control, "getControl"); //$NON-NLS-1$
-            String alive = "noControl"; //$NON-NLS-1$
-            if (swtControl instanceof org.eclipse.swt.widgets.Control c)
-                alive = c.isDisposed() ? "disposed" //$NON-NLS-1$
-                    : (c.isVisible() ? "visible" : "hidden"); //$NON-NLS-1$ //$NON-NLS-2$
-            Object commas = info == null ? null : Global.getField(info, "commaPosition"); //$NON-NLS-1$
-            Global.tempLog("param-hint", "census offset=" + offset //$NON-NLS-1$ //$NON-NLS-2$
-                + " listener=" + System.identityHashCode(listener) //$NON-NLS-1$
-                + " info=" + System.identityHashCode(info) //$NON-NLS-1$
-                + " first=" + Global.getField(info, "firstAvailablePosition") //$NON-NLS-1$ //$NON-NLS-2$
-                + " last=" + Global.getField(info, "lastAvailablePosition") //$NON-NLS-1$ //$NON-NLS-2$
-                + " paramNumber=" + Global.getField(info, "paramNumber") //$NON-NLS-1$ //$NON-NLS-2$
-                + " commas=" + commas //$NON-NLS-1$
-                + " lastOffset=" + Global.getField(listener, "lastOffset") //$NON-NLS-1$ //$NON-NLS-2$
-                + " lastCaretPos=" + Global.getField(listener, "lastCaretPos") //$NON-NLS-1$ //$NON-NLS-2$
-                + " control=" + alive //$NON-NLS-1$
-                + " stockUpdaterOwns=" + stockPositionUpdaterOwns(info)); //$NON-NLS-1$
-        }
-        catch (Exception | LinkageError ignored)
-        {
-        }
-    }
-
-    /**
-     * Ставит на окно подсказки безусловный лог закрытия со стеком: подсказку закрывают
-     * минимум четыре механизма (штатные {@code CustomCaretListener},
-     * {@code CustomPositionUpdater}, {@code CustomFocusListener}/{@code CustomKeyAdapter}
-     * и наши закрыватели), и без стека невозможно понять, чей это dispose.
-     */
-    static void watchParamHintClose(org.eclipse.swt.widgets.Shell shell)
-    {
-        if (shell == null || shell.isDisposed())
-            return;
-        if (Boolean.TRUE.equals(shell.getData(PARAM_HINT_CLOSE_WATCH)))
-            return;
-        shell.setData(PARAM_HINT_CLOSE_WATCH, Boolean.TRUE);
-        org.eclipse.swt.widgets.Listener logger = event ->
-        {
-            StringBuilder stack = new StringBuilder();
-            StackTraceElement[] trace = Thread.currentThread().getStackTrace();
-            for (int i = 0; i < trace.length && stack.length() < 2200; i++)
-            {
-                String line = trace[i].toString();
-                if (line.startsWith("java.lang.Thread.getStackTrace")) //$NON-NLS-1$
-                    continue;
-                stack.append("\n    ").append(line); //$NON-NLS-1$
-            }
-            Global.tempLog("param-hint-close", //$NON-NLS-1$
-                (event.type == org.eclipse.swt.SWT.Dispose ? "dispose" : "hide") //$NON-NLS-1$ //$NON-NLS-2$
-                    + " shell=" + System.identityHashCode(shell) //$NON-NLS-1$
-                    + " stack:" + stack); //$NON-NLS-1$
-        };
-        shell.addListener(org.eclipse.swt.SWT.Dispose, logger);
-        shell.addListener(org.eclipse.swt.SWT.Hide, logger);
-    }
-
-    private static final String PARAM_HINT_CLOSE_WATCH = "tormozit.paramHint.closeWatch"; //$NON-NLS-1$
-    // #endregion
-
     static void adjustParamHintBounds(int offset, int removed, String inserted)
     {
         try
@@ -1855,7 +1780,7 @@ public final class ParamHintHtmlModifier
                 return;
             Object listener = Global.getField(handler, "caretListener"); //$NON-NLS-1$
             Object info = listener == null ? null : Global.getField(listener, "info"); //$NON-NLS-1$
-            shiftParamInfoBounds(info, offset, removed, inserted);
+            shiftParamInfoBounds(info, null, offset, removed, inserted);
         }
         catch (Exception | LinkageError ignored)
         {
@@ -1863,12 +1788,12 @@ public final class ParamHintHtmlModifier
     }
 
     /** Сдвигает границы вызова и позиции запятых в {@code ParameterInfo}. */
-    private static boolean shiftParamInfoBounds(Object info, int offset, int removed,
-        String inserted)
+    private static boolean shiftParamInfoBounds(Object info, IDocument document, int offset,
+        int removed, String inserted)
     {
         if (info == null)
             return false;
-        if (stockPositionUpdaterOwns(info))
+        if (stockPositionUpdaterOwns(info, document))
         {
             // Штатный CustomPositionUpdater (его ставит showControlInfo на документ)
             // уже сдвинул lastAvailablePosition и пересчитал commaPosition по тексту.
@@ -1909,11 +1834,33 @@ public final class ParamHintHtmlModifier
      * Есть ли у этого {@code ParameterInfo} штатный {@code CustomPositionUpdater}.
      * Он зарегистрирован на документе и сам ведёт границы вызова, поэтому наш сдвиг для
      * такой подсказки не нужен — он был бы вторым.
+     *
+     * <p>Сначала ищем прямо среди position updater'ов документа: подсказку мог показать
+     * не тот экземпляр обработчика, до которого мы дотягиваемся (команда через
+     * {@code WorkbenchHandlerServiceHandler}), и проверка только по обработчику
+     * отвечала «нет» — границы сдвигались дважды на каждый символ, и подсказка
+     * переставала закрываться при выходе каретки из вызова (issue 609).
      */
-    private static boolean stockPositionUpdaterOwns(Object info)
+    private static boolean stockPositionUpdaterOwns(Object info, IDocument document)
     {
         if (info == null)
             return false;
+        if (document != null)
+        {
+            try
+            {
+                for (org.eclipse.jface.text.IPositionUpdater updater : document.getPositionUpdaters())
+                {
+                    if (updater != null
+                        && updater.getClass().getName().endsWith("CustomPositionUpdater") //$NON-NLS-1$
+                        && Global.getField(updater, "info") == info) //$NON-NLS-1$
+                        return true;
+                }
+            }
+            catch (Exception | LinkageError ignored)
+            {
+            }
+        }
         Object handler = madeParamHoverHandler;
         if (stockUpdaterInfo(handler) == info)
             return true;

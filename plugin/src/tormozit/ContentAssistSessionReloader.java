@@ -2025,9 +2025,6 @@ boolean inLiteral = endCaret >= 0
             if (probe.popupShown)
                 ParamHintHtmlModifier.repositionShownParamHint();
             Shell shown = findParamHintShell(false);
-            // #region agent log
-            ParamHintHtmlModifier.watchParamHintClose(shown);
-            // #endregion
             // Границы только что показанной подсказки считает EDT, и правую она ставит
             // НА закрывающую скобку — каретка перед «)» уже вне [first, last).
             if (shown != null && viewer != null)

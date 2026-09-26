@@ -4398,15 +4398,6 @@ ensureFilterPending(popup);
         SourceViewer activeViewer = ContentAssistSessionReloader.getActiveViewer();
         IDocument doc = activeViewer != null ? activeViewer.getDocument() : null;
         int caret = SmartContentAssistProcessor.resolveWidgetCaret(activeViewer);
-        // #region agent log
-        SmartContentAssistProcessor.endKwLog("popup.set", "caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
-            + " around=\"" + SmartContentAssistProcessor.uiBlockAround(doc, caret) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-            + " subset=" + filteredSubset //$NON-NLS-1$
-            + " given" + SmartContentAssistProcessor.endKwTrace( //$NON-NLS-1$
-                list == null ? null : list.toArray(new ICompletionProposal[0]))
-            + " applied" + SmartContentAssistProcessor.endKwTrace( //$NON-NLS-1$
-                applied == null ? null : applied.toArray(new ICompletionProposal[0])));
-        // #endregion
         ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
         if (assistant != null)
             syncEqualsSpacePad(assistant, doc, caret);

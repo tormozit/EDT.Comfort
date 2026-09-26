@@ -2554,11 +2554,6 @@ return;
             }
             result = synthesizeBareConstructorProposals(result,
                 viewer != null ? viewer.getDocument() : null, offset);
-            // #region agent log
-            endKwLog("computeCompletionProposals.out", "off=" + offset //$NON-NLS-1$ //$NON-NLS-2$
-                + " around=\"" + uiBlockAround(viewer != null ? viewer.getDocument() : null, offset) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                + " list" + endKwTrace(result)); //$NON-NLS-1$
-            // #endregion
             return result;
         }
         finally
@@ -3038,10 +3033,6 @@ return;
                             "ms=" + ((System.nanoTime() - tFilter) / 1_000_000L) //$NON-NLS-1$
                                 + " raw=" + result.length + " n=" + popup.length //$NON-NLS-1$ //$NON-NLS-2$
                                 + " filter=" + popupFilter); //$NON-NLS-1$
-                        endKwLog("wordListBackground.filter", "key=" + key + " probe=" + lastProbe //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                            + " filter=" + popupFilter //$NON-NLS-1$
-                            + " around=\"" + uiBlockAround(liveDoc, lastProbe) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                            + " raw" + endKwTrace(result) + " popup" + endKwTrace(popup)); //$NON-NLS-1$ //$NON-NLS-2$
                     }
                     finally
                     {
@@ -5464,52 +5455,8 @@ return stripEmptyPlaceholderProposals(result);
             + " popup=" + isPopupVisible() //$NON-NLS-1$
             + " seeded=" + wordListSeededOnUi //$NON-NLS-1$
             + " irN=" + irProposals.length); //$NON-NLS-1$
-        endKwLog("resolveExit." + exit, "caret=" + caret + " filter=" + filter //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " around=\"" + uiBlockAround(doc, caret) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-            + " cache" + endKwTrace(fullListCache) + " result" + endKwTrace(result)); //$NON-NLS-1$ //$NON-NLS-2$
         // #endregion
     }
-
-    // #region agent log
-    /** Временно: где теряется «КонецФункции» — пункты «Конец…/End…» в списке. */
-    static void endKwLog(String where, String data)
-    {
-        Global.tempLog("assist-endkw", where + " " + data); //$NON-NLS-1$ //$NON-NLS-2$
-    }
-
-    static String endKwTrace(ICompletionProposal[] list)
-    {
-        if (list == null)
-            return "[null]"; //$NON-NLS-1$
-        StringBuilder sb = new StringBuilder();
-        sb.append("(n=").append(list.length).append(")["); //$NON-NLS-1$ //$NON-NLS-2$
-        int k = 0;
-        int index = -1;
-        for (ICompletionProposal p : list)
-        {
-            index++;
-            String s;
-            try
-            {
-                s = p == null ? null : p.getDisplayString();
-            }
-            catch (RuntimeException e)
-            {
-                s = null;
-            }
-            if (s == null)
-                continue;
-            String low = s.toLowerCase(java.util.Locale.ROOT);
-            if (low.startsWith("конец") || low.startsWith("end")) //$NON-NLS-1$ //$NON-NLS-2$
-            {
-                if (k++ > 0)
-                    sb.append(',');
-                sb.append(index).append(':').append(s).append('{').append(p.getClass().getSimpleName()).append('}');
-            }
-        }
-        return sb.append(']').toString();
-    }
-    // #endregion
 
     // ---------------------------------------------------------------------------------
     // Ключевые слова — только живой расчёт в позиции каретки
@@ -5570,7 +5517,6 @@ return stripEmptyPlaceholderProposals(result);
                     keywords.add(keyword.toLowerCase(java.util.Locale.ROOT));
             }
             grammarKeywords = Collections.unmodifiableSet(keywords);
-            endKwLog("grammarKeywords", "n=" + keywords.size()); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
     }
@@ -5579,21 +5525,15 @@ return stripEmptyPlaceholderProposals(result);
     private static final class KeywordProbe
     {
         final Thread thread = Thread.currentThread();
-        final IDocument doc;
-        final int probeOffset;
-        final int caret;
-        final KeywordCost cost;
-        org.eclipse.xtext.ui.editor.contentassist.XtextContentAssistProcessor processor;
-        org.eclipse.xtext.ui.editor.contentassist.ContentAssistContext.Factory original;
+        final org.eclipse.xtext.ui.editor.contentassist.XtextContentAssistProcessor processor;
+        final org.eclipse.xtext.ui.editor.contentassist.ContentAssistContext.Factory original;
         /** Ключевые слова в каретке; {@code null} — EDT контекстов не строила или сбой. */
         ICompletionProposal[] live;
 
-        KeywordProbe(IDocument doc, int probeOffset, int caret, KeywordCost cost)
+        KeywordProbe(org.eclipse.xtext.ui.editor.contentassist.XtextContentAssistProcessor processor)
         {
-            this.doc = doc;
-            this.probeOffset = probeOffset;
-            this.caret = caret;
-            this.cost = cost;
+            this.processor = processor;
+            this.original = processor.getContextFactory();
         }
     }
 
@@ -5622,9 +5562,6 @@ return stripEmptyPlaceholderProposals(result);
     {
         if (viewer == null)
             return null;
-        // #region agent log
-        KeywordCost cost = new KeywordCost();
-        // #endregion
         IDocument doc = viewer.getDocument();
         if (!(doc instanceof IXtextDocument) || probeOffset < 0 || probeOffset > doc.getLength())
             return null;
@@ -5633,55 +5570,29 @@ return stripEmptyPlaceholderProposals(result);
             || isAfterNewKeyword(doc, caret)
             || isStringLiteralAssistContext(doc, caret)
             || isCommentAssistContext(doc, caret))
-        {
-            // #region agent log
-            cost.lap("guard"); //$NON-NLS-1$
-            cost.write("skip:context", caret, -1, -1); //$NON-NLS-1$
-            // #endregion
             return null;
-        }
         if (!(delegate instanceof org.eclipse.xtext.ui.editor.contentassist.XtextContentAssistProcessor processor)
             || !(processor.getContentProposalProvider()
                 instanceof org.eclipse.xtext.ui.editor.contentassist.AbstractContentProposalProvider provider)
             || processor.getContextFactory() == null)
-        {
-            endKwLog("live.fail", "why=noXtext delegate=" + delegate); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
-        }
-        KeywordProbe probe = new KeywordProbe(doc, probeOffset, caret, cost);
-        probe.processor = processor;
-        probe.original = processor.getContextFactory();
+        KeywordProbe probe = new KeywordProbe(processor);
         org.eclipse.xtext.ui.editor.contentassist.ContentAssistContext.Factory original = probe.original;
         processor.setContextFactory((contextViewer, offset, resource) -> {
             org.eclipse.xtext.ui.editor.contentassist.ContentAssistContext[] contexts =
                 original.create(contextViewer, offset, resource);
             if (Thread.currentThread() == probe.thread && probe.live == null && contexts != null)
-            {
-                // #region agent log
-                cost.mark();
-                // #endregion
-                probe.live = keywordsFromContexts(provider, contexts, doc, caret, cost);
-            }
+                probe.live = keywordsFromContexts(provider, contexts, doc, caret);
             return contexts;
         });
-        // #region agent log
-        cost.lap("guard+install"); //$NON-NLS-1$
-        // #endregion
         return probe;
     }
 
     /** Возвращает процессору EDT его фабрику контекстов. */
     private static void endKeywordProbe(KeywordProbe probe)
     {
-        if (probe == null)
-            return;
-        // #region agent log
-        probe.cost.mark();
-        // #endregion
-        probe.processor.setContextFactory(probe.original);
-        // #region agent log
-        probe.cost.lap("restore"); //$NON-NLS-1$
-        // #endregion
+        if (probe != null)
+            probe.processor.setContextFactory(probe.original);
     }
 
     /**
@@ -5692,27 +5603,13 @@ return stripEmptyPlaceholderProposals(result);
     {
         if (probe == null || raw == null || raw.length == 0)
             return raw;
-        KeywordCost cost = probe.cost;
-        int caret = probe.caret;
-        IDocument doc = probe.doc;
         ICompletionProposal[] live = probe.live;
         if (grammarKeywords == null || live == null)
-        {
-            // #region agent log
-            cost.write(grammarKeywords == null ? "skip:noGrammar" : "fail", caret, raw.length, -1); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
             return raw;
-        }
-        // #region agent log
-        cost.mark();
-        // #endregion
         List<ICompletionProposal> out = new ArrayList<>(raw.length + live.length);
-        List<ICompletionProposal> strippedList = new ArrayList<>();
         for (ICompletionProposal p : raw)
         {
-            if (isKeywordProposal(p))
-                strippedList.add(p);
-            else
+            if (!isKeywordProposal(p))
                 out.add(p);
         }
         // Список EDT упорядочен по приоритету, от него плагин берёт порядок пунктов. Ставим
@@ -5732,100 +5629,8 @@ return stripEmptyPlaceholderProposals(result);
             }
             out.add(at, p);
         }
-        ICompletionProposal[] result = out.toArray(new ICompletionProposal[0]);
-        // #region agent log
-        cost.lap("merge"); //$NON-NLS-1$
-        StringBuilder stripped = new StringBuilder();
-        for (ICompletionProposal p : strippedList)
-        {
-            if (stripped.length() > 0)
-                stripped.append(',');
-            stripped.append(displayString(unwrapProposal(p)));
-        }
-        StringBuilder added = new StringBuilder();
-        for (ICompletionProposal p : live)
-        {
-            if (added.length() > 0)
-                added.append(',');
-            added.append(displayString(p));
-        }
-        endKwLog("live", "probe=" + probe.probeOffset + " caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
-            + " around=\"" + uiBlockAround(doc, caret) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-            + " in=" + raw.length + " stripped=[" + stripped + "]" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " live=[" + added + "]"); //$NON-NLS-1$ //$NON-NLS-2$
-        cost.lap("diag"); //$NON-NLS-1$
-        cost.write("ok", caret, raw.length, live.length); //$NON-NLS-1$
-        // #endregion
-        return result;
+        return out.toArray(new ICompletionProposal[0]);
     }
-
-    // #region agent log
-    /**
-     * Временно: цена доработки «живые ключевые слова» по этапам. Одна строка на применение
-     * в {@code .tmp/temp-logs/assist-keywords-cost.log}. Этапы {@code diag*} — наше же
-     * временное логирование, в цену доработки не входят.
-     */
-    private static final class KeywordCost
-    {
-        private final long start = System.nanoTime();
-        private long last = start;
-        private final Map<String, Long> stages = new LinkedHashMap<>();
-
-        /** Закрывает этап: время с прошлой отметки добавляется к {@code stage}. */
-        void lap(String stage)
-        {
-            long now = System.nanoTime();
-            add(stage, now - last);
-            last = now;
-        }
-
-        /** Отметка без этапа — следующий {@link #lap} считается от неё. */
-        void mark()
-        {
-            last = System.nanoTime();
-        }
-
-        void add(String stage, long nanos)
-        {
-            stages.merge(stage, nanos, Long::sum);
-        }
-
-        void write(String outcome, int caret, int in, int live)
-        {
-            long total = System.nanoTime() - start;
-            long diag = 0;
-            long ours = 0;
-            StringBuilder sb = new StringBuilder();
-            sb.append(outcome)
-                .append(" thread=").append(org.eclipse.swt.widgets.Display.getCurrent() != null ? "UI" : "bg") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                .append(" caret=").append(caret) //$NON-NLS-1$
-                .append(" in=").append(in) //$NON-NLS-1$
-                .append(" live=").append(live); //$NON-NLS-1$
-            StringBuilder parts = new StringBuilder();
-            for (Map.Entry<String, Long> e : stages.entrySet())
-            {
-                if (e.getKey().startsWith("diag")) //$NON-NLS-1$
-                    diag += e.getValue();
-                else
-                    ours += e.getValue();
-                parts.append(' ').append(e.getKey()).append('=').append(fmt(e.getValue()));
-            }
-            // wall — от начала до записи, включая штатный расчёт EDT между этапами;
-            // feature — только наши этапы (без diag*); edt — всё остальное.
-            sb.append(" | feature=").append(fmt(ours)) //$NON-NLS-1$
-                .append(" diag=").append(fmt(diag)) //$NON-NLS-1$
-                .append(" edt=").append(fmt(total - ours - diag)) //$NON-NLS-1$
-                .append(" wall=").append(fmt(total)) //$NON-NLS-1$
-                .append(" |").append(parts); //$NON-NLS-1$
-            Global.tempLog("assist-keywords-cost", sb.toString()); //$NON-NLS-1$
-        }
-
-        private static String fmt(long nanos)
-        {
-            return String.format(java.util.Locale.ROOT, "%.2fms", nanos / 1_000_000.0); //$NON-NLS-1$
-        }
-    }
-    // #endregion
 
     /**
      * Ключевые слова по контекстам, которые EDT только что построила для своего расчёта списка —
@@ -5837,159 +5642,99 @@ return stripEmptyPlaceholderProposals(result);
     private ICompletionProposal[] keywordsFromContexts(
         org.eclipse.xtext.ui.editor.contentassist.AbstractContentProposalProvider provider,
         org.eclipse.xtext.ui.editor.contentassist.ContentAssistContext[] edtContexts,
-        IDocument doc, int caret, KeywordCost cost)
+        IDocument doc, int caret)
     {
         try
         {
-                List<ICompletionProposal> out = new ArrayList<>();
-                Set<String> seen = new HashSet<>();
-                org.eclipse.xtext.ui.editor.contentassist.ICompletionProposalAcceptor acceptor =
-                    new org.eclipse.xtext.ui.editor.contentassist.ICompletionProposalAcceptor()
+            List<ICompletionProposal> out = new ArrayList<>();
+            Set<String> seen = new HashSet<>();
+            org.eclipse.xtext.ui.editor.contentassist.ICompletionProposalAcceptor acceptor =
+                new org.eclipse.xtext.ui.editor.contentassist.ICompletionProposalAcceptor()
+                {
+                    @Override
+                    public void accept(ICompletionProposal proposal)
                     {
-                        @Override
-                        public void accept(ICompletionProposal proposal)
-                        {
-                            // Правила END_KEYWORD_RULES создают и шаблоны — берём только слова.
-                            if (proposal == null || !isKeywordProposal(proposal))
-                                return;
-                            String key = displayString(proposal);
-                            if (key != null && seen.add(key.toLowerCase(java.util.Locale.ROOT)))
-                                out.add(proposal);
-                        }
+                        // Правила END_KEYWORD_RULES создают и шаблоны — берём только слова.
+                        if (proposal == null || !isKeywordProposal(proposal))
+                            return;
+                        String key = displayString(proposal);
+                        if (key != null && seen.add(key.toLowerCase(java.util.Locale.ROOT)))
+                            out.add(proposal);
+                    }
 
-                        @Override
-                        public boolean canAcceptMoreProposals()
-                        {
-                            return true;
-                        }
-                    };
-                // Опрос идёт в начале слова, а модель к тому же может отставать от набора
-                // (EDT/Handly переразбирает модуль в фоне с задержкой; лог 26.09.2026
-                // 11:42:55: документ 9006, модель 9005). До начала слова модель совпадает с
-                // текстом — в копию контекстов EDT подставляем набранное слово и каретку.
-                // Контексты самой EDT не трогаем: по ним она дальше считает свой список.
-                int wordStart = computeIdentifierWordStart(doc, caret);
-                String typed = wordStart >= 0 && wordStart < caret
-                    ? doc.get(wordStart, caret - wordStart) : ""; //$NON-NLS-1$
-                org.eclipse.xtext.ui.editor.contentassist.ContentAssistContext[] contexts =
-                    edtContexts.clone();
-                if (!typed.isEmpty())
-                {
-                    for (int i = 0; i < contexts.length; i++)
+                    @Override
+                    public boolean canAcceptMoreProposals()
                     {
-                        contexts[i] = contexts[i].copy()
-                            .setPrefix(typed)
-                            .setOffset(caret)
-                            .setReplaceRegion(new org.eclipse.jface.text.Region(wordStart, typed.length()))
-                            .toContext();
+                        return true;
                     }
-                }
-                // #region agent log
-                cost.lap("ctxCopy"); //$NON-NLS-1$
-                // #endregion
-                if (contexts.length == 0)
-                    return new ICompletionProposal[0];
-                ensureGrammarKeywords(contexts[0]);
-                // #region agent log
-                cost.lap("grammar"); //$NON-NLS-1$
-                // #endregion
-                // Поля, которые штатный createProposals выставляет в начале каждого расчёта, —
-                // а мы считаем раньше него (в фабрике контекстов). Остаток от прошлого
-                // расчёта («Для Каждого … Из») глушит все ключевые слова; язык без первого
-                // расчёта остаётся английским (EndFunction вместо КонецФункции).
-                setProviderFlag(provider, "noProposals", false); //$NON-NLS-1$
-                setProviderFlag(provider, "noKeywords", false); //$NON-NLS-1$
-                Object projectManager = Global.getField(provider, "v8projectManager"); //$NON-NLS-1$
-                if (projectManager instanceof com._1c.g5.v8.dt.core.platform.IV8ProjectManager manager)
+                };
+            // Опрос идёт в начале слова, а модель к тому же может отставать от набора
+            // (EDT/Handly переразбирает модуль в фоне с задержкой; лог 26.09.2026 11:42:55:
+            // документ 9006, модель 9005). До начала слова модель совпадает с текстом — в
+            // копию контекстов EDT подставляем набранное слово и каретку. Контексты самой
+            // EDT не трогаем: по ним она дальше считает свой список.
+            int wordStart = computeIdentifierWordStart(doc, caret);
+            String typed = wordStart >= 0 && wordStart < caret
+                ? doc.get(wordStart, caret - wordStart) : ""; //$NON-NLS-1$
+            org.eclipse.xtext.ui.editor.contentassist.ContentAssistContext[] contexts =
+                edtContexts.clone();
+            if (!typed.isEmpty())
+            {
+                for (int i = 0; i < contexts.length; i++)
                 {
-                    setProviderFlag(provider, "isRussian", //$NON-NLS-1$
-                        com._1c.g5.v8.dt.bsl.util.BslUtil.isRussian(contexts[0].getRootModel(), manager));
+                    contexts[i] = contexts[i].copy()
+                        .setPrefix(typed)
+                        .setOffset(caret)
+                        .setReplaceRegion(new org.eclipse.jface.text.Region(wordStart, typed.length()))
+                        .toContext();
                 }
-                else
+            }
+            if (contexts.length == 0)
+                return new ICompletionProposal[0];
+            ensureGrammarKeywords(contexts[0]);
+            // Поля, которые штатный createProposals выставляет в начале каждого расчёта, —
+            // а мы считаем раньше него (в фабрике контекстов). Остаток от прошлого расчёта
+            // («Для Каждого … Из») глушит все ключевые слова; язык без первого расчёта
+            // остаётся английским (EndFunction вместо КонецФункции).
+            Global.setFieldForce(provider, "noProposals", Boolean.FALSE); //$NON-NLS-1$
+            Global.setFieldForce(provider, "noKeywords", Boolean.FALSE); //$NON-NLS-1$
+            if (Global.getField(provider, "v8projectManager") //$NON-NLS-1$
+                instanceof com._1c.g5.v8.dt.core.platform.IV8ProjectManager manager)
+            {
+                Global.setFieldForce(provider, "isRussian", Boolean.valueOf( //$NON-NLS-1$
+                    com._1c.g5.v8.dt.bsl.util.BslUtil.isRussian(contexts[0].getRootModel(), manager)));
+            }
+            for (org.eclipse.xtext.ui.editor.contentassist.ContentAssistContext context : contexts)
+            {
+                invokeEndMethodKeyword(provider, context, acceptor);
+                for (org.eclipse.xtext.AbstractElement element : context.getFirstSetGrammarElements())
                 {
-                    endKwLog("live.fail", "why=noProjectManager"); //$NON-NLS-1$ //$NON-NLS-2$
-                }
-                // #region agent log
-                cost.lap("flags"); //$NON-NLS-1$
-                // #endregion
-                StringBuilder rules = new StringBuilder();
-                for (org.eclipse.xtext.ui.editor.contentassist.ContentAssistContext context : contexts)
-                {
-                    invokeEndMethodKeyword(provider, context, acceptor);
-                    // #region agent log
-                    cost.lap("endMethod"); //$NON-NLS-1$
-                    // #endregion
-                    for (org.eclipse.xtext.AbstractElement element : context.getFirstSetGrammarElements())
+                    // Сбой одного элемента не должен срывать остальные ключевые слова.
+                    try
                     {
-                        // Сбой одного элемента не должен срывать остальные ключевые слова.
-                        try
+                        if (element instanceof org.eclipse.xtext.Keyword keyword)
                         {
-                            if (element instanceof org.eclipse.xtext.Keyword keyword)
-                            {
-                                provider.completeKeyword(keyword, context, acceptor);
-                                // #region agent log
-                                cost.lap("keywords"); //$NON-NLS-1$
-                                // #endregion
-                            }
-                            else if (element instanceof org.eclipse.xtext.RuleCall ruleCall
-                                && ruleCall.getRule() != null
-                                && END_KEYWORD_RULES.contains(ruleCall.getRule().getName()))
-                            {
-                                rules.append(ruleCall.getRule().getName()).append(' ');
-                                invokeCompleteRule(provider, ruleCall, context, acceptor);
-                                // #region agent log
-                                cost.lap("endRules"); //$NON-NLS-1$
-                                // #endregion
-                            }
-                            else
-                            {
-                                // #region agent log
-                                cost.lap("otherElements"); //$NON-NLS-1$
-                                // #endregion
-                            }
+                            provider.completeKeyword(keyword, context, acceptor);
                         }
-                        catch (Exception | LinkageError e)
+                        else if (element instanceof org.eclipse.xtext.RuleCall ruleCall
+                            && ruleCall.getRule() != null
+                            && END_KEYWORD_RULES.contains(ruleCall.getRule().getName()))
                         {
-                            Global.tempLogException("assist-endkw", "live.element " + element, e); //$NON-NLS-1$ //$NON-NLS-2$
-                            // #region agent log
-                            cost.lap("elementError"); //$NON-NLS-1$
-                            // #endregion
+                            invokeCompleteRule(provider, ruleCall, context, acceptor);
                         }
                     }
+                    catch (Exception | LinkageError ignored)
+                    {
+                        // следующий элемент
+                    }
                 }
-                // #region agent log
-                StringBuilder ctxInfo = new StringBuilder();
-                for (org.eclipse.xtext.ui.editor.contentassist.ContentAssistContext context : contexts)
-                {
-                    EObject model = context.getCurrentModel();
-                    ctxInfo.append(" {off=").append(context.getOffset()) //$NON-NLS-1$
-                        .append(" prefix=").append(context.getPrefix()) //$NON-NLS-1$
-                        .append(" model=").append(model == null ? "null" : model.eClass().getName()) //$NON-NLS-1$ //$NON-NLS-2$
-                        .append(" first=").append(context.getFirstSetGrammarElements().size()) //$NON-NLS-1$
-                        .append('}');
-                }
-                endKwLog("live.contexts.detail", ctxInfo.toString()); //$NON-NLS-1$
-                endKwLog("live.contexts", "n=" + contexts.length //$NON-NLS-1$ //$NON-NLS-2$
-                    + " prefix=" + contexts[0].getPrefix() //$NON-NLS-1$
-                    + " mode=" + delegateAssistMode() //$NON-NLS-1$
-                    + " endRules=[" + rules.toString().trim() + "]" //$NON-NLS-1$ //$NON-NLS-2$
-                    + " out=" + out.size()); //$NON-NLS-1$
-                cost.lap("diagContexts"); //$NON-NLS-1$
-                // #endregion
-                return out.toArray(new ICompletionProposal[0]);
+            }
+            return out.toArray(new ICompletionProposal[0]);
         }
         catch (Exception | LinkageError e)
         {
-            Global.tempLogException("assist-endkw", "live.fail", e); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
         }
-    }
-
-    /** Поле-флаг поставщика EDT; не записалось — в лог. */
-    private static void setProviderFlag(Object provider, String name, boolean value)
-    {
-        if (!Global.setFieldForce(provider, name, Boolean.valueOf(value)))
-            endKwLog("live.fail", "why=noField " + name); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     /**
@@ -6038,8 +5783,6 @@ return stripEmptyPlaceholderProposals(result);
                     // ищем выше по иерархии
                 }
             }
-            if (endMethodKeywordMethod == null)
-                endKwLog("live.fail", "why=noEndMethodKeyword"); //$NON-NLS-1$ //$NON-NLS-2$
         }
         if (endMethodKeywordMethod == null)
             return;
@@ -6047,9 +5790,9 @@ return stripEmptyPlaceholderProposals(result);
         {
             endMethodKeywordMethod.invoke(provider, context, acceptor);
         }
-        catch (Exception e)
+        catch (Exception ignored)
         {
-            Global.tempLogException("assist-endkw", "endMethodKeyword", e); //$NON-NLS-1$ //$NON-NLS-2$
+            // без КонецФункции/КонецПроцедуры — остальные ключевые слова остаются
         }
     }
 
@@ -6449,9 +6192,6 @@ return result;
             + " n=" + result.length //$NON-NLS-1$
             + " popup=" + isPopupVisible() //$NON-NLS-1$
             + " caller=" + uiBlockCaller()); //$NON-NLS-1$
-        endKwLog("fetchDelegateList", "probe=" + probeOffset + " caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " around=\"" + uiBlockAround(viewer != null ? viewer.getDocument() : null, caret) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-            + " list" + endKwTrace(result)); //$NON-NLS-1$
         // #endregion
         IDocument fetchDoc = viewer != null ? viewer.getDocument() : null;
         if (result.length > 0 && caret >= 0 && probeOffset != caret && fetchDoc != null)
@@ -7412,9 +7152,6 @@ if (!SmartAssistFilterState.isSmartFilterEnabled())
             + " dot=" + dot + " caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
             + (forceDelegateReadOnly ? " readOnly" : "") + " complete"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         // #region agent log
-        endKwLog("loadFullList.done", "caret=" + caret + " dot=" + dot //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " around=\"" + uiBlockAround(doc, caret) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-            + " raw" + endKwTrace(raw) + " cache" + endKwTrace(fullListCache)); //$NON-NLS-1$ //$NON-NLS-2$
         uiBlockLog("loadFullList.done", "ms=" + (System.currentTimeMillis() - loadStarted) //$NON-NLS-1$ //$NON-NLS-2$
             + " n=" + fullListCache.length + " caret=" + caret + " dot=" + dot); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         // #endregion
