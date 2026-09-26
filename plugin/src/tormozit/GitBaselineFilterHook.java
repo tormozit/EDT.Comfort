@@ -27,14 +27,20 @@ import org.eclipse.e4.ui.model.application.commands.MCommand;
 import org.eclipse.e4.ui.model.application.ui.menu.MHandledItem;
 import org.eclipse.e4.ui.workbench.modeling.EModelService;
 import org.eclipse.emf.common.util.URI;
+import org.eclipse.swt.SWT;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
+import org.eclipse.swt.widgets.Event;
+import org.eclipse.swt.widgets.Listener;
+import org.eclipse.swt.widgets.Menu;
+import org.eclipse.swt.widgets.MenuItem;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.ToolBar;
 import org.eclipse.swt.widgets.ToolItem;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.IWorkbench;
+import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.commands.ICommandService;
@@ -129,6 +135,8 @@ public class GitBaselineFilterHook
     private static final int RETRY_ATTEMPTS = 20;
 
     private static final int TOOLTIP_RETRY_MS = 500;
+
+    private static final String MENU_LISTENER_KEY = "tormozit.baselineToggle.menuListener"; //$NON-NLS-1$
 
     /** Модуль → строка проблемы «Обрыв разбора модуля» в нём. Не больше записи на модуль. */
     private static final Map<String, Integer> EXEMPT_ISSUE_LINES = new ConcurrentHashMap<>();
@@ -288,6 +296,7 @@ public class GitBaselineFilterHook
                 String wrapped = TooltipText.wrap(bar, TOGGLE_TOOLTIP);
                 if (!wrapped.equals(item.getToolTipText()))
                     item.setToolTipText(wrapped);
+                hookSettingsContextMenu(bar);
             }
         }
         if (root instanceof Composite composite)
@@ -295,6 +304,41 @@ public class GitBaselineFilterHook
             for (Control child : composite.getChildren())
                 patchToggleToolItems(child);
         }
+    }
+
+    /** Правый клик по кнопке — «Параметры...»: страница «Общие настройки проверок» активного проекта. */
+    private static void hookSettingsContextMenu(ToolBar bar)
+    {
+        if (bar.getData(MENU_LISTENER_KEY) != null)
+            return;
+        Listener listener = GitBaselineFilterHook::onToolbarMenuDetect;
+        bar.addListener(SWT.MenuDetect, listener);
+        bar.setData(MENU_LISTENER_KEY, listener);
+    }
+
+    private static void onToolbarMenuDetect(Event event)
+    {
+        if (!(event.widget instanceof ToolBar bar) || bar.isDisposed())
+            return;
+        ToolItem hit = bar.getItem(bar.toControl(event.x, event.y));
+        if (hit == null || hit.isDisposed() || !isBaselineToggle(hit))
+            return;
+
+        event.doit = false;
+        Shell shell = bar.getShell();
+        Menu menu = new Menu(shell, SWT.POP_UP);
+        MenuItem settings = new MenuItem(menu, SWT.PUSH);
+        settings.setText("Параметры..."); //$NON-NLS-1$
+        settings.setToolTipText(TooltipText.wrap(bar,
+            "Базовая ветка git и другие настройки проверок проекта" + Global.pluginSignForTooltip())); //$NON-NLS-1$
+        settings.addListener(SWT.Selection, e ->
+        {
+            IWorkbenchPage page = PlatformUI.getWorkbench().getActiveWorkbenchWindow().getActivePage();
+            ProblemViewHook.openProjectPage(shell, Global.getActiveProject(page, true),
+                CheckDevelopmentPageHook.PAGE_ID);
+        });
+        menu.setLocation(event.x, event.y);
+        menu.setVisible(true);
     }
 
     private static boolean isBaselineToggle(ToolItem item)

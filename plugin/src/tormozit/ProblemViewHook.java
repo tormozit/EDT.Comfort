@@ -2494,6 +2494,17 @@ public final class ProblemViewHook implements IStartup
         dialog.open();
     }
 
+    /** Открывает страницу параметров проекта с идентификатором {@code pageId}. */
+    static void openProjectPage(Shell shell, IProject project, String pageId)
+    {
+        if (project == null)
+            return;
+        Shell target = normalizeParentShell(shell != null ? shell : Display.getDefault().getActiveShell());
+        PreferenceDialog dialog = PreferencesUtil.createPropertyDialogOn(target, project, pageId, null, null);
+        if (dialog != null)
+            dialog.open();
+    }
+
     /**
      * Родитель окна параметров — только полноценное окно, не всплывающая подсказка.
      * <p>
