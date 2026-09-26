@@ -1882,7 +1882,7 @@ public class SmartOutlineHook implements IStartup {
         boolean hasName = ownerName != null;
         button.setEnabled(hasName);
         button.setToolTipText(TooltipText.wrap(button,
-            (hasName ? "Пометить тип, который ИР подбирает по имени «" + ownerName + "»" //$NON-NLS-1$ //$NON-NLS-2$
+            (hasName ? "Пометить тип, который ИР подбирает по имени реквизита" //$NON-NLS-1$
                 : "Недоступно: не удалось определить имя владельца типа") //$NON-NLS-1$
                 + Global.pluginSignForTooltip()));
         button.addListener(SWT.Selection, e ->

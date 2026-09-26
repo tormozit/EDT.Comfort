@@ -48,6 +48,8 @@ import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Group;
 import org.eclipse.swt.widgets.Label;
 import org.eclipse.swt.widgets.Link;
+import org.eclipse.swt.widgets.Monitor;
+import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Text;
 import org.eclipse.ui.IWorkbench;
 import org.eclipse.ui.IWorkbenchPage;
@@ -1513,10 +1515,15 @@ public class ComfortPreferencePage
                 Display display = Display.getDefault();
                 if (display == null || display.isDisposed())
                     return "—"; //$NON-NLS-1$
-                int dpiX = display.getDPI().x;
-                if (dpiX <= 0)
+                // Display.getDPI() при автомасштабировании SWT всегда даёт «логические» 96 —
+                // реальный масштаб монитора отдаёт только Monitor.getZoom().
+                Shell active = display.getActiveShell();
+                Monitor monitor = active != null && !active.isDisposed()
+                    ? active.getMonitor() : display.getPrimaryMonitor();
+                int zoom = monitor.getZoom();
+                if (zoom <= 0)
                     return "—"; //$NON-NLS-1$
-                return Math.round(dpiX / 96f * 100) + "%"; //$NON-NLS-1$
+                return zoom + "%"; //$NON-NLS-1$
             }
             catch (RuntimeException e)
             {

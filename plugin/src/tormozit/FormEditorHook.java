@@ -2277,7 +2277,7 @@ public class FormEditorHook implements IStartup
         }
 
         /**
-         * Вид команды кнопки для суффикса в дереве: «С» — стандартная, «О» — общая. Берётся из
+         * Вид команды кнопки для суффикса в дереве: «С» — стандартная, «Г» — глобальная (общая). Берётся из
          * того же кеша, что и наследуемый заголовок (ссылка на команду разрешается в фоне);
          * пока источник не посчитан — {@code null}. Команды формы суффикса не получают.
          */
@@ -2297,7 +2297,7 @@ public class FormEditorHook implements IStartup
             String name = commandFullName(command);
             Global.tempLog("formButtonCommandKind", item.getName() + " -> " + name //$NON-NLS-1$ //$NON-NLS-2$
                 + " class=" + command.getClass().getName() + " object=" + source.object); //$NON-NLS-1$ //$NON-NLS-2$
-            return name != null && name.indexOf('.') >= 0 ? "О" : null; //$NON-NLS-1$
+            return name != null && name.indexOf('.') >= 0 ? "Г" : null; //$NON-NLS-1$
         }
 
         /** Имя команды без разрешения ссылки: у прокси оно лежит во фрагменте URI. */
