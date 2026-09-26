@@ -239,6 +239,7 @@ import com._1c.g5.v8.dt.md.ui.shared.MdUiSharedImages;
 import org.eclipse.xtext.EcoreUtil2;
 import org.eclipse.emf.ecore.EEnumLiteral;
 import org.eclipse.emf.ecore.EStructuralFeature;
+import org.eclipse.emf.ecore.InternalEObject;
 import org.eclipse.emf.ecore.util.EcoreUtil;
 import org.eclipse.emf.common.util.EMap;
 import org.eclipse.emf.common.util.URI;
@@ -2271,6 +2272,47 @@ public class FormEditorHook implements IStartup
             if (state.pending.add(item))
                 schedule(page, state);
             return UNKNOWN;
+        }
+
+        /**
+         * Вид команды кнопки для суффикса в дереве: «С» — стандартная, «О» — общая. Берётся из
+         * того же кеша, что и наследуемый заголовок (ссылка на команду разрешается в фоне);
+         * пока источник не посчитан — {@code null}. Команды формы суффикса не получают.
+         */
+        static String buttonCommandKind(FormEditorPage page, FormItem item)
+        {
+            if (!(item instanceof Button))
+                return null;
+            Source source = cached(page, item);
+            if (source == UNKNOWN)
+                return null;
+            if (source.object instanceof FormStandardCommand)
+                return "С"; //$NON-NLS-1$
+            com._1c.g5.v8.dt.mcore.Command command = ((Button)item).getCommandName();
+            if (command == null || command instanceof FormCommand)
+                return null;
+            // Команда не из формы: её имя составное («Объект.Команда») — точка в имени и есть признак.
+            String name = commandFullName(command);
+            Global.tempLog("formButtonCommandKind", item.getName() + " -> " + name //$NON-NLS-1$ //$NON-NLS-2$
+                + " class=" + command.getClass().getName() + " object=" + source.object); //$NON-NLS-1$ //$NON-NLS-2$
+            return name != null && name.indexOf('.') >= 0 ? "О" : null; //$NON-NLS-1$
+        }
+
+        /** Имя команды без разрешения ссылки: у прокси оно лежит во фрагменте URI. */
+        private static String commandFullName(com._1c.g5.v8.dt.mcore.Command command)
+        {
+            try
+            {
+                URI uri = command instanceof InternalEObject internal && command.eIsProxy()
+                    ? internal.eProxyURI() : EcoreUtil.getURI(command);
+                if (uri != null && uri.fragment() != null)
+                    return uri.fragment();
+            }
+            catch (RuntimeException e)
+            {
+                // ниже — имя объекта
+            }
+            return Global.invoke(command, "getName") instanceof String name ? name : null; //$NON-NLS-1$
         }
 
         /**
@@ -7953,6 +7995,9 @@ public class FormEditorHook implements IStartup
                 String kind = groupKindName(domainItem(element));
                 if (kind != null)
                     styled.append(" (" + kind + ")", StyledString.DECORATIONS_STYLER); //$NON-NLS-1$ //$NON-NLS-2$
+                String commandKind = InheritedTitles.buttonCommandKind(page, domainItem(element));
+                if (commandKind != null)
+                    styled.append(" (" + commandKind + ")", StyledString.DECORATIONS_STYLER); //$NON-NLS-1$ //$NON-NLS-2$
                 SmartMatcher matcher = matcherOf(tree);
                 if (matcher != null && !matcher.isEmpty)
                 {

@@ -258,7 +258,7 @@ public final class GitHistoryHook implements IStartup
         {
             boolean pageReady = ensureGitHistoryPage(view);
             boolean colsReady = !ComfortSettings.isReplaceListFiltersEnabled()
-                || tryPatch(view);
+                || tryPatch(view, attempt);
             if ((!pageReady || !colsReady) && attempt < 20)
                 schedulePatch(view, attempt + 1);
             else if (attempt >= 20)
@@ -271,7 +271,7 @@ public final class GitHistoryHook implements IStartup
     // tryPatch — основная логика патчинга
     // -----------------------------------------------------------------------
 
-    private static boolean tryPatch(IViewPart view)
+    private static boolean tryPatch(IViewPart view, int attempt)
     {
         try
         {
@@ -309,20 +309,60 @@ public final class GitHistoryHook implements IStartup
             if (table == null || table.isDisposed())
                 return false;
 
-            if (Boolean.TRUE.equals(table.getData(PATCHED_KEY)))
+            boolean patched = Boolean.TRUE.equals(table.getData(PATCHED_KEY));
+            // #region agent log #599
+            Global.tempLog("gitHistory599", "tryPatch attempt=" + attempt + " patched=" + patched //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " columns=" + table.getColumnCount() + " items=" + table.getItemCount() //$NON-NLS-1$ //$NON-NLS-2$
+                + " lp=" + describe(fileViewer.getLabelProvider()) + " table=" + System.identityHashCode(table)); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+            if (patched)
             {
                 rememberLastRepo(historyPage);
                 return true;
             }
 
-            // Сохраняем оригинальный FileDiffLabelProvider до замены.
+            Composite originalParent = table.getParent();
+            if (historyControlOf(table) == null)
+            {
+                Debug.log("tryPatch: history control structure not ready"); //$NON-NLS-1$
+                return false;
+            }
+
+            // Флаг — до создания колонок: без него любой сбой ниже (и повтор schedulePatch или
+            // событие части) снова добавлял 4 колонки на ту же таблицу, а FormTableInteraction
+            // прошлых проходов на каждый setWidth перерисовывал все строки — зависание (#599).
+            table.setData(PATCHED_KEY, Boolean.TRUE);
+
+            // Сохраняем оригинальный FileDiffLabelProvider до замены (не оборачиваем свою обёртку).
             CellLabelProvider origLabelProvider = null;
             IBaseLabelProvider currentLp = fileViewer.getLabelProvider();
-            if (currentLp instanceof CellLabelProvider clp)
+            if (currentLp instanceof GitHistoryFileLabelProvider own)
+                origLabelProvider = own.origProvider;
+            else if (currentLp instanceof CellLabelProvider clp)
                 origLabelProvider = clp;
 
             TableColumn[] cols = installColumns(table);
-            installFilterComposite(fileViewer, table, origLabelProvider, cols[0], cols[1], cols[2], cols[3]);
+            try
+            {
+                installFilterComposite(fileViewer, table, origLabelProvider, cols[0], cols[1], cols[2], cols[3]);
+            }
+            catch (RuntimeException e)
+            {
+                // #region agent log #599
+                Global.tempLogException("gitHistory599", "installFilterComposite attempt=" + attempt, e); //$NON-NLS-1$ //$NON-NLS-2$
+                // #endregion
+                // Таблица ещё на прежнем месте — убираем колонки этого прохода, вид остаётся штатным.
+                // Флаг не снимаем: повтор на той же таблице опаснее, чем отсутствие доработки.
+                if (table.getParent() == originalParent)
+                {
+                    for (TableColumn col : cols)
+                    {
+                        if (!col.isDisposed())
+                            col.dispose();
+                    }
+                }
+                throw e;
+            }
             rememberLastRepo(historyPage);
 
             Debug.log("tryPatch: OK"); //$NON-NLS-1$
@@ -330,9 +370,54 @@ public final class GitHistoryHook implements IStartup
         }
         catch (Exception e)
         {
+            // #region agent log #599
+            Global.tempLogException("gitHistory599", "tryPatch attempt=" + attempt, e); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
             Debug.log("tryPatch EXCEPTION: " + e); //$NON-NLS-1$
             return false;
         }
+    }
+
+    /**
+     * {@code historyControl} — дед родителя таблицы файлов ({@code revInfoSplit → graphDetailSplit →
+     * historyControl}); {@code null}, если цепочка ещё не собрана или отличается.
+     */
+    private static Composite historyControlOf(Table table)
+    {
+        Composite revInfoSplit = table.getParent();
+        if (revInfoSplit == null || revInfoSplit.isDisposed())
+            return null;
+        Composite graphDetailSplit = revInfoSplit.getParent();
+        if (graphDetailSplit == null || graphDetailSplit.isDisposed())
+            return null;
+        Composite historyControl = graphDetailSplit.getParent();
+        if (historyControl == null || historyControl.isDisposed())
+            return null;
+        return historyControl;
+    }
+
+    /**
+     * Новый экземпляр штатного {@code FileDiffLabelProvider(RGB)} с тем же приглушённым цветом.
+     * Не удалось — {@code orig} (прежнее поведение; ошибка — во временный лог).
+     */
+    private static CellLabelProvider ownFileDiffLabelProvider(CellLabelProvider orig)
+    {
+        if (orig == null)
+            return null;
+        Object dimmed = Global.getField(orig, "dimmedForegroundColor"); //$NON-NLS-1$
+        Object copy = dimmed instanceof Color c && !c.isDisposed()
+            ? Global.newInstance(orig.getClass(), c.getRGB())
+            : null;
+        // #region agent log #599
+        Global.tempLog("gitHistory599", "ownFileDiffLabelProvider orig=" + describe(orig) //$NON-NLS-1$ //$NON-NLS-2$
+            + " dimmed=" + describe(dimmed) + " copy=" + describe(copy)); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
+        return copy instanceof CellLabelProvider clp ? clp : orig;
+    }
+
+    private static String describe(Object o)
+    {
+        return o == null ? "null" : o.getClass().getSimpleName() + "@" + System.identityHashCode(o); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private static boolean isGenericHistoryView(IViewPart view)
@@ -811,24 +896,18 @@ public final class GitHistoryHook implements IStartup
         CellLabelProvider origLabelProvider, TableColumn fileCol, TableColumn typeCol, TableColumn pathCol,
         TableColumn statusCol)
     {
+        // Структура проверена в tryPatch (historyControlOf) до создания колонок.
         Composite revInfoSplit = table.getParent();
-        if (revInfoSplit == null || revInfoSplit.isDisposed())
-            return;
-
         Composite graphDetailSplit = revInfoSplit.getParent();
-        if (graphDetailSplit == null || graphDetailSplit.isDisposed())
-            return;
-
         Composite historyControl = graphDetailSplit.getParent();
-        if (historyControl == null || historyControl.isDisposed())
-            return;
 
+        // Аргументы Debug.log вычисляются и при выключенном журнале — getLayout() может быть null.
         Debug.log("revInfoSplit=" + revInfoSplit.getClass().getSimpleName()
             + " children=" + childrenStr(revInfoSplit));
         Debug.log("graphDetailSplit=" + graphDetailSplit.getClass().getSimpleName()
-            + " layout=" + historyControl.getLayout().getClass().getSimpleName()
+            + " layout=" + describe(historyControl.getLayout())
             + " children=" + childrenStr(graphDetailSplit));
-        Debug.log("historyControl layout=" + historyControl.getLayout().getClass().getSimpleName()
+        Debug.log("historyControl layout=" + describe(historyControl.getLayout())
             + " children=" + childrenStr(historyControl));
 
         // --- Новый горизонтальный SashForm: graphDetailSplit | wrapper ---
@@ -850,8 +929,12 @@ public final class GitHistoryHook implements IStartup
         GitHistoryFileFilter filter = new GitHistoryFileFilter();
         fileViewer.addFilter(filter);
 
+        // setLabelProvider освобождает прежний провайдер (ColumnViewer.internalDisposeLabelProvider,
+        // после refresh) — штатный FileDiffLabelProvider уничтожает свой LocalResourceManager вместе
+        // с картинками, уже выданными строкам: «Graphic is disposed» при отрисовке (#599).
+        // Поэтому обёртка владеет СВОИМ экземпляром, а штатный освобождается, как и положено.
         GitHistoryFileLabelProvider labelProvider =
-            new GitHistoryFileLabelProvider(origLabelProvider);
+            new GitHistoryFileLabelProvider(ownFileDiffLabelProvider(origLabelProvider));
         fileViewer.setLabelProvider(labelProvider);
 
         final FormTableInteraction[] interactionRef = new FormTableInteraction[1];
