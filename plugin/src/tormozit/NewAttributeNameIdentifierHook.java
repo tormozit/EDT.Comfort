@@ -68,8 +68,9 @@ public class NewAttributeNameIdentifierHook implements IStartup
     private static final String WIZARD_ANCESTOR_CLASS =
         "com._1c.g5.v8.dt.md.ui.wizards.base.aef.DtAefMdNewWizard"; //$NON-NLS-1$
     private static final String LOG_TAG = "NewAttributeNameIdentifier"; //$NON-NLS-1$
-    private static final String IR_TYPE_MODULE = "ирОбщий"; //$NON-NLS-1$
-    private static final String IR_TYPE_FUNCTION = "ИмяТипаИзИмениПеременнойЛкс"; //$NON-NLS-1$
+    /** Функция ИР подбора типа по имени; также кнопка «Лучший ИР» в {@link SmartOutlineHook}. */
+    static final String IR_TYPE_MODULE = "ирОбщий"; //$NON-NLS-1$
+    static final String IR_TYPE_FUNCTION = "ИмяТипаИзИмениПеременнойЛкс"; //$NON-NLS-1$
     private static final String DEFAULT_TYPE_NAME_RU = "Строка"; //$NON-NLS-1$
     private static final int DEFAULT_STRING_LENGTH = 10;
 
@@ -336,21 +337,7 @@ public class NewAttributeNameIdentifierHook implements IStartup
             return;
         try
         {
-            Object typesObj = Global.invoke(typeModel, "getTypes", Boolean.FALSE); //$NON-NLS-1$
-            if (!(typesObj instanceof List<?> types))
-                return;
-
-            Object matched = null;
-            for (Object item : types)
-            {
-                Object nameRu = Global.invoke(item, "getNameRu"); //$NON-NLS-1$
-                Object name = Global.invoke(item, "getName"); //$NON-NLS-1$
-                if (irResult.equalsIgnoreCase(String.valueOf(nameRu)) || irResult.equalsIgnoreCase(String.valueOf(name)))
-                {
-                    matched = item;
-                    break;
-                }
-            }
+            Object matched = findTypeItemByIrName(typeModel, irResult);
             if (matched == null)
                 return;
 
@@ -362,5 +349,28 @@ public class NewAttributeNameIdentifierHook implements IStartup
         {
             Global.logError(LOG_TAG, "applyIrType", e); //$NON-NLS-1$
         }
+    }
+
+    /**
+     * {@link com._1c.g5.v8.dt.mcore.TypeItem} из доступных типов {@code typeModel}
+     * ({@code ITypeDescriptionModel.getTypes(false)}), имя которого (рус. или англ.) совпадает
+     * со строкой, возвращённой ИР; {@code null}, если такого нет.
+     */
+    static Object findTypeItemByIrName(Object typeModel, String irResult)
+    {
+        if (typeModel == null || irResult == null || irResult.isBlank())
+            return null;
+        String wanted = irResult.trim();
+        Object typesObj = Global.invoke(typeModel, "getTypes", Boolean.FALSE); //$NON-NLS-1$
+        if (!(typesObj instanceof List<?> types))
+            return null;
+        for (Object item : types)
+        {
+            Object nameRu = Global.invoke(item, "getNameRu"); //$NON-NLS-1$
+            Object name = Global.invoke(item, "getName"); //$NON-NLS-1$
+            if (wanted.equalsIgnoreCase(String.valueOf(nameRu)) || wanted.equalsIgnoreCase(String.valueOf(name)))
+                return item;
+        }
+        return null;
     }
 }

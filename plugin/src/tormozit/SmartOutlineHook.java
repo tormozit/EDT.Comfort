@@ -55,8 +55,11 @@ import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.handlers.IHandlerActivation;
 import org.eclipse.ui.handlers.IHandlerService;
 
+import org.eclipse.core.resources.IProject;
+
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.common.ui.controls.search.SearchBox;
+import com._1c.g5.v8.dt.core.platform.IDtProject;
 
 import org.eclipse.jface.viewers.StyledString;
 
@@ -87,6 +90,7 @@ public class SmartOutlineHook implements IStartup {
     private static final String PENDING_CLEAR_SELECTION_KEY = "tormozit.outlinePendingClearSelection"; //$NON-NLS-1$
     private static final String OUTLINE_RECENT_ON_OPEN_KEY = "tormozit.outlineRecentOnOpen"; //$NON-NLS-1$
     private static final String TYPE_MARKED_CHECKBOX_KEY = "tormozit.typeMarkedCheckbox"; //$NON-NLS-1$
+    private static final String LOG_TAG_IR_BEST_TYPE = "IrBestType"; //$NON-NLS-1$
 
     /** Число пометок, показанное в подписи флажка «Только помеченные (N)» (данные самого флажка). */
     private static final String MARKED_COUNT_KEY = "tormozit.markedCount"; //$NON-NLS-1$
@@ -531,6 +535,7 @@ public class SmartOutlineHook implements IStartup {
                 // --- Флажок «Только помеченные» в filterRow справа от SearchBox ---
                 installOnlyMarkedCheckbox(patchedShell, viewer, smartFilter,
                         highlightControl, aefTree, filterRow);
+                installIrBestTypeButton(patchedShell, viewer, filterRow);
             } else {
                 fc = filterControl;
             }
@@ -1800,6 +1805,7 @@ public class SmartOutlineHook implements IStartup {
                 () -> onlyMarkedBtn.getDisplay().asyncExec(
                     () -> updateOnlyMarkedButtonText(onlyMarkedBtn, multiItems, buttonParent, viewer,
                         applyMarkedOnly)));
+            installSingleTypeDoubleClick(patchedShell, viewer);
         }
         else
             installObjectPickerExtras(patchedShell, viewer, onlyMarkedBtn, buttonParent, applyMarkedOnly);
@@ -1836,6 +1842,230 @@ public class SmartOutlineHook implements IStartup {
     }
 
     /**
+     * Кнопка «Лучший ИР» слева от «ОК» диалога «Редактирование типа данных» — только если к
+     * проекту подключено приложение ИР. Подбирает тип по имени владельца свойства
+     * ({@code ITypeDescriptionModel.getParent()}, обычно реквизит) той же функцией ИР, что и
+     * автоподбор типа в «Новый реквизит» ({@link NewAttributeNameIdentifierHook}), и помечает его
+     * в дереве: без составного типа — заменяет пометку, с составным — добавляет к помеченным.
+     *
+     * @param fallbackParent куда положить кнопку, если «ОК» не найдена (строка фильтра)
+     */
+    private static void installIrBestTypeButton(Shell shell, TreeViewer viewer, Composite fallbackParent)
+    {
+        Object model = resolveTypeDescriptionModel(shell);
+        if (model == null)
+            return;
+        IDtProject dtProject = resolveIrDtProject(model);
+        if (dtProject == null || !IRApplication.hasConnectedSessionForKeys(dtProject))
+            return;
+
+        Button ok = shell.getDefaultButton();
+        if (ok == null || ok.isDisposed())
+            ok = findButtonRecursive(shell, "OK"); //$NON-NLS-1$
+        Composite buttonParent = ok != null && !ok.isDisposed() ? ok.getParent() : fallbackParent;
+        if (buttonParent == null || buttonParent.isDisposed())
+            return;
+
+        String ownerName = typeOwnerName(model);
+        // Штатная панель кнопок: +1 колонка, ширина новой кнопки — как у «ОК» (сама панель не
+        // растягивается, см. makeColumnsEqualWidth).
+        if (buttonParent.getLayout() instanceof GridLayout grid)
+            grid.numColumns++;
+        Button button = new Button(buttonParent, SWT.PUSH);
+        button.setText("Лучший ИР"); //$NON-NLS-1$
+        GridData gd = new GridData(ok != null ? SWT.FILL : SWT.BEGINNING, SWT.CENTER, false, false);
+        if (ok != null && ok.getLayoutData() instanceof GridData okGd)
+            gd.widthHint = Math.max(okGd.widthHint, button.computeSize(SWT.DEFAULT, SWT.DEFAULT, true).x);
+        button.setLayoutData(gd);
+        if (ok != null)
+            button.moveAbove(ok);
+        boolean hasName = ownerName != null;
+        button.setEnabled(hasName);
+        button.setToolTipText(TooltipText.wrap(button,
+            (hasName ? "Пометить тип, который ИР подбирает по имени «" + ownerName + "»" //$NON-NLS-1$ //$NON-NLS-2$
+                : "Недоступно: не удалось определить имя владельца типа") //$NON-NLS-1$
+                + Global.pluginSignForTooltip()));
+        button.addListener(SWT.Selection, e ->
+            Global.callIrFunctionInBackground(dtProject, NewAttributeNameIdentifierHook.IR_TYPE_MODULE,
+                NewAttributeNameIdentifierHook.IR_TYPE_FUNCTION, new Object[] { ownerName },
+                () -> !shell.isDisposed(),
+                result ->
+                {
+                    Object matched = applyIrBestType(model, result);
+                    if (matched == null)
+                        return;
+                    refreshTypeDialogTree(shell);
+                    // TreeRefreshEvent только ставится в очередь — выделяем после перерисовки.
+                    shell.getDisplay().asyncExec(() -> revealBestType(shell, viewer, model, matched));
+                }));
+
+        // Панель кнопок стала шире — дорастить окно, только если она больше не помещается в
+        // строку родителя. Сравнивать с шириной самой панели нельзя: штатная панель JFace прижата
+        // вправо и шириной равна своим кнопкам, поэтому любая новая кнопка «не помещалась» бы и
+        // окно расширялось при каждом открытии, хотя свободного места в строке хватало.
+        int need = buttonParent.computeSize(SWT.DEFAULT, SWT.DEFAULT, true).x
+            - availableRowWidth(buttonParent);
+        if (need > 0 && buttonParent.getSize().x > 0)
+        {
+            Point size = shell.getSize();
+            shell.setSize(size.x + need, size.y);
+        }
+        shell.layout(true, true);
+    }
+
+    /**
+     * Ширина, которую родитель может отдать контролу в строке: клиентская область родителя за
+     * вычетом полей его {@link GridLayout}.
+     */
+    private static int availableRowWidth(Control control)
+    {
+        Composite parent = control.getParent();
+        if (parent == null || parent.isDisposed())
+            return control.getSize().x;
+        int width = parent.getClientArea().width;
+        if (parent.getLayout() instanceof GridLayout grid)
+            width -= 2 * grid.marginWidth + grid.marginLeft + grid.marginRight;
+        return width;
+    }
+
+    /** Проект с ИР — по проекту самой модели типа, иначе активный. */
+    private static IDtProject resolveIrDtProject(Object model)
+    {
+        Object v8project = Global.invoke(model, "getV8project"); //$NON-NLS-1$
+        Object wsProject = v8project != null ? Global.invoke(v8project, "getProject") : null; //$NON-NLS-1$
+        IProject project = wsProject instanceof IProject p ? p
+            : Global.getActiveProject((org.eclipse.ui.IWorkbenchPage) null, false);
+        return project != null ? Global.getDtProjectFromWorkspaceProject(project) : null;
+    }
+
+    /** Имя объекта-владельца свойства типа ({@code getParent()}, затем {@code getParentContext()}). */
+    private static String typeOwnerName(Object model)
+    {
+        for (String getter : new String[] { "getParent", "getParentContext" }) //$NON-NLS-1$ //$NON-NLS-2$
+        {
+            Object owner = Global.invoke(model, getter);
+            Object name = owner != null ? Global.invoke(owner, "getName") : null; //$NON-NLS-1$
+            if (name instanceof String s && !s.isBlank())
+                return s;
+        }
+        return null;
+    }
+
+    /**
+     * Перерисовка дерева типов после пометки из кода: диалог на изменение {@code multiItems}
+     * дерево не обновляет (его {@code IListListener} обновляет только статус и квалификаторы),
+     * пометки пересчитываются только по {@code TreeRefreshEvent} — так же, как делает сам диалог
+     * при переключении «Составной тип» ({@code TypeDescriptionDialogComponent$1.valueChanged}).
+     */
+    private static void refreshTypeDialogTree(Shell shell)
+    {
+        try
+        {
+            Object component = resolveTypeDescriptionComponent(shell);
+            Object treeComponent = component != null ? Global.getField(component, "treeComponent") : null; //$NON-NLS-1$
+            if (treeComponent == null)
+                return;
+            ClassLoader loader = component.getClass().getClassLoader();
+            Class<?> itemClass = Class.forName("com._1c.g5.aef2.standard.viewModels.TreeItemViewModel", false, loader); //$NON-NLS-1$
+            Class<?> eventClass = Class.forName("com._1c.g5.v8.dt.ui.aef.events.TreeRefreshEvent", true, loader); //$NON-NLS-1$
+            Object emptyItems = java.lang.reflect.Array.newInstance(itemClass, 0);
+            Object event = eventClass.getConstructor(emptyItems.getClass()).newInstance(emptyItems);
+            Global.invokeVoid(treeComponent, "queueEvent", event); //$NON-NLS-1$
+        }
+        catch (Exception e)
+        {
+            Global.logError(LOG_TAG_IR_BEST_TYPE, "refreshTypeDialogTree", e); //$NON-NLS-1$
+        }
+    }
+
+    /**
+     * Сворачивает всё дерево типов, раскрывает только путь к {@code typeItem} и делает его строку
+     * текущей. Строки дерева — {@code TreeItemViewModel}; {@code TypeItem} переводится в строку
+     * штатным маппером компонента дерева ({@code mapModelToView}, как в
+     * {@code InternalTypeDescriptionDialogTreeComponent.createViewModels}).
+     */
+    private static void revealBestType(Shell shell, TreeViewer viewer, Object model, Object typeItem)
+    {
+        try
+        {
+            if (shell.isDisposed() || viewer == null || viewer.getTree() == null || viewer.getTree().isDisposed())
+                return;
+            Object component = resolveTypeDescriptionComponent(shell);
+            Object treeComponent = component != null ? Global.getField(component, "treeComponent") : null; //$NON-NLS-1$
+            Object mapper = treeComponent != null ? Global.invoke(treeComponent, "getMapper") : null; //$NON-NLS-1$
+            Object row = mapper != null ? Global.invoke(mapper, "mapModelToView", typeItem) : null; //$NON-NLS-1$
+            if (row == null)
+                return;
+
+            Object selectedItem = Global.invoke(model, "getSelectedItem"); //$NON-NLS-1$
+            if (selectedItem != null)
+                Global.invokeVoid(selectedItem, "set", typeItem); //$NON-NLS-1$
+
+            Tree tree = viewer.getTree();
+            tree.setRedraw(false);
+            try
+            {
+                viewer.collapseAll();
+                Set<Object> toExpand = new LinkedHashSet<>();
+                addAncestorChain(viewer, row, toExpand);
+                if (!toExpand.isEmpty())
+                    viewer.setExpandedElements(toExpand.toArray());
+                viewer.setSelection(new StructuredSelection(row), true);
+            }
+            finally
+            {
+                if (!tree.isDisposed())
+                    tree.setRedraw(true);
+            }
+            tree.setFocus();
+            keepSelectionVisible(viewer);
+        }
+        catch (Exception e)
+        {
+            Global.logError(LOG_TAG_IR_BEST_TYPE, "revealBestType", e); //$NON-NLS-1$
+        }
+    }
+
+    /** @return помеченный {@code TypeItem} (в т. ч. уже помеченный ранее) или {@code null}. */
+    private static Object applyIrBestType(Object model, String irResult)
+    {
+        try
+        {
+            Object matched = NewAttributeNameIdentifierHook.findTypeItemByIrName(model, irResult);
+            Object multiItems = Global.invoke(model, "getMultiItems"); //$NON-NLS-1$
+            if (matched == null || !(multiItems instanceof java.util.List<?>))
+            {
+                Global.log(LOG_TAG_IR_BEST_TYPE, "тип ИР не сопоставлен: «" + irResult + "»"); //$NON-NLS-1$ //$NON-NLS-2$
+                return null;
+            }
+            Object composite = Global.invoke(model, "getCompositeType"); //$NON-NLS-1$
+            Object compositeValue = composite != null ? Global.invoke(composite, "get") : null; //$NON-NLS-1$
+            @SuppressWarnings("unchecked")
+            java.util.List<Object> list = (java.util.List<Object>) multiItems;
+            if (Boolean.TRUE.equals(compositeValue))
+            {
+                // Пометка в дереве сравнивается по имени типа, не по экземпляру TypeItem.
+                Object matchedName = Global.invoke(matched, "getName"); //$NON-NLS-1$
+                for (Object item : list)
+                {
+                    if (item != null && java.util.Objects.equals(matchedName, Global.invoke(item, "getName"))) //$NON-NLS-1$
+                        return matched;
+                }
+                list.add(matched);
+            }
+            else
+                Global.invokeVoid(list, "fill", java.util.List.of(matched)); //$NON-NLS-1$
+            Global.log(LOG_TAG_IR_BEST_TYPE, "тип подобран через ИР: " + irResult); //$NON-NLS-1$
+            return matched;
+        }
+        catch (Exception e)
+        {
+            Global.logError(LOG_TAG_IR_BEST_TYPE, "applyIrBestType", e); //$NON-NLS-1$
+            return null;
+        }
+    }
+
+    /**
      * Держит выбранную строку в видимой области после перефильтрации: сам по себе
      * {@code refresh()} сохраняет выбор, но прокрутку не восстанавливает, и строка уезжает.
      * {@code asyncExec} — чтобы прокрутка отработала после отложенного рендера дерева.
@@ -1864,14 +2094,20 @@ public class SmartOutlineHook implements IStartup {
      */
     private static Object resolveTypeDescriptionModel(Shell shell)
     {
+        Object eventChannel = resolveTypeDescriptionComponent(shell);
+        return eventChannel != null ? Global.invoke(eventChannel, "getModel") : null; //$NON-NLS-1$
+    }
+
+    /** {@code TypeDescriptionDialogComponent} — компонент диалога «Редактирование типа данных». */
+    private static Object resolveTypeDescriptionComponent(Shell shell)
+    {
         if (shell == null || shell.isDisposed())
             return null;
         Object dialog = findDialog(shell);
         if (dialog == null)
             return null;
         Object dialogViewModel = Global.getField(dialog, "val$dialogViewModel"); //$NON-NLS-1$
-        Object eventChannel = dialogViewModel != null ? Global.getField(dialogViewModel, "eventChannel") : null; //$NON-NLS-1$
-        return eventChannel != null ? Global.invoke(eventChannel, "getModel") : null; //$NON-NLS-1$
+        return dialogViewModel != null ? Global.getField(dialogViewModel, "eventChannel") : null; //$NON-NLS-1$
     }
 
     /**
@@ -1972,6 +2208,58 @@ public class SmartOutlineHook implements IStartup {
                 return;
             markCurrentRowAndOk(shell, viewer);
         });
+    }
+
+    /**
+     * «Редактирование типа данных» при выключенном флажке «Составной тип»: двойной клик по строке
+     * ставит на ней пометку (заменяя прежнюю) и закрывает окно по OK. Флажок читается в момент
+     * клика — пользователь может переключать его при открытом окне.
+     */
+    private static void installSingleTypeDoubleClick(Shell shell, TreeViewer viewer)
+    {
+        Tree tree = viewer != null ? viewer.getTree() : null;
+        if (shell == null || shell.isDisposed() || tree == null || tree.isDisposed())
+            return;
+        installSingleTypeTitleHint(shell);
+        tree.addListener(SWT.MouseDoubleClick, event ->
+        {
+            Object model = resolveTypeDescriptionModel(shell);
+            Object composite = model != null ? Global.invoke(model, "getCompositeType") : null; //$NON-NLS-1$
+            Object value = composite != null ? Global.invoke(composite, "get") : null; //$NON-NLS-1$
+            if (!Boolean.FALSE.equals(value) || tree.getSelectionCount() == 0)
+                return;
+            Object element = tree.getSelection()[0].getData();
+            if (element == null || !isCheckablePickerElement(element))
+                return;
+            if (SmartOutlineFilter.isElementChecked(element))
+            {
+                pressDialogOk(shell);
+                return;
+            }
+            markCurrentRowAndOk(shell, viewer);
+        });
+    }
+
+    /** Подсказка в заголовке окна, пока флажок «Составной тип данных» снят. */
+    private static void installSingleTypeTitleHint(Shell shell)
+    {
+        Object model = resolveTypeDescriptionModel(shell);
+        Object composite = model != null ? Global.invoke(model, "getCompositeType") : null; //$NON-NLS-1$
+        if (composite == null)
+            return;
+        final String hint = " (двойной клик)"; //$NON-NLS-1$
+        final String baseTitle = shell.getText();
+        Runnable update = () ->
+        {
+            if (shell.isDisposed())
+                return;
+            Object value = Global.invoke(composite, "get"); //$NON-NLS-1$
+            shell.setText(Boolean.FALSE.equals(value) ? baseTitle + hint : baseTitle);
+        };
+        update.run();
+        Global.addGenericListener(composite, "addValueListener", //$NON-NLS-1$
+            "com._1c.g5.aef2.models.value.IValueListener", //$NON-NLS-1$
+            () -> shell.getDisplay().asyncExec(update));
     }
 
     private static int countCheckedInTree(TreeViewer viewer)
