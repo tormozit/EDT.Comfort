@@ -25,6 +25,11 @@
     <check
         category="tormozit.comfort.checks"
         class="tormozit.checks.BrokenFormPictureCheck"/>
+    <check category="tormozit.comfort.checks" class="tormozit.checks.StaticFeatureAccessChecks$Parameters"/>
+    <check category="tormozit.comfort.checks" class="tormozit.checks.StaticFeatureAccessChecks$Obsolete"/>
+    <check category="tormozit.comfort.checks" class="tormozit.checks.StaticFeatureAccessChecks$Compatibility"/>
+    <check category="tormozit.comfort.checks" class="tormozit.checks.StaticFeatureAccessChecks$VariableAccess"/>
+    <check category="tormozit.comfort.checks" class="tormozit.checks.StaticFeatureAccessChecks$EventHandler"/>
   </extension>
 
 </plugin>

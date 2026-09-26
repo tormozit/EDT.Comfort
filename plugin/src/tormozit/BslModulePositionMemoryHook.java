@@ -184,7 +184,6 @@ public class BslModulePositionMemoryHook implements IStartup
                 IEditorPart ed = ((IEditorReference) ref).getEditor(false);
                 if (ed != null)
                 {
-                    Global.tempLog("bsl-module-position", "part activated: input=" + ed.getEditorInput());
                     hookEditorIfNeeded(ed);
                 }
             }
@@ -247,7 +246,6 @@ public class BslModulePositionMemoryHook implements IStartup
 
     private void hookBslEditor(BslXtextEditor editor)
     {
-        Global.tempLog("bsl-module-position", "editor hooked: input=" + editor.getEditorInput());
         Display.getDefault().asyncExec(() -> attachToBslEditor(editor, 0));
     }
 
@@ -255,8 +253,6 @@ public class BslModulePositionMemoryHook implements IStartup
     {
         if (editor.getSite() == null || isWorkbenchClosing())
         {
-            Global.tempLog("bsl-module-position", "attach stopped: input=" + editor.getEditorInput()
-                + ", site=" + editor.getSite() + ", closing=" + isWorkbenchClosing());
             return;
         }
 
@@ -265,7 +261,6 @@ public class BslModulePositionMemoryHook implements IStartup
         {
             if (attempt >= MAX_ATTACH_ATTEMPTS)
             {
-                Global.tempLog("bsl-module-position", "attach exhausted: input=" + editor.getEditorInput());
                 return;
             }
             Display.getDefault().asyncExec(() -> attachToBslEditor(editor, attempt + 1));
@@ -275,14 +270,11 @@ public class BslModulePositionMemoryHook implements IStartup
         StyledText textWidget = ((SourceViewer) viewer).getTextWidget();
         if (textWidget == null || textWidget.isDisposed())
         {
-            Global.tempLog("bsl-module-position", "attach stopped: text widget unavailable, input="
-                + editor.getEditorInput());
             return;
         }
 
         if (!Boolean.TRUE.equals(textWidget.getData(RESTORE_MARKER)))
         {
-            Global.tempLog("bsl-module-position", "viewer attached: input=" + editor.getEditorInput());
             textWidget.setData(RESTORE_MARKER, Boolean.TRUE);
             restorePosition(editor, viewer);
 
@@ -323,14 +315,11 @@ public class BslModulePositionMemoryHook implements IStartup
     private static void restorePosition(BslXtextEditor editor, ISourceViewer viewer)
     {
         String key = moduleKey(editor);
-        Global.tempLog("bsl-module-position", "restore requested: key=" + key);
         if (key == null)
         {
             return;
         }
         int[] pos = ModulePositionStore.load(key);
-        Global.tempLog("bsl-module-position", "stored position: key=" + key
-            + ", value=" + java.util.Arrays.toString(pos));
         if (pos == null)
         {
             updateLiveCache(editor, viewer);
@@ -350,63 +339,39 @@ public class BslModulePositionMemoryHook implements IStartup
                     && viewer.getSelectionProvider().getSelection() instanceof ITextSelection currentSel
                     && currentSel.getOffset() != 0)
                 {
-                    Global.tempLog("bsl-module-position", "restore skipped: key=" + key
-                        + ", selectionOffset=" + currentSel.getOffset());
                     updateLiveCache(editor, viewer);
                     return;
                 }
                 IDocument doc = viewer.getDocument();
                 if (doc == null)
                 {
-                    Global.tempLog("bsl-module-position", "restore skipped: key=" + key + ", document=null");
                     return;
                 }
                 int offset = clampToDocument(doc, pos[0], pos[1]);
                 editor.selectAndReveal(offset, 0);
                 updateLiveCache(editor, viewer);
-                Global.tempLog("bsl-module-position", "restore applied: key=" + key
-                    + ", offset=" + offset + ", documentLength=" + doc.getLength());
-                logActualPosition(viewer, key, "immediately after restore");
-                Display.getDefault().timerExec(1000,
-                    () -> logActualPosition(viewer, key, "one second after restore"));
                 // Ставим каретку в середину области просмотра, а не первой строкой во viewport.
                 if (viewer instanceof SourceViewer)
                 {
                     StyledText textWidget = ((SourceViewer)viewer).getTextWidget();
                     if (textWidget != null && !textWidget.isDisposed())
                     {
-                        centerCaretInViewport(textWidget, key);
+                        centerCaretInViewport(textWidget);
                     }
                 }
             }
             catch (Exception e)
             {
-                Global.tempLog("bsl-module-position", "restore failed: key=" + key + ", error=" + e);
             }
         });
     }
 
-    private static void logActualPosition(ISourceViewer viewer, String key, String phase)
-    {
-        if (!(viewer instanceof SourceViewer))
-            return;
-        StyledText widget = ((SourceViewer) viewer).getTextWidget();
-        if (widget == null || widget.isDisposed())
-        {
-            Global.tempLog("bsl-module-position", phase + ": key=" + key + ", widget unavailable");
-            return;
-        }
-        Global.tempLog("bsl-module-position", phase + ": key=" + key
-            + ", widgetCaret=" + widget.getCaretOffset()
-            + ", visible=" + widget.isVisible() + ", focus=" + widget.isFocusControl());
-    }
-
     /** Помещает строку каретки примерно в середину текущей видимой области. */
-    private static void centerCaretInViewport(StyledText textWidget, String key)
+    private static void centerCaretInViewport(StyledText textWidget)
     {
         if (textWidget.getClientArea().height <= 0)
         {
-            centerCaretOnFirstReadyResize(textWidget, key);
+            centerCaretOnFirstReadyResize(textWidget);
             return;
         }
         int lineHeight = Math.max(1, textWidget.getLineHeight());
@@ -417,7 +382,7 @@ public class BslModulePositionMemoryHook implements IStartup
     }
 
     /** При startup размер поля ещё нулевой; центрирование откладывается до первой раскладки. */
-    private static void centerCaretOnFirstReadyResize(StyledText textWidget, String key)
+    private static void centerCaretOnFirstReadyResize(StyledText textWidget)
     {
         if (Boolean.TRUE.equals(textWidget.getData(CENTER_ON_RESIZE_MARKER)))
             return;
@@ -431,7 +396,7 @@ public class BslModulePositionMemoryHook implements IStartup
                     return;
                 textWidget.removeListener(SWT.Resize, this);
                 textWidget.setData(CENTER_ON_RESIZE_MARKER, null);
-                centerCaretInViewport(textWidget, key);
+                centerCaretInViewport(textWidget);
             }
         };
         textWidget.addListener(SWT.Resize, listener);
@@ -471,12 +436,9 @@ public class BslModulePositionMemoryHook implements IStartup
             IRegion li = doc.getLineInformation(line0);
             int column = textSel.getOffset() - li.getOffset();
             ModulePositionStore.updateMemory(key, line0, column);
-            Global.tempLog("bsl-module-position", "cache updated: key=" + key
-                + ", line=" + line0 + ", column=" + column);
         }
         catch (Exception e)
         {
-            Global.tempLog("bsl-module-position", "cache update failed: error=" + e);
         }
     }
 

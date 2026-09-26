@@ -286,7 +286,6 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
         new TitleObjectLink(form, titleText, mdObject, editor);
     }
 
-
     /**
      * Штатный заголовок EDT — «Справочники → Валюты → Формы → …». Комфорт приводит
      * его к полному имени с именем проекта спереди: «БСП.Справочник.Валюты.Форма.…».
@@ -353,7 +352,7 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
 
         String objectName = mdObject == null ? null : mdObject.getName();
         StringBuilder formatted = new StringBuilder();
-        for (int i = 0; i < parts.length; i++)
+        for (int i = projectRootedPathStart(parts, lastNonEmpty, editor); i < parts.length; i++)
         {
             String segment = parts[i].strip();
             if (segment.isEmpty())
@@ -369,6 +368,30 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
                 formatted.append(segment);
         }
         return formatted.length() == 0 ? title : projectPrefix + formatted;
+    }
+
+    /**
+     * Начало пути объекта без корня рабочей области и проекта. У объектов внешних
+     * обработок и отчётов штатный путь, как и у конфигурации, начинается от корня:
+     * «Рабочая область → ВнешнийОтчет → Отчеты → Анализ → Основные». Имя проекта и так
+     * стоит спереди заголовка, поэтому корень и проект отбрасываются.
+     *
+     * <p>Проект узнаётся по имени во втором сегменте; первый сегмент при этом не должен
+     * быть системным словом — иначе это обычный путь «Справочники → Валюты → …»
+     * объекта, названного как проект.
+     *
+     * @return индекс первого сегмента пути объекта; {@code 0}, если путь не от корня
+     */
+    private static int projectRootedPathStart(String[] parts, int lastNonEmpty, IEditorPart editor)
+    {
+        IProject project = Global.getActiveProject(editor, false);
+        String projectName = project == null ? null : project.getName();
+        if (projectName == null || projectName.isBlank() || lastNonEmpty < 3)
+            return 0;
+        String root = parts[0].strip();
+        if (root.isEmpty() || MdTypeMapping.systemLabelToSingular(root) != null)
+            return 0;
+        return projectName.equals(parts[1].strip()) ? 2 : 0;
     }
 
     /** Имя проекта редактора с точкой-разделителем, либо пустая строка, если оно недоступно. */

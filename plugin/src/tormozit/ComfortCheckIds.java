@@ -18,7 +18,13 @@ public final class ComfortCheckIds
     public static final String BSL_AST_TRUNCATION = "comfort-bsl-ast-truncation"; //$NON-NLS-1$
 
     /** {@code tormozit.checks.BrokenFormPictureCheck} — битая ссылка на картинку в форме. */
-    public static final String BROKEN_FORM_PICTURE = "tormozit.comfort.check.brokenFormPicture"; //$NON-NLS-1$
+    public static final String BROKEN_FORM_PICTURE = "comfort.check.brokenFormPicture"; //$NON-NLS-1$
+
+    public static final String STATIC_ACCESS_PARAMETERS = "comfort-bsl-static-access-parameters"; //$NON-NLS-1$
+    public static final String STATIC_ACCESS_OBSOLETE = "comfort-bsl-static-access-obsolete"; //$NON-NLS-1$
+    public static final String STATIC_ACCESS_COMPATIBILITY = "comfort-bsl-static-access-compatibility"; //$NON-NLS-1$
+    public static final String STATIC_ACCESS_VARIABLE = "comfort-bsl-static-access-variable"; //$NON-NLS-1$
+    public static final String STATIC_ACCESS_EVENT_HANDLER = "comfort-bsl-static-access-event-handler"; //$NON-NLS-1$
 
     private ComfortCheckIds() {}
 }

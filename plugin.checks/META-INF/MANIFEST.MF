@@ -3,7 +3,7 @@ Bundle-ManifestVersion: 2
 Bundle-SymbolicName: tormozit.comfort.checks;singleton:=true
 Bundle-Name: EDT Comfort Checks
 Bundle-Vendor: Tormozit
-Bundle-Version: 1.0.0
+Bundle-Version: 1.0.1
 Bundle-ActivationPolicy: lazy
 Bundle-RequiredExecutionEnvironment: JavaSE-17
 Require-Bundle: tormozit.comfort,
@@ -22,5 +22,6 @@ Require-Bundle: tormozit.comfort,
  com._1c.g5.v8.dt.metadata;bundle-version="[0.0.0,100.0.0)",
  com._1c.g5.v8.dt.form.model;bundle-version="[0.0.0,100.0.0)",
  com._1c.g5.v8.dt.bsl.model,
+ com._1c.g5.v8.dt.bsl,
  com._1c.g5.v8.dt.validation,
  com.e1c.g5.v8.dt.check;bundle-version="[0.0.0,100.0.0)"

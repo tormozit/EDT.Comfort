@@ -1,5 +1,19 @@
 package tormozit;
 
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.List;
+import java.util.Set;
+
+import org.eclipse.core.resources.IProject;
+import org.eclipse.core.resources.IResourceChangeEvent;
+import org.eclipse.core.resources.IResourceChangeListener;
+import org.eclipse.core.resources.IResourceDelta;
+import org.eclipse.core.resources.ResourcesPlugin;
+import org.eclipse.core.runtime.IProgressMonitor;
+import org.eclipse.core.runtime.IStatus;
+import org.eclipse.core.runtime.Status;
+import org.eclipse.core.runtime.jobs.Job;
 
 import org.eclipse.core.runtime.Plugin;
 import org.eclipse.swt.widgets.Display;
@@ -20,6 +34,11 @@ import com._1c.g5.wiring.AbstractGuiceAwareExecutableExtensionFactory;
 import com._1c.g5.wiring.AbstractServiceAwareModule;
 import com.google.inject.Guice;
 import com.google.inject.Injector;
+import com.e1c.g5.v8.dt.check.settings.CheckSettingsChange;
+import com.e1c.g5.v8.dt.check.settings.CheckUid;
+import com.e1c.g5.v8.dt.check.settings.ICheckRepository;
+import com.e1c.g5.v8.dt.check.settings.ICheckSettings;
+import com.e1c.g5.v8.dt.check.settings.ICheckSettingsChangeListener;
 
 /**
  * Activator (точка входа) плагина EDT Compare - Open Object.
@@ -155,11 +174,13 @@ public class Activator extends AbstractUIPlugin
         BslDocCommentDescriptionFix.install();
         BslDocCommentTypeMerge.install();
         BslXtextDocumentHook.install();
+        StaticFeatureAccessReplacement.start();
     }
 
     @Override
     public void stop(BundleContext context) throws Exception
     {
+        StaticFeatureAccessReplacement.stop();
         IRApplication.disconnectAll();
 
         ContentAssistManager mgr = ContentAssistManager.getInstance();
@@ -208,5 +229,141 @@ public class Activator extends AbstractUIPlugin
     }
     private Injector createInjector() {
         return Guice.createInjector(new ExternalDependenciesModule(this));
+    }
+
+    /**
+     * Штатная проверка не должна выдавать те же проблемы, что её замены: если в проекте включена
+     * хотя бы одна из пяти замен, штатная отключается (и снова отключается при её включении).
+     * Об этом сказано в описаниях всех шести проверок.
+     */
+    private static final class StaticFeatureAccessReplacement
+    {
+        private static final String BUILTIN_ID = "bsl-legacy-check-static-feature-access"; //$NON-NLS-1$
+        private static final String[] REPLACEMENT_IDS = { ComfortCheckIds.STATIC_ACCESS_PARAMETERS,
+            ComfortCheckIds.STATIC_ACCESS_OBSOLETE, ComfortCheckIds.STATIC_ACCESS_COMPATIBILITY,
+            ComfortCheckIds.STATIC_ACCESS_VARIABLE, ComfortCheckIds.STATIC_ACCESS_EVENT_HANDLER };
+        private static volatile boolean active;
+        private static volatile ICheckRepository repository;
+
+        private static final IResourceChangeListener PROJECTS = event -> {
+            IResourceDelta delta = event.getDelta();
+            if (delta == null)
+                return;
+            for (IResourceDelta child : delta.getAffectedChildren())
+                if (child.getResource() instanceof IProject
+                    && (child.getKind() == IResourceDelta.ADDED
+                        || (child.getFlags() & IResourceDelta.OPEN) != 0))
+                {
+                    schedule();
+                    return;
+                }
+        };
+
+        private static final ICheckSettingsChangeListener SETTINGS = new ICheckSettingsChangeListener()
+        {
+            @Override
+            public void onChange(IProject project, Collection<CheckSettingsChange> changes)
+            {
+                schedule();
+            }
+
+            @Override
+            public void onPreferenceChange(IProject project)
+            {
+                schedule();
+            }
+        };
+
+        private static final Job JOB = new Job("Замена штатной проверки доступа к свойствам") //$NON-NLS-1$
+        {
+            @Override
+            protected IStatus run(IProgressMonitor monitor)
+            {
+                if (!active)
+                    return Status.OK_STATUS;
+                ICheckRepository checks = Global.getOsgiService(ICheckRepository.class);
+                if (checks == null)
+                {
+                    Global.tempLog("StaticFeatureAccessReplacement", "ICheckRepository недоступен"); //$NON-NLS-1$ //$NON-NLS-2$
+                    schedule();
+                    return Status.OK_STATUS;
+                }
+                if (repository != checks)
+                {
+                    if (repository != null)
+                        repository.removeChangeListener(SETTINGS);
+                    checks.addChangeListener(SETTINGS);
+                    repository = checks;
+                }
+                for (IProject project : ResourcesPlugin.getWorkspace().getRoot().getProjects())
+                {
+                    if (!project.isAccessible() || monitor.isCanceled())
+                        continue;
+                    try
+                    {
+                        if (!isAnyReplacementEnabled(checks, project))
+                            continue;
+                        Set<CheckUid> uids = checks.getCheckUidForCheckId(BUILTIN_ID, project);
+                        List<ICheckSettings> changes = new ArrayList<>();
+                        for (CheckUid uid : uids)
+                        {
+                            ICheckSettings settings = checks.getSettings(uid, project);
+                            if (settings != null && settings.isEnabled())
+                            {
+                                settings.setEnabled(false);
+                                changes.add(settings);
+                            }
+                        }
+                        if (!changes.isEmpty())
+                        {
+                            checks.applyChanges(changes, project);
+                            Global.tempLog("StaticFeatureAccessReplacement", //$NON-NLS-1$
+                                "отключена штатная проверка: " + project.getName()); //$NON-NLS-1$
+                        }
+                    }
+                    catch (RuntimeException failure)
+                    {
+                        Global.tempLog("StaticFeatureAccessReplacement", //$NON-NLS-1$
+                            project.getName() + ": " + failure); //$NON-NLS-1$
+                    }
+                }
+                return Status.OK_STATUS;
+            }
+        };
+
+        private static boolean isAnyReplacementEnabled(ICheckRepository checks, IProject project)
+        {
+            for (String id : REPLACEMENT_IDS)
+                for (CheckUid uid : checks.getCheckUidForCheckId(id, project))
+                {
+                    ICheckSettings settings = checks.getSettings(uid, project);
+                    if (settings != null && settings.isEnabled())
+                        return true;
+                }
+            return false;
+        }
+
+        static void start()
+        {
+            active = true;
+            ResourcesPlugin.getWorkspace().addResourceChangeListener(PROJECTS, IResourceChangeEvent.POST_CHANGE);
+            schedule();
+        }
+
+        static void stop()
+        {
+            active = false;
+            ResourcesPlugin.getWorkspace().removeResourceChangeListener(PROJECTS);
+            if (repository != null)
+                repository.removeChangeListener(SETTINGS);
+            repository = null;
+            JOB.cancel();
+        }
+
+        private static void schedule()
+        {
+            if (active)
+                JOB.schedule(2_000);
+        }
     }
 }

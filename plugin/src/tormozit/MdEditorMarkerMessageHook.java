@@ -6,6 +6,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.WeakHashMap;
 
+import org.eclipse.jface.dialogs.IMessageProvider;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.ui.IEditorReference;
 import org.eclipse.ui.IPartListener2;
@@ -147,12 +148,27 @@ public final class MdEditorMarkerMessageHook implements IStartup
                     ProblemViewMarkers.showForCurrentObject();
                 }
             });
+            hideEmptyMessageControl(form);
             installIdleRebuildGuard(form);
         }
         catch (RuntimeException e)
         {
             Global.logError(TAG, "install on active page", e); //$NON-NLS-1$
         }
+    }
+
+    /**
+     * {@code addMessageHyperlinkListener} создаёт надпись сообщения шапки видимой, даже когда
+     * сообщения нет ({@code FormHeading.MessageRegion.ensureControlExists}). Пустая, но видимая
+     * надпись для {@code FormHeading} означает «есть сообщение», и минимальная ширина шапки
+     * считается по заголовку в одну строку, без переноса: редактор не сужается уже заголовка,
+     * появляется горизонтальная полоса прокрутки. Снятие сообщения штатно прячет надпись;
+     * с появлением настоящего сообщения Eclipse Forms покажет её сам.
+     */
+    private static void hideEmptyMessageControl(Form form)
+    {
+        if (form.getMessage() == null)
+            form.setMessage(null, IMessageProvider.NONE);
     }
 
     /**
