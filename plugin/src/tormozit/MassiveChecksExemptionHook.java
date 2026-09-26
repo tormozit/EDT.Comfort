@@ -70,7 +70,7 @@ public class MassiveChecksExemptionHook
     /** Приватное поле {@code CheckScheduler}: проект → набор разрешённых идентификаторов. */
     private static final String PERMITTED_FIELD = "permittedChecks"; //$NON-NLS-1$
 
-    /** Команда ЕДТ «Запустить проверку» (страница «Настройки для разработчиков проверок»). */
+    /** Команда ЕДТ «Запустить проверку» (страница «Общие настройки проверок»). */
     private static final String START_CHECK_COMMAND = "com._1c.g5.v8.dt.ui.command.startCheck"; //$NON-NLS-1$
 
     private static final String BSL_EXTENSION = "bsl"; //$NON-NLS-1$

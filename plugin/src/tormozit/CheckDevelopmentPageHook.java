@@ -12,7 +12,8 @@ import org.eclipse.swt.widgets.Shell;
 import org.eclipse.ui.IStartup;
 
 /**
- * Страница свойств проекта «Настройки для разработчиков проверок»
+ * Страница свойств проекта «Общие настройки проверок» (штатное название EDT —
+ * «Настройки для разработчиков проверок»; плагин переименовывает узел в дереве страниц и заголовок)
  * ({@code com._1c.g5.v8.dt.internal.ui.validation.development.CheckDevelopmentPropertyPage},
  * пакет internal — доступ только рефлексией).
  *
@@ -41,16 +42,21 @@ public final class CheckDevelopmentPageHook
     /** Поле страницы с флажком «Отключить режим массовых проверок». */
     private static final String DISABLE_MASSIVE_CHECKS_FIELD = "disableMassiveChecks"; //$NON-NLS-1$
 
+    private static final String STOCK_TITLE = "Настройки для разработчиков проверок"; //$NON-NLS-1$
+
+    /** Узел страницы в дереве переименовывает {@code PreferenceSearchFilterAugmenter.labelOf}. */
+    static final String PAGE_ID = "com.e1c.g5.v8.dt.checks.development.properties"; //$NON-NLS-1$
+
+    static final String TITLE = "Общие настройки проверок"; //$NON-NLS-1$
+
     private static final String PATCHED_KEY = "tormozit.checkDevelopmentPagePatched"; //$NON-NLS-1$
 
     private static final String TOOLTIP_DISABLE_MASSIVE_CHECKS =
-        "Пока флажок установлен, обычные проверки конфигурации не пересчитываются по массовым"
-            + " событиям: синхронизации файлов (в том числе после сохранения модуля), рефакторингу,"
-            + " сравнению и объединению. В редакторе проблемы по-прежнему подчёркиваются и дают"
-            + " значок на объекте, а в панель «Проблемы конфигурации» сами не попадают — там"
-            + " остаются прежние результаты и ошибки языка (синтаксис, неопределённые методы"
-            + " и т. п.). Комфорт не глушит проверки открытых и только что изменённых модулей"
-            + " и ручной запуск: команды «Запустить проверку» и «Проверить».";
+        "Пока флажок установлен, проверки не пересчитываются по массовым событиям: синхронизации"
+            + " файлов (в том числе после сохранения модуля), рефакторингу, сравнению. Проблемы"
+            + " подчёркиваются в редакторе, но в панель «Проблемы конфигурации» сами не попадают."
+            + " Исключение: открытые и только что изменённые модули и ручной запуск — для них"
+            + " Комфорт флажок игнорирует.";
 
     private static final int MAX_ATTEMPTS = 30;
 
@@ -131,6 +137,9 @@ public final class CheckDevelopmentPageHook
     {
         if (!(selected instanceof IPreferencePage page) || !PAGE_CLASS_NAME.equals(page.getClass().getName()))
             return true;
+
+        if (STOCK_TITLE.equals(page.getTitle()))
+            page.setTitle(TITLE);
 
         Object field = Global.getField(page, DISABLE_MASSIVE_CHECKS_FIELD);
         if (!(field instanceof Button button) || button.isDisposed())

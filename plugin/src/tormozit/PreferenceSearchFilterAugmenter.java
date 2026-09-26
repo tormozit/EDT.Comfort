@@ -749,6 +749,8 @@ final class PreferenceSearchFilterAugmenter
         String id = node.getId();
         if (VALIDATION_PAGE_IDS.contains(id))
             return ValidationChecksFilterHook.PAGE_TITLE;
+        if (CheckDevelopmentPageHook.PAGE_ID.equals(id))
+            return CheckDevelopmentPageHook.TITLE;
         return node.getLabelText();
     }
 
