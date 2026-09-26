@@ -2736,6 +2736,7 @@ public final class ConfigSearchResultsHook implements IStartup
             {
                 return false;
             }
+            PropertyFieldFocus.setPendingMatchRange(match.getTextOffset(), match.getTextLength());
             boolean insideDcs = isInsideDataCompositionSchema(matchedObject);
             boolean insideSpreadsheet = isInsideSpreadsheetDocument(matchedObject);
             // Текст запроса динамического списка (DynamicListExtInfo.queryText) намеренно НЕ
@@ -2789,6 +2790,8 @@ public final class ConfigSearchResultsHook implements IStartup
                 if (panelTarget)
                     PropertyFieldFocus.schedule(workbenchPage, matchedObject, match.getFeature(),
                         typeTargets);
+                else
+                    scheduleEditorFieldSelection(workbenchPage, match, 0, editorSelectToken = new Object());
                 return false;
             }
 
@@ -2864,6 +2867,71 @@ public final class ConfigSearchResultsHook implements IStartup
         {
             return false;
         }
+        finally
+        {
+            PropertyFieldFocus.clearPendingMatchRange();
+        }
+    }
+
+    /** Метка текущего ожидания {@link #scheduleEditorFieldSelection}: новое открытие обесценивает прежнее. */
+    private static volatile Object editorSelectToken;
+
+    /**
+     * Выделяет найденный фрагмент в поле AEF редактора объекта. Штатный {@code handleOpen}
+     * открывает редактор и активирует поле (выделено значение целиком), поэтому поле не
+     * ищется по признаку — берётся то из полей активной страницы, что в фокусе, и только если
+     * его полный текст совпал с текстом вхождения ({@code match.getText()} — весь текст
+     * свойства). Редактор и активация поля асинхронны — повтор по таймеру.
+     */
+    private static void scheduleEditorFieldSelection(IWorkbenchPage workbenchPage,
+        TextSearchModelMatch match, int attempt, Object token)
+    {
+        String text = match.getText();
+        if (text == null || match.getTextLength() <= 0 || match.getTextOffset() < 0)
+            return;
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        display.timerExec(150, () -> {
+            if (token != editorSelectToken)
+                return;
+            boolean done = false;
+            try
+            {
+                IEditorPart editor = workbenchPage.getActiveEditor();
+                Object pageInstance = editor != null
+                    ? Global.invoke(editor, "getActivePageInstance") : null; //$NON-NLS-1$
+                Object scene = pageInstance != null ? Global.invoke(pageInstance, "getScene") : null; //$NON-NLS-1$
+                Object root = pageInstance != null ? Global.getField(pageInstance, "pageComponent") : null; //$NON-NLS-1$
+                if (scene != null && root != null)
+                    done = AefFieldFocus.selectRangeInFocusedField(scene, root, match.getTextOffset(),
+                        match.getTextLength(), text);
+            }
+            catch (Throwable t)
+            {
+                Global.logError("ConfigSearchResults", "scheduleEditorFieldSelection", t); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            if (done)
+            {
+                // Страница может ещё раз выделить поле целиком — один повтор.
+                display.timerExec(150, () -> {
+                    if (token != editorSelectToken)
+                        return;
+                    IEditorPart editor = workbenchPage.getActiveEditor();
+                    Object pageInstance = editor != null
+                        ? Global.invoke(editor, "getActivePageInstance") : null; //$NON-NLS-1$
+                    Object scene = pageInstance != null ? Global.invoke(pageInstance, "getScene") : null; //$NON-NLS-1$
+                    Object root = pageInstance != null
+                        ? Global.getField(pageInstance, "pageComponent") : null; //$NON-NLS-1$
+                    if (scene != null && root != null)
+                        AefFieldFocus.selectRangeInFocusedField(scene, root, match.getTextOffset(),
+                            match.getTextLength(), text);
+                });
+                return;
+            }
+            if (attempt + 1 < 30)
+                scheduleEditorFieldSelection(workbenchPage, match, attempt + 1, token);
+        });
     }
 
     /** См. {@link #scheduleLeftmostScrollForOpenedMatch} — редактор активируется асинхронно. */
@@ -7627,6 +7695,11 @@ public final class ConfigSearchResultsHook implements IStartup
          */
         private static volatile Object activeToken;
 
+        /** Диапазон вхождения {offset, length} для следующего {@link #schedule}, см. {@link #setPendingMatchRange}. */
+        private static volatile int[] pendingMatchRange;
+        /** Диапазон вхождения текущего цикла ожидания. */
+        private static volatile int[] matchRange;
+
         private PropertyFieldFocus() {}
 
         /** Обесценить текущий цикл ожидания (открытие сорвалось / заменено). */
@@ -7667,7 +7740,24 @@ public final class ConfigSearchResultsHook implements IStartup
             }
             Object token = new Object();
             activeToken = token;
+            matchRange = pendingMatchRange;
             retry(workbenchPage, member, chain, typeDialogTargets, 0, token);
+        }
+
+        /**
+         * Диапазон найденного вхождения внутри текста поля — следующий {@link #schedule} выделит
+         * его в поле вместо выделения поля целиком. Ставится перед открытием вхождения и
+         * снимается вызывающим ({@code clearMatchRange}) после него: переходы из других мест
+         * (проблемы, дерево формы) диапазона не имеют.
+         */
+        static void setPendingMatchRange(int offset, int length)
+        {
+            pendingMatchRange = offset >= 0 && length > 0 ? new int[] { offset, length } : null;
+        }
+
+        static void clearPendingMatchRange()
+        {
+            pendingMatchRange = null;
         }
 
         /**
@@ -7682,6 +7772,7 @@ public final class ConfigSearchResultsHook implements IStartup
             }
             Object token = new Object();
             activeToken = token;
+            matchRange = null;
             retry(workbenchPage, member, List.of(feature), null, 0, token);
         }
 
@@ -7852,7 +7943,29 @@ public final class ConfigSearchResultsHook implements IStartup
                 return false;
             }
             boolean focused = focusFieldComponent(scene, fieldComponent);
+            if (focused)
+                selectMatchInField(scene, fieldComponent, token);
             return focused;
+        }
+
+        /**
+         * Выделяет в активированном поле найденный фрагмент. Панель дообновляет поле после
+         * получения фокуса и может сбросить выделение, поэтому оно выставляется сразу и ещё раз
+         * с небольшой задержкой (пока цикл ожидания не сменился другим переходом).
+         */
+        private static void selectMatchInField(Object scene, Object fieldComponent, Object token)
+        {
+            int[] range = matchRange;
+            if (range == null)
+                return;
+            AefFieldFocus.selectRangeInFocusedField(scene, fieldComponent, range[0], range[1]);
+            Display display = Display.getDefault();
+            if (display == null || display.isDisposed())
+                return;
+            display.timerExec(150, () -> {
+                if (token == activeToken)
+                    AefFieldFocus.selectRangeInFocusedField(scene, fieldComponent, range[0], range[1]);
+            });
         }
 
         /**

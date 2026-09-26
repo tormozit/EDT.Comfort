@@ -59,70 +59,62 @@ public class SmartMatcher {
      * Парсинг текста фильтра в секции.
      * Вне кавычек: точка — разделитель секций, пробел — разделитель фрагментов внутри секции.
      * Внутри кавычек: пробелы и точки — часть фрагмента (кавычки удаляются).
+     * Пустая секция (точка в начале/конце или две точки подряд) сохраняется и означает,
+     * что подходят любые значения этого уровня: {@code ком.} — предпоследний уровень содержит «ком», последний любой.
      *
      * Примеры:
      *   "док.реал тов"      → [[док], [реал, тов]]
-     *   "док.реал" тов       → [[док.реал], [тов]]
+     *   "док.реал" тов       → [[док.реал, тов]]
      *   док."реал тов"       → [[док], [реал тов]]
+     *   ком.                 → [[ком], []]
      */
     public static List<List<String>> parseSections(String filterText) {
         List<List<String>> result = new ArrayList<>();
         if (filterText == null || filterText.isEmpty())
             return result;
 
-        StringBuilder pending = new StringBuilder();
+        List<String> section = new ArrayList<>();
+        StringBuilder word = new StringBuilder();
         boolean inQuotes = false;
+        boolean hasDot = false;
 
         for (int i = 0; i < filterText.length(); i++) {
             char c = filterText.charAt(i);
-            if (c == '"') {
-                if (inQuotes) {
-                    String frag = pending.toString();
-                    pending.setLength(0);
+            if (inQuotes) {
+                if (c == '"') {
+                    addFragment(section, word.toString());
+                    word.setLength(0);
                     inQuotes = false;
-                    if (!frag.isEmpty())
-                        result.add(java.util.Collections.singletonList(frag));
                 } else {
-                    flushUnquotedToSections(pending, result);
-                    pending.setLength(0);
-                    inQuotes = true;
+                    word.append(c);
                 }
-            } else if (inQuotes) {
-                pending.append(c);
+            } else if (c == '"') {
+                addFragment(section, word.toString().trim());
+                word.setLength(0);
+                inQuotes = true;
+            } else if (c == '.') {
+                addFragment(section, word.toString().trim());
+                word.setLength(0);
+                result.add(section);
+                section = new ArrayList<>();
+                hasDot = true;
+            } else if (Character.isWhitespace(c)) {
+                addFragment(section, word.toString().trim());
+                word.setLength(0);
             } else {
-                pending.append(c);
+                word.append(c);
             }
         }
 
-        if (inQuotes) {
-            String frag = pending.toString();
-            if (!frag.isEmpty())
-                result.add(java.util.Collections.singletonList(frag));
-        } else {
-            flushUnquotedToSections(pending, result);
-        }
+        addFragment(section, inQuotes ? word.toString() : word.toString().trim());
+        if (hasDot || !section.isEmpty())
+            result.add(section);
         return result;
     }
 
-    private static void flushUnquotedToSections(StringBuilder buf, List<List<String>> result) {
-        String text = buf.toString();
-        if (text.isEmpty())
-            return;
-        String[] dotParts = text.split("\\.", -1);
-        for (String dotPart : dotParts) {
-            String trimmed = dotPart.trim();
-            if (trimmed.isEmpty())
-                continue;
-            String[] spaceParts = trimmed.split("\\s+", -1);
-            List<String> frags = new ArrayList<>();
-            for (String sp : spaceParts) {
-                String f = sp.trim();
-                if (!f.isEmpty())
-                    frags.add(f);
-            }
-            if (!frags.isEmpty())
-                result.add(frags);
-        }
+    private static void addFragment(List<String> section, String frag) {
+        if (!frag.isEmpty())
+            section.add(frag);
     }
 
     public boolean hasMultipleSections() {
@@ -189,7 +181,9 @@ public class SmartMatcher {
         int offset = elemSections.length - filterCount;
         for (int i = 0; i < filterCount; i++)
         {
-            if (!sectionEquals(elemSections[offset + i], sections.get(i)))
+            List<String> frags = sections.get(i);
+            // Пустая секция фильтра (ком.) — подходят любые значения этого уровня.
+            if (!frags.isEmpty() && !sectionEquals(elemSections[offset + i], frags))
                 return false;
         }
         return true;
@@ -223,6 +217,11 @@ public class SmartMatcher {
         {
             if (!sectionRangeInText(lastPart, filterCount - eaten, filterCount))
                 continue;
+            // Пустая секция (ком.) — отдельный уровень с любым значением: в имя узла её можно отнести,
+            // только если в имени хватает сегментов через точку.
+            if (eaten > 1 && hasEmptySection(filterCount - eaten, filterCount)
+                && lastPart.split("\\.", -1).length < eaten) //$NON-NLS-1$
+                continue;
             int remaining = filterCount - eaten;
             if (remaining == 0)
                 return true;
@@ -243,6 +242,16 @@ public class SmartMatcher {
             }
         }
         return true;
+    }
+
+    private boolean hasEmptySection(int fromSection, int toSection)
+    {
+        for (int i = fromSection; i < toSection; i++)
+        {
+            if (sections.get(i).isEmpty())
+                return true;
+        }
+        return false;
     }
 
     private boolean matchPrefixSectionsFromEnd(List<String> parts, int filterCount)

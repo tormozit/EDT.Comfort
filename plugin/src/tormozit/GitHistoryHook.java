@@ -317,6 +317,7 @@ public final class GitHistoryHook implements IStartup
             // #endregion
             if (patched)
             {
+                Debug.logColumnsIfChanged(table, "partEvent"); //$NON-NLS-1$
                 rememberLastRepo(historyPage);
                 return true;
             }
@@ -324,8 +325,22 @@ public final class GitHistoryHook implements IStartup
             Composite originalParent = table.getParent();
             if (historyControlOf(table) == null)
             {
-                Debug.log("tryPatch: history control structure not ready"); //$NON-NLS-1$
+                // Повторы schedulePatch идут до 20 раз — пишем один раз на таблицу.
+                if (Debug.isEnabled() && table.getData(Debug.STRUCTURE_LOGGED_KEY) == null)
+                {
+                    table.setData(Debug.STRUCTURE_LOGGED_KEY, Boolean.TRUE);
+                    Debug.log("[!] structure not ready: " + Debug.parentChain(table)); //$NON-NLS-1$
+                }
                 return false;
+            }
+            if (Debug.isEnabled())
+            {
+                Debug.log("install table=" + System.identityHashCode(table) //$NON-NLS-1$
+                    + " attempt=" + attempt + " items=" + table.getItemCount() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " lp=" + describe(fileViewer.getLabelProvider()) //$NON-NLS-1$
+                    + " egit=" + Debug.bundleVersion(historyPage) //$NON-NLS-1$
+                    + " columns=" + Debug.columnsSnapshot(table) //$NON-NLS-1$
+                    + " chain=" + Debug.parentChain(table)); //$NON-NLS-1$
             }
 
             // Флаг — до создания колонок: без него любой сбой ниже (и повтор schedulePatch или
@@ -351,6 +366,8 @@ public final class GitHistoryHook implements IStartup
                 // #region agent log #599
                 Global.tempLogException("gitHistory599", "installFilterComposite attempt=" + attempt, e); //$NON-NLS-1$ //$NON-NLS-2$
                 // #endregion
+                Debug.log("[!] install failed table=" + System.identityHashCode(table) //$NON-NLS-1$
+                    + " reparented=" + (table.getParent() != originalParent) + " " + Debug.shortStack(e)); //$NON-NLS-1$ //$NON-NLS-2$
                 // Таблица ещё на прежнем месте — убираем колонки этого прохода, вид остаётся штатным.
                 // Флаг не снимаем: повтор на той же таблице опаснее, чем отсутствие доработки.
                 if (table.getParent() == originalParent)
@@ -365,7 +382,7 @@ public final class GitHistoryHook implements IStartup
             }
             rememberLastRepo(historyPage);
 
-            Debug.log("tryPatch: OK"); //$NON-NLS-1$
+            Debug.logColumnsIfChanged(table, "installed"); //$NON-NLS-1$
             return true;
         }
         catch (Exception e)
@@ -373,7 +390,7 @@ public final class GitHistoryHook implements IStartup
             // #region agent log #599
             Global.tempLogException("gitHistory599", "tryPatch attempt=" + attempt, e); //$NON-NLS-1$ //$NON-NLS-2$
             // #endregion
-            Debug.log("tryPatch EXCEPTION: " + e); //$NON-NLS-1$
+            Debug.log("[!] tryPatch attempt=" + attempt + " " + Debug.shortStack(e)); //$NON-NLS-1$ //$NON-NLS-2$
             return false;
         }
     }
@@ -412,6 +429,9 @@ public final class GitHistoryHook implements IStartup
         Global.tempLog("gitHistory599", "ownFileDiffLabelProvider orig=" + describe(orig) //$NON-NLS-1$ //$NON-NLS-2$
             + " dimmed=" + describe(dimmed) + " copy=" + describe(copy)); //$NON-NLS-1$ //$NON-NLS-2$
         // #endregion
+        if (!(copy instanceof CellLabelProvider))
+            Debug.log("[!] own FileDiffLabelProvider not created, using stock orig=" + describe(orig) //$NON-NLS-1$
+                + " dimmed=" + describe(dimmed)); //$NON-NLS-1$
         return copy instanceof CellLabelProvider clp ? clp : orig;
     }
 
@@ -841,6 +861,7 @@ public final class GitHistoryHook implements IStartup
             {
                 lastInput[0] = input;
                 awaitingEgitSelect[0] = true;
+                Debug.logColumnsIfChanged(table, "commitSwitch"); //$NON-NLS-1$
                 Object data = table.getData(SORT_STATE_KEY);
                 if (data instanceof SortState state)
                     applySortState(viewer, table, state, interactionRef, false);
@@ -1836,12 +1857,95 @@ public final class GitHistoryHook implements IStartup
     {
         private static final String TAG = "GitHistoryFileColumns"; //$NON-NLS-1$
 
+        /** Структура окна уже записана для этой таблицы (не повторять на каждой попытке). */
+        static final String STRUCTURE_LOGGED_KEY = "tormozit.gitHistoryStructureLogged"; //$NON-NLS-1$
+
+        /** Число колонок таблицы на момент последней записи — журнал только при изменении. */
+        private static final String COLUMN_COUNT_LOGGED_KEY = "tormozit.gitHistoryColumnCountLogged"; //$NON-NLS-1$
+
         private Debug() {}
+
+        static boolean isEnabled()
+        {
+            return Global.isLogEnabled();
+        }
 
         static void log(String msg)
         {
-            if (Global.isLogEnabled())
+            if (isEnabled())
                 Global.log(TAG, msg);
+        }
+
+        /**
+         * Колонки таблицы в журнал, только если их число изменилось с прошлой записи (#599: у
+         * пользователя десятки узких колонок с картинкой в шапке — чьи и когда появляются).
+         */
+        static void logColumnsIfChanged(Table table, String where)
+        {
+            if (!isEnabled() || table == null || table.isDisposed())
+                return;
+            int count = table.getColumnCount();
+            Object logged = table.getData(COLUMN_COUNT_LOGGED_KEY);
+            if (logged instanceof Integer i && i.intValue() == count)
+                return;
+            table.setData(COLUMN_COUNT_LOGGED_KEY, Integer.valueOf(count));
+            log((count > 4 ? "[!] " : "") + "columns " + where + " table=" + System.identityHashCode(table) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+                + " was=" + logged + " " + columnsSnapshot(table)); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        /** {@code n=<число> [текст|img|ширина|L<логический номер нашей колонки>] …} в порядке показа. */
+        static String columnsSnapshot(Table table)
+        {
+            TableColumn[] cols = table.getColumns();
+            StringBuilder sb = new StringBuilder("n=").append(cols.length); //$NON-NLS-1$
+            int[] order = table.getColumnOrder();
+            int shown = Math.min(order.length, 12);
+            for (int k = 0; k < shown; k++)
+            {
+                TableColumn c = cols[order[k]];
+                sb.append(" [").append(order[k]).append(':').append(c.getText()); //$NON-NLS-1$
+                if (c.getImage() != null)
+                    sb.append("|img"); //$NON-NLS-1$
+                sb.append('|').append(c.getWidth());
+                Object logical = c.getData(COLUMN_LOGICAL_KEY);
+                if (logical != null)
+                    sb.append("|L").append(logical); //$NON-NLS-1$
+                sb.append(']');
+            }
+            if (order.length > shown)
+                sb.append(" …"); //$NON-NLS-1$
+            return sb.toString();
+        }
+
+        /** Классы и layout родителей таблицы до 4 уровней — сверка устройства окна в версии EDT пользователя. */
+        static String parentChain(Control control)
+        {
+            StringBuilder sb = new StringBuilder();
+            Composite p = control.getParent();
+            for (int i = 0; i < 4 && p != null; i++, p = p.getParent())
+            {
+                if (i > 0)
+                    sb.append(" < "); //$NON-NLS-1$
+                sb.append(p.getClass().getSimpleName()).append('/').append(describe(p.getLayout()))
+                    .append("#").append(p.getChildren().length); //$NON-NLS-1$
+            }
+            return sb.toString();
+        }
+
+        static String bundleVersion(Object o)
+        {
+            org.osgi.framework.Bundle b = org.osgi.framework.FrameworkUtil.getBundle(o.getClass());
+            return b != null ? b.getSymbolicName() + "_" + b.getVersion() : "?"; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        /** Исключение и первые кадры стека (свои и штатные) — одной строкой. */
+        static String shortStack(Throwable t)
+        {
+            StringBuilder sb = new StringBuilder(String.valueOf(t));
+            StackTraceElement[] st = t.getStackTrace();
+            for (int i = 0; i < Math.min(st.length, 6); i++)
+                sb.append(" @ ").append(st[i]); //$NON-NLS-1$
+            return sb.toString();
         }
     }
 }

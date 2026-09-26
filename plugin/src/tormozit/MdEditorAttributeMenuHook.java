@@ -43,7 +43,9 @@ import com._1c.g5.v8.dt.core.platform.IV8Project;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
 import com._1c.g5.v8.dt.md.ui.shared.MdUiSharedImages;
+import com._1c.g5.v8.dt.metadata.mdclass.BasicCommand;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicFeature;
+import com._1c.g5.v8.dt.metadata.mdclass.CommonCommand;
 import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
 import com._1c.g5.v8.dt.metadata.mdclass.MdClassPackage;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
@@ -52,8 +54,8 @@ import com._1c.g5.v8.dt.ui.util.OpenHelper;
 /**
  * Вкладка «Данные» редактора объекта метаданных:
  * <ul>
- *   <li>контекстное меню дерева реквизитов — переход на «Функц. опции», «Права»
- *       и открытие редактора «Все роли»;</li>
+ *   <li>контекстное меню дерева реквизитов вкладки «Данные» и таблицы вкладки «Команды» —
+ *       переход на «Функц. опции», «Права» и открытие редактора «Все роли»;</li>
  *   <li>двойной клик в «Общие реквизиты» и в «Значения» редактора перечисления —
  *       {@code bringToTop} панели «Свойства».
  *       Дерево «Стандартные реквизиты» не перехватывать: Grok 4.6 (2026-08-16) за ~40 попыток не смог правильно загрузить реквизит в панель «Свойства».</li>
@@ -73,6 +75,8 @@ public final class MdEditorAttributeMenuHook implements IStartup
         "com._1c.g5.v8.dt.ui.aef.swt.views.DtTreeView.treeViewer"; //$NON-NLS-1$
 
     private static final String FO_PAGE_ID = "editors.pages.functionalOptions"; //$NON-NLS-1$
+
+    private static final String COMMANDS_PAGE_ID = "editors.pages.commands"; //$NON-NLS-1$
 
     private static final String FO_CONTENT_COMPONENT_CLASS =
         "com._1c.g5.v8.dt.internal.md.ui.editors.pages.functionaloptions.DtGranularEditorFunctionalOptionsMdObjectContentComponent"; //$NON-NLS-1$
@@ -279,14 +283,38 @@ public final class MdEditorAttributeMenuHook implements IStartup
     {
         if (!(event.widget instanceof Control control) || control.isDisposed())
             return;
-        Tree tree = treeOf(control);
-        if (tree == null || tree.isDisposed() || !isDataPageAttributesTree(tree))
+        Control target = menuTargetOf(control);
+        if (target == null)
             return;
-        Menu menu = menuOf(tree);
+        Menu menu = menuOf(target);
         if (menu == null || menu.isDisposed())
             return;
-        hookMenu(tree, menu);
-        scheduleEnsureMenuItems(tree, menu);
+        hookMenu(target, menu);
+        scheduleEnsureMenuItems(target, menu);
+    }
+
+    /**
+     * Список, к меню которого добавляются переходы: дерево реквизитов вкладки «Данные»
+     * или таблица вкладки «Команды».
+     */
+    private static Control menuTargetOf(Control control)
+    {
+        if (control instanceof Table table)
+            return isCommandsPageTable(table) ? table : null;
+        Tree tree = treeOf(control);
+        return tree != null && !tree.isDisposed() && isDataPageAttributesTree(tree) ? tree : null;
+    }
+
+    private static boolean isCommandsPageTable(Table table)
+    {
+        if (table == null || table.isDisposed())
+            return false;
+        DtGranularEditor<?> editor = editorOf(table);
+        IFormPage page = editor != null ? editor.getActivePageInstance() : null;
+        if (!isCommandsPage(page))
+            return false;
+        Control root = page.getPartControl();
+        return root != null && isUnder(root, table);
     }
 
     /**
@@ -300,17 +328,17 @@ public final class MdEditorAttributeMenuHook implements IStartup
         Control parent = menu.getParent();
         if (parent == null || parent.isDisposed())
             return;
-        Tree tree = treeOf(parent);
-        if (tree == null || tree.isDisposed() || !isDataPageAttributesTree(tree))
+        Control target = menuTargetOf(parent);
+        if (target == null)
             return;
-        Menu treeMenu = menuOf(tree);
-        if (treeMenu != menu)
+        Menu targetMenu = menuOf(target);
+        if (targetMenu != menu)
             return;
-        hookMenu(tree, menu);
-        scheduleEnsureMenuItems(tree, menu);
+        hookMenu(target, menu);
+        scheduleEnsureMenuItems(target, menu);
     }
 
-    private static void hookMenu(Tree tree, Menu menu)
+    private static void hookMenu(Control tree, Menu menu)
     {
         Object hooked = tree.getData(HOOK_MENU_KEY);
         if (hooked == menu && Boolean.TRUE.equals(menu.getData(HOOK_MARKER)))
@@ -351,7 +379,7 @@ public final class MdEditorAttributeMenuHook implements IStartup
         });
     }
 
-    private static void scheduleEnsureMenuItems(Tree tree, Menu menu)
+    private static void scheduleEnsureMenuItems(Control tree, Menu menu)
     {
         Display display = tree.getDisplay();
         if (display == null || display.isDisposed())
@@ -370,17 +398,18 @@ public final class MdEditorAttributeMenuHook implements IStartup
         });
     }
 
-    private static void fillMenuItems(Menu swtMenu, Tree tree)
+    private static void fillMenuItems(Menu swtMenu, Control control)
     {
-        if (swtMenu == null || swtMenu.isDisposed() || tree == null || tree.isDisposed())
+        if (swtMenu == null || swtMenu.isDisposed() || control == null || control.isDisposed())
             return;
         if (hasOurItems(swtMenu))
             return;
-        EObject member = selectedDataMember(tree);
+        EObject member = control instanceof Tree tree ? selectedDataMember(tree)
+            : control instanceof Table table ? selectedCommand(table) : null;
         if (member == null)
             return;
 
-        DtGranularEditor<?> editor = editorOf(tree);
+        DtGranularEditor<?> editor = editorOf(control);
         if (editor == null)
             return;
 
@@ -398,7 +427,9 @@ public final class MdEditorAttributeMenuHook implements IStartup
         if (foImage != null)
             foItem.setImage(foImage);
         ComfortSubmenuHelper.setMenuItemTooltip(foItem,
-            "Открыть вкладку «Функц. опции» и выделить этот реквизит"); //$NON-NLS-1$
+            member instanceof BasicCommand
+                ? "Открыть вкладку «Функц. опции» и выделить эту команду" //$NON-NLS-1$
+                : "Открыть вкладку «Функц. опции» и выделить этот реквизит"); //$NON-NLS-1$
         foItem.setEnabled(foPage != null);
         foItem.addListener(SWT.Selection, ev -> revealOnFunctionalOptions(editor, member));
 
@@ -478,7 +509,7 @@ public final class MdEditorAttributeMenuHook implements IStartup
         return menu.getData(MENU_GEN_KEY) instanceof Integer value ? value.intValue() : 0;
     }
 
-    private static Menu menuOf(Tree tree)
+    private static Menu menuOf(Control tree)
     {
         Menu menu = tree.getMenu();
         if (menu != null && !menu.isDisposed())
@@ -518,6 +549,15 @@ public final class MdEditorAttributeMenuHook implements IStartup
         return page.getClass().getName().endsWith("EditorDataPage"); //$NON-NLS-1$
     }
 
+    private static boolean isCommandsPage(IFormPage page)
+    {
+        if (page == null)
+            return false;
+        if (COMMANDS_PAGE_ID.equals(page.getId()))
+            return true;
+        return page.getClass().getName().endsWith("EditorCommandsPage"); //$NON-NLS-1$
+    }
+
     private static boolean isFunctionalOptionsPage(IFormPage page)
     {
         if (page == null)
@@ -551,6 +591,29 @@ public final class MdEditorAttributeMenuHook implements IStartup
             return direct;
         EObject mapped = mapViewModelToEObject(tree, element);
         return isDataMember(mapped) ? mapped : null;
+    }
+
+    /** Команда объекта в таблице вкладки «Команды» ({@code navigatorTable(commands, …)}). */
+    private static EObject selectedCommand(Table table)
+    {
+        if (table == null || table.isDisposed())
+            return null;
+        TableItem[] selection = table.getSelection();
+        if (selection == null || selection.length == 0)
+            return null;
+        Object data = selection[0].getData();
+        if (data == null)
+            return null;
+        EObject direct = NavigatorElementModels.resolveEObject(data);
+        if (isObjectCommand(direct))
+            return direct;
+        EObject mapped = mapViewModelToEObject(table, data);
+        return isObjectCommand(mapped) ? mapped : null;
+    }
+
+    private static boolean isObjectCommand(EObject object)
+    {
+        return object instanceof BasicCommand && !(object instanceof CommonCommand);
     }
 
     static EObject mapViewModelToEObject(Control control, Object viewModel)
@@ -725,6 +788,8 @@ public final class MdEditorAttributeMenuHook implements IStartup
             return "ПризнакУчета"; //$NON-NLS-1$
         if (typeName.endsWith("Recalculation")) //$NON-NLS-1$
             return "Перерасчет"; //$NON-NLS-1$
+        if (typeName.endsWith("Command")) //$NON-NLS-1$
+            return "Команда"; //$NON-NLS-1$
         return typeName;
     }
 

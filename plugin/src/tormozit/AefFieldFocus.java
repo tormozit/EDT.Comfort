@@ -98,6 +98,90 @@ final class AefFieldFocus
     }
 
     /**
+     * Выделяет фрагмент текста в поле компонента, которое сейчас в фокусе (после
+     * {@link #focusComponent}). Нужно, чтобы переход к найденному вхождению подсвечивал само
+     * вхождение, а не поле целиком. Границы, выходящие за текст поля, не применяются.
+     *
+     * @return {@code true}, если выделение выставлено
+     */
+    static boolean selectRangeInFocusedField(Object scene, Object component, int offset, int length)
+    {
+        return selectRangeInFocusedField(scene, component, offset, length, null);
+    }
+
+    /**
+     * То же, но выделение ставится, только если полный текст поля равен {@code expectedText}
+     * ({@code null} — не проверять). Нужно там, где поле не выбрано по признаку, а берётся то,
+     * что сейчас в фокусе (страницы редакторов): иначе диапазон мог бы лечь на чужое поле.
+     */
+    static boolean selectRangeInFocusedField(Object scene, Object component, int offset, int length,
+        String expectedText)
+    {
+        if (offset < 0 || length <= 0)
+            return false;
+        for (Object nativeControl : editorNativeControls(scene, component))
+        {
+            if (!hasFocusNow(nativeControl))
+                continue;
+            String result = nativeControl instanceof Control control
+                ? selectRangeInSwtControl(control, offset, length, expectedText)
+                : selectRangeInLightTree(nativeControl, offset, length, expectedText, 0);
+            if (result.startsWith("ok")) //$NON-NLS-1$
+                return true;
+        }
+        return false;
+    }
+
+    private static String selectRangeInSwtControl(Control control, int offset, int length,
+        String expectedText)
+    {
+        if (control instanceof Text text)
+        {
+            if (expectedText != null && !expectedText.equals(text.getText()))
+                return "текст поля другой"; //$NON-NLS-1$
+            if (offset + length > text.getCharCount())
+                return "за пределами текста " + text.getCharCount(); //$NON-NLS-1$
+            text.setSelection(offset, offset + length);
+            return "ok Text"; //$NON-NLS-1$
+        }
+        if (control instanceof StyledText styledText)
+        {
+            if (expectedText != null && !expectedText.equals(styledText.getText()))
+                return "текст поля другой"; //$NON-NLS-1$
+            if (offset + length > styledText.getCharCount())
+                return "за пределами текста " + styledText.getCharCount(); //$NON-NLS-1$
+            styledText.setSelection(offset, offset + length);
+            return "ok StyledText"; //$NON-NLS-1$
+        }
+        return "не поддержано"; //$NON-NLS-1$
+    }
+
+    /** Как {@link #clearLightTreeSelection}: поле ввода LWT лежит внутри контейнера. */
+    private static String selectRangeInLightTree(Object lightControl, int offset, int length,
+        String expectedText, int depth)
+    {
+        if (lightControl == null || depth > 6)
+            return "не поддержано"; //$NON-NLS-1$
+        Object overlay = Global.getField(lightControl, "overlay"); //$NON-NLS-1$
+        if (overlay instanceof StyledText overlayText && !overlayText.isDisposed())
+        {
+            String result = selectRangeInSwtControl(overlayText, offset, length, expectedText);
+            return result.startsWith("ok") ? "ok lwt overlay" : result; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        // Без overlay текст поля не проверить — при заданном expectedText не рискуем.
+        if (expectedText == null && Global.invokeVoid(lightControl, "setSelection", Integer.valueOf(offset), //$NON-NLS-1$
+            Integer.valueOf(offset + length)))
+            return "ok lwt setSelection"; //$NON-NLS-1$
+        for (Object child : lightChildren(lightControl))
+        {
+            String result = selectRangeInLightTree(child, offset, length, expectedText, depth + 1);
+            if (result.startsWith("ok")) //$NON-NLS-1$
+                return result;
+        }
+        return "не поддержано (overlay=" + (overlay == null ? "null" : overlay.getClass().getName()) + ")"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+    }
+
+    /**
      * Поле ввода LWT лежит НЕ на верхнем уровне: рендерер отдаёт контейнер
      * ({@code LightEditorBar} — панель поля, {@code SwtLightComposite} — мост к SWT), а сам
      * {@code LightText} — внутри него (подтверждено дампом: среди нативных контролов страницы

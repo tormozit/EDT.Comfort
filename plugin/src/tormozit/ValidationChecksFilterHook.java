@@ -1274,7 +1274,10 @@ public final class ValidationChecksFilterHook implements IStartup
             if (settings != null)
             {
                 String text = titleOf(element);
-                result = state.accepts(settings) && (matcher.isEmpty || (text != null && matcher.matches(text)));
+                String checkId = settings.getId() != null ? settings.getId().getCheckId() : null;
+                result = state.accepts(settings) && (matcher.isEmpty
+                    || (text != null && matcher.matches(text))
+                    || (checkId != null && matcher.matches(checkId)));
             }
             else
             {
