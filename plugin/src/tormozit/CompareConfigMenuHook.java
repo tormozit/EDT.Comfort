@@ -5258,7 +5258,10 @@ public class CompareConfigMenuHook implements IStartup
 
     private static class CompareConfigExpandHandler extends AbstractHandler
     {
+        private static final String LOG_TAG = "CompareConfigExpand"; //$NON-NLS-1$
         private static Method retrieveMethodCache = null;
+        /** Число узлов, пройденных последним обходом (для журнала; только UI-поток). */
+        private static int visitedCount;
 
         @Override
         public Object execute(ExecutionEvent event) throws ExecutionException
@@ -5278,6 +5281,8 @@ public class CompareConfigMenuHook implements IStartup
 
             Set<Object> toExpand = new HashSet<>();
 
+            visitedCount = 0;
+            long t0 = System.nanoTime();
             for (Object root : cp.getElements(viewer.getInput()))
             {
                 try
@@ -5289,11 +5294,13 @@ public class CompareConfigMenuHook implements IStartup
                     Global.logError("CompareConfig", "collectElementsToExpand", e); //$NON-NLS-1$ //$NON-NLS-2$
                 }
             }
+            long t1 = System.nanoTime();
             applyExpandedState(viewer, () ->
             {
                 viewer.collapseAll();
                 viewer.setExpandedElements(toExpand.toArray());
             });
+            logTiming("expand", mode, toExpand.size(), t0, t1); //$NON-NLS-1$
 
             if (selection != null && !selection.isEmpty())
             {
@@ -5315,6 +5322,8 @@ public class CompareConfigMenuHook implements IStartup
                 return;
 
             Set<Object> toExpand = new HashSet<>();
+            visitedCount = 0;
+            long t0 = System.nanoTime();
             try
             {
                 collectElementsToExpand(cp, root, mode, toExpand, viewer);
@@ -5327,6 +5336,7 @@ public class CompareConfigMenuHook implements IStartup
             if (toExpand.isEmpty() && !skipAddedRoot)
                 return;
 
+            long t1 = System.nanoTime();
             applyExpandedState(viewer, () ->
             {
                 if (skipAddedRoot)
@@ -5334,12 +5344,26 @@ public class CompareConfigMenuHook implements IStartup
                 for (Object element : toExpand)
                     viewer.setExpandedState(element, true);
             });
+            logTiming("expandSubtree", mode, toExpand.size(), t0, t1); //$NON-NLS-1$
+        }
+
+        /** Одна строка в журнал «Комфорт»: обход модели и разворот в дереве. */
+        private static void logTiming(String op, CompareConfigExpandMode mode, int expanded,
+                long collectStart, long applyStart)
+        {
+            if (!Global.isLogEnabled())
+                return;
+            long now = System.nanoTime();
+            Global.log(LOG_TAG, op + " " + mode //$NON-NLS-1$
+                + ": пройдено " + visitedCount + ", развёрнуто " + expanded //$NON-NLS-1$ //$NON-NLS-2$
+                + ", обход " + (applyStart - collectStart) / 1_000_000 + " мс" //$NON-NLS-1$ //$NON-NLS-2$
+                + ", разворот " + (now - applyStart) / 1_000_000 + " мс"); //$NON-NLS-1$ //$NON-NLS-2$
         }
 
         /**
          * Рекурсивно собирает список узлов для раскрытия.
-         * В {@code toExpand} попадают только узлы, видимые при текущих фильтрах дерева.
-         * Обход модели — по content provider, без вызовов вьювера.
+         * Обходятся только узлы, видимые при текущих фильтрах дерева: скрытый узел
+         * отсекает всё поддерево. Обход модели — по content provider, без вызовов вьювера.
          * Для «До измененных» неизменённые объекты не обходятся ({@code hasChanged}),
          * {@code getChildren} не материализует формы и реквизиты.
          * Для «До помеченных» спускаемся по помеченным узлам до листьев;
@@ -5348,6 +5372,7 @@ public class CompareConfigMenuHook implements IStartup
         private static void collectElementsToExpand(ITreeContentProvider cp, Object element,
                 CompareConfigExpandMode mode, Set<Object> toExpand, AbstractTreeViewer viewer)
         {
+            visitedCount++;
             if (!cp.hasChildren(element)
                     || mode == CompareConfigExpandMode.toBothElement && isAddedOrDeleted(element)
                     || mode == CompareConfigExpandMode.toObject && isObject(element)
@@ -5355,8 +5380,11 @@ public class CompareConfigMenuHook implements IStartup
                     || mode == CompareConfigExpandMode.toBothElement && skipUnchangedForExpandToChanged(element))
                 return;
 
-            if (CompareConfigSearchDialogHook.isNodeMatchFilters(element, viewer))
-                toExpand.add(element);
+            // Скрытый отбором узел скрывает и всё своё поддерево — туда не спускаемся
+            // (как collectLeaves). Иначе при узком отборе обходится вся модель сравнения.
+            if (!CompareConfigSearchDialogHook.isNodeMatchFilters(element, viewer))
+                return;
+            toExpand.add(element);
             Object[] children;
             try
             {
