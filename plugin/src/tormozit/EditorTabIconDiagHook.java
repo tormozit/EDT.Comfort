@@ -1,5 +1,8 @@
 package tormozit;
 
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
 import java.net.URL;
 import java.util.ArrayList;
 import java.util.IdentityHashMap;
@@ -35,7 +38,19 @@ import org.eclipse.ui.IWorkbenchPartConstants;
 import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
+import org.eclipse.ui.forms.editor.FormEditor;
 import org.osgi.framework.Bundle;
+
+import com._1c.g5.v8.bm.core.IBmObject;
+import com._1c.g5.v8.dt.core.platform.IResourceLookup;
+import com._1c.g5.v8.dt.md.ui.aef.providers.AdoptedMdObjectDecorator;
+import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
+import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
+import com._1c.g5.v8.dt.metadata.mdclass.ObjectBelonging;
+import com._1c.g5.v8.dt.validation.ValidationUtil;
+import com._1c.g5.v8.dt.validation.marker.IMarkerManager;
+import com._1c.g5.v8.dt.validation.marker.Marker;
+import com._1c.g5.v8.dt.validation.marker.MarkerSeverity;
 
 /**
  * Обход штатной пропажи иконок вкладок панели редакторов
@@ -173,6 +188,11 @@ public final class EditorTabIconDiagHook implements IStartup
                         return;
                     MPart mpart = mpartOf(editor);
                     clearDisposedOverride(mpart);
+                    // Наш слушатель идёт после штатного, что ставит на вкладку картинку с значком
+                    // проблемы: исправляем сразу, а не после asyncExec, иначе значок расширения мигает.
+                    Image decorated = titleImageOf(editor);
+                    if (extensionWinsImage(editor, decorated) != null)
+                        applyTitleImage(editor, decorated);
                     Display display = Display.getCurrent();
                     if (display != null)
                         display.asyncExec(() -> restoreAfterTitleChange(editor));
@@ -359,6 +379,9 @@ public final class EditorTabIconDiagHook implements IStartup
     {
         if (editor == null || !usableImage(image))
             return;
+        Image extension = extensionWinsImage(editor, image);
+        if (extension != null)
+            image = extension;
         CTabFolder folder = folderOf(editor);
         CTabItem item = itemOf(editor, folder);
         if (item == null || item.isDisposed())
@@ -377,6 +400,93 @@ public final class EditorTabIconDiagHook implements IStartup
         catch (RuntimeException ex)
         {
             log("setImage fail tab='" + safeText(item.getText()) + "' " + ex); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    /**
+     * Значок проблемы и значок расширения рисуются в один угол (левый нижний), и первый затирает
+     * второй; на вкладке значка расширения может не быть вовсе: базовая иконка редактора «голая».
+     * У объекта расширения без проблем и при некритичных проблемах ставим базовую иконку со
+     * значком расширения ({@link AdoptedMdObjectDecorator}, как в EDT).
+     *
+     * @param decorated картинка редактора после декораторов ({@code getTitleImage})
+     * @return картинка со значком расширения или {@code null}, если подмена не нужна
+     */
+    private static Image extensionWinsImage(IEditorPart editor, Image decorated)
+    {
+        if (!(editor instanceof DtGranularEditor<?> granular) || !usableImage(decorated))
+            return null;
+        try
+        {
+            if (!(granular.getModel() instanceof MdObject mdObject)
+                || mdObject.getObjectBelonging() != ObjectBelonging.ADOPTED)
+                return null;
+            Image base = (Image) SUPER_TITLE_IMAGE.invoke(granular);
+            if (!usableImage(base))
+                return null;
+            MarkerSeverity severity = maxSeverity(mdObject);
+            Image withExtension = ADOPTED_DECORATOR.decorateImage(base, mdObject);
+            Global.tempLog("ext-overlay", "title='" + safeTitle(editor) + "' severity=" + severity //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " decorated=" + describeImage(decorated) + " base=" + describeImage(base) //$NON-NLS-1$ //$NON-NLS-2$
+                + " withExt=" + describeImage(withExtension) //$NON-NLS-1$
+                + " item=" + describeImage(safeImage(() -> { //$NON-NLS-1$
+                    CTabItem tab = itemOf(editor, folderOf(editor));
+                    return tab == null || tab.isDisposed() ? null : tab.getImage();
+                })));
+            boolean critical = severity == MarkerSeverity.ERRORS || severity == MarkerSeverity.BLOCKER
+                || severity == MarkerSeverity.CRITICAL;
+            return critical || !usableImage(withExtension) ? null : withExtension;
+        }
+        catch (Throwable ex)
+        {
+            return null;
+        }
+    }
+
+    private static final AdoptedMdObjectDecorator ADOPTED_DECORATOR = new AdoptedMdObjectDecorator();
+
+    /** Максимум по маркерам объекта и вложенных в него — как у штатной иконки вкладки. */
+    private static MarkerSeverity maxSeverity(MdObject model)
+    {
+        if (!(model instanceof IBmObject bmObject) || PlatformUI.getWorkbench().isClosing())
+            return null;
+        IResourceLookup lookup = Global.getOsgiService(IResourceLookup.class);
+        IMarkerManager markers = Global.getOsgiService(IMarkerManager.class);
+        if (lookup == null || markers == null)
+            return null;
+        var project = lookup.getProject(model);
+        if (project == null)
+            return null;
+        Long id = Long.valueOf(bmObject.bmGetId());
+        List<Marker> found = new ArrayList<>();
+        for (Marker[] batch : new Marker[][] { markers.getNestedMarkers(project, id),
+            markers.getMarkers(project, id) })
+        {
+            if (batch == null)
+                continue;
+            for (Marker marker : batch)
+            {
+                if (marker != null)
+                    found.add(marker);
+            }
+        }
+        return found.isEmpty() ? null : ValidationUtil.getMaxMarkerSeverity(found);
+    }
+
+    /** {@code FormEditor.getTitleImage()} без декораторов {@code DtGranularEditor}. */
+    private static final MethodHandle SUPER_TITLE_IMAGE = superTitleImage();
+
+    private static MethodHandle superTitleImage()
+    {
+        try
+        {
+            return MethodHandles.privateLookupIn(DtGranularEditor.class, MethodHandles.lookup())
+                .findSpecial(FormEditor.class, "getTitleImage", MethodType.methodType(Image.class), //$NON-NLS-1$
+                    DtGranularEditor.class);
+        }
+        catch (ReflectiveOperationException | RuntimeException ex)
+        {
+            return null;
         }
     }
 
@@ -480,6 +590,13 @@ public final class EditorTabIconDiagHook implements IStartup
             return;
         Image live = titleImageOf(editor);
         Image current = safeImage(item::getImage);
+        Image extension = extensionWinsImage(editor, live);
+        if (extension != null)
+        {
+            if (current != extension)
+                applyTitleImage(editor, live);
+            return;
+        }
         boolean innerOverlay = MdEditorListTabCountHook.innerTabsShowProblemOverlay(editor);
         if (innerOverlay && MdEditorTitleNavigatorMenuHook.isLiveProblemOverlay(editor, live))
         {

@@ -32,8 +32,8 @@ import org.eclipse.xtext.parser.antlr.XtextTokenStream;
  * <b>только самих директив</b> в тип {@code SL_COMMENT}. Токен скрыт для парсера (Xtext решает по
  * типу), код веток остаётся в дереве — подсказки и переходы работают. Блок скрывается, только
  * если после этого структура его метода сходится; иначе остаётся штатная ошибка EDT.
- * Проверка «Комфорт» ставит на такую {@code #Если} незначительную проблему
- * ({@link #findHiddenIfInstructions}); на {@code #Вставка}/{@code #Удаление} — нет.
+ * Проверка «Комфорт» ставит незначительную проблему на такие {@code #Если} и {@code #Удаление}
+ * ({@link #findReportedHiddenDirectives}); на {@code #Вставка} — нет.
  *
  * <p>Частичный разбор ({@code BslPartialParsingHelper.reparse}) перечитывает текст одного узла.
  * Если граница куска рассекает блок директив (в куске директива без пары), разбор куска
@@ -110,14 +110,22 @@ public final class BslParserHook
 
     // ---- Для проверки «Комфорт» ----
 
+    /** Вид инструкции в {@link #findReportedHiddenDirectives}: {@code #Если … Тогда}. */
+    public static final int KIND_IF = 0;
+
+    /** Вид инструкции в {@link #findReportedHiddenDirectives}: {@code #Удаление}. */
+    public static final int KIND_DELETE = 1;
+
     /**
-     * Скрытые хуком инструкции {@code #Если … Тогда} в дереве узлов: {@code {смещение, длина, строка}}.
-     * Скрытые {@code #Вставка}/{@code #Удаление} сюда не попадают: проблема о них не нужна.
+     * Скрытые хуком инструкции, о которых нужна проблема, в дереве узлов:
+     * {@code {смещение, длина, строка, вид}} ({@link #KIND_IF} — {@code #Если … Тогда},
+     * {@link #KIND_DELETE} — {@code #Удаление}). Скрытая {@code #Вставка} сюда не попадает: её код и так
+     * действующий, предупреждать не о чем.
      *
      * <p>Признак — скрытый лист {@code SL_COMMENT}, текст которого начинается с {@code #}: настоящий
      * комментарий всегда начинается с {@code //}.
      */
-    public static List<int[]> findHiddenIfInstructions(ICompositeNode root)
+    public static List<int[]> findReportedHiddenDirectives(ICompositeNode root)
     {
         List<int[]> out = new ArrayList<>();
         if (root == null)
@@ -137,12 +145,12 @@ public final class BslParserHook
                     end = leaf.getEndOffset();
                     if (isThen(leaf.getText()))
                     {
-                        out.add(new int[] {start, end - start, line});
+                        out.add(new int[] {start, end - start, line, KIND_IF});
                         start = -1;
                     }
                     continue;
                 }
-                out.add(new int[] {start, end - start, line}); // без «Тогда» — до последнего своего листа
+                out.add(new int[] {start, end - start, line, KIND_IF}); // без «Тогда» — до последнего своего листа
                 start = -1;
             }
             if (!ours)
@@ -154,9 +162,11 @@ public final class BslParserHook
                 end = leaf.getEndOffset();
                 line = leaf.getStartLine();
             }
+            else if ("удаление".equals(word) || "delete".equals(word)) //$NON-NLS-1$ //$NON-NLS-2$
+                out.add(new int[] {leaf.getOffset(), leaf.getLength(), leaf.getStartLine(), KIND_DELETE});
         }
         if (start >= 0)
-            out.add(new int[] {start, end - start, line});
+            out.add(new int[] {start, end - start, line, KIND_IF});
         return out;
     }
 

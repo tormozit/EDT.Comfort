@@ -26,16 +26,18 @@ import tormozit.ComfortCheckIds;
 import tormozit.bslparser.BslParserHook;
 
 /**
- * Проверка «Директива препроцессора разрывает оператор»: {@code #Если}, ветки которой содержат
- * часть оператора (например, {@code ИначеЕсли} или только {@code Если} без {@code КонецЕсли}).
+ * Проверка «Директива препроцессора разрывает оператор»: блок {@code #Если} или {@code #Удаление},
+ * ветки которого содержат часть оператора (например, {@code ИначеЕсли} или только {@code Если} без
+ * {@code КонецЕсли}).
  *
  * <p>Платформа такой код принимает, грамматика EDT — нет. {@link BslParserHook} скрывает от парсера
- * директивы такого блока, и код веток разбирается как обычный. Проблема ставится только на саму
- * инструкцию {@code #Если … Тогда}: условие препроцессора EDT для этого кода не учитывает, и
- * замечания о доступности на клиенте/сервере внутри блока могут быть ложными. Скрытые
- * {@code #Вставка}/{@code #Удаление} проблемы не дают.
+ * директивы такого блока, и код веток разбирается как обычный. Проблема ставится на открывающую
+ * инструкцию: на {@code #Если … Тогда} — условие препроцессора EDT для этого кода не учитывает, и
+ * замечания о доступности на клиенте/сервере внутри блока могут быть ложными; на {@code #Удаление} —
+ * удалённый код EDT разбирает как действующий. Скрытая {@code #Вставка} проблемы не даёт: её код и
+ * так действующий.
  *
- * <p>Скрытые директивы находятся в дереве узлов ({@link BslParserHook#findHiddenIfInstructions}),
+ * <p>Скрытые директивы находятся в дереве узлов ({@link BslParserHook#findReportedHiddenDirectives}),
  * своего разбора проверка не делает.
  */
 public class BslPreprocessorStraddleCheck
@@ -46,13 +48,17 @@ public class BslPreprocessorStraddleCheck
     private static final String TITLE = "Директива препроцессора разрывает оператор"; //$NON-NLS-1$
 
     private static final String DESCRIPTION =
-        "Блок #Если … #КонецЕсли, ветки которого содержат часть оператора: например, ИначеЕсли" //$NON-NLS-1$
-            + " или Если без КонецЕсли. Платформа такой код принимает, а грамматика EDT считает его" //$NON-NLS-1$
-            + " синтаксической ошибкой. Комфорт скрывает от разбора директивы этого блока, и код веток" //$NON-NLS-1$
-            + " проверяется как обычный, но без учёта условия препроцессора."; //$NON-NLS-1$
+        "Блок #Если … #КонецЕсли или #Удаление … #КонецУдаления, ветки которого содержат часть оператора:" //$NON-NLS-1$
+            + " например, ИначеЕсли или Если без КонецЕсли. Платформа такой код принимает, а грамматика EDT" //$NON-NLS-1$
+            + " считает его синтаксической ошибкой. Комфорт скрывает от разбора директивы этого блока, и код" //$NON-NLS-1$
+            + " веток проверяется как обычный: для #Если — без учёта условия препроцессора, для #Удаление —" //$NON-NLS-1$
+            + " как действующий, хотя в расширении он удалён."; //$NON-NLS-1$
 
-    private static final String MESSAGE =
+    private static final String MESSAGE_IF =
         "Директива препроцессора разрывает оператор: EDT разбирает код блока без учёта её условия"; //$NON-NLS-1$
+
+    private static final String MESSAGE_DELETE =
+        "Директива препроцессора разрывает оператор: EDT разбирает удалённый код блока как действующий"; //$NON-NLS-1$
 
     @Override
     public String getCheckId()
@@ -87,7 +93,7 @@ public class BslPreprocessorStraddleCheck
         String uri = String.valueOf(xtextResource.getURI());
         try
         {
-            instructions = BslParserHook.findHiddenIfInstructions(root);
+            instructions = BslParserHook.findReportedHiddenDirectives(root);
         }
         catch (NoClassDefFoundError e)
         {
@@ -102,7 +108,8 @@ public class BslPreprocessorStraddleCheck
         {
             DirectLocation location = new DirectLocation(Integer.valueOf(instr[0]), Integer.valueOf(instr[1]),
                 Integer.valueOf(instr[2]), causer(root, instr[0], module));
-            resultAceptor.addIssue(new BslDirectLocationIssue(MESSAGE, location));
+            String message = instr[3] == BslParserHook.KIND_DELETE ? MESSAGE_DELETE : MESSAGE_IF;
+            resultAceptor.addIssue(new BslDirectLocationIssue(message, location));
         }
     }
 
