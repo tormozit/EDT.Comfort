@@ -27,6 +27,8 @@
     <module>plugin</module>
     <!-- Бандл проверок: своя фиксированная версия, см. plugin.checks/README.md -->
     <module>plugin.checks</module>
+    <!-- Хук разбора модулей BSL, ранний старт: см. plugin.bslparser/README.md -->
+    <module>plugin.bslparser</module>
     <module>feature</module>
     <module>site</module>
   </modules>

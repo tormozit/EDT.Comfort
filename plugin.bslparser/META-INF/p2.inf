@@ -1,0 +1,4 @@
+# Бандл должен стартовать вместе с фреймворком, до загрузки парсера BSL: иначе его WeavingHook
+# не увидит классы парсера (см. README.md рядом).
+instructions.configure = setStartLevel(startLevel:4);markStarted(started:true);
+instructions.unconfigure = setStartLevel(startLevel:-1);markStarted(started:false);

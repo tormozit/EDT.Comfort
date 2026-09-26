@@ -11,9 +11,13 @@ $wsBundles = Join-Path $ComfortWsOsgi $ComfortBundlesInfoRel
 $wsDev = Join-Path $ComfortWsOsgi 'dev.properties'
 
 if ($Repair) {
-    $eclipse = Get-Process -Name 'eclipse*' -ErrorAction SilentlyContinue
-    if ($eclipse) {
-        throw "Close Eclipse PDE before -Repair (PID: $($eclipse.Id -join ','))"
+    # Мешает только запущенная из PDE EDT (java с -data ...runtime-EclipseApplication): она держит
+    # профиль. Сам PDE bundles.info не переписывает (generateProfile/clearConfig выключены), его
+    # закрывать не нужно.
+    $runtime = Get-CimInstance Win32_Process -Filter "Name like 'java%'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -match 'runtime-EclipseApplication' }
+    if ($runtime) {
+        throw "Close runtime EDT (Eclipse Application) before -Repair (PID: $($runtime.ProcessId -join ','))"
     }
     Repair-ComfortWorkspaceOsgiVersion -Qualifier $expected
 }

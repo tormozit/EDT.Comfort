@@ -30,6 +30,7 @@
     <check category="tormozit.comfort.checks" class="tormozit.checks.StaticFeatureAccessChecks$Compatibility"/>
     <check category="tormozit.comfort.checks" class="tormozit.checks.StaticFeatureAccessChecks$VariableAccess"/>
     <check category="tormozit.comfort.checks" class="tormozit.checks.StaticFeatureAccessChecks$EventHandler"/>
+    <check category="tormozit.comfort.checks" class="tormozit.checks.BslPreprocessorStraddleCheck"/>
   </extension>
 
 </plugin>

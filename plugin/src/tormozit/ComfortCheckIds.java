@@ -26,5 +26,8 @@ public final class ComfortCheckIds
     public static final String STATIC_ACCESS_VARIABLE = "comfort-bsl-static-access-variable"; //$NON-NLS-1$
     public static final String STATIC_ACCESS_EVENT_HANDLER = "comfort-bsl-static-access-event-handler"; //$NON-NLS-1$
 
+    /** {@code tormozit.checks.BslPreprocessorStraddleCheck} — {@code #Если}, разрывающая оператор. */
+    public static final String BSL_PREPROCESSOR_STRADDLE = "comfort-bsl-preprocessor-straddle"; //$NON-NLS-1$
+
     private ComfortCheckIds() {}
 }

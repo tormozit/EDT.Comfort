@@ -207,7 +207,15 @@ function Assert-PdeSiteArtifacts {
     if (-not $checksJar) {
         Write-Error "No checks plugin jar (tormozit.comfort.checks_*.jar) in $pluginsDir"
     }
-    Write-Host "PDE site artifacts OK: $($featureJar.Name), $($pluginJar.Name), $($checksJar.Name)"
+    # Хук разбора модулей BSL (ранний старт, см. plugin.bslparser/README.md). Без него пропадает
+    # разбор #Если, разрывающих оператор, а бандл проверок не разрешается.
+    $bslParserJar = Get-ChildItem -LiteralPath $pluginsDir -Filter 'tormozit.comfort.bslparser_*.jar' -File -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime |
+        Select-Object -Last 1
+    if (-not $bslParserJar) {
+        Write-Error "No BSL parser hook jar (tormozit.comfort.bslparser_*.jar) in $pluginsDir"
+    }
+    Write-Host "PDE site artifacts OK: $($featureJar.Name), $($pluginJar.Name), $($checksJar.Name), $($bslParserJar.Name)"
 }
 
 function Invoke-PdeBuild {

@@ -62,6 +62,10 @@ public class Activator extends AbstractUIPlugin
     public void start(BundleContext context) throws Exception
     {
         Global.clearTempLogs();
+        // Приёмник временного лога для бандла раннего старта tormozit.comfort.bslparser: он стартует
+        // раньше и копит строки, пока приёмника нет (иначе их стёр бы clearTempLogs).
+        System.getProperties().put("tormozit.comfort.tempLog", //$NON-NLS-1$
+            (java.util.function.BiConsumer<String, String>) Global::tempLog);
         Global.cleanOrphanedFormNativeTempDirs();
 
         super.start(context);
