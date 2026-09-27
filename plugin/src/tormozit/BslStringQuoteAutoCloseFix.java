@@ -76,16 +76,13 @@ public final class BslStringQuoteAutoCloseFix implements IStartup
         try
         {
             IWorkbenchPart part = ref.getPart(false);
-            Global.tempLog("quoteAutoClose", "inspectEditor: part=" //$NON-NLS-1$ //$NON-NLS-2$
-                + (part == null ? "null" : part.getClass().getName())); //$NON-NLS-1$
             if (part instanceof BslXtextEditor bsl)
                 attachToBslEditor(bsl);
             else if (part instanceof DtGranularEditor<?> granular)
                 attachToGranularEditor(granular);
         }
-        catch (Exception e)
+        catch (Exception ignored)
         {
-            Global.tempLogException("quoteAutoClose", "inspectEditor", e); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 
@@ -120,37 +117,23 @@ public final class BslStringQuoteAutoCloseFix implements IStartup
     {
         try
         {
-            Global.tempLog("quoteAutoClose", "attachToBslEditor: " + editor); //$NON-NLS-1$ //$NON-NLS-2$
             attach(editor.getInternalSourceViewer());
         }
-        catch (Exception e)
+        catch (Exception ignored)
         {
-            Global.tempLogException("quoteAutoClose", "attachToBslEditor", e); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 
     private static void attach(ISourceViewer viewer)
     {
         if (viewer == null)
-        {
-            Global.tempLog("quoteAutoClose", "attach: viewer=null"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
-        }
         IDocument document = viewer.getDocument();
-        if (document == null)
-        {
-            Global.tempLog("quoteAutoClose", "attach: document=null"); //$NON-NLS-1$ //$NON-NLS-2$
+        if (document == null || attached.containsKey(document))
             return;
-        }
-        if (attached.containsKey(document))
-        {
-            Global.tempLog("quoteAutoClose", "attach: already attached doc=" + System.identityHashCode(document)); //$NON-NLS-1$ //$NON-NLS-2$
-            return;
-        }
         IDocumentListener listener = new QuoteFixListener();
         document.addDocumentListener(listener);
         attached.put(document, listener);
-        Global.tempLog("quoteAutoClose", "attach: OK doc=" + System.identityHashCode(document)); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private static final class PartListener implements IPartListener2
@@ -196,35 +179,22 @@ public final class BslStringQuoteAutoCloseFix implements IStartup
         @Override
         public void documentChanged(DocumentEvent event)
         {
-            String text = event.getText();
-            if (event.getLength() != 0 || text == null || !text.equals("\"\"")) //$NON-NLS-1$
-            {
-                if (text != null && text.indexOf('"') >= 0)
-                    Global.tempLog("quoteAutoClose", "documentChanged: skip len=" + event.getLength() //$NON-NLS-1$ //$NON-NLS-2$
-                        + " text=" + escape(text)); //$NON-NLS-1$
+            if (event.getLength() != 0)
                 return;
-            }
+            String text = event.getText();
+            if (text == null || !text.equals("\"\"")) //$NON-NLS-1$
+                return;
             IDocument document = event.getDocument();
             int offset = event.getOffset();
             try
             {
-                boolean inside = insideMultilineStringLiteral(document, offset);
-                Global.tempLog("quoteAutoClose", "documentChanged: offset=" + offset //$NON-NLS-1$ //$NON-NLS-2$
-                    + " inside=" + inside); //$NON-NLS-1$
-                if (!inside)
+                if (!insideMultilineStringLiteral(document, offset))
                     return;
                 document.replace(offset + 1, 1, ""); //$NON-NLS-1$
-                Global.tempLog("quoteAutoClose", "documentChanged: corrected offset=" + offset); //$NON-NLS-1$ //$NON-NLS-2$
             }
-            catch (BadLocationException e)
+            catch (BadLocationException ignored)
             {
-                Global.tempLogException("quoteAutoClose", "documentChanged", e); //$NON-NLS-1$ //$NON-NLS-2$
             }
-        }
-
-        private static String escape(String s)
-        {
-            return s.replace("\r", "\\r").replace("\n", "\\n"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
         }
 
         /**
@@ -232,33 +202,22 @@ public final class BslStringQuoteAutoCloseFix implements IStartup
          * (позиция не затронута вставкой) сохраняет свою исходную классификацию партиции.
          *
          * <p>Партиция {@code __string} у BSL/QL однострочная даже внутри многострочного
-         * литерала — построчный сканер партиций не тянет её через перевод строки
-         * (подтверждено логом: {@code partitionOffset}/{@code partitionLen} укладываются
-         * в одну {@code currentLine}). Поэтому «многострочность» определяем по тексту
-         * строк, а не по границам партиции: продолжение BSL/QL-литерала помечается
-         * ведущим {@code |} на следующей строке (или на самой текущей, если каретка уже
-         * внутри такой строки-продолжения).
+         * литерала — построчный сканер партиций не тянет её через перевод строки. Поэтому
+         * «многострочность» определяем по тексту строк, а не по границам партиции:
+         * продолжение BSL/QL-литерала помечается ведущим {@code |} на следующей строке
+         * (или на самой текущей, если каретка уже внутри такой строки-продолжения).
          */
         private boolean insideMultilineStringLiteral(IDocument document, int offset) throws BadLocationException
         {
             if (offset <= 0)
-            {
-                Global.tempLog("quoteAutoClose", "insideMultilineStringLiteral: offset<=0"); //$NON-NLS-1$ //$NON-NLS-2$
                 return false;
-            }
             ITypedRegion partition = document.getPartition(offset - 1);
-            Global.tempLog("quoteAutoClose", "insideMultilineStringLiteral: partitionType=" + partition.getType() //$NON-NLS-1$ //$NON-NLS-2$
-                + " partitionOffset=" + partition.getOffset() + " partitionLen=" + partition.getLength()); //$NON-NLS-1$ //$NON-NLS-2$
             if (!TerminalsTokenTypeToPartitionMapper.STRING_LITERAL_PARTITION.equals(partition.getType()))
                 return false;
             int currentLine = document.getLineOfOffset(offset);
-            boolean currentStartsWithPipe = startsWithPipe(document, currentLine);
-            boolean nextStartsWithPipe = currentLine + 1 < document.getNumberOfLines()
-                && startsWithPipe(document, currentLine + 1);
-            Global.tempLog("quoteAutoClose", "insideMultilineStringLiteral: currentLine=" + currentLine //$NON-NLS-1$ //$NON-NLS-2$
-                + " currentStartsWithPipe=" + currentStartsWithPipe //$NON-NLS-1$
-                + " nextStartsWithPipe=" + nextStartsWithPipe); //$NON-NLS-1$
-            return currentStartsWithPipe || nextStartsWithPipe;
+            if (startsWithPipe(document, currentLine))
+                return true;
+            return currentLine + 1 < document.getNumberOfLines() && startsWithPipe(document, currentLine + 1);
         }
 
         private boolean startsWithPipe(IDocument document, int line) throws BadLocationException
