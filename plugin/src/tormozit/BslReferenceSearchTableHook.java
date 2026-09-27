@@ -4,10 +4,14 @@ import java.util.ArrayList;
 import java.util.List;
 
 import org.eclipse.core.resources.IFile;
+import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.ResourcesPlugin;
 import org.eclipse.core.runtime.Path;
 import org.eclipse.emf.common.util.URI;
+import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.EReference;
+import org.eclipse.emf.ecore.EStructuralFeature;
+import org.eclipse.emf.ecore.util.EcoreUtil;
 import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.jface.layout.TableColumnLayout;
 import org.eclipse.jface.viewers.ArrayContentProvider;
@@ -31,6 +35,7 @@ import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.IWorkbenchPart;
 import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
+import org.eclipse.ui.IPageLayout;
 import org.eclipse.ui.IPartListener2;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.part.Page;
@@ -40,6 +45,16 @@ import org.eclipse.search.ui.ISearchResultViewPart;
 import org.eclipse.search.ui.IQueryListener;
 import org.eclipse.search.ui.NewSearchUI;
 import org.eclipse.xtext.resource.IReferenceDescription;
+
+import com._1c.g5.v8.dt.bsl.ui.editor.findref.IReferenceFinderParticipant;
+import com._1c.g5.v8.dt.core.platform.IV8Project;
+import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
+import com._1c.g5.v8.dt.metadata.mdclass.AbstractForm;
+import com._1c.g5.v8.dt.metadata.mdclass.BasicForm;
+import com._1c.g5.v8.dt.metadata.mdclass.EventSubscription;
+import com._1c.g5.v8.dt.metadata.mdclass.MdClassPackage;
+import com._1c.g5.v8.dt.metadata.mdclass.ScheduledJob;
+import com._1c.g5.v8.dt.ui.util.OpenHelper;
 
 /**
  * Табличный режим панели результатов команды «Найти ссылки» на программный элемент BSL (переменную,
@@ -274,6 +289,25 @@ public final class BslReferenceSearchTableHook implements IStartup
         int[] region;
         /** {@code null} — контекст ещё не вычисляли (в ячейке «?»). */
         String parentType;
+        /** Не {@code null} — строка из {@link #applyParticipantMatch} (регламентное задание/подписка):
+         * {@link #sourceUri} — {@code bm://} URI, штатный xtext-опенер его не открывает, поэтому
+         * открытие идёт через {@link OpenHelper#openEditor(EObject)} по этому полю. */
+        EObject participantTarget;
+        /** Не {@code null} — объект, чьё свойство активируется в панели «Свойства», если он ОТЛИЧАЕТСЯ
+         * от {@link #participantTarget} (форма: открываем элемент/команду формы, а свойство —
+         * у вложенного {@code EventHandler}/{@code CommandHandler}). {@code null} — использовать
+         * {@link #participantTarget} и для открытия, и для панели (регл. задание/подписка). */
+        EObject participantPanelMember;
+        /** Свойство объекта из {@link #participantPanelMember} (или {@link #participantTarget}),
+         * активируемое в панели «Свойства» после открытия — тот же
+         * {@code ConfigSearchResultsHook.PropertyFieldFocus}, что и у матчей полнотекстового поиска
+         * по конфигурации. */
+        EStructuralFeature participantFeature;
+        /** Не {@code null} — обработчик события формы/элемента: открытие через
+         * {@link FormEditorHook#openFormEventHandler} ({@link #participantTarget} — владелец события),
+         * поле события в панели — динамическое, {@link #participantFeature} к нему не применим. */
+        com._1c.g5.v8.dt.form.model.EventHandler participantEventHandler;
+        BasicForm participantForm;
 
         ReferenceRow(IFile file, URI sourceUri, EReference reference, int indexInList)
         {
@@ -718,9 +752,252 @@ public final class BslReferenceSearchTableHook implements IStartup
                 row.fileType = ext != null ? ext : ""; //$NON-NLS-1$
                 row.module = moduleLabel(file);
             }
+            else if (applyParticipantMatch(row, reference, sourceUri))
+            {
+                return row;
+            }
             if (!row.needsContext())
                 row.parentType = ""; //$NON-NLS-1$
             return row;
+        }
+
+        /**
+         * Регламентное задание/подписка на событие/обработчик события или команды формы, найденные
+         * штатными участниками поиска ссылок EDT ({@code ScheduleJobReferenceFinderParticipant},
+         * {@code EventSubscriptionReferenceFinderParticipant} — бандл {@code com._1c.g5.v8.dt.md.ui};
+         * {@code FormReferenceFinderParticipant} — бандл {@code com._1c.g5.v8.dt.form.ui}; декомпиляция
+         * подтвердила формат) — их {@code sourceEObjectUri} вида {@code bm://<проект>/<FQN>#/} не
+         * EMF-ресурс, поэтому {@link #platformFile} не резолвит файл и строка оставалась пустой
+         * (issue 611). Сегмент(0) этого URI — тот же FQN (в т.ч. многосегментный, вида
+         * {@code Catalog.Имя.Form.ИмяФормы} — лишний хвостовой сегмент без пары молча игнорируется),
+         * что понимает уже существующий {@link GoToDefinition#resolveEObjectByQualifiedName}.
+         *
+         * @return {@code true} — строка заполнена отсюда; {@code false} — не такой матч, обычный путь
+         */
+        private boolean applyParticipantMatch(ReferenceRow row, IReferenceDescription reference, URI sourceUri)
+        {
+            if (sourceUri == null || !"bm".equals(sourceUri.scheme()) || sourceUri.authority() == null //$NON-NLS-1$
+                || sourceUri.segmentCount() == 0)
+                return false;
+            String fqn = sourceUri.segment(0);
+            if (fqn.indexOf('.') <= 0)
+                return false;
+
+            IProject project = ResourcesPlugin.getWorkspace().getRoot().getProject(sourceUri.authority());
+            if (!(Global.getServiceByClass(IV8ProjectManager.class) instanceof IV8ProjectManager pm))
+                return false;
+            IV8Project v8project = pm.getProject(project);
+            if (v8project == null)
+                return false;
+            EObject mdObject = GoToDefinition.resolveEObjectByQualifiedName(fqn, v8project);
+
+            String category;
+            String parentType;
+            String name;
+            EStructuralFeature feature = null;
+            IFile file = null;
+            String rawValue = null;
+
+            if (mdObject instanceof ScheduledJob job)
+            {
+                category = "Свойство «Метод обработчик»"; //$NON-NLS-1$
+                parentType = "РегламентноеЗадание"; //$NON-NLS-1$
+                name = job.getName() != null ? job.getName() : fqn; //$NON-NLS-1$
+                feature = MdClassPackage.Literals.SCHEDULED_JOB__METHOD_NAME;
+                rawValue = job.getMethodName();
+                file = mdoFile(project, parentType, name);
+            }
+            else if (mdObject instanceof EventSubscription subscription)
+            {
+                category = "Свойство «Обработчик»"; //$NON-NLS-1$
+                parentType = "ПодпискаНаСобытие"; //$NON-NLS-1$
+                name = subscription.getName() != null ? subscription.getName() : fqn; //$NON-NLS-1$
+                feature = MdClassPackage.Literals.EVENT_SUBSCRIPTION__HANDLER;
+                rawValue = subscription.getHandler();
+                file = mdoFile(project, parentType, name);
+            }
+            else if (mdObject instanceof BasicForm basicForm)
+            {
+                // resolveEObjectByQualifiedName по FQN вида Catalog.Имя.Form.ИмяФормы даёт СЛОТ формы
+                // на владельце (CatalogForm — MdObject, реквизит списка форм), а не саму загруженную
+                // форму. Содержимое (модуль, события формы, команды, элементы) — на
+                // BasicForm.getForm() (AbstractForm, в рантайме — form.model.Form). Участник поиска
+                // не хранит конкретный обработчик отдельным полем — только форму целиком, поэтому
+                // элемент/команду/событие ищем сами обходом дерева формы по имени метода
+                // ({@link #findFormHandlerMatch}), как EDT делает для подписи в Quick Outline.
+                String formName = basicForm.getName() != null ? basicForm.getName() : fqn; //$NON-NLS-1$
+                AbstractForm abstractForm = basicForm.getForm();
+                Object module = abstractForm != null ? abstractForm.getModule() : null;
+                if (module instanceof EObject moduleObject)
+                    file = platformFile(EcoreUtil.getURI(moduleObject).trimFragment());
+
+                String targetMethodName = targetMethodName(reference);
+                FormHandlerMatch handlerMatch = abstractForm instanceof com._1c.g5.v8.dt.form.model.Form contentForm
+                    && targetMethodName != null
+                    ? findFormHandlerMatch(contentForm, formName, targetMethodName) : null;
+                if (handlerMatch != null)
+                {
+                    category = handlerMatch.category();
+                    parentType = handlerMatch.ownerType();
+                    name = handlerMatch.ownerName();
+                    row.participantTarget = handlerMatch.openTarget();
+                    if (handlerMatch.eventHandler() != null)
+                    {
+                        row.participantEventHandler = handlerMatch.eventHandler();
+                        row.participantForm = basicForm;
+                    }
+                    if (handlerMatch.panelMember() != null)
+                    {
+                        row.participantPanelMember = handlerMatch.panelMember();
+                        feature = handlerMatch.panelFeature();
+                    }
+                }
+                else
+                {
+                    // Не нашли конкретный обработчик (участник сообщил о совпадении, а обход дерева —
+                    // нет) — резервный вариант: хотя бы форма целиком, без ложных подробностей.
+                    category = "Обработчик формы"; //$NON-NLS-1$
+                    parentType = "Форма"; //$NON-NLS-1$
+                    name = formName;
+                    row.participantTarget = mdObject;
+                }
+                rawValue = category;
+            }
+            else
+                return false;
+
+            row.project = project.getName();
+            if (file != null)
+            {
+                row.fileName = file.getName();
+                String ext = file.getFileExtension();
+                row.fileType = ext != null ? ext : ""; //$NON-NLS-1$
+            }
+            row.parent = name;
+            row.parentType = parentType;
+            row.syntaxKind = category;
+            if (row.participantTarget == null)
+                row.participantTarget = mdObject;
+            row.participantFeature = feature;
+            row.lineText = rawValue != null ? rawValue : ""; //$NON-NLS-1$
+            return true;
+        }
+
+        /** Найденный обработчик метода в дереве формы: чем открывать (двойной клик) и что
+         * активировать в панели «Свойства» ({@code panelMember}/{@code panelFeature} — {@code null},
+         * если для этого случая активация не применима). {@code ownerType} — «Тип родителя»: «Форма»/
+         * «Команда формы»/«Элемент формы» в зависимости от того, где нашёлся обработчик.
+         * {@code eventHandler} — не {@code null} для события формы/элемента. */
+        private record FormHandlerMatch(String ownerName, String ownerType, String category, EObject openTarget,
+            EObject panelMember, EStructuralFeature panelFeature,
+            com._1c.g5.v8.dt.form.model.EventHandler eventHandler) {}
+
+        /** Простое имя искомого метода из URI цели ссылки ({@code .../Module.bsl#/_method/Имя/0}) —
+         * надёжнее регэксп-разбора заголовка результата поиска ({@link #searchTargetName}), раз URI
+         * уже под рукой у каждого вхождения. */
+        private static String targetMethodName(IReferenceDescription reference)
+        {
+            URI targetUri = reference.getTargetEObjectUri();
+            String fragment = targetUri != null ? targetUri.fragment() : null;
+            if (fragment == null)
+                return null;
+            String[] parts = fragment.split("/"); //$NON-NLS-1$
+            for (int i = 0; i < parts.length - 1; i++)
+                if ("_method".equals(parts[i])) //$NON-NLS-1$
+                    return parts[i + 1];
+            return null;
+        }
+
+        /**
+         * Обходит дерево формы (собственные события → команды → элементы рекурсивно) в поисках
+         * обработчика с именем {@code methodName} — участник поиска ссылок EDT
+         * ({@code FormReferenceFinderParticipant}) не сообщает, какой именно элемент/команда/событие
+         * нашли совпадение, только форму целиком.
+         */
+        private static FormHandlerMatch findFormHandlerMatch(com._1c.g5.v8.dt.form.model.Form form,
+            String formName, String methodNameFallback)
+        {
+            FormHandlerMatch m = matchEventHandlers(formName, "Форма", form, form, methodNameFallback); //$NON-NLS-1$
+            if (m != null)
+                return m;
+            for (com._1c.g5.v8.dt.form.model.FormCommand cmd : form.getFormCommands())
+            {
+                com._1c.g5.v8.dt.form.model.CommandHandlerContainer action = cmd.getAction();
+                if (action instanceof com._1c.g5.v8.dt.form.model.FormCommandHandlerContainer fchc
+                    && fchc.getHandler() != null
+                    && methodNameFallback.equalsIgnoreCase(fchc.getHandler().getName()))
+                {
+                    // Панель «Свойства» у команды формы показывает поле «Действие» — это FormCommand
+                    // .getAction() (CommandHandlerContainer) на самой команде, а не имя вложенного
+                    // CommandHandler (тот отдельным полем панели не является).
+                    return new FormHandlerMatch(cmd.getName(), "Команда формы", "Обработчик команды формы", cmd, //$NON-NLS-1$ //$NON-NLS-2$
+                        cmd, com._1c.g5.v8.dt.form.model.FormPackage.Literals.FORM_COMMAND__ACTION, null);
+                }
+            }
+            return matchItems(form.getItems(), methodNameFallback);
+        }
+
+        private static FormHandlerMatch matchItems(List<com._1c.g5.v8.dt.form.model.FormItem> items,
+            String methodName)
+        {
+            if (items == null)
+                return null;
+            for (com._1c.g5.v8.dt.form.model.FormItem item : items)
+            {
+                FormHandlerMatch m = matchEventHandlers(item.getName(), "Элемент формы", item, item, methodName); //$NON-NLS-1$
+                if (m != null)
+                    return m;
+                if (item instanceof com._1c.g5.v8.dt.form.model.FormItemContainer nested)
+                {
+                    m = matchItems(nested.getItems(), methodName);
+                    if (m != null)
+                        return m;
+                }
+            }
+            return null;
+        }
+
+        private static FormHandlerMatch matchEventHandlers(String ownerName, String ownerType, EObject openTarget,
+            Object owner, String methodName)
+        {
+            List<com._1c.g5.v8.dt.form.model.EventHandler> handlers = new ArrayList<>();
+            if (owner instanceof com._1c.g5.v8.dt.form.model.EventHandlerContainer container)
+                handlers.addAll(container.getHandlers());
+            // Обработчики элемента формы EDT хранит в двух местах — на самом объекте и в его
+            // extInfo (FieldExtInfo/TableExtInfo/FormExtInfo — тоже EventHandlerContainer, но общего
+            // типа для доступа к extInfo нет, только по объекту). Тот же приём, что уже в
+            // FormEditorHook.ItemsTree.handlers() — у таблицы «ПриПолученииДанныхНаСервере» лежит
+            // именно там, без этой проверки строка терялась.
+            if (Global.invoke(owner, "getExtInfo") //$NON-NLS-1$
+                instanceof com._1c.g5.v8.dt.form.model.EventHandlerContainer extInfo)
+                handlers.addAll(extInfo.getHandlers());
+            for (com._1c.g5.v8.dt.form.model.EventHandler handler : handlers)
+            {
+                if (handler.getName() == null || !methodName.equalsIgnoreCase(handler.getName()))
+                    continue;
+                com._1c.g5.v8.dt.mcore.Event event = handler.getEvent();
+                String eventName = event == null ? "" //$NON-NLS-1$
+                    : event.getNameRu() != null && !event.getNameRu().isEmpty() ? event.getNameRu()
+                    : event.getName() != null ? event.getName() : ""; //$NON-NLS-1$
+                // Поля событий в панели «Свойства» — динамические, по каждому доступному Event, а не
+                // EStructuralFeature для PropertyFieldFocus.scheduleExact. Поэтому активация поля —
+                // тем же путём, что двойной клик по колонке обработчиков дерева элементов формы
+                // (FormEditorHook.openFormEventHandler).
+                return new FormHandlerMatch(ownerName, ownerType, "Обработчик события «" + eventName + "»", //$NON-NLS-1$ //$NON-NLS-2$
+                    openTarget, null, null, handler);
+            }
+            return null;
+        }
+
+        /** {@code src/<Папка>/<Имя>/<Имя>.mdo} — конвенция структуры проекта EDT для top-level
+         * метаданных вроде регл. задания/подписки ({@link MdTypeMapping#ruToFolder}). */
+        private static IFile mdoFile(IProject project, String ruKind, String name)
+        {
+            String folder = MdTypeMapping.ruToFolder(ruKind);
+            if (folder == null || name == null || name.isEmpty())
+                return null;
+            IFile candidate = project.getFile(new Path("src/" + folder + "/" + name + "/" + name + ".mdo")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            return candidate.exists() ? candidate : null;
         }
 
         /** Точный диапазон для полнотекстового вхождения ({@code LabelReferenceDescription.getSelection}). */
@@ -768,7 +1045,46 @@ public final class BslReferenceSearchTableHook implements IStartup
         private void openSelected()
         {
             ReferenceRow row = firstSelected();
-            if (row == null || row.sourceUri == null)
+            if (row == null)
+                return;
+            if (row.participantTarget != null)
+            {
+                try
+                {
+                    IWorkbenchPage page = PlatformUI.getWorkbench().getActiveWorkbenchWindow().getActivePage();
+                    if (page != null && row.participantEventHandler != null)
+                    {
+                        FormEditorHook.openFormEventHandler(page, row.participantForm, row.participantTarget,
+                            row.participantEventHandler);
+                        return;
+                    }
+                    if (page != null)
+                    {
+                        // Порядок как у ConfigSearchResultsHook.PropertyFieldFocus (эталон —
+                        // openNestedMdObjectMemberMatch): панель «Свойства» открыть и вооружить цикл
+                        // ожидания ДО открытия редактора объекта, иначе первые попытки уходят в ещё
+                        // старую палитру / findPropertySheetView не находит панель вовсе.
+                        try
+                        {
+                            page.showView(IPageLayout.ID_PROP_SHEET);
+                        }
+                        catch (org.eclipse.ui.PartInitException | RuntimeException e)
+                        {
+                        }
+                        if (row.participantFeature != null)
+                            ConfigSearchResultsHook.PropertyFieldFocus.scheduleExact(page,
+                                row.participantPanelMember != null ? row.participantPanelMember
+                                    : row.participantTarget,
+                                row.participantFeature);
+                    }
+                    new OpenHelper().openEditor(row.participantTarget);
+                }
+                catch (RuntimeException | LinkageError e)
+                {
+                }
+                return;
+            }
+            if (row.sourceUri == null)
                 return;
             try
             {

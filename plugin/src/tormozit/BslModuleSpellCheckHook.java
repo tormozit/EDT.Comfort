@@ -1501,6 +1501,19 @@ public final class BslModuleSpellCheckHook implements IStartup
             return kind == LeafKind.IDENTIFIER && leafLength > 0 && leafText != null;
         }
 
+        /**
+         * Текущее смещение проблемы в документе. {@link #offset} — снимок фонового Job на
+         * момент анализа; {@link #position} тот же объект, что лежит в annotation model, и
+         * документ сдвигает его при каждой правке (см. {@code model.getPosition(ann)} в других
+         * местах файла). Без этого автофикс после правки текста перед словом (напр. вставки
+         * символа) применяется по устаревшему месту.
+         */
+        int liveOffset()
+        {
+            Position p = position;
+            return p != null && !p.isDeleted ? p.offset : offset;
+        }
+
         /** Полное имя идентификатора после замены ошибочного сегмента на {@code suggestion}. */
         String correctedLeafName(String suggestion)
         {
@@ -1871,16 +1884,20 @@ public final class BslModuleSpellCheckHook implements IStartup
                 return;
             try
             {
+                // Правки документа после анализа (напр. вставленный перед словом символ)
+                // сдвигают live-позицию проблемы, но не застывшие offset/leafOffset — сносим
+                // этот сдвиг явно, иначе замена уедет на старое место.
+                int delta = problem != null ? problem.liveOffset() - problem.offset : 0;
                 if (problem != null && problem.isIdentifierLeaf())
                 {
                     String full = problem.correctedLeafName(suggestion);
                     if (full != null)
                     {
-                        document.replace(problem.leafOffset, problem.leafLength, full);
+                        document.replace(problem.leafOffset + delta, problem.leafLength, full);
                         return;
                     }
                 }
-                document.replace(getReplacementOffset(), getReplacementLength(), suggestion);
+                document.replace(getReplacementOffset() + delta, getReplacementLength(), suggestion);
             }
             catch (Exception e)
             {
@@ -1905,7 +1922,10 @@ public final class BslModuleSpellCheckHook implements IStartup
             IXtextDocument xdoc = editor.getDocument();
             if (xdoc == null)
                 return false;
-            ITextSelection selection = new TextSelection(problem.leafOffset, problem.leafLength);
+            // См. replaceInDocument — leafOffset нужно сдвинуть на правки, случившиеся
+            // после анализа (live-позиция проблемы), иначе резолвится не тот EObject.
+            int leafOffset = problem.leafOffset + (problem.liveOffset() - problem.offset);
+            ITextSelection selection = new TextSelection(leafOffset, problem.leafLength);
             try
             {
                 editor.getSelectionProvider().setSelection(selection);
@@ -1916,7 +1936,7 @@ public final class BslModuleSpellCheckHook implements IStartup
             try
             {
                 IRenameElementContext context = xdoc.priorityReadOnly(resource ->
-                    createRenameContext(resource, editor, selection, problem.leafOffset));
+                    createRenameContext(resource, editor, selection, leafOffset));
                 if (context == null)
                 {
                     return replaceAllIdentifierOccurrences(xdoc, oldName, newName);

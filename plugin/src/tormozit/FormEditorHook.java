@@ -703,6 +703,55 @@ public class FormEditorHook implements IStartup
                 generation, attempt + 1));
     }
 
+    /**
+     * Открывает форму, выделяет в дереве элементов владельца обработчика (элемент формы или
+     * корень «Форма») и ставит ввод в поле его события {@code handler} в панели «Свойства» —
+     * то же, что двойной клик по колонке обработчиков дерева, но для заданного обработчика.
+     *
+     * @param owner {@link Form} или {@link FormItem} — объекты модели, не редактора: сверяются по URI
+     */
+    static void openFormEventHandler(IWorkbenchPage workbenchPage,
+        com._1c.g5.v8.dt.metadata.mdclass.BasicForm basicForm, EObject owner, EventHandler handler)
+    {
+        if (workbenchPage == null || basicForm == null || owner == null || handler == null)
+            return;
+        int generation = ++externalGoToGeneration;
+        try
+        {
+            new OpenHelper(workbenchPage).openEditor(basicForm);
+        }
+        catch (RuntimeException e)
+        {
+            return;
+        }
+        awaitFormEventHandler(workbenchPage, basicForm, owner, ItemsTree.eventLabels(handler), generation, 0);
+    }
+
+    private static void awaitFormEventHandler(IWorkbenchPage workbenchPage,
+        com._1c.g5.v8.dt.metadata.mdclass.BasicForm basicForm, EObject owner, List<String> eventNames,
+        int generation, int attempt)
+    {
+        if (generation != externalGoToGeneration)
+            return;
+        IEditorPart activeEditor = workbenchPage.getActiveEditor();
+        FormEditorPage page = activeEditor instanceof FormEditor editor ? findFormPage(editor) : null;
+        Form model = page != null ? page.getModel() : null;
+        TreeViewer viewer = isRequestedForm(model, basicForm)
+            && Global.getField(page, "itemsViewer") instanceof TreeViewer v ? v : null; //$NON-NLS-1$
+        Object row = viewer != null && viewer.getContentProvider() != null
+            ? ItemsTree.findOwnerRow(viewer, owner) : null;
+        if (row != null)
+        {
+            viewer.setSelection(new StructuredSelection(row), true);
+            ItemsTree.focusEventField(page, eventNames);
+            return;
+        }
+        if (attempt >= EXTERNAL_GO_TO_MAX_ATTEMPTS)
+            return;
+        Display.getDefault().timerExec(EXTERNAL_GO_TO_RETRY_MS,
+            () -> awaitFormEventHandler(workbenchPage, basicForm, owner, eventNames, generation, attempt + 1));
+    }
+
     private static boolean isRequestedForm(Form model,
         com._1c.g5.v8.dt.metadata.mdclass.BasicForm basicForm)
     {
@@ -8692,7 +8741,35 @@ public class FormEditorHook implements IStartup
             EventHandler handler = firstHandler(page, element);
             List<String> names = handler != null ? eventLabels(handler) : Collections.emptyList();
             ShowPropertiesHandler.run(page.getSite());
-            scheduleEventFocus(page.getSite().getPage(), names, 0);
+            scheduleEventFocus(page.getSite().getPage(), names, false, 0);
+        }
+
+        /**
+         * Поле события {@code eventNames} в панели «Свойства» уже выделенной строки дерева.
+         * Строго по имени, без отката на первое событие: панель обновляется после выделения
+         * асинхронно, и в ещё старой панели откат активировал бы чужое поле.
+         */
+        static void focusEventField(FormEditorPage page, List<String> eventNames)
+        {
+            if (page == null || page.getSite() == null || eventNames.isEmpty())
+                return;
+            ShowPropertiesHandler.run(page.getSite());
+            scheduleEventFocus(page.getSite().getPage(), eventNames, true, 0);
+        }
+
+        /** Строка дерева владельца обработчиков: корень «Форма» для {@link Form}, иначе элемент. */
+        static Object findOwnerRow(TreeViewer viewer, EObject owner)
+        {
+            if (owner instanceof FormItem)
+                return findRow(viewer, candidate -> sameEObject(candidate, owner));
+            if (!(owner instanceof Form) || !(viewer.getContentProvider() instanceof ITreeContentProvider content))
+                return null;
+            Object[] roots = content.getElements(viewer.getInput());
+            if (roots != null)
+                for (Object root : roots)
+                    if (isFormRoot(root))
+                        return root;
+            return null;
         }
 
         /** Имя события в обоих вариантах написания — панель подписывает поле одним из них. */
@@ -8717,7 +8794,7 @@ public class FormEditorHook implements IStartup
          *        первое событие элемента
          */
         private static void scheduleEventFocus(IWorkbenchPage workbenchPage, List<String> eventNames,
-            int attempt)
+            boolean strict, int attempt)
         {
             if (workbenchPage == null || attempt >= MAX_FOCUS_ATTEMPTS)
             {
@@ -8727,16 +8804,16 @@ public class FormEditorHook implements IStartup
             if (display == null || display.isDisposed())
                 return;
             display.timerExec(FOCUS_RETRY_DELAY_MS, () -> {
-                if (tryFocusEventField(workbenchPage, eventNames))
+                if (tryFocusEventField(workbenchPage, eventNames, strict))
                 {
                     // Панель дозаполняется и после успешной активации, отбирая ввод в поле «Имя» —
                     // поэтому активация ещё некоторое время повторяется (см. AefFieldFocus).
                     AefFieldFocus.holdActivation(
-                        () -> tryFocusEventField(workbenchPage, eventNames));
+                        () -> tryFocusEventField(workbenchPage, eventNames, strict));
                 }
                 else
                 {
-                    scheduleEventFocus(workbenchPage, eventNames, attempt + 1);
+                    scheduleEventFocus(workbenchPage, eventNames, strict, attempt + 1);
                 }
             });
         }
@@ -8748,7 +8825,8 @@ public class FormEditorHook implements IStartup
          * назначенные обработчики, а подпись панели («При изменении») не совпадает с именем
          * события в модели («ПриИзменении») — отсюда сопоставление без пробелов и регистра.
          */
-        private static boolean tryFocusEventField(IWorkbenchPage workbenchPage, List<String> eventNames)
+        private static boolean tryFocusEventField(IWorkbenchPage workbenchPage, List<String> eventNames,
+            boolean strict)
         {
             IViewPart view = findPropertySheetView(workbenchPage);
             Object sheetPage =
@@ -8758,18 +8836,71 @@ public class FormEditorHook implements IStartup
                 scene != null ? PropertyNameIdentifierHook.eventRows(scene) : Collections.emptyList();
             if (rows.isEmpty())
                 return false;
-            Map.Entry<String, Object> target = rows.get(0);
+            Map.Entry<String, Object> target = strict ? null : rows.get(0);
             for (Map.Entry<String, Object> row : rows)
                 if (matchesEventName(row.getKey(), eventNames))
                 {
                     target = row;
                     break;
                 }
+            if (target == null && strict)
+                target = findEventRowByModelName(sheetPage, scene, rows, eventNames);
+            if (target == null)
+                return false;
             Object nativeControl = Global.invoke(target.getValue(), "getNativeControl"); //$NON-NLS-1$
             boolean focused = nativeControl != null && AefFieldFocus.focusNativeControl(nativeControl);
             if (focused)
                 revealEventsBlock(sheetPage, rows, target);
             return focused;
+        }
+
+        /**
+         * Подпись поля события не всегда выводится из имени события модели, поэтому строка
+         * сверяется по имени свойства — тому же, что отдаёт «Копировать имя» панели «Свойства».
+         */
+        private static Map.Entry<String, Object> findEventRowByModelName(Object sheetPage, Object scene,
+            List<Map.Entry<String, Object>> rows, List<String> eventNames)
+        {
+            Map<Object, Object> labelViews = new java.util.IdentityHashMap<>();
+            Object renderer = Global.invoke(scene, "getRenderer"); //$NON-NLS-1$
+            if (Global.getField(renderer, "viewModelToView") instanceof Map<?, ?> map) //$NON-NLS-1$
+            {
+                Object labelView = null;
+                for (Map.Entry<?, ?> entry : map.entrySet())
+                {
+                    Object key = entry.getKey();
+                    String keyClass = key == null ? "" : key.getClass().getName(); //$NON-NLS-1$
+                    if (keyClass.contains("LabelViewModel")) //$NON-NLS-1$
+                    {
+                        labelView = entry.getValue();
+                        continue;
+                    }
+                    if (labelView != null && entry.getValue() != null)
+                        labelViews.put(entry.getValue(), labelView);
+                    labelView = null;
+                }
+            }
+            for (Map.Entry<String, Object> row : rows)
+            {
+                String name;
+                try
+                {
+                    Object labelView = labelViews.get(row.getValue());
+                    String english = PropertySheetControlInterop.resolveModelPropertyName(sheetPage, scene,
+                        labelView, row.getKey());
+                    name = PropertySheetPlatformPropertyResolver.russianNameForCopy(sheetPage, scene,
+                        labelView, row.getKey(), english);
+                    if (name == null || !matchesEventName(name, eventNames))
+                        name = english != null && matchesEventName(english, eventNames) ? english : name;
+                }
+                catch (RuntimeException e)
+                {
+                    name = null;
+                }
+                if (name != null && matchesEventName(name, eventNames))
+                    return row;
+            }
+            return null;
         }
 
         /** Подпись панели («При изменении») против имени события модели («ПриИзменении»). */

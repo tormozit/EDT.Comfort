@@ -49,6 +49,7 @@ import org.eclipse.swt.events.MouseEvent;
 import org.eclipse.swt.events.MouseMoveListener;
 import org.eclipse.swt.events.SelectionAdapter;
 import org.eclipse.swt.events.SelectionEvent;
+import org.eclipse.swt.graphics.GC;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.graphics.Rectangle;
@@ -116,33 +117,33 @@ public class ApplicationsViewHook implements IStartup
     // Описание колонок — единственное место для изменения состава и порядка
     // =======================================================================
 
-    /** Начальная ширина колонок с флажками (одинаковая для обеих). */
-    private static final int CHECKBOX_COLUMN_WIDTH = 140;
-
     /**
      * Порядок констант = порядок колонок = индекс ({@code ordinal()}).
      * Вставить/убрать/переставить колонку: только этот enum.
+     *
+     * <p>Ширина колонки — {@code fixedWidth}, если задана (&gt; 0), иначе вычисляется в
+     * {@link #setupColumns} по ширине текста заголовка ({@link #headerTextWidth}).
      */
     private enum Column
     {
-        DB      ("Инфобаза",         null,                                                   200, true,  SWT.NONE  ),
-        PLATFORM("Версия платформы", "Версия платформы для взаимодействия EDT с базой. Клик — настроить доступ к базе.",
-                                                                                                80, true,  SWT.NONE  ),
-        SSH     ("Конфигуратор SSH",  "Дата сеанса конфигуратора SSH. Клик — отключить.",    165, true,  SWT.NONE  ),
-        IR      ("Приложение ИР",    "Версия платформы и дата сеанса ИР. Клик — подключить или отключить.", 165, true,  SWT.NONE  ),
-        AUTO    ("Авто ИР",             "Автоматически подключать приложение ИР при обращениях к нему", CHECKBOX_COLUMN_WIDTH, true, SWT.CENTER),
-        DYN_AUTO("Динамическое обновление",
+        DB      ("Инфобаза",              null,                                                              200, true,  SWT.NONE  ),
+        PLATFORM("Платформа",             "Версия платформы для взаимодействия EDT с базой. Клик — настроить доступ к базе.",
+                                                                                                                0, true,  SWT.NONE  ),
+        SSH     ("Конфигуратор SSH",      "Дата сеанса конфигуратора SSH. Клик — отключить.",                 0, true,  SWT.NONE  ),
+        IR      ("Приложение ИР",         "Версия платформы и дата сеанса ИР. Клик — подключить или отключить.", 0, true,  SWT.NONE  ),
+        AUTO    ("Авто ИР",               "Автоматически подключать приложение ИР при обращениях к нему",     0, true, SWT.CENTER),
+        DYN_AUTO("Дин. обновление ИР",
                  "Автоматически нажимать «Обновить динамически», если к базе подключено приложение ИР",
-                 CHECKBOX_COLUMN_WIDTH, true, SWT.CENTER);
+                 0, true, SWT.CENTER);
 
         final String  title, tooltip;
-        final int     width, style;
+        final int     fixedWidth, style;
         final boolean resizable;
 
-        Column(String title, String tooltip, int width, boolean resizable, int style)
+        Column(String title, String tooltip, int fixedWidth, boolean resizable, int style)
         {
             this.title = title; this.tooltip = tooltip;
-            this.width = width; this.resizable = resizable; this.style = style;
+            this.fixedWidth = fixedWidth; this.resizable = resizable; this.style = style;
         }
 
         int index() { return ordinal(); }
@@ -807,7 +808,7 @@ public class ApplicationsViewHook implements IStartup
             tvc.getColumn().setText(col.title);
             if (col.tooltip != null)
                 tvc.getColumn().setToolTipText(col.tooltip + Global.pluginSignForTooltip());
-            tvc.getColumn().setWidth(col.width);
+            tvc.getColumn().setWidth(col.fixedWidth > 0 ? col.fixedWidth : headerTextWidth(tree, col.title));
             tvc.getColumn().setResizable(col.resizable);
             tvc.setLabelProvider(makeLabelProvider(col, origProvider));
             if (col == Column.AUTO)
@@ -818,6 +819,24 @@ public class ApplicationsViewHook implements IStartup
 
         tree.setHeaderVisible(true);
         ThemeAwareColors.applyGridLines(tree);
+    }
+
+    /** Запас на внутренние отступы заголовка колонки (Windows-тема), px. */
+    private static final int HEADER_PADDING_PX = 16;
+
+    /** Ширина колонки по ширине текста заголовка {@code text} шрифтом дерева {@code tree}. */
+    private static int headerTextWidth(Tree tree, String text)
+    {
+        GC gc = new GC(tree);
+        try
+        {
+            gc.setFont(tree.getFont());
+            return gc.textExtent(text).x + HEADER_PADDING_PX;
+        }
+        finally
+        {
+            gc.dispose();
+        }
     }
 
     /** Добавить колонку = добавить case сюда. */
