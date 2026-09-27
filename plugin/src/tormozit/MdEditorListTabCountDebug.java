@@ -12,7 +12,7 @@ import org.eclipse.ui.forms.editor.IFormPage;
  * пропадает после перехода на вкладку
  * (<a href="https://github.com/tormozit/EDT.Comfort/issues/439">issue 439</a>).
  *
- * <p>Включение: Параметры → Комфорт → «Вести журнал». Эталон: {@link DebugInspectorDebug}.
+ * <p>Вывод в журнал отключён (см. {@link #isEnabled()}).
  */
 public final class MdEditorListTabCountDebug
 {
@@ -22,7 +22,7 @@ public final class MdEditorListTabCountDebug
 
     public static boolean isEnabled()
     {
-        return Global.isLogEnabled();
+        return false;
     }
 
     /**
