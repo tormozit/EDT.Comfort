@@ -27,6 +27,9 @@ import org.eclipse.core.commands.ExecutionEvent;
 import org.eclipse.core.commands.ExecutionException;
 import org.eclipse.core.commands.IExecutionListener;
 import org.eclipse.core.commands.NotHandledException;
+import org.eclipse.core.commands.ParameterizedCommand;
+import org.eclipse.core.expressions.IEvaluationContext;
+import org.eclipse.ui.ISources;
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.commands.AbstractHandler;
 import org.eclipse.core.runtime.IProgressMonitor;
@@ -191,7 +194,13 @@ import com._1c.g5.v8.dt.form.model.EventHandlerContainer;
 import com._1c.g5.v8.dt.form.model.DynamicListExtInfo;
 import com._1c.g5.v8.dt.form.model.Form;
 import com._1c.g5.v8.dt.form.model.FormAttribute;
+import com._1c.g5.v8.dt.form.model.CommandHandler;
+import com._1c.g5.v8.dt.form.model.CommandHandlerContainer;
+import com._1c.g5.v8.dt.form.model.CommandHandlerExtension;
 import com._1c.g5.v8.dt.form.model.FormCommand;
+import com._1c.g5.v8.dt.form.model.FormCommandHandlerContainer;
+import com._1c.g5.v8.dt.form.model.FormExtensionCommandHandlerContainer;
+import com._1c.g5.v8.dt.form.ui.shared.FormUiSharedImages;
 import com._1c.g5.v8.dt.form.model.FormGroup;
 import com._1c.g5.v8.dt.form.model.FormStandardCommand;
 import com._1c.g5.v8.dt.form.model.FormItem;
@@ -1190,6 +1199,16 @@ public class FormEditorHook implements IStartup
             return;
         }
 
+        if (control instanceof org.eclipse.swt.widgets.Table table && page != null
+            && Global.getField(page, "formCommandsViewer") instanceof TableViewer commandsViewer //$NON-NLS-1$
+            && commandsViewer.getTable() == table)
+        {
+            Menu tableMenu = table.getMenu();
+            if (tableMenu != null && !tableMenu.isDisposed())
+                OpenCommandHandler.hookMenu(page, commandsViewer, tableMenu);
+            return;
+        }
+
         if (!isWysiwygControl(control))
             return;
 
@@ -1658,6 +1677,153 @@ public class FormEditorHook implements IStartup
             if (!menu.isDisposed())
                 menu.removeMenuListener(listener);
         });
+    }
+
+    /**
+     * Пункт «Открыть обработчик» в контекстном меню списка «Команды формы». Выполняет штатную
+     * команду EDT {@code gotoCommandEventHandler} (та же, что открывает обработчик из «Свойств»:
+     * находит процедуру в модуле формы, а при её отсутствии создаёт по диалогу директивы) —
+     * выделение подставляется в контекст выполнения, как в {@link FetchResultDialogHook}.
+     */
+    private static final class OpenCommandHandler
+    {
+        private static final String MARKER = "tormozit.formCommandsOpenHandlerHooked"; //$NON-NLS-1$
+
+        private static final String COMMAND_ID = "com._1c.g5.v8.dt.form.ui.commands.gotoCommandEventHandler"; //$NON-NLS-1$
+
+        private static final String ITEM_TEXT = "Открыть обработчик"; //$NON-NLS-1$
+
+        static void hookMenu(FormEditorPage page, TableViewer viewer, Menu menu)
+        {
+            if (Boolean.TRUE.equals(menu.getData(MARKER)))
+                return;
+            menu.setData(MARKER, Boolean.TRUE);
+
+            MenuAdapter listener = new MenuAdapter()
+            {
+                private final List<MenuItem> added = new ArrayList<>(1);
+
+                @Override
+                public void menuShown(MenuEvent me)
+                {
+                    Menu swtMenu = (Menu) me.widget;
+                    FormCommand command = selectedCommand(viewer);
+                    if (command == null)
+                        return;
+                    // Как у кнопки в дереве элементов (штатный CommandEventContributionItem):
+                    // подпись — имя процедуры, а если оно не задано — «<Действие>».
+                    String handlerName = handlerName(command);
+                    MenuItem item = new MenuItem(swtMenu, SWT.PUSH, insertIndex(swtMenu));
+                    item.setText(handlerName != null ? handlerName : "<Действие>"); //$NON-NLS-1$
+                    ComfortSubmenuHelper.setMenuItemTooltip(item, "Перейти к обработчику события команды"); //$NON-NLS-1$
+                    setIcon(item);
+                    item.addListener(SWT.Selection, ev -> run(page, command));
+                    added.add(item);
+                }
+
+                @Override
+                public void menuHidden(MenuEvent me)
+                {
+                    List<MenuItem> snapshot = new ArrayList<>(added);
+                    added.clear();
+                    ((Menu) me.widget).getDisplay().asyncExec(() -> {
+                        for (MenuItem item : snapshot)
+                        {
+                            if (!item.isDisposed())
+                                item.dispose();
+                        }
+                    });
+                }
+            };
+            menu.addMenuListener(listener);
+            viewer.getTable().addDisposeListener(ev -> {
+                if (!menu.isDisposed())
+                    menu.removeMenuListener(listener);
+            });
+        }
+
+        /** Имя процедуры-обработчика команды; {@code null} — не задано. */
+        private static String handlerName(FormCommand command)
+        {
+            CommandHandlerContainer action = command.getAction();
+            if (action instanceof FormCommandHandlerContainer container)
+                return nonBlank(container.getHandler());
+            if (action instanceof FormExtensionCommandHandlerContainer container)
+            {
+                for (CommandHandlerExtension handler : container.getHandlers())
+                {
+                    String name = nonBlank(handler);
+                    if (name != null)
+                        return name;
+                }
+            }
+            return null;
+        }
+
+        private static String nonBlank(CommandHandler handler)
+        {
+            return handler != null && handler.getName() != null && !handler.getName().isBlank()
+                ? handler.getName() : null;
+        }
+
+        /** Перед штатным «Перейти» (как у кнопки), иначе перед «Свойства». */
+        private static int insertIndex(Menu menu)
+        {
+            MenuItem[] items = menu.getItems();
+            for (int i = 0; i < items.length; i++)
+            {
+                String text = stripMnemonics(items[i].getText());
+                int tab = text.indexOf('\t');
+                if ("Перейти".equals(tab < 0 ? text : text.substring(0, tab))) //$NON-NLS-1$
+                    return i;
+            }
+            return findMenuInsertIndex(menu, PROPERTIES_MENU_TEXT);
+        }
+
+        /** Значок штатного пункта у кнопки; нет значка — не беда, пункт остаётся рабочим. */
+        private static void setIcon(MenuItem item)
+        {
+            try
+            {
+                Image image = FormUiSharedImages.getDescriptor("/obj16/external_proc.png").createImage(); //$NON-NLS-1$
+                item.setImage(image);
+                item.addDisposeListener(ev -> image.dispose());
+            }
+            catch (RuntimeException e)
+            {
+                Global.logError("FormEditorHook.OpenCommandHandler", "icon", e); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+
+        private static FormCommand selectedCommand(TableViewer viewer)
+        {
+            IStructuredSelection selection = viewer.getStructuredSelection();
+            return selection.size() == 1 && selection.getFirstElement() instanceof FormCommand command
+                && !command.eIsProxy() ? command : null;
+        }
+
+        private static void run(FormEditorPage page, FormCommand command)
+        {
+            if (command == null || page == null || page.getSite() == null)
+                return;
+            try
+            {
+                IHandlerService handlers = page.getSite().getService(IHandlerService.class);
+                ICommandService commands = page.getSite().getService(ICommandService.class);
+                StructuredSelection selection = new StructuredSelection(command);
+                IEvaluationContext context = handlers.createContextSnapshot(false);
+                context.addVariable(ISources.ACTIVE_CURRENT_SELECTION_NAME, selection);
+                context.addVariable(ISources.ACTIVE_MENU_SELECTION_NAME, selection);
+                handlers.executeCommandInContext(
+                    new ParameterizedCommand(commands.getCommand(COMMAND_ID), null), null, context);
+            }
+            catch (Exception e)
+            {
+                Global.logError("FormEditorHook.OpenCommandHandler", "execute", e); //$NON-NLS-1$ //$NON-NLS-2$
+                ToastNotification.show(ITEM_TEXT,
+                    "Не удалось открыть обработчик команды «" + command.getName() + "»."); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
     }
 
     private static Tree getViewerTree(FormEditorPage page, String viewerField)
