@@ -196,6 +196,7 @@
     <startup class="tormozit.CheckDevelopmentPageHook"/>
     <startup class="tormozit.BslLanguageRootPageHook"/>
     <startup class="tormozit.MassiveChecksExemptionHook"/>
+    <startup class="tormozit.SchemaPropertiesTabSyncHook"/>
   </extension>
 
   <extension point="org.eclipse.ui.contexts">

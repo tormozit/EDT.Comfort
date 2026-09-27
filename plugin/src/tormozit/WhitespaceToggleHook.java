@@ -305,6 +305,14 @@ public final class WhitespaceToggleHook implements IStartup
                 hookPreferencesContextMenu(this);
             }
         };
+        /*
+         * У штатного action.getId() пустая строка, а ActionContributionItem берёт id
+         * элемента из него — без setId ниже наш элемент в модели окна получал id "".
+         * При закрытии общей (shared) EditorActionBars CoolBarToTrimManager.remove ищет
+         * в модели MToolBar с тем же id и натыкался на чужой элемент с тоже пустым id,
+         * из-за чего бросал IllegalStateException (подтверждено отладчиком 28.09.2026).
+         */
+        item.setId(TOOL_ITEM_KEY);
         item.setVisible(false);
         insertItem(toolbar, item);
         toolbar.update(true);
