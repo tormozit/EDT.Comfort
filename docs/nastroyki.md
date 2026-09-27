@@ -38,6 +38,7 @@
 | Серверные вызовы отдельным цветом | См. [Редактор модуля → Оформление серверных вызовов](redaktor-modulya.md#oformlenie-servernyh-vyzovov) ([#66](https://github.com/tormozit/EDT.Comfort/issues/66)) |
 | Подсвечивать создаваемые переменные | См. [Редактор модуля → Оформление создаваемых переменных](redaktor-modulya.md#oformlenie-sozdavaemyh-peremennyh) ([#391](https://github.com/tormozit/EDT.Comfort/issues/391)) |
 | Отображать начало конструкции в её конце | См. [Редактор модуля → Подсказка начала конструкции](redaktor-modulya.md#podskazka-nachala-konstrukcii) ([#80](https://github.com/tormozit/EDT.Comfort/issues/80)) |
+| Автоматически сворачиваемые области | См. [Редактор модуля → Автоматически сворачиваемые области](redaktor-modulya.md#avtosvorachivaemye-oblasti) ([#527](https://github.com/tormozit/EDT.Comfort/issues/527)) |
 | Проверять орфографию в идентификаторах в видимой области | См. [Орфография](orfografiya.md) ([#175](https://github.com/tormozit/EDT.Comfort/issues/175)) |
 
 ## Направляющие отступов

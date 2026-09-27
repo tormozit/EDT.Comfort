@@ -365,6 +365,22 @@ public class ComfortPreferencePage
         bracketHintMinLinesTextData.horizontalAlignment = SWT.LEFT;
         bracketHintMinLinesText.setLayoutData(bracketHintMinLinesTextData);
 
+        StringFieldEditor autoCollapseRegionsField = new StringFieldEditor(
+            ComfortSettings.PREF_AUTO_COLLAPSE_REGIONS,
+            "Автоматически сворачиваемые области", //$NON-NLS-1$
+            codeEditorGroup);
+        addField(autoCollapseRegionsField);
+        String autoCollapseRegionsTooltip =
+            "Имена областей (#Область) через запятую, например: АФВ, БСП.\n"
+            + "Такие области сворачиваются при открытии модуля и по команде\n"
+            + "«Сбросить сворачиваемые группы»."; //$NON-NLS-1$
+        setFieldTooltip(autoCollapseRegionsField, autoCollapseRegionsTooltip, codeEditorGroup);
+        Text autoCollapseRegionsText = autoCollapseRegionsField.getTextControl(codeEditorGroup);
+        autoCollapseRegionsText.setToolTipText(TooltipText.wrap(autoCollapseRegionsText, autoCollapseRegionsTooltip));
+        GridData autoCollapseRegionsTextData = new GridData(SWT.FILL, SWT.CENTER, true, false);
+        autoCollapseRegionsTextData.widthHint = 200;
+        autoCollapseRegionsText.setLayoutData(autoCollapseRegionsTextData);
+
         // BooleanFieldEditor.createControl() подменяет layout родителя на GridLayout —
         // отдельный host, иначе ломается сетка группы «Редактор кода».
         if (ComfortJdtAvailability.isJdtUiAvailable())
@@ -650,6 +666,7 @@ public class ComfortPreferencePage
             "Комбинируемые суффиксы хвоста имени. Могут идти цепочкой в любом количестве\n"
             + "(например Клиент + Сервер → …КлиентСервер, Клиент + ПовтИсп → …КлиентПовтИсп).", //$NON-NLS-1$
             navigatorGroup);
+        stretchTextField(suffixes1Field.getTextControl(navigatorGroup));
 
         StringFieldEditor suffixes2Field = new StringFieldEditor(
             ComfortSettings.PREF_GROUP_COMMON_MODULES_SUFFIXES_2,
@@ -661,6 +678,7 @@ public class ComfortPreferencePage
             "Не более одного суффикса из набора в хвосте имени — в любой позиции относительно\n"
             + "элементов набора 1 (до, между или после): …СлужебныйКлиент, …КлиентСлужебныйСервер.", //$NON-NLS-1$
             navigatorGroup);
+        stretchTextField(suffixes2Field.getTextControl(navigatorGroup));
 
         BooleanFieldEditor alphabeticCommonNodeField = new BooleanFieldEditor(
             ComfortSettings.PREF_ALPHABETIC_COMMON_NODE_ENABLED,
@@ -676,6 +694,16 @@ public class ComfortPreferencePage
         // FieldEditor в конструкторе обнуляет margin* группы — вернуть отступ
         // под заголовком «Навигатор», иначе первое поле слипается с рамкой.
         restoreGroupContentInsets(navigatorGroup);
+    }
+
+    /** Текстовое поле группы тянется по ширине; ширина в символах остаётся минимумом. */
+    private static void stretchTextField(Text text)
+    {
+        GridData data = new GridData(SWT.FILL, SWT.CENTER, true, false);
+        Object current = text.getLayoutData();
+        if (current instanceof GridData currentData)
+            data.widthHint = currentData.widthHint;
+        text.setLayoutData(data);
     }
 
     /** «Цвет фильтра» сразу под строкой «Улучшать списки». */

@@ -451,6 +451,28 @@ public class BslModulePositionMemoryHook implements IStartup
         return li.getOffset() + col;
     }
 
+    /**
+     * Смещение запомненной позиции каретки модуля или {@code -1}, если её нет (или это начало
+     * документа). Нужно {@link BslEditorFoldingHook}: свёртка области с этой позицией разворачивается
+     * восстановлением каретки ({@code selectAndReveal}), поэтому такую область не сворачиваем.
+     */
+    static int savedCaretOffset(BslXtextEditor editor, IDocument doc)
+    {
+        String key = moduleKey(editor);
+        int[] pos = key == null ? null : ModulePositionStore.load(key);
+        if (pos == null)
+            return -1;
+        try
+        {
+            int offset = clampToDocument(doc, pos[0], pos[1]);
+            return offset > 0 ? offset : -1;
+        }
+        catch (BadLocationException e)
+        {
+            return -1;
+        }
+    }
+
     private static String moduleKey(BslXtextEditor editor)
     {
         IEditorInput input = editor.getEditorInput();

@@ -30,6 +30,7 @@
     <startup class="tormozit.BslParseTruncationMarkHook"/>
     <startup class="tormozit.GitBaselineFilterHook"/>
     <startup class="tormozit.BslModulePositionMemoryHook"/>
+    <startup class="tormozit.BslEditorFoldingHook"/>
     <startup class="tormozit.BslBracketJumpHistoryHook"/>
     <startup class="tormozit.HorizontalScrollBarPositionFixHook"/>
     <startup class="tormozit.BslEditorRevealScrollFixHook"/>

@@ -266,6 +266,14 @@ public final class ComfortSettings
     /** Минимальное число строк по умолчанию — 50. */
     public static final int DEFAULT_BRACKET_CONTENT_HINT_MIN_LINES = 50;
 
+    // ---- Auto-collapsed regions ----
+
+    /** Ключ: имена областей (#Область), сворачиваемых при открытии модуля, через запятую. */
+    public static final String PREF_AUTO_COLLAPSE_REGIONS = "comfort.autoCollapseRegions"; //$NON-NLS-1$
+
+    /** По умолчанию ничего не сворачивается. */
+    public static final String DEFAULT_AUTO_COLLAPSE_REGIONS = ""; //$NON-NLS-1$
+
     // ---- Indent guides (направляющие отступов) ----
 
     /** Префикс ключей направляющих отступов. */
@@ -1148,6 +1156,25 @@ public final class ComfortSettings
         if (settings == null)
             return DEFAULT_BRACKET_CONTENT_HINT_ENABLED;
         return settings.preferenceStore.getBoolean(PREF_BRACKET_CONTENT_HINT_ENABLED);
+    }
+
+    // ---- Auto-collapsed regions accessors ----
+
+    /** Имена областей для автосворачивания (в нижнем регистре, без пустых). */
+    public static java.util.Set<String> getAutoCollapseRegionNames()
+    {
+        ComfortSettings settings = instance;
+        String raw = settings == null
+            ? DEFAULT_AUTO_COLLAPSE_REGIONS
+            : settings.preferenceStore.getString(PREF_AUTO_COLLAPSE_REGIONS);
+        java.util.Set<String> names = new java.util.HashSet<>();
+        for (String part : raw.split("[,;]")) //$NON-NLS-1$
+        {
+            String name = part.trim();
+            if (!name.isEmpty())
+                names.add(name.toLowerCase(java.util.Locale.ROOT));
+        }
+        return names;
     }
 
     // ---- Indent guides accessors ----
