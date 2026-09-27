@@ -18,6 +18,7 @@ import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.core.runtime.Plugin;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.ui.plugin.AbstractUIPlugin;
+import org.eclipse.xtext.ui.editor.autoedit.SingleLineTerminalsStrategy;
 import org.osgi.framework.Bundle;
 import org.osgi.framework.BundleContext;
 
@@ -182,6 +183,7 @@ public class Activator extends AbstractUIPlugin
         BslDocCommentTypeMerge.install();
         BslXtextDocumentHook.install();
         StaticFeatureAccessReplacement.start();
+        QueryParameterAutoCloseFix.install();
     }
 
     @Override
@@ -371,6 +373,26 @@ public class Activator extends AbstractUIPlugin
         {
             if (active)
                 JOB.schedule(2_000);
+        }
+    }
+
+    /**
+     * Штатный предикат Xtext ({@code SingleLineTerminalsStrategy.DEFAULT}), общий для редактора
+     * модуля и редактора запроса, не вставляет закрывающую скобку перед началом идентификатора,
+     * цифрой и рядом других символов, но не знает про "&" - начало параметра запроса
+     * ({@code &Параметр}), поэтому "(&Параметр)" превращалось в "(&Параметр))".
+     * Дополняем его напрямую: поле {@code DEFAULT} публичное и не {@code final}.
+     */
+    private static final class QueryParameterAutoCloseFix
+    {
+        static void install()
+        {
+            SingleLineTerminalsStrategy.StrategyPredicate original = SingleLineTerminalsStrategy.DEFAULT;
+            SingleLineTerminalsStrategy.DEFAULT = (doc, offset) -> {
+                if (doc.getLength() > offset && doc.getChar(offset) == '&')
+                    return false;
+                return original.isInsertClosingBracket(doc, offset);
+            };
         }
     }
 }
