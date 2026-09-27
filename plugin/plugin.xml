@@ -182,6 +182,7 @@
     <startup class="tormozit.PropertySheetHandlerRenameHook"/>
     <startup class="tormozit.BslEditorHighlightingHook"/>
     <startup class="tormozit.BracketContentHintHook"/>
+    <startup class="tormozit.BslStringQuoteAutoCloseFix"/>
     <startup class="tormozit.IndentGuideHook"/>
     <startup class="tormozit.GotoDefinitionFieldMenuHook"/>
     <startup class="tormozit.TypeComboOverlayHook"/>
