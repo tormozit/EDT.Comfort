@@ -34,6 +34,11 @@ import org.eclipse.core.runtime.ListenerList;
  *
  * <p>Если подменить поле не удалось (другая версия EDT, изменилось имя), {@link #install}
  * возвращает {@code false} — вызывающий код обязан не запускать фоновый расчёт.
+ *
+ * <p>У документа не-BSL языка (например, языка запросов в конструкторе схемы компоновки
+ * или в модальном «Редакторе запроса») {@code BslDocumentListener} нет вообще — там нет и
+ * карты {@code DataEvent}, которую нужно защищать, поэтому изолировать нечего: {@link #install}
+ * в этом случае тоже возвращает {@code true}, разрешая фоновый расчёт.
  */
 final class BslDataEventGuard
 {
@@ -41,6 +46,10 @@ final class BslDataEventGuard
 
     /** Документы, на которых обёртка уже стоит, и сама обёртка. */
     private static final Map<IDocument, IsolatingMap> installed = new java.util.WeakHashMap<>();
+
+    /** Документы без {@code BslDocumentListener} (не BSL) — guard для них не нужен. */
+    private static final Set<IDocument> noGuardNeeded =
+        java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>());
 
     /** Поток, чьи обращения к карте должны уходить в теневую копию. */
     private static final ThreadLocal<Boolean> isolated = new ThreadLocal<>();
@@ -50,18 +59,22 @@ final class BslDataEventGuard
     /**
      * Ставит обёртку на карту {@code DataEvent} документа.
      *
-     * @return {@code false}, если поле не найдено или подменить не удалось — фоновый расчёт
-     *     в этом случае запускать нельзя.
+     * @return {@code false}, если документ BSL, но поле не найдено или подменить не
+     *     удалось — фоновый расчёт в этом случае запускать нельзя. Для документа без
+     *     {@code BslDocumentListener} (не BSL) возвращает {@code true}: изолировать нечего.
      */
     static synchronized boolean install(IDocument doc)
     {
         if (doc == null)
             return false;
-        if (installed.containsKey(doc))
+        if (installed.containsKey(doc) || noGuardNeeded.contains(doc))
             return true;
         Object listener = findBslDocumentListener(doc);
         if (listener == null)
-            return false;
+        {
+            noGuardNeeded.add(doc);
+            return true;
+        }
         try
         {
             Field mapField = listener.getClass().getDeclaredField("map"); //$NON-NLS-1$
