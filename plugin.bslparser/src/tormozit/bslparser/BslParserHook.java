@@ -28,7 +28,8 @@ import org.eclipse.xtext.parser.antlr.XtextTokenStream;
  * {@code #Удаление…#КонецУдаления}, ветки которых разрывают оператор
  * (несбалансированы по {@code Если/КонецЕсли}, {@code Пока|Для/КонецЦикла},
  * {@code Попытка/КонецПопытки}, {@code Процедура|Функция/Конец…} или содержат
- * {@code ИначеЕсли}/{@code Иначе}/{@code Исключение} на нулевой глубине), и переводит токены
+ * {@code ИначеЕсли}/{@code Иначе}/{@code Исключение} на нулевой глубине, или директива стоит между
+ * строками многострочного литерала), и переводит токены
  * <b>только самих директив</b> в тип {@code SL_COMMENT}. Токен скрыт для парсера (Xtext решает по
  * типу), код веток остаётся в дереве — подсказки и переходы работают. Блок скрывается, только
  * если после этого структура его метода сходится; иначе остаётся штатная ошибка EDT.
@@ -279,7 +280,7 @@ public final class BslParserHook
                     String[] names = {"RULE_SL_COMMENT", "RULE_WS", "RULE_UTF8_BOM", "RULE_IDENT", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
                         "RULE_BEGIN_IFPREPROCESSOR", "RULE_ELSEIF_PREPROCESSOR", "RULE_ELSE_PREPROCESSOR", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                         "RULE_END_IFPREPROCESSOR", "RULE_BEGIN_INSERT", "RULE_END_INSERT", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        "RULE_BEGIN_DELETE", "RULE_END_DELETE"}; //$NON-NLS-1$ //$NON-NLS-2$
+                        "RULE_BEGIN_DELETE", "RULE_END_DELETE", "RULE_BML_STRING", "RULE_MML_STRING"}; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
                     int[] types = new int[names.length];
                     for (int i = 0; i < names.length; i++)
                         types[i] = lexer.getField(names[i]).getInt(null);
@@ -309,6 +310,9 @@ public final class BslParserHook
         private int tEndIns;
         private int tBeginDel;
         private int tEndDel;
+        /** Начало ({@code "…}) и середина ({@code |…}) многострочного литерала — строка литерала не закрыта. */
+        private int tBmlString;
+        private int tMmlString;
 
         private List<?> list;
         /** Индексы значимых (не скрытых) токенов в {@link #list}. */
@@ -346,6 +350,8 @@ public final class BslParserHook
             tEndIns = types[9];
             tBeginDel = types[10];
             tEndDel = types[11];
+            tBmlString = types[12];
+            tMmlString = types[13];
 
             long t0 = System.nanoTime();
             list = stream.getTokens(); // заполняет буфер целиком — парсер сделал бы это сам
@@ -524,9 +530,25 @@ public final class BslParserHook
             state.cut = true;
         }
 
-        /** Хотя бы одна ветка блока несбалансирована — директивы разрывают оператор. */
+        /**
+         * Директивы разрывают оператор: хотя бы одна ветка блока несбалансирована, или директива стоит
+         * внутри многострочного литерала (перед ней незакрытая строка литерала — в грамматике EDT
+         * литерал состоит из строк подряд, директива между ними его обрывает).
+         */
         private boolean straddles(List<int[]> block)
         {
+            for (int[] instr : block)
+            {
+                int prev = instr[0] - 1;
+                while (prev >= 0 && mask[prev])
+                    prev--;
+                if (prev >= 0)
+                {
+                    int type = token(sig[prev]).getType();
+                    if (type == tBmlString || type == tMmlString)
+                        return true;
+                }
+            }
             for (int b = 0; b + 1 < block.size(); b++)
             {
                 int depth = 0;

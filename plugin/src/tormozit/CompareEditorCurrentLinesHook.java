@@ -10,6 +10,9 @@ import org.eclipse.compare.internal.CompareUIPlugin;
 import org.eclipse.compare.internal.ViewerDescriptor;
 import org.eclipse.compare.structuremergeviewer.ICompareInput;
 import org.eclipse.core.resources.IFile;
+import org.eclipse.e4.core.contexts.IEclipseContext;
+import org.eclipse.e4.ui.model.application.ui.basic.MPart;
+import org.eclipse.e4.ui.workbench.modeling.EPartService;
 import org.eclipse.jface.action.Action;
 import org.eclipse.jface.action.IContributionItem;
 import org.eclipse.jface.action.IToolBarManager;
@@ -27,16 +30,23 @@ import org.eclipse.swt.widgets.Shell;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IEditorReference;
 import org.eclipse.ui.IPartListener2;
+import org.eclipse.ui.IPerspectiveDescriptor;
+import org.eclipse.ui.IPerspectiveListener2;
 import org.eclipse.ui.IWindowListener;
 import org.eclipse.ui.IWorkbench;
 import org.eclipse.ui.IWorkbenchPage;
+import org.eclipse.ui.IWorkbenchPart;
 import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 
 import com._1c.g5.v8.dt.core.platform.IDtProject;
 
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.nio.file.Path;
+import java.util.Map;
+import java.util.WeakHashMap;
 
 /**
  * Панель «Текущая строка» (см. {@link CompareCurrentLinesPanel}) и остальные доработки
@@ -156,6 +166,10 @@ public final class CompareEditorCurrentLinesHook
                 if (ed != null)
                     tryHandleEditor(ed);
             }
+
+        CloseActivationRestore closeRestore = new CloseActivationRestore();
+        window.getPartService().addPartListener(closeRestore);
+        window.addPerspectiveListener(closeRestore);
 
         window.getPartService().addPartListener(new IPartListener2()
         {
@@ -1103,6 +1117,122 @@ public final class CompareEditorCurrentLinesHook
     private static String labelOrDefault(String text, String fallback)
     {
         return text != null && !text.isBlank() ? text : fallback;
+    }
+
+    /**
+     * Закрытие активного редактора сравнения возвращает активность той части, что была активна
+     * до его открытия (обычно «История» или навигатор), а не соседнему редактору (#618).
+     *
+     * <p>Штатно {@code PartServiceImpl.hidePart} выбирает кандидата на активацию в самом начале,
+     * и для редактора в области редакторов ({@code PartActivationHistory.getNextActivationCandidate})
+     * первым берёт соседний редактор той же стопки. Его активация синхронно переключает ввод
+     * «Истории» со связью с редактором — отбор перескакивает на проект соседнего редактора.
+     * Исправить это после закрытия нельзя («История» перезагрузится дважды и потеряет выделенный
+     * коммит), поэтому прежнюю часть активируем ДО {@code hidePart}: закрываемый редактор тогда уже
+     * не активен и кандидат не ищется.
+     *
+     * <p>Пути закрытия:
+     * <ul>
+     *   <li>Ctrl+W, «Файл → Закрыть», {@code closeEditor} — {@code WorkbenchPage.closeEditors}
+     *   сообщает слушателям перспективы {@link IWorkbenchPage#CHANGE_EDITOR_CLOSE} до {@code hidePart};</li>
+     *   <li>крестик и средняя кнопка на вкладке — {@code StackRenderer.closePart} берёт
+     *   {@link EPartService} из контекста самой части; туда кладём прокси, который перед
+     *   {@code hidePart} этой части активирует прежнюю;</li>
+     *   <li>«Закрыть» из меню вкладки берёт сервис из контекста родителя — остаётся штатным.</li>
+     * </ul>
+     *
+     * <p>Прежняя часть — активная перед первой активацией редактора сравнения. Если она закрыта
+     * или не видна, поведение штатное.
+     */
+    private static final class CloseActivationRestore implements IPartListener2, IPerspectiveListener2
+    {
+        private final Map<IEditorPart, IWorkbenchPartReference> predecessors = new WeakHashMap<>();
+        private IWorkbenchPartReference lastActive;
+
+        @Override
+        public void partActivated(IWorkbenchPartReference ref)
+        {
+            IWorkbenchPart part = ref.getPart(false);
+            if (part instanceof IEditorPart ed && ed.getEditorInput() instanceof CompareEditorInput
+                && !predecessors.containsKey(ed))
+            {
+                predecessors.put(ed, lastActive);
+                installPartServiceProxy(ed);
+            }
+            lastActive = ref;
+        }
+
+        @Override
+        public void partClosed(IWorkbenchPartReference ref)
+        {
+            IWorkbenchPart part = ref.getPart(false);
+            if (part instanceof IEditorPart ed)
+                predecessors.remove(ed);
+            if (lastActive == ref)
+                lastActive = null;
+        }
+
+        @Override
+        public void perspectiveChanged(IWorkbenchPage page, IPerspectiveDescriptor perspective,
+            IWorkbenchPartReference partRef, String changeId)
+        {
+            if (!IWorkbenchPage.CHANGE_EDITOR_CLOSE.equals(changeId) || partRef == null)
+                return;
+            if (partRef.getPart(false) instanceof IEditorPart ed && predecessors.containsKey(ed))
+                activatePredecessor(ed);
+        }
+
+        /** Прокси {@link EPartService} в контексте части: перед её {@code hidePart} — {@link #activatePredecessor}. */
+        private void installPartServiceProxy(IEditorPart ed)
+        {
+            MPart mpart = ed.getSite().getService(MPart.class);
+            if (mpart == null)
+                return;
+            IEclipseContext ctx = mpart.getContext();
+            if (ctx == null)
+                return;
+            EPartService original = ctx.get(EPartService.class);
+            if (original == null || Proxy.isProxyClass(original.getClass()))
+                return;
+            EPartService proxy = (EPartService) Proxy.newProxyInstance(EPartService.class.getClassLoader(),
+                new Class<?>[] { EPartService.class }, (p, method, args) ->
+                {
+                    if ("hidePart".equals(method.getName()) && args != null && args.length > 0 //$NON-NLS-1$
+                        && args[0] == mpart)
+                        activatePredecessor(ed);
+                    try
+                    {
+                        return method.invoke(original, args);
+                    }
+                    catch (InvocationTargetException e)
+                    {
+                        throw e.getCause();
+                    }
+                });
+            ctx.set(EPartService.class, proxy);
+        }
+
+        private void activatePredecessor(IEditorPart ed)
+        {
+            IWorkbenchPage page = ed.getSite().getPage();
+            if (page.getActivePart() != ed)
+                return; // неактивный редактор закрывается без смены активности
+            IWorkbenchPartReference prev = predecessors.get(ed);
+            IWorkbenchPart prevPart = prev != null ? prev.getPart(false) : null;
+            if (prevPart != null && prevPart != ed && page.getReference(prevPart) != null
+                && page.isPartVisible(prevPart))
+                page.activate(prevPart);
+        }
+
+        @Override public void partBroughtToTop(IWorkbenchPartReference r) {}
+        @Override public void partDeactivated(IWorkbenchPartReference r)  {}
+        @Override public void partOpened(IWorkbenchPartReference r)       {}
+        @Override public void partHidden(IWorkbenchPartReference r)       {}
+        @Override public void partVisible(IWorkbenchPartReference r)      {}
+        @Override public void partInputChanged(IWorkbenchPartReference r) {}
+        @Override public void perspectiveActivated(IWorkbenchPage page, IPerspectiveDescriptor perspective) {}
+        @Override public void perspectiveChanged(IWorkbenchPage page, IPerspectiveDescriptor perspective,
+            String changeId) {}
     }
 
 }

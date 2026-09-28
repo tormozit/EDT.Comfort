@@ -101,9 +101,6 @@ public class BslPreprocessorStraddleCheck
             tormozit.Global.tempLog("bsl-preproc-straddle", "проверка: нет класса хука, " + uri + ": " + e); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return;
         }
-        // Временная диагностика: вызов проверки и сколько инструкций найдено.
-        tormozit.Global.tempLog("bsl-preproc-straddle", "проверка: " + uri + ", корень " //$NON-NLS-1$ //$NON-NLS-2$
-            + (root != null) + ", найдено " + instructions.size()); //$NON-NLS-1$
         for (int[] instr : instructions)
         {
             DirectLocation location = new DirectLocation(Integer.valueOf(instr[0]), Integer.valueOf(instr[1]),

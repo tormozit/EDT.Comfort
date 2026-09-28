@@ -197,6 +197,7 @@
     <startup class="tormozit.BslLanguageRootPageHook"/>
     <startup class="tormozit.MassiveChecksExemptionHook"/>
     <startup class="tormozit.SchemaPropertiesTabSyncHook"/>
+    <startup class="tormozit.SystemOverloadToastHook"/>
   </extension>
 
   <extension point="org.eclipse.ui.contexts">
@@ -252,6 +253,13 @@
           contextId="org.eclipse.ui.contexts.window"
           schemeId="org.eclipse.ui.defaultAcceleratorConfiguration"
           sequence="M1+3">
+    </key>
+    <!-- ВРЕМЕННО: ручной тест SystemOverloadToastHook, убрать после проверки -->
+    <key
+          commandId="tormozit.debug.testOverloadToast"
+          contextId="org.eclipse.ui.contexts.window"
+          schemeId="org.eclipse.ui.defaultAcceleratorConfiguration"
+          sequence="M1+M2+M3+F12">
     </key>
     <key
           commandId="tormozit.formTable.filterByCellValue"
@@ -405,6 +413,12 @@
         name="Последние места"
         categoryId="tormozit.commands.global"
         description="Открыть панель последних посещённых методов и объектов метаданных (Комфорт)"/>
+    <!-- ВРЕМЕННО: ручной тест SystemOverloadToastHook, убрать после проверки -->
+    <command
+        id="tormozit.debug.testOverloadToast"
+        name="Тест: тост перегрузки"
+        categoryId="tormozit.commands.global"
+        description="Отправить тестовую запись перегрузки в лог и проверить тост (Комфорт)"/>
     <command
         id="tormozit.ObjectSets"
         name="Наборы объектов"
@@ -694,6 +708,10 @@
         class="tormozit.ExecutableExtensionFactory:tormozit.GetRef"
         commandId="tormozit.CopyRef">
      </handler>
+    <!-- ВРЕМЕННО: ручной тест SystemOverloadToastHook, убрать после проверки -->
+    <handler
+        commandId="tormozit.debug.testOverloadToast"
+        class="tormozit.SystemOverloadToastTestHandler"/>
     <handler
         class="tormozit.IdentifierWordNavigationHandler"
         commandId="org.eclipse.ui.edit.text.select.wordPrevious"/>
