@@ -10,6 +10,7 @@ import org.eclipse.e4.ui.workbench.modeling.EPartService;
 import org.eclipse.e4.ui.workbench.modeling.EPartService.PartState;
 import org.eclipse.jface.dialogs.IPageChangedListener;
 import org.eclipse.swt.custom.CTabFolder;
+import org.eclipse.swt.custom.CTabItem;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.ui.IEditorPart;
@@ -36,11 +37,15 @@ import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
  * активная вкладка группы переключается вслед за редактором — вручную дёргать панели не
  * нужно.
  *
- * <p>При активации редактора кода (standalone {@link BslXtextEditor} либо страница
- * «Модуль» внутри {@link DtGranularEditor}, см. {@link GetRef#getActiveBslEditor}) группа
- * переключается на «Схема». При активации страницы «Форма» редактора формы
- * ({@link FormEditorPage}) — на «Свойства». Переключение — только если обе панели уже
- * открыты и лежат в одной группе вкладок; иначе трогать нечего.
+ * <p>При активации редактора модуля (standalone {@link BslXtextEditor} либо страница
+ * «Модуль» внутри {@link DtGranularEditor}, см. {@link GetRef#getActiveBslEditor}), если
+ * активна панель «Свойства» — активировать панель «Схема». При активации редактора формы
+ * (страница «Форма», {@link FormEditorPage}), если активна панель «Схема» — активировать
+ * панель «Свойства» (симметрично). Обе проверки — только пока обе панели открыты и лежат в
+ * одной группе вкладок. Повторные срабатывания активации одного и того же, уже активного
+ * редактора (Eclipse присылает {@code partActivated} не только на реальный переход из другой
+ * части) не переоткрывают проверку — иначе ручной выбор пользователем панели тут же
+ * откатывался бы обратно.
  *
  * <p>Показ панели — {@code EPartService.showPart(MPart, PartState.VISIBLE)}: делает вкладку
  * видимой в её группе, не забирая ввод у редактора (в отличие от {@code activate}). Сервис
@@ -61,6 +66,16 @@ public final class SchemaPropertiesTabSyncHook implements IStartup
     /** Многостраничные редакторы, на которых уже висит слушатель смены страницы. */
     private static final Set<DtGranularEditor<?>> HOOKED_EDITORS =
         Collections.newSetFromMap(new WeakHashMap<>());
+
+    /**
+     * Редактор, для которого уже выполнена проверка «при активации». Без этой отметки
+     * повторный {@code partActivated} того же самого, уже активного редактора (Eclipse
+     * присылает его не только на реальный переход из другой части) заставлял бы хук снова и
+     * снова принудительно возвращать «Схема», даже если пользователь только что сам вручную
+     * открыл «Свойства», работая в этом же редакторе — то есть заменял бы разовую проверку «в
+     * момент активации» на постоянное удержание состояния.
+     */
+    private static IWorkbenchPart lastActivatedEditor;
 
     @Override
     public void earlyStartup()
@@ -100,7 +115,10 @@ public final class SchemaPropertiesTabSyncHook implements IStartup
             }
             IEditorPart active = page.getActiveEditor();
             if (active != null)
+            {
+                lastActivatedEditor = active;
                 syncFromActiveEditor(active);
+            }
         }
         window.getPartService().addPartListener(new IPartListener2()
         {
@@ -111,7 +129,17 @@ public final class SchemaPropertiesTabSyncHook implements IStartup
                 {
                     if (editor instanceof DtGranularEditor<?> granular)
                         hookGranularEditor(granular);
-                    syncFromActiveEditor(editor);
+                    if (editor != lastActivatedEditor)
+                    {
+                        lastActivatedEditor = editor;
+                        syncFromActiveEditor(editor);
+                    }
+                }
+                else
+                {
+                    // Ушли из редакторов вообще (например, в навигатор): возврат в тот же
+                    // редактор потом — снова настоящая активация, проверку не пропускать.
+                    lastActivatedEditor = null;
                 }
             }
 
@@ -139,27 +167,49 @@ public final class SchemaPropertiesTabSyncHook implements IStartup
         editor.addPageChangedListener(listener);
     }
 
-    /** Определяет режим по активному редактору/странице и, если нужно, переключает группу. */
+    /** Определяет режим по активному редактору/странице и вызывает нужную проверку. */
     private static void syncFromActiveEditor(IEditorPart editor)
     {
-        boolean codeActive = GetRef.getActiveBslEditor(editor) != null;
-        boolean formDesignActive = !codeActive && editor instanceof FormEditor formEditor
-            && formEditor.getActivePageInstance() instanceof FormEditorPage;
-        if (!codeActive && !formDesignActive)
-            return;
         if (editor.getSite() == null)
             return;
-        syncTabGroup(editor.getSite().getPage(), codeActive);
+        if (GetRef.getActiveBslEditor(editor) != null)
+        {
+            // При активации редактора модуля, если активна панель «Свойства» —
+            // активировать панель «Схема».
+            onModuleEditorActivated(editor.getSite().getPage());
+        }
+        else if (editor instanceof FormEditor formEditor
+            && formEditor.getActivePageInstance() instanceof FormEditorPage)
+        {
+            // При активации редактора формы (вкладка «Форма»), если активна панель
+            // «Схема» — активировать панель «Свойства» (симметрично предыдущему).
+            onFormPageActivated(editor.getSite().getPage());
+        }
     }
 
-    /**
-     * @param preferOutline {@code true} — на верх группы должна выйти «Схема», {@code false} —
-     *        «Свойства»
-     */
-    private static void syncTabGroup(IWorkbenchPage page, boolean preferOutline)
+    private static void onModuleEditorActivated(IWorkbenchPage page)
+    {
+        Panels panels = resolvePanels(page);
+        if (panels == null)
+            return;
+        if (isSelectedTab(panels.folder, panels.propertiesPart))
+            showPartVisible(panels.outlineView, panels.outlinePart);
+    }
+
+    private static void onFormPageActivated(IWorkbenchPage page)
+    {
+        Panels panels = resolvePanels(page);
+        if (panels == null)
+            return;
+        if (isSelectedTab(panels.folder, panels.outlinePart))
+            showPartVisible(panels.propertiesView, panels.propertiesPart);
+    }
+
+    /** Обе панели, их {@link MPart} и общий {@link CTabFolder}; {@code null} — условия нет. */
+    private static Panels resolvePanels(IWorkbenchPage page)
     {
         if (page == null)
-            return;
+            return null;
         IViewReference propRef = page.findViewReference(PROPERTY_SHEET_VIEW_ID);
         IViewReference outlineRef = page.findViewReference(OUTLINE_VIEW_ID);
         // getView(true): панель может быть открытой фоновой вкладкой группы, ещё не
@@ -167,12 +217,12 @@ public final class SchemaPropertiesTabSyncHook implements IStartup
         IViewPart propView = propRef != null ? propRef.getView(true) : null;
         IViewPart outlineView = outlineRef != null ? outlineRef.getView(true) : null;
         if (propView == null || outlineView == null)
-            return; // одна из панелей не открыта — синхронизировать нечего
+            return null; // одна из панелей не открыта — синхронизировать нечего
 
         MPart propPart = mpartOf(propView);
         MPart outlinePart = mpartOf(outlineView);
         if (propPart == null || outlinePart == null)
-            return;
+            return null;
 
         // MPart.getParent() у этих панелей не заполнен (compatibility-обёртка e3-view над
         // CompatibilityView) — группу определяем по общему CTabFolder-предку виджетов,
@@ -180,10 +230,36 @@ public final class SchemaPropertiesTabSyncHook implements IStartup
         CTabFolder propFolder = folderOf(propPart);
         CTabFolder outlineFolder = folderOf(outlinePart);
         if (propFolder == null || propFolder != outlineFolder)
-            return; // не в одной группе вкладок
+            return null; // не в одной группе вкладок
 
-        MPart desired = preferOutline ? outlinePart : propPart;
-        showPartVisible(preferOutline ? outlineView : propView, desired);
+        return new Panels(propView, propPart, outlineView, outlinePart, propFolder);
+    }
+
+    private record Panels(IViewPart propertiesView, MPart propertiesPart,
+        IViewPart outlineView, MPart outlinePart, CTabFolder folder)
+    {
+    }
+
+    /** Виджет {@code part} сейчас показан выбранной вкладкой {@code folder}. */
+    private static boolean isSelectedTab(CTabFolder folder, MPart part)
+    {
+        CTabItem item = folder.getSelection();
+        Control selectedControl = item != null && !item.isDisposed() ? item.getControl() : null;
+        Object widget = part.getWidget();
+        if (selectedControl == null || !(widget instanceof Control partControl))
+            return false;
+        return selectedControl == partControl || isChild(selectedControl, partControl)
+            || isChild(partControl, selectedControl);
+    }
+
+    private static boolean isChild(Control control, Control ancestor)
+    {
+        for (Control c = control; c != null && !c.isDisposed(); c = c.getParent())
+        {
+            if (c == ancestor)
+                return true;
+        }
+        return false;
     }
 
     /** Ближайший предок-{@link CTabFolder} виджета панели; {@code null} — не найден. */
