@@ -309,6 +309,9 @@ public final class MdEditorAttributeMenuHook implements IStartup
     {
         if (table == null || table.isDisposed())
             return false;
+        // Наша таблица общих команд под штатной — не команда объекта, переходов реквизитов у неё нет.
+        if (table.getData(MdEditorObjectCommandsPageHook.TABLE_MARKER) != null)
+            return false;
         DtGranularEditor<?> editor = editorOf(table);
         IFormPage page = editor != null ? editor.getActivePageInstance() : null;
         if (!isCommandsPage(page))

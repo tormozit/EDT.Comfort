@@ -40,6 +40,7 @@ import org.eclipse.ui.IStartup;
 public final class GcPressureToastHook implements IStartup
 {
     private static final long POLL_MS = 1000;
+    /** Окно входа — оно же «за последние N секунд» в тексте тоста. */
     private static final long ENTER_WINDOW_MS = 10_000;
     private static final double ENTER_GC_SHARE = 0.5;
     private static final double ENTER_HEAP_SHARE = 0.85;
@@ -135,9 +136,11 @@ public final class GcPressureToastHook implements IStartup
             if (gcShare >= ENTER_GC_SHARE && heapShare >= ENTER_HEAP_SHARE)
             {
                 inEpisode = true;
+                int seconds = (int) (ENTER_WINDOW_MS / 1000);
                 showToast("Острая нехватка памяти процессу EDT", //$NON-NLS-1$
-                    "Сборка мусора заняла " + Math.round(gcShare * 100) + "% времени. Процессу выделено " //$NON-NLS-1$ //$NON-NLS-2$
-                        + formatBytes(max) + " " + limitSource() + "."); //$NON-NLS-1$ //$NON-NLS-2$
+                    "Сборка мусора заняла " + Math.round(gcShare * 100) + "% времени за " + seconds + " " //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        + Global.russianPlural(seconds, "секунду", "секунды", "секунд") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        + ". Процессу выделено " + formatBytes(max) + " " + limitSource() + "."); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             }
         }
 

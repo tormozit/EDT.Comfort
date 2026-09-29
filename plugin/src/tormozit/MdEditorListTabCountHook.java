@@ -991,6 +991,21 @@ public final class MdEditorListTabCountHook implements IStartup
             return;
         }
 
+        if (page instanceof MdEditorDefinedTypesPageHook.DefinedTypesPage definedTypesPage)
+        {
+            // Число помеченных — после первой загрузки списка (страница сама просит обновить заголовок).
+            Integer marked = definedTypesPage.markedCount();
+            applyTitle(item, baseTitle, marked != null ? Integer.toString(marked.intValue()) : "?"); //$NON-NLS-1$
+            return;
+        }
+
+        if (page instanceof MdEditorGlobalCommandsPageHook.GlobalCommandsPage commandsPage)
+        {
+            Integer count = commandsPage.commandCount();
+            applyTitle(item, baseTitle, count != null ? Integer.toString(count.intValue()) : "?"); //$NON-NLS-1$
+            return;
+        }
+
         if (isFunctionalOptionsPage(page, baseTitle))
         {
             Integer count = MdEditorFunctionalOptionsCountHook.nonZeroRowCount(page);
@@ -1219,6 +1234,8 @@ public final class MdEditorListTabCountHook implements IStartup
      */
     private static Integer countEventHandlerSubscriptions(IFormPage page)
     {
+        if (MdEventHandlersPageHook.hasNoDefinedTypeSubscriptions(page))
+            return Integer.valueOf(0);
         if (page == null || !Boolean.TRUE.equals(Global.getField(page, "filled"))) //$NON-NLS-1$
             return null;
         Object editor = Global.getField(page, "embeddedEditor"); //$NON-NLS-1$
@@ -1230,7 +1247,10 @@ public final class MdEditorListTabCountHook implements IStartup
         Tree tree = viewer.getTree();
         if (tree == null || tree.isDisposed())
             return null;
-        int rawItems = countVisibleEventSubscriptions(tree.getItems());
+        // Считаются только включённые подписки — те, к которым подключён объект страницы.
+        java.util.function.Predicate<EventSubscription> marked =
+            subscription -> MdEventHandlersPageHook.isMarked(page, subscription);
+        int rawItems = countVisibleEventSubscriptions(tree.getItems(), marked);
         Object provider = viewer.getContentProvider();
         if (!(provider instanceof ITreeContentProvider content))
         {
@@ -1251,7 +1271,7 @@ public final class MdEditorListTabCountHook implements IStartup
         }
         ViewerFilter[] filters = viewer.getFilters();
         int[] count = { 0 };
-        walkFilteredEventSubscriptions(viewer, content, filters, viewer.getInput(), roots, count);
+        walkFilteredEventSubscriptions(viewer, content, filters, viewer.getInput(), roots, count, marked);
         if (MdEditorListTabCountDebug.isEnabled())
         {
             Global.log("MdEditorListTabCount", "eventHandlers walk: filters=" //$NON-NLS-1$ //$NON-NLS-2$
@@ -1263,7 +1283,8 @@ public final class MdEditorListTabCountHook implements IStartup
     }
 
     private static void walkFilteredEventSubscriptions(TreeViewer viewer, ITreeContentProvider content,
-        ViewerFilter[] filters, Object parent, Object[] elements, int[] count)
+        ViewerFilter[] filters, Object parent, Object[] elements, int[] count,
+        java.util.function.Predicate<EventSubscription> marked)
     {
         if (elements == null)
             return;
@@ -1271,7 +1292,7 @@ public final class MdEditorListTabCountHook implements IStartup
         {
             if (!passesViewerFilters(viewer, filters, parent, element))
                 continue;
-            if (element instanceof EventSubscription)
+            if (element instanceof EventSubscription subscription && marked.test(subscription))
                 count[0]++;
             Object[] children;
             try
@@ -1282,7 +1303,7 @@ public final class MdEditorListTabCountHook implements IStartup
             {
                 continue;
             }
-            walkFilteredEventSubscriptions(viewer, content, filters, element, children, count);
+            walkFilteredEventSubscriptions(viewer, content, filters, element, children, count, marked);
         }
     }
 
@@ -1299,14 +1320,15 @@ public final class MdEditorListTabCountHook implements IStartup
         return true;
     }
 
-    private static int countVisibleEventSubscriptions(TreeItem[] items)
+    private static int countVisibleEventSubscriptions(TreeItem[] items,
+        java.util.function.Predicate<EventSubscription> marked)
     {
         int n = 0;
         for (TreeItem item : items)
         {
-            if (item.getData() instanceof EventSubscription)
+            if (item.getData() instanceof EventSubscription subscription && marked.test(subscription))
                 n++;
-            n += countVisibleEventSubscriptions(item.getItems());
+            n += countVisibleEventSubscriptions(item.getItems(), marked);
         }
         return n;
     }
@@ -1858,6 +1880,28 @@ public final class MdEditorListTabCountHook implements IStartup
             return BslSharedImages.getImage(BslSharedImages.IMG_MODULE);
         if (isMdEventHandlersPage(page, null))
             return mdImage(MdUiSharedImages.OBJS_EVENT_SUBSCRIPTION);
+        if (page instanceof MdEditorDefinedTypesPageHook.DefinedTypesPage)
+        {
+            try
+            {
+                return MdUiSharedImages.getMdClassImage(MdClassPackage.Literals.DEFINED_TYPE);
+            }
+            catch (RuntimeException ignored)
+            {
+                return null;
+            }
+        }
+        if (page instanceof MdEditorGlobalCommandsPageHook.GlobalCommandsPage)
+        {
+            try
+            {
+                return MdUiSharedImages.getMdClassImage(MdClassPackage.Literals.COMMON_COMMAND);
+            }
+            catch (RuntimeException ignored)
+            {
+                return null;
+            }
+        }
         if (isDataExchangePage(page, null))
             return mdImage(MdUiSharedImages.OBJS_EXCHANGE_PLAN);
         if (isFunctionalOptionsPage(page, null))
@@ -2210,7 +2254,9 @@ public final class MdEditorListTabCountHook implements IStartup
                 return false;
             if (lower.contains(".aindex")) //$NON-NLS-1$
                 return true;
-            if ("tormozit.mdEventHandlers".equals(id)) //$NON-NLS-1$
+            if ("tormozit.mdEventHandlers".equals(id) //$NON-NLS-1$
+                || MdEditorDefinedTypesPageHook.PAGE_ID.equals(id)
+                || MdEditorGlobalCommandsPageHook.PAGE_ID.equals(id))
                 return true;
             if (isRightsPageId(id))
                 return true;

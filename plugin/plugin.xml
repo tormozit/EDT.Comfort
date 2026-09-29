@@ -68,7 +68,12 @@
     <startup class="tormozit.TemplateTypeSuffixDecorator"/>
     <startup class="tormozit.FormMainAttributeTypeDecorator"/>
     <startup class="tormozit.MdObjectUsageDecorator"/>
+    <startup class="tormozit.DefinedTypeDecorator"/>
+    <startup class="tormozit.CommandDecorator"/>
     <startup class="tormozit.MdEventHandlersPageHook"/>
+    <startup class="tormozit.MdEditorDefinedTypesPageHook"/>
+    <startup class="tormozit.MdEditorGlobalCommandsPageHook"/>
+    <startup class="tormozit.MdEditorObjectCommandsPageHook"/>
     <startup class="tormozit.MdEditorTitleNavigatorMenuHook"/>
     <startup class="tormozit.MdEditorListTabCountHook"/>
     <!-- Обход issue 400: пропажа иконок вкладок панели редакторов -->
@@ -1508,6 +1513,28 @@
         class="tormozit.FormMainAttributeTypeDecorator">
       <enablement>
         <objectClass name="com._1c.g5.v8.dt.metadata.mdclass.BasicForm"/>
+      </enablement>
+    </decorator>
+    <decorator
+        id="tormozit.definedTypeDecorator"
+        label="Вид типа определяемого типа (Комфорт)"
+        description="К имени определяемого типа добавляется серый суффикс «Объект» или «Менеджер» по первому типу в составе."
+        lightweight="true"
+        state="true"
+        class="tormozit.DefinedTypeDecorator">
+      <enablement>
+        <objectClass name="com._1c.g5.v8.dt.metadata.mdclass.DefinedType"/>
+      </enablement>
+    </decorator>
+    <decorator
+        id="tormozit.commandParameterDecorator"
+        label="Признак параметризуемой команды (Комфорт)"
+        description="К имени команды добавляется суффикс «(Парам)», если у команды задан тип параметра, в навигаторе и в дереве команд редактора объекта."
+        lightweight="true"
+        state="true"
+        class="tormozit.CommandDecorator">
+      <enablement>
+        <objectClass name="com._1c.g5.v8.dt.metadata.mdclass.BasicCommand"/>
       </enablement>
     </decorator>
     <decorator

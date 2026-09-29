@@ -77,6 +77,9 @@ public final class EventHandlersFilterHook implements IStartup
 
     private static final String PATCHED_KEY = "tormozit.eventHandlersFilterPatched"; //$NON-NLS-1$
 
+    /** {@code Runnable} в данных дерева: вернуть свёртки и текущую строку вместо {@code expandAll} при очистке поиска. */
+    static final String RESTORE_ON_CLEAR_KEY = "tormozit.eventHandlersRestoreOnClear"; //$NON-NLS-1$
+
     private static final int MAX_ATTEMPTS = 40;
 
     private static final int RETRY_MS = 100;
@@ -269,6 +272,15 @@ public final class EventHandlersFilterHook implements IStartup
             String pattern = searchBox != null && !searchBox.isDisposed()
                 ? searchBox.getText().trim() : ""; //$NON-NLS-1$
             boolean filtering = !pattern.isEmpty();
+            // Поле поиска зовёт performSearch и при потере фокуса (клик по дереву) с тем же текстом.
+            // Повторный refresh пересобирает дерево и теряет выделение — клик «не срабатывает».
+            if (pattern.equals(filter.appliedPattern))
+            {
+                Global.tempLog("eventhandlers-tree-state", "hook.apply: пропущен, текст не менялся ('" //$NON-NLS-1$ //$NON-NLS-2$
+                    + pattern + "')"); //$NON-NLS-1$
+                return;
+            }
+            filter.appliedPattern = pattern;
             filter.setPattern(pattern);
             highlight.setHighlightPattern(pattern);
 
@@ -287,12 +299,69 @@ public final class EventHandlersFilterHook implements IStartup
 
             // Как штатный SearchListener: при активном фильтре («Текущий отбор» тоже)
             // дерево раскрывается полностью, иначе остаётся как есть.
-            if (filtering || hasActiveEventHandlersFilter(mainSection))
+            Global.tempLog("eventhandlers-tree-state", "hook.apply: filtering=" + filtering //$NON-NLS-1$ //$NON-NLS-2$
+                + " restorePresent=" + (viewer.getTree().getData(RESTORE_ON_CLEAR_KEY) != null) //$NON-NLS-1$
+                + " selection=" + viewer.getTree().getSelectionCount()); //$NON-NLS-1$
+            // Встроенная страница объекта сама возвращает состояние дерева после очистки поиска.
+            if (!filtering && viewer.getTree().getData(RESTORE_ON_CLEAR_KEY) instanceof Runnable restore)
+                restore.run();
+            else if (filtering || hasActiveEventHandlersFilter(mainSection))
+            {
+                Global.tempLog("eventhandlers-tree-state", "hook.apply: до expandAll раскрыто=" //$NON-NLS-1$ //$NON-NLS-2$
+                    + MdEventHandlersPageHook.expandedCount(viewer.getTree()));
+                logExpandability(viewer);
                 viewer.expandAll();
+                Global.tempLog("eventhandlers-tree-state", "hook.apply: после expandAll раскрыто=" //$NON-NLS-1$ //$NON-NLS-2$
+                    + MdEventHandlersPageHook.expandedCount(viewer.getTree()));
+            }
         }
         catch (RuntimeException e)
         {
             Global.logError(TAG, "apply", e); //$NON-NLS-1$
+        }
+    }
+
+    /**
+     * Диагностика: почему {@code expandAll()} не раскрывает корни. JFace раскрывает узел, только если
+     * {@code isExpandable} (при наличии фильтров — есть ли отфильтрованные дети); здесь для каждого
+     * корня пишется, сколько его детей пропускает каждый из фильтров дерева.
+     */
+    private static void logExpandability(TreeViewer viewer)
+    {
+        try
+        {
+            if (!(viewer.getContentProvider() instanceof ITreeContentProvider provider))
+                return;
+            for (org.eclipse.swt.widgets.TreeItem root : viewer.getTree().getItems())
+            {
+                Object data = root.getData();
+                if (data == null)
+                    continue;
+                Object[] raw = provider.getChildren(data);
+                StringBuilder sb = new StringBuilder("expandability: root=").append(root.getText()) //$NON-NLS-1$
+                    .append(" isExpandable=").append(viewer.isExpandable(data)) //$NON-NLS-1$
+                    .append(" hasChildren=").append(provider.hasChildren(data)) //$NON-NLS-1$
+                    .append(" raw=").append(raw == null ? -1 : raw.length); //$NON-NLS-1$
+                for (ViewerFilter filter : viewer.getFilters())
+                {
+                    int pass = 0;
+                    if (raw != null)
+                        for (Object child : raw)
+                            if (filter.select(viewer, data, child))
+                                pass++;
+                    sb.append(' ').append(filter.getClass().getName()).append('=').append(pass);
+                }
+                sb.append(" | до: expanded=").append(root.getExpanded()).append(" items=").append(root.getItemCount()); //$NON-NLS-1$ //$NON-NLS-2$
+                viewer.setExpandedState(data, true);
+                sb.append(" | после setExpandedState: expanded=").append(root.getExpanded()) //$NON-NLS-1$
+                    .append(" items=").append(root.getItemCount()) //$NON-NLS-1$
+                    .append(" viewerState=").append(viewer.getExpandedState(data)); //$NON-NLS-1$
+                Global.tempLog("eventhandlers-tree-state", sb.toString()); //$NON-NLS-1$
+            }
+        }
+        catch (RuntimeException e)
+        {
+            Global.tempLog("eventhandlers-tree-state", "expandability: ошибка " + e); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 
@@ -345,7 +414,7 @@ public final class EventHandlersFilterHook implements IStartup
         return highlight;
     }
 
-    private static boolean injectStyledStringProvider(DelegatingStyledCellLabelProvider provider,
+    static boolean injectStyledStringProvider(DelegatingStyledCellLabelProvider provider,
         IStyledLabelProvider smartProvider)
     {
         Class<?> cls = provider.getClass();
@@ -380,6 +449,9 @@ public final class EventHandlersFilterHook implements IStartup
     private static final class SearchFilter extends ViewerFilter
     {
         private final LabelHighlight labels;
+
+        /** Текст, с которым дерево уже отфильтровано ({@code null} — фильтр ещё ни разу не применялся). */
+        String appliedPattern;
 
         private SmartMatcher matcher = new SmartMatcher(""); //$NON-NLS-1$
 

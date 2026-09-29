@@ -116,6 +116,13 @@ public class MdObjectPickDialog extends Dialog
         setShellStyle(SWT.DIALOG_TRIM | SWT.RESIZE | SWT.APPLICATION_MODAL);
     }
 
+    /** Сортирует строки по имени (колонка «Представление»), без учёта регистра. */
+    public MdObjectPickDialog sortByName()
+    {
+        entries.sort((a, b) -> a.presentationText().compareToIgnoreCase(b.presentationText()));
+        return this;
+    }
+
     /** Локальный список полных имён метаданных (отдельно от {@link List}&lt;{@link Entry}&gt; из‑за erasure). */
     public static MdObjectPickDialog forMetadataNames(Shell parentShell, List<String> fullNames)
     {

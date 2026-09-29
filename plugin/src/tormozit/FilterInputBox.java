@@ -131,6 +131,9 @@ final class FilterInputBox
         EVENT_HANDLERS(
             "comfort.eventHandlers.filter.history.count", //$NON-NLS-1$
             "comfort.eventHandlers.filter.history."), //$NON-NLS-1$
+        DEFINED_TYPES(
+            "comfort.definedTypes.filter.history.count", //$NON-NLS-1$
+            "comfort.definedTypes.filter.history."), //$NON-NLS-1$
         FORM_ITEMS(
             "comfort.formItems.filter.history.count", //$NON-NLS-1$
             "comfort.formItems.filter.history."), //$NON-NLS-1$
@@ -226,6 +229,17 @@ final class FilterInputBox
         opts.layoutData = objectSetsLayoutData();
         opts.message = "Фильтр..."; //$NON-NLS-1$
         opts.tooltip = FLAT_FILTER_TOOLTIP; //$NON-NLS-1$
+        return create(parent, opts, onSearch);
+    }
+
+    /** Вкладка «Определяемые типы» редактора объекта метаданных. */
+    static FilterInputBox forDefinedTypes(Composite parent, Runnable onSearch)
+    {
+        Options opts = new Options();
+        opts.scope = Scope.DEFINED_TYPES;
+        opts.layoutData = compactLayoutData();
+        opts.message = "Фильтр..."; //$NON-NLS-1$
+        opts.tooltip = FLAT_FILTER_TOOLTIP;
         return create(parent, opts, onSearch);
     }
 
@@ -484,6 +498,7 @@ final class FilterInputBox
             case GIT_HISTORY -> forGitHistory(parent, onSearch);
             case FILTERED_LIST_DIALOG -> forFilteredListDialog(parent, onSearch);
             case LIST_ITEM_SELECTION_DIALOG -> forListItemSelectionDialog(parent, onSearch);
+            case DEFINED_TYPES -> forDefinedTypes(parent, onSearch);
             case FORM_ITEMS -> forFormItems(parent, onSearch);
             case GLOBAL_COMMANDS -> forGlobalCommands(parent, onSearch);
             case RIGHTS_DIALOG -> throw new IllegalStateException("RIGHTS_DIALOG: use attachHistory(SearchBox, Scope.RIGHTS_DIALOG)"); //$NON-NLS-1$

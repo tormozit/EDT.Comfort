@@ -650,6 +650,17 @@ public final class EventHandlersOpenHandlerHook implements IStartup
         {
             List<String> names = new ArrayList<>();
 
+            // Встроенная страница объекта: её объект известен, а отбор панели зависит от режима
+            // «Только помеченные» (при выключенном источников в нём нет).
+            List<Object> pageTypes = MdEventHandlersPageHook.objectTypesOf(editor);
+            if (pageTypes != null)
+            {
+                for (Object type : pageTypes)
+                    addTypeNames(type, names);
+                if (!names.isEmpty())
+                    return names;
+            }
+
             Object mainSection = Global.invoke(editor, "getMainSection"); //$NON-NLS-1$
             Object filter = mainSection != null
                 ? Global.invoke(mainSection, "getEventHandlersFilter") : null; //$NON-NLS-1$

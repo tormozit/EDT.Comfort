@@ -316,6 +316,8 @@ final class TypeDescriptionDialogFlow
         if (roots == null || roots.length == 0)
             return false;
         Object element = findTypeRow(tcp, roots, targets);
+        Global.tempLog("eventhandlers-open-link", "targets=" + targets + " roots=" + roots.length //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " found=" + (element == null ? "нет" : candidateNames(element))); //$NON-NLS-1$ //$NON-NLS-2$
         if (element == null)
             return false;
 

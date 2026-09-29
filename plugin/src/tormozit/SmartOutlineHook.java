@@ -37,6 +37,8 @@ import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Listener;
+import org.eclipse.swt.widgets.Menu;
+import org.eclipse.swt.widgets.MenuItem;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Table;
 import org.eclipse.swt.widgets.Text;
@@ -60,6 +62,10 @@ import org.eclipse.core.resources.IProject;
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.common.ui.controls.search.SearchBox;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
+import com._1c.g5.v8.dt.mcore.TypeItem;
+import com._1c.g5.v8.dt.md.resource.MdTypeUtil;
+import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
+import com._1c.g5.v8.dt.ui.util.OpenHelper;
 
 import org.eclipse.jface.viewers.StyledString;
 
@@ -95,6 +101,7 @@ public class SmartOutlineHook implements IStartup {
     /** Число пометок, показанное в подписи флажка «Только помеченные (N)» (данные самого флажка). */
     private static final String MARKED_COUNT_KEY = "tormozit.markedCount"; //$NON-NLS-1$
     private static final String OBJECT_PICKER_HOOK_KEY = "tormozit.objectPickerDialogHook"; //$NON-NLS-1$
+    private static final String TYPE_TREE_MENU_KEY = "tormozit.typeTreeContextMenu"; //$NON-NLS-1$
     /** Заголовок {@code SelectTypeDialog_title} / {@code TypeDescriptionDialogComponent_DialogTitle}. */
     private static final String SELECT_TYPE_DIALOG_TITLE =
             "Редактирование типа данных"; //$NON-NLS-1$
@@ -1806,6 +1813,7 @@ public class SmartOutlineHook implements IStartup {
                     () -> updateOnlyMarkedButtonText(onlyMarkedBtn, multiItems, buttonParent, viewer,
                         applyMarkedOnly)));
             installSingleTypeDoubleClick(patchedShell, viewer);
+            installTypeTreeContextMenu(patchedShell, viewer);
         }
         else
             installObjectPickerExtras(patchedShell, viewer, onlyMarkedBtn, buttonParent, applyMarkedOnly);
@@ -2238,6 +2246,75 @@ public class SmartOutlineHook implements IStartup {
             }
             markCurrentRowAndOk(shell, viewer);
         });
+    }
+
+    /**
+     * «Открыть объект» и «Показать в навигаторе» в контекстном меню дерева типов окна
+     * «Редактирование типа данных» (issue #624). Объект — производитель типа выбранной строки
+     * ({@code MdTypeUtil.getTypeProducer}); у строк-групп и типов платформы его нет — пункты
+     * недоступны. Строка дерева ({@code TreeItemViewModel}) переводится в {@code TypeItem}
+     * штатным маппером компонента дерева, как в {@link #revealBestType}.
+     */
+    private static void installTypeTreeContextMenu(Shell shell, TreeViewer viewer)
+    {
+        Tree tree = viewer != null ? viewer.getTree() : null;
+        if (shell == null || shell.isDisposed() || tree == null || tree.isDisposed())
+            return;
+        if (Boolean.TRUE.equals(tree.getData(TYPE_TREE_MENU_KEY)))
+            return;
+        tree.setData(TYPE_TREE_MENU_KEY, Boolean.TRUE);
+
+        Menu menu = tree.getMenu();
+        if (menu == null || menu.isDisposed())
+        {
+            menu = new Menu(tree);
+            tree.setMenu(menu);
+        }
+        else if (menu.getItemCount() > 0)
+            new MenuItem(menu, SWT.SEPARATOR);
+
+        MenuItem open = new MenuItem(menu, SWT.PUSH);
+        open.setText("Открыть объект"); //$NON-NLS-1$
+        ComfortSubmenuHelper.setMenuItemTooltip(open, "Открыть редактор объекта выбранного типа, не закрывая окно"); //$NON-NLS-1$
+        MenuItem reveal = new MenuItem(menu, SWT.PUSH);
+        reveal.setText("Показать в навигаторе"); //$NON-NLS-1$
+        ComfortSubmenuHelper.setMenuItemTooltip(reveal, "Показать объект выбранного типа в навигаторе, не закрывая окно"); //$NON-NLS-1$
+
+        menu.addListener(SWT.Show, e ->
+        {
+            boolean has = selectedTypeProducer(shell, tree) != null;
+            open.setEnabled(has);
+            reveal.setEnabled(has);
+        });
+        open.addListener(SWT.Selection, e ->
+        {
+            MdObject producer = selectedTypeProducer(shell, tree);
+            if (producer != null)
+                new OpenHelper().openEditor(producer);
+        });
+        reveal.addListener(SWT.Selection, e ->
+            NavigatorReveal.revealAndActivateIfHidden(selectedTypeProducer(shell, tree)));
+    }
+
+    /** Объект метаданных, произведший тип выбранной строки дерева; {@code null} — такого нет. */
+    private static MdObject selectedTypeProducer(Shell shell, Tree tree)
+    {
+        try
+        {
+            if (tree.isDisposed() || tree.getSelectionCount() == 0)
+                return null;
+            Object row = tree.getSelection()[0].getData();
+            Object component = resolveTypeDescriptionComponent(shell);
+            Object treeComponent = component != null ? Global.getField(component, "treeComponent") : null; //$NON-NLS-1$
+            Object mapper = treeComponent != null ? Global.invoke(treeComponent, "getMapper") : null; //$NON-NLS-1$
+            Object model = row != null && mapper != null ? Global.invoke(mapper, "mapViewToModel", row) : null; //$NON-NLS-1$
+            return model instanceof TypeItem typeItem ? MdTypeUtil.getTypeProducer(typeItem) : null;
+        }
+        catch (Exception | LinkageError e)
+        {
+            Global.logError(LOG_TAG_IR_BEST_TYPE, "selectedTypeProducer", e); //$NON-NLS-1$
+            return null;
+        }
     }
 
     /** Подсказка в заголовке окна, пока флажок «Составной тип данных» снят. */

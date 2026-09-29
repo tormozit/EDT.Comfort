@@ -1561,7 +1561,7 @@ public class GoToDefinition extends AbstractHandler
     private static boolean pickAndOpen(List<String> names, Shell shell, IWorkbenchPage page, IProject project,
         boolean allowIrAutoConnect)
     {
-        MdObjectPickDialog dlg = MdObjectPickDialog.forMetadataNames(shell, names);
+        MdObjectPickDialog dlg = MdObjectPickDialog.forMetadataNames(shell, names).sortByName();
         if (dlg.open() != Window.OK)
         {
             jumpCancelled = true;
@@ -2262,7 +2262,7 @@ public class GoToDefinition extends AbstractHandler
             List<MdObjectPickDialog.Entry> rows = new ArrayList<>();
             for (GotoDefItem item : items)
                 rows.add(MdObjectPickDialog.Entry.irItem(item.value, item.presentation));
-            MdObjectPickDialog dlg = new MdObjectPickDialog(shell, rows);
+            MdObjectPickDialog dlg = new MdObjectPickDialog(shell, rows).sortByName();
             if (dlg.open() != Window.OK)
             {
 
