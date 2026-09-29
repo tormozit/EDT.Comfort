@@ -14,6 +14,7 @@
     <startup class="tormozit.FormWysiwygScrollHook"/>
     <startup class="tormozit.ActiveProjectTracker"/>
     <startup class="tormozit.PreferencesDialogTransferHook"/>
+    <startup class="tormozit.ProjectPropertyDialogHook"/>
     <startup class="tormozit.CompareConfigMenuHook"/>
     <startup class="tormozit.NavigatorDropSearchHook"/>
     <startup class="tormozit.ApplicationsViewHook"/>
@@ -124,6 +125,7 @@
     <startup class="tormozit.NavigatorAttributePropertiesHook"/>
     <startup class="tormozit.NavigatorCopyTextAugmentHook"/>
     <startup class="tormozit.ChoiceParametersHook"/>
+    <startup class="tormozit.SelectTypeDialogHook"/>
     <startup class="tormozit.PredefinedSelectionDialogHook"/>
     <startup class="tormozit.ColorDialogHook"/>
     <startup class="tormozit.NaparnikFixDialogHook"/>
