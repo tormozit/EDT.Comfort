@@ -846,7 +846,7 @@ public class GoToDefinition extends AbstractHandler
         String normalizedRef = norm.normalizedRef();
 
         EObject eObject = resolveEObjectByQualifiedName(normalizedRef, v8Project);
-        if (openResolvedMdEObject(eObject, norm, page))
+        if (openResolvedMdEObject(eObject, norm, page, project))
             return true;
 
         String mdoPath = mdNameToMdoPath(normalizedRef);
@@ -862,7 +862,7 @@ public class GoToDefinition extends AbstractHandler
             return false;
         }
         eObject = resolveEObjectViaResourceSet(mdoFile, v8Project);
-        if (openResolvedMdEObject(eObject, norm, page))
+        if (openResolvedMdEObject(eObject, norm, page, project))
             return true;
 
         Global.log("GoToDefinition: EObject не получен, открываем .mdo напрямую"); //$NON-NLS-1$
@@ -939,7 +939,8 @@ public class GoToDefinition extends AbstractHandler
      * Открывает резолвленный EObject: top-level {@link MdObject}, дочерний элемент
      * (значение перечисления) или предопределённый элемент с выделением в редакторе.
      */
-    private static boolean openResolvedMdEObject(EObject eObject, MdLinkNormalizer.Result norm, IWorkbenchPage page)
+    private static boolean openResolvedMdEObject(EObject eObject, MdLinkNormalizer.Result norm, IWorkbenchPage page,
+        IProject project)
     {
         if (eObject == null || norm == null)
             return false;
@@ -954,13 +955,13 @@ public class GoToDefinition extends AbstractHandler
                 if (item != null)
                     selection = new StructuredSelection(item);
             }
-            return openMdObjectViaOpenHelper(mdObject, norm.normalizedRef(), page, selection);
+            return openMdObjectViaOpenHelper(mdObject, norm.normalizedRef(), page, selection, project);
         }
 
         MdObject parent = findContainingMdObject(eObject);
         if (parent == null)
             return false;
-        return openMdObjectViaOpenHelper(parent, norm.normalizedRef(), page, new StructuredSelection(eObject));
+        return openMdObjectViaOpenHelper(parent, norm.normalizedRef(), page, new StructuredSelection(eObject), project);
     }
 
     static MdObject findContainingMdObject(EObject eObject)
@@ -983,11 +984,18 @@ public class GoToDefinition extends AbstractHandler
     static boolean openMdObjectViaOpenHelper(
         MdObject mdObject, String fullName, IWorkbenchPage page, ISelection selection)
     {
+        return openMdObjectViaOpenHelper(mdObject, fullName, page, selection, null);
+    }
+
+    /** @param project проект целевого объекта; {@code null} — не сверять проект активного редактора. */
+    static boolean openMdObjectViaOpenHelper(
+        MdObject mdObject, String fullName, IWorkbenchPage page, ISelection selection, IProject project)
+    {
         if (page == null || mdObject == null)
             return false;
         OpenHelper helper = new OpenHelper(page);
         boolean hasSelection = selection != null && !selection.isEmpty();
-        if (isSameGranularEditorTarget(page, fullName))
+        if (isSameGranularEditorTarget(page, fullName, project))
         {
             if (!hasSelection)
                 return true;
@@ -1085,13 +1093,20 @@ public class GoToDefinition extends AbstractHandler
     }
 
     /** Целевой объект уже открыт в активном {@link DtGranularEditor}. */
-    private static boolean isSameGranularEditorTarget(IWorkbenchPage page, String fullName)
+    private static boolean isSameGranularEditorTarget(IWorkbenchPage page, String fullName, IProject project)
     {
         if (fullName == null || fullName.isBlank())
             return false;
         IEditorPart active = page.getActiveEditor();
         if (!(active instanceof DtGranularEditor<?>))
             return false;
+        // Одноимённый объект другого проекта — не тот же редактор.
+        if (project != null)
+        {
+            IProject editorProject = Global.getActiveProject(active, false);
+            if (editorProject != null && !editorProject.equals(project))
+                return false;
+        }
         String currentRef = GetRef.getRefFromEditor(active);
         if (currentRef == null || currentRef.isBlank())
             return false;

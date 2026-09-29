@@ -219,6 +219,9 @@ public final class ParamHintHtmlModifier
                 return;
             if (shell.isDisposed())
                 return;
+            // Боковая подсказка быстрой схемы — не подсказка параметров: её место считает сама схема.
+            if (shell.getData(BslSideHintOutlineInstall.SIDE_HINT_SHELL_MARK) != null)
+                return;
 
             Browser browser = IrBslHoverHtml.findControlBrowser(shell);
             if (browser == null || browser.isDisposed())

@@ -18,6 +18,8 @@ import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 
+import com._1c.g5.v8.dt.dcs.ui.DataCompositionSchemaControlContext;
+
 /**
  * Делает штатное окно настроек динамического списка
  * ({@code com._1c.g5.v8.dt.internal.form.ui.dynamiclist.aef.dialogs.DynamicListQueryDialog})
@@ -376,6 +378,8 @@ public final class DynamicListSettingsDialogHook implements IStartup
         }
 
         log("onDelayedSetup attr=" + attrName + " key=" + listKey); //$NON-NLS-1$ //$NON-NLS-2$
+        if (Global.getField(resolveDialog(shell), "context") instanceof DataCompositionSchemaControlContext context) //$NON-NLS-1$
+            DcsComputedValueTypes.install(context);
         shell.setData(DEMODALIZED_KEY, Boolean.TRUE);
         demodalize(shell);
         pinAboveOwner(shell);

@@ -24,7 +24,6 @@ import org.eclipse.jface.text.IInformationControlExtension3;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.graphics.Rectangle;
 import org.eclipse.swt.widgets.Control;
-import org.eclipse.swt.widgets.ScrollBar;
 import org.eclipse.swt.widgets.TreeItem;
 import com._1c.g5.v8.dt.bsl.model.Method;
 import com._1c.g5.v8.dt.bsl.ui.hover.BslDispatchingEObjectTextHover;
@@ -64,6 +63,8 @@ public final class BslSideHintOutlineInstall
     private static final String PRESENTER_KEY = "tormozit.bslSideHintPresenter"; //$NON-NLS-1$
     private static final String PENDING_KEY = "tormozit.bslSideHintPending"; //$NON-NLS-1$
     static final String SUPPRESS_SELECTION_KEY = "tormozit.bslSideHintSuppressSelection"; //$NON-NLS-1$
+    /** Метка shell боковой подсказки схемы: чужие хуки подсказок его не двигают. */
+    static final String SIDE_HINT_SHELL_MARK = "tormozit.bslSideHintShell"; //$NON-NLS-1$
     private static final String LAST_HINT_ELEMENT_KEY = "tormozit.bslSideHintLastElement"; //$NON-NLS-1$
     private static final String WORDS_TABLE_READY_KEY = "tormozit.bslSideHintWordsTableReady"; //$NON-NLS-1$
     private static final String CONTEXT_HOST_KEY = "tormozit.bslSideHintContextHost"; //$NON-NLS-1$
@@ -172,6 +173,13 @@ public final class BslSideHintOutlineInstall
             }
         };
         outlineShell.getDisplay().addFilter(SWT.Deactivate, outlineDeactivateFilter);
+        // #region agent log #633
+        presenter.diag("install", "outlineShellVisible=" + outlineShell.isVisible(), false); //$NON-NLS-1$ //$NON-NLS-2$
+        Listener outlineGeometryDiag = event -> presenter.diag(
+            event.type == SWT.Move ? "outlineShell move" : "outlineShell resize", null, false); //$NON-NLS-1$ //$NON-NLS-2$
+        outlineShell.addListener(SWT.Move, outlineGeometryDiag);
+        outlineShell.addListener(SWT.Resize, outlineGeometryDiag);
+        // #endregion
 
         tree.addDisposeListener(e -> {
 
@@ -393,6 +401,7 @@ public final class BslSideHintOutlineInstall
                 }
                 String baseHtml = IrBslHoverHtml.readHtml(baseInput);
                 String merged = IrBslHoverHtml.mergeHtml(baseHtml, irHtml);
+                presenter.diag("ir enrich", "method=" + methodName + " offset=" + sourceOffset, false); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ // #633
                 presenter.updateHint(new BslItemSideHint(merged, creator, sourceOffset));
                 BslSideHintDebug.log("ir enriched method=" + methodName + " len=" + irHtml.length()); //$NON-NLS-1$ //$NON-NLS-2$
             });
@@ -486,11 +495,6 @@ public final class BslSideHintOutlineInstall
             }
 
         };
-        private static final Anchor[] SIDE_ANCHORS = { ANCHOR_RIGHT, ANCHOR_LEFT };
-        /** Без {@code ANCHOR_TOP}: сверху подсказка перекрывает поле фильтра окна схемы. */
-        private static final Anchor[] ALL_ANCHORS = { ANCHOR_RIGHT, ANCHOR_LEFT, ANCHOR_BOTTOM };
-        /** Уже этой ширины сбоку подсказка нечитаема — тогда допускается место снизу. */
-        private static final int MIN_SIDE_WIDTH_PX = 280;
         private volatile BslItemSideHint pendingHint;
         private int shownSourceOffset = -1;
         private int shownAreaX = Integer.MIN_VALUE;
@@ -502,8 +506,9 @@ public final class BslSideHintOutlineInstall
 
             super(PLACEHOLDER_CREATOR);
             setAnchor(ANCHOR_RIGHT);
-            setFallbackAnchors(SIDE_ANCHORS);
-            setSizeConstraints(280, 120, true, true);
+            // Как у подсказки автодополнения (CompletionProposalPopup): 50×10 символов — нижняя граница,
+            // фактический размер — окно схемы (см. computeSizeConstraints).
+            setSizeConstraints(50, 10, true, true);
             takesFocusWhenVisible(false);
             InformationControlReplacer replacer = new InformationControlReplacer(PLACEHOLDER_CREATOR);
             getInternalAccessor().setInformationControlReplacer(replacer);
@@ -514,6 +519,32 @@ public final class BslSideHintOutlineInstall
         {
 
             super.install(subject);
+        }
+
+        /**
+         * Размер — как у подсказки автодополнения ({@code AdditionalInfoController.computeSizeConstraints}):
+         * не меньше окна схемы, за вычетом рамки подсказки (её JFace прибавит сам). Браузер свою ширину
+         * по HTML не измеряет и отдаёт ограничение, поэтому ограничение и есть итоговый размер.
+         */
+        @Override
+        protected Point computeSizeConstraints(Control subjectControl, IInformationControl informationControl)
+        {
+
+            Point sizeConstraint = super.computeSizeConstraints(subjectControl, informationControl);
+            Point size = subjectControl.getShell().getSize();
+            if (informationControl instanceof IInformationControlExtension3 ext3)
+            {
+
+                Rectangle shellTrim = ext3.computeTrim();
+                size.x -= shellTrim.width;
+                size.y -= shellTrim.height;
+            }
+
+            if (sizeConstraint.x < size.x)
+                sizeConstraint.x = size.x;
+            if (sizeConstraint.y < size.y)
+                sizeConstraint.y = size.y;
+            return sizeConstraint;
         }
 
         public void updateHint(BslItemSideHint hint)
@@ -531,6 +562,8 @@ public final class BslSideHintOutlineInstall
             Control subject = getSubjectControl();
             Rectangle area = getSubjectArea();
             int offset = hint.getSourceOffset();
+            diag("updateHint", "offset=" + offset + " shownOffset=" + shownSourceOffset + " area=" + area //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " shownAreaXY=" + shownAreaX + "," + shownAreaY + " reuse=" + hasReuseableControl(), false); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ // #633
             if (hasReuseableControl() && offset >= 0 && offset == shownSourceOffset && area != null)
             {
 
@@ -669,8 +702,8 @@ public final class BslSideHintOutlineInstall
             shownSourceOffset = hint.getSourceOffset();
             shownAreaX = area.x;
             shownAreaY = area.y;
+            diag("refreshInPlace", "input=" + (input instanceof String ? "html" : String.valueOf(input == null ? null : input.getClass().getSimpleName())), false); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ // #633
             repositionHint(area);
-            control.setVisible(true);
         }
 
         private void rememberArea(Rectangle area)
@@ -694,10 +727,9 @@ public final class BslSideHintOutlineInstall
         }
 
         /**
-         * Якорь ANCHOR_RIGHT: правый край дерева включая полосы прокрутки, на строку ниже выбранного
-         * элемента (не по полной ширине текста — иначе подсказка уезжает за окно; сдвиг вниз — без
-         * пересечения с тултипом). {@code getClientArea()} не включает скроллбары: без них подсказка
-         * наезжает на вертикальную полосу (и на угол с горизонтальной).
+         * По горизонтали — внешние границы окна схемы (с рамкой) в координатах дерева: ANCHOR_RIGHT/LEFT
+         * ставят подсказку вплотную к окну, не заходя на его рамку и полосы прокрутки. По вертикали —
+         * строка ниже выбранного элемента (без пересечения с тултипом).
          */
         private static Rectangle outlineTreeAnchorArea(Tree tree, TreeItem item)
         {
@@ -705,22 +737,13 @@ public final class BslSideHintOutlineInstall
             Rectangle itemBounds = item.getBounds();
             Rectangle client = tree.getClientArea();
             int lineH = tree.getItemHeight();
-            int width = client.x + client.width + visibleVerticalBarWidth(tree);
             int y = itemBounds.y + lineH;
             int clientBottom = client.y + client.height;
             if (y >= clientBottom)
                 y = itemBounds.y;
-            return new Rectangle(0, y, width, itemBounds.height);
-        }
-
-        /** Ширина видимой вертикальной полосы прокрутки; 0 если полосы нет. */
-        private static int visibleVerticalBarWidth(Tree tree)
-        {
-
-            ScrollBar bar = tree.getVerticalBar();
-            if (bar == null || bar.isDisposed() || !bar.getVisible())
-                return 0;
-            return Math.max(0, bar.getSize().x);
+            Rectangle shell = tree.getShell().getBounds();
+            Point treeOrigin = tree.toDisplay(0, 0);
+            return new Rectangle(shell.x - treeOrigin.x, y, shell.width, itemBounds.height);
         }
 
         private boolean hasReuseableControl()
@@ -751,73 +774,191 @@ public final class BslSideHintOutlineInstall
 
             if (size == null)
                 return;
+            Point sizeBefore = new Point(size.x, size.y); // #633
             Point location = computeInformationControlLocation(area, size);
             control.setSize(size.x, size.y);
             control.setLocation(location);
             control.setVisible(true);
+            hideIfOverlapsOutline("reposition"); //$NON-NLS-1$
+            diag("reposition", "area=" + area + " sizeIn=" + sizeBefore + " sizeOut=" + size + " loc=" + location, true); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ // #633
+        }
+
+        // #region agent log #633
+        private static final String DIAG_TOPIC = "outline-side-hint-633"; //$NON-NLS-1$
+
+        /**
+         * Временная диагностика #633 (подсказка перекрывает окно схемы): геометрия дерева, окна схемы,
+         * монитора и подсказки + флаг перекрытия. {@code recheck} — повторный снимок через 500 мс,
+         * чтобы поймать сдвиг после показа (браузер, перестройка окна схемы).
+         */
+        void diag(String phase, String detail, boolean recheck)
+        {
+
+            try
+            {
+
+                StringBuilder sb = new StringBuilder(phase);
+                if (detail != null)
+                    sb.append(" | ").append(detail); //$NON-NLS-1$
+                Control subject = getSubjectControl();
+                Rectangle outline = null;
+                if (subject != null && !subject.isDisposed())
+                {
+
+                    Point treeOrigin = subject.toDisplay(0, 0);
+                    Point treeSize = subject.getSize();
+                    outline = subject.getShell().getBounds();
+                    sb.append(" | tree=").append(new Rectangle(treeOrigin.x, treeOrigin.y, treeSize.x, treeSize.y)); //$NON-NLS-1$
+                    sb.append(" outlineShell=").append(outline).append(" visible=").append(subject.getShell().isVisible()); //$NON-NLS-1$ //$NON-NLS-2$
+                    sb.append(" monitor=").append(subject.getMonitor().getClientArea()); //$NON-NLS-1$
+                }
+
+                IInformationControl control = getInternalAccessor().getCurrentInformationControl();
+                if (control == null)
+                    sb.append(" | hint=none"); //$NON-NLS-1$
+                else if (control instanceof IInformationControlExtension3 ext3)
+                {
+
+                    Rectangle hb = ext3.getBounds();
+                    sb.append(" | hint=").append(hb).append(" class=").append(control.getClass().getName()) //$NON-NLS-1$ //$NON-NLS-2$
+                        .append(" super=").append(control.getClass().getSuperclass().getName()); //$NON-NLS-1$
+                    hookHintShellDiag(control);
+                    if (outline != null && hb != null)
+                    {
+
+                        Rectangle inter = hb.intersection(outline);
+                        boolean overlap = inter.width > 0 && inter.height > 0;
+                        sb.append(" OVERLAP=").append(overlap); //$NON-NLS-1$
+                        if (overlap)
+                            sb.append(" inter=").append(inter); //$NON-NLS-1$
+                    }
+
+                }
+
+                else
+                    sb.append(" | hint=").append(control.getClass().getSimpleName()).append(" (no ext3)"); //$NON-NLS-1$ //$NON-NLS-2$
+                Global.tempLog(DIAG_TOPIC, sb.toString());
+                if (recheck && subject != null && !subject.isDisposed())
+                    subject.getDisplay().timerExec(500, () -> diag("  +500ms after " + phase, null, false)); //$NON-NLS-1$
+            }
+
+            catch (RuntimeException e)
+            {
+
+                Global.tempLogException(DIAG_TOPIC, "diag " + phase, e); //$NON-NLS-1$
+            }
+
+        }
+
+        /** #633: кто двигает/ресайзит shell подсказки после нашего расчёта — стек на каждое событие. */
+        private void hookHintShellDiag(IInformationControl control)
+        {
+
+            Shell shell = null;
+            try
+            {
+
+                for (Class<?> cls = control.getClass(); cls != null && shell == null; cls = cls.getSuperclass())
+                    for (java.lang.reflect.Field f : cls.getDeclaredFields())
+                    {
+
+                        f.setAccessible(true);
+                        if (f.get(control) instanceof Shell s)
+                        {
+
+                            shell = s;
+                            break;
+                        }
+
+                    }
+
+            }
+
+            catch (Exception e)
+            {
+
+                Global.tempLogException(DIAG_TOPIC, "hookHintShellDiag", e); //$NON-NLS-1$
+            }
+
+            if (shell == null || shell.isDisposed() || shell.getData("tormozit.diag633") != null) //$NON-NLS-1$
+                return;
+            shell.setData("tormozit.diag633", Boolean.TRUE); //$NON-NLS-1$
+            final Shell hintShell = shell;
+            Listener l = event -> Global.tempLogException(DIAG_TOPIC,
+                "hintShell " + (event.type == SWT.Move ? "MOVE" : "RESIZE") + " bounds=" + hintShell.getBounds() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+                    + " visible=" + hintShell.isVisible(), //$NON-NLS-1$
+                new Throwable("stack")); //$NON-NLS-1$
+            hintShell.addListener(SWT.Move, l);
+            hintShell.addListener(SWT.Resize, l);
+            Global.tempLog(DIAG_TOPIC, "hintShell hooked bounds=" + hintShell.getBounds()); //$NON-NLS-1$
+        }
+
+        // #endregion
+
+        @Override
+        protected void showInformationControl(Rectangle subjectArea)
+        {
+
+            super.showInformationControl(subjectArea);
+            diag("shown (full show)", "subjectArea=" + subjectArea, true); //$NON-NLS-1$ //$NON-NLS-2$ // #633
+            hideIfOverlapsOutline("full show"); //$NON-NLS-1$
         }
 
         /**
-         * Штатный перебор якорей берёт первый, где подсказка помещается целиком: широкая подсказка
-         * не влезает ни справа, ни слева от окна схемы и уезжает наверх ({@code ANCHOR_TOP} сдвигает x
-         * до края экрана). Поэтому сначала только бока — с сужением до свободного места и пересчётом
-         * высоты под новую ширину; низ — только если сбоку места меньше {@link #MIN_SIDE_WIDTH_PX}.
-         * Верх исключён всегда: там поле фильтра окна схемы.
-         * {@code controlSize} меняется на месте, как в штатном методе.
+         * Всегда справа от окна схемы, без подбора стороны и размера: перебор якорей с сужением
+         * оказался хрупким (#633). Что не влезает в экран — штатно обрезается
+         * ({@code cropToClosestMonitor} только урезает прямоугольник, не сдвигая его влево),
+         * так что окно схемы подсказка не перекрывает. {@code controlSize} не меняется.
          */
         @Override
         protected Point computeInformationControlLocation(Rectangle subjectArea, Point controlSize)
         {
 
-            Point sideSize = new Point(controlSize.x, controlSize.y);
-            Point location = super.computeInformationControlLocation(subjectArea, sideSize);
-            if (sideSize.x == controlSize.x)
-            {
+            markSideHintShell();
+            Point location = computeLocation(subjectArea, controlSize, ANCHOR_RIGHT);
+            diag("computeLocation", "subjectArea=" + subjectArea + " size=" + controlSize + " loc=" + location, false); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ // #633
+            return location;
+        }
 
-                controlSize.y = sideSize.y;
-                return location;
-            }
+        /**
+         * Пометить shell подсказки {@link BslSideHintOutlineInstall#SIDE_HINT_SHELL_MARK} до показа: иначе
+         * фильтр {@code SWT.Show} подсказки параметров ({@link ParamHintHtmlModifier}) видит shell с браузером
+         * у левого края экрана и переносит его к каретке редактора — поверх окна схемы (#633).
+         */
+        private void markSideHintShell()
+        {
 
-            if (sideSize.x >= MIN_SIDE_WIDTH_PX)
-            {
+            IInformationControl control = getInformationControl();
+            org.eclipse.swt.browser.Browser browser = control != null ? IrBslHoverHtml.findControlBrowser(control) : null;
+            if (browser != null && !browser.isDisposed())
+                browser.getShell().setData(SIDE_HINT_SHELL_MARK, Boolean.TRUE);
+        }
 
-                IInformationControl control = getInformationControl();
-                if (control != null)
-                {
 
-                    Control subject = getSubjectControl();
-                    int maxHeight = subject != null && !subject.isDisposed()
-                            ? subject.getMonitor().getClientArea().height
-                            : sideSize.y;
-                    control.setSizeConstraints(sideSize.x, maxHeight);
-                    Point hint = control.computeSizeHint();
-                    if (hint != null)
-                    {
+        /**
+         * Подсказка НИКОГДА не перекрывает окно схемы: если после размещения (или чужой подгонки)
+         * она пересекает shell схемы либо обрезка экраном не оставила ничего — скрыть, а не показать поверх.
+         *
+         * @return {@code true}, если подсказку пришлось скрыть
+         */
+        private boolean hideIfOverlapsOutline(String phase)
+        {
 
-                        sideSize = new Point(Math.min(hint.x, sideSize.x), Math.min(hint.y, maxHeight));
-                        location = super.computeInformationControlLocation(subjectArea, sideSize);
-                    }
-
-                }
-
-                controlSize.x = sideSize.x;
-                controlSize.y = sideSize.y;
-                return location;
-            }
-
-            setFallbackAnchors(ALL_ANCHORS);
-            try
-            {
-
-                return super.computeInformationControlLocation(subjectArea, controlSize);
-            }
-
-            finally
-            {
-
-                setFallbackAnchors(SIDE_ANCHORS);
-            }
-
+            IInformationControl control = getInternalAccessor().getCurrentInformationControl();
+            Control subject = getSubjectControl();
+            if (!(control instanceof IInformationControlExtension3 ext3) || subject == null || subject.isDisposed())
+                return false;
+            Rectangle hint = ext3.getBounds();
+            Rectangle outline = subject.getShell().getBounds();
+            if (hint == null)
+                return false;
+            Rectangle inter = hint.intersection(outline);
+            boolean overlap = inter.width > 0 && inter.height > 0;
+            if (!overlap && hint.width > 0 && hint.height > 0)
+                return false;
+            control.setVisible(false);
+            diag("HIDDEN (overlap guard) after " + phase, "hint=" + hint + " inter=" + inter, false); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ // #633
+            return true;
         }
 
         @Override

@@ -35,6 +35,9 @@ import org.eclipse.emf.ecore.EObject;
 import org.eclipse.e4.ui.model.application.MApplication;
 import org.eclipse.e4.ui.model.application.descriptor.basic.MPartDescriptor;
 import org.eclipse.e4.ui.model.application.ui.basic.MPart;
+import org.eclipse.e4.ui.model.application.ui.menu.MHandledToolItem;
+import org.eclipse.e4.ui.model.application.ui.menu.MToolBar;
+import org.eclipse.e4.ui.model.application.ui.menu.MToolBarElement;
 import org.eclipse.jface.preference.IPreferencePage;
 import org.eclipse.jface.preference.PreferenceDialog;
 import org.eclipse.jface.viewers.CellLabelProvider;
@@ -142,6 +145,8 @@ public final class ProblemViewHook implements IStartup
     private static final String CHECK_ID_DATA_KEY = "ValidationPreferencePage.checkId"; //$NON-NLS-1$
     private static final String CODE_COLUMN_TITLE = "Код проверки"; //$NON-NLS-1$
     private static final String VIEW_TITLE = "Проблемы конфигурации"; //$NON-NLS-1$
+    private static final String SUPPRESS_ISSUE_COMMAND_ID =
+        "com._1c.g5.v8.dt.ui.command.suppressIssue"; //$NON-NLS-1$
 
     private static final String SCOPE_LABEL_KEY = "tormozit.problemViewScopeLabel"; //$NON-NLS-1$
     private static final String STATS_TOOLTIP_KEY = "tormozit.problemViewStatsTooltip"; //$NON-NLS-1$
@@ -400,6 +405,8 @@ public final class ProblemViewHook implements IStartup
                 Debug.log("applyTitle: " + wanted); //$NON-NLS-1$
             }
         }
+        showSuppressIssueToolbarButton(view);
+        Display.getDefault().asyncExec(() -> showSuppressIssueToolbarButton(view));
         installResultChangeGate(view);
         installScopeLabel(view);
         installOpenOverride(view);
@@ -407,6 +414,33 @@ public final class ProblemViewHook implements IStartup
         installComfortScope(view);
         UpdateWaitIndicator.install(view);
         refreshComfortScope(view);
+    }
+
+    /**
+     * EDT прячет штатную кнопку «Подавить ошибку» через visibleWhen по выделению.
+     * Из-за этого меняется высота области списка при выборе и снятии выбора.
+     * Кнопка остаётся на месте, а доступность команды по-прежнему определяет EDT.
+     */
+    private static void showSuppressIssueToolbarButton(IViewPart view)
+    {
+        if (view.getSite() == null)
+            return;
+        Object part = view.getSite().getService(MPart.class);
+        if (!(part instanceof MPart model))
+            return;
+        MToolBar toolbar = model.getToolbar();
+        if (toolbar == null)
+            return;
+        for (MToolBarElement element : toolbar.getChildren())
+        {
+            if (!(element instanceof MHandledToolItem item) || item.getCommand() == null
+                || !SUPPRESS_ISSUE_COMMAND_ID.equals(item.getCommand().getElementId()))
+                continue;
+            if (item.getVisibleWhen() != null)
+                item.setVisibleWhen(null);
+            if (!item.isVisible())
+                item.setVisible(true);
+        }
     }
 
     /**

@@ -1,10 +1,6 @@
 package tormozit.bslparser;
 
-import java.util.ArrayList;
 import java.util.List;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 import java.util.function.Function;
 
@@ -13,12 +9,10 @@ import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
-import org.osgi.framework.Bundle;
 import org.osgi.framework.BundleActivator;
 import org.osgi.framework.BundleContext;
 import org.osgi.framework.hooks.weaving.WeavingHook;
 import org.osgi.framework.hooks.weaving.WovenClass;
-import org.osgi.framework.wiring.BundleWiring;
 
 /**
  * Ранний старт: регистрация вплетения в парсер BSL до его загрузки (см. {@link BslParserHook}).
@@ -48,15 +42,13 @@ public final class Activator
      *
      * <p>Парсеры: {@link #PROP_BEFORE_CREATE_PARSER} в начале {@code createParser(XtextTokenStream)}.
      * Помощник частичного разбора: результат каждого {@code IParser.parse} в {@code reparse} проходит
-     * через {@link #PROP_AFTER_CHUNK_PARSE}, результат {@code fullyReparse} — через
-     * {@link #PROP_AFTER_FULL_REPARSE}.
+     * через {@link #PROP_AFTER_CHUNK_PARSE}.
      */
     private static final class ParserWeaving
         implements WeavingHook
     {
         static final String PROP_BEFORE_CREATE_PARSER = "tormozit.bslParser.beforeCreateParser"; //$NON-NLS-1$
         static final String PROP_AFTER_CHUNK_PARSE = "tormozit.bslParser.afterChunkParse"; //$NON-NLS-1$
-        static final String PROP_AFTER_FULL_REPARSE = "tormozit.bslParser.afterFullReparse"; //$NON-NLS-1$
         static final String PROP_SUPPRESSION_COMMENT = "tormozit.bslParser.suppressionComment"; //$NON-NLS-1$
 
         private static final String BSL_PARSER = "com._1c.g5.v8.dt.bsl.parser.antlr.BslParser"; //$NON-NLS-1$
@@ -80,13 +72,6 @@ public final class Activator
         private static final String IPARSER = "org/eclipse/xtext/parser/IParser"; //$NON-NLS-1$
         private static final String IPARSE_RESULT = "org/eclipse/xtext/parser/IParseResult"; //$NON-NLS-1$
 
-        private static final Set<String> WOVEN = ConcurrentHashMap.newKeySet();
-
-        // Временная диагностика порядка загрузки: копится без логирования (weave — путь загрузки классов).
-        private static volatile String loadedAtInstall;
-        private static final AtomicInteger PARSER_CLASSES_SEEN = new AtomicInteger();
-        private static final Set<String> WEAVE_ERRORS = ConcurrentHashMap.newKeySet();
-
         /** Свойства ставятся до хука: вплетённый код вызывает их без проверки на {@code null}. */
         static void install(BundleContext context)
         {
@@ -94,71 +79,10 @@ public final class Activator
                 (Consumer<Object>) stream -> BslParserHook.beforeCreateParser(stream));
             System.getProperties().put(PROP_AFTER_CHUNK_PARSE,
                 (Function<Object, Object>) result -> BslParserHook.afterChunkParse(result));
-            System.getProperties().put(PROP_AFTER_FULL_REPARSE,
-                (Function<Object, Object>) result -> BslParserHook.afterFullReparse(result));
             // Не «//…» бывает только скрытая нами директива: для разбора подавлений — пустой комментарий.
             System.getProperties().put(PROP_SUPPRESSION_COMMENT,
                 (Function<Object, Object>) text -> text instanceof String s && !s.startsWith("//") ? "//" : text); //$NON-NLS-1$ //$NON-NLS-2$
-            loadedAtInstall = describeLoadedTargets(context);
             context.registerService(WeavingHook.class, new ParserWeaving(), null);
-
-            // Временная диагностика: вплелись ли классы. Поток, а не Job — core.jobs здесь не нужен.
-            Thread report = new Thread(() -> {
-                try
-                {
-                    Thread.sleep(60_000);
-                }
-                catch (InterruptedException e)
-                {
-                    return;
-                }
-                reportWeavingState();
-            }, "Комфорт: состояние хука разбора BSL"); //$NON-NLS-1$
-            report.setDaemon(true);
-            report.start();
-        }
-
-        private static void reportWeavingState()
-        {
-            List<String> missing = new ArrayList<>();
-            for (String target : TARGETS)
-                if (!WOVEN.contains(target))
-                    missing.add(target);
-            TempLog.log(BslParserHook.TOPIC, "вплетено: " + WOVEN + "; не вплетено: " + missing); //$NON-NLS-1$ //$NON-NLS-2$
-            TempLog.log(BslParserHook.TOPIC, "при регистрации хука: " + loadedAtInstall //$NON-NLS-1$
-                + "; классов парсера через weave: " + PARSER_CLASSES_SEEN.get() + "; ошибки weave: " + WEAVE_ERRORS); //$NON-NLS-1$ //$NON-NLS-2$
-        }
-
-        /**
-         * Временная диагностика: состояние бандла {@code bsl} и какие целевые классы уже загружены
-         * (Equinox {@code ModuleClassLoader.publicFindLoaded}) в момент регистрации хука.
-         */
-        private static String describeLoadedTargets(BundleContext context)
-        {
-            StringBuilder sb = new StringBuilder();
-            try
-            {
-                Bundle bsl = null;
-                for (Bundle b : context.getBundles())
-                    if ("com._1c.g5.v8.dt.bsl".equals(b.getSymbolicName())) //$NON-NLS-1$
-                        bsl = b;
-                if (bsl == null)
-                    return "бандл bsl не найден"; //$NON-NLS-1$
-                sb.append("бандл bsl state=").append(bsl.getState()); //$NON-NLS-1$
-                BundleWiring wiring = bsl.adapt(BundleWiring.class);
-                ClassLoader loader = wiring != null ? wiring.getClassLoader() : null;
-                if (loader == null)
-                    return sb.append(", загрузчика нет").toString(); //$NON-NLS-1$
-                java.lang.reflect.Method findLoaded = loader.getClass().getMethod("publicFindLoaded", String.class); //$NON-NLS-1$
-                for (String target : TARGETS)
-                    sb.append(", ").append(target.substring(target.lastIndexOf('.') + 1)).append('=') //$NON-NLS-1$
-                        .append(findLoaded.invoke(loader, target) != null ? "загружен" : "нет"); //$NON-NLS-1$ //$NON-NLS-2$
-            }
-            catch (Throwable t)
-            {
-                sb.append(", ошибка: ").append(t); //$NON-NLS-1$
-            }
-            return sb.toString();
         }
 
         @Override
@@ -167,24 +91,17 @@ public final class Activator
             if (wovenClass.getState() != WovenClass.TRANSFORMING)
                 return;
             String name = wovenClass.getClassName();
-            if (name.startsWith("com._1c.g5.v8.dt.bsl.parser.")) //$NON-NLS-1$
-                PARSER_CLASSES_SEEN.incrementAndGet();
             if (!TARGETS.contains(name))
                 return;
             try
             {
                 byte[] transformed = transform(name, wovenClass.getBytes());
                 if (transformed != null)
-                {
                     wovenClass.setBytes(transformed);
-                    WOVEN.add(name);
-                }
-                else
-                    WEAVE_ERRORS.add(name + ": нет точки вставки"); //$NON-NLS-1$
             }
             catch (Throwable t)
             {
-                WEAVE_ERRORS.add(name + ": " + t); //$NON-NLS-1$
+                // Класс остаётся штатным: лучше без исправления, чем без парсера.
             }
         }
 
@@ -251,8 +168,6 @@ public final class Activator
                                     emitResultFilter(this, PROP_AFTER_CHUNK_PARSE);
                                     touched[0]++;
                                 }
-                                else if (opcode == Opcodes.INVOKEVIRTUAL && "fullyReparse".equals(mname)) //$NON-NLS-1$
-                                    emitResultFilter(this, PROP_AFTER_FULL_REPARSE);
                             }
                         };
                     }

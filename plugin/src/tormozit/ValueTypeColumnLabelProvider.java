@@ -10,25 +10,25 @@ import org.eclipse.jface.viewers.ColumnLabelProvider;
 import org.eclipse.swt.graphics.Color;
 import org.eclipse.swt.graphics.Font;
 import org.eclipse.swt.graphics.Image;
-import org.eclipse.swt.widgets.Tree;
+import org.eclipse.swt.widgets.Control;
 
 import com._1c.g5.v8.dt.mcore.TypeDescription;
 import com._1c.g5.v8.dt.mcore.TypeItem;
 import com._1c.g5.v8.dt.mcore.util.McoreUtil;
 import com._1c.g5.v8.dt.md.ui.shared.MdUiSharedImages;
 
-/** Общее представление колонки типа значения в деревьях реквизитов метаданных и формы. */
+/** Общее представление колонки типа значения у реквизитов и параметров формы и реквизитов метаданных. */
 final class ValueTypeColumnLabelProvider extends ColumnLabelProvider
 {
-    private final Tree tree;
+    private final Control control;
     private final Function<Object, TypeDescription> typeOf;
     private final Function<Object, EObject> contextOf;
     private final ColumnLabelProvider base;
 
-    ValueTypeColumnLabelProvider(Tree tree, Function<Object, TypeDescription> typeOf,
+    ValueTypeColumnLabelProvider(Control control, Function<Object, TypeDescription> typeOf,
         Function<Object, EObject> contextOf, ColumnLabelProvider base)
     {
-        this.tree = tree;
+        this.control = control;
         this.typeOf = typeOf;
         this.contextOf = contextOf;
         this.base = base;
@@ -69,11 +69,11 @@ final class ValueTypeColumnLabelProvider extends ColumnLabelProvider
         {
             String baseToolTip = base.getToolTipText(element);
             if (baseToolTip != null && !baseToolTip.isEmpty())
-                return TooltipText.wrap(tree, baseToolTip);
+                return TooltipText.wrap(control, baseToolTip);
         }
         TypeDescription type = typeOf.apply(element);
         String text = fullText(element, type);
-        return text == null || text.isEmpty() ? null : TooltipText.wrap(tree, text);
+        return text == null || text.isEmpty() ? null : TooltipText.wrap(control, text);
     }
 
     @Override

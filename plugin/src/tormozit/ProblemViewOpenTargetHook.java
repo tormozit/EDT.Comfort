@@ -2,7 +2,6 @@ package tormozit;
 
 import java.util.function.Function;
 
-import org.eclipse.core.resources.IProject;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.EStructuralFeature;
 import org.eclipse.jface.viewers.DoubleClickEvent;
@@ -28,7 +27,6 @@ import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 
-import com._1c.g5.v8.dt.form.model.ExtInfo;
 import com._1c.g5.v8.dt.form.model.FormAttribute;
 import com._1c.g5.v8.dt.form.model.FormCommand;
 import com._1c.g5.v8.dt.form.model.FormItem;
@@ -36,20 +34,19 @@ import com._1c.g5.v8.dt.form.model.FormParameter;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicFeature;
 import com._1c.g5.v8.dt.validation.marker.Marker;
 import com._1c.g5.v8.dt.validation.marker.StandardExtraInfo;
-import com.e1c.g5.v8.dt.check.settings.CheckUid;
-import com.e1c.g5.v8.dt.check.settings.ICheckRepository;
 
 /**
  * Двойной клик / Open по проблеме в панели «Проблемы конфигурации» EDT — после штатного открытия
  * редактора хук доводит переход до конкретного места:
  * <ul>
- * <li><b>«Битая ссылка на картинку»</b> — показывает панель «Свойства» и активирует поле
- * «Картинка» (как двойной клик по вхождению в результатах поиска по конфигурации,
- * {@link ConfigSearchResultsHook.PropertyFieldFocus});</li>
  * <li><b>право роли на объект</b> ({@code ObjectRight}/{@code ObjectRights} из
  * {@code com._1c.g5.v8.dt.rights.model}) — открывает редактор роли на странице «Права», выделяет
  * строку объекта и прокручивает колонку права в видимую область
- * ({@link ConfigSearchResultsHook#revealRoleRightsRow}, issue #463).</li>
+ * ({@link ConfigSearchResultsHook#revealRoleRightsRow}, issue #463);</li>
+ * <li><b>любая другая проблема на свойстве объекта панели «Свойства»</b> (элемент/реквизит/команда
+ * формы, реквизит МД; объект проблемы может быть вложен в него — путь к данным, {@code ExtInfo}
+ * картинки подменю) — показывает панель и активирует поле свойства
+ * ({@link ConfigSearchResultsHook.PropertyFieldFocus#schedule}).</li>
  * </ul>
  * <p>
  * Включение: Параметры → Комфорт → «Улучшать списки»
@@ -254,19 +251,41 @@ public final class ProblemViewOpenTargetHook implements IStartup
         if (page == null)
             return;
 
-        if (isBrokenFormPictureMarker(marker))
-        {
-            focusBrokenFormPicture(marker, page);
-            return;
-        }
-
         Function<EObject, EObject> identity = obj -> obj;
         EObject markerObject = marker.provideObject(identity);
-        if (markerObject != null)
+        if (markerObject == null)
+            return;
+        if (ConfigSearchResultsHook.revealRoleRightsRow(page, markerObject,
+            roleRightName(markerObject, marker)))
+            return;
+        focusPropertyField(marker, markerObject, page);
+    }
+
+    /**
+     * Любая проблема на свойстве объекта, который показывает панель «Свойства» (элемент/реквизит/
+     * команда формы, реквизит МД, форма): показывает панель и активирует поле — тем же путём, что
+     * и двойной клик по вхождению в результатах поиска по конфигурации
+     * ({@link ConfigSearchResultsHook.PropertyFieldFocus#schedule}). Объект проблемы может быть
+     * вложенным в объект панели (путь к данным «Список.DefaultPicture» внутри таблицы) — поле
+     * панели тогда первый уровень цепочки признаков.
+     */
+    private static void focusPropertyField(Marker marker, EObject object, IWorkbenchPage page)
+    {
+        EStructuralFeature feature = resolveFeature(object, marker);
+        if (!ConfigSearchResultsHook.PropertyFieldFocus.hasPanelOwner(object))
+            return;
+        // Сам объект панели без признака — поля нет, штатного выделения в редакторе достаточно
+        if (feature == null && isPaletteMember(object))
+            return;
+        try
         {
-            ConfigSearchResultsHook.revealRoleRightsRow(page, markerObject,
-                roleRightName(markerObject, marker));
+            page.showView(IPageLayout.ID_PROP_SHEET);
         }
+        catch (Exception e)
+        {
+        }
+        // После штатного openEditor палитра обновляется асинхронно — schedule ждёт её сам.
+        ConfigSearchResultsHook.PropertyFieldFocus.schedule(page, object, feature);
     }
 
     /** Имя права по объекту проблемы ({@code ObjectRight.getRight()}) либо из текста сообщения. */
@@ -305,55 +324,6 @@ public final class ProblemViewOpenTargetHook implements IStartup
         return value instanceof String s ? s : null;
     }
 
-    /**
-     * Показывает панель «Свойства» и активирует поле «Картинка» — как двойной клик по вхождению
-     * в результатах поиска по конфигурации ({@link ConfigSearchResultsHook.PropertyFieldFocus}).
-     */
-    private static void focusBrokenFormPicture(Marker marker, IWorkbenchPage page)
-    {
-        Function<EObject, EObject> identity = obj -> obj;
-        EObject object = marker.provideObject(identity);
-        if (object == null)
-        {
-            return;
-        }
-
-        EStructuralFeature feature = resolveFeature(object, marker);
-        EObject paletteMember = resolvePaletteMember(object);
-        if (paletteMember == null || feature == null)
-            return;
-
-        try
-        {
-            page.showView(IPageLayout.ID_PROP_SHEET);
-        }
-        catch (Exception e)
-        {
-        }
-        // После штатного openEditor палитра обновляется асинхронно — scheduleExact ждёт до ~6с.
-        ConfigSearchResultsHook.PropertyFieldFocus.scheduleExact(page, paletteMember, feature);
-    }
-
-    /**
-     * В маркере {@link Marker#getCheckId()} — короткий UID проекта ({@code SU47}), а не
-     * {@link ComfortCheckIds#BROKEN_FORM_PICTURE}. Резолв через
-     * {@link ICheckRepository#getUidForShortUid(String, IProject)}.
-     */
-    private static boolean isBrokenFormPictureMarker(Marker marker)
-    {
-        String id = marker.getCheckId();
-        if (id == null || id.isBlank())
-            return false;
-        if (ComfortCheckIds.BROKEN_FORM_PICTURE.equals(id))
-            return true;
-        ICheckRepository repository = Global.getOsgiService(ICheckRepository.class);
-        IProject project = marker.getProject();
-        if (repository == null || project == null)
-            return false;
-        CheckUid uid = repository.getUidForShortUid(id, project);
-        return uid != null && ComfortCheckIds.BROKEN_FORM_PICTURE.equals(uid.getCheckId());
-    }
-
     private static Marker resolveMarker(Object element)
     {
         if (element instanceof Marker marker)
@@ -386,29 +356,6 @@ public final class ProblemViewOpenTargetHook implements IStartup
             }
         }
         return null;
-    }
-
-    /**
-     * Объект, который показывает палитра «Свойства» после штатного выделения в редакторе формы.
-     * Для {@link ExtInfo} (картинка подменю и т.п.) — родитель-{@link FormItem}; для команды
-     * формы — сама команда.
-     */
-    private static EObject resolvePaletteMember(EObject object)
-    {
-        if (object == null)
-            return null;
-        if (isPaletteMember(object))
-            return object;
-        if (object instanceof ExtInfo)
-        {
-            EObject container = object.eContainer();
-            if (isPaletteMember(container))
-                return container;
-        }
-        for (EObject cur = object; cur != null; cur = cur.eContainer())
-            if (isPaletteMember(cur))
-                return cur;
-        return object;
     }
 
     private static boolean isPaletteMember(EObject obj)

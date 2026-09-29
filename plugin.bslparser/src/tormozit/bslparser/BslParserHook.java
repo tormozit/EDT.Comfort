@@ -5,14 +5,12 @@ import java.util.BitSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.antlr.runtime.Token;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.xtext.TerminalRule;
 import org.eclipse.xtext.nodemodel.ICompositeNode;
 import org.eclipse.xtext.nodemodel.ILeafNode;
-import org.eclipse.xtext.parser.IParseResult;
 import org.eclipse.xtext.parser.antlr.XtextTokenStream;
 
 /**
@@ -47,8 +45,6 @@ import org.eclipse.xtext.parser.antlr.XtextTokenStream;
  */
 public final class BslParserHook
 {
-    static final String TOPIC = "bsl-preproc-straddle"; //$NON-NLS-1$
-
     private static final ThreadLocal<ParseState> STATE = ThreadLocal.withInitial(ParseState::new);
 
     private BslParserHook()
@@ -61,8 +57,7 @@ public final class BslParserHook
     public static void beforeCreateParser(Object streamObj)
     {
         ParseState state = STATE.get();
-        state.resetParse();
-        state.parseStartNanos = System.nanoTime();
+        state.cut = false;
         if (!(streamObj instanceof XtextTokenStream stream))
             return;
         try
@@ -71,7 +66,7 @@ public final class BslParserHook
         }
         catch (Throwable t)
         {
-            TempLog.logException(TOPIC, "analyze", t); //$NON-NLS-1$
+            // Разбор идёт штатно: лучше ошибка EDT на директиве, чем сломанный парсер.
         }
     }
 
@@ -84,29 +79,8 @@ public final class BslParserHook
         ParseState state = STATE.get();
         if (!state.cut)
             return result;
-        long chunkNanos = System.nanoTime() - state.parseStartNanos;
-        TempLog.log(TOPIC, String.format(Locale.ROOT,
-            "частичный -> полный: кусок %d симв., строка %d; причина: %s; разбор куска %.1f мс", //$NON-NLS-1$
-            state.textLength, state.firstLine, state.cutReason, chunkNanos / 1e6));
         state.cut = false;
-        state.forcedStartNanos = System.nanoTime();
         return null;
-    }
-
-    /** Результат {@code fullyReparse} внутри {@code reparse} — замер, если полный разбор вызвали мы. */
-    public static Object afterFullReparse(Object result)
-    {
-        ParseState state = STATE.get();
-        if (state.forcedStartNanos == 0)
-            return result;
-        long nanos = System.nanoTime() - state.forcedStartNanos;
-        state.forcedStartNanos = 0;
-        int length = -1;
-        if (result instanceof IParseResult parseResult && parseResult.getRootNode() != null)
-            length = parseResult.getRootNode().getTotalLength();
-        TempLog.log(TOPIC, String.format(Locale.ROOT, "полный разбор (наш): %.1f мс, модуль %d симв.", //$NON-NLS-1$
-            nanos / 1e6, length));
-        return result;
     }
 
     // ---- Для проверки «Комфорт» ----
@@ -203,22 +177,8 @@ public final class BslParserHook
 
     private static final class ParseState
     {
-        long parseStartNanos;
+        /** В разобранном тексте директива без пары — кусок частичного разбора рассекает блок. */
         boolean cut;
-        String cutReason;
-        int textLength;
-        int firstLine;
-        /** Не сбрасывается в {@link #resetParse}: внутри нашего полного разбора идёт свой разбор. */
-        long forcedStartNanos;
-
-        void resetParse()
-        {
-            parseStartNanos = 0;
-            cut = false;
-            cutReason = null;
-            textLength = 0;
-            firstLine = 0;
-        }
     }
 
     // ---- Анализ потока токенов ----
@@ -269,6 +229,17 @@ public final class BslParserHook
             Map.entry("исключение", K_EXCEPT), Map.entry("except", K_EXCEPT), //$NON-NLS-1$ //$NON-NLS-2$
             Map.entry("тогда", K_THEN), Map.entry("then", K_THEN)); //$NON-NLS-1$ //$NON-NLS-2$
 
+        /** Лексемы (в нижнем регистре), после которых выражение обязано продолжиться. */
+        private static final java.util.Set<String> EXPECTS_CONTINUATION = java.util.Set.of(
+            "и", "and", "или", "or", "не", "not", "если", "if", "иначеесли", "elsif", "пока", "while", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$ //$NON-NLS-7$ //$NON-NLS-8$ //$NON-NLS-9$ //$NON-NLS-10$ //$NON-NLS-11$ //$NON-NLS-12$
+            "для", "for", "каждого", "each", "по", "to", "из", "in", "новый", "new", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$ //$NON-NLS-7$ //$NON-NLS-8$ //$NON-NLS-9$ //$NON-NLS-10$
+            "+", "-", "*", "/", "%", "=", "<>", "<", ">", "<=", ">=", ",", "(", "[", "."); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$ //$NON-NLS-7$ //$NON-NLS-8$ //$NON-NLS-9$ //$NON-NLS-10$ //$NON-NLS-11$ //$NON-NLS-12$ //$NON-NLS-13$ //$NON-NLS-14$ //$NON-NLS-15$
+
+        /** Лексемы (в нижнем регистре), с которых оператор начаться не может — это продолжение выражения. */
+        private static final java.util.Set<String> CANNOT_START_STATEMENT = java.util.Set.of(
+            "и", "and", "или", "or", "тогда", "then", "цикл", "do", "по", "to", "из", "in", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$ //$NON-NLS-7$ //$NON-NLS-8$ //$NON-NLS-9$ //$NON-NLS-10$ //$NON-NLS-11$ //$NON-NLS-12$
+            "+", "-", "*", "/", "%", "=", "<>", "<", ">", "<=", ">=", ",", ")", "]", "."); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$ //$NON-NLS-7$ //$NON-NLS-8$ //$NON-NLS-9$ //$NON-NLS-10$ //$NON-NLS-11$ //$NON-NLS-12$ //$NON-NLS-13$ //$NON-NLS-14$ //$NON-NLS-15$
+
         /** Типы токенов берутся из констант сгенерированного лексера по имени — не зашиты числами. */
         private static final ClassValue<int[]> TYPES = new ClassValue<>()
         {
@@ -292,8 +263,6 @@ public final class BslParserHook
                 }
             }
         };
-
-        private static final AtomicBoolean typesProblemLogged = new AtomicBoolean();
 
         private final XtextTokenStream stream;
         private final ParseState state;
@@ -333,11 +302,7 @@ public final class BslParserHook
             Object source = stream.getTokenSource();
             int[] types = source != null ? TYPES.get(source.getClass()) : null;
             if (types == null)
-            {
-                if (typesProblemLogged.compareAndSet(false, true))
-                    TempLog.log(TOPIC, "нет констант лексера: " + (source == null ? null : source.getClass())); //$NON-NLS-1$
                 return;
-            }
             tSl = types[0];
             tWs = types[1];
             tBom = types[2];
@@ -353,7 +318,6 @@ public final class BslParserHook
             tBmlString = types[12];
             tMmlString = types[13];
 
-            long t0 = System.nanoTime();
             list = stream.getTokens(); // заполняет буфер целиком — парсер сделал бы это сам
             int n = list.size();
             sig = new int[n];
@@ -371,42 +335,25 @@ public final class BslParserHook
             if (!anyDirective)
                 return;
 
-            if (n > 0)
-            {
-                Token last = token(n - 1);
-                state.textLength = last instanceof org.antlr.runtime.CommonToken ct ? ct.getStopIndex() + 1 : -1;
-                state.firstLine = token(0).getLine();
-            }
             classify();
             List<List<int[]>> blocks = collectBlocks();
             if (blocks.isEmpty())
-            {
-                logSummary(0, List.of(), System.nanoTime() - t0);
                 return;
-            }
             int[] segment = new int[sigCount];
             BitSet badSegments = validate(segment);
 
-            int hidden = 0;
-            List<String> rejected = new ArrayList<>();
+            boolean anyHidden = false;
             for (List<int[]> block : blocks)
             {
-                if (!straddles(block))
+                if (!straddles(block) || badSegments.get(segment[block.get(0)[0]]))
                     continue;
-                int beginSig = block.get(0)[0];
-                if (badSegments.get(segment[beginSig]))
-                {
-                    rejected.add(String.valueOf(token(sig[beginSig]).getLine()));
-                    continue;
-                }
                 for (int[] instr : block)
                     for (int j = instr[0]; j <= instr[1]; j++)
                         token(sig[j]).setType(tSl);
-                hidden++;
+                anyHidden = true;
             }
-            if (hidden > 0)
+            if (anyHidden)
                 repositionStream();
-            logSummary(hidden, rejected, System.nanoTime() - t0);
         }
 
         private Token token(int listIndex)
@@ -487,7 +434,7 @@ public final class BslParserHook
                 };
                 if (!matches)
                 {
-                    markCut("директива без пары, строка " + token(sig[instr[0]]).getLine()); //$NON-NLS-1$
+                    state.cut = true;
                     continue;
                 }
                 List<int[]> block = stack.get(stack.size() - 1);
@@ -497,12 +444,12 @@ public final class BslParserHook
                 stack.remove(stack.size() - 1);
                 stackKinds.remove(stackKinds.size() - 1);
                 if (block.stream().anyMatch(i -> i[2] != 0))
-                    markCut("директива без «Тогда», строка " + token(sig[block.get(0)[0]]).getLine()); //$NON-NLS-1$
+                    state.cut = true; // директива без «Тогда»
                 else
                     blocks.add(block);
             }
             if (!stack.isEmpty())
-                markCut("директива без закрывающей, строка " + token(sig[stack.get(0).get(0)[0]]).getLine()); //$NON-NLS-1$
+                state.cut = true; // директива без закрывающей
             return blocks;
         }
 
@@ -523,17 +470,18 @@ public final class BslParserHook
             return new int[] {j, j, 1};
         }
 
-        private void markCut(String reason)
+        private static boolean isIn(java.util.Set<String> set, Token t)
         {
-            if (!state.cut)
-                state.cutReason = reason;
-            state.cut = true;
+            String text = t.getText();
+            return text != null && set.contains(text.toLowerCase(Locale.ROOT));
         }
 
         /**
          * Директивы разрывают оператор: хотя бы одна ветка блока несбалансирована, или директива стоит
-         * внутри многострочного литерала (перед ней незакрытая строка литерала — в грамматике EDT
-         * литерал состоит из строк подряд, директива между ними его обрывает).
+         * внутри выражения — перед ней незакрытая строка многострочного литерала (в грамматике EDT
+         * литерал состоит из строк подряд) или лексема, после которой выражение продолжается
+         * ({@link #EXPECTS_CONTINUATION}), либо после неё лексема, с которой оператор начаться не может
+         * ({@link #CANNOT_START_STATEMENT}).
          */
         private boolean straddles(List<int[]> block)
         {
@@ -544,8 +492,18 @@ public final class BslParserHook
                     prev--;
                 if (prev >= 0)
                 {
-                    int type = token(sig[prev]).getType();
-                    if (type == tBmlString || type == tMmlString)
+                    Token t = token(sig[prev]);
+                    int type = t.getType();
+                    if (type == tBmlString || type == tMmlString || type != tIdent && isIn(EXPECTS_CONTINUATION, t))
+                        return true;
+                }
+                int next = instr[1] + 1;
+                while (next < sigCount && mask[next])
+                    next++;
+                if (next < sigCount)
+                {
+                    Token t = token(sig[next]);
+                    if (t.getType() != tIdent && isIn(CANNOT_START_STATEMENT, t))
                         return true;
                 }
             }
@@ -658,16 +616,6 @@ public final class BslParserHook
                 next++;
             }
             stream.seek(next);
-        }
-
-        private void logSummary(int hidden, List<String> rejected, long nanos)
-        {
-            if (hidden == 0 && rejected.isEmpty() && !state.cut)
-                return;
-            TempLog.log(TOPIC, String.format(Locale.ROOT,
-                "разбор %d симв. (с строки %d), токенов %d: скрыто блоков %d, отклонено %s, огрызок: %s; анализ %.2f мс", //$NON-NLS-1$
-                state.textLength, state.firstLine, list.size(), hidden, rejected, state.cut ? state.cutReason : "нет", //$NON-NLS-1$
-                nanos / 1e6));
         }
     }
 }

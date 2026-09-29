@@ -90,7 +90,6 @@ public class BslPreprocessorStraddleCheck
         IParseResult parseResult = xtextResource.getParseResult();
         ICompositeNode root = parseResult != null ? parseResult.getRootNode() : null;
         List<int[]> instructions;
-        String uri = String.valueOf(xtextResource.getURI());
         try
         {
             instructions = BslParserHook.findReportedHiddenDirectives(root);
@@ -98,7 +97,6 @@ public class BslPreprocessorStraddleCheck
         catch (NoClassDefFoundError e)
         {
             // Бандл хука не установлен (зависимость необязательная) — скрытых директив и быть не может.
-            tormozit.Global.tempLog("bsl-preproc-straddle", "проверка: нет класса хука, " + uri + ": " + e); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return;
         }
         for (int[] instr : instructions)

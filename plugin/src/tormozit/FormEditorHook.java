@@ -54,8 +54,11 @@ import org.eclipse.jface.viewers.ColumnViewer;
 import org.eclipse.jface.resource.ImageDescriptor;
 import org.eclipse.jface.viewers.CellLabelProvider;
 import org.eclipse.jface.viewers.ColumnLabelProvider;
+import org.eclipse.jface.viewers.IFontProvider;
+import org.eclipse.jface.viewers.ITableLabelProvider;
 import org.eclipse.jface.viewers.ITreeContentProvider;
 import org.eclipse.jface.viewers.TableViewer;
+import org.eclipse.jface.viewers.TableViewerColumn;
 import org.eclipse.jface.viewers.AbstractTreeViewer;
 import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.jface.viewers.TreeViewerColumn;
@@ -68,6 +71,7 @@ import org.eclipse.jface.viewers.ISelectionProvider;
 import org.eclipse.jface.viewers.StructuredViewer;
 import org.eclipse.jface.viewers.StyledCellLabelProvider;
 import org.eclipse.jface.viewers.StyledString;
+import org.eclipse.jface.viewers.ILabelProviderListener;
 import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.jface.viewers.StructuredSelection;
 import org.eclipse.jface.viewers.Viewer;
@@ -114,6 +118,7 @@ import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.TreeColumn;
 import org.eclipse.swt.widgets.TreeItem;
 import org.eclipse.swt.widgets.Widget;
+import org.eclipse.ui.IDecoratorManager;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IEditorReference;
 import org.eclipse.ui.IPartListener2;
@@ -205,6 +210,7 @@ import com._1c.g5.v8.dt.form.model.FormGroup;
 import com._1c.g5.v8.dt.form.model.FormStandardCommand;
 import com._1c.g5.v8.dt.form.model.FormItem;
 import com._1c.g5.v8.dt.form.model.FormItemContainer;
+import com._1c.g5.v8.dt.form.model.FormParameter;
 import com._1c.g5.v8.dt.form.model.FormVisualEntity;
 import com._1c.g5.v8.dt.form.model.FormField;
 import com._1c.g5.v8.dt.form.model.ManagedFormGroupType;
@@ -445,6 +451,7 @@ public class FormEditorHook implements IStartup
         TabCounts.install();
         AttributesDrop.install();
         AttributesTypePresentation.install();
+        ParametersTypePresentation.install();
         AttributeHeaderTooltips.install();
         AttributesExtraColumns.install();
         ItemsTree.install();
@@ -2578,7 +2585,7 @@ public class FormEditorHook implements IStartup
                 if (own != null)
                     return new Info(own, Origin.OWN, item);
             }
-            return InheritedTitles.cached(page, item).toInfo(language);
+            return InheritedTitles.titleInfo(page, item, language, false);
         }
 
         /**
@@ -2596,7 +2603,7 @@ public class FormEditorHook implements IStartup
                 if (own != null)
                     return new Info(own, Origin.OWN, item);
             }
-            return InheritedTitles.resolveNow(page, item).toInfo(language);
+            return InheritedTitles.titleInfo(page, item, language, true);
         }
 
         /**
@@ -2797,6 +2804,50 @@ public class FormEditorHook implements IStartup
             if (state.pending.add(item))
                 schedule(page, state);
             return UNKNOWN;
+        }
+
+        /**
+         * Наследуемый заголовок элемента из закешированного источника ({@code now} — источник при
+         * промахе разрешается сразу, см. {@link #resolveNow}).
+         *
+         * <p>Источник мог быть удалён из модели после того, как попал в кеш: например, после
+         * смены запроса в настройках динамического списка EDT пересоздаёт его стандартные команды.
+         * Признака «удалён» у BM-объекта нет — чтение такого объекта бросает
+         * {@code IllegalStateException("Object is removed")} ({@code GlobalObjectDelegate.getObjectData}).
+         * Тогда запись забывается и элемент заново встаёт в очередь: фоновое разрешение найдёт
+         * новый источник.
+         */
+        static EffectiveTitle.Info titleInfo(FormEditorPage page, FormItem item, String language, boolean now)
+        {
+            try
+            {
+                return (now ? resolveNow(page, item) : cached(page, item)).toInfo(language);
+            }
+            catch (IllegalStateException removed)
+            {
+                forget(page, item);
+            }
+            if (!now)
+                return null;
+            try
+            {
+                return resolveNow(page, item).toInfo(language);
+            }
+            catch (IllegalStateException removed)
+            {
+                return null;
+            }
+        }
+
+        /** Забыть разрешённый источник элемента и поставить элемент в очередь заново. */
+        private static void forget(FormEditorPage page, FormItem item)
+        {
+            PageState state = page != null ? STATES.get(page) : null;
+            if (state == null || item == null)
+                return;
+            state.resolved.remove(item);
+            if (state.pending.add(item))
+                schedule(page, state);
         }
 
         /**
@@ -4380,6 +4431,8 @@ public class FormEditorHook implements IStartup
                 }
                 hook(independentViewer);
                 hook(parametrizedViewer);
+                // Значки проблем у параметризуемых команд — тот же штатный DecoratingColumLabelProvider.
+                DecorationRelay.install(parametrizedViewer);
             }
             catch (Exception e)
             {
@@ -4956,6 +5009,83 @@ public class FormEditorHook implements IStartup
     // Представление штатной колонки «Тип значения» дерева реквизитов формы
     // -----------------------------------------------------------------------
 
+    /**
+     * Пересылка событий менеджера декораторов деревьям формы — индикаторы проблем.
+     * <p>
+     * Значки проблем деревьям элементов, реквизитов и параметризуемых команд даёт декоратор, подключённый штатным
+     * {@code ProblemsDecorationHelper.addProblemDecoration} → EMF {@code DecoratingColumLabelProvider}.
+     * Тот, в отличие от JFace {@code DecoratingLabelProvider}, не переопределяет {@code addListener}
+     * и события декоратора дереву не пересылает. Лёгкие декораторы считаются асинхронно: первый
+     * {@code getImage} отдаёт картинку без значка, готовый значок приходит позже событием менеджера
+     * декораторов, которое дерево не слышит. Отсюда «при открытии значков нет» и «после исправления
+     * значок не снимается» (до переоткрытия). Пересылаем события сами, как {@code DecoratingLabelProvider}.
+     */
+    private static final class DecorationRelay
+    {
+        private static final String KEY_INSTALLED = "tormozit.formEditor.decorationRelay"; //$NON-NLS-1$
+
+        private static final int DELAY_MS = 100;
+
+        static void install(TreeViewer viewer)
+        {
+            Tree tree = viewer.getTree();
+            if (tree == null || tree.isDisposed() || tree.getData(KEY_INSTALLED) != null)
+                return;
+            tree.setData(KEY_INSTALLED, Boolean.TRUE);
+            IDecoratorManager decorators = PlatformUI.getWorkbench().getDecoratorManager();
+            Set<Object> pending = new LinkedHashSet<>();
+            boolean[] pendingAll = new boolean[1];
+            ILabelProviderListener listener = event ->
+            {
+                if (tree.isDisposed())
+                    return;
+                Object[] changed = event.getElements();
+                Display display = tree.getDisplay();
+                display.asyncExec(() ->
+                {
+                    if (tree.isDisposed())
+                        return;
+                    boolean idle = !pendingAll[0] && pending.isEmpty();
+                    if (changed == null)
+                        pendingAll[0] = true;
+                    else
+                        pending.addAll(Arrays.asList(changed));
+                    if (idle)
+                        display.timerExec(DELAY_MS, () -> flush(viewer, tree, pending, pendingAll));
+                });
+            };
+            decorators.addListener(listener);
+            tree.addDisposeListener(e -> decorators.removeListener(listener));
+        }
+
+        private static void flush(TreeViewer viewer, Tree tree, Set<Object> pending, boolean[] pendingAll)
+        {
+            boolean all = pendingAll[0];
+            List<Object> elements = new ArrayList<>();
+            if (all)
+                collectExpandedElements(tree.isDisposed() ? new TreeItem[0] : tree.getItems(), elements);
+            else
+                elements.addAll(pending);
+            pendingAll[0] = false;
+            pending.clear();
+            if (tree.isDisposed() || elements.isEmpty())
+                return;
+            viewer.update(elements.toArray(), null);
+        }
+
+        private static void collectExpandedElements(TreeItem[] items, List<Object> into)
+        {
+            for (TreeItem item : items)
+            {
+                Object data = item.getData();
+                if (data != null)
+                    into.add(data);
+                if (item.getExpanded())
+                    collectExpandedElements(item.getItems(), into);
+            }
+        }
+    }
+
     private static final class AttributesTypePresentation
     {
         private static final String KEY_HOOKED = "tormozit.formAttributesTypeIcons.hooked"; //$NON-NLS-1$
@@ -4981,6 +5111,7 @@ public class FormEditorHook implements IStartup
                     retry(editor, attempt);
                     return;
                 }
+                DecorationRelay.install(viewer);
                 if (Boolean.TRUE.equals(tree.getData(KEY_HOOKED)))
                     return;
                 for (int i = 0; i < tree.getColumnCount(); i++)
@@ -5010,6 +5141,71 @@ public class FormEditorHook implements IStartup
                 Display.getDefault().timerExec(RETRY_DELAY_MS, () -> attach(editor, attempt + 1));
         }
 
+    }
+
+    /** Та же подача типа в колонке «Тип» таблицы параметров формы. */
+    private static final class ParametersTypePresentation
+    {
+        private static final String KEY_HOOKED = "tormozit.formParametersTypeIcons.hooked"; //$NON-NLS-1$
+
+        private static final int RETRY_DELAY_MS = 200;
+
+        private static final int MAX_ATTEMPTS = 100;
+
+        static void install()
+        {
+            trackFormEditors(editor -> attach(editor, 0));
+        }
+
+        private static void attach(FormEditor editor, int attempt)
+        {
+            try
+            {
+                FormEditorPage page = findFormPage(editor);
+                Object viewerObj = page != null ? Global.getField(page, "parametersViewer") : null; //$NON-NLS-1$
+                if (!(viewerObj instanceof TableViewer viewer) || viewer.getTable().isDisposed()
+                    || viewer.getTable().getColumnCount() < 2
+                    || !(viewer.getLabelProvider() instanceof ITableLabelProvider labels))
+                {
+                    retry(editor, attempt);
+                    return;
+                }
+                org.eclipse.swt.widgets.Table table = viewer.getTable();
+                if (Boolean.TRUE.equals(table.getData(KEY_HOOKED)))
+                    return;
+                ColumnLabelProvider base = new ColumnLabelProvider()
+                {
+                    @Override
+                    public String getText(Object element)
+                    {
+                        return labels.getColumnText(element, 1);
+                    }
+
+                    @Override
+                    public Font getFont(Object element)
+                    {
+                        return labels instanceof IFontProvider fonts ? fonts.getFont(element) : null;
+                    }
+                };
+                new TableViewerColumn(viewer, table.getColumn(1))
+                    .setLabelProvider(new ValueTypeColumnLabelProvider(table,
+                        element -> element instanceof FormParameter parameter ? parameter.getValueType() : null,
+                        element -> element instanceof FormParameter parameter ? parameter : null,
+                        base));
+                table.setData(KEY_HOOKED, Boolean.TRUE);
+                viewer.refresh();
+            }
+            catch (Exception e)
+            {
+                Global.logError("FormEditorHook.ParametersTypePresentation", "attach", e); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+
+        private static void retry(FormEditor editor, int attempt)
+        {
+            if (attempt < MAX_ATTEMPTS && editor.getSite() != null)
+                Display.getDefault().timerExec(RETRY_DELAY_MS, () -> attach(editor, attempt + 1));
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -7016,7 +7212,7 @@ public class FormEditorHook implements IStartup
             assert tree.getColumnCount() - 1 == COLUMN_NAME;
             nameColumn.getColumn().setText(TITLE_NAME);
             nameColumn.getColumn().setWidth(WIDTH_NAME_START);
-            nameColumn.setLabelProvider(new NameLabelProvider(base, page, tree));
+            nameColumn.setLabelProvider(new NameLabelProvider(base, page, tree, viewer));
 
             // Заголовок — единственная добавленная колонка с текстом, а не с числом или галочкой:
             // значок в шапке ей не нужен, подпись и так короткая.
@@ -7410,6 +7606,11 @@ public class FormEditorHook implements IStartup
                 // После отбора текущая строка могла уйти из списка — иначе стрелки из поля
                 // фильтра вели бы по невидимому выделению.
                 FilterInputBoxListNavigation.selectFirstRowIfSelectionLost(tree);
+            }
+            else
+            {
+                // После сброса отбора выделенная строка может оказаться вне видимой области.
+                tree.showSelection();
             }
         }
 
@@ -9055,12 +9256,13 @@ public class FormEditorHook implements IStartup
 
             private final Tree tree;
 
-            NameLabelProvider(ColumnLabelProvider base, FormEditorPage page, Tree tree)
+            NameLabelProvider(ColumnLabelProvider base, FormEditorPage page, Tree tree, TreeViewer viewer)
             {
                 super(COLORS_ON_SELECTION);
                 this.base = base;
                 this.page = page;
                 this.tree = tree;
+                DecorationRelay.install(viewer);
             }
 
             @Override

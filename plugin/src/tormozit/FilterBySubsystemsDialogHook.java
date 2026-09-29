@@ -1442,9 +1442,11 @@ public final class FilterBySubsystemsDialogHook implements IStartup
         });
         MenuItem loadItem = ComfortSubmenuHelper.createSortedMenuItem(menu, SWT.PUSH,
                 MENU_LOAD_PRESET);
-        ComfortSubmenuHelper.setMenuItemTooltip(loadItem,
-                "Загрузить ранее сохранённое состояние фильтра по подсистемам"); //$NON-NLS-1$
-        loadItem.setEnabled(!FilterPresetStore.listNames().isEmpty());
+        boolean hasPresets = !FilterPresetStore.listNames().isEmpty();
+        ComfortSubmenuHelper.setMenuItemTooltip(loadItem, hasPresets
+                ? "Загрузить ранее сохранённое состояние фильтра по подсистемам" //$NON-NLS-1$
+                : "Загрузить ранее сохранённое состояние фильтра по подсистемам.\nСейчас нет сохранённых состояний"); //$NON-NLS-1$
+        loadItem.setEnabled(hasPresets);
         loadItem.addSelectionListener(new SelectionAdapter()
         {
             @Override public void widgetSelected(SelectionEvent e)

@@ -8204,8 +8204,8 @@ public final class ConfigSearchResultsHook implements IStartup
                 if (n == path.size() && n > best)
                     best = n;
             }
-            // scheduleExact(picture) на FormItem: определение поля — [extInfo, picture],
-            // а цепочка из одного уже известного признака — [picture].
+            // scheduleExact с одним признаком: определение поля может быть вложенным
+            // (например [extInfo, picture]), а цепочка — только [picture].
             if (best == 0 && chain.size() == 1)
             {
                 String name = chain.get(0);

@@ -33,24 +33,40 @@ public final class BslAssistSourceHeuristics
     }
 
     /**
-     * Каретка в строковом аргументе имени формы {@code ПолучитьФорму}/{@code ОткрытьФорму}
-     * (и англ. {@code GetForm}/{@code OpenForm}). Без кавычек между {@code (} и текущим
-     * литералом — обычно первый строковый аргумент вызова.
+     * Имя метода, если каретка внутри строкового литерала, стоящего аргументом вызова
+     * {@code Имя(} (между {@code (} и литералом нет других кавычек), иначе {@code null}.
+     * Только строковый разбор префикса строки: без AST, дёшево для вызова на каждой букве.
      */
-    public static boolean isGetOrOpenFormNameLiteral(IDocument doc, int caret)
+    public static String literalCallMethodName(IDocument doc, int caret)
+    {
+        return parseLiteralCall(doc, caret, null);
+    }
+
+    /**
+     * Смещение открывающей кавычки литерала-аргумента вызова (см.
+     * {@link #literalCallMethodName}), иначе {@code -1}. Не меняется, пока набор идёт
+     * внутри литерала, — ключ кэша списка для этого литерала.
+     */
+    public static int literalCallOpenQuote(IDocument doc, int caret)
+    {
+        int[] quote = { -1 };
+        return parseLiteralCall(doc, caret, quote) != null ? quote[0] : -1;
+    }
+
+    private static String parseLiteralCall(IDocument doc, int caret, int[] quoteOut)
     {
         if (doc == null || caret < 0)
-            return false;
+            return null;
         try
         {
             int line = doc.getLineOfOffset(Math.min(caret, doc.getLength()));
             int lineStart = doc.getLineOffset(line);
             int end = Math.min(caret, lineStart + doc.getLineLength(line));
             if (end < lineStart)
-                return false;
+                return null;
             String prefix = doc.get(lineStart, end - lineStart);
             if (!isInsideStringLiteral(prefix))
-                return false;
+                return null;
             int openQuote = -1;
             int quotes = 0;
             for (int i = 0; i < prefix.length(); i++)
@@ -61,13 +77,13 @@ public final class BslAssistSourceHeuristics
                 openQuote = (quotes % 2 == 1) ? i : -1;
             }
             if (openQuote < 0)
-                return false;
+                return null;
             String before = prefix.substring(0, openQuote);
             int paren = before.lastIndexOf('(');
             if (paren < 0)
-                return false;
+                return null;
             if (before.indexOf('"', paren) >= 0)
-                return false;
+                return null;
             int nameEnd = paren;
             while (nameEnd > 0 && Character.isWhitespace(before.charAt(nameEnd - 1)))
                 nameEnd--;
@@ -80,13 +96,14 @@ public final class BslAssistSourceHeuristics
                 nameStart--;
             }
             if (nameStart >= nameEnd)
-                return false;
-            String name = before.substring(nameStart, nameEnd);
-            return BslFormTypeContextEnrichment.isStaticGetOrOpenFormMethod(name);
+                return null;
+            if (quoteOut != null)
+                quoteOut[0] = lineStart + openQuote;
+            return before.substring(nameStart, nameEnd);
         }
         catch (BadLocationException e)
         {
-            return false;
+            return null;
         }
     }
 

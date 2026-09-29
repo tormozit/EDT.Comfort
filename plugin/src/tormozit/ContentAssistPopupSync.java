@@ -674,6 +674,9 @@ proposals = processor.computeForPopupRefresh(viewer, caret);
             }
             if (proposals == null)
                 proposals = new ICompletionProposal[0];
+            // Кэш окна (filterCachedProposalsForPopup) идёт мимо compute — отбор параметров
+            // запроса после «&» ставим здесь, на общем выходе обоих путей.
+            proposals = SmartContentAssistProcessor.queryParametersOnly(viewer, caret, proposals);
             rec[1] = Integer.toString(proposals.length);
             if (inLiteralRecompute && !literalIrMerge && !literalIrExpected
                 && SmartAssistFilterState.isSmartFilterEnabled())

@@ -3506,22 +3506,17 @@ boolean inLiteral = endCaret >= 0
                 completionAutoOpenEdtOpened = false;
                 completionAutoOpenActiveSeq = seq;
             }
-            else if ("symbol".equals(branch) && inserted != '&'
+            else if ("symbol".equals(branch)
                 && IrBslExpressionHtmlSupport.resolveIrSessionForAssist(facade, viewer) == null)
             {
                 // Решать некому: без ИР ветка &~# молчала совсем — открываем список EDT
-                // (после # это слова препроцессора). Пробел не трогаем: без ИР popup
-                // после каждого пробела не нужен.
+                // (после # это слова препроцессора, после & — аннотации модуля или
+                // параметры запроса). Пробел не трогаем: без ИР popup после каждого
+                // пробела не нужен.
                 //
-                // Амперсанд исключён намеренно. Имена аннотаций штатная EDT отдаёт БЕЗ
-                // амперсанда (он у неё иконка), поэтому фильтр "&" по именам ничего не
-                // отбирает: строгий отбор оставил бы пустой список, а мягкий пропускает
-                // весь список EDT для этого места модуля — в попап доливались общие модули
-                // и прочий мусор. Отличить аннотацию от обычного имени в этот момент нечем:
-                // при подключённом ИР это делают слова ИР (они с амперсандом), а без него
-                // единственный надёжный источник — список делегата, посчитанный для офсета
-                // каретки, то есть Ctrl+Space. Он после & работает правильно, автооткрытие
-                // же собирает попап по кэшу и без такой гарантии.
+                // После «&» окно ждёт фоновый список, посчитанный для офсета самой каретки
+                // (prepareWordListAutoOpen), а не кэш прошлого места: EDT отдаёт там только
+                // аннотации. В запросе список отбирается до параметров (queryParametersOnly).
                 scheduleCompletionAutoOpen(caretAfter, seq);
             }
             else
@@ -3715,24 +3710,19 @@ boolean inLiteral = endCaret >= 0
                     "caret=" + caret + " inFlight=true literal=true"); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
             }
-            // ПолучитьФорму/ОткрытьФорму: имя формы даёт штатный EDT без ИР.
-            if (doc != null && BslAssistSourceHeuristics.isGetOrOpenFormNameLiteral(doc, caret))
+            // Литерал — аргумент вызова (Тип(""), ПолучитьФорму("") и любой другой метод):
+            // список считает фон, окно — через ворота показа (issue 628). Прочие литералы
+            // не трогаем: набор в них ничего не стоит.
+            if (processor.scheduleLiteralArgListInBackground(viewer, caret, "autoOpen", //$NON-NLS-1$
+                () -> openLiteralArgPopup(caret, autoOpenSeq)))
             {
-                logAssistOpen("autoOpen.begin", "{\"path\":\"formLiteralEdt\",\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                logAssistOpen("autoOpen.begin", "{\"path\":\"literalArgBg\",\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
                     + ",\"docLen\":" + docLen + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-                SmartContentAssistProcessor.uiBlockLog("autoOpen.begin.formLiteralEdt", //$NON-NLS-1$
-                    "caret=" + caret + " docLen=" + docLen //$NON-NLS-1$ //$NON-NLS-2$
-                        + " around=\"" + SmartContentAssistProcessor.uiBlockAround(doc, caret) + "\""); //$NON-NLS-1$ //$NON-NLS-2$
-                completionAutoOpenEdtOpened = true;
-                showGate.request("autoOpenFormLiteral", () -> { //$NON-NLS-1$
-                    if (ContentAssistPopupSync.isPopupVisible(assistant))
-                        return;
-                    warmupAssistBrowserCreator(caret);
-                    // false: кэша слов в литерале нет — нужен зонд делегата EDT.
-                    openCompletionAutoEdtPopup(caret, autoOpenSeq, false);
-                });
+                completionAutoOpenPending = false;
                 return;
             }
+            Global.tempLog("literal-arg", "autoOpen skip literalNoIr caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                + " method=" + BslAssistSourceHeuristics.literalCallMethodName(doc, caret)); //$NON-NLS-1$
             logAssistOpen("autoOpen.begin.skip", "{\"reason\":\"literalNoIr\",\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
                 + ",\"docLen\":" + docLen + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             SmartContentAssistProcessor.uiBlockLog("autoOpen.begin.skipLiteralNoIr", //$NON-NLS-1$
@@ -3795,6 +3785,45 @@ boolean inLiteral = endCaret >= 0
     }
 
     /**
+     * Показ списка литерала-аргумента вызова, посчитанного в фоне (issue 628). Вызывается из
+     * ворот показа, когда список уже лежит в кэше литерала: штатный литеральный путь берёт
+     * его оттуда без зонда EDT на UI.
+     */
+    /**
+     * То же для фонового списка литерала, запрошенного не из автооткрытия (смена сегмента
+     * литерала при открытом окне, например точка в {@code Тип("СправочникСсылка.")}):
+     * открывает окно или обновляет открытое. Вызывать из ворот показа.
+     */
+    static void openLiteralArgPopupFor(ITextViewer viewer)
+    {
+        ContentAssistSessionReloader reloader = gateHost(viewer);
+        if (reloader == null)
+            return;
+        int caret = reloader.modelCaretOffset();
+        if (caret < 0)
+            return;
+        reloader.openLiteralArgPopup(caret, reloader.completionAutoOpenSeq.incrementAndGet());
+    }
+
+    private void openLiteralArgPopup(int caret, int autoOpenSeq)
+    {
+        if (ContentAssistPopupSync.isPopupVisible(assistant))
+        {
+            refreshPopupIfOpen();
+            return;
+        }
+        int live = modelCaretOffset();
+        if (live < 0)
+            live = caret;
+        long tOpen = System.nanoTime();
+        warmupAssistBrowserCreator(live);
+        openCompletionAutoEdtPopup(live, autoOpenSeq, false);
+        Global.tempLog("literal-arg", "open uiMs=" + ((System.nanoTime() - tOpen) / 1_000_000L) //$NON-NLS-1$ //$NON-NLS-2$
+            + " caret=" + caret + " live=" + live //$NON-NLS-1$ //$NON-NLS-2$
+            + " visible=" + ContentAssistPopupSync.isPopupVisible(assistant)); //$NON-NLS-1$
+    }
+
+    /**
      * {@code cachedListOnly} только если кэш этого контекста уже есть. После «.»
      * {@link SmartContentAssistProcessor#isWordListSeededOnUi()} остаётся true, а кэш
      * пуст — показ с cachedListOnly даёт n=0 и окно не открывается.
@@ -3833,7 +3862,7 @@ boolean inLiteral = endCaret >= 0
                 + " caret=" + expectedCaret + " shown=" + shown //$NON-NLS-1$ //$NON-NLS-2$
                 + " cachedListOnly=" + cachedListOnly); //$NON-NLS-1$
         // #endregion
-        
+
         IDtProject dtProject = facade.getDtProject();
         boolean irConnected = dtProject != null && IRApplication.hasConnectedSessionForKeys(dtProject);
         if (!irConnected)
