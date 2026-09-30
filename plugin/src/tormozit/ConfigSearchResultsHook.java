@@ -3862,7 +3862,7 @@ public final class ConfigSearchResultsHook implements IStartup
             return false;
         }
         scheduleContentReveal(editor,
-            new ContentTarget(kind, feature, componentClass, target, selectionObject, null), 0);
+            new ContentTarget(kind, feature, componentClass, target, selectionObject, null, null, null), 0);
         return true;
     }
 
@@ -4140,10 +4140,14 @@ public final class ConfigSearchResultsHook implements IStartup
      * {@code rightName} задаётся только для {@link ContentKind#ROLE_RIGHTS} и только когда право
      * известно однозначно (двойной клик по проблеме права роли в панели «Проблемы конфигурации»,
      * см. {@link ProblemViewOpenTargetHook}): по нему колонка права прокручивается в видимую
-     * область после выделения строки. В остальных случаях — {@code null}.
+     * область после выделения строки. {@code rightObject} — само право для точного поиска колонки.
+     * {@code roleFilterText} задаётся при переходе из панели
+     * проблем: перед выделением строки отбирает один объект в редакторе роли.
+     * В остальных случаях — {@code null}.
      */
     private record ContentTarget(ContentKind kind, EStructuralFeature feature, String componentClass,
-        MdObject target, EObject selectionObject, String rightName)
+        MdObject target, EObject selectionObject, String rightName, EObject rightObject,
+        String roleFilterText)
     {
     }
 
@@ -4261,7 +4265,28 @@ public final class ConfigSearchResultsHook implements IStartup
         // ClientSetSelectionEvent в сцену по ключу-признаку, а дерево (DtTreeView) обрабатывает
         // только TreeSetSelectionEvent — вызов «проходит», а на экране ничего. Выделяем строку
         // самим компонентом дерева, см. selectContentRow.
-        scheduleContentRowSelect(editor, content, 0);
+        if (content.kind() == ContentKind.ROLE_RIGHTS && content.roleFilterText() != null)
+            scheduleRoleRightsFilter(editor, content, 0);
+        else
+            scheduleContentRowSelect(editor, content, 0);
+    }
+
+    /** Страница прав и её поле поиска появляются после открытия редактора. */
+    private static void scheduleRoleRightsFilter(IEditorPart editor, ContentTarget content, int attempt)
+    {
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed() || attempt >= 40)
+            return;
+        display.timerExec(attempt == 0 ? 0 : 150, () -> {
+            Object activePage = Global.invoke(editor, "getActivePageInstance"); //$NON-NLS-1$
+            boolean applied = RightsEditorFilterHook.applyFilterText(activePage, content.roleFilterText());
+            if (!applied)
+            {
+                scheduleRoleRightsFilter(editor, content, attempt + 1);
+                return;
+            }
+            scheduleContentRowSelect(editor, content, 0);
+        });
     }
 
     /**
@@ -4375,8 +4400,20 @@ public final class ConfigSearchResultsHook implements IStartup
         viewer.setSelection(new StructuredSelection(row), true);
         Tree tree = viewer.getTree();
         if (tree != null && !tree.isDisposed() && tree.getSelectionCount() > 0)
+        {
             tree.showSelection();
-        showRoleRightColumn(section, tree, content.rightName());
+            tree.setFocus();
+        }
+        if (content.roleFilterText() != null)
+        {
+            Object selected = viewer.getStructuredSelection().getFirstElement();
+            Object selectedObject = Global.invoke(selected, "getEObject"); //$NON-NLS-1$
+            boolean targetSelected = selectedObject instanceof EObject md
+                && sameShownMdObject(md, content.target());
+            if (tree == null || tree.isDisposed() || tree.getSelectionCount() == 0 || !targetSelected)
+                return false;
+        }
+        showRoleRightColumn(section, viewer, content.rightName(), content.rightObject());
         return true;
     }
 
@@ -4386,29 +4423,55 @@ public final class ConfigSearchResultsHook implements IStartup
      * держит в поле {@code columnRight}; сверяем по русскому и английскому имени права и по
      * тексту заголовка колонки.
      */
-    private static void showRoleRightColumn(Object section, Tree tree, String rightName)
+    private static void showRoleRightColumn(Object section, TreeViewer viewer, String rightName,
+        EObject rightObject)
     {
-        if (rightName == null || rightName.isBlank() || tree == null || tree.isDisposed())
+        Tree tree = viewer != null ? viewer.getTree() : null;
+        if ((rightName == null || rightName.isBlank()) && rightObject == null
+            || tree == null || tree.isDisposed())
             return;
-        String wanted = rightName.trim();
+        String wanted = rightName != null ? rightName.trim() : ""; //$NON-NLS-1$
         if (!(Global.getField(section, "columnRight") instanceof Map<?, ?> columnRight)) //$NON-NLS-1$
             return;
+        Integer chosenIndex = null;
         for (Map.Entry<?, ?> entry : columnRight.entrySet())
         {
             if (!(entry.getKey() instanceof Integer index) || entry.getValue() == null)
                 continue;
             String nameRu = asString(Global.invoke(entry.getValue(), "getNameRu")); //$NON-NLS-1$
             String name = asString(Global.invoke(entry.getValue(), "getName")); //$NON-NLS-1$
-            if (!wanted.equalsIgnoreCase(nameRu) && !wanted.equalsIgnoreCase(name))
+            boolean modelMatch = sameRoleRight(entry.getValue(), rightObject);
+            if (index < 0 || index >= tree.getColumnCount()
+                || !modelMatch && !wanted.equalsIgnoreCase(nameRu) && !wanted.equalsIgnoreCase(name))
                 continue;
-            if (index >= 0 && index < tree.getColumnCount())
+            if (modelMatch)
             {
-                TreeColumn column = tree.getColumn(index);
-                if (column != null && !column.isDisposed())
-                    tree.showColumn(column);
+                chosenIndex = index;
+                break;
+            }
+            if (chosenIndex == null)
+                chosenIndex = index;
+        }
+        if (chosenIndex != null)
+        {
+            TreeColumn column = tree.getColumn(chosenIndex);
+            if (column != null && !column.isDisposed())
+            {
+                tree.showColumn(column);
+                FormTreeInteraction interaction = FormTreeInteraction.installHighlightOnly(tree, viewer);
+                if (interaction != null)
+                    interaction.activateColumn(chosenIndex);
             }
             return;
         }
+    }
+
+    private static boolean sameRoleRight(Object candidate, EObject rightObject)
+    {
+        if (candidate == rightObject && rightObject != null)
+            return true;
+        return candidate instanceof EObject right && rightObject != null
+            && EcoreUtil.getURI(right).equals(EcoreUtil.getURI(rightObject));
     }
 
     private static String asString(Object value)
@@ -4424,7 +4487,8 @@ public final class ConfigSearchResultsHook implements IStartup
 
     /**
      * Открывает редактор роли на странице «Права» и выделяет строку объекта, для которого право
-     * роли задано ({@code markerObject} — {@code ObjectRight}/{@code ObjectRights} из
+     * роли задано ({@code markerObject} — {@code ObjectRight}/{@code ObjectRights} или
+     * {@code RoleDescription} из
      * {@code com._1c.g5.v8.dt.rights.model}, обычно объект проблемы из панели «Проблемы
      * конфигурации»). Переиспользует ту же механику перехода, что и открытие вхождения прав роли
      * из результатов поиска по конфигурации ({@link #openContentMatch}).
@@ -4432,13 +4496,30 @@ public final class ConfigSearchResultsHook implements IStartup
      * @param rightName имя права для прокрутки его колонки в видимую область либо {@code null}
      * @return {@code true}, если открытие обработано здесь
      */
-    static boolean revealRoleRightsRow(IWorkbenchPage page, EObject markerObject, String rightName)
+    static boolean revealRoleRightsRow(IWorkbenchPage page, EObject markerObject, String rightName,
+        String markerMessage)
     {
         if (page == null || markerObject == null)
             return false;
         EObject rights = markerObject;
+        EObject rightObject = null;
         while (rights != null && !isObjectRights(rights))
+        {
+            if ("ObjectRight".equals(eClassName(rights))) //$NON-NLS-1$
+                rightObject = Global.invoke(rights, "getRight") instanceof EObject right //$NON-NLS-1$
+                    ? right : null;
             rights = rights.eContainer();
+        }
+        if (rights == null && "RoleDescription".equals(eClassName(markerObject))) //$NON-NLS-1$
+        {
+            if (roleProblemTargetName(markerMessage, rightName) == null)
+                return false;
+            RoleProblemRights found = findRoleProblemRights(markerObject, markerMessage, rightName);
+            if (found == null)
+                return true; // штатное открытие роли уже выполнено; не выбираем объект наугад
+            rights = found.rights();
+            rightObject = found.right();
+        }
         Global.tempLog("issue463", "markerObject=" + eClassName(markerObject) //$NON-NLS-1$ //$NON-NLS-2$
             + " objectRights=" + eClassName(rights) + " rightName=" + rightName); //$NON-NLS-1$ //$NON-NLS-2$
         if (rights == null)
@@ -4456,8 +4537,81 @@ public final class ConfigSearchResultsHook implements IStartup
         if (editor == null)
             return false;
         scheduleContentReveal(editor, new ContentTarget(ContentKind.ROLE_RIGHTS,
-            MdClassPackage.Literals.ROLE__RIGHTS, null, target, rights, rightName), 0);
+            MdClassPackage.Literals.ROLE__RIGHTS, null, target, rights, rightName, rightObject,
+            roleRightsFilterText(target)), 0);
         return true;
+    }
+
+    private record RoleProblemRights(EObject rights, EObject right)
+    {
+    }
+
+    /** Имя объекта из сообщения проверки; формат проверяем целиком, включая имя права. */
+    private static String roleProblemTargetName(String message, String rightName)
+    {
+        String prefix = "Право \""; //$NON-NLS-1$
+        String separator = "\" роли установлено для \""; //$NON-NLS-1$
+        if (message == null || !message.startsWith(prefix) || !message.endsWith("\"")) //$NON-NLS-1$
+            return null;
+        int split = message.indexOf(separator, prefix.length());
+        if (split <= prefix.length() || split + separator.length() >= message.length() - 1)
+            return null;
+        String describedRight = message.substring(prefix.length(), split);
+        if (rightName == null || !describedRight.equals(rightName))
+            return null;
+        String targetName = message.substring(split + separator.length(), message.length() - 1);
+        return targetName.indexOf('"') < 0 ? targetName : null;
+    }
+
+    /** По подтверждённым API модели прав ищет ровно одну строку с объектом и правом из маркера. */
+    private static RoleProblemRights findRoleProblemRights(EObject roleDescription, String message,
+        String rightName)
+    {
+        String targetName = roleProblemTargetName(message, rightName);
+        Object rightsList = Global.invoke(roleDescription, "getRights"); //$NON-NLS-1$
+        if (!(rightsList instanceof Iterable<?> iterable))
+            return null;
+        RoleProblemRights found = null;
+        int matches = 0;
+        for (Object candidate : iterable)
+        {
+            if (!(candidate instanceof EObject objectRights) || !isObjectRights(objectRights))
+                continue;
+            Object targetObj = Global.invoke(objectRights, "getObject"); //$NON-NLS-1$
+            if (targetObj instanceof EObject proxy && proxy.eIsProxy())
+                targetObj = EcoreUtil.resolve(proxy, objectRights);
+            if (!(targetObj instanceof MdObject target)
+                || !targetName.equals(GetRef.eObjectToFullName(target)))
+                continue;
+            Object objectRightsList = Global.invoke(objectRights, "getRights"); //$NON-NLS-1$
+            if (!(objectRightsList instanceof Iterable<?> assignedRights))
+                continue;
+            for (Object assigned : assignedRights)
+            {
+                Object right = Global.invoke(assigned, "getRight"); //$NON-NLS-1$
+                if (!rightName.equals(asString(Global.invoke(right, "getNameRu"))) //$NON-NLS-1$
+                    && !rightName.equals(asString(Global.invoke(right, "getName")))) //$NON-NLS-1$
+                    continue;
+                found = right instanceof EObject rightModel
+                    ? new RoleProblemRights(objectRights, rightModel) : null;
+                matches++;
+                break;
+            }
+        }
+        return matches == 1 ? found : null;
+    }
+
+    /** Ссылка МД в поиске дерева прав начинается с имени группы во множественном числе. */
+    private static String roleRightsFilterText(MdObject target)
+    {
+        String fullName = GetRef.eObjectToFullName(target);
+        if (fullName == null || fullName.isBlank())
+            return null;
+        int dot = fullName.indexOf('.');
+        if (dot < 0)
+            return fullName;
+        String group = MdTypeMapping.ruSingularToGroupPlural(fullName.substring(0, dot));
+        return (group != null ? group : fullName.substring(0, dot)) + fullName.substring(dot);
     }
 
     /**

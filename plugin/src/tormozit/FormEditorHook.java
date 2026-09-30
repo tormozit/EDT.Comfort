@@ -1127,6 +1127,23 @@ public class FormEditorHook implements IStartup
                 handleAttributesTreeDoubleClick(e, page, tree);
                 return;
             }
+            if (page != null && Global.getField(page, "standardCommandsViewer") //$NON-NLS-1$
+                instanceof TreeViewer viewer && viewer.getTree() == tree)
+            {
+                handleStandardCommandUsageDoubleClick(e, page, viewer, tree);
+                return;
+            }
+        }
+
+        if (e.widget instanceof org.eclipse.swt.widgets.Table table)
+        {
+            FormEditorPage page = FormEditor.getActiveFormEditorPage();
+            if (page != null && Global.getField(page, "formCommandsViewer") instanceof TableViewer viewer //$NON-NLS-1$
+                && viewer.getTable() == table)
+            {
+                FormCommandsIcons.handleUsageDoubleClick(e, page, viewer, table);
+                return;
+            }
         }
 
         if (!(e.widget instanceof Composite))
@@ -1146,6 +1163,28 @@ public class FormEditorHook implements IStartup
      */
     private static void handleAttributesTreeDoubleClick(Event e, FormEditorPage page, Tree tree)
     {
+        TreeItem row = FormTreeInteraction.rowAt(tree, e.x, e.y);
+        int columnIndex = FormTreeInteraction.columnAtX(tree, e.x);
+        if (columnIndex >= 0 && columnIndex < tree.getColumnCount()
+            && tree.getColumn(columnIndex).getText().isEmpty()
+            && !Boolean.TRUE.equals(tree.getColumn(columnIndex)
+                .getData(AttributesExtraColumns.KEY_FUNCTIONAL_OPTIONS_COLUMN))
+            && row != null && row.getData() instanceof PropertyInfo info)
+        {
+            e.doit = false;
+            Display display = e.display;
+            if (display != null && !display.isDisposed())
+                display.asyncExec(() -> {
+                    Object viewer = Global.getField(page, "attributesViewer"); //$NON-NLS-1$
+                    if (viewer instanceof TreeViewer treeViewer && !treeViewer.getControl().isDisposed())
+                    {
+                        treeViewer.setSelection(new StructuredSelection(info), false);
+                        display.asyncExec(() -> runAttributeUsageGoTo(page));
+                    }
+                });
+            return;
+        }
+
         PropertyInfo selected = getSelectedPropertyInfo(tree);
         if (selected == null || isUserFormAttribute(selected))
             return;
@@ -1161,6 +1200,47 @@ public class FormEditorHook implements IStartup
         FormEditorPage pageFinal = page;
         PropertyInfo selectedFinal = selected;
         display.asyncExec(() -> runMetadataPropertyDoubleClickActions(pageFinal, selectedFinal));
+    }
+
+    /** Двойной клик в колонке «Использование» повторяет штатную команду «Перейти». */
+    private static void runAttributeUsageGoTo(FormEditorPage page)
+    {
+        if (page == null || page.getSite() == null)
+            return;
+        Object group = Global.getField(page, "attributeActionsGroup"); //$NON-NLS-1$
+        if (group != null)
+        {
+            Global.invoke(group, "calculateAvailablesGoToTtems"); //$NON-NLS-1$
+            Global.invokeVoid(group, "runGoToAction"); //$NON-NLS-1$
+        }
+    }
+
+    /** Колонка «Использование» стандартных команд — штатный переход к связанному элементу. */
+    private static void handleStandardCommandUsageDoubleClick(Event event, FormEditorPage page,
+        TreeViewer viewer, Tree tree)
+    {
+        if (tree.isDisposed() || tree.getColumnCount() < 2
+            || FormTreeInteraction.columnAtX(tree, event.x) != 1)
+            return;
+        TreeItem row = FormTreeInteraction.rowAt(tree, event.x, event.y);
+        if (row == null || row.isDisposed() || !(row.getData() instanceof FormStandardCommand command))
+            return;
+        event.doit = false;
+        tree.getDisplay().asyncExec(() -> {
+            if (tree.isDisposed() || page.getSite() == null)
+                return;
+            viewer.setSelection(new StructuredSelection(command), false);
+            tree.getDisplay().asyncExec(() -> {
+                if (tree.isDisposed() || page.getSite() == null)
+                    return;
+                Object group = Global.getField(page, "standardCommandActionsGroup"); //$NON-NLS-1$
+                if (group != null)
+                {
+                    Global.invoke(group, "calculateAvailablesGoToTtems"); //$NON-NLS-1$
+                    Global.invokeVoid(group, "runGoToAction"); //$NON-NLS-1$
+                }
+            });
+        });
     }
 
     /**
@@ -3552,14 +3632,103 @@ public class FormEditorHook implements IStartup
                     return;
                 }
                 table.setData(KEY_HOOKED, Boolean.TRUE);
+                Global.tempLog("form-commands-width", "attach columns=" + table.getColumnCount() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " client=" + table.getClientArea().width); //$NON-NLS-1$
                 column.setLabelProvider(new CommandIconLabelProvider(page, base));
                 EffectiveIcons.installCommands(page, viewer);
                 table.addListener(SWT.Paint, event -> refreshVisibleIcons(page, viewer, table));
+                installWidthFit(table);
             }
             catch (Exception e)
             {
                 Global.logError("FormEditorHook.FormCommandsIcons", "attach", e); //$NON-NLS-1$ //$NON-NLS-2$
             }
+        }
+
+        /** Двойной клик по значку использования выполняет штатное «Перейти». */
+        private static void handleUsageDoubleClick(Event event, FormEditorPage page,
+            TableViewer viewer, org.eclipse.swt.widgets.Table table)
+        {
+            if (table.isDisposed() || table.getColumnCount() < 2)
+                return;
+            org.eclipse.swt.widgets.TableItem row = table.getItem(new Point(event.x, event.y));
+            if (row == null || row.isDisposed() || !(row.getData() instanceof FormCommand command)
+                || !row.getBounds(1).contains(event.x, event.y))
+                return;
+            event.doit = false;
+            table.getDisplay().asyncExec(() -> {
+                if (table.isDisposed() || page.getSite() == null)
+                    return;
+                viewer.setSelection(new StructuredSelection(command), false);
+                table.getDisplay().asyncExec(() -> {
+                    if (table.isDisposed() || page.getSite() == null)
+                        return;
+                    Object group = Global.getField(page, "formCommandsActionsGroup"); //$NON-NLS-1$
+                    if (group != null)
+                    {
+                        Global.invoke(group, "calculateAvailablesGoToTtems"); //$NON-NLS-1$
+                        Global.invokeVoid(group, "runGoToAction"); //$NON-NLS-1$
+                    }
+                });
+            });
+        }
+
+        /** Сужает пустой остаток первой колонки, если он создаёт прокрутку при открытии. */
+        private static void installWidthFit(org.eclipse.swt.widgets.Table table)
+        {
+            Runnable fit = () -> {
+                if (table.isDisposed() || table.getColumnCount() < 2)
+                    return;
+                int clientWidth = table.getClientArea().width;
+                int otherWidth = 0;
+                for (int i = 1; i < table.getColumnCount(); i++)
+                    otherWidth += table.getColumn(i).getWidth();
+                org.eclipse.swt.widgets.TableColumn nameColumn = table.getColumn(0);
+                int target = clientWidth - otherWidth;
+                int total = nameColumn.getWidth() + otherWidth;
+                Global.tempLog("form-commands-width", "fit client=" + clientWidth //$NON-NLS-1$ //$NON-NLS-2$
+                    + " total=" + total + " first=" + nameColumn.getWidth() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " other=" + otherWidth + " target=" + target //$NON-NLS-1$ //$NON-NLS-2$
+                    + " hbar=" + (table.getHorizontalBar() != null //$NON-NLS-1$
+                        && table.getHorizontalBar().isVisible()));
+                if (clientWidth <= 0 || total <= clientWidth || target < 50)
+                    return;
+                org.eclipse.swt.graphics.GC gc = new org.eclipse.swt.graphics.GC(table);
+                try
+                {
+                    for (org.eclipse.swt.widgets.TableItem item : table.getItems())
+                    {
+                        Image image = item.getImage(0);
+                        int needed = gc.textExtent(item.getText(0)).x
+                            + (image != null ? image.getBounds().width + 8 : 0) + 12;
+                        if (needed > target)
+                        {
+                            Global.tempLog("form-commands-width", "content needs=" + needed //$NON-NLS-1$ //$NON-NLS-2$
+                                + " target=" + target + " text=" + item.getText(0)); //$NON-NLS-1$ //$NON-NLS-2$
+                            return;
+                        }
+                    }
+                }
+                finally
+                {
+                    gc.dispose();
+                }
+                nameColumn.setWidth(target);
+            };
+            table.addListener(SWT.Resize, event -> fit.run());
+            Display display = table.getDisplay();
+            final boolean[] paintPending = { false };
+            table.addListener(SWT.Paint, event -> {
+                if (paintPending[0])
+                    return;
+                paintPending[0] = true;
+                display.asyncExec(() -> {
+                    paintPending[0] = false;
+                    fit.run();
+                });
+            });
+            for (int delay : new int[] { 0, 100, 400 })
+                display.timerExec(delay, fit);
         }
 
         private static final String KEY_REFRESH_STAMP = "tormozit.formCommandsIcons.refreshed"; //$NON-NLS-1$
@@ -5306,6 +5475,7 @@ public class FormEditorHook implements IStartup
                 return TITLE_USAGE + ".\n" //$NON-NLS-1$
                     + "Значок показывается, если реквизит используется хотя бы" //$NON-NLS-1$
                     + " одним элементом формы (указан у него как данные)." //$NON-NLS-1$
+                    + " Двойной клик выполняет команду «Перейти»." //$NON-NLS-1$
                     + Global.pluginSignForTooltip();
             if (TITLE_USE_ALWAYS.equals(text))
                 return withTitleIfTruncated(column,

@@ -676,6 +676,8 @@ public class SmartOutlineHook implements IStartup {
         {
             installQuickOutlineHeaderButtons(fc, viewer, patchedShell, dialog, dialogName);
             installOutlineRecentPlacesOnOpen(viewer, baseLp);
+            if (bslQuickOutline)
+                centerInitialOutlineSelection(viewer);
         }
 
         if (bslQuickOutline)
@@ -906,6 +908,42 @@ public class SmartOutlineHook implements IStartup {
             return;
         tree.setData(OUTLINE_RECENT_ON_OPEN_KEY, Boolean.TRUE);
         tree.addListener(SWT.DefaultSelection, event -> recordOutlineOpenSelection(viewer, baseLp));
+    }
+
+    /** Помещает выбранный при открытии метод ближе к середине видимой области. */
+    private static void centerInitialOutlineSelection(TreeViewer viewer)
+    {
+        Tree tree = viewer.getTree();
+        tree.getDisplay().asyncExec(() -> {
+            if (tree.isDisposed() || tree.getSelectionCount() == 0)
+                return;
+            TreeItem selected = tree.getSelection()[0];
+            if (selected.isDisposed())
+                return;
+            int rowsAbove = Math.max(0, tree.getClientArea().height / Math.max(1, tree.getItemHeight()) / 2);
+            TreeItem top = selected;
+            for (int i = 0; i < rowsAbove; i++)
+            {
+                TreeItem previous = previousVisibleOutlineItem(top);
+                if (previous == null)
+                    break;
+                top = previous;
+            }
+            tree.setTopItem(top);
+        });
+    }
+
+    private static TreeItem previousVisibleOutlineItem(TreeItem item)
+    {
+        TreeItem parent = item.getParentItem();
+        TreeItem[] siblings = parent == null ? item.getParent().getItems() : parent.getItems();
+        int index = parent == null ? item.getParent().indexOf(item) : parent.indexOf(item);
+        if (index == 0)
+            return parent;
+        TreeItem previous = siblings[index - 1];
+        while (previous.getExpanded() && previous.getItemCount() > 0)
+            previous = previous.getItem(previous.getItemCount() - 1);
+        return previous;
     }
 
     private static void recordOutlineOpenSelection(TreeViewer viewer, ILabelProvider baseLp)

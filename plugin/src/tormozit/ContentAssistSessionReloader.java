@@ -6191,14 +6191,6 @@ return;
             if (event == null)
                 return;
             lastDocReplaced = event.getLength();
-            int live = host.modelCaretOffset();
-            if (!inTypingWindow() || live < 0)
-                return;
-            if (Math.abs(event.getOffset() - live) < CARET_JUMP_CHARS)
-                return;
-            log("inputJump.docOff", live, widgetCaret(), topIndex(), //$NON-NLS-1$
-                event.getOffset() - live, 0, 0, "off=" + event.getOffset() //$NON-NLS-1$
-                    + " repl=" + event.getLength()); //$NON-NLS-1$
         }
 
         void documentChanged(DocumentEvent event)
@@ -6312,18 +6304,6 @@ return;
                 return null;
             return host.viewer.getTextWidget() instanceof StyledText st && !st.isDisposed()
                 ? st : null;
-        }
-
-        private int widgetCaret()
-        {
-            StyledText text = widget();
-            return text == null ? -1 : text.getCaretOffset();
-        }
-
-        private int topIndex()
-        {
-            StyledText text = widget();
-            return text == null ? -1 : text.getTopIndex();
         }
 
         private static int countNewlines(String text)

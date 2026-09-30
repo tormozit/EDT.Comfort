@@ -5,6 +5,7 @@ import java.lang.reflect.Field;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.List;
@@ -20,7 +21,10 @@ import org.eclipse.core.resources.IResourceChangeListener;
 import org.eclipse.core.resources.ResourcesPlugin;
 import org.eclipse.jface.action.Action;
 import org.eclipse.jface.action.ContributionItem;
+import org.eclipse.jface.action.IMenuListener;
+import org.eclipse.jface.action.IContributionItem;
 import org.eclipse.jface.action.IToolBarManager;
+import org.eclipse.jface.action.MenuManager;
 import org.eclipse.jface.action.Separator;
 import org.eclipse.jface.viewers.CellLabelProvider;
 import org.eclipse.jface.viewers.CheckboxCellEditor;
@@ -70,6 +74,12 @@ import org.eclipse.swt.widgets.ToolItem;
 import org.eclipse.swt.widgets.TableItem;
 import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.TreeItem;
+import org.eclipse.e4.ui.model.application.ui.basic.MPart;
+import org.eclipse.e4.ui.model.application.ui.menu.MHandledMenuItem;
+import org.eclipse.e4.ui.model.application.ui.menu.MMenu;
+import org.eclipse.e4.ui.model.application.ui.menu.MMenuElement;
+import org.eclipse.e4.ui.workbench.renderers.swt.ContributionRecord;
+import org.eclipse.e4.ui.workbench.renderers.swt.MenuManagerRenderer;
 import org.eclipse.ui.IActionBars;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IPartListener2;
@@ -84,6 +94,7 @@ import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.commands.ICommandService;
 import org.eclipse.ui.dialogs.PreferencesUtil;
+import org.eclipse.ui.handlers.IHandlerService;
 import org.osgi.framework.BundleContext;
 import org.osgi.framework.ServiceReference;
 
@@ -96,8 +107,10 @@ import com._1c.g5.v8.dt.platform.services.model.RuntimeInstallation;
 import com._1c.g5.v8.dt.platform.services.ui.PlatformServicesUiFactory;
 import com._1c.g5.v8.dt.platform.services.ui.PlatformServicesUiPlugin;
 import com.e1c.g5.dt.applications.IApplicationEvent;
+import com.e1c.g5.dt.applications.IApplication;
 import com.e1c.g5.dt.applications.IApplicationListener;
 import com.e1c.g5.dt.applications.IApplicationManager;
+import com.e1c.g5.dt.applications.IUrlAccess;
 import com.e1c.g5.dt.applications.infobases.IInfobaseApplication;
 import com.google.inject.Injector;
 
@@ -193,6 +206,9 @@ public class ApplicationsViewHook implements IStartup
     private static final String ACTIVE_ITEM_KEY = "tormozit.applicationsView.activeItem"; //$NON-NLS-1$
 
     private static final String COPY_COMMAND_ID = "org.eclipse.ui.edit.copy"; //$NON-NLS-1$
+
+    private static final String OPEN_IN_BROWSER_COMMAND_ID =
+        "com.e1c.g5.dt.applications.ui.commands.openInBrowser"; //$NON-NLS-1$
 
     private static boolean copyExecutionListenerInstalled;
 
@@ -748,7 +764,7 @@ public class ApplicationsViewHook implements IStartup
             addClickHandlers(viewer, tree);
             installCopyExecutionListener();
             addToolbarButtons(view, viewer);
-            addContextMenu(viewer, control);
+            addContextMenu(view, viewer, control);
             registerRedrawOnPoolChange(viewer);
             registerRedrawOnIrChange(viewer);
             tree.setData(HOOKED_KEY, Boolean.TRUE);
@@ -757,7 +773,7 @@ public class ApplicationsViewHook implements IStartup
         else
         {
             addToolbarButtons(view, viewer);
-            addContextMenu(viewer, control);
+            addContextMenu(view, viewer, control);
             registerRedrawOnPoolChange(viewer);
             registerRedrawOnIrChange(viewer);
         }
@@ -1952,19 +1968,26 @@ public class ApplicationsViewHook implements IStartup
     // 4. Контекстное меню: CASCADE «Комфорт»
     // =======================================================================
 
-    private void addContextMenu(ColumnViewer viewer, Control control)
+    private void addContextMenu(IViewPart view, ColumnViewer viewer, Control control)
     {
         Menu menu = control.getMenu();
         if (menu == null) { menu = new Menu(control); control.setMenu(menu); }
         final Menu finalMenu = menu;
+        Object managerData = menu.getData(MenuManager.MANAGER_KEY);
+        MenuManager menuManager = managerData instanceof MenuManager ? (MenuManager) managerData : null;
+        IMenuListener lazyBrowserInterceptor = manager -> removeStockBrowserCommand(view, (MenuManager) manager);
+        if (menuManager != null)
+            menuManager.addMenuListener(lazyBrowserInterceptor);
 
         MenuAdapter adapter = new MenuAdapter()
         {
             private final List<MenuItem> added = new ArrayList<>(2);
+            private int menuGeneration;
 
             @Override
             public void menuShown(MenuEvent e)
             {
+                int generation = ++menuGeneration;
                 try
                 {
                     IStructuredSelection sel = (IStructuredSelection) viewer.getSelection();
@@ -1975,9 +1998,17 @@ public class ApplicationsViewHook implements IStartup
                     boolean anySsh = sel.toList().stream().anyMatch(el -> sshConnected(sshAcc, el));
                     boolean anyIr  = sel.toList().stream().anyMatch(el -> irReg.isConnected(getInfobase(el)));
 
-                    added.add(new MenuItem(finalMenu, SWT.SEPARATOR));
-
-                    MenuItem cascade = new MenuItem(finalMenu, SWT.CASCADE);
+                    int comfortIndex = finalMenu.getItemCount();
+                    MenuItem[] rootItems = finalMenu.getItems();
+                    for (int i = 0; i < rootItems.length; i++)
+                    {
+                        if ("Администрирование".equals(rootItems[i].getText().replace("&", ""))) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        {
+                            comfortIndex = i + 1;
+                            break;
+                        }
+                    }
+                    MenuItem cascade = new MenuItem(finalMenu, SWT.CASCADE, comfortIndex);
                     cascade.setText("Комфорт"); //$NON-NLS-1$
                     Image comfortIcon = Global.comfortIcon();
                     if (comfortIcon != null)
@@ -1995,21 +2026,153 @@ public class ApplicationsViewHook implements IStartup
                 {
                     Global.log("addContextMenu.menuShown: " + ex); //$NON-NLS-1$
                 }
+                finally
+                {
+                    scheduleBrowserCommand(view, viewer, finalMenu, generation);
+                }
             }
 
             @Override
             public void menuHidden(MenuEvent e)
             {
+                ++menuGeneration;
                 List<MenuItem> snapshot = new ArrayList<>(added);
                 added.clear();
                 finalMenu.getDisplay().asyncExec(() ->
                     snapshot.forEach(mi -> { if (!mi.isDisposed()) mi.dispose(); }));
             }
+
+            private void scheduleBrowserCommand(IViewPart view, ColumnViewer viewer, Menu menu, int generation)
+            {
+                if (!(viewer.getSelection() instanceof IStructuredSelection)) return;
+                IStructuredSelection selection = (IStructuredSelection) viewer.getSelection();
+                if (selection.size() != 1 || !(selection.getFirstElement() instanceof IApplication)) return;
+                IApplication application = (IApplication) selection.getFirstElement();
+                Object manager = Global.getField(view, "applicationManager"); //$NON-NLS-1$
+                if (!(manager instanceof IApplicationManager))
+                    return;
+                IApplicationManager applicationManager = (IApplicationManager) manager;
+                Display display = menu.getDisplay();
+                Thread worker = new Thread(() ->
+                {
+                    boolean available = false;
+                    try
+                    {
+                        for (IUrlAccess access : applicationManager.getUrlAccesses(application))
+                        {
+                            if (access.getUrl().isPresent())
+                            {
+                                available = true;
+                                break;
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Global.log("ApplicationsViewHook.scheduleBrowserCommand: " + ex); //$NON-NLS-1$
+                    }
+                    if (!available) return;
+                    display.asyncExec(() ->
+                    {
+                        if (menu.isDisposed() || !menu.isVisible() || generation != menuGeneration)
+                            return;
+                        MenuItem browser = new MenuItem(menu, SWT.PUSH);
+                        browser.setText("Открыть в браузере"); //$NON-NLS-1$
+                        ComfortSubmenuHelper.setMenuItemTooltip(browser, "Открыть опубликованный адрес приложения"); //$NON-NLS-1$
+                        browser.addListener(SWT.Selection, event ->
+                        {
+                            try
+                            {
+                                IHandlerService handlers = view.getSite().getService(IHandlerService.class);
+                                if (handlers != null)
+                                    handlers.executeCommand(OPEN_IN_BROWSER_COMMAND_ID, null);
+                            }
+                            catch (Exception ex)
+                            {
+                                Global.log("ApplicationsViewHook.openInBrowser: " + ex); //$NON-NLS-1$
+                            }
+                        });
+                        added.add(browser);
+                    });
+                }, "ApplicationsBrowserMenuLookup"); //$NON-NLS-1$
+                worker.setDaemon(true);
+                worker.start();
+            }
         };
 
         menu.addMenuListener(adapter);
         control.addDisposeListener(
-            ev -> { if (!finalMenu.isDisposed()) finalMenu.removeMenuListener(adapter); });
+            ev ->
+            {
+                if (menuManager != null)
+                    menuManager.removeMenuListener(lazyBrowserInterceptor);
+                if (!finalMenu.isDisposed()) finalMenu.removeMenuListener(adapter);
+            });
+    }
+
+    private static void removeStockBrowserCommand(IViewPart view, MenuManager manager)
+    {
+        MPart part = view.getSite().getService(MPart.class);
+        MenuManagerRenderer renderer = part != null && part.getContext() != null
+            ? part.getContext().get(MenuManagerRenderer.class) : null;
+        MMenu renderedModel = renderer != null ? renderer.getMenuModel(manager) : null;
+        List<IContributionItem> contributions = new ArrayList<>();
+        if (renderer != null)
+        {
+            for (IContributionItem item : manager.getItems())
+            {
+                if (isBrowserCommand(renderer.getMenuElement(item)))
+                    contributions.add(item);
+            }
+        }
+        if (renderer != null)
+        {
+            for (ContributionRecord record : renderer.getContributionRecords())
+            {
+                if (record.getManagerForModel() != manager) continue;
+                boolean hasBrowser = record.getGeneratedElements().stream().anyMatch(ApplicationsViewHook::isBrowserCommand)
+                    || record.getSharedElements().stream().anyMatch(ApplicationsViewHook::isBrowserCommand);
+                if (!hasBrowser) continue;
+                removeBrowserElements(record.getMenuContribution().getChildren());
+                removeBrowserElements(record.getGeneratedElements());
+                removeBrowserElements(record.getSharedElements());
+            }
+        }
+        removeBrowserItems(renderedModel);
+        if (part != null)
+        {
+            for (MMenu model : part.getMenus())
+            {
+                if (model != renderedModel)
+                    removeBrowserItems(model);
+            }
+        }
+        for (IContributionItem item : contributions)
+            manager.remove(item);
+    }
+
+    private static void removeBrowserItems(MMenu menu)
+    {
+        if (menu != null)
+            removeBrowserElements(menu.getChildren());
+    }
+
+    private static void removeBrowserElements(Collection<MMenuElement> elements)
+    {
+        for (MMenuElement element : new ArrayList<>(elements))
+        {
+            if (isBrowserCommand(element))
+                elements.remove(element);
+        }
+    }
+
+    private static boolean isBrowserCommand(MMenuElement element)
+    {
+        if (!(element instanceof MHandledMenuItem handled)) return false;
+        return (handled.getWbCommand() != null
+                && OPEN_IN_BROWSER_COMMAND_ID.equals(handled.getWbCommand().getId()))
+            || (handled.getCommand() != null
+                && OPEN_IN_BROWSER_COMMAND_ID.equals(handled.getCommand().getElementId()));
     }
 
     private void registerRedrawOnPoolChange(ColumnViewer viewer)

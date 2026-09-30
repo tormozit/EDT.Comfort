@@ -3085,11 +3085,15 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
 
     private void uninstallHeaderOverlays()
     {
+        Global.tempLog("formTableHeaderOverlay", "uninstall table=" //$NON-NLS-1$ //$NON-NLS-2$
+            + (table == null ? "null" : table.isDisposed() ? "disposed" : "live") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " columnHost=" + (columnHost == null ? "null" : columnHost.isDisposed() ? "disposed" : "live") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            + " tableResizeListener=" + (tableResizeListener != null)); //$NON-NLS-1$
         if (table != null && !table.isDisposed())
         {
             if (tableResizeListener != null)
                 table.removeControlListener(tableResizeListener);
-            if (columnHost != null && !columnHost.isDisposed())
+            if (columnHost != null && !columnHost.isDisposed() && tableResizeListener != null)
                 columnHost.removeControlListener(tableResizeListener);
             ScrollBar horizontal = table.getHorizontalBar();
             if (horizontal != null && horizontalScrollListener != null)

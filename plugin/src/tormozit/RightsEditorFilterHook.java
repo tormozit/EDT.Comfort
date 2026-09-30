@@ -19,6 +19,9 @@ import org.eclipse.jface.action.IAction;
 import org.eclipse.jface.action.MenuManager;
 import org.eclipse.jface.viewers.CellEditor;
 import org.eclipse.jface.viewers.CellLabelProvider;
+import org.eclipse.jface.viewers.ColumnViewerEditor;
+import org.eclipse.jface.viewers.ColumnViewerEditorActivationEvent;
+import org.eclipse.jface.viewers.ColumnViewerEditorActivationStrategy;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider.IStyledLabelProvider;
 import org.eclipse.jface.viewers.EditingSupport;
@@ -34,6 +37,7 @@ import org.eclipse.jface.viewers.StyledString;
 import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.jface.viewers.TreeViewerColumn;
 import org.eclipse.jface.viewers.Viewer;
+import org.eclipse.jface.viewers.ViewerCell;
 import org.eclipse.jface.viewers.ViewerFilter;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.dnd.Clipboard;
@@ -44,6 +48,7 @@ import org.eclipse.swt.graphics.Font;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.graphics.Rectangle;
+import org.eclipse.swt.events.MouseEvent;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.layout.GridLayout;
 import org.eclipse.swt.widgets.Button;
@@ -134,6 +139,8 @@ public final class RightsEditorFilterHook implements IStartup
     private static final String COPY_HOOKED_KEY = "tormozit.rightsEditorCopyHooked"; //$NON-NLS-1$
 
     private static final String COPY_ACTIVE_COLUMN_KEY = "tormozit.rightsEditorCopyColumn"; //$NON-NLS-1$
+
+    private static final String RIGHT_CLICK_STRATEGY_KEY = "tormozit.rightsEditorCheckHitStrategy"; //$NON-NLS-1$
 
     private static final String FILTER_BY_VALUE_HOOK_KEY = "tormozit.rightsEditorFilterByValue"; //$NON-NLS-1$
 
@@ -351,9 +358,6 @@ public final class RightsEditorFilterHook implements IStartup
         Object searchObj = section != null ? Global.getField(section, "searchBox") : null; //$NON-NLS-1$
         if (!(searchObj instanceof SearchBox searchBox) || searchBox.isDisposed())
             return false;
-        if (searchBox.getData(FILTER_KEY) instanceof RightsSmartFilter filter
-            && searchBox.getData(VIEWER_KEY) instanceof TreeViewer viewer)
-            applyLeafMode(searchBox, viewer, filter, true, isMdObjectRightsEditor(section));
         applyExactReference(searchBox);
         searchBox.setText(text);
         rememberAppliedFilter(section, text);
@@ -408,6 +412,8 @@ public final class RightsEditorFilterHook implements IStartup
         if (tree == null || tree.isDisposed())
             return false;
 
+        FormTreeInteraction.installHighlightOnly(tree, viewer);
+        installRightClickStrategy(section, viewer, tree);
         installTreeCopy(tree);
         TreeExpander.installWhitelisted(TreeExpander.Target.RIGHTS_EDITOR, viewer);
 
@@ -1260,6 +1266,59 @@ public final class RightsEditorFilterHook implements IStartup
             column.setEditingSupport(new LeafEditGuard(viewer, existing, filter));
         }
         wrapCheckLabelProviders(viewer, filter);
+    }
+
+    /** EDT активирует редактор права при клике по всей ячейке; оставляем активацию только по значку. */
+    private static void installRightClickStrategy(Object section, TreeViewer viewer, Tree tree)
+    {
+        if (Boolean.TRUE.equals(tree.getData(RIGHT_CLICK_STRATEGY_KEY)))
+            return;
+        ColumnViewerEditor editor = viewer.getColumnViewerEditor();
+        Object original = Global.getField(editor, "editorActivationStrategy"); //$NON-NLS-1$
+        if (!(original instanceof ColumnViewerEditorActivationStrategy delegate))
+            return;
+        Image checkImage = Global.getField(section, "IMG_CHECKED") instanceof Image image ? image : null; //$NON-NLS-1$
+        int checkWidth = checkImage != null && !checkImage.isDisposed() ? checkImage.getBounds().width : 16;
+        int checkHeight = checkImage != null && !checkImage.isDisposed() ? checkImage.getBounds().height : 16;
+        RightsCheckHitStrategy strategy = new RightsCheckHitStrategy(viewer, delegate,
+            checkWidth, checkHeight);
+        if (!Global.setFieldForce(editor, "editorActivationStrategy", strategy)) //$NON-NLS-1$
+            return;
+        tree.setData(RIGHT_CLICK_STRATEGY_KEY, Boolean.TRUE);
+    }
+
+    private static final class RightsCheckHitStrategy extends ColumnViewerEditorActivationStrategy
+    {
+        private final ColumnViewerEditorActivationStrategy delegate;
+        private final int checkWidth;
+        private final int checkHeight;
+
+        RightsCheckHitStrategy(TreeViewer viewer, ColumnViewerEditorActivationStrategy delegate,
+            int checkWidth, int checkHeight)
+        {
+            super(viewer);
+            this.delegate = delegate;
+            this.checkWidth = checkWidth;
+            this.checkHeight = checkHeight;
+        }
+
+        @Override
+        protected boolean isEditorActivationEvent(ColumnViewerEditorActivationEvent event)
+        {
+            Object result = Global.invoke(delegate, "isEditorActivationEvent", event); //$NON-NLS-1$
+            boolean accepted = result instanceof Boolean b ? b : super.isEditorActivationEvent(event);
+            if (!accepted || event.eventType != ColumnViewerEditorActivationEvent.MOUSE_CLICK_SELECTION
+                && event.eventType != ColumnViewerEditorActivationEvent.MOUSE_DOUBLE_CLICK_SELECTION
+                || !(event.getSource() instanceof ViewerCell cell) || cell.getColumnIndex() < 3)
+                return accepted;
+            if (!(event.sourceEvent instanceof MouseEvent mouse)
+                || !(cell.getItem() instanceof TreeItem item))
+                return false;
+            Rectangle bounds = item.getBounds(cell.getColumnIndex());
+            Rectangle check = new Rectangle(bounds.x + Math.max(0, bounds.width / 2 - checkWidth / 2),
+                bounds.y + Math.max(0, bounds.height / 2 - checkHeight / 2), checkWidth, checkHeight);
+            return check.contains(mouse.x, mouse.y);
+        }
     }
 
     private static void wrapCheckLabelProviders(TreeViewer viewer, RightsSmartFilter filter)

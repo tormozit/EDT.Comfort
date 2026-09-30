@@ -155,7 +155,7 @@ public final class ProblemViewOpenTargetHook implements IStartup
             Listener treeListener = event -> {
                 if (event.button != 1)
                     return;
-                handleOpenFromViewer(viewer, "treeMouseDblClick"); //$NON-NLS-1$
+                handleOpenFromViewer(viewer);
             };
             tree.addListener(SWT.MouseDoubleClick, treeListener);
             tree.setData(TREE_MARKER, Boolean.TRUE);
@@ -178,7 +178,7 @@ public final class ProblemViewOpenTargetHook implements IStartup
         TreeViewer viewer = resolveTreeViewer(problemView);
         if (viewer == null || viewer.getTree() != tree)
             return;
-        handleOpenFromViewer(viewer, "displayFilter"); //$NON-NLS-1$
+        handleOpenFromViewer(viewer);
     }
 
     private static IViewPart findProblemViewForTree(Tree tree)
@@ -210,7 +210,7 @@ public final class ProblemViewOpenTargetHook implements IStartup
         {
             if (event == null || !(event.getSelection() instanceof IStructuredSelection structured))
                 return;
-            handleOpenFromSelection(structured, "doubleClick"); //$NON-NLS-1$
+            handleOpenFromSelection(structured);
         }
     }
 
@@ -221,11 +221,11 @@ public final class ProblemViewOpenTargetHook implements IStartup
         {
             if (event == null || !(event.getSelection() instanceof IStructuredSelection structured))
                 return;
-            handleOpenFromSelection(structured, "open"); //$NON-NLS-1$
+            handleOpenFromSelection(structured);
         }
     }
 
-    private static void handleOpenFromViewer(TreeViewer viewer, String source)
+    private static void handleOpenFromViewer(TreeViewer viewer)
     {
         if (viewer == null)
             return;
@@ -233,10 +233,10 @@ public final class ProblemViewOpenTargetHook implements IStartup
         {
             return;
         }
-        handleOpenFromSelection(structured, source);
+        handleOpenFromSelection(structured);
     }
 
-    private static void handleOpenFromSelection(IStructuredSelection structured, String source)
+    private static void handleOpenFromSelection(IStructuredSelection structured)
     {
         // Доработка поведения панели — как и остальные, подчиняется «Улучшать списки»
         if (!ComfortSettings.isReplaceListFiltersEnabled())
@@ -256,7 +256,7 @@ public final class ProblemViewOpenTargetHook implements IStartup
         if (markerObject == null)
             return;
         if (ConfigSearchResultsHook.revealRoleRightsRow(page, markerObject,
-            roleRightName(markerObject, marker)))
+            roleRightName(markerObject, marker), marker.getMessage()))
             return;
         focusPropertyField(marker, markerObject, page);
     }

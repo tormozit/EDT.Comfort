@@ -6,6 +6,7 @@ import org.eclipse.swt.SWT;
 import org.eclipse.swt.graphics.Color;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.graphics.Rectangle;
+import org.eclipse.swt.graphics.RGB;
 import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.ScrollBar;
 import org.eclipse.swt.widgets.Tree;
@@ -14,11 +15,13 @@ import org.eclipse.swt.widgets.TreeItem;
 /**
  * Выбор ячейки и подсветка активной ячейки/строки в многоколоночном {@link Tree} — то же
  * поведение, что у таблиц плагина ({@link FormTableInteraction}) и панели «Индексирование Git»,
- * но для чужого (штатного) дерева, к которому колонки дописаны плагином.
+ * но для чужого (штатного) дерева: дерева элементов формы с колонками плагина и дерева прав роли.
  *
  * <p>Зачем отдельно от {@link FormTableInteraction}: тот работает с {@link org.eclipse.swt.widgets.Table}
  * и создаёт таблицу «под себя» (оверлей заголовка, порядок колонок), а здесь дерево уже создано
  * EDT со своим стилем и своими слушателями — трогать можно только рисование и выбор ячейки.
+ * В дереве прав роли используется режим {@link #installHighlightOnly(Tree, TreeViewer)}: выбор
+ * строк и редактирование остаются за EDT.
  *
  * <p><b>Клик мимо первой колонки.</b> Штатное дерево редактора формы создано без
  * {@link SWT#FULL_SELECTION}, поэтому клик во второй и далее колонках не выделяет строку вовсе.
@@ -51,6 +54,9 @@ final class FormTreeInteraction
 
     private final TreeViewer viewer;
 
+    /** В чужом редактируемом дереве оставляем выбор строк и правки его штатным слушателям. */
+    private final boolean highlightOnly;
+
     private TreeItem selectedItem;
 
     /**
@@ -61,6 +67,8 @@ final class FormTreeInteraction
 
     private int activeColumn;
 
+    private boolean columnActivated;
+
     private Color ownedRowBg;
 
     private Color ownedInactiveRowBg;
@@ -68,6 +76,8 @@ final class FormTreeInteraction
     private Color ownedActiveCellBg;
 
     private Color ownedFrame;
+
+    private Color ownedColumnTint;
 
     /**
      * Снимок выделения: {@link Tree#getSelection()} — нативный вызов, создающий массив, а
@@ -83,10 +93,11 @@ final class FormTreeInteraction
     /** Срок жизни снимка выделения, мс. */
     private static final long SELECTION_SNAPSHOT_MS = 20;
 
-    private FormTreeInteraction(Tree tree, TreeViewer viewer)
+    private FormTreeInteraction(Tree tree, TreeViewer viewer, boolean highlightOnly)
     {
         this.tree = tree;
         this.viewer = viewer;
+        this.highlightOnly = highlightOnly;
     }
 
     /** Подключить к дереву (идемпотентно). */
@@ -96,7 +107,20 @@ final class FormTreeInteraction
             return null;
         if (tree.getData(INSTALLED_KEY) instanceof FormTreeInteraction existing)
             return existing;
-        FormTreeInteraction interaction = new FormTreeInteraction(tree, viewer);
+        FormTreeInteraction interaction = new FormTreeInteraction(tree, viewer, false);
+        tree.setData(INSTALLED_KEY, interaction);
+        interaction.hook();
+        return interaction;
+    }
+
+    /** Подсветка активной ячейки без вмешательства в выбор строк и редактирование дерева EDT. */
+    static FormTreeInteraction installHighlightOnly(Tree tree, TreeViewer viewer)
+    {
+        if (tree == null || tree.isDisposed())
+            return null;
+        if (tree.getData(INSTALLED_KEY) instanceof FormTreeInteraction existing)
+            return existing;
+        FormTreeInteraction interaction = new FormTreeInteraction(tree, viewer, true);
         tree.setData(INSTALLED_KEY, interaction);
         interaction.hook();
         return interaction;
@@ -112,16 +136,24 @@ final class FormTreeInteraction
     {
         ListSelectionThemeColors.markOptOut(tree);
         ThemeAwareColors.hideGridLinesInDarkTheme(tree);
-        tree.addListener(SWT.MouseDown, this::onMouseDown);
+        tree.addListener(SWT.MouseDown, highlightOnly ? this::onHighlightOnlyMouseDown : this::onMouseDown);
         tree.addListener(SWT.EraseItem, this::onEraseItem);
         tree.addListener(SWT.PaintItem, this::onPaintItem);
+        if (highlightOnly)
+            tree.addListener(SWT.Paint, this::onPaintEmptyRows);
         tree.addListener(SWT.FocusIn, event -> {
             invalidateColors();
-            redrawRow(activeRow());
+            if (highlightOnly)
+                tree.redraw();
+            else
+                redrawRow(activeRow());
         });
         tree.addListener(SWT.FocusOut, event -> {
             invalidateColors();
-            redrawRow(activeRow());
+            if (highlightOnly)
+                tree.redraw();
+            else
+                redrawRow(activeRow());
         });
         // Полный tree.redraw() на Selection в больших списках (Задачи) блокирует UI:
         // перерисовываем только прежнюю и новую строки — как в FormTableInteraction.
@@ -132,7 +164,9 @@ final class FormTreeInteraction
             redrawRow(previous);
             redrawRow(selectedItem);
         });
-        tree.addListener(SWT.Dispose, event -> invalidateColors());
+        tree.addListener(SWT.Dispose, event -> {
+            invalidateColors();
+        });
     }
 
     /** Индекс активной колонки (0, если ещё не выбрана). */
@@ -140,6 +174,28 @@ final class FormTreeInteraction
     {
         int column = activeColumn;
         return column >= 0 && column < tree.getColumnCount() ? column : 0;
+    }
+
+    /** Сделать колонку текущей после программного перехода к строке. */
+    void activateColumn(int column)
+    {
+        if (tree.isDisposed() || column < 0 || column >= tree.getColumnCount())
+            return;
+        TreeItem previous = activeRow();
+        activeColumn = column;
+        if (highlightOnly)
+            columnActivated = true;
+        invalidateSelection();
+        syncFromSelection();
+        invalidateColors();
+        if (highlightOnly)
+            tree.redraw();
+        else
+        {
+            redrawRow(previous);
+            redrawRow(activeRow());
+        }
+        tree.update();
     }
 
     /**
@@ -229,6 +285,26 @@ final class FormTreeInteraction
         clearPendingRowLater();
     }
 
+    private void onHighlightOnlyMouseDown(Event e)
+    {
+        if (e.button != 1 && e.button != 3)
+            return;
+        TreeItem item = rowAt(tree, e.x, e.y);
+        int column = item != null ? columnAtX(tree, e.x) : -1;
+        if (column < 0)
+            return;
+        if (e.button == 1 && column == 0)
+        {
+            Rectangle content = item.getBounds(0);
+            if (content != null && e.x < content.x)
+                return;
+        }
+        activeColumn = column;
+        columnActivated = true;
+        invalidateColors();
+        tree.redraw();
+    }
+
     /** Перерисовать одну строку: полный {@code redraw()} дерева на клик избыточен. */
     private void redrawRow(TreeItem item)
     {
@@ -310,13 +386,23 @@ final class FormTreeInteraction
         if (!(e.item instanceof TreeItem item))
             return;
         TreeItem active = activeRow();
-        if (!isRowSelected(item) && item != active)
+        boolean activeColumnCell = highlightOnly && columnActivated && activeColumn() >= 3
+            && e.index == activeColumn();
+        boolean selected = isRowSelected(item);
+        if (!selected && item != active && !activeColumnCell)
             return;
         boolean activeRow = item == active;
         Color rowBg = activeRow ? rowSelectionBackground() : inactiveRowSelectionBackground();
-        Color bg = activeRow && e.index == activeColumn() ? activeCellBackground(rowBg) : rowBg;
+        Color bg = highlightOnly && activeColumnCell && !selected
+            ? columnTintBackground()
+            : !highlightOnly && activeRow && e.index == activeColumn()
+                ? activeCellBackground(rowBg) : rowBg;
         e.gc.setBackground(bg);
-        e.gc.fillRectangle(e.x, e.y, e.width, e.height);
+        Rectangle fill = activeColumnCell ? item.getBounds(e.index) : null;
+        if (fill != null && !fill.isEmpty())
+            e.gc.fillRectangle(fill);
+        else
+            e.gc.fillRectangle(e.x, e.y, e.width, e.height);
         e.detail &= ~SWT.BACKGROUND;
         if (ListSelectionThemeColors.isDarkList(tree))
         {
@@ -331,11 +417,30 @@ final class FormTreeInteraction
 
     private void onPaintItem(Event e)
     {
-        if (!(e.item instanceof TreeItem item) || item != activeRow() || e.index != activeColumn())
+        if (!(e.item instanceof TreeItem item) || item != activeRow() || e.index != activeColumn()
+            || highlightOnly && activeColumn() < 3)
             return;
         Rectangle bounds = item.getBounds(e.index);
         if (bounds == null || bounds.isEmpty())
             return;
+        if (highlightOnly && columnActivated)
+        {
+            Color previousForeground = e.gc.getForeground();
+            int previousWidth = e.gc.getLineWidth();
+            try
+            {
+                e.gc.setForeground(tree.getDisplay().getSystemColor(SWT.COLOR_LINK_FOREGROUND));
+                e.gc.setLineWidth(2);
+                e.gc.drawRectangle(bounds.x + 1, bounds.y + 1, Math.max(0, bounds.width - 3),
+                    Math.max(0, bounds.height - 3));
+            }
+            finally
+            {
+                e.gc.setLineWidth(previousWidth);
+                e.gc.setForeground(previousForeground);
+            }
+            return;
+        }
         // Цвет рамки кэшируется наравне с остальными: создание и освобождение нативного Color
         // на каждую отрисовку ячейки было вторым по стоимости местом при прокрутке.
         if (ownedFrame == null || ownedFrame.isDisposed())
@@ -344,6 +449,37 @@ final class FormTreeInteraction
         e.gc.setForeground(ownedFrame);
         e.gc.drawRectangle(bounds.x, bounds.y, Math.max(0, bounds.width - 1),
             Math.max(0, bounds.height - 1));
+    }
+
+    /** Продолжить фон колонки под последней строкой, где SWT уже не шлёт EraseItem. */
+    private void onPaintEmptyRows(Event e)
+    {
+        if (!columnActivated || activeColumn() < 3 || tree.isDisposed())
+            return;
+        TreeItem top = tree.getTopItem();
+        if (top == null || top.isDisposed())
+            return;
+        Rectangle column = top.getBounds(activeColumn());
+        Rectangle client = tree.getClientArea();
+        if (column == null || column.isEmpty() || client.isEmpty())
+            return;
+        int bottom = client.y;
+        int limit = client.height / Math.max(tree.getItemHeight(), 1) + 2;
+        int seen = 0;
+        for (TreeItem row = top; row != null && seen < limit; row = nextVisibleRow(row))
+        {
+            seen++;
+            Rectangle bounds = rowBounds(tree, row);
+            if (bounds == null)
+                continue;
+            if (bounds.y >= client.y + client.height)
+                break;
+            bottom = Math.max(bottom, bounds.y + bounds.height);
+        }
+        if (bottom >= client.y + client.height)
+            return;
+        e.gc.setBackground(columnTintBackground());
+        e.gc.fillRectangle(column.x, bottom, column.width, client.y + client.height - bottom);
     }
 
     private Color rowSelectionBackground()
@@ -368,12 +504,36 @@ final class FormTreeInteraction
         return ownedActiveCellBg;
     }
 
+    private Color columnTintBackground()
+    {
+        if (ownedColumnTint == null || ownedColumnTint.isDisposed())
+        {
+            Color base = tree.getBackground();
+            if (!tree.isFocusControl())
+                ownedColumnTint = ListSelectionThemeColors.isDarkList(tree)
+                    ? ListSelectionPalette.rowSelectionBackground(tree, PALETTE)
+                    : ListSelectionPalette.slightlyDarker(base, 0.12);
+            else
+            {
+                RGB background = base.getRGB();
+                RGB accent = tree.getDisplay().getSystemColor(SWT.COLOR_LINK_FOREGROUND).getRGB();
+                double share = 0.12;
+                ownedColumnTint = new Color(tree.getDisplay(),
+                    (int)Math.round(background.red * (1 - share) + accent.red * share),
+                    (int)Math.round(background.green * (1 - share) + accent.green * share),
+                    (int)Math.round(background.blue * (1 - share) + accent.blue * share));
+            }
+        }
+        return ownedColumnTint;
+    }
+
     private void invalidateColors()
     {
         ownedRowBg = disposed(ownedRowBg);
         ownedInactiveRowBg = disposed(ownedInactiveRowBg);
         ownedActiveCellBg = disposed(ownedActiveCellBg);
         ownedFrame = disposed(ownedFrame);
+        ownedColumnTint = disposed(ownedColumnTint);
     }
 
     private static Color disposed(Color color)

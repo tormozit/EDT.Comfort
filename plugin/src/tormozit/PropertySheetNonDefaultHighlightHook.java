@@ -217,7 +217,6 @@ public final class PropertySheetNonDefaultHighlightHook implements IStartup
     {
         if (page == null)
             return;
-        Global.tempLog("propertySuppressionIcon", "page=" + page.getClass().getName()); //$NON-NLS-1$ //$NON-NLS-2$
         watchPage(page);
         Map<?, ?> map = viewModelToView(page);
         if (map == null)
@@ -276,8 +275,6 @@ public final class PropertySheetNonDefaultHighlightHook implements IStartup
         if (viewModel == null)
             return;
         Object model = Global.invoke(component, "getModel"); //$NON-NLS-1$
-        Global.tempLog("propertySuppressionIcon", "link=" + component.getClass().getName() //$NON-NLS-1$ //$NON-NLS-2$
-            + ", model=" + (model != null ? model.getClass().getName() : "null")); //$NON-NLS-1$ //$NON-NLS-2$
         boolean suppressionLink = model != null
             && SUPPRESSION_LINK_MODEL.equals(model.getClass().getName());
         boolean helpLink = model != null && HELP_LINK_MODEL.equals(model.getClass().getName());
@@ -304,10 +301,6 @@ public final class PropertySheetNonDefaultHighlightHook implements IStartup
             return;
         }
         boolean hasSuppressions = suppressionLink && hasSuppressionSettings(model);
-        if (suppressionLink)
-            Global.tempLog("propertySuppressionIcon", "active=" + hasSuppressions //$NON-NLS-1$ //$NON-NLS-2$
-                + ", control=" + light.getClass().getName() + ", decoration=" //$NON-NLS-1$ //$NON-NLS-2$
-                + (Global.invoke(light, "getData", DECORATION_KEY) != null)); //$NON-NLS-1$
         if (hasSuppressions)
         {
             markLink(light, viewModel, SUPPRESSION_DECORATION_TOOLTIP);
@@ -320,8 +313,6 @@ public final class PropertySheetNonDefaultHighlightHook implements IStartup
     private static boolean hasSuppressionSettings(Object model)
     {
         Object resolved = Global.invoke(model, "getSuppressTopObject"); //$NON-NLS-1$
-        Global.tempLog("propertySuppressionIcon", "resolved=" //$NON-NLS-1$ //$NON-NLS-2$
-            + (resolved instanceof Optional<?> optional ? optional.isPresent() : "not-optional")); //$NON-NLS-1$
         return resolved instanceof Optional<?> optional && optional.isPresent()
             && hasSuppression(optional.get());
     }
@@ -330,9 +321,6 @@ public final class PropertySheetNonDefaultHighlightHook implements IStartup
     {
         Object suppressed = Global.invoke(container, "getSuppressed"); //$NON-NLS-1$
         Object suppressions = Global.invoke(container, "getSuppressions"); //$NON-NLS-1$
-        Global.tempLog("propertySuppressionIcon", "container=" + container.getClass().getName() //$NON-NLS-1$ //$NON-NLS-2$
-            + ", suppressed=" + suppressed + ", entries=" //$NON-NLS-1$ //$NON-NLS-2$
-            + (suppressions instanceof java.util.Collection<?> collection ? collection.size() : "unknown")); //$NON-NLS-1$
         if (Boolean.TRUE.equals(suppressed))
             return true;
         if (suppressions instanceof Iterable<?> entries)

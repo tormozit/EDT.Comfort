@@ -1,6 +1,7 @@
 package tormozit;
 
 import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Future;
 
@@ -111,12 +112,23 @@ public final class SyntaxAssistOpenElementHandler extends AbstractHandler
     {
         EObject element = BslSyntaxAssist.elementAt(document, offset);
         Object group = element != null ? BslSyntaxAssist.viewDocumentationPages(element) : null;
-        List<?> pages = BslSyntaxAssist.pagesOf(group);
+        List<?> rawPages = BslSyntaxAssist.pagesOf(group);
+        List<?> pages = rawPages.stream().filter(Objects::nonNull).toList();
         String query = firstMeaningful(selected, BslSyntaxAssist.searchQueryOf(group),
             wordAt(document, offset));
         Global.tempLog(TEMP_TOPIC, "смещение " + offset + ", элемент=" //$NON-NLS-1$ //$NON-NLS-2$
             + (element == null ? "null" : element.eClass().getName()) //$NON-NLS-1$
-            + ", страниц=" + pages.size() + ", запрос=" + query); //$NON-NLS-1$ //$NON-NLS-2$
+            + ", страниц=" + rawPages.size() + ", непустых=" + pages.size() //$NON-NLS-1$ //$NON-NLS-2$
+            + ", запрос=" + query); //$NON-NLS-1$
+        for (int i = 0; i < rawPages.size(); i++)
+        {
+            Object page = rawPages.get(i);
+            Global.tempLog(TEMP_TOPIC, "страница " + i + ": класс=" //$NON-NLS-1$ //$NON-NLS-2$
+                + (page == null ? "null" : page.getClass().getName()) //$NON-NLS-1$
+                + ", заголовок=" + Global.invoke(page, "getExternalTitle") //$NON-NLS-1$ //$NON-NLS-2$
+                + ", ссылка=" + Global.invoke(page, "getLink") //$NON-NLS-1$ //$NON-NLS-2$
+                + ", platformId=" + Global.invoke(page, "getPlatformId")); //$NON-NLS-1$ //$NON-NLS-2$
+        }
         if (display.isDisposed())
             return;
         display.asyncExec(() -> show(pages, query));
