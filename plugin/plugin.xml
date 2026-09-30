@@ -201,6 +201,7 @@
     <startup class="tormozit.FindReplaceDialogHook"/>
     <startup class="tormozit.AnnotationsPreferenceHook"/>
     <startup class="tormozit.CheckDevelopmentPageHook"/>
+    <startup class="tormozit.SuppressionSettingsDialogHook"/>
     <startup class="tormozit.BslLanguageRootPageHook"/>
     <startup class="tormozit.MassiveChecksExemptionHook"/>
     <startup class="tormozit.SchemaPropertiesTabSyncHook"/>
@@ -1839,4 +1840,34 @@
   </extension>
 
 
+  <!-- Свойства дочерней формы в редакторе формы (issue #639). -->
+  <extension point="com._1c.g5.v8.dt.md.ui.granularEditorPages">
+    <page
+        id="tormozit.comfort.childForm.pages.main"
+        class="tormozit.ChildFormMainPage"/>
+  </extension>
+  <extension point="com._1c.g5.v8.dt.md.ui.granularEditorContentPages">
+    <editor editorId="com._1c.g5.v8.dt.form.ui.formEditor">
+      <page
+          pageId="tormozit.comfort.childForm.pages.main">
+        <enablement>
+          <and>
+            <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Native"/>
+            <not>
+              <test property="com._1c.g5.v8.dt.md.ui.editors.commonForm.isCommonFormEditor"/>
+            </not>
+          </and>
+        </enablement>
+      </page>
+    </editor>
+  </extension>
+  <extension point="com._1c.g5.v8.dt.ui.dtEditorDescriptors">
+    <descriptor
+        pageId="tormozit.comfort.childForm.pages.main"
+        class="tormozit.ChildFormMainPageDescriptor">
+      <enablement>
+        <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Native"/>
+      </enablement>
+    </descriptor>
+  </extension>
 </plugin>

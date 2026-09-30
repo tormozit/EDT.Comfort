@@ -1,13 +1,22 @@
 package tormozit;
 
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
+import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
 
+import org.eclipse.core.expressions.Expression;
 import org.eclipse.e4.ui.model.application.ui.basic.MPart;
 import org.eclipse.e4.ui.workbench.modeling.EPartService;
 import org.eclipse.e4.ui.workbench.modeling.EPartService.PartState;
+import org.eclipse.emf.ecore.EClass;
+import org.eclipse.emf.ecore.EClassifier;
+import org.eclipse.emf.ecore.EStructuralFeature;
 import org.eclipse.jface.dialogs.IPageChangedListener;
 import org.eclipse.swt.custom.CTabFolder;
 import org.eclipse.swt.custom.CTabItem;
@@ -27,10 +36,20 @@ import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 
+import com._1c.g5.aef2.standard.definitions.ContainerDefinition;
+import com._1c.g5.aef2.standard.definitions.IDefinition;
+import com._1c.g5.aef2.standard.definitions.SectionDefinition;
+import com._1c.g5.aef2.standard.parameterization.LinkParameterization;
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.form.ui.editor.FormEditor;
 import com._1c.g5.v8.dt.form.ui.editor.FormEditorPage;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
+import com._1c.g5.v8.dt.metadata.mdclass.MdClassPackage;
+import com._1c.g5.v8.dt.ui.aef.definitions.builder.DtSectionDefinitionBuilder;
+import com._1c.g5.v8.dt.ui.editor.aef.definition.IDtGranularEditorManagingDefinition;
+import com._1c.g5.v8.dt.ui.editor.aef.descriptor.DtEditorDescriptorRegistry;
+import com._1c.g5.v8.dt.ui.editor.aef.descriptor.IDtGranularEditorAefPageDescriptor;
+import com.e1c.g5.v8.dt.check.suppress.ui.aef.components.OpenSuppressionSettingsEditorByLinkComponent;
 
 /**
  * Issue 2202: если панели «Свойства» и «Схема» (Outline) стоят в одной группе вкладок,
@@ -40,8 +59,9 @@ import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
  * <p>При активации редактора модуля (standalone {@link BslXtextEditor} либо страница
  * «Модуль» внутри {@link DtGranularEditor}, см. {@link GetRef#getActiveBslEditor}), если
  * активна панель «Свойства» — активировать панель «Схема». При активации редактора формы
- * (страница «Форма», {@link FormEditorPage}), если активна панель «Схема» — активировать
- * панель «Свойства» (симметрично). Обе проверки — только пока обе панели открыты и лежат в
+ * (страница «Форма», {@link FormEditorPage}, или «Основные», {@link ChildFormMainPage}),
+ * если активна панель «Схема» — активировать панель «Свойства» (симметрично).
+ * Обе проверки — только пока обе панели открыты и лежат в
  * одной группе вкладок. Повторные срабатывания активации одного и того же, уже активного
  * редактора (Eclipse присылает {@code partActivated} не только на реальный переход из другой
  * части) не переоткрывают проверку — иначе ручной выбор пользователем панели тут же
@@ -80,6 +100,7 @@ public final class SchemaPropertiesTabSyncHook implements IStartup
     @Override
     public void earlyStartup()
     {
+        MdMainPageHook.earlyStartup();
         Display.getDefault().asyncExec(SchemaPropertiesTabSyncHook::install);
     }
 
@@ -179,9 +200,10 @@ public final class SchemaPropertiesTabSyncHook implements IStartup
             onModuleEditorActivated(editor.getSite().getPage());
         }
         else if (editor instanceof FormEditor formEditor
-            && formEditor.getActivePageInstance() instanceof FormEditorPage)
+            && (formEditor.getActivePageInstance() instanceof FormEditorPage
+                || formEditor.getActivePageInstance() instanceof ChildFormMainPage))
         {
-            // При активации редактора формы (вкладка «Форма»), если активна панель
+            // При активации вкладки «Форма» или «Основные», если активна панель
             // «Схема» — активировать панель «Свойства» (симметрично предыдущему).
             onFormPageActivated(editor.getSite().getPage());
         }
@@ -308,6 +330,176 @@ public final class SchemaPropertiesTabSyncHook implements IStartup
         catch (ReflectiveOperationException | RuntimeException ex)
         {
             // Переключение вкладки — необязательное улучшение UX.
+        }
+    }
+
+    /** Дополняет штатные страницы «Основные» свойством подавления проверок. */
+    private static final class MdMainPageHook
+    {
+        private static final String TEMP_LOG = "mdMainPageSuppression"; //$NON-NLS-1$
+
+        static void earlyStartup()
+        {
+            Global.tempLog(TEMP_LOG, "earlyStartup"); //$NON-NLS-1$
+            Display.getDefault().asyncExec(MdMainPageHook::install);
+        }
+
+        private static void install()
+        {
+            try
+            {
+                // В EDT нет расширения для добавления поля в уже зарегистрированный дескриптор.
+                // Инициализация и чтение реестра выполняются под его собственным монитором.
+                synchronized (DtEditorDescriptorRegistry.class)
+                {
+                    DtEditorDescriptorRegistry registry = DtEditorDescriptorRegistry.INSTANCE;
+                    Field initialized = DtEditorDescriptorRegistry.class.getDeclaredField("initialized"); //$NON-NLS-1$
+                    initialized.setAccessible(true);
+                    if (!initialized.getBoolean(registry))
+                    {
+                        Method init = DtEditorDescriptorRegistry.class.getDeclaredMethod("init"); //$NON-NLS-1$
+                        init.setAccessible(true);
+                        init.invoke(registry);
+                        initialized.setBoolean(registry, true);
+                    }
+
+                    Field descriptorsField = DtEditorDescriptorRegistry.class.getDeclaredField("descriptors"); //$NON-NLS-1$
+                    Field expressionsField = DtEditorDescriptorRegistry.class.getDeclaredField("expressions"); //$NON-NLS-1$
+                    descriptorsField.setAccessible(true);
+                    expressionsField.setAccessible(true);
+                    @SuppressWarnings("unchecked")
+                    Map<String, Collection<IDtGranularEditorAefPageDescriptor>> descriptors =
+                        (Map<String, Collection<IDtGranularEditorAefPageDescriptor>>) descriptorsField.get(registry);
+                    @SuppressWarnings("unchecked")
+                    Map<IDtGranularEditorAefPageDescriptor, Expression> expressions =
+                        (Map<IDtGranularEditorAefPageDescriptor, Expression>) expressionsField.get(registry);
+                    int wrapped = 0;
+                    for (Map.Entry<String, Collection<IDtGranularEditorAefPageDescriptor>> entry : descriptors.entrySet())
+                    {
+                        EStructuralFeature feature = suppressionFeature(entry.getKey());
+                        if (feature == null)
+                            continue;
+                        List<IDtGranularEditorAefPageDescriptor> replacements = new ArrayList<>();
+                        for (IDtGranularEditorAefPageDescriptor descriptor : entry.getValue())
+                        {
+                            if (descriptor instanceof SuppressionDescriptor)
+                            {
+                                replacements.add(descriptor);
+                                continue;
+                            }
+                            SuppressionDescriptor wrapper = new SuppressionDescriptor(descriptor, entry.getKey(), feature);
+                            expressions.put(wrapper, expressions.remove(descriptor));
+                            replacements.add(wrapper);
+                            wrapped++;
+                        }
+                        entry.setValue(replacements);
+                    }
+                    Global.tempLog(TEMP_LOG, "wrapped=" + wrapped); //$NON-NLS-1$
+                }
+            }
+            catch (Throwable error)
+            {
+                Global.tempLogException(TEMP_LOG, "install failed", error); //$NON-NLS-1$
+            }
+        }
+
+        private static EStructuralFeature suppressionFeature(String pageId)
+        {
+            if (pageId == null || !pageId.startsWith("editors.") || !pageId.endsWith(".pages.main")) //$NON-NLS-1$ //$NON-NLS-2$
+                return null;
+            String objectName = pageId.substring("editors.".length(), pageId.length() - ".pages.main".length()); //$NON-NLS-1$ //$NON-NLS-2$
+            for (EClassifier classifier : MdClassPackage.eINSTANCE.getEClassifiers())
+            {
+                if (classifier instanceof EClass objectClass && classifier.getName().equalsIgnoreCase(objectName))
+                    return objectClass.getEStructuralFeature("suppressObject"); //$NON-NLS-1$
+            }
+            return null;
+        }
+
+        private static void addSuppression(IDtGranularEditorManagingDefinition definition,
+            EStructuralFeature feature, String pageId)
+        {
+            if (definition.getPageFeatures().contains(feature))
+            {
+                Global.tempLog(TEMP_LOG, pageId + " already contains property"); //$NON-NLS-1$
+                return;
+            }
+            if (!(definition instanceof ContainerDefinition root))
+                throw new IllegalStateException("Unknown definition type: " + definition.getClass()); //$NON-NLS-1$
+            ContainerDefinition left = root;
+            List<IDefinition> children = root.getChildren();
+            if (!children.isEmpty() && children.get(0) instanceof ContainerDefinition column
+                && !(column instanceof SectionDefinition))
+                left = column;
+            SectionDefinition main = null;
+            for (IDefinition child : left.getChildren())
+            {
+                if (child instanceof SectionDefinition section)
+                {
+                    main = section;
+                    break;
+                }
+            }
+            if (main == null)
+                throw new IllegalStateException("Main section not found: " + pageId); //$NON-NLS-1$
+
+            SectionDefinition addedRows = new SectionDefinition("Основные"); //$NON-NLS-1$
+            DtSectionDefinitionBuilder.builder(() -> addedRows, ignored -> {}, null)
+                .separator()
+                .element(feature)
+                .setup()
+                .component(OpenSuppressionSettingsEditorByLinkComponent.class, LinkParameterization.OPEN)
+                .endSetup()
+                .endSection();
+            for (IDefinition row : addedRows.getChildren())
+                main.addDefinition(row);
+            Global.tempLog(TEMP_LOG, pageId + " added: " + feature.getName()); //$NON-NLS-1$
+        }
+
+        private static final class SuppressionDescriptor implements IDtGranularEditorAefPageDescriptor
+        {
+            private final IDtGranularEditorAefPageDescriptor delegate;
+            private final String pageId;
+            private final EStructuralFeature feature;
+            private boolean added;
+
+            private SuppressionDescriptor(IDtGranularEditorAefPageDescriptor delegate, String pageId,
+                EStructuralFeature feature)
+            {
+                this.delegate = delegate;
+                this.pageId = pageId;
+                this.feature = feature;
+            }
+
+            @Override
+            public synchronized IDtGranularEditorManagingDefinition getDefinition()
+            {
+                Global.tempLog(TEMP_LOG, pageId + " getDefinition"); //$NON-NLS-1$
+                IDtGranularEditorManagingDefinition definition;
+                try
+                {
+                    definition = delegate.getDefinition();
+                }
+                catch (RuntimeException | Error error)
+                {
+                    Global.tempLogException(TEMP_LOG, pageId + " getDefinition failed", error); //$NON-NLS-1$
+                    throw error;
+                }
+                if (!added)
+                {
+                    added = true;
+                    try
+                    {
+                        addSuppression(definition, feature, pageId);
+                    }
+                    catch (RuntimeException | Error error)
+                    {
+                        // Ошибка нашего дополнения не должна ломать штатную страницу EDT.
+                        Global.tempLogException(TEMP_LOG, pageId + " addSuppression failed", error); //$NON-NLS-1$
+                    }
+                }
+                return definition;
+            }
         }
     }
 }

@@ -3,6 +3,7 @@ package tormozit;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.WeakHashMap;
 
@@ -43,7 +44,10 @@ import com._1c.g5.v8.dt.metadata.mdclass.AdjustableBoolean;
  * <li>поля-ссылки «Открыть» с ограничением по ролям («Использование» команды формы,
  * «Просмотр» и «Редактирование» реквизита формы, «Пользовательская видимость» элемента) —
  * их значение {@code AdjustableBoolean} по умолчанию разрешено всем ролям. Цвет самой
- * ссылки не меняем: «Открыть» должно читаться как гиперссылка.</li>
+ * ссылки не меняем: «Открыть» должно читаться как гиперссылка;</li>
+ * <li>«Подавление проверок» — если подавлен весь объект или хотя бы одна проверка в нём
+ * либо во вложенном элементе;</li>
+ * <li>«Справка» — если для объекта создана справка.</li>
  * </ul>
  */
 public final class PropertySheetNonDefaultHighlightHook implements IStartup
@@ -53,6 +57,10 @@ public final class PropertySheetNonDefaultHighlightHook implements IStartup
     private static final String VALUE_LISTENER = "com._1c.g5.aef2.models.value.IValueListener"; //$NON-NLS-1$
     private static final String DECORATION_TOOLTIP = "Значение не Авто"; //$NON-NLS-1$
     private static final String LINK_DECORATION_TOOLTIP = "Значение не по умолчанию"; //$NON-NLS-1$
+    private static final String SUPPRESSION_DECORATION_TOOLTIP = "Есть подавления проверок"; //$NON-NLS-1$
+    private static final String SUPPRESSION_LINK_MODEL = "com.e1c.g5.v8.dt.check.suppress.ui.internal.aef.models.BmSuppressionSettingsLinkModel"; //$NON-NLS-1$
+    private static final String HELP_DECORATION_TOOLTIP = "Справка задана"; //$NON-NLS-1$
+    private static final String HELP_LINK_MODEL = "com._1c.g5.v8.dt.md.help.ui.aef.model.BmOpenMdHelpModel"; //$NON-NLS-1$
     private static final String LINK_VIEW_MODEL = "LinkViewModel"; //$NON-NLS-1$
     /** Глубина обхода дерева компонентов сцены: поля лежат внутри секций и групп. */
     private static final int COMPONENT_SCAN_DEPTH = 12;
@@ -107,6 +115,7 @@ public final class PropertySheetNonDefaultHighlightHook implements IStartup
             @Override public void windowDeactivated(IWorkbenchWindow w) {}
             @Override public void windowClosed(IWorkbenchWindow w) {}
         });
+        Display.getDefault().addFilter(SWT.Activate, event -> scheduleSync());
         scheduleSync();
     }
 
@@ -208,6 +217,7 @@ public final class PropertySheetNonDefaultHighlightHook implements IStartup
     {
         if (page == null)
             return;
+        Global.tempLog("propertySuppressionIcon", "page=" + page.getClass().getName()); //$NON-NLS-1$ //$NON-NLS-2$
         watchPage(page);
         Map<?, ?> map = viewModelToView(page);
         if (map == null)
@@ -224,11 +234,11 @@ public final class PropertySheetNonDefaultHighlightHook implements IStartup
             wireCombo(light);
             applyCombo(vm, light);
         }
-        applyAdjustableLinks(page, liveLinks);
+        applyDecoratedLinks(page, liveLinks);
     }
 
     // -----------------------------------------------------------------------
-    // Поля-ссылки «Открыть» с ограничением по ролям (AdjustableBoolean)
+    // Поля-ссылки «Открыть» с ограничением по ролям, подавлениями и справкой
     // -----------------------------------------------------------------------
 
     /**
@@ -237,7 +247,7 @@ public final class PropertySheetNonDefaultHighlightHook implements IStartup
      * а по карте {@code viewModelToView} находится сам {@code Hyperlink} «Открыть».
      * Карты недостаточно: значение свойства известно модели поля, а не модели представления.
      */
-    private static void applyAdjustableLinks(Object page, Set<Object> liveLinks)
+    private static void applyDecoratedLinks(Object page, Set<Object> liveLinks)
     {
         Object scene = Global.invoke(page, "getScene"); //$NON-NLS-1$
         Object renderer = scene != null ? Global.invoke(scene, "getRenderer") : null; //$NON-NLS-1$
@@ -251,7 +261,7 @@ public final class PropertySheetNonDefaultHighlightHook implements IStartup
     {
         if (component == null || depth > COMPONENT_SCAN_DEPTH)
             return;
-        applyAdjustableComponent(component, renderer, liveLinks);
+        applyDecoratedLinkComponent(component, renderer, liveLinks);
         Object children = Global.invoke(component, "getComponents"); //$NON-NLS-1$
         if (!(children instanceof Iterable<?> list))
             return;
@@ -259,28 +269,91 @@ public final class PropertySheetNonDefaultHighlightHook implements IStartup
             visitComponent(child, renderer, liveLinks, depth + 1);
     }
 
-    private static void applyAdjustableComponent(Object component, Object renderer,
+    private static void applyDecoratedLinkComponent(Object component, Object renderer,
         Set<Object> liveLinks)
     {
         Object viewModel = linkViewModel(component);
         if (viewModel == null)
             return;
         Object model = Global.invoke(component, "getModel"); //$NON-NLS-1$
-        Object value = model != null ? Global.invoke(model, "get") : null; //$NON-NLS-1$
-        if (!(value instanceof AdjustableBoolean adjustable))
+        Global.tempLog("propertySuppressionIcon", "link=" + component.getClass().getName() //$NON-NLS-1$ //$NON-NLS-2$
+            + ", model=" + (model != null ? model.getClass().getName() : "null")); //$NON-NLS-1$ //$NON-NLS-2$
+        boolean suppressionLink = model != null
+            && SUPPRESSION_LINK_MODEL.equals(model.getClass().getName());
+        boolean helpLink = model != null && HELP_LINK_MODEL.equals(model.getClass().getName());
+        Object value = model != null && !suppressionLink
+            ? Global.invoke(model, "get") : null; //$NON-NLS-1$
+        AdjustableBoolean adjustable = value instanceof AdjustableBoolean a ? a : null;
+        if (adjustable == null && !suppressionLink && !helpLink)
             return;
-        wireModel(model);
+        if (adjustable != null || helpLink)
+            wireModel(model);
         Object light = Global.invoke(
             PropertySheetControlInterop.viewForViewModel(renderer, viewModel), "getNativeControl"); //$NON-NLS-1$
         if (light == null || isDisposed(light))
             return;
         liveLinks.add(light);
-        if (FormEditorHook.isDefaultAdjustable(adjustable))
+        if (adjustable != null && !FormEditorHook.isDefaultAdjustable(adjustable))
         {
-            restoreLink(light, viewModel);
+            markLink(light, viewModel, LINK_DECORATION_TOOLTIP);
             return;
         }
-        markLink(light, viewModel);
+        if (helpLink && value != null)
+        {
+            markLink(light, viewModel, HELP_DECORATION_TOOLTIP);
+            return;
+        }
+        boolean hasSuppressions = suppressionLink && hasSuppressionSettings(model);
+        if (suppressionLink)
+            Global.tempLog("propertySuppressionIcon", "active=" + hasSuppressions //$NON-NLS-1$ //$NON-NLS-2$
+                + ", control=" + light.getClass().getName() + ", decoration=" //$NON-NLS-1$ //$NON-NLS-2$
+                + (Global.invoke(light, "getData", DECORATION_KEY) != null)); //$NON-NLS-1$
+        if (hasSuppressions)
+        {
+            markLink(light, viewModel, SUPPRESSION_DECORATION_TOOLTIP);
+            return;
+        }
+        restoreLink(light, viewModel);
+    }
+
+    /** Учитывает подавление объекта и проверки в самом объекте и его вложенных элементах. */
+    private static boolean hasSuppressionSettings(Object model)
+    {
+        Object resolved = Global.invoke(model, "getSuppressTopObject"); //$NON-NLS-1$
+        Global.tempLog("propertySuppressionIcon", "resolved=" //$NON-NLS-1$ //$NON-NLS-2$
+            + (resolved instanceof Optional<?> optional ? optional.isPresent() : "not-optional")); //$NON-NLS-1$
+        return resolved instanceof Optional<?> optional && optional.isPresent()
+            && hasSuppression(optional.get());
+    }
+
+    private static boolean hasSuppression(Object container)
+    {
+        Object suppressed = Global.invoke(container, "getSuppressed"); //$NON-NLS-1$
+        Object suppressions = Global.invoke(container, "getSuppressions"); //$NON-NLS-1$
+        Global.tempLog("propertySuppressionIcon", "container=" + container.getClass().getName() //$NON-NLS-1$ //$NON-NLS-2$
+            + ", suppressed=" + suppressed + ", entries=" //$NON-NLS-1$ //$NON-NLS-2$
+            + (suppressions instanceof java.util.Collection<?> collection ? collection.size() : "unknown")); //$NON-NLS-1$
+        if (Boolean.TRUE.equals(suppressed))
+            return true;
+        if (suppressions instanceof Iterable<?> entries)
+        {
+            for (Object entry : entries)
+            {
+                if (entry instanceof Map.Entry<?, ?> suppression
+                    && Boolean.TRUE.equals(suppression.getValue()))
+                    return true;
+            }
+        }
+        Object containments = Global.invoke(container, "getContainments"); //$NON-NLS-1$
+        if (containments instanceof Iterable<?> children)
+        {
+            for (Object child : children)
+            {
+                if (hasSuppression(child))
+                    return true;
+            }
+        }
+        return false;
     }
 
     /** Модель представления самого поля-ссылки — {@code null}, если компонент не ссылка. */
@@ -303,10 +376,10 @@ public final class PropertySheetNonDefaultHighlightHook implements IStartup
      * (к тому же его пришлось бы восстанавливать после каждого наведения мыши — штатный
      * {@code HyperlinkGroup} возвращает свой цвет при уходе курсора).
      */
-    private static void markLink(Object light, Object viewModel)
+    private static void markLink(Object light, Object viewModel, String tooltip)
     {
         MARKED_LINKS.add(light);
-        showDecorationIfNoError(viewModel, light, LINK_DECORATION_TOOLTIP);
+        showDecorationIfNoError(viewModel, light, tooltip);
     }
 
     private static void restoreLink(Object light, Object viewModel)

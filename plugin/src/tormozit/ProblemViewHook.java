@@ -16,6 +16,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 import org.eclipse.core.commands.Command;
+import org.eclipse.core.commands.ExecutionEvent;
 import org.eclipse.core.commands.ExecutionException;
 import org.eclipse.core.commands.IExecutionListener;
 import org.eclipse.core.commands.NotHandledException;
@@ -28,9 +29,11 @@ import org.eclipse.core.resources.ResourcesPlugin;
 import org.eclipse.core.runtime.Adapters;
 import org.eclipse.core.runtime.CoreException;
 import org.eclipse.core.runtime.ICoreRunnable;
+import org.eclipse.core.runtime.Platform;
 import org.eclipse.core.runtime.jobs.IJobChangeEvent;
 import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.core.runtime.jobs.JobChangeAdapter;
+import org.eclipse.emf.ecore.EStructuralFeature;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.e4.ui.model.application.MApplication;
 import org.eclipse.e4.ui.model.application.descriptor.basic.MPartDescriptor;
@@ -61,6 +64,8 @@ import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.TreeColumn;
 import org.eclipse.swt.widgets.TreeItem;
 import org.eclipse.ui.IEditorPart;
+import org.eclipse.ui.IEditorReference;
+import org.eclipse.ui.IPageLayout;
 import org.eclipse.ui.IPartListener2;
 import org.eclipse.ui.ISelectionListener;
 import org.eclipse.ui.ISelectionService;
@@ -74,11 +79,19 @@ import org.eclipse.ui.IWorkbenchPart;
 import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
+import org.eclipse.ui.PartInitException;
 import org.eclipse.ui.commands.ICommandService;
 import org.eclipse.ui.dialogs.PreferencesUtil;
+import org.eclipse.ui.handlers.HandlerUtil;
 import org.eclipse.ui.handlers.RegistryToggleState;
 
 import com._1c.g5.v8.bm.core.IBmObject;
+import com._1c.g5.v8.dt.core.platform.IBmModelManager;
+import com._1c.g5.v8.dt.core.platform.IV8Project;
+import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
+import com._1c.g5.v8.dt.md.MdUtil;
+import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
+import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com._1c.g5.v8.derived.IDerivedDataManager;
 import com._1c.g5.v8.dt.core.platform.IDerivedDataManagerProvider;
 import com._1c.g5.v8.dt.validation.marker.IMarkerInfo;
@@ -93,7 +106,10 @@ import com._1c.g5.v8.dt.validation.marker.v2.IMarkerManagerV2;
 import com._1c.g5.v8.dt.validation.marker.v2.IMarkerReader;
 import com.e1c.g5.v8.dt.check.settings.CheckUid;
 import com.e1c.g5.v8.dt.check.settings.ICheckRepository;
+import com.e1c.g5.v8.dt.check.settings.ISuppressSettingsManager;
 import com.e1c.g5.v8.dt.check.settings.IssueType;
+
+import org.osgi.framework.Bundle;
 
 /**
  * Панель проблем конфигурации ({@code com._1c.g5.v8.dt.ui.problemView}), issue 401.
@@ -255,6 +271,7 @@ public final class ProblemViewHook implements IStartup
         });
 
         listenReplaceListFilters(workbench);
+        SuppressionNotification.install(workbench);
         syncUpdateGateCommandState(ComfortSettings.isProblemViewUpdateGateEnabled());
 
         Debug.log("install: installed"); //$NON-NLS-1$
@@ -3309,6 +3326,325 @@ public final class ProblemViewHook implements IStartup
             return marker;
         Object marker = Global.invoke(element, "getMarker"); //$NON-NLS-1$
         return marker instanceof Marker m ? m : null;
+    }
+
+    /** Уведомление о модельных подавлениях, которые не видны сразу в тексте модуля. */
+    private static final class SuppressionNotification implements IExecutionListener
+    {
+        private List<Marker> pending = List.of();
+
+        static void install(IWorkbench workbench)
+        {
+            ICommandService commands = workbench.getService(ICommandService.class);
+            if (commands != null)
+                commands.addExecutionListener(new SuppressionNotification());
+        }
+
+        @Override
+        public void preExecute(String commandId, ExecutionEvent event)
+        {
+            if (!SUPPRESS_ISSUE_COMMAND_ID.equals(commandId))
+                return;
+            pending = List.of();
+            IWorkbenchPart part = HandlerUtil.getActivePart(event);
+            java.util.stream.Stream<?> selected = ProblemViewMarkers.selectedMarkers(part);
+            if (selected != null)
+                pending = selected.filter(Marker.class::isInstance).map(Marker.class::cast)
+                    .filter(com._1c.g5.v8.dt.validation.marker.BmObjectMarker.class::isInstance)
+                    .toList();
+        }
+
+        @Override
+        public void postExecuteSuccess(String commandId, Object returnValue)
+        {
+            if (!SUPPRESS_ISSUE_COMMAND_ID.equals(commandId))
+                return;
+            List<Marker> markers = pending;
+            pending = List.of();
+            if (markers.isEmpty())
+                return;
+            ICheckRepository checks = Global.getOsgiService(ICheckRepository.class);
+            if (checks == null)
+                return;
+            for (Marker marker : markers)
+            {
+                try
+                {
+                    IProject project = marker.getProject();
+                    CheckUid uid = project != null
+                        ? checks.getUidForShortUid(marker.getCheckId(), project) : null;
+                    if (uid == null)
+                        continue;
+                    String targetFqn = marker.provideObject((java.util.function.Function<EObject, String>)
+                        object -> object instanceof IBmObject bm && bm.bmGetTopObject() != null
+                            ? bm.bmGetTopObject().bmGetFqn() : null);
+                    String containmentFqn = marker.provideObject((java.util.function.Function<EObject, String>)
+                        object -> object instanceof IBmObject bm ? containmentFqn(bm) : null);
+                    if (targetFqn != null)
+                        notifyWhenApplied(marker, project, targetFqn, containmentFqn, uid, 0);
+                }
+                catch (RuntimeException e)
+                {
+                    Global.tempLog("problemSuppression", "Не удалось определить место подавления: " + e); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+            }
+        }
+
+        private static void notifyWhenApplied(Marker marker, IProject project, String targetFqn,
+            String containmentFqn, CheckUid uid, int attempt)
+        {
+            Display.getDefault().timerExec(attempt == 0 ? 0 : 100, () ->
+            {
+                Boolean applied = Boolean.FALSE;
+                try
+                {
+                    ISuppressSettingsManager suppressions = Global.getOsgiService(ISuppressSettingsManager.class);
+                    if (suppressions != null)
+                        applied = marker.provideObject((java.util.function.Function<EObject, Boolean>) object ->
+                            suppressions.isSuppressed(object, uid.getCheckId(), uid.getContributorId()));
+                }
+                catch (RuntimeException e)
+                {
+                    Global.tempLog("problemSuppression", "Ошибка проверки применения: " + e); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+                Global.tempLog("problemSuppression", "Применение: попытка=" + attempt //$NON-NLS-1$ //$NON-NLS-2$
+                    + ", объект=" + targetFqn + ", проверка=" + uid //$NON-NLS-1$ //$NON-NLS-2$
+                    + ", подтверждено=" + applied); //$NON-NLS-1$
+                if (Boolean.TRUE.equals(applied))
+                    show(marker.getMessage(), project, targetFqn, containmentFqn, uid);
+                else if (attempt < 20)
+                    notifyWhenApplied(marker, project, targetFqn, containmentFqn, uid, attempt + 1);
+            });
+        }
+
+        private static String containmentFqn(IBmObject object)
+        {
+            try
+            {
+                Bundle bundle = Platform.getBundle("com.e1c.g5.v8.dt.check.suppress"); //$NON-NLS-1$
+                Class<?> util = bundle.loadClass("com.e1c.g5.v8.dt.check.suppress.util.SuppressUtil"); //$NON-NLS-1$
+                return (String)util.getMethod("getContainmentFqnByTarget", IBmObject.class) //$NON-NLS-1$
+                    .invoke(null, object);
+            }
+            catch (ReflectiveOperationException | RuntimeException e)
+            {
+                Global.tempLog("problemSuppression", "Не удалось определить элемент: " + e); //$NON-NLS-1$ //$NON-NLS-2$
+                return null;
+            }
+        }
+
+        private static void show(String problem, IProject project, String targetFqn,
+            String containmentFqn, CheckUid uid)
+        {
+            String objectName = MdTypeMapping.bmFqnToRuFullName(targetFqn);
+            String message = "Подавлена проверка: " + problem + "\nОбъект: " //$NON-NLS-1$ //$NON-NLS-2$
+                + (objectName != null ? objectName : targetFqn);
+            ToastNotification.show("Подавление проверки", message, 5_000, //$NON-NLS-1$
+                () -> openDialog(project, targetFqn, containmentFqn, uid),
+                "Открыть подавление"); //$NON-NLS-1$
+        }
+
+        private static void openDialog(IProject project, String targetFqn, String containmentFqn,
+            CheckUid uid)
+        {
+            Global.tempLog("problemSuppression", "Открытие: проект=" + project.getName() //$NON-NLS-1$ //$NON-NLS-2$
+                + ", объект=" + targetFqn + ", элемент=" + containmentFqn + ", проверка=" + uid); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            try
+            {
+                IV8ProjectManager projects = Global.getOsgiService(IV8ProjectManager.class);
+                IBmModelManager models = Global.getOsgiService(IBmModelManager.class);
+                ICheckRepository checks = Global.getOsgiService(ICheckRepository.class);
+                IV8Project v8Project = projects != null ? projects.getProject(project) : null;
+                if (v8Project == null || models == null || checks == null)
+                    throw new IllegalStateException("Службы EDT недоступны"); //$NON-NLS-1$
+                EObject target = GoToDefinition.resolveEObjectByQualifiedName(targetFqn, v8Project);
+                if (!(target instanceof MdObject))
+                    throw new IllegalStateException("Объект настройки не найден: " + targetFqn); //$NON-NLS-1$
+                EStructuralFeature feature = target.eClass().getEAllStructuralFeatures().stream()
+                    .filter(MdUtil::isSuppressSettingsFeature).findFirst().orElse(null);
+                if (feature == null)
+                    throw new IllegalStateException("Свойство подавлений не найдено: " + targetFqn); //$NON-NLS-1$
+                IWorkbenchPage editorPage = activateOpenEditor(project, targetFqn);
+                Bundle ui = Platform.getBundle("com.e1c.g5.v8.dt.check.suppress.ui"); //$NON-NLS-1$
+                Bundle mdUi = Platform.getBundle("com._1c.g5.v8.dt.md.ui"); //$NON-NLS-1$
+                if (ui == null || mdUi == null)
+                    throw new IllegalStateException("Бандл диалога подавлений недоступен"); //$NON-NLS-1$
+                Object model = Global.newInstance(ui.loadClass(
+                    "com.e1c.g5.v8.dt.check.suppress.ui.internal.aef.models.BmSuppressionSettingsLinkModel"), //$NON-NLS-1$
+                    target, feature, v8Project, models, checks);
+                if (model == null)
+                    throw new IllegalStateException("Модель диалога подавлений не создана"); //$NON-NLS-1$
+                Object component = Global.newInstance(ui.loadClass(
+                    "com.e1c.g5.v8.dt.check.suppress.ui.internal.aef.components.SuppressionSettingsDialogComponent"), //$NON-NLS-1$
+                    model);
+                Object engine = createEngine(mdUi);
+                if (component == null || engine == null)
+                    throw new IllegalStateException("Компонент диалога подавлений не создан"); //$NON-NLS-1$
+                installEngineDisposal(mdUi, component, engine, () ->
+                {
+                    if (editorPage != null)
+                        ConfigSearchResultsHook.PropertyFieldFocus.scheduleExact(editorPage, target, feature);
+                });
+                Object scene = Global.invoke(engine, "showDialog", component, model); //$NON-NLS-1$
+                if (scene == null)
+                {
+                    Global.invokeVoid(engine, "dispose"); //$NON-NLS-1$
+                    throw new IllegalStateException("EDT не создала сцену диалога"); //$NON-NLS-1$
+                }
+                selectSuppression(component, model, uid, containmentFqn, 0);
+            }
+            catch (ReflectiveOperationException | RuntimeException e)
+            {
+                Global.tempLog("problemSuppression", "Не удалось открыть диалог: " + e); //$NON-NLS-1$ //$NON-NLS-2$
+                ToastNotification.show("Подавление проверки", //$NON-NLS-1$
+                    "Не удалось открыть настройку подавления: " + e.getMessage(), 8_000); //$NON-NLS-1$
+            }
+        }
+
+        /** Показывает свойство только через уже открытый редактор объекта того же проекта. */
+        private static IWorkbenchPage activateOpenEditor(IProject project, String targetFqn)
+        {
+            IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+            if (window == null)
+                return null;
+            for (IWorkbenchPage page : window.getPages())
+            {
+                for (IEditorReference ref : page.getEditorReferences())
+                {
+                    IEditorPart editor = ref.getEditor(false);
+                    if (!(editor instanceof DtGranularEditor<?>)
+                        || !project.equals(Global.getActiveProject(editor, false)))
+                        continue;
+                    IFile editorFile = editor.getEditorInput().getAdapter(IFile.class);
+                    String editorRef = editorFile != null
+                        ? GoToDefinition.fullNameFromFile(editorFile) : null;
+                    if (editorRef == null)
+                        editorRef = GetRef.getRefFromEditor(editor);
+                    String editorFqn = editorRef != null
+                        ? MdTypeMapping.anyFullNameToBmFqn(editorRef) : null;
+                    if (editorFqn == null || !targetFqn.equalsIgnoreCase(editorFqn))
+                        continue;
+                    try
+                    {
+                        page.activate(editor);
+                        page.showView(IPageLayout.ID_PROP_SHEET);
+                        Global.tempLog("problemSuppression", //$NON-NLS-1$
+                            "Активирован открытый редактор: " + editorRef); //$NON-NLS-1$
+                        return page;
+                    }
+                    catch (PartInitException | RuntimeException e)
+                    {
+                        Global.tempLog("problemSuppression", //$NON-NLS-1$
+                            "Не удалось показать свойства редактора: " + e); //$NON-NLS-1$
+                        return null;
+                    }
+                }
+            }
+            Global.tempLog("problemSuppression", //$NON-NLS-1$
+                "Открытый редактор объекта не найден: " + targetFqn); //$NON-NLS-1$
+            return null;
+        }
+
+        private static void installEngineDisposal(Bundle bundle, Object component, Object engine,
+            Runnable afterClose)
+            throws ReflectiveOperationException
+        {
+            Class<?> listenerClass = bundle.loadClass("com._1c.g5.aef2.events.IEventChannelListener"); //$NON-NLS-1$
+            InvocationHandler handler = (proxy, method, args) ->
+            {
+                if ("eventReceived".equals(method.getName()) && args != null && args.length == 1) //$NON-NLS-1$
+                {
+                    String eventName = args[0].getClass().getSimpleName();
+                    if ("CommitEvent".equals(eventName) || "DiscardEvent".equals(eventName)) //$NON-NLS-1$ //$NON-NLS-2$
+                    {
+                        Global.invokeVoid(engine, "dispose"); //$NON-NLS-1$
+                        Display.getDefault().asyncExec(afterClose);
+                    }
+                }
+                return null;
+            };
+            Object listener = Proxy.newProxyInstance(listenerClass.getClassLoader(),
+                new Class<?>[] { listenerClass }, handler);
+            Global.invokeVoid(component, "addListener", listener); //$NON-NLS-1$
+        }
+
+        private static Object createEngine(Bundle bundle) throws ReflectiveOperationException
+        {
+            Object engine = Global.invoke(bundle.loadClass("com._1c.g5.aef2.engines.EngineFactory"), //$NON-NLS-1$
+                "createEngine", "Comfort.SuppressionDialog"); //$NON-NLS-1$ //$NON-NLS-2$
+            if (engine == null)
+                return null;
+            registerRenderer(bundle, engine, "com._1c.g5.v8.dt.md.ui.aef.swt.MdSwtRenderer", //$NON-NLS-1$
+                "com._1c.g5.aef2.swt.renderers.SwtRenderingParameters"); //$NON-NLS-1$
+            registerRenderer(bundle, engine, "com._1c.g5.v8.dt.ui.aef.swt.SwtMdDialogRenderer", //$NON-NLS-1$
+                "com._1c.g5.aef2.swt.renderers.SwtDialogRenderingParameters"); //$NON-NLS-1$
+            registerRenderer(bundle, engine, "com._1c.g5.v8.dt.md.ui.aef.lwt.MdLwtRenderer", //$NON-NLS-1$
+                "com._1c.g5.aef2.lwt.LwtRenderingParameters"); //$NON-NLS-1$
+            registerRenderer(bundle, engine, "com._1c.g5.v8.dt.ui.aef.lwt.LwtMdDialogRenderer", //$NON-NLS-1$
+                "com._1c.g5.aef2.lwt.LwtDialogRenderingParameters"); //$NON-NLS-1$
+            Object heavy = Global.invoke(bundle.loadClass("com._1c.g5.aef2.utils.Aef2Utils"), //$NON-NLS-1$
+                "areHeavyControlsPreferred"); //$NON-NLS-1$
+            Class<?> dialogRenderer = bundle.loadClass(Boolean.TRUE.equals(heavy)
+                ? "com._1c.g5.v8.dt.ui.aef.swt.SwtMdDialogRenderer" //$NON-NLS-1$
+                : "com._1c.g5.v8.dt.ui.aef.lwt.LwtMdDialogRenderer"); //$NON-NLS-1$
+            Global.invoke(engine, "setDialogRenderer", dialogRenderer); //$NON-NLS-1$
+            return engine;
+        }
+
+        private static void registerRenderer(Bundle bundle, Object engine, String renderer,
+            String parameters) throws ReflectiveOperationException
+        {
+            Global.invoke(engine, "registerRenderer", bundle.loadClass(renderer), //$NON-NLS-1$
+                bundle.loadClass(parameters));
+        }
+
+        private static void selectSuppression(Object component, Object model, CheckUid uid,
+            String containmentFqn, int attempt)
+        {
+            Display.getDefault().timerExec(attempt == 0 ? 0 : 100, () ->
+            {
+                Object tree = Global.getField(component, "treeComponent"); //$NON-NLS-1$
+                Object provider = Global.invoke(model, "getSuppressionsProvider"); //$NON-NLS-1$
+                String fqn = containmentFqn != null ? containmentFqn
+                    : (String)Global.invoke(model, "getSuppressTopObjectFqn"); //$NON-NLS-1$
+                Object entry = suppressionEntry(provider, fqn, uid);
+                Global.tempLog("problemSuppression", "Выделение: попытка=" + attempt //$NON-NLS-1$ //$NON-NLS-2$
+                    + ", fqn=" + fqn + ", запись=" + (entry != null)); //$NON-NLS-1$ //$NON-NLS-2$
+                if (tree != null && entry != null)
+                {
+                    boolean modelSelected = Global.invokeVoid(model, "setSelection", entry); //$NON-NLS-1$
+                    boolean treeSelected = Global.invokeVoid(tree, "setSelection", List.of(entry)); //$NON-NLS-1$
+                    Global.tempLog("problemSuppression", "Выделение: модель=" + modelSelected //$NON-NLS-1$ //$NON-NLS-2$
+                        + ", дерево=" + treeSelected); //$NON-NLS-1$
+                }
+                else if (attempt < 30)
+                    selectSuppression(component, model, uid, containmentFqn, attempt + 1);
+                else
+                    ToastNotification.show("Подавление проверки", //$NON-NLS-1$
+                        "Диалог открыт, но добавленную проверку не удалось выделить", 8_000); //$NON-NLS-1$
+            });
+        }
+
+        private static Object suppressionEntry(Object provider, String fqn, CheckUid uid)
+        {
+            if (provider == null || fqn == null)
+                return null;
+            try
+            {
+                java.lang.reflect.Method method = provider.getClass().getMethod("getSuppressions", String.class); //$NON-NLS-1$
+                method.setAccessible(true);
+                Object entries = method.invoke(provider, fqn);
+                return entries instanceof Map<?, ?> map ? map.get(uid) : null;
+            }
+            catch (ReflectiveOperationException e)
+            {
+                Global.tempLog("problemSuppression", "Не удалось найти запись: " + e); //$NON-NLS-1$ //$NON-NLS-2$
+                return null;
+            }
+        }
+
+        @Override public void postExecuteFailure(String commandId, ExecutionException exception) { pending = List.of(); }
+        @Override public void notHandled(String commandId, NotHandledException exception) { pending = List.of(); }
     }
 
     /** Имя класса объекта для журнала. */

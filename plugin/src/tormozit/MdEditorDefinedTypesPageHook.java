@@ -341,7 +341,12 @@ public final class MdEditorDefinedTypesPageHook implements IStartup
             });
 
             Composite tableHost = new Composite(host, SWT.NONE);
-            tableHost.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true, 2, 1));
+            GridData tableData = new GridData(SWT.FILL, SWT.FILL, true, true, 2, 1);
+            // Предпочтительный размер таблицы (все строки списка) не должен раздувать страницу:
+            // форма редактора прокручивается по размеру содержимого, а таблица прокручивается сама.
+            tableData.heightHint = 100;
+            tableData.widthHint = 100;
+            tableHost.setLayoutData(tableData);
             TableColumnLayout tableLayout = new TableColumnLayout();
             tableHost.setLayout(tableLayout);
 
