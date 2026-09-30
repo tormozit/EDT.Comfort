@@ -94,6 +94,7 @@ import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com._1c.g5.v8.derived.IDerivedDataManager;
 import com._1c.g5.v8.dt.core.platform.IDerivedDataManagerProvider;
+import com._1c.g5.v8.dt.validation.marker.DelayedMarkerUpdateListener;
 import com._1c.g5.v8.dt.validation.marker.IMarkerInfo;
 import com._1c.g5.v8.dt.validation.marker.IMarkerManager;
 import com._1c.g5.v8.dt.validation.marker.IMarkerUpdateListener;
@@ -197,6 +198,7 @@ public final class ProblemViewHook implements IStartup
     private static final String SCOPE_CURRENT_OBJECT = "CURRENT_OBJECT"; //$NON-NLS-1$
     private static final String SCOPE_CURRENT_ELEMENT = "CURRENT_ELEMENT"; //$NON-NLS-1$
     private static final String SCOPE_CURRENT_PROJECT = "CURRENT_PROJECT"; //$NON-NLS-1$
+    private static final String SCOPE_SUBSYSTEM_FILTER = "SUBSYSTEM_FILTER"; //$NON-NLS-1$
     /** Режим без отбора по области — им же подписывается включённое «Показывать все». */
     private static final String SCOPE_ALL = "ALL"; //$NON-NLS-1$
 
@@ -534,7 +536,7 @@ public final class ProblemViewHook implements IStartup
     }
 
     /**
-     * Тумблер тулбара: выключить заслонку — сразу отдать панели всё, что ещё держали.
+     * Тумблер тулбара: выключить заслонку — перечитать дерево по текущему отбору.
      * Включить — следующее событие снова идёт через сверку.
      */
     static void applyUpdateGateEnabled(boolean enabled)
@@ -1151,6 +1153,15 @@ public final class ProblemViewHook implements IStartup
         /** Отбор панели, снятый в UI-потоке: в потоке события его строить нельзя. */
         private volatile MarkerFilter filterSnapshot;
 
+        /** Отбор по подсистемам: его маркерные события всегда идут штатному слушателю. */
+        private volatile boolean subsystemFilterActive = true;
+
+        /** В этих областях заслонка не может надёжно определить затронутые объекты. */
+        private boolean bypassUpdateGate()
+        {
+            return subsystemFilterActive || ProblemViewComfortScope.mode() != ProblemViewComfortScope.Mode.NONE;
+        }
+
         /**
          * Последнее событие, ожидающее сверки. Сверка его забирает: иначе поле остаётся
          * заполненным навсегда и каждое следующее событие выглядит как вытеснившее несверенное.
@@ -1200,8 +1211,13 @@ public final class ProblemViewHook implements IStartup
         @Override
         public void handleMarkersChanged(MarkersChangedEvent event)
         {
+            boolean bypass = bypassUpdateGate();
+            Global.tempLog("issue647", "событие маркеров: проекты=" + changedProjectNames(event) //$NON-NLS-1$ //$NON-NLS-2$
+                + ", фильтр по подсистемам=" + subsystemFilterActive //$NON-NLS-1$
+                + ", область Комфорта=" + ProblemViewComfortScope.mode() //$NON-NLS-1$
+                + ", фильтр обновлений=" + ComfortSettings.isProblemViewUpdateGateEnabled()); //$NON-NLS-1$
             if (!ComfortSettings.isReplaceListFiltersEnabled()
-                || !ComfortSettings.isProblemViewUpdateGateEnabled())
+                || !ComfortSettings.isProblemViewUpdateGateEnabled() || bypass)
             {
                 stock.handleMarkersChanged(event);
                 return;
@@ -1238,6 +1254,12 @@ public final class ProblemViewHook implements IStartup
                 return;
             try
             {
+                if (bypassUpdateGate())
+                {
+                    applySourceWait(false);
+                    deliver(event, "отбор по подсистемам или область Комфорта"); //$NON-NLS-1$
+                    return;
+                }
                 MarkerChangeTap.get().ensureInstalled();
                 MarkerChangeTap.Verdict verdict = MarkerChangeTap.get().take();
                 if (verdict.skip())
@@ -1350,7 +1372,7 @@ public final class ProblemViewHook implements IStartup
             UpdateWaitIndicator.setWaitingForIndex(view, false);
         }
 
-        /** Тумблер выключили: отдать панели то, что ещё не сверили. */
+        /** Тумблер выключили: перечитать дерево, включая уже отброшенные события. */
         synchronized void releaseHeldEvents()
         {
             if (view.getSite() == null)
@@ -1359,9 +1381,18 @@ public final class ProblemViewHook implements IStartup
             sourceIdleJob.cancel();
             UpdateWaitIndicator.setWaitingForIndex(view, false);
             MarkersChangedEvent held = pending.getAndSet(null);
-            if (held == null)
-                return;
-            deliver(held, "тумблер «Фильтр обновлений» выключен"); //$NON-NLS-1$
+            if (stock instanceof DelayedMarkerUpdateListener listener)
+            {
+                // Так EDT обновляет панель при смене её отбора: новая задача заново читает
+                // маркеры по getMarkerFilter(), даже если отложенного события уже нет.
+                listener.scheduleUpdateJob(true);
+                refreshFilterSnapshot();
+                Debug.log("заслонка обновлений: тумблер выключен, дерево перечитывается по отбору"); //$NON-NLS-1$
+            }
+            else if (held != null)
+            {
+                deliver(held, "тумблер «Фильтр обновлений» выключен"); //$NON-NLS-1$
+            }
         }
 
         /** Передаёт событие штатному слушателю панели. */
@@ -1388,6 +1419,10 @@ public final class ProblemViewHook implements IStartup
                 {
                     if (view.getSite() == null)
                         return;
+                    Object filters = problemFilters(view.getClass().getClassLoader());
+                    subsystemFilterActive = filters == null
+                        || (SCOPE_SUBSYSTEM_FILTER.equals(scopeName(Global.invoke(filters, "getScope"))) //$NON-NLS-1$
+                            && !Boolean.TRUE.equals(Global.invoke(filters, "isShowAll"))); //$NON-NLS-1$
                     Object filter = Global.invoke(view, "getMarkerFilter"); //$NON-NLS-1$
                     if (filter instanceof MarkerFilter markerFilter)
                     {
