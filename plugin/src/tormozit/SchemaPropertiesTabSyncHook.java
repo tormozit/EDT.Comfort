@@ -38,6 +38,7 @@ import org.eclipse.ui.PlatformUI;
 
 import com._1c.g5.aef2.standard.definitions.ContainerDefinition;
 import com._1c.g5.aef2.standard.definitions.IDefinition;
+import com._1c.g5.aef2.standard.definitions.IFieldDefinition;
 import com._1c.g5.aef2.standard.definitions.SectionDefinition;
 import com._1c.g5.aef2.standard.parameterization.LinkParameterization;
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
@@ -451,9 +452,35 @@ public final class SchemaPropertiesTabSyncHook implements IStartup
                 .component(OpenSuppressionSettingsEditorByLinkComponent.class, LinkParameterization.OPEN)
                 .endSetup()
                 .endSection();
+            int insertAt = "editors.commonmodule.pages.main".equals(pageId) //$NON-NLS-1$
+                ? afterComment(main) : -1;
             for (IDefinition row : addedRows.getChildren())
-                main.addDefinition(row);
-            Global.tempLog(TEMP_LOG, pageId + " added: " + feature.getName()); //$NON-NLS-1$
+            {
+                if (insertAt >= 0)
+                    main.addDefinition(insertAt++, row);
+                else
+                    main.addDefinition(row);
+            }
+            Global.tempLog(TEMP_LOG, pageId + " added: " + feature.getName() //$NON-NLS-1$
+                + ", afterComment=" + (insertAt >= 0)); //$NON-NLS-1$
+        }
+
+        private static int afterComment(SectionDefinition main)
+        {
+            List<IDefinition> rows = main.getChildren();
+            for (int i = 0; i < rows.size(); i++)
+            {
+                if (!(rows.get(i) instanceof IFieldDefinition field))
+                    continue;
+                for (var path : field.getFeaturePaths())
+                {
+                    EStructuralFeature[] features = path.getFeaturePath();
+                    if (features.length > 0
+                        && features[features.length - 1] == MdClassPackage.Literals.MD_OBJECT__COMMENT)
+                        return i + 1;
+                }
+            }
+            return -1;
         }
 
         private static final class SuppressionDescriptor implements IDtGranularEditorAefPageDescriptor

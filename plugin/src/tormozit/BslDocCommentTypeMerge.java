@@ -3,8 +3,10 @@ package tormozit;
 
 import java.lang.instrument.ClassFileTransformer;
 import java.security.ProtectionDomain;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Deque;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -15,6 +17,7 @@ import java.util.function.Consumer;
 
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.util.EcoreUtil;
+import org.eclipse.xtext.util.Tuples;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.ClassWriter;
@@ -131,10 +134,64 @@ public final class BslDocCommentTypeMerge
                 return;
             collectInParameters(comment);
             collectInReturn(comment);
+            traceStageParameter(comment);
         }
         catch (Throwable ignored)
         {
         }
+    }
+
+    private static void traceStageParameter(Object comment)
+    {
+        Object parameters = Global.invoke(comment, "getParametersSection"); //$NON-NLS-1$
+        if (parameters == null)
+            return;
+        Object rawFields = Global.invoke(parameters, "getParameterDefinitions"); //$NON-NLS-1$
+        if (!(rawFields instanceof List<?> fields))
+            return;
+        for (Object field : fields)
+        {
+            if (field == null)
+                continue;
+            if (!"Этап".equalsIgnoreCase(str(Global.invoke(field, "getName")))) //$NON-NLS-1$ //$NON-NLS-2$
+                continue;
+            Object rawSections = Global.invoke(field, "getTypeSections"); //$NON-NLS-1$
+            StringBuilder detail = new StringBuilder("description=") //$NON-NLS-1$
+                .append(partsText(descriptionParts(Global.invoke(field, "getDescription")))); //$NON-NLS-1$
+            if (rawSections instanceof List<?> sections)
+                for (Object section : sections)
+                {
+                    detail.append("; line=").append(lineNumber(section)) //$NON-NLS-1$
+                        .append(" source=").append(partsText(typeLineParts(section))) //$NON-NLS-1$
+                        .append(" definitions="); //$NON-NLS-1$
+                    Object rawDefinitions = Global.invoke(section, "getTypeDefinitions"); //$NON-NLS-1$
+                    if (rawDefinitions instanceof List<?> definitions)
+                        for (Object definition : definitions)
+                        {
+                            detail.append('[').append(typeDefName(definition));
+                            Object rawExtensions = Global.invoke(definition, "getFieldDefinitionExtension"); //$NON-NLS-1$
+                            if (rawExtensions instanceof List<?> nested)
+                                for (Object item : nested)
+                                {
+                                    Object rawFieldSections = Global.invoke(item, "getTypeSections"); //$NON-NLS-1$
+                                    detail.append('{').append(Global.invoke(item, "getName")) //$NON-NLS-1$
+                                        .append(':').append(rawFieldSections instanceof List<?> fieldSections
+                                            ? fieldSections.size() : -1).append('}');
+                                }
+                            detail.append(']');
+                        }
+                }
+            Global.tempLog("bsl-param-types", detail.toString()); //$NON-NLS-1$
+        }
+    }
+
+    private static String partsText(List<Object> parts)
+    {
+        StringBuilder text = new StringBuilder();
+        for (Object part : parts)
+            text.append('[').append(part.getClass().getSimpleName()).append(':')
+                .append(str(Global.invoke(part, "getText"))).append(']'); //$NON-NLS-1$
+        return text.toString();
     }
 
     /**
@@ -166,12 +223,39 @@ public final class BslDocCommentTypeMerge
                 }
             }
             BslFormTypeContextEnrichment.enrichTypes(result);
+            traceComputedTypes(types, result);
             return result;
         }
         catch (Throwable t)
         {
             return types;
         }
+    }
+
+    private static void traceComputedTypes(Collection<?> input, Collection<?> result)
+    {
+        try
+        {
+            String before = typeNames(input);
+            String after = typeNames(result);
+            if (before.contains("ДанныеФормыСтруктура") || after.contains("ДанныеФормыСтруктура") //$NON-NLS-1$ //$NON-NLS-2$
+                || before.contains("ДокументОбъект.Документ1") || after.contains("ДокументОбъект.Документ1")) //$NON-NLS-1$ //$NON-NLS-2$
+                Global.tempLog("bsl-param-types", "computed before=" + before + "; after=" + after); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        }
+        catch (Throwable ignored)
+        {
+        }
+    }
+
+    private static String typeNames(Collection<?> items)
+    {
+        StringBuilder names = new StringBuilder();
+        if (items != null)
+            for (Object item : items)
+                if (item instanceof TypeItem type)
+                    names.append('[').append(McoreUtil.getTypeNameRu(type)).append('|')
+                        .append(McoreUtil.getTypeName(type)).append(']');
+        return names.toString();
     }
 
     private static int collectInParameters(Object comment)
@@ -191,14 +275,13 @@ public final class BslDocCommentTypeMerge
             if (sectionsObj instanceof List<?> sections && sections.isEmpty()
                 && fieldHasTypeParts(field))
             {
-                Object created = createTypeSection(field);
+                Object created = createNativeFieldTypeSection(comment, field);
                 if (created != null)
                 {
                     @SuppressWarnings("unchecked")
                     List<Object> writable = (List<Object>) sections;
                     writable.add(created);
-                    added += collectFromParts(created, descriptionParts(
-                        Global.invoke(field, "getDescription"))); //$NON-NLS-1$
+                    added += 1;
                 }
             }
             added += collectInTypeSections(sectionsObj);
@@ -377,25 +460,75 @@ public final class BslDocCommentTypeMerge
     private static boolean fieldHasTypeParts(Object field)
     {
         List<Object> parts = descriptionParts(Global.invoke(field, "getDescription")); //$NON-NLS-1$
-        return isCommaSeparatedTypeLine(parts);
+        return !parts.isEmpty() && isCommaSeparatedTypeLine(parts.subList(0, 1));
     }
 
-    private static Object createTypeSection(Object field)
+    /** Передаём строку «- Тип1, Тип2:» штатному разбору EDT в форме «- Тип1, Тип2 - :». */
+    private static Object createNativeFieldTypeSection(Object comment, Object field)
     {
-        ClassLoader cl = field.getClass().getClassLoader();
+        List<Object> parts = descriptionParts(Global.invoke(field, "getDescription")); //$NON-NLS-1$
+        if (parts.isEmpty())
+            return null;
+        Object first = parts.get(0);
+        if (!TEXT_PART.equals(first.getClass().getName()))
+            return null;
+        String raw = str(Global.invoke(first, "getText")); //$NON-NLS-1$
+        if (raw == null)
+            return null;
+        String line = raw.trim();
+        if (!line.startsWith("-") || line.indexOf(',') < 0) //$NON-NLS-1$
+            return null;
+        int lineNumber = intValue(Global.invoke(first, "getLineNumber")); //$NON-NLS-1$
+        int offset = intValue(Global.invoke(first, "getOffset")) + raw.indexOf(line); //$NON-NLS-1$
+        String normalized = line.endsWith(":") //$NON-NLS-1$
+            ? line.substring(0, line.length() - 1).trim() + " - :" //$NON-NLS-1$
+            : line + " - "; //$NON-NLS-1$
         try
         {
-            Class<?> typeSection = Class.forName(
-                "com._1c.g5.v8.dt.bsl.documentation.comment.TypeSection", true, cl); //$NON-NLS-1$
-            Class<?> part = Class.forName(
-                "com._1c.g5.v8.dt.bsl.documentation.comment.IDescriptionPart", true, cl); //$NON-NLS-1$
-            java.lang.reflect.Constructor<?> ctor = typeSection.getConstructor(part, int.class);
-            return ctor.newInstance(field, Integer.valueOf(0));
+            Object section = Global.invoke(comment, "createTypeSection", field, //$NON-NLS-1$
+                Tuples.create(normalized, Integer.valueOf(offset), Integer.valueOf(0)),
+                Integer.valueOf(normalized.lastIndexOf('-')), Integer.valueOf(lineNumber),
+                Boolean.TRUE);
+            if (section == null)
+                return null;
+            Deque<Object> stack = new ArrayDeque<>();
+            stack.addLast(section);
+            for (int i = 1; i < parts.size(); i++)
+            {
+                Object part = parts.get(i);
+                if (!TEXT_PART.equals(part.getClass().getName()))
+                    continue;
+                String value = str(Global.invoke(part, "getText")); //$NON-NLS-1$
+                if (value == null || !value.trim().startsWith("*")) //$NON-NLS-1$
+                    continue;
+                String content = value.trim();
+                int partOffset = intValue(Global.invoke(part, "getOffset")) //$NON-NLS-1$
+                    + value.indexOf(content);
+                int partLine = intValue(Global.invoke(part, "getLineNumber")); //$NON-NLS-1$
+                Object contentTriple = Tuples.create(content, Integer.valueOf(partOffset),
+                    Integer.valueOf(0));
+                while (!stack.isEmpty())
+                {
+                    Object current = stack.peekLast();
+                    Object consumed = Global.invoke(comment, "readTypeSectionContent", current, //$NON-NLS-1$
+                        Integer.valueOf(partLine), contentTriple, stack);
+                    if (Boolean.TRUE.equals(consumed))
+                        break;
+                    stack.pollLast();
+                }
+            }
+            return section;
         }
         catch (Throwable t)
         {
+            Global.tempLog("bsl-param-types", "native section failed: " + t); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
         }
+    }
+
+    private static int intValue(Object value)
+    {
+        return value instanceof Integer number ? number.intValue() : 0;
     }
 
     private static boolean isCommaSeparatedTypeLine(List<Object> parts)
@@ -424,7 +557,9 @@ public final class BslDocCommentTypeMerge
     {
         List<Object> out = new ArrayList<>();
         appendDescriptionParts(out, Global.invoke(typeSection, "getSourceDescription")); //$NON-NLS-1$
-        appendDescriptionParts(out, Global.invoke(typeSection, "getCurrentDescription")); //$NON-NLS-1$
+        // У секции с «:» currentDescription содержит вложенные поля, а не имена типов.
+        if (!Boolean.TRUE.equals(Global.invoke(typeSection, "isExtensionPart"))) //$NON-NLS-1$
+            appendDescriptionParts(out, Global.invoke(typeSection, "getCurrentDescription")); //$NON-NLS-1$
         return out;
     }
 
