@@ -13,6 +13,7 @@ import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.ICoreRunnable;
 import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.emf.ecore.EObject;
+import org.eclipse.emf.ecore.util.EcoreUtil;
 import org.eclipse.jface.dialogs.PageChangedEvent;
 import org.eclipse.jface.viewers.CellLabelProvider;
 import org.eclipse.jface.viewers.ColumnViewer;
@@ -21,13 +22,17 @@ import org.eclipse.jface.viewers.TableViewer;
 import org.eclipse.jface.viewers.ViewerCell;
 import org.eclipse.jface.viewers.ViewerColumn;
 import org.eclipse.swt.graphics.Image;
+import org.eclipse.swt.SWT;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
+import org.eclipse.swt.widgets.Menu;
+import org.eclipse.swt.widgets.MenuItem;
 import org.eclipse.swt.widgets.Table;
 import org.eclipse.swt.widgets.TableColumn;
 import org.eclipse.swt.widgets.TableItem;
 import org.eclipse.ui.IEditorReference;
+import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IPartListener2;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.IWindowListener;
@@ -42,7 +47,12 @@ import com._1c.g5.v8.bm.core.IBmObject;
 import com._1c.g5.v8.dt.core.platform.IResourceLookup;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
 import com._1c.g5.v8.dt.md.ui.shared.MdUiSharedImages;
+import com._1c.g5.v8.dt.metadata.mdclass.AbstractForm;
+import com._1c.g5.v8.dt.metadata.mdclass.BasicForm;
+import com._1c.g5.v8.dt.metadata.mdclass.FormType;
+import com._1c.g5.v8.dt.metadata.mdclass.MdClassPackage;
 import com._1c.g5.v8.dt.ui.validation.ProblemsDecorationHelper;
+import com._1c.g5.v8.dt.ui.util.OpenHelper;
 import com._1c.g5.v8.dt.validation.ValidationUtil;
 import com._1c.g5.v8.dt.validation.marker.IMarkerManager;
 import com._1c.g5.v8.dt.validation.marker.IMarkerUpdateListener;
@@ -205,6 +215,7 @@ public final class MdEditorFormsPageHook implements IStartup
         FormMarkerIcons icons = new FormMarkerIcons(viewer, Global.invoke(component, "getMapper"), project); //$NON-NLS-1$
         if (!icons.install())
             return false;
+        FormModuleMenu.install(table, icons);
         table.setData(HOOK_MARKER, icons);
         return true;
     }
@@ -292,6 +303,85 @@ public final class MdEditorFormsPageHook implements IStartup
         {
             for (Control child : composite.getChildren())
                 collectTableViewers(child, out, depth + 1);
+        }
+    }
+
+    /** Первый пункт штатного контекстного меню списка форм. */
+    private static final class FormModuleMenu
+    {
+        private static final String ITEM_MARKER = "tormozit.formsOpenModule"; //$NON-NLS-1$
+
+        private static final String MENU_MARKER = "tormozit.formsOpenModuleMenu"; //$NON-NLS-1$
+
+        private static void install(Table table, FormMarkerIcons icons)
+        {
+            // AEF может назначить таблице новый экземпляр меню после создания контрола.
+            table.addListener(SWT.MenuDetect, event -> hook(table, icons));
+            hook(table, icons);
+        }
+
+        private static void hook(Table table, FormMarkerIcons icons)
+        {
+            Menu menu = table.getMenu();
+            if (menu == null || menu.isDisposed() || Boolean.TRUE.equals(menu.getData(MENU_MARKER)))
+                return;
+            menu.setData(MENU_MARKER, Boolean.TRUE);
+            // Слушатель AEF уже установлен и наполняет меню раньше нашего.
+            menu.addListener(SWT.Show, event -> fill(menu, table, icons));
+        }
+
+        private static void fill(Menu menu, Table table, FormMarkerIcons icons)
+        {
+            for (MenuItem existing : menu.getItems())
+            {
+                if (Boolean.TRUE.equals(existing.getData(ITEM_MARKER)))
+                    existing.dispose();
+            }
+            MenuItem item = new MenuItem(menu, SWT.PUSH, 0);
+            item.setData(ITEM_MARKER, Boolean.TRUE);
+            item.setText("Открыть модуль"); //$NON-NLS-1$
+            ComfortSubmenuHelper.setMenuItemTooltip(item, "Открыть модуль выбранной формы"); //$NON-NLS-1$
+            item.setEnabled(formWithModule(selectedForm(table, icons)) != null);
+            item.addListener(SWT.Selection, event ->
+            {
+                BasicForm form = selectedForm(table, icons);
+                Global.tempLog("formsOpenModule", "click form=" + (form == null ? "null" : form.getName())); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                AbstractForm formModel = formWithModule(form);
+                if (formModel == null)
+                    return;
+                try
+                {
+                    // Так EDT открывает модуль формы в AbstractGotoEventHandlerHandler.
+                    IEditorPart opened = new OpenHelper().openEditor(formModel,
+                        MdClassPackage.Literals.ABSTRACT_FORM__MODULE);
+                    Global.tempLog("formsOpenModule", "opened=" + //$NON-NLS-1$ //$NON-NLS-2$
+                        (opened == null ? "null" : opened.getClass().getName())); //$NON-NLS-1$
+                }
+                catch (RuntimeException e)
+                {
+                    Global.tempLogException("formsOpenModule", "open form module", e); //$NON-NLS-1$ //$NON-NLS-2$
+                    Global.logError(TAG, "open form module", e); //$NON-NLS-1$
+                }
+            });
+        }
+
+        private static BasicForm selectedForm(Table table, FormMarkerIcons icons)
+        {
+            if (table.isDisposed() || table.getSelectionCount() != 1)
+                return null;
+            EObject model = icons.modelOf(table.getSelection()[0].getData());
+            return model instanceof BasicForm basicForm && basicForm.getFormType() == FormType.MANAGED
+                ? basicForm : null;
+        }
+
+        private static AbstractForm formWithModule(BasicForm basicForm)
+        {
+            if (basicForm == null)
+                return null;
+            AbstractForm form = basicForm.getForm();
+            if (form != null && form.eIsProxy())
+                form = (AbstractForm) EcoreUtil.resolve(form, basicForm);
+            return form != null && form.getModule() != null ? form : null;
         }
     }
 

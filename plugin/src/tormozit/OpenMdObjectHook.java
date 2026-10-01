@@ -1027,7 +1027,7 @@ public class OpenMdObjectHook implements IStartup {
         private final ILabelProvider labelProvider;
         private SmartMatcher matcher;
         private Map<String, Integer> historyOrder = Map.of();
-        private final Map<Object, Integer> premiumCache = new HashMap<>();
+        private final Map<Object, int[]> premiumCache = new HashMap<>();
 
         public OpenMdObjectComparator(Object dialog, ILabelProvider labelProvider) {
             this.dialog = dialog;
@@ -1070,17 +1070,23 @@ public class OpenMdObjectHook implements IStartup {
             if (matcher == null || matcher.isEmpty)
                 return compareAlphabetically(o1, o2);
 
-            int p1 = premiumCache.computeIfAbsent(o1,
-                    k -> matcher.computeNamePremium(getObjectName(labelProvider.getText(k))));
-            int p2 = premiumCache.computeIfAbsent(o2,
-                    k -> matcher.computeNamePremium(getObjectName(labelProvider.getText(k))));
-            if (p1 != p2)
-                return Integer.compare(p2, p1);
+            int[] p1 = premiumCache.computeIfAbsent(o1, this::computePremiums);
+            int[] p2 = premiumCache.computeIfAbsent(o2, this::computePremiums);
+            for (int i = 0; i < p1.length; i++) {
+                int comparison = Integer.compare(p2[i], p1[i]);
+                if (comparison != 0)
+                    return comparison;
+            }
             return compareAlphabetically(o1, o2);
         }
 
-        private String getObjectName(String fullText) {
-            return org.eclipse.ui.dialogs.OpenMdObjectItemsFilter.getObjectName(fullText);
+        private int[] computePremiums(Object element) {
+            String objectName = org.eclipse.ui.dialogs.OpenMdObjectItemsFilter
+                    .getObjectName(labelProvider.getText(element));
+            if (!matcher.hasMultipleSections())
+                return new int[] { matcher.computeNamePremium(objectName) };
+            String fullName = org.eclipse.ui.dialogs.OpenMdObjectItemsFilter.resolveFullNameFast(element);
+            return matcher.computeTreePremiums(fullName != null ? fullName : objectName);
         }
 
         private int compareAlphabetically(Object o1, Object o2) {

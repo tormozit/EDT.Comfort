@@ -255,8 +255,8 @@ public final class ProblemViewOpenTargetHook implements IStartup
         EObject markerObject = marker.provideObject(identity);
         if (markerObject == null)
             return;
-        if (ConfigSearchResultsHook.revealRoleRightsRow(page, markerObject,
-            roleRightName(markerObject, marker), marker.getMessage()))
+        String rightName = roleRightName(markerObject, marker);
+        if (ConfigSearchResultsHook.revealRoleRightsRow(page, markerObject, rightName, marker.getMessage()))
             return;
         focusPropertyField(marker, markerObject, page);
     }

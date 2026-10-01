@@ -140,7 +140,7 @@ final class BracketContentHintIndex
      * Для остальных типов (Если/Пока/Для/Попытка/Процедура/Функция) узел
      * ограничен корректно — используется {@code node.getEndOffset()}.
      */
-    private static int resolveEndOffset(EObject element, ICompositeNode node)
+    static int resolveEndOffset(EObject element, ICompositeNode node)
     {
         if (element instanceof RegionPreprocessor || element instanceof IfPreprocessor)
             return findOwnClosingTerminalEndOffset(node);

@@ -43,9 +43,6 @@ public class ProblemViewRecomputeChecksHandler extends AbstractHandler
         Object scope = Global.invoke(filters, "getScope"); //$NON-NLS-1$
         String scopeName = scope instanceof Enum<?> value ? value.name() : null;
         boolean showAll = Boolean.TRUE.equals(Global.invoke(filters, "isShowAll")); //$NON-NLS-1$
-        Global.tempLog("problem-view-recompute", "вызов: панель=" + (part != null) //$NON-NLS-1$ //$NON-NLS-2$
-            + ", область=" + scopeName + ", показать все=" + showAll //$NON-NLS-1$ //$NON-NLS-2$
-            + ", выделение=" + (scopeSelection != null)); //$NON-NLS-1$
         Debug.log("команда вызвана: страница=" + (page != null) //$NON-NLS-1$
             + ", панель=" + (part == null ? "не найдена" : part.getClass().getName()) //$NON-NLS-1$ //$NON-NLS-2$
             + ", область=" + (scopeSelection == null ? "null" : scopeSelection.getClass().getName())); //$NON-NLS-1$ //$NON-NLS-2$
@@ -57,7 +54,6 @@ public class ProblemViewRecomputeChecksHandler extends AbstractHandler
 
         if (showAll || "ALL".equals(scopeName) || "SUBSYSTEM_FILTER".equals(scopeName)) //$NON-NLS-1$ //$NON-NLS-2$
         {
-            Global.tempLog("problem-view-recompute", "область без конкретных объектов: " + scopeName); //$NON-NLS-1$ //$NON-NLS-2$
             toast("Проверить", //$NON-NLS-1$
                 "Для перепроверки выберите область «Текущий проект», «Текущий объект» или «Текущий элемент»."); //$NON-NLS-1$
             return null;
@@ -70,7 +66,6 @@ public class ProblemViewRecomputeChecksHandler extends AbstractHandler
         {
             Set<IProject> projects = new LinkedHashSet<>(selectedProjects);
             projects.addAll(selectedObjects.keySet());
-            Global.tempLog("problem-view-recompute", "проекты=" + projects); //$NON-NLS-1$ //$NON-NLS-2$
             if (projects.isEmpty())
                 toast("Проверить", "В текущей области нет проекта для перепроверки."); //$NON-NLS-1$ //$NON-NLS-2$
             for (IProject project : projects)
@@ -84,9 +79,6 @@ public class ProblemViewRecomputeChecksHandler extends AbstractHandler
             toast("Проверить", "Неизвестная область отбора панели: " + scopeName); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
         }
-        Global.tempLog("problem-view-recompute", "объекты по проектам=" + selectedObjects //$NON-NLS-1$ //$NON-NLS-2$
-            .entrySet().stream().map(entry -> entry.getKey().getName() + ": " + entry.getValue().size()) //$NON-NLS-1$
-            .toList());
         if (selectedObjects.isEmpty())
         {
             toast("Проверить", //$NON-NLS-1$
@@ -117,7 +109,6 @@ public class ProblemViewRecomputeChecksHandler extends AbstractHandler
         }
         catch (ClassNotFoundException e)
         {
-            Global.tempLog("problem-view-recompute", "настройки панели: " + e); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
         }
     }

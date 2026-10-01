@@ -3,7 +3,7 @@ Bundle-ManifestVersion: 2
 Bundle-SymbolicName: tormozit.comfort.bslparser;singleton:=true
 Bundle-Name: EDT Comfort BSL Parser Hook
 Bundle-Vendor: Tormozit
-Bundle-Version: 1.0.0.qualifier
+Bundle-Version: 1.0.1.qualifier
 Bundle-Activator: tormozit.bslparser.Activator
 Bundle-RequiredExecutionEnvironment: JavaSE-17
 Require-Bundle: org.eclipse.osgi,

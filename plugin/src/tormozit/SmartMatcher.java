@@ -343,15 +343,54 @@ public class SmartMatcher {
      * Расчет Премии Фильтра для изолированной части строки (Имени или Параметров)
      */
     private int computePartPremium(String partText) {
-        if (isEmpty || partText == null || partText.isEmpty()) {
+        return computePartPremium(partText, fullPattern, fragments);
+    }
+
+    /** Премии секций иерархического фильтра в порядке секций запроса. */
+    public int[] computeTreePremiums(String elementFullName) {
+        if (isEmpty || elementFullName == null)
+            return new int[0];
+        if (!hasMultipleSections()) {
+            int lastDot = elementFullName.lastIndexOf('.');
+            return new int[] { computeNamePremium(elementFullName.substring(lastDot + 1)) };
+        }
+
+        int[] premiums = new int[sections.size()];
+        String[] elementSections = elementFullName.split("\\.", -1); //$NON-NLS-1$
+        int offset = elementSections.length - sections.size();
+        if (offset < 0)
+            return premiums;
+        for (int i = 0; i < sections.size(); i++) {
+            List<String> section = sections.get(i);
+            if (!section.isEmpty())
+                premiums[i] = computePartPremium(elementSections[offset + i],
+                        String.join(" ", section), section.toArray(new String[0])); //$NON-NLS-1$
+        }
+        return premiums;
+    }
+
+    /** Сравнение премий по секциям слева направо, каждая по убыванию. */
+    public int compareTreePremiums(String first, String second) {
+        int[] p1 = computeTreePremiums(first);
+        int[] p2 = computeTreePremiums(second);
+        for (int i = 0; i < Math.min(p1.length, p2.length); i++) {
+            int comparison = Integer.compare(p2[i], p1[i]);
+            if (comparison != 0)
+                return comparison;
+        }
+        return 0;
+    }
+
+    private int computePartPremium(String partText, String pattern, String[] fragments) {
+        if (isEmpty || partText == null || partText.isEmpty() || pattern.isEmpty() || fragments.length == 0) {
             return 0;
         }
 
         String lowerText = partText.toLowerCase();
 
         // --- ГРУППА 1: ПОЛНОЕ СОВПАДЕНИЕ ВСЕГО ФИЛЬТРА ЦЕЛИКОМ ВНУТРИ ЧАСТИ ---
-        if (lowerText.contains(fullPattern)) {
-            int fullIdx = lowerText.indexOf(fullPattern);
+        if (lowerText.contains(pattern)) {
+            int fullIdx = lowerText.indexOf(pattern);
             if (fullIdx == 0) {
                 return 4; // полное совпадение в начале первого слова
             }
@@ -360,7 +399,7 @@ public class SmartMatcher {
             }
             
             boolean crossesWords = false;
-            for (int i = fullIdx; i < fullIdx + fullPattern.length(); i++) {
+            for (int i = fullIdx; i < fullIdx + pattern.length(); i++) {
                 if (i > 0 && isWordBoundary(partText, i) && !Character.isUpperCase(partText.charAt(i))) {
                     crossesWords = true;
                     break;

@@ -1730,24 +1730,15 @@ public class TypeComboOverlayHook implements IStartup
             if (matcher.matchesTree(entry.label))
                 state.visibleEntries.add(entry);
         }
-        // Сортировка по рейтингу smart-фильтра — тот же приоритет, что и
-        // SmartOutlineComparator.compare (SmartOutlineComparator.java:53-70): рейтинг имени по
-        // убыванию → рейтинг параметров по убыванию → алфавит без учёта регистра. У наших меток
-        // нет скобок с параметрами — computeParamPremium всегда 0, только достраивает
-        // детерминированность сортировки при равном computeNamePremium. Пустой фильтр не сортируем
-        // вообще — при пустом matcher все премии всегда 0 (см. SmartMatcher.computePartPremium),
-        // сортировка выродилась бы в чисто алфавитную и поменяла бы порядок списка без фильтра.
+        // Премия по каждому сегменту подписи: при запросе без точки она считается
+        // по последнему сегменту, а не по строке вместе с префиксом до точки.
+        // Пустой фильтр не сортируем, чтобы сохранить исходный порядок списка.
         if (!matcher.isEmpty)
         {
             state.visibleEntries.sort((a, b) ->
             {
-                int np = Integer.compare(matcher.computeNamePremium(b.label), matcher.computeNamePremium(a.label));
-                if (np != 0)
-                    return np;
-                int pp = Integer.compare(matcher.computeParamPremium(b.label), matcher.computeParamPremium(a.label));
-                if (pp != 0)
-                    return pp;
-                return a.label.compareToIgnoreCase(b.label);
+                int bySections = matcher.compareTreePremiums(a.label, b.label);
+                return bySections != 0 ? bySections : a.label.compareToIgnoreCase(b.label);
             });
         }
 

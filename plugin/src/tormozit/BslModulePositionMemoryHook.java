@@ -246,7 +246,9 @@ public class BslModulePositionMemoryHook implements IStartup
 
     private void hookBslEditor(BslXtextEditor editor)
     {
-        Display.getDefault().asyncExec(() -> attachToBslEditor(editor, 0));
+        // Сразу, без asyncExec: позиция должна встать до первой отрисовки редактора, иначе модуль
+        // на миг виден с начала. Если viewer ещё не готов, attachToBslEditor сам повторит через asyncExec.
+        attachToBslEditor(editor, 0);
     }
 
     private void attachToBslEditor(BslXtextEditor editor, int attempt)
@@ -326,11 +328,11 @@ public class BslModulePositionMemoryHook implements IStartup
             return;
         }
 
-        Display.getDefault().asyncExec(() ->
+        Runnable restore = () ->
         {
             try
             {
-                // Восстановление выполняется асинхронно и может сработать уже после того, как
+                // Восстановление может сработать уже после того, как
                 // пользователь сам успел переместить каретку в свежеоткрытом редакторе — тогда
                 // она уже не на нулевой позиции.
                 // В этом случае не вмешиваемся: пользовательское действие имеет приоритет над
@@ -363,7 +365,13 @@ public class BslModulePositionMemoryHook implements IStartup
             catch (Exception e)
             {
             }
-        });
+        };
+        // Документ уже заполнен — ставим позицию сразу (до первой отрисовки); иначе ждём очередь.
+        IDocument ready = viewer.getDocument();
+        if (ready != null && ready.getLength() > 0)
+            restore.run();
+        else
+            Display.getDefault().asyncExec(restore);
     }
 
     /** Помещает строку каретки примерно в середину текущей видимой области. */
@@ -452,33 +460,26 @@ public class BslModulePositionMemoryHook implements IStartup
     }
 
     /**
-     * Смещение запомненной позиции каретки модуля или {@code -1}, если её нет (или это начало
-     * документа). Нужно {@link BslEditorFoldingHook}: свёртка области с этой позицией разворачивается
-     * восстановлением каретки ({@code selectAndReveal}), поэтому такую область не сворачиваем.
+     * Номер строки (с 0) запомненной позиции каретки модуля-файла или {@code -1}, если её нет (или
+     * это начало документа). Нужно {@link BslEditorFoldingHook}: свёртка области с этой позицией
+     * разворачивается восстановлением каретки ({@code selectAndReveal}), поэтому такую область
+     * не сворачиваем.
      */
-    static int savedCaretOffset(BslXtextEditor editor, IDocument doc)
+    static int savedCaretLine(IFile file)
     {
-        String key = moduleKey(editor);
+        String key = moduleKey(file);
         int[] pos = key == null ? null : ModulePositionStore.load(key);
-        if (pos == null)
-            return -1;
-        try
-        {
-            int offset = clampToDocument(doc, pos[0], pos[1]);
-            return offset > 0 ? offset : -1;
-        }
-        catch (BadLocationException e)
-        {
-            return -1;
-        }
+        return pos != null && pos[0] > 0 ? pos[0] : -1;
     }
 
     private static String moduleKey(BslXtextEditor editor)
     {
         IEditorInput input = editor.getEditorInput();
-        if (input == null)
-            return null;
-        IFile file = input.getAdapter(IFile.class);
+        return input == null ? null : moduleKey(input.getAdapter(IFile.class));
+    }
+
+    private static String moduleKey(IFile file)
+    {
         if (file == null)
             return null;
         GetRef.ModuleRef moduleRef = GetRef.pathToModuleRef(file.getProjectRelativePath().toString());

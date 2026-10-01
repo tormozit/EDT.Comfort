@@ -39,7 +39,6 @@ import com._1c.g5.v8.dt.core.platform.IDtProject;
 /** Переключение проекта в штатном окне «Свойства проекта» с сохранением выбранной страницы. */
 public final class ProjectPropertyDialogHook implements IStartup
 {
-    private static final String LOG_TOPIC = "projectPropertyDialog"; //$NON-NLS-1$
     private static final String PROJECT_SELECTOR_KEY =
         "tormozit.comfort.projectPropertyDialog.selector"; //$NON-NLS-1$
     private static final String PENDING_KEY =
@@ -49,7 +48,6 @@ public final class ProjectPropertyDialogHook implements IStartup
     public void earlyStartup()
     {
         Display display = Display.getDefault();
-        Global.tempLog(LOG_TOPIC, "earlyStartup display=" + display); //$NON-NLS-1$
         if (display != null && !display.isDisposed())
             display.asyncExec(() ->
             {
@@ -58,9 +56,6 @@ public final class ProjectPropertyDialogHook implements IStartup
                     if (!(event.widget instanceof Shell shell) || shell.isDisposed())
                         return;
                     PreferenceDialog found = findPreferenceDialog(shell);
-                    Global.tempLog(LOG_TOPIC, "shell event=" + event.type + " title=" //$NON-NLS-1$ //$NON-NLS-2$
-                        + shell.getText() + " data=" + typeName(shell.getData()) //$NON-NLS-1$
-                        + " dialog=" + typeName(found)); //$NON-NLS-1$
                     if (!(found instanceof PropertyDialog dialog))
                         return;
                     Shell propertyShell = dialog.getShell();
@@ -72,7 +67,6 @@ public final class ProjectPropertyDialogHook implements IStartup
                 };
                 display.addFilter(SWT.Show, listener);
                 display.addFilter(SWT.Activate, listener);
-                Global.tempLog(LOG_TOPIC, "filters installed"); //$NON-NLS-1$
             });
     }
 
@@ -85,16 +79,10 @@ public final class ProjectPropertyDialogHook implements IStartup
         return null;
     }
 
-    private static String typeName(Object value)
-    {
-        return value == null ? "null" : value.getClass().getName(); //$NON-NLS-1$
-    }
-
     private static void scheduleInstall(Display display, PropertyDialog dialog, Shell shell, int attempt)
     {
         if (shell.isDisposed())
             return;
-        Global.tempLog(LOG_TOPIC, "install attempt=" + attempt + " title=" + shell.getText()); //$NON-NLS-1$ //$NON-NLS-2$
         if (install(dialog, shell) || attempt >= 30)
             return;
         display.timerExec(100, () -> scheduleInstall(display, dialog, shell, attempt + 1));
@@ -106,17 +94,9 @@ public final class ProjectPropertyDialogHook implements IStartup
             return true;
 
         if (!(dialog.getSelection() instanceof IStructuredSelection selection))
-        {
-            Global.tempLog(LOG_TOPIC, "not a project selection: " //$NON-NLS-1$
-                + typeName(dialog.getSelection()));
             return true;
-        }
         Object selected = selection.getFirstElement();
         IProject current = projectFromSelection(selected);
-        Global.tempLog(LOG_TOPIC, "selection first=" + typeName(selected) //$NON-NLS-1$
-            + " inner=" + typeName(selected instanceof IStructuredSelection nested //$NON-NLS-1$
-                ? nested.getFirstElement() : selected)
-            + " project=" + (current != null ? current.getName() : "null")); //$NON-NLS-1$ //$NON-NLS-2$
         if (current == null)
             return true;
 
@@ -124,32 +104,19 @@ public final class ProjectPropertyDialogHook implements IStartup
         for (IProject project : ResourcesPlugin.getWorkspace().getRoot().getProjects())
             if (project.isOpen())
                 projects.add(project);
-        Global.tempLog(LOG_TOPIC, "project=" + current.getName() //$NON-NLS-1$
-            + " openProjects=" + projects.size()); //$NON-NLS-1$
         if (projects.size() < 2)
             return true;
         projects.sort(Comparator.comparing(IProject::getName, String.CASE_INSENSITIVE_ORDER));
 
         TreeViewer tree = dialog.getTreeViewer();
         if (tree == null || tree.getControl() == null)
-        {
-            Global.tempLog(LOG_TOPIC, "tree not ready"); //$NON-NLS-1$
             return false;
-        }
         FilteredTree filteredTree = findFilteredTree(tree.getControl());
         if (filteredTree == null)
-        {
-            Global.tempLog(LOG_TOPIC, "filtered tree not found: " //$NON-NLS-1$
-                + typeName(tree.getControl().getParent()));
             return false;
-        }
         Composite leftArea = filteredTree.getParent();
         if (!(leftArea.getLayout() instanceof GridLayout))
-        {
-            Global.tempLog(LOG_TOPIC, "unexpected left layout: " //$NON-NLS-1$
-                + typeName(leftArea.getLayout()));
             return false;
-        }
         ((GridLayout) leftArea.getLayout()).verticalSpacing = 6;
 
         Composite row = new Composite(leftArea, SWT.NONE);
@@ -174,7 +141,6 @@ public final class ProjectPropertyDialogHook implements IStartup
         }
         if (currentIndex < 0)
         {
-            Global.tempLog(LOG_TOPIC, "current project missing from open projects"); //$NON-NLS-1$
             row.dispose();
             return true;
         }
@@ -206,7 +172,6 @@ public final class ProjectPropertyDialogHook implements IStartup
         });
         leftArea.layout(true, true);
         shell.setData(PROJECT_SELECTOR_KEY, Boolean.TRUE);
-        Global.tempLog(LOG_TOPIC, "selector installed current=" + current.getName()); //$NON-NLS-1$
         return true;
     }
 
@@ -250,7 +215,6 @@ public final class ProjectPropertyDialogHook implements IStartup
         Object replacement = targetElement(dialog, target);
         if (replacement == null)
         {
-            Global.tempLog(LOG_TOPIC, "target element unavailable: " + target.getName()); //$NON-NLS-1$
             combo.select(originalIndex);
             combo.setEnabled(true);
             return;

@@ -60,7 +60,18 @@ public final class Activator
          * например скобке в условии {@code #Если Не (…) Тогда}. Валидация модуля при этом обрывается.
          */
         private static final String SUPPRESSION_PROVIDER = "com._1c.g5.v8.dt.bsl.validation.BslSuppressionProvider"; //$NON-NLS-1$
-        private static final List<String> TARGETS = List.of(BSL_PARSER, CUSTOM_BSL_PARSER, HELPER, SUPPRESSION_PROVIDER);
+        /**
+         * Провайдер свёрток BSL EDT: в начало {@code isInitiallyCollapsed(EObject)} вставлен вызов
+         * функции основного бандла ({@link #PROP_INITIALLY_COLLAPSED}) — «Автоматически сворачиваемые
+         * области» (issue #527). Из основного бандла вплетение не успевает: класс грузится раньше
+         * его активации. Функции может ещё не быть (основной бандл не стартовал) — тогда вставка
+         * ничего не делает.
+         */
+        private static final String FOLDING_PROVIDER = "com._1c.g5.v8.dt.bsl.ui.folding.BslFoldingRegionProvider"; //$NON-NLS-1$
+        static final String PROP_INITIALLY_COLLAPSED = "tormozit.bslFolding.initiallyCollapsed"; //$NON-NLS-1$
+        private static final String INITIALLY_COLLAPSED_DESC = "(Lorg/eclipse/emf/ecore/EObject;)Z"; //$NON-NLS-1$
+        private static final List<String> TARGETS =
+            List.of(BSL_PARSER, CUSTOM_BSL_PARSER, HELPER, SUPPRESSION_PROVIDER, FOLDING_PROVIDER);
 
         private static final String EXTRACT_SUPPRESSIONS_DESC = "(Lorg/eclipse/xtext/nodemodel/ILeafNode;)Ljava/util/Set;"; //$NON-NLS-1$
         private static final String ILEAF_NODE = "org/eclipse/xtext/nodemodel/ILeafNode"; //$NON-NLS-1$
@@ -108,6 +119,8 @@ public final class Activator
         /** Кадры стека остаются исходными: вставки без ветвлений и не меняют высоту стека в точках кадров. */
         static byte[] transform(String className, byte[] bytes)
         {
+            if (FOLDING_PROVIDER.equals(className))
+                return transformFoldingProvider(bytes);
             boolean helper = HELPER.equals(className);
             boolean suppression = SUPPRESSION_PROVIDER.equals(className);
             ClassReader reader = new ClassReader(bytes);
@@ -175,6 +188,79 @@ public final class Activator
                 }
             }, 0);
             return touched[0] > 0 ? writer.toByteArray() : null;
+        }
+
+        /**
+         * В отличие от остальных вставок здесь есть ветвления, поэтому кадры стека пересчитываются
+         * ({@code COMPUTE_FRAMES}); общий предок типов — {@code Object}, классы EDT не загружаются.
+         */
+        private static byte[] transformFoldingProvider(byte[] bytes)
+        {
+            ClassReader reader = new ClassReader(bytes);
+            ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_FRAMES)
+            {
+                @Override
+                protected String getCommonSuperClass(String type1, String type2)
+                {
+                    return "java/lang/Object"; //$NON-NLS-1$
+                }
+            };
+            boolean[] touched = new boolean[1];
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor, String signature,
+                    String[] exceptions)
+                {
+                    MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    if (mv == null || !"isInitiallyCollapsed".equals(name) //$NON-NLS-1$
+                        || !INITIALLY_COLLAPSED_DESC.equals(descriptor))
+                        return mv;
+                    return new MethodVisitor(Opcodes.ASM9, mv)
+                    {
+                        @Override
+                        public void visitCode()
+                        {
+                            super.visitCode();
+                            emitInitiallyCollapsedPrologue(this);
+                            touched[0] = true;
+                        }
+                    };
+                }
+            }, ClassReader.EXPAND_FRAMES);
+            return touched[0] ? writer.toByteArray() : null;
+        }
+
+        /**
+         * {@code f = System.getProperties().get(PROP); if (f instanceof Function
+         * && Boolean.TRUE.equals(f.apply(element))) return true;}; локальная 1 — {@code element}.
+         */
+        private static void emitInitiallyCollapsedPrologue(MethodVisitor mv)
+        {
+            mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", //$NON-NLS-1$ //$NON-NLS-2$
+                "()Ljava/util/Properties;", false); //$NON-NLS-1$
+            mv.visitLdcInsn(PROP_INITIALLY_COLLAPSED);
+            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", //$NON-NLS-1$ //$NON-NLS-2$
+                "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$
+            mv.visitInsn(Opcodes.DUP);
+            org.objectweb.asm.Label notFunction = new org.objectweb.asm.Label();
+            org.objectweb.asm.Label rest = new org.objectweb.asm.Label();
+            mv.visitTypeInsn(Opcodes.INSTANCEOF, "java/util/function/Function"); //$NON-NLS-1$
+            mv.visitJumpInsn(Opcodes.IFEQ, notFunction);
+            mv.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Function"); //$NON-NLS-1$
+            mv.visitVarInsn(Opcodes.ALOAD, 1);
+            mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Function", "apply", //$NON-NLS-1$ //$NON-NLS-2$
+                "(Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$
+            mv.visitFieldInsn(Opcodes.GETSTATIC, "java/lang/Boolean", "TRUE", "Ljava/lang/Boolean;"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            mv.visitInsn(Opcodes.SWAP);
+            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/Boolean", "equals", //$NON-NLS-1$ //$NON-NLS-2$
+                "(Ljava/lang/Object;)Z", false); //$NON-NLS-1$
+            mv.visitJumpInsn(Opcodes.IFEQ, rest);
+            mv.visitInsn(Opcodes.ICONST_1);
+            mv.visitInsn(Opcodes.IRETURN);
+            mv.visitLabel(notFunction);
+            mv.visitInsn(Opcodes.POP);
+            mv.visitLabel(rest);
         }
 
         /** {@code ((Consumer) System.getProperties().get(PROP)).accept(stream)}; локальная 1 — поток. */

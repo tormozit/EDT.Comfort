@@ -83,8 +83,10 @@ public class Activator extends AbstractUIPlugin
         BslDocCommentComputedTypes.installWeavingHook();
         BslDocCommentDescriptionFix.installWeavingHook();
         BslDocCommentTypeMerge.installWeavingHook();
+        BslEditorFoldingHook.install();
         BslFormTypeContextEnrichment.installWeavingHook();
         BslHandlerBlankLineHook.installWeavingHook();
+        ConfigSearchDialogHook.installWeavingHook();
         MdEditorTreeHook.installWeavingHook();
         MdEventHandlersPageHook.installWeavingHook();
         OpenHelperAttributePropertiesHook.installWeavingHook();
@@ -408,7 +410,6 @@ public class Activator extends AbstractUIPlugin
         private static final String EXTENSION_POINT = "com._1c.g5.v8.dt.form.propertyInfoProvider"; //$NON-NLS-1$
         private static final String STOCK_CLASS =
             "com._1c.g5.v8.dt.internal.form.datasourceinfo.property.DynamicListPropertyInfoProvider"; //$NON-NLS-1$
-        private static final String TOPIC = "DynamicListDefaultPicture"; //$NON-NLS-1$
 
         private volatile IPropertyInfoProvider stock;
         private volatile Method createDefaultPicture;
@@ -423,14 +424,12 @@ public class Activator extends AbstractUIPlugin
                 @Override
                 protected IStatus run(IProgressMonitor monitor)
                 {
-                    Global.tempLog(TOPIC, "ожидание инициализации EDT"); //$NON-NLS-1$
                     try
                     {
                         ServiceInitialization.join();
                     }
-                    catch (RuntimeException e)
+                    catch (RuntimeException ignored)
                     {
-                        Global.tempLog(TOPIC, "ошибка ожидания инициализации EDT: " + e); //$NON-NLS-1$
                     }
                     registerAfterBootstrap();
                     return Status.OK_STATUS;
@@ -443,7 +442,6 @@ public class Activator extends AbstractUIPlugin
             if (!initializeStock())
                 return;
             IPropertyInfoProvider.Registry.INSTANCE.addDataInfoProvider(this);
-            Global.tempLog(TOPIC, "провайдер зарегистрирован после инициализации EDT"); //$NON-NLS-1$
         }
 
         private synchronized boolean initializeStock()
@@ -467,13 +465,11 @@ public class Activator extends AbstractUIPlugin
                     stock = provider;
                     return true;
                 }
-                catch (CoreException | ReflectiveOperationException | RuntimeException e)
+                catch (CoreException | ReflectiveOperationException | RuntimeException ignored)
                 {
-                    Global.tempLog(TOPIC, "штатный провайдер недоступен: " + e); //$NON-NLS-1$
                     return false;
                 }
             }
-            Global.tempLog(TOPIC, "расширение штатного провайдера не найдено"); //$NON-NLS-1$
             return false;
         }
 
@@ -486,24 +482,20 @@ public class Activator extends AbstractUIPlugin
         @Override
         public List<PropertyInfo> getPropertyInfo(Form form)
         {
-            Global.tempLog(TOPIC, "getPropertyInfo(Form)"); //$NON-NLS-1$
             return requireStock().getPropertyInfo(form);
         }
 
         @Override
         public List<PropertyInfo> getPropertyInfo(PropertyInfo parent)
         {
-            Global.tempLog(TOPIC, "getPropertyInfo(PropertyInfo): " + parent.getName()); //$NON-NLS-1$
             List<PropertyInfo> result = requireStock().getPropertyInfo(parent);
             // После исправления EDT штатный провайдер сам вернёт реквизит — обход не нужен.
             if (result.stream().anyMatch(child -> "DefaultPicture".equals(child.getName()))) //$NON-NLS-1$
             {
-                Global.tempLog(TOPIC, "реквизит уже есть: " + parent.getName()); //$NON-NLS-1$
                 return result;
             }
             if (!needsPicture(parent))
             {
-                Global.tempLog(TOPIC, "условие обхода не выполнено: " + parent.getName()); //$NON-NLS-1$
                 return result;
             }
             List<PropertyInfo> extended = new ArrayList<>(result);
@@ -519,12 +511,10 @@ public class Activator extends AbstractUIPlugin
                         break;
                     }
                 extended.addAll(orderIndex, picture);
-                Global.tempLog(TOPIC, "реквизит добавлен: " + parent.getName()); //$NON-NLS-1$
                 return extended;
             }
-            catch (ReflectiveOperationException | RuntimeException e)
+            catch (ReflectiveOperationException | RuntimeException ignored)
             {
-                Global.tempLog(TOPIC, "ошибка добавления реквизита: " + e); //$NON-NLS-1$
                 return result;
             }
         }

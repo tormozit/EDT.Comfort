@@ -89,12 +89,7 @@ import com._1c.g5.v8.dt.ui.util.OpenHelper;
  */
 public final class MdEditorDefinedTypesPageHook implements IStartup
 {
-    private static final String TAG = "MdEditorDefinedTypesPageHook"; //$NON-NLS-1$
-
     static final String PAGE_ID = "tormozit.mdDefinedTypes"; //$NON-NLS-1$
-
-    /** Временная диагностика (.tmp/temp-logs/definedTypesPage.log). */
-    private static final String TEMP_LOG = "definedTypesPage"; //$NON-NLS-1$
 
     private static final String PAGE_TITLE = "Опред. типы"; //$NON-NLS-1$
 
@@ -111,7 +106,6 @@ public final class MdEditorDefinedTypesPageHook implements IStartup
     @Override
     public void earlyStartup()
     {
-        Global.tempLog(TEMP_LOG, "earlyStartup"); //$NON-NLS-1$
         Display.getDefault().asyncExec(() ->
         {
             IWorkbench workbench = PlatformUI.getWorkbench();
@@ -178,14 +172,11 @@ public final class MdEditorDefinedTypesPageHook implements IStartup
                 return;
             Object model = editor.getModel();
             TypeItem refType = model instanceof MdObject mdObject ? refTypeOf(mdObject) : null;
-            Global.tempLog(TEMP_LOG, "hookEditor: model=" + model + " refType=" + refType //$NON-NLS-1$ //$NON-NLS-2$
-                + " (" + (refType != null ? refType.getClass().getName() : null) + ")"); //$NON-NLS-1$ //$NON-NLS-2$
             if (refType != null)
                 addPage(editor, (MdObject)model);
         }
         catch (RuntimeException e)
         {
-            Global.logError(TAG, "hook editor", e); //$NON-NLS-1$
         }
     }
 
@@ -223,7 +214,6 @@ public final class MdEditorDefinedTypesPageHook implements IStartup
         }
         catch (PartInitException | RuntimeException e)
         {
-            Global.logError(TAG, "add page", e); //$NON-NLS-1$
         }
     }
 
@@ -247,13 +237,10 @@ public final class MdEditorDefinedTypesPageHook implements IStartup
         Object producedValue = produced != null ? mdObject.eGet(produced) : null;
         if (!(producedValue instanceof EObject producedTypes))
         {
-            Global.tempLog(TEMP_LOG, "refTypeOf " + mdObject.eClass().getName() + ": producedTypes=" + producedValue); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
         }
         EStructuralFeature refType = producedTypes.eClass().getEStructuralFeature("refType"); //$NON-NLS-1$
         Object refValue = refType != null ? producedTypes.eGet(refType) : null;
-        Global.tempLog(TEMP_LOG, "refTypeOf " + mdObject.eClass().getName() + ": refType feature=" + refType //$NON-NLS-1$ //$NON-NLS-2$
-            + " value=" + (refValue != null ? refValue.getClass().getName() : null)); //$NON-NLS-1$
         // refType — обёртка MdType с идентификатором; сам TypeItem даёт getType() (как ProdusedTypesUtil EDT).
         return refValue instanceof MdType mdType && mdType.getType() instanceof TypeItem type ? type : null;
     }
@@ -472,7 +459,6 @@ public final class MdEditorDefinedTypesPageHook implements IStartup
             }
             catch (RuntimeException | LinkageError e)
             {
-                Global.logError(TAG, "open defined type", e); //$NON-NLS-1$
             }
         }
 
@@ -536,7 +522,6 @@ public final class MdEditorDefinedTypesPageHook implements IStartup
             if (configuration != null)
                 rows.addAll(configuration.getDefinedTypes());
             rows.sort((a, b) -> String.CASE_INSENSITIVE_ORDER.compare(nameOf(a), nameOf(b)));
-            logMarks(configuration, rows);
             if (!firstLoadDone)
             {
                 // Первый заход: «Только помеченные» имеет смысл, только если есть что показать.
@@ -551,41 +536,6 @@ public final class MdEditorDefinedTypesPageHook implements IStartup
         }
 
         private boolean firstLoadDone;
-
-        /** Временная безусловная диагностика: почему пометки не находятся (см. definedTypesPage.log). */
-        private void logMarks(Configuration configuration, List<DefinedType> rows)
-        {
-            Global.tempLog(TEMP_LOG, "reload " + mdObject.eClass().getName() + " " + mdObject.getName() //$NON-NLS-1$ //$NON-NLS-2$
-                + ": configuration=" + configuration + " definedTypes=" + rows.size() //$NON-NLS-1$ //$NON-NLS-2$
-                + " refType: " + describe(refType)); //$NON-NLS-1$
-            for (DefinedType definedType : rows)
-            {
-                TypeDescription description = definedType.getTypeDescription();
-                if (description == null)
-                {
-                    Global.tempLog(TEMP_LOG, "  " + nameOf(definedType) + ": typeDescription=null"); //$NON-NLS-1$ //$NON-NLS-2$
-                    continue;
-                }
-                for (TypeItem type : description.getTypes())
-                {
-                    boolean sameName = refType != null && type != null
-                        && (java.util.Objects.equals(type.getName(), refType.getName())
-                            || java.util.Objects.equals(type.getNameRu(), refType.getNameRu()));
-                    if (sameName || sameType(type, refType))
-                        Global.tempLog(TEMP_LOG, "  " + nameOf(definedType) + ": sameName=" + sameName //$NON-NLS-1$ //$NON-NLS-2$
-                            + " sameType=" + sameType(type, refType) + " identical=" + (type == refType) //$NON-NLS-1$ //$NON-NLS-2$
-                            + " item: " + describe(type)); //$NON-NLS-1$
-                }
-            }
-        }
-
-        private static String describe(TypeItem type)
-        {
-            if (type == null)
-                return "null"; //$NON-NLS-1$
-            return type.getClass().getName() + " name=" + type.getName() + " nameRu=" + type.getNameRu() //$NON-NLS-1$ //$NON-NLS-2$
-                + " proxy=" + type.eIsProxy() + " uri=" + EcoreUtil.getURI(type); //$NON-NLS-1$ //$NON-NLS-2$
-        }
 
         private void onFilterChanged()
         {
@@ -677,7 +627,6 @@ public final class MdEditorDefinedTypesPageHook implements IStartup
             }
             catch (RuntimeException e)
             {
-                Global.logError(TAG, "apply defined type change", e); //$NON-NLS-1$
                 Display display = Display.getDefault();
                 if (!display.isDisposed())
                     display.asyncExec(() -> ToastNotification.show(PAGE_TITLE,

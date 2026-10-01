@@ -1,12 +1,15 @@
 package tormozit;
 
+import java.lang.instrument.ClassFileTransformer;
 import java.lang.reflect.Proxy;
+import java.security.ProtectionDomain;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -29,6 +32,16 @@ import org.eclipse.swt.widgets.Label;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Table;
 import org.eclipse.ui.IStartup;
+import org.objectweb.asm.ClassReader;
+import org.objectweb.asm.ClassVisitor;
+import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.MethodVisitor;
+import org.objectweb.asm.Opcodes;
+import org.osgi.framework.Bundle;
+import org.osgi.framework.BundleContext;
+import org.osgi.framework.FrameworkUtil;
+import org.osgi.framework.hooks.weaving.WeavingHook;
+import org.osgi.framework.hooks.weaving.WovenClass;
 
 import com._1c.g5.v8.bm.core.IBmObject;
 import com._1c.g5.v8.bm.core.IBmTransaction;
@@ -61,9 +74,16 @@ public class ConfigSearchDialogHook implements IStartup
     private static final String PROJECTS_TITLE_EN = "within projects";
     private static final Pattern TITLE_COUNT_SUFFIX = Pattern.compile(" \\(\\d+\\)$");
 
+    /** Регистрируется из Activator.start до первой загрузки поискового класса EDT. */
+    public static void installWeavingHook()
+    {
+        ChoiceParameterSearchPatch.install();
+    }
+
     @Override
     public void earlyStartup()
     {
+        ChoiceParameterSearchPatch.installFallback();
         Display.getDefault().asyncExec(() -> {
             Display.getDefault().addFilter(SWT.Show, event ->
             {
@@ -1202,5 +1222,171 @@ public class ConfigSearchDialogHook implements IStartup
             Global.log("ConfigSearchHook", msg);
         Activator.getDefault().getLog().log(
             new Status(Status.INFO, "tormozit.comfort", "ConfigurationSearchHook: " + msg));
+    }
+
+    /** Добавляет имя параметра выбора к полям, просматриваемым штатным поиском элементов языка. */
+    private static final class ChoiceParameterSearchPatch
+    {
+        private static final String TOPIC = "search-choice-655"; //$NON-NLS-1$
+        private static final String TARGET =
+            "com._1c.g5.v8.dt.internal.search.core.SearchForPredicatesProvider"; //$NON-NLS-1$
+        private static final String TARGET_INTERNAL = TARGET.replace('.', '/');
+        private static final String ATTRIBUTE_OWNER =
+            "com/_1c/g5/v8/dt/metadata/common/CommonPackage$Literals"; //$NON-NLS-1$
+        private static final String ATTRIBUTE_NAME = "CHOICE_PARAMETER__NAME"; //$NON-NLS-1$
+        private static final String ATTRIBUTE_DESC = "Lorg/eclipse/emf/ecore/EAttribute;"; //$NON-NLS-1$
+        private static final String PREDICATE_DESC = "(Lorg/eclipse/emf/ecore/EAttribute;)Z"; //$NON-NLS-1$
+
+        private static final AtomicBoolean installed = new AtomicBoolean();
+        private static volatile boolean woven;
+
+        private ChoiceParameterSearchPatch() {}
+
+        static void install()
+        {
+            if (!installed.compareAndSet(false, true))
+                return;
+            Bundle bundle = FrameworkUtil.getBundle(ConfigSearchDialogHook.class);
+            BundleContext context = bundle != null ? bundle.getBundleContext() : null;
+            if (context == null)
+            {
+                Global.tempLog(TOPIC, "weaving unavailable: no bundle context"); //$NON-NLS-1$
+                return;
+            }
+            context.registerService(WeavingHook.class, new SearchWeavingHook(), null);
+            Global.tempLog(TOPIC, "weaving registered"); //$NON-NLS-1$
+        }
+
+        static void installFallback()
+        {
+            install();
+            if (woven)
+                return;
+            boolean registered = BslDocCommentDescriptionFix.registerExtraTransformer(
+                new SearchTransformer(), TARGET);
+            Global.tempLog(TOPIC, "instrumentation fallback registered=" + registered //$NON-NLS-1$
+                + " woven=" + woven); //$NON-NLS-1$
+        }
+
+        private static byte[] transform(byte[] original)
+        {
+            ClassReader reader = new ClassReader(original);
+            AtomicBoolean found = new AtomicBoolean();
+            AtomicBoolean alreadyPatched = new AtomicBoolean();
+            reader.accept(new ClassVisitor(Opcodes.ASM9)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor,
+                    String signature, String[] exceptions)
+                {
+                    if (!"lambda$1".equals(name) || !PREDICATE_DESC.equals(descriptor)) //$NON-NLS-1$
+                        return null;
+                    found.set(true);
+                    return new MethodVisitor(Opcodes.ASM9)
+                    {
+                        @Override
+                        public void visitFieldInsn(int opcode, String owner, String field,
+                            String fieldDescriptor)
+                        {
+                            if (opcode == Opcodes.GETSTATIC && ATTRIBUTE_OWNER.equals(owner)
+                                && ATTRIBUTE_NAME.equals(field))
+                                alreadyPatched.set(true);
+                        }
+                    };
+                }
+            }, ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+            if (!found.get() || alreadyPatched.get())
+            {
+                Global.tempLog(TOPIC, "predicate found=" + found.get() //$NON-NLS-1$
+                    + " alreadyPatched=" + alreadyPatched.get()); //$NON-NLS-1$
+                return null;
+            }
+
+            ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_FRAMES)
+            {
+                @Override
+                protected String getCommonSuperClass(String type1, String type2)
+                {
+                    return "java/lang/Object"; //$NON-NLS-1$
+                }
+            };
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor,
+                    String signature, String[] exceptions)
+                {
+                    MethodVisitor mv = super.visitMethod(access, name, descriptor, signature,
+                        exceptions);
+                    if (!"lambda$1".equals(name) || !PREDICATE_DESC.equals(descriptor)) //$NON-NLS-1$
+                        return mv;
+                    return new MethodVisitor(Opcodes.ASM9, mv)
+                    {
+                        @Override
+                        public void visitCode()
+                        {
+                            super.visitCode();
+                            org.objectweb.asm.Label originalCode = new org.objectweb.asm.Label();
+                            super.visitVarInsn(Opcodes.ALOAD, 0);
+                            super.visitFieldInsn(Opcodes.GETSTATIC, ATTRIBUTE_OWNER,
+                                ATTRIBUTE_NAME, ATTRIBUTE_DESC);
+                            super.visitJumpInsn(Opcodes.IF_ACMPNE, originalCode);
+                            super.visitInsn(Opcodes.ICONST_1);
+                            super.visitInsn(Opcodes.IRETURN);
+                            super.visitLabel(originalCode);
+                        }
+                    };
+                }
+            }, ClassReader.EXPAND_FRAMES);
+            Global.tempLog(TOPIC, "predicate patched"); //$NON-NLS-1$
+            return writer.toByteArray();
+        }
+
+        private static final class SearchWeavingHook implements WeavingHook
+        {
+            @Override
+            public void weave(WovenClass wovenClass)
+            {
+                if (wovenClass.getState() != WovenClass.TRANSFORMING
+                    || !TARGET.equals(wovenClass.getClassName()))
+                    return;
+                try
+                {
+                    byte[] changed = transform(wovenClass.getBytes());
+                    if (changed != null)
+                    {
+                        wovenClass.setBytes(changed);
+                        woven = true;
+                    }
+                }
+                catch (Throwable t)
+                {
+                    Global.tempLog(TOPIC, "weaving failed: " + t); //$NON-NLS-1$
+                }
+            }
+        }
+
+        private static final class SearchTransformer implements ClassFileTransformer
+        {
+            @Override
+            public byte[] transform(ClassLoader loader, String className, Class<?> classBeingRedefined,
+                ProtectionDomain protectionDomain, byte[] classfileBuffer)
+            {
+                if (!TARGET_INTERNAL.equals(className))
+                    return null;
+                try
+                {
+                    byte[] changed = ChoiceParameterSearchPatch.transform(classfileBuffer);
+                    if (changed != null)
+                        woven = true;
+                    return changed;
+                }
+                catch (Throwable t)
+                {
+                    Global.tempLog(TOPIC, "instrumentation failed: " + t); //$NON-NLS-1$
+                    return null;
+                }
+            }
+        }
     }
 }

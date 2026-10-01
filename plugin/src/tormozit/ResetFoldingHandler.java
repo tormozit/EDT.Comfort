@@ -63,7 +63,6 @@ public final class ResetFoldingHandler extends AbstractHandler
             return;
 
         clearProjectionAnnotations(model);
-        BslEditorFoldingHook.collapseWhenPopulated(editor);
         editor.resetProjection();
     }
 

@@ -3861,8 +3861,12 @@ public final class ConfigSearchResultsHook implements IStartup
         {
             return false;
         }
-        scheduleContentReveal(editor,
-            new ContentTarget(kind, feature, componentClass, target, selectionObject, null, null, null), 0);
+        ContentTarget content = new ContentTarget(kind, feature, componentClass, target,
+            selectionObject, null, null, null);
+        if (kind == ContentKind.ROLE_RIGHTS)
+            scheduleRoleContentReveal(editor, content);
+        else
+            scheduleContentReveal(editor, content, 0);
         return true;
     }
 
@@ -4151,6 +4155,20 @@ public final class ConfigSearchResultsHook implements IStartup
     {
     }
 
+    /** Последний переход к правам в каждом редакторе; отменяет отложенные действия прежних событий открытия. */
+    private static final Map<IEditorPart, ContentTarget> ACTIVE_ROLE_REVEALS = new java.util.WeakHashMap<>();
+
+    private static void scheduleRoleContentReveal(IEditorPart editor, ContentTarget content)
+    {
+        ACTIVE_ROLE_REVEALS.put(editor, content);
+        scheduleContentReveal(editor, content, 0);
+    }
+
+    private static boolean isCurrentRoleReveal(IEditorPart editor, ContentTarget content)
+    {
+        return content.kind() != ContentKind.ROLE_RIGHTS || ACTIVE_ROLE_REVEALS.get(editor) == content;
+    }
+
     /**
      * Права роли на объект ({@code ObjectRights} из {@code com._1c.g5.v8.dt.rights.model}).
      * Бандл прав в {@code Require-Bundle} плагина не заявлен, поэтому проверка — по EMF-классу.
@@ -4203,12 +4221,16 @@ public final class ConfigSearchResultsHook implements IStartup
     /** Модель редактора наполняется асинхронно — ждём её так же, как поле панели «Свойства». */
     private static void scheduleContentReveal(IEditorPart editor, ContentTarget content, int attempt)
     {
+        if (!isCurrentRoleReveal(editor, content))
+            return;
         Display display = Display.getDefault();
         if (display == null || display.isDisposed() || attempt >= EXCHANGE_PLAN_MAX_ATTEMPTS)
         {
             return;
         }
         display.timerExec(attempt == 0 ? 0 : 150, () -> {
+            if (!isCurrentRoleReveal(editor, content))
+                return;
             // Элемент состава плана обмена берём ИЗ МОДЕЛИ ОТКРЫТОГО РЕДАКТОРА: BM-объект из
             // результатов поиска и из редактора — разные экземпляры. У подсистемы состав — прямой
             // список объектов, отдельного элемента нет.
@@ -4218,7 +4240,8 @@ public final class ConfigSearchResultsHook implements IStartup
             // страницу загрузки, и getPageForFeatureOrDefault отдаёт её же для любого признака (лог:
             // «страница признака=DtGranularEditorProgressPage(editors.pages.loading)»). Переход,
             // сделанный в этот момент, уходит в никуда — ждём настоящую страницу признака.
-            if (selectionObject == null || !isRealFeaturePage(editor, content.feature()))
+            boolean pageReady = selectionObject != null && isRealFeaturePage(editor, content.feature());
+            if (selectionObject == null || !pageReady)
             {
                 scheduleContentReveal(editor, content, attempt + 1);
                 return;
@@ -4252,14 +4275,13 @@ public final class ConfigSearchResultsHook implements IStartup
         Object model = Global.invoke(editor, "getModel"); //$NON-NLS-1$
         EStructuralFeature feature = content.feature();
         ISelection selection = new StructuredSelection(selectionObject);
-        boolean featureSet = Global.invokeVoid(editor, "setActiveFeature", feature); //$NON-NLS-1$
-        boolean selectionSet = Global.invokeVoid(editor, "setActiveSelection", selection, //$NON-NLS-1$
+        Global.invokeVoid(editor, "setActiveFeature", feature); //$NON-NLS-1$
+        Global.invokeVoid(editor, "setActiveSelection", selection, //$NON-NLS-1$
             DtEditorSelectionProcessingPolicy.Immediate);
-        boolean inputShown = false;
         if (model instanceof EObject modelObject)
         {
             IDtEditorInput<?> input = DtEditorInputFactory.create(modelObject, feature, selection);
-            inputShown = Global.invokeVoid(editor, "showEditorInput", input); //$NON-NLS-1$
+            Global.invokeVoid(editor, "showEditorInput", input); //$NON-NLS-1$
         }
         // Само выделение строки штатной цепочкой не доходит: страница шлёт
         // ClientSetSelectionEvent в сцену по ключу-признаку, а дерево (DtTreeView) обрабатывает
@@ -4274,10 +4296,14 @@ public final class ConfigSearchResultsHook implements IStartup
     /** Страница прав и её поле поиска появляются после открытия редактора. */
     private static void scheduleRoleRightsFilter(IEditorPart editor, ContentTarget content, int attempt)
     {
+        if (!isCurrentRoleReveal(editor, content))
+            return;
         Display display = Display.getDefault();
         if (display == null || display.isDisposed() || attempt >= 40)
             return;
         display.timerExec(attempt == 0 ? 0 : 150, () -> {
+            if (!isCurrentRoleReveal(editor, content))
+                return;
             Object activePage = Global.invoke(editor, "getActivePageInstance"); //$NON-NLS-1$
             boolean applied = RightsEditorFilterHook.applyFilterText(activePage, content.roleFilterText());
             if (!applied)
@@ -4285,6 +4311,9 @@ public final class ConfigSearchResultsHook implements IStartup
                 scheduleRoleRightsFilter(editor, content, attempt + 1);
                 return;
             }
+            Object section = activePage != null ? Global.getField(activePage, "objectsSection") : null; //$NON-NLS-1$
+            if (section != null && Global.getField(section, "viewer") instanceof TreeViewer viewer) //$NON-NLS-1$
+                showRoleRightColumn(section, viewer, content.rightName(), content.rightObject());
             scheduleContentRowSelect(editor, content, 0);
         });
     }
@@ -4296,14 +4325,24 @@ public final class ConfigSearchResultsHook implements IStartup
      */
     private static void scheduleContentRowSelect(IEditorPart editor, ContentTarget content, int attempt)
     {
+        if (!isCurrentRoleReveal(editor, content))
+            return;
         Display display = Display.getDefault();
         if (display == null || display.isDisposed() || attempt >= 40)
             return;
         display.timerExec(attempt == 0 ? 0 : 150, () -> {
-            if (selectContentRow(editor, content))
+            if (!isCurrentRoleReveal(editor, content))
+                return;
+            boolean selected = selectContentRow(editor, content);
+            if (selected)
             {
                 for (int delay : new int[] { 300, 800, 1500 })
-                    display.timerExec(delay, () -> selectContentRow(editor, content));
+                    display.timerExec(delay, () -> {
+                        if (isCurrentRoleReveal(editor, content)
+                            && (content.kind() != ContentKind.ROLE_RIGHTS
+                                || !isRoleRightsRowSelected(editor, content)))
+                            selectContentRow(editor, content);
+                    });
                 return;
             }
             scheduleContentRowSelect(editor, content, attempt + 1);
@@ -4393,12 +4432,13 @@ public final class ConfigSearchResultsHook implements IStartup
             || !(viewer.getContentProvider() instanceof ITreeContentProvider provider))
             return false;
         Object row = findRightsRow(provider, provider.getElements(viewer.getInput()), content.target(), 0);
-        Global.tempLog("issue463", "selectRoleRightsRow row=" + (row == null ? "null" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            : String.valueOf(Global.invoke(row, "getEObjectName")))); //$NON-NLS-1$
         if (row == null)
             return false;
-        viewer.setSelection(new StructuredSelection(row), true);
         Tree tree = viewer.getTree();
+        if (tree == null || tree.isDisposed()
+            || !hasRenderedRightsRow(tree.getItems(), row, content.target()))
+            return false;
+        viewer.setSelection(new StructuredSelection(row), true);
         if (tree != null && !tree.isDisposed() && tree.getSelectionCount() > 0)
         {
             tree.showSelection();
@@ -4415,6 +4455,33 @@ public final class ConfigSearchResultsHook implements IStartup
         }
         showRoleRightColumn(section, viewer, content.rightName(), content.rightObject());
         return true;
+    }
+
+    private static boolean hasRenderedRightsRow(TreeItem[] items, Object row, MdObject target)
+    {
+        for (TreeItem item : items)
+        {
+            Object data = item.getData();
+            if (data == row || Global.invoke(data, "getEObject") instanceof EObject md //$NON-NLS-1$
+                && sameShownMdObject(md, target))
+                return true;
+            if (hasRenderedRightsRow(item.getItems(), row, target))
+                return true;
+        }
+        return false;
+    }
+
+    private static boolean isRoleRightsRowSelected(IEditorPart editor, ContentTarget content)
+    {
+        Object page = Global.invoke(editor, "getActivePageInstance"); //$NON-NLS-1$
+        Object section = page != null ? Global.getField(page, "objectsSection") : null; //$NON-NLS-1$
+        if (!(Global.getField(section, "viewer") instanceof TreeViewer viewer)) //$NON-NLS-1$
+            return false;
+        Tree tree = viewer.getTree();
+        Object selected = viewer.getStructuredSelection().getFirstElement();
+        Object selectedObject = Global.invoke(selected, "getEObject"); //$NON-NLS-1$
+        return tree != null && !tree.isDisposed() && tree.getSelectionCount() > 0
+            && selectedObject instanceof EObject md && sameShownMdObject(md, content.target());
     }
 
     /**
@@ -4512,38 +4579,37 @@ public final class ConfigSearchResultsHook implements IStartup
         }
         if (rights == null && "RoleDescription".equals(eClassName(markerObject))) //$NON-NLS-1$
         {
-            if (roleProblemTargetName(markerMessage, rightName) == null)
+            String targetName = roleProblemTargetName(markerMessage, rightName);
+            if (targetName == null)
                 return false;
-            RoleProblemRights found = findRoleProblemRights(markerObject, markerMessage, rightName);
-            if (found == null)
-                return true; // штатное открытие роли уже выполнено; не выбираем объект наугад
-            rights = found.rights();
-            rightObject = found.right();
+            IEditorPart roleEditor = openRoleRightsEditor(page, markerObject);
+            if (roleEditor == null)
+                return false;
+            IProject project = Global.getActiveProject(roleEditor, false);
+            EObject resolved = GoToDefinition.resolveEObjectForFullName(targetName, page, project);
+            String resolvedName = resolved != null ? GetRef.eObjectToFullName(resolved) : null;
+            if (!(resolved instanceof MdObject target) || !targetName.equals(resolvedName))
+                return true;
+            scheduleRoleContentReveal(roleEditor, new ContentTarget(ContentKind.ROLE_RIGHTS,
+                MdClassPackage.Literals.ROLE__RIGHTS, null, target, markerObject, rightName, null,
+                roleRightsFilterText(target)));
+            return true;
         }
-        Global.tempLog("issue463", "markerObject=" + eClassName(markerObject) //$NON-NLS-1$ //$NON-NLS-2$
-            + " objectRights=" + eClassName(rights) + " rightName=" + rightName); //$NON-NLS-1$ //$NON-NLS-2$
         if (rights == null)
             return false;
         Object targetObj = Global.invoke(rights, "getObject"); //$NON-NLS-1$
         if (targetObj instanceof EObject proxy && proxy.eIsProxy())
             targetObj = EcoreUtil.resolve(proxy, rights);
-        Global.tempLog("issue463", "target=" + (targetObj instanceof EObject t //$NON-NLS-1$ //$NON-NLS-2$
-            ? eClassName(t) + " " + GetRef.eObjectToFullName(t) : String.valueOf(targetObj))); //$NON-NLS-1$
         if (!(targetObj instanceof MdObject target))
             return false;
 
         IEditorPart editor = openRoleRightsEditor(page, rights);
-        Global.tempLog("issue463", "editor=" + (editor == null ? "null" : editor.getClass().getName())); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         if (editor == null)
             return false;
-        scheduleContentReveal(editor, new ContentTarget(ContentKind.ROLE_RIGHTS,
+        scheduleRoleContentReveal(editor, new ContentTarget(ContentKind.ROLE_RIGHTS,
             MdClassPackage.Literals.ROLE__RIGHTS, null, target, rights, rightName, rightObject,
-            roleRightsFilterText(target)), 0);
+            roleRightsFilterText(target)));
         return true;
-    }
-
-    private record RoleProblemRights(EObject rights, EObject right)
-    {
     }
 
     /** Имя объекта из сообщения вида «Право "имя" ... "объект"»; сверяем и имя права. */
@@ -4563,44 +4629,6 @@ public final class ConfigSearchResultsHook implements IStartup
             return null;
         String targetName = message.substring(targetStart + 1, message.length() - 1);
         return targetName.indexOf('"') < 0 ? targetName : null;
-    }
-
-    /** По подтверждённым API модели прав ищет ровно одну строку с объектом и правом из маркера. */
-    private static RoleProblemRights findRoleProblemRights(EObject roleDescription, String message,
-        String rightName)
-    {
-        String targetName = roleProblemTargetName(message, rightName);
-        Object rightsList = Global.invoke(roleDescription, "getRights"); //$NON-NLS-1$
-        if (!(rightsList instanceof Iterable<?> iterable))
-            return null;
-        RoleProblemRights found = null;
-        int matches = 0;
-        for (Object candidate : iterable)
-        {
-            if (!(candidate instanceof EObject objectRights) || !isObjectRights(objectRights))
-                continue;
-            Object targetObj = Global.invoke(objectRights, "getObject"); //$NON-NLS-1$
-            if (targetObj instanceof EObject proxy && proxy.eIsProxy())
-                targetObj = EcoreUtil.resolve(proxy, objectRights);
-            if (!(targetObj instanceof MdObject target)
-                || !targetName.equals(GetRef.eObjectToFullName(target)))
-                continue;
-            Object objectRightsList = Global.invoke(objectRights, "getRights"); //$NON-NLS-1$
-            if (!(objectRightsList instanceof Iterable<?> assignedRights))
-                continue;
-            for (Object assigned : assignedRights)
-            {
-                Object right = Global.invoke(assigned, "getRight"); //$NON-NLS-1$
-                if (!rightName.equals(asString(Global.invoke(right, "getNameRu"))) //$NON-NLS-1$
-                    && !rightName.equals(asString(Global.invoke(right, "getName")))) //$NON-NLS-1$
-                    continue;
-                found = right instanceof EObject rightModel
-                    ? new RoleProblemRights(objectRights, rightModel) : null;
-                matches++;
-                break;
-            }
-        }
-        return matches == 1 ? found : null;
     }
 
     /** Ссылка МД в поиске дерева прав начинается с имени группы во множественном числе. */

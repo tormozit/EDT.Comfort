@@ -40,6 +40,7 @@ import org.eclipse.jface.resource.ImageDescriptor;
 import org.eclipse.jface.viewers.ArrayContentProvider;
 import org.eclipse.jface.viewers.ColumnPixelData;
 import org.eclipse.jface.viewers.ColumnLabelProvider;
+import org.eclipse.jface.viewers.ColumnViewerToolTipSupport;
 import org.eclipse.jface.viewers.ILabelProvider;
 import org.eclipse.jface.viewers.ITreeContentProvider;
 import org.eclipse.jface.viewers.LabelProvider;
@@ -578,6 +579,8 @@ public final class MdEditorTreeHook
                 EObject object = elementObject(tree, element);
                 return object instanceof BasicFeature feature ? feature.getType() : null;
             }, element -> elementObject(tree, element), null));
+        // Провайдер подсказки должен работать для ячейки под мышью, а не только текущей строки.
+        ColumnViewerToolTipSupport.enableFor(viewer);
         installTypeColumnDoubleClick(tree, viewer);
         tree.setHeaderVisible(true);
         ThemeAwareColors.applyGridLines(tree);

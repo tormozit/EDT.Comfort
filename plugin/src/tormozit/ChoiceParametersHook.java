@@ -89,6 +89,11 @@ import com._1c.g5.v8.dt.metadata.mdtype.EnumTypes;
 import java.math.BigDecimal;
 import java.util.Set;
 import org.eclipse.emf.ecore.EStructuralFeature;
+import org.eclipse.core.databinding.observable.list.IObservableList;
+import org.eclipse.core.databinding.observable.list.IListChangeListener;
+import com._1c.g5.v8.dt.md.ui.TypesUtil;
+import com._1c.g5.v8.dt.md.ui.aef.models.IMdChoiceParameterLinksModel;
+import com._1c.g5.v8.dt.metadata.common.ChoiceParameterLink;
 
 /**
  * В диалоге «Редактирование параметров выбора» автоматически выставляет тип значения
@@ -109,6 +114,8 @@ public class ChoiceParametersHook implements IStartup
     /** Окно связей параметров выбора СКД — остаётся штатным (дерево доступных полей схемы), дополняется списком имён. */
     private static final String DCS_LINKS_DIALOG_CLASS =
             "com._1c.g5.v8.dt.dcs.ui.valueeditors.choiceparameterlinks.ChoiceParameterLinksDialog"; //$NON-NLS-1$
+    private static final String MD_LINKS_DIALOG_CLASS =
+            "com._1c.g5.v8.dt.md.ui.dialogs.ChoiceParameterLinksDialog"; //$NON-NLS-1$
 
     @Override
     public void earlyStartup()
@@ -146,6 +153,7 @@ public class ChoiceParametersHook implements IStartup
     {
         Object data = shell.getData();
         if (data != null && (DIALOG_CLASS.equals(data.getClass().getName())
+                || MD_LINKS_DIALOG_CLASS.equals(data.getClass().getName())
                 || DCS_LINKS_DIALOG_CLASS.equals(data.getClass().getName())))
             return true;
         String title = shell.getText();
@@ -173,6 +181,8 @@ public class ChoiceParametersHook implements IStartup
         Object dialog = shell.getData();
         if (dialog == null)
             dialog = shell.getData("org.eclipse.jface.window.Window"); //$NON-NLS-1$
+        if (dialog != null && MD_LINKS_DIALOG_CLASS.equals(dialog.getClass().getName()))
+            return MdLinksSession.tryPatch(shell, dialog);
         if (dialog != null && DCS_DIALOG_CLASS.equals(dialog.getClass().getName()))
             return DcsNameProposals.tryPatch(shell, dialog, false);
         if (dialog != null && DCS_LINKS_DIALOG_CLASS.equals(dialog.getClass().getName()))
@@ -198,6 +208,168 @@ public class ChoiceParametersHook implements IStartup
         shell.addDisposeListener(e -> session.dispose());
         ChoiceParametersDebug.log("PATCH OK fields=" + fieldMap.size()); //$NON-NLS-1$
         return true;
+    }
+
+    /** Подбор имени новой связи в штатном диалоге реквизита; существующие связи не меняются. */
+    private static final class MdLinksSession
+    {
+        private MdLinksSession() {}
+
+        @SuppressWarnings("unchecked")
+        static boolean tryPatch(Shell shell, Object dialog)
+        {
+            Object result = Global.getField(dialog, "result"); //$NON-NLS-1$
+            Object names = Global.getField(dialog, "allowedNames"); //$NON-NLS-1$
+            Object viewer = Global.getField(dialog, "optionsViewer"); //$NON-NLS-1$
+            Object converter = Global.getField(dialog, "attributeToCplFunction"); //$NON-NLS-1$
+            if (!(result instanceof IObservableList<?>) || !(names instanceof List<?>)
+                    || !(viewer instanceof ColumnViewer) || converter == null)
+                return false;
+            IMdChoiceParameterLinksModel model = capturedModel(converter);
+            if (model == null)
+                return false;
+            try
+            {
+                Map<String, Field> fields = buildFields(model);
+                IObservableList<Object> items = (IObservableList<Object>) result;
+                List<String> allowedNames = (List<String>) names;
+                ColumnViewer optionsViewer = (ColumnViewer) viewer;
+                IListChangeListener<Object> listener = event ->
+                {
+                    for (var entry : event.diff.getDifferences())
+                    {
+                        if (entry.isAddition() && entry.getElement() instanceof ChoiceParameterLink)
+                            selectName((ChoiceParameterLink) entry.getElement(), items, allowedNames,
+                                    fields, model, optionsViewer);
+                    }
+                };
+                items.addListChangeListener(listener);
+                shell.addDisposeListener(e ->
+                {
+                    if (!items.isDisposed())
+                        items.removeListChangeListener(listener);
+                });
+                shell.setData(PATCHED_KEY, Boolean.TRUE);
+                return true;
+            }
+            catch (RuntimeException e)
+            {
+                return false;
+            }
+        }
+
+        /** EDT передаёт model::toLink; получаем захваченную модель без зависимости от имени поля лямбды. */
+        private static IMdChoiceParameterLinksModel capturedModel(Object converter)
+        {
+            for (java.lang.reflect.Field field : converter.getClass().getDeclaredFields())
+            {
+                if (java.lang.reflect.Modifier.isStatic(field.getModifiers()))
+                    continue;
+                try
+                {
+                    if (field.trySetAccessible())
+                    {
+                        Object value = field.get(converter);
+                        if (value instanceof IMdChoiceParameterLinksModel)
+                            return (IMdChoiceParameterLinksModel) value;
+                    }
+                }
+                catch (ReflectiveOperationException | RuntimeException e)
+                {
+                    // Недоступная модель: сохраняем штатное поведение диалога.
+                }
+            }
+            return null;
+        }
+
+        /** Тот же набор полей, что IMdChoiceParameterLinksModel.getAllowedParameterNames(). */
+        private static Map<String, Field> buildFields(IMdChoiceParameterLinksModel model)
+        {
+            Map<String, Field> fields = new LinkedHashMap<>();
+            TypeDescription type = model.getTypeDescription();
+            if (type == null || type.eIsProxy())
+                return fields;
+            IV8Project project = model.getV8project();
+            String prefix = project.getScriptVariant() == ScriptVariant.ENGLISH ? "Filter." : "Отбор."; //$NON-NLS-1$ //$NON-NLS-2$
+            ILabelProvider labels = new FieldLabelProvider(new ScriptVariantProvider(project));
+            try
+            {
+                for (TypeItem ownerType : McoreUtil.flatTypes(type))
+                {
+                    for (TypeItem allowedType : TypesUtil.getChoiceParameterLinksTypesForAllowedNames(project, ownerType))
+                    {
+                        MdObject owner = EcoreUtil2.getContainerOfType(allowedType, MdObject.class);
+                        Object[] elements = IMdChoiceParameterLinksModel.ALL_FIELDS_CONTENT_PROVIDER.getElements(owner);
+                        if (elements == null)
+                            continue;
+                        for (Object element : elements)
+                        {
+                            if (!(element instanceof Field))
+                                continue;
+                            Field field = resolveField((Field) element, model);
+                            if (!field.eIsProxy() && !field.isReadOnly())
+                                fields.putIfAbsent(prefix + labels.getText(field), field);
+                        }
+                    }
+                }
+            }
+            finally
+            {
+                labels.dispose();
+            }
+            return fields;
+        }
+
+        private static Field resolveField(Field field, IMdChoiceParameterLinksModel model)
+        {
+            if (field == null || !field.eIsProxy())
+                return field;
+            IBmModel bm = model.getV8project().getAdapter(IBmModel.class);
+            return bm == null ? field : (Field) EcoreUtil.resolve(field, bm.getEngine().getResourceSet());
+        }
+
+        private static void selectName(ChoiceParameterLink link, IObservableList<Object> items,
+                List<String> allowedNames, Map<String, Field> fields, IMdChoiceParameterLinksModel model,
+                ColumnViewer viewer)
+        {
+            try
+            {
+                Field source = resolveField(link.getField(), model);
+                TypeDescription sourceType = source == null || source.eIsProxy() ? null : source.getType();
+                if (sourceType == null || sourceType.eIsProxy() || sourceType.getTypes().isEmpty())
+                    return;
+                for (String name : allowedNames)
+                {
+                    Field field = fields.get(name);
+                    TypeDescription type = field == null ? null : field.getType();
+                    boolean matches = type != null && !type.eIsProxy()
+                            && McoreUtil.compareTypeDescriptions(sourceType, type);
+                    if (!matches)
+                        continue;
+                    String uniqueName = name;
+                    while (isUsedName(uniqueName, link, items))
+                        uniqueName = "_" + uniqueName; //$NON-NLS-1$
+                    link.setName(uniqueName);
+                    viewer.refresh(link);
+                    return;
+                }
+            }
+            catch (RuntimeException e)
+            {
+                // Ошибка подбора не должна мешать добавлению связи штатным диалогом.
+            }
+        }
+
+        private static boolean isUsedName(String name, ChoiceParameterLink added, IObservableList<Object> items)
+        {
+            for (Object item : items)
+            {
+                if (item != added && item instanceof ChoiceParameterLink
+                        && name.equalsIgnoreCase(((ChoiceParameterLink) item).getName()))
+                    return true;
+            }
+            return false;
+        }
     }
 
     private static final class PatchSession

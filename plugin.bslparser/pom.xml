@@ -13,6 +13,6 @@
 
   <!-- Бандл раннего старта: хук разбора модулей BSL, см. README.md -->
   <artifactId>tormozit.comfort.bslparser</artifactId>
-  <version>1.0.0-SNAPSHOT</version>
+  <version>1.0.1-SNAPSHOT</version>
   <packaging>eclipse-plugin</packaging>
 </project>
