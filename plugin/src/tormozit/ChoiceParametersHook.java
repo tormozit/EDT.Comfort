@@ -338,7 +338,30 @@ public class ChoiceParametersHook implements IStartup
                 TypeDescription sourceType = source == null || source.eIsProxy() ? null : source.getType();
                 if (sourceType == null || sourceType.eIsProxy() || sourceType.getTypes().isEmpty())
                     return;
-                for (String name : allowedNames)
+                ILabelProvider labels = new FieldLabelProvider(new ScriptVariantProvider(model.getV8project()));
+                String sourceName;
+                try
+                {
+                    sourceName = labels.getText(source);
+                }
+                finally
+                {
+                    labels.dispose();
+                }
+                // Как штатный selectName: сравниваем последние части имён без пути и префикса Отбор./Filter.
+                sourceName = sourceName.substring(sourceName.lastIndexOf('.') + 1);
+                List<String> candidates = new ArrayList<>(allowedNames);
+                for (int i = 0; i < candidates.size(); i++)
+                {
+                    String name = candidates.get(i);
+                    if (sourceName.equals(name.substring(name.lastIndexOf('.') + 1)))
+                    {
+                        candidates.remove(i);
+                        candidates.add(0, name);
+                        break;
+                    }
+                }
+                for (String name : candidates)
                 {
                     Field field = fields.get(name);
                     TypeDescription type = field == null ? null : field.getType();

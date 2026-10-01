@@ -712,6 +712,15 @@ public final class FilterInputBoxListNavigation
             return;
         if (!(box.getData(NAV_CONTEXT_KEY) instanceof NavContext))
             return;
+        // Esc сначала закрывает историю, не передавая обход клавиши окну диалога.
+        if (event.detail == SWT.TRAVERSE_ESCAPE
+            && Boolean.TRUE.equals(Global.getField(box, "displayingPopup"))) //$NON-NLS-1$
+        {
+            Global.invoke(box, "hidePopup"); //$NON-NLS-1$
+            event.doit = false;
+            event.detail = SWT.TRAVERSE_NONE;
+            return;
+        }
         if (event.detail != SWT.TRAVERSE_RETURN)
             return;
         if (!Boolean.TRUE.equals(Global.getField(box, "displayingPopup"))) //$NON-NLS-1$

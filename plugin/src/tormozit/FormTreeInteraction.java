@@ -1,5 +1,9 @@
 package tormozit;
 
+import java.util.ArrayDeque;
+import java.util.Map;
+import java.util.WeakHashMap;
+
 import org.eclipse.jface.viewers.StructuredSelection;
 import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.swt.SWT;
@@ -8,6 +12,7 @@ import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.graphics.Rectangle;
 import org.eclipse.swt.graphics.RGB;
 import org.eclipse.swt.widgets.Event;
+import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.ScrollBar;
 import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.TreeItem;
@@ -69,6 +74,8 @@ final class FormTreeInteraction
 
     private boolean columnActivated;
 
+    private Listener selectionPaintFilter;
+
     private Color ownedRowBg;
 
     private Color ownedInactiveRowBg;
@@ -80,15 +87,19 @@ final class FormTreeInteraction
     private Color ownedColumnTint;
 
     /**
-     * Снимок выделения: {@link Tree#getSelection()} — нативный вызов, создающий массив, а
-     * отрисовка спрашивает выделение на КАЖДУЮ ячейку (и не по разу). На прокрутке это давало
-     * сотни таких вызовов в секунду и было главной статьёй расхода времени в обработчиках
-     * отрисовки. Снимок живёт {@link #SELECTION_SNAPSHOT_MS} — заведомо дольше одной перерисовки
-     * и заведомо незаметно для глаза, даже если выделение сменили программно (без событий).
+     * Снимок полного выделения используется при проверке строк и выборе текущей строки.
+     * Во время отрисовки снимок проверяется по исходному SWT.SELECTED каждой ячейки,
+     * до слушателей JFace; расхождение сбрасывает снимок. Это учитывает программный выбор,
+     * не требуя полного чтения выделения на каждый кадр. Вне отрисовки срок жизни — {@link #SELECTION_SNAPSHOT_MS}
+     * после окончания чтения; события выбора сбрасывают его сразу.
      */
     private TreeItem[] selectionSnapshot;
 
     private long selectionSnapshotAt;
+
+    private int paintCellDepth;
+
+    private final Map<TreeItem, Integer> visibleRowIndexes = new WeakHashMap<>();
 
     /** Срок жизни снимка выделения, мс. */
     private static final long SELECTION_SNAPSHOT_MS = 20;
@@ -132,26 +143,99 @@ final class FormTreeInteraction
             && tree.getData(INSTALLED_KEY) instanceof FormTreeInteraction interaction ? interaction : null;
     }
 
+    private void redrawHighlightColumn(int column)
+    {
+        if (column < 3 || column >= tree.getColumnCount())
+            return;
+        TreeItem top = tree.getTopItem();
+        if (top == null || top.isDisposed())
+            return;
+        Rectangle bounds = top.getBounds(column);
+        Rectangle client = tree.getClientArea();
+        Rectangle dirty = new Rectangle(bounds.x, client.y, bounds.width, client.height).intersection(client);
+        if (dirty.isEmpty())
+            return;
+        tree.redraw(dirty.x, dirty.y, dirty.width, dirty.height, false);
+    }
+
+    private void redrawHighlightOnFocusChange()
+    {
+        if (columnActivated)
+            redrawHighlightColumn(activeColumn());
+        redrawRow(activeRow());
+        redrawRowsFromSelection();
+    }
+
+    private void redrawRowsFromSelection()
+    {
+        for (TreeItem item : selection())
+            redrawRow(item);
+    }
+
+    private void handlePaintCell(Event event, Listener action)
+    {
+        paintCellDepth++;
+        try
+        {
+            action.handleEvent(event);
+        }
+        finally
+        {
+            paintCellDepth--;
+        }
+    }
+
+    private void validateSelectionOnPaint(Event event)
+    {
+        if (event.widget != tree || !(event.item instanceof TreeItem item) || selectionSnapshot == null)
+            return;
+        // Без FULL_SELECTION SWT сообщает SELECTED только для первой видимой колонки.
+        if ((tree.getStyle() & SWT.FULL_SELECTION) == 0)
+        {
+            int[] order = tree.getColumnOrder();
+            int firstColumn = order.length > 0 ? order[0] : 0;
+            if (event.index != firstColumn)
+                return;
+        }
+        boolean cachedSelected = false;
+        for (TreeItem selected : selectionSnapshot)
+        {
+            if (selected == item)
+            {
+                cachedSelected = true;
+                break;
+            }
+        }
+        // Display-фильтр выполняется раньше OwnerDrawLabelProvider.erase(), который
+        // может снять SWT.SELECTED ради своей заливки. Здесь флаг ещё задан самим SWT.
+        if (cachedSelected != ((event.detail & SWT.SELECTED) != 0))
+        {
+            invalidateSelection();
+        }
+    }
+
     private void hook()
     {
         ListSelectionThemeColors.markOptOut(tree);
         ThemeAwareColors.hideGridLinesInDarkTheme(tree);
+        selectionPaintFilter = this::validateSelectionOnPaint;
+        tree.getDisplay().addFilter(SWT.EraseItem, selectionPaintFilter);
         tree.addListener(SWT.MouseDown, highlightOnly ? this::onHighlightOnlyMouseDown : this::onMouseDown);
-        tree.addListener(SWT.EraseItem, this::onEraseItem);
-        tree.addListener(SWT.PaintItem, this::onPaintItem);
+        tree.addListener(SWT.EraseItem, event -> handlePaintCell(event, this::onEraseItem));
+        tree.addListener(SWT.PaintItem, event -> handlePaintCell(event, this::onPaintItem));
         if (highlightOnly)
             tree.addListener(SWT.Paint, this::onPaintEmptyRows);
         tree.addListener(SWT.FocusIn, event -> {
             invalidateColors();
             if (highlightOnly)
-                tree.redraw();
+                redrawHighlightOnFocusChange();
             else
                 redrawRow(activeRow());
         });
         tree.addListener(SWT.FocusOut, event -> {
             invalidateColors();
             if (highlightOnly)
-                tree.redraw();
+                redrawHighlightOnFocusChange();
             else
                 redrawRow(activeRow());
         });
@@ -165,7 +249,10 @@ final class FormTreeInteraction
             redrawRow(selectedItem);
         });
         tree.addListener(SWT.Dispose, event -> {
+            tree.getDisplay().removeFilter(SWT.EraseItem, selectionPaintFilter);
             invalidateColors();
+            invalidateSelection();
+            visibleRowIndexes.clear();
         });
     }
 
@@ -182,6 +269,7 @@ final class FormTreeInteraction
         if (tree.isDisposed() || column < 0 || column >= tree.getColumnCount())
             return;
         TreeItem previous = activeRow();
+        int previousColumn = columnActivated ? activeColumn() : -1;
         activeColumn = column;
         if (highlightOnly)
             columnActivated = true;
@@ -189,7 +277,13 @@ final class FormTreeInteraction
         syncFromSelection();
         invalidateColors();
         if (highlightOnly)
-            tree.redraw();
+        {
+            redrawHighlightColumn(previousColumn);
+            if (column != previousColumn)
+                redrawHighlightColumn(column);
+            redrawRow(previous);
+            redrawRowsFromSelection();
+        }
         else
         {
             redrawRow(previous);
@@ -299,10 +393,13 @@ final class FormTreeInteraction
             if (content != null && e.x < content.x)
                 return;
         }
+        int previousColumn = columnActivated ? activeColumn() : -1;
         activeColumn = column;
         columnActivated = true;
         invalidateColors();
-        tree.redraw();
+        redrawHighlightColumn(previousColumn);
+        if (column != previousColumn)
+            redrawHighlightColumn(column);
     }
 
     /** Перерисовать одну строку: полный {@code redraw()} дерева на клик избыточен. */
@@ -352,10 +449,11 @@ final class FormTreeInteraction
     private TreeItem[] selection()
     {
         long now = System.currentTimeMillis();
-        if (selectionSnapshot == null || now - selectionSnapshotAt > SELECTION_SNAPSHOT_MS)
+        if (selectionSnapshot == null
+            || paintCellDepth == 0 && now - selectionSnapshotAt > SELECTION_SNAPSHOT_MS)
         {
             selectionSnapshot = tree.getSelection();
-            selectionSnapshotAt = now;
+            selectionSnapshotAt = System.currentTimeMillis();
         }
         return selectionSnapshot;
     }
@@ -466,7 +564,8 @@ final class FormTreeInteraction
         int bottom = client.y;
         int limit = client.height / Math.max(tree.getItemHeight(), 1) + 2;
         int seen = 0;
-        for (TreeItem row = top; row != null && seen < limit; row = nextVisibleRow(row))
+        VisibleRowCursor cursor = new VisibleRowCursor(tree, top, visibleRowIndexes);
+        for (TreeItem row = top; row != null && seen < limit; row = cursor.next())
         {
             seen++;
             Rectangle bounds = rowBounds(tree, row);
@@ -475,6 +574,8 @@ final class FormTreeInteraction
             if (bounds.y >= client.y + client.height)
                 break;
             bottom = Math.max(bottom, bounds.y + bounds.height);
+            if (bottom >= client.y + client.height)
+                break;
         }
         if (bottom >= client.y + client.height)
             return;
@@ -567,7 +668,11 @@ final class FormTreeInteraction
         int height = Math.max(tree.getItemHeight(), 1);
         int limit = tree.getClientArea().height / height + 2;
         int seen = 0;
-        for (TreeItem row = tree.getTopItem(); row != null && seen < limit; row = nextVisibleRow(row))
+        TreeItem top = tree.getTopItem();
+        FormTreeInteraction interaction = of(tree);
+        Map<TreeItem, Integer> indexes = interaction != null ? interaction.visibleRowIndexes : new WeakHashMap<>();
+        VisibleRowCursor cursor = new VisibleRowCursor(tree, top, indexes);
+        for (TreeItem row = top; row != null && seen < limit; row = cursor.next())
         {
             seen++;
             if (row.isDisposed())
@@ -579,22 +684,93 @@ final class FormTreeInteraction
         return null;
     }
 
-    /** Следующая строка в порядке показа: первый развёрнутый потомок, иначе следующий сосед. */
-    private static TreeItem nextVisibleRow(TreeItem row)
+    /** Обход раскрытых строк через публичный SWT API, без массивов всех соседей на каждый шаг. */
+    private static final class VisibleRowCursor
     {
-        if (row.getExpanded() && row.getItemCount() > 0)
-            return row.getItem(0);
-        for (TreeItem current = row; current != null; current = current.getParentItem())
+        private final Tree tree;
+
+        private final ArrayDeque<Level> levels = new ArrayDeque<>();
+
+        private final Map<TreeItem, Integer> indexes;
+
+        private TreeItem current;
+
+        VisibleRowCursor(Tree tree, TreeItem first, Map<TreeItem, Integer> indexes)
         {
-            TreeItem parent = current.getParentItem();
-            TreeItem[] siblings = parent != null ? parent.getItems() : current.getParent().getItems();
-            for (int i = 0; i < siblings.length - 1; i++)
+            this.tree = tree;
+            this.indexes = indexes;
+            current = first;
+            // Начальные индексы ищем один раз на уровень, затем увеличиваем при переходе.
+            // Верхняя строка может быть потомком: сохраняем и путь к её корневому узлу.
+            for (TreeItem item = first; item != null;)
             {
-                if (siblings[i] == current)
-                    return siblings[i + 1];
+                TreeItem parent = item.getParentItem();
+                Integer cached = indexes.get(item);
+                // Перестройка дерева могла сдвинуть индекс: всегда проверяем сам объект.
+                boolean valid = cached != null && cached >= 0 && itemAt(parent, cached) == item;
+                int index = valid ? cached : parent != null ? parent.indexOf(item) : tree.indexOf(item);
+                indexes.put(item, index);
+                levels.addFirst(new Level(parent, index));
+                item = parent;
             }
         }
-        return null;
+
+        TreeItem next()
+        {
+            if (current == null || current.isDisposed())
+                return null;
+            TreeItem child = current.getExpanded() ? itemAt(current, 0) : null;
+            if (child != null)
+            {
+                levels.addLast(new Level(current, 0));
+                current = child;
+                indexes.put(current, 0);
+                return current;
+            }
+            while (!levels.isEmpty())
+            {
+                Level level = levels.peekLast();
+                int nextIndex = level.index + 1;
+                TreeItem sibling = itemAt(level.parent, nextIndex);
+                if (sibling != null)
+                {
+                    level.index = nextIndex;
+                    current = sibling;
+                    indexes.put(current, nextIndex);
+                    return current;
+                }
+                levels.removeLast();
+            }
+            current = null;
+            return null;
+        }
+
+        private TreeItem itemAt(TreeItem parent, int index)
+        {
+            try
+            {
+                return parent != null ? parent.getItem(index) : tree.getItem(index);
+            }
+            catch (IllegalArgumentException e)
+            {
+                // getItem(index) документированно бросает ERROR_INVALID_RANGE при
+                // отсутствии такого ребёнка. Это конец списка, без getItemCount().
+                return null;
+            }
+        }
+
+        private static final class Level
+        {
+            private final TreeItem parent;
+
+            private int index;
+
+            Level(TreeItem parent, int index)
+            {
+                this.parent = parent;
+                this.index = index;
+            }
+        }
     }
 
     /** Прямоугольник строки: годится любой непустой прямоугольник её ячеек — нужна только высота. */

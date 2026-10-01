@@ -404,11 +404,20 @@ public final class BslDocCommentTypeMerge
         if (typeSection == null)
             return 0;
         Object defsObj = Global.invoke(typeSection, "getTypeDefinitions"); //$NON-NLS-1$
-        if (!(defsObj instanceof List<?>))
+        if (!(defsObj instanceof List<?> defs))
             return 0;
         List<Object> parts = typeLineParts(typeSection);
         if (!isCommaSeparatedTypeLine(parts))
             return 0;
+        // EDT уже разобрала «Массив из Тип1, Тип2» в один тип с getContainTypes().
+        // Повторный split по запятой поднял бы Тип2 на уровень самой переменной.
+        // Сохраняем штатную структуру, в том числе для английского «Array of …».
+        for (Object def : defs)
+        {
+            Object contained = Global.invoke(def, "getContainTypes"); //$NON-NLS-1$
+            if (contained instanceof List<?> elements && !elements.isEmpty())
+                return 0;
+        }
         return collectFromParts(typeSection, parts);
     }
 
