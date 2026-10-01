@@ -1153,13 +1153,17 @@ public final class ProblemViewHook implements IStartup
         /** Отбор панели, снятый в UI-потоке: в потоке события его строить нельзя. */
         private volatile MarkerFilter filterSnapshot;
 
-        /** Отбор по подсистемам: его маркерные события всегда идут штатному слушателю. */
+        /** При отборе по подсистемам не определяем принадлежность изменённых объектов. */
         private volatile boolean subsystemFilterActive = true;
 
-        /** В этих областях заслонка не может надёжно определить затронутые объекты. */
-        private boolean bypassUpdateGate()
+        /** «Показывать все» снимает отбор по области, поэтому анализировать принадлежность нельзя. */
+        private volatile boolean showAllActive = true;
+
+        /** В этих областях события объединяем, но не делим на «свои» и «чужие». */
+        private boolean skipOwnershipAnalysis()
         {
-            return subsystemFilterActive || ProblemViewComfortScope.mode() != ProblemViewComfortScope.Mode.NONE;
+            return showAllActive || subsystemFilterActive
+                || ProblemViewComfortScope.mode() != ProblemViewComfortScope.Mode.NONE;
         }
 
         /**
@@ -1211,13 +1215,13 @@ public final class ProblemViewHook implements IStartup
         @Override
         public void handleMarkersChanged(MarkersChangedEvent event)
         {
-            boolean bypass = bypassUpdateGate();
             Global.tempLog("issue647", "событие маркеров: проекты=" + changedProjectNames(event) //$NON-NLS-1$ //$NON-NLS-2$
+                + ", показывать все=" + showAllActive //$NON-NLS-1$
                 + ", фильтр по подсистемам=" + subsystemFilterActive //$NON-NLS-1$
                 + ", область Комфорта=" + ProblemViewComfortScope.mode() //$NON-NLS-1$
                 + ", фильтр обновлений=" + ComfortSettings.isProblemViewUpdateGateEnabled()); //$NON-NLS-1$
             if (!ComfortSettings.isReplaceListFiltersEnabled()
-                || !ComfortSettings.isProblemViewUpdateGateEnabled() || bypass)
+                || !ComfortSettings.isProblemViewUpdateGateEnabled())
             {
                 stock.handleMarkersChanged(event);
                 return;
@@ -1254,10 +1258,10 @@ public final class ProblemViewHook implements IStartup
                 return;
             try
             {
-                if (bypassUpdateGate())
+                if (skipOwnershipAnalysis())
                 {
-                    applySourceWait(false);
-                    deliver(event, "отбор по подсистемам или область Комфорта"); //$NON-NLS-1$
+                    applySourceWait(!isSourceIdle(event, filterSnapshot));
+                    deliver(event, "без анализа «свой/чужой»"); //$NON-NLS-1$
                     return;
                 }
                 MarkerChangeTap.get().ensureInstalled();
@@ -1420,9 +1424,11 @@ public final class ProblemViewHook implements IStartup
                     if (view.getSite() == null)
                         return;
                     Object filters = problemFilters(view.getClass().getClassLoader());
+                    showAllActive = filters == null
+                        || Boolean.TRUE.equals(Global.invoke(filters, "isShowAll")); //$NON-NLS-1$
                     subsystemFilterActive = filters == null
                         || (SCOPE_SUBSYSTEM_FILTER.equals(scopeName(Global.invoke(filters, "getScope"))) //$NON-NLS-1$
-                            && !Boolean.TRUE.equals(Global.invoke(filters, "isShowAll"))); //$NON-NLS-1$
+                            && !showAllActive);
                     Object filter = Global.invoke(view, "getMarkerFilter"); //$NON-NLS-1$
                     if (filter instanceof MarkerFilter markerFilter)
                     {
@@ -2037,7 +2043,14 @@ public final class ProblemViewHook implements IStartup
             InvocationHandler handler = (proxy, method, args) ->
             {
                 if ("accept".equals(method.getName())) //$NON-NLS-1$
-                    display.asyncExec(() -> appendScope(view, status, filters, loader));
+                    display.asyncExec(() ->
+                    {
+                        appendScope(view, status, filters, loader);
+                        // «Показывать все» может смениться при той же подписи области.
+                        ResultChangeGate gate = gates.get(view);
+                        if (gate != null)
+                            gate.refreshFilterSnapshot();
+                    });
                 return defaultProxyResult(method, args, proxy);
             };
             Object listener = Proxy.newProxyInstance(loader, new Class<?>[] { listenerType }, handler);
