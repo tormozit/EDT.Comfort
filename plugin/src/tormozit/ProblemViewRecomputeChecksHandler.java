@@ -18,16 +18,13 @@ import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
 
 /**
  * «Проверить» в панели «Ошибки конфигурации» — перезапускает проверки по текущей области отбора
- * панели (проект / объект / элемент), а не по всему проекту и не по объектам уже показанных ошибок.
+ * панели (проект / объект / элемент), а не по последнему выделению редактора.
  * <p>
- * Область берётся из самой панели: поле {@code scopeSelection}
- * ({@code com._1c.g5.v8.dt.internal.ui.validation.ScopeSelection}) — то же, по которому панель
- * строит отбор маркеров, поэтому перепроверяется ровно то, что панель показывает. Сам пересчёт —
- * {@link ComfortCheckRecompute}.
+ * Режим области берётся из настроек панели, а её источник — из {@code scopeSelection}.
+ * Сам пересчёт — {@link ComfortCheckRecompute}.
  * <p>
- * Если область — проект целиком (или отбор по подсистемам), конкретных объектов у панели нет;
- * такой случай не выполняется молча дорогой полной перепроверкой, а сообщается тостом:
- * для проверки всего проекта есть штатная команда EDT.
+ * Для областей «Все проекты» и «Фильтр по подсистемам» конкретный набор объектов здесь не определён;
+ * команда предлагает выбрать область проекта, объекта или элемента.
  * <p>
  * Кнопка живёт в собственной панели инструментов панели «Ошибки конфигурации», поэтому у обработчика
  * нет {@code activeWhen} по {@code activePartId}: иначе кнопка сереет, как только фокус уходит из
@@ -42,19 +39,58 @@ public class ProblemViewRecomputeChecksHandler extends AbstractHandler
         IWorkbenchPage page = HandlerUtil.getActiveWorkbenchWindow(event).getActivePage();
         IViewPart part = page != null ? page.findView(ProblemViewMarkers.PROBLEM_VIEW_ID) : null;
         Object scopeSelection = Global.getField(part, "scopeSelection"); //$NON-NLS-1$
+        Object filters = problemFilters(part);
+        Object scope = Global.invoke(filters, "getScope"); //$NON-NLS-1$
+        String scopeName = scope instanceof Enum<?> value ? value.name() : null;
+        boolean showAll = Boolean.TRUE.equals(Global.invoke(filters, "isShowAll")); //$NON-NLS-1$
+        Global.tempLog("problem-view-recompute", "вызов: панель=" + (part != null) //$NON-NLS-1$ //$NON-NLS-2$
+            + ", область=" + scopeName + ", показать все=" + showAll //$NON-NLS-1$ //$NON-NLS-2$
+            + ", выделение=" + (scopeSelection != null)); //$NON-NLS-1$
         Debug.log("команда вызвана: страница=" + (page != null) //$NON-NLS-1$
             + ", панель=" + (part == null ? "не найдена" : part.getClass().getName()) //$NON-NLS-1$ //$NON-NLS-2$
             + ", область=" + (scopeSelection == null ? "null" : scopeSelection.getClass().getName())); //$NON-NLS-1$ //$NON-NLS-2$
-        if (scopeSelection == null)
+        if (filters == null || scopeName == null || scopeSelection == null)
+        {
+            toast("Проверить", "Не удалось определить область отбора панели."); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
+        }
+
+        if (showAll || "ALL".equals(scopeName) || "SUBSYSTEM_FILTER".equals(scopeName)) //$NON-NLS-1$ //$NON-NLS-2$
+        {
+            Global.tempLog("problem-view-recompute", "область без конкретных объектов: " + scopeName); //$NON-NLS-1$ //$NON-NLS-2$
+            toast("Проверить", //$NON-NLS-1$
+                "Для перепроверки выберите область «Текущий проект», «Текущий объект» или «Текущий элемент»."); //$NON-NLS-1$
+            return null;
+        }
 
         Map<IProject, Set<EObject>> selectedObjects = nonEmptySelectedObjects(scopeSelection);
         Set<IProject> selectedProjects = selectedProjects(scopeSelection);
         logScope(selectedObjects, selectedProjects);
-        if (selectedObjects.isEmpty() && selectedProjects.isEmpty())
+        if ("CURRENT_PROJECT".equals(scopeName)) //$NON-NLS-1$
+        {
+            Set<IProject> projects = new LinkedHashSet<>(selectedProjects);
+            projects.addAll(selectedObjects.keySet());
+            Global.tempLog("problem-view-recompute", "проекты=" + projects); //$NON-NLS-1$ //$NON-NLS-2$
+            if (projects.isEmpty())
+                toast("Проверить", "В текущей области нет проекта для перепроверки."); //$NON-NLS-1$ //$NON-NLS-2$
+            for (IProject project : projects)
+                ComfortCheckRecompute.recomputeProject(project);
+            return null;
+        }
+        if ("CURRENT_OBJECT".equals(scopeName)) //$NON-NLS-1$
+            selectedObjects = topObjects(part, scopeSelection, selectedObjects);
+        else if (!"CURRENT_ELEMENT".equals(scopeName)) //$NON-NLS-1$
+        {
+            toast("Проверить", "Неизвестная область отбора панели: " + scopeName); //$NON-NLS-1$ //$NON-NLS-2$
+            return null;
+        }
+        Global.tempLog("problem-view-recompute", "объекты по проектам=" + selectedObjects //$NON-NLS-1$ //$NON-NLS-2$
+            .entrySet().stream().map(entry -> entry.getKey().getName() + ": " + entry.getValue().size()) //$NON-NLS-1$
+            .toList());
+        if (selectedObjects.isEmpty())
         {
             toast("Проверить", //$NON-NLS-1$
-                "В текущей области отбора панели нет ни объектов, ни проекта — проверять нечего.");
+                "В текущей области отбора панели нет объектов для перепроверки.");
             return null;
         }
 
@@ -66,13 +102,39 @@ public class ProblemViewRecomputeChecksHandler extends AbstractHandler
                 ComfortCheckRecompute.recomputeObjects(entry.getKey(), entry.getValue());
         }
 
-        // Область — проект целиком: конкретных объектов у панели нет
-        for (IProject project : selectedProjects)
-        {
-            if (!selectedObjects.containsKey(project))
-                ComfortCheckRecompute.recomputeProject(project);
-        }
         return null;
+    }
+
+    private static Object problemFilters(IViewPart part)
+    {
+        if (part == null)
+            return null;
+        try
+        {
+            Class<?> plugin = part.getClass().getClassLoader()
+                .loadClass("com._1c.g5.v8.dt.internal.ui.validation.V8UiValidationPlugin"); //$NON-NLS-1$
+            return Global.invoke(plugin, "getProblemFilters"); //$NON-NLS-1$
+        }
+        catch (ClassNotFoundException e)
+        {
+            Global.tempLog("problem-view-recompute", "настройки панели: " + e); //$NON-NLS-1$ //$NON-NLS-2$
+            return null;
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<IProject, Set<EObject>> topObjects(IViewPart part, Object selection,
+        Map<IProject, Set<EObject>> objects)
+    {
+        Object manager = Global.getField(part, "scopeSelectionManager"); //$NON-NLS-1$
+        Map<IProject, Set<EObject>> result = new LinkedHashMap<>();
+        for (IProject project : objects.keySet())
+        {
+            Object top = Global.invoke(manager, "getTopObjects", selection, project); //$NON-NLS-1$
+            if (top instanceof Set<?> set && !set.isEmpty())
+                result.put(project, (Set<EObject>)set);
+        }
+        return result;
     }
 
     /** Что панель кладёт в область отбора — в журнал «Комфорт». */

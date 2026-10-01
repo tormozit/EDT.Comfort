@@ -454,6 +454,7 @@ public class FormEditorHook implements IStartup
         ParametersTypePresentation.install();
         AttributeHeaderTooltips.install();
         AttributesExtraColumns.install();
+        AttributesScrollMeasurements.install();
         ItemsTree.install();
         GlobalCommandsProperties.install();
         GlobalCommandsFilter.install();
@@ -5255,6 +5256,62 @@ public class FormEditorHook implements IStartup
         }
     }
 
+    /** Временные безусловные замеры прокрутки дерева реквизитов для #642. */
+    private static final class AttributesScrollMeasurements
+    {
+        private static final String LOG = "form-attributes-scroll-642"; //$NON-NLS-1$
+        private static final String KEY = "tormozit.formAttributesScroll642"; //$NON-NLS-1$
+
+        static void install()
+        {
+            trackFormEditors(editor -> attach(editor, 0));
+        }
+
+        private static void attach(FormEditor editor, int attempt)
+        {
+            FormEditorPage page = findFormPage(editor);
+            Tree tree = getAttributesTree(page);
+            if (tree == null || tree.isDisposed())
+            {
+                if (attempt < 100 && editor.getSite() != null)
+                    Display.getDefault().timerExec(200, () -> attach(editor, attempt + 1));
+                return;
+            }
+            if (Boolean.TRUE.equals(tree.getData(KEY)))
+                return;
+            tree.setData(KEY, Boolean.TRUE);
+            int[] sequence = {0};
+            tree.addListener(SWT.MouseWheel, event -> input("wheel", sequence)); //$NON-NLS-1$
+            tree.addListener(SWT.KeyDown, event ->
+            {
+                if (event.keyCode == SWT.ARROW_UP || event.keyCode == SWT.ARROW_DOWN
+                    || event.keyCode == SWT.PAGE_UP || event.keyCode == SWT.PAGE_DOWN)
+                    input("key:" + event.keyCode, sequence); //$NON-NLS-1$
+            });
+            org.eclipse.swt.widgets.ScrollBar bar = tree.getVerticalBar();
+            if (bar != null)
+                bar.addListener(SWT.Selection,
+                    event -> input("scrollbar:" + event.detail, sequence)); //$NON-NLS-1$
+            tree.addListener(SWT.Paint, event -> Global.tempLog(LOG,
+                "paint sequence=" + sequence[0] + " area=" + event.width + "x" + event.height)); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            Global.tempLog(LOG, "attached columns=" + tree.getColumnCount()); //$NON-NLS-1$
+        }
+
+        private static void input(String kind, int[] sequence)
+        {
+            int current = ++sequence[0];
+            Global.tempLog(LOG, "input sequence=" + current + " kind=" + kind); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        private static void duration(Tree tree, String operation, long started)
+        {
+            if (tree != null && Display.getCurrent() != null && !tree.isDisposed()
+                && Display.getCurrent() == tree.getDisplay()
+                && Boolean.TRUE.equals(tree.getData(KEY)))
+                Global.tempLog(LOG, operation + " ms=" + (System.nanoTime() - started) / 1_000_000.0); //$NON-NLS-1$
+        }
+    }
+
     private static final class AttributesTypePresentation
     {
         private static final String KEY_HOOKED = "tormozit.formAttributesTypeIcons.hooked"; //$NON-NLS-1$
@@ -5448,14 +5505,22 @@ public class FormEditorHook implements IStartup
          */
         private static void applyTooltips(Tree tree)
         {
-            for (TreeColumn column : tree.getColumns())
+            long started = System.nanoTime();
+            try
             {
-                if (column.isDisposed())
-                    continue;
-                String tooltip = tooltipFor(column);
-                String wrapped = tooltip != null ? TooltipText.wrap(tree, tooltip) : null;
-                if (!Objects.equals(wrapped, column.getToolTipText()))
-                    column.setToolTipText(wrapped);
+                for (TreeColumn column : tree.getColumns())
+                {
+                    if (column.isDisposed())
+                        continue;
+                    String tooltip = tooltipFor(column);
+                    String wrapped = tooltip != null ? TooltipText.wrap(tree, tooltip) : null;
+                    if (!Objects.equals(wrapped, column.getToolTipText()))
+                        column.setToolTipText(wrapped);
+                }
+            }
+            finally
+            {
+                AttributesScrollMeasurements.duration(tree, "headerTooltips", started); //$NON-NLS-1$
             }
         }
 
@@ -5723,17 +5788,26 @@ public class FormEditorHook implements IStartup
          */
         private static void paintSavedData(Event event, TreeColumn savedDataColumn)
         {
-            if (savedDataColumn.isDisposed() || !(event.widget instanceof Tree tree)
-                || event.index != tree.indexOf(savedDataColumn) || !(event.item instanceof TreeItem item))
-                return;
-            FormAttribute attribute = attributeOf(item.getData());
-            if (attribute == null)
-                return;
-            Image image = CommonUI.getCheckedStateImage(Boolean.valueOf(attribute.isSavedData()));
-            if (image == null)
-                return;
-            Rectangle imageBounds = checkboxImageBounds(item, event.index, image);
-            event.gc.drawImage(image, imageBounds.x, imageBounds.y);
+            long started = System.nanoTime();
+            try
+            {
+                if (savedDataColumn.isDisposed() || !(event.widget instanceof Tree tree)
+                    || event.index != tree.indexOf(savedDataColumn) || !(event.item instanceof TreeItem item))
+                    return;
+                FormAttribute attribute = attributeOf(item.getData());
+                if (attribute == null)
+                    return;
+                Image image = CommonUI.getCheckedStateImage(Boolean.valueOf(attribute.isSavedData()));
+                if (image == null)
+                    return;
+                Rectangle imageBounds = checkboxImageBounds(item, event.index, image);
+                event.gc.drawImage(image, imageBounds.x, imageBounds.y);
+            }
+            finally
+            {
+                if (event.widget instanceof Tree tree)
+                    AttributesScrollMeasurements.duration(tree, "savedDataPaint", started); //$NON-NLS-1$
+            }
         }
 
         /** Прямоугольник значка внутри ячейки — центрирован, как у штатных колонок-флажков. */
@@ -5933,19 +6007,27 @@ public class FormEditorHook implements IStartup
             @Override
             public String getText(Object element)
             {
-                if (!(element instanceof PropertyInfo info))
-                    return ""; //$NON-NLS-1$
-                int count = 0;
-                if (info.getSource() instanceof AbstractFormAttribute source)
-                    count = source.getFunctionalOptions().size();
-                else if (tree.getData(KEY_FO_INDEX) instanceof Map<?, ?> index)
+                long started = System.nanoTime();
+                try
                 {
-                    EObject metadata = resolveMetadataPropertyEObject(info);
-                    Object value = metadata != null ? index.get(foKey(metadata)) : null;
-                    if (value instanceof Integer number)
-                        count = number.intValue();
+                    if (!(element instanceof PropertyInfo info))
+                        return ""; //$NON-NLS-1$
+                    int count = 0;
+                    if (info.getSource() instanceof AbstractFormAttribute source)
+                        count = source.getFunctionalOptions().size();
+                    else if (tree.getData(KEY_FO_INDEX) instanceof Map<?, ?> index)
+                    {
+                        EObject metadata = resolveMetadataPropertyEObject(info);
+                        Object value = metadata != null ? index.get(foKey(metadata)) : null;
+                        if (value instanceof Integer number)
+                            count = number.intValue();
+                    }
+                    return count > 0 ? String.valueOf(count) : ""; //$NON-NLS-1$
                 }
-                return count > 0 ? String.valueOf(count) : ""; //$NON-NLS-1$
+                finally
+                {
+                    AttributesScrollMeasurements.duration(tree, "functionalOptionsText", started); //$NON-NLS-1$
+                }
             }
         }
 

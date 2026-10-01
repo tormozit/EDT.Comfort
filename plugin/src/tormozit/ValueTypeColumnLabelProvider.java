@@ -11,6 +11,7 @@ import org.eclipse.swt.graphics.Color;
 import org.eclipse.swt.graphics.Font;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.widgets.Control;
+import org.eclipse.swt.widgets.Display;
 
 import com._1c.g5.v8.dt.mcore.TypeDescription;
 import com._1c.g5.v8.dt.mcore.TypeItem;
@@ -37,29 +38,61 @@ final class ValueTypeColumnLabelProvider extends ColumnLabelProvider
     @Override
     public String getText(Object element)
     {
-        TypeDescription type = typeOf.apply(element);
-        if (type != null && type.getTypes().size() == 1)
+        long started = startAttributeMeasurement();
+        try
         {
-            String name = typeName(resolve(type.getTypes().get(0), element));
-            int dot = name != null ? name.lastIndexOf('.') : -1;
-            if (dot > 0 && dot < name.length() - 1 && isReferenceCategory(name.substring(0, dot)))
-                return name.substring(dot + 1);
+            TypeDescription type = typeOf.apply(element);
+            if (type != null && type.getTypes().size() == 1)
+            {
+                String name = typeName(resolve(type.getTypes().get(0), element));
+                int dot = name != null ? name.lastIndexOf('.') : -1;
+                if (dot > 0 && dot < name.length() - 1 && isReferenceCategory(name.substring(0, dot)))
+                    return name.substring(dot + 1);
+            }
+            return fullText(element, type);
         }
-        return fullText(element, type);
+        finally
+        {
+            logAttributeDuration("typeText", started); //$NON-NLS-1$
+        }
     }
 
     @Override
     public Image getImage(Object element)
     {
-        TypeDescription type = typeOf.apply(element);
-        if (type == null || type.getTypes().isEmpty())
-            return base != null ? base.getImage(element) : null;
-        if (type.getTypes().size() > 1)
-            return MdUiSharedImages.getImage(MdUiSharedImages.OBJS_TYPE_DESCRIPTION);
-        TypeItem item = resolve(type.getTypes().get(0), element);
-        String category = item != null ? McoreUtil.getTypeCategory(item) : null;
-        Image image = category != null && !category.isBlank() ? MdUiSharedImages.getTypeImage(category) : null;
-        return image != null ? image : base != null ? base.getImage(element) : null;
+        long started = startAttributeMeasurement();
+        try
+        {
+            TypeDescription type = typeOf.apply(element);
+            if (type == null || type.getTypes().isEmpty())
+                return base != null ? base.getImage(element) : null;
+            if (type.getTypes().size() > 1)
+                return MdUiSharedImages.getImage(MdUiSharedImages.OBJS_TYPE_DESCRIPTION);
+            TypeItem item = resolve(type.getTypes().get(0), element);
+            String category = item != null ? McoreUtil.getTypeCategory(item) : null;
+            Image image = category != null && !category.isBlank() ? MdUiSharedImages.getTypeImage(category) : null;
+            return image != null ? image : base != null ? base.getImage(element) : null;
+        }
+        finally
+        {
+            logAttributeDuration("typeImage", started); //$NON-NLS-1$
+        }
+    }
+
+    private long startAttributeMeasurement()
+    {
+        return Display.getCurrent() != null && !control.isDisposed()
+            && Display.getCurrent() == control.getDisplay()
+            && Boolean.TRUE.equals(control.getData("tormozit.formAttributesScroll642")) //$NON-NLS-1$
+                ? System.nanoTime() : 0;
+    }
+
+    private void logAttributeDuration(String operation, long started)
+    {
+        if (started != 0 && Display.getCurrent() != null && !control.isDisposed()
+            && Display.getCurrent() == control.getDisplay())
+            Global.tempLog("form-attributes-scroll-642", //$NON-NLS-1$
+                operation + " ms=" + (System.nanoTime() - started) / 1_000_000.0); //$NON-NLS-1$
     }
 
     @Override

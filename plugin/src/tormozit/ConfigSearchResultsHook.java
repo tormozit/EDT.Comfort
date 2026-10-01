@@ -4546,20 +4546,22 @@ public final class ConfigSearchResultsHook implements IStartup
     {
     }
 
-    /** Имя объекта из сообщения проверки; формат проверяем целиком, включая имя права. */
+    /** Имя объекта из сообщения вида «Право "имя" ... "объект"»; сверяем и имя права. */
     private static String roleProblemTargetName(String message, String rightName)
     {
         String prefix = "Право \""; //$NON-NLS-1$
-        String separator = "\" роли установлено для \""; //$NON-NLS-1$
         if (message == null || !message.startsWith(prefix) || !message.endsWith("\"")) //$NON-NLS-1$
             return null;
-        int split = message.indexOf(separator, prefix.length());
-        if (split <= prefix.length() || split + separator.length() >= message.length() - 1)
+        int rightEnd = message.indexOf('"', prefix.length());
+        if (rightEnd <= prefix.length())
             return null;
-        String describedRight = message.substring(prefix.length(), split);
+        String describedRight = message.substring(prefix.length(), rightEnd);
         if (rightName == null || !describedRight.equals(rightName))
             return null;
-        String targetName = message.substring(split + separator.length(), message.length() - 1);
+        int targetStart = message.indexOf('"', rightEnd + 1);
+        if (targetStart < 0 || targetStart >= message.length() - 2)
+            return null;
+        String targetName = message.substring(targetStart + 1, message.length() - 1);
         return targetName.indexOf('"') < 0 ? targetName : null;
     }
 
