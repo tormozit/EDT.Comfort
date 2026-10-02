@@ -408,7 +408,8 @@ public final class ModuleMergeStructureFilterHook implements IStartup
     {
         String name = lp.getClass().getSimpleName();
         return "ComparisonSideColumnLabelProvider".equals(name) //$NON-NLS-1$
-            || "ModuleStructureLabelProvider".equals(name); //$NON-NLS-1$
+            || "ModuleStructureLabelProvider".equals(name) //$NON-NLS-1$
+            || "MethodColumnLabelProvider".equals(name); //$NON-NLS-1$
     }
 
     private static ObjectColumnHighlight installObjectColumnHighlight(DelegatingStyledCellLabelProvider delegating)

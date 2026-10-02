@@ -33,6 +33,10 @@ import org.eclipse.jface.action.ToolBarManager;
 import org.eclipse.jface.dialogs.IDialogConstants;
 import org.eclipse.jface.resource.ImageDescriptor;
 import org.eclipse.jface.viewers.AbstractTreeViewer;
+import org.eclipse.jface.viewers.ColumnLabelProvider;
+import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider;
+import org.eclipse.jface.viewers.ViewerCell;
+import org.eclipse.jface.viewers.ViewerColumn;
 import org.eclipse.jface.viewers.CheckboxTreeViewer;
 import org.eclipse.jface.viewers.CheckStateChangedEvent;
 import org.eclipse.jface.viewers.ComboViewer;
@@ -68,6 +72,7 @@ import org.eclipse.swt.widgets.MenuItem;
 import org.eclipse.swt.widgets.ToolBar;
 import org.eclipse.swt.widgets.ToolItem;
 import org.eclipse.swt.widgets.Tree;
+import org.eclipse.swt.widgets.TreeColumn;
 import org.eclipse.swt.widgets.TreeItem;
 import org.eclipse.swt.widgets.Widget;
 import org.eclipse.swt.layout.GridData;
@@ -93,6 +98,12 @@ import com._1c.g5.v8.dt.bsl.compare.BslCompareUtils;
 import com._1c.g5.v8.dt.bsl.compare.BslModuleComparisonNode;
 import com._1c.g5.v8.dt.bsl.compare.BslModuleContentInfo;
 import com._1c.g5.v8.dt.bsl.compare.BslModuleSectionComparisonNode;
+import com._1c.g5.v8.dt.bsl.compare.BslModuleSectionType;
+import com._1c.g5.v8.dt.compare.model.ComparedObjects;
+import com._1c.g5.v8.dt.compare.model.ComparisonNodeStatus;
+import org.eclipse.jface.text.BadLocationException;
+import org.eclipse.jface.text.Document;
+import org.eclipse.jface.text.IDocument;
 import com._1c.g5.v8.dt.compare.model.MatchedObjectsComparisonNode;
 import com._1c.g5.v8.dt.compare.model.TopComparisonNode;
 import com._1c.g5.v8.dt.compare.ui.editor.ISelectionProviderDelegate;
@@ -363,6 +374,7 @@ public class CompareConfigMenuHook implements IStartup
         attachMenuListener(editor, tree);
         CompareConfigOpenModuleMergeHandler.attachDoubleClickListener(editor, tree);
         CompareModuleStructureColumnHook.install(tree);
+        CompareConfigMethodColors.install(tree);
         CompareConfigMultiMarkSupport.install(editor, tree);
         TreeExpander.bindCompareConfigTree(tree, editor);
         NavigatorDropSupport.install(editor, tree);
@@ -4821,6 +4833,387 @@ public class CompareConfigMenuHook implements IStartup
         }
     }
 
+    /**
+     * Равный текст метода — фон равных строк, даже при переносе в другую область.
+     * EDT объединяет флаги текста и родительского препроцессора; флаги модели,
+     * пометки и правила объединения здесь не меняем. Текст берём по штатным
+     * ComparisonRegions, включая сигнатуру и комментарии, а не по имени метода.
+     */
+    private static final class CompareConfigMethodColors
+    {
+        private static final String KEY = "tormozit.compareConfigMethodColors"; //$NON-NLS-1$
+        // Значения не держат сессию: закрытая сессия освобождается вместе с кэшем.
+        private static final Map<IComparisonSession, SessionCache> SESSION_CACHES = new java.util.WeakHashMap<>();
+        private final Tree tree;
+        private TreeViewer viewer;
+        private IComparisonSession session;
+        private SessionCache cache;
+
+        private CompareConfigMethodColors(Tree tree)
+        {
+            this.tree = tree;
+        }
+
+        static void install(Tree tree)
+        {
+            if (tree.getData(KEY) != null)
+                return;
+            CompareConfigMethodColors support = new CompareConfigMethodColors(tree);
+            tree.setData(KEY, support);
+            for (TreeColumn column : tree.getColumns())
+            {
+                if (!(column.getData("org.eclipse.jface.columnViewer") instanceof ViewerColumn viewerColumn)) //$NON-NLS-1$
+                    continue;
+                Object provider = Global.invoke(viewerColumn, "getLabelProvider"); //$NON-NLS-1$
+                if (viewerColumn.getViewer() instanceof TreeViewer treeViewer)
+                    support.viewer = treeViewer;
+                if (provider instanceof DelegatingStyledCellLabelProvider styled)
+                {
+                    viewerColumn.setLabelProvider(new MethodStyledColumnLabelProvider(styled, support));
+                }
+                else if (provider instanceof ColumnLabelProvider plain)
+                {
+                    viewerColumn.setLabelProvider(new MethodColumnLabelProvider(plain, support));
+                }
+            }
+            support.installFirstColumnBackground();
+            Listener focusChanged = event ->
+            {
+                // Нативная обработка смены фокуса должна закончиться до перерисовки.
+                tree.getDisplay().asyncExec(() ->
+                {
+                    if (!tree.isDisposed())
+                        tree.redraw();
+                });
+            };
+            tree.addListener(SWT.FocusIn, focusChanged);
+            tree.addListener(SWT.FocusOut, focusChanged);
+            tree.addDisposeListener(event ->
+            {
+                if (support.cache != null)
+                    support.cache.trees.remove(tree);
+            });
+            support.refreshColors();
+        }
+
+        /** EDT хранит отдельный провайдер фона первой ячейки в обработчике пометок. */
+        private void installFirstColumnBackground()
+        {
+            String listenerClass = "com._1c.g5.v8.dt.compare.ui.editor.ComparisonTreeControl$CheckboxEraseListener"; //$NON-NLS-1$
+            for (Listener listener : tree.getListeners(SWT.EraseItem))
+            {
+                if (!listenerClass.equals(listener.getClass().getName()))
+                    continue;
+                Object control = Global.getField(listener, "this$0"); //$NON-NLS-1$
+                Object provider = Global.getField(control, "firstColumnLabelProvider"); //$NON-NLS-1$
+                if (control instanceof ComparisonTreeControl && provider instanceof ColumnLabelProvider original)
+                {
+                    MethodColumnLabelProvider replacement = new MethodColumnLabelProvider(original, this);
+                    Global.setFieldForce(control, "firstColumnLabelProvider", replacement); //$NON-NLS-1$
+                }
+            }
+            // Сохраняем порядок слушателей: обработчик EDT должен остаться перед JFace.
+            for (int eventType : new int[] { SWT.EraseItem, SWT.PaintItem })
+            {
+                Listener[] listeners = tree.getListeners(eventType);
+                boolean found = false;
+                for (Listener listener : listeners)
+                    found |= listenerClass.equals(listener.getClass().getName());
+                if (!found)
+                    continue;
+                for (Listener listener : listeners)
+                    tree.removeListener(eventType, listener);
+                for (Listener listener : listeners)
+                {
+                    if (!listenerClass.equals(listener.getClass().getName()))
+                    {
+                        tree.addListener(eventType, listener);
+                        continue;
+                    }
+                    tree.addListener(eventType, event ->
+                    {
+                        // EDT выбирает голубой цвет по SELECTED без проверки фокуса.
+                        // На неактивном дереве оставляем выделение штатному SWT.
+                        boolean nativeSelection = event.index == 0 && !tree.isFocusControl()
+                            && (event.detail & SWT.SELECTED) != 0;
+                        if (nativeSelection)
+                            event.detail &= ~SWT.SELECTED;
+                        try
+                        {
+                            listener.handleEvent(event);
+                        }
+                        finally
+                        {
+                            if (nativeSelection)
+                                event.detail |= SWT.SELECTED;
+                        }
+                    });
+                }
+            }
+        }
+
+        /** Обновляем свойства уже созданных ячеек через провайдер, без своей отрисовки. */
+        private void refreshColors()
+        {
+            if (viewer == null || tree.isDisposed())
+                return;
+            List<Object> elements = new ArrayList<>();
+            collectItems(tree.getItems(), elements);
+            viewer.update(elements.toArray(), null);
+        }
+
+        private static void collectItems(TreeItem[] items, List<Object> elements)
+        {
+            for (TreeItem item : items)
+            {
+                if (item.getData() != null)
+                    elements.add(item.getData());
+                collectItems(item.getItems(), elements);
+            }
+        }
+
+        private boolean isEqualMethod(Object element)
+        {
+            if (!(element instanceof IPartialModelNode partial)
+                || partial.getStatus() == ComparisonNodeStatus.UNFINISHED
+                || partial.getStatus() == ComparisonNodeStatus.HAS_UNFINISHED_CHILDREN
+                || !(partial.retrieveComparisonNode() instanceof BslModuleSectionComparisonNode section)
+                || !isMethod(section) || section.getMainSymlink() == null || section.getOtherSymlink() == null)
+                return false;
+            IComparisonSession current = partial.getComparisonSession();
+            if (current == null)
+                return false;
+            if (current != session)
+            {
+                if (cache != null)
+                    cache.trees.remove(tree);
+                session = current;
+                cache = SESSION_CACHES.computeIfAbsent(current,
+                    key -> new SessionCache(key, tree.getDisplay()));
+                cache.trees.add(tree);
+            }
+            ComparisonNode parent = section.getParent();
+            while (parent != null && !(parent instanceof BslModuleComparisonNode))
+                parent = parent.getParent();
+            if (parent instanceof BslModuleComparisonNode module && cache.loadedModules.add(module.bmGetId()))
+                cache.load(module.bmGetId(), current);
+            return Boolean.TRUE.equals(cache.equalMethods.get(section.bmGetId()));
+        }
+
+        /** Первая колонка сохраняет стандартный styled-провайдер JFace и его выделение. */
+        private static final class MethodStyledColumnLabelProvider extends DelegatingStyledCellLabelProvider
+        {
+            private final CompareConfigMethodColors support;
+
+            MethodStyledColumnLabelProvider(DelegatingStyledCellLabelProvider original,
+                CompareConfigMethodColors support)
+            {
+                super(original.getStyledStringProvider());
+                this.support = support;
+            }
+
+            @Override
+            public Color getBackground(Object element)
+            {
+                // null наследует фон TreeItem; равной ячейке нужен явный фон дерева.
+                return support.isEqualMethod(element) ? support.tree.getBackground() : super.getBackground(element);
+            }
+        }
+
+        /** Остальные колонки сохраняют текст, изображения, шрифты и подсказки EDT. */
+        private static final class MethodColumnLabelProvider extends ColumnLabelProvider
+        {
+            private final ColumnLabelProvider original;
+            private final CompareConfigMethodColors support;
+
+            MethodColumnLabelProvider(ColumnLabelProvider original, CompareConfigMethodColors support)
+            {
+                this.original = original;
+                this.support = support;
+            }
+
+            @Override
+            public void update(ViewerCell cell)
+            {
+                original.update(cell);
+                if (support.isEqualMethod(cell.getElement()))
+                    cell.setBackground(support.tree.getBackground());
+            }
+
+            @Override
+            public String getText(Object element) { return original.getText(element); }
+
+            @Override
+            public Image getImage(Object element) { return original.getImage(element); }
+
+            @Override
+            public String getToolTipText(Object element) { return original.getToolTipText(element); }
+
+            @Override
+            public Color getForeground(Object element) { return original.getForeground(element); }
+
+            @Override
+            public Color getBackground(Object element)
+            {
+                return support.isEqualMethod(element) ? support.tree.getBackground() : original.getBackground(element);
+            }
+
+            @Override
+            public void dispose()
+            {
+                original.dispose();
+                super.dispose();
+            }
+        }
+
+        /** Один результат и одна фоновая задача для всех деревьев одной сессии. */
+        private static final class SessionCache
+        {
+            private final Display display;
+            private final Map<Long, Boolean> equalMethods = new java.util.HashMap<>();
+            private final Set<Long> loadedModules = new HashSet<>();
+            private final Set<Job> jobs = new HashSet<>();
+            private final Set<Tree> trees = Collections.newSetFromMap(new IdentityHashMap<>());
+            private int generation;
+
+            SessionCache(IComparisonSession session, Display display)
+            {
+                this.display = display;
+                session.addComparisonTreeListener(events ->
+                {
+                    if (display.isDisposed() || events.isEmpty())
+                        return;
+                    display.asyncExec(() ->
+                    {
+                        generation++;
+                        for (Job job : jobs)
+                            job.cancel();
+                        jobs.clear();
+                        loadedModules.clear();
+                        equalMethods.clear();
+                        redrawTrees();
+                    });
+                });
+            }
+
+            private void redrawTrees()
+            {
+                for (Tree tree : trees)
+                    if (!tree.isDisposed() && tree.getData(KEY) instanceof CompareConfigMethodColors support)
+                        support.refreshColors();
+            }
+
+            private void load(long moduleId, IComparisonSession current)
+            {
+                int expectedGeneration = generation;
+                Job job = new Job("Сравнение текста методов") //$NON-NLS-1$
+                {
+                    @Override
+                    protected IStatus run(IProgressMonitor monitor)
+                    {
+                        Map<Long, Boolean> result = new java.util.HashMap<>();
+                        try
+                        {
+                            current.runComparisonTreeReadonlyTask(new AbstractBmTask<Void>(getName())
+                            {
+                                @Override
+                                public Void execute(IBmTransaction transaction, IProgressMonitor progressMonitor)
+                                {
+                                    if (monitor.isCanceled()
+                                        || !(current.getNode(moduleId) instanceof BslModuleComparisonNode module))
+                                        return null;
+                                    IQualifiedNameFilePathConverter converter = BslModuleTextCompareHandler.filePathConverter();
+                                    if (converter == null)
+                                        return null;
+                                    BslModuleContentInfo main = BslCompareUtils.readBslModuleContentInfo(
+                                        module, current, ComparisonSide.MAIN, true, converter);
+                                    BslModuleContentInfo other = BslCompareUtils.readBslModuleContentInfo(
+                                        module, current, ComparisonSide.OTHER, true, converter);
+                                    // Ошибка чтения или бинарный модуль не означают равенство.
+                                    if (main == null || other == null || main.isBinary() || other.isBinary()
+                                        || main.getContent() == null || other.getContent() == null)
+                                        return null;
+                                    ComparedObjects<IDocument> documents = new ComparedObjects<>(
+                                        new Document(main.getContent()), new Document(other.getContent()), null);
+                                    collect(module, documents, result, monitor);
+                                    return null;
+                                }
+                            });
+                        }
+                        catch (Exception exception)
+                        {
+                            // Ошибка чтения не подтверждает равенство методов.
+                        }
+                        if (display.isDisposed())
+                            return Status.CANCEL_STATUS;
+                        display.asyncExec(() ->
+                        {
+                            jobs.remove(this);
+                            if (expectedGeneration != generation || monitor.isCanceled())
+                                return;
+                            equalMethods.putAll(result);
+                            redrawTrees();
+                        });
+                        return Status.OK_STATUS;
+                    }
+                };
+                jobs.add(job);
+                job.setSystem(true);
+                job.schedule();
+            }
+        }
+
+        private static boolean isMethod(BslModuleSectionComparisonNode section)
+        {
+            return section.getSectionType() == BslModuleSectionType.PROCEDURE
+                || section.getSectionType() == BslModuleSectionType.FUNCTION;
+        }
+
+        private static void collect(ComparisonNode node, ComparedObjects<IDocument> documents,
+            Map<Long, Boolean> result, IProgressMonitor monitor)
+        {
+            if (monitor.isCanceled())
+                return;
+            if (node instanceof BslModuleSectionComparisonNode section && isMethod(section)
+                && section.getMainSymlink() != null && section.getOtherSymlink() != null)
+            {
+                try
+                {
+                    String main = methodText(section, documents, ComparisonSide.MAIN);
+                    String other = methodText(section, documents, ComparisonSide.OTHER);
+                    result.put(section.bmGetId(), main != null && main.equals(other));
+                }
+                catch (BadLocationException exception)
+                {
+                    // Некорректные границы текста не подтверждают равенство метода.
+                }
+            }
+            for (ComparisonNode child : node.getChildren())
+                collect(child, documents, result, monitor);
+        }
+
+        private static String methodText(BslModuleSectionComparisonNode section,
+            ComparedObjects<IDocument> documents, ComparisonSide side) throws BadLocationException
+        {
+            if (section.getSymlink(side) == null)
+                return null;
+            if (!section.getComparisonRegions().isEmpty())
+                return BslCompareUtils.getSectionContent(section, documents, side);
+            // При раздельном сравнении сигнатуры и тела EDT хранит текст в дочерних секциях.
+            if (section.getChildren().isEmpty())
+                return null;
+            StringBuilder text = new StringBuilder();
+            for (BslModuleSectionComparisonNode child : section.getChildren())
+            {
+                String part = methodText(child, documents, side);
+                if (part == null)
+                    return null;
+                text.append(part);
+            }
+            return text.toString();
+        }
+    }
+
     private static final class CompareConfigOpenModuleMergeHandler
     {
         private static final String TAG = "CompareConfig"; //$NON-NLS-1$
@@ -4835,17 +5228,28 @@ public class CompareConfigMenuHook implements IStartup
         {
             display.addFilter(SWT.Show, event ->
             {
-                if (pendingSection == null || !(event.widget instanceof Shell))
+                if (!(event.widget instanceof Shell))
                     return;
                 Shell shell = (Shell) event.widget;
-                if (shell.getData(SHELL_PATCHED_KEY) != null)
-                    return;
                 Object dialog = shell.getData();
                 if (dialog == null)
                     return;
                 if (!dialog.getClass().getName().contains(DIALOG_CLASS_SNIPPET))
                     return;
 
+                // createDialogArea уже создал comparisonView до показа Shell.
+                // Окраска нужна при любом открытии, независимо от перехода к методу.
+                DtComparisonView view = getDialogComparisonView(dialog);
+                ComparisonTreeControl treeControl = view != null ? view.getTreeControl() : null;
+                TreeViewer viewer = treeControl != null ? treeControl.getTreeViewer() : null;
+                if (viewer != null && !viewer.getTree().isDisposed())
+                {
+                    CompareConfigMethodColors.install(viewer.getTree());
+                    viewer.getTree().redraw();
+                }
+
+                if (pendingSection == null || shell.getData(SHELL_PATCHED_KEY) != null)
+                    return;
                 shell.setData(SHELL_PATCHED_KEY, Boolean.TRUE);
                 final BslModuleSectionComparisonNode section = pendingSection;
                 scheduleSelectSectionInDialog(shell, dialog, section);

@@ -667,6 +667,16 @@ public class CompareSearchResultPage implements ISearchResultPage
         if (view == null)
             return null;
 
+        // Источник фона — тот же провайдер, которым EDT красит первую ячейку дерева.
+        // Обращаемся к провайдеру, а не TreeItem: строка может быть ещё не создана.
+        Object treeControl = view.getTreeControl();
+        Object provider = Global.getField(treeControl, "firstColumnLabelProvider"); //$NON-NLS-1$
+        if (provider instanceof ColumnLabelProvider labels)
+        {
+            Color background = labels.getBackground(m.getComparisonNode());
+            // null — штатный фон равного узла, а не повод вернуться к старому статусу.
+            return background;
+        }
         CompareSearchMatch.RowColorKind kind = m.getRowColorKind();
         if (kind == null || kind == CompareSearchMatch.RowColorKind.NONE)
             return null;
