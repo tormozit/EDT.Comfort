@@ -248,6 +248,7 @@ public final class ConfigSearchResultsHook implements IStartup
             {
                 @Override public void queryAdded(ISearchQuery query)
                 {
+                    removeSuppressionMatches(query.getSearchResult());
                     // История/повторный показ без Dispose панели — сначала зафиксировать текущие ширины.
                     saveMatchColumnStateOnUiThread();
                     onQueryEvent("queryAdded"); //$NON-NLS-1$
@@ -262,6 +263,7 @@ public final class ConfigSearchResultsHook implements IStartup
                 }
                 @Override public void queryFinished(ISearchQuery query)
                 {
+                    removeSuppressionMatches(query.getSearchResult());
                     onSearchFinished(); onQueryEvent("queryFinished"); //$NON-NLS-1$
                 }
             });
@@ -2668,6 +2670,8 @@ public final class ConfigSearchResultsHook implements IStartup
         try
         {
             Object matchObj = Global.invoke(tableItem, "getData"); //$NON-NLS-1$
+            if (SuppressionReferencesSearch.openMatch(matchObj))
+                return true;
             // Справочная информация: штатный handleOpen открывает владельца (журнал/справочник…),
             // а нужен MdHelpContentEditor — тот же вызов, что OpenMdHelpContentAction:
             // OpenHelper.openEditor(mdObject, helpFeature).
@@ -6810,6 +6814,37 @@ public final class ConfigSearchResultsHook implements IStartup
         return (name instanceof String s && !s.isBlank()) ? s : null;
     }
 
+    private static final String SUPPRESSION_MODEL_URI = "http://g5.1c.ru/v8/dt/check/suppress/model"; //$NON-NLS-1$
+
+    /** Удаляем настройки подавления из обычного поиска, включая штатные счётчики. */
+    private static void removeSuppressionMatches(ISearchResult result)
+    {
+        if (result == null || SuppressionReferencesSearch.isResult(result)
+            || !"com._1c.g5.v8.dt.internal.search.ui.SearchResult" //$NON-NLS-1$
+            .equals(result.getClass().getName()))
+            return;
+        List<Object> unwanted = new ArrayList<>();
+        Object elements = Global.invoke(result, "getElements"); //$NON-NLS-1$
+        if (elements instanceof Iterable<?> items)
+        {
+            for (Object element : items)
+            {
+                Object matches = Global.invoke(result, "getMatches", element); //$NON-NLS-1$
+                if (!(matches instanceof Iterable<?> occurrences))
+                    continue;
+                for (Object match : occurrences)
+                {
+                    EStructuralFeature feature = resolveMatchFeature(match);
+                    if (feature != null
+                        && SUPPRESSION_MODEL_URI.equals(feature.getEContainingClass().getEPackage().getNsURI()))
+                        unwanted.add(match);
+                }
+            }
+        }
+        if (!unwanted.isEmpty())
+            Global.invokeVoid(result, "removeMatches", unwanted); //$NON-NLS-1$
+    }
+
     /**
      * Полный путь до найденного вхождения внутри модели МД-объекта — не только внутри схемы
      * компоновки данных (СКД), управляемой формы (Form) или табличного документа (Moxel/
@@ -6835,6 +6870,9 @@ public final class ConfigSearchResultsHook implements IStartup
         try
         {
             Object matchObj = Global.invoke(tableItem, "getData"); //$NON-NLS-1$
+            String suppressionProperty = SuppressionReferencesSearch.propertyText(matchObj);
+            if (suppressionProperty != null)
+                return suppressionProperty;
             if (!(matchObj instanceof TextSearchModelMatch) && !(matchObj instanceof BmReferenceMatch))
                 return null;
 

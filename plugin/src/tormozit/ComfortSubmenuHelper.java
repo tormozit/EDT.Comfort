@@ -32,6 +32,8 @@ final class ComfortSubmenuHelper
 {
     static final String SUBMENU_TEXT = "Комфорт"; //$NON-NLS-1$
     static final String SUBMENU_MARKER = "tormozit.comfortSubmenu"; //$NON-NLS-1$
+    static final String FIRST_ITEM_MARKER = "tormozit.comfortFirstItem"; //$NON-NLS-1$
+    private static final String ROOT_COMMANDS_MARKER = "tormozit.comfortRootCommands"; //$NON-NLS-1$
 
     /** Ключ данных подменю: выделение внешнего меню (см. {@link #fillExternalMenu}). */
     private static final String EXTERNAL_SELECTION_KEY = "tormozit.comfortSubmenu.selection"; //$NON-NLS-1$
@@ -358,6 +360,25 @@ final class ComfortSubmenuHelper
         return findOrCreateComfortSubmenu(parentMenu, shell, null);
     }
 
+    /** Все команды меню добавлены плагином: размещаем их в корне без каскадного пункта. */
+    static void useRootForComfortCommands(Menu menu)
+    {
+        if (menu == null || menu.isDisposed())
+            return;
+        menu.setData(ROOT_COMMANDS_MARKER, Boolean.TRUE);
+        menu.setData(SUBMENU_MARKER, Boolean.TRUE);
+        // Меню могло получить каскадный пункт до подключения страницы; следующие наполнители уже используют корень.
+        for (MenuItem item : menu.getItems())
+            if ((item.getStyle() & SWT.CASCADE) != 0 && Boolean.TRUE.equals(item.getData(SUBMENU_MARKER)))
+            {
+                Menu sub = item.getMenu();
+                if (sub != null && !sub.isDisposed())
+                    sub.dispose();
+                item.dispose();
+            }
+        TreeCollapseOthers.ensureComfortMenuItem(menu);
+    }
+
     /**
      * Находит существующее подменю «Комфорт» в {@code parentMenu}, ничего не создавая.
      * Используется там, где новый пункт должен попадать в уже имеющееся подменю «Комфорт»
@@ -368,6 +389,8 @@ final class ComfortSubmenuHelper
     {
         if (parentMenu == null || parentMenu.isDisposed())
             return null;
+        if (Boolean.TRUE.equals(parentMenu.getData(ROOT_COMMANDS_MARKER)))
+            return parentMenu;
         for (MenuItem item : parentMenu.getItems())
         {
             if (item.isDisposed())
@@ -506,7 +529,8 @@ final class ComfortSubmenuHelper
 
         for (int i = groupStart; i < items.length; i++)
         {
-            if (items[i].isDisposed() || (items[i].getStyle() & SWT.SEPARATOR) != 0)
+            if (items[i].isDisposed() || (items[i].getStyle() & SWT.SEPARATOR) != 0
+                || Boolean.TRUE.equals(items[i].getData(FIRST_ITEM_MARKER)))
                 continue;
             if (RU_COLLATOR.compare(key, sortKey(items[i].getText())) < 0)
                 return i;

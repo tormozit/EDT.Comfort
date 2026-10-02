@@ -67,7 +67,9 @@ public final class DebugRequestsHook implements IStartup
 
         private static void activateEdt()
         {
-            if (WinWindowActivator.activateWorkbench())
+            // Не activateWorkbench(): на переднем плане окно приложения, а присоединение к его
+            // потоку ввода оставляет приложение 1С неспособным принять активность обратно.
+            if (WinWindowActivator.activateWorkbenchWithoutInputAttach())
                 return;
             IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
             Shell shell = window != null ? window.getShell() : null;

@@ -185,7 +185,7 @@ public final class SuppressionSettingsDialogHook implements IStartup
                 ICheckSettings settings = repository.getSettings(uids.iterator().next(), project);
                 String title = settings != null ? settings.getTitle() : null;
                 if (title != null && !title.isBlank())
-                    item.setText(title + " (" + code + ")"); //$NON-NLS-1$ //$NON-NLS-2$
+                    item.setText(code + " (" + title + ")"); //$NON-NLS-1$ //$NON-NLS-2$
             }
         }
         for (TreeItem child : item.getItems())

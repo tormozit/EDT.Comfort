@@ -84,6 +84,7 @@ import com._1c.g5.v8.dt.ui.validation.ChecksViewerProvider;
 import com._1c.g5.v8.dt.ui.validation.IChecksTreeNode;
 import com.e1c.g5.v8.dt.check.settings.ICheckRepository;
 import com.e1c.g5.v8.dt.check.settings.ICheckSettings;
+import com.e1c.g5.v8.dt.check.settings.CheckUid;
 import com.e1c.g5.v8.dt.check.settings.INamedElement;
 import com.e1c.g5.v8.dt.check.settings.IssueSeverity;
 import com.e1c.g5.v8.dt.check.settings.IssueType;
@@ -226,6 +227,7 @@ public final class ValidationChecksFilterHook implements IStartup
             if (event.widget instanceof Menu menu)
             {
                 patchTypeMenu(menu);
+                patchCheckReferencesMenu(menu);
                 return;
             }
             if (!(event.widget instanceof Shell shell) || shell.isDisposed())
@@ -374,6 +376,9 @@ public final class ValidationChecksFilterHook implements IStartup
             // в строке с тулбаром (fillDefaults + minSize 100 + grab).
             relaxBodyMinimumWidth(treeViewer);
             ChecksTablePane.install(control, treeViewer, filter, pageControl);
+            registerCheckReferencesMenu(control, treeViewer.getTree(), () ->
+                treeViewer.getStructuredSelection().getFirstElement() instanceof IChecksTreeNode node
+                    && node.getValue() instanceof ICheckSettings settings ? settings : null);
             installStaticFeatureAccessDescription(control, pageControl);
             TreeExpander.installWhitelisted(TreeExpander.Target.VALIDATION_CHECKS, treeViewer);
             installAutoExpandOnReset(treeViewer, filter);
@@ -408,6 +413,59 @@ public final class ValidationChecksFilterHook implements IStartup
                 sb.append("        at ").append(frame).append('\n'); //$NON-NLS-1$
             Debug.temp(sb.toString());
             return false;
+        }
+    }
+
+    private static final Map<Control, CheckReferencesMenu> CHECK_REFERENCES_MENUS = new WeakHashMap<>();
+
+    private record CheckReferencesMenu(ChecksViewerControl control,
+        java.util.function.Supplier<ICheckSettings> selection) {}
+
+    private static void registerCheckReferencesMenu(ChecksViewerControl control, Control widget,
+        java.util.function.Supplier<ICheckSettings> selection)
+    {
+        CHECK_REFERENCES_MENUS.put(widget, new CheckReferencesMenu(control, selection));
+        widget.addDisposeListener(event -> CHECK_REFERENCES_MENUS.remove(widget));
+        if (widget.getMenu() == null)
+            widget.setMenu(new Menu(widget));
+        ComfortSubmenuHelper.useRootForComfortCommands(widget.getMenu());
+    }
+
+    private static void patchCheckReferencesMenu(Menu menu)
+    {
+        for (Map.Entry<Control, CheckReferencesMenu> entry : CHECK_REFERENCES_MENUS.entrySet())
+        {
+            if (entry.getKey().isDisposed() || entry.getKey().getMenu() != menu)
+                continue;
+            CheckReferencesMenu context = entry.getValue();
+            // EDT может заменить меню после регистрации контрола; помечаем актуальное меню при каждом показе.
+            ComfortSubmenuHelper.useRootForComfortCommands(menu);
+            String marker = "tormozit.checkReferences"; //$NON-NLS-1$
+            MenuItem item = null;
+            for (MenuItem candidate : menu.getItems())
+                if (Boolean.TRUE.equals(candidate.getData(marker)))
+                    item = candidate;
+            if (item == null)
+            {
+                item = new MenuItem(menu, SWT.PUSH, 0);
+                item.setData(marker, Boolean.TRUE);
+                item.setData(ComfortSubmenuHelper.FIRST_ITEM_MARKER, Boolean.TRUE);
+                item.setText("Найти ссылки"); //$NON-NLS-1$
+                ComfortSubmenuHelper.setMenuItemTooltip(item,
+                    "Найти эту проверку в настройках подавления проверок текущего проекта"); //$NON-NLS-1$
+                item.addListener(SWT.Selection, event ->
+                {
+                    ICheckSettings settings = context.selection().get();
+                    CheckUid uid = settings != null ? settings.getId() : null;
+                    if (uid != null)
+                        SuppressionReferencesSearch.findReferences(
+                            context.control().getChecksViewerProvider().getProject(), uid);
+                });
+            }
+            ICheckSettings selected = context.selection().get();
+            item.setEnabled(selected != null && selected.getId() != null
+                && context.control().getChecksViewerProvider().getProject() != null);
+            return;
         }
     }
 
@@ -1761,6 +1819,8 @@ public final class ValidationChecksFilterHook implements IStartup
             interaction.install(hasSavedWidths);
             interaction.enableHeaderSort();
             installSeverityMenu();
+            registerCheckReferencesMenu(control, table, () ->
+                viewer.getStructuredSelection().getFirstElement() instanceof CheckRow row ? row.settings : null);
         }
 
         /**

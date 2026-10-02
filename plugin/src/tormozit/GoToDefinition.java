@@ -228,6 +228,8 @@ public class GoToDefinition extends AbstractHandler
         }
         else
         {
+            if (BslCheckDefinitionHandler.tryOpen(event))
+                return null;
             command = getTextFromActiveEditor(page);
             if (command == null || command.isBlank())
             {

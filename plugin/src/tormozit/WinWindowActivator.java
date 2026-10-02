@@ -45,6 +45,8 @@ public final class WinWindowActivator
     private static final int VK_RETURN = 0x0D;
     /** Win32 {@code KEYEVENTF_KEYUP} — в JNA 5.13 не объявлен в {@link WinUser}. */
     private static final int KEYEVENTF_KEYUP = 0x0002;
+    /** Win32 {@code MOUSEEVENTF_MOVE} — в JNA 5.13 не объявлен в {@link WinUser}. */
+    private static final int MOUSEEVENTF_MOVE = 0x0001;
 
     /** Win32-API, отсутствующие в {@link User32} JNA 5.13. */
     private interface User32Extra extends StdCallLibrary
@@ -700,6 +702,61 @@ public final class WinWindowActivator
             return false;
 
         activateWindow(hwnd);
+        return true;
+    }
+
+    /**
+     * Активирует главное окно EDT, когда на переднем плане окно другого процесса, которое само
+     * запросило показ (отлаживаемое приложение, команда «Открыть в конфигураторе»).
+     * <p>
+     * {@link #activateWorkbench()} здесь нельзя: он присоединяет поток EDT к очереди ввода окна
+     * переднего плана ({@code AttachThreadInput}), и приложение 1С после этого время от времени
+     * перестаёт принимать активность — окно выглядит зависшим (issue 600). Поэтому без
+     * присоединения: обычный {@code SetForegroundWindow}, а при отказе Windows — пустое событие
+     * мыши (смещение 0) от имени EDT. Передний план разрешён процессу, от которого пришёл
+     * последний ввод, поэтому повторный вызов проходит.
+     *
+     * @return {@code true}, если окно workbench найдено
+     */
+    public static boolean activateWorkbenchWithoutInputAttach()
+    {
+        if (!WINDOWS)
+            return false;
+
+        HWND hwnd = null;
+        try
+        {
+            IWorkbenchWindow active = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+            if (active != null)
+                hwnd = hwndFromShell(active.getShell());
+        }
+        catch (Exception ignored)
+        {
+        }
+        if (hwnd == null)
+        {
+            for (HWND wb : collectWorkbenchShells())
+            {
+                hwnd = wb;
+                break;
+            }
+        }
+        if (hwnd == null)
+            return false;
+
+        if (isMinimized(hwnd))
+            User32.INSTANCE.ShowWindow(hwnd, WinUser.SW_RESTORE);
+
+        if (User32.INSTANCE.SetForegroundWindow(hwnd)
+                && hwndEquals(User32.INSTANCE.GetForegroundWindow(), hwnd))
+            return true;
+
+        WinUser.INPUT[] inputs = (WinUser.INPUT[]) new WinUser.INPUT().toArray(1);
+        inputs[0].type = new DWORD(WinUser.INPUT.INPUT_MOUSE);
+        inputs[0].input.setType("mi"); //$NON-NLS-1$
+        inputs[0].input.mi.dwFlags = new DWORD(MOUSEEVENTF_MOVE);
+        User32.INSTANCE.SendInput(new DWORD(1), inputs, inputs[0].size());
+        User32.INSTANCE.SetForegroundWindow(hwnd);
         return true;
     }
 

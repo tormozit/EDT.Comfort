@@ -3376,6 +3376,12 @@ public final class ProblemViewHook implements IStartup
         return marker instanceof Marker m ? m : null;
     }
 
+    /** Переход из результатов поиска ссылок на проверку. */
+    static void openSuppressionSettings(IProject project, String targetFqn, String containmentFqn, CheckUid uid)
+    {
+        SuppressionNotification.openDialog(project, targetFqn, containmentFqn, uid);
+    }
+
     /** Уведомление о модельных подавлениях, которые не видны сразу в тексте модуля. */
     private static final class SuppressionNotification implements IExecutionListener
     {
@@ -3433,7 +3439,6 @@ public final class ProblemViewHook implements IStartup
                 }
                 catch (RuntimeException e)
                 {
-                    Global.tempLog("problemSuppression", "Не удалось определить место подавления: " + e); //$NON-NLS-1$ //$NON-NLS-2$
                 }
             }
         }
@@ -3453,11 +3458,7 @@ public final class ProblemViewHook implements IStartup
                 }
                 catch (RuntimeException e)
                 {
-                    Global.tempLog("problemSuppression", "Ошибка проверки применения: " + e); //$NON-NLS-1$ //$NON-NLS-2$
                 }
-                Global.tempLog("problemSuppression", "Применение: попытка=" + attempt //$NON-NLS-1$ //$NON-NLS-2$
-                    + ", объект=" + targetFqn + ", проверка=" + uid //$NON-NLS-1$ //$NON-NLS-2$
-                    + ", подтверждено=" + applied); //$NON-NLS-1$
                 if (Boolean.TRUE.equals(applied))
                     show(marker.getMessage(), project, targetFqn, containmentFqn, uid);
                 else if (attempt < 20)
@@ -3476,7 +3477,6 @@ public final class ProblemViewHook implements IStartup
             }
             catch (ReflectiveOperationException | RuntimeException e)
             {
-                Global.tempLog("problemSuppression", "Не удалось определить элемент: " + e); //$NON-NLS-1$ //$NON-NLS-2$
                 return null;
             }
         }
@@ -3495,8 +3495,6 @@ public final class ProblemViewHook implements IStartup
         private static void openDialog(IProject project, String targetFqn, String containmentFqn,
             CheckUid uid)
         {
-            Global.tempLog("problemSuppression", "Открытие: проект=" + project.getName() //$NON-NLS-1$ //$NON-NLS-2$
-                + ", объект=" + targetFqn + ", элемент=" + containmentFqn + ", проверка=" + uid); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             try
             {
                 IV8ProjectManager projects = Global.getOsgiService(IV8ProjectManager.class);
@@ -3505,7 +3503,10 @@ public final class ProblemViewHook implements IStartup
                 IV8Project v8Project = projects != null ? projects.getProject(project) : null;
                 if (v8Project == null || models == null || checks == null)
                     throw new IllegalStateException("Службы EDT недоступны"); //$NON-NLS-1$
-                EObject target = GoToDefinition.resolveEObjectByQualifiedName(targetFqn, v8Project);
+                EObject target = "Configuration".equals(targetFqn) //$NON-NLS-1$
+                    && v8Project instanceof com._1c.g5.v8.dt.core.platform.IConfigurationProject configurationProject
+                        ? configurationProject.getConfiguration()
+                        : GoToDefinition.resolveEObjectByQualifiedName(targetFqn, v8Project);
                 if (!(target instanceof MdObject))
                     throw new IllegalStateException("Объект настройки не найден: " + targetFqn); //$NON-NLS-1$
                 EStructuralFeature feature = target.eClass().getEAllStructuralFeatures().stream()
@@ -3543,7 +3544,6 @@ public final class ProblemViewHook implements IStartup
             }
             catch (ReflectiveOperationException | RuntimeException e)
             {
-                Global.tempLog("problemSuppression", "Не удалось открыть диалог: " + e); //$NON-NLS-1$ //$NON-NLS-2$
                 ToastNotification.show("Подавление проверки", //$NON-NLS-1$
                     "Не удалось открыть настройку подавления: " + e.getMessage(), 8_000); //$NON-NLS-1$
             }
@@ -3576,20 +3576,14 @@ public final class ProblemViewHook implements IStartup
                     {
                         page.activate(editor);
                         page.showView(IPageLayout.ID_PROP_SHEET);
-                        Global.tempLog("problemSuppression", //$NON-NLS-1$
-                            "Активирован открытый редактор: " + editorRef); //$NON-NLS-1$
                         return page;
                     }
                     catch (PartInitException | RuntimeException e)
                     {
-                        Global.tempLog("problemSuppression", //$NON-NLS-1$
-                            "Не удалось показать свойства редактора: " + e); //$NON-NLS-1$
                         return null;
                     }
                 }
             }
-            Global.tempLog("problemSuppression", //$NON-NLS-1$
-                "Открытый редактор объекта не найден: " + targetFqn); //$NON-NLS-1$
             return null;
         }
 
@@ -3656,21 +3650,70 @@ public final class ProblemViewHook implements IStartup
                 String fqn = containmentFqn != null ? containmentFqn
                     : (String)Global.invoke(model, "getSuppressTopObjectFqn"); //$NON-NLS-1$
                 Object entry = suppressionEntry(provider, fqn, uid);
-                Global.tempLog("problemSuppression", "Выделение: попытка=" + attempt //$NON-NLS-1$ //$NON-NLS-2$
-                    + ", fqn=" + fqn + ", запись=" + (entry != null)); //$NON-NLS-1$ //$NON-NLS-2$
+                SuppressionSelection selection = new SuppressionSelection(false, false);
                 if (tree != null && entry != null)
                 {
-                    boolean modelSelected = Global.invokeVoid(model, "setSelection", entry); //$NON-NLS-1$
-                    boolean treeSelected = Global.invokeVoid(tree, "setSelection", List.of(entry)); //$NON-NLS-1$
-                    Global.tempLog("problemSuppression", "Выделение: модель=" + modelSelected //$NON-NLS-1$ //$NON-NLS-2$
-                        + ", дерево=" + treeSelected); //$NON-NLS-1$
+                    Global.invokeVoid(model, "setSelection", entry); //$NON-NLS-1$
+                    Global.invokeVoid(tree, "setSelection", List.of(entry)); //$NON-NLS-1$
+                    selection = selectNativeSuppression(tree, entry);
                 }
-                else if (attempt < 30)
+                if ((!selection.selected() || !selection.focused()) && attempt < 30)
                     selectSuppression(component, model, uid, containmentFqn, attempt + 1);
-                else
+                else if (!selection.selected())
                     ToastNotification.show("Подавление проверки", //$NON-NLS-1$
-                        "Диалог открыт, но добавленную проверку не удалось выделить", 8_000); //$NON-NLS-1$
+                        "Диалог открыт, но строку проверки не удалось выделить", 8_000); //$NON-NLS-1$
             });
+        }
+
+        /** Выделяем отображаемую модель и проверяем реальное выделение SWT, а не постановку события AEF в очередь. */
+        private record SuppressionSelection(boolean selected, boolean focused) {}
+
+        private static SuppressionSelection selectNativeSuppression(Object tree, Object entry)
+        {
+            Object mapper = Global.invoke(tree, "getMapper"); //$NON-NLS-1$
+            Object viewModel = Global.invoke(mapper, "mapModelToView", entry); //$NON-NLS-1$
+            if (viewModel == null)
+            {
+                return new SuppressionSelection(false, false);
+            }
+            Object treeViewModel = Global.invoke(tree, "getControlViewModel"); //$NON-NLS-1$
+            Object scene = Global.invoke(tree, "getScene"); //$NON-NLS-1$
+            Object dialogRenderer = Global.invoke(scene, "getRenderer"); //$NON-NLS-1$
+            // SwtDialogRenderer и LwtDialogRenderer делегируют нативные элементы contentRenderer.
+            Object renderer = Global.getField(dialogRenderer, "contentRenderer"); //$NON-NLS-1$
+            Object views = Global.getField(renderer, "viewModelToView"); //$NON-NLS-1$
+            Object view = views instanceof Map<?, ?> map ? map.get(treeViewModel) : null;
+            Object nativeControl = Global.invoke(view, "getNativeControl"); //$NON-NLS-1$
+            Object swtControl = nativeControl instanceof Control ? nativeControl
+                : Global.invoke(nativeControl, "getSwtControl"); //$NON-NLS-1$
+            TreeViewer viewer = swtControl instanceof Composite composite ? suppressionTreeViewer(composite) : null;
+            if (viewer != null && !viewer.getTree().isDisposed())
+            {
+                viewer.expandToLevel(viewModel, 0);
+                viewer.setSelection(new org.eclipse.jface.viewers.StructuredSelection(viewModel), true);
+                viewer.getTree().showSelection();
+                boolean focused = viewer.getTree().setFocus();
+                boolean selected = viewer.getStructuredSelection().getFirstElement() == viewModel;
+                return new SuppressionSelection(selected, focused);
+            }
+            return new SuppressionSelection(false, false);
+        }
+
+        /** Ищем viewer только внутри нативного контрола компонента дерева этого диалога. */
+        private static TreeViewer suppressionTreeViewer(Composite composite)
+        {
+            if (composite.isDisposed())
+                return null;
+            if (composite.getData("com._1c.g5.v8.dt.ui.aef.swt.views.DtTreeView.treeViewer") instanceof TreeViewer viewer) //$NON-NLS-1$
+                return viewer;
+            for (Control child : composite.getChildren())
+                if (child instanceof Composite nested)
+                {
+                    TreeViewer viewer = suppressionTreeViewer(nested);
+                    if (viewer != null)
+                        return viewer;
+                }
+            return null;
         }
 
         private static Object suppressionEntry(Object provider, String fqn, CheckUid uid)
@@ -3686,7 +3729,6 @@ public final class ProblemViewHook implements IStartup
             }
             catch (ReflectiveOperationException e)
             {
-                Global.tempLog("problemSuppression", "Не удалось найти запись: " + e); //$NON-NLS-1$ //$NON-NLS-2$
                 return null;
             }
         }
