@@ -45,6 +45,7 @@
     <startup class="tormozit.BlameHyperlinkOpenFixHook"/>
     <startup class="tormozit.TextEditorRightClickCaretHook"/>
     <startup class="tormozit.TextEditorCtrlClickSelectWordHook"/>
+    <startup class="tormozit.BslEditorHyperlinkHook"/>
     <startup class="tormozit.TextEditorIdentifierSelectionHook"/>
     <startup class="tormozit.TextEditorOccurrencesHook"/>
     <startup class="tormozit.SmartHomeKeyHook"/>
@@ -78,7 +79,7 @@
     <startup class="tormozit.MdEditorGlobalCommandsPageHook"/>
     <startup class="tormozit.MdEditorObjectCommandsPageHook"/>
     <startup class="tormozit.MdEditorTitleNavigatorMenuHook"/>
-    <startup class="tormozit.MdEditorListTabCountHook"/>
+    <startup class="tormozit.MdEditorTabsHook"/>
     <!-- Обход issue 400: пропажа иконок вкладок панели редакторов -->
     <startup class="tormozit.EditorTabIconDiagHook"/>
     <startup class="tormozit.MdEditorAttributeMenuHook"/>

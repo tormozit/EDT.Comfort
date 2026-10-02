@@ -532,7 +532,7 @@ public final class MdEditorDefinedTypesPageHook implements IStartup
             viewer.setInput(rows);
             syncChecks();
             if (getEditor() instanceof DtGranularEditor<?> granularEditor)
-                MdEditorListTabCountHook.requestRefresh(granularEditor);
+                MdEditorTabsHook.requestRefresh(granularEditor);
         }
 
         private boolean firstLoadDone;

@@ -553,7 +553,7 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
             boolean liveOverlay = isLiveProblemOverlay(editor, nowImage);
             if (!titleChanged && !imageChanged)
             {
-                if (liveOverlay && MdEditorListTabCountHook.innerTabsShowProblemOverlay(editor))
+                if (liveOverlay && MdEditorTabsHook.innerTabsShowProblemOverlay(editor))
                 {
                     rememberWorkbenchOverlay(editor, nowImage);
                     EditorTabIconDiagHook.applyLiveProblemOverlay(editor, nowImage);
@@ -562,7 +562,7 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
             }
             if (imageChanged && drop && !targeted)
             {
-                if (MdEditorListTabCountHook.innerTabsShowProblemOverlay(editor))
+                if (MdEditorTabsHook.innerTabsShowProblemOverlay(editor))
                 {
                     rememberWorkbenchOverlay(editor, lastImage);
                     if (titleChanged)
@@ -582,7 +582,7 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
             }
             if (imageChanged && drop && targeted)
                 clearWorkbenchOverlay(editor);
-            else if (liveOverlay && MdEditorListTabCountHook.innerTabsShowProblemOverlay(editor))
+            else if (liveOverlay && MdEditorTabsHook.innerTabsShowProblemOverlay(editor))
                 rememberWorkbenchOverlay(editor, nowImage);
             lastTitle = nowTitle;
             lastImage = nowImage;
@@ -593,7 +593,7 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
                     Integer.valueOf(IWorkbenchPartConstants.PROP_TITLE));
             if (liveOverlay)
             {
-                if (MdEditorListTabCountHook.innerTabsShowProblemOverlay(editor))
+                if (MdEditorTabsHook.innerTabsShowProblemOverlay(editor))
                     EditorTabIconDiagHook.applyLiveProblemOverlay(editor, nowImage);
             }
         }

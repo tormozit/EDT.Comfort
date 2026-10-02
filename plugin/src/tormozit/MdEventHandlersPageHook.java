@@ -1090,7 +1090,7 @@ public final class MdEventHandlersPageHook implements IStartup
                 }
                 else
                     installSubscriptionMarks(subscriptionsViewer);
-                MdEditorListTabCountHook.requestRefresh(granularEditor);
+                MdEditorTabsHook.requestRefresh(granularEditor);
             }
             catch (Exception | LinkageError e)
             {
@@ -1556,7 +1556,7 @@ public final class MdEventHandlersPageHook implements IStartup
                     syncSourceChecks();
                     scheduleSyncChecks();
                     if (getEditor() instanceof DtGranularEditor<?> granularEditor)
-                        MdEditorListTabCountHook.requestRefresh(granularEditor);
+                        MdEditorTabsHook.requestRefresh(granularEditor);
                 });
         }
 
@@ -2140,7 +2140,7 @@ public final class MdEventHandlersPageHook implements IStartup
                 scheduleSyncChecks();
                 refreshSourceList();
                 if (getEditor() instanceof DtGranularEditor<?> granularEditor)
-                    MdEditorListTabCountHook.requestRefresh(granularEditor);
+                    MdEditorTabsHook.requestRefresh(granularEditor);
             });
         }
 

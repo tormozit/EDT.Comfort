@@ -206,6 +206,10 @@ public final class FilterBySubsystemsDialogHook implements IStartup
     private static void registerShell(Shell shell)
     {
         shell.setData(HOOKED_KEY, Boolean.TRUE);
+        Object dialog = resolveDialog(shell);
+        Object settings = dialog != null ? Global.getField(dialog, "filterSettings") : null; //$NON-NLS-1$
+        if (isNavigatorSubsystemsSettings(settings))
+            ObjectSetSubsystemsFilterBridge.stopSubsystemsMementoReapplyForDialog(settings);
         applyStoredShellBounds(shell);
         shell.addDisposeListener(e -> saveShellBounds((Shell) e.widget));
         schedulePatchAttempt(shell.getDisplay(), shell, 0);
@@ -244,6 +248,9 @@ public final class FilterBySubsystemsDialogHook implements IStartup
             return false;
         }
 
+        Object settings = Global.getField(dialog, "filterSettings"); //$NON-NLS-1$
+        if (isNavigatorSubsystemsSettings(settings))
+            ObjectSetSubsystemsFilterBridge.stopSubsystemsMementoReapplyForDialog(settings);
         installComfortToolbarActions(dialog, panel, viewer);
         installTreeContextMarkMenu(panel, viewer);
         installLastChildCheckGuard(panel, viewer);
@@ -3416,6 +3423,50 @@ public final class FilterBySubsystemsDialogHook implements IStartup
 
         @Override
         public void checkStateChanged(CheckStateChangedEvent event)
+        {
+            try
+            {
+                handleCheckStateChanged(event);
+            }
+            finally
+            {
+                discardUncheckedSubtreeOverrides();
+            }
+        }
+
+        /**
+         * setState снимает полную пометку предка через setSubtreeChecked(false), а затем
+         * ставит явную пометку ребёнку и частичную предку. В ImprovedCheckboxTreeViewer
+         * остаётся отрицательное правило для детей предка. Его провайдер читает это
+         * правило раньше currentFilterSettings и при обновлении снова снимает пометки.
+         * Удаляем только отрицательные правила уже помеченных узлов; прочий кэш сохраняем.
+         */
+        private void discardUncheckedSubtreeOverrides()
+        {
+            Tree tree = viewer.getTree();
+            if (tree.isDisposed())
+                return;
+            Object modified = Global.getField(viewer, "userModifiedElements"); //$NON-NLS-1$
+            if (!(modified instanceof Map<?, ?> map))
+                return;
+            List<TreeItem> items = new ArrayList<>(Arrays.asList(tree.getItems()));
+            for (int i = 0; i < items.size(); i++)
+            {
+                TreeItem item = items.get(i);
+                if (item.isDisposed())
+                    continue;
+                // Только материализованные SWT-узлы, без раскрытия и getCheckedElements().
+                Collections.addAll(items, item.getItems());
+                Object element = item.getData();
+                Object cached = map.get(element);
+                if (!item.getChecked() || cached == null
+                    || !Boolean.FALSE.equals(Global.invoke(cached, "isChecked"))) //$NON-NLS-1$
+                    continue;
+                map.remove(element);
+            }
+        }
+
+        private void handleCheckStateChanged(CheckStateChangedEvent event)
         {
             Object element = event.getElement();
             if (!event.getChecked() || element == null

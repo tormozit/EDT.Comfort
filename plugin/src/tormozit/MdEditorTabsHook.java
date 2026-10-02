@@ -94,6 +94,7 @@ import com._1c.g5.v8.dt.validation.marker.MarkerSeverity;
  * «Подсистемы»: при открытии — «?», после перехода — число подсистем в составе объекта.
  * Вкладки модулей: если модуль один — «Модуль»; если несколько — короткое имя
  * без «Модуль» («Объект», «Менеджер», …). «+» если файл не пустой, «-» если файла нет или размер 0.
+ * Вкладки модулей следуют сразу за «Макеты», сохраняя взаимный порядок.
  * У вкладок — картинка EDT (как в навигаторе); значок ошибки/предупреждения штатной
  * вкладки не затирается. Сброс картинки EDT восстанавливается без повторного
  * {@code setImage}. В меню «>>» скрытые вкладки в порядке полосы, между левыми и
@@ -101,9 +102,9 @@ import com._1c.g5.v8.dt.validation.marker.MarkerSeverity;
  * Вертикальный список слева — флажок {@link ComfortSettings#PREF_MD_EDITOR_VERTICAL_TABS}
  * и больше 10 вкладок.
  */
-public final class MdEditorListTabCountHook implements IStartup
+public final class MdEditorTabsHook implements IStartup
 {
-    private static final String TAG = "MdEditorListTabCountHook"; //$NON-NLS-1$
+    private static final String TAG = "MdEditorTabsHook"; //$NON-NLS-1$
 
     private static final String KEY_FOLDER = "tormozit.mdListTabCount.folder"; //$NON-NLS-1$
 
@@ -666,12 +667,15 @@ public final class MdEditorListTabCountHook implements IStartup
                 return;
 
             if (!isTabFolderReady(editor, folder))
+            {
                 return;
+            }
             folder.setRedraw(false);
             try
             {
                 Object pagesObj = Global.getField(editor, "pages"); //$NON-NLS-1$
                 List<?> pages = pagesObj instanceof List<?> list ? list : List.of();
+                placeModulesAfterTemplates(editor, folder, pages);
                 CTabItem[] items = folder.getItems();
                 for (int i = 0; i < items.length; i++)
                 {
@@ -695,6 +699,111 @@ public final class MdEditorListTabCountHook implements IStartup
         {
             Global.logError(TAG, "refresh editor", e); //$NON-NLS-1$
         }
+    }
+
+    /**
+     * FormEditor хранит страницы в pages, а currentPage — отдельно от выделения
+     * CTabFolder. Меняем все три индекса согласованно, без removePage/addPage:
+     * эти методы уничтожают страницу или повторно инициализируют вложенный редактор.
+     * CTabItem.dispose() уничтожает только вкладку, оставляя её Control живым.
+     */
+    private static void placeModulesAfterTemplates(DtGranularEditor<?> editor, CTabFolder folder,
+        List<?> pages)
+    {
+        int tabCount = folder.getItemCount();
+        if (pages.size() < tabCount)
+        {
+            return;
+        }
+        // В pages может оставаться null после реальных страниц (в документе:
+        // 21 элемент при 20 вкладках). Переставляем только соответствующий вкладкам
+        // участок списка, сохраняя этот хвост. Несопоставленные живые страницы не трогаем.
+        for (int i = tabCount; i < pages.size(); i++)
+        {
+            if (pages.get(i) != null)
+            {
+                return;
+            }
+        }
+        pages = pages.subList(0, tabCount);
+        CTabItem templates = null;
+        List<CTabItem> modules = new ArrayList<>();
+        for (int i = 0; i < pages.size(); i++)
+        {
+            if (!(pages.get(i) instanceof IFormPage page))
+            {
+                return;
+            }
+            if ("editors.pages.templates".equals(page.getId())) //$NON-NLS-1$
+                templates = folder.getItem(i);
+            else if (isModulePage(page))
+                modules.add(folder.getItem(i));
+        }
+        if (templates == null || modules.isEmpty())
+        {
+            return;
+        }
+        int firstModule = folder.indexOf(templates) + 1;
+        boolean ordered = true;
+        for (int i = 0; i < modules.size(); i++)
+            ordered &= folder.indexOf(modules.get(i)) == firstModule + i;
+        if (ordered)
+        {
+            return;
+        }
+
+        Object currentPage = Global.getField(editor, "currentPage"); //$NON-NLS-1$
+        if (!(currentPage instanceof Integer current) || current.intValue() != folder.getSelectionIndex())
+        {
+            return;
+        }
+        CTabItem selected = folder.getSelection();
+        // С конца к началу: каждый модуль вставляется сразу за «Макеты».
+        // Так сохраняется порядок модулей, даже если часть была перед «Макеты».
+        for (int i = modules.size() - 1; i >= 0; i--)
+        {
+            CTabItem oldItem = modules.get(i);
+            int source = folder.indexOf(oldItem);
+            int target = folder.indexOf(templates) + 1;
+            if (source < target)
+                target--;
+            if (source == target)
+                continue;
+
+            Control control = oldItem.getControl();
+            String text = oldItem.getText();
+            String tooltip = oldItem.getToolTipText();
+            Image image = oldItem.getImage();
+            var font = oldItem.getFont();
+            Object data = oldItem.getData();
+            Object comfortImage = oldItem.getData(KEY_COMFORT_IMAGE);
+            int style = oldItem.getStyle();
+            boolean wasSelected = oldItem == selected;
+            // Создаём замену до удаления: удаление выбранного CTabItem иначе
+            // посылает SWT.Selection и запускает pageChange на промежуточном порядке.
+            int insertion = source < target ? target + 1 : target;
+            CTabItem newItem = new CTabItem(folder, style, insertion);
+            newItem.setText(text);
+            newItem.setImage(image);
+            newItem.setFont(font);
+            newItem.setToolTipText(TooltipText.wrap(folder, tooltip));
+            newItem.setData(data);
+            newItem.setData(KEY_COMFORT_IMAGE, comfortImage);
+            newItem.setControl(control);
+            if (wasSelected)
+                folder.setSelection(newItem);
+            oldItem.dispose();
+            Collections.rotate(pages.subList(Math.min(source, target), Math.max(source, target) + 1),
+                source < target ? -1 : 1);
+            if (wasSelected)
+                selected = newItem;
+        }
+        for (int i = 0; i < pages.size(); i++)
+            ((IFormPage)pages.get(i)).setIndex(i);
+        int selectedIndex = selected == null ? -1 : folder.indexOf(selected);
+        Global.setField(editor, "currentPage", Integer.valueOf(selectedIndex)); //$NON-NLS-1$
+        if (selected != null)
+            folder.setSelection(selected);
     }
 
     private static void scheduleRefreshEditor(DtGranularEditor<?> editor)
@@ -2461,7 +2570,6 @@ public final class MdEditorListTabCountHook implements IStartup
             return null;
         int[] count = { 0 };
         walkMarkedSubsystems(configuration.getSubsystems(), mdObject, count, 0);
-        Global.tempLog("subsys-count", mdObject.getName() + " marked=" + count[0]); //$NON-NLS-1$ //$NON-NLS-2$
         return Integer.valueOf(count[0]);
     }
 

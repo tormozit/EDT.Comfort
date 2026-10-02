@@ -101,7 +101,7 @@ public final class ComfortSettings
 
     /**
      * Ключ: вкладки редактора объекта метаданных списком слева,
-     * если вкладок больше 10 ({@link MdEditorListTabCountHook}).
+     * если вкладок больше 10 ({@link MdEditorTabsHook}).
      */
     public static final String PREF_MD_EDITOR_VERTICAL_TABS = "comfort.mdEditor.verticalTabs"; //$NON-NLS-1$
 

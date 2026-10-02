@@ -590,7 +590,7 @@ public final class EditorTabIconDiagHook implements IStartup
                 applyTitleImage(editor, live);
             return;
         }
-        boolean innerOverlay = MdEditorListTabCountHook.innerTabsShowProblemOverlay(editor);
+        boolean innerOverlay = MdEditorTabsHook.innerTabsShowProblemOverlay(editor);
         if (innerOverlay && MdEditorTitleNavigatorMenuHook.isLiveProblemOverlay(editor, live))
         {
             applyLiveProblemOverlay(editor, live);

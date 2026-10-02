@@ -362,7 +362,7 @@ public final class MdEditorGlobalCommandsPageHook implements IStartup
             rows.sort((a, b) -> String.CASE_INSENSITIVE_ORDER.compare(nameOf(a), nameOf(b)));
             viewer.setInput(rows);
             if (getEditor() instanceof DtGranularEditor<?> granularEditor)
-                MdEditorListTabCountHook.requestRefresh(granularEditor);
+                MdEditorTabsHook.requestRefresh(granularEditor);
         }
     }
 }

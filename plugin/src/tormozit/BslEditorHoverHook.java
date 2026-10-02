@@ -85,6 +85,7 @@ public final class BslEditorHoverHook implements IStartup
         Display.getDefault().asyncExec(() ->
         {
             ParamHintHtmlModifier.install(Display.getDefault());
+            MethodDefinitionLink.install(Display.getDefault());
 
             PlatformUI.getWorkbench().addWindowListener(new IWindowListener()
             {
@@ -508,6 +509,89 @@ public final class BslEditorHoverHook implements IStartup
         }
     }
 
+    /** Мост клика без навигации браузера, как в подсказке параметров. */
+    private static final class MethodDefinitionLink
+    {
+        private static final String FUNCTION = "comfortOpenMethodDefinition";
+        private static final Map<String, java.lang.ref.WeakReference<Object>> documentationPages =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+        static String registerDocumentation(Object descriptor)
+        {
+            documentationPages.entrySet().removeIf(entry -> entry.getValue().get() == null);
+            String token = "documentation:" + java.util.UUID.randomUUID();
+            documentationPages.put(token, new java.lang.ref.WeakReference<>(descriptor));
+            return token;
+        }
+
+        static void install(Display display)
+        {
+            display.addFilter(org.eclipse.swt.SWT.Show, event -> {
+                if (!(event.widget instanceof org.eclipse.swt.widgets.Shell shell))
+                    return;
+                Browser browser = IrBslHoverHtml.findControlBrowser(shell);
+                if (browser == null || browser.getData(FUNCTION) != null)
+                    return;
+                org.eclipse.swt.browser.BrowserFunction function =
+                    new org.eclipse.swt.browser.BrowserFunction(browser, FUNCTION)
+                    {
+                        @Override
+                        public Object function(Object[] arguments)
+                        {
+                            if (arguments == null || arguments.length != 1
+                                || !(arguments[0] instanceof String encoded))
+                                return Boolean.FALSE;
+                            if (encoded.startsWith("documentation:"))
+                            {
+                                java.lang.ref.WeakReference<Object> reference = documentationPages.get(encoded);
+                                Object descriptor = reference == null ? null : reference.get();
+                                if (descriptor == null)
+                                    return Boolean.FALSE;
+                                display.asyncExec(() -> {
+                                    ClassLoader loader = descriptor.getClass().getClassLoader();
+                                    try
+                                    {
+                                        Class<?> viewUtil = Class.forName(
+                                            "com._1c.g5.v8.dt.internal.bsl.ui.syntaxassist.SyntaxAssistViewUtil",
+                                            true, loader);
+                                        Object view = Global.invoke(viewUtil, "showOrGetShowedView");
+                                        Object panel = Global.invoke(view, "getDescriptionPanel");
+                                        Object targetBrowser = Global.invoke(panel, "getBrowser");
+                                        Global.invokeVoid(targetBrowser, "openPage", descriptor);
+                                        if (targetBrowser != null && !shell.isDisposed())
+                                            shell.setVisible(false);
+                                        Global.tempLog("method-definition-663", "documentation open browser="
+                                            + targetBrowser);
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        Global.tempLog("method-definition-663", "documentation open error=" + ex);
+                                    }
+                                });
+                                return Boolean.TRUE;
+                            }
+                            org.eclipse.emf.common.util.URI uri = org.eclipse.emf.common.util.URI.createURI(
+                                java.net.URLDecoder.decode(encoded, java.nio.charset.StandardCharsets.UTF_8));
+                            display.asyncExec(() -> {
+                                org.eclipse.xtext.resource.IResourceServiceProvider provider =
+                                    org.eclipse.xtext.resource.IResourceServiceProvider.Registry.INSTANCE
+                                        .getResourceServiceProvider(org.eclipse.emf.common.util.URI.createURI("*.bsl"));
+                                org.eclipse.xtext.ui.editor.IURIEditorOpener opener = provider == null ? null
+                                    : provider.get(org.eclipse.xtext.ui.editor.IURIEditorOpener.class);
+                                if (opener != null)
+                                {
+                                    if (!shell.isDisposed())
+                                        shell.setVisible(false);
+                                    opener.open(uri, true);
+                                }
+                            });
+                            return Boolean.TRUE;
+                        }
+                    };
+                browser.setData(FUNCTION, function);
+            });
+        }
+    }
     /** Ctrl+F2 (INFORMATION_PROPOSAL) — {@code XtextInformationProvider.hover}, не из {@code fTextHovers}. */
     private static boolean wrapInformationProviderHover(BslXtextEditor editor)
     {
@@ -568,6 +652,9 @@ public final class BslEditorHoverHook implements IStartup
         private volatile String lastIrHtml;
         private volatile String lastBaseHtml;
         private volatile String lastDirective;
+        private volatile String lastMethodLink;
+        private volatile String lastMethodName;
+        private volatile Object lastDocumentationDescriptor;
         private volatile boolean lastCreationSite;
         private volatile HtmlIntegrityWatcher activeWatcher;
 
@@ -623,6 +710,9 @@ public final class BslEditorHoverHook implements IStartup
             Object info = delegateExt2 != null
                 ? delegateExt2.getHoverInfo2(textViewer, hoverRegion)
                 : delegate.getHoverInfo(textViewer, hoverRegion);
+            Global.tempLog("method-definition-663", "hover info="
+                + (info == null ? "null" : info.getClass().getName())
+                + " region=" + hoverRegion + " html=" + IrBslHoverHtml.readHtml(info));
             if (info == null || hoverRegion == null || editor == null)
                 return info;
             if (!IrBslHoverHtml.isBslBrowserInput(info))
@@ -631,6 +721,9 @@ public final class BslEditorHoverHook implements IStartup
             String directive = resolveHoverDirective(offset);
             lastDirective = (directive != null && !directive.isBlank()) ? directive : null;
             lastCreationSite = isImplicitVariableCreationAt(hoverRegion);
+            lastMethodLink = resolveMethodLink(hoverRegion, info);
+            Global.tempLog("method-definition-663", "resolved name=" + lastMethodName
+                + " link=" + lastMethodLink);
             IRSession session = IrBslExpressionHtmlSupport.resolveConnectedSession(editor);
             if (session == null)
             {
@@ -820,6 +913,36 @@ public final class BslEditorHoverHook implements IStartup
                 result = IrBslHoverHtml.injectDirectiveIntoHtml(result, lastDirective);
             if (lastCreationSite)
                 result = IrBslHoverHtml.injectNewVariablePrefix(result);
+            if (lastMethodLink != null && lastMethodName != null
+                && !result.contains("comfort-method-definition"))
+            {
+                int heading = result.indexOf("infocontrol-heading");
+                if (heading < 0)
+                    heading = result.indexOf("contentassist-heading-content");
+                int headingStart = heading < 0 ? -1 : result.indexOf('>', heading);
+                int headingEnd = headingStart < 0 ? -1 : result.indexOf("</div>", headingStart);
+                if (headingEnd > headingStart)
+                {
+                    java.util.regex.Matcher text = java.util.regex.Pattern.compile(">([^<]*)<")
+                        .matcher(result).region(headingStart, headingEnd + 1);
+                    java.util.regex.Pattern namePattern = java.util.regex.Pattern.compile(
+                        "(?iu)(?<![\\p{L}\\p{N}_])" + java.util.regex.Pattern.quote(lastMethodName)
+                            + "(?![\\p{L}\\p{N}_])");
+                    while (text.find())
+                    {
+                        java.util.regex.Matcher name = namePattern.matcher(text.group(1));
+                        if (!name.find())
+                            continue;
+                        int start = text.start(1) + name.start();
+                        int end = text.start(1) + name.end();
+                        result = result.substring(0, start) + lastMethodLink
+                            + result.substring(start, end) + "</a>" + result.substring(end);
+                        break;
+                    }
+                }
+            }
+            Global.tempLog("method-definition-663", "decorated name=" + lastMethodName
+                + " html=" + result);
             return result;
         }
 
@@ -846,6 +969,97 @@ public final class BslEditorHoverHook implements IStartup
                 }
                 if (control.hasDelayedInputChangeListener())
                     control.notifyDelayedInputChange(baseInput);
+            });
+        }
+
+        private String resolveMethodLink(IRegion region, Object browserInput)
+        {
+            lastMethodName = null;
+            lastDocumentationDescriptor = null;
+            if (!(editor.getDocument() instanceof IXtextDocument document))
+                return null;
+            return document.readOnly((IUnitOfWork<String, XtextResource>) resource -> {
+                EObject object = resource == null ? null
+                    : new EObjectAtOffsetHelper().resolveContainedElementAt(resource, region.getOffset());
+                Global.tempLog("method-definition-663", "resolve object="
+                    + (object == null ? "null" : object.eClass().getName()));
+                com._1c.g5.v8.dt.bsl.model.FeatureAccess access = null;
+                for (EObject current = object; current != null && access == null; current = current.eContainer())
+                {
+                    if (!(current instanceof com._1c.g5.v8.dt.bsl.model.FeatureAccess candidate))
+                        continue;
+                    for (INode node : NodeModelUtils.findNodesForFeature(candidate,
+                        BslPackage.Literals.FEATURE_ACCESS__NAME))
+                        if (region.getOffset() < node.getEndOffset()
+                            && region.getOffset() + Math.max(1, region.getLength()) > node.getOffset())
+                        {
+                            access = candidate;
+                            break;
+                        }
+                }
+                Global.tempLog("method-definition-663", "resolve access="
+                    + (access == null ? "null" : access.eClass().getName()));
+                if (access == null)
+                    return null;
+                org.eclipse.xtext.resource.IResourceServiceProvider provider =
+                    org.eclipse.xtext.resource.IResourceServiceProvider.Registry.INSTANCE
+                        .getResourceServiceProvider(resource.getURI());
+                com._1c.g5.v8.dt.bsl.resource.DynamicFeatureAccessComputer computer = provider == null
+                    ? null : provider.get(com._1c.g5.v8.dt.bsl.resource.DynamicFeatureAccessComputer.class);
+                List<com._1c.g5.v8.dt.bsl.model.FeatureEntry> entries =
+                    access instanceof StaticFeatureAccess staticAccess ? staticAccess.getFeatureEntries()
+                    : computer == null ? List.of()
+                        : com._1c.g5.v8.dt.bsl.resource.DynamicFeatureAccessComputer
+                            .resolveDynamicFeatureAccess(access, computer);
+                for (com._1c.g5.v8.dt.bsl.model.FeatureEntry entry : entries)
+                {
+                    Global.tempLog("method-definition-663", "resolve feature=" + entry.getFeature());
+                    EObject feature = entry.getFeature();
+                    org.eclipse.emf.common.util.URI sourceUri =
+                        feature instanceof com._1c.g5.v8.dt.bsl.model.BslContextDefMethod contextMethod
+                            ? contextMethod.getSourceUri()
+                            : feature instanceof com._1c.g5.v8.dt.bsl.model.Method method
+                                ? org.eclipse.emf.ecore.util.EcoreUtil.getURI(method) : null;
+                    Global.tempLog("method-definition-663", "resolve sourceUri=" + sourceUri);
+                    String uri;
+                    if (sourceUri != null)
+                        uri = java.net.URLEncoder.encode(sourceUri.toString(),
+                            java.nio.charset.StandardCharsets.UTF_8);
+                    else if (feature instanceof com._1c.g5.v8.dt.mcore.Method
+                        || feature instanceof com._1c.g5.v8.dt.mcore.Property)
+                    {
+                        Object page = Global.invoke(browserInput, "getViewPage");
+                        if (page == null || provider == null)
+                            continue;
+                        try
+                        {
+                            ClassLoader loader = browserInput.getClass().getClassLoader();
+                            Class<?> providerClass = Class.forName(
+                                "com._1c.g5.v8.dt.internal.bsl.ui.documentation.BslDocumentationProvider",
+                                true, loader);
+                            Object documentationProvider = provider.get(providerClass);
+                            Object descriptor = Global.newInstance(
+                                "com._1c.g5.v8.dt.internal.bsl.ui.syntaxassist.description.DocumentationPageDescriptor",
+                                loader, page, documentationProvider);
+                            Global.tempLog("method-definition-663", "documentation descriptor=" + descriptor);
+                            if (descriptor == null)
+                                continue;
+                            lastDocumentationDescriptor = descriptor;
+                            uri = MethodDefinitionLink.registerDocumentation(descriptor);
+                        }
+                        catch (Exception ex)
+                        {
+                            Global.tempLog("method-definition-663", "documentation resolve error=" + ex);
+                            continue;
+                        }
+                    }
+                    else
+                        continue;
+                    lastMethodName = access.getName();
+                    return "<a class=\"comfort-method-definition\" href=\"#\" onclick=\""
+                        + "comfortOpenMethodDefinition('" + uri + "');return false;\">";
+                }
+                return null;
             });
         }
 

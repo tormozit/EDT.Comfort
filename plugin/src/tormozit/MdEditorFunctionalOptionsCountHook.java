@@ -749,7 +749,7 @@ public final class MdEditorFunctionalOptionsCountHook implements IStartup
                     viewer.refresh();
                     scheduleColumnLayout(tree);
                     if (tree.getData(EDITOR_KEY) instanceof DtGranularEditor<?> editor)
-                        MdEditorListTabCountHook.refreshFunctionalOptionsTitle(editor);
+                        MdEditorTabsHook.refreshFunctionalOptionsTitle(editor);
                 });
                 return Status.OK_STATUS;
             }

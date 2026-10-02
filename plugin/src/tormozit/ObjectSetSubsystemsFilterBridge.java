@@ -557,6 +557,7 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
      * {@code getFilterBySubsystemsSettings()} один раз строит Settings из Data. Если BM/индекс
      * подсистем ещё не готов — часть FQN не матчится и неполный Settings кэшируется. Повторяем
      * {@code getFilterSettings(data)} после готовности и подменяем кэш Navigator + NSF.
+     * Только один стартовый цикл на дерево: после него текущий выбор важнее memento.
      */
     private static void scheduleSubsystemsMementoReapply(IViewPart navigator)
     {
@@ -566,10 +567,32 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
         Tree tree = viewer != null ? viewer.getTree() : null;
         if (tree == null || tree.isDisposed())
             return;
-        if (Boolean.TRUE.equals(tree.getData(MEMENTO_REAPPLY_MARKER)))
+        if (tree.getData(MEMENTO_REAPPLY_MARKER) != null)
+        {
             return;
+        }
         tree.setData(MEMENTO_REAPPLY_MARKER, Boolean.TRUE);
         scheduleSubsystemsMementoReapplyAttempt(navigator, 0, -1, 0);
+    }
+
+    /** Диалог уже получил текущие settings: отложенная подмена оторвёт его от навигатора. */
+    static void stopSubsystemsMementoReapplyForDialog(Object settings)
+    {
+        if (settings == null || !PlatformUI.isWorkbenchRunning())
+            return;
+        for (IWorkbenchWindow window : PlatformUI.getWorkbench().getWorkbenchWindows())
+            for (IWorkbenchPage page : window.getPages())
+            {
+                IViewPart navigator = page.findView(Global.NAVIGATOR_VIEW_ID);
+                if (navigator == null
+                    || Global.getField(navigator, "filterBySubsystemsSettings") != settings) //$NON-NLS-1$
+                    continue;
+                CommonViewer viewer = getCommonViewer(navigator);
+                Tree tree = viewer != null ? viewer.getTree() : null;
+                if (tree == null || tree.isDisposed())
+                    continue;
+                tree.setData(MEMENTO_REAPPLY_MARKER, Boolean.FALSE);
+            }
     }
 
     private static void scheduleSubsystemsMementoReapplyAttempt(
@@ -586,6 +609,10 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
             Tree tree = viewer != null ? viewer.getTree() : null;
             if (tree == null || tree.isDisposed())
                 return;
+            if (!Boolean.TRUE.equals(tree.getData(MEMENTO_REAPPLY_MARKER)))
+            {
+                return;
+            }
 
             int checked = tryReapplySubsystemsMemento(navigator, attempt);
             if (checked == -1)

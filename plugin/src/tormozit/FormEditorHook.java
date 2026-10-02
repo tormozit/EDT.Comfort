@@ -5,10 +5,13 @@ import java.net.URL;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashSet;
+import java.util.LinkedHashMap;
+import java.util.Locale;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -44,6 +47,7 @@ import org.eclipse.jface.action.IToolBarManager;
 import org.eclipse.jface.action.Separator;
 import org.eclipse.jface.action.ToolBarManager;
 import org.eclipse.jface.dialogs.IDialogSettings;
+import org.eclipse.jface.dialogs.MessageDialog;
 import org.eclipse.jface.layout.GridDataFactory;
 import org.eclipse.jface.util.LocalSelectionTransfer;
 import org.eclipse.jface.action.IMenuListener;
@@ -155,6 +159,7 @@ import com._1c.g5.v8.dt.common.localization.EnumLiteralLocalizationProvider;
 import com._1c.g5.v8.dt.common.localization.FeatureNameLocalizationProvider;
 import com._1c.g5.v8.dt.core.naming.ITopObjectFqnGenerator;
 import com._1c.g5.v8.dt.core.platform.IConfigurationProject;
+import com._1c.g5.v8.dt.core.platform.IExtensionProject;
 import com._1c.g5.v8.dt.core.platform.IEditingLanguageManager;
 import com._1c.g5.v8.dt.core.platform.IResourceLookup;
 import com._1c.g5.v8.dt.core.platform.IV8Project;
@@ -177,6 +182,11 @@ import com._1c.g5.v8.dt.dcs.ui.util.DcsUiUtil;
 import com._1c.g5.v8.dt.common.StringUtils;
 import com._1c.g5.v8.dt.common.ui.CommonUI;
 import com._1c.g5.v8.dt.form.copypaste.FormElementTransfer;
+import com._1c.g5.v8.dt.form.copypaste.TransferObject;
+import com._1c.g5.v8.dt.form.service.command.AddFormCommandTask;
+import com._1c.g5.v8.dt.form.service.command.FormCommandManagementService;
+import com._1c.g5.v8.dt.form.service.dnd.DropEvent;
+import com._1c.g5.v8.dt.form.service.dnd.IDropDelegate;
 import com._1c.g5.v8.dt.form.mapping.model.IMappingModel;
 import com._1c.g5.v8.dt.form.mapping.model.Item;
 import com._1c.g5.v8.dt.form.mapping.model.ParameterizedAttributeItem;
@@ -232,6 +242,7 @@ import com._1c.g5.v8.dt.form.model.SelectedItemsActionsPanel;
 import com._1c.g5.v8.dt.form.model.PropertyInfo.PropertyInfoType;
 import com._1c.g5.v8.dt.form.model.Visible;
 import com._1c.g5.v8.dt.form.ui.editor.FormEditor;
+import com._1c.g5.v8.dt.form.ui.editor.FormEditorModulePage;
 import com._1c.g5.v8.dt.form.ui.editor.FormEditorComponent;
 import com._1c.g5.v8.dt.form.ui.editor.FormEditorPage;
 import com._1c.g5.v8.dt.form.ui.editor.attribute.TypeColumnLabelProvider;
@@ -258,6 +269,11 @@ import com._1c.g5.v8.dt.md.ui.sattribute.SAttributeFactory;
 import com._1c.g5.v8.dt.md.ui.sattribute.StandardAttributeProxy;
 import com._1c.g5.v8.dt.md.ui.shared.MdUiSharedImages;
 import org.eclipse.xtext.EcoreUtil2;
+import org.eclipse.xtext.nodemodel.util.NodeModelUtils;
+import org.eclipse.xtext.resource.XtextResource;
+import org.eclipse.xtext.ui.editor.XtextEditor;
+import org.eclipse.xtext.ui.editor.model.IXtextDocument;
+import org.eclipse.xtext.util.concurrent.IUnitOfWork;
 import org.eclipse.emf.ecore.EEnumLiteral;
 import org.eclipse.emf.ecore.EStructuralFeature;
 import org.eclipse.emf.ecore.InternalEObject;
@@ -459,6 +475,7 @@ public class FormEditorHook implements IStartup
         GlobalCommandsFilter.install();
         GlobalCommandsExpansion.install();
         FormCommandsIcons.install();
+        FormPaste.install();
         AppearancePage.install();
         ConditionalAppearanceCellStyle.install(display);
     }
@@ -4005,6 +4022,470 @@ public class FormEditorHook implements IStartup
         }
     }
 
+    /** Сохраняет «Действие» команд и предлагает перенос кода обработчиков между формами. */
+    private static final class FormPaste
+    {
+        static void install()
+        {
+            trackFormEditors(editor -> attach(editor, 0));
+        }
+
+        private static void attach(FormEditor editor, int attempt)
+        {
+            FormEditorPage page = findFormPage(editor);
+            boolean commandsReady = attachGroup(page, "formCommandsActionsGroup"); //$NON-NLS-1$
+            boolean itemsReady = attachGroup(page, "itemsActionsGroup"); //$NON-NLS-1$
+            if ((!commandsReady || !itemsReady) && attempt < 100 && editor.getSite() != null)
+            {
+                editor.getSite().getShell().getDisplay().timerExec(200, () -> {
+                    if (editor.getSite() != null && !editor.getSite().getShell().isDisposed())
+                        attach(editor, attempt + 1);
+                });
+            }
+        }
+
+        private static boolean attachGroup(FormEditorPage page, String field)
+        {
+            Object group = page != null ? Global.getField(page, field) : null;
+            Object action = group != null ? Global.getField(group, "pasteAction") : null; //$NON-NLS-1$
+            Object delegates = action != null ? Global.getField(action, "dropDelegates") : null; //$NON-NLS-1$
+            if (!(delegates instanceof IDropDelegate[] items) || items.length == 0)
+            {
+                return false;
+            }
+            for (int i = 0; i < items.length; i++)
+            {
+                IDropDelegate original = items[i];
+                if (original instanceof HandlerPasteDelegate)
+                    continue;
+                // Поля и класс подтверждены в FormEditorPage/FormItemPasteAction EDT.
+                String type = original.getClass().getName();
+                if (type.equals("com._1c.g5.v8.dt.form.internal.ui.dnd.CopyFormCommandDropDelegate")) //$NON-NLS-1$
+                {
+                    Object service = Global.getField(page, "formCommandManagementService"); //$NON-NLS-1$
+                    if (!(service instanceof FormCommandManagementService management))
+                    {
+                        return false;
+                    }
+                    original = new CommandPasteDelegate(page, management, original);
+                }
+                else if (!type.equals(
+                    "com._1c.g5.v8.dt.form.internal.ui.editor.item.CopyToExternalFormByFormItemDropDelegate") //$NON-NLS-1$
+                    && !type.equals(
+                        "com._1c.g5.v8.dt.form.internal.ui.editor.item.CopyFormItemByPasteFormItemDropDelegate") //$NON-NLS-1$
+                    && !type.equals(
+                        "com._1c.g5.v8.dt.form.internal.ui.editor.item.CreateButtonByPasteCommandDropDelegate")) //$NON-NLS-1$
+                    continue;
+                items[i] = new HandlerPasteDelegate(page, original);
+            }
+            return true;
+        }
+
+        private static final class HandlerPasteDelegate implements IDropDelegate
+        {
+            private final FormEditorPage page;
+            private final IDropDelegate original;
+
+            HandlerPasteDelegate(FormEditorPage page, IDropDelegate original)
+            {
+                this.page = page;
+                this.original = original;
+            }
+
+            @Override
+            public boolean isDropSupported(Collection<TransferObject<?>> objects, DropEvent event)
+            {
+                return original.isDropSupported(objects, event);
+            }
+
+            @Override
+            public boolean isDropAsSibling(Collection<TransferObject<?>> objects, DropEvent event)
+            {
+                return original.isDropAsSibling(objects, event);
+            }
+
+            @Override
+            public boolean isCopyAction()
+            {
+                return original.isCopyAction();
+            }
+
+            @Override
+            public void process(Collection<TransferObject<?>> objects, DropEvent event)
+            {
+                Map<Form, Set<String>> handlers = collectHandlers(page, objects);
+                Set<URI> before = entities(page.getModel()).keySet();
+                original.process(objects, event);
+                Map<URI, EObject> inserted = entities(page.getModel());
+                inserted.keySet().removeAll(before);
+                queueInsertedSelection(page, inserted.values());
+                if (!inserted.isEmpty())
+                    page.getSite().getShell().getDisplay().asyncExec(() -> {
+                        if (page.getSite() == null || page.getSite().getShell().isDisposed())
+                            return;
+                        selectInserted(page, inserted.values(), false);
+                        if (!handlers.isEmpty())
+                        {
+                            try
+                            {
+                                offerHandlers(page, handlers);
+                            }
+                            finally
+                            {
+                                selectInserted(page, inserted.values(), true);
+                            }
+                        }
+                    });
+            }
+        }
+
+        private static Map<URI, EObject> entities(Form form)
+        {
+            Map<URI, EObject> entities = new LinkedHashMap<>();
+            var contents = form.eAllContents();
+            while (contents.hasNext())
+            {
+                EObject object = contents.next();
+                if (object instanceof FormItem || object instanceof FormCommand)
+                    entities.put(EcoreUtil.getURI(object), object);
+                else if (object instanceof com._1c.g5.v8.dt.bsl.model.Module)
+                    contents.prune();
+            }
+            return entities;
+        }
+
+        private static void selectInserted(FormEditorPage page, Collection<EObject> inserted, boolean restorePage)
+        {
+            if (page.getSite() == null || page.getSite().getShell().isDisposed())
+                return;
+            if (restorePage)
+            {
+                page.getEditor().setActivePage(page.getId());
+                page.getSite().getPage().activate(page.getEditor());
+            }
+            List<EObject> items = new ArrayList<>();
+            List<EObject> commands = new ArrayList<>();
+            for (EObject object : inserted)
+            {
+                if (object instanceof FormItem)
+                    items.add(object);
+                else if (object instanceof FormCommand)
+                    commands.add(object);
+            }
+            if (!commands.isEmpty())
+                page.setSelection(FormEditorComponent.FORM_COMMANDS, items.isEmpty(), commands.toArray());
+            if (!items.isEmpty())
+                page.setSelection(FormEditorComponent.ITEMS, true, items.toArray());
+            queueInsertedSelection(page, inserted);
+        }
+
+        /** EDT применяет это выделение после обновления модели и наполнения списков. */
+        private static void queueInsertedSelection(FormEditorPage page, Collection<EObject> inserted)
+        {
+            // Поля подтверждены в FormEditorPage, FormEditorStateSwitcher и FormObjectEventRefreshContributor.
+            Object switcher = Global.getField(page, "stateSwitcher"); //$NON-NLS-1$
+            Object listeners = switcher == null ? null : Global.getField(switcher, "listeners"); //$NON-NLS-1$
+            if (!(listeners instanceof org.eclipse.core.runtime.ListenerList<?> list))
+            {
+                return;
+            }
+            for (Object listener : list.getListeners())
+            {
+                if (!listener.getClass().getName().equals(
+                    "com._1c.g5.v8.dt.form.internal.ui.editor.refresher.FormObjectEventRefreshContributor")) //$NON-NLS-1$
+                    continue;
+                Object raw = Global.getField(listener, "updater"); //$NON-NLS-1$
+                if (!(raw instanceof com._1c.g5.v8.dt.form.ui.editor.refresher.ISelectionUpdater updater))
+                    continue;
+                for (FormEditorComponent component : new FormEditorComponent[] {
+                    FormEditorComponent.FORM_COMMANDS, FormEditorComponent.ITEMS })
+                {
+                    Object[] objects = inserted.stream().filter(object -> component == FormEditorComponent.ITEMS
+                        ? object instanceof FormItem : object instanceof FormCommand).toArray();
+                    if (objects.length == 0)
+                        continue;
+                    updater.update(component, objects);
+                }
+                return;
+            }
+        }
+
+        private static Map<Form, Set<String>> collectHandlers(FormEditorPage page,
+            Collection<TransferObject<?>> objects)
+        {
+            Map<Form, Set<String>> result = new LinkedHashMap<>();
+            if (formV8Project(page) instanceof IExtensionProject)
+                return result;
+            URI target = EcoreUtil.getURI(page.getModel());
+            for (TransferObject<?> transfer : objects)
+            {
+                Form source = transfer.getSourceForm();
+                if (target.equals(EcoreUtil.getURI(source)) || !(transfer.getObject() instanceof EObject object))
+                    continue;
+                Set<String> names = new LinkedHashSet<>();
+                addHandlerName(object, names);
+                object.eAllContents().forEachRemaining(child -> addHandlerName(child, names));
+                if (!names.isEmpty())
+                    result.computeIfAbsent(source, key -> new LinkedHashSet<>()).addAll(names);
+            }
+            return result;
+        }
+
+        private static void addHandlerName(EObject object, Set<String> names)
+        {
+            String name = object instanceof EventHandler handler ? handler.getName()
+                : object instanceof CommandHandler handler ? handler.getName() : null;
+            if (name != null && !name.isBlank())
+                names.add(name);
+        }
+
+        private static void offerHandlers(FormEditorPage page, Map<Form, Set<String>> handlers)
+        {
+            Shell shell = page.getSite() != null ? page.getSite().getShell() : null;
+            if (shell == null || shell.isDisposed())
+                return;
+            String title = Global.withPluginWindowTitle("Перенос обработчиков");
+            if (!MessageDialog.openQuestion(shell, title,
+                "Скопировать в модуль этой формы код методов-обработчиков вставленных команд и элементов?"
+                    + "\n\nОдноимённые методы в принимающем модуле будут сохранены."
+                    + " Вызываемые обработчиками вспомогательные методы не переносятся."))
+            {
+                return;
+            }
+            try
+            {
+                Map<String, String> code = new LinkedHashMap<>();
+                List<String> skipped = new ArrayList<>();
+                for (Map.Entry<Form, Set<String>> entry : handlers.entrySet())
+                {
+                    Set<String> requested = new HashSet<>();
+                    entry.getValue().forEach(name -> requested.add(name.toLowerCase(Locale.ROOT)));
+                    Map<String, String> methods = moduleMethods(moduleEditor(page, entry.getKey()).getDocument(), requested);
+                    for (String name : entry.getValue())
+                    {
+                        String key = name.toLowerCase(Locale.ROOT);
+                        String text = methods.get(key);
+                        if (text == null)
+                            skipped.add(name + " — не найден в исходном модуле");
+                        else if (code.containsKey(key) && !code.get(key).equals(text))
+                            throw new IllegalStateException("Разные исходные методы имеют имя «" + name + "».");
+                        else
+                            code.putIfAbsent(key, text);
+                    }
+                }
+                if (!code.isEmpty())
+                {
+                    XtextEditor editor = moduleEditor(page, page.getModel());
+                    if (!editor.isEditable())
+                        throw new IllegalStateException("Модуль принимающей формы недоступен для редактирования.");
+                    IXtextDocument document = editor.getDocument();
+                    Set<String> existing = moduleMethods(document, null).keySet();
+                    StringBuilder addition = new StringBuilder();
+                    for (Map.Entry<String, String> entry : code.entrySet())
+                    {
+                        if (existing.contains(entry.getKey()))
+                            skipped.add(entry.getKey() + " — уже есть в принимающем модуле");
+                        else
+                            addition.append("\r\n\r\n").append(entry.getValue().strip()); //$NON-NLS-1$
+                    }
+                    if (addition.length() > 0)
+                    {
+                        // Одна правка документа: общий шаг отмены для всех перенесённых методов.
+                        int offset = methodInsertionOffset(document);
+                        document.replace(offset, 0, addition.append("\r\n\r\n").toString()); //$NON-NLS-1$
+                    }
+                }
+                if (!skipped.isEmpty())
+                    MessageDialog.openInformation(shell, title, "Пропущены методы:\n\n" + String.join("\n", skipped));
+            }
+            catch (Exception e)
+            {
+                MessageDialog.openError(shell, title, "Не удалось перенести код обработчиков.\n\n" + e.getMessage());
+            }
+        }
+
+        private static XtextEditor moduleEditor(FormEditorPage page, Form form)
+        {
+            if (form.getModule() == null)
+                throw new IllegalStateException("У формы нет модуля.");
+            IEditorPart part = new OpenHelper(page.getSite().getPage()).openEditor(form.getMdForm());
+            if (part instanceof FormEditor formEditor)
+            {
+                // Страница лениво создаёт вложенный редактор при активации.
+                var active = formEditor.setActivePage(FormEditorModulePage.PAGE_ID);
+                part = active instanceof FormEditorModulePage modulePage ? modulePage.getEmbeddedEditor() : null;
+            }
+            XtextEditor editor = part instanceof XtextEditor textEditor ? textEditor : null;
+            if (editor == null || editor.getDocument() == null)
+                throw new IllegalStateException("Не удалось открыть модуль формы.");
+            return editor;
+        }
+
+        private static int methodInsertionOffset(IXtextDocument document)
+        {
+            return document.readOnly((IUnitOfWork<Integer, XtextResource>) resource -> {
+                if (resource == null || resource.getParseResult() == null
+                    || resource.getParseResult().hasSyntaxErrors()
+                    || !(resource.getParseResult().getRootASTElement() instanceof com._1c.g5.v8.dt.bsl.model.Module module))
+                    throw new IllegalStateException("Модуль не разобран или содержит синтаксические ошибки.");
+                int offset = document.getLength();
+                for (com._1c.g5.v8.dt.bsl.model.Statement statement : module.allStatements())
+                {
+                    EObject boundary = statement;
+                    // Метод должен оказаться вне условий компиляции исполняемого кода.
+                    for (EObject parent = statement.eContainer(); parent != null && parent != module;
+                        parent = parent.eContainer())
+                        if (parent instanceof com._1c.g5.v8.dt.bsl.model.IfPreprocessor)
+                            boundary = parent;
+                    var node = NodeModelUtils.findActualNodeFor(boundary);
+                    if (node == null)
+                        throw new IllegalStateException("Не найдена граница исполняемого кода модуля.");
+                    offset = Math.min(offset, node.getTotalOffset());
+                }
+                // Общее условие с объявлениями и телом нельзя разрезать без изменения контекста.
+                List<EObject> declarations = new ArrayList<>(module.allDeclareStatements());
+                declarations.addAll(module.allMethods());
+                for (EObject declaration : declarations)
+                {
+                    var node = NodeModelUtils.findActualNodeFor(declaration);
+                    if (node == null || node.getTotalEndOffset() > offset)
+                        throw new IllegalStateException(
+                            "Не удалось отделить объявления от исполняемого кода модуля. Перенесите методы вручную.");
+                }
+                return offset;
+            });
+        }
+
+        private static Map<String, String> moduleMethods(IXtextDocument document, Set<String> requested)
+        {
+            return document.readOnly((IUnitOfWork<Map<String, String>, XtextResource>) resource -> {
+                if (resource == null || resource.getParseResult() == null
+                    || resource.getParseResult().hasSyntaxErrors()
+                    || !(resource.getParseResult().getRootASTElement() instanceof com._1c.g5.v8.dt.bsl.model.Module module))
+                    throw new IllegalStateException("Модуль не разобран или содержит синтаксические ошибки.");
+                Map<String, String> methods = new LinkedHashMap<>();
+                for (com._1c.g5.v8.dt.bsl.model.Method method : module.allMethods())
+                {
+                    String key = method.getName().toLowerCase(Locale.ROOT);
+                    if (requested == null)
+                        methods.putIfAbsent(key, ""); //$NON-NLS-1$
+                    else if (requested.contains(key))
+                        methods.merge(key, methodCode(document, method), (first, next) -> first + "\r\n\r\n" + next); //$NON-NLS-1$
+                }
+                return methods;
+            });
+        }
+
+        /** Переносит также исходные условия компиляции, оставляя прочие ветви пустыми. */
+        private static String methodCode(IXtextDocument document, com._1c.g5.v8.dt.bsl.model.Method method)
+            throws org.eclipse.jface.text.BadLocationException
+        {
+            var node = NodeModelUtils.findActualNodeFor(method);
+            if (node == null)
+                throw new IllegalStateException("Не найден текст метода «" + method.getName() + "».");
+            String code = document.get(node.getTotalOffset(), node.getTotalLength());
+            EObject child = method;
+            for (EObject parent = method.eContainer(); parent != null; child = parent, parent = parent.eContainer())
+            {
+                if (!(parent instanceof com._1c.g5.v8.dt.bsl.model.IfPreprocessor conditional))
+                    continue;
+                var outer = NodeModelUtils.findActualNodeFor(parent);
+                List<com._1c.g5.v8.dt.bsl.model.PreprocessorConditional> branches = new ArrayList<>();
+                branches.add(conditional.getIfPart());
+                branches.addAll(conditional.getElsIfParts());
+                if (conditional.getElseElement() != null)
+                    branches.add(conditional.getElseElement());
+                if (outer == null)
+                    throw new IllegalStateException("Не найден текст условия компиляции.");
+                int offset = outer.getTotalOffset();
+                StringBuilder wrapped = new StringBuilder();
+                boolean found = false;
+                for (var branch : branches)
+                {
+                    var body = NodeModelUtils.findActualNodeFor(branch.getItem());
+                    if (body == null || body.getTotalOffset() < offset
+                        || body.getTotalEndOffset() > outer.getTotalEndOffset())
+                        throw new IllegalStateException("Не удалось определить границы ветви условия компиляции.");
+                    wrapped.append(document.get(offset, body.getTotalOffset() - offset));
+                    if (branch == child)
+                    {
+                        wrapped.append("\r\n").append(code.strip()).append("\r\n"); //$NON-NLS-1$
+                        found = true;
+                    }
+                    offset = body.getTotalEndOffset();
+                }
+                if (!found)
+                    throw new IllegalStateException("Не найдена ветвь условия для метода «" + method.getName() + "».");
+                wrapped.append(document.get(offset, outer.getTotalEndOffset() - offset));
+                code = wrapped.toString();
+            }
+            return code;
+        }
+
+        private static final class CommandPasteDelegate implements IDropDelegate
+        {
+            private final FormEditorPage page;
+            private final FormCommandManagementService management;
+            private final IDropDelegate original;
+
+            CommandPasteDelegate(FormEditorPage page, FormCommandManagementService management,
+                IDropDelegate original)
+            {
+                this.page = page;
+                this.management = management;
+                this.original = original;
+            }
+
+            @Override
+            public boolean isDropSupported(Collection<TransferObject<?>> objects, DropEvent event)
+            {
+                return original.isDropSupported(objects, event);
+            }
+
+            @Override
+            public boolean isDropAsSibling(Collection<TransferObject<?>> objects, DropEvent event)
+            {
+                return original.isDropAsSibling(objects, event);
+            }
+
+            @Override
+            public boolean isCopyAction()
+            {
+                return original.isCopyAction();
+            }
+
+            @Override
+            public void process(Collection<TransferObject<?>> objects, DropEvent event)
+            {
+                IV8Project project = formV8Project(page);
+                if (project == null || project instanceof IExtensionProject
+                    || objects.stream().anyMatch(object -> !(object.getObject() instanceof FormCommand command)
+                        || command.getAction() != null
+                            && !(command.getAction() instanceof FormCommandHandlerContainer)))
+                {
+                    original.process(objects, event);
+                    return;
+                }
+                List<IBmTask<?>> tasks = new ArrayList<>(objects.size());
+                for (TransferObject<?> object : objects)
+                {
+                    FormCommand source = (FormCommand)object.getObject();
+                    // action и handler — containment: копируется имя, не ссылка на исходную форму.
+                    FormCommand copy = EcoreUtil.copy(source);
+                    tasks.add(new AddFormCommandTask(management, page.getModel(), copy));
+                }
+                if (tasks.size() == 1)
+                    page.getEditingContext().execute(tasks.get(0));
+                else if (!tasks.isEmpty())
+                    page.getEditingContext().execute(new BmCompoundTask(tasks));
+            }
+        }
+
+        private FormPaste()
+        {
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Переупорядочивание подменю
     // -----------------------------------------------------------------------
@@ -6243,7 +6724,7 @@ public class FormEditorHook implements IStartup
 
     /**
      * Дописывает в заголовки вкладок правой части редактора формы число строк списка —
-     * «Реквизиты 7», «Команды 3», «Параметры 1» — как {@link MdEditorListTabCountHook}
+     * «Реквизиты 7», «Команды 3», «Параметры 1» — как {@link MdEditorTabsHook}
      * делает это в редакторе объекта метаданных.
      *
      * <p>Числа берутся из модели формы ({@code attributes}, {@code formCommands},
