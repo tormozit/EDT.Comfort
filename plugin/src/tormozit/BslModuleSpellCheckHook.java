@@ -104,6 +104,9 @@ import org.eclipse.ui.IWindowListener;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.commands.ICommandService;
 import org.eclipse.ui.editors.text.EditorsUI;
+import org.eclipse.ui.dialogs.PreferencesUtil;
+import org.eclipse.ui.plugin.AbstractUIPlugin;
+import org.eclipse.ui.texteditor.AnnotationPreference;
 import org.eclipse.ui.texteditor.MarkerAnnotation;
 import org.eclipse.ui.texteditor.spelling.SpellingAnnotation;
 import org.eclipse.ui.texteditor.spelling.SpellingProblem;
@@ -3091,8 +3094,6 @@ public final class BslModuleSpellCheckHook implements IStartup
         int offset = resolveAnnotationOffset(viewer, list);
         boolean hasSyntax = viewer != null && offset >= 0
             && hasIdentifierDocumentation(viewer, offset);
-        if (!hasNav && !hasSyntax)
-            return;
         addAnnotationToolbarActions(manager, list, viewer, pageIndex, offset, hasSyntax);
         manager.update(true);
         layoutNavToolbar(manager);
@@ -3121,6 +3122,43 @@ public final class BslModuleSpellCheckHook implements IStartup
             // давал скачущую ширину при layout.
             manager.add(newAnnotationSyntaxHelpAction(viewer, docOffset));
         }
+        if (list != null && !list.isEmpty())
+            manager.add(newAnnotationPreferencesAction(list, viewer, index));
+    }
+
+    private static Action newAnnotationPreferencesAction(List<Annotation> annotations,
+        ISourceViewer viewer, int pageIndex)
+    {
+        Action action = new Action("Параметры аннотации") //$NON-NLS-1$
+        {
+            @Override
+            public void run()
+            {
+                Annotation annotation = currentAnnotationHoverAnnotation(annotations);
+                if (annotation == null)
+                {
+                    AnnotationHoverNavState state = annotationHoverNav;
+                    int index = state != null && state.viewer == viewer ? state.index : pageIndex;
+                    annotation = annotations.get(index >= 0 && index < annotations.size() ? index : 0);
+                }
+                AnnotationPreference preference = EditorsUI.getAnnotationPreferenceLookup()
+                    .getAnnotationPreference(annotation);
+                if (preference == null)
+                    return;
+                Shell shell = viewer != null && viewer.getTextWidget() != null
+                    && !viewer.getTextWidget().isDisposed() ? viewer.getTextWidget().getShell()
+                        : PlatformUI.getWorkbench().getActiveWorkbenchWindow().getShell();
+                String pageId = "org.eclipse.ui.editors.preferencePages.Annotations"; //$NON-NLS-1$
+                PreferencesUtil.createPreferenceDialogOn(shell, pageId, new String[] { pageId },
+                    preference.getPreferenceLabel()).open();
+            }
+        };
+        action.setId("tormozit.comfort.annPreferences"); //$NON-NLS-1$
+        action.setImageDescriptor(AbstractUIPlugin.imageDescriptorFromPlugin(
+            "com._1c.g5.v8.dt.md.ui.shared", "icons/obj16/palette_color.png")); //$NON-NLS-1$ //$NON-NLS-2$
+        action.setToolTipText(TooltipText.wrap(viewer != null ? viewer.getTextWidget() : null,
+            "Открыть параметры аннотации текущей страницы" + Global.pluginSignForTooltip())); //$NON-NLS-1$
+        return action;
     }
 
     private static Action newAnnotationNavPageAction(int pageIndex, int pageCount)
@@ -3199,6 +3237,9 @@ public final class BslModuleSpellCheckHook implements IStartup
         IContributionItem syntax = manager.find("tormozit.comfort.annSyntaxHelp"); //$NON-NLS-1$
         if (syntax != null)
             manager.remove(syntax);
+        IContributionItem preferences = manager.find("tormozit.comfort.annPreferences"); //$NON-NLS-1$
+        if (preferences != null)
+            manager.remove(preferences);
     }
 
     private static int resolveAnnotationOffset(ISourceViewer viewer, List<Annotation> list)
@@ -4365,7 +4406,7 @@ public final class BslModuleSpellCheckHook implements IStartup
             int offset = resolveAnnotationOffset(viewer, list);
             boolean hasSyntax = viewer != null && offset >= 0
                 && hasIdentifierDocumentation(viewer, offset);
-            if (list.size() < 2 && !hasSyntax)
+            if (list.isEmpty() && !hasSyntax)
             {
                 removeAnnotationToolbarActions(manager);
                 manager.update(true);

@@ -1,5 +1,9 @@
 package tormozit;
 
+import java.lang.reflect.Array;
+import java.util.HashSet;
+import java.util.Objects;
+import java.util.Set;
 import java.util.WeakHashMap;
 
 import org.eclipse.jface.dialogs.IDialogSettings;
@@ -8,6 +12,7 @@ import org.eclipse.jface.preference.IPreferencePage;
 import org.eclipse.jface.preference.PreferenceDialog;
 import org.eclipse.jface.viewers.StructuredSelection;
 import org.eclipse.jface.viewers.StructuredViewer;
+import org.eclipse.jface.viewers.IElementComparer;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.widgets.Button;
 import org.eclipse.swt.widgets.Control;
@@ -15,6 +20,16 @@ import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.ui.IStartup;
+import org.eclipse.ui.IEditorPart;
+import org.eclipse.ui.IEditorReference;
+import org.eclipse.ui.IWorkbenchPage;
+import org.eclipse.ui.IWorkbenchWindow;
+import org.eclipse.ui.PlatformUI;
+import org.eclipse.ui.editors.text.EditorsUI;
+import org.eclipse.ui.texteditor.AnnotationPreference;
+import org.eclipse.ui.texteditor.SourceViewerDecorationSupport;
+
+import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 
 /**
  * Страница «Аннотации» окна «Параметры» (Общие → Редакторы → Текстовые редакторы
@@ -47,6 +62,12 @@ import org.eclipse.ui.IStartup;
  *
  * <p>4. <b>Подсказки у всех флажков</b> ({@link TooltipText#wrap} — нативная
  * подсказка Windows сама строки не переносит).
+ *
+ * <p>5. В списке оставляются настройки вхождений и деклараций Xtext/BSL:
+ * добавленные JDT строки используют те же ключи оформления в общем хранилище (#573).
+ *
+ * <p>6. После изменения цвета «Вхождений» оформление открытых BSL-модулей
+ * перечитывается из настроек без переоткрытия редакторов (#573).
  */
 public final class AnnotationsPreferenceHook implements IStartup
 {
@@ -95,6 +116,12 @@ public final class AnnotationsPreferenceHook implements IStartup
     {
         if (display == null || display.isDisposed())
             return;
+
+        EditorsUI.getPreferenceStore().addPropertyChangeListener(event ->
+        {
+            if ("occurrenceIndicationColor".equals(event.getProperty())) //$NON-NLS-1$
+                display.asyncExec(AnnotationsPreferenceHook::refreshOpenModuleOccurrenceColors);
+        });
 
         Listener listener = event ->
         {
@@ -181,6 +208,8 @@ public final class AnnotationsPreferenceHook implements IStartup
                 return true;
 
             enhanceCheckboxes(block);
+            hideDuplicateOccurrences(viewer, block, "org.eclipse.xtext.ui.editor.defaultOccurrenceAnnotation"); //$NON-NLS-1$
+            hideDuplicateOccurrences(viewer, block, "org.eclipse.xtext.ui.editor.declarationAnnotation"); //$NON-NLS-1$
             rememberSelectionOnRowChange(viewer);
             restoreRememberedRow(viewer, block, dialog);
 
@@ -192,6 +221,119 @@ public final class AnnotationsPreferenceHook implements IStartup
         {
             Debug.log("tryPatch EXCEPTION: " + e); //$NON-NLS-1$
             return false;
+        }
+    }
+
+    /** Перечитывает оформление аннотаций, как при install(), сохраняя документ и редактор. */
+    private static void refreshOpenModuleOccurrenceColors()
+    {
+        Set<BslXtextEditor> updated = new HashSet<>();
+        for (IWorkbenchWindow window : PlatformUI.getWorkbench().getWorkbenchWindows())
+        {
+            for (IWorkbenchPage page : window.getPages())
+            {
+                for (IEditorReference reference : page.getEditorReferences())
+                {
+                    IEditorPart part = reference.getEditor(false);
+                    BslXtextEditor editor = GetRef.getActiveBslEditor(part);
+                    if (editor == null || !updated.add(editor))
+                        continue;
+                    if (editor.getInternalSourceViewer() == null
+                        || editor.getInternalSourceViewer().getTextWidget() == null
+                        || editor.getInternalSourceViewer().getTextWidget().isDisposed())
+                        continue;
+                    try
+                    {
+                        Object object = Global.getField(editor, "fSourceViewerDecorationSupport"); //$NON-NLS-1$
+                        if (!(object instanceof SourceViewerDecorationSupport support))
+                            continue;
+                        Global.invokeVoid(support, "updateTextDecorations"); //$NON-NLS-1$
+                        support.updateOverviewDecorations();
+                    }
+                    catch (RuntimeException e)
+                    {
+                    }
+                }
+            }
+        }
+    }
+
+    /** Убирает только строки с полностью совпадающими ключами выбранной настройки Xtext. */
+    private static void hideDuplicateOccurrences(StructuredViewer viewer, Object block, String annotationType)
+    {
+        AnnotationPreference preference = EditorsUI.getAnnotationPreferenceLookup()
+            .getAnnotationPreference(annotationType);
+        Object model = Global.getField(block, "fListModel"); //$NON-NLS-1$
+        if (preference == null || !(model instanceof Object[] items))
+            return;
+        String label = preference.getPreferenceLabel();
+        Object retained = null;
+        for (Object item : items)
+        {
+            if ((Objects.equals(label, labelOf(item))
+                || Objects.equals(label + " (" + annotationType + ")", labelOf(item))) //$NON-NLS-1$ //$NON-NLS-2$
+                && Objects.equals(preference.getColorPreferenceKey(), Global.getField(item, "colorKey"))) //$NON-NLS-1$
+            {
+                retained = item;
+                break;
+            }
+        }
+        if (retained == null)
+            return;
+        Set<Object> hidden = new HashSet<>();
+        String[] keys = { "colorKey", "textKey", "highlightKey", "overviewRulerKey", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            "verticalRulerKey", "textStyleKey", "isNextPreviousNavigationKey" }; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        for (Object item : items)
+        {
+            if (item == retained)
+                continue;
+            boolean same = true;
+            for (String key : keys)
+                same &= Objects.equals(Global.getField(retained, key), Global.getField(item, key));
+            if (same)
+                hidden.add(item);
+        }
+        if (hidden.isEmpty())
+            return;
+        Object retainedItem = retained;
+        // applyData мог уже поставить выбор старого элемента в asyncExec.
+        // Сопоставляем его с оставшейся строкой до штатного обработчика выбора.
+        IElementComparer originalComparer = viewer.getComparer();
+        viewer.setComparer(new IElementComparer()
+        {
+            @Override
+            public boolean equals(Object first, Object second)
+            {
+                Object left = hidden.contains(first) ? retainedItem : first;
+                Object right = hidden.contains(second) ? retainedItem : second;
+                return originalComparer == null ? Objects.equals(left, right) : originalComparer.equals(left, right);
+            }
+
+            @Override
+            public int hashCode(Object element)
+            {
+                Object canonical = hidden.contains(element) ? retainedItem : element;
+                return originalComparer == null ? Objects.hashCode(canonical) : originalComparer.hashCode(canonical);
+            }
+        });
+        Object selected = viewer.getStructuredSelection().getFirstElement();
+        if (selected == null || hidden.contains(selected))
+            viewer.setSelection(new StructuredSelection(retainedItem), true);
+        Object[] filtered = (Object[]) Array.newInstance(items.getClass().getComponentType(), items.length - hidden.size());
+        int index = 0;
+        for (Object item : items)
+        {
+            if (!hidden.contains(item))
+                filtered[index++] = item;
+        }
+        if (!Global.setFieldForce(block, "fListModel", filtered)) //$NON-NLS-1$
+            throw new IllegalStateException("Cannot update annotation list model"); //$NON-NLS-1$
+        viewer.setInput(filtered);
+        String remembered = dialogSettings().get(KEY_SELECTED_ANNOTATION);
+        for (Object item : hidden)
+        {
+            if (Objects.equals(remembered, labelOf(item)))
+                dialogSettings().put(KEY_SELECTED_ANNOTATION, labelOf(retainedItem));
         }
     }
 
@@ -260,7 +402,7 @@ public final class AnnotationsPreferenceHook implements IStartup
     {
         viewer.addSelectionChangedListener(event ->
         {
-            Object element = event.getStructuredSelection().getFirstElement();
+            Object element = viewer.getStructuredSelection().getFirstElement();
             String label = labelOf(element);
             if (label == null || label.isEmpty())
                 return;
