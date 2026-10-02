@@ -73,6 +73,7 @@ public class RecentPlacesHandler extends AbstractHandler
     /**
      * Переход к записи «Последние места» через {@link GoToDefinition#jump}.
      * Без автоподключения ИР (двойной щелчок, Enter, контекстное меню).
+     * Открытие формы сохраняет текущую строку её дерева элементов.
      */
     public static void jumpToEntry(RecentPlaces.Entry entry, Shell shell, IWorkbenchPage page)
     {

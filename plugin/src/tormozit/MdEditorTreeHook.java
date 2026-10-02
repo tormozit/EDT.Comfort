@@ -45,6 +45,7 @@ import org.eclipse.jface.viewers.ILabelProvider;
 import org.eclipse.jface.viewers.ITreeContentProvider;
 import org.eclipse.jface.viewers.LabelProvider;
 import org.eclipse.jface.viewers.ISelection;
+import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.jface.viewers.ISelectionChangedListener;
 import org.eclipse.jface.viewers.ISelectionProvider;
 import org.eclipse.jface.viewers.SelectionChangedEvent;
@@ -474,6 +475,8 @@ public final class MdEditorTreeHook
         if (previous != null && now - previous.longValue() < RESCHEDULE_PAUSE_MS)
             return;
         lastScheduled.put(editor, Long.valueOf(now));
+        // Как у дерева формы: готовые контролы подключаем до первой отрисовки.
+        install(editor);
         for (int delay : RETRY_DELAYS)
             display.timerExec(delay, () -> install(editor));
     }
@@ -483,7 +486,70 @@ public final class MdEditorTreeHook
         Object container = Global.invoke(editor, "getContainer"); //$NON-NLS-1$
         if (!(container instanceof Composite composite) || composite.isDisposed())
             return;
+        OpeningSelection.apply(editor);
         installInChildren(composite, 0);
+    }
+
+    /** Начальное выделение реквизита применяется до отложенной навигации EDT. */
+    private static final class OpeningSelection
+    {
+        private static final String APPLIED = "tormozit.mdEditorOpeningSelection"; //$NON-NLS-1$
+
+        static void apply(IEditorPart part)
+        {
+            if (!(part instanceof DtGranularEditor<?> editor))
+                return;
+            var page = editor.getActivePageInstance();
+            if (page == null || page.getId() == null || !page.getId().endsWith(".pages.data")) //$NON-NLS-1$
+                return;
+            Control control = page.getPartControl();
+            if (!(control instanceof Composite root) || root.isDisposed()
+                || Boolean.TRUE.equals(root.getData(APPLIED)))
+                return;
+            ISelection selection = editor.getEditorInput().getSelection();
+            if (!(selection instanceof IStructuredSelection structured)
+                || !(structured.getFirstElement() instanceof EObject object))
+                return;
+            for (EObject target = object; target != null && target != editor.getModel();
+                target = target.eContainer())
+            {
+                if (target instanceof BasicFeature)
+                {
+                    if (select(root, target))
+                        root.setData(APPLIED, Boolean.TRUE);
+                    return;
+                }
+            }
+        }
+
+        private static boolean select(Composite parent, EObject target)
+        {
+            if (parent.getData(DT_TREE_VIEWER_KEY) instanceof TreeViewer viewer)
+            {
+                Tree tree = viewer.getTree();
+                List<Object> rows = new ArrayList<>();
+                collectObjectRows(tree, tree.getItems(), List.of(target), rows);
+                if (!rows.isEmpty())
+                {
+                    // Поздняя попытка не должна отменять выбор другого реквизита пользователем.
+                    for (TreeItem item : tree.getSelection())
+                    {
+                        EObject current = elementObject(tree, item.getData());
+                        if (current instanceof BasicFeature
+                            && !MdEditorAttributeMenuHook.sameObject(current, target))
+                            return true;
+                    }
+                    StructuredSelection desired = new StructuredSelection(rows.get(0));
+                    if (!desired.equals(viewer.getSelection()))
+                        viewer.setSelection(desired, true);
+                    return true;
+                }
+            }
+            for (Control child : parent.getChildren())
+                if (child instanceof Composite composite && select(composite, target))
+                    return true;
+            return false;
+        }
     }
 
     private static void installInChildren(Composite composite, int depth)

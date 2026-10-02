@@ -2762,13 +2762,22 @@ public final class ConfigSearchResultsHook implements IStartup
                 if (openChildFormPropertyMatch(matchedObject, workbenchPage, match.getFeature(),
                     typeTargets))
                     return true;
-                // Штатная обработка EDT (handleOpen) сама корректно открывает форму и выделяет
-                // найденный элемент (реквизит/команду/элемент формы) — это уже подтверждено и трогать
-                // не нужно (попытка сделать выделение самим сломала штатную активацию, см. откат
-                // этой правки выше). Единственное, чего штатная обработка не делает сама — не
-                // показывает панель «Свойства». Только показываем её (не трогая выделение/открытие)
-                // и отдаём управление штатному handleOpen (return false) — панель сама подхватит
-                // выделение, которое штатно выставит handleOpen, через ISelectionListener.
+                // Передаём цель до открытия формы: первая отрисовка дерева уже с нужной строкой.
+                // Штатный handleOpen после этого не нужен — он повторил бы открытие и переход.
+                if (isInsideForm(matchedObject)
+                    && FormEditorHook.openFormElement(workbenchPage, matchedObject) != null)
+                {
+                    try
+                    {
+                        workbenchPage.showView(IPageLayout.ID_PROP_SHEET);
+                    }
+                    catch (Exception e)
+                    {
+                        log("openFormElement: showView failed: " + e); //$NON-NLS-1$
+                    }
+                    PropertyFieldFocus.schedule(workbenchPage, matchedObject, match.getFeature(), typeTargets);
+                    return true;
+                }
                 // Сюда же попадают собственные свойства общей формы («Имя», «Синоним»): её
                 // владелец — конфигурация, отдельного перехода (openChildFormPropertyMatch) для
                 // неё нет, а поле панели у неё есть — см. PropertyFieldFocus.hasPanelOwner.
@@ -4930,17 +4939,28 @@ public final class ConfigSearchResultsHook implements IStartup
             {
                 if (!isHelpContentFile(fm.getFile()))
                     return false;
-                mdObject = resolveMatchTopAsMdObject(matchObj);
                 fileMatch = fm;
+                // BM-топ для справки формы — документ/справочник, а путь HTML задаёт саму форму.
+                EObject fileOwner = GitChangedFileMenuHook.resolveEObject(fm.getFile());
+                if (fileOwner instanceof MdObject md)
+                    mdObject = md;
+                else
+                {
+                    // Для справки конфигурации файловый резолвер не возвращает объект.
+                    // BM-топ допустим лишь при совпадении полного имени с владельцем файла.
+                    MdObject top = resolveMatchTopAsMdObject(matchObj);
+                    String fileFullName = GetRef.pathToFullName(fm.getFile().getProjectRelativePath().toString());
+                    if (top != null && fileFullName != null
+                        && fileFullName.equals(GetRef.eObjectToFullName(top)))
+                        mdObject = top;
+                }
             }
             else
             {
                 EObject leaf = resolveMatchLeaf(matchObj);
                 if (leaf == null || !isInsideHelp(leaf))
                     return false;
-                mdObject = resolveMatchTopAsMdObject(matchObj);
-                if (mdObject == null)
-                    mdObject = GoToDefinition.findContainingMdObject(leaf);
+                mdObject = GoToDefinition.findContainingMdObject(leaf);
             }
             IEditorPart editor = openMdHelpEditor(mdObject, workbenchPage);
             if (editor == null)

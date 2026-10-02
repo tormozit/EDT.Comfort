@@ -632,6 +632,175 @@ public class FormEditorHook implements IStartup
         return null;
     }
 
+    /**
+     * Открывает форму один раз и активирует элемент при готовности контролов редактора.
+     * Вложенное свойство относится к ближайшему элементу, реквизиту, команде или параметру.
+     * Вызывать в UI-потоке. Возвращает null, если объект не принадлежит элементу формы
+     * или редактор открыть не удалось.
+     */
+    public static IEditorPart openFormElement(IWorkbenchPage workbenchPage, EObject object)
+    {
+        return FormElementOpening.open(workbenchPage, object);
+    }
+
+    /** Открывает саму форму, сохраняя выбор в дереве; внутреннюю навигацию EDT не вызывает. */
+    public static IEditorPart openFormPreservingSelection(IWorkbenchPage workbenchPage, EObject form)
+    {
+        if (workbenchPage == null || !(form instanceof Form
+            || form instanceof com._1c.g5.v8.dt.metadata.mdclass.BasicForm))
+            return null;
+        try
+        {
+            OpenHelper helper = new OpenHelper(workbenchPage);
+            var input = helper.getEditorInput(form, null, null);
+            IEditorPart existing = input != null ? workbenchPage.findEditor(input) : null;
+            if (existing instanceof FormEditor editor)
+            {
+                FormEditorPage formPage = findFormPage(editor);
+                if (formPage != null)
+                {
+                    editor.setActivePage(formPage.getId());
+                    workbenchPage.activate(editor);
+                    return editor;
+                }
+            }
+            ISelection selection = ItemsTree.SelectionMemory.selectionForOpen(form);
+            if (selection != null && input instanceof com._1c.g5.v8.dt.ui.editor.input.IDtEditorInput<?> dtInput)
+                dtInput.setSelection(selection);
+            String editorId = input != null ? helper.getEditorId(input) : null;
+            return editorId != null ? workbenchPage.openEditor(input, editorId, true,
+                IWorkbenchPage.MATCH_INPUT | IWorkbenchPage.MATCH_ID) : null;
+        }
+        catch (Exception e)
+        {
+            Global.logError("FormEditorHook", "openFormPreservingSelection", e); //$NON-NLS-1$ //$NON-NLS-2$
+            return null;
+        }
+    }
+
+    private static final class FormElementOpening
+    {
+
+        /** Цели разделены по рабочему окну и URI формы; повторный запрос заменяет прежний. */
+        private static final Map<IWorkbenchPage, Map<String, EObject>> pending = new WeakHashMap<>();
+
+        private static EObject target(EObject object)
+        {
+            for (EObject current = object; current != null; current = current.eContainer())
+            {
+                if (current instanceof FormItem || current instanceof FormAttribute
+                    || current instanceof FormCommand || current instanceof FormParameter)
+                    return current;
+                if (current instanceof Form)
+                    break;
+            }
+            return null;
+        }
+
+        private static Form form(EObject object)
+        {
+            for (EObject current = object; current != null; current = current.eContainer())
+                if (current instanceof Form found)
+                    return found;
+            return null;
+        }
+
+        static IEditorPart open(IWorkbenchPage workbenchPage, EObject object)
+        {
+            EObject target = target(object);
+            Form form = form(target);
+            if (workbenchPage == null || form == null)
+                return null;
+            String key = EcoreUtil.getURI(form).toString();
+            Map<String, EObject> requests = pending.computeIfAbsent(workbenchPage, ignored -> new HashMap<>());
+            requests.put(key, target);
+            try
+            {
+                OpenHelper helper = new OpenHelper(workbenchPage);
+                // EDT запоминает начальное выделение до создания контролов и затем применяет его
+                // асинхронно. Цель должна быть во входе заранее, иначе поздний переход выберет корень.
+                var input = helper.getEditorInput(form, null, new StructuredSelection(target));
+                String editorId = input != null ? helper.getEditorId(input) : null;
+                if (editorId == null)
+                {
+                    requests.remove(key, target);
+                    return null;
+                }
+                IEditorPart result = workbenchPage.openEditor(input, editorId, true,
+                    IWorkbenchPage.MATCH_INPUT | IWorkbenchPage.MATCH_ID);
+                if (!(result instanceof FormEditor editor))
+                {
+                    requests.remove(key, target);
+                    return null;
+                }
+                // Готовая форма выбирает элемент сейчас; новая использует общий attach.
+                // Если цель применена при создании, повторного выбора не будет.
+                ItemsTree.attach(editor, 0);
+                return editor;
+            }
+            catch (Exception e)
+            {
+                requests.remove(key, target);
+                Global.logError("FormEditorHook", "openFormElement", e); //$NON-NLS-1$ //$NON-NLS-2$
+                return null;
+            }
+        }
+
+        private static Map<String, EObject> requests(FormEditor editor)
+        {
+            return editor.getSite() != null ? pending.get(editor.getSite().getPage()) : null;
+        }
+
+        static boolean hasPending(FormEditor editor, FormEditorPage page)
+        {
+            Map<String, EObject> requests = requests(editor);
+            return requests != null && page.getModel() != null
+                && requests.containsKey(EcoreUtil.getURI(page.getModel()).toString());
+        }
+
+        static void cancel(FormEditor editor)
+        {
+            Map<String, EObject> requests = requests(editor);
+            Form form = requests != null && !requests.isEmpty() ? editor.getForm() : null;
+            if (form == null)
+                return;
+            requests.remove(EcoreUtil.getURI(form).toString());
+        }
+
+        /** false — контролы/строка ещё не готовы; повтор делает существующий attach. */
+        static boolean apply(FormEditor editor, FormEditorPage page)
+        {
+            Map<String, EObject> requests = requests(editor);
+            if (requests == null || page.getModel() == null)
+                return true;
+            String key = EcoreUtil.getURI(page.getModel()).toString();
+            EObject target = requests.get(key);
+            if (target == null)
+                return true;
+            if (target instanceof FormItem item)
+            {
+                Object rawViewer = Global.getField(page, "itemsViewer"); //$NON-NLS-1$
+                if (!(rawViewer instanceof TreeViewer viewer) || viewer.getTree().isDisposed())
+                    return false;
+                Object row = ItemsTree.findRow(viewer, candidate -> sameEObject(candidate, item));
+                if (row == null)
+                    return false;
+                requests.remove(key, target);
+                if (!viewer.getStructuredSelection().equals(new StructuredSelection(row)))
+                    viewer.setSelection(new StructuredSelection(row), true);
+                page.setActiveComponent(FormEditorComponent.ITEMS);
+            }
+            else
+            {
+                FormEditorComponent component = target instanceof FormAttribute ? FormEditorComponent.ATTRIBUTES
+                    : target instanceof FormCommand ? FormEditorComponent.FORM_COMMANDS : FormEditorComponent.PARAMETERS;
+                requests.remove(key, target);
+                page.setSelection(component, true, target);
+            }
+            return true;
+        }
+    }
+
     /** Страница редактора формы (в редакторе есть и другие страницы — модуль и т.п.). */
     private static FormEditorPage findFormPage(FormEditor editor)
     {
@@ -7339,20 +7508,90 @@ public class FormEditorHook implements IStartup
                     scheduleRetry(editor, attempt);
                     return;
                 }
+                installNestedSelectionGuard(editor, tree);
                 if (tree.getData(KEY_HOOKED) != null)
+                {
+                    if (!FormElementOpening.apply(editor, page))
+                        scheduleRetry(editor, attempt);
                     return;
+                }
                 tree.setData(KEY_HOOKED, Boolean.TRUE);
                 tree.setData(KEY_VIEWER, viewer);
+                tree.addListener(SWT.Dispose, event -> FormElementOpening.cancel(editor));
                 createColumns(page, viewer, tree);
-                Global.tempLog(SelectionMemory.LOG, "attach: колонки созданы, попытка " + attempt); //$NON-NLS-1$
-                SelectionMemory.install(page, viewer, tree);
+                SelectionMemory.install(editor, page, viewer, tree);
+                if (!FormElementOpening.apply(editor, page))
+                    scheduleRetry(editor, attempt);
                 InheritedTitles.install(page, viewer, tree);
                 EffectiveIcons.installItems(page, viewer, tree);
             }
             catch (Exception e)
             {
-                Global.tempLog(SelectionMemory.LOG, "attach: исключение " + e); //$NON-NLS-1$
                 Global.logError("FormEditorHook.ItemsTree", "attach", e); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+
+        /** Таймер модуля не должен передавать старое выделение после перехода на другую страницу. */
+        private static void installNestedSelectionGuard(FormEditor editor, Tree tree)
+        {
+            hookNestedSelectionSites(editor);
+            String key = "comfort.formNestedPostSelection"; //$NON-NLS-1$
+            if (tree.getData(key) != null)
+                return;
+            tree.setData(key, Boolean.TRUE);
+            org.eclipse.jface.dialogs.IPageChangedListener listener = event -> hookNestedSelectionSites(editor);
+            editor.addPageChangedListener(listener);
+            tree.addListener(SWT.Dispose, event -> editor.removePageChangedListener(listener));
+        }
+
+        private static void hookNestedSelectionSites(FormEditor editor)
+        {
+            Object pages = Global.getField(editor, "pages"); //$NON-NLS-1$
+            if (!(pages instanceof List<?> list))
+                return;
+            for (Object sourcePage : list)
+            {
+                Object rawSite = Global.getField(sourcePage, "site"); //$NON-NLS-1$
+                if (!(rawSite instanceof org.eclipse.ui.part.MultiPageEditorSite site)
+                    || !(site.getSelectionProvider() instanceof org.eclipse.jface.viewers.IPostSelectionProvider provider))
+                    continue;
+                Object rawListener = Global.getField(site, "postSelectionChangedListener"); //$NON-NLS-1$
+                if (!(rawListener instanceof org.eclipse.jface.viewers.ISelectionChangedListener original)
+                    || original instanceof NestedPostSelectionGuard)
+                    continue;
+                NestedPostSelectionGuard guard = new NestedPostSelectionGuard(editor, sourcePage, original);
+                // Поле и его регистрация проверены в MultiPageEditorSite.setSelectionProvider:
+                // при смене провайдера сам site должен снять и заново поставить эту же обёртку.
+                Global.setField(site, "postSelectionChangedListener", guard); //$NON-NLS-1$
+                if (Global.getField(site, "postSelectionChangedListener") != guard) //$NON-NLS-1$
+                {
+                    continue;
+                }
+                provider.removePostSelectionChangedListener(original);
+                provider.addPostSelectionChangedListener(guard);
+            }
+        }
+
+        private static final class NestedPostSelectionGuard implements org.eclipse.jface.viewers.ISelectionChangedListener
+        {
+            private final FormEditor editor;
+            private final Object sourcePage;
+            private final org.eclipse.jface.viewers.ISelectionChangedListener original;
+
+            NestedPostSelectionGuard(FormEditor editor, Object sourcePage,
+                org.eclipse.jface.viewers.ISelectionChangedListener original)
+            {
+                this.editor = editor;
+                this.sourcePage = sourcePage;
+                this.original = original;
+            }
+
+            @Override
+            public void selectionChanged(org.eclipse.jface.viewers.SelectionChangedEvent event)
+            {
+                boolean active = editor.getActivePageInstance() == sourcePage;
+                if (active)
+                    original.selectionChanged(event);
             }
         }
 
@@ -7360,7 +7599,7 @@ public class FormEditorHook implements IStartup
         {
             if (attempt >= MAX_ATTEMPTS || editor.getSite() == null)
             {
-                if (attempt >= MAX_ATTEMPTS)
+                FormElementOpening.cancel(editor);
                 return;
             }
             Display.getDefault().timerExec(RETRY_DELAY_MS, () -> attach(editor, attempt + 1));
@@ -9661,7 +9900,6 @@ public class FormEditorHook implements IStartup
          */
         private static final class SelectionMemory
         {
-            private static final String LOG = "formItemsSelection"; //$NON-NLS-1$
 
             /** Пустое значение (корень «Форма» от прежних сеансов): восстанавливать нечего. */
             private static final String ROOT = ""; //$NON-NLS-1$
@@ -9677,21 +9915,81 @@ public class FormEditorHook implements IStartup
             {
             }
 
-            static void install(FormEditorPage page, TreeViewer viewer, Tree tree)
+            /** Цель задаётся до создания страницы: её штатный gotoSelection получает тот же элемент. */
+            static ISelection selectionForOpen(EObject source)
             {
+                EObject model = source instanceof com._1c.g5.v8.dt.metadata.mdclass.BasicForm basicForm
+                    ? basicForm.getForm() : source;
+                if (model != null && model.eIsProxy())
+                    model = EcoreUtil.resolve(model, source);
+                if (!(model instanceof Form form))
+                    return null;
+                IResourceLookup lookup = Global.getOsgiService(IResourceLookup.class);
+                IFile file = lookup != null ? lookup.getPlatformResource(form) : null;
+                String key = file != null ? file.getFullPath().toString() : EcoreUtil.getURI(form).toString();
+                String remembered = STORE.load(key);
+                if (remembered == null || ROOT.equals(remembered))
+                    return null;
+                var contents = form.eAllContents();
+                while (contents.hasNext())
+                {
+                    EObject object = contents.next();
+                    if (object instanceof FormItem item && remembered.equals(item.getName()))
+                    {
+                        return new StructuredSelection(item);
+                    }
+                }
+                return null;
+            }
+
+            static void install(FormEditor editor, FormEditorPage page, TreeViewer viewer, Tree tree)
+            {
+                FormItem openingItem = openingItem(editor);
+                if (openingItem != null)
+                {
+                    Object row = findRow(viewer, item -> sameEObject(item, openingItem));
+                    if (row != null)
+                        viewer.setSelection(new StructuredSelection(row), true);
+                }
+
                 String key = formKey(page);
                 if (key == null)
                     return;
                 String remembered = STORE.load(key);
                 // Пока не отработало восстановление — корень не запоминаем (см. remember):
                 // это или ещё не наша целевая строка, или транзитный корень EDT при открытии.
-                AtomicBoolean restoring = new AtomicBoolean(remembered != null && !ROOT.equals(remembered));
+                AtomicBoolean restoring = new AtomicBoolean(!FormElementOpening.hasPending(editor, page)
+                    && openingItem == null
+                    && remembered != null && !ROOT.equals(remembered));
+                // Дерево EDT заполняет синхронно при создании страницы. Первая попытка
+                // выполняется здесь, до возврата в цикл событий и первой отрисовки дерева.
                 if (restoring.get())
-                    Display.getDefault().asyncExec(() -> restore(remembered, viewer, tree, 0, restoring));
+                    restore(remembered, viewer, tree, 0, restoring);
 
                 viewer.addSelectionChangedListener(event -> remember(key, viewer, restoring));
+                if (openingItem != null && !isRootSelected(viewer))
+                    remember(key, viewer, restoring);
                 tree.addListener(SWT.FocusOut, event -> STORE.flush());
                 tree.addListener(SWT.Dispose, event -> STORE.flush());
+            }
+
+            /** Целевой элемент открытия; вложенное свойство EDT относит к содержащему элементу. */
+            private static FormItem openingItem(FormEditor editor)
+            {
+                ISelection selection = editor.getEditorInput().getSelection();
+                if (!(selection instanceof IStructuredSelection structured)
+                    || !(structured.getFirstElement() instanceof EObject object))
+                    return null;
+                for (EObject current = object; current != null; current = current.eContainer())
+                {
+                    if (current instanceof FormVisualEntity)
+                        return current instanceof FormItem item ? item : null;
+                    // Эти объекты EDT открывает в других списках, а не в дереве элементов.
+                    if (current instanceof FormAttribute || current instanceof FormCommand
+                        || current instanceof FormParameter)
+                        return null;
+                }
+                return null;
             }
 
             private static void remember(String key, TreeViewer viewer, AtomicBoolean restoring)
