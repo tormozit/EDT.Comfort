@@ -6,7 +6,13 @@ import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.IdentityHashMap;
+import org.eclipse.jface.preference.IPreferenceStore;
+import org.eclipse.jface.preference.PreferenceConverter;
+import org.eclipse.swt.graphics.RGB;
+import org.eclipse.ui.editors.text.EditorsUI;
+import org.eclipse.ui.texteditor.AnnotationPreference;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -19,6 +25,8 @@ import org.eclipse.core.runtime.IStatus;
 import org.eclipse.core.runtime.Status;
 import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.jface.dialogs.IDialogSettings;
+import org.eclipse.egit.ui.Activator;
+import org.eclipse.jface.util.IPropertyChangeListener;
 import org.eclipse.jface.util.LocalSelectionTransfer;
 import org.eclipse.jface.viewers.CellLabelProvider;
 import org.eclipse.jface.viewers.ColumnLabelProvider;
@@ -185,9 +193,12 @@ public final class GitStagingFilterHook implements IStartup
         "Расширение файла", //$NON-NLS-1$
         "Полное имя объекта метаданных", //$NON-NLS-1$
         "Время изменения файла на диске", //$NON-NLS-1$
-        "Статус изменения" //$NON-NLS-1$
+        "Статус изменения: «+» добавлен, «-» удалён, «!» конфликт; у изменённого пусто" //$NON-NLS-1$
     };
-    private static final int[] COLUMN_DEFAULT_WIDTHS = { 220, 55, 220, 95, 100 };
+    /** Ширины по умолчанию в режиме «Список» (по колонкам Имя/Тип/Путь/Время/Статус). */
+    private static final int[] COLUMN_DEFAULT_WIDTHS = { 36, 50, 250, 95, 24 };
+    /** Ширины по умолчанию в древовидных режимах; «Путь» там не создаётся. */
+    private static final int[] COLUMN_TREE_DEFAULT_WIDTHS = { 275, 67, 0, 95, 24 };
 
     private static final String COLUMN_LOGICAL_KEY = "tormozit.gitStagingColumnLogical"; //$NON-NLS-1$
     private static final String INTERACTION_KEY = "tormozit.gitStagingTreeInteraction"; //$NON-NLS-1$
@@ -324,9 +335,17 @@ public final class GitStagingFilterHook implements IStartup
         return "columnOrder"; //$NON-NLS-1$
     }
 
-    private static String widthKey(int logical)
+    /** Ширины помнятся раздельно для режима «Список» и для древовидных режимов. */
+    private static String widthKey(int logical, boolean treeMode)
     {
-        return "colWidth" + COLUMN_KEYS[logical]; //$NON-NLS-1$
+        return "colWidth" + COLUMN_KEYS[logical] + (treeMode ? "Tree" : ""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+    }
+
+    /** Сохранённая ширина колонки в режиме; без записи — ширина по умолчанию этого режима. */
+    private static int storedWidth(IDialogSettings settings, int logical, boolean treeMode)
+    {
+        int[] defaults = treeMode ? COLUMN_TREE_DEFAULT_WIDTHS : COLUMN_DEFAULT_WIDTHS;
+        return FormTableColumnState.readWidth(settings, widthKey(logical, treeMode), defaults[logical], 20);
     }
 
     /** Сортировка — общая для stagedViewer/unstagedViewer (как порядок/ширина колонок). */
@@ -347,12 +366,13 @@ public final class GitStagingFilterHook implements IStartup
         settings.put(sortAscendingKey(), ascending);
     }
 
+    /**
+     * Порядок по умолчанию: Имя, Путь, Тип, Время, Статус. В древовидных режимах «Путь» удалена —
+     * остаётся Имя, Тип, Время, Статус.
+     */
     private static int[] defaultOrder()
     {
-        int[] result = new int[COLUMN_COUNT];
-        for (int i = 0; i < COLUMN_COUNT; i++)
-            result[i] = i;
-        return result;
+        return new int[] { COL_NAME, COL_PATH, COL_TYPE, COL_TIME, COL_STATUS };
     }
 
     /** Сохранённый порядок — только если это перестановка всех {@link #COLUMN_COUNT} колонок. */
@@ -394,39 +414,132 @@ public final class GitStagingFilterHook implements IStartup
         for (TreeColumn c : tree.getColumns())
             c.dispose();
         int[] order = loadOrder(settings);
-        for (int logical : order)
+        boolean treeMode = isTreePresentation();
+        tree.setData(TREE_MODE_KEY, Boolean.valueOf(treeMode));
+        for (int i = 0; i < order.length; i++)
         {
-            TreeColumn col = new TreeColumn(tree, SWT.LEFT);
-            col.setText(COLUMN_HEADERS[logical]);
-            col.setToolTipText(COLUMN_TOOLTIPS[logical] + Global.pluginSignForTooltip());
-            col.setResizable(true);
-            col.setMoveable(true);
-            col.setWidth(FormTableColumnState.readWidth(settings, widthKey(logical),
-                COLUMN_DEFAULT_WIDTHS[logical], 20));
-            col.setData(COLUMN_LOGICAL_KEY, Integer.valueOf(logical));
-            col.addListener(SWT.Selection, e ->
+            if (treeMode && order[i] == COL_PATH)
             {
-                Object data = tree.getData(INTERACTION_KEY);
-                if (data instanceof GitStagingTreeInteraction interaction)
-                    interaction.sortBy(logical, col);
-            });
-            col.addControlListener(new ControlAdapter()
-            {
-                @Override
-                public void controlResized(ControlEvent e)
-                {
-                    syncWidthToPeer(view, tree, logical, col.getWidth());
-                }
-
-                @Override
-                public void controlMoved(ControlEvent e)
-                {
-                    syncOrderToPeer(view, tree);
-                }
-            });
+                tree.setData(PATH_INDEX_KEY, Integer.valueOf(i));
+                continue;
+            }
+            createColumn(tree, settings, view, order[i], treeMode);
         }
         tree.setHeaderVisible(true);
         ThemeAwareColors.applyGridLines(tree);
+    }
+
+    private static TreeColumn createColumn(Tree tree, IDialogSettings settings, IViewPart view, int logical,
+        boolean treeMode)
+    {
+        TreeColumn col = new TreeColumn(tree, SWT.LEFT);
+        col.setText(COLUMN_HEADERS[logical]);
+        col.setToolTipText(COLUMN_TOOLTIPS[logical] + Global.pluginSignForTooltip());
+        col.setResizable(true);
+        col.setMoveable(true);
+        col.setWidth(storedWidth(settings, logical, treeMode));
+        col.setData(COLUMN_LOGICAL_KEY, Integer.valueOf(logical));
+        col.addListener(SWT.Selection, e ->
+        {
+            Object data = tree.getData(INTERACTION_KEY);
+            if (data instanceof GitStagingTreeInteraction interaction)
+                interaction.sortBy(logical, col);
+        });
+        col.addControlListener(new ControlAdapter()
+        {
+            @Override
+            public void controlResized(ControlEvent e)
+            {
+                syncWidthToPeer(view, tree, logical, col.getWidth());
+            }
+
+            @Override
+            public void controlMoved(ControlEvent e)
+            {
+                syncOrderToPeer(view, tree);
+            }
+        });
+        return col;
+    }
+
+    /** Ключ настройки EGit с режимом списка (значения {@code LIST}/{@code TREE}/{@code COMPACT_TREE}). */
+    private static final String PRESENTATION_PREF_KEY = "StagingView_Presentation"; //$NON-NLS-1$
+    /** Режим, которому принадлежат текущие ширины колонок дерева ({@code Boolean}: {@code true} — дерево). */
+    private static final String TREE_MODE_KEY = "tormozit.gitStagingTreeMode"; //$NON-NLS-1$
+    /** Визуальная позиция колонки «Путь» на момент её удаления в режиме дерева ({@code Integer}). */
+    private static final String PATH_INDEX_KEY = "tormozit.gitStagingPathIndex"; //$NON-NLS-1$
+
+    private static boolean isTreePresentation()
+    {
+        Activator activator = Activator.getDefault();
+        if (activator == null)
+            return false;
+        String value = activator.getPreferenceStore().getString(PRESENTATION_PREF_KEY);
+        return "TREE".equals(value) || "COMPACT_TREE".equals(value); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /** Ширины колонок дерева — в память режима {@code treeMode}; в режиме дерева колонки «Путь» нет. */
+    private static void saveWidths(Tree tree, IDialogSettings settings, boolean treeMode)
+    {
+        for (TreeColumn col : tree.getColumns())
+        {
+            Object logicalObj = col.getData(COLUMN_LOGICAL_KEY);
+            int logical = logicalObj instanceof Integer li ? li : COL_NAME;
+            if (treeMode && logical == COL_PATH)
+                continue;
+            settings.put(widthKey(logical, treeMode), Integer.toString(col.getWidth()));
+        }
+    }
+
+    /**
+     * Смена режима списка: ширины прежнего режима уходят в его память, из памяти нового берутся его
+     * ширины. В древовидных режимах полный путь виден по узлам дерева, колонка «Путь» не нужна —
+     * удаляем её; в режиме «Список» она создаётся заново на прежнем месте со своей шириной.
+     */
+    private static void applyPresentation(Tree tree, IDialogSettings settings, IViewPart view)
+    {
+        if (tree == null || tree.isDisposed())
+            return;
+        boolean treeMode = isTreePresentation();
+        Boolean previous = tree.getData(TREE_MODE_KEY) instanceof Boolean b ? b : null;
+        if (previous == null || previous == treeMode)
+            return;
+        tree.setData(SYNC_SUPPRESS_KEY, Boolean.TRUE);
+        try
+        {
+            saveWidths(tree, settings, previous);
+            tree.setData(TREE_MODE_KEY, Boolean.valueOf(treeMode));
+            TreeColumn pathCol = columnByLogical(tree, COL_PATH);
+            if (treeMode && pathCol != null)
+            {
+                int[] logicalOrder = currentLogicalOrder(tree);
+                for (int i = 0; i < logicalOrder.length; i++)
+                    if (logicalOrder[i] == COL_PATH)
+                        tree.setData(PATH_INDEX_KEY, Integer.valueOf(i));
+                pathCol.dispose();
+            }
+            for (TreeColumn col : tree.getColumns())
+            {
+                Object logicalObj = col.getData(COLUMN_LOGICAL_KEY);
+                int logical = logicalObj instanceof Integer li ? li : COL_NAME;
+                col.setWidth(storedWidth(settings, logical, treeMode));
+            }
+            if (!treeMode && columnByLogical(tree, COL_PATH) == null)
+            {
+                int[] others = currentLogicalOrder(tree);
+                createColumn(tree, settings, view, COL_PATH, false);
+                int pathIndex = tree.getData(PATH_INDEX_KEY) instanceof Integer pi
+                    ? Math.min(pi, others.length) : others.length;
+                int[] full = new int[others.length + 1];
+                for (int i = 0, j = 0; i < full.length; i++)
+                    full[i] = i == pathIndex ? COL_PATH : others[j++];
+                applyLogicalOrder(tree, full);
+            }
+        }
+        finally
+        {
+            tree.setData(SYNC_SUPPRESS_KEY, null);
+        }
     }
 
     /** Порядок + ширины — одним проходом (ключи общие, не per-viewer). */
@@ -434,18 +547,23 @@ public final class GitStagingFilterHook implements IStartup
     {
         if (tree == null || tree.isDisposed() || tree.getColumnCount() <= 0)
             return;
-        int[] visualOrder = tree.getColumnOrder();
-        StringBuilder orderStr = new StringBuilder();
-        for (int i = 0; i < visualOrder.length; i++)
+        // В режиме дерева колонки «Путь» нет — возвращаем её в порядок на запомненное место.
+        List<Integer> logicalOrder = new ArrayList<>();
+        for (int logical : currentLogicalOrder(tree))
+            logicalOrder.add(logical);
+        if (!logicalOrder.contains(COL_PATH))
         {
-            TreeColumn col = tree.getColumn(visualOrder[i]);
-            Object logicalObj = col.getData(COLUMN_LOGICAL_KEY);
-            int logical = logicalObj instanceof Integer li ? li : COL_NAME;
+            int pathIndex = tree.getData(PATH_INDEX_KEY) instanceof Integer pi ? pi : logicalOrder.size();
+            logicalOrder.add(Math.min(pathIndex, logicalOrder.size()), COL_PATH);
+        }
+        StringBuilder orderStr = new StringBuilder();
+        for (int i = 0; i < logicalOrder.size(); i++)
+        {
             if (i > 0)
                 orderStr.append(','); //$NON-NLS-1$
-            orderStr.append(logical);
-            settings.put(widthKey(logical), Integer.toString(col.getWidth()));
+            orderStr.append(logicalOrder.get(i));
         }
+        saveWidths(tree, settings, Boolean.TRUE.equals(tree.getData(TREE_MODE_KEY)));
         settings.put(orderKey(), orderStr.toString());
     }
 
@@ -775,8 +893,23 @@ public final class GitStagingFilterHook implements IStartup
         interaction.restoreSort(settings);
         // Колонки растягиваются с панелью (issue #273). Ставится после installColumns: подгонка живёт на
         // дереве, поэтому переживает их пересоздание, а первичный проход идёт по уже готовым колонкам.
-        ColumnAutoFit.install(tree, t -> stagingWidthBudget(view, t));
+        // «Статус» — узкая колонка из символов: авто-подгонка её ширину не трогает.
+        ColumnAutoFit.install(tree, t -> stagingWidthBudget(view, t),
+            i -> logicalOfColumn(tree, i) == COL_STATUS);
         tree.addDisposeListener(e -> saveColumnState(tree, columnSettings()));
+
+        Activator egitActivator = Activator.getDefault();
+        if (egitActivator != null)
+        {
+            IPropertyChangeListener presentationListener = e ->
+            {
+                if (PRESENTATION_PREF_KEY.equals(e.getProperty()))
+                    applyPresentation(tree, columnSettings(), view);
+            };
+            egitActivator.getPreferenceStore().addPropertyChangeListener(presentationListener);
+            tree.addDisposeListener(e ->
+                egitActivator.getPreferenceStore().removePropertyChangeListener(presentationListener));
+        }
 
         TreeColumnValueFilterSupport.CellTextResolver textResolver = (element, physicalColumn) ->
             sortKey(element, logicalOfColumn(tree, physicalColumn));
@@ -1575,11 +1708,9 @@ public final class GitStagingFilterHook implements IStartup
         String name = stateObj.toString();
         return switch (name)
         {
-            case "ADDED", "UNTRACKED" -> "Добавлен"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            case "MODIFIED", "CHANGED", "MODIFIED_AND_CHANGED" -> "Изменён"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-            case "REMOVED", "MISSING", "MISSING_AND_CHANGED" -> "Удалён"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-            case "MODIFIED_AND_ADDED" -> "Добавлен, изменён"; //$NON-NLS-1$ //$NON-NLS-2$
-            case "CONFLICTING" -> "Конфликт"; //$NON-NLS-1$ //$NON-NLS-2$
+            case "ADDED", "UNTRACKED", "MODIFIED_AND_ADDED" -> "+"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            case "REMOVED", "MISSING", "MISSING_AND_CHANGED" -> "-"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            case "CONFLICTING" -> "!"; //$NON-NLS-1$ //$NON-NLS-2$
             default -> ""; //$NON-NLS-1$
         };
     }
@@ -1734,6 +1865,12 @@ public final class GitStagingFilterHook implements IStartup
             cell.setText(text != null ? text : ""); //$NON-NLS-1$
             cell.setImage(logical == COL_NAME ? getImage(element) : null);
             copyRowStyle(cell, element);
+            if (logical == COL_STATUS)
+            {
+                Color statusBg = statusBackground(cell.getControl().getDisplay(), text);
+                if (statusBg != null)
+                    cell.setBackground(statusBg);
+            }
 
             // Вызываем всегда, а не только при непустом фильтре — иначе при очистке поля старые
             // StyleRange (SWT переиспользует TreeItem между refresh-ами) остаются висеть.
@@ -1745,6 +1882,39 @@ public final class GitStagingFilterHook implements IStartup
                 && highlightMatcher.matches(matchText(element))
                     ? highlightMatcher.getHighlightRanges(text) : List.of();
             SmartMatchHighlight.appendMatchRanges(cell, ranges);
+        }
+
+        private final Map<RGB, Color> statusColors = new HashMap<>();
+
+        /**
+         * Фон ячейки «Статус»: «+» / «-» цветом маркеров Quick Diff (Параметры → Выделение изменений),
+         * смешанным с фоном списка — как клетка на полосе номеров (добавление 0.6, удаление 0.75).
+         */
+        private Color statusBackground(Display display, String text)
+        {
+            boolean added = "+".equals(text); //$NON-NLS-1$
+            if (!added && !"-".equals(text) && !"!".equals(text)) //$NON-NLS-1$ //$NON-NLS-2$
+                return null;
+            String type = added ? "org.eclipse.ui.workbench.texteditor.quickdiff.addition" //$NON-NLS-1$
+                : "org.eclipse.ui.workbench.texteditor.quickdiff.deletion"; //$NON-NLS-1$
+            RGB marker = added ? new RGB(144, 238, 144) : new RGB(255, 182, 193);
+            AnnotationPreference pref = EditorsUI.getAnnotationPreferenceLookup().getAnnotationPreference(type);
+            if (pref != null)
+            {
+                IPreferenceStore store = EditorsUI.getPreferenceStore();
+                String key = pref.getColorPreferenceKey();
+                RGB rgb = store != null && key != null && store.contains(key) && !store.isDefault(key)
+                    ? PreferenceConverter.getColor(store, key) : pref.getColorPreferenceValue();
+                if (rgb != null)
+                    marker = rgb;
+            }
+            RGB listBg = display.getSystemColor(SWT.COLOR_LIST_BACKGROUND).getRGB();
+            double scale = added ? 0.6 : 0.75;
+            RGB mixed = new RGB(
+                (int) Math.round(marker.red * scale + listBg.red * (1 - scale)),
+                (int) Math.round(marker.green * scale + listBg.green * (1 - scale)),
+                (int) Math.round(marker.blue * scale + listBg.blue * (1 - scale)));
+            return statusColors.computeIfAbsent(mixed, rgb -> new Color(display, rgb));
         }
 
         /** Копирует foreground/background/font штатного провайдера (dim/конфликт и т.п.) на всю строку. */
@@ -1807,6 +1977,8 @@ public final class GitStagingFilterHook implements IStartup
         @Override
         public void dispose()
         {
+            statusColors.values().forEach(Color::dispose);
+            statusColors.clear();
             base.dispose();
         }
     }
