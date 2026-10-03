@@ -1188,7 +1188,14 @@ public class OpenMdObjectHook implements IStartup {
         public StyledString getStyledText(Object element) {
             StyledString styledString;
             if (baseStyled != null) {
-                styledString = baseStyled.getStyledText(element);
+                try {
+                    styledString = baseStyled.getStyledText(element);
+                } catch (java.util.regex.PatternSyntaxException e) {
+                    // Штатный провайдер строит регулярное выражение из текста фильтра без
+                    // экранирования: «\» (привязка к началу текста, #659) роняет Pattern.compile.
+                    // Штатная подсветка здесь не нужна — вхождения красим сами ниже.
+                    styledString = null;
+                }
                 if (styledString == null) styledString = new StyledString(getText(element));
             } else {
                 styledString = new StyledString(getText(element));

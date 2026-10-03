@@ -7,74 +7,79 @@ public class SmartMatcher {
     /** Союзы, пропуск которых между совпавшими словами не штрафуется премией фильтра (#429). */
     static final java.util.Set<String> UNPENALIZED_GAP_WORDS = java.util.Set.of("и", "или");
 
-    private final String[] fragments;
-    private final List<List<String>> sections;
+    /**
+     * Спецсимвол привязки к началу текста (#659): {@code \вал} подходит только тексту, который
+     * начинается с «вал». Действует в начале фрагмента вне кавычек, в т.ч. перед открывающей
+     * кавычкой ({@code \"их вал"}); в середине слова и внутри кавычек — обычный символ.
+     */
+    public static final char ANCHOR_START = '\\';
+
+    /** Фрагмент фильтра: искомый текст (без спецсимвола) и признак привязки к началу текста. */
+    private record Frag(String text, boolean anchored) {
+        /** {@code lowerText} — уже в нижнем регистре. */
+        boolean foundIn(String lowerText) {
+            return anchored ? lowerText.startsWith(text) : lowerText.contains(text);
+        }
+    }
+
+    private final Frag[] fragments;
+    private final List<List<Frag>> sections;
     public final String fullPattern;
+    /** Текст фильтра для расчёта премии: без спецсимволов привязки. */
+    private final String premiumPattern;
     public final boolean isEmpty;
 
     public SmartMatcher(String filterPattern) {
         if (filterPattern == null || filterPattern.trim().isEmpty()) {
-            this.fragments = new String[0];
+            this.fragments = new Frag[0];
             this.sections = new ArrayList<>();
             this.fullPattern = "";
+            this.premiumPattern = "";
             this.isEmpty = true;
         } else {
             this.fullPattern = filterPattern.toLowerCase().trim();
-            this.sections = parseSections(this.fullPattern);
+            this.sections = parse(this.fullPattern, true);
             // Плоские фрагменты (многословный фильтр) — отдельный разбор: кавычки учитываются
             // ("их вал" — один фрагмент с пробелом внутри), а точка НЕ разделитель — она часть
             // слова («объект.контрагент» ищется как есть). Точка режет только секции
             // (иерархический фильтр, matchesTree*).
-            this.fragments = parseFragments(this.fullPattern);
+            List<Frag> flat = new ArrayList<>();
+            for (List<Frag> section : parse(this.fullPattern, false))
+                flat.addAll(section);
+            this.fragments = flat.toArray(new Frag[0]);
+            this.premiumPattern = hasAnchored(flat) ? String.join(" ", texts(flat)) : this.fullPattern; //$NON-NLS-1$
             this.isEmpty = false;
         }
     }
 
-    /**
-     * Плоский разбор: пробел вне кавычек — разделитель фрагментов, кавычки группируют
-     * (и удаляются), точка — обычный символ.
-     */
-    private static String[] parseFragments(String filterText) {
-        List<String> result = new ArrayList<>();
-        StringBuilder word = new StringBuilder();
-        boolean inQuotes = false;
-        for (int i = 0; i < filterText.length(); i++) {
-            char c = filterText.charAt(i);
-            if (inQuotes) {
-                if (c == '"') {
-                    addFragment(result, word.toString());
-                    word.setLength(0);
-                    inQuotes = false;
-                } else {
-                    word.append(c);
-                }
-            } else if (c == '"') {
-                addFragment(result, word.toString().trim());
-                word.setLength(0);
-                inQuotes = true;
-            } else if (Character.isWhitespace(c)) {
-                addFragment(result, word.toString().trim());
-                word.setLength(0);
-            } else {
-                word.append(c);
-            }
+    private static boolean hasAnchored(List<Frag> frags) {
+        for (Frag frag : frags) {
+            if (frag.anchored())
+                return true;
         }
-        addFragment(result, inQuotes ? word.toString() : word.toString().trim());
-        return result.toArray(new String[0]);
+        return false;
     }
 
+    private static List<String> texts(List<Frag> frags) {
+        List<String> result = new ArrayList<>(frags.size());
+        for (Frag frag : frags)
+            result.add(frag.text());
+        return result;
+    }
+
+    /** Тексты фрагментов плоского фильтра — без спецсимвола привязки к началу текста. */
     public String[] getFragments()
     {
-        return fragments.clone();
+        return texts(java.util.Arrays.asList(fragments)).toArray(new String[0]);
     }
 
     public boolean matches(String text) {
         if (isEmpty) return true;
         if (text == null) return false;
-        
+
         String lowerText = text.toLowerCase();
-        for (String frag : fragments) {
-            if (!lowerText.contains(frag)) {
+        for (Frag frag : fragments) {
+            if (!frag.foundIn(lowerText)) {
                 return false;
             }
         }
@@ -83,64 +88,83 @@ public class SmartMatcher {
 
     /**
      * Парсинг текста фильтра в секции.
-     * Вне кавычек: точка — разделитель секций, пробел — разделитель фрагментов внутри секции.
+     * Вне кавычек: точка — разделитель секций (при {@code dotSplits}; иначе обычный символ и
+     * секция одна), пробел — разделитель фрагментов внутри секции.
      * Внутри кавычек: пробелы и точки — часть фрагмента (кавычки удаляются).
      * Пустая секция (точка в начале/конце или две точки подряд) сохраняется и означает,
      * что подходят любые значения этого уровня: {@code ком.} — предпоследний уровень содержит «ком», последний любой.
+     * {@link #ANCHOR_START} в начале фрагмента — привязка к началу текста (для секции — к началу
+     * имени её уровня).
      *
      * Примеры:
      *   "док.реал тов"      → [[док], [реал, тов]]
      *   "док.реал" тов       → [[док.реал, тов]]
      *   док."реал тов"       → [[док], [реал тов]]
      *   ком.                 → [[ком], []]
+     *   \док.\реал           → [[^док], [^реал]]
      */
-    public static List<List<String>> parseSections(String filterText) {
-        List<List<String>> result = new ArrayList<>();
+    private static List<List<Frag>> parse(String filterText, boolean dotSplits) {
+        List<List<Frag>> result = new ArrayList<>();
         if (filterText == null || filterText.isEmpty())
             return result;
 
-        List<String> section = new ArrayList<>();
+        List<Frag> section = new ArrayList<>();
         StringBuilder word = new StringBuilder();
         boolean inQuotes = false;
+        boolean quoteAnchored = false;
         boolean hasDot = false;
 
         for (int i = 0; i < filterText.length(); i++) {
             char c = filterText.charAt(i);
             if (inQuotes) {
                 if (c == '"') {
-                    addFragment(section, word.toString());
+                    if (word.length() > 0)
+                        section.add(new Frag(word.toString(), quoteAnchored));
                     word.setLength(0);
                     inQuotes = false;
                 } else {
                     word.append(c);
                 }
             } else if (c == '"') {
-                addFragment(section, word.toString().trim());
+                // Одиночный спецсимвол прямо перед кавычкой привязывает фрагмент в кавычках.
+                quoteAnchored = word.length() == 1 && word.charAt(0) == ANCHOR_START;
+                if (!quoteAnchored)
+                    addFragment(section, word.toString());
                 word.setLength(0);
                 inQuotes = true;
-            } else if (c == '.') {
-                addFragment(section, word.toString().trim());
+            } else if (dotSplits && c == '.') {
+                addFragment(section, word.toString());
                 word.setLength(0);
                 result.add(section);
                 section = new ArrayList<>();
                 hasDot = true;
             } else if (Character.isWhitespace(c)) {
-                addFragment(section, word.toString().trim());
+                addFragment(section, word.toString());
                 word.setLength(0);
             } else {
                 word.append(c);
             }
         }
 
-        addFragment(section, inQuotes ? word.toString() : word.toString().trim());
+        if (inQuotes) {
+            if (word.length() > 0)
+                section.add(new Frag(word.toString(), quoteAnchored));
+        } else {
+            addFragment(section, word.toString());
+        }
         if (hasDot || !section.isEmpty())
             result.add(section);
         return result;
     }
 
-    private static void addFragment(List<String> section, String frag) {
+    /** Слово вне кавычек: ведущий {@link #ANCHOR_START} — привязка, а не часть искомого текста. */
+    private static void addFragment(List<Frag> section, String word) {
+        String frag = word.trim();
+        boolean anchored = !frag.isEmpty() && frag.charAt(0) == ANCHOR_START;
+        if (anchored)
+            frag = frag.substring(1);
         if (!frag.isEmpty())
-            section.add(frag);
+            section.add(new Frag(frag, anchored));
     }
 
     public boolean hasMultipleSections() {
@@ -174,8 +198,8 @@ public class SmartMatcher {
         int offset = elemCount - filterCount;
         for (int i = 0; i < filterCount; i++) {
             String elemSection = elemSections[offset + i];
-            for (String frag : sections.get(i)) {
-                if (!elemSection.contains(frag)) {
+            for (Frag frag : sections.get(i)) {
+                if (!frag.foundIn(elemSection)) {
                     return false;
                 }
             }
@@ -207,7 +231,7 @@ public class SmartMatcher {
         int offset = elemSections.length - filterCount;
         for (int i = 0; i < filterCount; i++)
         {
-            List<String> frags = sections.get(i);
+            List<Frag> frags = sections.get(i);
             // Пустая секция фильтра (ком.) — подходят любые значения этого уровня.
             if (!frags.isEmpty() && !sectionEquals(elemSections[offset + i], frags))
                 return false;
@@ -215,11 +239,11 @@ public class SmartMatcher {
         return true;
     }
 
-    private static boolean sectionEquals(String elemSection, List<String> frags)
+    private static boolean sectionEquals(String elemSection, List<Frag> frags)
     {
         if (frags == null || frags.isEmpty())
             return elemSection == null || elemSection.isEmpty();
-        return elemSection.equals(String.join(" ", frags)); //$NON-NLS-1$
+        return elemSection.equals(String.join(" ", texts(frags))); //$NON-NLS-1$
     }
 
     /**
@@ -261,9 +285,14 @@ public class SmartMatcher {
     {
         for (int i = fromSection; i < toSection; i++)
         {
-            for (String frag : sections.get(i))
+            for (Frag frag : sections.get(i))
             {
-                if (!lowerText.contains(frag))
+                // Имя узла здесь несёт несколько секций сразу — привязанный фрагмент подходит
+                // началу имени или началу любого его сегмента после точки.
+                boolean found = frag.anchored()
+                    ? lowerText.startsWith(frag.text()) || lowerText.contains("." + frag.text()) //$NON-NLS-1$
+                    : lowerText.contains(frag.text());
+                if (!found)
                     return false;
             }
         }
@@ -288,9 +317,9 @@ public class SmartMatcher {
         for (int i = 0; i < filterCount; i++)
         {
             String elemSection = parts.get(offset + i).toLowerCase();
-            for (String frag : sections.get(i))
+            for (Frag frag : sections.get(i))
             {
-                if (!elemSection.contains(frag))
+                if (!frag.foundIn(elemSection))
                     return false;
             }
         }
@@ -305,10 +334,10 @@ public class SmartMatcher {
             return result;
         String lowerText = text.toLowerCase();
         String lowerOther = other != null ? other.toLowerCase() : ""; //$NON-NLS-1$
-        for (String frag : fragments)
+        for (Frag frag : fragments)
         {
-            if (lowerText.contains(frag) && !lowerOther.contains(frag))
-                result.add(frag);
+            if (frag.foundIn(lowerText) && !frag.foundIn(lowerOther))
+                result.add(frag.text());
         }
         return result;
     }
@@ -343,7 +372,7 @@ public class SmartMatcher {
      * Расчет Премии Фильтра для изолированной части строки (Имени или Параметров)
      */
     private int computePartPremium(String partText) {
-        return computePartPremium(partText, fullPattern, fragments);
+        return computePartPremium(partText, premiumPattern, getFragments());
     }
 
     /** Премии секций иерархического фильтра в порядке секций запроса. */
@@ -361,7 +390,7 @@ public class SmartMatcher {
         if (offset < 0)
             return premiums;
         for (int i = 0; i < sections.size(); i++) {
-            List<String> section = sections.get(i);
+            List<String> section = texts(sections.get(i));
             if (!section.isEmpty())
                 premiums[i] = computePartPremium(elementSections[offset + i],
                         String.join(" ", section), section.toArray(new String[0])); //$NON-NLS-1$
@@ -502,8 +531,12 @@ public class SmartMatcher {
 
     /** Все фрагменты из всех секций одним плоским списком (для подсветки/поиска без учёта иерархии). */
     public List<String> getAllSectionFragments() {
-        List<String> all = new ArrayList<>();
-        for (List<String> sec : sections) {
+        return texts(allSectionFrags());
+    }
+
+    private List<Frag> allSectionFrags() {
+        List<Frag> all = new ArrayList<>();
+        for (List<Frag> sec : sections) {
             all.addAll(sec);
         }
         return all;
@@ -522,21 +555,14 @@ public class SmartMatcher {
      * фрагменты всех секций по отдельности, точка — разделитель секций.
      */
     public List<HighlightRange> getSectionHighlightRanges(String text) {
-        return highlightFragments(text, getAllSectionFragments());
+        return highlightFragments(text, allSectionFrags());
     }
 
-    private List<HighlightRange> highlightFragments(String text, List<String> frags) {
+    private List<HighlightRange> highlightFragments(String text, List<Frag> frags) {
         List<HighlightRange> ranges = new ArrayList<>();
         if (isEmpty || text == null) return ranges;
 
-        String lowerText = text.toLowerCase();
-        for (String frag : frags) {
-            int idx = lowerText.indexOf(frag);
-            while (idx >= 0) {
-                ranges.add(new HighlightRange(idx, frag.length()));
-                idx = lowerText.indexOf(frag, idx + frag.length());
-            }
-        }
+        appendFragmentRanges(ranges, text, 0, frags);
         return ranges;
     }
 
@@ -544,15 +570,7 @@ public class SmartMatcher {
         List<HighlightRange> ranges = new ArrayList<>();
         if (isEmpty || text == null || sections.isEmpty()) return ranges;
 
-        List<String> lastSection = sections.get(sections.size() - 1);
-        String lowerText = text.toLowerCase();
-        for (String frag : lastSection) {
-            int idx = lowerText.indexOf(frag);
-            while (idx >= 0) {
-                ranges.add(new HighlightRange(idx, frag.length()));
-                idx = lowerText.indexOf(frag, idx + frag.length());
-            }
-        }
+        appendFragmentRanges(ranges, text, 0, sections.get(sections.size() - 1));
         return ranges;
     }
 
@@ -572,7 +590,7 @@ public class SmartMatcher {
             int lastDot = text.lastIndexOf('.');
             String section = lastDot >= 0 ? text.substring(lastDot + 1) : text;
             int sectionStart = lastDot >= 0 ? lastDot + 1 : 0;
-            appendFragmentRanges(ranges, section, sectionStart, fragments);
+            appendFragmentRanges(ranges, section, sectionStart, java.util.Arrays.asList(fragments));
             return ranges;
         }
 
@@ -596,25 +614,32 @@ public class SmartMatcher {
         for (int i = 0; i < filterCount; i++)
         {
             String segment = segments[offset + i];
-            appendFragmentRanges(ranges, segment, segmentStart[offset + i],
-                    sections.get(i).toArray(new String[0]));
+            appendFragmentRanges(ranges, segment, segmentStart[offset + i], sections.get(i));
         }
         return ranges;
     }
 
     private static void appendFragmentRanges(List<HighlightRange> ranges, String segment,
-            int segmentStart, String[] frags)
+            int segmentStart, List<Frag> frags)
     {
         if (segment == null || frags == null)
             return;
         String lowerSegment = segment.toLowerCase();
-        for (String frag : frags)
+        for (Frag frag : frags)
         {
-            int idx = lowerSegment.indexOf(frag);
+            String fragText = frag.text();
+            if (frag.anchored())
+            {
+                // Привязанный фрагмент красится только в начале текста.
+                if (lowerSegment.startsWith(fragText))
+                    ranges.add(new HighlightRange(segmentStart, fragText.length()));
+                continue;
+            }
+            int idx = lowerSegment.indexOf(fragText);
             while (idx >= 0)
             {
-                ranges.add(new HighlightRange(segmentStart + idx, frag.length()));
-                idx = lowerSegment.indexOf(frag, idx + frag.length());
+                ranges.add(new HighlightRange(segmentStart + idx, fragText.length()));
+                idx = lowerSegment.indexOf(fragText, idx + fragText.length());
             }
         }
     }

@@ -545,6 +545,13 @@ public final class FilterInputBoxListNavigation
 
     private static void handleSearchBoxVerifyKey(SearchBox box, VerifyEvent event)
     {
+        // #region agent log — Ctrl+↓ в фильтре навигатора
+        if (event.keyCode == SWT.ARROW_DOWN)
+            Global.tempLog("filter-ctrl-down", "verifyKey stateMask=" + event.stateMask //$NON-NLS-1$ //$NON-NLS-2$
+                + " ctx=" + (box.getData(NAV_CONTEXT_KEY) != null) //$NON-NLS-1$
+                + " displayingPopup=" + Global.getField(box, "displayingPopup") //$NON-NLS-1$ //$NON-NLS-2$
+                + " history=" + describeHistory(box)); //$NON-NLS-1$
+        // #endregion
         if (Boolean.TRUE.equals(Global.getField(box, "displayingPopup"))) //$NON-NLS-1$
         {
             if (isEnterKey(event.keyCode))
@@ -565,7 +572,12 @@ public final class FilterInputBoxListNavigation
 
         if (event.keyCode == SWT.ARROW_DOWN && (event.stateMask & SWT.CTRL) != 0)
         {
-            openSearchHistory(box);
+            boolean opened = openSearchHistory(box);
+            // #region agent log — Ctrl+↓ в фильтре навигатора
+            Global.tempLog("filter-ctrl-down", "openSearchHistory=" + opened + " " + describePopup(box)); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            box.getDisplay().asyncExec(() -> Global.tempLog("filter-ctrl-down", "async " + describePopup(box))); //$NON-NLS-1$ //$NON-NLS-2$
+            box.getDisplay().timerExec(400, () -> Global.tempLog("filter-ctrl-down", "400ms " + describePopup(box))); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
             event.doit = false;
             return;
         }
@@ -607,6 +619,29 @@ public final class FilterInputBoxListNavigation
         keepFilterFocus(box);
         event.doit = false;
     }
+
+    // #region agent log — Ctrl+↓ в фильтре навигатора
+    private static String describeHistory(SearchBox box)
+    {
+        Object history = Global.getField(box, "history"); //$NON-NLS-1$
+        Object recent = history != null ? Global.invoke(history, "getRecentPatterns", Integer.valueOf(10)) : null; //$NON-NLS-1$
+        return (history != null ? history.getClass().getName() : "null") //$NON-NLS-1$
+            + " recent=" + (recent instanceof List<?> list ? String.valueOf(list.size()) : String.valueOf(recent)); //$NON-NLS-1$
+    }
+
+    private static String describePopup(SearchBox box)
+    {
+        if (box.isDisposed())
+            return "box disposed"; //$NON-NLS-1$
+        Object popup = Global.getField(box, "popup"); //$NON-NLS-1$
+        String shellInfo = "popup=null"; //$NON-NLS-1$
+        if (popup instanceof Shell shell)
+            shellInfo = shell.isDisposed() ? "popup disposed" //$NON-NLS-1$
+                : "popup visible=" + shell.isVisible() + " bounds=" + shell.getBounds(); //$NON-NLS-1$ //$NON-NLS-2$
+        return "displayingPopup=" + Global.getField(box, "displayingPopup") + " " + shellInfo //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " focus=" + box.isFocusControl() + " history=" + describeHistory(box); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+    // #endregion
 
     /** @return {@code true}, если клавиша обработана навигацией по открытому popup истории */
     private static boolean handleSearchBoxPopupNavigation(SearchBox box, VerifyEvent event)
@@ -781,6 +816,10 @@ public final class FilterInputBoxListNavigation
     /** После stock {@code KeyDown}: закрыть popup/quick browse, если ↓ успел открыть историю. */
     private static void dismissSearchBoxPopupAfterStockNav(SearchBox box, Event event)
     {
+        // #region agent log — Ctrl+↓ в фильтре навигатора
+        if (event.keyCode == SWT.ARROW_DOWN)
+            Global.tempLog("filter-ctrl-down", "keyDown stateMask=" + event.stateMask + " " + describePopup(box)); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        // #endregion
         NavContext ctx = box.getData(NAV_CONTEXT_KEY) instanceof NavContext nav ? nav : null;
         if (ctx == null)
             return;

@@ -1164,30 +1164,90 @@ public class PropertySheetActivePropertyHook implements IStartup
         String filter = paletteFilterText(page);
         if (filter != null && !filter.isBlank())
             return;
-        Object scene = Global.invoke(page, "getScene"); //$NON-NLS-1$
-        Map.Entry<?, ?> row = scene != null
-            ? PropertyNameIdentifierHook.findValueViewAfterLabel(scene, activePropertyName) : null;
-        Object nativeControl = row != null ? Global.invoke(row.getValue(), "getNativeControl") : null; //$NON-NLS-1$
+        // Ввод вне панели (навигатор, редактор) отбирать нельзя: активация поля делает «Свойства»
+        // активной частью. Прокрутка состоится, когда пользователь сам перейдёт в панель.
+        if (!focusInsidePalettePart(page))
+            return;
+        // Как при клике по подписи: сначала редактор значения, кнопка «...» — запасной вариант
+        // (у свойств вроде «Цвет фона» другого контрола в строке нет).
+        List<Object> rowControls = rowNativeControls(page, activePropertyName);
         boolean focused = false;
-        if (nativeControl != null)
+        // Возврат к ТЕКУЩЕМУ свойству, а не переход к другому: без этого флага активация
+        // сбрасывала подсветку и само текущее свойство (onFieldActivatedProgrammatically).
+        restoringActiveProperty = true;
+        try
         {
-            // Возврат к ТЕКУЩЕМУ свойству, а не переход к другому: без этого флага активация
-            // сбрасывала подсветку и само текущее свойство (onFieldActivatedProgrammatically).
-            restoringActiveProperty = true;
-            try
+            for (Object control : rowControls)
             {
-                focused = AefFieldFocus.focusNativeControl(nativeControl);
+                if (AefFieldFocus.focusNativeControl(control))
+                {
+                    focused = true;
+                    break;
+                }
             }
-            finally
-            {
-                restoringActiveProperty = false;
-            }
+        }
+        finally
+        {
+            restoringActiveProperty = false;
         }
         if (focused)
             return;
         Display display = Display.getDefault();
         if (display != null && !display.isDisposed())
             display.timerExec(REVEAL_RETRY_MS, () -> revealLabel(page, attempt + 1));
+    }
+
+    /**
+     * Контролы строки свойства в порядке предпочтения для активации: редакторы значения, затем
+     * кнопки «...» ({@code ActionBar}). Пусто — строки свойства в палитре сейчас нет.
+     */
+    private static List<Object> rowNativeControls(Object page, String propertyName)
+    {
+        List<Object> editors = new ArrayList<>();
+        Map<?, ?> map = viewModelToView(page);
+        if (map == null || propertyName == null)
+            return editors;
+        List<Object> actionBars = new ArrayList<>();
+        boolean rowStarted = false;
+        for (Map.Entry<?, ?> entry : map.entrySet())
+        {
+            Object key = entry.getKey();
+            String keyClass = key == null ? "" : key.getClass().getName(); //$NON-NLS-1$
+            boolean boundary = keyClass.contains(LABEL_VIEW_MODEL) || keyClass.contains(SECTION_VIEW_MODEL);
+            if (boundary && rowStarted)
+                break;
+            if (keyClass.contains(LABEL_VIEW_MODEL))
+            {
+                rowStarted = propertyNamesMatch(propertyName, labelText(key));
+                continue;
+            }
+            if (!rowStarted)
+                continue;
+            Object nativeControl = Global.invoke(entry.getValue(), "getNativeControl"); //$NON-NLS-1$
+            if (nativeControl == null)
+                continue;
+            if (keyClass.contains("ActionBarViewModel")) //$NON-NLS-1$
+                actionBars.add(nativeControl);
+            else
+                editors.add(nativeControl);
+        }
+        editors.addAll(actionBars);
+        return editors;
+    }
+
+    /**
+     * Ввод внутри панели «Свойства»: в самой палитре или в её части (поле фильтра лежит выше
+     * контрола страницы).
+     */
+    private static boolean focusInsidePalettePart(Object page)
+    {
+        Composite scope = pageControlFor(page);
+        for (int up = 0; scope != null && !scope.isDisposed() && up < 3; up++, scope = scope.getParent())
+        {
+            if (containsFocus(scope))
+                return true;
+        }
+        return false;
     }
 
     /**
