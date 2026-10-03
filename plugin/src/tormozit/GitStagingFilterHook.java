@@ -6,13 +6,7 @@ import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.IdentityHashMap;
-import org.eclipse.jface.preference.IPreferenceStore;
-import org.eclipse.jface.preference.PreferenceConverter;
-import org.eclipse.swt.graphics.RGB;
-import org.eclipse.ui.editors.text.EditorsUI;
-import org.eclipse.ui.texteditor.AnnotationPreference;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -193,8 +187,11 @@ public final class GitStagingFilterHook implements IStartup
         "Расширение файла", //$NON-NLS-1$
         "Полное имя объекта метаданных", //$NON-NLS-1$
         "Время изменения файла на диске", //$NON-NLS-1$
-        "Статус изменения: «+» добавлен, «-» удалён, «!» конфликт; у изменённого пусто" //$NON-NLS-1$
+        "Статус изменения" //$NON-NLS-1$
     };
+    /** Легенда значений колонки «Статус»: добавляется к подсказке заголовка отдельными строками. */
+    private static final String STATUS_LEGEND =
+        ".\n+ добавлен\n- удалён\n! конфликт\nпусто — изменён"; //$NON-NLS-1$
     /** Ширины по умолчанию в режиме «Список» (по колонкам Имя/Тип/Путь/Время/Статус). */
     private static final int[] COLUMN_DEFAULT_WIDTHS = { 36, 50, 250, 95, 24 };
     /** Ширины по умолчанию в древовидных режимах; «Путь» там не создаётся. */
@@ -434,7 +431,8 @@ public final class GitStagingFilterHook implements IStartup
     {
         TreeColumn col = new TreeColumn(tree, SWT.LEFT);
         col.setText(COLUMN_HEADERS[logical]);
-        col.setToolTipText(COLUMN_TOOLTIPS[logical] + Global.pluginSignForTooltip());
+        col.setToolTipText(COLUMN_TOOLTIPS[logical] + Global.pluginSignForTooltip()
+            + (logical == COL_STATUS ? STATUS_LEGEND : "")); //$NON-NLS-1$
         col.setResizable(true);
         col.setMoveable(true);
         col.setWidth(storedWidth(settings, logical, treeMode));
@@ -1708,9 +1706,9 @@ public final class GitStagingFilterHook implements IStartup
         String name = stateObj.toString();
         return switch (name)
         {
-            case "ADDED", "UNTRACKED", "MODIFIED_AND_ADDED" -> "+"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-            case "REMOVED", "MISSING", "MISSING_AND_CHANGED" -> "-"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-            case "CONFLICTING" -> "!"; //$NON-NLS-1$ //$NON-NLS-2$
+            case "ADDED", "UNTRACKED", "MODIFIED_AND_ADDED" -> ChangeStatusColors.ADDED; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            case "REMOVED", "MISSING", "MISSING_AND_CHANGED" -> ChangeStatusColors.REMOVED; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            case "CONFLICTING" -> ChangeStatusColors.CONFLICT; //$NON-NLS-1$
             default -> ""; //$NON-NLS-1$
         };
     }
@@ -1867,7 +1865,7 @@ public final class GitStagingFilterHook implements IStartup
             copyRowStyle(cell, element);
             if (logical == COL_STATUS)
             {
-                Color statusBg = statusBackground(cell.getControl().getDisplay(), text);
+                Color statusBg = statusColors.background(cell.getControl().getDisplay(), text);
                 if (statusBg != null)
                     cell.setBackground(statusBg);
             }
@@ -1884,38 +1882,7 @@ public final class GitStagingFilterHook implements IStartup
             SmartMatchHighlight.appendMatchRanges(cell, ranges);
         }
 
-        private final Map<RGB, Color> statusColors = new HashMap<>();
-
-        /**
-         * Фон ячейки «Статус»: «+» / «-» цветом маркеров Quick Diff (Параметры → Выделение изменений),
-         * смешанным с фоном списка — как клетка на полосе номеров (добавление 0.6, удаление 0.75).
-         */
-        private Color statusBackground(Display display, String text)
-        {
-            boolean added = "+".equals(text); //$NON-NLS-1$
-            if (!added && !"-".equals(text) && !"!".equals(text)) //$NON-NLS-1$ //$NON-NLS-2$
-                return null;
-            String type = added ? "org.eclipse.ui.workbench.texteditor.quickdiff.addition" //$NON-NLS-1$
-                : "org.eclipse.ui.workbench.texteditor.quickdiff.deletion"; //$NON-NLS-1$
-            RGB marker = added ? new RGB(144, 238, 144) : new RGB(255, 182, 193);
-            AnnotationPreference pref = EditorsUI.getAnnotationPreferenceLookup().getAnnotationPreference(type);
-            if (pref != null)
-            {
-                IPreferenceStore store = EditorsUI.getPreferenceStore();
-                String key = pref.getColorPreferenceKey();
-                RGB rgb = store != null && key != null && store.contains(key) && !store.isDefault(key)
-                    ? PreferenceConverter.getColor(store, key) : pref.getColorPreferenceValue();
-                if (rgb != null)
-                    marker = rgb;
-            }
-            RGB listBg = display.getSystemColor(SWT.COLOR_LIST_BACKGROUND).getRGB();
-            double scale = added ? 0.6 : 0.75;
-            RGB mixed = new RGB(
-                (int) Math.round(marker.red * scale + listBg.red * (1 - scale)),
-                (int) Math.round(marker.green * scale + listBg.green * (1 - scale)),
-                (int) Math.round(marker.blue * scale + listBg.blue * (1 - scale)));
-            return statusColors.computeIfAbsent(mixed, rgb -> new Color(display, rgb));
-        }
+        private final ChangeStatusColors statusColors = new ChangeStatusColors();
 
         /** Копирует foreground/background/font штатного провайдера (dim/конфликт и т.п.) на всю строку. */
         private void copyRowStyle(ViewerCell cell, Object element)
@@ -1977,8 +1944,7 @@ public final class GitStagingFilterHook implements IStartup
         @Override
         public void dispose()
         {
-            statusColors.values().forEach(Color::dispose);
-            statusColors.clear();
+            statusColors.dispose();
             base.dispose();
         }
     }

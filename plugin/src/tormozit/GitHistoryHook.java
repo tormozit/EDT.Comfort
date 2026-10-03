@@ -647,10 +647,11 @@ public final class GitHistoryHook implements IStartup
 
         TableColumn statusCol = new TableColumn(table, SWT.LEFT, 3);
         statusCol.setText("Статус"); //$NON-NLS-1$
-        statusCol.setToolTipText("Статус изменения файла в коммите" + Global.pluginSignForTooltip()); //$NON-NLS-1$
+        statusCol.setToolTipText("Статус изменения файла в коммите" + Global.pluginSignForTooltip() //$NON-NLS-1$
+            + ".\n+ добавлен или скопирован\n- удалён\n/ переименован\nпусто — изменён"); //$NON-NLS-1$
         statusCol.setResizable(true);
         statusCol.setMoveable(true);
-        statusCol.setWidth(90);
+        statusCol.setWidth(24);
         statusCol.setData(COLUMN_LOGICAL_KEY, Integer.valueOf(COL_STATUS));
 
         table.setHeaderVisible(true);
@@ -1043,7 +1044,7 @@ public final class GitHistoryHook implements IStartup
         int fileWidth = FormTableColumnState.readWidth(columnSettings, KEY_COL_FILE_WIDTH, 300, 1);
         int typeWidth = FormTableColumnState.readWidth(columnSettings, KEY_COL_TYPE_WIDTH, 60, 1);
         int pathWidth = FormTableColumnState.readWidth(columnSettings, KEY_COL_PATH_WIDTH, 250, 1);
-        int statusWidth = FormTableColumnState.readWidth(columnSettings, KEY_COL_STATUS_WIDTH, 90, 1);
+        int statusWidth = FormTableColumnState.readWidth(columnSettings, KEY_COL_STATUS_WIDTH, 24, 1);
         columnLayout.setColumnData(fileCol, new ColumnPixelData(fileWidth, true, true));
         columnLayout.setColumnData(typeCol, new ColumnPixelData(typeWidth, true, true));
         columnLayout.setColumnData(pathCol, new ColumnPixelData(pathWidth, true, true));
@@ -1281,11 +1282,9 @@ public final class GitHistoryHook implements IStartup
             return ""; //$NON-NLS-1$
         return switch (change.toString())
         {
-            case "ADD" -> "Добавлен"; //$NON-NLS-1$ //$NON-NLS-2$
-            case "MODIFY" -> "Изменён"; //$NON-NLS-1$ //$NON-NLS-2$
-            case "DELETE" -> "Удалён"; //$NON-NLS-1$ //$NON-NLS-2$
-            case "RENAME" -> "Переименован"; //$NON-NLS-1$ //$NON-NLS-2$
-            case "COPY" -> "Скопирован"; //$NON-NLS-1$ //$NON-NLS-2$
+            case "ADD", "COPY" -> ChangeStatusColors.ADDED; //$NON-NLS-1$ //$NON-NLS-2$
+            case "DELETE" -> ChangeStatusColors.REMOVED; //$NON-NLS-1$
+            case "RENAME" -> ChangeStatusColors.RENAMED; //$NON-NLS-1$
             default -> ""; //$NON-NLS-1$
         };
     }
@@ -1336,6 +1335,7 @@ public final class GitHistoryHook implements IStartup
     {
         private final CellLabelProvider origProvider;
         private SmartMatcher highlightMatcher = new SmartMatcher(""); //$NON-NLS-1$
+        private final ChangeStatusColors statusColors = new ChangeStatusColors();
 
         GitHistoryFileLabelProvider(CellLabelProvider origProvider)
         {
@@ -1386,8 +1386,12 @@ public final class GitHistoryHook implements IStartup
             else if (col == 3)
             {
                 Object element = cell.getElement();
-                cell.setText(statusText(element));
+                String status = statusText(element);
+                cell.setText(status);
                 copyFileColumnStyle(cell, element);
+                Color statusBg = statusColors.background(cell.getControl().getDisplay(), status);
+                if (statusBg != null)
+                    cell.setBackground(statusBg);
             }
 
             // Всегда вызываем appendMatchRanges — иначе при очистке фильтра
@@ -1469,6 +1473,7 @@ public final class GitHistoryHook implements IStartup
         @Override
         public void dispose()
         {
+            statusColors.dispose();
             if (origProvider != null)
                 origProvider.dispose();
         }
