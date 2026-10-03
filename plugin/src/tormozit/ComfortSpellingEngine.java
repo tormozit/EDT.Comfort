@@ -2276,6 +2276,8 @@ public final class ComfortSpellingEngine
         private Composite dialogArea;
         private MorphAddResult result;
         private boolean updating;
+        /** Ручная правка отключает автоподбор леммы до закрытия диалога. */
+        private boolean lemmaManuallyEdited;
         /** Высота по полной компоновке (существительное); не сжимаем при смене POS. */
         private int preferredShellHeight;
 
@@ -2540,7 +2542,10 @@ public final class ComfortSpellingEngine
             ModifyListener refresh = e ->
             {
                 if (!updating)
+                {
+                    lemmaManuallyEdited = true;
                     refreshPreviewAndWarning();
+                }
             };
             lemmaText.addModifyListener(refresh);
             SelectionAdapter morphListener = new SelectionAdapter()
@@ -2551,14 +2556,16 @@ public final class ComfortSpellingEngine
                     if (updating)
                         return;
                     updating = true;
-                    if (!morphCheck.getSelection())
+                    if (!morphCheck.getSelection() && !lemmaManuallyEdited)
                     {
                         lemmaText.setText(seedWord);
                     }
-                    else
+                    else if (morphCheck.getSelection())
                     {
-                        MorphGuess g = guessMorphology(seedWord);
-                        lemmaText.setText(g.lemma != null ? g.lemma : seedWord);
+                        MorphGuess g = guessMorphology(lemmaManuallyEdited
+                            ? lemmaText.getText() : seedWord);
+                        if (!lemmaManuallyEdited)
+                            lemmaText.setText(g.lemma != null ? g.lemma : seedWord);
                         selectPos(g.pos);
                         selectNumber(g.number);
                         selectGender(g.gender);
@@ -2583,7 +2590,7 @@ public final class ComfortSpellingEngine
                     if (updating)
                         return;
                     if (morphCheck.getSelection())
-                        applyHeuristicFromSeed(selectedPos());
+                        updateParadigmForCurrentLemma(selectedPos());
                     updateNounControlsVisible();
                     updateMorphEnabled();
                     if (selectedPos() == MorphPos.NOUN)
@@ -2637,12 +2644,14 @@ public final class ComfortSpellingEngine
             setNounFieldsVisible(selectedPos() == MorphPos.NOUN);
         }
 
-        /** Пересчёт леммы/склонения от {@link #seedWord} под выбранную часть речи. */
-        private void applyHeuristicFromSeed(MorphPos pos)
+        /** Автоподбор от исходного слова до ручной правки; после неё лемму сохраняем. */
+        private void updateParadigmForCurrentLemma(MorphPos pos)
         {
-            MorphGuess g = guessMorphologyForPos(seedWord, pos);
+            String lemma = lemmaText.getText().trim();
+            MorphGuess g = guessMorphologyForPos(lemmaManuallyEdited ? lemma : seedWord, pos);
             updating = true;
-            lemmaText.setText(g.lemma != null ? g.lemma : seedWord);
+            if (!lemmaManuallyEdited)
+                lemmaText.setText(g.lemma != null ? g.lemma : seedWord);
             if (pos == MorphPos.NOUN)
             {
                 selectNumber(g.number);
@@ -2651,7 +2660,7 @@ public final class ComfortSpellingEngine
             refillDeclensions(pos,
                 pos == MorphPos.NOUN ? g.number : null,
                 pos == MorphPos.NOUN ? g.gender : null,
-                g.declension);
+                lemmaManuallyEdited ? null : g.declension);
             updating = false;
         }
 
@@ -2976,6 +2985,27 @@ public final class ComfortSpellingEngine
             }
         }
 
+        private List<String> dictionariesContaining(String word)
+        {
+            if (word == null || word.isBlank())
+                return List.of();
+            Set<String> sources = new LinkedHashSet<>();
+            for (HunspellDictionary dictionary : sharedDictionaries())
+            {
+                if (dictionary.isCorrect(word))
+                    sources.add("поставляемые словари"); //$NON-NLS-1$
+            }
+            if (isUserWord(word))
+                sources.add("пользовательский словарь"); //$NON-NLS-1$
+            HunspellDictionary common = sharedCommonUserMorphDictionary();
+            if (common != null && common.isCorrect(word))
+                sources.add("пользовательский словарь"); //$NON-NLS-1$
+            HunspellDictionary project = sharedProjectUserMorphDictionary();
+            if (project != null && project.isCorrect(word))
+                sources.add("словарь проекта"); //$NON-NLS-1$
+            return List.copyOf(sources);
+        }
+
         private void refreshReplaceWarning(String lemma, String flagOrNull)
         {
             String text = ""; //$NON-NLS-1$
@@ -2995,6 +3025,12 @@ public final class ComfortSpellingEngine
                             + describeMorphEntry(existing) + "»."; //$NON-NLS-1$
                     }
                 }
+            }
+            List<String> sources = dictionariesContaining(lemma);
+            if (!sources.isEmpty())
+            {
+                String presence = "Слово уже есть: " + String.join(", ", sources) + "."; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                text = text.isEmpty() ? presence : presence + "\n" + text; //$NON-NLS-1$
             }
             replaceWarningLabel.setText(text);
             GridData warnGd = (GridData) replaceWarningLabel.getLayoutData();

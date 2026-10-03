@@ -1068,8 +1068,7 @@ public final class MdEditorTabsHook implements IStartup
 
         if (!looksLikeListPage(page))
         {
-            if (COUNT_SUFFIX.matcher(item.getText()).find())
-                applyTitle(item, baseTitle, null);
+            applyTitle(item, baseTitle, null);
             return;
         }
 
@@ -1531,15 +1530,31 @@ public final class MdEditorTabsHook implements IStartup
     {
         if (base == null)
             return null;
+        base = switch (base)
+        {
+            case "Последовательности" -> "Последов-ти"; //$NON-NLS-1$ //$NON-NLS-2$
+            case "Ввод на основании" -> "На основании"; //$NON-NLS-1$ //$NON-NLS-2$
+            case "Функц. опции" -> "Фун. опции"; //$NON-NLS-1$ //$NON-NLS-2$
+            case "Обмен данными" -> "Обмен"; //$NON-NLS-1$ //$NON-NLS-2$
+            case "Характеристики" -> "Характер-ки"; //$NON-NLS-1$ //$NON-NLS-2$
+            default -> base;
+        };
         if (isAdditionalIndexesPage(page, base))
             return "Доп. индексы"; //$NON-NLS-1$
         if (isFunctionalOptionsPage(page, base))
-            return "Функц. опции"; //$NON-NLS-1$
+            return "Фун. опции"; //$NON-NLS-1$
         if (isMdEventHandlersPage(page, base))
             return "Подписки"; //$NON-NLS-1$
         if (isModulePage(page) || looksLikeModuleTabTitle(base))
             return shortenModuleTabTitle(editor, base);
-        return shortenPredefinedBase(page, base);
+        String predefinedBase = shortenPredefinedBase(page, base);
+        if (isPredefinedPage(page, base))
+        {
+            String desired = base.startsWith("Предопредел") //$NON-NLS-1$
+                ? "Предопр-ные" : predefinedBase; //$NON-NLS-1$
+            return desired;
+        }
+        return predefinedBase;
     }
 
     private static boolean looksLikeModuleTabTitle(String base)

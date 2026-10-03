@@ -5,6 +5,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Set;
 import java.util.WeakHashMap;
+import java.util.function.Function;
 
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.IStatus;
@@ -50,6 +51,7 @@ final class StyledTextSpellCheck
         Collections.newSetFromMap(new WeakHashMap<>());
 
     private static boolean keyFilterInstalled;
+    private static final String RANGE_FINDER_KEY = "tormozit.spelling.rangeFinder"; //$NON-NLS-1$
 
     private StyledTextSpellCheck()
     {
@@ -66,6 +68,12 @@ final class StyledTextSpellCheck
      */
     static void install(StyledText styled)
     {
+        install(styled, null);
+    }
+
+    /** Пользовательские диапазоны: отрисовка поверх штатной раскраски, без LineStyleListener. */
+    static void install(StyledText styled, Function<String, List<int[]>> rangeFinder)
+    {
         if (styled == null || styled.isDisposed())
             return;
         if (!SpellCheckHook.isComfortPlatformSpellingActive())
@@ -77,7 +85,10 @@ final class StyledTextSpellCheck
         }
 
         ensureKeyFilter(styled.getDisplay());
-        styled.addLineStyleListener(StyledTextSpellCheck::provideLineStyles);
+        if (rangeFinder == null)
+            styled.addLineStyleListener(StyledTextSpellCheck::provideLineStyles);
+        else
+            styled.setData(RANGE_FINDER_KEY, rangeFinder);
         styled.addListener(SWT.Paint, StyledTextSpellCheck::paintErrorUnderlines);
         styled.addModifyListener(e ->
         {
@@ -93,6 +104,7 @@ final class StyledTextSpellCheck
     /** После изменения пользовательского словаря — перерисовать подчёркивания. */
     static void redrawAll()
     {
+        FormattedTextEditorHook.invalidateSpelling();
         Display display = Display.getDefault();
         if (display == null || display.isDisposed())
             return;
@@ -230,7 +242,7 @@ final class StyledTextSpellCheck
         String text = styled.getText();
         if (text == null || text.isEmpty())
             return;
-        List<int[]> bad = ComfortSpellingEngine.findMisspelledRanges(text);
+        List<int[]> bad = findErrors(styled, text);
         if (bad.isEmpty())
             return;
         GC gc = event.gc;
@@ -371,9 +383,23 @@ final class StyledTextSpellCheck
         String word = text.substring(segStart, segEnd);
         if (!hasLetter(word))
             return null;
-        boolean misspelled = word.length() >= 2
-            && ComfortSpellingEngine.isMisspelledAt(text, segStart, segEnd - segStart);
+        boolean misspelled;
+        if (styled.getData(RANGE_FINDER_KEY) != null)
+            misspelled = findErrors(styled, text).stream()
+                .anyMatch(range -> range[0] == segStart && range[1] == segEnd - segStart);
+        else
+            misspelled = word.length() >= 2
+                && ComfortSpellingEngine.isMisspelledAt(text, segStart, segEnd - segStart);
         return new WordSpan(segStart, segEnd - segStart, word, misspelled);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<int[]> findErrors(StyledText styled, String text)
+    {
+        Object finder = styled.getData(RANGE_FINDER_KEY);
+        return finder instanceof Function<?, ?>
+            ? ((Function<String, List<int[]>>)finder).apply(text)
+            : ComfortSpellingEngine.findMisspelledRanges(text);
     }
 
     private static void showAssistMenu(StyledText styled, int displayX, int displayY,

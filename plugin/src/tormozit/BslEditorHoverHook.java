@@ -1020,13 +1020,23 @@ public final class BslEditorHoverHook implements IStartup
                             ? contextMethod.getSourceUri()
                             : feature instanceof com._1c.g5.v8.dt.bsl.model.Method method
                                 ? org.eclipse.emf.ecore.util.EcoreUtil.getURI(method) : null;
+                    if (feature instanceof com._1c.g5.v8.dt.mcore.DerivedProperty derivedProperty)
+                    {
+                        // Как BslHyperlinkHelper: переход к объекту, породившему свойство.
+                        EObject source = derivedProperty.getSource();
+                        if (source == null || source instanceof com._1c.g5.v8.dt.bsl.model.BslDerivedPropertySource)
+                            continue;
+                        sourceUri = resource.getResourceSet().getURIConverter().normalize(
+                            org.eclipse.emf.ecore.util.EcoreUtil.getURI(source));
+                    }
                     Global.tempLog("method-definition-663", "resolve sourceUri=" + sourceUri);
                     String uri;
                     if (sourceUri != null)
                         uri = java.net.URLEncoder.encode(sourceUri.toString(),
                             java.nio.charset.StandardCharsets.UTF_8);
                     else if (feature instanceof com._1c.g5.v8.dt.mcore.Method
-                        || feature instanceof com._1c.g5.v8.dt.mcore.Property)
+                        || (feature instanceof com._1c.g5.v8.dt.mcore.Property
+                            && !(feature instanceof com._1c.g5.v8.dt.mcore.DerivedProperty)))
                     {
                         Object page = Global.invoke(browserInput, "getViewPage");
                         if (page == null || provider == null)
