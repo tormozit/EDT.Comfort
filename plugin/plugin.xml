@@ -13,6 +13,7 @@
   </extension>
   <extension point="tormozit.comfort.startup">
     <startup class="tormozit.ComfortShutdownHook"/>
+    <startup class="tormozit.ExternalOpenRequestHook"/>
     <startup class="tormozit.EditorStatusFieldsFixHook"/>
     <startup class="tormozit.LwtComboPopupFixHook"/>
     <startup class="tormozit.FormWysiwygScrollHook"/>
