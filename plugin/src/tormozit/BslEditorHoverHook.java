@@ -524,6 +524,19 @@ public final class BslEditorHoverHook implements IStartup
             return token;
         }
 
+        private static final Map<String, Runnable> formHandlerActions =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+        /** Действие ссылки на элемент формы, подписанный на событие методом (issue 671). */
+        static String registerFormHandler(Runnable action)
+        {
+            if (formHandlerActions.size() > 200)
+                formHandlerActions.clear();
+            String token = "formhandler:" + java.util.UUID.randomUUID();
+            formHandlerActions.put(token, action);
+            return token;
+        }
+
         static void install(Display display)
         {
             display.addFilter(org.eclipse.swt.SWT.Show, event -> {
@@ -541,6 +554,18 @@ public final class BslEditorHoverHook implements IStartup
                             if (arguments == null || arguments.length != 1
                                 || !(arguments[0] instanceof String encoded))
                                 return Boolean.FALSE;
+                            if (encoded.startsWith("formhandler:"))
+                            {
+                                Runnable action = formHandlerActions.get(encoded);
+                                if (action == null)
+                                    return Boolean.FALSE;
+                                display.asyncExec(() -> {
+                                    if (!shell.isDisposed())
+                                        shell.setVisible(false);
+                                    action.run();
+                                });
+                                return Boolean.TRUE;
+                            }
                             if (encoded.startsWith("documentation:"))
                             {
                                 java.lang.ref.WeakReference<Object> reference = documentationPages.get(encoded);
@@ -654,6 +679,7 @@ public final class BslEditorHoverHook implements IStartup
         private volatile String lastDirective;
         private volatile String lastMethodLink;
         private volatile String lastMethodName;
+        private volatile String lastFormHandlersHtml;
         private volatile Object lastDocumentationDescriptor;
         private volatile boolean lastCreationSite;
         private volatile HtmlIntegrityWatcher activeWatcher;
@@ -722,6 +748,7 @@ public final class BslEditorHoverHook implements IStartup
             lastDirective = (directive != null && !directive.isBlank()) ? directive : null;
             lastCreationSite = isImplicitVariableCreationAt(hoverRegion);
             lastMethodLink = resolveMethodLink(hoverRegion, info);
+            lastFormHandlersHtml = resolveFormHandlersHtml(hoverRegion);
             Global.tempLog("method-definition-663", "resolved name=" + lastMethodName
                 + " link=" + lastMethodLink);
             IRSession session = IrBslExpressionHtmlSupport.resolveConnectedSession(editor);
@@ -941,6 +968,18 @@ public final class BslEditorHoverHook implements IStartup
                     }
                 }
             }
+            String handlersHtml = lastFormHandlersHtml;
+            if (handlersHtml != null && !result.contains("comfort-form-handlers"))
+            {
+                // Сразу под заголовком: низ подсказки обрезается высотой окна (штатная сноска
+                // тоже не видна), блок в конце тела оставался за краем.
+                int insertAt = result.indexOf("<div class=\"hover-content\">");
+                if (insertAt < 0)
+                    insertAt = result.toLowerCase().lastIndexOf("</body>");
+                result = insertAt >= 0
+                    ? result.substring(0, insertAt) + handlersHtml + result.substring(insertAt)
+                    : result + handlersHtml;
+            }
             Global.tempLog("method-definition-663", "decorated name=" + lastMethodName
                 + " html=" + result);
             return result;
@@ -972,6 +1011,57 @@ public final class BslEditorHoverHook implements IStartup
             });
         }
 
+        private String resolveEventDeclarationLink(XtextResource resource, EObject object, IRegion region,
+            Object browserInput, org.eclipse.xtext.resource.IResourceServiceProvider provider)
+        {
+            if (resource == null || provider == null || resource.getParseResult() == null)
+                return null;
+            com._1c.g5.v8.dt.bsl.model.Method method = null;
+            for (EObject current = object; current != null; current = current.eContainer())
+                if (current instanceof com._1c.g5.v8.dt.bsl.model.Method candidate)
+                {
+                    method = candidate;
+                    break;
+                }
+            ILeafNode leaf = NodeModelUtils.findLeafNodeAtOffset(resource.getParseResult().getRootNode(),
+                region.getOffset());
+            if (method == null || leaf == null || !method.getName().equalsIgnoreCase(leaf.getText()))
+                return null;
+            try
+            {
+                ClassLoader loader = browserInput.getClass().getClassLoader();
+                Class<?> providerClass = Class.forName(
+                    "com._1c.g5.v8.dt.internal.bsl.ui.documentation.BslDocumentationProvider", true, loader);
+                Object documentationProvider = provider.get(providerClass);
+                // Тот же выбор события, что в BslDocumentationProvider.getDocByModelMethod.
+                Object resolved = Global.invoke(documentationProvider, "getEventsFromModelMethod", method);
+                Global.tempLog("method-definition-663", "declaration events=" + resolved);
+                if (!(resolved instanceof List<?> events) || events.isEmpty()
+                    || !(events.get(0) instanceof com._1c.g5.v8.dt.mcore.Event event))
+                    return null;
+                Object page = Global.invoke(browserInput, "getViewPage");
+                if (page == null)
+                    return null;
+                Object descriptor = Global.newInstance(
+                    "com._1c.g5.v8.dt.internal.bsl.ui.syntaxassist.description.DocumentationPageDescriptor",
+                    loader, page, documentationProvider);
+                if (descriptor == null)
+                    return null;
+                lastDocumentationDescriptor = descriptor;
+                lastMethodName = event.getNameRu();
+                if (lastMethodName == null || lastMethodName.isBlank()
+                    || !IrBslHoverHtml.readHtml(browserInput).contains(lastMethodName))
+                    lastMethodName = event.getName();
+                String token = MethodDefinitionLink.registerDocumentation(descriptor);
+                return "<a class=\"comfort-method-definition\" href=\"#\" onclick=\""
+                    + "comfortOpenMethodDefinition('" + token + "');return false;\">";
+            }
+            catch (Exception ex)
+            {
+                Global.tempLog("method-definition-663", "declaration event error=" + ex);
+                return null;
+            }
+        }
         private String resolveMethodLink(IRegion region, Object browserInput)
         {
             lastMethodName = null;
@@ -999,11 +1089,11 @@ public final class BslEditorHoverHook implements IStartup
                 }
                 Global.tempLog("method-definition-663", "resolve access="
                     + (access == null ? "null" : access.eClass().getName()));
-                if (access == null)
-                    return null;
-                org.eclipse.xtext.resource.IResourceServiceProvider provider =
-                    org.eclipse.xtext.resource.IResourceServiceProvider.Registry.INSTANCE
+                org.eclipse.xtext.resource.IResourceServiceProvider provider = resource == null ? null
+                    : org.eclipse.xtext.resource.IResourceServiceProvider.Registry.INSTANCE
                         .getResourceServiceProvider(resource.getURI());
+                if (access == null)
+                    return resolveEventDeclarationLink(resource, object, region, browserInput, provider);
                 com._1c.g5.v8.dt.bsl.resource.DynamicFeatureAccessComputer computer = provider == null
                     ? null : provider.get(com._1c.g5.v8.dt.bsl.resource.DynamicFeatureAccessComputer.class);
                 List<com._1c.g5.v8.dt.bsl.model.FeatureEntry> entries =
@@ -1035,6 +1125,7 @@ public final class BslEditorHoverHook implements IStartup
                         uri = java.net.URLEncoder.encode(sourceUri.toString(),
                             java.nio.charset.StandardCharsets.UTF_8);
                     else if (feature instanceof com._1c.g5.v8.dt.mcore.Method
+                        || feature instanceof com._1c.g5.v8.dt.mcore.Event
                         || (feature instanceof com._1c.g5.v8.dt.mcore.Property
                             && !(feature instanceof com._1c.g5.v8.dt.mcore.DerivedProperty)))
                     {
@@ -1071,6 +1162,181 @@ public final class BslEditorHoverHook implements IStartup
                 }
                 return null;
             });
+        }
+
+        /**
+         * Наведение на имя метода в модуле формы: ссылки на элементы формы (и саму форму),
+         * чьи события подписаны на этот метод (issue 671). Клик — как двойной клик по колонке
+         * обработчиков дерева элементов формы ({@link FormEditorHook#openFormEventHandler}).
+         *
+         * @return HTML-блок или {@code null}, если это не имя метода формы или подписок нет
+         */
+        private String resolveFormHandlersHtml(IRegion region)
+        {
+            if (!(editor.getDocument() instanceof IXtextDocument document))
+                return null;
+            try
+            {
+                // До блокировки документа: определение темы уходит в UI-поток.
+                String color = formHandlersTextColor();
+                return document.readOnly((IUnitOfWork<String, XtextResource>) resource -> {
+                    if (resource == null)
+                        return null;
+                    EObject object = new EObjectAtOffsetHelper().resolveContainedElementAt(resource,
+                        region.getOffset());
+                    com._1c.g5.v8.dt.bsl.model.Method method = null;
+                    for (EObject current = object; current != null && method == null; current = current.eContainer())
+                        if (current instanceof com._1c.g5.v8.dt.bsl.model.Method candidate)
+                            method = candidate;
+                    if (method == null || method.getName() == null)
+                        return null;
+                    ILeafNode leaf = NodeModelUtils.findLeafNodeAtOffset(resource.getParseResult().getRootNode(),
+                        region.getOffset());
+                    if (leaf == null || !method.getName().equalsIgnoreCase(leaf.getText()))
+                        return null;
+                    com._1c.g5.v8.dt.bsl.model.Module module =
+                        org.eclipse.emf.ecore.util.EcoreUtil.getRootContainer(method)
+                            instanceof com._1c.g5.v8.dt.bsl.model.Module m ? m : null;
+                    EObject owner = module == null ? null : module.getOwner();
+                    // Владелец модуля формы — содержимое формы (form.model.Form), а не BasicForm.
+                    if (!(owner instanceof com._1c.g5.v8.dt.form.model.Form form))
+                        return null;
+                    org.eclipse.emf.common.util.URI moduleUri = resource.getURI();
+                    List<String> links = new ArrayList<>();
+                    collectFormHandlerLinks(moduleUri, form, "Форма", form, method.getName(), links);
+                    collectFormItemHandlerLinks(moduleUri, form.getItems(), method.getName(), links);
+                    for (com._1c.g5.v8.dt.form.model.FormCommand command : form.getFormCommands())
+                    {
+                        if (!(command.getAction() instanceof com._1c.g5.v8.dt.form.model.FormCommandHandlerContainer
+                            action) || action.getHandler() == null
+                            || !method.getName().equalsIgnoreCase(action.getHandler().getName()))
+                            continue;
+                        // Как строка «Найти ссылки»: команда формы и её поле «Действие» в «Свойствах».
+                        String token = MethodDefinitionLink.registerFormHandler(() -> {
+                            org.eclipse.ui.IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+                            org.eclipse.ui.IWorkbenchPage page = window == null ? null : window.getActivePage();
+                            ConfigSearchResultsHook.PropertyFieldFocus.scheduleExact(page, command,
+                                com._1c.g5.v8.dt.form.model.FormPackage.Literals.FORM_COMMAND__ACTION);
+                            FormEditorHook.openFormElement(page, command);
+                        });
+                        links.add("<a href=\"#\" onclick=\"comfortOpenMethodDefinition('" + token
+                            + "');return false;\">" + escapeHtml(command.getName() == null ? "" : command.getName())
+                            + "</a> (Команда формы)");
+                    }
+                    if (links.isEmpty())
+                        return null;
+                    return "<div class=\"comfort-form-handlers\" style=\"color:" + color + ";\">Обработчик для: "
+                        + String.join(", ", links) + "</div>";
+                });
+            }
+            catch (Exception | LinkageError ex)
+            {
+                return null;
+            }
+        }
+
+        /** Цвет строки «Обработчик для» в светлой теме; для тёмной пересчитывается. */
+        private static final org.eclipse.swt.graphics.RGB FORM_HANDLERS_LIGHT_RGB =
+            new org.eclipse.swt.graphics.RGB(0x50, 0x50, 0x00);
+
+        /** Определяется один раз в UI-потоке (подсказка считается в фоновом). */
+        private static volatile String formHandlersTextColor;
+
+        /**
+         * Цвет текста строки «Обработчик для»: свой оттенок (бирюзовый), а не приглушение —
+         * строка должна выделяться среди штатного текста. Задан для светлой темы, для тёмной —
+         * {@link ThemeAwareColors#toEffectiveRgb}.
+         */
+        private static String formHandlersTextColor()
+        {
+            String color = formHandlersTextColor;
+            if (color == null)
+            {
+                org.eclipse.swt.graphics.RGB[] result = new org.eclipse.swt.graphics.RGB[1];
+                Runnable probe = () -> result[0] = ThemeAwareColors.toEffectiveRgb(FORM_HANDLERS_LIGHT_RGB);
+                if (Display.getCurrent() != null)
+                    probe.run();
+                else
+                    Display.getDefault().syncExec(probe);
+                org.eclipse.swt.graphics.RGB rgb = result[0];
+                formHandlersTextColor = color = String.format(java.util.Locale.ROOT, "#%02X%02X%02X",
+                    Integer.valueOf(rgb.red), Integer.valueOf(rgb.green), Integer.valueOf(rgb.blue));
+            }
+            return color;
+        }
+
+        /**
+         * Форма объекта метаданных по файлу её модуля. Содержимое формы ({@code form.model.Form})
+         * обратной ссылки на неё не имеет. Полное имя файла модуля длиннее имени формы (хвост —
+         * содержимое формы и модуль), а спуск по парам «тип.имя» на лишней паре даёт {@code null},
+         * поэтому укорачиваем по паре, пока не получим саму форму. Звать вне блокировки документа.
+         */
+        private static com._1c.g5.v8.dt.metadata.mdclass.BasicForm resolveBasicForm(
+            org.eclipse.emf.common.util.URI moduleUri)
+        {
+            if (moduleUri == null || !moduleUri.isPlatformResource())
+                return null;
+            org.eclipse.core.resources.IFile file =
+                org.eclipse.core.resources.ResourcesPlugin.getWorkspace().getRoot().getFile(
+                    new org.eclipse.core.runtime.Path(moduleUri.toPlatformString(true)));
+            com._1c.g5.v8.dt.core.platform.IV8Project v8project =
+                Global.getServiceByClass(com._1c.g5.v8.dt.core.platform.IV8ProjectManager.class)
+                    instanceof com._1c.g5.v8.dt.core.platform.IV8ProjectManager pm
+                        ? pm.getProject(file.getProject()) : null;
+            String fullName = v8project == null ? null : GoToDefinition.fullNameFromFile(file);
+            String[] parts = fullName == null ? new String[0] : fullName.split("\\.", -1);
+            EObject resolved = null;
+            for (int count = parts.length - parts.length % 2; count >= 2
+                && !(resolved instanceof com._1c.g5.v8.dt.metadata.mdclass.BasicForm); count -= 2)
+                resolved = GoToDefinition.resolveEObjectByQualifiedName(
+                    String.join(".", java.util.Arrays.copyOf(parts, count)), v8project);
+            return resolved instanceof com._1c.g5.v8.dt.metadata.mdclass.BasicForm basicForm ? basicForm : null;
+        }
+
+        private static void collectFormItemHandlerLinks(org.eclipse.emf.common.util.URI moduleUri,
+            List<com._1c.g5.v8.dt.form.model.FormItem> items, String methodName, List<String> links)
+        {
+            if (items == null)
+                return;
+            for (com._1c.g5.v8.dt.form.model.FormItem item : items)
+            {
+                collectFormHandlerLinks(moduleUri, item, item.getName(), item, methodName, links);
+                if (item instanceof com._1c.g5.v8.dt.form.model.FormItemContainer nested)
+                    collectFormItemHandlerLinks(moduleUri, nested.getItems(), methodName, links);
+            }
+        }
+
+        private static void collectFormHandlerLinks(org.eclipse.emf.common.util.URI moduleUri,
+            EObject target, String ownerName, Object owner, String methodName, List<String> links)
+        {
+            List<com._1c.g5.v8.dt.form.model.EventHandler> handlers = new ArrayList<>();
+            if (owner instanceof com._1c.g5.v8.dt.form.model.EventHandlerContainer container)
+                handlers.addAll(container.getHandlers());
+            // Обработчики элемента лежат и в extInfo (как в BslReferenceSearchTableHook.matchEventHandlers).
+            if (Global.invoke(owner, "getExtInfo") instanceof com._1c.g5.v8.dt.form.model.EventHandlerContainer extInfo)
+                handlers.addAll(extInfo.getHandlers());
+            for (com._1c.g5.v8.dt.form.model.EventHandler handler : handlers)
+            {
+                if (handler.getName() == null || !methodName.equalsIgnoreCase(handler.getName()))
+                    continue;
+                com._1c.g5.v8.dt.mcore.Event event = handler.getEvent();
+                String eventName = event == null ? ""
+                    : event.getNameRu() != null && !event.getNameRu().isEmpty() ? event.getNameRu()
+                    : event.getName() != null ? event.getName() : "";
+                String token = MethodDefinitionLink.registerFormHandler(() -> {
+                    org.eclipse.ui.IWorkbenchPage page = PlatformUI.getWorkbench().getActiveWorkbenchWindow() == null
+                        ? null : PlatformUI.getWorkbench().getActiveWorkbenchWindow().getActivePage();
+                    FormEditorHook.openFormEventHandler(page, resolveBasicForm(moduleUri), target, handler);
+                });
+                links.add("<a href=\"#\" onclick=\"comfortOpenMethodDefinition('" + token + "');return false;\">"
+                    + escapeHtml(ownerName == null ? "" : ownerName) + "</a>"
+                    + (eventName.isEmpty() ? "" : " (" + escapeHtml(eventName) + ")"));
+            }
+        }
+
+        private static String escapeHtml(String text)
+        {
+            return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
         }
 
         private String resolveHoverDirective(int offset)

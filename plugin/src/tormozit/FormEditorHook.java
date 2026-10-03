@@ -673,13 +673,9 @@ public class FormEditorHook implements IStartup
             IEditorPart existing = input != null ? workbenchPage.findEditor(input) : null;
             if (existing instanceof FormEditor editor)
             {
-                FormEditorPage formPage = findFormPage(editor);
-                if (formPage != null)
-                {
-                    editor.setActivePage(formPage.getId());
-                    workbenchPage.activate(editor);
-                    return editor;
-                }
+                // Только активируем: активная вкладка открытого редактора остаётся прежней.
+                workbenchPage.activate(editor);
+                return editor;
             }
             ISelection selection = ItemsTree.SelectionMemory.selectionForOpen(form);
             if (selection != null && input instanceof com._1c.g5.v8.dt.ui.editor.input.IDtEditorInput<?> dtInput)
@@ -814,6 +810,8 @@ public class FormEditorHook implements IStartup
                 requests.remove(key, target);
                 page.setSelection(component, true, target);
             }
+            // Элемент выбран — показываем его свойства (панель активируется после текущего события UI).
+            OpenHelperAttributePropertiesHook.scheduleActivateProperties();
             return true;
         }
     }
@@ -854,6 +852,17 @@ public class FormEditorHook implements IStartup
         awaitFormAttributeAndGoTo(workbenchPage, basicForm, sourceAttribute, generation, 0);
     }
 
+    /**
+     * Параметризованное открытие формы (к реквизиту, элементу, событию) обязано показать вкладку
+     * формы: редактор мог быть уже открыт на вкладке «Модуль», а {@code openEditor} её не переключает.
+     */
+    private static void activateFormPage(IEditorPart activeEditor, FormEditorPage page)
+    {
+        if (activeEditor instanceof FormEditor formEditor && page != null
+            && formEditor.getActivePageInstance() != page)
+            formEditor.setActivePage(page.getId());
+    }
+
     /** Общий переход к полю панели «Свойства» для колонок редакторов формы и метаданных. */
     static void focusPropertyField(IWorkbenchPage workbenchPage, List<String> labels)
     {
@@ -871,7 +880,10 @@ public class FormEditorHook implements IStartup
         IEditorPart activeEditor = workbenchPage.getActiveEditor();
         FormEditorPage page = activeEditor instanceof FormEditor editor ? findFormPage(editor) : null;
         Form model = page != null ? page.getModel() : null;
-        Tree tree = page != null && isRequestedForm(model, basicForm) ? getAttributesTree(page) : null;
+        boolean requested = page != null && isRequestedForm(model, basicForm);
+        if (requested)
+            activateFormPage(activeEditor, page);
+        Tree tree = requested ? getAttributesTree(page) : null;
         EObject actualSource = ContentUtil.getActualObject(sourceAttribute);
         MdObject metadata = actualSource instanceof MdObject mdObject ? mdObject : null;
         if (page != null && tree != null && !tree.isDisposed() && tree.getItemCount() > 0
@@ -902,11 +914,23 @@ public class FormEditorHook implements IStartup
      * то же, что двойной клик по колонке обработчиков дерева, но для заданного обработчика.
      *
      * @param owner {@link Form} или {@link FormItem} — объекты модели, не редактора: сверяются по URI
+     * @param basicForm нужна только для событий самой формы; элемент открывает {@link #openFormElement}
      */
     static void openFormEventHandler(IWorkbenchPage workbenchPage,
         com._1c.g5.v8.dt.metadata.mdclass.BasicForm basicForm, EObject owner, EventHandler handler)
     {
-        if (workbenchPage == null || basicForm == null || owner == null || handler == null)
+        if (workbenchPage == null || owner == null || handler == null)
+            return;
+        if (owner instanceof FormItem)
+        {
+            // Элемент выделяет только общий путь открытия (цель во входе редактора) — своё
+            // выделение после открытия затирается собственным выделением новой вкладки.
+            ++externalGoToGeneration;
+            if (openFormElement(workbenchPage, owner) != null)
+                ItemsTree.scheduleEventFocus(workbenchPage, ItemsTree.eventLabels(handler), true, 0);
+            return;
+        }
+        if (basicForm == null)
             return;
         int generation = ++externalGoToGeneration;
         try
@@ -929,7 +953,10 @@ public class FormEditorHook implements IStartup
         IEditorPart activeEditor = workbenchPage.getActiveEditor();
         FormEditorPage page = activeEditor instanceof FormEditor editor ? findFormPage(editor) : null;
         Form model = page != null ? page.getModel() : null;
-        TreeViewer viewer = isRequestedForm(model, basicForm)
+        boolean requested = isRequestedForm(model, basicForm);
+        if (requested)
+            activateFormPage(activeEditor, page);
+        TreeViewer viewer = requested
             && Global.getField(page, "itemsViewer") instanceof TreeViewer v ? v : null; //$NON-NLS-1$
         Object row = viewer != null && viewer.getContentProvider() != null
             ? ItemsTree.findOwnerRow(viewer, owner) : null;

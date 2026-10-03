@@ -87,6 +87,7 @@ public class Activator extends AbstractUIPlugin
         BslFormTypeContextEnrichment.installWeavingHook();
         BslHandlerBlankLineHook.installWeavingHook();
         ConfigSearchDialogHook.installWeavingHook();
+        DtGranularEditorHook.installWeavingHook();
         MdEditorTreeHook.installWeavingHook();
         MdEventHandlersPageHook.installWeavingHook();
         OpenHelperAttributePropertiesHook.installWeavingHook();

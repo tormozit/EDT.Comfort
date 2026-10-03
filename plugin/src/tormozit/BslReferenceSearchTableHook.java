@@ -167,7 +167,12 @@ public final class BslReferenceSearchTableHook implements IStartup
         {
             @Override public void partOpened(IWorkbenchPartReference ref) { tryFromRef(ref); }
             @Override public void partVisible(IWorkbenchPartReference ref) { tryFromRef(ref); }
-            @Override public void partActivated(IWorkbenchPartReference ref) { tryFromRef(ref); }
+            @Override public void partActivated(IWorkbenchPartReference ref)
+            {
+                tryFromRef(ref);
+                if (isSearchView(ref != null ? ref.getPart(false) : null))
+                    Display.getDefault().asyncExec(BslReferenceSearchTableHook::redirectFocusToTable);
+            }
             @Override public void partBroughtToTop(IWorkbenchPartReference r) {}
             @Override public void partClosed(IWorkbenchPartReference r) {}
             @Override public void partDeactivated(IWorkbenchPartReference r) {}
@@ -181,6 +186,24 @@ public final class BslReferenceSearchTableHook implements IStartup
                     schedulePatch((IViewPart)part, 0);
             }
         });
+    }
+
+    /**
+     * Штатная страница при активации панели ставит фокус на дерево, а оно в скрытом слое — фокус не
+     * берёт и остаётся в редакторе при активной панели «Поиск» (команды меню редактора гаснут).
+     * Отдаём фокус таблице.
+     */
+    private static void redirectFocusToTable()
+    {
+        IViewPart view = findSearchViewPart();
+        if (!(view instanceof ISearchResultViewPart searchView)
+            || !(Global.invoke(searchView.getActivePage(), "getViewer") instanceof TreeViewer treeViewer)) //$NON-NLS-1$
+            return;
+        Tree tree = treeViewer.getTree();
+        if (tree.isDisposed() || tree.getParent() == null
+            || !(tree.getParent().getData(HANDLED_KEY) instanceof ReferenceTablePane pane))
+            return;
+        pane.focusTable();
     }
 
     private static boolean isSearchView(Object part)
@@ -458,6 +481,12 @@ public final class BslReferenceSearchTableHook implements IStartup
             pane.wireListeners();
             pane.reload();
             return pane;
+        }
+
+        void focusTable()
+        {
+            if (!table.isDisposed() && table.isVisible() && !table.isFocusControl())
+                table.setFocus();
         }
 
         private void createColumns(TableColumnLayout columnLayout)

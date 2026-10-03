@@ -1038,7 +1038,18 @@ public class GoToDefinition extends AbstractHandler
         {
             IEditorPart editor;
             if (!hasSelection)
+            {
+                // Редактор уже открыт (не активный): только активируем, иначе openEditor
+                // переключает его на страницу по умолчанию и сбрасывает выбранную вкладку.
+                var input = helper.getEditorInput(mdObject, null, null);
+                IEditorPart existing = input != null ? page.findEditor(input) : null;
+                if (existing != null)
+                {
+                    page.activate(existing);
+                    return true;
+                }
                 editor = helper.openEditor(mdObject);
+            }
             else
             {
                 org.eclipse.emf.ecore.EStructuralFeature feature = selectionFeature(selection);

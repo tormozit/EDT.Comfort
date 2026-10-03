@@ -5,7 +5,9 @@ import java.security.ProtectionDomain;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiConsumer;
 
+import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.EObject;
+import org.eclipse.emf.ecore.util.EcoreUtil;
 import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.ui.IEditorPart;
@@ -86,9 +88,25 @@ public final class OpenHelperAttributePropertiesHook implements IStartup
      */
     public static void afterOpened(Object obj, Object selection)
     {
-        if (!isMdObjectAttribute(asEObject(obj)) && !isMdObjectAttribute(selectionFirst(selection)))
+        EObject opened = asEObject(obj);
+        EObject selected = selectionFirst(selection);
+        if (!isMdObjectAttribute(opened) && !isMdObjectAttribute(selected) && !isChildOf(opened, selected))
             return;
         scheduleActivateProperties();
+    }
+
+    /** Выделен дочерний элемент открываемого объекта (табличная часть, команда, макет и т.п.), не модуль. */
+    private static boolean isChildOf(EObject parent, EObject child)
+    {
+        if (parent == null || child == null || child instanceof com._1c.g5.v8.dt.bsl.model.Module)
+            return false;
+        URI parentUri = EcoreUtil.getURI(parent);
+        for (EObject current = child.eContainer(); current != null; current = current.eContainer())
+        {
+            if (current == parent || parentUri.equals(EcoreUtil.getURI(current)))
+                return true;
+        }
+        return false;
     }
 
     private static EObject asEObject(Object obj)

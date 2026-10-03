@@ -509,8 +509,9 @@ public class PropertySheetActivePropertyHook implements IStartup
 
         // Двухколоночная палитра: порядок viewModelToView не совпадает с парами «подпись→редактор».
         // Если ввод уже в редакторе, не угадывать свойство по карте — это давало чужую подпись
-        // из левой колонки и мигание подсветки.
-        if (PropertySheetControlInterop.hasFocusedEditorView(page))
+        // из левой колонки и мигание подсветки. Панель «Свойства» одноколоночная, там запасной
+        // путь верен и нужен: у полей обработчиков событий имя через FieldComponent не находится.
+        if (page instanceof IFormPage && PropertySheetControlInterop.hasFocusedEditorView(page))
             return null;
 
         // Запасной путь для одноколоночной палитры «Свойства» (LabelViewModel сразу перед редактором).
