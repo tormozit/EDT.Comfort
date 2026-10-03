@@ -50,7 +50,7 @@ import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 
 /**
  * Дополняет штатную вкладку «Команды» редактора объекта ({@code DtGranularEditorCommandsPage}):
- * под таблицей команд объекта показывает параметризуемые команды конфигурации, в типе
+ * под таблицей команд объекта показывает внешние параметризуемые команды конфигурации, в типе
  * параметра которых указан ссылочный тип объекта — прямо или через определяемый тип, в состав
  * которого он входит. Только просмотр; двойной клик или Enter открывает команду.
  *
@@ -438,7 +438,7 @@ public final class MdEditorObjectCommandsPageHook implements IStartup
                 MdEditorGlobalCommandsPageHook.GlobalCommandsPage.nameOf(a),
                 MdEditorGlobalCommandsPageHook.GlobalCommandsPage.nameOf(b)));
             viewer.setInput(rows);
-            title.setText("Параметризуемые команды: " + rows.size()); //$NON-NLS-1$
+            title.setText("Внешние параметризуемые команды: " + rows.size()); //$NON-NLS-1$
             parent.layout(true, true);
         }
 

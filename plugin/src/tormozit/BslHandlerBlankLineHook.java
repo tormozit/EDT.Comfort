@@ -1,87 +1,47 @@
 package tormozit;
 
-import java.lang.instrument.ClassFileTransformer;
-import java.security.ProtectionDomain;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.function.BiFunction;
-
+import org.eclipse.core.commands.ExecutionEvent;
+import org.eclipse.core.commands.ExecutionException;
+import org.eclipse.core.commands.IExecutionListener;
+import org.eclipse.core.commands.NotHandledException;
 import org.eclipse.jface.text.BadLocationException;
+import org.eclipse.swt.graphics.Point;
+import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IStartup;
+import org.eclipse.ui.IWorkbenchPage;
+import org.eclipse.ui.PlatformUI;
+import org.eclipse.ui.commands.ICommandService;
 import org.eclipse.xtext.ui.editor.model.IXtextDocument;
-import org.objectweb.asm.ClassReader;
-import org.objectweb.asm.ClassVisitor;
-import org.objectweb.asm.ClassWriter;
-import org.objectweb.asm.Label;
-import org.objectweb.asm.MethodVisitor;
-import org.objectweb.asm.Opcodes;
-import org.osgi.framework.Bundle;
-import org.osgi.framework.BundleContext;
-import org.osgi.framework.FrameworkUtil;
-import org.osgi.framework.hooks.weaving.WeavingHook;
-import org.osgi.framework.hooks.weaving.WovenClass;
 
-import com._1c.g5.v8.dt.bsl.common.IBslModuleTextInsertInfo;
+import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 
 /**
- * Пустая строка-разделитель перед создаваемым обработчиком события или подписки, как
- * в конфигураторе.
+ * Пустая строка-разделитель перед создаваемым обработчиком события, как в конфигураторе.
  *
- * <p>Штатная EDT вставляет процедуру вплотную к предыдущему методу. Общая точка —
- * {@code BslModuleRegionsInfoServiceProvider.wrap}: лупа в панели «Свойства», подписка,
- * схема модуля. Подмена поля сервиса не срабатывает (Guice отдаёт другой экземпляр, чем
- * уже внедрён в lookup) — поэтому {@code wrap} инструментируется ASM через {@code WeavingHook}
- * (агент — только запасной путь, если класс загрузился раньше): вызов через
- * {@code System.getProperties}, без зависимости {@code bsl.ui} → Комфорт.
+ * <p>Штатная EDT вставляет процедуру вплотную к предыдущему методу. Окно «Создать обработчик
+ * события» открывают команды формы {@code gotoEventHandler} / {@code gotoCommandEventHandler}
+ * (переход к обработчику события элемента или команды формы): они вставляют текст обычным
+ * {@code IXtextDocument.replace} и затем выделяют в нём заготовку {@code //TODO}.
+ * Подмена {@code BslModuleRegionsInfoServiceProvider.wrap} не работает: к моменту регистрации
+ * {@code WeavingHook} класс уже загружен. Поэтому после выполнения команды находим новый обработчик
+ * по выделенной заготовке и дописываем пустую строку отдельной правкой.
+ *
+ * <p>Для обработчика из схемы модуля разделитель добавляет
+ * {@link #ensureSeparatingBlankLineBeforeHandler} напрямую (см. {@code BslOutlineEventsSupport}).
  *
  * @see <a href="https://github.com/tormozit/EDT.Comfort/issues/394">issue 394</a>
  */
 public final class BslHandlerBlankLineHook implements IStartup
 {
-    static final String PROP_AFTER_WRAP = "tormozit.bslHandler.afterWrap"; //$NON-NLS-1$
-    private static final String TARGET =
-        "com._1c.g5.v8.dt.bsl.ui.event.BslModuleRegionsInfoServiceProvider"; //$NON-NLS-1$
-    private static final String TARGET_INTERNAL =
-        "com/_1c/g5/v8/dt/bsl/ui/event/BslModuleRegionsInfoServiceProvider"; //$NON-NLS-1$
-    private static final String WRAP_DESC =
-        "(Lcom/_1c/g5/v8/dt/bsl/common/IBslModuleTextInsertInfo;Ljava/lang/String;)Ljava/lang/String;"; //$NON-NLS-1$
-
-    private static final AtomicBoolean weavingHookInstalled = new AtomicBoolean();
-    private static volatile boolean woven;
-
-    /**
-     * Регистрация {@link WeavingHook}; как можно раньше из {@code Activator.start}.
-     * Instrumentation в EDT обычно недоступен (самоприсоединение агента запрещено),
-     * поэтому основной путь — {@code WeavingHook}.
-     */
-    public static void installWeavingHook()
-    {
-        if (!weavingHookInstalled.compareAndSet(false, true))
-            return;
-        System.getProperties().put(PROP_AFTER_WRAP,
-            (BiFunction<Object, Object, Object>) BslHandlerBlankLineHook::afterWrap);
-        Bundle bundle = FrameworkUtil.getBundle(BslHandlerBlankLineHook.class);
-        BundleContext context = bundle != null ? bundle.getBundleContext() : null;
-        if (context != null)
-            context.registerService(WeavingHook.class, new WrapWeavingHook(), null);
-    }
-
     @Override
     public void earlyStartup()
     {
-        installWeavingHook();
-        if (woven)
-            return;
-        // Класс мог загрузиться до регистрации WeavingHook — тогда остаётся только агент.
-        BslDocCommentDescriptionFix.registerExtraTransformer(new WrapTransformer(), TARGET);
-    }
-
-    /** Вызов из инструментированного {@code wrap}: {@code (insertInfo, content) → content}. */
-    public static Object afterWrap(Object insertInfo, Object contentObj)
-    {
-        String content = contentObj instanceof String s ? s : null;
-        int pos = insertInfo instanceof IBslModuleTextInsertInfo info ? info.getPosition() : -1;
-        String out = ensureSeparatingBlankLineBeforeHandler(documentOf(insertInfo), pos, content);
-        return out != null ? out : contentObj;
+        PlatformUI.getWorkbench().getDisplay().asyncExec(() ->
+        {
+            ICommandService commandService = PlatformUI.getWorkbench().getService(ICommandService.class);
+            if (commandService != null)
+                commandService.addExecutionListener(new GotoEventHandlerCommandListener());
+        });
     }
 
     /**
@@ -117,14 +77,6 @@ public final class BslHandlerBlankLineHook implements IStartup
         {
             return content;
         }
-    }
-
-    private static IXtextDocument documentOf(Object info)
-    {
-        if (info == null)
-            return null;
-        Object doc = Global.getField(info, "val$document"); //$NON-NLS-1$
-        return doc instanceof IXtextDocument d ? d : null;
     }
 
     private static boolean hasBlankLineBefore(IXtextDocument document, int offset) throws BadLocationException
@@ -198,115 +150,88 @@ public final class BslHandlerBlankLineHook implements IStartup
         return count;
     }
 
-    private static final class WrapTransformer implements ClassFileTransformer
+    private static final class GotoEventHandlerCommandListener implements IExecutionListener
     {
-        @Override
-        public byte[] transform(ClassLoader loader, String className, Class<?> classBeingRedefined,
-            ProtectionDomain protectionDomain, byte[] classfileBuffer)
-        {
-            if (!TARGET_INTERNAL.equals(className))
-                return null;
-            try
-            {
-                return transformWrap(classfileBuffer);
-            }
-            catch (Throwable t)
-            {
-                return null;
-            }
-        }
-    }
+        private static final String COMMAND_EVENT = "com._1c.g5.v8.dt.form.ui.commands.gotoEventHandler"; //$NON-NLS-1$
+        private static final String COMMAND_FORM_COMMAND =
+            "com._1c.g5.v8.dt.form.ui.commands.gotoCommandEventHandler"; //$NON-NLS-1$
 
-    private static final class WrapWeavingHook implements WeavingHook
-    {
-        @Override
-        public void weave(WovenClass wovenClass)
+        private static boolean isTarget(String commandId)
         {
-            if (wovenClass.getState() != WovenClass.TRANSFORMING || !TARGET.equals(wovenClass.getClassName()))
+            return COMMAND_EVENT.equals(commandId) || COMMAND_FORM_COMMAND.equals(commandId);
+        }
+
+        @Override
+        public void preExecute(String commandId, ExecutionEvent event)
+        {
+        }
+
+        @Override
+        public void postExecuteSuccess(String commandId, Object returnValue)
+        {
+            if (!isTarget(commandId))
                 return;
-            try
+            PlatformUI.getWorkbench().getDisplay().asyncExec(() ->
             {
-                byte[] transformed = transformWrap(wovenClass.getBytes());
-                if (transformed != null)
+                try
                 {
-                    wovenClass.setBytes(transformed);
-                    woven = true;
+                    fix();
                 }
-            }
-            catch (Throwable ignored)
-            {
-            }
-        }
-    }
-
-    static byte[] transformWrap(byte[] classfileBuffer)
-    {
-        ClassReader reader = new ClassReader(classfileBuffer);
-        ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_FRAMES)
-        {
-            @Override
-            protected String getCommonSuperClass(String type1, String type2)
-            {
-                return "java/lang/Object"; //$NON-NLS-1$
-            }
-        };
-        AtomicBoolean touched = new AtomicBoolean();
-        reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
-        {
-            @Override
-            public MethodVisitor visitMethod(int access, String name, String descriptor,
-                String signature, String[] exceptions)
-            {
-                MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
-                if (mv == null)
-                    return null;
-                if (!"wrap".equals(name) || !WRAP_DESC.equals(descriptor)) //$NON-NLS-1$
-                    return mv;
-                return new MethodVisitor(Opcodes.ASM9, mv)
+                catch (Throwable t)
                 {
-                    @Override
-                    public void visitInsn(int opcode)
-                    {
-                        if (opcode == Opcodes.ARETURN)
-                            emitAfterWrap(this, touched);
-                        super.visitInsn(opcode);
-                    }
-                };
-            }
-        }, ClassReader.EXPAND_FRAMES);
-        return touched.get() ? writer.toByteArray() : null;
-    }
+                    Global.logError("BslHandlerBlankLine", "fix", t); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+            });
+        }
 
-    /**
-     * Стек при {@code ARETURN}: {@code result}. Локальная 1 — {@code insertInfo}.
-     * Вызов {@code BiFunction.apply(insertInfo, result)} из {@link #PROP_AFTER_WRAP}.
-     */
-    private static void emitAfterWrap(MethodVisitor mv, AtomicBoolean touched)
-    {
-        mv.visitVarInsn(Opcodes.ALOAD, 1);
-        mv.visitInsn(Opcodes.SWAP);
-        mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", //$NON-NLS-1$ //$NON-NLS-2$
-            "()Ljava/util/Properties;", false); //$NON-NLS-1$
-        mv.visitLdcInsn(PROP_AFTER_WRAP);
-        mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", //$NON-NLS-1$ //$NON-NLS-2$
-            "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$
-        mv.visitInsn(Opcodes.DUP);
-        Label skip = new Label();
-        mv.visitTypeInsn(Opcodes.INSTANCEOF, "java/util/function/BiFunction"); //$NON-NLS-1$
-        mv.visitJumpInsn(Opcodes.IFEQ, skip);
-        mv.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/BiFunction"); //$NON-NLS-1$
-        mv.visitInsn(Opcodes.DUP_X2);
-        mv.visitInsn(Opcodes.POP);
-        mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BiFunction", "apply", //$NON-NLS-1$ //$NON-NLS-2$
-            "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$
-        mv.visitTypeInsn(Opcodes.CHECKCAST, "java/lang/String"); //$NON-NLS-1$
-        Label end = new Label();
-        mv.visitJumpInsn(Opcodes.GOTO, end);
-        mv.visitLabel(skip);
-        mv.visitInsn(Opcodes.POP);
-        mv.visitInsn(Opcodes.SWAP);
-        mv.visitInsn(Opcodes.POP);
-        mv.visitLabel(end);
-        touched.set(true);
+        @Override
+        public void postExecuteFailure(String commandId, ExecutionException exception)
+        {
+        }
+
+        @Override
+        public void notHandled(String commandId, NotHandledException exception)
+        {
+        }
+
+        private static boolean isMethodHeader(String trimmed)
+        {
+            return trimmed.startsWith("Процедура") || trimmed.startsWith("Функция") //$NON-NLS-1$ //$NON-NLS-2$
+                || trimmed.startsWith("Procedure") || trimmed.startsWith("Function"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        /** Только что созданный обработчик: EDT выделяет в нём заготовку {@code //TODO…}. */
+        private void fix() throws BadLocationException
+        {
+            IWorkbenchPage page = PlatformUI.getWorkbench().getActiveWorkbenchWindow() != null
+                ? PlatformUI.getWorkbench().getActiveWorkbenchWindow().getActivePage() : null;
+            IEditorPart part = page != null ? page.getActiveEditor() : null;
+            BslXtextEditor editor = part != null ? GetRef.getActiveBslEditor(part) : null;
+            IXtextDocument document = editor != null ? editor.getDocument() : null;
+            if (document == null)
+                return;
+            var viewer = editor.getInternalSourceViewer();
+            Point sel = viewer.getSelectedRange();
+            String selected = sel.y > 0 ? document.get(sel.x, sel.y) : ""; //$NON-NLS-1$
+            if (!selected.startsWith("//TODO")) //$NON-NLS-1$
+                return;
+            int line = document.getLineOfOffset(sel.x);
+            while (line > 0 && !isMethodHeader(document.get(document.getLineOffset(line),
+                document.getLineLength(line)).trim()))
+                line--;
+            while (line > 0 && document.get(document.getLineOffset(line - 1),
+                document.getLineLength(line - 1)).trim().startsWith("&")) //$NON-NLS-1$
+                line--;
+            int start = document.getLineOffset(line);
+            boolean needBlank = line > 0 && !hasBlankLineBefore(document, start);
+            if (!needBlank)
+                return;
+            String ld = document.getLineDelimiter(line - 1);
+            if (ld == null || ld.isEmpty())
+                ld = "\r\n"; //$NON-NLS-1$
+            document.replace(start, 0, ld);
+            viewer.setSelectedRange(sel.x + ld.length(), sel.y);
+            viewer.revealRange(sel.x + ld.length(), sel.y);
+        }
     }
 }

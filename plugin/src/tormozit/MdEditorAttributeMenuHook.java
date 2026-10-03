@@ -561,7 +561,7 @@ public final class MdEditorAttributeMenuHook implements IStartup
         return page.getClass().getName().endsWith("EditorCommandsPage"); //$NON-NLS-1$
     }
 
-    private static boolean isFunctionalOptionsPage(IFormPage page)
+    static boolean isFunctionalOptionsPage(IFormPage page)
     {
         if (page == null)
             return false;
@@ -571,7 +571,7 @@ public final class MdEditorAttributeMenuHook implements IStartup
         return page.getClass().getName().contains("FunctionalOptionsPage"); //$NON-NLS-1$
     }
 
-    private static boolean isRightsPage(IFormPage page)
+    static boolean isRightsPage(IFormPage page)
     {
         if (page == null)
             return false;
@@ -614,7 +614,7 @@ public final class MdEditorAttributeMenuHook implements IStartup
         return isObjectCommand(mapped) ? mapped : null;
     }
 
-    private static boolean isObjectCommand(EObject object)
+    static boolean isObjectCommand(EObject object)
     {
         return object instanceof BasicCommand && !(object instanceof CommonCommand);
     }
@@ -713,7 +713,7 @@ public final class MdEditorAttributeMenuHook implements IStartup
             || typeName.endsWith("Recalculation"); //$NON-NLS-1$
     }
 
-    private static String relativeName(EObject member, EObject owner)
+    static String relativeName(EObject member, EObject owner)
     {
         String fromFullName = relativeFromFullName(member, owner);
         if (fromFullName != null && !fromFullName.isBlank())
@@ -805,7 +805,7 @@ public final class MdEditorAttributeMenuHook implements IStartup
         return name instanceof String text && !text.isBlank() ? text : null;
     }
 
-    private static void revealOnFunctionalOptions(DtGranularEditor<?> editor, EObject member)
+    static void revealOnFunctionalOptions(DtGranularEditor<?> editor, EObject member)
     {
         if (editor == null || member == null)
             return;
@@ -992,7 +992,7 @@ public final class MdEditorAttributeMenuHook implements IStartup
         return null;
     }
 
-    private static void revealOnRights(DtGranularEditor<?> editor, String relativeName)
+    static void revealOnRights(DtGranularEditor<?> editor, String relativeName)
     {
         if (editor == null || relativeName == null || relativeName.isBlank())
             return;
@@ -1137,7 +1137,7 @@ public final class MdEditorAttributeMenuHook implements IStartup
         return null;
     }
 
-    private static IFormPage findPage(DtGranularEditor<?> editor, Predicate<IFormPage> match)
+    static IFormPage findPage(DtGranularEditor<?> editor, Predicate<IFormPage> match)
     {
         if (editor == null || match == null)
             return null;
@@ -1249,7 +1249,7 @@ public final class MdEditorAttributeMenuHook implements IStartup
     }
 
     /** Те же картинки, что у вкладок «Функц. опции» / «Права» в редакторе объекта. */
-    private static Image mdImage(String key)
+    static Image mdImage(String key)
     {
         if (key == null)
             return null;

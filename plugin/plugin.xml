@@ -124,6 +124,7 @@
     <startup class="tormozit.NavigatorRevealDropHook"/>
     <startup class="tormozit.NavigatorCopyProjectMenuHook"/>
     <startup class="tormozit.NavigatorRecomputeChecksMenuHook"/>
+    <startup class="tormozit.NavigatorCommandMenuHook"/>
     <startup class="tormozit.OpenHelperAttributePropertiesHook"/>
     <startup class="tormozit.NavigatorAttributePropertiesHook"/>
     <startup class="tormozit.NavigatorCopyTextAugmentHook"/>

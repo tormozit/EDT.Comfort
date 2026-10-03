@@ -7996,7 +7996,10 @@ public class FormEditorHook implements IStartup
 
         static void install()
         {
-            trackFormEditors(editor -> attach(editor, 0));
+            trackFormEditors(editor -> {
+                SelectionMemory.primePage(editor);
+                attach(editor, 0);
+            });
         }
 
         private static void attach(FormEditor editor, int attempt)
@@ -10448,6 +10451,66 @@ public class FormEditorHook implements IStartup
                     }
                 }
                 return null;
+            }
+
+            /** Редакторы, на которые уже поставлен слушатель {@link #primePage}. */
+            private static final java.util.Set<FormEditor> PRIMED =
+                java.util.Collections.newSetFromMap(new WeakHashMap<>());
+
+            /**
+             * Подменяет корень «Форма» запомненным элементом в выделении страницы, пока страница
+             * строит свои контролы — чтобы штатный отложенный переход выбрал сразу нужную строку.
+             *
+             * <p>При построении контролов EDT выбирает в дереве корень, и
+             * {@code ForwardsToGlobalSelectionListener} записывает его в выделение страницы
+             * ({@code DtGranularEditorPage.activeSelection}). Сразу после построения страница читает
+             * это выделение и ставит в очередь {@code asyncExec} свой {@code gotoSelection} с ним;
+             * задача выполняется уже после {@link #install} и затирала восстановленную строку корнем
+             * (лог 03.10.2026: сброс через 1,4 с после установки).
+             *
+             * <p>Вмешаться между записью и чтением позволяет то, что
+             * {@code page.setActiveSelection} синхронно зовёт {@code DtGranularEditor.setActiveSelection},
+             * а тот — {@code firePropertyChange(PROP_INPUT)}. Слушатель работает только до подключения
+             * плагина к дереву: дальше корень — уже выбор пользователя.
+             */
+            static void primePage(FormEditor editor)
+            {
+                if (!PRIMED.add(editor))
+                    return;
+                editor.addPropertyListener(new org.eclipse.ui.IPropertyListener()
+                {
+                    @Override
+                    public void propertyChanged(Object source, int propId)
+                    {
+                        if (propId != org.eclipse.ui.IEditorPart.PROP_INPUT)
+                            return;
+                        try
+                        {
+                            FormEditorPage page = findFormPage(editor);
+                            if (page == null)
+                                return;
+                            if (Global.getField(page, "itemsViewer") instanceof TreeViewer viewer //$NON-NLS-1$
+                                && viewer.getTree() != null && !viewer.getTree().isDisposed()
+                                && viewer.getTree().getData(KEY_HOOKED) != null)
+                            {
+                                editor.removePropertyListener(this);
+                                return;
+                            }
+                            Object current = Global.getField(page, "activeSelection"); //$NON-NLS-1$
+                            boolean root = current instanceof IStructuredSelection structured
+                                && structured.getFirstElement() instanceof Form;
+                            ISelection remembered = root && !FormElementOpening.hasPending(editor, page)
+                                ? selectionForOpen(editor.getForm()) : null;
+                            if (remembered != null)
+                                page.setActiveSelection(remembered,
+                                    com._1c.g5.v8.dt.ui.editor.DtEditorSelectionProcessingPolicy.Immediate);
+                        }
+                        catch (Exception e)
+                        {
+                            Global.logError("FormEditorHook.SelectionMemory", "primePage", e); //$NON-NLS-1$ //$NON-NLS-2$
+                        }
+                    }
+                });
             }
 
             static void install(FormEditor editor, FormEditorPage page, TreeViewer viewer, Tree tree)

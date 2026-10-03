@@ -36,8 +36,8 @@ import com._1c.g5.v8.dt.ui.dialog.ListItemSelectionDialog;
  * (обычная и общая форма) в навигаторе EDT, в дереве категории «Формы»
  * редактора объекта метаданных и в многоцелевом диалоге выбора
  * ({@link ListItemSelectionDialog}, например выбор общей формы в свойстве).
- * Берётся первый фрагмент русского имени типа до точки, например
- * «СправочникОбъект.Номенклатура» → «СправочникОбъект».
+ * Берётся первый фрагмент русского имени типа до точки в короткой форме, например
+ * «СправочникОбъект.Номенклатура» → «Объект», «ДинамическийСписок» → «Список».
  */
 public final class FormMainAttributeTypeDecorator extends LabelProvider implements ILightweightLabelDecorator, IStartup
 {
@@ -47,6 +47,9 @@ public final class FormMainAttributeTypeDecorator extends LabelProvider implemen
     private static final String SUFFIX_PATCHED_DATA = "tormozit.formMainAttributeTypeSuffixPatched"; //$NON-NLS-1$
     private static final String WINDOW_KEY = "org.eclipse.jface.window.Window"; //$NON-NLS-1$
     private static final String NONE = ""; //$NON-NLS-1$
+    private static final String DYNAMIC_LIST = "ДинамическийСписок"; //$NON-NLS-1$
+    private static final String LIST = "Список"; //$NON-NLS-1$
+    private static final String OBJECT = "Объект"; //$NON-NLS-1$
 
     private static final ConcurrentHashMap<String, String> SUFFIX_CACHE = new ConcurrentHashMap<>();
 
@@ -328,9 +331,22 @@ public final class FormMainAttributeTypeDecorator extends LabelProvider implemen
             int dot = typeName.indexOf('.');
             String fragment = dot > 0 ? typeName.substring(0, dot) : typeName;
             if (!fragment.isBlank())
-                return fragment;
+                return shortenFragment(fragment);
         }
         return null;
+    }
+
+    /**
+     * Короткая форма фрагмента типа: вид объекта метаданных виден по месту формы в дереве,
+     * поэтому «СправочникОбъект», «ДокументОбъект» и т.п. → «Объект», «ДинамическийСписок» → «Список».
+     */
+    private static String shortenFragment(String fragment)
+    {
+        if (fragment.equals(DYNAMIC_LIST))
+            return LIST;
+        if (fragment.endsWith(OBJECT))
+            return OBJECT;
+        return fragment;
     }
 
     static String withSuffix(String text, Object element)
