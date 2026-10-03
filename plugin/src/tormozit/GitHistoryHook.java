@@ -1060,6 +1060,8 @@ public final class GitHistoryHook implements IStartup
             });
         interaction.setOwnerDrawColumns(fileCol, typeCol, pathCol, statusCol);
         interaction.setColumnReorderEnabled(true);
+        // «Статус» — узкая колонка из символов: авто-заполнение её ширину не трогает.
+        interaction.setFixedWidthColumns(i -> i == COL_STATUS);
         // Отбор/«Различные значения колонки» работают по ЭЛЕМЕНТУ модели (FileDiff), а не по
         // TableItem — тот же расчёт, что и в GitHistoryFileLabelProvider.update() для колонок
         // «Тип»/«Путь» (там же — только пишется в ViewerCell, а не возвращается строкой). Без

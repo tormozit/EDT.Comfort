@@ -175,6 +175,7 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
     private int suppressTableToViewerSync;
     private TableColumn activeColumnWidget;
     private boolean columnReorderEnabled = true;
+    private java.util.function.IntPredicate fixedWidthColumns;
     private boolean headerSortEnabled;
     private TableColumn headerSortColumn;
     private boolean headerSortAscending = true;
@@ -683,6 +684,15 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
     void setColumnReorderEnabled(boolean columnReorderEnabled)
     {
         this.columnReorderEnabled = columnReorderEnabled;
+    }
+
+    /**
+     * Колонки (по индексу в порядке создания), которые авто-заполнение по ширине не трогает —
+     * см. {@link ColumnWidthFit.Columns#fixedWidth}. {@code null} — таких колонок нет.
+     */
+    void setFixedWidthColumns(java.util.function.IntPredicate fixedWidthColumns)
+    {
+        this.fixedWidthColumns = fixedWidthColumns;
     }
 
     /**
@@ -2539,7 +2549,7 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
     /** Доступ к колонкам таблицы для общего расчёта ширин ({@link ColumnWidthFit}). */
     private ColumnWidthFit.Columns columnAccess()
     {
-        return new ColumnWidthFit.TableColumns(table, i -> isHiddenColumn(table.getColumn(i)));
+        return new ColumnWidthFit.TableColumns(table, i -> isHiddenColumn(table.getColumn(i)), fixedWidthColumns);
     }
 
     /** Запомнить текущие ширины колонок (визуальный порядок) — база до-драг снимка для следующей серии. */
