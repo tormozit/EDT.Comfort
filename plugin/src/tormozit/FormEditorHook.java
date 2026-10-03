@@ -8208,8 +8208,8 @@ public class FormEditorHook implements IStartup
             // Ширины — общий механизм плагина: колонки занимают всю клиентскую область и
             // переживают ресайз панели (issue #273). Добавленные колонки из перераспределения
             // исключены: их ширину задаёт пользователь и она запоминается, а весь свободный
-            // остаток забирает колонка «Элемент».
-            ColumnAutoFit.install(tree, null, index -> index != COLUMN_NAME);
+            // остаток делят колонки «Элемент» и «Заголовок» (текстовые, остальные — узкие значки).
+            ColumnAutoFit.install(tree, null, index -> index != COLUMN_NAME && index != COLUMN_TITLE);
             // Клик по ячейке добавленных колонок штатное дерево не считает выбором строки:
             // оно создано без SWT.FULL_SELECTION.
             FormTreeInteraction interaction = FormTreeInteraction.install(tree, viewer);
