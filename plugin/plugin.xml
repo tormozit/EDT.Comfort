@@ -185,6 +185,7 @@
     <startup class="tormozit.ModuleMergeStructureFilterHook"/>
     <startup class="tormozit.FilteredListDialogFilterHook"/>
     <startup class="tormozit.ListItemSelectionDialogFilterHook"/>
+    <startup class="tormozit.DataPathDialogHook"/>
     <startup class="tormozit.SyntaxAssistHook"/>
     <startup class="tormozit.NewAttributeNameIdentifierHook"/>
     <startup class="tormozit.PropertyNameIdentifierHook"/>

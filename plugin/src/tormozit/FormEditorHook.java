@@ -2543,8 +2543,8 @@ public class FormEditorHook implements IStartup
     /**
      * Узел реквизитов формы со ссылочным типом значения: категория оканчивается на «Ссылка»
      * ({@code СправочникСсылка}, {@code ДокументСсылка}, {@code ЛюбаяСсылка}) или англ. {@code Ref}
-     * ({@code CatalogRef}, {@code AnyRef}). Рекурсивный обход дерева реквизитов в такие узлы не
-     * спускается: ссылка на тот же объект дала бы бесконечный спуск.
+     * ({@code CatalogRef}, {@code AnyRef}), либо тип {@code Характеристика.*}. Рекурсивный обход
+     * дерева реквизитов в такие узлы не спускается: ссылка на тот же объект дала бы бесконечный спуск.
      */
     public static boolean isFormAttributeReferenceNode(Object element)
     {
@@ -2630,14 +2630,17 @@ public class FormEditorHook implements IStartup
     /** Ссылочная категория типа оканчивается на «Ссылка» ({@code СправочникСсылка},
      * {@code ДокументСсылка}, {@code ЛюбаяСсылка}) или англ. {@code Ref}
      * ({@code CatalogRef}, {@code AnyRef}). Имя объекта после точки не важно — спускаться в
-     * реквизиты ссылочного типа нельзя в любом случае. */
+     * реквизиты ссылочного типа нельзя в любом случае. К ссылочным приравнен и тип
+     * {@code Характеристика.*} ({@code Characteristic.*}) — тип значения характеристики плана
+     * видов характеристик: в его составе те же ссылки. */
     private static boolean matchesReferenceTypeMask(String typeName)
     {
         if (typeName == null || typeName.isEmpty())
             return false;
         int dot = typeName.indexOf('.');
         String category = dot < 0 ? typeName : typeName.substring(0, dot);
-        return category.endsWith("Ссылка") || category.endsWith("Ref"); //$NON-NLS-1$ //$NON-NLS-2$
+        return category.endsWith("Ссылка") || category.endsWith("Ref") //$NON-NLS-1$ //$NON-NLS-2$
+            || "Характеристика".equals(category) || "Characteristic".equals(category); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private static List<PropertyInfo> buildPropertyInfoChain(PropertyInfo anchor, PropertyInfo leaf)

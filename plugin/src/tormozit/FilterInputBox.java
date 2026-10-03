@@ -150,7 +150,10 @@ final class FilterInputBox
             "comfort.syntaxAssistSearch.filter.history."), //$NON-NLS-1$
         LIST_ITEM_SELECTION_DIALOG(
             "comfort.listItemSelectionDialog.filter.history.count", //$NON-NLS-1$
-            "comfort.listItemSelectionDialog.filter.history."); //$NON-NLS-1$
+            "comfort.listItemSelectionDialog.filter.history."), //$NON-NLS-1$
+        DATA_PATH_DIALOG(
+            "comfort.dataPathDialog.filter.history.count", //$NON-NLS-1$
+            "comfort.dataPathDialog.filter.history."); //$NON-NLS-1$
 
         final String prefCountKey;
         final String prefItemPrefix;
@@ -398,6 +401,17 @@ final class FilterInputBox
         return create(parent, opts, onSearch);
     }
 
+    /** Замена штатного поля в диалоге выбора пути к данным элемента формы — см. {@code DataPathDialogHook}. */
+    static FilterInputBox forDataPathDialog(Composite parent, Runnable onSearch)
+    {
+        Options opts = new Options();
+        opts.scope = Scope.DATA_PATH_DIALOG;
+        opts.layoutData = compactLayoutData();
+        opts.message = "Фильтр..."; //$NON-NLS-1$
+        opts.tooltip = FLAT_FILTER_TOOLTIP;
+        return create(parent, opts, onSearch);
+    }
+
     /**
      * Заменяет штатное поле паттерна в диалоге EDT на {@link SearchBox} с историей. Принимает
      * любой {@link Control} с текстом ({@link Text} или {@link StyledText}, в т.ч. потомки вроде
@@ -500,6 +514,7 @@ final class FilterInputBox
             case GIT_HISTORY -> forGitHistory(parent, onSearch);
             case FILTERED_LIST_DIALOG -> forFilteredListDialog(parent, onSearch);
             case LIST_ITEM_SELECTION_DIALOG -> forListItemSelectionDialog(parent, onSearch);
+            case DATA_PATH_DIALOG -> forDataPathDialog(parent, onSearch);
             case DEFINED_TYPES -> forDefinedTypes(parent, onSearch);
             case FORM_ITEMS -> forFormItems(parent, onSearch);
             case GLOBAL_COMMANDS -> forGlobalCommands(parent, onSearch);
