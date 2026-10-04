@@ -87,6 +87,17 @@ final class ColumnWidthFit
             return false;
         }
 
+        /**
+         * Получает ли колонка место, освободившееся при перетаскивании границы колонки левее влево.
+         * По умолчанию — любая не {@link #fixedWidth фиксированная}. Нужно колонке, которая в
+         * авто-заполнении не участвует (её ширина запоминается), но является естественным приёмником
+         * освободившегося места при ручном перетаскивании («Заголовок» в дереве элементов формы).
+         */
+        default boolean takesFreedSpace(int index)
+        {
+            return !fixedWidth(index);
+        }
+
         int clientWidth();
 
         /** Индексы колонок (в порядке создания) в ВИЗУАЛЬНОМ порядке — {@code getColumnOrder()} контрола. */
@@ -294,20 +305,37 @@ final class ColumnWidthFit
         private final Tree tree;
         private final IntPredicate excluded;
         private final IntPredicate fixedWidth;
+        private final IntPredicate takesFreedSpace;
         private final WidthBatch batch = new WidthBatch();
 
         /** @param excluded см. {@link TableColumns#TableColumns(Table, IntPredicate)}. */
         TreeColumns(Tree tree, IntPredicate excluded)
         {
-            this(tree, excluded, null);
+            this(tree, excluded, null, null);
         }
 
         /** @param fixedWidth см. {@link Columns#fixedWidth}; {@code null} — таких колонок нет. */
         TreeColumns(Tree tree, IntPredicate excluded, IntPredicate fixedWidth)
         {
+            this(tree, excluded, fixedWidth, null);
+        }
+
+        /**
+         * @param takesFreedSpace см. {@link Columns#takesFreedSpace}; {@code null} — по умолчанию
+         *            (любая не фиксированная).
+         */
+        TreeColumns(Tree tree, IntPredicate excluded, IntPredicate fixedWidth, IntPredicate takesFreedSpace)
+        {
             this.tree = tree;
             this.excluded = excluded;
             this.fixedWidth = fixedWidth;
+            this.takesFreedSpace = takesFreedSpace;
+        }
+
+        @Override
+        public boolean takesFreedSpace(int index)
+        {
+            return takesFreedSpace != null ? takesFreedSpace.test(index) : !fixedWidth(index);
         }
 
         @Override
@@ -611,7 +639,7 @@ final class ColumnWidthFit
                 // отсутствующие пиксели.
                 resizableTarget -= columns.width(index);
             }
-            else if (columns.resizable(index) && !(effectiveDelta < 0 && columns.fixedWidth(index)))
+            else if (columns.resizable(index) && !(effectiveDelta < 0 && !columns.takesFreedSpace(index)))
             {
                 // Освободившееся место (effectiveDelta < 0) фиксированной колонке не отдаём: она растёт
                 // только по решению пользователя; сужаться вместе с прочими при росте левой границы может.

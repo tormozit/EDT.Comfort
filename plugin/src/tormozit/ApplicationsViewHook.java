@@ -73,6 +73,7 @@ import org.eclipse.swt.widgets.ToolBar;
 import org.eclipse.swt.widgets.ToolItem;
 import org.eclipse.swt.widgets.TableItem;
 import org.eclipse.swt.widgets.Tree;
+import org.eclipse.swt.widgets.TreeColumn;
 import org.eclipse.swt.widgets.TreeItem;
 import org.eclipse.e4.ui.model.application.ui.basic.MPart;
 import org.eclipse.e4.ui.model.application.ui.menu.MHandledMenuItem;
@@ -826,6 +827,8 @@ public class ApplicationsViewHook implements IStartup
                 tvc.getColumn().setToolTipText(col.tooltip + Global.pluginSignForTooltip());
             tvc.getColumn().setWidth(col.fixedWidth > 0 ? col.fixedWidth : headerTextWidth(tree, col.title));
             tvc.getColumn().setResizable(col.resizable);
+            if (col == Column.DYN_AUTO)
+                tvc.getColumn().setData(DYN_AUTO_COLUMN_KEY, Boolean.TRUE);
             tvc.setLabelProvider(makeLabelProvider(col, origProvider));
             if (col == Column.AUTO)
                 tvc.setEditingSupport(makeAutoEditingSupport(viewer));
@@ -835,6 +838,34 @@ public class ApplicationsViewHook implements IStartup
 
         tree.setHeaderVisible(true);
         ThemeAwareColors.applyGridLines(tree);
+        updateDynAutoColumnVisibility(tree);
+    }
+
+    private static final String DYN_AUTO_COLUMN_KEY = "tormozit.applications.dynAutoColumn"; //$NON-NLS-1$
+
+    /** Колонка «Дин. обновление ИР» видна, только когда ИР подключён хотя бы к одной базе. */
+    private static void updateDynAutoColumnVisibility(Tree tree)
+    {
+        if (tree == null || tree.isDisposed())
+            return;
+        boolean show = IRApplication.getInstance().isAnyConnected();
+        for (TreeColumn column : tree.getColumns())
+        {
+            if (!Boolean.TRUE.equals(column.getData(DYN_AUTO_COLUMN_KEY)))
+                continue;
+            if (show)
+            {
+                column.setResizable(Column.DYN_AUTO.resizable);
+                if (column.getWidth() == 0)
+                    column.setWidth(headerTextWidth(tree, Column.DYN_AUTO.title));
+            }
+            else
+            {
+                column.setResizable(false);
+                if (column.getWidth() != 0)
+                    column.setWidth(0);
+            }
+        }
     }
 
     /** Запас на внутренние отступы заголовка колонки (Windows-тема), px. */
@@ -2186,7 +2217,13 @@ public class ApplicationsViewHook implements IStartup
     private void registerRedrawOnIrChange(ColumnViewer viewer)
     {
         IRApplication ir = IRApplication.getInstance();
-        Runnable r = () -> Display.getDefault().asyncExec(() -> safeRefresh(viewer));
+        Runnable r = () -> Display.getDefault().asyncExec(() ->
+        {
+            Control c = viewer.getControl();
+            if (c instanceof Tree t)
+                updateDynAutoColumnVisibility(t);
+            safeRefresh(viewer);
+        });
         ir.addChangeListener(r);
         viewer.getControl().addDisposeListener(e -> ir.removeChangeListener(r));
     }

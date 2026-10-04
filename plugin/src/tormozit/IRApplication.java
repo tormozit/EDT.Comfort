@@ -107,6 +107,17 @@ public final class IRApplication
         return s != null && s.state == State.CONNECTED;
     }
 
+    /** Подключено ли приложение ИР хотя бы к одной базе. */
+    public boolean isAnyConnected()
+    {
+        for (IRSession s : sessions.values())
+        {
+            if (s.state == State.CONNECTED)
+                return true;
+        }
+        return false;
+    }
+
     public boolean isConnecting(InfobaseReference infobase)
     {
         IRSession s = findSession(infobase);

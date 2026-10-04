@@ -8208,8 +8208,11 @@ public class FormEditorHook implements IStartup
             // Ширины — общий механизм плагина: колонки занимают всю клиентскую область и
             // переживают ресайз панели (issue #273). Добавленные колонки из перераспределения
             // исключены: их ширину задаёт пользователь и она запоминается, а весь свободный
-            // остаток делят колонки «Элемент» и «Заголовок» (текстовые, остальные — узкие значки).
-            ColumnAutoFit.install(tree, null, index -> index != COLUMN_NAME && index != COLUMN_TITLE);
+            // остаток забирает колонка «Элемент». «Заголовок» в авто-заполнении не участвует (его
+            // ширина запоминается), но при перетаскивании границы «Элемента» влево получает освободившееся
+            // место — иначе справа остаётся пустая полоса.
+            ColumnAutoFit.install(tree, null, index -> index != COLUMN_NAME, index -> index == COLUMN_TITLE);
+            applyDefaultNameWidth(tree);
             // Клик по ячейке добавленных колонок штатное дерево не считает выбором строки:
             // оно создано без SWT.FULL_SELECTION.
             FormTreeInteraction interaction = FormTreeInteraction.install(tree, viewer);
@@ -8637,6 +8640,37 @@ public class FormEditorHook implements IStartup
             String key = WIDTH_KEYS[index];
             int fallback = index == COLUMN_TITLE ? WIDTH_TITLE_START : minimalColumnWidth(tree);
             return FormTableColumnState.readWidth(widthSettings(), key, fallback, MIN_WIDTH);
+        }
+
+        /**
+         * Ширины по умолчанию, пока пользователь свою не выставлял: «Элемент» занимает 2/3 клиентской
+         * области, остаток после добавленных значковых колонок — «Заголовок». Один раз, по первой
+         * известной ширине дерева (при создании колонок она ещё нулевая).
+         */
+        private static void applyDefaultNameWidth(Tree tree)
+        {
+            if (widthSettings().get(WIDTH_KEYS[COLUMN_TITLE]) != null)
+                return;
+            Listener[] once = new Listener[1];
+            once[0] = event ->
+            {
+                if (tree.isDisposed())
+                    return;
+                int client = tree.getClientArea().width;
+                if (client <= 0 || tree.getColumnCount() <= COLUMN_LAST)
+                    return;
+                tree.removeListener(SWT.Resize, once[0]);
+                tree.removeListener(SWT.Paint, once[0]);
+                int nameWidth = client * 2 / 3;
+                int others = 0;
+                for (int index = COLUMN_HANDLERS; index <= COLUMN_LAST; index++)
+                    others += tree.getColumn(index).getWidth();
+                int titleWidth = Math.max(MIN_WIDTH, client - nameWidth - others);
+                tree.getColumn(COLUMN_NAME).setWidth(client - titleWidth - others);
+                tree.getColumn(COLUMN_TITLE).setWidth(titleWidth);
+            };
+            tree.addListener(SWT.Resize, once[0]);
+            tree.addListener(SWT.Paint, once[0]);
         }
 
         /** Ширина под три символа текущего шрифта дерева, но не уже значка в шапке. */

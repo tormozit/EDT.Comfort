@@ -75,10 +75,11 @@ final class ColumnAutoFit
     /** Последние известные ширины (визуальный порядок) — снимок до начала перетаскивания. */
     private int[] lastKnownVisualWidths;
 
-    private ColumnAutoFit(Tree tree, ToIntFunction<Tree> widthBudget, IntPredicate fixedWidth)
+    private ColumnAutoFit(Tree tree, ToIntFunction<Tree> widthBudget, IntPredicate fixedWidth,
+        IntPredicate takesFreedSpace)
     {
         this.tree = tree;
-        this.columns = new ColumnWidthFit.TreeColumns(tree, null, fixedWidth);
+        this.columns = new ColumnWidthFit.TreeColumns(tree, null, fixedWidth, takesFreedSpace);
         this.widthBudget = widthBudget;
         this.resizeListener = e -> fit();
         this.columnResizeListener = e ->
@@ -129,11 +130,23 @@ final class ColumnAutoFit
      */
     static ColumnAutoFit install(Tree tree, ToIntFunction<Tree> widthBudget, IntPredicate fixedWidth)
     {
+        return install(tree, widthBudget, fixedWidth, null);
+    }
+
+    /**
+     * @param takesFreedSpace колонки, получающие место, освободившееся при перетаскивании границы влево
+     *            (см. {@link ColumnWidthFit.Columns#takesFreedSpace}); {@code null} — любая не
+     *            фиксированная. Позволяет фиксированной (для авто-заполнения) колонке быть приёмником
+     *            при ручном перетаскивании.
+     */
+    static ColumnAutoFit install(Tree tree, ToIntFunction<Tree> widthBudget, IntPredicate fixedWidth,
+        IntPredicate takesFreedSpace)
+    {
         if (tree == null || tree.isDisposed())
             return null;
         if (tree.getData(INSTALLED_KEY) instanceof ColumnAutoFit existing)
             return existing;
-        ColumnAutoFit autoFit = new ColumnAutoFit(tree, widthBudget, fixedWidth);
+        ColumnAutoFit autoFit = new ColumnAutoFit(tree, widthBudget, fixedWidth, takesFreedSpace);
         tree.setData(INSTALLED_KEY, autoFit);
         tree.addListener(SWT.Resize, autoFit.resizeListener);
         tree.addListener(SWT.Paint, autoFit.paintListener);
