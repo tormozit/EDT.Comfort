@@ -91,12 +91,27 @@ final class TableExHeaderAccent
         if (accent.header == null || accent.data == null)
             return;
         table.setData(ATTACHED_KEY, Boolean.TRUE);
+        accent.header.addListener(SWT.MouseUp, accent::restoreHeaderBorders);
         accent.header.addListener(SWT.Paint, accent::paintHeader);
         // Смена текущей ячейки всегда перерисовывает данные (у ячейки меняется фон), поэтому
         // отрисовка данных — единая точка, где замечаем смену колонки: и мышь, и клавиши,
         // и программное выделение.
         accent.data.addListener(SWT.Paint, event -> accent.syncHeader());
         accent.data.addListener(SWT.Selection, event -> accent.syncHeader());
+    }
+
+    private void restoreHeaderBorders(Event event)
+    {
+        if (event.button != 1)
+            return;
+        // TableEx$4 после Resize/Layout заменяет правильную координату последней
+        // границы на event.x. Layout при этом перераспределяет ширины остальных
+        // колонок: в логе граница 1128 была заменена на 1099. После завершения
+        // перетаскивания возвращаем координаты из фактических ширин штатным API.
+        table.fillBorders();
+        // fillBorders сбрасывает разрешения границ; возвращаем ограничения
+        // текущего поля и объединения ячеек многоэтажной шапки штатным API.
+        table.updateHeader();
     }
 
     private void syncHeader()

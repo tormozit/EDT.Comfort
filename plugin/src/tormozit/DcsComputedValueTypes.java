@@ -29,6 +29,7 @@ import org.eclipse.swt.graphics.Font;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.widgets.Composite;
+import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 
 import com._1c.g5.v8.bm.core.event.BmChangeEvent;
@@ -43,6 +44,7 @@ import com._1c.g5.v8.dt.dcs.model.schema.DataCompositionSchemaDataSetField;
 import com._1c.g5.v8.dt.dcs.model.schema.DataCompositionSchemaDataSetObject;
 import com._1c.g5.v8.dt.dcs.model.schema.DataCompositionSchemaDataSetQuery;
 import com._1c.g5.v8.dt.dcs.model.schema.DataCompositionSchemaDataSetUnion;
+import com._1c.g5.v8.dt.dcs.model.schema.DataCompositionSchemaParameter;
 import com._1c.g5.v8.dt.dcs.model.schema.DataSet;
 import com._1c.g5.v8.dt.dcs.model.schema.DataSetField;
 import com._1c.g5.v8.dt.dcs.path.DcsPath;
@@ -54,6 +56,7 @@ import com._1c.g5.v8.dt.dcs.ui.EditorPage;
 import com._1c.g5.v8.dt.mcore.TypeDescription;
 import com._1c.g5.v8.dt.mcore.TypeItem;
 import com._1c.g5.v8.dt.mcore.util.McoreUtil;
+import com._1c.g5.v8.dt.md.ui.shared.MdUiSharedImages;
 import com._1c.g5.v8.dt.platform.version.Version;
 import com._1c.g5.v8.dt.ql.typesystem.TypeDescriptionSource;
 
@@ -105,6 +108,10 @@ final class DcsComputedValueTypes
         DcsAvailableSettingsSourceForSchema.FieldUse.eGroupping,
         DcsAvailableSettingsSourceForSchema.FieldUse.eCalculatedFieldExpression };
 
+    /** Подключённые экземпляры — по ним {@link #hasEffectiveType} отвечает про владельца типа. */
+    private static final List<java.lang.ref.WeakReference<DcsComputedValueTypes>> INSTANCES =
+        new java.util.concurrent.CopyOnWriteArrayList<>();
+
     private final DataCompositionSchemaControlContext context;
     private final Display display;
     private final List<ColumnViewer> viewers = new ArrayList<>();
@@ -116,7 +123,16 @@ final class DcsComputedValueTypes
     private IBmAsyncEventListener bmListener;
     private URI schemaUri;
     /** Ключ — {@link #pathKey} пути данных поля, значение — представление типа. */
-    private volatile Map<String, String> types = Map.of();
+    private volatile Map<String, TypePresentation> types = Map.of();
+
+    private record TypePresentation(String text, String category, boolean composite)
+    {
+        Image image()
+        {
+            return composite ? MdUiSharedImages.getImage(MdUiSharedImages.OBJS_TYPE_DESCRIPTION)
+                : category != null && !category.isBlank() ? MdUiSharedImages.getTypeImage(category) : null;
+        }
+    }
     private String lastFingerprint;
     private boolean refreshPending;
     /** Идёт наше обновление таблиц — их перерисовка не повод для пересчёта. */
@@ -146,6 +162,7 @@ final class DcsComputedValueTypes
             return;
         Composite dataSetsPage = null;
         Composite calculatedPage = null;
+        Composite parametersPage = null;
         for (EditorPage editorPage : context.getPages())
         {
             if (!(editorPage instanceof Composite composite) || composite.isDisposed())
@@ -155,16 +172,23 @@ final class DcsComputedValueTypes
                 dataSetsPage = composite;
             else if ("CalculatedFields".equals(name)) //$NON-NLS-1$
                 calculatedPage = composite;
+            else if ("Parameters".equals(name)) //$NON-NLS-1$
+                parametersPage = composite;
         }
         if (dataSetsPage == null || dataSetsPage.getData(INSTALLED_KEY) != null)
             return;
         DcsComputedValueTypes instance = new DcsComputedValueTypes(context, dataSetsPage.getDisplay());
         dataSetsPage.setData(INSTALLED_KEY, instance);
+        INSTANCES.add(new java.lang.ref.WeakReference<>(instance));
         for (String fieldName : DATASET_FIELD_VIEWERS)
             instance.wrapDataSetFieldsViewer(Global.getField(dataSetsPage, fieldName));
         if (calculatedPage != null
             && Global.invoke(calculatedPage, "getViewer") instanceof ColumnViewer viewer) //$NON-NLS-1$
             instance.wrapColumn(viewer, CALCULATED_VALUE_TYPE_COLUMN);
+        // ParametersLabelProvider: тип значения — колонка 2 в обоих контекстах.
+        if (parametersPage != null
+            && Global.invoke(parametersPage, "getViewer") instanceof ColumnViewer viewer) //$NON-NLS-1$
+            instance.wrapColumn(viewer, 2);
         CTabFolder tabs = enclosingTabFolder(dataSetsPage);
         if (tabs != null)
             tabs.addListener(SWT.Selection, e -> instance.schedule(true));
@@ -193,7 +217,7 @@ final class DcsComputedValueTypes
     }
 
     @SuppressWarnings({ "unchecked", "rawtypes" })
-    private static Object fieldsColumn(Object fieldsViewer, String name)
+    static Object fieldsColumn(Object fieldsViewer, String name)
     {
         try
         {
@@ -225,7 +249,7 @@ final class DcsComputedValueTypes
         Object current = Global.invoke(viewerColumn, "getLabelProvider"); //$NON-NLS-1$
         if (!(current instanceof CellLabelProvider delegate) || current instanceof HintLabelProvider)
             return;
-        viewerColumn.setLabelProvider(new HintLabelProvider(delegate, this));
+        viewerColumn.setLabelProvider(new HintLabelProvider(delegate, this, viewer.getControl()));
         viewers.add(viewer);
     }
 
@@ -274,6 +298,7 @@ final class DcsComputedValueTypes
 
     private void dispose()
     {
+        INSTANCES.removeIf(reference -> reference.get() == null || reference.get() == this);
         job.cancel();
         IBmModel bmModel = context.getBmModel();
         if (bmListener != null && bmModel != null)
@@ -281,15 +306,40 @@ final class DcsComputedValueTypes
         bmListener = null;
     }
 
+    /**
+     * Имена вычисленных (эффективных) типов поля набора данных или вычисляемого поля {@code owner} —
+     * тех, что показываются серым в колонке «Тип значения»; пусто, если их нет.
+     */
+    static List<String> effectiveTypes(Object owner)
+    {
+        String dataPath = owner instanceof DataCompositionSchemaDataSetField field ? field.getDataPath()
+            : owner instanceof DataCompositionSchemaCalculatedField calculated ? calculated.getDataPath() : null;
+        if (dataPath == null)
+            return List.of();
+        Resource resource = ((EObject)owner).eResource();
+        URI uri = resource != null ? resource.getURI() : null;
+        for (java.lang.ref.WeakReference<DcsComputedValueTypes> reference : INSTANCES)
+        {
+            DcsComputedValueTypes instance = reference.get();
+            if (instance == null || uri != null && instance.schemaUri != null && !uri.equals(instance.schemaUri))
+                continue;
+            String text = instance.typeFor(dataPath);
+            if (text != null)
+                return List.of(text.split(", ")); //$NON-NLS-1$
+        }
+        return List.of();
+    }
+
     private String typeFor(String dataPath)
     {
-        return dataPath == null ? null : types.get(pathKey(dataPath));
+        TypePresentation type = dataPath == null ? null : types.get(pathKey(dataPath));
+        return type != null ? type.text() : null;
     }
 
     /** Фоновый расчёт — как {@code Settings.refreshAvailableFieldsSource}. */
     private void recompute(boolean force)
     {
-        Map<String, String> result = new HashMap<>();
+        Map<String, TypePresentation> result = new HashMap<>();
         try
         {
             DataCompositionSchema schema = context.getDataCompositionSchema();
@@ -317,9 +367,16 @@ final class DcsComputedValueTypes
                 Map<String, DcsAvailableFieldInfo> infos = findFieldInfos(source, paths);
                 for (String path : paths)
                 {
-                    String text = typeText(infos.get(pathKey(path)), alias);
+                    DcsAvailableFieldInfo info = infos.get(pathKey(path));
+                    String text = typeText(info, alias);
                     if (text != null)
-                        result.put(pathKey(path), text);
+                    {
+                        List<TypeItem> items = info.valueType.getTypes();
+                        boolean composite = items.size() > 1;
+                        String category = !composite && !items.isEmpty()
+                            ? McoreUtil.getTypeCategory(items.get(0)) : null;
+                        result.put(pathKey(path), new TypePresentation(text, category, composite));
+                    }
                 }
             }
         }
@@ -371,7 +428,8 @@ final class DcsComputedValueTypes
             boolean untyped = isEmpty(dataSetField.getValueType());
             fingerprint.append("\nF|").append(dataSetField.getDataPath()).append('|') //$NON-NLS-1$
                 .append(dataSetField.getField()).append('|').append(untyped);
-            if (untyped && dataSetField.getDataPath() != null)
+            // У набора «Объект» тип задаёт пользователь, вычисленный тип здесь неуместен.
+            if (untyped && dataSetField.getDataPath() != null && !(dataSet instanceof DataCompositionSchemaDataSetObject))
                 paths.add(dataSetField.getDataPath());
         }
         if (dataSet instanceof DataCompositionSchemaDataSetUnion union)
@@ -436,6 +494,12 @@ final class DcsComputedValueTypes
             String name = alias == 0 ? McoreUtil.getTypeName(type) : McoreUtil.getTypeNameRu(type);
             if (name == null || name.isEmpty())
                 continue;
+            if (valueType.getTypes().size() == 1)
+            {
+                String shortName = ValueTypeColumnLabelProvider.singleReferenceName(name);
+                if (shortName != null)
+                    name = shortName;
+            }
             if (text.length() > 0)
                 text.append(", "); //$NON-NLS-1$
             text.append(name);
@@ -493,11 +557,21 @@ final class DcsComputedValueTypes
     {
         private final CellLabelProvider delegate;
         private final DcsComputedValueTypes owner;
+        private final ValueTypeColumnLabelProvider typeLabels;
 
-        HintLabelProvider(CellLabelProvider delegate, DcsComputedValueTypes owner)
+        HintLabelProvider(CellLabelProvider delegate, DcsComputedValueTypes owner, Control control)
         {
             this.delegate = delegate;
             this.owner = owner;
+            this.typeLabels = new ValueTypeColumnLabelProvider(control, HintLabelProvider::valueType,
+                element -> element instanceof EObject object ? object : null, null);
+        }
+
+        private static TypeDescription valueType(Object element)
+        {
+            return element instanceof DataCompositionSchemaDataSetField field ? field.getValueType()
+                : element instanceof DataCompositionSchemaCalculatedField field ? field.getValueType()
+                    : element instanceof DataCompositionSchemaParameter parameter ? parameter.getValueType() : null;
         }
 
         @Override
@@ -506,17 +580,34 @@ final class DcsComputedValueTypes
             delegate.update(cell);
             owner.onCellUpdated();
             String text = cell.getText();
-            if (text != null && !text.isEmpty())
-                return;
             Object element = cell.getElement();
+            if (text != null && !text.isEmpty())
+            {
+                TypeDescription type = valueType(element);
+                Image image = typeLabels.getImage(element);
+                if (image != null)
+                    cell.setImage(image);
+                if (type != null && type.getTypes().size() == 1)
+                {
+                    String shortName = ValueTypeColumnLabelProvider.singleReferenceName(text);
+                    if (shortName != null)
+                        cell.setText(shortName);
+                }
+                return;
+            }
+            // Путь поля объекта может совпасть с путём поля другого набора — подсказку не даём.
+            if (element instanceof DataCompositionSchemaDataSetField objectField
+                && objectField.eContainer() instanceof DataCompositionSchemaDataSetObject)
+                return;
             String dataPath = element instanceof DataCompositionSchemaDataSetField dataSetField
                 ? dataSetField.getDataPath()
                 : element instanceof DataCompositionSchemaCalculatedField calculatedField
                     ? calculatedField.getDataPath() : null;
-            String hint = owner.typeFor(dataPath);
+            TypePresentation hint = dataPath != null ? owner.types.get(pathKey(dataPath)) : null;
             if (hint == null)
                 return;
-            cell.setText(hint);
+            cell.setText(hint.text());
+            cell.setImage(hint.image());
             cell.setForeground(ThemeAwareColors.effectiveSystemColor(
                 cell.getControl().getDisplay(), SWT.COLOR_DARK_GRAY));
         }
@@ -588,3 +679,5 @@ final class DcsComputedValueTypes
         }
     }
 }
+
+

@@ -658,6 +658,8 @@ public class SmartOutlineHook implements IStartup {
                     // Переводим фокус в дерево
                     tree.setFocus();
                     tree.showSelection();
+                    if (resolveTypeDescriptionModel(patchedShell) != null)
+                        performTreeDoubleClick(viewer);
                 }
             });
             FilterInputBoxListNavigation.installTreeNavigation(fc, viewer.getTree(), null);
@@ -1905,7 +1907,9 @@ public class SmartOutlineHook implements IStartup {
         IDtProject dtProject = resolveIrDtProject(model);
         String ownerName = typeOwnerName(model);
         String source = TypeByNameAdvisor.availableSource(dtProject, model, ownerName);
-        if (source == null)
+        // Вычисленный (эффективный) тип владельца и есть лучший: подбирать по имени не нужно.
+        java.util.List<String> effectiveTypes = ownerEffectiveTypes(model);
+        if (source == null && effectiveTypes.isEmpty())
             return;
 
         Button ok = shell.getDefaultButton();
@@ -1927,26 +1931,56 @@ public class SmartOutlineHook implements IStartup {
         button.setLayoutData(gd);
         if (ok != null)
             button.moveAbove(ok);
-        boolean hasName = ownerName != null;
+        boolean hasName = ownerName != null || !effectiveTypes.isEmpty();
         button.setEnabled(hasName);
         button.setToolTipText(TooltipText.wrap(button,
             (!hasName ? "Недоступно: не удалось определить имя владельца типа" //$NON-NLS-1$
+                : !effectiveTypes.isEmpty() ? "Пометить вычисленный тип" //$NON-NLS-1$
                 : TypeByNameAdvisor.SOURCE_EXACT_NAME.equals(source)
                     ? "Пометить тип объекта метаданных, имя которого совпадает с именем реквизита" //$NON-NLS-1$
                     : "Пометить тип, который " + source + " подбирает по имени реквизита") //$NON-NLS-1$ //$NON-NLS-2$
                 + Global.pluginSignForTooltip()));
-        button.addListener(SWT.Selection, e ->
-            TypeByNameAdvisor.suggest(dtProject, model, ownerName,
-                () -> !shell.isDisposed(),
-                result ->
+        // Помечается только по кнопке (mark); при открытии строка лучшего типа лишь становится текущей.
+        java.util.function.Consumer<Boolean> suggest = mark ->
+        {
+            if (!effectiveTypes.isEmpty())
+            {
+                // Вычисленные типы — готовый лучший ответ, без ИР и Напарника.
+                Object first = null;
+                for (String typeName : effectiveTypes)
                 {
-                    Object matched = applyIrBestType(model, result);
-                    if (matched == null)
-                        return;
+                    Object matched = mark ? applyIrBestType(model, typeName)
+                        : TypeByNameAdvisor.findTypeItem(model, typeName);
+                    if (first == null)
+                        first = matched;
+                }
+                if (first == null)
+                    return;
+                if (mark)
                     refreshTypeDialogTree(shell);
-                    // TreeRefreshEvent только ставится в очередь — выделяем после перерисовки.
-                    shell.getDisplay().asyncExec(() -> revealBestType(shell, viewer, model, matched));
-                }));
+                Object revealed = first;
+                shell.getDisplay().asyncExec(() -> revealBestType(shell, viewer, model, revealed));
+                return;
+            }
+            TypeByNameAdvisor.suggest(dtProject, model, ownerName, () -> !shell.isDisposed(), result ->
+            {
+                Object matched = mark ? applyIrBestType(model, result) : TypeByNameAdvisor.findTypeItem(model, result);
+                if (matched == null)
+                    return;
+                if (mark)
+                    refreshTypeDialogTree(shell);
+                shell.getDisplay().asyncExec(() -> revealBestType(shell, viewer, model, matched));
+            });
+        };
+        button.addListener(SWT.Selection, e -> suggest.accept(Boolean.TRUE));
+        // Тип ещё не выбран — сразу при открытии делаем лучший тип текущей строкой, не дожидаясь кнопки.
+        if (hasName)
+            shell.getDisplay().asyncExec(() ->
+            {
+                Object multiItems = Global.invoke(model, "getMultiItems"); //$NON-NLS-1$
+                if (!shell.isDisposed() && multiItems != null && multiItemsSize(multiItems) == 0)
+                    suggest.accept(Boolean.FALSE);
+            });
 
         // Панель кнопок стала шире — дорастить окно, только если она больше не помещается в
         // строку родителя. Сравнивать с шириной самой панели нельзя: штатная панель JFace прижата
@@ -1987,15 +2021,40 @@ public class SmartOutlineHook implements IStartup {
         return project != null ? Global.getDtProjectFromWorkspaceProject(project) : null;
     }
 
+    /** Вычисленные типы владельца типа (поле схемы компоновки), см. {@link DcsComputedValueTypes#effectiveTypes}. */
+    private static java.util.List<String> ownerEffectiveTypes(Object model)
+    {
+        for (String getter : new String[] { "getParent", "getParentContext" }) //$NON-NLS-1$ //$NON-NLS-2$
+        {
+            Object owner = Global.invoke(model, getter);
+            Object realOwner = SelectTypeDialogHook.holderOwner(owner);
+            java.util.List<String> types = DcsComputedValueTypes.effectiveTypes(realOwner != null ? realOwner : owner);
+            if (!types.isEmpty())
+                return types;
+        }
+        return java.util.List.of();
+    }
+
     /** Имя объекта-владельца свойства типа ({@code getParent()}, затем {@code getParentContext()}). */
     private static String typeOwnerName(Object model)
     {
         for (String getter : new String[] { "getParent", "getParentContext" }) //$NON-NLS-1$ //$NON-NLS-2$
         {
             Object owner = Global.invoke(model, getter);
-            Object name = owner != null ? Global.invoke(owner, "getName") : null; //$NON-NLS-1$
-            if (name instanceof String s && !s.isBlank())
-                return s;
+            // Общий диалог редактора компоновки держит значение в служебном объекте — настоящий
+            // владелец (поле, параметр, ресурс...) запомнен в SelectTypeDialogHook.
+            Object realOwner = SelectTypeDialogHook.holderOwner(owner);
+            if (realOwner != null)
+                owner = realOwner;
+            if (owner == null)
+                continue;
+            // У объектов компоновки имени может не быть: у поля набора — «Поле» и «Путь», у вычисляемого поля и ресурса — «Путь».
+            for (String nameGetter : new String[] { "getName", "getField", "getDataPath" }) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            {
+                if (Global.invoke(owner, nameGetter) instanceof String s && !s.isBlank())
+                    return s;
+            }
+            Global.tempLog("best-type-owner", getter + ": имени нет, класс=" + owner.getClass().getName()); //$NON-NLS-1$ //$NON-NLS-2$
         }
         return null;
     }
@@ -2270,6 +2329,14 @@ public class SmartOutlineHook implements IStartup {
         if (shell == null || shell.isDisposed() || tree == null || tree.isDisposed())
             return;
         installSingleTypeTitleHint(shell);
+        tree.addListener(SWT.Traverse, event ->
+        {
+            if (event.detail != SWT.TRAVERSE_RETURN)
+                return;
+            event.doit = false;
+            event.detail = SWT.TRAVERSE_NONE;
+            performTreeDoubleClick(viewer);
+        });
         tree.addListener(SWT.MouseDoubleClick, event ->
         {
             Object model = resolveTypeDescriptionModel(shell);

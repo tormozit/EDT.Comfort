@@ -5,11 +5,9 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
@@ -73,6 +71,8 @@ final class TypeByNameAdvisor
     /** Тип объекта метаданных с именем, равным имени реквизита, — без ИР и Напарника. */
     static final String SOURCE_EXACT_NAME = "совпадение имени"; //$NON-NLS-1$
 
+    private static final String TAG = "TypeByNameAdvisor"; //$NON-NLS-1$
+
     private static final String IR_TYPE_MODULE = "ирОбщий"; //$NON-NLS-1$
     private static final String IR_TYPE_FUNCTION = "ИмяТипаИзИмениПеременнойЛкс"; //$NON-NLS-1$
     private static final String DEFAULT_TYPE_NAME_RU = "Строка"; //$NON-NLS-1$
@@ -127,7 +127,6 @@ final class TypeByNameAdvisor
         String exact = Naparnik.exactNameType(project.getWorkspaceProject(), typeModel, name);
         if (exact != null)
         {
-            Global.tempLog(Naparnik.LOG, "точное совпадение имени: " + name + " → " + exact); //$NON-NLS-1$ //$NON-NLS-2$
             // Как и ответ ИР/Напарника — отдельным шагом очереди, а не изнутри обработчика ввода.
             Display.getCurrent().asyncExec(() ->
             {
@@ -180,25 +179,15 @@ final class TypeByNameAdvisor
         Supplier<Boolean> answerWanted, Supplier<Object> currentTypeModel, boolean waitForNameInModel)
     {
         if (typeModel == null || name == null || name.isEmpty())
-        {
-            Global.tempLog(Naparnik.LOG, "автоподбор [" + logTag + "]: пропуск — модельТипа=" //$NON-NLS-1$ //$NON-NLS-2$
-                + (typeModel != null) + " имя=" + name); //$NON-NLS-1$
             return;
-        }
         Integer untouchedLength = untouchedStringLength(typeModel);
         if (untouchedLength == null)
-        {
-            Global.tempLog(Naparnik.LOG, "автоподбор [" + logTag + "]: пропуск — тип не считается нетронутым: " //$NON-NLS-1$ //$NON-NLS-2$
-                + describeCurrentType(typeModel));
             return;
-        }
 
         IProject workspaceProject = Global.getActiveProject((IWorkbenchPage) null, false);
         IDtProject project = workspaceProject != null
             ? Global.getDtProjectFromWorkspaceProject(workspaceProject) : null;
         String source = availableSource(project, typeModel, name);
-        Global.tempLog(Naparnik.LOG, "автоподбор [" + logTag + "]: имя=" + name + " проект=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + (workspaceProject != null ? workspaceProject.getName() : null) + " источник=" + source); //$NON-NLS-1$
         if (source == null)
             return;
 
@@ -230,30 +219,18 @@ final class TypeByNameAdvisor
     {
         Object current = currentTypeModel.get();
         Object target = current != null ? current : capturedModel;
-        String committed = committedOwnerName(target);
-        Global.tempLog(Naparnik.LOG, "ожидание имени в модели [" + logTag + "]: попытка=" + attempt //$NON-NLS-1$ //$NON-NLS-2$
-            + " ждём=" + name + " вМодели=" + committed //$NON-NLS-1$ //$NON-NLS-2$
-            + " модельПанели=" + (current == null ? "нет" : current == capturedModel ? "прежняя" : "новая") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-            + " имяВладельцаМодели=" + Global.invoke(Global.invoke(target, "getParent"), "getName")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        if (name.equals(committed))
+        if (name.equals(committedOwnerName(target)))
         {
-            Integer length = currentStringLength(target);
-            boolean applicable = untouchedLength.equals(length) && Boolean.TRUE.equals(answerWanted.get());
-            Global.tempLog(Naparnik.LOG, "ожидание имени в модели [" + logTag + "]: имя дошло, длинаСтроки=" + length //$NON-NLS-1$ //$NON-NLS-2$
-                + " актуально=" + applicable); //$NON-NLS-1$
-            if (applicable)
+            if (untouchedLength.equals(currentStringLength(target)) && Boolean.TRUE.equals(answerWanted.get()))
             {
-                keepCaretAtEndAfterRebuild(name, logTag);
+                keepCaretAtEndAfterRebuild(name);
                 applySingleType(target, typeName, source, logTag);
             }
             return;
         }
         Display display = Display.getCurrent();
         if (attempt >= NAME_COMMIT_ATTEMPTS || display == null || display.isDisposed())
-        {
-            Global.tempLog(Naparnik.LOG, "ожидание имени в модели [" + logTag + "]: имя не дошло — тип не подставлен"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
-        }
         display.timerExec(NAME_COMMIT_RETRY_MS, () -> applyWhenNameCommitted(capturedModel, currentTypeModel, name,
             typeName, source, logTag, untouchedLength, answerWanted, attempt + 1));
     }
@@ -266,7 +243,7 @@ final class TypeByNameAdvisor
      * {@link #CARET_RESTORE_WINDOW_MS} после подстановки у поля ввода с текстом {@code name},
      * получившего фокус, выделение снимается, курсор ставится в конец.
      */
-    private static void keepCaretAtEndAfterRebuild(String name, String logTag)
+    private static void keepCaretAtEndAfterRebuild(String name)
     {
         Display display = Display.getCurrent();
         if (display == null || display.isDisposed())
@@ -281,8 +258,6 @@ final class TypeByNameAdvisor
             {
                 if (text.isDisposed() || !name.equals(text.getText()))
                     return;
-                Global.tempLog(Naparnik.LOG, "курсор поля «Имя» [" + logTag + "]: выделение " //$NON-NLS-1$ //$NON-NLS-2$
-                    + text.getSelection() + " → в конец"); //$NON-NLS-1$
                 text.setSelection(name.length());
             });
         };
@@ -337,7 +312,7 @@ final class TypeByNameAdvisor
         }
         catch (RuntimeException e)
         {
-            Global.tempLogException(Naparnik.LOG, "[!] чтение имени владельца типа из модели", e); //$NON-NLS-1$
+            Global.logError(TAG, "committedOwnerName", e); //$NON-NLS-1$
             return null;
         }
     }
@@ -362,6 +337,22 @@ final class TypeByNameAdvisor
     }
 
     /**
+     * Доступные типы владельца, у которого нет {@code ITypeDescriptionModel} (поле набора данных
+     * схемы компоновки): годится везде, где вместо модели типа передаётся {@code typeModel}.
+     */
+    record TypeCatalog(List<TypeItem> items)
+    {
+    }
+
+    /** Доступные типы {@code typeModel}: {@link TypeCatalog} или {@code ITypeDescriptionModel.getTypes(false)}. */
+    private static List<?> typeItems(Object typeModel)
+    {
+        if (typeModel instanceof TypeCatalog catalog)
+            return catalog.items();
+        return Global.invoke(typeModel, "getTypes", Boolean.FALSE) instanceof List<?> types ? types : null; //$NON-NLS-1$
+    }
+
+    /**
      * {@link com._1c.g5.v8.dt.mcore.TypeItem} из доступных типов {@code typeModel}
      * ({@code ITypeDescriptionModel.getTypes(false)}), имя которого (рус. или англ.) совпадает
      * с {@code typeName}; {@code null}, если такого нет.
@@ -371,8 +362,8 @@ final class TypeByNameAdvisor
         if (typeModel == null || typeName == null || typeName.isBlank())
             return null;
         String wanted = typeName.trim();
-        Object typesObj = Global.invoke(typeModel, "getTypes", Boolean.FALSE); //$NON-NLS-1$
-        if (!(typesObj instanceof List<?> types))
+        List<?> types = typeItems(typeModel);
+        if (types == null)
             return null;
         for (Object item : types)
         {
@@ -447,38 +438,23 @@ final class TypeByNameAdvisor
             }
         }
         if (attribute == null)
-        {
-            Global.tempLog(Naparnik.LOG, "Строка(0): владелец типа — не реквизит формы: " //$NON-NLS-1$
-                + (owner != null ? owner.getClass().getSimpleName() : null));
             return false;
-        }
 
         try
         {
             EObject root = EcoreUtil.getRootContainer(attribute);
             if (!(root instanceof Form))
-            {
-                Global.tempLog(Naparnik.LOG, "Строка(0): корень реквизита — не форма: " //$NON-NLS-1$
-                    + root.getClass().getSimpleName());
                 return false;
-            }
             List<Integer> idPath = attributeIdPath(attribute);
 
             IResourceLookup lookup = Global.getOsgiService(IResourceLookup.class);
             IFile file = lookup != null ? lookup.getPlatformResource(root) : null;
             if (file == null)
-            {
-                Global.tempLog(Naparnik.LOG, "Строка(0): файл формы не определён"); //$NON-NLS-1$
                 return false;
-            }
+            // Файла формы ещё нет — форма ни разу не сохранялась.
             if (!file.exists())
-            {
-                Global.tempLog(Naparnik.LOG, "Строка(0): файла формы ещё нет — форма не сохранялась: " //$NON-NLS-1$
-                    + file.getFullPath());
                 return true;
-            }
 
-            long started = System.nanoTime();
             Resource resource = new ResourceSetImpl().getResource(
                 URI.createPlatformResourceURI(file.getFullPath().toString(), true), true);
             Form savedForm = null;
@@ -487,21 +463,11 @@ final class TypeByNameAdvisor
                 if (content instanceof Form form)
                     savedForm = form;
             }
-            if (savedForm == null)
-            {
-                Global.tempLog(Naparnik.LOG, "Строка(0): в файле формы нет объекта Form: " + file.getFullPath() //$NON-NLS-1$
-                    + " содержимое=" + resource.getContents().size()); //$NON-NLS-1$
-                return false;
-            }
-            boolean saved = containsAttribute(savedForm, idPath);
-            Global.tempLog(Naparnik.LOG, "Строка(0): реквизит формы id=" + idPath + " файл=" + file.getFullPath() //$NON-NLS-1$ //$NON-NLS-2$
-                + " реквизитовВФайле=" + savedForm.getAttributes().size() + " естьВСохранённой=" + saved //$NON-NLS-1$ //$NON-NLS-2$
-                + " мс=" + (System.nanoTime() - started) / 1_000_000L); //$NON-NLS-1$
-            return !saved;
+            return savedForm != null && !containsAttribute(savedForm, idPath);
         }
         catch (RuntimeException e)
         {
-            Global.tempLogException(Naparnik.LOG, "[!] Строка(0): чтение сохранённой формы", e); //$NON-NLS-1$
+            Global.logError(TAG, "isUnsavedFormAttribute", e); //$NON-NLS-1$
             return false;
         }
     }
@@ -539,29 +505,12 @@ final class TypeByNameAdvisor
         return path;
     }
 
-    /** Текущий тип и длина строки модели — для временной диагностики. */
-    private static String describeCurrentType(Object typeModel)
-    {
-        try
-        {
-            Object typeItem = Global.invoke(Global.invoke(typeModel, "getSingleTypeItem"), "get"); //$NON-NLS-1$ //$NON-NLS-2$
-            Object length = Global.invoke(Global.invoke(typeModel, "getStringLength"), "get"); //$NON-NLS-1$ //$NON-NLS-2$
-            return "тип=" + Global.invoke(typeItem, "getNameRu") + " длина=" + length; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        }
-        catch (Exception e)
-        {
-            return String.valueOf(e);
-        }
-    }
-
     /** Сопоставляет предложенное имя типа с типом модели и подставляет его единственным типом. */
     private static void applySingleType(Object typeModel, String typeName, String source, String logTag)
     {
         try
         {
             Object matched = findTypeItem(typeModel, typeName);
-            Global.tempLog(Naparnik.LOG, "подстановка [" + logTag + "]: «" + typeName + "» сопоставлен=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + (matched != null));
             if (matched == null)
                 return;
 
@@ -596,8 +545,6 @@ final class TypeByNameAdvisor
      */
     private static final class Naparnik
     {
-        /** Временная диагностика — снять после подтверждения работы во всех местах вызова. */
-        private static final String LOG = "naparnik-type"; //$NON-NLS-1$
         private static final String CORE_BUNDLE = "com.e1c.edt.ai"; //$NON-NLS-1$
         private static final String UI_COMMON_BUNDLE = "com.e1c.edt.ai.ui.common"; //$NON-NLS-1$
         private static final int MAX_REFERENCE_NAMES = 500;
@@ -641,10 +588,6 @@ final class TypeByNameAdvisor
 
             Candidates candidates = collectCandidates(project, typeModel, name);
             String prompt = buildPrompt(name, candidates);
-            Global.tempLog(LOG, "запрос: имя=" + name + " простых типов=" + candidates.simpleTypes().size() //$NON-NLS-1$ //$NON-NLS-2$
-                + " имён объектов=" + candidates.referenceTypes().size() //$NON-NLS-1$
-                + " определяемых типов=" + candidates.definedTypes().size()); //$NON-NLS-1$
-            Global.tempLog(LOG, "текст запроса:\n" + prompt); //$NON-NLS-1$
 
             new Job("Напарник: подбор типа") //$NON-NLS-1$
             {
@@ -655,7 +598,6 @@ final class TypeByNameAdvisor
                     {
                         String answer = ask(facade, project, prompt);
                         String typeName = resolveTypeName(cleanAnswer(answer), candidates);
-                        Global.tempLog(LOG, "ответ: «" + answer + "» → «" + typeName + "»"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                         if (typeName == null)
                             return Status.OK_STATUS;
 
@@ -664,16 +606,14 @@ final class TypeByNameAdvisor
                         {
                             display.asyncExec(() ->
                             {
-                                boolean applicable = Boolean.TRUE.equals(stillApplicable.get());
-                                Global.tempLog(LOG, "применение «" + typeName + "»: актуально=" + applicable); //$NON-NLS-1$ //$NON-NLS-2$
-                                if (applicable)
+                                if (Boolean.TRUE.equals(stillApplicable.get()))
                                     onResult.accept(typeName);
                             });
                         }
                     }
                     catch (Throwable t)
                     {
-                        Global.tempLogException(LOG, "[!] запрос к Напарнику не выполнен", t); //$NON-NLS-1$
+                        Global.logError(TAG, "запрос к Напарнику не выполнен", t); //$NON-NLS-1$
                     }
                     return Status.OK_STATUS;
                 }
@@ -699,19 +639,13 @@ final class TypeByNameAdvisor
                 Object activator = Global.invoke(activatorClass, "getDefault"); //$NON-NLS-1$
                 Object injector = Global.invoke(activator, "getInjector"); //$NON-NLS-1$
                 if (injector == null)
-                {
-                    Global.tempLog(LOG, "нет инжектора Напарника: activator=" + activator); //$NON-NLS-1$
                     return null;
-                }
 
                 Object stateService = Global.invoke(injector, "getInstance", //$NON-NLS-1$
                     core.loadClass("com.e1c.edt.ai.IStateService")); //$NON-NLS-1$
                 Object serviceState = Global.invoke(Global.invoke(stateService, "getState"), "getServiceState"); //$NON-NLS-1$ //$NON-NLS-2$
                 if (!(serviceState instanceof Enum<?> state) || !"ONLINE".equals(state.name())) //$NON-NLS-1$
-                {
-                    Global.tempLog(LOG, "Напарник не в сети: " + serviceState); //$NON-NLS-1$
                     return null;
-                }
 
                 Class<?> facadeClass;
                 try
@@ -720,14 +654,14 @@ final class TypeByNameAdvisor
                 }
                 catch (ClassNotFoundException oldVersion)
                 {
-                    Global.tempLog(LOG, "в этой версии Напарника нет IConversationFacade: " + core.getVersion()); //$NON-NLS-1$
+                    // В этой версии Напарника фасада нет (см. javadoc класса).
                     return null;
                 }
                 return Global.invoke(injector, "getInstance", facadeClass); //$NON-NLS-1$
             }
             catch (Throwable t)
             {
-                Global.tempLogException(LOG, "[!] не удалось получить фасад Напарника", t); //$NON-NLS-1$
+                Global.logError(TAG, "не удалось получить фасад Напарника", t); //$NON-NLS-1$
                 return null;
             }
         }
@@ -752,7 +686,7 @@ final class TypeByNameAdvisor
             }
             if (request == null)
             {
-                Global.tempLog(LOG, "[!] нет конструктора SendUserMessageRequest с 9 параметрами"); //$NON-NLS-1$
+                Global.log(TAG, "[!] нет конструктора SendUserMessageRequest с 9 параметрами"); //$NON-NLS-1$
                 return null;
             }
 
@@ -790,10 +724,8 @@ final class TypeByNameAdvisor
             Map<String, String> others = new LinkedHashMap<>();
             Map<String, String> matchingDefined = new LinkedHashMap<>();
             Map<String, String> otherDefined = new LinkedHashMap<>();
-            Set<String> skippedKinds = new LinkedHashSet<>();
             DefinedTypeClassifier classifier = new DefinedTypeClassifier(project);
-            int skippedDefined = 0;
-            if (Global.invoke(typeModel, "getTypes", Boolean.FALSE) instanceof List<?> types) //$NON-NLS-1$
+            if (typeItems(typeModel) instanceof List<?> types)
             {
                 for (Object item : types)
                 {
@@ -802,7 +734,10 @@ final class TypeByNameAdvisor
                     int dot = typeName.indexOf('.');
                     if (dot < 0)
                     {
-                        simpleTypes.add(typeName);
+                        // «СправочникСсылка», «ДокументСсылка», «ЛюбаяСсылка» — обобщённые ссылки без
+                        // объекта метаданных: подбирать по имени их нельзя.
+                        if (!typeName.endsWith(REFERENCE_KIND_SUFFIX))
+                            simpleTypes.add(typeName);
                         continue;
                     }
                     String kind = typeName.substring(0, dot);
@@ -810,20 +745,14 @@ final class TypeByNameAdvisor
                     boolean matches = stems.stream().anyMatch(objectName.toLowerCase(Locale.ROOT)::contains);
                     if (DEFINED_TYPE_KIND.equals(kind))
                     {
-                        if (classifier.hasObjectTypes(objectName))
-                            skippedDefined++;
-                        else
+                        if (!classifier.hasObjectTypes(objectName))
                             (matches ? matchingDefined : otherDefined).put(typeName, typeName);
                     }
-                    else if (!kind.endsWith(REFERENCE_KIND_SUFFIX))
-                        skippedKinds.add(kind);
-                    else if (!matching.containsKey(objectName) && !others.containsKey(objectName))
+                    else if (kind.endsWith(REFERENCE_KIND_SUFFIX) && !matching.containsKey(objectName)
+                        && !others.containsKey(objectName))
                         (matches ? matching : others).put(objectName, typeName);
                 }
             }
-            Global.tempLog(LOG, "виды типов, не вошедшие в запрос: " + skippedKinds //$NON-NLS-1$
-                + "; определяемых типов с объектными типами пропущено: " + skippedDefined //$NON-NLS-1$
-                + "; классифицировано заново: " + classifier.classified); //$NON-NLS-1$
 
             // Квота общая: сначала совпавшие по имени (объекты, затем определяемые типы), потом остальные.
             int[] quota = { MAX_REFERENCE_NAMES };
@@ -859,7 +788,7 @@ final class TypeByNameAdvisor
          */
         static String exactNameType(IProject project, Object typeModel, String name)
         {
-            if (!(Global.invoke(typeModel, "getTypes", Boolean.FALSE) instanceof List<?> types)) //$NON-NLS-1$
+            if (!(typeItems(typeModel) instanceof List<?> types))
                 return null;
             String reference = null;
             for (Object item : types)
@@ -892,8 +821,6 @@ final class TypeByNameAdvisor
             private final IProject project;
             private final String cachePrefix;
             private Map<String, DefinedType> byName;
-            /** Сколько типов классифицировано заново за этот проход — для временной диагностики. */
-            int classified;
 
             DefinedTypeClassifier(IProject project)
             {
@@ -917,12 +844,11 @@ final class TypeByNameAdvisor
                 {
                     boolean result = Naparnik.hasObjectTypes(definedType);
                     OBJECT_DEFINED_TYPE.put(cachePrefix + name, Boolean.valueOf(result));
-                    classified++;
                     return result;
                 }
                 catch (RuntimeException e)
                 {
-                    Global.tempLogException(LOG, "[!] состав определяемого типа " + name, e); //$NON-NLS-1$
+                    Global.logError(TAG, "состав определяемого типа " + name, e); //$NON-NLS-1$
                     return false;
                 }
             }
@@ -939,16 +865,13 @@ final class TypeByNameAdvisor
                 Configuration configuration = v8Project instanceof IConfigurationAware aware
                     ? aware.getConfiguration() : null;
                 if (configuration == null)
-                {
-                    Global.tempLog(LOG, "определяемые типы не прочитаны: нет конфигурации проекта"); //$NON-NLS-1$
                     return result;
-                }
                 for (DefinedType definedType : configuration.getDefinedTypes())
                     result.put(definedType.getName(), definedType);
             }
             catch (RuntimeException e)
             {
-                Global.tempLogException(LOG, "[!] чтение определяемых типов", e); //$NON-NLS-1$
+                Global.logError(TAG, "definedTypesByName", e); //$NON-NLS-1$
             }
             return result;
         }
@@ -1008,7 +931,8 @@ final class TypeByNameAdvisor
 
         /**
          * Ответ Напарника → имя типа модели: имя объекта метаданных заменяется полным именем его
-         * ссылочного типа, всё остальное (простой тип или уже полное имя) остаётся как есть.
+         * ссылочного типа; простой тип и определяемый тип остаются как есть. Ответ вне списков
+         * запроса (в том числе обобщённая ссылка вроде «СправочникСсылка») отбрасывается.
          */
         private static String resolveTypeName(String answer, Candidates candidates)
         {
@@ -1019,7 +943,17 @@ final class TypeByNameAdvisor
                 if (entry.getKey().equalsIgnoreCase(answer))
                     return entry.getValue();
             }
-            return answer;
+            for (String name : candidates.simpleTypes())
+            {
+                if (name.equalsIgnoreCase(answer))
+                    return name;
+            }
+            for (String name : candidates.definedTypes())
+            {
+                if (name.equalsIgnoreCase(answer))
+                    return name;
+            }
+            return null;
         }
 
         /** Первая непустая строка ответа без кавычек, обратных апострофов и точки в конце. */

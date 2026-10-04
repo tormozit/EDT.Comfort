@@ -41,8 +41,6 @@ public class PropertyNameIdentifierHook implements IStartup
 {
     private static final String NAME_PROPERTY_LABEL = "Имя"; //$NON-NLS-1$
     private static final String LOG_TAG = "PropertyNameIdentifier"; //$NON-NLS-1$
-    /** Временная диагностика: подбор типа из панели «Свойства» не запускается — снять после фикса. */
-    private static final String TEMP_LOG = "property-name-type"; //$NON-NLS-1$
     private static final String TYPE_DESCRIPTION_MODEL_INTERFACE =
         "com._1c.g5.v8.dt.md.ui.aef.models.type.ITypeDescriptionModel"; //$NON-NLS-1$
 
@@ -170,8 +168,6 @@ public class PropertyNameIdentifierHook implements IStartup
                 return;
             if (attempt < 100) // строки палитры свойств подгружаются лениво — окно ожидания ~10с
                 scheduleAttach(view, attempt + 1);
-            else
-                Global.tempLog(TEMP_LOG, "строка «Имя» не найдена за 100 попыток"); //$NON-NLS-1$
         });
     }
 
@@ -201,34 +197,14 @@ public class PropertyNameIdentifierHook implements IStartup
 
         Object typeModel = findTypeDescriptionModel(scene);
         String initialName = readLightTextValue(nativeControl);
-        Object nameViewModel = nameEditorEntry.getKey();
-        Global.tempLog(TEMP_LOG, "строка «Имя» найдена: редактор=" //$NON-NLS-1$
-            + (nameViewModel != null ? nameViewModel.getClass().getSimpleName() : null)
-            + " контрол=" + nativeControl.getClass().getSimpleName() //$NON-NLS-1$
-            + " модельТипа=" + (typeModel != null ? typeModel.getClass().getName() : null) //$NON-NLS-1$
-            + " владелецТипа=" + describeClass(Global.invoke(typeModel, "getParent")) //$NON-NLS-1$ //$NON-NLS-2$
-            + "/" + describeClass(Global.invoke(typeModel, "getParentContext")) //$NON-NLS-1$ //$NON-NLS-2$
-            + " имя=" + initialName); //$NON-NLS-1$
         PropertySheetLayoutDiag.dump("новая строка «Имя»: " + initialName); //$NON-NLS-1$
-        // ВРЕМЕННО: все события строки «Имя» (кроме движения мыши и отрисовки) — чтобы увидеть,
-        // доходят ли до слушателя потеря фокуса и Enter.
-        Global.installLightControlListener(nativeControl, event ->
-        {
-            if (event.type != SWT.MouseMove && event.type != SWT.MouseEnter && event.type != SWT.MouseExit
-                && event.type != SWT.MouseHover && event.type != SWT.Paint)
-                Global.tempLog(TEMP_LOG, "событие строки «Имя»: тип=" + event.type //$NON-NLS-1$
-                    + " символ=" + (int)event.character + " имя=" + initialName); //$NON-NLS-1$ //$NON-NLS-2$
-        });
 
         // В отличие от мастеров «Новый ...» — здесь обработчик срабатывает и на Enter (не только
         // на потерю фокуса), т.к. в панели «Свойства» пользователь обычно правит одно поле и
         // не уходит из него сразу; фокус при Enter не теряется.
         Runnable onCommit = () -> onNameFocusLost(nativeControl, typeModel, initialName, view);
         if (!Global.installLightControlListener(nativeControl, onCommit, onCommit))
-        {
-            Global.tempLog(TEMP_LOG, "[!] слушатель на строку «Имя» не установлен"); //$NON-NLS-1$
             return false;
-        }
 
         ATTACHED.add(nativeControl);
         Global.log(LOG_TAG, "строка «Имя» подключена в панели «Свойства»"); //$NON-NLS-1$
@@ -434,15 +410,11 @@ public class PropertyNameIdentifierHook implements IStartup
             Object textControl = content != null ? content : nativeControl;
 
             Object textObj = Global.invoke(textControl, "getText"); //$NON-NLS-1$
-            Global.tempLog(TEMP_LOG, "обработчик завершения ввода: контрол=" //$NON-NLS-1$
-                + textControl.getClass().getSimpleName() + " текст=" + textObj); //$NON-NLS-1$
             if (!(textObj instanceof String text) || text.isEmpty())
                 return;
 
             modified = !text.equals(initialName);
             PropertySheetLayoutDiag.dump("ввод имени завершён: «" + text + "» было «" + initialName + "»"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            Global.tempLog(TEMP_LOG, "ввод имени завершён: «" + text + "» было «" + initialName //$NON-NLS-1$ //$NON-NLS-2$
-                + "» изменено=" + modified + " модельТипа=" + (typeModel != null)); //$NON-NLS-1$ //$NON-NLS-2$
 
             identifier = Global.identifierFromRepresentation(text, "_", "", ""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             if (!identifier.equals(text))
@@ -472,11 +444,6 @@ public class PropertyNameIdentifierHook implements IStartup
         Object page = resolvePropertySheetPage(view);
         Object scene = page != null ? Global.invoke(page, "getScene") : null; //$NON-NLS-1$
         return scene != null ? findTypeDescriptionModel(scene) : null;
-    }
-
-    private static String describeClass(Object object)
-    {
-        return object != null ? object.getClass().getSimpleName() : null;
     }
 
     /** {@code true}, если панель — активная часть своего окна и фокус ввода сейчас в этом окне. */

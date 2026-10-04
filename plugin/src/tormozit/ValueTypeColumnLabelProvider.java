@@ -41,9 +41,9 @@ final class ValueTypeColumnLabelProvider extends ColumnLabelProvider
         if (type != null && type.getTypes().size() == 1)
         {
             String name = typeName(resolve(type.getTypes().get(0), element));
-            int dot = name != null ? name.lastIndexOf('.') : -1;
-            if (dot > 0 && dot < name.length() - 1 && isReferenceCategory(name.substring(0, dot)))
-                return name.substring(dot + 1);
+            String shortName = singleReferenceName(name);
+            if (shortName != null)
+                return shortName;
         }
         return fullText(element, type);
     }
@@ -130,8 +130,18 @@ final class ValueTypeColumnLabelProvider extends ColumnLabelProvider
         return name == null || name.isBlank() ? McoreUtil.getTypeName(item) : name;
     }
 
+    /** Чистое имя одинарного ссылочного типа; null для остальных типов. */
+    static String singleReferenceName(String name)
+    {
+        int dot = name != null ? name.lastIndexOf('.') : -1;
+        if (dot > 0 && dot < name.length() - 1 && isReferenceCategory(name.substring(0, dot)))
+            return name.substring(dot + 1);
+        return null;
+    }
+
     private static boolean isReferenceCategory(String category)
     {
         return category.endsWith("Ссылка") || category.endsWith("Ref"); //$NON-NLS-1$ //$NON-NLS-2$
     }
 }
+

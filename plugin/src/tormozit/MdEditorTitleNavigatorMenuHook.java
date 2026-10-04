@@ -100,8 +100,9 @@ import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
  * <p>Меню — не копия, а само меню навигатора: панель «Навигатор» делается активной частью,
  * объект выделяется в дереве ({@code selectReveal}), затем показывается {@link Menu} дерева.
  * Активация обязательна — видимость части пунктов привязана к активной части, и при активном
- * редакторе меню получается короче настоящего. После закрытия меню фокус возвращается
- * в редактор.
+ * редакторе меню получается короче настоящего. После закрытия меню навигатор остаётся
+ * активной частью: возврат активации в редактор по таймеру отбирал её у навигатора,
+ * если пользователь уже кликнул в нём, и урезал его следующие контекстные меню.
  */
 public final class MdEditorTitleNavigatorMenuHook implements IStartup
 {
@@ -138,8 +139,8 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
 
     private static final String ATTR_LOCATION_URI = "locationURI"; //$NON-NLS-1$
 
-    /** Пауза перед возвратом фокуса в редактор — чтобы выбранный пункт успел отработать, мс. */
-    private static final int FOCUS_RETURN_DELAY_MS = 300;
+    /** Пауза перед снятием подмены выделения — чтобы выбранный пункт успел отработать, мс. */
+    private static final int SPOOF_RESTORE_DELAY_MS = 300;
 
     /** Редакторы, к которым уже подключён слушатель смены страницы. */
     private final Set<DtGranularEditor<?>> hookedEditors =
@@ -1033,7 +1034,6 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
             Menu menu = viewer.getTree().getMenu();
             if (menu == null || menu.isDisposed())
                 return;
-            hookMenuClose(menu, null);
             menu.setLocation(menuLocation(name));
             menu.setVisible(true);
         }
@@ -1069,7 +1069,7 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
             if (name.ownMenu == null)
                 return;
 
-            hookMenuClose(name.ownMenu, spoof);
+            restoreSpoofOnClose(name.ownMenu, spoof);
             name.ownMenu.setLocation(menuLocation(name));
             name.ownMenu.setVisible(true);
         }
@@ -1131,8 +1131,7 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
                     actionService.fillContextMenu(menu);
                     addSkippedCommands(menu, navigator.getSite());
                 });
-                actionService.prepareMenuForPlatformContributions(manager,
-                    new FixedSelectionProvider(selection), true);
+                registerOwnMenu(navigator, manager, new FixedSelectionProvider(selection));
 
                 name.ownManager = manager;
                 name.ownMenu = manager.createContextMenu(titleText);
@@ -1149,6 +1148,29 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
             {
                 Global.logError(TAG, "create own menu", e); //$NON-NLS-1$
             }
+        }
+
+        /**
+         * Регистрирует своё меню для вкладов платформы, не трогая модель меню навигатора.
+         *
+         * <p>{@code PopupMenuExtender} ищет e4-модель всплывающего меню части по идентификатору
+         * и, найдя, заново привязывает её к менеджеру, который регистрируется. Штатная
+         * {@link NavigatorActionService#prepareMenuForPlatformContributions} регистрирует по
+         * идентификатору навигатора — то есть перепривязывала к нашему менеджеру
+         * <b>общую</b> модель, и штатное меню навигатора после этого теряло вклады
+         * ({@code org.eclipse.ui.menus}: «Создать», «Добавить в расширение», «Переместить …»).
+         *
+         * <p>Поэтому первая регистрация идёт под собственным уникальным идентификатором
+         * (своя модель), а идентификатор навигатора добавляется второй регистрацией с тем же
+         * менеджером и провайдером: {@code PartSite} в этом случае лишь добавляет к найденному
+         * экстендеру тег {@code popup:<id>}, и вклады навигатора применяются к нашей модели.
+         */
+        private static void registerOwnMenu(CommonNavigator navigator, MenuManager manager,
+            ISelectionProvider provider)
+        {
+            String ownId = NAVIGATOR_POPUP_ID + ".titleLink." + System.identityHashCode(manager); //$NON-NLS-1$
+            navigator.getSite().registerContextMenu(ownId, manager, provider);
+            navigator.getSite().registerContextMenu(NAVIGATOR_POPUP_ID, manager, provider);
         }
 
         /**
@@ -1240,27 +1262,21 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
         }
 
         /**
-         * Снимает подмену выделения и возвращает фокус в редактор после закрытия меню.
+         * Снимает подмену выделения после закрытия своего меню.
          *
          * <p>{@code SWT.Hide} приходит раньше {@code Selection} выбранного пункта, поэтому
-         * и то, и другое откладывается таймером: иначе команда выполнилась бы уже при
-         * восстановленном (пустом) выделении и активном редакторе — ровно тот контекст,
-         * ради подмены которого всё и делается. Если команда сама увела фокус (например,
-         * открыла редактор), фокус не трогаем.
+         * снятие откладывается таймером: иначе команда выполнилась бы уже при
+         * восстановленном (пустом) выделении — ровно тот контекст, ради подмены которого всё
+         * и делается. Фокус в редактор не возвращается: навигатор остаётся активной частью,
+         * а возврат по таймеру отбирал у него активацию и урезал его следующие меню.
          */
-        private void hookMenuClose(Menu menu, SelectionSpoof spoof)
+        private static void restoreSpoofOnClose(Menu menu, SelectionSpoof spoof)
         {
             Listener[] onHide = new Listener[1];
             onHide[0] = event ->
             {
                 menu.removeListener(SWT.Hide, onHide[0]);
-                menu.getDisplay().timerExec(FOCUS_RETURN_DELAY_MS, () ->
-                {
-                    if (spoof != null)
-                        spoof.restore();
-                    if (isNavigatorActive())
-                        NavigatorReveal.reactivateEditorPart(editor);
-                });
+                menu.getDisplay().timerExec(SPOOF_RESTORE_DELAY_MS, spoof::restore);
             };
             menu.addListener(SWT.Hide, onHide[0]);
         }
@@ -1286,14 +1302,6 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
             }
             name.ownManager = null;
             name.ownMenu = null;
-        }
-
-        private static boolean isNavigatorActive()
-        {
-            IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
-            IWorkbenchPage page = window == null ? null : window.getActivePage();
-            IWorkbenchPart active = page == null ? null : page.getActivePart();
-            return active != null && Global.NAVIGATOR_VIEW_ID.equals(active.getSite().getId());
         }
 
         /** Точка под именем объекта в экранных координатах. */

@@ -1,5 +1,6 @@
 package tormozit;
 
+import java.lang.ref.WeakReference;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Proxy;
 
@@ -12,6 +13,7 @@ import org.eclipse.emf.ecore.EcoreFactory;
 import org.eclipse.emf.ecore.util.EcoreUtil;
 import org.eclipse.jface.window.Window;
 import org.eclipse.swt.SWT;
+import org.eclipse.swt.widgets.Button;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Shell;
@@ -84,6 +86,60 @@ public class SelectTypeDialogHook implements IStartup
         };
         // SWT.Show приходит до ShowWindow — старый диалог ещё не на экране
         display.addFilter(SWT.Show, listener);
+        // Владелец типа известен только обработчику кнопки «...» редактора компоновки; фильтр
+        // выполняется до него, то есть до открытия диалога.
+        display.addFilter(SWT.Selection, SelectTypeDialogHook::captureTypeOwner);
+    }
+
+    private static final String TYPE_EDITOR_LISTENER_CLASS =
+        "com._1c.g5.v8.dt.dcs.ui.valueeditors.TypeDescriptionEditor$1"; //$NON-NLS-1$
+    /** Владелец типа, чья кнопка «...» нажата последней, и время нажатия. */
+    private static WeakReference<EObject> lastTypeOwner;
+    private static long lastTypeOwnerTime;
+    private static final long TYPE_OWNER_TTL_MS = 5000;
+    /** Владелец значения для держателя — по идентичности держателя. */
+    private static final java.util.Map<EObject, EObject> HOLDER_OWNERS =
+        java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
+
+    /**
+     * Нажата кнопка «...» ячейки типа редактора компоновки: слушатель кнопки — {@code TypeDescriptionEditor$1},
+     * у него {@code this$0.data.object} — объект (поле, параметр, ресурс...), чей тип редактируется.
+     */
+    private static void captureTypeOwner(org.eclipse.swt.widgets.Event event)
+    {
+        if (!(event.widget instanceof Button button) || button.isDisposed())
+            return;
+        for (Listener l : button.getListeners(SWT.Selection))
+        {
+            Object inner = Global.unwrapTypedListener(l);
+            if (inner == null || !TYPE_EDITOR_LISTENER_CLASS.equals(inner.getClass().getName()))
+                continue;
+            Object data = Global.getField(Global.getField(inner, "this$0"), "data"); //$NON-NLS-1$ //$NON-NLS-2$
+            if (Global.getField(data, "object") instanceof EObject owner) //$NON-NLS-1$
+            {
+                lastTypeOwner = new WeakReference<>(owner);
+                lastTypeOwnerTime = System.currentTimeMillis();
+                Global.tempLog("best-type-owner", "владелец типа из кнопки: " + owner.eClass().getName()); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            return;
+        }
+    }
+
+    /** Владелец типа для открываемого сейчас диалога; {@code null}, если диалог открыт не из редактора компоновки. */
+    private static EObject takeTypeOwner()
+    {
+        EObject owner = lastTypeOwner != null ? lastTypeOwner.get() : null;
+        lastTypeOwner = null;
+        return owner != null && System.currentTimeMillis() - lastTypeOwnerTime <= TYPE_OWNER_TTL_MS ? owner : null;
+    }
+
+    /**
+     * Владелец значения, ради которого создан {@code holder} (держатель общего диалога); {@code null}, если
+     * {@code holder} не наш или владелец неизвестен.
+     */
+    static EObject holderOwner(Object holder)
+    {
+        return holder instanceof EObject key ? HOLDER_OWNERS.get(key) : null;
     }
 
     /**
@@ -136,6 +192,9 @@ public class SelectTypeDialogHook implements IStartup
                 holder.eSet(holderClass().getEStructuralFeature(HOLDER_FEATURE), EcoreUtil.copy(currentType));
             registerTypeProvider(bundle);
             HOLDERS.put(holder, tdi);
+            EObject typeOwner = takeTypeOwner();
+            if (typeOwner != null)
+                HOLDER_OWNERS.put(holder, typeOwner);
             Object model = Global.newInstance(modelClass, holder, null,
                 holderClass().getEStructuralFeature(HOLDER_FEATURE), v8Project);
             if (model == null)
