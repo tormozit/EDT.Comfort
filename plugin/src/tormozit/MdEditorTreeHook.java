@@ -41,7 +41,6 @@ import org.eclipse.jface.viewers.ArrayContentProvider;
 import org.eclipse.jface.viewers.CellLabelProvider;
 import org.eclipse.jface.viewers.ColumnPixelData;
 import org.eclipse.jface.viewers.ColumnLabelProvider;
-import org.eclipse.jface.viewers.ColumnViewerToolTipSupport;
 import org.eclipse.jface.viewers.ILabelProvider;
 import org.eclipse.jface.viewers.ITreeContentProvider;
 import org.eclipse.jface.viewers.LabelProvider;
@@ -781,9 +780,19 @@ public final class MdEditorTreeHook
             element -> {
                 EObject object = elementObject(tree, element);
                 return object instanceof BasicFeature feature ? feature.getType() : null;
-            }, element -> elementObject(tree, element), null));
-        // Провайдер подсказки должен работать для ячейки под мышью, а не только текущей строки.
-        ColumnViewerToolTipSupport.enableFor(viewer);
+            }, element -> elementObject(tree, element), null)
+        {
+            // Подсказку JFace в этом дереве включает сама EDT (DtTreeView.configureTree →
+            // ColumnViewerToolTipSupport.enableFor). Она находит ячейку только в выделенной строке:
+            // с непустым текстом показывает там вторую подсказку поверх нативной и оставляет дереву
+            // setToolTipText(""), из-за чего нативная подсказка обрезанной ячейки молчит в остальных
+            // строках. С null она сама сбрасывает текст подсказки дерева и не мешает нативной.
+            @Override
+            public String getToolTipText(Object element)
+            {
+                return null;
+            }
+        });
         installTypeColumnDoubleClick(tree, viewer);
         tree.setHeaderVisible(true);
         ThemeAwareColors.applyGridLines(tree);

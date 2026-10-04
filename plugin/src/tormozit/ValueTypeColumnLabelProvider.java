@@ -18,7 +18,7 @@ import com._1c.g5.v8.dt.mcore.util.McoreUtil;
 import com._1c.g5.v8.dt.md.ui.shared.MdUiSharedImages;
 
 /** Общее представление колонки типа значения у реквизитов и параметров формы и реквизитов метаданных. */
-final class ValueTypeColumnLabelProvider extends ColumnLabelProvider
+class ValueTypeColumnLabelProvider extends ColumnLabelProvider
 {
     private final Control control;
     private final Function<Object, TypeDescription> typeOf;
@@ -141,7 +141,8 @@ final class ValueTypeColumnLabelProvider extends ColumnLabelProvider
 
     private static boolean isReferenceCategory(String category)
     {
-        return category.endsWith("Ссылка") || category.endsWith("Ref"); //$NON-NLS-1$ //$NON-NLS-2$
+        return category.endsWith("Ссылка") || category.endsWith("Ref") //$NON-NLS-1$ //$NON-NLS-2$
+            || "ОпределяемыйТип".equals(category) || "DefinedType".equals(category); //$NON-NLS-1$ //$NON-NLS-2$
     }
 }
 
