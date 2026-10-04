@@ -1090,6 +1090,11 @@ public final class BslOccurrenceContextResolver
     /**
      * Значение колонки «Подходит» для вхождения в строковом литерале: цепочка «Родитель» + имя
      * вхождения должна укладываться в полное имя искомого объекта.
+     * <p>
+     * Судить можно только цепочку, которая сама является полным именем объекта метаданных
+     * («Документ.Анкета.…»). Родитель-псевдоним таблицы запроса («Анкета.ДатаРедактирования»),
+     * имя переменной или отсутствие родителя — тип родителя неизвестен, вердикт
+     * {@link #SUITABLE_UNKNOWN}, а не «Нет».
      */
     static String suitabilityByLiteralParent(Sought sought, String parentText, String occurrenceName)
     {
@@ -1101,8 +1106,8 @@ public final class BslOccurrenceContextResolver
         else if (path.isEmpty() && occurrenceName != null)
             path = occurrenceName.trim();
         String[] have = path.isEmpty() ? new String[0] : path.split("\\."); //$NON-NLS-1$
-        if (have.length < 2)
-            return SUITABLE_NO;
+        if (have.length < 2 || !MdTypeMapping.isKnownMdRootType(suitSlot(have[0])))
+            return SUITABLE_UNKNOWN;
         String[] want = {suitSlot(sought.baseRu), sought.objectName};
         for (int i = 0; i < Math.min(have.length, want.length); i++)
         {
