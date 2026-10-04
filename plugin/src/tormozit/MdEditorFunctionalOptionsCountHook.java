@@ -852,10 +852,7 @@ public final class MdEditorFunctionalOptionsCountHook implements IStartup
 
     private static Object treeViewModelInput(Object component)
     {
-        Object viewModels = Global.invoke(component, "getViewModels"); //$NON-NLS-1$
-        if (!(viewModels instanceof Iterable<?> iterable))
-            return null;
-        for (Object viewModel : iterable)
+        for (Object viewModel : AefFieldFocus.existingViewModels(component))
         {
             if (viewModel == null)
                 continue;

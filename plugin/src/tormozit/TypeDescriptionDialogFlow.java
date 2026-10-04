@@ -233,14 +233,10 @@ final class TypeDescriptionDialogFlow
      */
     private static Object findButtonChannel(Object typeDescriptionComponent)
     {
-        Object children = Global.invoke(typeDescriptionComponent, "getComponents"); //$NON-NLS-1$
-        if (children instanceof Iterable<?> iterable)
+        for (Object child : AefFieldFocus.existingComponents(typeDescriptionComponent))
         {
-            for (Object child : iterable)
-            {
-                if (child != null && child.getClass().getName().startsWith(COMPONENT_CLASS + '$'))
-                    return child;
-            }
+            if (child != null && child.getClass().getName().startsWith(COMPONENT_CLASS + '$'))
+                return child;
         }
         return typeDescriptionComponent;
     }

@@ -356,10 +356,7 @@ public class ApplicationEditorHook implements IStartup
         Object mapObj = renderer != null ? Global.getField(renderer, "viewModelToView") : null; //$NON-NLS-1$
         if (!(mapObj instanceof java.util.Map<?, ?> viewModelToView))
             return false;
-        Object viewModels = Global.invoke(component, "getViewModels"); //$NON-NLS-1$
-        if (!(viewModels instanceof Iterable<?> it))
-            return false;
-        for (Object viewModel : it)
+        for (Object viewModel : AefFieldFocus.existingViewModels(component))
         {
             if (viewModel == null || viewModel.getClass().getName().contains("LabelViewModel")) //$NON-NLS-1$
                 continue;

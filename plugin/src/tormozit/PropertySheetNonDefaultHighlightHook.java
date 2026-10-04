@@ -261,10 +261,7 @@ public final class PropertySheetNonDefaultHighlightHook implements IStartup
         if (component == null || depth > COMPONENT_SCAN_DEPTH)
             return;
         applyDecoratedLinkComponent(component, renderer, liveLinks);
-        Object children = Global.invoke(component, "getComponents"); //$NON-NLS-1$
-        if (!(children instanceof Iterable<?> list))
-            return;
-        for (Object child : list)
+        for (Object child : AefFieldFocus.existingComponents(component))
             visitComponent(child, renderer, liveLinks, depth + 1);
     }
 
@@ -347,10 +344,7 @@ public final class PropertySheetNonDefaultHighlightHook implements IStartup
     /** Модель представления самого поля-ссылки — {@code null}, если компонент не ссылка. */
     private static Object linkViewModel(Object component)
     {
-        Object viewModels = Global.invoke(component, "getViewModels"); //$NON-NLS-1$
-        if (!(viewModels instanceof Iterable<?> list))
-            return null;
-        for (Object vm : list)
+        for (Object vm : AefFieldFocus.existingViewModels(component))
         {
             if (vm != null && vm.getClass().getName().contains(LINK_VIEW_MODEL))
                 return vm;

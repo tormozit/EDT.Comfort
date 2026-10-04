@@ -280,15 +280,11 @@ public final class MdEditorFormsPageHook implements IStartup
 
     private static List<Object> viewModels(Object component)
     {
-        Object viewModels = Global.invoke(component, "getViewModels"); //$NON-NLS-1$
         List<Object> out = new ArrayList<>();
-        if (viewModels instanceof Iterable<?> iterable)
+        for (Object viewModel : AefFieldFocus.existingViewModels(component))
         {
-            for (Object viewModel : iterable)
-            {
-                if (viewModel != null)
-                    out.add(viewModel);
-            }
+            if (viewModel != null)
+                out.add(viewModel);
         }
         return out;
     }

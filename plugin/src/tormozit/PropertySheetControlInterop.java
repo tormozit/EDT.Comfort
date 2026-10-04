@@ -1088,10 +1088,7 @@ final class PropertySheetControlInterop
     /** Текст {@code LabelViewModel} среди моделей представления самого компонента. */
     private static String labelTextOfComponentViewModels(Object component)
     {
-        Object viewModels = Global.invoke(component, "getViewModels"); //$NON-NLS-1$
-        if (!(viewModels instanceof Iterable))
-            return null;
-        for (Object vm : (Iterable<?>) viewModels)
+        for (Object vm : AefFieldFocus.existingViewModels(component))
         {
             if (vm == null || !vm.getClass().getName().contains("LabelViewModel")) //$NON-NLS-1$
                 continue;
@@ -1432,10 +1429,7 @@ final class PropertySheetControlInterop
     private static boolean ownsViewDirectly(Object component, Object renderer, Object lwtView,
             Object matchedVm)
     {
-        Object viewModels = Global.invoke(component, "getViewModels"); //$NON-NLS-1$
-        if (!(viewModels instanceof Iterable))
-            return false;
-        for (Object vm : (Iterable<?>) viewModels)
+        for (Object vm : AefFieldFocus.existingViewModels(component))
         {
             if (matchedVm != null && matchedVm == vm)
                 return true;
@@ -1459,10 +1453,7 @@ final class PropertySheetControlInterop
     {
         if (component == null)
             return null;
-        Object children = Global.invoke(component, "getComponents"); //$NON-NLS-1$
-        if (children instanceof Iterable)
-            return ((Iterable<?>) children).iterator();
-        return null;
+        return AefFieldFocus.existingComponents(component).iterator();
     }
 
     private static String labelTextOfViewModel(Object viewModel)

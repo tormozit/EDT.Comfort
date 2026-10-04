@@ -286,32 +286,93 @@ final class AefFieldFocus
     {
         if (component == null || depth > 8)
             return;
-        Object viewModels = Global.invoke(component, "getViewModels"); //$NON-NLS-1$
-        if (viewModels instanceof Iterable)
+        for (Object viewModel : existingViewModels(component))
         {
-            for (Object viewModel : (Iterable<?>)viewModels)
-            {
-                if (viewModel == null || viewModel.getClass().getName().contains("LabelViewModel")) //$NON-NLS-1$
-                    continue;
-                Object view = viewModelToView.get(viewModel);
-                Object nativeControl = view != null ? Global.invoke(view, "getNativeControl") : null; //$NON-NLS-1$
-                if (nativeControl != null && !out.contains(nativeControl))
-                    out.add(nativeControl);
-            }
+            if (viewModel == null || viewModel.getClass().getName().contains("LabelViewModel")) //$NON-NLS-1$
+                continue;
+            Object view = viewModelToView.get(viewModel);
+            Object nativeControl = view != null ? Global.invoke(view, "getNativeControl") : null; //$NON-NLS-1$
+            if (nativeControl != null && !out.contains(nativeControl))
+                out.add(nativeControl);
         }
         for (Object child : childComponents(component))
             if (!child.getClass().getName().contains("LabelComponent")) //$NON-NLS-1$
                 collectEditorNativeControls(viewModelToView, child, out, depth + 1);
     }
 
+    /** Временная диагностика {@link #logEarlyRead}: уже записанные пары «компонент — кто спросил». */
+    private static final java.util.Set<String> EARLY_VIEW_MODEL_READS =
+        java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    /**
+     * Уже созданные модели представления компонента; пусто, если их ещё нет. Замена
+     * {@code IComponent.getViewModels()} для любого нашего обхода дерева компонентов.
+     *
+     * <p>{@code getViewModels()} создаёт модели лениво, и вызывать его раньше штатного
+     * рендерера нельзя. {@code TypeDescriptionComponent} кладёт счётчик длины сразу в двух
+     * родителей: {@code ContainerComponent.spinner()} добавляет его в сам компонент типа, затем
+     * он же добавляется в поле «Длина», а {@code Component.addComponent} из прежнего родителя
+     * не убирает. Список детей модели контейнера — EMF-containment: модель счётчика достаётся
+     * тому, кто добавил её последним. Штатный порядок (сверху вниз) — компонент типа, потом поле:
+     * счётчик оказывается в поле, после подписи. Если поле создаст свои модели раньше (наш обход
+     * спросил их у ещё не отрисованной сцены), компонент типа позже заберёт счётчик себе — он
+     * встанет перед подписью «Длина», и двухколоночная раскладка секции съедет.
+     *
+     * <p>Всем вызывающим модели нужны только для поиска уже построенных view, так что
+     * «моделей ещё нет» для них равно «view ещё нет».
+     */
+    static Iterable<?> existingViewModels(Object component)
+    {
+        if (component == null)
+            return java.util.Collections.emptyList();
+        if (Global.getField(component, "viewModels") instanceof Iterable<?> created) //$NON-NLS-1$
+            return created;
+        logEarlyRead(component, "моделей представления ещё нет"); //$NON-NLS-1$
+        return java.util.Collections.emptyList();
+    }
+
+    /**
+     * Уже созданные дочерние компоненты; пусто, если их ещё нет. Замена
+     * {@code IComponent.getComponents()} для любого нашего обхода дерева компонентов.
+     *
+     * <p>{@code Component.getComponents()} — ленивое создание без синхронизации: «детей нет →
+     * {@code createComponents()}». AEF строит дерево в своём потоке ({@code RunnableQueue}),
+     * наши хуки ходят по нему из UI-потока; когда оба вызова попадают на ещё не построенный
+     * компонент, {@code createComponents()} выполняется дважды. Подтверждено временным
+     * воспроизводителем (04.10.2026, удалён) на компоненте описания типа: в секции панели
+     * «Свойства» по два поля типа, счётчика и по две подписи «Длина», «Допустимая длина»,
+     * «Неограниченная длина», двухколоночная раскладка съезжает.
+     */
+    static Iterable<?> existingComponents(Object component)
+    {
+        if (component == null)
+            return java.util.Collections.emptyList();
+        if (Global.getField(component, "components") instanceof Iterable<?> created) //$NON-NLS-1$
+            return created;
+        logEarlyRead(component, "детей ещё нет"); //$NON-NLS-1$
+        return java.util.Collections.emptyList();
+    }
+
+    /**
+     * ВРЕМЕННО: каждое попадание сюда — момент, когда прежний ленивый вызов создал бы детей или
+     * модели раньше рендерера. Пишется раз на пару «класс компонента — вызывающий».
+     */
+    private static void logEarlyRead(Object component, String what)
+    {
+        StackTraceElement[] stack = new Throwable().getStackTrace();
+        String caller = stack.length > 2 ? stack[2].getClassName() + '.' + stack[2].getMethodName() : "?"; //$NON-NLS-1$
+        String key = what + ": " + component.getClass().getName() + " <- " + caller; //$NON-NLS-1$ //$NON-NLS-2$
+        if (EARLY_VIEW_MODEL_READS.add(key))
+            Global.tempLog("aef-early-view-models", key //$NON-NLS-1$
+                + " родитель=" + Global.invoke(component, "getParent")); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
     static List<Object> childComponents(Object component)
     {
         List<Object> out = new ArrayList<>();
-        Object children = Global.invoke(component, "getComponents"); //$NON-NLS-1$
-        if (children instanceof Iterable)
-            for (Object child : (Iterable<?>)children)
-                if (child != null)
-                    out.add(child);
+        for (Object child : existingComponents(component))
+            if (child != null)
+                out.add(child);
         Object definitionComponent = Global.invoke(component, "getDefinitionComponent"); //$NON-NLS-1$
         if (definitionComponent != null && !out.contains(definitionComponent))
             out.add(definitionComponent);

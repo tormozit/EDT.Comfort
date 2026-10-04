@@ -379,7 +379,10 @@ public final class DynamicListSettingsDialogHook implements IStartup
 
         log("onDelayedSetup attr=" + attrName + " key=" + listKey); //$NON-NLS-1$ //$NON-NLS-2$
         if (Global.getField(resolveDialog(shell), "context") instanceof DataCompositionSchemaControlContext context) //$NON-NLS-1$
+        {
             DcsComputedValueTypes.install(context);
+            TableExHeaderAccent.install(context);
+        }
         shell.setData(DEMODALIZED_KEY, Boolean.TRUE);
         demodalize(shell);
         pinAboveOwner(shell);

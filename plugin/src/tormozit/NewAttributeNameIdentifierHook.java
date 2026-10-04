@@ -1,10 +1,8 @@
 package tormozit;
 
 import java.util.Iterator;
-import java.util.List;
 import java.util.Map;
 
-import org.eclipse.core.resources.IProject;
 import org.eclipse.jface.wizard.IWizard;
 import org.eclipse.jface.wizard.IWizardContainer;
 import org.eclipse.jface.wizard.IWizardPage;
@@ -13,8 +11,6 @@ import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.ui.IStartup;
-
-import com._1c.g5.v8.dt.core.platform.IDtProject;
 
 /**
  * В штатных диалогах создания объектов метаданных («Новый реквизит», «Новый реквизит табличной
@@ -68,11 +64,6 @@ public class NewAttributeNameIdentifierHook implements IStartup
     private static final String WIZARD_ANCESTOR_CLASS =
         "com._1c.g5.v8.dt.md.ui.wizards.base.aef.DtAefMdNewWizard"; //$NON-NLS-1$
     private static final String LOG_TAG = "NewAttributeNameIdentifier"; //$NON-NLS-1$
-    /** Функция ИР подбора типа по имени; также кнопка «Лучший ИР» в {@link SmartOutlineHook}. */
-    static final String IR_TYPE_MODULE = "ирОбщий"; //$NON-NLS-1$
-    static final String IR_TYPE_FUNCTION = "ИмяТипаИзИмениПеременнойЛкс"; //$NON-NLS-1$
-    private static final String DEFAULT_TYPE_NAME_RU = "Строка"; //$NON-NLS-1$
-    private static final int DEFAULT_STRING_LENGTH = 10;
 
     @Override
     public void earlyStartup()
@@ -158,7 +149,7 @@ public class NewAttributeNameIdentifierHook implements IStartup
         Object typeModel = Global.getField(wizard, "model"); //$NON-NLS-1$
 
         // Исходное значение «Имя» на момент подключения слушателя (обычно дефолт вида
-        // «Реквизит1») — чтобы подбор типа через ИР запускался по факту правки пользователем,
+        // «Реквизит1») — чтобы подбор типа запускался по факту правки пользователем,
         // а не только когда наш конвертер идентификатора меняет текст (пробелы и т.п.).
         String initialName = readLightTextValue(lightText);
 
@@ -216,14 +207,8 @@ public class NewAttributeNameIdentifierHook implements IStartup
 
     private static Object firstViewModel(Object component)
     {
-        Object viewModels = Global.invoke(component, "getViewModels"); //$NON-NLS-1$
-        if (viewModels instanceof Iterable<?> iterable)
-        {
-            Iterator<?> it = iterable.iterator();
-            if (it.hasNext())
-                return it.next();
-        }
-        return null;
+        Iterator<?> it = AefFieldFocus.existingViewModels(component).iterator();
+        return it.hasNext() ? it.next() : null;
     }
 
     /** Текущий текст поля «Имя» (см. {@link #onNameFocusLost} про обёртку {@code LightEditorBar}). */
@@ -277,100 +262,8 @@ public class NewAttributeNameIdentifierHook implements IStartup
             return;
         }
 
+        // Автоподбор типа по имени (ИР, иначе Напарник) — общий для всех мест плагина.
         if (modified)
-            tryAutofillTypeFromIr(typeModel, identifier);
-    }
-
-    /**
-     * Если поле «Тип» ещё не тронуто пользователем (тип = Строка, длина = 10 — 1С-дефолт для
-     * нового реквизита) и подключено приложение ИР — запускает в фоне
-     * {@code ирОбщий.ИмяТипаИзИмениПеременнойЛкс(Имя)} и, если по готовности результата тип
-     * всё ещё стандартный (пользователь не успел выбрать свой), подставляет предложенный ИР тип.
-     */
-    private static void tryAutofillTypeFromIr(Object typeModel, String name)
-    {
-        if (typeModel == null || name == null || name.isEmpty())
-            return;
-        if (!isDefaultStringType(typeModel))
-            return;
-
-        IDtProject project = resolveDtProject();
-        if (project == null)
-            return;
-
-        Global.callIrFunctionInBackground(project, IR_TYPE_MODULE, IR_TYPE_FUNCTION, new Object[] { name },
-            () -> isDefaultStringType(typeModel),
-            result -> applyIrType(typeModel, result));
-    }
-
-    /** {@code true}, если {@code typeModel} сейчас описывает 1С-дефолт для нового реквизита — Строка(10). */
-    private static boolean isDefaultStringType(Object typeModel)
-    {
-        try
-        {
-            Object singleTypeItemValue = Global.invoke(typeModel, "getSingleTypeItem"); //$NON-NLS-1$
-            Object typeItem = Global.invoke(singleTypeItemValue, "get"); //$NON-NLS-1$
-            Object nameRu = Global.invoke(typeItem, "getNameRu"); //$NON-NLS-1$
-            Object stringLengthValue = Global.invoke(typeModel, "getStringLength"); //$NON-NLS-1$
-            Object length = Global.invoke(stringLengthValue, "get"); //$NON-NLS-1$
-            if (!DEFAULT_TYPE_NAME_RU.equals(nameRu))
-                return false;
-            return length instanceof Integer i && i == DEFAULT_STRING_LENGTH;
-        }
-        catch (Exception ignored)
-        {
-            return false;
-        }
-    }
-
-    /** Активный проект как {@link IDtProject} — по установленному в плагине паттерну ({@code Global.getActiveProject}). */
-    private static IDtProject resolveDtProject()
-    {
-        IProject project = Global.getActiveProject((org.eclipse.ui.IWorkbenchPage) null, false);
-        return project != null ? Global.getDtProjectFromWorkspaceProject(project) : null;
-    }
-
-    /** Сопоставляет строку, возвращённую ИР, с {@link com._1c.g5.v8.dt.mcore.TypeItem} и подставляет в {@code typeModel}. */
-    private static void applyIrType(Object typeModel, String irResult)
-    {
-        if (irResult == null || irResult.isBlank())
-            return;
-        try
-        {
-            Object matched = findTypeItemByIrName(typeModel, irResult);
-            if (matched == null)
-                return;
-
-            Object singleTypeItemValue = Global.invoke(typeModel, "getSingleTypeItem"); //$NON-NLS-1$
-            Global.invokeVoid(singleTypeItemValue, "set", matched); //$NON-NLS-1$
-            Global.log(LOG_TAG, "Тип подобран через ИР: " + irResult); //$NON-NLS-1$
-        }
-        catch (Exception e)
-        {
-            Global.logError(LOG_TAG, "applyIrType", e); //$NON-NLS-1$
-        }
-    }
-
-    /**
-     * {@link com._1c.g5.v8.dt.mcore.TypeItem} из доступных типов {@code typeModel}
-     * ({@code ITypeDescriptionModel.getTypes(false)}), имя которого (рус. или англ.) совпадает
-     * со строкой, возвращённой ИР; {@code null}, если такого нет.
-     */
-    static Object findTypeItemByIrName(Object typeModel, String irResult)
-    {
-        if (typeModel == null || irResult == null || irResult.isBlank())
-            return null;
-        String wanted = irResult.trim();
-        Object typesObj = Global.invoke(typeModel, "getTypes", Boolean.FALSE); //$NON-NLS-1$
-        if (!(typesObj instanceof List<?> types))
-            return null;
-        for (Object item : types)
-        {
-            Object nameRu = Global.invoke(item, "getNameRu"); //$NON-NLS-1$
-            Object name = Global.invoke(item, "getName"); //$NON-NLS-1$
-            if (wanted.equalsIgnoreCase(String.valueOf(nameRu)) || wanted.equalsIgnoreCase(String.valueOf(name)))
-                return item;
-        }
-        return null;
+            TypeByNameAdvisor.autofillDefaultType(typeModel, identifier, LOG_TAG);
     }
 }

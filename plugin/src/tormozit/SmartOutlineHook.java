@@ -1888,11 +1888,12 @@ public class SmartOutlineHook implements IStartup {
     }
 
     /**
-     * Кнопка «Лучший ИР» слева от «ОК» диалога «Редактирование типа данных» — только если к
-     * проекту подключено приложение ИР. Подбирает тип по имени владельца свойства
-     * ({@code ITypeDescriptionModel.getParent()}, обычно реквизит) той же функцией ИР, что и
-     * автоподбор типа в «Новый реквизит» ({@link NewAttributeNameIdentifierHook}), и помечает его
-     * в дереве: без составного типа — заменяет пометку, с составным — добавляет к помеченным.
+     * Кнопка «Лучший тип» слева от «ОК» диалога «Редактирование типа данных» —
+     * только если есть кому подбирать ({@link TypeByNameAdvisor#availableSource}: объект
+     * метаданных с именем реквизита, подключённое приложение ИР, иначе 1С:Напарник в сети). Подбирает тип по имени владельца свойства
+     * ({@code ITypeDescriptionModel.getParent()}, обычно реквизит) тем же способом, что и
+     * автоподбор типа в «Новый реквизит», и помечает его в дереве: без составного типа —
+     * заменяет пометку, с составным — добавляет к помеченным.
      *
      * @param fallbackParent куда положить кнопку, если «ОК» не найдена (строка фильтра)
      */
@@ -1902,7 +1903,9 @@ public class SmartOutlineHook implements IStartup {
         if (model == null)
             return;
         IDtProject dtProject = resolveIrDtProject(model);
-        if (dtProject == null || !IRApplication.hasConnectedSessionForKeys(dtProject))
+        String ownerName = typeOwnerName(model);
+        String source = TypeByNameAdvisor.availableSource(dtProject, model, ownerName);
+        if (source == null)
             return;
 
         Button ok = shell.getDefaultButton();
@@ -1912,13 +1915,12 @@ public class SmartOutlineHook implements IStartup {
         if (buttonParent == null || buttonParent.isDisposed())
             return;
 
-        String ownerName = typeOwnerName(model);
         // Штатная панель кнопок: +1 колонка, ширина новой кнопки — как у «ОК» (сама панель не
         // растягивается, см. makeColumnsEqualWidth).
         if (buttonParent.getLayout() instanceof GridLayout grid)
             grid.numColumns++;
         Button button = new Button(buttonParent, SWT.PUSH);
-        button.setText("Лучший ИР"); //$NON-NLS-1$
+        button.setText("Лучший тип"); //$NON-NLS-1$
         GridData gd = new GridData(ok != null ? SWT.FILL : SWT.BEGINNING, SWT.CENTER, false, false);
         if (ok != null && ok.getLayoutData() instanceof GridData okGd)
             gd.widthHint = Math.max(okGd.widthHint, button.computeSize(SWT.DEFAULT, SWT.DEFAULT, true).x);
@@ -1928,12 +1930,13 @@ public class SmartOutlineHook implements IStartup {
         boolean hasName = ownerName != null;
         button.setEnabled(hasName);
         button.setToolTipText(TooltipText.wrap(button,
-            (hasName ? "Пометить тип, который ИР подбирает по имени реквизита" //$NON-NLS-1$
-                : "Недоступно: не удалось определить имя владельца типа") //$NON-NLS-1$
+            (!hasName ? "Недоступно: не удалось определить имя владельца типа" //$NON-NLS-1$
+                : TypeByNameAdvisor.SOURCE_EXACT_NAME.equals(source)
+                    ? "Пометить тип объекта метаданных, имя которого совпадает с именем реквизита" //$NON-NLS-1$
+                    : "Пометить тип, который " + source + " подбирает по имени реквизита") //$NON-NLS-1$ //$NON-NLS-2$
                 + Global.pluginSignForTooltip()));
         button.addListener(SWT.Selection, e ->
-            Global.callIrFunctionInBackground(dtProject, NewAttributeNameIdentifierHook.IR_TYPE_MODULE,
-                NewAttributeNameIdentifierHook.IR_TYPE_FUNCTION, new Object[] { ownerName },
+            TypeByNameAdvisor.suggest(dtProject, model, ownerName,
                 () -> !shell.isDisposed(),
                 result ->
                 {
@@ -2077,11 +2080,11 @@ public class SmartOutlineHook implements IStartup {
     {
         try
         {
-            Object matched = NewAttributeNameIdentifierHook.findTypeItemByIrName(model, irResult);
+            Object matched = TypeByNameAdvisor.findTypeItem(model, irResult);
             Object multiItems = Global.invoke(model, "getMultiItems"); //$NON-NLS-1$
             if (matched == null || !(multiItems instanceof java.util.List<?>))
             {
-                Global.log(LOG_TAG_IR_BEST_TYPE, "тип ИР не сопоставлен: «" + irResult + "»"); //$NON-NLS-1$ //$NON-NLS-2$
+                Global.log(LOG_TAG_IR_BEST_TYPE, "подобранный тип не сопоставлен: «" + irResult + "»"); //$NON-NLS-1$ //$NON-NLS-2$
                 return null;
             }
             Object composite = Global.invoke(model, "getCompositeType"); //$NON-NLS-1$
