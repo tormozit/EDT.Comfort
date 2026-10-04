@@ -15,6 +15,7 @@
     <startup class="tormozit.ComfortShutdownHook"/>
     <startup class="tormozit.ExternalOpenRequestHook"/>
     <startup class="tormozit.EditorStatusFieldsFixHook"/>
+    <startup class="tormozit.CompileContextStatusHook"/>
     <startup class="tormozit.LwtComboPopupFixHook"/>
     <startup class="tormozit.FormWysiwygScrollHook"/>
     <startup class="tormozit.ActiveProjectTracker"/>

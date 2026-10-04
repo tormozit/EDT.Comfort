@@ -145,6 +145,9 @@ public class Activator extends AbstractUIPlugin
             ComfortSettings.PREF_BRACKET_CONTENT_HINT_MIN_LINES,
             ComfortSettings.DEFAULT_BRACKET_CONTENT_HINT_MIN_LINES);
         settings.getPreferenceStore().setDefault(
+            ComfortSettings.PREF_COMPILE_CONTEXT_STATUS_WIDTH,
+            ComfortSettings.DEFAULT_COMPILE_CONTEXT_STATUS_WIDTH);
+        settings.getPreferenceStore().setDefault(
             ComfortSettings.PREF_AUTO_COLLAPSE_REGIONS,
             ComfortSettings.DEFAULT_AUTO_COLLAPSE_REGIONS);
         ComfortSettings.applyIndentGuideDefaults(settings.getPreferenceStore());

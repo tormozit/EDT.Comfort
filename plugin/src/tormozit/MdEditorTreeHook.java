@@ -588,7 +588,6 @@ public final class MdEditorTreeHook
             installTypeColumn(viewer);
             installModelAddObserver(viewer);
             installFunctionalOptionsPanel(viewer);
-            installAttributesFilter(viewer);
         }
         ISelectionChangedListener stock = findListener(viewer, STOCK_LISTENER_CLASS);
         if (stock == null)
@@ -1217,6 +1216,8 @@ public final class MdEditorTreeHook
             return;
         installFunctionalOptionsCountColumn(viewer, tree, editor);
         installIncludedOptionsList(viewer, tree, editor);
+        // Фильтр — только там, где есть панель ФО: не над деревом «Стандартные реквизиты».
+        installAttributesFilter(viewer);
     }
 
     /**

@@ -266,6 +266,14 @@ public final class ComfortSettings
     /** Минимальное число строк по умолчанию — 50. */
     public static final int DEFAULT_BRACKET_CONTENT_HINT_MIN_LINES = 50;
 
+    // ---- Compile context status field ----
+
+    /** Ключ: ширина индикатора условий компиляции в строке состояния, в символах; 0 — не показывать. */
+    public static final String PREF_COMPILE_CONTEXT_STATUS_WIDTH = "comfort.compileContextStatus.width"; //$NON-NLS-1$
+
+    /** Ширина индикатора условий компиляции по умолчанию — 20 символов. */
+    public static final int DEFAULT_COMPILE_CONTEXT_STATUS_WIDTH = 20;
+
     // ---- Auto-collapsed regions ----
 
     /** Ключ: имена областей (#Область), сворачиваемых при открытии модуля, через запятую. */
@@ -1424,6 +1432,15 @@ public final class ComfortSettings
         if (settings == null)
             return DEFAULT_BRACKET_CONTENT_HINT_MIN_LINES;
         return settings.preferenceStore.getInt(PREF_BRACKET_CONTENT_HINT_MIN_LINES);
+    }
+
+    /** Ширина индикатора условий компиляции в строке состояния, в символах; 0 — индикатор выключен. */
+    public static int getCompileContextStatusWidth()
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return DEFAULT_COMPILE_CONTEXT_STATUS_WIDTH;
+        return settings.preferenceStore.getInt(PREF_COMPILE_CONTEXT_STATUS_WIDTH);
     }
 
     /**

@@ -294,6 +294,10 @@ public class ComfortPreferencePage
         timeoutTextData.grabExcessHorizontalSpace = false;
         timeoutTextData.horizontalAlignment = SWT.LEFT;
         timeoutText.setLayoutData(timeoutTextData);
+        // Смещение вправо: поле зависит от флажка выше.
+        GridData timeoutLabelData = new GridData(SWT.BEGINNING, SWT.CENTER, false, false);
+        timeoutLabelData.horizontalIndent = 20;
+        timeoutField.getLabelControl(codeEditorGroup).setLayoutData(timeoutLabelData);
 
         BooleanFieldEditor serverCallField = new BooleanFieldEditor(
             ComfortSettings.PREF_SERVER_CALL_HIGHLIGHTING_ENABLED,
@@ -310,6 +314,7 @@ public class ComfortPreferencePage
             codeEditorGroup);
         addField(serverCallColorField);
         setFieldTooltip(serverCallColorField, SERVER_CALL_COLOR_TOOLTIP, codeEditorGroup);
+        indentUnderCheckbox(serverCallColorField, codeEditorGroup);
 
         ThemeAwareColorFieldEditor serverCallContextColorField = new ThemeAwareColorFieldEditor(
             ComfortSettings.PREF_SERVER_CALL_CONTEXT_HIGHLIGHTING_COLOR,
@@ -317,6 +322,7 @@ public class ComfortPreferencePage
             codeEditorGroup);
         addField(serverCallContextColorField);
         setFieldTooltip(serverCallContextColorField, SERVER_CALL_CONTEXT_COLOR_TOOLTIP, codeEditorGroup);
+        indentUnderCheckbox(serverCallContextColorField, codeEditorGroup);
 
         BooleanFieldEditor implicitVariableField = new BooleanFieldEditor(
             ComfortSettings.PREF_IMPLICIT_VARIABLE_HIGHLIGHTING_ENABLED,
@@ -333,6 +339,7 @@ public class ComfortPreferencePage
             codeEditorGroup);
         addField(implicitVariableColorField);
         setFieldTooltip(implicitVariableColorField, IMPLICIT_VARIABLE_COLOR_TOOLTIP, codeEditorGroup);
+        indentUnderCheckbox(implicitVariableColorField, codeEditorGroup);
 
         BooleanFieldEditor bracketHintField = new BooleanFieldEditor(
             ComfortSettings.PREF_BRACKET_CONTENT_HINT_ENABLED,
@@ -364,6 +371,29 @@ public class ComfortPreferencePage
         bracketHintMinLinesTextData.grabExcessHorizontalSpace = false;
         bracketHintMinLinesTextData.horizontalAlignment = SWT.LEFT;
         bracketHintMinLinesText.setLayoutData(bracketHintMinLinesTextData);
+        // Смещение вправо: поле зависит от флажка выше.
+        GridData bracketHintMinLinesLabelData = new GridData(SWT.BEGINNING, SWT.CENTER, false, false);
+        bracketHintMinLinesLabelData.horizontalIndent = 20;
+        bracketHintMinLinesField.getLabelControl(codeEditorGroup).setLayoutData(bracketHintMinLinesLabelData);
+
+        IntegerFieldEditor compileContextWidthField = new IntegerFieldEditor(
+            ComfortSettings.PREF_COMPILE_CONTEXT_STATUS_WIDTH,
+            "Ширина индикатора условий компиляции", //$NON-NLS-1$
+            codeEditorGroup,
+            3);
+        compileContextWidthField.setValidRange(0, 200);
+        addField(compileContextWidthField);
+        String compileContextWidthTooltip =
+            "Ширина в символах поля строки состояния, которое показывает условия препроцессора\n"
+            + "и директиву компиляции для позиции каретки в модуле. 0 — не показывать."; //$NON-NLS-1$
+        setFieldTooltip(compileContextWidthField, compileContextWidthTooltip, codeEditorGroup);
+        Text compileContextWidthText = compileContextWidthField.getTextControl(codeEditorGroup);
+        compileContextWidthText.setToolTipText(compileContextWidthTooltip);
+        GridData compileContextWidthTextData = new GridData();
+        compileContextWidthTextData.widthHint = 40;
+        compileContextWidthTextData.grabExcessHorizontalSpace = false;
+        compileContextWidthTextData.horizontalAlignment = SWT.LEFT;
+        compileContextWidthText.setLayoutData(compileContextWidthTextData);
 
         StringFieldEditor autoCollapseRegionsField = new StringFieldEditor(
             ComfortSettings.PREF_AUTO_COLLAPSE_REGIONS,
@@ -721,6 +751,14 @@ public class ComfortPreferencePage
      * Color picker: store = светлый RGB; в тёмной теме в контроле — {@link ThemeAwareColors#invertLightness};
      * при Save из контрола — обратный invert → светлый в store.
      */
+    /** Сдвигает подпись поля цвета вправо: поле зависит от флажка выше. */
+    private static void indentUnderCheckbox(ColorFieldEditor field, Composite parent)
+    {
+        // ColorFieldEditor.doFillIntoGrid кладёт GridData (с horizontalSpan) прямо на саму подпись.
+        if (field.getLabelControl(parent).getLayoutData() instanceof GridData data)
+            data.horizontalIndent = 20;
+    }
+
     private static final class ThemeAwareColorFieldEditor extends ColorFieldEditor
     {
         /** Страница открыта в тёмной теме → в контроле должен быть effective. */
