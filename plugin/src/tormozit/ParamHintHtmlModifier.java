@@ -44,6 +44,7 @@ import org.eclipse.swt.events.KeyEvent;
 import org.eclipse.swt.graphics.Color;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.graphics.Rectangle;
+import org.eclipse.swt.graphics.RGB;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Listener;
@@ -79,10 +80,12 @@ import com._1c.g5.v8.dt.bsl.model.DynamicFeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.Expression;
 import com._1c.g5.v8.dt.bsl.model.FeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.FeatureEntry;
+import com._1c.g5.v8.dt.bsl.model.FormalParam;
 import com._1c.g5.v8.dt.bsl.model.Invocation;
 import com._1c.g5.v8.dt.bsl.model.NullLiteral;
 import com._1c.g5.v8.dt.bsl.model.NumberLiteral;
 import com._1c.g5.v8.dt.bsl.model.OperatorStyleCreator;
+import com._1c.g5.v8.dt.bsl.model.SimpleStatement;
 import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.StringLiteral;
 import com._1c.g5.v8.dt.bsl.model.UndefinedLiteral;
@@ -5020,6 +5023,15 @@ public final class ParamHintHtmlModifier
             + " caller=" + modifyContentCaller()); //$NON-NLS-1$
         // #endregion
         String directionPrefix = buildDirectionPrefix(isOut);
+        if (Boolean.TRUE.equals(isOut) && ctx != null && paramName != null
+            && ctx.assignedParamNames.contains(paramName.toLowerCase(Locale.ROOT)))
+        {
+            RGB color = ThemeAwareColors.toEffectiveRgb(new RGB(198, 40, 40));
+            String cssColor = String.format(Locale.ROOT, "#%02X%02X%02X", //$NON-NLS-1$
+                color.red, color.green, color.blue);
+            directionPrefix = "<span class=\"comfort-param-assigned\" style=\"color:" //$NON-NLS-1$
+                + cssColor + "\">Вых. (присвоение)</span> - "; //$NON-NLS-1$
+        }
         String suffix = buildMetaSuffix(defaultDescription, description);
         String newTypeInner = directionPrefix + typeBase + suffix;
         if (!virtualParam && (newTypeInner == null || newTypeInner.isEmpty()))
@@ -5435,6 +5447,13 @@ public final class ParamHintHtmlModifier
         if (typeInnerHtml == null || typeInnerHtml.isEmpty())
             return ""; //$NON-NLS-1$
         String s = typeInnerHtml;
+        // Цвет зависит от темы; Browser также может сериализовать его как rgb(...).
+        if (s.startsWith("<span class=\"comfort-param-assigned\"")) //$NON-NLS-1$
+        {
+            int end = s.indexOf("</span>"); //$NON-NLS-1$
+            if (end >= 0)
+                s = "Вых." + s.substring(end + "</span>".length()); //$NON-NLS-1$ //$NON-NLS-2$
+        }
         if (s.startsWith("Вых. - ")) //$NON-NLS-1$
             s = s.substring("Вых. - ".length()); //$NON-NLS-1$
         else if (s.startsWith("Вх. - ")) //$NON-NLS-1$
@@ -6035,6 +6054,7 @@ public final class ParamHintHtmlModifier
             ctx.actualArgTypes = snap.actualArgTypes;
             ctx.actualArgTypeNames = snap.actualArgTypeNames;
             ctx.method = snap.method;
+            ctx.assignedParamNames = snap.assignedParamNames;
             ctx.constructorType = snap.constructorType;
             ctx.directive = snap.directive;
             ctx.currentArgIndex = snap.currentArgIndex;
@@ -6062,6 +6082,7 @@ public final class ParamHintHtmlModifier
         {
             params = invocation.getParams();
             snap.method = resolveMethod(invocation.getMethodAccess());
+            snap.assignedParamNames = assignedParamNames(invocation.getMethodAccess());
             snap.directive = extractMethodDirective(resource, invocation);
         }
         else
@@ -6237,6 +6258,39 @@ public final class ParamHintHtmlModifier
                 return i;
         }
         return separatorOffsets.size();
+    }
+
+    /** Прямые присвоения формальным параметрам в теле вызываемого метода. */
+    private static Set<String> assignedParamNames(FeatureAccess access)
+    {
+        EList<FeatureEntry> entries;
+        if (access instanceof StaticFeatureAccess staticAccess)
+            entries = staticAccess.getFeatureEntries();
+        else if (access instanceof DynamicFeatureAccess dynamic)
+            entries = dynamic.getFeatureEntries();
+        else
+            return Collections.emptySet();
+        Set<String> names = new LinkedHashSet<>();
+        for (FeatureEntry entry : entries)
+        {
+            if (!(entry.getFeature() instanceof com._1c.g5.v8.dt.bsl.model.Method method))
+                continue;
+            var contents = method.eAllContents();
+            while (contents.hasNext())
+            {
+                EObject object = contents.next();
+                if (!(object instanceof SimpleStatement statement) || statement.getRight() == null
+                    || !(statement.getLeft() instanceof StaticFeatureAccess left))
+                    continue;
+                for (FeatureEntry target : left.getFeatureEntries())
+                {
+                    if (target.getFeature() instanceof FormalParam param
+                        && param.eContainer() == method && param.getName() != null)
+                        names.add(param.getName().toLowerCase(Locale.ROOT));
+                }
+            }
+        }
+        return names;
     }
 
     private static Method resolveMethod(FeatureAccess access)
@@ -6937,6 +6991,7 @@ public final class ParamHintHtmlModifier
         int currentArgIndex = -1;
         List<TypeItem> actualArgTypes = Collections.emptyList();
         Set<String> actualArgTypeNames = Collections.emptySet();
+        Set<String> assignedParamNames = Collections.emptySet();
         Method method;
         /** Тип {@code Новый Тип(...)} — для maxParams сигнатуры конструктора. */
         Type constructorType;
@@ -7006,6 +7061,7 @@ public final class ParamHintHtmlModifier
         List<String> actualArgTexts = Collections.emptyList();
         List<TypeItem> actualArgTypes = Collections.emptyList();
         Set<String> actualArgTypeNames = Collections.emptySet();
+        Set<String> assignedParamNames = Collections.emptySet();
         Method method;
         Type constructorType;
         String directive;

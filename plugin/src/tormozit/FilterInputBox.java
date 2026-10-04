@@ -153,7 +153,13 @@ final class FilterInputBox
             "comfort.listItemSelectionDialog.filter.history."), //$NON-NLS-1$
         DATA_PATH_DIALOG(
             "comfort.dataPathDialog.filter.history.count", //$NON-NLS-1$
-            "comfort.dataPathDialog.filter.history."); //$NON-NLS-1$
+            "comfort.dataPathDialog.filter.history."), //$NON-NLS-1$
+        MD_ATTRIBUTES(
+            "comfort.mdAttributes.filter.history.count", //$NON-NLS-1$
+            "comfort.mdAttributes.filter.history."), //$NON-NLS-1$
+        ALL_PICTURES(
+            "comfort.allPicturesEditor.filter.history.count", //$NON-NLS-1$
+            "comfort.allPicturesEditor.filter.history."); //$NON-NLS-1$
 
         final String prefCountKey;
         final String prefItemPrefix;
@@ -242,6 +248,17 @@ final class FilterInputBox
     {
         Options opts = new Options();
         opts.scope = Scope.DEFINED_TYPES;
+        opts.layoutData = compactLayoutData();
+        opts.message = "Фильтр..."; //$NON-NLS-1$
+        opts.tooltip = FLAT_FILTER_TOOLTIP;
+        return create(parent, opts, onSearch);
+    }
+
+    /** Дерево реквизитов вкладки «Данные» редактора объекта метаданных. */
+    static FilterInputBox forMdAttributes(Composite parent, Runnable onSearch)
+    {
+        Options opts = new Options();
+        opts.scope = Scope.MD_ATTRIBUTES;
         opts.layoutData = compactLayoutData();
         opts.message = "Фильтр..."; //$NON-NLS-1$
         opts.tooltip = FLAT_FILTER_TOOLTIP;
@@ -517,6 +534,7 @@ final class FilterInputBox
             case DATA_PATH_DIALOG -> forDataPathDialog(parent, onSearch);
             case DEFINED_TYPES -> forDefinedTypes(parent, onSearch);
             case FORM_ITEMS -> forFormItems(parent, onSearch);
+            case MD_ATTRIBUTES -> forMdAttributes(parent, onSearch);
             case GLOBAL_COMMANDS -> forGlobalCommands(parent, onSearch);
             case RIGHTS_DIALOG -> throw new IllegalStateException("RIGHTS_DIALOG: use attachHistory(SearchBox, Scope.RIGHTS_DIALOG)"); //$NON-NLS-1$
             case RIGHTS_EDITOR -> throw new IllegalStateException("RIGHTS_EDITOR: use attachHistory(SearchBox, Scope.RIGHTS_EDITOR)"); //$NON-NLS-1$
@@ -533,6 +551,7 @@ final class FilterInputBox
             case EVENT_HANDLERS -> throw new IllegalStateException("EVENT_HANDLERS: use attachHistory(SearchBox, Scope.EVENT_HANDLERS)"); //$NON-NLS-1$
             case SYNTAX_CONTENTS -> throw new IllegalStateException("SYNTAX_CONTENTS: use attachHistory(SearchBox, Scope.SYNTAX_CONTENTS)"); //$NON-NLS-1$
             case SYNTAX_SEARCH -> throw new IllegalStateException("SYNTAX_SEARCH: use attachHistoryKeepLayout(SearchBox, Scope.SYNTAX_SEARCH)"); //$NON-NLS-1$
+            case ALL_PICTURES -> throw new IllegalStateException("ALL_PICTURES: use attachHistory(SearchBox, Scope.ALL_PICTURES)"); //$NON-NLS-1$
         };
     }
 

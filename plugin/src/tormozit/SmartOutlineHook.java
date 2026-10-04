@@ -1939,6 +1939,8 @@ public class SmartOutlineHook implements IStartup {
                 : TypeByNameAdvisor.SOURCE_EXACT_NAME.equals(source)
                     ? "Пометить тип объекта метаданных, имя которого совпадает с именем реквизита" //$NON-NLS-1$
                     : "Пометить тип, который " + source + " подбирает по имени реквизита") //$NON-NLS-1$ //$NON-NLS-2$
+                + (effectiveTypes.isEmpty() && (dtProject == null || !IRApplication.hasConnectedSessionForKeys(dtProject))
+                    ? ". Подключите ИР для улучшенного подбора типа." : "") //$NON-NLS-1$ //$NON-NLS-2$
                 + Global.pluginSignForTooltip()));
         // Помечается только по кнопке (mark); при открытии строка лучшего типа лишь становится текущей.
         java.util.function.Consumer<Boolean> suggest = mark ->

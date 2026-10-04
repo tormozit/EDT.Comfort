@@ -380,8 +380,6 @@ public class DataCompositionSchemaEditorHook implements IStartup
     private static final class FieldTypeAutofill
     {
         private static final String INSTALLED_KEY = "tormozit.dcs.fieldTypeAutofill"; //$NON-NLS-1$
-        /** Временная диагностика — снять после подтверждения работы. */
-        private static final String LOG = "dcs-field-type"; //$NON-NLS-1$
         private static final String[] OBJECT_FIELD_VIEWERS =
             { "objectFieldsFullViewer", "objectFieldsInUnionViewer" }; //$NON-NLS-1$ //$NON-NLS-2$
         private static final String[] NAME_COLUMNS = { "FIELD_COL_INDEX", "PATH_COL_INDEX" }; //$NON-NLS-1$ //$NON-NLS-2$
@@ -420,11 +418,7 @@ public class DataCompositionSchemaEditorHook implements IStartup
                     && !(original instanceof NameEditingSupport))
                 {
                     viewerColumn.setEditingSupport(new NameEditingSupport(viewer, original, context));
-                    Global.tempLog(LOG, "обёртка колонки " + columnName + " установлена: " //$NON-NLS-1$ //$NON-NLS-2$
-                        + fieldsViewer.getClass().getSimpleName());
                 }
-                else
-                    Global.tempLog(LOG, "[!] колонка " + columnName + ": EditingSupport не найден"); //$NON-NLS-1$ //$NON-NLS-2$
             }
         }
 
@@ -474,8 +468,6 @@ public class DataCompositionSchemaEditorHook implements IStartup
                     || !(field.eContainer() instanceof DataCompositionSchemaDataSetObject))
                     return;
                 String trimmed = name.trim();
-                Global.tempLog(LOG, "правка имени поля: «" + before + "» → «" + trimmed + "» тип пуст=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + isEmpty(field.getValueType()));
                 // Вложенные поля («Реквизит.Поле») и пустое имя — не про этот подбор; запись в
                 // модель завершается вне обработчика ячейки.
                 if (trimmed.isEmpty() || trimmed.indexOf('.') >= 0 || !isEmpty(field.getValueType()))
@@ -499,12 +491,9 @@ public class DataCompositionSchemaEditorHook implements IStartup
                 TypeByNameAdvisor.TypeCatalog catalog = availableTypes(field);
                 if (project == null || catalog == null)
                 {
-                    Global.tempLog(LOG, "подбор пропущен: проект=" + (project != null) + " типы=" + (catalog != null)); //$NON-NLS-1$ //$NON-NLS-2$
                     return;
                 }
                 String source = TypeByNameAdvisor.availableSource(project, catalog, name);
-                Global.tempLog(LOG, "подбор: имя=" + name + " типовДоступно=" + catalog.items().size() //$NON-NLS-1$ //$NON-NLS-2$
-                    + " источник=" + source); //$NON-NLS-1$
                 if (source == null)
                     return;
                 TypeByNameAdvisor.suggest(project, catalog, name,
@@ -516,7 +505,6 @@ public class DataCompositionSchemaEditorHook implements IStartup
                 String typeName, String source)
             {
                 Object item = TypeByNameAdvisor.findTypeItem(catalog, typeName);
-                Global.tempLog(LOG, "подстановка «" + typeName + "»: сопоставлен=" + (item != null)); //$NON-NLS-1$ //$NON-NLS-2$
                 if (!(item instanceof TypeItem typeItem))
                     return;
                 TypeDescription description = McoreFactory.eINSTANCE.createTypeDescription();
@@ -552,7 +540,6 @@ public class DataCompositionSchemaEditorHook implements IStartup
                 }
                 catch (ReflectiveOperationException | RuntimeException e)
                 {
-                    Global.tempLogException(LOG, "[!] список типов поля", e); //$NON-NLS-1$
                     return null;
                 }
             }

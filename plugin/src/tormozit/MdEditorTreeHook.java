@@ -38,6 +38,7 @@ import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.jface.layout.TreeColumnLayout;
 import org.eclipse.jface.resource.ImageDescriptor;
 import org.eclipse.jface.viewers.ArrayContentProvider;
+import org.eclipse.jface.viewers.CellLabelProvider;
 import org.eclipse.jface.viewers.ColumnPixelData;
 import org.eclipse.jface.viewers.ColumnLabelProvider;
 import org.eclipse.jface.viewers.ColumnViewerToolTipSupport;
@@ -55,6 +56,8 @@ import org.eclipse.jface.viewers.TreePath;
 import org.eclipse.jface.viewers.TreeSelection;
 import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.jface.viewers.TreeViewerColumn;
+import org.eclipse.jface.viewers.Viewer;
+import org.eclipse.jface.viewers.ViewerFilter;
 import org.eclipse.jface.util.LocalSelectionTransfer;
 import org.eclipse.jface.window.Window;
 import org.eclipse.swt.SWT;
@@ -89,6 +92,7 @@ import org.eclipse.swt.widgets.Table;
 import org.eclipse.swt.widgets.TableItem;
 import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.TreeColumn;
+import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.TreeItem;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IEditorReference;
@@ -252,8 +256,6 @@ public final class MdEditorTreeHook
     private static final String FO_PANEL_TABLE_KEY = "tormozit.mdEditorFoPanelTable"; //$NON-NLS-1$
 
     private static final String FO_PANEL_TITLE_KEY = "tormozit.mdEditorFoPanelTitle"; //$NON-NLS-1$
-
-    private static final String FO_PANEL_LOG_TOPIC = "fo-data-panel"; //$NON-NLS-1$
 
     private static final int FO_PANEL_HEIGHT = 110;
 
@@ -587,6 +589,7 @@ public final class MdEditorTreeHook
             installTypeColumn(viewer);
             installModelAddObserver(viewer);
             installFunctionalOptionsPanel(viewer);
+            installAttributesFilter(viewer);
         }
         ISelectionChangedListener stock = findListener(viewer, STOCK_LISTENER_CLASS);
         if (stock == null)
@@ -596,7 +599,141 @@ public final class MdEditorTreeHook
             viewer.removeSelectionChangedListener(previous);
         viewer.removeSelectionChangedListener(stock);
         viewer.addSelectionChangedListener(new KeepSelectionListener(viewer, stock));
-        Debug.log("перехват выделения установлен"); //$NON-NLS-1$
+    }
+
+    private static final String ATTR_FILTER_MARKER = "tormozit.mdEditorAttrFilterInstalled"; //$NON-NLS-1$
+
+    /**
+     * Многословный фильтр над деревом реквизитов вкладки «Данные» (на вкладке «Функц. опции»
+     * такой штатный). Строка остаётся видимой, если совпала она сама или кто-то из потомков
+     * (иначе найденный реквизит табличной части негде показать). Поле стоит над деревом, ширина
+     * compact, история запросов переживает закрытие редактора.
+     */
+    private static void installAttributesFilter(TreeViewer viewer)
+    {
+        Tree tree = viewer.getTree();
+        if (Boolean.TRUE.equals(tree.getData(ATTR_FILTER_MARKER)))
+            return;
+        Composite parent = tree.getParent();
+        if (parent == null || parent.isDisposed() || !(parent.getLayout() instanceof GridLayout gridLayout))
+            return;
+        tree.setData(ATTR_FILTER_MARKER, Boolean.TRUE);
+        FilterInputBox[] filter = new FilterInputBox[1];
+        filter[0] = FilterInputBox.forMdAttributes(parent, () -> applyAttributesFilter(viewer, filter[0].getText()));
+        Control box = filter[0].widget();
+        if (box.getLayoutData() instanceof GridData data)
+            data.horizontalSpan = gridLayout.numColumns;
+        box.moveAbove(tree);
+        FilterInputBoxListNavigation.installTreeNavigation(box, tree, () -> pressEnterOnTree(tree));
+        tree.addDisposeListener(event ->
+        {
+            if (!box.isDisposed())
+                box.dispose();
+        });
+        parent.layout(true, true);
+    }
+
+    /**
+     * Enter из поля фильтра — то же, что Enter в самом дереве: штатный {@code DtTreeView} реагирует
+     * на {@code KeyDown} с кодом Enter (открывает элемент), а не на {@code DefaultSelection}.
+     */
+    private static boolean pressEnterOnTree(Tree tree)
+    {
+        if (tree.isDisposed() || tree.getItemCount() == 0)
+            return false;
+        if (tree.getSelectionCount() == 0)
+        {
+            TreeItem first = tree.getItem(0);
+            tree.setSelection(first);
+            tree.showItem(first);
+            Event selected = new Event();
+            selected.widget = tree;
+            selected.item = first;
+            tree.notifyListeners(SWT.Selection, selected);
+        }
+        Event key = new Event();
+        key.widget = tree;
+        key.keyCode = SWT.CR;
+        key.character = SWT.CR;
+        tree.notifyListeners(SWT.KeyDown, key);
+        return true;
+    }
+
+    private static void applyAttributesFilter(TreeViewer viewer, String pattern)
+    {
+        Tree tree = viewer.getTree();
+        if (tree.isDisposed())
+            return;
+        SmartMatcher matcher = new SmartMatcher(pattern != null ? pattern : ""); //$NON-NLS-1$
+        // Текущую строку запоминаем до refresh: фильтр может её скрыть, а после очистки она должна вернуться.
+        ISelection before = viewer.getSelection();
+        CellLabelHighlightWrapper highlight = installAttributesHighlight(viewer);
+        if (highlight != null)
+            highlight.setHighlightPattern(pattern);
+        for (ViewerFilter existing : viewer.getFilters())
+            if (existing instanceof AttributesFilter)
+                viewer.removeFilter(existing);
+        if (!matcher.isEmpty)
+            viewer.addFilter(new AttributesFilter(matcher));
+        viewer.refresh();
+        if (!matcher.isEmpty)
+            viewer.expandAll();
+        if (!before.isEmpty())
+            viewer.setSelection(before, true);
+        if (!matcher.isEmpty)
+            FilterInputBoxListNavigation.selectFirstRowIfSelectionLost(tree);
+        else
+            tree.showSelection();
+    }
+
+    /** Оборачивает провайдер колонки 0 для окраски вхождений фильтра (один раз на дерево). */
+    private static CellLabelHighlightWrapper installAttributesHighlight(TreeViewer viewer)
+    {
+        Tree tree = viewer.getTree();
+        if (tree.isDisposed() || tree.getColumnCount() == 0)
+            return null;
+        if (!(Global.invoke(viewer, "getViewerColumn", Integer.valueOf(0)) instanceof TreeViewerColumn column)) //$NON-NLS-1$
+            return null;
+        Object current = Global.invoke(column, "getLabelProvider"); //$NON-NLS-1$
+        if (current instanceof CellLabelHighlightWrapper existing)
+            return existing;
+        if (!(current instanceof CellLabelProvider provider))
+            return null;
+        CellLabelHighlightWrapper wrapper = new CellLabelHighlightWrapper(provider);
+        SmartMatchHighlight.enableColorsOnSelection(wrapper);
+        column.setLabelProvider(wrapper);
+        return wrapper;
+    }
+
+    private static final class AttributesFilter
+        extends ViewerFilter
+    {
+        private final SmartMatcher matcher;
+
+        AttributesFilter(SmartMatcher matcher)
+        {
+            this.matcher = matcher;
+        }
+
+        @Override
+        public boolean select(Viewer viewer, Object parentElement, Object element)
+        {
+            return matches((TreeViewer)viewer, element, 0);
+        }
+
+        private boolean matches(TreeViewer viewer, Object element, int depth)
+        {
+            if (element == null || depth > 16)
+                return false;
+            if (viewer.getLabelProvider() instanceof ILabelProvider labels && matcher.matches(labels.getText(element)))
+                return true;
+            if (!(viewer.getContentProvider() instanceof ITreeContentProvider content))
+                return false;
+            for (Object child : content.getChildren(element))
+                if (matches(viewer, child, depth + 1))
+                    return true;
+            return false;
+        }
     }
 
     private static void installChildCounts(TreeViewer viewer)
@@ -1093,8 +1230,6 @@ public final class MdEditorTreeHook
         Layout layout = parent.getLayout();
         if (!(layout instanceof GridLayout gridLayout))
         {
-            Global.tempLog(FO_PANEL_LOG_TOPIC, "родитель дерева реквизитов не GridLayout: " //$NON-NLS-1$
-                + (layout == null ? "null" : layout.getClass().getName())); //$NON-NLS-1$
             tree.setData(FO_PANEL_MARKER, Boolean.TRUE);
             return;
         }
@@ -2084,8 +2219,7 @@ public final class MdEditorTreeHook
                 }
                 catch (ReflectiveOperationException e)
                 {
-                    Throwable cause = e.getCause() != null ? e.getCause() : e;
-                    Debug.log("перетаскивание реквизита: " + cause); //$NON-NLS-1$
+                    // штатный assistant недоступен — перетаскивание не выполняется
                 }
             }
         });
@@ -2208,7 +2342,6 @@ public final class MdEditorTreeHook
         }
         catch (ReflectiveOperationException e)
         {
-            Debug.log("не удалось получить NavigatorDropAssistant: " + e); //$NON-NLS-1$
             return null;
         }
     }
@@ -2224,7 +2357,6 @@ public final class MdEditorTreeHook
         }
         catch (RuntimeException | SWTError e)
         {
-            Debug.log("не удалось создать приёмник перетаскивания: " + e); //$NON-NLS-1$
             return null;
         }
     }
@@ -2653,7 +2785,6 @@ public final class MdEditorTreeHook
                 stock.selectionChanged(event);
                 return;
             }
-            Debug.log("промах программного выделения — текущая строка сохранена"); //$NON-NLS-1$
         }
 
         /**
@@ -3052,18 +3183,5 @@ public final class MdEditorTreeHook
             }
         }, ClassReader.EXPAND_FRAMES);
         return touched.get() ? writer.toByteArray() : null;
-    }
-
-    private static final class Debug
-    {
-        private static final String TAG = "MdEditorTree"; //$NON-NLS-1$
-
-        private Debug() {}
-
-        static void log(String message)
-        {
-            if (Global.isLogEnabled())
-                Global.log(TAG, message);
-        }
     }
 }
