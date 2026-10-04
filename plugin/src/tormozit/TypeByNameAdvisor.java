@@ -567,9 +567,11 @@ final class TypeByNameAdvisor
          * @param referenceTypes имя объекта метаданных → полное имя его ссылочного типа
          *                       ({@code Валюты} → {@code СправочникСсылка.Валюты})
          * @param definedTypes  полные имена определяемых типов ({@code ОпределяемыйТип.Контрагент})
+         * @param likely        имена из {@code referenceTypes} и {@code definedTypes}, содержащие
+         *                      начало одного из слов имени реквизита
          */
         private record Candidates(List<String> simpleTypes, Map<String, String> referenceTypes,
-            List<String> definedTypes)
+            List<String> definedTypes, List<String> likely)
         {
         }
 
@@ -762,7 +764,18 @@ final class TypeByNameAdvisor
             takeWithinQuota(matchingDefined, definedTypes, quota);
             takeWithinQuota(others, referenceTypes, quota);
             takeWithinQuota(otherDefined, definedTypes, quota);
-            return new Candidates(simpleTypes, referenceTypes, new ArrayList<>(definedTypes.keySet()));
+            List<String> likely = new ArrayList<>();
+            for (String objectName : matching.keySet())
+            {
+                if (referenceTypes.containsKey(objectName))
+                    likely.add(objectName);
+            }
+            for (String typeName : matchingDefined.keySet())
+            {
+                if (definedTypes.containsKey(typeName))
+                    likely.add(typeName);
+            }
+            return new Candidates(simpleTypes, referenceTypes, new ArrayList<>(definedTypes.keySet()), likely);
         }
 
         private static void takeWithinQuota(Map<String, String> source, Map<String, String> target, int[] quota)
@@ -912,15 +925,31 @@ final class TypeByNameAdvisor
         {
             // Объекты — первым списком и с явным приоритетом: на равноправные списки Напарник
             // отвечал «Строка» даже при точном совпадении имени («валюта» при объекте «Валюты»).
-            return "Определи тип значения реквизита конфигурации 1С:Предприятие с именем «" + name + "».\n" //$NON-NLS-1$ //$NON-NLS-2$
-                + "Правило: если имя реквизита по смыслу соответствует одному из объектов метаданных " //$NON-NLS-1$
-                + "из списка ниже (с учётом числа и падежа: «Валюта» — «Валюты», «Контрагент» — " //$NON-NLS-1$
-                + "«Контрагенты», «СкладОтправитель» — «Склады»), реквизит ссылается на этот объект — " //$NON-NLS-1$
-                + "ответь именем объекта. Если подходящего объекта нет, но имя реквизита по смыслу " //$NON-NLS-1$
-                + "соответствует одному из определяемых типов, ответь его полным именем, как в списке " //$NON-NLS-1$
-                + "(вместе с «ОпределяемыйТип.»). Только если не подходит ни то, ни другое, ответь " //$NON-NLS-1$
-                + "одним из простых типов.\n" //$NON-NLS-1$
-                + "Ответ — ровно одно имя из списков, одной строкой, без пояснений и оформления.\n\n" //$NON-NLS-1$
+            // Похожие по имени — отдельным коротким списком: в общем списке из сотен имён Напарник
+            // не находил «_ДемоПартнеры» для «Партнер» и отвечал «НЕТ».
+            String likely = candidates.likely().isEmpty() ? "" //$NON-NLS-1$
+                : "Похожие по написанию на имя реквизита (проверь их первыми): " //$NON-NLS-1$
+                    + String.join(", ", candidates.likely()) + "\n\n"; //$NON-NLS-1$ //$NON-NLS-2$
+            return "Подбери тип значения реквизита конфигурации 1С:Предприятие по его имени «" + name + "».\n" //$NON-NLS-1$ //$NON-NLS-2$
+                + "Проверяй шаги по порядку и остановись на первом подошедшем.\n" //$NON-NLS-1$
+                + "1. Имя реквизита называет то же понятие, что и объект из списка «Объекты метаданных», — " //$NON-NLS-1$
+                + "реквизит ссылается на этот объект, ответь именем объекта точно как в списке. Форма " //$NON-NLS-1$
+                + "слова, регистр букв, уточняющие слова в имени реквизита и служебная приставка в имени " //$NON-NLS-1$
+                + "объекта понятие не меняют: «Валюта» — «Валюты», «СкладОтправитель» — «Склады», " //$NON-NLS-1$
+                + "«Партнер» — «_ДемоПартнеры».\n" //$NON-NLS-1$
+                + "2. Имя реквизита называет то же понятие, что и один из определяемых типов, — ответь " //$NON-NLS-1$
+                + "его полным именем, как в списке (вместе с «ОпределяемыйТип.»).\n" //$NON-NLS-1$
+                + "3. Имя реквизита прямо называет величину простого типа — ответь именем простого типа. " //$NON-NLS-1$
+                + "Дата: в имени есть слово «Дата», «Период», «Срок», «Время» («ДатаВыгрузки», " //$NON-NLS-1$
+                + "«ДатаДокумента»). Число: «Количество», «Сумма», «Цена», «Процент», «Номер». " //$NON-NLS-1$
+                + "Строка: «Наименование», «Комментарий», «Описание», «Адрес». Булево: признак или " //$NON-NLS-1$
+                + "состояние — «Активность», «Проведен», «Использовать…», «Это…».\n" //$NON-NLS-1$
+                + "4. Иначе ответь одним словом НЕТ. Наименее неподходящий вариант не выбирай: для имени, " //$NON-NLS-1$
+                + "не связанного ни с одним объектом и не называющего величину («Ведро», «Окно»), " //$NON-NLS-1$
+                + "верный ответ — НЕТ.\n" //$NON-NLS-1$
+                + "Ответ — ровно одно имя из списков или слово НЕТ, одной строкой. Ход рассуждений, " //$NON-NLS-1$
+                + "шаги, пояснения и оформление не выводи — только само имя.\n\n" //$NON-NLS-1$
+                + likely
                 + "Объекты метаданных: " //$NON-NLS-1$
                 + String.join(", ", candidates.referenceTypes().keySet()) //$NON-NLS-1$
                 + "\n\nОпределяемые типы: " //$NON-NLS-1$
@@ -953,7 +982,24 @@ final class TypeByNameAdvisor
                 if (name.equalsIgnoreCase(answer))
                     return name;
             }
-            return null;
+            // Напарник теряет подчёркивания по краям имени («ДемоПартнеры» вместо «_ДемоПартнеры»):
+            // объект, совпавший без них, принимается, если такой один.
+            String bare = stripUnderscores(answer);
+            String found = null;
+            for (Map.Entry<String, String> entry : candidates.referenceTypes().entrySet())
+            {
+                if (!stripUnderscores(entry.getKey()).equalsIgnoreCase(bare))
+                    continue;
+                if (found != null)
+                    return null;
+                found = entry.getValue();
+            }
+            return found;
+        }
+
+        private static String stripUnderscores(String name)
+        {
+            return name.replaceAll("^_+|_+$", ""); //$NON-NLS-1$ //$NON-NLS-2$
         }
 
         /** Первая непустая строка ответа без кавычек, обратных апострофов и точки в конце. */

@@ -1111,7 +1111,13 @@ public class TypeComboOverlayHook implements IStartup
         // без явного возврата фокус достаётся первому попавшемуся контролу, обычно нативному).
         // asyncExec — виджет должен быть полностью реализован (layout уже вызван выше, но
         // setFocus сразу после создания на некоторых платформах не срабатывает надёжно).
-        if (focusAfterCreate)
+        // Пересборку мог вызвать и не пользователь нашего поля: автоподбор типа по имени
+        // (TypeByNameAdvisor) меняет модель, когда фокус уже ушёл по TAB в «Синоним», —
+        // checkExternalChange пересобирает оверлей, и безусловный setFocus утаскивал фокус в
+        // «Тип». Возвращаем фокус, только если до пересборки он был у нас (см. rediscoverOverlay).
+        boolean wantsFocus = rediscoverWantsFocus;
+        rediscoverWantsFocus = true;
+        if (focusAfterCreate && wantsFocus)
         {
             Text focusText = text;
             focusText.getDisplay().asyncExec(() ->
@@ -2063,7 +2069,9 @@ public class TypeComboOverlayHook implements IStartup
                 // оверлей тем же путём, что и после выбора из своего попапа. asyncExec — даём
                 // обработке закрытия Shell полностью завершиться, прежде чем сносить/искать виджет
                 // заново (rediscoverOverlay и так делает то же самое для commitSelection).
-                display.asyncExec(() -> rediscoverOverlay(state));
+                // Диалог открывали из нашего поля (F4), но фокус на время F4 стоял на штатном
+                // контроле — возврат фокуса в оверлей здесь нужен безусловно.
+                display.asyncExec(() -> rediscoverOverlay(state, true));
             });
         };
         display.addFilter(SWT.Show, filterHolder[0]);
@@ -2139,13 +2147,31 @@ public class TypeComboOverlayHook implements IStartup
         });
     }
 
+    /**
+     * Нужно ли следующему созданному оверлею забрать фокус (при {@code focusAfterCreate}).
+     * Выставляется в {@link #rediscoverOverlay} до уничтожения старого контейнера и снимается
+     * первым же удачным {@code createOverlay} — привязка после пересборки может повторяться по
+     * таймеру (см. {@link #patchTypeComboWithRetry}), поэтому значение живёт между вызовами.
+     */
+    private static boolean rediscoverWantsFocus = true;
+
     private static void rediscoverOverlay(OverlayState state)
+    {
+        rediscoverOverlay(state, false);
+    }
+
+    /**
+     * @param forceFocus {@code true} — новый оверлей забирает фокус независимо от того, где фокус
+     *     сейчас; иначе — только если фокус в старом оверлее (поле или его список)
+     */
+    private static void rediscoverOverlay(OverlayState state, boolean forceFocus)
     {
         if (state.container == null || state.container.isDisposed())
         {
             diag("rediscoverOverlay: container null/disposed — пропуск пересборки"); //$NON-NLS-1$
             return;
         }
+        rediscoverWantsFocus = forceFocus || ownsFocus(state);
         ATTACHED.remove(state.nativeControl);
         state.container.dispose();
         try
@@ -2157,6 +2183,22 @@ public class TypeComboOverlayHook implements IStartup
             diag("rediscoverOverlay: исключение " + e); //$NON-NLS-1$
             Global.logError(LOG_TAG, "rediscoverOverlay", e); //$NON-NLS-1$
         }
+    }
+
+    /** Фокус ввода сейчас в этом оверлее: в его поле/кнопке или в выпадающем списке. */
+    private static boolean ownsFocus(OverlayState state)
+    {
+        Control focus = state.container.getDisplay().getFocusControl();
+        if (focus == null)
+            return false;
+        if (state.popup != null && !state.popup.isDisposed() && focus.getShell() == state.popup)
+            return true;
+        for (Control c = focus; c != null; c = c.getParent())
+        {
+            if (c == state.container)
+                return true;
+        }
+        return false;
     }
 
     /**
