@@ -32,6 +32,10 @@ import com._1c.g5.v8.dt.mcore.Type;
 import com._1c.g5.v8.dt.mcore.TypeContainer;
 import com._1c.g5.v8.dt.mcore.TypeItem;
 import com._1c.g5.v8.dt.mcore.util.McoreUtil;
+import com._1c.g5.v8.dt.moxel.content.BaseDrawingProperties;
+import com._1c.g5.v8.dt.moxel.content.BaseFormattingCellProperties;
+import com._1c.g5.v8.dt.moxel.content.CellReference;
+import com._1c.g5.v8.dt.moxel.content.SpreadsheetProperties;
 import com._1c.g5.v8.dt.platform.IEObjectProvider;
 import com._1c.g5.v8.dt.platform.version.IRuntimeVersionSupport;
 import com._1c.g5.v8.dt.platform.version.Version;
@@ -247,6 +251,22 @@ final class PropertySheetPlatformPropertyResolver
                 }
                 Global.tempLog(TEMP_TOPIC, "форма: не найдено для признака " + english //$NON-NLS-1$
                         + " (подпись «" + displayName + "»)"); //$NON-NLS-1$ //$NON-NLS-2$
+                return null;
+            }
+
+            String moxelType = moxelPlatformTypeName(owner);
+            if (moxelType != null)
+            {
+                Resolved resolved = resolveMoxelProperty(owner, moxelType, english);
+                if (resolved != null)
+                {
+                    Global.tempLog(TEMP_TOPIC, "макет: " + McoreUtil.getTypeName(resolved.ownerType) //$NON-NLS-1$
+                            + '.' + resolved.englishName() + " → " + resolved.russianName()); //$NON-NLS-1$
+                    return resolved;
+                }
+                Global.tempLog(TEMP_TOPIC, "макет: у типа " + moxelType + " нет свойства для признака " //$NON-NLS-1$ //$NON-NLS-2$
+                        + english + " (подпись «" + displayName + "», " + owner.eClass().getName() //$NON-NLS-1$ //$NON-NLS-2$
+                        + ")"); //$NON-NLS-1$
                 return null;
             }
 
@@ -697,6 +717,97 @@ final class PropertySheetPlatformPropertyResolver
             Global.tempLogException(TEMP_TOPIC, "FormItemInformationService", e); //$NON-NLS-1$
         }
         return null;
+    }
+
+    /**
+     * Тип платформы для объекта свойств редактора макета. Палитра показывает не саму модель
+     * табличного документа, а временный объект свойств выделения: он не лежит ни в форме, ни в
+     * объекте метаданных, поэтому тип определяется по его классу.
+     */
+    private static String moxelPlatformTypeName(EObject owner)
+    {
+        if (owner instanceof BaseFormattingCellProperties)
+            return "SpreadsheetDocumentRange"; //$NON-NLS-1$
+        if (owner instanceof BaseDrawingProperties)
+            return "SpreadsheetDocumentDrawing"; //$NON-NLS-1$
+        if (owner instanceof SpreadsheetProperties)
+            return "SpreadsheetDocument"; //$NON-NLS-1$
+        return null;
+    }
+
+    private static Resolved resolveMoxelProperty(EObject owner, String typeName, String english)
+    {
+        // У временного объекта свойств своего ресурса нет — прокси типа платформы разрешается
+        // через сам табличный документ.
+        EObject context = moxelSpreadsheet(owner);
+        Type type = loadPlatformTypeNamed(context != null ? context : owner, typeName);
+        if (type == null)
+        {
+            Global.tempLog(TEMP_TOPIC, "макет: тип платформы не загружен: " + typeName //$NON-NLS-1$
+                    + ", контекст=" + (context == null ? "<null>" : context.eClass().getName())); //$NON-NLS-1$ //$NON-NLS-2$
+            return null;
+        }
+        Property property = findProperty(type, moxelPlatformPropertyName(english));
+        if (property == null)
+        {
+            ContextDef contextDef = type.getContextDef();
+            Global.tempLog(TEMP_TOPIC, "макет: тип " + typeName + ", proxy=" + type.eIsProxy() //$NON-NLS-1$ //$NON-NLS-2$
+                    + ", свойств=" + (contextDef != null ? contextDef.allProperties().size() : -1)); //$NON-NLS-1$
+            return null;
+        }
+        return new Resolved(type, property);
+    }
+
+    private static EObject moxelSpreadsheet(EObject owner)
+    {
+        CellReference reference = null;
+        if (owner instanceof BaseFormattingCellProperties cells)
+            reference = cells.getCellReference();
+        else if (owner instanceof BaseDrawingProperties drawing)
+            reference = drawing.getCellReference();
+        else if (owner instanceof SpreadsheetProperties spreadsheet)
+            reference = spreadsheet.getCellReference();
+        return reference != null ? reference.getSpreadsheet() : null;
+    }
+
+    /**
+     * Имя свойства платформы по имени признака модели макета — там, где они расходятся
+     * (сверено со списками свойств типов в синтакс-помощнике). Остальные совпадают.
+     */
+    private static String moxelPlatformPropertyName(String english)
+    {
+        if (english == null)
+            return null;
+        return switch (english)
+        {
+            case "horizontalAlignment" -> "HorizontalAlign"; //$NON-NLS-1$ //$NON-NLS-2$
+            case "verticalAlignment" -> "VerticalAlign"; //$NON-NLS-1$ //$NON-NLS-2$
+            case "pictureHorizontalAlignment" -> "PictureHorizontalAlign"; //$NON-NLS-1$ //$NON-NLS-2$
+            case "pictureVerticalAlignment" -> "PictureVerticalAlign"; //$NON-NLS-1$ //$NON-NLS-2$
+            case "textPosition" -> "TextPositionRelativeToPicture"; //$NON-NLS-1$ //$NON-NLS-2$
+            case "detailUse" -> "DetailsUse"; //$NON-NLS-1$ //$NON-NLS-2$
+            case "detailParameter" -> "DetailsParameter"; //$NON-NLS-1$ //$NON-NLS-2$
+            case "dataFormat" -> "Format"; //$NON-NLS-1$ //$NON-NLS-2$
+            case "sizeChangeMode" -> "ColumnSizeChangeMode"; //$NON-NLS-1$ //$NON-NLS-2$
+            case "areaName" -> "Name"; //$NON-NLS-1$ //$NON-NLS-2$
+            case "controlType" -> "Control"; //$NON-NLS-1$ //$NON-NLS-2$
+            case "marginLeft" -> "LeftMargin"; //$NON-NLS-1$ //$NON-NLS-2$
+            case "marginTop" -> "TopMargin"; //$NON-NLS-1$ //$NON-NLS-2$
+            case "marginRight" -> "RightMargin"; //$NON-NLS-1$ //$NON-NLS-2$
+            case "marginBottom" -> "BottomMargin"; //$NON-NLS-1$ //$NON-NLS-2$
+            case "keepWithNext" -> "StayWithNext"; //$NON-NLS-1$ //$NON-NLS-2$
+            case "pageBreakBefore" -> "PageTop"; //$NON-NLS-1$ //$NON-NLS-2$
+            case "pageBreakAfter" -> "PageBottom"; //$NON-NLS-1$ //$NON-NLS-2$
+            case "haveLeftBorder" -> "LeftBorder"; //$NON-NLS-1$ //$NON-NLS-2$
+            case "haveTopBorder" -> "TopBorder"; //$NON-NLS-1$ //$NON-NLS-2$
+            case "haveRightBorder" -> "RightBorder"; //$NON-NLS-1$ //$NON-NLS-2$
+            case "haveBottomBorder" -> "BottomBorder"; //$NON-NLS-1$ //$NON-NLS-2$
+            case "isTemplate" -> "Template"; //$NON-NLS-1$ //$NON-NLS-2$
+            case "repeatRows" -> "RepeatOnRowPrint"; //$NON-NLS-1$ //$NON-NLS-2$
+            case "repeatColumns" -> "RepeatOnColumnPrint"; //$NON-NLS-1$ //$NON-NLS-2$
+            case "saveViewState" -> "SaveViewProperties"; //$NON-NLS-1$ //$NON-NLS-2$
+            default -> english;
+        };
     }
 
     private static Resolved resolveMdProperty(MdObject mdOwner, EStructuralFeature feature, String english)
