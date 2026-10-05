@@ -555,6 +555,11 @@
         categoryId="tormozit.commands.global"
         description="Найти ссылки на слово или объект метаданных через приложение ИР. Активно только при подключённом ИР. Настраивайте только «Редактирование источника Xtext». Остальные контексты не редактируйте. (Комфорт)"/>
     <command
+        id="tormozit.MoveMethodToModule"
+        name="Переместить метод в модуль"
+        categoryId="tormozit.commands.global"
+        description="Переместить процедуру или функцию под кареткой в общий модуль или модуль менеджера с переписыванием всех её вызовов, включая локальные. Каретка должна стоять на заголовке метода. (Комфорт)"/>
+    <command
         id="tormozit.IrModuleCheck"
         name="Проверить модуль ИР"
         categoryId="tormozit.commands.global"
@@ -1018,6 +1023,17 @@
       </activeWhen>
     </handler>
     <handler
+        class="tormozit.MoveMethodToModuleHandler"
+        commandId="tormozit.MoveMethodToModule">
+      <activeWhen>
+        <with variable="activeContexts">
+          <iterate operator="or">
+            <equals value="com._1c.g5.v8.dt.bsl.ui.editor.BslEditorScope"/>
+          </iterate>
+        </with>
+      </activeWhen>
+    </handler>
+    <handler
         class="tormozit.ExecutableExtensionFactory:tormozit.IrModuleCheckCommandHandler"
         commandId="tormozit.IrModuleCheck">
     </handler>
@@ -1201,6 +1217,18 @@
             label="Фильтр по набору"
             style="toggle"
             tooltip="Показать только объекты активного набора; вытесняет фильтр подсистем (Комфорт)"/>
+      </menuContribution>
+      <!-- Штатное подменю «Рефакторинг» контекстного меню редактора модуля
+           (com._1c.g5.v8.dt.bsl.ui/plugin.xml); видимость подменю задаёт сама EDT.
+           Место — сразу после «Переименовать...»: у штатного пункта своего id нет, его
+           идентификатором служит id команды. -->
+      <menuContribution
+          locationURI="popup:com._1c.g5.v8.dt.bsl.ui.menus.refactoring?after=com._1c.g5.v8.dt.bsl.ui.refactoring.RenameElement">
+        <command
+            commandId="tormozit.MoveMethodToModule"
+            label="Переместить в модуль..."
+            style="push"
+            tooltip="Переместить метод под кареткой в другой модуль и переписать его вызовы (Комфорт)"/>
       </menuContribution>
       <menuContribution locationURI="popup:com._1c.g5.v8.dt.navigator.ui.navigator.popup?after=additions">
         <command

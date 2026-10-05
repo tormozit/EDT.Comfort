@@ -162,7 +162,10 @@ final class FilterInputBox
             "comfort.mdAttributes.filter.history."), //$NON-NLS-1$
         ALL_PICTURES(
             "comfort.allPicturesEditor.filter.history.count", //$NON-NLS-1$
-            "comfort.allPicturesEditor.filter.history."); //$NON-NLS-1$
+            "comfort.allPicturesEditor.filter.history."), //$NON-NLS-1$
+        MOVE_METHOD_TARGET(
+            "comfort.moveMethodTarget.filter.history.count", //$NON-NLS-1$
+            "comfort.moveMethodTarget.filter.history."); //$NON-NLS-1$
 
         final String prefCountKey;
         final String prefItemPrefix;
@@ -233,6 +236,14 @@ final class FilterInputBox
         opts.layoutData = recentPlacesLayoutData();
         opts.message = "Фильтр..."; //$NON-NLS-1$
         opts.tooltip = FLAT_FILTER_TOOLTIP; //$NON-NLS-1$
+        return create(parent, opts, onSearch);
+    }
+
+    /** Окно выбора целевого модуля команды «Переместить в модуль». */
+    static FilterInputBox forMoveMethodTarget(Composite parent, Runnable onSearch)
+    {
+        Options opts = new Options();
+        opts.scope = Scope.MOVE_METHOD_TARGET;
         return create(parent, opts, onSearch);
     }
 
@@ -556,6 +567,7 @@ final class FilterInputBox
             case SYNTAX_CONTENTS -> throw new IllegalStateException("SYNTAX_CONTENTS: use attachHistory(SearchBox, Scope.SYNTAX_CONTENTS)"); //$NON-NLS-1$
             case SYNTAX_SEARCH -> throw new IllegalStateException("SYNTAX_SEARCH: use attachHistoryKeepLayout(SearchBox, Scope.SYNTAX_SEARCH)"); //$NON-NLS-1$
             case ALL_PICTURES -> throw new IllegalStateException("ALL_PICTURES: use attachHistory(SearchBox, Scope.ALL_PICTURES)"); //$NON-NLS-1$
+            case MOVE_METHOD_TARGET -> forMoveMethodTarget(parent, onSearch);
         };
     }
 
