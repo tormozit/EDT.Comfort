@@ -344,6 +344,13 @@ public final class ConfigSearchResultsHook implements IStartup
     private static final String MATCH_PANE_HOOKED_KEY = "tormozit.searchAggregationMatchPaneHooked"; //$NON-NLS-1$
 
     private static TableViewer cachedMatchTableViewer;
+    /**
+     * Элементы штатной таблицы, по которым последний раз построена таблица вхождений
+     * ({@link #refreshMatchTable}); сверка с ними — в {@link #onTreeRefreshed}. Только UI-поток.
+     */
+    private static List<Object> lastSyncedTableItems;
+    /** Синхронизация таблицы вхождений по обновлению дерева уже запланирована. Только UI-поток. */
+    private static boolean treeRefreshSyncPending;
     private static TableColumn cachedMatchPathColumn;
     private static TableColumn cachedMatchPropertyColumn;
     private static TableColumn cachedMatchLineColumn;
@@ -910,6 +917,7 @@ public final class ConfigSearchResultsHook implements IStartup
                 cancelMatchContextResolution();
                 BslOccurrenceContextResolver.clearCaches();
                 cachedMatchTableViewer = null;
+                lastSyncedTableItems = null;
                 cachedMatchTextColumn = null;
                 cachedMatchPathColumn = null;
                 cachedMatchPropertyColumn = null;
@@ -962,6 +970,7 @@ public final class ConfigSearchResultsHook implements IStartup
         List<Object> tableItems = new ArrayList<>();
         for (Object node : selectedNodes)
             collectTableItemsRecursively(node, tableItems);
+        lastSyncedTableItems = tableItems;
 
         List<MatchRow> rows = new ArrayList<>();
         for (Object tableItem : tableItems)
@@ -5212,7 +5221,12 @@ public final class ConfigSearchResultsHook implements IStartup
         treeViewer.setContentProvider(new ITreeContentProvider()
         {
             @Override
-            public Object[] getElements(Object inputElement) { return original.getElements(inputElement); }
+            public Object[] getElements(Object inputElement)
+            {
+                Object[] elements = original.getElements(inputElement);
+                onTreeRefreshed(treeViewer);
+                return elements;
+            }
 
             @Override
             public Object[] getChildren(Object parentElement) { return original.getChildren(parentElement); }
@@ -5236,6 +5250,58 @@ public final class ConfigSearchResultsHook implements IStartup
         });
         tree.setData(INPUT_WATCH_HOOKED_KEY, Boolean.TRUE);
         log("installTreeInputChangeWatch: OK"); //$NON-NLS-1$
+    }
+
+    /**
+     * Дерево результатов перечитало корневые элементы — значит, штатная страница применила очередную
+     * порцию вхождений: {@code SearchViewUpdateManager.ChangeElementsJob} →
+     * {@code SearchResultTreeContentProvider.elementsChanged} → {@code TreeViewer.refresh()}
+     * (декомпиляция search-ui, {@code .tmp/bundles/search-ui}). Это задание откладывается на 300 мс,
+     * поэтому последняя порция попадает в дерево уже ПОСЛЕ {@code queryFinished} и могла прийти позже
+     * нашей последней синхронизации по таймеру ({@link #scheduleFinalAggregationReapplyAttempt}) —
+     * таблица вхождений тогда оставалась с первой порцией при полном дереве.
+     *
+     * <p>Синхронизируем по самому событию: после обновления дерева заново собираем вхождения
+     * выделенных узлов и перестраиваем таблицу, только если их состав изменился (обновление дерева
+     * по другим поводам строки и выделение таблицы не трогает).
+     */
+    private static void onTreeRefreshed(TreeViewer treeViewer)
+    {
+        if (treeRefreshSyncPending || Display.getCurrent() == null
+            || !ComfortSettings.isReplaceListFiltersEnabled())
+            return;
+        Tree tree = treeViewer.getTree();
+        if (tree == null || tree.isDisposed())
+            return;
+        treeRefreshSyncPending = true;
+        // Не сразу: вызов идёт изнутри refresh(), выделение дерева восстанавливается после него.
+        tree.getDisplay().asyncExec(() -> {
+            treeRefreshSyncPending = false;
+            if (tree.isDisposed())
+                return;
+            TableViewer matchViewer = cachedMatchTableViewer;
+            if (matchViewer == null || matchViewer.getTable() == null || matchViewer.getTable().isDisposed())
+                return;
+            List<Object> tableItems = new ArrayList<>();
+            for (Object node : treeViewer.getStructuredSelection().toList())
+                collectTableItemsRecursively(node, tableItems);
+            List<Object> synced = lastSyncedTableItems;
+            if (synced != null && sameElements(synced, tableItems))
+                return;
+            refreshMatchTable(treeViewer, matchViewer);
+        });
+    }
+
+    private static boolean sameElements(List<Object> a, List<Object> b)
+    {
+        if (a.size() != b.size())
+            return false;
+        for (int i = 0; i < a.size(); i++)
+        {
+            if (a.get(i) != b.get(i))
+                return false;
+        }
+        return true;
     }
 
     private static void onSearchStarting()

@@ -2,6 +2,8 @@ package tormozit;
 
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.StyledText;
+import org.eclipse.swt.events.FocusEvent;
+import org.eclipse.swt.events.FocusListener;
 import org.eclipse.swt.events.VerifyEvent;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
@@ -13,9 +15,11 @@ import org.eclipse.swt.widgets.TableItem;
 import org.eclipse.swt.widgets.Text;
 import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.TreeItem;
+import org.eclipse.swt.widgets.TypedListener;
 
 import com._1c.g5.v8.dt.common.ui.controls.search.SearchBox;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Supplier;
 
@@ -267,13 +271,82 @@ public final class FilterInputBoxListNavigation
         TreeItem first = tree.getItem(0);
         if (first == null || first.isDisposed())
             return;
-        tree.setSelection(first);
-        tree.showItem(first);
-        Event event = new Event();
-        event.type = SWT.Selection;
-        event.widget = tree;
-        event.item = first;
-        tree.notifyListeners(SWT.Selection, event);
+        selectAndNotifyTree(tree, first);
+    }
+
+    private static final String AEF_CONTEXT_FOCUS_LISTENER =
+        "DtTreeView$ContextActivationFocusListener"; //$NON-NLS-1$
+
+    /**
+     * {@code SWT.Selection} для строки, выбранной из поля фильтра. Компонент AEF-дерева
+     * ({@code DtTreeView}) сообщает редактору о выделении, только пока «активен», а этот признак
+     * снимается при потере фокуса деревом ({@code ContextDeactivationEvent}) — панель «Свойства»
+     * смену строки не видела. Пока фокус не в дереве, на время рассылки дерево объявляется
+     * активным штатным слушателем фокуса и возвращается обратно; события AEF синхронные
+     * ({@code queueAndWaitEvent}), порядок сохраняется.
+     *
+     * <p>Строка выделяется после активации, а не до: при активации компонент возвращает в дерево
+     * своё прежнее выделение, и выставленная раньше строка терялась.
+     */
+    private static void selectAndNotifyTree(Tree tree, TreeItem item)
+    {
+        boolean unfocused = !tree.isFocusControl();
+        List<FocusListener> contexts = unfocused
+            ? focusListeners(tree, AEF_CONTEXT_FOCUS_LISTENER) : List.of();
+        for (FocusListener listener : contexts)
+            listener.focusGained(null);
+        try
+        {
+            if (tree.isDisposed() || item.isDisposed())
+                return;
+            tree.setSelection(item);
+            tree.showItem(item);
+            Event event = new Event();
+            event.type = SWT.Selection;
+            event.widget = tree;
+            event.item = item;
+            tree.notifyListeners(SWT.Selection, event);
+            if (unfocused && !tree.isDisposed())
+                publishFormPageSelection(tree);
+        }
+        finally
+        {
+            if (!tree.isDisposed() && !tree.isFocusControl())
+                for (FocusListener listener : contexts)
+                    listener.focusLost(null);
+        }
+    }
+
+    private static final String FORM_SELECTION_FOCUS_LISTENER =
+        "FormMultiControlSelectionProvider$FocusListener"; //$NON-NLS-1$
+
+    /**
+     * Деревья редактора формы: общий провайдер выделения страницы
+     * ({@code FormMultiControlSelectionProvider}) запоминает выделение дерева всегда, но рассылает
+     * его подписчикам (панель «Свойства»), только если дерево в фокусе. Его же слушатель фокуса
+     * рассылает текущее выделение безусловно — он и вызывается после смены строки из поля фильтра.
+     */
+    private static void publishFormPageSelection(Tree tree)
+    {
+        List<FocusListener> listeners = focusListeners(tree, FORM_SELECTION_FOCUS_LISTENER);
+        if (listeners.isEmpty())
+            return;
+        Event raw = new Event();
+        raw.widget = tree;
+        raw.display = tree.getDisplay();
+        FocusEvent focusEvent = new FocusEvent(raw);
+        for (FocusListener listener : listeners)
+            listener.focusGained(focusEvent);
+    }
+
+    private static List<FocusListener> focusListeners(Tree tree, String classNameSuffix)
+    {
+        List<FocusListener> result = new ArrayList<>();
+        for (Listener listener : tree.getListeners(SWT.FocusIn))
+            if (listener instanceof TypedListener typed && typed.getEventListener() instanceof FocusListener focus
+                && focus.getClass().getName().endsWith(classNameSuffix))
+                result.add(focus);
+        return result;
     }
 
     /** Синхронизация {@link org.eclipse.jface.viewers.TableViewer} и строки статуса после программного выбора. */
@@ -1032,13 +1105,7 @@ public final class FilterInputBoxListNavigation
 
         if (targetItem != null && !targetItem.isDisposed())
         {
-            tree.setSelection(targetItem);
-            tree.showItem(targetItem);
-
-            Event selectionEvent = new Event();
-            selectionEvent.widget = tree;
-            selectionEvent.item = targetItem;
-            tree.notifyListeners(SWT.Selection, selectionEvent);
+            selectAndNotifyTree(tree, targetItem);
         }
     }
 

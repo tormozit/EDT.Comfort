@@ -927,6 +927,37 @@ public class ComfortPreferencePage
             "Журнал отладки: content assist, установщик «Сменить»/«Обновить» и др.\n"
             + "Окно: Показать представление → Прочее → Журнал Комфорт", //$NON-NLS-1$
             checkboxHost);
+
+        Composite stallRow = new Composite(getFieldEditorParent(), SWT.NONE);
+        GridData rowData = new GridData(SWT.FILL, SWT.CENTER, true, false);
+        rowData.horizontalSpan = 2;
+        stallRow.setLayoutData(rowData);
+        GridLayout rowLayout = new GridLayout(2, false);
+        rowLayout.marginWidth = 0;
+        rowLayout.marginHeight = 0;
+        stallRow.setLayout(rowLayout);
+        Composite stallHost = new Composite(stallRow, SWT.NONE);
+        stallHost.setLayoutData(new GridData(SWT.BEGINNING, SWT.CENTER, false, false));
+        BooleanFieldEditor stallField = new BooleanFieldEditor(
+            ComfortSettings.PREF_RECORD_STALL_STACKS,
+            "Записывать стеки при зависаниях",
+            stallHost);
+        addField(stallField);
+        setFieldTooltip(stallField,
+            "Пока флажок включён, плагин следит за зависаниями окна EDT (дольше 1 секунды)\n"
+            + "и записывает, какой код в это время занимал интерфейс.\n"
+            + "Флажок сам отключается через минуту после включения и при перезапуске EDT.\n"
+            + "Если зависания были, при отключении появится уведомление со ссылкой «Открыть файл» с записанными стеками.", //$NON-NLS-1$
+            stallHost);
+
+        Link stallFileLink = new Link(stallRow, SWT.NONE);
+        stallFileLink.setText("<a>Открыть файл</a>"); //$NON-NLS-1$
+        stallFileLink.setLayoutData(new GridData(SWT.BEGINNING, SWT.CENTER, false, false));
+        stallFileLink.setToolTipText(TooltipText.wrap(stallFileLink,
+            "Открыть файл со стеками зависаний. Стеки дописываются в него сразу, по мере " //$NON-NLS-1$
+                + "записи, поэтому файл полезен, даже если EDT пришлось закрыть во время " //$NON-NLS-1$
+                + "зависания. Если файла ещё нет — будет создан файл с пояснением.")); //$NON-NLS-1$
+        stallFileLink.addListener(SWT.Selection, e -> UiStallSampler.openLogFile());
     }
 
     private void createVersionSection()

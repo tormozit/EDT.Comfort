@@ -585,12 +585,10 @@ public final class BslEditorHoverHook implements IStartup
                                         Global.invokeVoid(targetBrowser, "openPage", descriptor);
                                         if (targetBrowser != null && !shell.isDisposed())
                                             shell.setVisible(false);
-                                        Global.tempLog("method-definition-663", "documentation open browser="
-                                            + targetBrowser);
                                     }
                                     catch (Exception ex)
                                     {
-                                        Global.tempLog("method-definition-663", "documentation open error=" + ex);
+                                        // Документация не открылась — подсказка остаётся как есть.
                                     }
                                 });
                                 return Boolean.TRUE;
@@ -736,9 +734,6 @@ public final class BslEditorHoverHook implements IStartup
             Object info = delegateExt2 != null
                 ? delegateExt2.getHoverInfo2(textViewer, hoverRegion)
                 : delegate.getHoverInfo(textViewer, hoverRegion);
-            Global.tempLog("method-definition-663", "hover info="
-                + (info == null ? "null" : info.getClass().getName())
-                + " region=" + hoverRegion + " html=" + IrBslHoverHtml.readHtml(info));
             if (info == null || hoverRegion == null || editor == null)
                 return info;
             if (!IrBslHoverHtml.isBslBrowserInput(info))
@@ -749,8 +744,6 @@ public final class BslEditorHoverHook implements IStartup
             lastCreationSite = isImplicitVariableCreationAt(hoverRegion);
             lastMethodLink = resolveMethodLink(hoverRegion, info);
             lastFormHandlersHtml = resolveFormHandlersHtml(hoverRegion);
-            Global.tempLog("method-definition-663", "resolved name=" + lastMethodName
-                + " link=" + lastMethodLink);
             IRSession session = IrBslExpressionHtmlSupport.resolveConnectedSession(editor);
             if (session == null)
             {
@@ -980,8 +973,6 @@ public final class BslEditorHoverHook implements IStartup
                     ? result.substring(0, insertAt) + handlersHtml + result.substring(insertAt)
                     : result + handlersHtml;
             }
-            Global.tempLog("method-definition-663", "decorated name=" + lastMethodName
-                + " html=" + result);
             return result;
         }
 
@@ -1035,7 +1026,6 @@ public final class BslEditorHoverHook implements IStartup
                 Object documentationProvider = provider.get(providerClass);
                 // Тот же выбор события, что в BslDocumentationProvider.getDocByModelMethod.
                 Object resolved = Global.invoke(documentationProvider, "getEventsFromModelMethod", method);
-                Global.tempLog("method-definition-663", "declaration events=" + resolved);
                 if (!(resolved instanceof List<?> events) || events.isEmpty()
                     || !(events.get(0) instanceof com._1c.g5.v8.dt.mcore.Event event))
                     return null;
@@ -1058,7 +1048,6 @@ public final class BslEditorHoverHook implements IStartup
             }
             catch (Exception ex)
             {
-                Global.tempLog("method-definition-663", "declaration event error=" + ex);
                 return null;
             }
         }
@@ -1071,8 +1060,6 @@ public final class BslEditorHoverHook implements IStartup
             return document.readOnly((IUnitOfWork<String, XtextResource>) resource -> {
                 EObject object = resource == null ? null
                     : new EObjectAtOffsetHelper().resolveContainedElementAt(resource, region.getOffset());
-                Global.tempLog("method-definition-663", "resolve object="
-                    + (object == null ? "null" : object.eClass().getName()));
                 com._1c.g5.v8.dt.bsl.model.FeatureAccess access = null;
                 for (EObject current = object; current != null && access == null; current = current.eContainer())
                 {
@@ -1087,8 +1074,6 @@ public final class BslEditorHoverHook implements IStartup
                             break;
                         }
                 }
-                Global.tempLog("method-definition-663", "resolve access="
-                    + (access == null ? "null" : access.eClass().getName()));
                 org.eclipse.xtext.resource.IResourceServiceProvider provider = resource == null ? null
                     : org.eclipse.xtext.resource.IResourceServiceProvider.Registry.INSTANCE
                         .getResourceServiceProvider(resource.getURI());
@@ -1103,7 +1088,6 @@ public final class BslEditorHoverHook implements IStartup
                             .resolveDynamicFeatureAccess(access, computer);
                 for (com._1c.g5.v8.dt.bsl.model.FeatureEntry entry : entries)
                 {
-                    Global.tempLog("method-definition-663", "resolve feature=" + entry.getFeature());
                     EObject feature = entry.getFeature();
                     org.eclipse.emf.common.util.URI sourceUri =
                         feature instanceof com._1c.g5.v8.dt.bsl.model.BslContextDefMethod contextMethod
@@ -1119,7 +1103,6 @@ public final class BslEditorHoverHook implements IStartup
                         sourceUri = resource.getResourceSet().getURIConverter().normalize(
                             org.eclipse.emf.ecore.util.EcoreUtil.getURI(source));
                     }
-                    Global.tempLog("method-definition-663", "resolve sourceUri=" + sourceUri);
                     String uri;
                     if (sourceUri != null)
                         uri = java.net.URLEncoder.encode(sourceUri.toString(),
@@ -1142,7 +1125,6 @@ public final class BslEditorHoverHook implements IStartup
                             Object descriptor = Global.newInstance(
                                 "com._1c.g5.v8.dt.internal.bsl.ui.syntaxassist.description.DocumentationPageDescriptor",
                                 loader, page, documentationProvider);
-                            Global.tempLog("method-definition-663", "documentation descriptor=" + descriptor);
                             if (descriptor == null)
                                 continue;
                             lastDocumentationDescriptor = descriptor;
@@ -1150,7 +1132,6 @@ public final class BslEditorHoverHook implements IStartup
                         }
                         catch (Exception ex)
                         {
-                            Global.tempLog("method-definition-663", "documentation resolve error=" + ex);
                             continue;
                         }
                     }

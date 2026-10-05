@@ -1,6 +1,5 @@
 package tormozit;
 
-import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
@@ -13,9 +12,6 @@ import org.eclipse.core.resources.IResourceDelta;
 import org.eclipse.core.resources.ResourcesPlugin;
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.IStatus;
-import org.eclipse.core.runtime.CoreException;
-import org.eclipse.core.runtime.IConfigurationElement;
-import org.eclipse.core.runtime.Platform;
 import org.eclipse.core.runtime.Status;
 import org.eclipse.core.runtime.jobs.Job;
 
@@ -37,12 +33,6 @@ import com._1c.g5.v8.dt.export.IExportOperationFactory;
 import com._1c.g5.v8.dt.platform.version.IRuntimeVersionSupport;
 import com._1c.g5.wiring.AbstractGuiceAwareExecutableExtensionFactory;
 import com._1c.g5.wiring.AbstractServiceAwareModule;
-import com._1c.g5.wiring.ServiceInitialization;
-import com._1c.g5.v8.dt.form.model.DynamicListExtInfo;
-import com._1c.g5.v8.dt.form.model.Form;
-import com._1c.g5.v8.dt.form.model.FormAttribute;
-import com._1c.g5.v8.dt.form.model.IPropertyInfoProvider;
-import com._1c.g5.v8.dt.form.model.PropertyInfo;
 import com.google.inject.Guice;
 import com.google.inject.Injector;
 import com.e1c.g5.v8.dt.check.settings.CheckSettingsChange;
@@ -73,6 +63,10 @@ public class Activator extends AbstractUIPlugin
     public void start(BundleContext context) throws Exception
     {
         Global.clearTempLogs();
+        // #region agent log
+        // Отметка сборки: файл stale-markers.log обязан появиться сразу после старта плагина.
+        Global.tempLog("stale-markers", "плагин запущен, диагностика протухших маркеров v3"); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
         Global.cleanOrphanedFormNativeTempDirs();
 
         super.start(context);
@@ -405,139 +399,6 @@ public class Activator extends AbstractUIPlugin
                     return false;
                 return original.isInsertClosingBracket(doc, offset);
             };
-        }
-    }
-    /** Провайдер реквизитов формы, доступный редактору и проверкам. */
-    public static final class DynamicListDefaultPictureProvider implements IPropertyInfoProvider
-    {
-        private static final String EXTENSION_POINT = "com._1c.g5.v8.dt.form.propertyInfoProvider"; //$NON-NLS-1$
-        private static final String STOCK_CLASS =
-            "com._1c.g5.v8.dt.internal.form.datasourceinfo.property.DynamicListPropertyInfoProvider"; //$NON-NLS-1$
-
-        private volatile IPropertyInfoProvider stock;
-        private volatile Method createDefaultPicture;
-
-        public DynamicListDefaultPictureProvider()
-        {
-            initializeStock();
-            // Конструктор вызывается внутри FormServiceBootstrap.link(). Дожидаемся завершения
-            // инициализации сервисов и повторно ставим провайдер после всех штатных регистраций.
-            new Job("Реквизит СтандартнаяКартинка динамического списка") //$NON-NLS-1$
-            {
-                @Override
-                protected IStatus run(IProgressMonitor monitor)
-                {
-                    try
-                    {
-                        ServiceInitialization.join();
-                    }
-                    catch (RuntimeException ignored)
-                    {
-                    }
-                    registerAfterBootstrap();
-                    return Status.OK_STATUS;
-                }
-            }.schedule();
-        }
-
-        private void registerAfterBootstrap()
-        {
-            if (!initializeStock())
-                return;
-            IPropertyInfoProvider.Registry.INSTANCE.addDataInfoProvider(this);
-        }
-
-        private synchronized boolean initializeStock()
-        {
-            if (stock != null)
-                return true;
-            for (IConfigurationElement element : Platform.getExtensionRegistry()
-                .getConfigurationElementsFor(EXTENSION_POINT))
-            {
-                String className = element.getAttribute("class"); //$NON-NLS-1$
-                if (className == null || !className.endsWith(":" + STOCK_CLASS)) //$NON-NLS-1$
-                    continue;
-                try
-                {
-                    IPropertyInfoProvider provider =
-                        (IPropertyInfoProvider) element.createExecutableExtension("class"); //$NON-NLS-1$
-                    Method method = provider.getClass().getDeclaredMethod("createDefaultPicture", //$NON-NLS-1$
-                        PropertyInfo.class, List.class);
-                    method.setAccessible(true);
-                    createDefaultPicture = method;
-                    stock = provider;
-                    return true;
-                }
-                catch (CoreException | ReflectiveOperationException | RuntimeException ignored)
-                {
-                    return false;
-                }
-            }
-            return false;
-        }
-
-        @Override
-        public Set<String> getProvidedTypeNames()
-        {
-            return stock != null ? stock.getProvidedTypeNames() : Set.of();
-        }
-
-        @Override
-        public List<PropertyInfo> getPropertyInfo(Form form)
-        {
-            return requireStock().getPropertyInfo(form);
-        }
-
-        @Override
-        public List<PropertyInfo> getPropertyInfo(PropertyInfo parent)
-        {
-            List<PropertyInfo> result = requireStock().getPropertyInfo(parent);
-            // После исправления EDT штатный провайдер сам вернёт реквизит — обход не нужен.
-            if (result.stream().anyMatch(child -> "DefaultPicture".equals(child.getName()))) //$NON-NLS-1$
-            {
-                return result;
-            }
-            if (!needsPicture(parent))
-            {
-                return result;
-            }
-            List<PropertyInfo> extended = new ArrayList<>(result);
-            try
-            {
-                List<PropertyInfo> picture = new ArrayList<>(1);
-                createDefaultPicture.invoke(stock, parent, picture);
-                int orderIndex = extended.size();
-                for (int i = 0; i < extended.size(); i++)
-                    if ("Order".equals(extended.get(i).getName())) //$NON-NLS-1$
-                    {
-                        orderIndex = i;
-                        break;
-                    }
-                extended.addAll(orderIndex, picture);
-                return extended;
-            }
-            catch (ReflectiveOperationException | RuntimeException ignored)
-            {
-                return result;
-            }
-        }
-
-        private IPropertyInfoProvider requireStock()
-        {
-            IPropertyInfoProvider provider = stock;
-            if (provider == null)
-                throw new IllegalStateException("Штатный провайдер динамического списка не инициализирован"); //$NON-NLS-1$
-            return provider;
-        }
-
-        private static boolean needsPicture(PropertyInfo parent)
-        {
-            if (!(parent.getSource() instanceof FormAttribute attribute)
-                || !(attribute.getExtInfo() instanceof DynamicListExtInfo ext))
-                return false;
-            var mainTable = ext.getMainTable();
-            return mainTable == null
-                || mainTable.getMdObject() instanceof com._1c.g5.v8.dt.metadata.mdclass.Enum;
         }
     }
 }

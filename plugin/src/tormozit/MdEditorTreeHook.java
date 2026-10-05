@@ -635,7 +635,7 @@ public final class MdEditorTreeHook
      * Enter из поля фильтра — то же, что Enter в самом дереве: штатный {@code DtTreeView} реагирует
      * на {@code KeyDown} с кодом Enter (открывает элемент), а не на {@code DefaultSelection}.
      */
-    private static boolean pressEnterOnTree(Tree tree)
+    static boolean pressEnterOnTree(Tree tree)
     {
         if (tree.isDisposed() || tree.getItemCount() == 0)
             return false;
@@ -2755,6 +2755,7 @@ public final class MdEditorTreeHook
         private final ISelectionChangedListener stock;
         private ISelection lastNonEmpty;
         private boolean restoring;
+        private boolean forwardingEmpty;
 
         KeepSelectionListener(TreeViewer viewer, ISelectionChangedListener stock)
         {
@@ -2777,8 +2778,21 @@ public final class MdEditorTreeHook
             // отдаём штатному, иначе выделение зациклится.
             if (restoring || lastNonEmpty == null || !appliedByTreeView())
             {
+                // Штатный на пустое выделение сам выделяет верхнюю строку; если и она не
+                // выделилась (скрыта фильтром), пустое выделение приходит снова из-под него же —
+                // без этой отметки восстановление и штатный вызывали друг друга до переполнения стека.
+                if (forwardingEmpty)
+                    return;
                 restoring = false;
-                stock.selectionChanged(event);
+                forwardingEmpty = true;
+                try
+                {
+                    stock.selectionChanged(event);
+                }
+                finally
+                {
+                    forwardingEmpty = false;
+                }
                 return;
             }
             restoring = true;

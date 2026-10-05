@@ -1800,6 +1800,8 @@ return;
             fullListReady = true;
             uiBlockLog("memberList.afterDot", "stock=" + memberStockFullList.length //$NON-NLS-1$ //$NON-NLS-2$
                 + " popup=" + isPopupVisible()); //$NON-NLS-1$
+            if (ContentAssistSessionReloader.suppressMemberPopupForDotBeforeListedWord(viewer))
+                return;
             if (isPopupVisible())
                 ContentAssistSessionReloader.refreshPopupIfOpen();
             else
@@ -2817,8 +2819,7 @@ return;
             return wordListSkip("memberAccess"); //$NON-NLS-1$
         int liveCaret = resolveWidgetCaret(viewer);
         if (liveCaret >= 0 && liveCaret != caret
-            && (ReceiverTypeLabel.findMemberAccessDot(doc, liveCaret) >= 0
-                || isOrdinaryWordListStaleForLiveCaret(doc, liveCaret)))
+            && ReceiverTypeLabel.findMemberAccessDot(doc, liveCaret) >= 0)
             return wordListSkip("liveMemberOrDot"); //$NON-NLS-1$
         if (isStringLiteralAssistContext(doc, caret))
             return wordListSkip("literal"); //$NON-NLS-1$
@@ -2887,6 +2888,8 @@ return;
         wordListBackgroundKey = key;
         final int gen = memberStockContextGen;
         final int epoch = wordListEpoch;
+        // Слово набирают вплотную перед уже стоящей «.» — это не точка, набранная вдогонку.
+        final boolean dotAhead = isDotAt(doc, caret);
         final boolean inspectJob = DebugInspectorHook.isInspectExpressionViewer(viewer);
         Job job = new Job("SCAP word list") //$NON-NLS-1$
         {
@@ -2923,7 +2926,7 @@ return;
                         return Status.CANCEL_STATUS;
                     IDocument liveNow = viewer.getDocument();
                     int liveNowCaret = liveAssistCaret;
-                    if (isOrdinaryWordListStaleForLiveCaret(liveNow, liveNowCaret))
+                    if (isOrdinaryWordListStaleForLiveCaret(liveNow, liveNowCaret, dotAhead))
                     {
                         uiBlockLog("wordListBackground.abort", "why=liveMemberDot"); //$NON-NLS-1$ //$NON-NLS-2$
                         return Status.CANCEL_STATUS;
@@ -3076,7 +3079,7 @@ return;
                 IDocument liveAfter = viewer.getDocument();
                 int liveAfterCaret = liveAssistCaret;
                 if (monitor.isCanceled() || epoch != wordListEpoch
-                    || isOrdinaryWordListStaleForLiveCaret(liveAfter, liveAfterCaret))
+                    || isOrdinaryWordListStaleForLiveCaret(liveAfter, liveAfterCaret, dotAhead))
                 {
                     uiBlockLog("wordListBackground.abort", "why=staleBeforePublish"); //$NON-NLS-1$ //$NON-NLS-2$
                     return Status.CANCEL_STATUS;
@@ -3291,16 +3294,29 @@ return;
         }
     }
 
-    /** Каретка уже после {@code .} или на точке — словарный Job буквы не должен открывать окно. */
-    private static boolean isOrdinaryWordListStaleForLiveCaret(IDocument doc, int caret)
+    /**
+     * Каретка уже после {@code .} или на точке — словарный Job буквы не должен открывать окно.
+     * «На точке» — это точка, набранная вдогонку: запомненная каретка ещё не сдвинулась.
+     *
+     * @param dotAhead «.» стояла справа от каретки ещё при запуске расчёта (слово набирают
+     *     перед готовой точкой) — тогда она расчёт не бракует
+     */
+    private static boolean isOrdinaryWordListStaleForLiveCaret(IDocument doc, int caret,
+                                                               boolean dotAhead)
     {
         if (doc == null || caret < 0)
             return false;
         if (ReceiverTypeLabel.findMemberAccessDot(doc, caret) >= 0)
             return true;
+        return !dotAhead && isDotAt(doc, caret);
+    }
+
+    private static boolean isDotAt(IDocument doc, int offset)
+    {
         try
         {
-            return caret < doc.getLength() && doc.getChar(caret) == '.';
+            return doc != null && offset >= 0 && offset < doc.getLength()
+                && doc.getChar(offset) == '.';
         }
         catch (Exception ignored)
         {
@@ -3516,7 +3532,8 @@ return;
             }
             key = liveKey;
         }
-        if (isOrdinaryWordListStaleForLiveCaret(liveDoc, liveCaret))
+        // UI-поток, живая каретка: «.» справа от неё стояла там и раньше.
+        if (isOrdinaryWordListStaleForLiveCaret(liveDoc, liveCaret, true))
         {
             uiBlockLog("wordListBackground.dropStale", "key=" + key //$NON-NLS-1$ //$NON-NLS-2$
                 + " caret=" + liveCaret); //$NON-NLS-1$
@@ -8189,6 +8206,32 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         return dot >= 0 && memberStockFullListDot == dot && memberStockFullList.length > 0;
     }
 
+    /** В списке есть предложение с таким именем (без учёта регистра). */
+    static boolean containsProposalName(ICompletionProposal[] list, String name)
+    {
+        if (list == null || name == null || name.isEmpty())
+            return false;
+        for (ICompletionProposal p : list)
+        {
+            if (p != null && name.equalsIgnoreCase(filterMatchName(p)))
+                return true;
+        }
+        return false;
+    }
+
+    /** Имя есть среди уже посчитанных членов получателя для точки перед {@code caret}. */
+    boolean memberListContainsName(IDocument doc, int caret, String name)
+    {
+        if (doc == null || caret < 0)
+            return false;
+        int dot = ReceiverTypeLabel.findMemberAccessDot(doc, caret);
+        if (dot < 0)
+            return false;
+        if (hasMemberListForDot(dot) && containsProposalName(memberStockFullList, name))
+            return true;
+        return fullListContextKey == dot && containsProposalName(fullListCache, name);
+    }
+
     private ICompletionProposal[] preferMemberFullList(ITextViewer viewer, int dot,
                                                        ICompletionProposal[] raw)
     {
@@ -8615,6 +8658,8 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         // Открытое окно — обновить на месте. Закрытое открываем только cachedListOnly:
         // обычный show снова зовёт compute, после точки он часто пустой, и замыкается
         // цикл publish → reopen → n:0 (замер 05.09.2026: 538 витков за секунду).
+        if (ContentAssistSessionReloader.suppressMemberPopupForDotBeforeListedWord(viewer))
+            return;
         if (isPopupVisible())
             ContentAssistSessionReloader.refreshPopupIfOpen();
         else if (hasMemberStock(dotContextKey))
@@ -8674,6 +8719,8 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                 repairPopupListFromMemberStock(doc, caret);
                 if (viewer instanceof SourceViewer)
                     ContentAssistPopupUi.updateContextTypeLabel((SourceViewer) viewer);
+                if (ContentAssistSessionReloader.suppressMemberPopupForDotBeforeListedWord(viewer))
+                    return;
                 if (isPopupVisible())
                     ContentAssistSessionReloader.refreshPopupIfOpen();
                 else if (hasMemberStock(dotContextKey))

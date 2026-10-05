@@ -337,7 +337,10 @@ public final class CompareTabularDocumentsInIr
         if (workspaceFile != null && workspaceFile.getLocation() != null)
         {
             Path location = workspaceFile.getLocation().toFile().toPath();
-            if (Files.isRegularFile(location))
+            // Сторона из индекса/коммита Git сопоставляется с тем же workspace-файлом, что и рабочая копия,
+            // поэтому файл на диске годится, только если содержимое стороны совпадает с ним.
+            if (Files.isRegularFile(location)
+                && (!(element instanceof IStreamContentAccessor) || contentEqualsFile(element, location)))
                 return location;
         }
         if (!(element instanceof IStreamContentAccessor accessor))
@@ -359,6 +362,21 @@ public final class CompareTabularDocumentsInIr
         {
             Global.log("CompareTabularDocumentsInIr: не удалось получить файл стороны: " + e.getMessage()); //$NON-NLS-1$
             return null;
+        }
+    }
+
+    private static boolean contentEqualsFile(ITypedElement element, Path file)
+    {
+        try (InputStream stream = ((IStreamContentAccessor) element).getContents())
+        {
+            if (stream == null)
+                return false;
+            return java.util.Arrays.equals(stream.readAllBytes(), Files.readAllBytes(file));
+        }
+        catch (CoreException | java.io.IOException e)
+        {
+            Global.log("CompareTabularDocumentsInIr: не удалось сверить содержимое стороны: " + e.getMessage()); //$NON-NLS-1$
+            return false;
         }
     }
 

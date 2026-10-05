@@ -598,7 +598,15 @@ public class OpenMdObjectHook implements IStartup {
                 Display display = Display.getDefault();
                 if (display == null || display.isDisposed())
                     return;
-                display.syncExec(() -> {
+                // Только asyncExec. Слушатель вызывается из потока запуска задания, а UI-поток в это
+                // же время может отменять это задание (scheduleRefresh → cancelAll) и ждать, пока
+                // слушатель вернётся: syncExec здесь — взаимный захват до таймаута JobManager (3 с),
+                // всё это время диалог не принимает ввод (#699). Порядок не страдает: RefreshJob —
+                // UIJob, свой asyncExec он ставит уже после aboutToRun, то есть позже нашего.
+                display.asyncExec(() -> {
+                    Shell shell = dialogShell(dialog);
+                    if (shell == null || shell.isDisposed())
+                        return;
                     dedupeContentProviderItems(dialog);
                     resortDialogLists(dialog, comparator);
                 });
@@ -658,7 +666,7 @@ public class OpenMdObjectHook implements IStartup {
         Object listObj = Global.getField(cp, fieldName);
         if (!(listObj instanceof List))
             return;
-        List<Object> list = (List<Object>) listObj;
+        List<Object> list = resizableProviderList(cp, fieldName, (List<Object>) listObj);
         synchronized (list)
         {
             Map<String, Object> unique = new LinkedHashMap<>();
@@ -796,7 +804,7 @@ public class OpenMdObjectHook implements IStartup {
         Object listObj = Global.getField(cp, fieldName);
         if (!(listObj instanceof List))
             return;
-        List<Object> list = (List<Object>) listObj;
+        List<Object> list = resizableProviderList(cp, fieldName, (List<Object>) listObj);
         synchronized (list)
         {
             // Всегда пересобираем из items: после reset lastFilteredItems не чистится,
@@ -811,6 +819,24 @@ public class OpenMdObjectHook implements IStartup {
             }
             list.sort((a, b) -> compareByHistoryAccess(a, b, orderByUri));
         }
+    }
+
+    /**
+     * Штатный {@code reloadCache} кладёт в {@code lastFilteredItems} результат {@code Arrays.asList}
+     * — список постоянной длины, {@code clear()}/{@code addAll()} на нём бросают
+     * {@code UnsupportedOperationException}. Такой список заменяем в поле на изменяемую копию.
+     */
+    private static List<Object> resizableProviderList(Object cp, String fieldName, List<Object> list)
+    {
+        if (list instanceof ArrayList)
+            return list;
+        List<Object> copy;
+        synchronized (list)
+        {
+            copy = new ArrayList<>(list);
+        }
+        Global.setField(cp, fieldName, copy);
+        return copy;
     }
 
     /** Новее (больший индекс истории) выше; вне истории — в конец, алфавит между собой. */

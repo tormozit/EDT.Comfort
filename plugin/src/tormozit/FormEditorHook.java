@@ -3848,8 +3848,6 @@ public class FormEditorHook implements IStartup
                     return;
                 }
                 table.setData(KEY_HOOKED, Boolean.TRUE);
-                Global.tempLog("form-commands-width", "attach columns=" + table.getColumnCount() //$NON-NLS-1$ //$NON-NLS-2$
-                    + " client=" + table.getClientArea().width); //$NON-NLS-1$
                 column.setLabelProvider(new CommandIconLabelProvider(page, base));
                 EffectiveIcons.installCommands(page, viewer);
                 table.addListener(SWT.Paint, event -> refreshVisibleIcons(page, viewer, table));
@@ -3902,11 +3900,6 @@ public class FormEditorHook implements IStartup
                 org.eclipse.swt.widgets.TableColumn nameColumn = table.getColumn(0);
                 int target = clientWidth - otherWidth;
                 int total = nameColumn.getWidth() + otherWidth;
-                Global.tempLog("form-commands-width", "fit client=" + clientWidth //$NON-NLS-1$ //$NON-NLS-2$
-                    + " total=" + total + " first=" + nameColumn.getWidth() //$NON-NLS-1$ //$NON-NLS-2$
-                    + " other=" + otherWidth + " target=" + target //$NON-NLS-1$ //$NON-NLS-2$
-                    + " hbar=" + (table.getHorizontalBar() != null //$NON-NLS-1$
-                        && table.getHorizontalBar().isVisible()));
                 if (clientWidth <= 0 || total <= clientWidth || target < 50)
                     return;
                 org.eclipse.swt.graphics.GC gc = new org.eclipse.swt.graphics.GC(table);
@@ -3918,11 +3911,7 @@ public class FormEditorHook implements IStartup
                         int needed = gc.textExtent(item.getText(0)).x
                             + (image != null ? image.getBounds().width + 8 : 0) + 12;
                         if (needed > target)
-                        {
-                            Global.tempLog("form-commands-width", "content needs=" + needed //$NON-NLS-1$ //$NON-NLS-2$
-                                + " target=" + target + " text=" + item.getText(0)); //$NON-NLS-1$ //$NON-NLS-2$
                             return;
-                        }
                     }
                 }
                 finally

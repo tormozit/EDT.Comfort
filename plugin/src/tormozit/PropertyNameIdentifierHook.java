@@ -99,13 +99,7 @@ public class PropertyNameIdentifierHook implements IStartup
                 {
                     // Одна попытка без серии повторов: строки к этому моменту уже построены, а
                     // у объекта без строки «Имя» серия на каждый вход фокуса шла бы впустую.
-                    control.getDisplay().asyncExec(() ->
-                    {
-                        tryAttach(view);
-                        // ВРЕМЕННО: клик в панель со сбитой раскладкой снимает её состояние.
-                        PropertySheetLayoutDiag.dumpNow("вход фокуса в панель: " //$NON-NLS-1$
-                            + control.getClass().getSimpleName());
-                    });
+                    control.getDisplay().asyncExec(() -> tryAttach(view));
                     return;
                 }
             }
@@ -197,7 +191,6 @@ public class PropertyNameIdentifierHook implements IStartup
 
         Object typeModel = findTypeDescriptionModel(scene);
         String initialName = readLightTextValue(nativeControl);
-        PropertySheetLayoutDiag.dump("новая строка «Имя»: " + initialName); //$NON-NLS-1$
 
         // В отличие от мастеров «Новый ...» — здесь обработчик срабатывает и на Enter (не только
         // на потерю фокуса), т.к. в панели «Свойства» пользователь обычно правит одно поле и
@@ -414,13 +407,11 @@ public class PropertyNameIdentifierHook implements IStartup
                 return;
 
             modified = !text.equals(initialName);
-            PropertySheetLayoutDiag.dump("ввод имени завершён: «" + text + "» было «" + initialName + "»"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
 
             identifier = Global.identifierFromRepresentation(text, "_", "", ""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             if (!identifier.equals(text))
             {
                 Global.invokeVoid(textControl, "setText", identifier); //$NON-NLS-1$
-                PropertySheetLayoutDiag.dump("имя заменено идентификатором: «" + text + "» → «" + identifier + "»"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 Global.log(LOG_TAG, "«" + text + "» → «" + identifier + "»"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             }
         }

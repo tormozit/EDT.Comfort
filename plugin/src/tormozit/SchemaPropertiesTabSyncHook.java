@@ -337,11 +337,8 @@ public final class SchemaPropertiesTabSyncHook implements IStartup
     /** Дополняет штатные страницы «Основные» свойством подавления проверок. */
     private static final class MdMainPageHook
     {
-        private static final String TEMP_LOG = "mdMainPageSuppression"; //$NON-NLS-1$
-
         static void earlyStartup()
         {
-            Global.tempLog(TEMP_LOG, "earlyStartup"); //$NON-NLS-1$
             Display.getDefault().asyncExec(MdMainPageHook::install);
         }
 
@@ -374,7 +371,6 @@ public final class SchemaPropertiesTabSyncHook implements IStartup
                     @SuppressWarnings("unchecked")
                     Map<IDtGranularEditorAefPageDescriptor, Expression> expressions =
                         (Map<IDtGranularEditorAefPageDescriptor, Expression>) expressionsField.get(registry);
-                    int wrapped = 0;
                     for (Map.Entry<String, Collection<IDtGranularEditorAefPageDescriptor>> entry : descriptors.entrySet())
                     {
                         EStructuralFeature feature = suppressionFeature(entry.getKey());
@@ -391,16 +387,14 @@ public final class SchemaPropertiesTabSyncHook implements IStartup
                             SuppressionDescriptor wrapper = new SuppressionDescriptor(descriptor, entry.getKey(), feature);
                             expressions.put(wrapper, expressions.remove(descriptor));
                             replacements.add(wrapper);
-                            wrapped++;
                         }
                         entry.setValue(replacements);
                     }
-                    Global.tempLog(TEMP_LOG, "wrapped=" + wrapped); //$NON-NLS-1$
                 }
             }
-            catch (Throwable error)
+            catch (Throwable ignored)
             {
-                Global.tempLogException(TEMP_LOG, "install failed", error); //$NON-NLS-1$
+                // Дополнение необязательно: без него страницы EDT работают штатно.
             }
         }
 
@@ -421,10 +415,7 @@ public final class SchemaPropertiesTabSyncHook implements IStartup
             EStructuralFeature feature, String pageId)
         {
             if (definition.getPageFeatures().contains(feature))
-            {
-                Global.tempLog(TEMP_LOG, pageId + " already contains property"); //$NON-NLS-1$
                 return;
-            }
             if (!(definition instanceof ContainerDefinition root))
                 throw new IllegalStateException("Unknown definition type: " + definition.getClass()); //$NON-NLS-1$
             ContainerDefinition left = root;
@@ -461,8 +452,6 @@ public final class SchemaPropertiesTabSyncHook implements IStartup
                 else
                     main.addDefinition(row);
             }
-            Global.tempLog(TEMP_LOG, pageId + " added: " + feature.getName() //$NON-NLS-1$
-                + ", afterComment=" + (insertAt >= 0)); //$NON-NLS-1$
         }
 
         private static int afterComment(SectionDefinition main)
@@ -501,17 +490,7 @@ public final class SchemaPropertiesTabSyncHook implements IStartup
             @Override
             public synchronized IDtGranularEditorManagingDefinition getDefinition()
             {
-                Global.tempLog(TEMP_LOG, pageId + " getDefinition"); //$NON-NLS-1$
-                IDtGranularEditorManagingDefinition definition;
-                try
-                {
-                    definition = delegate.getDefinition();
-                }
-                catch (RuntimeException | Error error)
-                {
-                    Global.tempLogException(TEMP_LOG, pageId + " getDefinition failed", error); //$NON-NLS-1$
-                    throw error;
-                }
+                IDtGranularEditorManagingDefinition definition = delegate.getDefinition();
                 if (!added)
                 {
                     added = true;
@@ -522,7 +501,6 @@ public final class SchemaPropertiesTabSyncHook implements IStartup
                     catch (RuntimeException | Error error)
                     {
                         // Ошибка нашего дополнения не должна ломать штатную страницу EDT.
-                        Global.tempLogException(TEMP_LOG, pageId + " addSuppression failed", error); //$NON-NLS-1$
                     }
                 }
                 return definition;

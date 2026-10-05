@@ -250,6 +250,13 @@ public final class LocalStringDialogSpellCheckHook implements IStartup
         {
             if (event.detail == SWT.TRAVERSE_TAB_NEXT || event.detail == SWT.TRAVERSE_TAB_PREVIOUS)
                 event.doit = true;
+            // Shift+Enter в многострочном поле — перевод строки, а не нажатие кнопки по
+            // умолчанию (иначе окно закрывалось). Ctrl+Enter (ОК) обрабатывает VerifyKey выше.
+            else if (multiLine && event.detail == SWT.TRAVERSE_RETURN && (event.stateMask & SWT.SHIFT) != 0)
+            {
+                event.doit = false;
+                event.detail = SWT.TRAVERSE_NONE;
+            }
         });
         // Колесо мыши. Нативное поле, которому нечего прокручивать, отдаёт колесо окну само
         // (DefWindowProc пересылает его родителю), и список языков прокручивался. StyledText —

@@ -92,6 +92,11 @@ public final class ContentAssistSessionReloader
     private static final IdentityHashMap<SourceViewer, ContentAssistSessionReloader> INSTALLED =
         new IdentityHashMap<>();
     private boolean pendingAutoOpen = false;
+    /**
+     * Модельный офсет каретки сразу после набранной «.», если вплотную за ней уже стоит
+     * слово; иначе {@code -1}. Сбрасывается любой следующей правкой текста и Ctrl+Space.
+     */
+    private int dotBeforeWordCaret = -1;
 
     private static final ThreadLocal<ContentAssistant> ACTIVE_ASSISTANT = new ThreadLocal<>();
     private static final ThreadLocal<SourceViewer> ACTIVE_VIEWER = new ThreadLocal<>();
@@ -872,6 +877,12 @@ boolean inLiteral = endCaret >= 0
             public void documentChanged(DocumentEvent event)
             {
                 long t0 = System.nanoTime();
+                noteDocumentChangedForValidation(event);
+                // #region agent log
+                // Первой строкой обработчика: ниже есть ранние выходы и вызовы, способные
+                // бросить исключение, а эта запись должна появляться на каждую правку.
+                logValidationAfterDocumentChange(event);
+                // #endregion
                 String text = event == null ? null : event.getText();
                 if (inputJumpProbe != null)
                     inputJumpProbe.documentChanged(event);
@@ -929,6 +940,12 @@ boolean inLiteral = endCaret >= 0
             }
         };
         doc.addDocumentListener(completionAutoOpenDocumentListener);
+        installAssistSyncValidationRestart();
+        // #region agent log
+        Global.tempLog("stale-markers", "слушатель правок подключён: документ " //$NON-NLS-1$ //$NON-NLS-2$
+            + doc.getClass().getName() + "@" + System.identityHashCode(doc)); //$NON-NLS-1$
+        logValidationState(doc, "listener.install"); //$NON-NLS-1$
+        // #endregion
     }
 
     /**
@@ -2564,13 +2581,222 @@ boolean inLiteral = endCaret >= 0
         {
             // Прямой тип BslXtextDocument тянет отсутствующий в build path
             // HandlyXtextDocument; сам публичный метод подтверждён в EDT-бандле.
+            // #region agent log
+            logValidationState(doc, "read.done"); //$NON-NLS-1$
+            // #endregion
             Global.invokeVoid(doc, "checkAndUpdateAnnotations"); //$NON-NLS-1$
+            // #region agent log
+            logValidationState(doc, "afterCheckAndUpdate"); //$NON-NLS-1$
+            // #endregion
             @SuppressWarnings("unchecked")
             T typed = (T) result;
             return typed;
         }
         return doc == null || work == null ? null : doc.readOnly(work);
     }
+
+    /** Семейство штатного задания, догоняющего модель до текста для автодополнения. */
+    private static final String ASSIST_SYNC_JOB_FAMILY =
+        "com._1c.g5.v8.dt.bsl.ui.editor.BslXtextDocument$ContentAssistResourceSync"; //$NON-NLS-1$
+
+    private static final java.util.Map<IDocument, ValidationWatch> VALIDATION_WATCHES =
+        java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
+
+    private static boolean assistSyncValidationRestartInstalled;
+
+    /** Когда документ последний раз правили и когда его проверка последний раз отработала. */
+    private static final class ValidationWatch
+    {
+        volatile long changedAt;
+        volatile long validatedAt;
+        org.eclipse.core.runtime.jobs.Job job;
+    }
+
+    /**
+     * Обход ошибки EDT: маркер ошибки остаётся после правки, которая ошибку устранила.
+     *
+     * <p>Проверку модуля планирует только {@code checkAndUpdateAnnotations}, а в
+     * {@code BslXtextDocument} он выходит без планирования, пока у задания проверки взведён
+     * признак пропуска. {@code readOnlyForContentAssist} взводит признак, отменяет
+     * {@code XtextReconciler} и, если модель отстала от текста, запускает
+     * {@code ContentAssistResourceSync}. То согласует модель и зовёт
+     * {@code checkAndUpdateAnnotations} при ещё взведённом признаке, а снимает его только
+     * потом. Проверку после этого не запускает никто — до следующей правки текста.
+     * Поэтому по завершении {@code ContentAssistResourceSync} запускаем её сами.
+     */
+    private static synchronized void installAssistSyncValidationRestart()
+    {
+        if (assistSyncValidationRestartInstalled)
+            return;
+        assistSyncValidationRestartInstalled = true;
+        org.eclipse.core.runtime.jobs.Job.getJobManager().addJobChangeListener(
+            new org.eclipse.core.runtime.jobs.JobChangeAdapter()
+            {
+                @Override
+                public void done(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
+                {
+                    if (event.getJob().belongsTo(ASSIST_SYNC_JOB_FAMILY))
+                        restartMissedValidations();
+                }
+            });
+    }
+
+    private static void noteDocumentChangedForValidation(DocumentEvent event)
+    {
+        IDocument doc = event == null ? null : event.getDocument();
+        if (!(doc instanceof IXtextDocument))
+            return;
+        ValidationWatch watch = VALIDATION_WATCHES.computeIfAbsent(doc, key -> new ValidationWatch());
+        watch.changedAt = System.nanoTime();
+        Object jobObject = Global.invoke(doc, "getValidationJob"); //$NON-NLS-1$
+        if (!(jobObject instanceof org.eclipse.core.runtime.jobs.Job job))
+            return;
+        synchronized (watch)
+        {
+            if (watch.job == job)
+                return;
+            watch.job = job;
+        }
+        job.addJobChangeListener(new org.eclipse.core.runtime.jobs.JobChangeAdapter()
+        {
+            @Override
+            public void done(org.eclipse.core.runtime.jobs.IJobChangeEvent done)
+            {
+                // Отменённый и пропущенный запуски аннотаций не обновляют
+                if (done.getResult() != null && done.getResult().isOK()
+                    && !Boolean.TRUE.equals(Global.invoke(done.getJob(), "isSkip"))) //$NON-NLS-1$
+                    watch.validatedAt = System.nanoTime();
+            }
+        });
+    }
+
+    private static void restartMissedValidations()
+    {
+        java.util.List<java.util.Map.Entry<IDocument, ValidationWatch>> watches;
+        synchronized (VALIDATION_WATCHES)
+        {
+            watches = new java.util.ArrayList<>(VALIDATION_WATCHES.entrySet());
+        }
+        for (java.util.Map.Entry<IDocument, ValidationWatch> entry : watches)
+        {
+            IDocument doc = entry.getKey();
+            ValidationWatch watch = entry.getValue();
+            if (doc == null || watch.validatedAt >= watch.changedAt)
+                continue;
+            Object jobObject = Global.invoke(doc, "getValidationJob"); //$NON-NLS-1$
+            if (!(jobObject instanceof org.eclipse.core.runtime.jobs.Job job))
+                continue;
+            boolean idle = job.getState() == org.eclipse.core.runtime.jobs.Job.NONE;
+            boolean skip = Boolean.TRUE.equals(Global.invoke(job, "isSkip")); //$NON-NLS-1$
+            // #region agent log
+            Global.tempLog("stale-markers", "assistSync.done: проверка после правки не отработала," //$NON-NLS-1$ //$NON-NLS-2$
+                + " перезапуск=" + (idle && !skip) + " " + describeValidationJob(job)); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+            // Задание уже запланировано или идёт — оно отработает само
+            if (idle && !skip)
+                Global.invokeVoid(doc, "checkAndUpdateAnnotations"); //$NON-NLS-1$
+        }
+    }
+
+    // #region agent log
+    private static final java.util.Set<org.eclipse.core.runtime.jobs.Job> VALIDATION_JOBS_WATCHED =
+        java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>());
+
+    /**
+     * Временная диагностика протухших маркеров ошибок. Штатный
+     * {@code readOnlyForContentAssist} ставит заданию проверки признак пропуска
+     * ({@code skip}) и отменяет его; если модель ещё не догнала текст, признак остаётся
+     * взведённым, и {@code checkAndUpdateAnnotations} задание не перезапускает. Пишем
+     * состояние задания в точках чтения и каждое его планирование/завершение: чтение с
+     * {@code skip=true}, после которого нет запуска проверки, и есть протухший маркер.
+     */
+    private static void logValidationAfterDocumentChange(DocumentEvent event)
+    {
+        if (event == null)
+        {
+            Global.tempLog("stale-markers", "docChanged: событие null"); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        }
+        IDocument doc = event.getDocument();
+        if (!(doc instanceof IXtextDocument))
+        {
+            Global.tempLog("stale-markers", "docChanged: документ не Xtext — " //$NON-NLS-1$ //$NON-NLS-2$
+                + (doc == null ? "null" : doc.getClass().getName())); //$NON-NLS-1$
+            return;
+        }
+        String text = event.getText() == null ? "" : event.getText(); //$NON-NLS-1$
+        logValidationState(doc, "docChanged offset=" + event.getOffset() //$NON-NLS-1$
+            + " removed=" + event.getLength() + " inserted=" + text.length()); //$NON-NLS-1$ //$NON-NLS-2$
+        long stampAtChange = doc instanceof org.eclipse.jface.text.IDocumentExtension4 ext
+            ? ext.getModificationStamp() : -1;
+        // Через 3 с после правки: если текст с тех пор не менялся, а проверка так и не
+        // отработала — это и есть протухший маркер. Задание, а не timerExec: слушатель
+        // документа может прийти не из UI-потока.
+        org.eclipse.core.runtime.jobs.Job probe = org.eclipse.core.runtime.jobs.Job.create(
+            "Комфорт: проба задания проверки модуля", //$NON-NLS-1$
+            (org.eclipse.core.runtime.ICoreRunnable)monitor -> {
+                long stampNow = doc instanceof org.eclipse.jface.text.IDocumentExtension4 ext
+                    ? ext.getModificationStamp() : -1;
+                logValidationState(doc, "probe+3s textUnchanged=" + (stampNow == stampAtChange)); //$NON-NLS-1$
+            });
+        probe.setSystem(true);
+        probe.schedule(3000);
+    }
+
+    private static void logValidationState(IDocument doc, String point)
+    {
+        try
+        {
+            Object jobObject = Global.invoke(doc, "getValidationJob"); //$NON-NLS-1$
+            org.eclipse.core.runtime.jobs.Job job =
+                jobObject instanceof org.eclipse.core.runtime.jobs.Job found ? found : null;
+            long stamp = doc instanceof org.eclipse.jface.text.IDocumentExtension4 ext
+                ? ext.getModificationStamp() : -1;
+            Global.tempLog("stale-markers", point + " " + describeValidationJob(job) //$NON-NLS-1$ //$NON-NLS-2$
+                + " docStamp=" + stamp + " docLen=" + doc.getLength() //$NON-NLS-1$ //$NON-NLS-2$
+                + " th=" + Thread.currentThread().getName()); //$NON-NLS-1$
+            if (job == null)
+                return;
+            boolean added;
+            synchronized (VALIDATION_JOBS_WATCHED)
+            {
+                added = VALIDATION_JOBS_WATCHED.add(job);
+            }
+            if (!added)
+                return;
+            job.addJobChangeListener(new org.eclipse.core.runtime.jobs.JobChangeAdapter()
+            {
+                @Override
+                public void scheduled(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
+                {
+                    Global.tempLog("stale-markers", "validation.scheduled delay=" + event.getDelay() //$NON-NLS-1$ //$NON-NLS-2$
+                        + " " + describeValidationJob(event.getJob()) //$NON-NLS-1$
+                        + " th=" + Thread.currentThread().getName()); //$NON-NLS-1$
+                }
+
+                @Override
+                public void done(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
+                {
+                    Global.tempLog("stale-markers", "validation.done result=" + event.getResult() //$NON-NLS-1$ //$NON-NLS-2$
+                        + " " + describeValidationJob(event.getJob())); //$NON-NLS-1$
+                }
+            });
+        }
+        catch (RuntimeException ex)
+        {
+            Global.tempLog("stale-markers", point + " сбой диагностики: " + ex); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    private static String describeValidationJob(org.eclipse.core.runtime.jobs.Job job)
+    {
+        if (job == null)
+            return "job=null"; //$NON-NLS-1$
+        return "job=" + System.identityHashCode(job) //$NON-NLS-1$
+            + " state=" + job.getState() //$NON-NLS-1$
+            + " skip=" + Global.invoke(job, "isSkip"); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+    // #endregion
 
     /**
      * Только заглянуть в модель: без notify и без отмены {@code XtextReconciler}.
@@ -3112,7 +3338,10 @@ boolean inLiteral = endCaret >= 0
             return;
         IDocument doc = viewer != null ? viewer.getDocument() : null;
         if (doc != null)
+        {
             doc.removeDocumentListener(completionAutoOpenDocumentListener);
+            VALIDATION_WATCHES.remove(doc);
+        }
         completionAutoOpenDocumentListener = null;
     }
 
@@ -3301,6 +3530,76 @@ boolean inLiteral = endCaret >= 0
         return toModelOffset(st.getCaretOffset());
     }
 
+    /** Идентификатор, начинающийся ровно с {@code offset} (справа от каретки), или пусто. */
+    private static String wordRightOfCaret(IDocument doc, int offset)
+    {
+        if (doc == null || offset < 0)
+            return ""; //$NON-NLS-1$
+        try
+        {
+            int len = doc.getLength();
+            if (offset >= len)
+                return ""; //$NON-NLS-1$
+            char first = doc.getChar(offset);
+            if (!Character.isLetter(first) && first != '_')
+                return ""; //$NON-NLS-1$
+            int end = offset + 1;
+            while (end < len)
+            {
+                char c = doc.getChar(end);
+                if (!Character.isLetterOrDigit(c) && c != '_')
+                    break;
+                end++;
+            }
+            return doc.get(offset, end - offset);
+        }
+        catch (BadLocationException e)
+        {
+            return ""; //$NON-NLS-1$
+        }
+    }
+
+    /**
+     * «.» дописали перед готовым словом, и это слово есть в списке членов — окно не нужно
+     * (перенос методов в общий модуль: к вызовам дописывается {@code Модуль.}). Уже открытое
+     * окно (слова, набранные до точки) закрывается. Ручной вызов сюда не попадает:
+     * Ctrl+Space сбрасывает {@link #dotBeforeWordCaret}.
+     *
+     * @param extra список помимо кэша процессора (слова ИР) или {@code null}
+     */
+    private boolean suppressPopupForDotBeforeListedWord(ICompletionProposal[] extra)
+    {
+        if (dotBeforeWordCaret < 0 || processor == null || viewer == null)
+            return false;
+        int caret = modelCaretOffset();
+        if (caret != dotBeforeWordCaret)
+            return false;
+        IDocument doc = viewer.getDocument();
+        String word = wordRightOfCaret(doc, caret);
+        if (word.isEmpty())
+            return false;
+        if (!SmartContentAssistProcessor.containsProposalName(extra, word)
+            && !processor.memberListContainsName(doc, caret, word))
+            return false;
+        boolean wasVisible = ContentAssistPopupSync.isPopupVisible(assistant);
+        SmartContentAssistProcessor.uiBlockLog("autoOpen.skipDotBeforeListedWord", //$NON-NLS-1$
+            "caret=" + caret + " word=" + word + " popup=" + wasVisible); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        if (wasVisible)
+        {
+            // Закрытие не из-за вставки: следующая буква должна открыть список как обычно.
+            skipAutoOpenSuppressForStaleClose = true;
+            ContentAssistPopupSync.hideProposalPopup(assistant);
+        }
+        return true;
+    }
+
+    /** См. {@link #suppressPopupForDotBeforeListedWord}; вызывать с UI перед показом членов. */
+    static boolean suppressMemberPopupForDotBeforeListedWord(ITextViewer viewer)
+    {
+        ContentAssistSessionReloader reloader = gateHost(viewer);
+        return reloader != null && reloader.suppressPopupForDotBeforeListedWord(null);
+    }
+
     /**
      * H-INSERT: таймлайн каретки после confirm — EDT LinkedMode в documentChanged
      * vs последующий JFace {@code getSelection}/{@code setSelectedRange}.
@@ -3378,6 +3677,10 @@ boolean inLiteral = endCaret >= 0
     {
         String skipText = event == null ? null : event.getText();
         boolean inLiteral = false;
+        dotBeforeWordCaret = -1;
+        if (".".equals(skipText) && event != null && viewer != null //$NON-NLS-1$
+            && !wordRightOfCaret(viewer.getDocument(), event.getOffset() + 1).isEmpty())
+            dotBeforeWordCaret = event.getOffset() + 1;
         if (skipText != null && !skipText.isEmpty() && event != null)
         {
             IDocument d = viewer != null ? viewer.getDocument() : null;
@@ -3654,6 +3957,12 @@ boolean inLiteral = endCaret >= 0
         if (settings == null || !settings.isEnabled())
         {
             logAssistOpen("autoOpen.begin.skip", "{\"reason\":\"settingOff\",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            return;
+        }
+        // Список членов уже в кэше. Если ещё считается — то же решение примет публикация.
+        if (suppressPopupForDotBeforeListedWord(null))
+        {
+            logAssistOpen("autoOpen.begin.skip", "{\"reason\":\"dotBeforeListedWord\",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return;
         }
         if (ContentAssistPopupSync.isPopupVisible(assistant))
@@ -3947,6 +4256,8 @@ boolean inLiteral = endCaret >= 0
     private void openCompletionAutoMemberIrPopup(IrBslCompletionSupport.Snapshot snapshot,
                                                  int liveCaret, int autoOpenSeq)
     {
+        if (suppressPopupForDotBeforeListedWord(snapshot != null ? snapshot.proposals : null))
+            return;
         processor.exitIrOnlyManualMode();
         processor.onAssistSessionContextReady(viewer, liveCaret);
         processor.primeIrSnapshotForDualAssist(snapshot);
@@ -5663,6 +5974,7 @@ if (!hadFlag)
 
     private void onContentAssistProposalsCommand()
     {
+        dotBeforeWordCaret = -1;
         boolean popupVisible = ContentAssistPopupSync.isPopupVisible(assistant);
         int caret = ContentAssistPopupSync.syncSessionOffsets(assistant, viewer);
         boolean inLiteral = caret >= 0

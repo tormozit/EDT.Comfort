@@ -657,7 +657,6 @@ public class TypeComboOverlayHook implements IStartup
         ATTACHED.add(nativeControl);
         PROPERTY_OVERLAYS.put(view, state);
         diag("tryAttachPropertySheet: оверлей установлен для view=" + view); //$NON-NLS-1$
-        PropertySheetLayoutDiag.dump("оверлей «Тип» установлен"); //$NON-NLS-1$
         return true;
     }
 
@@ -711,29 +710,6 @@ public class TypeComboOverlayHook implements IStartup
         OverlayState state = PROPERTY_OVERLAYS.get(view);
         return state != null && state.text != null && !state.text.isDisposed()
             && state.text.isFocusControl();
-    }
-
-    /** ВРЕМЕННО, для {@link PropertySheetLayoutDiag}: где стоит оверлей панели и жив ли накрытый контрол. */
-    static String describePropertyOverlay(IViewPart view)
-    {
-        OverlayState state = PROPERTY_OVERLAYS.get(view);
-        if (state == null)
-            return "нет"; //$NON-NLS-1$
-        Object nativeControl = state.nativeControl;
-        StringBuilder out = new StringBuilder();
-        if (state.container == null || state.container.isDisposed())
-            out.append("контейнер disposed"); //$NON-NLS-1$
-        else
-            out.append("контейнер=").append(state.container.getBounds()) //$NON-NLS-1$
-                .append(" видим=").append(state.container.isVisible()); //$NON-NLS-1$
-        if (state.text != null && !state.text.isDisposed())
-            out.append(" текст=«").append(state.text.getText()).append('»'); //$NON-NLS-1$
-        out.append(" накрыт=").append(describeClass(nativeControl)) //$NON-NLS-1$
-            .append('@').append(Integer.toHexString(System.identityHashCode(nativeControl)))
-            .append(' ').append(Global.invoke(nativeControl, "getBounds")) //$NON-NLS-1$
-            .append(" вДереве=").append(Global.invoke(nativeControl, "getParent") != null) //$NON-NLS-1$ //$NON-NLS-2$
-            .append(" оторванТиков=").append(state.detachedTicks); //$NON-NLS-1$
-        return out.toString();
     }
 
     private static void disposePropertyOverlay(IViewPart view)
@@ -1305,7 +1281,6 @@ public class TypeComboOverlayHook implements IStartup
         }
         detachRebindCount++;
         diag("handleDetachedControl: контрол оторван от LWT-дерева — пересборка #" + detachRebindCount); //$NON-NLS-1$
-        PropertySheetLayoutDiag.dump("оверлей «Тип»: контрол оторван от LWT-дерева, пересборка #" + detachRebindCount); //$NON-NLS-1$
         scheduleRediscoverOverlay(state);
     }
 
@@ -2108,7 +2083,6 @@ public class TypeComboOverlayHook implements IStartup
 
         Object singleTypeItemValue = Global.invoke(state.typeModel, "getSingleTypeItem"); //$NON-NLS-1$
         Global.invokeVoid(singleTypeItemValue, "set", chosen.typeItem); //$NON-NLS-1$
-        PropertySheetLayoutDiag.dump("оверлей «Тип»: выбран тип «" + chosen.label + "»"); //$NON-NLS-1$ //$NON-NLS-2$
 
         state.lastCommittedText = chosen.label;
         state.programmaticChange = true;

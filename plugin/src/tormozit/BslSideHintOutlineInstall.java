@@ -173,13 +173,6 @@ public final class BslSideHintOutlineInstall
             }
         };
         outlineShell.getDisplay().addFilter(SWT.Deactivate, outlineDeactivateFilter);
-        // #region agent log #633
-        presenter.diag("install", "outlineShellVisible=" + outlineShell.isVisible(), false); //$NON-NLS-1$ //$NON-NLS-2$
-        Listener outlineGeometryDiag = event -> presenter.diag(
-            event.type == SWT.Move ? "outlineShell move" : "outlineShell resize", null, false); //$NON-NLS-1$ //$NON-NLS-2$
-        outlineShell.addListener(SWT.Move, outlineGeometryDiag);
-        outlineShell.addListener(SWT.Resize, outlineGeometryDiag);
-        // #endregion
 
         tree.addDisposeListener(e -> {
 
@@ -401,7 +394,6 @@ public final class BslSideHintOutlineInstall
                 }
                 String baseHtml = IrBslHoverHtml.readHtml(baseInput);
                 String merged = IrBslHoverHtml.mergeHtml(baseHtml, irHtml);
-                presenter.diag("ir enrich", "method=" + methodName + " offset=" + sourceOffset, false); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ // #633
                 presenter.updateHint(new BslItemSideHint(merged, creator, sourceOffset));
                 BslSideHintDebug.log("ir enriched method=" + methodName + " len=" + irHtml.length()); //$NON-NLS-1$ //$NON-NLS-2$
             });
@@ -562,8 +554,6 @@ public final class BslSideHintOutlineInstall
             Control subject = getSubjectControl();
             Rectangle area = getSubjectArea();
             int offset = hint.getSourceOffset();
-            diag("updateHint", "offset=" + offset + " shownOffset=" + shownSourceOffset + " area=" + area //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " shownAreaXY=" + shownAreaX + "," + shownAreaY + " reuse=" + hasReuseableControl(), false); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ // #633
             if (hasReuseableControl() && offset >= 0 && offset == shownSourceOffset && area != null)
             {
 
@@ -702,7 +692,6 @@ public final class BslSideHintOutlineInstall
             shownSourceOffset = hint.getSourceOffset();
             shownAreaX = area.x;
             shownAreaY = area.y;
-            diag("refreshInPlace", "input=" + (input instanceof String ? "html" : String.valueOf(input == null ? null : input.getClass().getSimpleName())), false); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ // #633
             repositionHint(area);
         }
 
@@ -774,133 +763,18 @@ public final class BslSideHintOutlineInstall
 
             if (size == null)
                 return;
-            Point sizeBefore = new Point(size.x, size.y); // #633
             Point location = computeInformationControlLocation(area, size);
             control.setSize(size.x, size.y);
             control.setLocation(location);
             control.setVisible(true);
             hideIfOverlapsOutline("reposition"); //$NON-NLS-1$
-            diag("reposition", "area=" + area + " sizeIn=" + sizeBefore + " sizeOut=" + size + " loc=" + location, true); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ // #633
         }
-
-        // #region agent log #633
-        private static final String DIAG_TOPIC = "outline-side-hint-633"; //$NON-NLS-1$
-
-        /**
-         * Временная диагностика #633 (подсказка перекрывает окно схемы): геометрия дерева, окна схемы,
-         * монитора и подсказки + флаг перекрытия. {@code recheck} — повторный снимок через 500 мс,
-         * чтобы поймать сдвиг после показа (браузер, перестройка окна схемы).
-         */
-        void diag(String phase, String detail, boolean recheck)
-        {
-
-            try
-            {
-
-                StringBuilder sb = new StringBuilder(phase);
-                if (detail != null)
-                    sb.append(" | ").append(detail); //$NON-NLS-1$
-                Control subject = getSubjectControl();
-                Rectangle outline = null;
-                if (subject != null && !subject.isDisposed())
-                {
-
-                    Point treeOrigin = subject.toDisplay(0, 0);
-                    Point treeSize = subject.getSize();
-                    outline = subject.getShell().getBounds();
-                    sb.append(" | tree=").append(new Rectangle(treeOrigin.x, treeOrigin.y, treeSize.x, treeSize.y)); //$NON-NLS-1$
-                    sb.append(" outlineShell=").append(outline).append(" visible=").append(subject.getShell().isVisible()); //$NON-NLS-1$ //$NON-NLS-2$
-                    sb.append(" monitor=").append(subject.getMonitor().getClientArea()); //$NON-NLS-1$
-                }
-
-                IInformationControl control = getInternalAccessor().getCurrentInformationControl();
-                if (control == null)
-                    sb.append(" | hint=none"); //$NON-NLS-1$
-                else if (control instanceof IInformationControlExtension3 ext3)
-                {
-
-                    Rectangle hb = ext3.getBounds();
-                    sb.append(" | hint=").append(hb).append(" class=").append(control.getClass().getName()) //$NON-NLS-1$ //$NON-NLS-2$
-                        .append(" super=").append(control.getClass().getSuperclass().getName()); //$NON-NLS-1$
-                    hookHintShellDiag(control);
-                    if (outline != null && hb != null)
-                    {
-
-                        Rectangle inter = hb.intersection(outline);
-                        boolean overlap = inter.width > 0 && inter.height > 0;
-                        sb.append(" OVERLAP=").append(overlap); //$NON-NLS-1$
-                        if (overlap)
-                            sb.append(" inter=").append(inter); //$NON-NLS-1$
-                    }
-
-                }
-
-                else
-                    sb.append(" | hint=").append(control.getClass().getSimpleName()).append(" (no ext3)"); //$NON-NLS-1$ //$NON-NLS-2$
-                Global.tempLog(DIAG_TOPIC, sb.toString());
-                if (recheck && subject != null && !subject.isDisposed())
-                    subject.getDisplay().timerExec(500, () -> diag("  +500ms after " + phase, null, false)); //$NON-NLS-1$
-            }
-
-            catch (RuntimeException e)
-            {
-
-                Global.tempLogException(DIAG_TOPIC, "diag " + phase, e); //$NON-NLS-1$
-            }
-
-        }
-
-        /** #633: кто двигает/ресайзит shell подсказки после нашего расчёта — стек на каждое событие. */
-        private void hookHintShellDiag(IInformationControl control)
-        {
-
-            Shell shell = null;
-            try
-            {
-
-                for (Class<?> cls = control.getClass(); cls != null && shell == null; cls = cls.getSuperclass())
-                    for (java.lang.reflect.Field f : cls.getDeclaredFields())
-                    {
-
-                        f.setAccessible(true);
-                        if (f.get(control) instanceof Shell s)
-                        {
-
-                            shell = s;
-                            break;
-                        }
-
-                    }
-
-            }
-
-            catch (Exception e)
-            {
-
-                Global.tempLogException(DIAG_TOPIC, "hookHintShellDiag", e); //$NON-NLS-1$
-            }
-
-            if (shell == null || shell.isDisposed() || shell.getData("tormozit.diag633") != null) //$NON-NLS-1$
-                return;
-            shell.setData("tormozit.diag633", Boolean.TRUE); //$NON-NLS-1$
-            final Shell hintShell = shell;
-            Listener l = event -> Global.tempLogException(DIAG_TOPIC,
-                "hintShell " + (event.type == SWT.Move ? "MOVE" : "RESIZE") + " bounds=" + hintShell.getBounds() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-                    + " visible=" + hintShell.isVisible(), //$NON-NLS-1$
-                new Throwable("stack")); //$NON-NLS-1$
-            hintShell.addListener(SWT.Move, l);
-            hintShell.addListener(SWT.Resize, l);
-            Global.tempLog(DIAG_TOPIC, "hintShell hooked bounds=" + hintShell.getBounds()); //$NON-NLS-1$
-        }
-
-        // #endregion
 
         @Override
         protected void showInformationControl(Rectangle subjectArea)
         {
 
             super.showInformationControl(subjectArea);
-            diag("shown (full show)", "subjectArea=" + subjectArea, true); //$NON-NLS-1$ //$NON-NLS-2$ // #633
             hideIfOverlapsOutline("full show"); //$NON-NLS-1$
         }
 
@@ -915,9 +789,7 @@ public final class BslSideHintOutlineInstall
         {
 
             markSideHintShell();
-            Point location = computeLocation(subjectArea, controlSize, ANCHOR_RIGHT);
-            diag("computeLocation", "subjectArea=" + subjectArea + " size=" + controlSize + " loc=" + location, false); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ // #633
-            return location;
+            return computeLocation(subjectArea, controlSize, ANCHOR_RIGHT);
         }
 
         /**
@@ -957,7 +829,6 @@ public final class BslSideHintOutlineInstall
             if (!overlap && hint.width > 0 && hint.height > 0)
                 return false;
             control.setVisible(false);
-            diag("HIDDEN (overlap guard) after " + phase, "hint=" + hint + " inter=" + inter, false); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ // #633
             return true;
         }
 

@@ -35,6 +35,12 @@ public final class ComfortSettings
     /** Ключ: общий отладочный журнал ({@link GlobalLogView}). */
     public static final String PREF_DEBUG_LOG = "comfort.debugLog"; //$NON-NLS-1$
 
+    /**
+     * Ключ: запись стеков при зависаниях UI ({@link UiStallSampler}). Не переживает перезапуск
+     * и сам выключается через минуту — при старте плагина сбрасывается.
+     */
+    public static final String PREF_RECORD_STALL_STACKS = "comfort.recordStallStacks"; //$NON-NLS-1$
+
     /** Ключ: автопрокрутка журнала к последней строке ({@link GlobalLogView}). */
     public static final String PREF_LOG_AUTOSCROLL = "comfort.log.autoscroll"; //$NON-NLS-1$
 
@@ -775,6 +781,17 @@ public final class ComfortSettings
         if (store.contains(PREF_CONTENT_ASSIST_LOG_LEGACY))
             return store.getBoolean(PREF_CONTENT_ASSIST_LOG_LEGACY);
         return DEFAULT_DEBUG_LOG;
+    }
+
+    public static boolean isRecordStallStacks()
+    {
+        ComfortSettings settings = instance;
+        return settings != null && settings.preferenceStore.getBoolean(PREF_RECORD_STALL_STACKS);
+    }
+
+    public static void setRecordStallStacks(boolean enabled)
+    {
+        setAndSave(PREF_RECORD_STALL_STACKS, enabled);
     }
 
     public static boolean isLogAutoscroll()

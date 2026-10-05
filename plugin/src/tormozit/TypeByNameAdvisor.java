@@ -515,9 +515,7 @@ final class TypeByNameAdvisor
                 return;
 
             Object singleTypeItemValue = Global.invoke(typeModel, "getSingleTypeItem"); //$NON-NLS-1$
-            PropertySheetLayoutDiag.dumpNow("автоподбор [" + logTag + "]: перед подстановкой «" + typeName + "»"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             Global.invokeVoid(singleTypeItemValue, "set", matched); //$NON-NLS-1$
-            PropertySheetLayoutDiag.dump("автоподбор [" + logTag + "]: подставлен «" + typeName + "»"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             Global.log(logTag, "Тип подобран через " + source + ": " + typeName); //$NON-NLS-1$ //$NON-NLS-2$
         }
         catch (Exception e)

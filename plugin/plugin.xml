@@ -7,10 +7,6 @@
   <extension point="org.eclipse.ui.startup">
     <startup class="tormozit.ComfortStartup"/>
   </extension>
-  <!-- Реквизиты динамического списка доступны модели и проверкам форм до открытия редактора. -->
-  <extension point="com._1c.g5.v8.dt.form.propertyInfoProvider">
-    <propertyInfoProvider class="tormozit.Activator$DynamicListDefaultPictureProvider"/>
-  </extension>
   <extension point="tormozit.comfort.startup">
     <startup class="tormozit.ComfortShutdownHook"/>
     <startup class="tormozit.ExternalOpenRequestHook"/>
@@ -215,6 +211,7 @@
     <startup class="tormozit.MassiveChecksExemptionHook"/>
     <startup class="tormozit.SchemaPropertiesTabSyncHook"/>
     <startup class="tormozit.GcPressureToastHook"/>
+    <startup class="tormozit.UiStallSampler"/>
   </extension>
 
   <extension point="org.eclipse.ui.contexts">
