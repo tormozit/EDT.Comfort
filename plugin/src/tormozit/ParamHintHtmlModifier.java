@@ -5023,14 +5023,18 @@ public final class ParamHintHtmlModifier
             + " caller=" + modifyContentCaller()); //$NON-NLS-1$
         // #endregion
         String directionPrefix = buildDirectionPrefix(isOut);
+        boolean copy = Boolean.TRUE.equals(isOut) && ctx != null && ctx.serverCall;
+        if (copy)
+            directionPrefix = "Вых. (копия) - "; //$NON-NLS-1$
         if (Boolean.TRUE.equals(isOut) && ctx != null && paramName != null
             && ctx.assignedParamNames.contains(paramName.toLowerCase(Locale.ROOT)))
         {
             RGB color = ThemeAwareColors.toEffectiveRgb(new RGB(198, 40, 40));
             String cssColor = String.format(Locale.ROOT, "#%02X%02X%02X", //$NON-NLS-1$
                 color.red, color.green, color.blue);
-            directionPrefix = "<span class=\"comfort-param-assigned\" style=\"color:" //$NON-NLS-1$
-                + cssColor + "\">Вых. (присвоение)</span> - "; //$NON-NLS-1$
+            directionPrefix = "Вых. (<span class=\"comfort-param-assigned\" style=\"color:" //$NON-NLS-1$
+                + cssColor + "\">присвоение</span>" //$NON-NLS-1$
+                + (copy ? ", копия" : "") + ") - "; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         }
         String suffix = buildMetaSuffix(defaultDescription, description);
         String newTypeInner = directionPrefix + typeBase + suffix;
@@ -5447,6 +5451,12 @@ public final class ParamHintHtmlModifier
         if (typeInnerHtml == null || typeInnerHtml.isEmpty())
             return ""; //$NON-NLS-1$
         String s = typeInnerHtml;
+        if (s.startsWith("Вых. (<span class=\"comfort-param-assigned\"")) //$NON-NLS-1$
+        {
+            int end = s.indexOf(") - "); //$NON-NLS-1$
+            if (end >= 0)
+                s = s.substring(end + ") - ".length()); //$NON-NLS-1$
+        }
         // Цвет зависит от темы; Browser также может сериализовать его как rgb(...).
         if (s.startsWith("<span class=\"comfort-param-assigned\"")) //$NON-NLS-1$
         {
@@ -5454,7 +5464,11 @@ public final class ParamHintHtmlModifier
             if (end >= 0)
                 s = "Вых." + s.substring(end + "</span>".length()); //$NON-NLS-1$ //$NON-NLS-2$
         }
-        if (s.startsWith("Вых. - ")) //$NON-NLS-1$
+        if (s.startsWith("Вых. (копия) - ")) //$NON-NLS-1$
+            s = s.substring("Вых. (копия) - ".length()); //$NON-NLS-1$
+        else if (s.startsWith("Вх. (копия) - ")) //$NON-NLS-1$
+            s = s.substring("Вх. (копия) - ".length()); //$NON-NLS-1$
+        else if (s.startsWith("Вых. - ")) //$NON-NLS-1$
             s = s.substring("Вых. - ".length()); //$NON-NLS-1$
         else if (s.startsWith("Вх. - ")) //$NON-NLS-1$
             s = s.substring("Вх. - ".length()); //$NON-NLS-1$
@@ -6054,6 +6068,7 @@ public final class ParamHintHtmlModifier
             ctx.actualArgTypes = snap.actualArgTypes;
             ctx.actualArgTypeNames = snap.actualArgTypeNames;
             ctx.method = snap.method;
+            ctx.serverCall = snap.serverCall;
             ctx.assignedParamNames = snap.assignedParamNames;
             ctx.constructorType = snap.constructorType;
             ctx.directive = snap.directive;
@@ -6082,6 +6097,7 @@ public final class ParamHintHtmlModifier
         {
             params = invocation.getParams();
             snap.method = resolveMethod(invocation.getMethodAccess());
+            snap.serverCall = invocation.isIsServerCall();
             snap.assignedParamNames = assignedParamNames(invocation.getMethodAccess());
             snap.directive = extractMethodDirective(resource, invocation);
         }
@@ -6992,6 +7008,7 @@ public final class ParamHintHtmlModifier
         List<TypeItem> actualArgTypes = Collections.emptyList();
         Set<String> actualArgTypeNames = Collections.emptySet();
         Set<String> assignedParamNames = Collections.emptySet();
+        boolean serverCall;
         Method method;
         /** Тип {@code Новый Тип(...)} — для maxParams сигнатуры конструктора. */
         Type constructorType;
@@ -7062,6 +7079,7 @@ public final class ParamHintHtmlModifier
         List<TypeItem> actualArgTypes = Collections.emptyList();
         Set<String> actualArgTypeNames = Collections.emptySet();
         Set<String> assignedParamNames = Collections.emptySet();
+        boolean serverCall;
         Method method;
         Type constructorType;
         String directive;
