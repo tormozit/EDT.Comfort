@@ -7,9 +7,18 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.WeakHashMap;
+import java.util.function.Supplier;
 
+import org.eclipse.core.commands.ExecutionEvent;
+import org.eclipse.core.commands.ExecutionException;
+import org.eclipse.core.commands.IExecutionListener;
+import org.eclipse.core.commands.NotHandledException;
 import org.eclipse.core.resources.IFile;
+import org.eclipse.core.runtime.IProgressMonitor;
+import org.eclipse.core.runtime.NullProgressMonitor;
+import org.eclipse.core.runtime.Platform;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.events.MenuAdapter;
 import org.eclipse.swt.events.MenuEvent;
@@ -34,13 +43,24 @@ import org.eclipse.ui.IStartup;
 import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
+import org.eclipse.ui.commands.ICommandService;
 import org.eclipse.ui.handlers.IHandlerService;
+import org.osgi.framework.Bundle;
+import org.osgi.framework.Version;
 
+import com._1c.g5.v8.bm.core.IBmObject;
+import com._1c.g5.v8.bm.core.IBmTransaction;
+import com._1c.g5.v8.bm.integration.AbstractBmTask;
+import com._1c.g5.v8.dt.core.operations.model.IEditingContext;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorEmbeddedEditorPage;
+import com._1c.g5.v8.dt.moxel.Columns;
+import com._1c.g5.v8.dt.moxel.SpreadsheetDocument;
+import com._1c.g5.v8.dt.moxel.ViewSettings;
 import com._1c.g5.v8.dt.moxel.content.impl.TablePropertiesImpl;
 import com._1c.g5.v8.dt.moxel.sheet.CellsSelection;
+import com._1c.g5.v8.dt.moxel.sheet.ReadOnlyFormat;
 import com._1c.g5.v8.dt.moxel.sheet.Selection;
 import com._1c.g5.v8.dt.moxel.sheet.SheetAccessor;
 import com._1c.g5.v8.dt.moxel.sheet.TableSelection;
@@ -72,6 +92,7 @@ public class MoxelEditorHook implements IStartup
     {
         Display.getDefault().asyncExec(() ->
         {
+            PasteCacheRepair.install();
             PlatformUI.getWorkbench().addWindowListener(new org.eclipse.ui.IWindowListener()
             {
                 @Override public void windowOpened(IWorkbenchWindow w)     { hookWindow(w); }
@@ -154,6 +175,7 @@ public class MoxelEditorHook implements IStartup
         if (!(embeddedEditor instanceof MoxelEditor))
             return;
         MoxelEditor moxelEditor = (MoxelEditor) embeddedEditor;
+        Global.tempLog(PasteCacheRepair.LOG_TOPIC, "подключение к редактору макета: " + granularEditor.getTitle()); //$NON-NLS-1$
         Control partControl = page.getPartControl();
         if (!(partControl instanceof Composite))
             return;
@@ -464,6 +486,357 @@ public class MoxelEditorHook implements IStartup
             }
         });
         return ok[0];
+    }
+
+    /**
+     * Обход ошибки EDT (issue 691). После вставки целого табличного документа {@link MoxelControl}
+     * продолжает держать объекты модели, которые вставка заменила либо создала в откатанной транзакции,
+     * и падает на каждой перерисовке («Object is removed» / «connected to a rolled back transaction»):
+     * <ul>
+     * <li>{@code ViewParameters.fixedColumnColumns} — вставка удаляет все столбцы документа и создаёт новые,
+     * а в контроле остаётся удалённый объект — отрисовка падает, а сохранение записывает его в настройки
+     * документа и падает с «Failed to persist reference value». Если объекта столбцов контрола больше нет
+     * среди столбцов документа (сравнение по {@link IBmObject#bmGetId()}), подставляем актуальные столбцы
+     * документа. Проверенные тупики: штатный {@link MoxelControl#refreshViewParameters()} читает из
+     * настроек отображения документа объект-пустышку (вставка не обновляет и эту ссылку); сравнение по
+     * {@code getColumnsId()} не работает — у удалённых и новых столбцов он одинаковый, а чтение удалённого
+     * объекта не всегда даёт исключение;</li>
+     * <li>{@code SheetAccessor.formatCache} / {@code formatsMap} — штатного сброса без удаления форматов
+     * из модели нет, чистим поля напрямую; оба кэша ленивые и наполняются из модели заново.</li>
+     * </ul>
+     * То же делают отмена и повтор вставки (они снова подменяют столбцы и форматы), поэтому слушаем и их;
+     * перед ними кэш форматов сбрасывается заранее: они читают форматы уже по ходу команды.
+     * Слушаем команду, а не клавишу (см. правило про Ctrl+буква).
+     */
+    private static final class PasteCacheRepair implements IExecutionListener
+    {
+        static final String LOG_TOPIC = "moxel-paste-691"; //$NON-NLS-1$
+        private static final String PASTE_COMMAND = "org.eclipse.ui.edit.paste"; //$NON-NLS-1$
+        private static final String UNDO_COMMAND = "org.eclipse.ui.edit.undo"; //$NON-NLS-1$
+        private static final String REDO_COMMAND = "org.eclipse.ui.edit.redo"; //$NON-NLS-1$
+
+        private MoxelEditor target;
+        /** До вставки закреплённые столбцы контрола были основными столбцами документа. */
+        private boolean fixedWasMain;
+        /** Идентификатор закреплённых столбцов контрола до вставки (для неосновных столбцов). */
+        private UUID fixedColumnsId;
+
+        /**
+         * {@code true} только для бандла moxel старой EDT (major {@code < 18}, EDT 2025.2). В EDT 2026.1
+         * вставка работает правильно — там слушатель не ставится вовсе, чтобы ничего не задеть.
+         */
+        private static boolean isAffectedEdt()
+        {
+            Bundle moxel = Platform.getBundle("com._1c.g5.v8.dt.moxel"); //$NON-NLS-1$
+            Version version = moxel != null ? moxel.getVersion() : null;
+            return version != null && version.getMajor() < 18;
+        }
+
+        static void install()
+        {
+            if (!isAffectedEdt())
+            {
+                Global.tempLog(LOG_TOPIC, "старт: версия EDT не затронута, слушатель вставки не ставится"); //$NON-NLS-1$
+                return;
+            }
+            ICommandService commandService = PlatformUI.getWorkbench().getService(ICommandService.class);
+            if (commandService == null)
+            {
+                Global.tempLog(LOG_TOPIC, "старт: нет ICommandService, слушатель вставки не установлен"); //$NON-NLS-1$
+                return;
+            }
+            commandService.addExecutionListener(new PasteCacheRepair());
+            Global.tempLog(LOG_TOPIC, "старт: слушатель вставки установлен"); //$NON-NLS-1$
+        }
+
+        @Override
+        public void preExecute(String commandId, ExecutionEvent event)
+        {
+            String label = commandLabel(commandId);
+            if (label == null) return;
+            target = activeMoxelEditor();
+            fixedWasMain = false;
+            fixedColumnsId = null;
+            MoxelControl control = getMoxelControl(target);
+            if (control != null)
+            {
+                try
+                {
+                    Columns fixed = control.getFixedColumnColumns();
+                    fixedWasMain = sameBmObject(fixed, control.getSheet().getDocument().getColumns());
+                    if (fixed != null)
+                        fixedColumnsId = readInTask(control, fixed::getColumnsId);
+                }
+                catch (RuntimeException e)
+                {
+                    Global.tempLog(LOG_TOPIC, "перед (" + label + "): столбцы контрола не прочитаны: " + e); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+            }
+            Global.tempLog(LOG_TOPIC, "перед (" + label + "): " //$NON-NLS-1$ //$NON-NLS-2$
+                + (control == null ? "активен не редактор макета" : describe(control))); //$NON-NLS-1$
+            // Отмена и повтор читают форматы уже по ходу команды, сразу после изменения модели:
+            // кэш к этому моменту должен быть пуст, иначе сама команда падает с «Object is removed».
+            if (control != null && !PASTE_COMMAND.equals(commandId))
+            {
+                String error = clearFormatCache(control.getSheet());
+                if (!error.isEmpty())
+                    Global.tempLog(LOG_TOPIC, "перед (" + label + "):" + error); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+
+        /** Название команды для лога; {@code null} — команда нас не интересует. */
+        private static String commandLabel(String commandId)
+        {
+            if (PASTE_COMMAND.equals(commandId)) return "вставка"; //$NON-NLS-1$
+            if (UNDO_COMMAND.equals(commandId)) return "отмена"; //$NON-NLS-1$
+            if (REDO_COMMAND.equals(commandId)) return "повтор"; //$NON-NLS-1$
+            return null;
+        }
+
+        /** Сбрасывает ленивые кэши форматов {@link SheetAccessor}; возвращает текст ошибки либо пустую строку. */
+        private static String clearFormatCache(SheetAccessor sheet)
+        {
+            String error = ""; //$NON-NLS-1$
+            Object formatCache = Global.getField(sheet, "formatCache"); //$NON-NLS-1$
+            if (formatCache instanceof Map<?, ?>)
+                ((Map<?, ?>) formatCache).clear();
+            else
+                error += " formatCache: поле не найдено"; //$NON-NLS-1$
+            if (Global.getField(sheet, "formatsMap") != null //$NON-NLS-1$
+                && !Global.setFieldForce(sheet, "formatsMap", null)) //$NON-NLS-1$
+                error += " formatsMap: не сброшено"; //$NON-NLS-1$
+            return error;
+        }
+
+        @Override
+        public void postExecuteSuccess(String commandId, Object returnValue)
+        {
+            finish(commandId, "успех", null); //$NON-NLS-1$
+        }
+
+        @Override
+        public void postExecuteFailure(String commandId, ExecutionException exception)
+        {
+            finish(commandId, "ошибка команды", exception); //$NON-NLS-1$
+        }
+
+        @Override
+        public void notHandled(String commandId, NotHandledException exception)
+        {
+            finish(commandId, "нет обработчика", exception); //$NON-NLS-1$
+        }
+
+        private void finish(String commandId, String result, Exception exception)
+        {
+            String label = commandLabel(commandId);
+            if (label == null) return;
+            String outcome = label + ", " + result; //$NON-NLS-1$
+            MoxelEditor editor = target;
+            boolean wasMain = fixedWasMain;
+            UUID columnsId = fixedColumnsId;
+            target = null;
+            fixedWasMain = false;
+            fixedColumnsId = null;
+            if (exception != null)
+                Global.tempLog(LOG_TOPIC, outcome + ": " + exception); //$NON-NLS-1$
+            if (editor == null) return;
+            repair(editor, wasMain, columnsId, outcome);
+            // Операция вставки могла завершиться (или откатиться) позже самой команды.
+            Display display = Display.getCurrent();
+            if (display != null)
+                display.asyncExec(() -> repair(editor, wasMain, columnsId, outcome + ", отложенно")); //$NON-NLS-1$
+        }
+
+        /** Один и тот же объект модели BM (экземпляры Java вне и внутри транзакции различаются). */
+        private static boolean sameBmObject(Object first, Object second)
+        {
+            return first instanceof IBmObject && second instanceof IBmObject
+                && ((IBmObject) first).bmGetId() == ((IBmObject) second).bmGetId();
+        }
+
+        /**
+         * Если объекта закреплённых столбцов контрола больше нет среди столбцов документа, подставляет
+         * актуальные. Пишем в поле контрола, а не через {@link MoxelControl#setFixedColumnColumns}: тот
+         * сразу меняет модель вне транзакции. В настройки документа живой объект запишет штатное сохранение.
+         */
+        private static String restoreFixedColumns(MoxelControl control, boolean wasMain, UUID columnsId)
+        {
+            try
+            {
+                Columns current = control.getFixedColumnColumns();
+                if (current == null)
+                    return " закреплённых столбцов в контроле нет"; //$NON-NLS-1$
+                SpreadsheetDocument document = control.getSheet().getDocument();
+                List<Columns> all = new ArrayList<>(document.getAllColumns());
+                for (Columns each : all)
+                    if (sameBmObject(current, each))
+                        return " столбцы контрола на месте"; //$NON-NLS-1$
+                Columns fresh = null;
+                if (!wasMain && columnsId != null)
+                    for (Columns each : all)
+                        if (columnsId.equals(each.getColumnsId()))
+                        {
+                            fresh = each;
+                            break;
+                        }
+                if (fresh == null)
+                    fresh = document.getColumns();
+                if (fresh == null)
+                    return " столбцов контрола в документе нет, замены нет — не тронуты"; //$NON-NLS-1$
+                Object viewParameters = Global.getField(control, "viewParameters"); //$NON-NLS-1$
+                if (viewParameters == null)
+                    return " столбцов контрола в документе нет, поле viewParameters не найдено"; //$NON-NLS-1$
+                if (!Global.setFieldForce(viewParameters, "fixedColumnColumns", fresh)) //$NON-NLS-1$
+                    return " столбцов контрола в документе нет, поле fixedColumnColumns не записано"; //$NON-NLS-1$
+                return " столбцы контрола заменены (были основными=" + wasMain + ")"; //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            catch (RuntimeException e)
+            {
+                return " столбцы контрола: " + e; //$NON-NLS-1$
+            }
+        }
+
+        private static <T> T readInTask(MoxelControl control, Supplier<T> reader)
+        {
+            IEditingContext context = control.getEditingContext();
+            if (context == null) return reader.get();
+            return context.executeReadonlyTask(new AbstractBmTask<T>("comfort.moxelPaste691") //$NON-NLS-1$
+            {
+                @Override
+                public T execute(IBmTransaction transaction, IProgressMonitor monitor)
+                {
+                    return reader.get();
+                }
+            }, new NullProgressMonitor());
+        }
+
+        private static MoxelEditor activeMoxelEditor()
+        {
+            IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+            if (window == null || window.getActivePage() == null) return null;
+            IEditorPart editor = window.getActivePage().getActiveEditor();
+            if (editor instanceof MoxelEditor) return (MoxelEditor) editor;
+            if (editor instanceof DtGranularEditor<?>)
+                return moxelFromPage(((DtGranularEditor<?>) editor).getActivePageInstance());
+            return null;
+        }
+
+        private static void repair(MoxelEditor editor, boolean wasMain, UUID columnsId, String phase)
+        {
+            MoxelControl control = getMoxelControl(editor);
+            if (control == null || control.isDisposed())
+            {
+                Global.tempLog(LOG_TOPIC, "после (" + phase + "): нет контрола макета"); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            }
+            String before = describe(control);
+            String error = restoreFixedColumns(control, wasMain, columnsId);
+            error += clearFormatCache(control.getSheet());
+            control.redraw();
+            Global.tempLog(LOG_TOPIC, "после (" + phase + "): было " + before //$NON-NLS-1$ //$NON-NLS-2$
+                + "; стало " + describe(control) + error); //$NON-NLS-1$
+        }
+
+        /**
+         * Состояние кэшей контрола: сколько в них объектов, к которым модель уже не даёт обратиться.
+         * Читаем внутри задачи чтения BM, как это делает отрисовка: вне транзакции обращение к удалённому
+         * объекту исключения не даёт.
+         */
+        private static String describe(MoxelControl control)
+        {
+            try
+            {
+                return readInTask(control, () -> describeInTask(control));
+            }
+            catch (RuntimeException e)
+            {
+                return "вне задачи BM (" + e + "): " + describeInTask(control); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+
+        /** Объект столбцов: хеш (как в сообщениях BM), жив ли, числится ли в документе. */
+        private static String columnsInfo(SpreadsheetDocument document, Columns columns)
+        {
+            if (columns == null) return "нет"; //$NON-NLS-1$
+            StringBuilder sb = new StringBuilder("@").append(Integer.toHexString(columns.hashCode())); //$NON-NLS-1$
+            if (columns instanceof IBmObject)
+                sb.append(" bm=").append(((IBmObject) columns).bmGetId()); //$NON-NLS-1$
+            try
+            {
+                sb.append(" id=").append(columns.getColumnsId()); //$NON-NLS-1$
+            }
+            catch (RuntimeException e)
+            {
+                sb.append(" мёртвые [").append(e.getMessage()).append(']'); //$NON-NLS-1$
+            }
+            try
+            {
+                sb.append(" контейнер=").append(columns.eContainer() != null ? "есть" : "нет"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                boolean listed = false;
+                for (Columns each : document.getAllColumns())
+                    if (each == columns) listed = true;
+                sb.append(" в документе=").append(listed ? "да" : "нет"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            }
+            catch (RuntimeException e)
+            {
+                sb.append(" [").append(e.getMessage()).append(']'); //$NON-NLS-1$
+            }
+            return sb.toString();
+        }
+
+        private static String describeInTask(MoxelControl control)
+        {
+            SheetAccessor sheet = control.getSheet();
+            StringBuilder sb = new StringBuilder();
+            try
+            {
+                sb.append("форматов в модели=").append(sheet.getDocument().getFormats().size()); //$NON-NLS-1$
+            }
+            catch (RuntimeException e)
+            {
+                sb.append("форматы модели: ").append(e); //$NON-NLS-1$
+            }
+            Object formatCache = Global.getField(sheet, "formatCache"); //$NON-NLS-1$
+            if (formatCache instanceof Map<?, ?>)
+            {
+                int dead = 0;
+                String firstError = null;
+                for (Object value : new ArrayList<>(((Map<?, ?>) formatCache).values()))
+                {
+                    if (!(value instanceof ReadOnlyFormat)) continue;
+                    try
+                    {
+                        ((ReadOnlyFormat) value).isSetLeftBorder();
+                    }
+                    catch (RuntimeException e)
+                    {
+                        dead++;
+                        if (firstError == null) firstError = e.getMessage();
+                    }
+                }
+                sb.append(", кэш форматов=").append(((Map<?, ?>) formatCache).size()) //$NON-NLS-1$
+                    .append(", из них мёртвых=").append(dead); //$NON-NLS-1$
+                if (firstError != null) sb.append(" [").append(firstError).append(']'); //$NON-NLS-1$
+            }
+            else
+                sb.append(", кэш форматов: поле не найдено"); //$NON-NLS-1$
+            sb.append(", formatsMap=").append(Global.getField(sheet, "formatsMap") != null ? "есть" : "нет"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            try
+            {
+                SpreadsheetDocument document = sheet.getDocument();
+                sb.append(", столбцы контрола=").append(columnsInfo(document, control.getFixedColumnColumns())); //$NON-NLS-1$
+                ViewSettings viewSettings = document.getViewSettings();
+                sb.append(", столбцы настроек документа=").append(viewSettings == null ? "нет настроек" //$NON-NLS-1$ //$NON-NLS-2$
+                    : columnsInfo(document, viewSettings.getFixedColumnColumns()));
+                sb.append(", основные столбцы документа=").append(columnsInfo(document, document.getColumns())); //$NON-NLS-1$
+                sb.append(", всего столбцов=").append(document.getAllColumns().size()); //$NON-NLS-1$
+            }
+            catch (RuntimeException e)
+            {
+                sb.append(", столбцы: ").append(e); //$NON-NLS-1$
+            }
+            return sb.toString();
+        }
     }
 
 }
