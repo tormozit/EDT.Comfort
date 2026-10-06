@@ -85,7 +85,7 @@ public class SmartCompletionProposal implements
     private int wordOnlyCaret = -1;
 
     /** Временная диагностика возврата каретки в начало вставленного слова. */
-    private static final boolean APPLY_CARET_LOG_ENABLED = false;
+    private static final boolean APPLY_CARET_LOG_ENABLED = true;
 
     private ApplyCaretProbe applyCaretProbe;
 

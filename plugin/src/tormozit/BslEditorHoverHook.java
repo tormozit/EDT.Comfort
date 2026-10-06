@@ -644,6 +644,35 @@ public final class BslEditorHoverHook implements IStartup
         return new IrBslTextHoverWrapper(hover, editor, suppressPointerHover);
     }
 
+    /** Доработки описания из кнопки аннотации — те же, что при наведении. */
+    static java.util.function.Consumer<IInformationControl> createIdentifierDocDecorator(
+        ISourceViewer viewer, IRegion region, Object info)
+    {
+        if (viewer instanceof SourceViewer sourceViewer)
+        {
+            @SuppressWarnings("unchecked")
+            Map<Object, ITextHover> hovers =
+                (Map<Object, ITextHover>)Global.getField(sourceViewer, "fTextHovers"); //$NON-NLS-1$
+            if (hovers != null)
+                for (ITextHover hover : hovers.values())
+                    if (hover instanceof IrBslTextHoverWrapper existing)
+                    {
+                        IrBslTextHoverWrapper wrapper =
+                            new IrBslTextHoverWrapper(existing.delegate, existing.editor, false);
+                        wrapper.prepareHoverDecorations(region, info);
+                        // Замыкание сохраняет и descriptor синтакс-помощника: реестр ссылок
+                        // хранит его слабо, а подсказка должна владеть им до закрытия.
+                        return control -> {
+                            String html = IrBslHoverHtml.readHtml(info);
+                            String decorated = wrapper.applyHoverDecorations(html);
+                            if (!decorated.equals(html))
+                                IrBslHoverHtml.applyHtmlToControl(control, decorated);
+                        };
+                    }
+        }
+        return control -> {};
+    }
+
     private static boolean isWrappableBslHover(ITextHover hover)
     {
         if (hover == null)
@@ -739,11 +768,7 @@ public final class BslEditorHoverHook implements IStartup
             if (!IrBslHoverHtml.isBslBrowserInput(info))
                 return info;
             final int offset = hoverRegion.getOffset();
-            String directive = resolveHoverDirective(offset);
-            lastDirective = (directive != null && !directive.isBlank()) ? directive : null;
-            lastCreationSite = isImplicitVariableCreationAt(hoverRegion);
-            lastMethodLink = resolveMethodLink(hoverRegion, info);
-            lastFormHandlersHtml = resolveFormHandlersHtml(hoverRegion);
+            prepareHoverDecorations(hoverRegion, info);
             IRSession session = IrBslExpressionHtmlSupport.resolveConnectedSession(editor);
             if (session == null)
             {
@@ -764,6 +789,15 @@ public final class BslEditorHoverHook implements IStartup
             scheduleNativeInputSync(baseInput, offset, gen);
             session.executor.submit(() -> scheduleIrEnrichment(session, baseInput, payload, offset, gen));
             return maybeDecorateHoverInfo(info);
+        }
+
+        private void prepareHoverDecorations(IRegion region, Object info)
+        {
+            String directive = resolveHoverDirective(region.getOffset());
+            lastDirective = (directive != null && !directive.isBlank()) ? directive : null;
+            lastCreationSite = isImplicitVariableCreationAt(region);
+            lastMethodLink = resolveMethodLink(region, info);
+            lastFormHandlersHtml = resolveFormHandlersHtml(region);
         }
 
         /**

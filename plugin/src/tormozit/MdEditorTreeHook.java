@@ -131,6 +131,7 @@ import com._1c.g5.v8.dt.core.platform.IConfigurationProject;
 import com._1c.g5.v8.dt.core.platform.IV8Project;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
 import com._1c.g5.v8.dt.common.localization.FeatureNameLocalizationProvider;
+import com._1c.g5.v8.dt.md.ui.aef.components.StandardObjectsTreeComponent;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
 import com._1c.g5.v8.dt.md.ui.shared.MdUiSharedImages;
 import com._1c.g5.v8.dt.form.model.AbstractDataPath;
@@ -1134,8 +1135,54 @@ public final class MdEditorTreeHook
     /** Отдельное дерево стандартных реквизитов на вкладке «Данные». */
     private static boolean isStandardAttributesTree(Tree tree)
     {
+        DtGranularEditor<?> editor = MdEditorAttributeMenuHook.editorOf(tree);
+        IFormPage page = editor != null ? editor.getActivePageInstance() : null;
+        Object root = page != null ? Global.getField(page, "pageComponent") : null; //$NON-NLS-1$
+        if (isStandardAttributesComponentTree(root, tree, 0))
+            return true;
         for (TreeItem item : tree.getItems())
             if (containsStandardAttribute(tree, item))
+                return true;
+        return false;
+    }
+
+    /**
+     * Тип секции определяем по компоненту EDT, а не только по строкам: у обработки и
+     * отчёта корни стандартного дерева — табличные части, а реквизиты могут быть ленивыми.
+     */
+    private static boolean isStandardAttributesComponentTree(Object component, Tree tree, int depth)
+    {
+        if (component == null || depth > 20)
+            return false;
+        if (component instanceof StandardObjectsTreeComponent)
+        {
+            Object scene = Global.invoke(component, "getScene"); //$NON-NLS-1$
+            for (Object nativeControl : AefFieldFocus.editorNativeControls(scene, component))
+            {
+                // LwtDtTreeView оборачивает SWT Composite в SwtLightControl.
+                Object swtControl = nativeControl instanceof Control ? nativeControl
+                    : Global.invoke(nativeControl, "getSwtControl"); //$NON-NLS-1$
+                Control control = swtControl instanceof Control swt && !swt.isDisposed() ? swt : null;
+                boolean matches = false;
+                if (control != null)
+                    for (Control current = tree; current != null; current = current.getParent())
+                        if (current == control)
+                        {
+                            matches = true;
+                            break;
+                        }
+                Global.tempLog("md-standard-attributes-filter", //$NON-NLS-1$
+                    "component=" + component.getClass().getName() //$NON-NLS-1$
+                        + " native=" + nativeControl.getClass().getName() //$NON-NLS-1$
+                        + " swt=" + (control != null ? control.getClass().getName() : "null") //$NON-NLS-1$ //$NON-NLS-2$
+                        + " tree=" + System.identityHashCode(tree) + " matches=" + matches); //$NON-NLS-1$ //$NON-NLS-2$
+                if (matches)
+                    return true;
+            }
+            return false;
+        }
+        for (Object child : AefFieldFocus.childComponents(component))
+            if (isStandardAttributesComponentTree(child, tree, depth + 1))
                 return true;
         return false;
     }
@@ -1212,7 +1259,14 @@ public final class MdEditorTreeHook
         if (!MdEditorAttributeMenuHook.isDataPageAttributesTree(tree))
             return;
         installFoColumnGuard(viewer);
-        if (!hasClassifiableRow(tree) || isStandardAttributesTree(tree))
+        boolean standardAttributes = isStandardAttributesTree(tree);
+        boolean classifiableRow = hasClassifiableRow(tree);
+        // Временная безусловная диагностика: снять только после подтверждения в EDT.
+        Global.tempLog("md-standard-attributes-filter", //$NON-NLS-1$
+            "tree=" + System.identityHashCode(tree) + " standardAttributes=" + standardAttributes //$NON-NLS-1$ //$NON-NLS-2$
+                + " classifiableRow=" + classifiableRow + " items=" + tree.getItemCount() //$NON-NLS-1$ //$NON-NLS-2$
+                + " filterInstalled=" + tree.getData(ATTR_FILTER_MARKER)); //$NON-NLS-1$
+        if (!classifiableRow || standardAttributes)
             return;
         DtGranularEditor<?> editor = MdEditorAttributeMenuHook.editorOf(tree);
         if (editor == null)

@@ -47,6 +47,7 @@ import org.eclipse.jface.action.IToolBarManager;
 import org.eclipse.jface.action.ToolBarManager;
 import org.eclipse.jface.dialogs.IPageChangedListener;
 import org.eclipse.jface.dialogs.PageChangedEvent;
+import org.eclipse.jface.internal.text.InformationControlReplacer;
 import org.eclipse.jface.resource.ImageDescriptor;
 import org.eclipse.jface.text.AbstractInformationControlManager;
 import org.eclipse.jface.text.DocumentEvent;
@@ -54,6 +55,8 @@ import org.eclipse.jface.text.IDocumentListener;
 import org.eclipse.jface.text.IInformationControl;
 import org.eclipse.jface.text.IInformationControlCreator;
 import org.eclipse.jface.text.IInformationControlExtension2;
+import org.eclipse.jface.text.IInformationControlExtension3;
+import org.eclipse.jface.text.IInformationControlExtension5;
 import org.eclipse.jface.text.IRegion;
 import org.eclipse.jface.text.Region;
 import org.eclipse.jface.text.ITextHover;
@@ -3196,7 +3199,8 @@ public final class BslModuleSpellCheckHook implements IStartup
             action.setImageDescriptor(icon);
         else
             action.setText("?"); //$NON-NLS-1$
-        action.setToolTipText("Открыть описание" + Global.pluginSignForTooltip()); //$NON-NLS-1$
+        action.setToolTipText(TooltipText.wrap(viewer.getTextWidget(),
+            "Открыть описание" + Global.pluginSignForTooltip())); //$NON-NLS-1$
         return action;
     }
 
@@ -3393,7 +3397,8 @@ public final class BslModuleSpellCheckHook implements IStartup
             // Иначе штатный mouse-hover открывает второй попап поверх нашего.
             suppressEditorTextHovers(viewer);
             IdentifierDocHoverPresenter presenter =
-                new IdentifierDocHoverPresenter(prepared.creator, viewer);
+                new IdentifierDocHoverPresenter(prepared.creator, viewer,
+                    BslEditorHoverHook.createIdentifierDocDecorator(viewer, prepared.region, prepared.info));
             Object srcMgr = Global.getField(viewer, "fTextHoverManager"); //$NON-NLS-1$
             copyHoverSizeConstraints(srcMgr, presenter);
             presenter.install(widget);
@@ -3504,12 +3509,67 @@ public final class BslModuleSpellCheckHook implements IStartup
         private final ISourceViewer viewer;
         private Object pendingInfo;
         private Rectangle pendingArea;
+        private final InformationControlReplacer replacer;
+        private final DocHoverCloser closer = new DocHoverCloser();
+        private final java.util.function.Consumer<IInformationControl> decorator;
+        private boolean replacing;
 
-        IdentifierDocHoverPresenter(IInformationControlCreator creator, ISourceViewer viewer)
+        IdentifierDocHoverPresenter(IInformationControlCreator creator, ISourceViewer viewer,
+            java.util.function.Consumer<IInformationControl> decorator)
         {
             super(creator);
             this.viewer = viewer;
-            setCloser(new DocHoverCloser());
+            this.decorator = decorator;
+            setCloser(closer);
+            replacer = new InformationControlReplacer(creator)
+            {
+                @Override
+                protected void showInformationControl(Rectangle subjectArea)
+                {
+                    decorator.accept(getInternalAccessor().getCurrentInformationControl());
+                    super.showInformationControl(subjectArea);
+                }
+            };
+            getInternalAccessor().setInformationControlReplacer(replacer);
+        }
+
+        @Override
+        public void install(Control subject)
+        {
+            super.install(subject);
+            replacer.install(subject);
+        }
+
+        @Override
+        protected void showInformationControl(Rectangle subjectArea)
+        {
+            decorator.accept(getInternalAccessor().getCurrentInformationControl());
+            super.showInformationControl(subjectArea);
+        }
+
+        /** JFace сохраняет содержимое и границы при переходе в фокусируемый контрол. */
+        private void enrichInformationControl(IInformationControl control)
+        {
+            if (replacing || !getInternalAccessor().canReplace(control))
+                return;
+            Rectangle area = pendingArea;
+            replacing = true;
+            try
+            {
+                getInternalAccessor().replaceInformationControl(false);
+            }
+            finally
+            {
+                replacing = false;
+            }
+            IInformationControl enriched = replacer.getInternalAccessor().getCurrentInformationControl();
+            if (enriched instanceof IInformationControlExtension5 ext5 && ext5.isVisible())
+            {
+                closer.setInformationControl(enriched);
+                closer.start(area);
+            }
+            else
+                hideInformationControl();
         }
 
         void show(Object info, Rectangle subjectArea)
@@ -3531,9 +3591,14 @@ public final class BslModuleSpellCheckHook implements IStartup
         @Override
         protected void hideInformationControl()
         {
+            super.hideInformationControl();
+            // replaceInformationControl скрывает исходный контрол после показа нового.
+            // В этот момент подсказка ещё открыта, штатные hover-ы включать рано.
+            if (replacing)
+                return;
+            replacer.disposeInformationControl();
             pendingInfo = null;
             pendingArea = null;
-            super.hideInformationControl();
             if (identifierDocPresenter == this)
                 identifierDocPresenter = null;
             restoreEditorTextHovers(viewer);
@@ -3546,6 +3611,7 @@ public final class BslModuleSpellCheckHook implements IStartup
             private IInformationControl informationControl;
             private Display display;
             private boolean active;
+            private boolean enrichmentScheduled;
 
             @Override
             public void setSubjectControl(Control control)
@@ -3576,6 +3642,8 @@ public final class BslModuleSpellCheckHook implements IStartup
                         return;
                     display.addFilter(SWT.MouseDown, this);
                     display.addFilter(SWT.KeyDown, this);
+                    display.addFilter(SWT.MouseMove, this);
+                    display.addFilter(SWT.MouseEnter, this);
                 });
             }
 
@@ -3585,10 +3653,13 @@ public final class BslModuleSpellCheckHook implements IStartup
                 if (!active)
                     return;
                 active = false;
+                enrichmentScheduled = false;
                 if (display == null || display.isDisposed())
                     return;
                 display.removeFilter(SWT.MouseDown, this);
                 display.removeFilter(SWT.KeyDown, this);
+                display.removeFilter(SWT.MouseMove, this);
+                display.removeFilter(SWT.MouseEnter, this);
             }
 
             @Override
@@ -3596,6 +3667,29 @@ public final class BslModuleSpellCheckHook implements IStartup
             {
                 if (!active)
                     return;
+                if (event.type == SWT.MouseMove || event.type == SWT.MouseEnter)
+                {
+                    IInformationControl control = informationControl;
+                    if (!enrichmentScheduled && control instanceof IInformationControlExtension5 ext5
+                        && event.widget instanceof Control hovered && ext5.containsControl(hovered)
+                        && getInternalAccessor().canReplace(control))
+                    {
+                        enrichmentScheduled = true;
+                        // Штатный AFTER_DELAY в JFace также ждёт 200 мс внутри подсказки.
+                        display.timerExec(200, () ->
+                        {
+                            enrichmentScheduled = false;
+                            if (active && informationControl == control && ext5.isVisible()
+                                && control instanceof IInformationControlExtension3 ext3)
+                            {
+                                Rectangle bounds = ext3.getBounds();
+                                if (bounds != null && bounds.contains(display.getCursorLocation()))
+                                    enrichInformationControl(control);
+                            }
+                        });
+                    }
+                    return;
+                }
                 if (event.type == SWT.KeyDown && event.keyCode == SWT.ESC)
                 {
                     hideInformationControl();

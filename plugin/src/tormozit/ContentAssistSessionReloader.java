@@ -2708,7 +2708,7 @@ boolean inLiteral = endCaret >= 0
      * Выключена 06.10.2026 по просьбе автора; сама диагностика не снята — второй сценарий
      * (проверка не планируется после блочной замены) не разобран. Включить: {@code true}.
      */
-    static final boolean STALE_MARKERS_LOG = false;
+    static final boolean STALE_MARKERS_LOG = true;
 
     private static final java.util.Set<org.eclipse.core.runtime.jobs.Job> VALIDATION_JOBS_WATCHED =
         java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>());
