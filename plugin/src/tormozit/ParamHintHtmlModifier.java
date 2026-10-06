@@ -1736,8 +1736,6 @@ public final class ParamHintHtmlModifier
             if (at < 0 || at >= document.getLength() || document.getChar(at) != ')')
                 return;
             Global.setFieldForce(info, "lastAvailablePosition", Integer.valueOf(at + 1)); //$NON-NLS-1$
-            Global.tempLog("param-hint", "bounds.closingParen last=" + at //$NON-NLS-1$ //$NON-NLS-2$
-                + " -> " + (at + 1)); //$NON-NLS-1$
         }
         catch (Exception | LinkageError ignored)
         {
@@ -1806,9 +1804,6 @@ public final class ParamHintHtmlModifier
             // Свой сдвиг поверх давал двойной: при вставке границы расползались, при
             // удалении сжимались вдвое — каретка попадала ровно в lastAvailablePosition,
             // и штатный CustomCaretListener закрывал подсказку.
-            Global.tempLog("param-hint", "bounds.stockUpdater offset=" + offset //$NON-NLS-1$ //$NON-NLS-2$
-                + " removed=" + removed //$NON-NLS-1$
-                + " added=" + (inserted == null ? 0 : inserted.length())); //$NON-NLS-1$
             return true;
         }
         if (!(Global.getField(info, "firstAvailablePosition") instanceof Integer first) //$NON-NLS-1$
@@ -1823,16 +1818,6 @@ public final class ParamHintHtmlModifier
         Global.setFieldForce(info, "firstAvailablePosition", Integer.valueOf(newFirst)); //$NON-NLS-1$
         Global.setFieldForce(info, "lastAvailablePosition", Integer.valueOf(newLast)); //$NON-NLS-1$
         shiftCommaPositions(info, offset, removed, inserted, delta);
-        // Штатный CustomCaretListener закрывает подсказку, как только каретка выходит из
-        // [first, last). Поэтому пишем и «до», и каретку: закрытие при удалении символа —
-        // это ровно попадание каретки в last.
-        Global.tempLog("param-hint", "bounds.adjust offset=" + offset //$NON-NLS-1$ //$NON-NLS-2$
-            + " removed=" + removed //$NON-NLS-1$
-            + " added=" + added //$NON-NLS-1$
-            + " delta=" + delta //$NON-NLS-1$
-            + " before=[" + first + "," + last + ")" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " after=[" + newFirst + "," + newLast + ")" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " caret=" + paramHintCaretForLog()); //$NON-NLS-1$
         return true;
     }
 
@@ -1879,20 +1864,6 @@ public final class ParamHintHtmlModifier
             return null;
         Object updater = Global.getField(handler, "updater"); //$NON-NLS-1$
         return updater == null ? null : Global.getField(updater, "info"); //$NON-NLS-1$
-    }
-
-    /** Модельная каретка активного поля/редактора — только для строки лога. */
-    private static String paramHintCaretForLog()
-    {
-        try
-        {
-            ActiveEditor active = resolveParamHintEditor();
-            return active == null ? "-" : String.valueOf(active.caret); //$NON-NLS-1$
-        }
-        catch (Exception | LinkageError ignored)
-        {
-            return "-"; //$NON-NLS-1$
-        }
     }
 
     private static void shiftCommaPositions(Object info, int offset, int removed, String inserted,
@@ -5751,8 +5722,6 @@ public final class ParamHintHtmlModifier
             // запятой ещё нет — номер аргумента из AST на единицу меньше, и виртуальный
             // параметр не дорисовывается до следующего показа. Запятые EDT — уже в новых смещениях.
             int stockArg = stockArgIndexAtCaret();
-            Global.tempLog("param-hint", "argIndex ast=" + ctx.currentArgIndex //$NON-NLS-1$ //$NON-NLS-2$
-                + " stock=" + stockArg + " paramIndex=" + ctx.paramIndex); //$NON-NLS-1$ //$NON-NLS-2$
             if (stockArg >= 0)
                 ctx.currentArgIndex = stockArg;
             return;

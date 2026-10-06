@@ -332,7 +332,8 @@ this.completionListener = new CompletionListenerAdapter() {
             public void assistSessionStarted(ContentAssistEvent event)
             {
                 // #region agent log
-                Global.tempLog("stale-markers", "assist.sessionStarted " + describeReconciler(viewer)); //$NON-NLS-1$ //$NON-NLS-2$
+                if (STALE_MARKERS_LOG)
+                    Global.tempLog("stale-markers", "assist.sessionStarted " + describeReconciler(viewer)); //$NON-NLS-1$ //$NON-NLS-2$
                 // #endregion
                 assistSessionStartedImpl(event);
             }
@@ -473,7 +474,8 @@ if (Boolean.TRUE.equals(LITERAL_REPEAT_FROM_COMMAND.get()))
             public void assistSessionEnded(ContentAssistEvent event)
             {
                 // #region agent log
-                Global.tempLog("stale-markers", "assist.sessionEnded " + describeReconciler(viewer)); //$NON-NLS-1$ //$NON-NLS-2$
+                if (STALE_MARKERS_LOG)
+                    Global.tempLog("stale-markers", "assist.sessionEnded " + describeReconciler(viewer)); //$NON-NLS-1$ //$NON-NLS-2$
                 // #endregion
                 assistSessionEndedImpl(event);
             }
@@ -948,8 +950,9 @@ boolean inLiteral = endCaret >= 0
         doc.addDocumentListener(completionAutoOpenDocumentListener);
         installAssistSyncValidationRestart();
         // #region agent log
-        Global.tempLog("stale-markers", "слушатель правок подключён: документ " //$NON-NLS-1$ //$NON-NLS-2$
-            + doc.getClass().getName() + "@" + System.identityHashCode(doc)); //$NON-NLS-1$
+        if (STALE_MARKERS_LOG)
+            Global.tempLog("stale-markers", "слушатель правок подключён: документ " //$NON-NLS-1$ //$NON-NLS-2$
+                + doc.getClass().getName() + "@" + System.identityHashCode(doc)); //$NON-NLS-1$
         logValidationState(doc, "listener.install"); //$NON-NLS-1$
         watchReconcilerAndRewriteSessions(doc, viewer);
         // #endregion
@@ -2560,18 +2563,10 @@ boolean inLiteral = endCaret >= 0
             || Boolean.TRUE.equals(SmartCompletionProposal.IR_PROPOSAL_APPLY_IN_PROGRESS.get());
     }
 
-    /** No-op: раньше temp-log {@code assist-ui}. */
-    // #region agent log
-    /**
-     * Временно включено: точки этой диагностики расставлены по всей цепочке подсказки
-     * параметров (hint.onChar → hint.poll → hover.exec → miss.skip → openFast.*), а метод
-     * был пустым — из-за этого цепочку не было видно вообще.
-     */
+    /** No-op: раньше temp-log {@code param-hint}; точки вызова оставлены. */
     static void logLinkedMode(String location, String json)
     {
-        Global.tempLog("param-hint", location + " " + json); //$NON-NLS-1$ //$NON-NLS-2$
     }
-    // #endregion
 
     /**
      * Чтение AST без переподсветки модуля. Штатный {@code IXtextDocument.readOnly}
@@ -2696,9 +2691,10 @@ boolean inLiteral = endCaret >= 0
             boolean idle = job.getState() == org.eclipse.core.runtime.jobs.Job.NONE;
             boolean skip = Boolean.TRUE.equals(Global.invoke(job, "isSkip")); //$NON-NLS-1$
             // #region agent log
-            Global.tempLog("stale-markers", "assistSync.done: проверка после правки не отработала," //$NON-NLS-1$ //$NON-NLS-2$
-                + " перезапуск=" + (idle && !skip) + " " + describeValidationJob(job) //$NON-NLS-1$ //$NON-NLS-2$
-                + " " + describeOutdated(doc)); //$NON-NLS-1$
+            if (STALE_MARKERS_LOG)
+                Global.tempLog("stale-markers", "assistSync.done: проверка после правки не отработала," //$NON-NLS-1$ //$NON-NLS-2$
+                    + " перезапуск=" + (idle && !skip) + " " + describeValidationJob(job) //$NON-NLS-1$ //$NON-NLS-2$
+                    + " " + describeOutdated(doc)); //$NON-NLS-1$
             // #endregion
             // Задание уже запланировано или идёт — оно отработает само
             if (idle && !skip)
@@ -2707,6 +2703,13 @@ boolean inLiteral = endCaret >= 0
     }
 
     // #region agent log
+    /**
+     * Выключатель временной диагностики протухших маркеров (тема {@code stale-markers}).
+     * Выключена 06.10.2026 по просьбе автора; сама диагностика не снята — второй сценарий
+     * (проверка не планируется после блочной замены) не разобран. Включить: {@code true}.
+     */
+    static final boolean STALE_MARKERS_LOG = false;
+
     private static final java.util.Set<org.eclipse.core.runtime.jobs.Job> VALIDATION_JOBS_WATCHED =
         java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>());
 
@@ -2721,6 +2724,8 @@ boolean inLiteral = endCaret >= 0
     private static void logValidationAfterDocumentChange(DocumentEvent event,
         org.eclipse.jface.text.ITextViewer viewer)
     {
+        if (!STALE_MARKERS_LOG)
+            return;
         if (event == null)
         {
             Global.tempLog("stale-markers", "docChanged: событие null"); //$NON-NLS-1$ //$NON-NLS-2$
@@ -2776,6 +2781,8 @@ boolean inLiteral = endCaret >= 0
     private static void watchReconcilerAndRewriteSessions(IDocument doc,
         org.eclipse.jface.text.ITextViewer viewer)
     {
+        if (!STALE_MARKERS_LOG)
+            return;
         try
         {
             installReconcilerJobDiagnostics();
@@ -2912,6 +2919,8 @@ boolean inLiteral = endCaret >= 0
 
     private static void logValidationState(IDocument doc, String point)
     {
+        if (!STALE_MARKERS_LOG)
+            return;
         try
         {
             Object jobObject = Global.invoke(doc, "getValidationJob"); //$NON-NLS-1$

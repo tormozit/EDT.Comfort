@@ -85,6 +85,8 @@ public class SmartCompletionProposal implements
     private int wordOnlyCaret = -1;
 
     /** Временная диагностика возврата каретки в начало вставленного слова. */
+    private static final boolean APPLY_CARET_LOG_ENABLED = false;
+
     private ApplyCaretProbe applyCaretProbe;
 
     public SmartCompletionProposal(ICompletionProposal delegate)
@@ -336,8 +338,11 @@ public class SmartCompletionProposal implements
     {
         if (applyCaretProbe != null)
             applyCaretProbe.close();
-        applyCaretProbe = new ApplyCaretProbe(this, viewer);
-        applyCaretProbe.install(offset, trigger, stateMask);
+        if (APPLY_CARET_LOG_ENABLED)
+        {
+            applyCaretProbe = new ApplyCaretProbe(this, viewer);
+            applyCaretProbe.install(offset, trigger, stateMask);
+        }
         IDocument document = viewer != null ? viewer.getDocument() : null;
         int caret = resolveApplyCaret(document, offset);
         EqualsSpacePad pad = EqualsSpacePad.install(document, caret, delegate);
@@ -381,8 +386,11 @@ public class SmartCompletionProposal implements
         }
         finally
         {
-            applyCaretProbe.log("apply.end"); //$NON-NLS-1$
-            applyCaretProbe.scheduleClose();
+            if (applyCaretProbe != null)
+            {
+                applyCaretProbe.log("apply.end"); //$NON-NLS-1$
+                applyCaretProbe.scheduleClose();
+            }
             endProposalApply();
             pad.scheduleRestore();
         }
