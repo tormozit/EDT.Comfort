@@ -65,7 +65,7 @@ public class Activator extends AbstractUIPlugin
         Global.clearTempLogs();
         // #region agent log
         // Отметка сборки: файл stale-markers.log обязан появиться сразу после старта плагина.
-        Global.tempLog("stale-markers", "плагин запущен, диагностика протухших маркеров v3"); //$NON-NLS-1$ //$NON-NLS-2$
+        Global.tempLog("stale-markers", "плагин запущен, диагностика протухших маркеров v4"); //$NON-NLS-1$ //$NON-NLS-2$
         // #endregion
         Global.cleanOrphanedFormNativeTempDirs();
 

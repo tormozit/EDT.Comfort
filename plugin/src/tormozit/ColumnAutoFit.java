@@ -164,6 +164,43 @@ final class ColumnAutoFit
         return autoFit;
     }
 
+    /** Программная смена ширины не должна становиться перетаскиванием границы. */
+    static void setColumnWidth(TreeColumn column, int width)
+    {
+        Tree tree = column.getParent();
+        Global.tempLog("columnVisibility385", "tree.setColumnWidth column=" + tree.indexOf(column) //$NON-NLS-1$ //$NON-NLS-2$
+            + " before=" + column.getWidth() + " requested=" + width); //$NON-NLS-1$ //$NON-NLS-2$
+        if (!(tree.getData(INSTALLED_KEY) instanceof ColumnAutoFit autoFit))
+        {
+            column.setWidth(width);
+            return;
+        }
+        int budgetBefore = autoFit.widthBudget();
+        int totalBefore = ColumnWidthFit.totalWidth(autoFit.columns);
+        boolean exactFillBefore = budgetBefore > 0 && totalBefore == budgetBefore;
+        if (autoFit.pendingDragCommit != null)
+            tree.getDisplay().timerExec(-1, autoFit.pendingDragCommit);
+        autoFit.pendingDragCommit = null;
+        autoFit.dragColumnIndex = -1;
+        autoFit.dragBaselineWidths = null;
+        boolean previous = autoFit.adjusting;
+        autoFit.adjusting = true;
+        try
+        {
+            column.setWidth(width);
+        }
+        finally
+        {
+            autoFit.adjusting = previous;
+        }
+        autoFit.rememberVisualWidths();
+        autoFit.fit(exactFillBefore);
+        Global.tempLog("columnVisibility385", "tree.setColumnWidth totalBefore=" + totalBefore //$NON-NLS-1$ //$NON-NLS-2$
+            + " budgetBefore=" + budgetBefore + " exactFillBefore=" + exactFillBefore //$NON-NLS-1$ //$NON-NLS-2$
+            + " totalAfter=" + ColumnWidthFit.totalWidth(autoFit.columns) //$NON-NLS-1$
+            + " budgetAfter=" + autoFit.widthBudget()); //$NON-NLS-1$
+    }
+
     void dispose()
     {
         if (tree == null || tree.isDisposed())
@@ -182,6 +219,12 @@ final class ColumnAutoFit
 
     private void fit()
     {
+        fit(false);
+    }
+
+    /** Добавление ширины колонки сохраняет заполнение, если до него колонки занимали весь бюджет. */
+    private void fit(boolean exactFillBefore)
+    {
         if (adjusting || tree.isDisposed())
             return;
         if (columns.count() <= 0)
@@ -196,7 +239,7 @@ final class ColumnAutoFit
         if (clientWidth <= 0)
             return;
         int total = ColumnWidthFit.totalWidth(columns);
-        boolean fitBefore = lastClientWidth <= 0 || total <= lastClientWidth;
+        boolean fitBefore = exactFillBefore || lastClientWidth <= 0 || total <= lastClientWidth;
         lastClientWidth = clientWidth;
         if (total == clientWidth)
             return;

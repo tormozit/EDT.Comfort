@@ -1194,17 +1194,7 @@ public class ConfigSearchDialogHook implements IStartup
         if (!matched.equals(searchWord))
             return false;
 
-        if (offset > 0 && isWordChar(fullText.charAt(offset - 1)))
-            return false;
-        int end = offset + length;
-        if (end < fullText.length() && isWordChar(fullText.charAt(end)))
-            return false;
-        return true;
-    }
-
-    private static boolean isWordChar(char c)
-    {
-        return Character.isLetterOrDigit(c) || c == '_';
+        return IdentifierSelectionSupport.isWholeWordMatch(fullText, offset, offset + length);
     }
 
     private static IDialogSettings getDialogSettings()

@@ -1092,6 +1092,10 @@ public final class GitHistoryHook implements IStartup
             KEY_COL_FILE_WIDTH, KEY_COL_TYPE_WIDTH, KEY_COL_PATH_WIDTH, KEY_COL_STATUS_WIDTH);
         interaction.install(hasSavedColumnWidths);
         interactionRef[0] = interaction;
+        ColumnVisibilityMenu visibility = ColumnVisibilityMenu.forTable(table, "GitHistory", interaction); //$NON-NLS-1$
+        visibility.add(typeCol, "type", "Тип"); //$NON-NLS-1$ //$NON-NLS-2$
+        visibility.add(pathCol, "path", "Путь"); //$NON-NLS-1$ //$NON-NLS-2$
+        visibility.add(statusCol, "status", "Статус"); //$NON-NLS-1$ //$NON-NLS-2$
         installColumnSort(fileViewer, table, new TableColumn[] { fileCol, typeCol, pathCol, statusCol },
             interactionRef);
         installCommitSwitchHooks(fileViewer, table, interactionRef);
@@ -1100,7 +1104,8 @@ public final class GitHistoryHook implements IStartup
             boolean fillMode = interaction.isColumnsExactFill();
             FormTableColumnState.saveOrderAndWidths(dialogSettings(), KEY_COL_ORDER, KEY_COL_FILL_MODE, fillMode,
                 new String[] { KEY_COL_FILE_WIDTH, KEY_COL_TYPE_WIDTH, KEY_COL_PATH_WIDTH, KEY_COL_STATUS_WIDTH },
-                new TableColumn[] { fileCol, typeCol, pathCol, statusCol }, table);
+                new int[] { fileCol.getWidth(), ColumnVisibilityMenu.savedWidth(typeCol),
+                    ColumnVisibilityMenu.savedWidth(pathCol), ColumnVisibilityMenu.savedWidth(statusCol) }, table);
         });
 
         horizontalSplit.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));

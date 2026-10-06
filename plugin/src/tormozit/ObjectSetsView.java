@@ -725,7 +725,16 @@ public final class ObjectSetsView extends ViewPart
         {
             if (getViewSite() == null || getSite().getShell().isDisposed())
                 return;
-            refreshSetsTable();
+            long started = System.nanoTime();
+            try
+            {
+                refreshSetsTable();
+            }
+            finally
+            {
+                Global.tempLog("object-sets-git", "panelDeferredRefresh ms=" //$NON-NLS-1$ //$NON-NLS-2$
+                    + (System.nanoTime() - started) / 1_000_000);
+            }
         });
     }
 
@@ -856,9 +865,19 @@ public final class ObjectSetsView extends ViewPart
     {
         if (set == null)
             return;
-        ObjectSetsAddTargetState.getInstance().setAddTarget(set.id);
-        if (setsViewer != null && !setsViewer.getControl().isDisposed())
-            setsViewer.refresh();
+        long started = System.nanoTime();
+        try
+        {
+            ObjectSetsAddTargetState.getInstance().setAddTarget(set.id);
+            if (setsViewer != null && !setsViewer.getControl().isDisposed())
+                setsViewer.refresh();
+        }
+        finally
+        {
+            Global.tempLog("object-sets-git", "activateSet id=" + set.id //$NON-NLS-1$ //$NON-NLS-2$
+                + " navigatorFilter=" + ObjectSetsNavigatorFilterSupport.isActive() //$NON-NLS-1$
+                + " ms=" + (System.nanoTime() - started) / 1_000_000); //$NON-NLS-1$
+        }
     }
 
     private ObjectSets.SetDef addTargetSetForActiveProject()
@@ -947,7 +966,7 @@ public final class ObjectSetsView extends ViewPart
         boolean selected = selectedSet != null && set.id.equals(selectedSet.id);
         if (dynamicItemsCache != null && selected)
         {
-            if (InfobaseChangedObjects.isResultPending(set))
+            if (InfobaseChangedObjects.isResultPending(set) || ObjectSetsItems.isGitResultPending(set))
                 return COUNT_UNKNOWN;
             return dynamicItemsCache.size();
         }
@@ -955,7 +974,7 @@ public final class ObjectSetsView extends ViewPart
         if (cached != null)
             return cached;
         List<ObjectSets.Item> items = ObjectSetsItems.collectDynamicItems(set);
-        if (set.kind == ObjectSets.SetKind.INFOBASE_CHANGED && InfobaseChangedObjects.isResultPending(set))
+        if (InfobaseChangedObjects.isResultPending(set) || ObjectSetsItems.isGitResultPending(set))
             return COUNT_UNKNOWN;
         dynamicCountBySetId.put(set.id, items.size());
         return items.size();
@@ -965,6 +984,12 @@ public final class ObjectSetsView extends ViewPart
     {
         if (selectedSet == null || !selectedSet.system || dynamicItemsCache == null)
             return;
+        if (ObjectSetsItems.isGitResultPending(selectedSet))
+        {
+            dynamicCountBySetId.remove(selectedSet.id);
+            setsViewer.refresh(selectedSet, true);
+            return;
+        }
         int count = dynamicItemsCache.size();
         Integer previous = dynamicCountBySetId.put(selectedSet.id, count);
         if (previous != null && previous.intValue() == count)
@@ -1034,7 +1059,7 @@ public final class ObjectSetsView extends ViewPart
         gitChangedRefreshPending = false;
     }
 
-    private void scheduleGitChangedRefresh()
+    void scheduleGitChangedRefresh()
     {
         if (gitChangedRefreshPending)
             return;
@@ -1149,6 +1174,7 @@ public final class ObjectSetsView extends ViewPart
     {
         if (itemsViewer == null || itemsViewer.getControl().isDisposed())
             return;
+        long started = System.nanoTime();
         if (iconResolver != null)
             iconResolver.clearCache();
         Table table = itemsViewer.getTable();
@@ -1160,6 +1186,8 @@ public final class ObjectSetsView extends ViewPart
         finally
         {
             table.setRedraw(true);
+            Global.tempLog("object-sets-git", "itemIconsRefresh items=" + filteredItems.size() //$NON-NLS-1$ //$NON-NLS-2$
+                + " ms=" + (System.nanoTime() - started) / 1_000_000); //$NON-NLS-1$
         }
     }
 

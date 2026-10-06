@@ -441,6 +441,8 @@ public class ComfortPreferencePage
 
         createTextEditorsGroup();
 
+        createMoxelCheckbox();
+
         createLoggingCheckbox();
 
         // Поле «Символы» намеренно не добавляется:
@@ -906,6 +908,29 @@ public class ComfortPreferencePage
             + "если это слово ещё не выделено. Повторный клик (в том числе быстрый двойной\n"
             + "щелчок) работает штатно: в редакторе модуля — переход по гиперссылке.", //$NON-NLS-1$
             ctrlClickHost);
+    }
+
+    private void createMoxelCheckbox()
+    {
+        // BooleanFieldEditor.createControl() подменяет layout родителя на GridLayout —
+        // отдельный host, иначе ломается сетка страницы.
+        Composite moxelHost = new Composite(getFieldEditorParent(), SWT.NONE);
+        GridData hostData = new GridData(SWT.FILL, SWT.CENTER, true, false);
+        hostData.horizontalSpan = 2;
+        hostData.verticalIndent = 8;
+        moxelHost.setLayoutData(hostData);
+
+        BooleanFieldEditor moxelField = new BooleanFieldEditor(
+            ComfortSettings.PREF_MOXEL_FAST_CELL_NAVIGATION,
+            "Ускорить переход по ячейкам табличного документа", //$NON-NLS-1$
+            moxelHost);
+        addField(moxelField);
+        setFieldTooltip(moxelField,
+            "При переходе на другую ячейку EDT перерисовывает всю видимую область табличного документа.\n"
+            + "С флажком перерисовываются только прежняя и новая ячейка и участки шапок строк и столбцов напротив них.\n"
+            + "Действует при переходе клавишами и щелчком мыши, только в Windows.\n"
+            + "Если выделение или шапки отображаются неверно — выключите флажок.", //$NON-NLS-1$
+            moxelHost);
     }
 
     private void createLoggingCheckbox()

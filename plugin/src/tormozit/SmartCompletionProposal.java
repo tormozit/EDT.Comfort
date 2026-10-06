@@ -5,6 +5,7 @@ import org.eclipse.core.runtime.NullProgressMonitor;
 import org.eclipse.jface.text.BadLocationException;
 import org.eclipse.jface.text.DocumentEvent;
 import org.eclipse.jface.text.IDocument;
+import org.eclipse.jface.text.IDocumentListener;
 import org.eclipse.jface.text.ITextViewer;
 import org.eclipse.jface.text.IInformationControlCreator;
 import org.eclipse.jface.text.contentassist.ContentAssistant;
@@ -19,6 +20,7 @@ import org.eclipse.jface.text.contentassist.IContextInformation;
 import org.eclipse.jface.text.source.SourceViewer;
 import org.eclipse.jface.viewers.StyledString;
 import org.eclipse.swt.custom.StyledText;
+import org.eclipse.swt.custom.CaretListener;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.widgets.Display;
@@ -81,6 +83,9 @@ public class SmartCompletionProposal implements
 
     /** Каретка внутри сохранённых скобок после вставки только имени метода. */
     private int wordOnlyCaret = -1;
+
+    /** Временная диагностика возврата каретки в начало вставленного слова. */
+    private ApplyCaretProbe applyCaretProbe;
 
     public SmartCompletionProposal(ICompletionProposal delegate)
     {
@@ -205,19 +210,24 @@ public class SmartCompletionProposal implements
     @Override
     public Point getSelection(IDocument document)
     {
+        Point selection;
         if (wordOnlyCaret >= 0)
         {
             int caret = wordOnlyCaret;
             wordOnlyCaret = -1;
-            return new Point(caret, 0);
+            selection = new Point(caret, 0);
         }
-        if (overlapIrCaret >= 0)
+        else if (overlapIrCaret >= 0)
         {
             int caret = overlapIrCaret;
             overlapIrCaret = -1;
-            return new Point(caret, 0);
+            selection = new Point(caret, 0);
         }
-        return delegate.getSelection(document);
+        else
+            selection = delegate.getSelection(document);
+        if (applyCaretProbe != null)
+            applyCaretProbe.log("getSelection result=" + selection); //$NON-NLS-1$
+        return selection;
     }
 
     @Override
@@ -324,6 +334,10 @@ public class SmartCompletionProposal implements
     @Override
     public void apply(ITextViewer viewer, char trigger, int stateMask, int offset)
     {
+        if (applyCaretProbe != null)
+            applyCaretProbe.close();
+        applyCaretProbe = new ApplyCaretProbe(this, viewer);
+        applyCaretProbe.install(offset, trigger, stateMask);
         IDocument document = viewer != null ? viewer.getDocument() : null;
         int caret = resolveApplyCaret(document, offset);
         EqualsSpacePad pad = EqualsSpacePad.install(document, caret, delegate);
@@ -367,8 +381,108 @@ public class SmartCompletionProposal implements
         }
         finally
         {
+            applyCaretProbe.log("apply.end"); //$NON-NLS-1$
+            applyCaretProbe.scheduleClose();
             endProposalApply();
             pad.scheduleRestore();
+        }
+    }
+
+    /** Наблюдает вставку и последующее восстановление выделения, не меняя их. */
+    private static final class ApplyCaretProbe
+    {
+        private final SmartCompletionProposal proposal;
+        private final ITextViewer viewer;
+        private final IDocument document;
+        private final StyledText text;
+        private final CaretListener caretListener = event -> log("caret"); //$NON-NLS-1$
+        private final IDocumentListener documentListener =
+            new IDocumentListener()
+            {
+                @Override
+                public void documentAboutToBeChanged(DocumentEvent event)
+                {
+                    logDocument("document.before", event); //$NON-NLS-1$
+                }
+
+                @Override
+                public void documentChanged(DocumentEvent event)
+                {
+                    logDocument("document.after", event); //$NON-NLS-1$
+                }
+            };
+
+        ApplyCaretProbe(SmartCompletionProposal proposal, ITextViewer viewer)
+        {
+            this.proposal = proposal;
+            this.viewer = viewer;
+            document = viewer != null ? viewer.getDocument() : null;
+            text = viewer != null ? viewer.getTextWidget() : null;
+        }
+
+        void install(int offset, char trigger, int stateMask)
+        {
+            if (text != null && !text.isDisposed())
+                text.addCaretListener(caretListener);
+            if (document != null)
+                document.addDocumentListener(documentListener);
+            log("apply.begin offset=" + offset + " trigger=" + (int) trigger //$NON-NLS-1$ //$NON-NLS-2$
+                + " stateMask=" + stateMask); //$NON-NLS-1$
+        }
+
+        private void logDocument(String phase, DocumentEvent event)
+        {
+            log(phase + " offset=" + event.getOffset() + " replaced=" + event.getLength() //$NON-NLS-1$ //$NON-NLS-2$
+                + " inserted=" + (event.getText() == null ? 0 : event.getText().length()) //$NON-NLS-1$
+                + " dataEvent=" + BslDataEventGuard.describeRealMap(document, event.getText())); //$NON-NLS-1$
+        }
+
+        void log(String phase)
+        {
+            try
+            {
+                String detail = " proposal=" + System.identityHashCode(proposal) //$NON-NLS-1$
+                    + " delegate=" + proposal.delegate.getClass().getName(); //$NON-NLS-1$
+                if (proposal.delegate instanceof ConfigurableCompletionProposal cp)
+                    detail += " replacement=" + ContentAssistDebug.jsonEscapeForLog(cp.getReplacementString()) //$NON-NLS-1$
+                        + " offset=" + cp.getReplacementOffset() + " length=" + cp.getReplacementLength() //$NON-NLS-1$ //$NON-NLS-2$
+                        + " cursor=" + cp.getCursorPosition() + " selectionStart=" + cp.getSelectionStart() //$NON-NLS-1$ //$NON-NLS-2$
+                        + " selectionLength=" + cp.getSelectionLength() //$NON-NLS-1$
+                        + " linkedMode=" + Global.getField(cp, "linkedMode"); //$NON-NLS-1$ //$NON-NLS-2$
+                if (text != null && !text.isDisposed())
+                    detail += " modelSelection=" + viewer.getSelectedRange() //$NON-NLS-1$
+                        + " widgetCaret=" + text.getCaretOffset() + " widgetSelection=" + text.getSelection(); //$NON-NLS-1$ //$NON-NLS-2$
+                String trace = StackWalker.getInstance().walk(frames -> frames.skip(1).limit(18)
+                    .map(frame -> frame.getClassName() + "." + frame.getMethodName() + ":" + frame.getLineNumber()) //$NON-NLS-1$ //$NON-NLS-2$
+                    .collect(java.util.stream.Collectors.joining("|"))); //$NON-NLS-1$
+                Global.tempLog("assist-caret", phase + detail + " trace=" + trace); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            catch (Exception e)
+            {
+                Global.tempLog("assist-caret", phase + " diagnosticError=" + e); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+
+        void scheduleClose()
+        {
+            if (text == null || text.isDisposed())
+                close();
+            else
+                text.getDisplay().timerExec(1000, () ->
+                {
+                    log("apply.settled"); //$NON-NLS-1$
+                    close();
+                });
+        }
+
+        void close()
+        {
+            if (text != null && !text.isDisposed())
+                text.removeCaretListener(caretListener);
+            if (document != null)
+                document.removeDocumentListener(documentListener);
+            if (proposal.applyCaretProbe == this)
+                proposal.applyCaretProbe = null;
         }
     }
 

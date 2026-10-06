@@ -399,6 +399,19 @@ public final class GitStagingFilterHook implements IStartup
                 syncOrderToPeer(view, tree);
             }
         });
+        if (logical != COL_NAME)
+            ColumnVisibilityMenu.forTree(tree, "GitStaging", (column, width) -> { //$NON-NLS-1$
+                Object previous = tree.getData(SYNC_SUPPRESS_KEY);
+                tree.setData(SYNC_SUPPRESS_KEY, Boolean.TRUE);
+                try
+                {
+                    ColumnAutoFit.setColumnWidth(column, width);
+                }
+                finally
+                {
+                    tree.setData(SYNC_SUPPRESS_KEY, previous);
+                }
+            }).add(col, COLUMN_KEYS[logical], COLUMN_HEADERS[logical]);
         return col;
     }
 
@@ -427,7 +440,7 @@ public final class GitStagingFilterHook implements IStartup
             int logical = logicalObj instanceof Integer li ? li : COL_NAME;
             if (treeMode && logical == COL_PATH)
                 continue;
-            settings.put(widthKey(logical, treeMode), Integer.toString(col.getWidth()));
+            settings.put(widthKey(logical, treeMode), Integer.toString(ColumnVisibilityMenu.savedWidth(col)));
         }
     }
 
@@ -478,6 +491,7 @@ public final class GitStagingFilterHook implements IStartup
         }
         finally
         {
+            ColumnVisibilityMenu.reapply(tree);
             tree.setData(SYNC_SUPPRESS_KEY, null);
         }
     }

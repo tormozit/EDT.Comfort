@@ -319,6 +319,13 @@ public class TypeComboOverlayHook implements IStartup
     // старая пропадает). PROPERTY_OVERLAYS хранит текущий оверлей для каждой view панели, чтобы
     // корректно его продиспозить при смене объекта, а не плодить дубликаты/утечки.
     private static final String TYPE_PROPERTY_LABEL = "Тип"; //$NON-NLS-1$
+
+    /**
+     * Подписи свойств панели «Свойства», поле которых накрывается оверлеем. У объекта в панели
+     * бывает только одно из них: «Тип параметра команды» — у команды (issue 707).
+     */
+    private static final List<String> TYPE_PROPERTY_LABELS =
+        List.of(TYPE_PROPERTY_LABEL, "Тип параметра команды"); //$NON-NLS-1$
     private static final Map<IViewPart, OverlayState> PROPERTY_OVERLAYS = new HashMap<>();
 
     /**
@@ -559,7 +566,15 @@ public class TypeComboOverlayHook implements IStartup
 
         notePropertiesLoad(view, page);
 
-        Map.Entry<?, ?> typeEditorEntry = PropertyNameIdentifierHook.findValueViewAfterLabel(scene, TYPE_PROPERTY_LABEL);
+        Map.Entry<?, ?> typeEditorEntry = null;
+        for (String label : TYPE_PROPERTY_LABELS)
+        {
+            typeEditorEntry = PropertyNameIdentifierHook.findValueViewAfterLabel(scene, label);
+            if (typeEditorEntry != null)
+                break;
+        }
+        if (typeEditorEntry == null)
+            typeEditorEntry = findDisplacedTypeEditor(scene);
         if (typeEditorEntry == null)
         {
             diag("tryAttachPropertySheet: findValueViewAfterLabel вернул null (строка «Тип» не найдена " //$NON-NLS-1$
@@ -661,6 +676,50 @@ public class TypeComboOverlayHook implements IStartup
     }
 
     /**
+     * Редактор поля типа, который в {@code renderer.viewModelToView} стоит не сразу за своей
+     * подписью. После выбора типа у «Тип параметра команды» AEF пересоздаёт только редактор, и он
+     * попадает в конец карты — поиск «запись после подписи» упирается в следующую подпись (лог
+     * issue 707). Редактор опознаётся так же, как в мастере ({@link #patchTypeCombo}), — по
+     * компоненту {@link #TYPE_COMPONENT_MARKER} в {@code eventChannel}.
+     *
+     * @return запись карты или {@code null}: подписи свойства в панели нет либо редактор не
+     *         единственный (чей он — неизвестно)
+     */
+    private static Map.Entry<?, ?> findDisplacedTypeEditor(Object scene)
+    {
+        Object renderer = Global.invoke(scene, "getRenderer"); //$NON-NLS-1$
+        Object mapObj = renderer != null ? Global.getField(renderer, "viewModelToView") : null; //$NON-NLS-1$
+        if (!(mapObj instanceof Map<?, ?> map))
+            return null;
+        boolean labelFound = false;
+        Map.Entry<?, ?> found = null;
+        int count = 0;
+        for (Map.Entry<?, ?> entry : map.entrySet())
+        {
+            Object key = entry.getKey();
+            if (key == null)
+                continue;
+            if (key.getClass().getName().contains("LabelViewModel")) //$NON-NLS-1$
+            {
+                Object text = Global.invoke(key, "getText"); //$NON-NLS-1$
+                if (text == null)
+                    text = Global.getField(key, "text"); //$NON-NLS-1$
+                if (TYPE_PROPERTY_LABELS.contains(text))
+                    labelFound = true;
+                continue;
+            }
+            Object eventChannel = Global.getField(key, "eventChannel"); //$NON-NLS-1$
+            if (eventChannel != null && eventChannel.getClass().getName().endsWith(TYPE_COMPONENT_MARKER))
+            {
+                found = entry;
+                count++;
+            }
+        }
+        diag("findDisplacedTypeEditor: labelFound=" + labelFound + " редакторов=" + count); //$NON-NLS-1$ //$NON-NLS-2$
+        return labelFound && count == 1 ? found : null;
+    }
+
+    /**
      * Ставит фокус в наше поле-оверлей панели «Свойства», если оно накрывает свойство с подписью
      * {@code propertyLabel}. Нужен внешним потребителям, которым надо «активировать поле X в панели
      * свойств» ({@code ConfigSearchResultsHook.PropertyFieldFocus} — переход к результату поиска,
@@ -676,7 +735,7 @@ public class TypeComboOverlayHook implements IStartup
     /** Свойство с такой подписью в панели «Свойства» перекрыто нашим оверлеем. */
     static boolean coversProperty(String propertyLabel)
     {
-        return TYPE_PROPERTY_LABEL.equals(propertyLabel);
+        return TYPE_PROPERTY_LABELS.contains(propertyLabel);
     }
 
     static boolean focusPropertyOverlay(IViewPart view, String propertyLabel)
@@ -1755,6 +1814,11 @@ public class TypeComboOverlayHook implements IStartup
         {
             state.table.removeAll();
             int currentIndex = -1;
+            // Тип параметра команды ещё не выбран — текущей делаем строку типа ссылки объекта,
+            // которому команда принадлежит (issue 707).
+            String preferredName = (text.isEmpty() || skipFilter) && !hasSingleType(state.typeModel)
+                ? TypeByNameAdvisor.commandOwnerRefTypeName(state.typeModel) : null;
+            int preferredIndex = -1;
             for (TypeEntry entry : state.visibleEntries)
             {
                 TableItem item = new TableItem(state.table, SWT.NONE);
@@ -1762,7 +1826,11 @@ public class TypeComboOverlayHook implements IStartup
                 item.setImage(entry.icon);
                 if (skipFilter && currentIndex < 0 && entry.label.equals(text))
                     currentIndex = state.table.getItemCount() - 1;
+                if (preferredName != null && preferredIndex < 0 && preferredName.equals(entry.name))
+                    preferredIndex = state.table.getItemCount() - 1;
             }
+            if (preferredIndex >= 0)
+                currentIndex = preferredIndex;
             // При открытии списка кнопкой-стрелкой (без набора фильтра — skipFilter=true)
             // подсвечиваем и прокручиваем к строке текущего типа, а не всегда к первой строке
             // списка: список отсортирован по алфавиту, и текущий тип обычно вовсе не первый.
@@ -1785,6 +1853,44 @@ public class TypeComboOverlayHook implements IStartup
             hidePopup(state, "refresh: visibleEntries пуст"); //$NON-NLS-1$
     }
 
+    /** В модели выбран одиночный тип ({@code null} — тип не задан, «Произвольный» либо составной). */
+    private static boolean hasSingleType(Object typeModel)
+    {
+        Object single = Global.invoke(typeModel, "getSingleTypeItem"); //$NON-NLS-1$
+        return single != null && Global.invoke(single, "get") != null; //$NON-NLS-1$
+    }
+
+    /**
+     * Обход особенности модели типа EDT: штатная «Очистить» обнуляет описание типа, а у значения
+     * одиночного типа ({@code AbstractTypeDescriptionModel$4}) сбрасывается только текущее
+     * значение — зафиксированное ({@code Value.committedValue}) остаётся прежним типом. Если
+     * после очистки выбрать тот же тип снова, {@code AbstractTypeDescriptionModel.commit()}
+     * сравнивает его с зафиксированным, видит {@code NO_CHANGE} и описание типа не строит: тип в
+     * объект не попадает, хотя поле его показывает, а «Очистить» уже нечего сбрасывать
+     * (подтверждено логом issue 707). Поэтому при пустом текущем значении приводим
+     * зафиксированное к нему же.
+     */
+    private static void forgetClearedSingleType(Object singleTypeItemValue)
+    {
+        if (Global.invoke(singleTypeItemValue, "get") == null //$NON-NLS-1$
+            && Global.invoke(singleTypeItemValue, "getCommittedValue") != null) //$NON-NLS-1$
+            Global.invokeVoid(singleTypeItemValue, "setCommittedValue", (Object)null); //$NON-NLS-1$
+    }
+
+    /**
+     * Доращивает список, если строкам досталось меньше места, чем нужно: при названиях длиннее
+     * ширины списка таблица показывает горизонтальную полосу прокрутки, и та занимает высоту
+     * нижних строк — при одной найденной строке её не было видно вовсе.
+     */
+    private static void growPopupToFitRows(OverlayState state, int rowsHeight)
+    {
+        int missing = rowsHeight - state.table.getClientArea().height;
+        if (missing <= 0)
+            return;
+        Rectangle bounds = state.popup.getBounds();
+        state.popup.setBounds(bounds.x, bounds.y, bounds.width, bounds.height + missing);
+    }
+
     private static void showPopup(OverlayState state)
     {
         if (state.table.getItemCount() == 0)
@@ -1798,9 +1904,17 @@ public class TypeComboOverlayHook implements IStartup
         int rows = Math.min(POPUP_VISIBLE_ROWS, state.table.getItemCount());
         int itemHeight = state.table.getItemHeight();
         state.popup.setBounds(displayLoc.x, displayLoc.y, Math.max(anchorSize.x, 200), rows * itemHeight + 4);
+        growPopupToFitRows(state, rows * itemHeight);
         if (!state.popup.isVisible())
         {
             state.popup.setVisible(true);
+            growPopupToFitRows(state, rows * itemHeight);
+            // refresh() выбирает и прокручивает строку ещё до первого показа, когда у таблицы
+            // нет размера, — такая прокрутка не действует. Повторяем, когда список уже на экране.
+            int topBefore = state.table.getTopIndex();
+            int selected = state.table.getSelectionIndex();
+            if (selected >= 0 && (selected < topBefore || selected >= topBefore + rows))
+                state.table.setTopIndex(Math.max(0, selected - rows / 2));
             // Клик по строке попапа определяем через focusLost на text (см. installBehaviour) —
             // но клик по ПОЛОСЕ ПРОКРУТКИ таблицы фокус на table не переводит (нативный
             // скроллбар Windows не крадёт keyboard focus), поэтому та проверка ошибочно считает
@@ -2082,6 +2196,7 @@ public class TypeComboOverlayHook implements IStartup
         TypeEntry chosen = state.visibleEntries.get(idx);
 
         Object singleTypeItemValue = Global.invoke(state.typeModel, "getSingleTypeItem"); //$NON-NLS-1$
+        forgetClearedSingleType(singleTypeItemValue);
         Global.invokeVoid(singleTypeItemValue, "set", chosen.typeItem); //$NON-NLS-1$
 
         state.lastCommittedText = chosen.label;

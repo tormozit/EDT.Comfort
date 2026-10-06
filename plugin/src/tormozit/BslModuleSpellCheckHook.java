@@ -2523,6 +2523,8 @@ public final class BslModuleSpellCheckHook implements IStartup
                 break;
             }
         }
+        if (annotation instanceof XtextAnnotation liveAnnotation)
+            base = ModuleAccessibilityAtClientFix.withLiveProposal(base, liveAnnotation, fallbackIcon);
         ICompletionProposal extra = null;
         if (annotation instanceof XtextAnnotation xa)
             extra = similarNameProposalForUnresolvedReference(xa, viewer, fallbackIcon);

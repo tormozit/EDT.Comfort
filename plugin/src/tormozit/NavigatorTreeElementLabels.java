@@ -72,9 +72,14 @@ public final class NavigatorTreeElementLabels
      */
     public static boolean hasRootMdObjectIdentity(Object element)
     {
+        return hasRootMdObjectIdentity(element, GetRef.fullNameFromNavigatorElement(element));
+    }
+
+    /** Вариант для фильтра, уже получившего полное имя: не обращаться к модели повторно. */
+    static boolean hasRootMdObjectIdentity(Object element, String fullName)
+    {
         if (element == null)
             return false;
-        String fullName = GetRef.fullNameFromNavigatorElement(element);
         if (fullName != null && !fullName.isBlank())
             return MdTypeMapping.isRootMdObjectRef(fullName);
         if (isNamedLeafMdObjectAdapter(element))
@@ -91,9 +96,13 @@ public final class NavigatorTreeElementLabels
      */
     public static String inferRootMdObjectRef(Object element)
     {
+        return inferRootMdObjectRef(element, GetRef.fullNameFromNavigatorElement(element));
+    }
+
+    static String inferRootMdObjectRef(Object element, String fullName)
+    {
         if (element == null)
             return null;
-        String fullName = GetRef.fullNameFromNavigatorElement(element);
         if (fullName != null && !fullName.isBlank())
         {
             String owner = MdTypeMapping.toOwnerMdObjectRef(fullName);
@@ -193,7 +202,12 @@ public final class NavigatorTreeElementLabels
      */
     public static boolean keepEmptyGroupVisible(Object element)
     {
-        if (element == null || hasRootMdObjectIdentity(element))
+        return keepEmptyGroupVisible(element, GetRef.fullNameFromNavigatorElement(element));
+    }
+
+    static boolean keepEmptyGroupVisible(Object element, String fullName)
+    {
+        if (element == null || hasRootMdObjectIdentity(element, fullName))
             return false;
         return isGroupNodeStructural(element) || isMetadataTypeCollectionFolder(element);
     }

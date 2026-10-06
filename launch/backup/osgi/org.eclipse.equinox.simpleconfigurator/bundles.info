@@ -1298,4 +1298,4 @@ org.tukaani.xz,1.9.0,file:/C:/VC/EDT-plugin-WS/.metadata/.plugins/org.eclipse.pd
 org.yaml.snakeyaml,1.27.0,file:/C:/VC/EDT-plugin-WS/.metadata/.plugins/org.eclipse.pde.core/.bundle_pool/plugins/org.yaml.snakeyaml_1.27.0.jar,4,false
 tormozit.comfort,1.0.1.8-qualifier,file:/C:/VC/EDT.Comfort/plugin/,4,false
 tormozit.comfort.bslparser,1.0.1.qualifier,file:/C:/VC/EDT.Comfort/plugin.bslparser/,4,true
-tormozit.comfort.checks,1.0.2,file:/C:/VC/EDT.Comfort/plugin.checks/,4,false
+tormozit.comfort.checks,1.0.3,file:/C:/VC/EDT.Comfort/plugin.checks/,4,false

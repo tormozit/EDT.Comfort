@@ -187,6 +187,7 @@
     <startup class="tormozit.DataPathDialogHook"/>
     <startup class="tormozit.SyntaxAssistHook"/>
     <startup class="tormozit.NewAttributeNameIdentifierHook"/>
+    <startup class="tormozit.NewCommandWizardHook"/>
     <startup class="tormozit.PropertyNameIdentifierHook"/>
     <startup class="tormozit.PropertySheetActivePropertyHook"/>
     <startup class="tormozit.PropertySheetNonDefaultHighlightHook"/>
@@ -1925,5 +1926,9 @@
         <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Native"/>
       </enablement>
     </descriptor>
+  </extension>
+  <!-- Исправление проблемы EDT 2026; в EDT 2025 её идентификатор не возникает. -->
+  <extension point="com.e1c.g5.v8.dt.check.fixes">
+    <fix class="tormozit.ModuleAccessibilityAtClientFix"/>
   </extension>
 </plugin>

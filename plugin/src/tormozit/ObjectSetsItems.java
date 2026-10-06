@@ -23,6 +23,9 @@ import org.eclipse.swt.widgets.Shell;
 import org.eclipse.ui.IViewPart;
 
 import org.eclipse.egit.core.project.RepositoryMapping;
+import org.eclipse.egit.core.internal.indexdiff.IndexDiffCache;
+import org.eclipse.egit.core.internal.indexdiff.IndexDiffCacheEntry;
+import org.eclipse.egit.core.internal.indexdiff.IndexDiffData;
 import org.eclipse.jgit.lib.Repository;
 
 import com._1c.g5.v8.dt.core.platform.IDtProject;
@@ -570,13 +573,13 @@ final class ObjectSetsItems
             }
             if (NavigatorTreeElementLabels.isNavigatorConfigurationRoot(element))
                 return true;
-            if (NavigatorTreeElementLabels.keepEmptyGroupVisible(element))
+            String fullName = fullNameFromElement(element);
+            if (NavigatorTreeElementLabels.keepEmptyGroupVisible(element, fullName))
                 return true;
-            if (NavigatorTreeElementLabels.hasRootMdObjectIdentity(element))
+            if ((fullName == null || fullName.isBlank())
+                    && NavigatorTreeElementLabels.hasRootMdObjectIdentity(element, fullName))
             {
-                String ref = fullNameFromElement(element);
-                if (ref == null || ref.isBlank())
-                    ref = NavigatorTreeElementLabels.inferRootMdObjectRef(element);
+                String ref = NavigatorTreeElementLabels.inferRootMdObjectRef(element, fullName);
                 if (ref != null && !ref.isBlank())
                 {
                     String owner = MdTypeMapping.toOwnerMdObjectRef(ref);
@@ -587,7 +590,6 @@ final class ObjectSetsItems
                     return false;
                 }
             }
-            String fullName = fullNameFromElement(element);
             if (fullName != null && !fullName.isBlank())
             {
                 if (relatesToAnyRef(fullName))
@@ -690,27 +692,32 @@ final class ObjectSetsItems
 
     /**
      * Полные имена владеющих объектов МД по изменённым файлам рабочего каталога проекта
-     * (JGit status: modified/added/changed/untracked). Репозиторий проекта — через
-     * {@link RepositoryMapping}; файлы вне проекта пропускаются.
+     * (modified/added/changed/untracked из фонового кэша EGit). Репозиторий проекта — через
+     * {@link RepositoryMapping}; файлы вне проекта пропускаются. Полный Git status в UI не запускается.
      */
     static List<String> collectGitChangedRefs(String projectName)
     {
+        long started = System.nanoTime();
         Set<String> result = new LinkedHashSet<>();
-        if (projectName == null || projectName.isBlank())
-            return new ArrayList<>();
-        IProject project = ResourcesPlugin.getWorkspace().getRoot().getProject(projectName);
-        if (project == null || !project.isOpen())
-            return new ArrayList<>();
+        boolean pending = false;
         try
         {
+            if (projectName == null || projectName.isBlank())
+                return new ArrayList<>();
+            IProject project = ResourcesPlugin.getWorkspace().getRoot().getProject(projectName);
+            if (project == null || !project.isOpen())
+                return new ArrayList<>();
             RepositoryMapping mapping = RepositoryMapping.getMapping(project);
             if (mapping == null)
                 return new ArrayList<>();
             Repository repository = mapping.getRepository();
             if (repository == null)
                 return new ArrayList<>();
-            org.eclipse.jgit.api.Status status =
-                org.eclipse.jgit.api.Git.wrap(repository).status().call();
+            IndexDiffCacheEntry entry = IndexDiffCache.INSTANCE.getIndexDiffCacheEntry(repository);
+            IndexDiffData status = entry != null ? entry.getIndexDiff() : null;
+            pending = entry != null && status == null;
+            if (status == null)
+                return new ArrayList<>();
             String projectRepoPath = mapping.getRepoRelativePath(project);
             collectGitChangedRefsFromPaths(project, result, projectRepoPath, status.getModified());
             collectGitChangedRefsFromPaths(project, result, projectRepoPath, status.getAdded());
@@ -719,9 +726,31 @@ final class ObjectSetsItems
         }
         catch (Exception e)
         {
+            Global.tempLogException("object-sets-git", "collectGitChangedRefs project=" + projectName, e); //$NON-NLS-1$ //$NON-NLS-2$
             ObjectSetsDebug.problem("collectGitChangedRefs: " + e); //$NON-NLS-1$
         }
+        finally
+        {
+            Global.tempLog("object-sets-git", "collect project=" + projectName //$NON-NLS-1$ //$NON-NLS-2$
+                + " pending=" + pending + " thread=" + Thread.currentThread().getName() //$NON-NLS-1$ //$NON-NLS-2$
+                + " refs=" + result.size() + " ms=" + (System.nanoTime() - started) / 1_000_000); //$NON-NLS-1$ //$NON-NLS-2$
+        }
         return new ArrayList<>(result);
+    }
+
+    /** Первый фоновый расчёт EGit ещё не готов: пустой результат пока не означает ноль объектов. */
+    static boolean isGitResultPending(ObjectSets.SetDef set)
+    {
+        if (set == null || set.kind != ObjectSets.SetKind.GIT_CHANGED)
+            return false;
+        IProject project = ResourcesPlugin.getWorkspace().getRoot().getProject(set.projectName);
+        if (!project.isOpen())
+            return false;
+        RepositoryMapping mapping = RepositoryMapping.getMapping(project);
+        if (mapping == null || mapping.getRepository() == null)
+            return false;
+        IndexDiffCacheEntry entry = IndexDiffCache.INSTANCE.getIndexDiffCacheEntry(mapping.getRepository());
+        return entry != null && entry.getIndexDiff() == null;
     }
 
     private static void collectGitChangedRefsFromPaths(

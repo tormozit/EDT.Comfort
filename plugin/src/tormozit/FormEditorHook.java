@@ -213,6 +213,7 @@ import com._1c.g5.v8.dt.form.model.CommandHandler;
 import com._1c.g5.v8.dt.form.model.CommandHandlerContainer;
 import com._1c.g5.v8.dt.form.model.CommandHandlerExtension;
 import com._1c.g5.v8.dt.form.model.FormCommand;
+import com._1c.g5.v8.dt.form.model.FormCommandInterfaceItem;
 import com._1c.g5.v8.dt.form.model.FormCommandHandlerContainer;
 import com._1c.g5.v8.dt.form.model.FormExtensionCommandHandlerContainer;
 import com._1c.g5.v8.dt.form.ui.shared.FormUiSharedImages;
@@ -1930,15 +1931,11 @@ public class FormEditorHook implements IStartup
         return metadata != null ? metadata : resolveMetadataNavigatorTarget(selected);
     }
 
-    /** Общая команда, выбранная в дереве вкладки «Глобальные команды»; {@code null} — не выбрана. */
+    /** Команда метаданных в «Глобальных командах» или «Командном интерфейсе». */
     private static EObject selectedGlobalCommand(Tree tree)
     {
-        if (tree.isDisposed())
-            return null;
-        TreeItem[] selection = tree.getSelection();
-        if (selection.length != 1 || !(selection[0].getData() instanceof IMappingModel<?> mapping))
-            return null;
-        return mapping.getDomain() instanceof EObject eObject ? ContentUtil.getActualObject(eObject) : null;
+        EObject domain = GlobalCommandsProperties.resolveSelectedDomain(tree);
+        return domain != null ? ContentUtil.getActualObject(domain) : null;
     }
 
     private static void hookGlobalCommandsMenu(Tree tree, Menu menu)
@@ -4671,7 +4668,7 @@ public class FormEditorHook implements IStartup
     }
 
     // -----------------------------------------------------------------------
-    // Клик по общей команде на вкладке «Глобальные команды» → «Свойства» (issue #541)
+    // Команды метаданных в деревьях редактора формы → «Свойства» (issue #541)
     // -----------------------------------------------------------------------
 
     /**
@@ -4683,10 +4680,14 @@ public class FormEditorHook implements IStartup
      * умеет строить по ним свойства. Настоящий объект — {@link IMappingModel#getDomain()} (для
      * общей команды это сам {@code CommonCommand}, поскольку {@code BasicCommand} — и
      * {@code Command}, и {@code MdObject} одновременно).
+     * В «Командном интерфейсе» добавленные команды обёрнуты дополнительно в
+     * {@link FormCommandInterfaceItem}; автоматические команды лежат в домене напрямую.
      */
     private static final class GlobalCommandsProperties
     {
         private static final String KEY_HOOKED = "tormozit.formGlobalCommandsProperties.hooked"; //$NON-NLS-1$
+
+        private static final String KEY_COMMAND_INTERFACE = "tormozit.formCommandInterfaceProperties.hooked"; //$NON-NLS-1$
 
         private static final int RETRY_DELAY_MS = 200;
 
@@ -4694,7 +4695,32 @@ public class FormEditorHook implements IStartup
 
         static void install()
         {
-            trackFormEditors(editor -> attach(editor, 0));
+            trackFormEditors(editor -> {
+                attach(editor, 0);
+                attachCommandInterface(editor, 0);
+            });
+        }
+
+        private static void attachCommandInterface(FormEditor editor, int attempt)
+        {
+            try
+            {
+                FormEditorPage page = findFormPage(editor);
+                Tree tree = getViewerTree(page, "commandInterfaceViewer"); //$NON-NLS-1$
+                if (tree == null || tree.isDisposed())
+                {
+                    if (attempt < MAX_ATTEMPTS && editor.getSite() != null)
+                        Display.getDefault().timerExec(RETRY_DELAY_MS,
+                                () -> attachCommandInterface(editor, attempt + 1));
+                    return;
+                }
+                tree.setData(KEY_COMMAND_INTERFACE, Boolean.TRUE);
+                hook(page, tree, "commandInterfaceActionsGroup"); //$NON-NLS-1$
+            }
+            catch (Exception e)
+            {
+                Global.logError("FormEditorHook.GlobalCommandsProperties", "attachCommandInterface", e); //$NON-NLS-1$ //$NON-NLS-2$
+            }
         }
 
         private static void attach(FormEditor editor, int attempt)
@@ -4803,6 +4829,14 @@ public class FormEditorHook implements IStartup
             if (!(data instanceof IMappingModel<?> mapping))
                 return null;
             Object domain = mapping.getDomain();
+            if (Boolean.TRUE.equals(tree.getData(KEY_COMMAND_INTERFACE)))
+            {
+                if (domain instanceof FormCommandInterfaceItem item)
+                    domain = item.getCommand();
+                // Группы, команды формы и стандартные команды обслуживает сама EDT.
+                if (!(domain instanceof com._1c.g5.v8.dt.mcore.Command) || !(domain instanceof MdObject))
+                    return null;
+            }
             return domain instanceof EObject eObject ? eObject : null;
         }
     }
@@ -8209,6 +8243,11 @@ public class FormEditorHook implements IStartup
             // Ctrl+C оставляем штатным — это копирование элемента формы; в добавленных плагином
             // колонках копируем текст активной ячейки (см. copyActiveCellText).
             CopyCommandSupport.wireCopyOverride(tree, () -> copyActiveCellText(tree, interaction));
+            ColumnVisibilityMenu visibility = ColumnVisibilityMenu.forTree(tree, "FormItems"); //$NON-NLS-1$
+            String[] labels = { TITLE_TITLE, TITLE_HANDLERS, TITLE_APPEARANCE,
+                TITLE_INVISIBLE, TITLE_READ_ONLY, TITLE_HEIGHT, TITLE_WIDTH };
+            for (int index = COLUMN_TITLE; index <= COLUMN_LAST; index++)
+                visibility.add(tree.getColumn(index), WIDTH_KEYS[index], labels[index - COLUMN_TITLE]);
             viewer.refresh();
         }
 
@@ -8656,7 +8695,8 @@ public class FormEditorHook implements IStartup
                     others += tree.getColumn(index).getWidth();
                 int titleWidth = Math.max(MIN_WIDTH, client - nameWidth - others);
                 tree.getColumn(COLUMN_NAME).setWidth(client - titleWidth - others);
-                tree.getColumn(COLUMN_TITLE).setWidth(titleWidth);
+                if (!ColumnVisibilityMenu.isHidden(tree.getColumn(COLUMN_TITLE)))
+                    tree.getColumn(COLUMN_TITLE).setWidth(titleWidth);
             };
             tree.addListener(SWT.Resize, once[0]);
             tree.addListener(SWT.Paint, once[0]);
@@ -8690,7 +8730,7 @@ public class FormEditorHook implements IStartup
             IDialogSettings settings = widthSettings();
             for (int index = COLUMN_TITLE; index <= COLUMN_LAST; index++)
             {
-                int width = tree.getColumn(index).getWidth();
+                int width = ColumnVisibilityMenu.savedWidth(tree.getColumn(index));
                 if (width >= MIN_WIDTH)
                     settings.put(WIDTH_KEYS[index], width);
             }

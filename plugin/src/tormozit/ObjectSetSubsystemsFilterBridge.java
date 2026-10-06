@@ -6,6 +6,9 @@ import org.eclipse.core.resources.IResourceChangeEvent;
 import org.eclipse.core.resources.IResourceChangeListener;
 import org.eclipse.core.resources.IResourceDelta;
 import org.eclipse.core.resources.ResourcesPlugin;
+import org.eclipse.egit.core.internal.indexdiff.IndexDiffCache;
+import org.eclipse.egit.core.internal.indexdiff.IndexDiffChangedListener;
+import org.eclipse.egit.core.project.RepositoryMapping;
 import org.eclipse.jface.viewers.ITreeContentProvider;
 import org.eclipse.jface.viewers.TreePath;
 import org.eclipse.jface.viewers.TreeViewer;
@@ -108,6 +111,7 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
         installMdObjectCreateListener();
         installCompetingNavigatorFilterListener();
         Display.getDefault().asyncExec(() -> {
+            installGitIndexDiffListener();
             ObjectSetsNavigatorFilterSupport.syncFromCommandToggle();
             IWorkbench wb = PlatformUI.getWorkbench();
             if (wb == null)
@@ -448,6 +452,44 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
             display.asyncExec(refresh);
     }
 
+    /** EGit публикует готовый снимок после фонового расчёта, в том числе при первом открытии. */
+    private static void installGitIndexDiffListener()
+    {
+        Display display = Display.getDefault();
+        IndexDiffChangedListener listener = (repository, data) ->
+        {
+            Global.tempLog("object-sets-git", "indexDiffChanged repository=" + repository.getDirectory()); //$NON-NLS-1$ //$NON-NLS-2$
+            if (display.isDisposed())
+                return;
+            display.asyncExec(() ->
+            {
+                boolean affectsSets = false;
+                boolean affectsFilter = false;
+                for (ObjectSets.SetDef set : ObjectSets.getInstance().getAllSets())
+                {
+                    if (set.kind != ObjectSets.SetKind.GIT_CHANGED || !ObjectSets.isProjectOpen(set.projectName))
+                        continue;
+                    IProject project = ResourcesPlugin.getWorkspace().getRoot().getProject(set.projectName);
+                    RepositoryMapping mapping = RepositoryMapping.getMapping(project);
+                    if (mapping == null || mapping.getRepository() == null
+                            || !repository.getDirectory().equals(mapping.getRepository().getDirectory()))
+                        continue;
+                    affectsSets = true;
+                    ObjectSets.SetDef active = ObjectSetsAddTargetState.getInstance().getAddTargetSet(set.projectName);
+                    if (active != null && active.id.equals(set.id))
+                        affectsFilter = true;
+                }
+                ObjectSetsView view = ObjectSetsView.getActiveInstance();
+                if (affectsSets && view != null)
+                    view.scheduleGitChangedRefresh();
+                if (affectsFilter)
+                    maybeRefreshGitChangedFilter();
+            });
+        };
+        IndexDiffCache.INSTANCE.addIndexDiffChangedListener(listener);
+        display.disposeExec(() -> IndexDiffCache.INSTANCE.removeIndexDiffChangedListener(listener));
+    }
+
     private static boolean refreshAllNavigators()
     {
         if (!PlatformUI.isWorkbenchRunning())
@@ -481,8 +523,16 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
         installBridge(navigator, viewer);
         if (NavigatorAddToObjectSetMenuHook.deferNavigatorRefresh())
             return;
-        viewer.refresh();
-        syncGroupExpandIndicators(viewer);
+        long started = System.nanoTime();
+        try
+        {
+            viewer.refresh();
+            syncGroupExpandIndicators(viewer);
+        }
+        finally
+        {
+            Global.tempLog("object-sets-git", "navigatorRefresh ms=" + (System.nanoTime() - started) / 1_000_000); //$NON-NLS-1$ //$NON-NLS-2$
+        }
     }
 
     private static void hookWindow(IWorkbenchWindow window)

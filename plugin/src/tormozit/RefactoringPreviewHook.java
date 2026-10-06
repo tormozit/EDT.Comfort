@@ -76,6 +76,8 @@ import org.eclipse.text.edits.TextEdit;
 
 import com._1c.g5.v8.dt.core.platform.IResourceLookup;
 import com._1c.g5.v8.dt.lcore.refactoring.IFullTextSearchChange;
+import com._1c.g5.v8.dt.metadata.mdclass.EventSubscription;
+import com._1c.g5.v8.dt.metadata.mdclass.ScheduledJob;
 
 /**
  * Все доработки окна мастера рефакторинга LTK — «Рефакторинг», «Переименовать элемент», «Мастер
@@ -1125,12 +1127,45 @@ public final class RefactoringPreviewHook
             }
             if (!row.needsContext())
                 row.parentType = ""; //$NON-NLS-1$
+            applyMdPropertyContext(row, node);
             row.sought = sought;
             row.fullText = isFullTextOccurrence(node);
             if (sought != null && !row.fullText)
                 // Вхождение-ссылку EDT уже разрешил как настоящую ссылку на объект — подходит.
                 row.suitable = BslOccurrenceContextResolver.SUITABLE_YES;
             return row;
+        }
+
+        /**
+         * Правка свойства объекта метаданных — обработчик регламентного задания или подписки на
+         * событие (штатное переименование метода и «Переместить в модуль»). Колонки «Родитель»,
+         * «Тип родителя», «Категория» и «Текст» — те же, что у такой ссылки в панели «Найти ссылки»
+         * ({@code BslReferenceSearchTableHook.applyParticipantMatch}); «Текст» — текущее значение
+         * свойства.
+         */
+        private static void applyMdPropertyContext(PreviewRow row, Object node)
+        {
+            if (!(Global.invoke(node, "getChange") instanceof Change change)) //$NON-NLS-1$
+                return;
+            Object modified = change.getModifiedElement();
+            String value;
+            if (modified instanceof ScheduledJob job)
+            {
+                row.parent = job.getName() != null ? job.getName() : ""; //$NON-NLS-1$
+                row.parentType = "РегламентноеЗадание"; //$NON-NLS-1$
+                row.syntaxKind = "Свойство «Метод обработчик»"; //$NON-NLS-1$
+                value = job.getMethodName();
+            }
+            else if (modified instanceof EventSubscription subscription)
+            {
+                row.parent = subscription.getName() != null ? subscription.getName() : ""; //$NON-NLS-1$
+                row.parentType = "ПодпискаНаСобытие"; //$NON-NLS-1$
+                row.syntaxKind = "Свойство «Обработчик»"; //$NON-NLS-1$
+                value = subscription.getHandler();
+            }
+            else
+                return;
+            row.lineText = value != null ? value : ""; //$NON-NLS-1$
         }
 
         /** Вхождение найдено полнотекстовым поиском (изменение реализует {@link IFullTextSearchChange}). */

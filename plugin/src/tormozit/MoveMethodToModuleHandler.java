@@ -27,6 +27,8 @@ import org.eclipse.core.runtime.SubMonitor;
 import org.eclipse.emf.common.util.TreeIterator;
 import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.EObject;
+import org.eclipse.emf.ecore.EStructuralFeature;
+import org.eclipse.emf.ecore.util.EcoreUtil;
 import org.eclipse.jface.dialogs.Dialog;
 import org.eclipse.jface.dialogs.DialogSettings;
 import org.eclipse.jface.dialogs.IDialogSettings;
@@ -80,6 +82,7 @@ import org.eclipse.ui.handlers.IHandlerService;
 import org.eclipse.ui.ide.ResourceUtil;
 import org.eclipse.xtext.nodemodel.ICompositeNode;
 import org.eclipse.xtext.nodemodel.util.NodeModelUtils;
+import org.eclipse.xtext.resource.IReferenceDescription;
 import org.eclipse.xtext.resource.IResourceServiceProvider;
 import org.eclipse.xtext.resource.XtextResource;
 import org.eclipse.xtext.ui.editor.XtextEditor;
@@ -92,6 +95,9 @@ import org.eclipse.xtext.ui.refactoring.ui.IRenameContextFactory;
 import org.eclipse.xtext.ui.refactoring.ui.IRenameElementContext;
 import org.eclipse.xtext.util.concurrent.IUnitOfWork;
 
+import com._1c.g5.v8.bm.core.IBmTransaction;
+import com._1c.g5.v8.bm.integration.AbstractBmTask;
+import com._1c.g5.v8.bm.integration.IBmModel;
 import com._1c.g5.v8.dt.bsl.contextdef.IBslModuleContextDefService;
 import com._1c.g5.v8.dt.bsl.model.ExplicitVariable;
 import com._1c.g5.v8.dt.bsl.model.Method;
@@ -100,6 +106,8 @@ import com._1c.g5.v8.dt.bsl.model.ModuleType;
 import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.Variable;
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
+import com._1c.g5.v8.dt.bsl.ui.editor.findref.ReferenceFinderParticipantServiceProvider;
+import com._1c.g5.v8.dt.core.platform.IBmModelManager;
 import com._1c.g5.v8.dt.core.platform.IV8Project;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
 import com._1c.g5.v8.dt.form.model.EventHandler;
@@ -115,6 +123,9 @@ import com._1c.g5.v8.dt.mcore.NamedElement;
 import com._1c.g5.v8.dt.mcore.util.Environment;
 import com._1c.g5.v8.dt.mcore.util.Environments;
 import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
+import com._1c.g5.v8.dt.metadata.mdclass.EventSubscription;
+import com._1c.g5.v8.dt.metadata.mdclass.MdClassPackage;
+import com._1c.g5.v8.dt.metadata.mdclass.ScheduledJob;
 import com._1c.g5.v8.dt.metadata.mdclass.CommonModule;
 
 /**
@@ -130,8 +141,10 @@ import com._1c.g5.v8.dt.metadata.mdclass.CommonModule;
  * {@link IRefactoringUpdateAcceptor} (он же различает открытый редактор и файл на диске) и
  * показывается в штатном окне «Рефакторинг».
  *
- * <p>Упоминания в строковых литералах и в свойствах объектов (обработчики подписок, заданий,
- * элементов форм) не меняются: участники переименования и полнотекстовый проход не запускаются.
+ * <p>Ссылки из свойств объектов метаданных («Имя метода» регламентного задания, «Обработчик»
+ * подписки на событие) ищут штатные участники команды «Найти ссылки»
+ * ({@link ReferenceFinderParticipantServiceProvider}); свойство переписывается на новый общий
+ * модуль. Упоминания в строковых литералах не меняются: полнотекстовый проход не запускается.
  */
 public class MoveMethodToModuleHandler extends AbstractHandler
 {
@@ -288,6 +301,8 @@ public class MoveMethodToModuleHandler extends AbstractHandler
         Map<Integer, Integer> exportEdits = new TreeMap<>();
         /** Начало метода (директива компиляции или ключевое слово). */
         int nodeStart;
+        /** Метод как цель поиска ссылок из свойств объектов метаданных. */
+        URI methodUri;
         /** Занятые в методе имена (параметры и переменные), в нижнем регистре. */
         Set<String> localNames = new HashSet<>();
         /** Имя добавляемого первого параметра-контекста; {@code null} — параметр не нужен. */
@@ -569,6 +584,7 @@ public class MoveMethodToModuleHandler extends AbstractHandler
             source.name = text.substring(header.nameOffset, header.nameOffset + header.nameLength);
             source.text = text;
             source.header = header;
+            source.methodUri = EcoreUtil.getURI(method);
             source.nodeStart = nodeStart;
             source.nodeEnd = nodeEnd;
             source.environments = method.environments();
@@ -1265,6 +1281,8 @@ public class MoveMethodToModuleHandler extends AbstractHandler
         /** Родитель вызова; пусто — вызывать без родителя (глобальный общий модуль). */
         private final String prefix;
         private IRefactoringUpdateAcceptor acceptor;
+        /** Правки свойств объектов метаданных, ссылающихся на метод. */
+        private final List<Change> propertyChanges = new ArrayList<>();
 
         MoveRefactoring(Source source, TargetModule target, String prefix)
         {
@@ -1308,7 +1326,16 @@ public class MoveMethodToModuleHandler extends AbstractHandler
         @Override
         public Change createChange(IProgressMonitor pm) throws CoreException
         {
-            return acceptor != null ? acceptor.createCompositeChange(getName(), pm) : new CompositeChange(getName());
+            if (acceptor == null)
+                return new CompositeChange(getName());
+            Change textChanges = acceptor.createCompositeChange(getName(), pm);
+            if (propertyChanges.isEmpty())
+                return textChanges;
+            CompositeChange result = textChanges instanceof CompositeChange composite ? composite
+                : new CompositeChange(getName(), new Change[] { textChanges });
+            for (Change change : propertyChanges)
+                result.add(change);
+            return result;
         }
 
         private void collectEdits(SubMonitor monitor, RefactoringStatus status) throws CoreException
@@ -1431,9 +1458,76 @@ public class MoveMethodToModuleHandler extends AbstractHandler
                 updates.accept(source.uri, new DeleteEdit(source.deleteStart, methodStart - source.deleteStart));
             updates.accept(source.uri, new DeleteEdit(methodStart, source.deleteEnd - methodStart));
             updates.accept(targetUri, insertion(targetText));
-            if (rewritten == 0)
+            propertyChanges.clear();
+            collectPropertyReferences(monitor.split(10), status);
+            if (rewritten == 0 && propertyChanges.isEmpty())
                 status.addInfo("Вызовы метода «" + source.name + "» не найдены.");
             acceptor = updates;
+        }
+
+        /**
+         * Ссылки на метод из свойств объектов метаданных — участниками штатной «Найти ссылки»
+         * (регламентные задания, подписки на события; формы уже учтены вопросом перед выбором
+         * модуля). Источник ссылки участника — {@code bm://<проект>/<FQN>#/}, как в
+         * {@code BslReferenceSearchTableHook.applyParticipantMatch}.
+         */
+        private void collectPropertyReferences(IProgressMonitor monitor, RefactoringStatus status)
+        {
+            List<IReferenceDescription> references = new ArrayList<>();
+            try
+            {
+                source.services.get(ReferenceFinderParticipantServiceProvider.class)
+                    .findAllReferences(List.of(source.methodUri), references::add, monitor);
+            }
+            catch (OperationCanceledException e)
+            {
+                throw e;
+            }
+            catch (RuntimeException | LinkageError e)
+            {
+                status.addWarning("Не удалось найти ссылки на метод из свойств объектов метаданных: " + e);
+                return;
+            }
+            IV8Project v8project = Global.getServiceByClass(IV8ProjectManager.class) instanceof IV8ProjectManager manager
+                ? manager.getProject(source.file.getProject()) : null;
+            Set<EObject> seen = new HashSet<>();
+            for (IReferenceDescription reference : references)
+            {
+                URI sourceUri = reference.getSourceEObjectUri();
+                if (v8project == null || sourceUri == null || !"bm".equals(sourceUri.scheme())
+                    || sourceUri.segmentCount() == 0)
+                    continue;
+                EObject object = GoToDefinition.resolveEObjectByQualifiedName(sourceUri.segment(0), v8project);
+                EStructuralFeature feature;
+                String title;
+                String value;
+                if (object instanceof ScheduledJob job)
+                {
+                    feature = MdClassPackage.Literals.SCHEDULED_JOB__METHOD_NAME;
+                    title = "Регламентное задание «" + job.getName() + "», свойство «Имя метода»";
+                    value = job.getMethodName();
+                }
+                else if (object instanceof EventSubscription subscription)
+                {
+                    feature = MdClassPackage.Literals.EVENT_SUBSCRIPTION__HANDLER;
+                    title = "Подписка на событие «" + subscription.getName() + "», свойство «Обработчик»";
+                    value = subscription.getHandler();
+                }
+                else
+                    continue;
+                if (!seen.add(object))
+                    continue;
+                // значение свойства — «CommonModule.<ИмяМодуля>.<ИмяМетода>»
+                String[] parts = value != null ? value.split("\\.", -1) : new String[0];
+                if (target.prefix.contains(".") || parts.length != 3 || !parts[2].equalsIgnoreCase(source.name))
+                {
+                    status.addWarning(title + " не изменено: " + (target.prefix.contains(".")
+                        ? "обработчиком может быть только метод общего модуля." : "значение «" + value + "» не разобрано."));
+                    continue;
+                }
+                propertyChanges.add(new PropertyChange(object, feature, parts[0] + "." + target.prefix + "." + parts[2],
+                    title));
+            }
         }
 
         /** Вставка метода в целевой модуль: после последнего метода, а без методов — в конец текста. */
@@ -1482,6 +1576,73 @@ public class MoveMethodToModuleHandler extends AbstractHandler
             String lead = targetText.isBlank() ? ""
                 : targetText.endsWith("\n") ? delimiter : delimiter + delimiter;
             return new InsertEdit(targetText.length(), lead + moved + delimiter);
+        }
+    }
+
+    /**
+     * Правка строкового свойства объекта метаданных в его модели — как штатное
+     * {@code MdObjectHandlerNameChange} переименования: задача в глобальном контексте модели.
+     */
+    private static final class PropertyChange extends Change
+    {
+        private final EObject object;
+        private final EStructuralFeature feature;
+        private final String value;
+        private final String title;
+
+        PropertyChange(EObject object, EStructuralFeature feature, String value, String title)
+        {
+            this.object = object;
+            this.feature = feature;
+            this.value = value;
+            this.title = title;
+        }
+
+        @Override
+        public String getName()
+        {
+            return title + " → " + value;
+        }
+
+        @Override
+        public void initializeValidationData(IProgressMonitor pm)
+        {
+            // сверять нечего: значение ставится целиком
+        }
+
+        @Override
+        public RefactoringStatus isValid(IProgressMonitor pm)
+        {
+            return new RefactoringStatus();
+        }
+
+        @Override
+        public Change perform(IProgressMonitor pm) throws CoreException
+        {
+            IBmModelManager manager = Global.getOsgiService(IBmModelManager.class);
+            IBmModel model = manager != null ? manager.getModel(object) : null;
+            if (model == null)
+                return null;
+            Object previous = model.getGlobalContext().execute(new AbstractBmTask<Object>("Comfort: move method handler")
+            {
+                @Override
+                public Object execute(IBmTransaction transaction, IProgressMonitor monitor)
+                {
+                    EObject editable = transaction.toTransactionObject(object);
+                    Object old = editable.eGet(feature);
+                    editable.eSet(feature, value);
+                    return old;
+                }
+            });
+            model.waitAllEnqueuedEventsSent();
+            // обратная правка — для «Отменить»
+            return previous instanceof String old ? new PropertyChange(object, feature, old, title) : null;
+        }
+
+        @Override
+        public Object getModifiedElement()
+        {
+            return object;
         }
     }
 

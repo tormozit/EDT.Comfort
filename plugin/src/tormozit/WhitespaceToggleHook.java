@@ -122,23 +122,6 @@ public final class WhitespaceToggleHook implements IStartup
         if (!PlatformUI.isWorkbenchRunning() || PlatformUI.getWorkbench() == null)
             return;
 
-        // #region agent log (временная диагностика ISE при закрытии: дубли id в панелях модели)
-        PlatformUI.getWorkbench().addWorkbenchListener(new org.eclipse.ui.IWorkbenchListener()
-        {
-            @Override
-            public boolean preShutdown(org.eclipse.ui.IWorkbench wb, boolean forced)
-            {
-                dumpToolBarsForShutdownDiag(wb);
-                return true;
-            }
-
-            @Override
-            public void postShutdown(org.eclipse.ui.IWorkbench wb)
-            {
-            }
-        });
-        // #endregion
-
         PlatformUI.getWorkbench().addWindowListener(new org.eclipse.ui.IWindowListener()
         {
             @Override public void windowOpened(IWorkbenchWindow w)     { hookWindow(w); }
@@ -184,58 +167,6 @@ public final class WhitespaceToggleHook implements IStartup
         }
     }
 
-    private static void dumpToolBarsForShutdownDiag(org.eclipse.ui.IWorkbench wb)
-    {
-        final String topic = "shutdown-toolbars"; //$NON-NLS-1$
-        try
-        {
-            for (IWorkbenchWindow w : wb.getWorkbenchWindows())
-            {
-                org.eclipse.e4.ui.model.application.ui.basic.MWindow mw =
-                    w.getService(org.eclipse.e4.ui.model.application.ui.basic.MWindow.class);
-                org.eclipse.e4.ui.workbench.modeling.EModelService ms =
-                    w.getService(org.eclipse.e4.ui.workbench.modeling.EModelService.class);
-                if (mw == null || ms == null)
-                {
-                    Global.tempLog(topic, "window: no MWindow/EModelService"); //$NON-NLS-1$
-                    continue;
-                }
-                Map<String, Integer> counts = new java.util.TreeMap<>();
-                List<org.eclipse.e4.ui.model.application.ui.menu.MToolBar> bars =
-                    ms.findElements(mw, null, org.eclipse.e4.ui.model.application.ui.menu.MToolBar.class, null);
-                for (org.eclipse.e4.ui.model.application.ui.menu.MToolBar bar : bars)
-                {
-                    Object obj = bar.getTransientData().get("coolbar.object"); //$NON-NLS-1$
-                    String objDesc = obj == null ? "null" : obj.getClass().getName() + "@" //$NON-NLS-1$ //$NON-NLS-2$
-                        + Integer.toHexString(System.identityHashCode(obj))
-                        + (obj instanceof IContributionItem ci ? " itemId=" + ci.getId() : ""); //$NON-NLS-1$ //$NON-NLS-2$
-                    Global.tempLog(topic, "toolbar elementId=[" + bar.getElementId() + "] toBeRendered=" //$NON-NLS-1$ //$NON-NLS-2$
-                        + bar.isToBeRendered() + " parent=" + (bar.getParent() == null ? "null" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                            : bar.getParent().getClass().getSimpleName() + "[" + bar.getParent().getElementId() + "]") //$NON-NLS-1$ //$NON-NLS-2$
-                        + " obj=" + objDesc); //$NON-NLS-1$
-                    if (bar.getElementId() == null || bar.getElementId().isEmpty())
-                    {
-                        Global.tempLog(topic, "  EMPTY-ID toolbar tags=" + bar.getTags() + " persisted=" //$NON-NLS-1$ //$NON-NLS-2$
-                            + bar.getPersistedState() + " contributorURI=" + bar.getContributorURI()); //$NON-NLS-1$
-                        for (org.eclipse.e4.ui.model.application.ui.menu.MToolBarElement child : bar.getChildren())
-                            Global.tempLog(topic, "    child " + child.getClass().getSimpleName() + " id=[" //$NON-NLS-1$ //$NON-NLS-2$
-                                + child.getElementId() + "] contributorURI=" + child.getContributorURI() //$NON-NLS-1$
-                                + (child instanceof org.eclipse.e4.ui.model.application.ui.menu.MItem it
-                                    ? " label=" + it.getLabel() + " tooltip=" + it.getTooltip() : "")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    }
-                    counts.merge(String.valueOf(bar.getElementId()), 1, Integer::sum);
-                }
-                for (Map.Entry<String, Integer> e : counts.entrySet())
-                    if (e.getValue() > 1)
-                        Global.tempLog(topic, "DUPLICATE elementId=[" + e.getKey() + "] x" + e.getValue()); //$NON-NLS-1$ //$NON-NLS-2$
-                Global.tempLog(topic, "total toolbars=" + bars.size()); //$NON-NLS-1$
-            }
-        }
-        catch (Throwable t)
-        {
-            Global.tempLogException(topic, "dump failed", t); //$NON-NLS-1$
-        }
-    }
     // #endregion
 
     private static void hookWindow(IWorkbenchWindow window)

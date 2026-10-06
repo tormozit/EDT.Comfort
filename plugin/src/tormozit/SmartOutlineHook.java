@@ -1908,7 +1908,10 @@ public class SmartOutlineHook implements IStartup {
         String ownerName = typeOwnerName(model);
         String source = TypeByNameAdvisor.availableSource(dtProject, model, ownerName);
         // Вычисленный (эффективный) тип владельца и есть лучший: подбирать по имени не нужно.
-        java.util.List<String> effectiveTypes = ownerEffectiveTypes(model);
+        // Тип параметра команды: лучший — ссылка на объект, которому команда принадлежит.
+        String commandOwnerType = TypeByNameAdvisor.commandOwnerRefTypeName(model);
+        java.util.List<String> effectiveTypes = commandOwnerType != null ? java.util.List.of(commandOwnerType)
+            : ownerEffectiveTypes(model);
         if (source == null && effectiveTypes.isEmpty())
             return;
 
@@ -1935,6 +1938,7 @@ public class SmartOutlineHook implements IStartup {
         button.setEnabled(hasName);
         button.setToolTipText(TooltipText.wrap(button,
             (!hasName ? "Недоступно: не удалось определить имя владельца типа" //$NON-NLS-1$
+                : commandOwnerType != null ? "Пометить тип ссылки объекта, которому принадлежит команда" //$NON-NLS-1$
                 : !effectiveTypes.isEmpty() ? "Пометить вычисленный тип" //$NON-NLS-1$
                 : TypeByNameAdvisor.SOURCE_EXACT_NAME.equals(source)
                     ? "Пометить тип объекта метаданных, имя которого совпадает с именем реквизита" //$NON-NLS-1$

@@ -331,6 +331,9 @@ this.completionListener = new CompletionListenerAdapter() {
             @Override
             public void assistSessionStarted(ContentAssistEvent event)
             {
+                // #region agent log
+                Global.tempLog("stale-markers", "assist.sessionStarted " + describeReconciler(viewer)); //$NON-NLS-1$ //$NON-NLS-2$
+                // #endregion
                 assistSessionStartedImpl(event);
             }
 
@@ -469,6 +472,9 @@ if (Boolean.TRUE.equals(LITERAL_REPEAT_FROM_COMMAND.get()))
             @Override
             public void assistSessionEnded(ContentAssistEvent event)
             {
+                // #region agent log
+                Global.tempLog("stale-markers", "assist.sessionEnded " + describeReconciler(viewer)); //$NON-NLS-1$ //$NON-NLS-2$
+                // #endregion
                 assistSessionEndedImpl(event);
             }
 
@@ -881,7 +887,7 @@ boolean inLiteral = endCaret >= 0
                 // #region agent log
                 // Первой строкой обработчика: ниже есть ранние выходы и вызовы, способные
                 // бросить исключение, а эта запись должна появляться на каждую правку.
-                logValidationAfterDocumentChange(event);
+                logValidationAfterDocumentChange(event, viewer);
                 // #endregion
                 String text = event == null ? null : event.getText();
                 if (inputJumpProbe != null)
@@ -945,6 +951,7 @@ boolean inLiteral = endCaret >= 0
         Global.tempLog("stale-markers", "слушатель правок подключён: документ " //$NON-NLS-1$ //$NON-NLS-2$
             + doc.getClass().getName() + "@" + System.identityHashCode(doc)); //$NON-NLS-1$
         logValidationState(doc, "listener.install"); //$NON-NLS-1$
+        watchReconcilerAndRewriteSessions(doc, viewer);
         // #endregion
     }
 
@@ -2690,7 +2697,8 @@ boolean inLiteral = endCaret >= 0
             boolean skip = Boolean.TRUE.equals(Global.invoke(job, "isSkip")); //$NON-NLS-1$
             // #region agent log
             Global.tempLog("stale-markers", "assistSync.done: проверка после правки не отработала," //$NON-NLS-1$ //$NON-NLS-2$
-                + " перезапуск=" + (idle && !skip) + " " + describeValidationJob(job)); //$NON-NLS-1$ //$NON-NLS-2$
+                + " перезапуск=" + (idle && !skip) + " " + describeValidationJob(job) //$NON-NLS-1$ //$NON-NLS-2$
+                + " " + describeOutdated(doc)); //$NON-NLS-1$
             // #endregion
             // Задание уже запланировано или идёт — оно отработает само
             if (idle && !skip)
@@ -2710,7 +2718,8 @@ boolean inLiteral = endCaret >= 0
      * состояние задания в точках чтения и каждое его планирование/завершение: чтение с
      * {@code skip=true}, после которого нет запуска проверки, и есть протухший маркер.
      */
-    private static void logValidationAfterDocumentChange(DocumentEvent event)
+    private static void logValidationAfterDocumentChange(DocumentEvent event,
+        org.eclipse.jface.text.ITextViewer viewer)
     {
         if (event == null)
         {
@@ -2726,21 +2735,179 @@ boolean inLiteral = endCaret >= 0
         }
         String text = event.getText() == null ? "" : event.getText(); //$NON-NLS-1$
         logValidationState(doc, "docChanged offset=" + event.getOffset() //$NON-NLS-1$
-            + " removed=" + event.getLength() + " inserted=" + text.length()); //$NON-NLS-1$ //$NON-NLS-2$
+            + " removed=" + event.getLength() + " inserted=" + text.length() //$NON-NLS-1$ //$NON-NLS-2$
+            + " " + describeReconciler(viewer) + " " + describeOutdated(doc)); //$NON-NLS-1$ //$NON-NLS-2$
+        watchReconcilerAndRewriteSessions(doc, viewer);
+        // Блочная замена — после неё проверка не планируется вовсе (лог 06.10.2026).
+        // Стек показывает, какая команда правит текст. Порог — данные, а не условие записи
+        // самой правки: строка docChanged выше пишется всегда.
+        if (event.getLength() >= 200 || text.length() >= 200)
+            Global.tempLogException("stale-markers", "стек блочной замены offset=" //$NON-NLS-1$ //$NON-NLS-2$
+                + event.getOffset(), new Throwable("кто правит документ")); //$NON-NLS-1$
         long stampAtChange = doc instanceof org.eclipse.jface.text.IDocumentExtension4 ext
             ? ext.getModificationStamp() : -1;
-        // Через 3 с после правки: если текст с тех пор не менялся, а проверка так и не
-        // отработала — это и есть протухший маркер. Задание, а не timerExec: слушатель
+        // Через 3 и 20 с после правки: если текст с тех пор не менялся, а проверка так и
+        // не отработала — это и есть протухший маркер. Задание, а не timerExec: слушатель
         // документа может прийти не из UI-потока.
-        org.eclipse.core.runtime.jobs.Job probe = org.eclipse.core.runtime.jobs.Job.create(
-            "Комфорт: проба задания проверки модуля", //$NON-NLS-1$
-            (org.eclipse.core.runtime.ICoreRunnable)monitor -> {
-                long stampNow = doc instanceof org.eclipse.jface.text.IDocumentExtension4 ext
-                    ? ext.getModificationStamp() : -1;
-                logValidationState(doc, "probe+3s textUnchanged=" + (stampNow == stampAtChange)); //$NON-NLS-1$
+        for (int delaySeconds : new int[] { 3, 20 })
+        {
+            org.eclipse.core.runtime.jobs.Job probe = org.eclipse.core.runtime.jobs.Job.create(
+                "Комфорт: проба задания проверки модуля", //$NON-NLS-1$
+                (org.eclipse.core.runtime.ICoreRunnable)monitor -> {
+                    long stampNow = doc instanceof org.eclipse.jface.text.IDocumentExtension4 ext
+                        ? ext.getModificationStamp() : -1;
+                    logValidationState(doc, "probe+" + delaySeconds + "s textUnchanged=" //$NON-NLS-1$ //$NON-NLS-2$
+                        + (stampNow == stampAtChange)
+                        + " " + describeReconciler(viewer) + " " + describeOutdated(doc)); //$NON-NLS-1$ //$NON-NLS-2$
+                });
+            probe.setSystem(true);
+            probe.schedule(delaySeconds * 1000L);
+        }
+    }
+
+    private static final java.util.Set<Object> RECONCILER_WATCHED =
+        java.util.Collections.synchronizedSet(
+            java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>()));
+
+    /**
+     * Каждое планирование, запуск и завершение штатного согласователя и каждый сеанс
+     * перезаписи документа: видно, дошла ли правка до согласователя и чем он закончил.
+     */
+    private static void watchReconcilerAndRewriteSessions(IDocument doc,
+        org.eclipse.jface.text.ITextViewer viewer)
+    {
+        try
+        {
+            installReconcilerJobDiagnostics();
+            if (doc instanceof org.eclipse.jface.text.IDocumentExtension4 sessions
+                && RECONCILER_WATCHED.add(doc))
+                sessions.addDocumentRewriteSessionListener(event ->
+                    Global.tempLog("stale-markers", "rewriteSession " //$NON-NLS-1$ //$NON-NLS-2$
+                        + (event.getChangeType() == org.eclipse.jface.text.DocumentRewriteSessionEvent.SESSION_START
+                            ? "start" : "stop") //$NON-NLS-1$ //$NON-NLS-2$
+                        + " type=" + (event.getSession() == null ? null //$NON-NLS-1$
+                            : event.getSession().getSessionType())
+                        + " th=" + Thread.currentThread().getName())); //$NON-NLS-1$
+        }
+        catch (RuntimeException ex)
+        {
+            Global.tempLog("stale-markers", "сбой подключения к согласователю: " + ex); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    /**
+     * Состояние штатного {@code XtextReconciler}: пока идёт сеанс автодополнения, он стоит
+     * на паузе ({@code paused}) и модель до текста не догоняет, а возобновляется только по
+     * {@code assistSessionEnded}. Незакрытый сеанс значит «проверки нет до конца сеанса».
+     */
+    private static String describeReconciler(org.eclipse.jface.text.ITextViewer viewer)
+    {
+        // Лог 06.10.2026: viewer.fReconciler в редакторе модуля — неработающий экземпляр
+        // (ни разу не запланирован, сеансов автодополнения не видит). Настоящий согласователь
+        // узнаём по событиям менеджера заданий, см. installReconcilerJobDiagnostics.
+        java.lang.ref.WeakReference<Object> known = viewer == null ? null : RECONCILER_BY_VIEWER.get(viewer);
+        Object real = known == null ? null : known.get();
+        return describeReconcilerObject(
+            real != null ? real : Global.getField(viewer, "fReconciler"), //$NON-NLS-1$
+            real != null ? "job" : "fReconciler"); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    // Слабая ссылка на значение: задание само держит свой viewer, иначе ключ не освободится
+    private static final java.util.Map<Object, java.lang.ref.WeakReference<Object>> RECONCILER_BY_VIEWER =
+        java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
+
+    private static boolean reconcilerJobDiagnosticsInstalled;
+
+    /**
+     * Семейство заданий штатного согласователя — то же, по которому его ищет и отменяет
+     * сама EDT в {@code readOnlyForContentAssist}.
+     */
+    private static final String RECONCILER_JOB_FAMILY =
+        "org.eclipse.xtext.ui.editor.reconciler.XtextReconciler"; //$NON-NLS-1$
+
+    private static synchronized void installReconcilerJobDiagnostics()
+    {
+        if (reconcilerJobDiagnosticsInstalled)
+            return;
+        reconcilerJobDiagnosticsInstalled = true;
+        Global.tempLog("stale-markers", "слушатель заданий согласователя подключён"); //$NON-NLS-1$ //$NON-NLS-2$
+        org.eclipse.core.runtime.jobs.Job.getJobManager().addJobChangeListener(
+            new org.eclipse.core.runtime.jobs.JobChangeAdapter()
+            {
+                @Override
+                public void scheduled(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
+                {
+                    log("scheduled delay=" + event.getDelay(), event); //$NON-NLS-1$
+                }
+
+                @Override
+                public void aboutToRun(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
+                {
+                    log("aboutToRun", event); //$NON-NLS-1$
+                }
+
+                @Override
+                public void done(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
+                {
+                    log("done result=" + event.getResult(), event); //$NON-NLS-1$
+                }
+
+                private void log(String what, org.eclipse.core.runtime.jobs.IJobChangeEvent event)
+                {
+                    org.eclipse.core.runtime.jobs.Job job = event.getJob();
+                    if (!job.belongsTo(RECONCILER_JOB_FAMILY))
+                        return;
+                    Object jobViewer = Global.getField(job, "textViewer"); //$NON-NLS-1$
+                    if (jobViewer != null)
+                        RECONCILER_BY_VIEWER.put(jobViewer, new java.lang.ref.WeakReference<>(job));
+                    IDocument doc = jobViewer instanceof org.eclipse.jface.text.ITextViewer textViewer
+                        ? textViewer.getDocument() : null;
+                    Global.tempLog("stale-markers", "reconciler." + what //$NON-NLS-1$ //$NON-NLS-2$
+                        + " " + describeReconcilerObject(job, "job") //$NON-NLS-1$ //$NON-NLS-2$
+                        + " viewer=" + System.identityHashCode(jobViewer) //$NON-NLS-1$
+                        + (doc == null ? "" : " " + describeOutdated(doc)) //$NON-NLS-1$ //$NON-NLS-2$
+                        + " th=" + Thread.currentThread().getName()); //$NON-NLS-1$
+                }
             });
-        probe.setSystem(true);
-        probe.schedule(3000);
+    }
+
+    private static String describeReconcilerObject(Object reconciler, String source)
+    {
+        try
+        {
+            if (reconciler == null)
+                return "reconciler=null"; //$NON-NLS-1$
+            Object pending = Global.getField(reconciler, "pendingChanges"); //$NON-NLS-1$
+            Object listener = Global.getField(reconciler, "documentListener"); //$NON-NLS-1$
+            return "reconciler{" + source + "@" + System.identityHashCode(reconciler) //$NON-NLS-1$ //$NON-NLS-2$
+                + " paused=" + Global.getField(reconciler, "paused") //$NON-NLS-1$ //$NON-NLS-2$
+                + " pending=" + (pending instanceof java.util.Collection<?> queue ? queue.size() : -1) //$NON-NLS-1$
+                + " sessionStarted=" + Global.getField(listener, "sessionStarted") //$NON-NLS-1$ //$NON-NLS-2$
+                + " state=" + (reconciler instanceof org.eclipse.core.runtime.jobs.Job job //$NON-NLS-1$
+                    ? job.getState() : -1) + "}"; //$NON-NLS-1$
+        }
+        catch (RuntimeException ex)
+        {
+            return "reconciler=сбой:" + ex; //$NON-NLS-1$
+        }
+    }
+
+    /**
+     * Считает ли EDT модель устаревшей относительно текста. При {@code true} штатный
+     * {@code checkAndUpdateAnnotations} проверку не планирует.
+     */
+    private static String describeOutdated(IDocument doc)
+    {
+        try
+        {
+            Object indicator = Global.invoke(doc, "getCancelIndicator"); //$NON-NLS-1$
+            return "outdated=" + (indicator instanceof org.eclipse.xtext.util.CancelIndicator cancel //$NON-NLS-1$
+                ? String.valueOf(cancel.isCanceled()) : "?"); //$NON-NLS-1$
+        }
+        catch (RuntimeException ex)
+        {
+            return "outdated=сбой:" + ex; //$NON-NLS-1$
+        }
     }
 
     private static void logValidationState(IDocument doc, String point)
@@ -2779,12 +2946,58 @@ boolean inLiteral = endCaret >= 0
                 {
                     Global.tempLog("stale-markers", "validation.done result=" + event.getResult() //$NON-NLS-1$ //$NON-NLS-2$
                         + " " + describeValidationJob(event.getJob())); //$NON-NLS-1$
+                    // Аннотации попадают в модель чуть позже завершения задания
+                    org.eclipse.core.runtime.jobs.Job report = org.eclipse.core.runtime.jobs.Job.create(
+                        "Комфорт: аннотации после проверки модуля", //$NON-NLS-1$
+                        (org.eclipse.core.runtime.ICoreRunnable)monitor ->
+                            Global.tempLog("stale-markers", "annotations+1s " //$NON-NLS-1$ //$NON-NLS-2$
+                                + describeIssueAnnotations(event.getJob())));
+                    report.setSystem(true);
+                    report.schedule(1000);
                 }
             });
         }
         catch (RuntimeException ex)
         {
             Global.tempLog("stale-markers", point + " сбой диагностики: " + ex); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    /**
+     * Что осталось в редакторе после проверки: число аннотаций проверки и первые из них
+     * (позиция и текст). Маркер, который пережил успешную проверку уже исправленного места,
+     * виден здесь без снимка экрана.
+     */
+    private static String describeIssueAnnotations(org.eclipse.core.runtime.jobs.Job job)
+    {
+        try
+        {
+            Object model = Global.getField(job, "annotationModel"); //$NON-NLS-1$
+            if (!(model instanceof org.eclipse.jface.text.source.IAnnotationModel annotations))
+                return "job=" + System.identityHashCode(job) + " модель аннотаций недоступна"; //$NON-NLS-1$ //$NON-NLS-2$
+            int total = 0;
+            StringBuilder first = new StringBuilder();
+            for (java.util.Iterator<org.eclipse.jface.text.source.Annotation> it =
+                annotations.getAnnotationIterator(); it.hasNext();)
+            {
+                org.eclipse.jface.text.source.Annotation annotation = it.next();
+                if (annotation.isMarkedDeleted()
+                    || !annotation.getClass().getName().endsWith("XtextAnnotation")) //$NON-NLS-1$
+                    continue;
+                total++;
+                if (total > 12)
+                    continue;
+                org.eclipse.jface.text.Position position = annotations.getPosition(annotation);
+                String text = String.valueOf(annotation.getText());
+                first.append(" | ").append(position == null ? "?" : position.getOffset() + "+" + position.getLength()) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    .append(' ').append(annotation.getType()).append(' ')
+                    .append(text.length() > 90 ? text.substring(0, 90) : text);
+            }
+            return "job=" + System.identityHashCode(job) + " всего=" + total + first; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        catch (RuntimeException ex)
+        {
+            return "job=" + System.identityHashCode(job) + " сбой чтения аннотаций: " + ex; //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 

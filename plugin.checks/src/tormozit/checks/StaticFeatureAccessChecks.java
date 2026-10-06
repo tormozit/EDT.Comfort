@@ -232,7 +232,7 @@ public abstract class StaticFeatureAccessChecks extends BasicCheck<Object>
                 issue(typeLine == null ? MESSAGES.too_many_actual_parameters()
                     : MESSAGES.too_many_actual_parameters_for_types(typeLine), invocation.getMethodAccess(),
                     BslPackage.Literals.FEATURE_ACCESS__NAME, -1, envs);
-            else if (actual < set.getMinParams())
+            else if (actual < set.getMinParams() || hasMissingRequiredParameter(set, actual))
                 issue(typeLine == null ? MESSAGES.not_enough_actual_parameters()
                     : MESSAGES.not_enough_actual_parameters_for_types(typeLine), invocation.getMethodAccess(),
                     BslPackage.Literals.FEATURE_ACCESS__NAME, -1, envs);
@@ -245,6 +245,15 @@ public abstract class StaticFeatureAccessChecks extends BasicCheck<Object>
                 || invocation.eContainingFeature() == BslPackage.Literals.AWAIT_EXPRESSION__EXPRESSION))
                 issue(MESSAGES.procedure_called_as_function(), invocation.getMethodAccess(),
                     BslPackage.Literals.FEATURE_ACCESS__NAME, -1, envs);
+        }
+
+        /** minParams считает обязательные параметры, но не учитывает их позиции. */
+        private static boolean hasMissingRequiredParameter(ParamSet set, int actual)
+        {
+            for (int i = actual; i < set.getParams().size(); i++)
+                if (!set.getParams().get(i).isDefaultValue())
+                    return true;
+            return false;
         }
 
         private boolean isBuiltInFunction()

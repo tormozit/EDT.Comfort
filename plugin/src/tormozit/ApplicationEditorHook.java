@@ -117,9 +117,13 @@ public class ApplicationEditorHook implements IStartup
     private static void hookWindow(IWorkbenchWindow window)
     {
         if (window.getActivePage() != null)
-            for (IEditorPart ed : window.getActivePage().getEditors())
-                if (EDITOR_ID.equals(ed.getSite().getId()))
+            // Не getEditors(): он создаёт все восстановленные вкладки, а проект при старте ещё не поднят.
+            for (IEditorReference ref : window.getActivePage().getEditorReferences())
+            {
+                IEditorPart ed = EDITOR_ID.equals(ref.getId()) ? ref.getEditor(false) : null;
+                if (ed != null)
                     hookEditor(ed);
+            }
 
         window.getPartService().addPartListener(new IPartListener2()
         {

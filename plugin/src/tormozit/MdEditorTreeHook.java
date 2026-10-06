@@ -792,6 +792,7 @@ public final class MdEditorTreeHook
                 return null;
             }
         });
+        ColumnVisibilityMenu.forTree(tree, "MdAttributes").add(column, "type", "Тип"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         installTypeColumnDoubleClick(tree, viewer);
         tree.setHeaderVisible(true);
         ThemeAwareColors.applyGridLines(tree);
@@ -906,6 +907,8 @@ public final class MdEditorTreeHook
                     + "». Двойной клик открывает элемент формы.")); //$NON-NLS-1$
             column.setMoveable(true);
             setFixedColumnWidth(tree, column, 90);
+            ColumnVisibilityMenu.forTree(tree, "MdAttributes") //$NON-NLS-1$
+                .add(column, "form." + form.title(), "forms", "<Формы>"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             viewerColumn.setLabelProvider(new ColumnLabelProvider()
             {
                 @Override
@@ -994,7 +997,7 @@ public final class MdEditorTreeHook
             || Boolean.TRUE.equals(column.getData(TYPE_COLUMN_WIDTH_LISTENER_MARKER)))
             return;
         column.setData(TYPE_COLUMN_WIDTH_LISTENER_MARKER, Boolean.TRUE);
-        column.addListener(SWT.Resize, event -> AttributesColumnWidthStore.saveType(column.getWidth()));
+        column.addListener(SWT.Resize, event -> AttributesColumnWidthStore.saveType(ColumnVisibilityMenu.savedWidth(column)));
     }
 
     /** Ширины колонок «Реквизиты» и «Тип» на вкладке «Данные» — между сеансами EDT. */
@@ -1917,6 +1920,8 @@ public final class MdEditorTreeHook
         setFixedColumnWidth(tree, swtColumn, ColumnWidthFit.headerIconColumnWidth());
         swtColumn.setResizable(false);
         swtColumn.setMoveable(false);
+        ColumnVisibilityMenu.forTree(tree, "MdAttributes") //$NON-NLS-1$
+            .add(swtColumn, "functionalOptions", "Функциональные опции"); //$NON-NLS-1$ //$NON-NLS-2$
         column.setLabelProvider(new ColumnLabelProvider()
         {
             @Override

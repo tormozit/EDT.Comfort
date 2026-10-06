@@ -381,6 +381,15 @@ public final class ComfortSettings
     /** Выделение слова по Ctrl+клику включено по умолчанию. */
     public static final boolean DEFAULT_CTRL_CLICK_SELECT_WORD = true;
 
+    /**
+     * Ключ: ускоренный переход по ячейкам табличного документа — перерисовка только старого и
+     * нового места выделения (см. {@code MoxelEditorHook.SelectionRepaint}).
+     */
+    public static final String PREF_MOXEL_FAST_CELL_NAVIGATION = "comfort.moxel.fastCellNavigation"; //$NON-NLS-1$
+
+    /** Ускоренный переход по ячейкам вмешивается в отрисовку EDT, поэтому по умолчанию выключен. */
+    public static final boolean DEFAULT_MOXEL_FAST_CELL_NAVIGATION = false;
+
     // ---- Hover hints (подсказки при наведении) ----
 
     /** Ключ: показывать ли всплывающие подсказки при удержании мыши на слове в модуле и XML. */
@@ -1254,6 +1263,15 @@ public final class ComfortSettings
         if (settings == null)
             return DEFAULT_CTRL_CLICK_SELECT_WORD;
         return settings.preferenceStore.getBoolean(PREF_CTRL_CLICK_SELECT_WORD);
+    }
+
+    /** Ускоренный переход по ячейкам табличного документа. */
+    public static boolean isMoxelFastCellNavigationEnabled()
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return DEFAULT_MOXEL_FAST_CELL_NAVIGATION;
+        return settings.preferenceStore.getBoolean(PREF_MOXEL_FAST_CELL_NAVIGATION);
     }
 
     // ---- Spell checking accessors ----

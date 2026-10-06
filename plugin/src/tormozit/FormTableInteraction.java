@@ -2618,21 +2618,32 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
     {
         if (column == null || column.isDisposed())
             return;
+        boolean exactFillBefore = isColumnsExactFill();
+        Global.tempLog("columnVisibility385", "table.setColumnHidden column=" + table.indexOf(column) //$NON-NLS-1$ //$NON-NLS-2$
+            + " hidden=" + hidden + " before=" + column.getWidth() + " requested=" + widthWhenVisible //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " exactFillBefore=" + exactFillBefore); //$NON-NLS-1$
         column.setData(COLUMN_HIDDEN_KEY, hidden ? Boolean.TRUE : null);
         int width = hidden ? 0 : Math.max(minColumnWidth(), widthWhenVisible);
-        if (column.getWidth() != width)
+        // Ширины и данные раскладки меняются вместе, до layout() хозяина меню.
+        // Иначе TableColumnLayout вернёт ширины, сохранённые до переключения видимости.
+        boolean previousAdjusting = selfAdjusting;
+        selfAdjusting = true;
+        try
         {
             // selfAdjusting — чтобы наш же setWidth не был принят за пользовательский drag границы
             // (иначе commitPendingResize подтянул бы скрываемую колонку до minColumnWidth()).
-            selfAdjusting = true;
-            try
-            {
+            if (column.getWidth() != width)
                 column.setWidth(width);
-            }
-            finally
-            {
-                selfAdjusting = false;
-            }
+            rebindColumnLayoutData();
+        }
+        finally
+        {
+            selfAdjusting = previousAdjusting;
+        }
+        if (exactFillBefore)
+        {
+            columnsFitBefore = true;
+            columnsExactFillBefore = true;
         }
         rememberVisualWidths();
         lastAutoFillClientWidth = -1;

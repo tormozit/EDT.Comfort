@@ -29,6 +29,7 @@ import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.events.SelectionAdapter;
 import org.eclipse.swt.events.SelectionEvent;
 import org.eclipse.swt.graphics.Rectangle;
+import org.eclipse.swt.graphics.Region;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
@@ -66,6 +67,7 @@ import com._1c.g5.v8.dt.moxel.sheet.ReadOnlyFormat;
 import com._1c.g5.v8.dt.moxel.sheet.Selection;
 import com._1c.g5.v8.dt.moxel.sheet.SheetAccessor;
 import com._1c.g5.v8.dt.moxel.sheet.TableSelection;
+import com._1c.g5.v8.dt.moxel.ui.editor.HeaderArea;
 import com._1c.g5.v8.dt.moxel.ui.editor.MoxelControl;
 import com._1c.g5.v8.dt.moxel.ui.editor.MoxelEditor;
 import com._1c.g5.v8.dt.moxel.ui.editor.MoxelViewer;
@@ -96,6 +98,7 @@ public class MoxelEditorHook implements IStartup
         {
             PasteCacheRepair.install();
             CellNavigationProbe.install(Display.getDefault());
+            SelectionRepaint.install(Display.getDefault());
             PlatformUI.getWorkbench().addWindowListener(new org.eclipse.ui.IWindowListener()
             {
                 @Override public void windowOpened(IWorkbenchWindow w)     { hookWindow(w); }
@@ -143,8 +146,13 @@ public class MoxelEditorHook implements IStartup
         window.getPartService().addPartListener(listener);
 
         if (window.getActivePage() != null)
-            for (IEditorPart ed : window.getActivePage().getEditors())
-                hookGranularEditorPart(ed);
+            // Не getEditors(): он создаёт все восстановленные вкладки, а проект при старте ещё не поднят.
+            for (org.eclipse.ui.IEditorReference ref : window.getActivePage().getEditorReferences())
+            {
+                IEditorPart ed = ref.getEditor(false);
+                if (ed != null)
+                    hookGranularEditorPart(ed);
+            }
     }
 
     private void hookGranularEditorPart(Object part)
@@ -492,6 +500,206 @@ public class MoxelEditorHook implements IStartup
     }
 
     /**
+     * Ускорение перехода по ячейкам (только Windows), по флажку «Ускорить переход по ячейкам
+     * табличного документа» ({@link ComfortSettings#isMoxelFastCellNavigationEnabled()}; по умолчанию
+     * выключен — вмешательство в отрисовку EDT). При смене выделения EDT помечает к перерисовке
+     * шапку столбцов и шапку строк целиком плюс прямоугольник выделения
+     * ({@link MoxelControl#invalidateSelection()}). Windows отдаёт в событие отрисовки один
+     * охватывающий прямоугольник — полоса сверху и полоса слева дают весь контрол, и макет рисуется
+     * целиком (сотни мс), хотя сама отрисовка EDT ограничена прямоугольником события.
+     *
+     * <p>Здесь та же область перерисовывается частями. До обработки ввода (фильтр) просим EDT
+     * пометить текущее выделение и запоминаем помеченное без шапок — это старое место рамки. После
+     * обработки (слушатель контрола, добавлен позже слушателей EDT) берём помеченную область,
+     * снимаем пометку целиком и синхронно рисуем по отдельности: старое место, новое место и
+     * участки шапок напротив них. Геометрию выделения считает только EDT.
+     *
+     * <p>Не вмешиваемся (остаётся штатная перерисовка), если до ввода уже была помеченная область
+     * или если после ввода помечено больше половины контрола (прокрутка, смена размеров). Флаг
+     * {@code SWT.NO_MERGE_PAINTS} для той же цели не подошёл: рамка выделения перестала двигаться.
+     */
+    private static final class SelectionRepaint implements Listener
+    {
+        private static final String AFTER_HOOKED = "tormozit.moxelSelectionRepaintHooked"; //$NON-NLS-1$
+
+        private MoxelControl pendingControl;
+        private Region pendingOld;
+
+        /** Только из UI-потока. */
+        static void install(Display display)
+        {
+            if (!"win32".equals(SWT.getPlatform())) //$NON-NLS-1$
+                return;
+            SelectionRepaint repaint = new SelectionRepaint();
+            display.addFilter(SWT.KeyDown, repaint);
+            display.addFilter(SWT.MouseDown, repaint);
+        }
+
+        /** Фильтр: до слушателей EDT. */
+        @Override
+        public void handleEvent(Event event)
+        {
+            if (!(event.widget instanceof MoxelControl))
+                return;
+            try
+            {
+                before((MoxelControl) event.widget);
+            }
+            catch (RuntimeException | LinkageError e)
+            {
+                clearPending();
+                Global.tempLog(CellNavigationProbe.LOG_TOPIC, "сужение перерисовки, сбой до ввода: " + e); //$NON-NLS-1$
+            }
+        }
+
+        private void clearPending()
+        {
+            if (pendingOld != null && !pendingOld.isDisposed())
+                pendingOld.dispose();
+            pendingOld = null;
+            pendingControl = null;
+        }
+
+        private void before(MoxelControl control)
+        {
+            clearPending();
+            if (control.isDisposed() || !ComfortSettings.isMoxelFastCellNavigationEnabled())
+                return;
+            if (control.getData(AFTER_HOOKED) == null)
+            {
+                control.setData(AFTER_HOOKED, Boolean.TRUE);
+                Listener after = e -> after(control);
+                control.addListener(SWT.KeyDown, after);
+                control.addListener(SWT.MouseDown, after);
+            }
+            Region old = Win32.updateRegion(control);
+            boolean alreadyDirty = !old.isEmpty();
+            old.dispose();
+            if (alreadyDirty)
+            {
+                Global.tempLog(CellNavigationProbe.LOG_TOPIC, "сужение перерисовки: пропуск, до ввода уже есть помеченная область"); //$NON-NLS-1$
+                return;
+            }
+            control.invalidateSelection();
+            old = Win32.updateRegion(control);
+            for (Rectangle header : headerRects(control))
+                old.subtract(header);
+            pendingControl = control;
+            pendingOld = old;
+        }
+
+        /** Слушатель контрола: после слушателей EDT. */
+        private void after(MoxelControl control)
+        {
+            Region old = pendingOld;
+            if (pendingControl != control || old == null)
+                return;
+            pendingControl = null;
+            pendingOld = null;
+            Region all = null;
+            try
+            {
+                if (control.isDisposed())
+                    return;
+                all = Win32.updateRegion(control);
+                if (all.isEmpty())
+                    return;
+                List<Rectangle> headers = headerRects(control);
+                for (Rectangle header : headers)
+                    all.subtract(header);
+                Rectangle oldPlace = old.getBounds();
+                all.subtract(old);
+                Rectangle newPlace = all.getBounds();
+                Rectangle client = control.getClientArea();
+                long limit = (long) client.width * client.height / 2;
+                if ((long) oldPlace.width * oldPlace.height > limit || (long) newPlace.width * newPlace.height > limit)
+                {
+                    Global.tempLog(CellNavigationProbe.LOG_TOPIC, "сужение перерисовки: пропуск, помечено много: было " //$NON-NLS-1$
+                        + oldPlace + ", стало " + newPlace + ", контрол " + client.width + "x" + client.height); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    return;
+                }
+                List<Rectangle> pieces = new ArrayList<>();
+                addPiece(pieces, oldPlace, 1);
+                addPiece(pieces, newPlace, 1);
+                int cells = pieces.size();
+                for (int i = 0; i < cells; i++)
+                {
+                    Rectangle cell = pieces.get(i);
+                    for (Rectangle header : headers)
+                    {
+                        addPiece(pieces, header.intersection(new Rectangle(cell.x, header.y, cell.width, header.height)), 0);
+                        addPiece(pieces, header.intersection(new Rectangle(header.x, cell.y, header.width, cell.height)), 0);
+                    }
+                }
+                Win32.validateAll(control);
+                for (Rectangle piece : pieces)
+                {
+                    if (control.isDisposed())
+                        return;
+                    control.redraw(piece.x, piece.y, piece.width, piece.height, false);
+                    control.update();
+                }
+                Global.tempLog(CellNavigationProbe.LOG_TOPIC, "сужение перерисовки: частей=" + pieces.size() //$NON-NLS-1$
+                    + ", было " + oldPlace + ", стало " + newPlace + ", шапок=" + headers.size()); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            catch (RuntimeException | LinkageError e)
+            {
+                Global.tempLog(CellNavigationProbe.LOG_TOPIC, "сужение перерисовки, сбой после ввода: " + e); //$NON-NLS-1$
+                if (!control.isDisposed())
+                    control.redraw();
+            }
+            finally
+            {
+                if (all != null)
+                    all.dispose();
+                old.dispose();
+            }
+        }
+
+        private static void addPiece(List<Rectangle> pieces, Rectangle rect, int inflate)
+        {
+            if (rect == null || rect.width <= 0 || rect.height <= 0)
+                return;
+            pieces.add(new Rectangle(rect.x - inflate, rect.y - inflate, rect.width + 2 * inflate, rect.height + 2 * inflate));
+        }
+
+        /** Области шапок строк и столбцов в координатах контрола; пусто, если поле EDT недоступно. */
+        private static List<Rectangle> headerRects(MoxelControl control)
+        {
+            List<Rectangle> result = new ArrayList<>();
+            Object areas = Global.getField(control, "headerAreas"); //$NON-NLS-1$
+            if (!(areas instanceof List<?>))
+                return result;
+            for (Object area : (List<?>) areas)
+            {
+                if (!(area instanceof HeaderArea))
+                    continue;
+                Rectangle r = ((HeaderArea) area).getDevicePosition();
+                if (r != null && r.width > 0 && r.height > 0)
+                    result.add(new Rectangle(r.x, r.y, r.width, r.height));
+            }
+            return result;
+        }
+
+        /** Вызовы Win32 — в отдельном классе, чтобы не грузить {@code OS} на других платформах. */
+        private static final class Win32
+        {
+            /** Помеченная к перерисовке область контрола; вызывающий освобождает. */
+            static Region updateRegion(Control control)
+            {
+                Region region = new Region(control.getDisplay());
+                org.eclipse.swt.internal.win32.OS.GetUpdateRgn(control.handle, region.handle, false);
+                return region;
+            }
+
+            static void validateAll(Control control)
+            {
+                org.eclipse.swt.internal.win32.OS.ValidateRect(control.handle, null);
+            }
+        }
+    }
+
+    /**
      * Временная диагностика: медленный переход по ячейкам табличного документа (тормозит сама EDT).
      * Каждое нажатие клавиши или кнопки мыши в {@link MoxelControl} открывает эпизод; пока он идёт,
      * фоновый поток раз в {@link #SAMPLE_MS} мс снимает стек UI-потока. Эпизод считается дошедшим до
@@ -501,34 +709,40 @@ public class MoxelEditorHook implements IStartup
      * и т.п.); в нём учитываются только сэмплы, где UI-поток занят.
      *
      * <p>Запись в {@code .tmp/temp-logs/moxel-cell-nav.log} — на каждый эпизод, без порогов: время
-     * до простоя, паузы GC, число сэмплов, методы EDT и плагина по числу попаданий (включительно)
-     * и самые частые стеки. Сам ввод не трогается, в UI-потоке — только отметки времени.
+     * до простоя, паузы GC, число сэмплов. Методы EDT по числу попаданий (включительно) и самые частые
+     * стеки дописываются только к медленному эпизоду ({@link #SLOW_MS}). Сам ввод не трогается,
+     * в UI-потоке — только отметки времени.
      */
     private static final class CellNavigationProbe implements Listener
     {
         private static final String LOG_TOPIC = "moxel-cell-nav"; //$NON-NLS-1$
         private static final long SAMPLE_MS = 10;
         private static final long TAIL_MS = 700;
-        /** Только для поля {@code slow} в записи; на то, пишется ли запись, не влияет. */
+        /** Поле {@code slow} в записи и порог подробностей (методы, стеки); на то, пишется ли запись, не влияет. */
         private static final long SLOW_MS = 100;
-        private static final int STACK_DEPTH = 45;
-        private static final int TOP_STACKS = 3;
-        private static final int TOP_FRAMES = 20;
+        private static final int STACK_DEPTH = 60;
+        private static final int TOP_STACKS = 5;
+        private static final int TOP_FRAMES = 40;
+        private static final int TOP_LEAVES = 15;
+        private static final String PAINT_CLASS = "com._1c.g5.v8.dt.moxel.ui.editor.MoxelControl"; //$NON-NLS-1$
+        private static final String PAINT_METHOD = "onPaint"; //$NON-NLS-1$
 
         private static final class Episode
         {
             final long startNs = System.nanoTime();
             final String input;
             final String cellBefore;
+            final String controlSize;
             /** Пишет только UI-поток, читает поток сэмплера. */
             volatile int inputs = 1;
             volatile long idleNs;
             volatile String cellAfter;
 
-            Episode(String input, String cellBefore)
+            Episode(String input, String cellBefore, String controlSize)
             {
                 this.input = input;
                 this.cellBefore = cellBefore;
+                this.controlSize = controlSize;
             }
         }
 
@@ -553,7 +767,11 @@ public class MoxelEditorHook implements IStartup
             Thread thread = new Thread(probe::sampleLoop, "Комфорт: диагностика перехода по ячейкам"); //$NON-NLS-1$
             thread.setDaemon(true);
             thread.start();
-            Global.tempLog(LOG_TOPIC, "старт: диагностика установлена, период сэмплов " + SAMPLE_MS + " мс"); //$NON-NLS-1$ //$NON-NLS-2$
+            org.eclipse.swt.graphics.Point dpi = display.getDPI();
+            Global.tempLog(LOG_TOPIC, "старт: диагностика установлена, период сэмплов " + SAMPLE_MS + " мс" //$NON-NLS-1$ //$NON-NLS-2$
+                + ", сеанс Windows=" + System.getenv("SESSIONNAME") //$NON-NLS-1$ //$NON-NLS-2$
+                + ", dpi=" + dpi.x + ", глубина цвета=" + display.getDepth() //$NON-NLS-1$ //$NON-NLS-2$
+                + ", экран=" + display.getBounds().width + "x" + display.getBounds().height); //$NON-NLS-1$ //$NON-NLS-2$
         }
 
         @Override
@@ -571,7 +789,8 @@ public class MoxelEditorHook implements IStartup
                     running.inputs++;
                     return;
                 }
-                Episode episode = new Episode(describeInput(event), describeCell(control));
+                org.eclipse.swt.graphics.Point size = control.getSize();
+                Episode episode = new Episode(describeInput(event), describeCell(control), size.x + "x" + size.y); //$NON-NLS-1$
                 display.asyncExec(() ->
                 {
                     episode.cellAfter = describeCell(control);
@@ -672,10 +891,12 @@ public class MoxelEditorHook implements IStartup
         {
             Map<String, Integer> stacks = new HashMap<>();
             Map<String, Integer> frames = new HashMap<>();
+            Map<String, Integer> paintFrames = new HashMap<>();
+            Map<String, Integer> paintLeaves = new HashMap<>();
             long gcStart = gcMillis();
+            int paintSamples = 0;
             int samples = 0;
             int tailBusy = 0;
-            int withPlugin = 0;
             boolean superseded = false;
             while (true)
             {
@@ -698,23 +919,42 @@ public class MoxelEditorHook implements IStartup
                         tailBusy++;
                     else
                         samples++;
+                    // Ниже цикла сообщений кадры у всех сэмплов одинаковые — в запись не идут
+                    int loopFrame = trace.length;
+                    int paintFrame = -1;
+                    for (int i = 0; i < trace.length; i++)
+                    {
+                        String cls = trace[i].getClassName();
+                        String method = trace[i].getMethodName();
+                        if (paintFrame < 0 && PAINT_METHOD.equals(method) && PAINT_CLASS.equals(cls))
+                            paintFrame = i;
+                        if ("readAndDispatch".equals(method) && "org.eclipse.swt.widgets.Display".equals(cls)) //$NON-NLS-1$ //$NON-NLS-2$
+                        {
+                            loopFrame = i;
+                            break;
+                        }
+                    }
                     StringBuilder key = new StringBuilder(tail ? "\n    [хвост]" : ""); //$NON-NLS-1$ //$NON-NLS-2$
-                    for (int i = 0; i < Math.min(trace.length, STACK_DEPTH); i++)
+                    for (int i = 0; i < Math.min(loopFrame, STACK_DEPTH); i++)
                         key.append("\n    ").append(trace[i]); //$NON-NLS-1$
                     stacks.merge(key.toString(), 1, Integer::sum);
                     Set<String> seen = new java.util.HashSet<>();
-                    boolean plugin = false;
-                    for (StackTraceElement frame : trace)
+                    for (int i = 0; i < loopFrame; i++)
                     {
-                        String cls = frame.getClassName();
-                        boolean own = cls.startsWith("tormozit."); //$NON-NLS-1$
-                        plugin |= own;
-                        if ((own || cls.startsWith("com._1c.") || cls.startsWith("com.e1c.")) //$NON-NLS-1$ //$NON-NLS-2$
-                            && seen.add(cls + "." + frame.getMethodName())) //$NON-NLS-1$
-                            frames.merge(cls + "." + frame.getMethodName(), 1, Integer::sum); //$NON-NLS-1$
+                        String cls = trace[i].getClassName();
+                        String name = cls + "." + trace[i].getMethodName(); //$NON-NLS-1$
+                        if (!seen.add(name))
+                            continue;
+                        if (paintFrame >= 0 && i <= paintFrame)
+                            paintFrames.merge(name, 1, Integer::sum);
+                        else if (cls.startsWith("com._1c.") || cls.startsWith("com.e1c.")) //$NON-NLS-1$ //$NON-NLS-2$
+                            frames.merge(name, 1, Integer::sum);
                     }
-                    if (plugin)
-                        withPlugin++;
+                    if (paintFrame >= 0)
+                    {
+                        paintSamples++;
+                        paintLeaves.merge(trace[0].toString(), 1, Integer::sum);
+                    }
                 }
                 Thread.sleep(SAMPLE_MS);
             }
@@ -727,18 +967,30 @@ public class MoxelEditorHook implements IStartup
                 .append(" gcMs=").append(gcMillis() - gcStart) //$NON-NLS-1$
                 .append(" сэмплов=").append(samples) //$NON-NLS-1$
                 .append(" хвостЗанятСэмплов=").append(tailBusy) //$NON-NLS-1$
-                .append(" сэмпловСКодомПлагина=").append(withPlugin) //$NON-NLS-1$
+                .append(" сэмпловОтрисовкиМакета=").append(paintSamples) //$NON-NLS-1$
+                .append(" размерМакета=").append(episode.controlSize) //$NON-NLS-1$
                 .append(superseded ? " хвостПрерванНовымВводом" : ""); //$NON-NLS-1$ //$NON-NLS-2$
-            sb.append("\n  методы EDT и плагина по числу сэмплов (включительно):"); //$NON-NLS-1$
-            frames.entrySet().stream()
-                .sorted((a, b) -> b.getValue() - a.getValue())
-                .limit(TOP_FRAMES)
-                .forEach(e -> sb.append("\n    ").append(e.getValue()).append("  ").append(e.getKey())); //$NON-NLS-1$ //$NON-NLS-2$
-            stacks.entrySet().stream()
-                .sorted((a, b) -> b.getValue() - a.getValue())
-                .limit(TOP_STACKS)
-                .forEach(e -> sb.append("\n  стек, сэмплов=").append(e.getValue()).append(e.getKey())); //$NON-NLS-1$
+            // Строка эпизода пишется всегда; методы и стеки — только у медленного эпизода, иначе лог нечитаем
+            if (durMs >= SLOW_MS)
+            {
+                appendTop(sb, "отрисовка макета, методы по числу сэмплов (включительно)", paintFrames, TOP_FRAMES); //$NON-NLS-1$
+                appendTop(sb, "отрисовка макета, вершина стека", paintLeaves, TOP_LEAVES); //$NON-NLS-1$
+                appendTop(sb, "вне отрисовки макета, методы EDT (включительно)", frames, TOP_FRAMES); //$NON-NLS-1$
+                stacks.entrySet().stream()
+                    .sorted((a, b) -> b.getValue() - a.getValue())
+                    .limit(TOP_STACKS)
+                    .forEach(e -> sb.append("\n  стек, сэмплов=").append(e.getValue()).append(e.getKey())); //$NON-NLS-1$
+            }
             Global.tempLog(LOG_TOPIC, sb.toString());
+        }
+
+        private static void appendTop(StringBuilder sb, String title, Map<String, Integer> counts, int limit)
+        {
+            sb.append("\n  ").append(title).append(':'); //$NON-NLS-1$
+            counts.entrySet().stream()
+                .sorted((a, b) -> b.getValue() - a.getValue())
+                .limit(limit)
+                .forEach(e -> sb.append("\n    ").append(e.getValue()).append("  ").append(e.getKey())); //$NON-NLS-1$ //$NON-NLS-2$
         }
 
         /** UI-поток ждёт сообщений: {@code Display.sleep} у вершины стека. */

@@ -353,6 +353,32 @@ final class TypeByNameAdvisor
     }
 
     /**
+     * Имя типа ссылки объекта, которому принадлежит команда, если {@code typeModel} — модель
+     * свойства «Тип параметра команды» ({@code ITypeDescriptionModel} поля либо модель диалога
+     * «Редактирование типа данных»). Это самый вероятный тип параметра, поэтому его строка
+     * становится текущей, пока тип не выбран (issue 707).
+     *
+     * @return {@code TypeItem.getName()} или {@code null}: владелец типа не команда, команда общая
+     *         либо у её объекта нет ссылочного типа
+     */
+    static String commandOwnerRefTypeName(Object typeModel)
+    {
+        if (typeModel == null)
+            return null;
+        for (String getter : new String[] { "getParent", "getParentContext" }) //$NON-NLS-1$ //$NON-NLS-2$
+        {
+            Object parent = Global.invoke(typeModel, getter);
+            if (parent instanceof com._1c.g5.v8.dt.metadata.mdclass.BasicCommand command
+                && command.eContainer() instanceof com._1c.g5.v8.dt.metadata.mdclass.MdObject owner)
+            {
+                com._1c.g5.v8.dt.mcore.TypeItem refType = MdEditorDefinedTypesPageHook.refTypeOf(owner);
+                return refType != null ? refType.getName() : null;
+            }
+        }
+        return null;
+    }
+
+    /**
      * {@link com._1c.g5.v8.dt.mcore.TypeItem} из доступных типов {@code typeModel}
      * ({@code ITypeDescriptionModel.getTypes(false)}), имя которого (рус. или англ.) совпадает
      * с {@code typeName}; {@code null}, если такого нет.

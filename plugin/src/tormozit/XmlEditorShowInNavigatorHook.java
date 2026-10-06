@@ -88,8 +88,13 @@ public class XmlEditorShowInNavigatorHook implements IStartup
 
         if (window.getActivePage() != null)
         {
-            for (IEditorPart ed : window.getActivePage().getEditors())
-                hookEditor(ed);
+            // Не getEditors(): он создаёт все восстановленные вкладки, а проект при старте ещё не поднят.
+            for (org.eclipse.ui.IEditorReference ref : window.getActivePage().getEditorReferences())
+            {
+                IEditorPart ed = ref.getEditor(false);
+                if (ed != null)
+                    hookEditor(ed);
+            }
         }
     }
 

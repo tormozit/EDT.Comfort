@@ -65,6 +65,9 @@ public class ComfortInitializer extends AbstractPreferenceInitializer
             ComfortSettings.PREF_CTRL_CLICK_SELECT_WORD,
             ComfortSettings.DEFAULT_CTRL_CLICK_SELECT_WORD);
         store.setDefault(
+            ComfortSettings.PREF_MOXEL_FAST_CELL_NAVIGATION,
+            ComfortSettings.DEFAULT_MOXEL_FAST_CELL_NAVIGATION);
+        store.setDefault(
             ComfortSettings.PREF_COMPARE_CURRENT_LINES_VISIBLE,
             ComfortSettings.DEFAULT_COMPARE_CURRENT_LINES_VISIBLE);
         store.setDefault(

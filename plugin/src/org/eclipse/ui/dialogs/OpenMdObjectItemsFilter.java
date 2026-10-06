@@ -69,6 +69,17 @@ public class OpenMdObjectItemsFilter extends FilteredItemsSelectionDialog.ItemsF
     }
 
     @Override
+    public boolean isSubFilter(ItemsFilter filter) {
+        // «рег» ищет по имени, а «рег.кур» — по типу и имени: результат первого
+        // не содержит всех кандидатов второго. Штатный SearchPattern этого не знает.
+        // Для иерархического поиска запрашиваем объекты заново, включая созданные
+        // после предыдущего поиска; плоский поиск сохраняет штатный кэш.
+        boolean hierarchical = matcher.hasMultipleSections()
+                || filter instanceof OpenMdObjectItemsFilter next && next.matcher.hasMultipleSections();
+        return !hierarchical && super.isSubFilter(filter);
+    }
+
+    @Override
     public boolean matchItem(Object item) {
         if (matcher.isEmpty) {
             return isHistoryElement(item);

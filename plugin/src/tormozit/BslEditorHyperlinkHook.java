@@ -1,12 +1,15 @@
 package tormozit;
 
 import java.lang.reflect.Field;
+import java.util.ArrayList;
+import java.util.List;
 
 import org.eclipse.core.commands.ExecutionEvent;
 import org.eclipse.core.commands.ExecutionException;
 import org.eclipse.core.commands.IExecutionListener;
 import org.eclipse.core.commands.NotHandledException;
 import org.eclipse.emf.ecore.EObject;
+import org.eclipse.emf.ecore.EStructuralFeature;
 import org.eclipse.emf.ecore.util.EcoreUtil;
 import org.eclipse.jface.text.IRegion;
 import org.eclipse.jface.text.ITextViewer;
@@ -42,24 +45,31 @@ import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.mcore.McorePackage;
 import com._1c.g5.v8.dt.mcore.TypeItem;
 import com._1c.g5.v8.dt.md.resource.MdTypeUtil;
+import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
+import com._1c.g5.v8.dt.md.ui.editor.base.EditorPageDescriptor;
+import com._1c.g5.v8.dt.md.ui.editor.base.IEditorPagesRegistry;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
+import com._1c.g5.v8.dt.ui.util.OpenHelper;
 
 /**
  * История переходов по ссылкам BSL-редактора (Ctrl+клик), issue 664.
  * Команды перехода к определению сохраняют штатные обработчики.
  * Дополнительно: переход по имени типа объекта метаданных в комментарии
  * (Ctrl+клик и команда «Перейти к определению»).
+ * По Ctrl+наведению на объект метаданных предлагает его модули, issue 708.
  */
 public final class BslEditorHyperlinkHook implements IStartup
 {
     @Override
     public void earlyStartup()
     {
+        Global.tempLog("bsl-metadata-links", "startup issue708 diagnostics"); //$NON-NLS-1$ //$NON-NLS-2$
         Display.getDefault().asyncExec(() ->
         {
             Display display = Display.getDefault();
             display.addFilter(SWT.MouseMove, BslEditorHyperlinkHook::attach);
             display.addFilter(SWT.MouseDown, BslEditorHyperlinkHook::attach);
+            Global.tempLog("bsl-metadata-links", "mouse filters installed"); //$NON-NLS-1$ //$NON-NLS-2$
             ICommandService commands = PlatformUI.getWorkbench().getService(ICommandService.class);
             if (commands != null)
                 commands.addExecutionListener(new OpenDeclarationListener());
@@ -217,19 +227,162 @@ public final class BslEditorHyperlinkHook implements IStartup
         return Character.isLetterOrDigit(c) || c == '_' || c == '.';
     }
 
+    /**
+     * Расширяем только список выбора ссылок: одиночный переход и штатные ссылки
+     * форм/методов сохраняются. URI объекта разрешаем в ResourceSet документа,
+     * как в BslSideHintOutlineInstall.resolveHandlerTargetInResourceSet.
+     */
+    private static IHyperlink[] metadataLinks(ITextViewer viewer, IHyperlink[] links,
+        BslXtextEditor source, IWorkbenchPage page)
+    {
+        Global.tempLog("bsl-metadata-links", "expand enter links=" + links.length); //$NON-NLS-1$ //$NON-NLS-2$
+        if (!(viewer.getDocument() instanceof IXtextDocument document))
+        {
+            Global.tempLog("bsl-metadata-links", "expand skip document=" + viewer.getDocument()); //$NON-NLS-1$ //$NON-NLS-2$
+            return links;
+        }
+        try
+        {
+            return document.readOnly(resource ->
+            {
+                if (resource == null)
+                {
+                    Global.tempLog("bsl-metadata-links", "expand skip null resource"); //$NON-NLS-1$ //$NON-NLS-2$
+                    return links;
+                }
+                List<IHyperlink> result = new ArrayList<>();
+                for (IHyperlink link : links)
+                {
+                    Global.tempLog("bsl-metadata-links", "candidate class=" + link.getClass().getName() //$NON-NLS-1$ //$NON-NLS-2$
+                        + " text=" + link.getHyperlinkText() //$NON-NLS-1$
+                        + " uri=" + (link instanceof XtextHyperlink xtext ? xtext.getURI() : null)); //$NON-NLS-1$
+                    EObject target = null;
+                    if (link instanceof TypeHyperlink type)
+                        target = type.target;
+                    else if (link instanceof XtextHyperlink xtext && xtext.getURI() != null
+                        && !"bsl".equalsIgnoreCase(xtext.getURI().fileExtension())) //$NON-NLS-1$
+                        target = resource.getResourceSet().getEObject(xtext.getURI(), true);
+                    // EDT ссылается на producedTypes/managerType/type, а не на корень МД.
+                    // Как для имени типа в комментарии, берём объект — производитель типа.
+                    boolean typeTarget = target instanceof TypeItem;
+                    if (target instanceof TypeItem type)
+                    {
+                        Global.tempLog("bsl-metadata-links", "resolve type producer for=" + target.eClass().getName()); //$NON-NLS-1$ //$NON-NLS-2$
+                        target = MdTypeUtil.getTypeProducer(type);
+                    }
+                    EStructuralFeature objectModule = target instanceof MdObject
+                        ? target.eClass().getEStructuralFeature("objectModule") : null; //$NON-NLS-1$
+                    EStructuralFeature managerModule = target instanceof MdObject
+                        ? target.eClass().getEStructuralFeature("managerModule") : null; //$NON-NLS-1$
+                    String dataPage = target instanceof MdObject ? dataPageId(target, page) : null;
+                    Global.tempLog("bsl-metadata-links", "resolved target=" //$NON-NLS-1$ //$NON-NLS-2$
+                        + (target == null ? null : target.eClass().getName())
+                        + " proxy=" + (target != null && target.eIsProxy()) //$NON-NLS-1$
+                        + " objectModule=" + (objectModule != null) + " managerModule=" + (managerModule != null)); //$NON-NLS-1$ //$NON-NLS-2$
+                    // Имена и типы свойств подтверждены в .tmp/bundles/mdclass/model/MdClass.xcore.
+                    if (objectModule == null && managerModule == null && dataPage == null)
+                    {
+                        result.add(link);
+                        continue;
+                    }
+                    if (objectModule != null)
+                        result.add(new TypeHyperlink(link.getHyperlinkRegion(), "Модуль объекта",
+                            (MdObject) target, objectModule, source, page));
+                    if (managerModule != null)
+                        result.add(new TypeHyperlink(link.getHyperlinkRegion(), "Модуль менеджера",
+                            (MdObject) target, managerModule, source, page));
+                    if (dataPage != null)
+                        result.add(new DataHyperlink(link.getHyperlinkRegion(), (MdObject) target,
+                            dataPage, source, page));
+                    // У штатной ссылки сохраняем обработчик открытия объекта.
+                    result.add(!typeTarget && link instanceof XtextHyperlink xtext
+                        ? new HistoryHyperlink(xtext, source, page, "Объект")
+                        : new TypeHyperlink(link.getHyperlinkRegion(), "Объект", (MdObject) target,
+                            source, page));
+                }
+                Global.tempLog("bsl-metadata-links", "expand result=" + result.size()); //$NON-NLS-1$ //$NON-NLS-2$
+                return result.toArray(IHyperlink[]::new);
+            });
+        }
+        catch (RuntimeException | LinkageError e)
+        {
+            Global.tempLogException("bsl-metadata-links", "Cannot expand hyperlinks", e); //$NON-NLS-1$ //$NON-NLS-2$
+            return links;
+        }
+    }
+
+    private static String dataPageId(EObject target, IWorkbenchPage page)
+    {
+        OpenHelper helper = new OpenHelper(page);
+        var input = helper.getEditorInput(target, null, null);
+        if (input == null)
+            return null;
+        String editorId = helper.getEditorId(input);
+        if (editorId == null)
+            return null;
+        // Тот же реестр, которым DtGranularEditor.addPages наполняет редактор.
+        for (EditorPageDescriptor descriptor : IEditorPagesRegistry.INSTANCE.getEditorPages(editorId, target))
+            if (descriptor.getPageId().endsWith(".pages.data")) //$NON-NLS-1$
+                return descriptor.getPageId();
+        return null;
+    }
+
+    private static final class DataHyperlink implements IHyperlink
+    {
+        private final IRegion region;
+        private final MdObject target;
+        private final String pageId;
+        private final BslXtextEditor source;
+        private final IWorkbenchPage page;
+
+        DataHyperlink(IRegion region, MdObject target, String pageId, BslXtextEditor source, IWorkbenchPage page)
+        {
+            this.region = region;
+            this.target = target;
+            this.pageId = pageId;
+            this.source = source;
+            this.page = page;
+        }
+
+        @Override public IRegion getHyperlinkRegion() { return region; }
+        @Override public String getTypeLabel() { return null; }
+        @Override public String getHyperlinkText() { return "Данные"; }
+
+        @Override
+        public void open()
+        {
+            try (HistoryScope scope = new HistoryScope(page, source))
+            {
+                IEditorPart editor = new OpenHelper(page).openEditor(target);
+                boolean selected = editor instanceof DtGranularEditor<?> granular
+                    && granular.setActivePage(pageId) != null;
+                Global.tempLog("bsl-metadata-links", "open data page=" + pageId + " selected=" + selected); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                scope.opened = selected;
+            }
+        }
+    }
+
     private static final class TypeHyperlink implements IHyperlink
     {
         private final IRegion region;
         private final String name;
         private final MdObject target;
+        private final EStructuralFeature moduleFeature;
         private final BslXtextEditor source;
         private final IWorkbenchPage page;
 
         TypeHyperlink(IRegion region, String name, MdObject target, BslXtextEditor source, IWorkbenchPage page)
         {
+            this(region, name, target, null, source, page);
+        }
+
+        TypeHyperlink(IRegion region, String name, MdObject target, EStructuralFeature moduleFeature,
+            BslXtextEditor source, IWorkbenchPage page)
+        {
             this.region = region;
             this.name = name;
             this.target = target;
+            this.moduleFeature = moduleFeature;
             this.source = source;
             this.page = page;
         }
@@ -243,8 +396,15 @@ public final class BslEditorHyperlinkHook implements IStartup
         {
             try (HistoryScope scope = new HistoryScope(page, source))
             {
-                CompareConfigOpenObjectHandler.openInEditor(target, source, source.getSite().getShell());
-                scope.opened = true;
+                // OpenHelper.getFile использует feature именно для открытия BSL-модуля
+                // (подтверждено в .tmp/bundles/dt-ui/OpenHelper.bytecode.javap.txt).
+                if (moduleFeature != null)
+                    scope.opened = new OpenHelper(page).openEditor(target, moduleFeature) != null;
+                else
+                {
+                    CompareConfigOpenObjectHandler.openInEditor(target, source, source.getSite().getShell());
+                    scope.opened = true;
+                }
             }
         }
     }
@@ -254,17 +414,27 @@ public final class BslEditorHyperlinkHook implements IStartup
         if (!(event.widget instanceof StyledText text) || text.isDisposed()
             || (event.stateMask & SWT.MOD1) == 0 || !PlatformUI.isWorkbenchRunning())
             return;
+        Global.tempLog("bsl-metadata-links", "attach event=" + event.type); //$NON-NLS-1$ //$NON-NLS-2$
         IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
         IWorkbenchPage page = window == null ? null : window.getActivePage();
         BslXtextEditor editor = page == null ? null : GetRef.getActiveBslEditor(page.getActivePart());
         if (editor == null)
+        {
+            Global.tempLog("bsl-metadata-links", "attach skip no BSL editor part=" + (page == null ? null : page.getActivePart())); //$NON-NLS-1$ //$NON-NLS-2$
             return;
+        }
         ITextViewer viewer = editor.getInternalSourceViewer();
         if (viewer == null || viewer.getTextWidget() != text)
+        {
+            Global.tempLog("bsl-metadata-links", "attach skip viewer mismatch"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
+        }
         Object value = Global.getField(viewer, "fHyperlinkDetectors");
         if (!(value instanceof IHyperlinkDetector[] detectors))
+        {
+            Global.tempLog("bsl-metadata-links", "attach skip detectors=" + value); //$NON-NLS-1$ //$NON-NLS-2$
             return;
+        }
         // TextViewer и HyperlinkManager используют один массив (проверено в
         // .tmp/bundles/jface-text/). setHyperlinkDetectors вызвал бы dispose
         // действующих детекторов. Меняем только элементы общего массива.
@@ -273,6 +443,8 @@ public final class BslEditorHyperlinkHook implements IStartup
             for (int i = 0; i < detectors.length; i++)
             {
                 IHyperlinkDetector detector = detectors[i];
+                Global.tempLog("bsl-metadata-links", "detector index=" + i + " class=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + (detector == null ? null : detector.getClass().getName()));
                 if (detector == null || detector instanceof HistoryDetector
                     || !"com._1c.g5.v8.dt.bsl.ui.editor.CustomHyperlinkDetector"
                         .equals(detector.getClass().getName()))
@@ -280,6 +452,7 @@ public final class BslEditorHyperlinkHook implements IStartup
                 detectors[i] = detector instanceof IHyperlinkDetectorExtension2
                     ? new ModifiedHistoryDetector(detector, editor, page)
                     : new HistoryDetector(detector, editor, page);
+                Global.tempLog("bsl-metadata-links", "detector wrapped index=" + i); //$NON-NLS-1$ //$NON-NLS-2$
             }
         }
     }
@@ -300,13 +473,19 @@ public final class BslEditorHyperlinkHook implements IStartup
         @Override
         public IHyperlink[] detectHyperlinks(ITextViewer viewer, IRegion region, boolean multiple)
         {
+            Global.tempLog("bsl-metadata-links", "detect enter multiple=" + multiple //$NON-NLS-1$ //$NON-NLS-2$
+                + " offset=" + (region == null ? null : region.getOffset())); //$NON-NLS-1$
             IHyperlink[] links = delegate.detectHyperlinks(viewer, region, multiple);
+            Global.tempLog("bsl-metadata-links", "detect stock links=" + (links == null ? null : links.length)); //$NON-NLS-1$ //$NON-NLS-2$
             if (links == null || links.length == 0)
             {
                 IHyperlink type = region == null ? null : typeLink(source, page, viewer, region.getOffset());
-                return type == null ? links : new IHyperlink[] { type };
+                Global.tempLog("bsl-metadata-links", "detect fallback type=" + (type == null ? null : type.getHyperlinkText())); //$NON-NLS-1$ //$NON-NLS-2$
+                if (type == null)
+                    return links;
+                links = new IHyperlink[] { type };
             }
-            IHyperlink[] result = links.clone();
+            IHyperlink[] result = multiple ? metadataLinks(viewer, links, source, page) : links.clone();
             for (int i = 0; i < result.length; i++)
             {
                 // Ссылки на строки BSL оставляем штатными. Для реквизита
@@ -315,6 +494,7 @@ public final class BslEditorHyperlinkHook implements IStartup
                     && !"bsl".equalsIgnoreCase(link.getURI().fileExtension()))
                     result[i] = new HistoryHyperlink(link, source, page);
             }
+            Global.tempLog("bsl-metadata-links", "detect result=" + result.length); //$NON-NLS-1$ //$NON-NLS-2$
             return result;
         }
 
@@ -344,19 +524,26 @@ public final class BslEditorHyperlinkHook implements IStartup
     private static final class HistoryHyperlink implements IHyperlink
     {
         private final XtextHyperlink delegate;
+        private final String text;
         private final BslXtextEditor source;
         private final IWorkbenchPage page;
 
         HistoryHyperlink(XtextHyperlink delegate, BslXtextEditor source, IWorkbenchPage page)
         {
+            this(delegate, source, page, delegate.getHyperlinkText());
+        }
+
+        HistoryHyperlink(XtextHyperlink delegate, BslXtextEditor source, IWorkbenchPage page, String text)
+        {
             this.delegate = delegate;
+            this.text = text;
             this.source = source;
             this.page = page;
         }
 
         @Override public IRegion getHyperlinkRegion() { return delegate.getHyperlinkRegion(); }
         @Override public String getTypeLabel() { return delegate.getTypeLabel(); }
-        @Override public String getHyperlinkText() { return delegate.getHyperlinkText(); }
+        @Override public String getHyperlinkText() { return text; }
 
         @Override
         public void open()
