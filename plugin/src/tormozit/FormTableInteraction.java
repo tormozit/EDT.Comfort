@@ -198,6 +198,7 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
     private boolean externalMenuPopulation;
     private ViewerFilter columnValueViewerFilter;
     private Runnable substringFilterClearer;
+    private Runnable columnFilterChangeListener;
     private Image filterGlyph;
 
     private Canvas headerSeparator;
@@ -713,6 +714,17 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
     void setSubstringFilterClearer(Runnable substringFilterClearer)
     {
         this.substringFilterClearer = substringFilterClearer;
+    }
+
+    /**
+     * Оповещение об изменении набора отборов по значениям колонок (включение, снятие одного или
+     * всех). Вызывается при каждом пересчёте значков отбора, в том числе когда набор не изменился,
+     * — слушатель сам сверяет состояние через {@link #isColumnFiltered}. Менять отборы прямо из
+     * слушателя нельзя (идёт обновление таблицы) — только отложенно.
+     */
+    void setColumnFilterChangeListener(Runnable columnFilterChangeListener)
+    {
+        this.columnFilterChangeListener = columnFilterChangeListener;
     }
 
     /**
@@ -1477,6 +1489,12 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
     public boolean isColumnFiltered(int column)
     {
         return columnValueFilters.containsKey(Integer.valueOf(column));
+    }
+
+    /** Значение отбора по этой колонке; отбора нет — {@code null}. */
+    public String columnFilterValue(int column)
+    {
+        return columnValueFilters.get(Integer.valueOf(column));
     }
 
     @Override
@@ -3201,6 +3219,8 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
     {
         if (table == null || table.isDisposed())
             return;
+        if (columnFilterChangeListener != null)
+            columnFilterChangeListener.run();
         List<Integer> stale = new ArrayList<>();
         for (Map.Entry<Integer, Canvas> entry : filterIndicators.entrySet())
         {

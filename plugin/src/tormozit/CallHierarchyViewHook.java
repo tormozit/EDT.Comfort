@@ -25,6 +25,7 @@ import org.eclipse.jface.action.Separator;
 import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.jface.layout.TableColumnLayout;
 import org.eclipse.jface.viewers.ColumnPixelData;
+import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider;
 import org.eclipse.jface.viewers.IBaseLabelProvider;
 import org.eclipse.jface.viewers.IContentProvider;
 import org.eclipse.jface.viewers.ISelectionChangedListener;
@@ -33,6 +34,7 @@ import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.jface.viewers.ITableLabelProvider;
 import org.eclipse.jface.viewers.LabelProvider;
 import org.eclipse.jface.viewers.StructuredSelection;
+import org.eclipse.jface.viewers.StyledString;
 import org.eclipse.jface.viewers.TableViewer;
 import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.jface.viewers.Viewer;
@@ -72,6 +74,7 @@ import org.eclipse.xtext.resource.IReferenceDescription;
 import org.eclipse.xtext.ui.editor.XtextEditor;
 
 import com._1c.g5.v8.dt.bsl.model.DynamicFeatureAccess;
+import com._1c.g5.v8.dt.bsl.common.Symbols;
 import com._1c.g5.v8.dt.bsl.model.Expression;
 import com._1c.g5.v8.dt.bsl.model.FeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.FeatureEntry;
@@ -79,9 +82,13 @@ import com._1c.g5.v8.dt.bsl.model.FormalParam;
 import com._1c.g5.v8.dt.bsl.model.Invocation;
 import com._1c.g5.v8.dt.bsl.model.Method;
 import com._1c.g5.v8.dt.bsl.model.Module;
+import com._1c.g5.v8.dt.bsl.model.ModuleType;
 import com._1c.g5.v8.dt.bsl.model.OperatorStyleCreator;
 import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
+import com._1c.g5.v8.dt.bsl.model.util.BslUtil;
 import com._1c.g5.v8.dt.bsl.ui.menu.BslHandlerUtil;
+import com._1c.g5.v8.dt.mcore.Environmental;
+import com._1c.g5.v8.dt.mcore.util.Environments;
 
 /**
  * Доработки штатной панели «Иерархия вызовов»:
@@ -113,6 +120,12 @@ public final class CallHierarchyViewHook implements IStartup
     private static final String CALLER_COLUMN_KEY = "tormozit.callHierarchyCallerColumn"; //$NON-NLS-1$
     private static final String CALLER_KIND_MODULE = "module"; //$NON-NLS-1$
     private static final String CALLER_KIND_METHOD = "method"; //$NON-NLS-1$
+    private static final String CALLER_KIND_SERVER = "server"; //$NON-NLS-1$
+    private static final String SERVER_CONTEXT = "Ф"; //$NON-NLS-1$
+    private static final String SERVER_NO_CONTEXT = "С"; //$NON-NLS-1$
+    private static final String SERVER_TOOLTIP = "Тип серверного вызова: " + SERVER_CONTEXT //$NON-NLS-1$
+        + " — контекстный серверный вызов формы; " + SERVER_NO_CONTEXT //$NON-NLS-1$
+        + " — бесконтекстный серверный вызов"; //$NON-NLS-1$
     private static final String FOLLOW_TREE_ACTION_ID = "tormozit.callHierarchyFollowTree"; //$NON-NLS-1$
     private static final String SETTINGS_SECTION = "CallHierarchyView"; //$NON-NLS-1$
     private static final String KEY_COL_ORDER = "col.order"; //$NON-NLS-1$
@@ -121,6 +134,9 @@ public final class CallHierarchyViewHook implements IStartup
     private static final String KEY_COL_INFO_WIDTH = "col.infoWidth"; //$NON-NLS-1$
     private static final String KEY_COL_MODULE_WIDTH = "col.moduleWidth"; //$NON-NLS-1$
     private static final String KEY_COL_METHOD_WIDTH = "col.methodWidth"; //$NON-NLS-1$
+    private static final String SERVER_ICON_BUNDLE = "com._1c.g5.v8.dt.platform.services.ui"; //$NON-NLS-1$
+    private static final String SERVER_ICON_PATH = "icons/obj16/server.png"; //$NON-NLS-1$
+    private static final String SERVER_ICON_KEY = "tormozit.callHierarchy.serverIcon"; //$NON-NLS-1$
     private static final String KEY_FOLLOW_TREE = "followTree"; //$NON-NLS-1$
     private static final String KEY_SASH_LEFT = "sashLeft"; //$NON-NLS-1$
     private static final String KEY_SASH_RIGHT = "sashRight"; //$NON-NLS-1$
@@ -128,7 +144,17 @@ public final class CallHierarchyViewHook implements IStartup
     private static final int SASH_LINE_WIDTH = 1;
     private static final String LISTENER_CLASS =
         "com._1c.g5.v8.dt.bsl.ui.editor.callhierarchy.ICallHierarchyResultListener"; //$NON-NLS-1$
-    private static final int BASE_COLUMN_COUNT = 3;
+    private static final String ICON_COLUMN_REMOVED = "tormozit.callHierarchyIconColumnRemoved"; //$NON-NLS-1$
+    /**
+     * Штатных колонок у EDT три: значок, «Строка», «Вызов». Значок во всех строках один и тот же
+     * ({@code occ_match.gif}) и ничего не сообщает — колонку удаляем, поэтому индексы штатного
+     * провайдера подписей сдвинуты на {@link #STOCK_COLUMN_SHIFT}.
+     */
+    private static final int STOCK_COLUMN_COUNT = 3;
+    private static final int STOCK_COLUMN_SHIFT = 1;
+    private static final int LINE_COLUMN = 0;
+    private static final int INFO_COLUMN = 1;
+    private static final int BASE_COLUMN_COUNT = 2;
     private static final int DEFAULT_LINE_WIDTH = 60;
     private static final int DEFAULT_INFO_WIDTH = 300;
     private static final int DEFAULT_PARAM_WIDTH = 80;
@@ -213,6 +239,17 @@ public final class CallHierarchyViewHook implements IStartup
         Object treeRaw = Global.invoke(view, "getTreeViewer"); //$NON-NLS-1$
         if (!(treeRaw instanceof TreeViewer treeViewer))
             return;
+        if (!Boolean.TRUE.equals(table.getData(ICON_COLUMN_REMOVED)))
+        {
+            if (table.getColumnCount() < STOCK_COLUMN_COUNT)
+                return;
+            table.getColumn(0).dispose();
+            table.setData(ICON_COLUMN_REMOVED, Boolean.TRUE);
+            // После удаления нулевой колонки её место занимает «Строка», и в шапке у неё
+            // остаётся признак значка — снимаем повторной установкой пустой картинки.
+            for (TableColumn column : table.getColumns())
+                column.setImage(null);
+        }
 
         try
         {
@@ -224,6 +261,7 @@ public final class CallHierarchyViewHook implements IStartup
             session.installKeepInput();
             session.installFollowTreeAction();
             session.installTreeSort();
+            session.installTreeServerPrefix();
             session.installOpenActualArg();
 
             // Штатный слушатель EDT на каждый клик в дереве пересобирает правую таблицу
@@ -266,8 +304,9 @@ public final class CallHierarchyViewHook implements IStartup
             table.setData(SESSION_KEY, session);
             Debug.log("installed"); //$NON-NLS-1$
         }
-        catch (RuntimeException ignored)
+        catch (RuntimeException ex)
         {
+            Global.tempLog("callHierarchyServer", "install failed: " + ex); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 
@@ -302,11 +341,10 @@ public final class CallHierarchyViewHook implements IStartup
         IDialogSettings settings = dialogSettings();
         if (columns.length >= BASE_COLUMN_COUNT)
         {
-            FormTableInteraction.applyIconColumn(columns[0], columnLayout);
             int lineWidth = FormTableColumnState.readWidth(settings, KEY_COL_LINE_WIDTH, DEFAULT_LINE_WIDTH, 1);
             int infoWidth = FormTableColumnState.readWidth(settings, KEY_COL_INFO_WIDTH, DEFAULT_INFO_WIDTH, 1);
-            columnLayout.setColumnData(columns[1], new ColumnPixelData(lineWidth, true, true));
-            columnLayout.setColumnData(columns[2], new ColumnPixelData(infoWidth, true, true));
+            columnLayout.setColumnData(columns[LINE_COLUMN], new ColumnPixelData(lineWidth, true, true));
+            columnLayout.setColumnData(columns[INFO_COLUMN], new ColumnPixelData(infoWidth, true, true));
             for (int i = BASE_COLUMN_COUNT; i < columns.length; i++)
                 columnLayout.setColumnData(columns[i], new ColumnPixelData(DEFAULT_PARAM_WIDTH, true, true));
         }
@@ -341,8 +379,8 @@ public final class CallHierarchyViewHook implements IStartup
                 }
             });
         }
-        TableColumn lineColumn = columns.length > 1 ? columns[1] : null;
-        TableColumn infoColumn = columns.length > 2 ? columns[2] : null;
+        TableColumn lineColumn = columns.length > LINE_COLUMN ? columns[LINE_COLUMN] : null;
+        TableColumn infoColumn = columns.length > INFO_COLUMN ? columns[INFO_COLUMN] : null;
         // Как в результатах поиска: IDialogSettings при закрытии/пересоздании панели, не на ресайз.
         sash.addDisposeListener(e -> saveSashWeights(sash));
         table.addDisposeListener(e -> saveColumnState(table, interaction, lineColumn, infoColumn));
@@ -482,8 +520,8 @@ public final class CallHierarchyViewHook implements IStartup
             if (columns.length < BASE_COLUMN_COUNT)
                 return;
             TableColumnLayout layout = columnLayoutOf(table);
-            applyPixelWidth(columns[1], layout, lineWidth);
-            applyPixelWidth(columns[2], layout, infoWidth);
+            applyPixelWidth(columns[LINE_COLUMN], layout, lineWidth);
+            applyPixelWidth(columns[INFO_COLUMN], layout, infoWidth);
             IDialogSettings settings = dialogSettings();
             for (TableColumn column : columns)
             {
@@ -496,6 +534,27 @@ public final class CallHierarchyViewHook implements IStartup
                         FormTableColumnState.readWidth(settings, KEY_COL_METHOD_WIDTH, column.getWidth(), 1));
             }
         });
+    }
+
+    /** Штатный значок сервера EDT для шапки колонки «Сервер»; один на дисплей, либо null. */
+    private static Image serverIcon(Display display)
+    {
+        if (display.getData(SERVER_ICON_KEY) instanceof Image cached && !cached.isDisposed())
+            return cached;
+        org.osgi.framework.Bundle bundle = org.eclipse.core.runtime.Platform.getBundle(SERVER_ICON_BUNDLE);
+        java.net.URL url = bundle != null ? bundle.getEntry(SERVER_ICON_PATH) : null;
+        Image image = url != null
+            ? org.eclipse.jface.resource.ImageDescriptor.createFromURL(url).createImage(false, display)
+            : null;
+        if (image == null)
+            return null;
+        display.setData(SERVER_ICON_KEY, image);
+        display.disposeExec(() ->
+        {
+            if (!image.isDisposed())
+                image.dispose();
+        });
+        return image;
     }
 
     private static boolean isTreeNode(Object element)
@@ -546,6 +605,8 @@ public final class CallHierarchyViewHook implements IStartup
         private int resetGeneration;
         private final Map<URI, String[]> callerBySource = new LinkedHashMap<>();
         private final Map<Object, String[]> treeSortByNode = new IdentityHashMap<>();
+        private final Map<URI, String> serverBySource = new LinkedHashMap<>();
+        private final Map<Object, Object[]> treePrefixByNode = new IdentityHashMap<>();
         private Boolean treeSortCallersMode;
 
         Session(IViewPart view, TreeViewer treeViewer, TableViewer locationViewer)
@@ -714,6 +775,8 @@ public final class CallHierarchyViewHook implements IStartup
             argsBySource.clear();
             lastParamMethodUri = null;
             treeSortByNode.clear();
+            treePrefixByNode.clear();
+            serverBySource.clear();
             cancelParamHeaderTips();
             if (hookedResult == null)
                 return;
@@ -884,6 +947,123 @@ public final class CallHierarchyViewHook implements IStartup
             });
         }
 
+        void installTreeServerPrefix()
+        {
+            Global.tempLog("callHierarchyServer", "installTreeServerPrefix provider=" //$NON-NLS-1$ //$NON-NLS-2$
+                + treeViewer.getLabelProvider().getClass().getName());
+            if (!(treeViewer.getLabelProvider() instanceof DelegatingStyledCellLabelProvider current))
+                return;
+            treeViewer.setLabelProvider(new DelegatingStyledCellLabelProvider(
+                new ServerPrefixLabelProvider(current.getStyledStringProvider(), this)));
+        }
+
+        /**
+         * Вид серверного вызова в месте вызова: «Ф» — контекстный (метод формы), «С» — бесконтекстный,
+         * пусто — не серверный; null — место ещё не удалось разрешить (не кэшируется).
+         */
+        String serverKindOf(IReferenceDescription description)
+        {
+            URI uri = sourceUri(description);
+            if (uri == null)
+                return ""; //$NON-NLS-1$
+            String cached = serverBySource.get(uri);
+            if (cached != null)
+                return cached;
+            EObject source = resolveEObject(uri);
+            if (source == null)
+            {
+                Global.tempLog("callHierarchyServer", "serverKindOf unresolved uri=" + uri); //$NON-NLS-1$ //$NON-NLS-2$
+                return null;
+            }
+            String kind = ""; //$NON-NLS-1$
+            Invocation invocation = EcoreUtil2.getContainerOfType(source, Invocation.class);
+            boolean ownCall = invocation != null && EcoreUtil.isAncestor(invocation.getMethodAccess(), source);
+            Method method = ownCall ? resolveCalledMethod(description) : null;
+            // Invocation.isIsServerCall() заполняется только расчётом типов (CreatorTreeState), которого
+            // в модели иерархии вызовов не было; считаем признак той же функцией EDT, что и он.
+            boolean serverCall = false;
+            EObject feature = null;
+            String error = ""; //$NON-NLS-1$
+            if (ownCall)
+            {
+                feature = calledFeature(invocation.getMethodAccess());
+                if (feature == null)
+                    feature = method;
+                try
+                {
+                    serverCall = invocation.isIsServerCall() || feature != null
+                        && com._1c.g5.v8.dt.bsl.util.BslUtil.isCallFromClient(feature, invocation);
+                }
+                catch (RuntimeException ex)
+                {
+                    error = ex.toString();
+                }
+            }
+            Global.tempLog("callHierarchyServer", "serverKindOf uri=" + uri + " source=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + source.eClass().getName() + " ownCall=" + ownCall //$NON-NLS-1$
+                + " flag=" + (invocation != null && invocation.isIsServerCall()) //$NON-NLS-1$
+                + " feature=" + (feature != null ? feature.eClass().getName() : "null") //$NON-NLS-1$ //$NON-NLS-2$
+                + " method=" + (method != null ? method.getName() : "null") //$NON-NLS-1$ //$NON-NLS-2$
+                + " serverCall=" + serverCall + " error=" + error); //$NON-NLS-1$ //$NON-NLS-2$
+            if (serverCall)
+            {
+                boolean noContext = method != null && BslUtil.hasPragma(method,
+                    Symbols.AT_SERVER_NO_CONTEXT_INTNL, Symbols.AT_SERVER_NO_CONTEXT_RUS);
+                kind = noContext ? SERVER_NO_CONTEXT : SERVER_CONTEXT;
+            }
+            serverBySource.put(uri, kind);
+            return kind;
+        }
+
+        /** Разрешённый объект вызова (метод модуля или метод общего модуля из контекста) либо null. */
+        static EObject calledFeature(FeatureAccess access)
+        {
+            EList<FeatureEntry> entries = null;
+            if (access instanceof DynamicFeatureAccess dynamic)
+                entries = dynamic.getFeatureEntries();
+            else if (access instanceof StaticFeatureAccess staticAccess)
+                entries = staticAccess.getFeatureEntries();
+            if (entries == null)
+                return null;
+            for (FeatureEntry entry : entries)
+            {
+                EObject feature = entry != null ? entry.getFeature() : null;
+                if (feature != null && !feature.eIsProxy())
+                    return feature;
+            }
+            return null;
+        }
+
+        /** Префикс подписи узла дерева; только в вызывающей иерархии (узел — метод, делающий вызовы). */
+        String treePrefix(Object node)
+        {
+            if (!isCallersMode(view) || !isTreeNode(node))
+                return ""; //$NON-NLS-1$
+            List<IReferenceDescription> descriptions = descriptionsOf(node);
+            Object[] cached = treePrefixByNode.get(node);
+            if (cached != null && ((Integer) cached[0]).intValue() == descriptions.size())
+                return (String) cached[1];
+            boolean context = false;
+            boolean noContext = false;
+            boolean resolved = true;
+            for (IReferenceDescription description : descriptions)
+            {
+                String kind = serverKindOf(description);
+                if (kind == null)
+                    resolved = false;
+                else if (SERVER_CONTEXT.equals(kind))
+                    context = true;
+                else if (SERVER_NO_CONTEXT.equals(kind))
+                    noContext = true;
+            }
+            String prefix = context && noContext ? SERVER_CONTEXT + SERVER_NO_CONTEXT + "-" //$NON-NLS-1$
+                : context ? SERVER_CONTEXT + "-" //$NON-NLS-1$
+                : noContext ? SERVER_NO_CONTEXT + "-" : ""; //$NON-NLS-1$ //$NON-NLS-2$
+            if (resolved)
+                treePrefixByNode.put(node, new Object[] { Integer.valueOf(descriptions.size()), prefix });
+            return prefix;
+        }
+
         String[] treeSortKeys(Object node)
         {
             boolean callers = isCallersMode(view);
@@ -1019,21 +1199,70 @@ public final class CallHierarchyViewHook implements IStartup
 
         int paramColumnStart()
         {
-            return BASE_COLUMN_COUNT + (hasCallerColumns() ? 2 : 0);
+            return BASE_COLUMN_COUNT + callerColumnCount();
+        }
+
+        int callerColumnCount()
+        {
+            Table table = locationViewer.getTable();
+            if (table == null || table.isDisposed())
+                return 0;
+            int count = 0;
+            for (TableColumn column : table.getColumns())
+            {
+                if (column.getData(CALLER_COLUMN_KEY) != null)
+                    count++;
+            }
+            return count;
+        }
+
+        /** Вид дополнительной колонки (модуль/метод/сервер) по индексу или null. */
+        Object callerColumnKind(int columnIndex)
+        {
+            Table table = locationViewer.getTable();
+            if (table == null || table.isDisposed() || columnIndex < BASE_COLUMN_COUNT
+                || columnIndex >= table.getColumnCount())
+                return null;
+            return table.getColumn(columnIndex).getData(CALLER_COLUMN_KEY);
         }
 
         boolean hasCallerColumns()
         {
-            Table table = locationViewer.getTable();
-            if (table == null || table.isDisposed())
+            return findCallerColumn(CALLER_KIND_MODULE) != null;
+        }
+
+        boolean serverColumnVisible(List<IReferenceDescription> shown)
+        {
+            if (!isCallersMode(view))
                 return false;
-            for (TableColumn column : table.getColumns())
-            {
-                if (CALLER_KIND_MODULE.equals(column.getData(CALLER_COLUMN_KEY))
-                    || CALLER_KIND_METHOD.equals(column.getData(CALLER_COLUMN_KEY)))
-                    return true;
-            }
-            return false;
+            Method called = resolveCalledMethod(firstDescription(shown));
+            boolean callable = called == null || serverCallable(called);
+            Global.tempLog("callHierarchyServer", "serverColumnVisible called=" //$NON-NLS-1$ //$NON-NLS-2$
+                + (called != null ? called.getName() : "null") + " callable=" + callable); //$NON-NLS-1$ //$NON-NLS-2$
+            return callable;
+        }
+
+        /**
+         * Метод можно вызвать серверным вызовом с клиента — условия вызываемой стороны из
+         * {@code BslUtil.isCallFromClient}: модуль формы, команды или общий, метод исполняется на
+         * сервере и не на клиенте; у общего модуля дополнительно включён «Вызов сервера».
+         */
+        static boolean serverCallable(Method method)
+        {
+            Module module = EcoreUtil2.getContainerOfType(method, Module.class);
+            if (module == null)
+                return false;
+            ModuleType type = module.getModuleType();
+            if (type != ModuleType.COMMON_MODULE && type != ModuleType.FORM_MODULE
+                && type != ModuleType.COMMAND_MODULE)
+                return false;
+            if (module.getOwner() instanceof com._1c.g5.v8.dt.metadata.mdclass.CommonModule common
+                && !common.isServerCall())
+                return false;
+            Environmental environmental = EcoreUtil2.getContainerOfType(method, Environmental.class);
+            Environments environments = environmental != null ? environmental.environments() : null;
+            return environments != null && environments.containsAny(Environments.ALL_SERVERS)
+                && !environments.containsAny(Environments.ALL_CLIENTS);
         }
 
         void selectTableRows(List<IReferenceDescription> shown, List<IReferenceDescription> mine)
@@ -1083,48 +1312,86 @@ public final class CallHierarchyViewHook implements IStartup
             return matches;
         }
 
-        boolean syncCallerColumns()
+        boolean syncCallerColumns(List<IReferenceDescription> shown)
         {
             Table table = locationViewer.getTable();
             if (table == null || table.isDisposed())
                 return false;
             boolean want = callerColumnsVisible();
             boolean have = hasCallerColumns();
-            if (want == have)
+            boolean wantServer = serverColumnVisible(shown);
+            boolean haveServer = findCallerColumn(CALLER_KIND_SERVER) != null;
+            Global.tempLog("callHierarchyServer", "syncCallerColumns want=" + want + " have=" + have //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " wantServer=" + wantServer + " haveServer=" + haveServer); //$NON-NLS-1$ //$NON-NLS-2$
+            if (want == have && wantServer == haveServer)
                 return false;
             TableColumnLayout layout = columnLayoutOf(table);
-            int lineWidth = table.getColumnCount() > 1 ? table.getColumns()[1].getWidth() : 0;
-            int infoWidth = table.getColumnCount() > 2 ? table.getColumns()[2].getWidth() : 0;
-            boolean added = false;
+            int lineWidth = table.getColumnCount() > LINE_COLUMN ? table.getColumns()[LINE_COLUMN].getWidth() : 0;
+            int infoWidth = table.getColumnCount() > INFO_COLUMN ? table.getColumns()[INFO_COLUMN].getWidth() : 0;
+            IDialogSettings settings = dialogSettings();
+            if (have && !want)
+                clearTableSort();
+            // Пересоздаём группу дополнительных колонок целиком; текущие ширины сохраняем.
+            TableColumn[] existing = table.getColumns();
+            for (int i = existing.length - 1; i >= 0; i--)
+            {
+                TableColumn column = existing[i];
+                Object kind = column.getData(CALLER_COLUMN_KEY);
+                if (kind == null)
+                    continue;
+                if (CALLER_KIND_MODULE.equals(kind))
+                    settings.put(KEY_COL_MODULE_WIDTH, Integer.toString(column.getWidth()));
+                else if (CALLER_KIND_METHOD.equals(kind))
+                    settings.put(KEY_COL_METHOD_WIDTH, Integer.toString(column.getWidth()));
+                column.dispose();
+            }
+            int index = BASE_COLUMN_COUNT;
             if (want)
             {
-                IDialogSettings settings = dialogSettings();
                 int moduleWidth = FormTableColumnState.readWidth(settings, KEY_COL_MODULE_WIDTH, DEFAULT_CALLER_WIDTH, 1);
                 int methodWidth = FormTableColumnState.readWidth(settings, KEY_COL_METHOD_WIDTH, DEFAULT_CALLER_WIDTH, 1);
-                TableColumn moduleColumn = new TableColumn(table, SWT.LEFT, BASE_COLUMN_COUNT);
+                TableColumn moduleColumn = new TableColumn(table, SWT.LEFT, index++);
                 moduleColumn.setData(CALLER_COLUMN_KEY, CALLER_KIND_MODULE);
                 moduleColumn.setText("Модуль"); //$NON-NLS-1$
                 moduleColumn.setResizable(true);
                 bindCallerColumn(moduleColumn, layout, moduleWidth);
-                TableColumn methodColumn = new TableColumn(table, SWT.LEFT, BASE_COLUMN_COUNT + 1);
+                TableColumn methodColumn = new TableColumn(table, SWT.LEFT, index++);
                 methodColumn.setData(CALLER_COLUMN_KEY, CALLER_KIND_METHOD);
                 methodColumn.setText("Метод"); //$NON-NLS-1$
                 methodColumn.setResizable(true);
                 bindCallerColumn(methodColumn, layout, methodWidth);
-                added = true;
             }
-            else
+            if (wantServer)
             {
-                clearTableSort();
-                TableColumn[] columns = table.getColumns();
-                for (int i = columns.length - 1; i >= 0; i--)
+                // В шапке только значок, ширина минимальная и фиксированная; без значка — текст.
+                Image serverIcon = serverIcon(table.getDisplay());
+                TableColumn serverColumn = new TableColumn(table, SWT.CENTER, index++);
+                serverColumn.setData(CALLER_COLUMN_KEY, CALLER_KIND_SERVER);
+                serverColumn.setText(serverIcon != null ? "" : "Сервер"); //$NON-NLS-1$ //$NON-NLS-2$
+                serverColumn.setImage(serverIcon);
+                serverColumn.setResizable(false);
+                serverColumn.setMoveable(false);
+                int serverWidth = serverIcon != null ? ColumnWidthFit.headerIconColumnWidth(serverIcon)
+                    : DEFAULT_CALLER_WIDTH;
+                if (layout != null)
+                    layout.setColumnData(serverColumn, new ColumnPixelData(serverWidth, false, false));
+                serverColumn.setWidth(serverWidth);
+                if (interaction != null)
+                    interaction.setHeaderTooltipExtra(serverColumn, SERVER_TOOLTIP);
+                else
+                    serverColumn.setToolTipText(SERVER_TOOLTIP);
+                // Со значком в шапке одной колонки Windows рисует значок и в первой колонке
+                // («Строка»); повторная установка пустой картинки снимает у неё признак значка.
+                if (serverIcon != null)
                 {
-                    TableColumn column = columns[i];
-                    Object kind = column.getData(CALLER_COLUMN_KEY);
-                    if (CALLER_KIND_MODULE.equals(kind) || CALLER_KIND_METHOD.equals(kind))
-                        column.dispose();
+                    for (TableColumn column : table.getColumns())
+                    {
+                        if (column != serverColumn && column.getImage() == null)
+                            column.setImage(null);
+                    }
                 }
             }
+            boolean added = want && !have;
             lastParamMethodUri = null;
             if (interaction != null)
                 interaction.notifyColumnsChanged();
@@ -1205,7 +1472,7 @@ public final class CallHierarchyViewHook implements IStartup
 
         String lineTextOf(Object element)
         {
-            return columnText(locationViewer, element, 1, null);
+            return columnText(locationViewer, element, LINE_COLUMN, null);
         }
 
         static int compareCallerLine(String a, String b)
@@ -1331,7 +1598,7 @@ public final class CallHierarchyViewHook implements IStartup
                 List<IReferenceDescription> shown = all;
                 boolean tableEmpty = table.getItemCount() == 0 || locationViewer.getInput() == null
                     || forceEmpty;
-                boolean callerColsAdded = syncCallerColumns();
+                boolean callerColsAdded = syncCallerColumns(all);
                 if (tableEmpty || !sameDescriptions(locationViewer.getInput(), all))
                 {
                     syncParamColumns(all);
@@ -1620,8 +1887,8 @@ public final class CallHierarchyViewHook implements IStartup
             lastParamMethodUri = methodUri;
             if (!sameHeaders)
             {
-                int lineWidth = columns.length > 1 ? columns[1].getWidth() : 0;
-                int infoWidth = columns.length > 2 ? columns[2].getWidth() : 0;
+                int lineWidth = columns.length > LINE_COLUMN ? columns[LINE_COLUMN].getWidth() : 0;
+                int infoWidth = columns.length > INFO_COLUMN ? columns[INFO_COLUMN].getWidth() : 0;
                 while (extra > headers.size())
                 {
                     TableColumn last = table.getColumns()[table.getColumnCount() - 1];
@@ -1983,8 +2250,6 @@ public final class CallHierarchyViewHook implements IStartup
         @Override
         public Image getColumnImage(Object element, int columnIndex)
         {
-            if (columnIndex < BASE_COLUMN_COUNT)
-                return delegate.getColumnImage(element, columnIndex);
             return null;
         }
 
@@ -1992,19 +2257,69 @@ public final class CallHierarchyViewHook implements IStartup
         public String getColumnText(Object element, int columnIndex)
         {
             if (columnIndex < BASE_COLUMN_COUNT)
-                return delegate.getColumnText(element, columnIndex);
-            if (session.hasCallerColumns())
+                return delegate.getColumnText(element, columnIndex + STOCK_COLUMN_SHIFT);
+            Object kind = session.callerColumnKind(columnIndex);
+            if (CALLER_KIND_MODULE.equals(kind))
+                return session.callerModuleOf(element);
+            if (CALLER_KIND_METHOD.equals(kind))
+                return session.callerMethodOf(element);
+            if (CALLER_KIND_SERVER.equals(kind))
             {
-                if (columnIndex == BASE_COLUMN_COUNT)
-                    return session.callerModuleOf(element);
-                if (columnIndex == BASE_COLUMN_COUNT + 1)
-                    return session.callerMethodOf(element);
+                String server = session.serverKindOf(Session.asDescription(element));
+                return server != null ? server : ""; //$NON-NLS-1$
             }
             String[] args = session.argsOf(element);
             int index = columnIndex - session.paramColumnStart();
             if (args == null || index < 0 || index >= args.length)
                 return ""; //$NON-NLS-1$
             return args[index];
+        }
+    }
+
+    /** Подпись узла дерева: перед именем метода «Ф-»/«С-»/«ФС-», если он делает серверный вызов. */
+    private static final class ServerPrefixLabelProvider extends LabelProvider
+        implements DelegatingStyledCellLabelProvider.IStyledLabelProvider
+    {
+        private final DelegatingStyledCellLabelProvider.IStyledLabelProvider inner;
+        private final Session session;
+
+        ServerPrefixLabelProvider(DelegatingStyledCellLabelProvider.IStyledLabelProvider inner, Session session)
+        {
+            this.inner = inner;
+            this.session = session;
+        }
+
+        @Override
+        public StyledString getStyledText(Object element)
+        {
+            StyledString base = inner.getStyledText(element);
+            String prefix = session.treePrefix(element);
+            if (prefix.isEmpty())
+                return base;
+            StyledString result = new StyledString(prefix);
+            if (base != null)
+                result.append(base);
+            return result;
+        }
+
+        @Override
+        public Image getImage(Object element)
+        {
+            return inner.getImage(element);
+        }
+
+        @Override
+        public String getText(Object element)
+        {
+            StyledString styled = getStyledText(element);
+            return styled != null ? styled.getString() : ""; //$NON-NLS-1$
+        }
+
+        @Override
+        public void dispose()
+        {
+            super.dispose();
+            inner.dispose();
         }
     }
 

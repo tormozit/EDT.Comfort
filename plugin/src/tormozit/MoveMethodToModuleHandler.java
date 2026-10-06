@@ -13,6 +13,7 @@ import java.util.TreeMap;
 import org.eclipse.core.commands.AbstractHandler;
 import org.eclipse.core.commands.ExecutionEvent;
 import org.eclipse.core.commands.ExecutionException;
+import org.eclipse.core.commands.common.CommandException;
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IFolder;
 import org.eclipse.core.resources.IProject;
@@ -75,6 +76,7 @@ import org.eclipse.text.edits.ReplaceEdit;
 import org.eclipse.text.edits.TextEdit;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.handlers.HandlerUtil;
+import org.eclipse.ui.handlers.IHandlerService;
 import org.eclipse.ui.ide.ResourceUtil;
 import org.eclipse.xtext.nodemodel.ICompositeNode;
 import org.eclipse.xtext.nodemodel.util.NodeModelUtils;
@@ -133,8 +135,10 @@ import com._1c.g5.v8.dt.metadata.mdclass.CommonModule;
  */
 public class MoveMethodToModuleHandler extends AbstractHandler
 {
-    private static final String LOG_TOPIC = "move-method-697";
     private static final String TITLE = "Переместить в модуль";
+    /** Штатная команда редактора модуля «Иерархия вызовов» (com._1c.g5.v8.dt.bsl.ui/plugin.xml). */
+    private static final String CALL_HIERARCHY_COMMAND_ID =
+        "com._1c.g5.v8.dt.bsl.ui.editor.callhierarchy.CallHierarchy";
     /** Пробное имя для штатного переименования: нужно только чтобы оно прошло проверку имени. */
     private static final String PROBE_SUFFIX = "КомфортПеренос";
 
@@ -158,7 +162,7 @@ public class MoveMethodToModuleHandler extends AbstractHandler
         }
         catch (RuntimeException e)
         {
-            Global.tempLog(LOG_TOPIC, "findSource failed: " + e);
+            // модель модуля не разобралась — ведём себя как при каретке вне заголовка
             source = null;
         }
         if (source == null)
@@ -167,8 +171,6 @@ public class MoveMethodToModuleHandler extends AbstractHandler
                 "Установите курсор на заголовок процедуры или функции.");
             return null;
         }
-        Global.tempLog(LOG_TOPIC, "source " + source.uri + " method=" + source.name + " block=" + source.blockStart
-            + ".." + source.nodeEnd + " export=" + source.header.export);
 
         // Всё важное — одним вопросом до выбора модуля; у мастера страницы ввода нет.
         if (!source.formBindings.isEmpty() && !MessageDialog.openQuestion(shell, Global.withPluginWindowTitle(TITLE),
@@ -177,10 +179,17 @@ public class MoveMethodToModuleHandler extends AbstractHandler
             return null;
 
         Map<String, CommonModule> commonModules = commonModules(source.file.getProject());
+        TargetModule self = source.staticContext
+            ? describeModule(source.file, source.header.russian, commonModules) : null;
+        // Серверный метод общего модуля с «Вызовом сервера» мог вызываться с клиента из других модулей.
+        if (source.serverOnly && self != null && self.serverCall)
+            source.needsServerCall = true;
+        // Серверный метод, который можно вызвать с клиента (общий модуль с «Вызовом сервера», модуль
+        // формы): откуда его зовут на самом деле — показывает штатная «Иерархия вызовов».
+        if (source.serverOnly && (source.formModule || self != null && self.serverCall))
+            showCallHierarchy(editor, source);
         if (!source.contextRefs.isEmpty() && !source.instanceContext)
         {
-            TargetModule self = source.staticContext
-                ? describeModule(source.file, source.header.russian, commonModules) : null;
             if (self == null)
                 source.contextUnsupported = true;
             else if (!self.global)
@@ -191,7 +200,6 @@ public class MoveMethodToModuleHandler extends AbstractHandler
         if (target == null)
             return null;
         String prefix = target.global ? "" : target.prefix;
-        Global.tempLog(LOG_TOPIC, "target " + target.file.getFullPath() + " prefix='" + prefix + "'");
 
         MoveRefactoring refactoring = new MoveRefactoring(source, target, prefix);
         try
@@ -204,6 +212,25 @@ public class MoveMethodToModuleHandler extends AbstractHandler
             // отмена во время проверки начальных условий — окно не открывалось
         }
         return null;
+    }
+
+    /**
+     * Штатная команда «Иерархия вызовов» для перемещаемого метода. Команда берёт метод под кареткой,
+     * поэтому каретка сначала ставится на его имя.
+     */
+    private static void showCallHierarchy(BslXtextEditor editor, Source source)
+    {
+        try
+        {
+            editor.selectAndReveal(source.header.nameOffset, 0);
+            IHandlerService handlers = editor.getSite().getService(IHandlerService.class);
+            if (handlers != null)
+                handlers.executeCommand(CALL_HIERARCHY_COMMAND_ID, null);
+        }
+        catch (CommandException | RuntimeException e)
+        {
+            // иерархия — справочная: без неё выбор модуля всё равно возможен
+        }
     }
 
     // =========================================================================
@@ -232,6 +259,18 @@ public class MoveMethodToModuleHandler extends AbstractHandler
         List<String> formBindings = new ArrayList<>();
         /** Контексты компиляции метода с учётом модуля, директивы и {@code #Если}; {@code null} — неизвестны. */
         Environments environments;
+        /** Метод компилируется только на сервере. */
+        boolean serverOnly;
+        /**
+         * Серверный метод вызывается из клиентского кода — целевому общему модулю нужно свойство
+         * «Вызов сервера»; окно выбора включает отбор по этой колонке.
+         */
+        boolean needsServerCall;
+        /**
+         * Серверный метод вызывается из клиентского метода этого же модуля — это известно точно,
+         * поэтому отбор «Вызов сервера» в окне выбора снять нельзя.
+         */
+        boolean calledFromClient;
 
         /** Модуль с экземпляром (форма, объект, набор записей): контекст передаётся параметром. */
         boolean instanceContext;
@@ -312,11 +351,9 @@ public class MoveMethodToModuleHandler extends AbstractHandler
             }
             catch (RuntimeException | LinkageError e)
             {
-                Global.tempLog(LOG_TOPIC, "owner context failed: " + e);
+                // члены владельца неизвестны — остаются методы и переменные самого модуля
             }
         }
-        Global.tempLog(LOG_TOPIC, "context type=" + type + " locals=" + source.localNames.size() + " methods="
-            + moduleMethods.size() + " variables=" + moduleVariables.size() + " ownerMembers=" + ownerMembers.size());
 
         String selfName = lower(method.getName());
         Set<String> exported = new HashSet<>();
@@ -361,8 +398,6 @@ public class MoveMethodToModuleHandler extends AbstractHandler
                         Integer.valueOf(variableOffset + name.length()));
             }
         }
-        Global.tempLog(LOG_TOPIC, "contextRefs=" + source.contextRefs.size() + " selfCalls=" + source.selfCalls.size()
-            + " exports=" + source.exportEdits.size());
 
         if (source.instanceContext && !source.contextRefs.isEmpty())
         {
@@ -373,6 +408,25 @@ public class MoveMethodToModuleHandler extends AbstractHandler
                 candidate = (source.header.russian ? "Контекст" : "Context") + (index == 0 ? "" : String.valueOf(index));
             source.contextParam = candidate;
         }
+    }
+
+    /** Есть ли в модуле вызов метода из чисто клиентского метода (типично — серверный метод формы). */
+    private static boolean isCalledFromClient(Module module, Method method)
+    {
+        String name = method.getName();
+        for (Method caller : module.allMethods())
+        {
+            Environments environments = caller != null && caller != method ? caller.environments() : null;
+            if (environments == null || !environments.containsAny(Environments.ALL_CLIENTS)
+                || environments.contains(Environment.SERVER))
+                continue;
+            for (TreeIterator<EObject> it = caller.eAllContents(); it.hasNext();)
+            {
+                if (it.next() instanceof StaticFeatureAccess access && name.equalsIgnoreCase(access.getName()))
+                    return true;
+            }
+        }
+        return false;
     }
 
     private static void addMemberNames(ContextDef context, Set<String> result)
@@ -417,7 +471,7 @@ public class MoveMethodToModuleHandler extends AbstractHandler
         }
         catch (RuntimeException | LinkageError e)
         {
-            Global.tempLog(LOG_TOPIC, "collectFormBindings failed: " + e);
+            // привязки формы недоступны — предупреждения не будет, перемещению это не мешает
         }
     }
 
@@ -441,13 +495,12 @@ public class MoveMethodToModuleHandler extends AbstractHandler
                         event = true;
                 }
             }
-            Global.tempLog(LOG_TOPIC, "module event=" + event + " isEvent=" + method.isEvent());
             if (event)
                 result.add("событие «" + method.getName() + "» модуля");
         }
         catch (RuntimeException | LinkageError e)
         {
-            Global.tempLog(LOG_TOPIC, "collectModuleEventBinding failed: " + e);
+            // список событий модуля недоступен — предупреждения не будет
         }
     }
 
@@ -519,6 +572,10 @@ public class MoveMethodToModuleHandler extends AbstractHandler
             source.nodeStart = nodeStart;
             source.nodeEnd = nodeEnd;
             source.environments = method.environments();
+            source.serverOnly = source.environments != null && source.environments.contains(Environment.SERVER)
+                && !source.environments.containsAny(Environments.ALL_CLIENTS);
+            source.calledFromClient = source.serverOnly && isCalledFromClient(module, method);
+            source.needsServerCall = source.calledFromClient;
             collectFormBindings(module, source.name, source.formBindings);
             collectModuleEventBinding(module, method, services, source.formBindings);
             analyzeContext(module, method, services, text, source);
@@ -652,9 +709,12 @@ public class MoveMethodToModuleHandler extends AbstractHandler
         final boolean global;
         /** Контексты, в которых модуль компилируется; {@code null} — неизвестны. */
         final Environments environments;
+        /** Свойство «Вызов сервера» общего модуля: его серверные методы можно вызывать с клиента. */
+        final boolean serverCall;
 
-        TargetModule(IFile file, String prefix, boolean global, Environments environments)
+        TargetModule(IFile file, String prefix, boolean global, Environments environments, boolean serverCall)
         {
+            this.serverCall = serverCall;
             this.file = file;
             this.prefix = prefix;
             this.global = global;
@@ -705,16 +765,23 @@ public class MoveMethodToModuleHandler extends AbstractHandler
         }
         catch (RuntimeException e)
         {
-            Global.tempLog(LOG_TOPIC, "commonModules failed: " + e);
+            // модель недоступна — модули останутся в списке без сведений о контекстах
         }
-        Global.tempLog(LOG_TOPIC, "commonModules=" + result.size());
         return result;
     }
 
     /**
-     * Выбор целевого модуля. В списке только модули, которые компилируются во всех контекстах
-     * метода: его контексты — сумма контекстов исходного модуля, директивы компиляции и
-     * {@code #Если} (готовое {@code environments()} модели EDT).
+     * Выбор целевого модуля. Контексты метода — сумма контекстов исходного модуля, директивы
+     * компиляции и {@code #Если} (готовое {@code environments()} модели EDT).
+     *
+     * <p>С клиента сервер вызвать можно, с сервера клиент — нельзя. Поэтому:
+     * <ul>
+     * <li>метод, компилируемый на сервере, переносится только в серверный модуль — такие модули
+     * отбираются жёстко, клиентских в списке нет;</li>
+     * <li>метод, компилируемый в клиенте, можно перенести и в клиентский модуль, и в серверный
+     * с «Вызовом сервера» — отбор по колонке «Клиент» лишь включён при открытии и снимается;</li>
+     * <li>отбор по «Вызову сервера» (серверный метод зовут с клиента) — тоже снимаемый.</li>
+     * </ul>
      */
     private static TargetModule chooseTarget(Shell shell, Source source, Map<String, CommonModule> commonModules)
     {
@@ -725,22 +792,20 @@ public class MoveMethodToModuleHandler extends AbstractHandler
         }
         catch (CoreException e)
         {
-            Global.tempLog(LOG_TOPIC, "collectTargets failed: " + e);
+            // папки проекта не читаются — список останется пустым, об этом скажет сообщение ниже
         }
+        boolean serverMethod = source.environments != null && source.environments.contains(Environment.SERVER);
         List<TargetModule> targets = new ArrayList<>();
         for (TargetModule module : all)
         {
-            if (source.environments == null || module.environments == null
-                || module.environments.containsAll(source.environments))
+            if (!serverMethod || module.environments == null || module.environments.contains(Environment.SERVER))
                 targets.add(module);
         }
-        Global.tempLog(LOG_TOPIC, "targets all=" + all.size() + " suitable=" + targets.size() + " method environments="
-            + source.environments);
         if (targets.isEmpty())
         {
             MessageDialog.openInformation(shell, Global.withPluginWindowTitle(TITLE), all.isEmpty()
                 ? "В проекте нет других общих модулей и модулей менеджеров."
-                : "Нет модулей, которые компилируются во всех контекстах метода «" + source.name + "».");
+                : "В проекте нет других серверных модулей для метода «" + source.name + "».");
             return null;
         }
         targets.sort((a, b) -> a.prefix.compareToIgnoreCase(b.prefix));
@@ -754,8 +819,12 @@ public class MoveMethodToModuleHandler extends AbstractHandler
             if (module.prefix.equalsIgnoreCase(lastPrefix))
                 last = module;
         }
-        Global.tempLog(LOG_TOPIC, "lastTarget key=" + settingsKey + " stored=" + lastPrefix + " found=" + (last != null));
-        TargetDialog dialog = new TargetDialog(shell, targets, last);
+        Environments environments = source.environments;
+        boolean[] columnFilters = new boolean[TargetDialog.COLUMN_COUNT];
+        columnFilters[TargetDialog.CLIENT_COLUMN] =
+            environments != null && environments.containsAny(Environments.MNG_CLIENTS);
+        columnFilters[TargetDialog.SERVER_CALL_COLUMN] = source.needsServerCall;
+        TargetDialog dialog = new TargetDialog(shell, targets, last, columnFilters, source.calledFromClient);
         if (dialog.open() != Window.OK || dialog.chosen == null)
             return null;
         settings.put(settingsKey, dialog.chosen.prefix);
@@ -773,33 +842,47 @@ public class MoveMethodToModuleHandler extends AbstractHandler
         private static final String SETTINGS_SECTION = "MoveMethodToModule.targetModules";
         private static final String KEY_COL_ORDER = "columnOrder";
         private static final String KEY_COL_FILL_MODE = "colFillMode";
-        private static final String[] KEY_COL_WIDTHS = { "colModuleWidth", "colClientWidth", "colServerWidth" };
+        private static final String[] KEY_COL_WIDTHS =
+            { "colModuleWidth", "colClientWidth", "colServerWidth", "colServerCallWidth" };
         private static final int DEFAULT_MODULE_COL_WIDTH = 320;
         private static final int MIN_COL_WIDTH = 30;
         /** Поля текста в шапке колонки (слева и справа вместе). */
         private static final int HEADER_TEXT_INSET_PX = 24;
         /** Отметка в колонках «Клиент» и «Сервер» — как у флагов в дереве элементов формы. */
         private static final String FLAG_MARK = "✓";
+        static final int CLIENT_COLUMN = 1;
+        static final int SERVER_CALL_COLUMN = 3;
+        static final int COLUMN_COUNT = 4;
 
         private final List<TargetModule> targets;
         private final TargetModule initial;
+        /** Колонки-галочки, по которым список открывается с отбором (пользователь может его снять). */
+        private final boolean[] columnFilters;
+        /** Были ли отборы по галочке в «Клиент» и «Вызов сервера» при прошлом оповещении — чтобы поймать снятие. */
+        private boolean clientFiltered;
+        private boolean serverCallFiltered;
+        /** Отбор «Вызов сервера» снять нельзя: при снятии он возвращается. */
+        private final boolean serverCallLocked;
         TargetModule chosen;
 
         private FilterInputBox filterInput;
         private TableViewer viewer;
         private FormTableInteraction interaction;
-        private final TableColumn[] columns = new TableColumn[3];
+        private final TableColumn[] columns = new TableColumn[COLUMN_COUNT];
         private SmartMatcher matcher = new SmartMatcher("");
         /** Строка, выбранная пользователем: переживает фильтр и возвращается, когда снова видна. */
         private TargetModule current;
         /** Выделение меняет сам диалог (после фильтра) — {@link #current} не трогать. */
         private boolean selecting;
 
-        TargetDialog(Shell parentShell, List<TargetModule> targets, TargetModule initial)
+        TargetDialog(Shell parentShell, List<TargetModule> targets, TargetModule initial, boolean[] columnFilters,
+            boolean serverCallLocked)
         {
             super(parentShell);
+            this.serverCallLocked = serverCallLocked;
             this.targets = targets;
             this.initial = initial;
+            this.columnFilters = columnFilters;
             setShellStyle(SWT.DIALOG_TRIM | SWT.RESIZE | SWT.APPLICATION_MODAL);
         }
 
@@ -845,7 +928,7 @@ public class MoveMethodToModuleHandler extends AbstractHandler
             IDialogSettings settings = dialogSettings();
             boolean hasSavedColumnWidths =
                 FormTableColumnState.hasSavedColumnWidths(settings, KEY_COL_FILL_MODE, KEY_COL_WIDTHS);
-            String[] titles = { "Модуль", "Клиент", "Сервер" };
+            String[] titles = { "Модуль", "Клиент", "Сервер", "Вызов сервера" };
             for (int index = 0; index < columns.length; index++)
             {
                 TableViewerColumn viewerColumn = new TableViewerColumn(viewer, index == 0 ? SWT.NONE : SWT.CENTER);
@@ -854,6 +937,9 @@ public class MoveMethodToModuleHandler extends AbstractHandler
                 if (index == 1)
                     columns[index].setToolTipText(TooltipText.wrap(table,
                         "Модуль компилируется в клиенте управляемого приложения."));
+                if (index == 3)
+                    columns[index].setToolTipText(TooltipText.wrap(table,
+                        "Свойство «Вызов сервера» общего модуля. Нужно, если серверный метод вызывается из клиентских."));
                 int columnIndex = index;
                 if (index == 0)
                     viewerColumn.setLabelProvider(new SelectionAwareStyledCellLabelProvider(new ModuleLabelProvider()));
@@ -894,6 +980,48 @@ public class MoveMethodToModuleHandler extends AbstractHandler
             interaction.setOwnerDrawColumns(columns[0]);
             interaction.setFilterTextResolver((element, column) -> columnText(element, modelColumn(column)));
             interaction.install(hasSavedColumnWidths);
+            for (int index = 0; index < columnFilters.length; index++)
+            {
+                if (columnFilters[index])
+                    interaction.applyColumnFilterValue(index, FLAG_MARK);
+            }
+            // У общего модуля сочетание «Клиент» = да и «Вызов сервера» = да запрещено платформой,
+            // поэтому отборы по галочке в этих колонках взаимоисключающие: включение одного снимает
+            // другой (отбор по пустому значению сюда не относится). Клиентский метод можно перенести
+            // в клиентский модуль либо в серверный с «Вызовом сервера» — для него снятие одного
+            // отбора по галочке включает другой.
+            boolean clientMethod = columnFilters[CLIENT_COLUMN];
+            clientFiltered = isMarkFiltered(CLIENT_COLUMN);
+            serverCallFiltered = isMarkFiltered(SERVER_CALL_COLUMN);
+            interaction.setColumnFilterChangeListener(() ->
+            {
+                boolean client = isMarkFiltered(CLIENT_COLUMN);
+                boolean serverCall = isMarkFiltered(SERVER_CALL_COLUMN);
+                // включён второй отбор — снять тот, что был раньше
+                int clear = !(client && serverCall) ? -1
+                    : clientFiltered || serverCallLocked ? CLIENT_COLUMN : SERVER_CALL_COLUMN;
+                int enable = !clientMethod || client || serverCall ? -1
+                    : clientFiltered ? SERVER_CALL_COLUMN : serverCallFiltered ? CLIENT_COLUMN : -1;
+                // серверный метод зовут с клиента в этом же модуле — без «Вызова сервера» нельзя
+                boolean restore = serverCallLocked && !serverCall;
+                clientFiltered = client;
+                serverCallFiltered = serverCall;
+                if (clear < 0 && enable < 0 && !restore)
+                    return;
+                table.getDisplay().asyncExec(() ->
+                {
+                    if (table.isDisposed())
+                        return;
+                    boolean clientNow = isMarkFiltered(CLIENT_COLUMN);
+                    boolean serverCallNow = isMarkFiltered(SERVER_CALL_COLUMN);
+                    if (restore && !serverCallNow)
+                        interaction.applyColumnFilterValue(SERVER_CALL_COLUMN, FLAG_MARK);
+                    else if (clear >= 0 && clientNow && serverCallNow)
+                        interaction.clearColumnFilter(clear);
+                    else if (enable >= 0 && !clientNow && !serverCallNow)
+                        interaction.applyColumnFilterValue(enable, FLAG_MARK);
+                });
+            });
 
             current = initial;
             selectCurrentOrFirst();
@@ -967,6 +1095,12 @@ public class MoveMethodToModuleHandler extends AbstractHandler
             }
         }
 
+        /** Наложен ли на колонку отбор именно по галочке. */
+        private boolean isMarkFiltered(int column)
+        {
+            return FLAG_MARK.equals(interaction.columnFilterValue(column));
+        }
+
         private static int headerTextWidth(Table table, String title)
         {
             GC gc = new GC(table);
@@ -1006,6 +1140,7 @@ public class MoveMethodToModuleHandler extends AbstractHandler
                 // «Клиент» — управляемый клиент; толстый клиент обычного приложения галочкой не отмечается
                 case 1 -> environments != null && environments.containsAny(Environments.MNG_CLIENTS) ? FLAG_MARK : "";
                 case 2 -> environments != null && environments.contains(Environment.SERVER) ? FLAG_MARK : "";
+                case 3 -> module.serverCall ? FLAG_MARK : "";
                 default -> "";
             };
         }
@@ -1057,7 +1192,8 @@ public class MoveMethodToModuleHandler extends AbstractHandler
                 names.add(environment.name());
         }
         names.sort(null);
-        return source.file.getProject().getName() + "|" + String.join(",", names);
+        return source.file.getProject().getName() + "|" + String.join(",", names)
+            + (source.needsServerCall ? "|serverCall" : "");
     }
 
     /**
@@ -1107,7 +1243,7 @@ public class MoveMethodToModuleHandler extends AbstractHandler
         {
             CommonModule module = commonModules.get(lower(objectFolder.getName()));
             return new TargetModule(file, objectFolder.getName(), module != null && module.isGlobal(),
-                module != null ? commonModuleEnvironments(module) : null);
+                module != null ? commonModuleEnvironments(module) : null, module != null && module.isServerCall());
         }
         GetRef.ModuleRef ref = GetRef.pathToModuleRef(file.getProjectRelativePath().toString());
         String prefix = ref != null ? MdTypeMapping.directModuleName(ref.modulePath) : "";
@@ -1115,7 +1251,7 @@ public class MoveMethodToModuleHandler extends AbstractHandler
         if (prefix.isEmpty() || MdTypeMapping.ruPluralToRu(MdTypeMapping.firstSegment(prefix)) == null)
             return null;
         return new TargetModule(file, russian ? prefix : typeFolder.getName() + "." + objectFolder.getName(), false,
-            managerModuleEnvironments());
+            managerModuleEnvironments(), false);
     }
 
     // =========================================================================
@@ -1164,10 +1300,8 @@ public class MoveMethodToModuleHandler extends AbstractHandler
             }
             catch (RuntimeException e)
             {
-                Global.tempLog(LOG_TOPIC, "collectEdits failed: " + e);
                 status.addFatalError("Не удалось подготовить перемещение: " + e);
             }
-            Global.tempLog(LOG_TOPIC, "status " + status);
             return status;
         }
 
@@ -1209,7 +1343,6 @@ public class MoveMethodToModuleHandler extends AbstractHandler
             }
             renameProcessor.setNewName(source.name + PROBE_SUFFIX);
             RefactoringStatus renameStatus = rename.checkAllConditions(monitor.split(70));
-            Global.tempLog(LOG_TOPIC, "rename conditions " + renameStatus);
             if (renameStatus.hasFatalError())
             {
                 status.merge(renameStatus);
@@ -1224,8 +1357,6 @@ public class MoveMethodToModuleHandler extends AbstractHandler
                 URI uri = entry.getKey();
                 boolean inSource = uri.equals(source.uri);
                 String text = inSource ? source.text : uri.equals(targetUri) ? targetText : contents(updates, uri);
-                Global.tempLog(LOG_TOPIC, "occurrences " + uri + " count=" + entry.getValue().size()
-                    + " text=" + (text != null));
                 if (text == null)
                     continue;
                 // внутри целевого модуля и для глобального модуля вызов остаётся без родителя
@@ -1239,8 +1370,6 @@ public class MoveMethodToModuleHandler extends AbstractHandler
                     String place = uri.lastSegment() + ", строка " + lineNumber(text, occurrence.getKey());
                     if (offset < 0 || insideStringLiteral(text, offset))
                     {
-                        Global.tempLog(LOG_TOPIC, "skip occurrence " + place + " offset=" + occurrence.getKey()
-                            + " length=" + occurrence.getValue());
                         status.addWarning("Упоминание метода не изменено (" + uri.trimSegments(1).lastSegment()
                             + "/" + place + ").");
                         continue;
@@ -1279,7 +1408,6 @@ public class MoveMethodToModuleHandler extends AbstractHandler
                     rewritten++;
                 }
             }
-            Global.tempLog(LOG_TOPIC, "rewritten=" + rewritten);
 
             if (source.contextUnsupported)
                 status.addWarning("Обращения метода к методам и переменным исходного модуля не переписаны: "
@@ -1373,18 +1501,11 @@ public class MoveMethodToModuleHandler extends AbstractHandler
             return;
         }
         if (!(change instanceof TextEditBasedChange))
-        {
-            Global.tempLog(LOG_TOPIC, "unknown change " + (change != null ? change.getClass().getName() : null));
             return;
-        }
         IFile file = fileOfChange(change);
         Object edit = change instanceof TextChange textChange ? textChange.getEdit() : Global.invoke(change, "getEdit");
         if (file == null || !(edit instanceof TextEdit root))
-        {
-            Global.tempLog(LOG_TOPIC, "no file/edit: " + change.getClass().getName() + " modified="
-                + change.getModifiedElement());
             return;
-        }
         URI uri = URI.createPlatformResourceURI(file.getFullPath().toString(), true);
         collectLeafEdits(root, result.computeIfAbsent(uri, key -> new TreeMap<>()));
     }
