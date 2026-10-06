@@ -304,9 +304,8 @@ public final class CallHierarchyViewHook implements IStartup
             table.setData(SESSION_KEY, session);
             Debug.log("installed"); //$NON-NLS-1$
         }
-        catch (RuntimeException ex)
+        catch (RuntimeException ignored)
         {
-            Global.tempLog("callHierarchyServer", "install failed: " + ex); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 
@@ -949,8 +948,6 @@ public final class CallHierarchyViewHook implements IStartup
 
         void installTreeServerPrefix()
         {
-            Global.tempLog("callHierarchyServer", "installTreeServerPrefix provider=" //$NON-NLS-1$ //$NON-NLS-2$
-                + treeViewer.getLabelProvider().getClass().getName());
             if (!(treeViewer.getLabelProvider() instanceof DelegatingStyledCellLabelProvider current))
                 return;
             treeViewer.setLabelProvider(new DelegatingStyledCellLabelProvider(
@@ -971,10 +968,7 @@ public final class CallHierarchyViewHook implements IStartup
                 return cached;
             EObject source = resolveEObject(uri);
             if (source == null)
-            {
-                Global.tempLog("callHierarchyServer", "serverKindOf unresolved uri=" + uri); //$NON-NLS-1$ //$NON-NLS-2$
                 return null;
-            }
             String kind = ""; //$NON-NLS-1$
             Invocation invocation = EcoreUtil2.getContainerOfType(source, Invocation.class);
             boolean ownCall = invocation != null && EcoreUtil.isAncestor(invocation.getMethodAccess(), source);
@@ -982,11 +976,9 @@ public final class CallHierarchyViewHook implements IStartup
             // Invocation.isIsServerCall() заполняется только расчётом типов (CreatorTreeState), которого
             // в модели иерархии вызовов не было; считаем признак той же функцией EDT, что и он.
             boolean serverCall = false;
-            EObject feature = null;
-            String error = ""; //$NON-NLS-1$
             if (ownCall)
             {
-                feature = calledFeature(invocation.getMethodAccess());
+                EObject feature = calledFeature(invocation.getMethodAccess());
                 if (feature == null)
                     feature = method;
                 try
@@ -994,17 +986,10 @@ public final class CallHierarchyViewHook implements IStartup
                     serverCall = invocation.isIsServerCall() || feature != null
                         && com._1c.g5.v8.dt.bsl.util.BslUtil.isCallFromClient(feature, invocation);
                 }
-                catch (RuntimeException ex)
+                catch (RuntimeException ignored)
                 {
-                    error = ex.toString();
                 }
             }
-            Global.tempLog("callHierarchyServer", "serverKindOf uri=" + uri + " source=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + source.eClass().getName() + " ownCall=" + ownCall //$NON-NLS-1$
-                + " flag=" + (invocation != null && invocation.isIsServerCall()) //$NON-NLS-1$
-                + " feature=" + (feature != null ? feature.eClass().getName() : "null") //$NON-NLS-1$ //$NON-NLS-2$
-                + " method=" + (method != null ? method.getName() : "null") //$NON-NLS-1$ //$NON-NLS-2$
-                + " serverCall=" + serverCall + " error=" + error); //$NON-NLS-1$ //$NON-NLS-2$
             if (serverCall)
             {
                 boolean noContext = method != null && BslUtil.hasPragma(method,
@@ -1236,10 +1221,7 @@ public final class CallHierarchyViewHook implements IStartup
             if (!isCallersMode(view))
                 return false;
             Method called = resolveCalledMethod(firstDescription(shown));
-            boolean callable = called == null || serverCallable(called);
-            Global.tempLog("callHierarchyServer", "serverColumnVisible called=" //$NON-NLS-1$ //$NON-NLS-2$
-                + (called != null ? called.getName() : "null") + " callable=" + callable); //$NON-NLS-1$ //$NON-NLS-2$
-            return callable;
+            return called == null || serverCallable(called);
         }
 
         /**
@@ -1321,8 +1303,6 @@ public final class CallHierarchyViewHook implements IStartup
             boolean have = hasCallerColumns();
             boolean wantServer = serverColumnVisible(shown);
             boolean haveServer = findCallerColumn(CALLER_KIND_SERVER) != null;
-            Global.tempLog("callHierarchyServer", "syncCallerColumns want=" + want + " have=" + have //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " wantServer=" + wantServer + " haveServer=" + haveServer); //$NON-NLS-1$ //$NON-NLS-2$
             if (want == have && wantServer == haveServer)
                 return false;
             TableColumnLayout layout = columnLayoutOf(table);
