@@ -192,8 +192,7 @@ public final class ComfortNavigatorSearchEngine implements IModelObjectTreeSearc
 
         if (matcher.hasMultipleSections())
         {
-            String pathRu = MdTypeMapping.translateDottedToRu(path.toString(".")); //$NON-NLS-1$
-            if (!matcher.matchesTree(pathRu))
+            if (!matcher.matchesTree(navigatorSearchPath(path)))
                 return false;
         }
         else
@@ -223,7 +222,7 @@ public final class ComfortNavigatorSearchEngine implements IModelObjectTreeSearc
 
         if (matcher.hasMultipleSections())
         {
-            if (!matcher.matchesTree(MdTypeMapping.translateDottedToRu(path.toString(".")))) //$NON-NLS-1$
+            if (!matcher.matchesTree(navigatorSearchPath(path)))
                 return false;
         }
         else
@@ -241,6 +240,31 @@ public final class ComfortNavigatorSearchEngine implements IModelObjectTreeSearc
         if (eObject != null)
             trie.setEObject(path, eObject);
         return true;
+    }
+
+    /**
+     * Секции поиска — подписи веток навигатора, а не типы из полного имени объекта.
+     * BM-путь чередует тип и имя: Catalog.Имя.Template.Имя. Имена не переводятся,
+     * даже если совпадают с именем класса метаданных (например, Catalog).
+     */
+    private static String navigatorSearchPath(QualifiedName path)
+    {
+        StringBuilder result = new StringBuilder();
+        for (int i = 0; i < path.getSegmentCount(); i++)
+        {
+            if (i > 0)
+                result.append('.');
+            String segment = path.getSegment(i);
+            if (i % 2 == 0)
+            {
+                String ruType = MdTypeMapping.anyToRu(segment);
+                String groupLabel = MdTypeMapping.ruSingularToGroupPlural(ruType);
+                if (groupLabel != null)
+                    segment = groupLabel;
+            }
+            result.append(segment);
+        }
+        return result.toString();
     }
 
     private static String collectPairSearchText(IEObjectDescription primary, IEObjectDescription secondary)

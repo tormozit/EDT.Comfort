@@ -69,6 +69,14 @@ final class IndentGuidePainter implements IPainter, PaintListener
     @Override
     public void paint(int reason)
     {
+        if (viewer == null || widget == null || widget.isDisposed())
+            return;
+        if (!isEnabled())
+        {
+            deactivate(true);
+            return;
+        }
+
         IDocument doc = viewer.getDocument();
         if (doc == null)
         {
@@ -116,8 +124,13 @@ final class IndentGuidePainter implements IPainter, PaintListener
     @Override
     public void paintControl(PaintEvent evt)
     {
-        if (widget != null)
+        if (active && isEnabled() && widget != null && !widget.isDisposed())
             handleDrawRequest(evt.gc, evt.x, evt.y, evt.width, evt.height);
+    }
+
+    private boolean isEnabled()
+    {
+        return store != null && store.getBoolean(ComfortSettings.PREF_INDENT_GUIDE_ENABLED);
     }
 
     private void handleDrawRequest(GC gc, int x, int y, int w, int h)
@@ -307,6 +320,8 @@ final class IndentGuidePainter implements IPainter, PaintListener
 
     void activate(boolean redraw)
     {
+        if (!isEnabled() || widget == null || widget.isDisposed())
+            return;
         if (!active)
         {
             active = true;
@@ -332,6 +347,7 @@ final class IndentGuidePainter implements IPainter, PaintListener
     @Override
     public void dispose()
     {
+        deactivate(true);
         store = null;
         viewer = null;
         widget = null;

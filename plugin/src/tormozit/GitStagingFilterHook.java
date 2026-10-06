@@ -1813,12 +1813,6 @@ public final class GitStagingFilterHook implements IStartup
             cell.setText(text != null ? text : ""); //$NON-NLS-1$
             cell.setImage(logical == COL_NAME ? getImage(element) : null);
             copyRowStyle(cell, element);
-            if (logical == COL_STATUS)
-            {
-                Color statusBg = statusColors.background(cell.getControl().getDisplay(), text);
-                if (statusBg != null)
-                    cell.setBackground(statusBg);
-            }
 
             // Вызываем всегда, а не только при непустом фильтре — иначе при очистке поля старые
             // StyleRange (SWT переиспользует TreeItem между refresh-ами) остаются висеть.
@@ -1830,6 +1824,8 @@ public final class GitStagingFilterHook implements IStartup
                 && highlightMatcher.matches(matchText(element))
                     ? highlightMatcher.getHighlightRanges(text) : List.of();
             SmartMatchHighlight.appendMatchRanges(cell, ranges);
+            if (logical == COL_STATUS)
+                statusColors.apply(cell);
         }
 
         private final ChangeStatusColors statusColors = new ChangeStatusColors();

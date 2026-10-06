@@ -1059,6 +1059,8 @@ public final class GitHistoryHook implements IStartup
                 return text != null ? text : ""; //$NON-NLS-1$
             });
         interaction.setOwnerDrawColumns(fileCol, typeCol, pathCol, statusCol);
+        interaction.setNormalCellBackground((control, item, column) -> column == control.indexOf(statusCol)
+            ? labelProvider.statusColors.background(control, item.getText(column)) : null);
         interaction.setColumnReorderEnabled(true);
         // «Статус» — узкая колонка из символов: авто-заполнение её ширину не трогает.
         interaction.setFixedWidthColumns(i -> i == COL_STATUS);
@@ -1346,6 +1348,7 @@ public final class GitHistoryHook implements IStartup
 
         GitHistoryFileLabelProvider(CellLabelProvider origProvider)
         {
+            super(COLORS_ON_SELECTION);
             this.origProvider = origProvider;
         }
 
@@ -1396,9 +1399,6 @@ public final class GitHistoryHook implements IStartup
                 String status = statusText(element);
                 cell.setText(status);
                 copyFileColumnStyle(cell, element);
-                Color statusBg = statusColors.background(cell.getControl().getDisplay(), status);
-                if (statusBg != null)
-                    cell.setBackground(statusBg);
             }
 
             // Всегда вызываем appendMatchRanges — иначе при очистке фильтра
@@ -1412,6 +1412,8 @@ public final class GitHistoryHook implements IStartup
                     ? highlightMatcher.getHighlightRanges(text)
                     : List.of();
             SmartMatchHighlight.appendMatchRanges(cell, ranges);
+            if (col == 3)
+                statusColors.apply(cell);
         }
 
         /** Копирует foreground/background/font штатного {@code FileDiffLabelProvider}. */

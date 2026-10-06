@@ -222,6 +222,7 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
     /** Programmatic {@code viewer.setSelection} часто не шлёт SWT.Selection — см. {@link #syncActiveCellFromSelection}. */
     private ISelectionChangedListener viewerSelectionListener;
     private TableColumn[] ownerDrawColumns = NO_OWNER_DRAW_COLUMNS;
+    private ListSelectionThemeColors.SelectionCellBackground normalCellBackground;
 
     /** Ширины колонок (визуальный порядок) на момент последнего фактического применения (commit) сужения/fill. */
     private int[] lastKnownVisualWidths;
@@ -536,6 +537,12 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
     void setCopyHook(Runnable copyHook)
     {
         this.copyHook = copyHook;
+    }
+
+    /** Фон невыделенных ячеек; цветами владеет вызывающий код. */
+    void setNormalCellBackground(ListSelectionThemeColors.SelectionCellBackground provider)
+    {
+        normalCellBackground = provider;
     }
 
     /** Колонки с {@code DelegatingStyledCellLabelProvider} (owner-draw), напр. «Имя». */
@@ -3438,7 +3445,8 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
      * которое {@code StyledCellLabelProvider} накладывает на GC перед отрисовкой текста).
      * Per-cell background — единственный механизм, который одинаково уважают ОБА пути отрисовки,
      * поэтому синхронизируем его для ВСЕХ колонок тем же цветом, что даёт
-     * {@link #selectionCellBackground} ({@code null} для невыделенных строк — сброс к штатному).
+     * {@link #selectionCellBackground}. Для невыделенных строк фон берётся из
+     * {@link #normalCellBackground}, если он задан, иначе сбрасывается к штатному.
      *
      * <p>Только тёмная тема: в светлой оформление и так соблюдается везде единообразно, и вмешиваться
      * в нативную отрисовку там незачем.
@@ -3451,7 +3459,12 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
             return;
         int cols = table.getColumnCount();
         for (int idx = 0; idx < cols; idx++)
-            item.setBackground(idx, selectionCellBackground(table, item, idx));
+        {
+            Color bg = selectionCellBackground(table, item, idx);
+            if (bg == null && normalCellBackground != null)
+                bg = normalCellBackground.cellBackground(table, item, idx);
+            item.setBackground(idx, bg);
+        }
     }
 
     private void redrawRows(TableItem[] items)
