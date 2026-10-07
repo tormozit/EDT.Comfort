@@ -890,7 +890,7 @@ public final class IRSession
         Object formatTextVar = ComBridge.createByrefBool(false);
         Object isGeneratorVar = ComBridge.createByrefBool(false);
 
-        // Функция Адаптер_ПриВыбореСтрокиАвтодополнения(
+        // Функция Адаптер_ПриВыбореСтрокиАвтодополнения( 
         //   Знач Значение, Знач ЭтоМетод, Знач КлючСловаря,
         //   ШаблонДляВставки, ФорматироватьТекст, ЛиГенераторСПоглощениемНачалаСтроки 
         // ) Экспорт
