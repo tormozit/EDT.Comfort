@@ -1,18 +1,31 @@
 package tormozit;
 
+import java.lang.reflect.InvocationTargetException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Predicate;
 
+import org.eclipse.core.commands.AbstractHandler;
+import org.eclipse.core.commands.ExecutionEvent;
 import org.eclipse.emf.ecore.EObject;
+import org.eclipse.emf.ecore.EReference;
 import org.eclipse.emf.ecore.util.EcoreUtil;
+import org.eclipse.emf.edit.ui.dnd.LocalTransfer;
+import org.eclipse.jface.action.Action;
+import org.eclipse.jface.action.IAction;
+import org.eclipse.jface.dialogs.MessageDialog;
+import org.eclipse.jface.dialogs.ProgressMonitorDialog;
 import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.jface.viewers.ITreeContentProvider;
 import org.eclipse.jface.viewers.StructuredSelection;
+import org.eclipse.jface.viewers.TableViewer;
 import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.swt.SWT;
+import org.eclipse.swt.dnd.Clipboard;
+import org.eclipse.swt.dnd.Transfer;
 import org.eclipse.swt.events.MenuAdapter;
 import org.eclipse.swt.events.MenuEvent;
 import org.eclipse.swt.graphics.Image;
@@ -28,6 +41,7 @@ import org.eclipse.swt.widgets.TableItem;
 import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.TreeItem;
 import org.eclipse.swt.widgets.Widget;
+import org.eclipse.ui.IActionBars;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.IViewPart;
@@ -35,16 +49,26 @@ import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PartInitException;
 import org.eclipse.ui.PlatformUI;
+import org.eclipse.ui.actions.ActionFactory;
 import org.eclipse.ui.forms.editor.IFormPage;
+import org.eclipse.ui.handlers.IHandlerActivation;
+import org.eclipse.ui.handlers.IHandlerService;
 
 import com._1c.g5.v8.bm.core.IBmObject;
+import com._1c.g5.v8.dt.core.model.EditingMode;
+import com._1c.g5.v8.dt.core.model.IModelEditingSupport;
 import com._1c.g5.v8.dt.core.platform.IConfigurationProject;
 import com._1c.g5.v8.dt.core.platform.IV8Project;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
+import com._1c.g5.v8.dt.md.copy.IModelObjectCopySupport;
+import com._1c.g5.v8.dt.md.ui.MdExecutableExtensionFactory;
+import com._1c.g5.v8.dt.md.ui.aef.viewModels.CharacteristicsTableItemViewModel;
+import com._1c.g5.v8.dt.md.ui.aef.viewModels.CharacteristicsTableViewModel;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
 import com._1c.g5.v8.dt.md.ui.shared.MdUiSharedImages;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicCommand;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicFeature;
+import com._1c.g5.v8.dt.metadata.mdclass.CharacteristicsDescription;
 import com._1c.g5.v8.dt.metadata.mdclass.CommonCommand;
 import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
 import com._1c.g5.v8.dt.metadata.mdclass.MdClassPackage;
@@ -57,8 +81,9 @@ import com._1c.g5.v8.dt.ui.util.OpenHelper;
  *   <li>контекстное меню дерева реквизитов вкладки «Данные» и таблицы вкладки «Команды» —
  *       переход на «Функц. опции», «Права» и открытие редактора «Все роли»;</li>
  *   <li>двойной клик в «Общие реквизиты» и в «Значения» редактора перечисления —
- *       {@code bringToTop} панели «Свойства».
+ *       {@code bringToTop} панели «Свойства»; то же для строк вкладки «Характеристики».
  *       Дерево «Стандартные реквизиты» не перехватывать: Grok 4.6 (2026-08-16) за ~40 попыток не смог правильно загрузить реквизит в панель «Свойства».</li>
+ *   <li>таблица характеристик — множественное выделение, копирование и вставка объектов.</li>
  * </ul>
  */
 public final class MdEditorAttributeMenuHook implements IStartup
@@ -77,6 +102,8 @@ public final class MdEditorAttributeMenuHook implements IStartup
     private static final String FO_PAGE_ID = "editors.pages.functionalOptions"; //$NON-NLS-1$
 
     private static final String COMMANDS_PAGE_ID = "editors.pages.commands"; //$NON-NLS-1$
+
+    private static final String CHARACTERISTICS_PAGE_ID = "editors.pages.characteristics"; //$NON-NLS-1$
 
     private static final String FO_CONTENT_COMPONENT_CLASS =
         "com._1c.g5.v8.dt.internal.md.ui.editors.pages.functionaloptions.DtGranularEditorFunctionalOptionsMdObjectContentComponent"; //$NON-NLS-1$
@@ -115,7 +142,323 @@ public final class MdEditorAttributeMenuHook implements IStartup
             display.addFilter(SWT.Show, MdEditorAttributeMenuHook::handleMenuShow);
             display.addFilter(SWT.MouseDown, MdEditorAttributeMenuHook::handleMouseDown);
             display.addFilter(SWT.MouseDoubleClick, MdEditorAttributeMenuHook::handleMouseDoubleClick);
+            display.addFilter(SWT.FocusIn, MdEditorAttributeMenuHook::installCharacteristicsClipboard);
+            Control focus = display.getFocusControl();
+            if (focus instanceof Table table)
+                installCharacteristicsClipboard(table);
         });
+    }
+
+    /** Вызывается из DtTableView.createTable до создания SWT-контрола. */
+    public static int characteristicsTableStyle(int style, Object viewModel)
+    {
+        if (!(viewModel instanceof CharacteristicsTableViewModel))
+            return style;
+        int result = (style & ~SWT.SINGLE) | SWT.MULTI;
+        Global.tempLog("characteristics-clipboard", "table style=" + style + " result=" + result); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        return result;
+    }
+
+    private static void installCharacteristicsClipboard(Event event)
+    {
+        if (event.widget instanceof Table table)
+            installCharacteristicsClipboard(table);
+    }
+
+    private static void installCharacteristicsClipboard(Table table)
+    {
+        if (table.isDisposed() || table.getData(CharacteristicsClipboard.KEY) != null)
+            return;
+        DtGranularEditor<?> editor = editorOf(table);
+        IFormPage page = editor != null ? editor.getActivePageInstance() : null;
+        if (page == null || !CHARACTERISTICS_PAGE_ID.equals(page.getId())
+            || page.getPartControl() == null || !isUnder(page.getPartControl(), table))
+            return;
+        CharacteristicsClipboard clipboard = new CharacteristicsClipboard(table, editor);
+        table.setData(CharacteristicsClipboard.KEY, clipboard);
+        page.getPartControl().setData(CharacteristicsClipboard.KEY, clipboard);
+        clipboard.install();
+    }
+
+    /** Штатный компонент хранит первую строку; команды EDT должны получать всё выделение. */
+    public static Object[] characteristicsSelection(Object[] original)
+    {
+        if (original.length == 0 || !(original[0] instanceof CharacteristicsDescription))
+            return original;
+        DtGranularEditor<?> editor = editorOf(null);
+        IFormPage page = editor != null ? editor.getActivePageInstance() : null;
+        Control root = page != null ? page.getPartControl() : null;
+        if (root == null || root.isDisposed()
+            || !(root.getData(CharacteristicsClipboard.KEY) instanceof CharacteristicsClipboard clipboard)
+            || clipboard.table.isDisposed())
+            return original;
+        List<EObject> selected = clipboard.selectedCharacteristics();
+        // Не подменяем события другого компонента или уже сменившейся строки.
+        if (!selected.contains(original[0]))
+            return original;
+        Global.tempLog("characteristics-clipboard", "selection count=" + selected.size()); //$NON-NLS-1$ //$NON-NLS-2$
+        return selected.toArray();
+    }
+
+    /** Сравниваем весь набор, сохраняя защиту EDT от повторной передачи того же выделения. */
+    public static boolean characteristicsSelectionUnchanged(boolean firstUnchanged)
+    {
+        DtGranularEditor<?> editor = editorOf(null);
+        IFormPage page = editor != null ? editor.getActivePageInstance() : null;
+        Control root = page != null ? page.getPartControl() : null;
+        if (root == null || root.isDisposed()
+            || !(root.getData(CharacteristicsClipboard.KEY) instanceof CharacteristicsClipboard clipboard)
+            || clipboard.table.isDisposed())
+            return firstUnchanged;
+        List<EObject> selected = clipboard.selectedCharacteristics();
+        boolean unchanged = firstUnchanged && selected.equals(clipboard.lastSelection);
+        clipboard.lastSelection = List.copyOf(selected);
+        Global.tempLog("characteristics-clipboard", "selection compare count=" + selected.size() //$NON-NLS-1$ //$NON-NLS-2$
+            + " unchanged=" + unchanged); //$NON-NLS-1$
+        return unchanged;
+    }
+
+    /** Формат LocalTransfer и copyAndAttach — те же, что у штатной вставки объектов EDT. */
+    private static final class CharacteristicsClipboard extends MdExecutableExtensionFactory
+    {
+        private static final String KEY = "tormozit.characteristicsClipboard"; //$NON-NLS-1$
+
+        private final Table table;
+        private final DtGranularEditor<?> editor;
+        private List<EObject> lastSelection = List.of();
+        private int pasteGeneration;
+        private IHandlerActivation activation;
+        private IAction originalPaste;
+        private final IAction pasteAction = new Action()
+        {
+            @Override public void run() { paste(); }
+            @Override public boolean isEnabled() { return canPaste(); }
+        };
+
+        private CharacteristicsClipboard(Table table, DtGranularEditor<?> editor)
+        {
+            this.table = table;
+            this.editor = editor;
+        }
+
+        private void install()
+        {
+            Global.tempLog("characteristics-clipboard", "install style=" + table.getStyle()); //$NON-NLS-1$ //$NON-NLS-2$
+            CopyCommandSupport.wireCopyOverride(table, (Runnable) this::copy);
+            table.addListener(SWT.FocusIn, event -> activatePaste());
+            table.addListener(SWT.FocusOut, event -> deactivatePaste());
+            table.addDisposeListener(event -> deactivatePaste());
+            Menu menu = table.getMenu();
+            if (menu != null)
+                menu.addMenuListener(new MenuAdapter()
+                {
+                    @Override public void menuShown(MenuEvent event) { fillClipboardMenu(menu); }
+                });
+            if (table.isFocusControl())
+                activatePaste();
+        }
+
+        private void activatePaste()
+        {
+            if (activation != null)
+                return;
+            IHandlerService service = editor.getSite().getService(IHandlerService.class);
+            if (service != null)
+                activation = service.activateHandler("org.eclipse.ui.edit.paste", new AbstractHandler() //$NON-NLS-1$
+                {
+                    @Override public Object execute(ExecutionEvent event) { paste(); return null; }
+                    @Override public boolean isEnabled() { return canPaste(); }
+                });
+            IActionBars bars = editor.getEditorSite().getActionBars();
+            originalPaste = bars.getGlobalActionHandler(ActionFactory.PASTE.getId());
+            bars.setGlobalActionHandler(ActionFactory.PASTE.getId(), pasteAction);
+            bars.updateActionBars();
+        }
+
+        private void deactivatePaste()
+        {
+            IHandlerService service = editor.getSite().getService(IHandlerService.class);
+            if (activation != null && service != null)
+                service.deactivateHandler(activation);
+            activation = null;
+            IActionBars bars = editor.getEditorSite().getActionBars();
+            if (bars.getGlobalActionHandler(ActionFactory.PASTE.getId()) == pasteAction)
+            {
+                bars.setGlobalActionHandler(ActionFactory.PASTE.getId(), originalPaste);
+                bars.updateActionBars();
+            }
+        }
+
+        private void fillClipboardMenu(Menu menu)
+        {
+            for (MenuItem item : menu.getItems())
+                if (Boolean.TRUE.equals(item.getData(KEY)))
+                    item.dispose();
+            MenuItem separator = new MenuItem(menu, SWT.SEPARATOR);
+            separator.setData(KEY, Boolean.TRUE);
+            MenuItem copy = new MenuItem(menu, SWT.PUSH);
+            copy.setData(KEY, Boolean.TRUE);
+            copy.setText("Копировать\tCtrl+C"); //$NON-NLS-1$
+            copy.setEnabled(table.getSelectionCount() > 0);
+            ComfortSubmenuHelper.setMenuItemTooltip(copy, "Копировать выбранные характеристики для вставки в другой объект"); //$NON-NLS-1$
+            copy.addListener(SWT.Selection, event -> copy());
+            MenuItem paste = new MenuItem(menu, SWT.PUSH);
+            paste.setData(KEY, Boolean.TRUE);
+            paste.setText("Вставить\tCtrl+V"); //$NON-NLS-1$
+            paste.setEnabled(canPaste());
+            ComfortSubmenuHelper.setMenuItemTooltip(paste, "Вставить скопированные характеристики в этот объект"); //$NON-NLS-1$
+            paste.addListener(SWT.Selection, event -> paste());
+        }
+
+        private List<EObject> selectedCharacteristics()
+        {
+            List<EObject> objects = new ArrayList<>();
+            for (TableItem item : table.getSelection())
+            {
+                EObject object = mapViewModelToEObject(table, item.getData());
+                if (object instanceof CharacteristicsDescription)
+                    objects.add(object);
+            }
+            return objects;
+        }
+
+        private void copy()
+        {
+            List<EObject> objects = selectedCharacteristics();
+            Global.tempLog("characteristics-clipboard", "copy selected=" + table.getSelectionCount() //$NON-NLS-1$ //$NON-NLS-2$
+                + " mapped=" + objects.size()); //$NON-NLS-1$
+            if (objects.isEmpty())
+                return;
+            Clipboard clipboard = new Clipboard(table.getDisplay());
+            try
+            {
+                clipboard.setContents(new Object[] { objects.toArray() },
+                    new Transfer[] { LocalTransfer.getInstance() });
+            }
+            finally
+            {
+                clipboard.dispose();
+            }
+        }
+
+        private List<EObject> copiedCharacteristics()
+        {
+            Clipboard clipboard = new Clipboard(table.getDisplay());
+            try
+            {
+                Object content = clipboard.getContents(LocalTransfer.getInstance());
+                List<EObject> objects = new ArrayList<>();
+                if (content instanceof Object[] values)
+                    for (Object value : values)
+                    {
+                        if (!(value instanceof CharacteristicsDescription object) || object.eIsProxy())
+                            return List.of();
+                        objects.add(object);
+                    }
+                return objects;
+            }
+            finally
+            {
+                clipboard.dispose();
+            }
+        }
+
+        private EReference targetFeature()
+        {
+            EObject model = editor.getModel();
+            return model != null && model.eClass().getEStructuralFeature("characteristics") //$NON-NLS-1$
+                instanceof EReference reference && reference.isMany() && reference.isContainment()
+                    ? reference : null;
+        }
+
+        private boolean canPaste()
+        {
+            return !table.isDisposed() && targetFeature() != null
+                && getInjector().getInstance(IModelEditingSupport.class).canEdit(editor.getModel(), EditingMode.DIRECT)
+                && !copiedCharacteristics().isEmpty();
+        }
+
+        private void paste()
+        {
+            boolean enabled = canPaste();
+            Global.tempLog("characteristics-clipboard", "paste requested enabled=" + enabled); //$NON-NLS-1$ //$NON-NLS-2$
+            if (!enabled)
+                return;
+            List<EObject> objects = copiedCharacteristics();
+            EObject target = editor.getModel();
+            EReference feature = targetFeature();
+            IModelObjectCopySupport support = getInjector().getInstance(IModelObjectCopySupport.class);
+            AtomicReference<List<EObject>> inserted = new AtomicReference<>(List.of());
+            int generation = ++pasteGeneration;
+            Global.tempLog("characteristics-clipboard", "paste count=" + objects.size() //$NON-NLS-1$ //$NON-NLS-2$
+                + " target=" + EcoreUtil.getURI(target)); //$NON-NLS-1$
+            try
+            {
+                new ProgressMonitorDialog(table.getShell()).run(true, false, monitor ->
+                {
+                    try
+                    {
+                        List<EObject> copied = support.copyAndAttach(objects, target, feature, monitor);
+                        inserted.set(List.copyOf(copied));
+                        Global.tempLog("characteristics-clipboard", "paste copied=" + copied.size()); //$NON-NLS-1$ //$NON-NLS-2$
+                    }
+                    catch (org.eclipse.core.runtime.CoreException | RuntimeException e)
+                    {
+                        throw new InvocationTargetException(e);
+                    }
+                });
+                if (!inserted.get().isEmpty() && !table.isDisposed())
+                    table.getDisplay().asyncExec(() -> selectInserted(inserted.get(), generation, 0));
+            }
+            catch (InvocationTargetException e)
+            {
+                Throwable cause = e.getCause();
+                Global.tempLog("characteristics-clipboard", "paste failed=" + cause); //$NON-NLS-1$ //$NON-NLS-2$
+                Global.logError(TAG, "Вставка характеристик", cause); //$NON-NLS-1$
+                MessageDialog.openError(table.getShell(), Global.withPluginWindowTitle("Вставка характеристик"), //$NON-NLS-1$
+                    "Не удалось вставить характеристики: " + cause.getMessage()); //$NON-NLS-1$
+            }
+            catch (InterruptedException e)
+            {
+                Thread.currentThread().interrupt();
+                Global.tempLog("characteristics-clipboard", "paste interrupted=" + e); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+
+        /** Модель обновляет таблицу асинхронно: ждём появления всех вставленных объектов. */
+        private void selectInserted(List<EObject> objects, int generation, int attempt)
+        {
+            if (table.isDisposed() || generation != pasteGeneration || editorOf(table) != editor)
+                return;
+            TableViewer viewer = null;
+            for (Control control = table; control != null; control = control.getParent())
+                if (control.getData("com._1c.g5.v8.dt.ui.aef.swt.views.DtTableView.tableViewer") //$NON-NLS-1$
+                    instanceof TableViewer candidate && candidate.getTable() == table)
+                {
+                    viewer = candidate;
+                    break;
+                }
+            List<Object> rows = new ArrayList<>();
+            for (TableItem item : table.getItems())
+            {
+                EObject rowObject = mapViewModelToEObject(table, item.getData());
+                for (EObject object : objects)
+                    if (sameObject(rowObject, object))
+                    {
+                        rows.add(item.getData());
+                        break;
+                    }
+            }
+            Global.tempLog("characteristics-clipboard", "select inserted attempt=" + attempt //$NON-NLS-1$ //$NON-NLS-2$
+                + " found=" + rows.size() + " expected=" + objects.size() + " viewer=" + (viewer != null)); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            if (viewer != null && rows.size() == objects.size())
+            {
+                viewer.setSelection(new StructuredSelection(rows), true);
+                return;
+            }
+            if (attempt < 20)
+                table.getDisplay().timerExec(150, () -> selectInserted(objects, generation, attempt + 1));
+        }
     }
 
     /**
@@ -126,7 +469,7 @@ public final class MdEditorAttributeMenuHook implements IStartup
     {
         if (event.button != 1)
             return;
-        Control control = dataPageTableOrTree(event);
+        Control control = doubleClickPageTableOrTree(event);
         if (control == null)
             return;
         Object item = itemDataOf(event);
@@ -142,7 +485,7 @@ public final class MdEditorAttributeMenuHook implements IStartup
     }
 
     /**
-     * «Общие реквизиты» и «Значения» перечисления: {@code bringToTop}.
+     * «Общие реквизиты», «Значения» перечисления и «Характеристики»: {@code bringToTop}.
      * Деревья вкладки не перехватываем. В «Стандартные реквизиты» не лезть:
      * Grok 4.6 (2026-08-16) за ~40 попыток не смог правильно загрузить реквизит в панель «Свойства».
      */
@@ -150,7 +493,7 @@ public final class MdEditorAttributeMenuHook implements IStartup
     {
         if (event.button != 1)
             return;
-        Control control = dataPageTableOrTree(event);
+        Control control = doubleClickPageTableOrTree(event);
         if (!(control instanceof Table table))
             return;
         Object item = itemDataOf(event);
@@ -158,7 +501,8 @@ public final class MdEditorAttributeMenuHook implements IStartup
             && sameItemDowns >= 2
             && Objects.equals(item, lastDownItem);
         DtGranularEditor<?> editor = editorOf(table);
-        if (selectedCommonAttribute(table) == null && selectedEnumValue(table) == null)
+        if (!(item instanceof CharacteristicsTableItemViewModel)
+            && selectedCommonAttribute(table) == null && selectedEnumValue(table) == null)
             return;
         if (!genuine || item == null || editor == null || editor.getSite() == null)
             return;
@@ -195,12 +539,20 @@ public final class MdEditorAttributeMenuHook implements IStartup
         return view;
     }
 
-    private static Control dataPageTableOrTree(Event event)
+    private static Control doubleClickPageTableOrTree(Event event)
     {
         if (event.widget instanceof Table table && !table.isDisposed())
         {
             DtGranularEditor<?> editor = editorOf(table);
-            return isDataPageControl(editor, table) ? table : null;
+            if (isDataPageControl(editor, table))
+                return table;
+            IFormPage page = editor != null ? editor.getActivePageInstance() : null;
+            if (page != null && CHARACTERISTICS_PAGE_ID.equals(page.getId()))
+            {
+                Control root = page.getPartControl();
+                return root != null && isUnder(root, table) ? table : null;
+            }
+            return null;
         }
         if (event.widget instanceof Tree tree && !tree.isDisposed())
         {

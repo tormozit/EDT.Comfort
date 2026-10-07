@@ -277,6 +277,12 @@ public final class MdEditorTreeHook
     private static final String DT_TREE_VIEW_INTERNAL =
         "com/_1c/g5/v8/dt/ui/aef/swt/views/DtTreeView"; //$NON-NLS-1$
 
+    private static final String DT_TABLE_VIEW_CLASS =
+        "com._1c.g5.v8.dt.ui.aef.swt.views.DtTableView"; //$NON-NLS-1$
+
+    private static final String CHARACTERISTICS_COMPONENT_CLASS =
+        "com._1c.g5.v8.dt.internal.md.ui.editors.pages.characteristics.CharacteristicsTableComponent"; //$NON-NLS-1$
+
     private static final String DT_TREE_VIEW_PROVIDER_INTERNAL =
         "com/_1c/g5/v8/dt/ui/aef/swt/views/DtTreeViewProvider"; //$NON-NLS-1$
 
@@ -3105,7 +3111,7 @@ public final class MdEditorTreeHook
         }
     }
 
-    /** Подменяет стиль штатного {@code TreeViewer} на {@code SWT.MULTI} для редактора МД. */
+    /** Множественный выбор в деревьях МД и таблице характеристик, сопровождение копирования. */
     private static final class TreeStyleWeavingHook
         implements WeavingHook
     {
@@ -3115,17 +3121,27 @@ public final class MdEditorTreeHook
             if (wovenClass.getState() != WovenClass.TRANSFORMING)
                 return;
             boolean treeView = DT_TREE_VIEW_INTERNAL.replace('/', '.').equals(wovenClass.getClassName());
+            boolean tableView = DT_TABLE_VIEW_CLASS.equals(wovenClass.getClassName());
+            boolean characteristics = CHARACTERISTICS_COMPONENT_CLASS.equals(wovenClass.getClassName());
             boolean copySupport = MODEL_OBJECT_COPY_SUPPORT_INTERNAL.replace('/', '.')
                 .equals(wovenClass.getClassName());
             boolean treeProvider = DT_TREE_VIEW_PROVIDER_INTERNAL.replace('/', '.')
                 .equals(wovenClass.getClassName());
-            if (!treeView && !copySupport && !treeProvider)
+            if (!treeView && !tableView && !characteristics && !copySupport && !treeProvider)
                 return;
             try
             {
                 byte[] transformed = treeView ? transformTreeStyle(wovenClass.getBytes())
-                    : copySupport ? transformCopyResult(wovenClass.getBytes())
-                        : transformTreeProvider(wovenClass.getBytes());
+                    : tableView ? transformCharacteristicsTableStyle(wovenClass.getBytes())
+                        : characteristics ? transformCharacteristicsSelection(wovenClass.getBytes())
+                            : copySupport ? transformCopyResult(wovenClass.getBytes())
+                                : transformTreeProvider(wovenClass.getBytes());
+                if (characteristics)
+                    Global.tempLog("characteristics-clipboard", "weave CharacteristicsTableComponent transformed=" //$NON-NLS-1$ //$NON-NLS-2$
+                        + (transformed != null));
+                if (tableView)
+                    Global.tempLog("characteristics-clipboard", "weave DtTableView transformed=" //$NON-NLS-1$ //$NON-NLS-2$
+                        + (transformed != null));
                 if (transformed == null)
                     return;
                 wovenClass.getDynamicImports().add("tormozit"); //$NON-NLS-1$
@@ -3133,8 +3149,107 @@ public final class MdEditorTreeHook
             }
             catch (Throwable ignored)
             {
+                if (tableView)
+                    Global.tempLog("characteristics-clipboard", "weave DtTableView failed=" + ignored); //$NON-NLS-1$ //$NON-NLS-2$
+                if (characteristics)
+                    Global.tempLog("characteristics-clipboard", "weave CharacteristicsTableComponent failed=" + ignored); //$NON-NLS-1$ //$NON-NLS-2$
             }
         }
+    }
+
+    /** Передаёт все выбранные характеристики в штатный провайдер выделения страницы. */
+    private static byte[] transformCharacteristicsSelection(byte[] source)
+    {
+        ClassReader reader = new ClassReader(source);
+        ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+        AtomicBoolean selectionTouched = new AtomicBoolean();
+        AtomicBoolean changeTouched = new AtomicBoolean();
+        reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+        {
+            @Override
+            public MethodVisitor visitMethod(int access, String name, String descriptor,
+                String signature, String[] exceptions)
+            {
+                MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                boolean selection = "queueNavigatorObjectSelectionEvent".equals(name) //$NON-NLS-1$
+                    && "()V".equals(descriptor); //$NON-NLS-1$
+                boolean event = "processEvent".equals(name) //$NON-NLS-1$
+                    && "(Lcom/_1c/g5/aef2/events/IEvent;)V".equals(descriptor); //$NON-NLS-1$
+                if (!selection && !event)
+                    return mv;
+                return new MethodVisitor(Opcodes.ASM9, mv)
+                {
+                    @Override
+                    public void visitMethodInsn(int opcode, String owner, String method,
+                        String methodDescriptor, boolean isInterface)
+                    {
+                        if (selection && opcode == Opcodes.INVOKESPECIAL
+                            && "com/_1c/g5/v8/dt/ui/aef/events/NavigatorObjectSelectionEvent".equals(owner) //$NON-NLS-1$
+                            && "<init>".equals(method) && "([Ljava/lang/Object;)V".equals(methodDescriptor)) //$NON-NLS-1$ //$NON-NLS-2$
+                        {
+                            super.visitMethodInsn(Opcodes.INVOKESTATIC, "tormozit/MdEditorAttributeMenuHook", //$NON-NLS-1$
+                                "characteristicsSelection", "([Ljava/lang/Object;)[Ljava/lang/Object;", false); //$NON-NLS-1$ //$NON-NLS-2$
+                            selectionTouched.set(true);
+                        }
+                        super.visitMethodInsn(opcode, owner, method, methodDescriptor, isInterface);
+                        if (event && opcode == Opcodes.INVOKESTATIC && "java/util/Objects".equals(owner) //$NON-NLS-1$
+                            && "equals".equals(method) //$NON-NLS-1$
+                            && "(Ljava/lang/Object;Ljava/lang/Object;)Z".equals(methodDescriptor)) //$NON-NLS-1$
+                        {
+                            // Первая строка может остаться прежней при добавлении/снятии выделения Ctrl.
+                            // Дополнительно сравниваем весь набор, не создавая повторных событий.
+                            super.visitMethodInsn(Opcodes.INVOKESTATIC, "tormozit/MdEditorAttributeMenuHook", //$NON-NLS-1$
+                                "characteristicsSelectionUnchanged", "(Z)Z", false); //$NON-NLS-1$ //$NON-NLS-2$
+                            changeTouched.set(true);
+                        }
+                    }
+                };
+            }
+        }, 0);
+        return selectionTouched.get() && changeTouched.get() ? writer.toByteArray() : null;
+    }
+
+    /** DtTableView.createTable: стиль меняется только для модели таблицы характеристик. */
+    private static byte[] transformCharacteristicsTableStyle(byte[] source)
+    {
+        ClassReader reader = new ClassReader(source);
+        ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+        AtomicBoolean touched = new AtomicBoolean();
+        reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+        {
+            @Override
+            public MethodVisitor visitMethod(int access, String name, String descriptor,
+                String signature, String[] exceptions)
+            {
+                MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                if (!"createTable".equals(name) //$NON-NLS-1$
+                    || !descriptor.equals("(Lorg/eclipse/swt/widgets/Composite;" //$NON-NLS-1$
+                        + "Lcom/_1c/g5/aef2/standard/viewModels/TableViewModel;)" //$NON-NLS-1$
+                        + "Lorg/eclipse/jface/viewers/TableViewer;")) //$NON-NLS-1$
+                    return mv;
+                return new MethodVisitor(Opcodes.ASM9, mv)
+                {
+                    @Override
+                    public void visitMethodInsn(int opcode, String owner, String method,
+                        String methodDescriptor, boolean isInterface)
+                    {
+                        if (opcode == Opcodes.INVOKESPECIAL
+                            && "org/eclipse/jface/viewers/TableViewer".equals(owner) //$NON-NLS-1$
+                            && "<init>".equals(method) //$NON-NLS-1$
+                            && "(Lorg/eclipse/swt/widgets/Composite;I)V".equals(methodDescriptor)) //$NON-NLS-1$
+                        {
+                            super.visitVarInsn(Opcodes.ALOAD, 2);
+                            super.visitMethodInsn(Opcodes.INVOKESTATIC,
+                                "tormozit/MdEditorAttributeMenuHook", "characteristicsTableStyle", //$NON-NLS-1$ //$NON-NLS-2$
+                                "(ILjava/lang/Object;)I", false); //$NON-NLS-1$
+                            touched.set(true);
+                        }
+                        super.visitMethodInsn(opcode, owner, method, methodDescriptor, isInterface);
+                    }
+                };
+            }
+        }, 0);
+        return touched.get() ? writer.toByteArray() : null;
     }
 
     private static byte[] transformTreeProvider(byte[] source)
