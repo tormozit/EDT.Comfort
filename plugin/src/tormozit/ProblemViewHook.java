@@ -646,10 +646,12 @@ public final class ProblemViewHook implements IStartup
      * проекта {@code ProjectMarkerStorage}, а у него — набор идентификаторов объектов, которые
      * уходят в этот коммит ({@code markUncommitted}, публичный {@code isUncommitted}).
      *
-     * <p><b>Как вклиниваемся.</b> Поле {@code records} подменяется обёрткой над очередью: она
-     * работает как обычная очередь, но на каждом {@code poll()} успевает спросить хранилище про
-     * идентификаторы <b>из отбора панели</b> — то есть проверка стоит O(размера отбора), а не
-     * O(числа проблем в списке, как отпечаток), и хранилище маркеров при этом не читается.
+     * <p><b>Как вклиниваемся.</b> Обёртка очереди подключает наблюдение за наборами
+     * {@code uncommittedIds} до помещения записи в очередь: {@code commitLater()} вызывает
+     * {@code markUncommitted()} уже после {@code offer()}. Добавленные идентификаторы сохраняем
+     * отдельно до сверки события; штатный {@code commit()} может очистить наборы раньше
+     * {@code poll()}. Штатные операции наборов и очереди остаются у их исходных экземпляров.
+     * При сверке сравниваем сохранённые идентификаторы с отбором, маркеры из индекса не читаем.
      *
      * <p><b>Почему так, а не отпечатком.</b> Отпечаток (количество и сумма хэшей маркеров под
      * отбором) требовал чтения хранилища, зависел от снимка отбора и не отвечал на нужный вопрос:
@@ -667,8 +669,6 @@ public final class ProblemViewHook implements IStartup
         private static final String RECORDS_FIELD = "records"; //$NON-NLS-1$
 
         private static final String RECORD_STORAGE_FIELD = "storage"; //$NON-NLS-1$
-
-        private static final String IS_UNCOMMITTED_METHOD = "isUncommitted"; //$NON-NLS-1$
 
         private static final String GET_PROJECT_NAME_METHOD = "getProjectName"; //$NON-NLS-1$
 
@@ -701,16 +701,21 @@ public final class ProblemViewHook implements IStartup
          */
         private volatile java.util.Set<String> scopeProjects = java.util.Set.of();
 
-        /** В пачке был объект из отбора панели. */
-        private final java.util.concurrent.atomic.AtomicBoolean hit =
-            new java.util.concurrent.atomic.AtomicBoolean();
+        /** Наблюдатели хранилищ не удерживают закрытые проекты. */
+        private final Map<Object, StorageJournal> storageJournals = new java.util.WeakHashMap<>();
 
-        /** Сколько записей пачки удалось осмотреть. */
-        private final java.util.concurrent.atomic.AtomicInteger inspected =
-            new java.util.concurrent.atomic.AtomicInteger();
+        /** Копия id привязана к записи, а не ко всему хранилищу или интервалу таймера. */
+        private final Map<Object, CommitChange> recordChanges = new java.util.WeakHashMap<>();
+
+        /** Данные одного решения забираются вместе, без разрыва между счётчиками и флагами. */
+        private final Object batchLock = new Object();
+
+        private final Set<CommitChange> batchChanges = new java.util.LinkedHashSet<>();
+
+        private int inspected;
 
         /** Пачку разобрать не удалось — что изменилось, неизвестно. */
-        private volatile boolean unknown;
+        private boolean unknown;
 
         private volatile boolean installed;
 
@@ -767,6 +772,8 @@ public final class ProblemViewHook implements IStartup
                     return;
                 field.setAccessible(true);
                 field.set(committer, new ObservingQueue(delegate));
+                for (Object record : delegate)
+                    watchStorage(Global.getField(record, RECORD_STORAGE_FIELD));
                 installed = true;
                 Debug.log("наблюдатель пачки: очередь коммиттера подменена"); //$NON-NLS-1$
             }
@@ -879,16 +886,42 @@ public final class ProblemViewHook implements IStartup
         /** Забирает решение по накопленной пачке и начинает копить заново. */
         Verdict take()
         {
-            boolean sawHit = hit.getAndSet(false);
-            int records = inspected.getAndSet(0);
-            boolean lost = unknown;
-            unknown = false;
+            int records;
+            boolean lost;
+            Set<CommitChange> captured;
+            synchronized (batchLock)
+            {
+                records = inspected;
+                inspected = 0;
+                lost = unknown;
+                unknown = false;
+                captured = new java.util.LinkedHashSet<>(batchChanges);
+                batchChanges.clear();
+            }
             Object[] ids = scopeIds;
+            Set<String> projects = scopeProjects;
+            boolean sawHit = false;
+            for (CommitChange change : captured)
+            {
+                Set<Object> changes = change.ids;
+                boolean ownProject = projects.isEmpty() || projects.contains(change.project);
+                if (!ownProject)
+                    continue;
+                if (changes == null || changes.isEmpty())
+                {
+                    lost = true;
+                    continue;
+                }
+                if (changes.contains(Long.valueOf(-1L)))
+                    sawHit = true; // EDT помечает -1 изменения, относящиеся ко всему проекту.
+                for (Object id : ids)
+                    sawHit |= changes.contains(id);
+            }
 
             if (!installed)
                 return finishTake(false, false, "наблюдатель пачки не установлен"); //$NON-NLS-1$
             if (lost)
-                return finishTake(false, false, "пачку разобрать не удалось"); //$NON-NLS-1$
+                return finishTake(false, sawHit, "в пачке есть общее уведомление или нет сведений об объектах"); //$NON-NLS-1$
             if (ids.length == 0)
                 return finishTake(false, false, "в отборе панели нет объектов — решать не по чему"); //$NON-NLS-1$
             if (records == 0)
@@ -902,6 +935,17 @@ public final class ProblemViewHook implements IStartup
         private static Verdict finishTake(boolean skip, boolean touched, String reason)
         {
             return new Verdict(skip, touched, reason);
+        }
+
+        /** Область не анализируется: не удерживать копии id до будущего включения отбора. */
+        void discard()
+        {
+            synchronized (batchLock)
+            {
+                batchChanges.clear();
+                inspected = 0;
+                unknown = false;
+            }
         }
 
         /**
@@ -994,46 +1038,198 @@ public final class ProblemViewHook implements IStartup
             return id.getClass().getSimpleName() + ":" + id; //$NON-NLS-1$
         }
 
-        /** Осматривает запись пачки в момент, когда коммиттер забирает её из очереди. */
+        /**
+         * Подключает сохранение идентификаторов до markUncommitted(). В EDT оба элемента
+         * uncommittedIds создаются в конструкторе как Set и затем только читаются/очищаются.
+         * Наблюдатель сохраняет addAll даже при повторном добавлении уже существующих id.
+         */
+        private StorageJournal watchStorage(Object storage)
+        {
+            if (storage == null)
+                return null;
+            synchronized (storageJournals)
+            {
+                StorageJournal existing = storageJournals.get(storage);
+                if (existing != null)
+                    return existing;
+                Object raw = Global.getField(storage, "uncommittedIds"); //$NON-NLS-1$
+                Object name = Global.invoke(storage, GET_PROJECT_NAME_METHOD);
+                if (!(raw instanceof Set<?>[] stores) || !(name instanceof String project))
+                    return null;
+                for (Set<?> store : stores)
+                    if (store == null)
+                        return null;
+                StorageJournal journal = new StorageJournal(project);
+                for (int i = 0; i < stores.length; i++)
+                {
+                    @SuppressWarnings("unchecked")
+                    Set<Object> delegate = (Set<Object>)stores[i];
+                    stores[i] = new ObservingIds(delegate, journal);
+                }
+                storageJournals.put(storage, journal);
+                return journal;
+            }
+        }
+
+        /**
+         * commitLater() в том же потоке после offer(COMMIT) вызывает markUncommitted(),
+         * который делает addAll(ids). Контекст потока связывает эти два вызова, даже если
+         * коммиттер успеет забрать запись до addAll. CHECK_DUPLICATES приходит уже после них.
+         */
+        private void prepareRecord(Object record)
+        {
+            Object storage = Global.getField(record, RECORD_STORAGE_FIELD);
+            StorageJournal journal = watchStorage(storage);
+            Object rawType = Global.getField(record, "type"); //$NON-NLS-1$
+            if (journal != null && rawType instanceof Enum<?> type && "COMMIT".equals(type.name())) //$NON-NLS-1$
+            {
+                CommitChange change = new CommitChange(journal.project);
+                synchronized (recordChanges)
+                {
+                    recordChanges.put(record, change);
+                }
+                journal.nextCommit.set(change);
+            }
+        }
+
+        /** Осматривает тип записи; идентификаторы берём из журнала добавлений, а не после clear(). */
         private void inspect(Object record)
         {
-            Object[] ids = scopeIds;
+            Object storage = Global.getField(record, RECORD_STORAGE_FIELD);
+            Object recordType = Global.getField(record, "type"); //$NON-NLS-1$
             try
             {
-                Object storage = Global.getField(record, RECORD_STORAGE_FIELD);
-                if (storage == null)
-                {
-                    // Запись без хранилища (NOTIFY) — что изменилось, отсюда не видно
-                    unknown = true;
+                // Этот тип записи нужен только штатной диагностике дубликатов. Он не
+                // коммитит маркеры и не добавляет проект в событие обновления.
+                if (recordType instanceof Enum<?> type && "CHECK_DUPLICATES".equals(type.name())) //$NON-NLS-1$
                     return;
+                Object project = storage == null ? null : Global.invoke(storage, GET_PROJECT_NAME_METHOD);
+                CommitChange change;
+                synchronized (recordChanges)
+                {
+                    change = recordChanges.remove(record);
                 }
-                if (ids.length == 0)
-                    return;
-                java.util.Set<String> projects = scopeProjects;
-                if (!projects.isEmpty())
+                synchronized (batchLock)
                 {
-                    Object name = Global.invoke(storage, GET_PROJECT_NAME_METHOD);
-                    if (name instanceof String storageProject && !projects.contains(storageProject))
+                    inspected++;
+                    if (!(project instanceof String name))
                     {
-                        // Чужой проект: его объекты в списке панели не показываются
-                        inspected.incrementAndGet();
+                        unknown = true;
                         return;
                     }
-                }
-                inspected.incrementAndGet();
-                for (Object id : ids)
-                {
-                    if (Boolean.TRUE.equals(Global.invoke(storage, IS_UNCOMMITTED_METHOD, id)))
+                    if (change != null)
+                        batchChanges.add(change);
+                    if (!scopeProjects.isEmpty() && !scopeProjects.contains(name))
+                        return;
+                    if (change == null)
                     {
-                        hit.set(true);
-                        break;
+                        // NOTIFY сообщает только о проекте. Для COMMIT без подключённого
+                        // наблюдателя (например, уже стоявшего в очереди) данных тоже нет.
+                        unknown = true;
                     }
                 }
             }
             catch (Exception | LinkageError e)
             {
-                unknown = true;
+                synchronized (batchLock)
+                {
+                    unknown = true;
+                }
                 Debug.log("наблюдатель пачки: запись не разобрана — " + e); //$NON-NLS-1$
+            }
+        }
+
+        /** Полная копия идентификаторов одной записи COMMIT, не зависящая от clear(). */
+        private static final class CommitChange
+        {
+            final String project;
+
+            volatile Set<Object> ids;
+
+            CommitChange(String project)
+            {
+                this.project = project;
+            }
+        }
+
+        /** Контекст производителя записи; не смешивает параллельные проверки разных потоков. */
+        private static final class StorageJournal
+        {
+            final String project;
+
+            final ThreadLocal<CommitChange> nextCommit = new ThreadLocal<>();
+
+            StorageJournal(String project)
+            {
+                this.project = project;
+            }
+
+            void remember(Collection<?> ids)
+            {
+                CommitChange change = nextCommit.get();
+                nextCommit.remove();
+                if (change != null)
+                    change.ids = java.util.Collections.unmodifiableSet(new java.util.LinkedHashSet<>(ids));
+            }
+        }
+
+        /** Все штатные операции идут в исходный concurrent Set; добавления ещё и запоминаются. */
+        private static final class ObservingIds extends java.util.AbstractSet<Object>
+        {
+            private final Set<Object> delegate;
+
+            private final StorageJournal journal;
+
+            ObservingIds(Set<Object> delegate, StorageJournal journal)
+            {
+                this.delegate = delegate;
+                this.journal = journal;
+            }
+
+            @Override
+            public boolean add(Object id)
+            {
+                boolean result = delegate.add(id);
+                journal.remember(java.util.Collections.singleton(id));
+                return result;
+            }
+
+            @Override
+            public boolean addAll(Collection<?> ids)
+            {
+                boolean result = delegate.addAll(ids);
+                journal.remember(ids);
+                return result;
+            }
+
+            @Override
+            public boolean contains(Object id)
+            {
+                return delegate.contains(id);
+            }
+
+            @Override
+            public boolean remove(Object id)
+            {
+                return delegate.remove(id);
+            }
+
+            @Override
+            public void clear()
+            {
+                delegate.clear();
+            }
+
+            @Override
+            public java.util.Iterator<Object> iterator()
+            {
+                return delegate.iterator();
+            }
+
+            @Override
+            public int size()
+            {
+                return delegate.size();
             }
         }
 
@@ -1096,6 +1292,14 @@ public final class ProblemViewHook implements IStartup
             @Override
             public boolean offer(Object record)
             {
+                try
+                {
+                    INSTANCE.prepareRecord(record);
+                }
+                catch (RuntimeException | LinkageError ignored)
+                {
+                    // Не мешаем штатной очереди при недоступности наблюдателя.
+                }
                 return delegate.offer(record);
             }
 
@@ -1215,14 +1419,10 @@ public final class ProblemViewHook implements IStartup
         @Override
         public void handleMarkersChanged(MarkersChangedEvent event)
         {
-            Global.tempLog("issue647", "событие маркеров: проекты=" + changedProjectNames(event) //$NON-NLS-1$ //$NON-NLS-2$
-                + ", показывать все=" + showAllActive //$NON-NLS-1$
-                + ", фильтр по подсистемам=" + subsystemFilterActive //$NON-NLS-1$
-                + ", область Комфорта=" + ProblemViewComfortScope.mode() //$NON-NLS-1$
-                + ", фильтр обновлений=" + ComfortSettings.isProblemViewUpdateGateEnabled()); //$NON-NLS-1$
             if (!ComfortSettings.isReplaceListFiltersEnabled()
                 || !ComfortSettings.isProblemViewUpdateGateEnabled())
             {
+                MarkerChangeTap.get().discard();
                 stock.handleMarkersChanged(event);
                 return;
             }
@@ -1260,6 +1460,7 @@ public final class ProblemViewHook implements IStartup
             {
                 if (skipOwnershipAnalysis())
                 {
+                    MarkerChangeTap.get().discard();
                     applySourceWait(!isSourceIdle(event, filterSnapshot));
                     deliver(event, "без анализа «свой/чужой»"); //$NON-NLS-1$
                     return;
