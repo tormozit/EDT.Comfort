@@ -136,6 +136,9 @@ final class FilterInputBox
         PREDEFINED_DATA(
             "comfort.predefinedData.filter.history.count", //$NON-NLS-1$
             "comfort.predefinedData.filter.history."), //$NON-NLS-1$
+        PREDEFINED_SELECTION_DIALOG(
+            "comfort.predefinedSelectionDialog.filter.history.count", //$NON-NLS-1$
+            "comfort.predefinedSelectionDialog.filter.history."), //$NON-NLS-1$
         DEFINED_TYPES(
             "comfort.definedTypes.filter.history.count", //$NON-NLS-1$
             "comfort.definedTypes.filter.history."), //$NON-NLS-1$
@@ -563,6 +566,11 @@ final class FilterInputBox
             case COLUMN_VALUES -> forColumnValues(parent, onSearch);
             case PROJECT_STRUCTURE -> forProjectStructure(parent, onSearch);
             case PREDEFINED_DATA -> throw new IllegalStateException("PREDEFINED_DATA: use attachHistory(SearchBox, Scope.PREDEFINED_DATA)"); //$NON-NLS-1$
+            case PREDEFINED_SELECTION_DIALOG -> {
+                Options opts = new Options();
+                opts.scope = scope;
+                yield create(parent, opts, onSearch);
+            }
             case EVENT_HANDLERS -> throw new IllegalStateException("EVENT_HANDLERS: use attachHistory(SearchBox, Scope.EVENT_HANDLERS)"); //$NON-NLS-1$
             case SYNTAX_CONTENTS -> throw new IllegalStateException("SYNTAX_CONTENTS: use attachHistory(SearchBox, Scope.SYNTAX_CONTENTS)"); //$NON-NLS-1$
             case SYNTAX_SEARCH -> throw new IllegalStateException("SYNTAX_SEARCH: use attachHistoryKeepLayout(SearchBox, Scope.SYNTAX_SEARCH)"); //$NON-NLS-1$

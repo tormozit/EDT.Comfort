@@ -8,6 +8,7 @@
     <startup class="tormozit.ComfortStartup"/>
   </extension>
   <extension point="tormozit.comfort.startup">
+    <startup class="tormozit.WorkbenchTabsHook"/>
     <startup class="tormozit.ComfortShutdownHook"/>
     <startup class="tormozit.ExternalOpenRequestHook"/>
     <startup class="tormozit.EditorStatusFieldsFixHook"/>
