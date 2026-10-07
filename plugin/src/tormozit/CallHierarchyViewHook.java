@@ -13,7 +13,11 @@ import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import org.eclipse.core.runtime.IProgressMonitor;
+import org.eclipse.core.runtime.OperationCanceledException;
+import org.eclipse.core.runtime.jobs.IJobChangeEvent;
 import org.eclipse.core.runtime.jobs.Job;
+import org.eclipse.core.runtime.jobs.JobChangeAdapter;
 import org.eclipse.emf.common.util.EList;
 import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.EObject;
@@ -72,6 +76,8 @@ import org.eclipse.xtext.nodemodel.ICompositeNode;
 import org.eclipse.xtext.nodemodel.util.NodeModelUtils;
 import org.eclipse.xtext.resource.IReferenceDescription;
 import org.eclipse.xtext.ui.editor.XtextEditor;
+import org.eclipse.xtext.ui.editor.findrefs.IReferenceFinder;
+import org.eclipse.xtext.util.IAcceptor;
 
 import com._1c.g5.v8.dt.bsl.model.DynamicFeatureAccess;
 import com._1c.g5.v8.dt.bsl.common.Symbols;
@@ -87,6 +93,7 @@ import com._1c.g5.v8.dt.bsl.model.OperatorStyleCreator;
 import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.util.BslUtil;
 import com._1c.g5.v8.dt.bsl.ui.menu.BslHandlerUtil;
+import com._1c.g5.v8.dt.bsl.ui.editor.findref.IFullTextSearchResultReferenceFinder;
 import com._1c.g5.v8.dt.mcore.Environmental;
 import com._1c.g5.v8.dt.mcore.util.Environments;
 
@@ -165,6 +172,7 @@ public final class CallHierarchyViewHook implements IStartup
     @Override
     public void earlyStartup()
     {
+        LocalMethodReferenceFinder.install();
         Display.getDefault().asyncExec(() ->
         {
             IWorkbench wb = PlatformUI.getWorkbench();
@@ -184,6 +192,116 @@ public final class CallHierarchyViewHook implements IStartup
                 }
             });
         });
+    }
+
+    /**
+     * Поиск вызывающих для неэкспортного метода ограничен его собственным модулем (issue 704).
+     * CallHierarchyQuery.run сначала вызывает findAllReferences, затем полнотекстовый findReferences.
+     * Поля finder, callHierarchyJobRecord/query и порядок вызовов проверены по EDT 22.0.0
+     * (.tmp/bundles/bsl-ui-full-22/); API ограниченного поиска — по xtext-ui-full.
+     */
+    private static final class LocalMethodReferenceFinder
+        implements IReferenceFinder, IFullTextSearchResultReferenceFinder
+    {
+        private static boolean installed;
+        private final IReferenceFinder delegate;
+        private List<URI> globalTargets;
+
+        private LocalMethodReferenceFinder(IReferenceFinder delegate)
+        {
+            this.delegate = delegate;
+        }
+
+        private static synchronized void install()
+        {
+            if (installed)
+                return;
+            installed = true;
+            Job.getJobManager().addJobChangeListener(new JobChangeAdapter()
+            {
+                @Override
+                public void aboutToRun(IJobChangeEvent event)
+                {
+                    Job job = event.getJob();
+                    if (!job.getClass().getName().equals(
+                        "com._1c.g5.v8.dt.bsl.ui.editor.callhierarchy.CallHierarchyUI$InternalCallHierarchyJob")) //$NON-NLS-1$
+                        return;
+                    Object record = Global.getField(job, "callHierarchyJobRecord"); //$NON-NLS-1$
+                    Object query = Global.getField(record, "query"); //$NON-NLS-1$
+                    if (query == null || !query.getClass().getName().equals(
+                        "com._1c.g5.v8.dt.bsl.ui.editor.callhierarchy.CallHierarchyQuery")) //$NON-NLS-1$
+                        return;
+                    Object finder = Global.getField(query, "finder"); //$NON-NLS-1$
+                    if (finder instanceof LocalMethodReferenceFinder)
+                        return;
+                    boolean patched = finder instanceof IReferenceFinder referenceFinder
+                        && Global.setFieldForce(query, "finder", new LocalMethodReferenceFinder(referenceFinder)); //$NON-NLS-1$
+                    Global.tempLog("callHierarchy-scope", "install patched=" + patched //$NON-NLS-1$ //$NON-NLS-2$
+                        + " finder=" + (finder == null ? "null" : finder.getClass().getName())); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+            });
+        }
+
+        @Override
+        public void findAllReferences(Iterable<URI> targetUris, ILocalResourceAccess localResourceAccess,
+            IAcceptor<IReferenceDescription> acceptor, IProgressMonitor monitor)
+        {
+            // Пересчитываем при каждом запуске: метод мог получить/потерять Экспорт после первого поиска.
+            globalTargets = new ArrayList<>();
+            Map<URI, List<URI>> localTargets = new LinkedHashMap<>();
+            for (URI targetUri : targetUris)
+            {
+                if (monitor.isCanceled())
+                    throw new OperationCanceledException();
+                boolean local = false;
+                try
+                {
+                    local = Boolean.TRUE.equals(localResourceAccess.readOnly(targetUri.trimFragment(), resourceSet ->
+                    {
+                        EObject target = resourceSet.getEObject(targetUri, true);
+                        return target instanceof Method method && !method.isExport();
+                    }));
+                }
+                catch (OperationCanceledException canceled)
+                {
+                    throw canceled;
+                }
+                catch (RuntimeException error)
+                {
+                    // Если модель недоступна, сохраняем штатный поиск, а не теряем результаты.
+                    Global.tempLog("callHierarchy-scope", "resolve failed target=" + targetUri + " error=" + error); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                }
+                Global.tempLog("callHierarchy-scope", "target=" + targetUri + " local=" + local); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                if (local)
+                    localTargets.computeIfAbsent(targetUri.trimFragment(), uri -> new ArrayList<>()).add(targetUri);
+                else
+                    globalTargets.add(targetUri);
+            }
+            for (Map.Entry<URI, List<URI>> entry : localTargets.entrySet())
+                delegate.findReferences(entry.getValue(), Collections.singletonList(entry.getKey()),
+                    localResourceAccess, acceptor, monitor);
+            if (!globalTargets.isEmpty())
+                delegate.findAllReferences(globalTargets, localResourceAccess, acceptor, monitor);
+        }
+
+        @Override
+        public void findReferences(Iterable<URI> targetUris, Iterable<URI> resourceUris,
+            ILocalResourceAccess localResourceAccess, IAcceptor<IReferenceDescription> acceptor,
+            IProgressMonitor monitor)
+        {
+            delegate.findReferences(targetUris, resourceUris, localResourceAccess, acceptor, monitor);
+        }
+
+        @Override
+        public void findReferences(Iterable<URI> targetUris, IAcceptor<IReferenceDescription> acceptor,
+            IProgressMonitor monitor)
+        {
+            Global.tempLog("callHierarchy-scope", "fullText globalTargets=" //$NON-NLS-1$ //$NON-NLS-2$
+                + (globalTargets == null ? "unclassified" : globalTargets.size())); //$NON-NLS-1$
+            if (delegate instanceof IFullTextSearchResultReferenceFinder fullTextFinder
+                && (globalTargets == null || !globalTargets.isEmpty()))
+                fullTextFinder.findReferences(globalTargets == null ? targetUris : globalTargets, acceptor, monitor);
+        }
     }
 
     private static void hookWindow(IWorkbenchWindow window)
