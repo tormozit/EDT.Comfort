@@ -22,10 +22,19 @@ public class CompareSearchMatch
     final String comparisonStatus;
     final RowColorKind rowColorKind;
     final boolean checkable;
+    final String referenceFqn;
 
     public CompareSearchMatch(Object comparisonNode, String objectPath, String propertyName,
             String columnSide, String matchText, String comparisonStatus, RowColorKind rowColorKind,
             boolean checkable)
+    {
+        this(comparisonNode, objectPath, propertyName, columnSide, matchText, comparisonStatus,
+            rowColorKind, checkable, null);
+    }
+
+    public CompareSearchMatch(Object comparisonNode, String objectPath, String propertyName,
+            String columnSide, String matchText, String comparisonStatus, RowColorKind rowColorKind,
+            boolean checkable, String referenceFqn)
     {
         this.comparisonNode = comparisonNode;
         this.objectPath = objectPath;
@@ -35,6 +44,12 @@ public class CompareSearchMatch
         this.comparisonStatus = comparisonStatus;
         this.rowColorKind = rowColorKind != null ? rowColorKind : RowColorKind.NONE;
         this.checkable = checkable;
+        this.referenceFqn = referenceFqn;
+    }
+
+    public String getReferenceFqn()
+    {
+        return referenceFqn;
     }
 
     public Object getComparisonNode()

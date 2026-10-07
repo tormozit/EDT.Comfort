@@ -2761,9 +2761,14 @@ boolean inLiteral = endCaret >= 0
                 (org.eclipse.core.runtime.ICoreRunnable)monitor -> {
                     long stampNow = doc instanceof org.eclipse.jface.text.IDocumentExtension4 ext
                         ? ext.getModificationStamp() : -1;
-                    logValidationState(doc, "probe+" + delaySeconds + "s textUnchanged=" //$NON-NLS-1$ //$NON-NLS-2$
-                        + (stampNow == stampAtChange)
+                    // Сокращение объёма лога (07.10.2026, по просьбе автора): пробу пишем
+                    // только для последней правки — когда текст с тех пор не менялся.
+                    if (stampNow != stampAtChange)
+                        return;
+                    logValidationState(doc, "probe+" + delaySeconds + "s" //$NON-NLS-1$ //$NON-NLS-2$
                         + " " + describeReconciler(viewer) + " " + describeOutdated(doc)); //$NON-NLS-1$ //$NON-NLS-2$
+                    Global.tempLog("stale-markers", "painter+" + delaySeconds + "s " //$NON-NLS-1$ //$NON-NLS-2$
+                        + describePainterVsModel(viewer));
                 });
             probe.setSystem(true);
             probe.schedule(delaySeconds * 1000L);
@@ -2844,21 +2849,18 @@ boolean inLiteral = endCaret >= 0
                 @Override
                 public void scheduled(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
                 {
-                    log("scheduled delay=" + event.getDelay(), event); //$NON-NLS-1$
-                }
-
-                @Override
-                public void aboutToRun(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
-                {
-                    log("aboutToRun", event); //$NON-NLS-1$
+                    log(null, event);
                 }
 
                 @Override
                 public void done(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
                 {
-                    log("done result=" + event.getResult(), event); //$NON-NLS-1$
+                    log("done result=" + (event.getResult() != null && event.getResult().isOK() //$NON-NLS-1$
+                        ? "OK" : "CANCEL"), event); //$NON-NLS-1$ //$NON-NLS-2$
                 }
 
+                // Сокращение объёма лога: планирование только запоминает согласователь
+                // редактора (what == null), в лог идёт одно завершение.
                 private void log(String what, org.eclipse.core.runtime.jobs.IJobChangeEvent event)
                 {
                     org.eclipse.core.runtime.jobs.Job job = event.getJob();
@@ -2867,6 +2869,8 @@ boolean inLiteral = endCaret >= 0
                     Object jobViewer = Global.getField(job, "textViewer"); //$NON-NLS-1$
                     if (jobViewer != null)
                         RECONCILER_BY_VIEWER.put(jobViewer, new java.lang.ref.WeakReference<>(job));
+                    if (what == null)
+                        return;
                     IDocument doc = jobViewer instanceof org.eclipse.jface.text.ITextViewer textViewer
                         ? textViewer.getDocument() : null;
                     Global.tempLog("stale-markers", "reconciler." + what //$NON-NLS-1$ //$NON-NLS-2$
@@ -2945,16 +2949,24 @@ boolean inLiteral = endCaret >= 0
                 @Override
                 public void scheduled(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
                 {
-                    Global.tempLog("stale-markers", "validation.scheduled delay=" + event.getDelay() //$NON-NLS-1$ //$NON-NLS-2$
-                        + " " + describeValidationJob(event.getJob()) //$NON-NLS-1$
-                        + " th=" + Thread.currentThread().getName()); //$NON-NLS-1$
+                    validationRunsSinceOk(event.getJob()).scheduled(Thread.currentThread().getName());
                 }
 
                 @Override
                 public void done(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
                 {
-                    Global.tempLog("stale-markers", "validation.done result=" + event.getResult() //$NON-NLS-1$ //$NON-NLS-2$
-                        + " " + describeValidationJob(event.getJob())); //$NON-NLS-1$
+                    // Сокращение объёма лога: планирования и отмены не пишем построчно
+                    // (их тысячи на десятки успешных), а считаем до следующего успеха;
+                    // счётчики видны в строке успеха и в пробах (describeValidationJob).
+                    ValidationRuns runs = validationRunsSinceOk(event.getJob());
+                    if (event.getResult() == null || !event.getResult().isOK())
+                    {
+                        runs.canceled();
+                        return;
+                    }
+                    Global.tempLog("stale-markers", "validation.done OK " //$NON-NLS-1$ //$NON-NLS-2$
+                        + describeValidationJob(event.getJob()));
+                    runs.reset();
                     // Аннотации попадают в модель чуть позже завершения задания
                     org.eclipse.core.runtime.jobs.Job report = org.eclipse.core.runtime.jobs.Job.create(
                         "Комфорт: аннотации после проверки модуля", //$NON-NLS-1$
@@ -2985,6 +2997,7 @@ boolean inLiteral = endCaret >= 0
             if (!(model instanceof org.eclipse.jface.text.source.IAnnotationModel annotations))
                 return "job=" + System.identityHashCode(job) + " модель аннотаций недоступна"; //$NON-NLS-1$ //$NON-NLS-2$
             int total = 0;
+            int errors = 0;
             StringBuilder first = new StringBuilder();
             for (java.util.Iterator<org.eclipse.jface.text.source.Annotation> it =
                 annotations.getAnnotationIterator(); it.hasNext();)
@@ -2994,7 +3007,11 @@ boolean inLiteral = endCaret >= 0
                     || !annotation.getClass().getName().endsWith("XtextAnnotation")) //$NON-NLS-1$
                     continue;
                 total++;
-                if (total > 12)
+                // Сокращение объёма лога: пишем только ошибки — протухают именно они
+                if (!String.valueOf(annotation.getType()).endsWith("error")) //$NON-NLS-1$
+                    continue;
+                errors++;
+                if (errors > 40)
                     continue;
                 org.eclipse.jface.text.Position position = annotations.getPosition(annotation);
                 String text = String.valueOf(annotation.getText());
@@ -3002,11 +3019,74 @@ boolean inLiteral = endCaret >= 0
                     .append(' ').append(annotation.getType()).append(' ')
                     .append(text.length() > 90 ? text.substring(0, 90) : text);
             }
-            return "job=" + System.identityHashCode(job) + " всего=" + total + first; //$NON-NLS-1$ //$NON-NLS-2$
+            return "job=" + System.identityHashCode(job) + " всего=" + total //$NON-NLS-1$ //$NON-NLS-2$
+                + " ошибок=" + errors + first; //$NON-NLS-1$
         }
         catch (RuntimeException ex)
         {
             return "job=" + System.identityHashCode(job) + " сбой чтения аннотаций: " + ex; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    /**
+     * Сверка штатного отрисовщика подчёркиваний с моделью аннотаций. Лог 07.10.2026: после
+     * успешной проверки ошибок в модели уже нет (и на вертикальной полосе их нет), а в
+     * тексте подчёркивания остались — то есть {@code AnnotationPainter} держит в
+     * {@code fDecorationsMap} аннотации, которых в модели нет. Пишем именно такие.
+     */
+    private static String describePainterVsModel(org.eclipse.jface.text.ITextViewer viewer)
+    {
+        try
+        {
+            Object painter = null;
+            Object painters = Global.getField(Global.getField(viewer, "fPaintManager"), "fPainters"); //$NON-NLS-1$ //$NON-NLS-2$
+            if (painters instanceof java.util.Collection<?> list)
+                for (Object candidate : new java.util.ArrayList<>(list))
+                    if (candidate instanceof org.eclipse.jface.text.source.AnnotationPainter)
+                        painter = candidate;
+            if (painter == null)
+                return "painter=не найден"; //$NON-NLS-1$
+            Object modelObject = Global.getField(painter, "fModel"); //$NON-NLS-1$
+            Object lock = Global.getField(painter, "fDecorationMapLock"); //$NON-NLS-1$
+            Object mapObject = Global.getField(painter, "fDecorationsMap"); //$NON-NLS-1$
+            if (!(modelObject instanceof org.eclipse.jface.text.source.IAnnotationModel model)
+                || !(mapObject instanceof java.util.Map<?, ?> map) || lock == null)
+                return "painter@" + System.identityHashCode(painter) + " поля недоступны"; //$NON-NLS-1$ //$NON-NLS-2$
+            java.util.List<java.util.Map.Entry<?, ?>> decorations;
+            synchronized (lock)
+            {
+                decorations = new java.util.ArrayList<>(map.entrySet());
+            }
+            int stale = 0;
+            StringBuilder text = new StringBuilder();
+            for (java.util.Map.Entry<?, ?> entry : decorations)
+            {
+                if (!(entry.getKey() instanceof org.eclipse.jface.text.source.Annotation annotation))
+                    continue;
+                boolean inModel = model.getPosition(annotation) != null;
+                if (inModel && !annotation.isMarkedDeleted())
+                    continue;
+                stale++;
+                if (stale > 30)
+                    continue;
+                Object position = Global.getField(entry.getValue(), "fPosition"); //$NON-NLS-1$
+                String message = String.valueOf(annotation.getText());
+                text.append(" | ").append(position instanceof org.eclipse.jface.text.Position drawn //$NON-NLS-1$
+                    ? drawn.getOffset() + "+" + drawn.getLength() + (drawn.isDeleted() ? "(удалена)" : "") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    : "?") //$NON-NLS-1$
+                    .append(" inModel=").append(inModel) //$NON-NLS-1$
+                    .append(" markedDeleted=").append(annotation.isMarkedDeleted()) //$NON-NLS-1$
+                    .append(' ').append(annotation.getClass().getSimpleName())
+                    .append(' ').append(annotation.getType()).append(' ')
+                    .append(message.length() > 90 ? message.substring(0, 90) : message);
+            }
+            return "painter@" + System.identityHashCode(painter) //$NON-NLS-1$
+                + " model@" + System.identityHashCode(model) //$NON-NLS-1$
+                + " нарисовано=" + decorations.size() + " лишних=" + stale + text; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        catch (RuntimeException ex)
+        {
+            return "painter=сбой:" + ex; //$NON-NLS-1$
         }
     }
 
@@ -3016,7 +3096,56 @@ boolean inLiteral = endCaret >= 0
             return "job=null"; //$NON-NLS-1$
         return "job=" + System.identityHashCode(job) //$NON-NLS-1$
             + " state=" + job.getState() //$NON-NLS-1$
-            + " skip=" + Global.invoke(job, "isSkip"); //$NON-NLS-1$ //$NON-NLS-2$
+            + " skip=" + Global.invoke(job, "isSkip") //$NON-NLS-1$ //$NON-NLS-2$
+            + " " + validationRunsSinceOk(job); //$NON-NLS-1$
+    }
+
+    private static final java.util.Map<org.eclipse.core.runtime.jobs.Job, ValidationRuns> VALIDATION_RUNS =
+        java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
+
+    private static ValidationRuns validationRunsSinceOk(org.eclipse.core.runtime.jobs.Job job)
+    {
+        return VALIDATION_RUNS.computeIfAbsent(job, key -> new ValidationRuns());
+    }
+
+    /**
+     * Планирования и отмены задания проверки с последнего успешного запуска — вместо
+     * строки лога на каждое из них. «Отмены есть, а успеха нет» видно по пробе.
+     */
+    private static final class ValidationRuns
+    {
+        private int scheduled;
+        private int canceled;
+        private String firstScheduler;
+        private String lastScheduler;
+
+        synchronized void scheduled(String thread)
+        {
+            scheduled++;
+            if (firstScheduler == null)
+                firstScheduler = thread;
+            lastScheduler = thread;
+        }
+
+        synchronized void canceled()
+        {
+            canceled++;
+        }
+
+        synchronized void reset()
+        {
+            scheduled = 0;
+            canceled = 0;
+            firstScheduler = null;
+            lastScheduler = null;
+        }
+
+        @Override
+        public synchronized String toString()
+        {
+            return "sinceOk{scheduled=" + scheduled + " canceled=" + canceled //$NON-NLS-1$ //$NON-NLS-2$
+                + " first=" + firstScheduler + " last=" + lastScheduler + "}"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        }
     }
     // #endregion
 

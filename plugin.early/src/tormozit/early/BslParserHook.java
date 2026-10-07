@@ -1,4 +1,4 @@
-package tormozit.bslparser;
+package tormozit.early;
 
 import java.util.ArrayList;
 import java.util.BitSet;

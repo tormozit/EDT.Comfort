@@ -1,4 +1,4 @@
-﻿param(
+param(
     [Parameter(Mandatory = $true)]
     [ValidateSet('Republish', 'Release')]
     [string]$Mode
@@ -207,15 +207,15 @@ function Assert-PdeSiteArtifacts {
     if (-not $checksJar) {
         Write-Error "No checks plugin jar (tormozit.comfort.checks_*.jar) in $pluginsDir"
     }
-    # Хук разбора модулей BSL (ранний старт, см. plugin.bslparser/README.md). Без него пропадает
-    # разбор #Если, разрывающих оператор, а бандл проверок не разрешается.
-    $bslParserJar = Get-ChildItem -LiteralPath $pluginsDir -Filter 'tormozit.comfort.bslparser_*.jar' -File -ErrorAction SilentlyContinue |
+    # Бандл раннего старта (см. plugin.early/README.md). Без него пропадают вплетения в классы EDT
+    # и SWT (разбор #Если, разрывающих оператор, и др.), а бандл проверок не разрешается.
+    $earlyJar = Get-ChildItem -LiteralPath $pluginsDir -Filter 'tormozit.comfort.early_*.jar' -File -ErrorAction SilentlyContinue |
         Sort-Object LastWriteTime |
         Select-Object -Last 1
-    if (-not $bslParserJar) {
-        Write-Error "No BSL parser hook jar (tormozit.comfort.bslparser_*.jar) in $pluginsDir"
+    if (-not $earlyJar) {
+        Write-Error "No early start bundle jar (tormozit.comfort.early_*.jar) in $pluginsDir"
     }
-    Write-Host "PDE site artifacts OK: $($featureJar.Name), $($pluginJar.Name), $($checksJar.Name), $($bslParserJar.Name)"
+    Write-Host "PDE site artifacts OK: $($featureJar.Name), $($pluginJar.Name), $($checksJar.Name), $($earlyJar.Name)"
 }
 
 function Invoke-PdeBuild {

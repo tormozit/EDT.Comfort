@@ -102,7 +102,7 @@ public final class ProjectPropertyDialogHook implements IStartup
 
         List<IProject> projects = new ArrayList<>();
         for (IProject project : ResourcesPlugin.getWorkspace().getRoot().getProjects())
-            if (project.isOpen())
+            if (project.isOpen() && Global.getDtProjectFromWorkspaceProject(project) != null)
                 projects.add(project);
         if (projects.size() < 2)
             return true;

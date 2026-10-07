@@ -21,14 +21,14 @@ import com._1c.g5.v8.dt.bsl.model.RegionPreprocessor;
  * «Сбросить сворачиваемые группы» ({@link ResetFoldingHandler}) — оба пути идут через
  * {@code initialize()} провайдера.
  *
- * <p>Вплетение в {@code isInitiallyCollapsed} делает ранний бандл {@code tormozit.comfort.bslparser}
+ * <p>Вплетение в {@code isInitiallyCollapsed} делает ранний бандл {@code tormozit.comfort.early}
  * (см. его README): класс провайдера свёрток грузится раньше, чем активируется основной бандл, и
  * {@code WeavingHook} отсюда его уже не успевает. Вплетённый код вызывает функцию, которую
  * регистрирует {@link #install()} в {@code System.getProperties()}.
  */
 public final class BslEditorFoldingHook
 {
-    /** Ключ функции; должен совпадать с {@code PROP_INITIALLY_COLLAPSED} в {@code tormozit.bslparser.Activator}. */
+    /** Ключ функции; должен совпадать с {@code PROP_INITIALLY_COLLAPSED} в {@code tormozit.early.Activator}. */
     static final String PROP_INITIALLY_COLLAPSED = "tormozit.bslFolding.initiallyCollapsed"; //$NON-NLS-1$
 
     private static final AtomicBoolean installed = new AtomicBoolean();

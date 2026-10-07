@@ -23,7 +23,7 @@ import com.e1c.g5.v8.dt.check.settings.IssueSeverity;
 import com.e1c.g5.v8.dt.check.settings.IssueType;
 
 import tormozit.ComfortCheckIds;
-import tormozit.bslparser.BslParserHook;
+import tormozit.early.BslParserHook;
 
 /**
  * Проверка «Директива препроцессора разрывает оператор»: блок {@code #Если} или {@code #Удаление},

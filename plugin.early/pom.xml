@@ -11,8 +11,8 @@
     <relativePath>../pom.xml</relativePath>
   </parent>
 
-  <!-- Бандл раннего старта: хук разбора модулей BSL, см. README.md -->
-  <artifactId>tormozit.comfort.bslparser</artifactId>
+  <!-- Бандл раннего старта: вплетения в классы EDT и SWT, см. README.md -->
+  <artifactId>tormozit.comfort.early</artifactId>
   <version>1.0.1-SNAPSHOT</version>
   <packaging>eclipse-plugin</packaging>
 </project>

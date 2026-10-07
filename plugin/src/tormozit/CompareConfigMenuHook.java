@@ -13,6 +13,25 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.HashMap;
+import java.util.BitSet;
+import java.util.function.Function;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+import org.eclipse.core.runtime.OperationCanceledException;
+import org.eclipse.core.runtime.SubMonitor;
+import org.eclipse.emf.common.util.URI;
+import org.eclipse.emf.ecore.EObject;
+import org.eclipse.emf.ecore.EReference;
+import org.eclipse.emf.ecore.EStructuralFeature;
+import org.eclipse.emf.ecore.util.EcoreUtil;
+import org.eclipse.emf.ecore.util.InternalEList;
+import com._1c.g5.v8.bm.core.IBmObject;
+import com._1c.g5.v8.dt.compare.core.ComparisonContext;
+import com._1c.g5.v8.dt.compare.model.CollectionElementComparisonNode;
+import com._1c.g5.v8.dt.compare.model.MergeRule;
+import com._1c.g5.v8.dt.metadata.mdclass.MdClassPackage;
+import com._1c.g5.v8.dt.rights.model.RightsPackage;
 
 import org.eclipse.compare.CompareConfiguration;
 import org.eclipse.compare.CompareEditorInput;
@@ -248,11 +267,767 @@ public class CompareConfigMenuHook implements IStartup
     private static final String COLLAPSE_ALL_ICON_PATH =
             "icons/full/elcl16/collapseall.png"; //$NON-NLS-1$
 
+    /** Проверка будущего состояния; рабочая BM-модель и настройки сравнения не изменяются. */
+    private static final class MergePreflight
+    {
+        private static final String TITLE = "Проверка битых ссылок";
+        private static final String CALLBACK = "tormozit.compare.mergeConfirmation";
+        private static final Set<IEditorPart> pending = Collections.newSetFromMap(new IdentityHashMap<>());
+        private static final Set<IEditorPart> approved = Collections.newSetFromMap(new IdentityHashMap<>());
+
+        static void install()
+        {
+            System.getProperties().put(CALLBACK, (Function<Object, Object>) MergePreflight::beforeMerge);
+        }
+
+        private static Object beforeMerge(Object value)
+        {
+            if (!(value instanceof IEditorPart editor))
+                return Boolean.FALSE;
+            if (approved.remove(editor))
+                return Boolean.TRUE.equals(Global.invoke(editor, "openMergeConfirmationDialog"));
+            if (!pending.add(editor))
+                return Boolean.FALSE;
+            Global.tempLog("broken-links-merge", "start editor=" + editor.getTitle());
+            List<IComparisonSession> sessions = new ArrayList<>();
+            Object artifacts = Global.getField(editor, "comparisonArtifactsList");
+            if (artifacts instanceof List<?> list)
+                for (Object artifact : list)
+                    if (Global.call(artifact, "getSession") instanceof IComparisonSession session
+                        && !sessions.contains(session))
+                        sessions.add(session);
+            if (sessions.isEmpty())
+            {
+                pending.remove(editor);
+                MessageDialog.openError(editor.getSite().getShell(), TITLE,
+                    "Не удалось получить данные сравнения. Объединение остановлено.");
+                return Boolean.FALSE;
+            }
+            AtomicBoolean changed = new AtomicBoolean();
+            IComparisonSession.IComparisonTreeListener listener = events -> changed.set(true);
+            sessions.forEach(session -> session.addComparisonTreeListener(listener));
+            Job job = new Job(TITLE)
+            {
+                @Override
+                protected IStatus run(IProgressMonitor monitor)
+                {
+                    long started = System.nanoTime();
+                    List<Finding> findings = new ArrayList<>();
+                    String error = null;
+                    boolean canceled = false;
+                    try
+                    {
+                        SubMonitor progress = SubMonitor.convert(monitor, TITLE, sessions.size());
+                        for (IComparisonSession session : sessions)
+                        {
+                            SubMonitor part = progress.split(1);
+                            session.runComparisonTreeReadonlyTask(new AbstractBmTask<Void>(TITLE)
+                            {
+                                @Override
+                                public Void execute(IBmTransaction transaction, IProgressMonitor ignored)
+                                {
+                                    try (ComparisonContext context = ComparisonUtils.createComparisonContext(session))
+                                    {
+                                        context.setComparisonTransaction(transaction);
+                                        try
+                                        {
+                                            new FinalComposition(session, context, part).check(findings);
+                                        }
+                                        finally
+                                        {
+                                            // Транзакцией дерева владеет runComparisonTreeReadonlyTask.
+                                            context.setComparisonTransaction(null);
+                                        }
+                                    }
+                                    return null;
+                                }
+                            });
+                        }
+                        canceled = monitor.isCanceled();
+                    }
+                    catch (OperationCanceledException e)
+                    {
+                        canceled = true;
+                    }
+                    catch (Throwable e)
+                    {
+                        Global.tempLogException("broken-links-merge", "failure", e);
+                        error = "Не удалось проверить итоговый состав. Объединение остановлено.\n" + e.getMessage();
+                    }
+                    finally
+                    {
+                        monitor.done();
+                        Global.tempLog("broken-links-merge", "finished ms="
+                            + (System.nanoTime() - started) / 1_000_000 + " findings=" + findings.size()
+                            + " canceled=" + canceled + " changed=" + changed.get());
+                    }
+                    String failure = error;
+                    boolean wasCanceled = canceled;
+                    Display.getDefault().asyncExec(() ->
+                    {
+                        sessions.forEach(session -> session.removeComparisonTreeListener(listener));
+                        pending.remove(editor);
+                        if (editor.getSite() == null || editor.getSite().getShell().isDisposed() || wasCanceled)
+                            return;
+                        boolean open = Arrays.stream(editor.getSite().getPage().getEditorReferences())
+                            .anyMatch(reference -> reference.getEditor(false) == editor);
+                        if (!open)
+                            return;
+                        if (failure != null || changed.get())
+                        {
+                            MessageDialog.openError(editor.getSite().getShell(), TITLE, failure != null ? failure
+                                : "Настройки или данные сравнения изменились во время проверки. Повторите объединение.");
+                            return;
+                        }
+                        if (!findings.isEmpty())
+                        {
+                            AbstractTreeViewer viewer = getTreeViewerFromEditor(editor);
+                            List<CompareSearchMatch> matches = new ArrayList<>(findings.size());
+                            for (Finding finding : findings)
+                            {
+                                ComparisonNode node = finding.nodeId >= 0 ? finding.session.getNode(finding.nodeId) : null;
+                                TopComparisonNode top = node != null ? finding.session.getTopNodeOf(node) : null;
+                                Object partial = viewer != null && top != null
+                                    ? NavigatorDropSupport.resolvePartialNode(editor, viewer, top) : null;
+                                matches.add(new CompareSearchMatch(partial != null ? partial
+                                    : MdTypeMapping.anyFullNameToBmFqn(finding.owner), finding.owner, finding.property,
+                                    "Итог объединения", finding.reference, "Битая ссылка",
+                                    CompareSearchMatch.RowColorKind.NONE, false, finding.target));
+                            }
+                            CompareConfigSearchDialogHook.showFindAllResults(editor, matches, "битые ссылки");
+                            if (!MessageDialog.openQuestion(editor.getSite().getShell(),
+                                Global.withPluginWindowTitle(TITLE),
+                                "Объединение приведет к появлению битых ссылок (показаны в панели Поиск). Продолжить объединение?"))
+                                return;
+                        }
+                        approved.add(editor);
+                        try
+                        {
+                            Global.invokeVoid(editor, "startMerge");
+                        }
+                        finally
+                        {
+                            approved.remove(editor);
+                        }
+                    });
+                    return canceled ? Status.CANCEL_STATUS : error != null
+                        ? new Status(IStatus.ERROR, "tormozit.comfort", error) : Status.OK_STATUS;
+                }
+            };
+            job.setUser(true);
+            job.schedule();
+            return Boolean.FALSE;
+        }
+
+        private record Finding(IComparisonSession session, long nodeId, String owner, String property,
+            String reference, String target) {}
+
+        /** Только значения ссылок и наложение адресов: без пробного объединения и копирования проекта. */
+        private static final class FinalComposition
+        {
+            private final IComparisonSession session;
+            private final ComparisonContext context;
+            private final SubMonitor progress;
+            private final List<ComparisonNode> nodes = new ArrayList<>();
+            private final Map<String, Delta> delta = new HashMap<>();
+            private final Map<String, String> otherToFinal = new HashMap<>();
+            private final Map<String, String> renamed = new HashMap<>();
+            private final Map<Long, ComparisonNode> mainNodes = new HashMap<>();
+            private final Map<Long, ComparisonNode> otherNodes = new HashMap<>();
+            private final Map<String, Resolution> existence = new HashMap<>();
+            private final Map<Long, Resolution> targetStates = new HashMap<>();
+            private final Map<Long, Boolean> enabled = new HashMap<>();
+            private final List<Reference> references = new ArrayList<>();
+
+            private record Delta(boolean exists, ComparisonSide source, String sourceFqn) {}
+            private record Pair(EObject main, EObject other, ComparisonNode node, ComparisonSide side) {}
+            private record Reference(long nodeId, String owner, String property, EObject target,
+                ComparisonSide side) {}
+            private record Resolution(boolean exists, String target, String navigation) {}
+
+            FinalComposition(IComparisonSession session, ComparisonContext context, SubMonitor monitor)
+            {
+                this.session = session;
+                this.context = context;
+                this.progress = SubMonitor.convert(monitor, TITLE, 100);
+            }
+
+            void check(List<Finding> findings)
+            {
+                collectNodes(progress.split(20));
+                buildNamespace(progress.split(20));
+                collectReferences(progress.split(60), findings);
+            }
+
+            private void checkReferences(SubMonitor checking, List<Finding> findings)
+            {
+                checking.subTask("Проверка ссылок итогового состава");
+                checking.setWorkRemaining(Math.max(1, references.size()));
+                for (Reference reference : references)
+                {
+                    checking.checkCanceled();
+                    URI uri = EcoreUtil.getURI(reference.target);
+                    String sourceFqn = fqn(uri);
+                    String target = reference.side == ComparisonSide.OTHER
+                        ? translate(sourceFqn, otherToFinal) : translate(sourceFqn, renamed);
+                    String key = reference.side + ":" + uri + ":" + reference.target.eClass().getName();
+                    Resolution resolution = existence.computeIfAbsent(key, ignored -> resolve(reference, uri, target));
+                    if (!resolution.exists)
+                        findings.add(new Finding(session, reference.nodeId, reference.owner, reference.property,
+                            localized(resolution.target) + (uri.fragment() != null && !"/".equals(uri.fragment())
+                                ? "#" + uri.fragment() : ""), resolution.navigation));
+                    checking.worked(1);
+                }
+                checking.done();
+            }
+
+            private void collectNodes(SubMonitor monitor)
+            {
+                monitor.subTask("Чтение изменений объектов метаданных");
+                Deque<ComparisonNode> queue = new ArrayDeque<>();
+                queue.add(session.getRootNode());
+                while (!queue.isEmpty())
+                {
+                    monitor.checkCanceled();
+                    ComparisonNode node = queue.removeFirst();
+                    nodes.add(node);
+                    var type = session.getMatchedObjectsEClass(node);
+                    if (!(node instanceof com._1c.g5.v8.dt.compare.model.ReferenceFeatureComparisonNode)
+                        && (type == null || isMetadata(node) || Set.of("TypeDescription", "RoleDescription",
+                            "ObjectRights", "ExchangePlanContentItem", "CommonAttributeContentItem").contains(type.getName())))
+                        queue.addAll(node.getChildren());
+                    monitor.setWorkRemaining(Math.max(1, queue.size() + 1));
+                    monitor.worked(1);
+                    monitor.subTask("Чтение изменений объектов метаданных: " + nodes.size());
+                }
+                monitor.done();
+            }
+
+            private void buildNamespace(SubMonitor monitor)
+            {
+                monitor.subTask("Расчёт итогового состава объектов метаданных");
+                monitor.setWorkRemaining(Math.max(1, nodes.size()));
+                // Сначала имена всех объектов: адрес ребёнка зависит от итогового имени родителя.
+                for (ComparisonNode node : nodes)
+                {
+                    monitor.checkCanceled();
+                    if (node instanceof MatchedObjectsComparisonNode matched
+                        && !(node instanceof com._1c.g5.v8.dt.compare.model.ReferencedObjectsComparisonNode))
+                    {
+                        if (matched.getMainObjectId() != null)
+                            mainNodes.put(matched.getMainObjectId(), node);
+                        if (matched.getOtherObjectId() != null)
+                            otherNodes.put(matched.getOtherObjectId(), node);
+                    }
+                    if (node instanceof TopComparisonNode top && isMetadata(node))
+                    {
+                        String main = top.getMainSymlink();
+                        String other = top.getOtherSymlink();
+                        if (main != null && other != null && !main.equals(other) && isEnabled(node))
+                        {
+                            ComparisonNode name = featureNode(node, "name");
+                            // Штатный prepareRenameOperations проверяет пометку свойства «Имя».
+                            if (name != null && !name.isOneSideNode() && isEnabled(name))
+                            {
+                                int dot = main.lastIndexOf('.');
+                                String newName = other.substring(other.lastIndexOf('.') + 1);
+                                renamed.put(main, (dot >= 0 ? translate(main.substring(0, dot), renamed) + "." : "") + newName);
+                            }
+                        }
+                    }
+                    monitor.worked(1);
+                }
+                Map<String, Delta> additions = new HashMap<>();
+                for (ComparisonNode node : nodes)
+                {
+                    monitor.checkCanceled();
+                    if (!(node instanceof TopComparisonNode top) || !isMetadata(node))
+                        continue;
+                    String main = top.getMainSymlink();
+                    String other = top.getOtherSymlink();
+                    boolean selected = isEnabled(node);
+                    boolean survives = main != null ? !deletedTop(node, other != null, selected) && !deletedAncestor(node)
+                        : other != null && selected && (!session.isThreeWay() || !node.isAncestorObjectExists()
+                            || rule(node) == MergeRule.GET_FROM_OTHER);
+                    String result = main != null ? translate(main, renamed) : translate(other, otherToFinal);
+                    targetStates.put(node.bmGetId(), new Resolution(survives, result, main != null ? main : other));
+                    if (other != null && survives)
+                        otherToFinal.put(other, result);
+                    if (main != null && (!survives || !main.equals(result)))
+                        delta.put(main, new Delta(false, ComparisonSide.MAIN, main));
+                    if (survives)
+                        additions.put(result, new Delta(true, main != null ? ComparisonSide.MAIN : ComparisonSide.OTHER,
+                            main != null ? main : other));
+                }
+                // При обмене именами A ↔ B удаление старого имени не перекрывает новое.
+                delta.putAll(additions);
+                monitor.done();
+            }
+
+            private boolean isMetadata(ComparisonNode node)
+            {
+                if (!(node instanceof MatchedObjectsComparisonNode))
+                    return false;
+                var type = session.getMatchedObjectsEClass(node);
+                return type != null && MdClassPackage.Literals.MD_OBJECT.isSuperTypeOf(type);
+            }
+
+            private boolean isEnabled(ComparisonNode node)
+            {
+                Boolean cached = enabled.get(node.bmGetId());
+                if (cached != null)
+                    return cached;
+                // isInScope в EDT работает только для узлов с символическим именем;
+                // для свойств и элементов состава область наследуется от владельца.
+                boolean result = selected(node)
+                    && (!(node instanceof com._1c.g5.v8.dt.compare.model.SymlinkComparisonNode) || session.isInScope(node));
+                ComparisonNode parent = node.getParent();
+                // Корень сравнения — контейнер, его пометка не управляет свойствами конфигурации.
+                if (result && parent != null && parent != session.getRootNode())
+                    result = isEnabled(parent);
+                enabled.put(node.bmGetId(), result);
+                return result;
+            }
+
+            private static boolean selected(ComparisonNode node)
+            {
+                return node.getMergeSettings() != null && node.getMergeSettings().isMustBeMerged();
+            }
+
+            private static MergeRule rule(ComparisonNode node)
+            {
+                return node.getMergeSettings() != null ? node.getMergeSettings().getMergeRule() : MergeRule.DO_NOT_MERGE;
+            }
+
+            private boolean deletedTop(ComparisonNode node, boolean hasOther, boolean selected)
+            {
+                return !hasOther && selected && (rule(node) == MergeRule.GET_FROM_OTHER
+                    || session.isThreeWay() && node.isAncestorObjectExists()
+                        && rule(node) == MergeRule.MERGE_PRIORITIZING_OTHER);
+            }
+
+            private boolean deletedAncestor(ComparisonNode node)
+            {
+                for (ComparisonNode parent = node.getParent(); parent != null; parent = parent.getParent())
+                    if (parent instanceof TopComparisonNode top
+                        && deletedTop(parent, top.getOtherSymlink() != null, isEnabled(parent)))
+                        return true;
+                return false;
+            }
+
+            private void collectReferences(SubMonitor monitor, List<Finding> findings)
+            {
+                monitor.subTask("Расчёт итоговых составов общих объектов");
+                List<Pair> owners = new ArrayList<>();
+                Object nativeTransaction = Global.call(context.getDataSourceContext().getTransaction(ComparisonSide.MAIN),
+                    "getTransaction");
+                if (!(nativeTransaction instanceof IBmTransaction transaction))
+                    throw new IllegalStateException("Не удалось открыть модель конфигурации для проверки");
+                {
+                    // Владельцев берём из всей основной модели, а не из помеченных узлов сравнения:
+                    // удаление цели может испортить ссылку в любом неизменённом составе.
+                    for (var type : List.of(MdClassPackage.Literals.FUNCTIONAL_OPTION,
+                        MdClassPackage.Literals.FILTER_CRITERION, MdClassPackage.Literals.DEFINED_TYPE,
+                        MdClassPackage.Literals.EVENT_SUBSCRIPTION, MdClassPackage.Literals.EXCHANGE_PLAN,
+                        MdClassPackage.Literals.COMMON_ATTRIBUTE, RightsPackage.Literals.ROLE_DESCRIPTION))
+                    {
+                        var iterator = transaction.getTopObjectIterator(type);
+                        while (iterator.hasNext())
+                        {
+                            monitor.checkCanceled();
+                            IBmObject object = iterator.next();
+                            ComparisonNode node = mainNodes.get(object.bmGetId());
+                            if (node != null && node instanceof TopComparisonNode top
+                                && deletedTop(node, top.getOtherSymlink() != null, isEnabled(node)))
+                                continue;
+                            EObject other = node != null ? compared(node, ComparisonSide.OTHER) : null;
+                            owners.add(new Pair(object, other, node, ComparisonSide.MAIN));
+                        }
+                    }
+                    for (ComparisonNode node : nodes)
+                    {
+                        monitor.checkCanceled();
+                        if (!(node instanceof MatchedObjectsComparisonNode matched)
+                            || matched.getMainObjectId() != null || !isEnabled(node))
+                            continue;
+                        var type = session.getMatchedObjectsEClass(node);
+                        if (type == null || !compositionType(type.getName()))
+                            continue;
+                        EObject other = compared(node, ComparisonSide.OTHER);
+                        if (other != null && (!(node instanceof TopComparisonNode)
+                            || !session.isThreeWay() || !node.isAncestorObjectExists()
+                            || rule(node) == MergeRule.GET_FROM_OTHER))
+                            owners.add(new Pair(null, other, node, ComparisonSide.OTHER));
+                    }
+                    long weight = 0;
+                    for (Pair owner : owners)
+                        weight += referenceWeight(owner);
+                    monitor.setWorkRemaining((int)Math.min(Integer.MAX_VALUE, Math.max(1, weight)));
+                    for (Pair owner : owners)
+                    {
+                        monitor.checkCanceled();
+                        SubMonitor checking = monitor.split(referenceWeight(owner));
+                        // В памяти остаются только ссылки текущего владельца, а не всей конфигурации.
+                        references.clear();
+                        collectOwner(owner);
+                        checkReferences(checking, findings);
+                    }
+                }
+                monitor.done();
+            }
+
+            private static int referenceWeight(Pair owner)
+            {
+                var main = MdCompositionSupport.composition(owner.main);
+                var other = MdCompositionSupport.composition(owner.other);
+                return (int)Math.min(Integer.MAX_VALUE, Math.max(1,
+                    (long)(main != null ? main.entries().size() : 0) + (other != null ? other.entries().size() : 0)));
+            }
+
+            private static boolean compositionType(String name)
+            {
+                return Set.of("FunctionalOption", "FilterCriterion", "DefinedType", "EventSubscription",
+                    "ExchangePlan", "CommonAttribute", "RoleDescription").contains(name);
+            }
+
+            private EObject compared(ComparisonNode node, ComparisonSide side)
+            {
+                var objects = session.getComparedObjects(node, context);
+                return objects != null && objects.getComparedObject(side) instanceof EObject object ? object : null;
+            }
+
+            private void collectOwner(Pair owner)
+            {
+                EObject object = owner.main != null ? owner.main : owner.other;
+                MdCompositionSupport.Composition composition = MdCompositionSupport.composition(object);
+                if (composition == null)
+                    return;
+                if (owner.node != null && isEnabled(owner.node)
+                    && (rule(owner.node) == MergeRule.CUSTOM_MERGE || rule(owner.node) == MergeRule.MERGE_USING_EXTERNAL_TOOL))
+                    throw new IllegalStateException("Не удалось определить итоговый состав при ручном объединении");
+                String name = object instanceof IBmObject bm ? bm.bmGetFqn() : object.eClass().getName();
+                String finalName = translate(name, owner.side == ComparisonSide.OTHER ? otherToFinal : renamed);
+                Delta state = longest(finalName, delta);
+                if (state != null && !state.exists)
+                    return;
+                long id = owner.node != null ? owner.node.bmGetId() : -1;
+                String feature = composition.feature().getName();
+                if ("DefinedType".equals(object.eClass().getName()) || "EventSubscription".equals(object.eClass().getName()))
+                {
+                    for (Pair description : project(owner, feature))
+                        for (Pair reference : project(description, "types"))
+                            addReference(reference, id, finalName, feature);
+                }
+                else
+                {
+                    for (Pair entry : project(owner, feature))
+                    {
+                        EObject value = entry.main != null ? entry.main : entry.other;
+                        String inner = switch (value.eClass().getName())
+                        {
+                            case "ExchangePlanContentItem" -> "mdObject";
+                            case "CommonAttributeContentItem" -> "metadata";
+                            case "ObjectRights" -> "object";
+                            default -> null;
+                        };
+                        if (inner == null)
+                            addReference(entry, id, finalName, feature);
+                        else
+                            for (Pair reference : project(entry, inner))
+                                addReference(reference, id, finalName, feature);
+                    }
+                }
+            }
+
+            private void addReference(Pair pair, long id, String owner, String property)
+            {
+                EObject target = pair.side == ComparisonSide.OTHER ? pair.other : pair.main;
+                if (target != null)
+                    references.add(new Reference(id, localized(owner), switch (property)
+                    {
+                        case "type" -> "Тип";
+                        case "source" -> "Источник";
+                        case "rights" -> "Права";
+                        default -> "Состав";
+                    }, target, pair.side));
+            }
+
+            /** Проекция одного свойства: неизменённые элементы MAIN сохраняются, пометки индивидуальны. */
+            private List<Pair> project(Pair owner, String name)
+            {
+                List<EObject> main = values(owner.main, name);
+                List<EObject> other = values(owner.other, name);
+                ComparisonNode feature = owner.node != null ? featureNode(owner.node, name) : null;
+                if (owner.main == null)
+                {
+                    // importEmfObject/importMany* пропускают непомеченные свойства и элементы
+                    // даже внутри целиком добавляемого объекта.
+                    if (feature != null && !isEnabled(feature))
+                        return List.of();
+                    EStructuralFeature imported = owner.other.eClass().getEStructuralFeature(name);
+                    if (feature == null)
+                        return pairs(other, ComparisonSide.OTHER);
+                    if (imported == null || !imported.isMany())
+                        return other.isEmpty() ? List.of()
+                            : List.of(new Pair(null, other.get(0), feature, ComparisonSide.OTHER));
+                    Map<Integer, ComparisonNode> elements = new HashMap<>();
+                    for (ComparisonNode child : feature.getChildren())
+                        if (child instanceof CollectionElementComparisonNode element && element.getOtherPosition() != null)
+                            elements.put(element.getOtherPosition(), child);
+                    List<Pair> importedValues = new ArrayList<>(other.size());
+                    for (int i = 0; i < other.size(); i++)
+                    {
+                        progress.checkCanceled();
+                        ComparisonNode child = elements.get(i);
+                        if (child == null || isEnabled(child))
+                            importedValues.add(new Pair(null, other.get(i), child, ComparisonSide.OTHER));
+                    }
+                    return importedValues;
+                }
+                if (feature == null || !isEnabled(feature))
+                    return pairs(main, ComparisonSide.MAIN);
+                EStructuralFeature structural = owner.main.eClass().getEStructuralFeature(name);
+                if (rule(feature) == MergeRule.CUSTOM_MERGE || rule(feature) == MergeRule.MERGE_USING_EXTERNAL_TOOL)
+                    throw new IllegalStateException("Не удалось определить итоговый состав при ручном объединении");
+                if (!structural.isMany())
+                {
+                    EObject a = main.isEmpty() ? null : main.get(0);
+                    EObject b = other.isEmpty() ? null : other.get(0);
+                    if (structural instanceof EReference ref && ref.isContainment())
+                    {
+                        if (a == null)
+                            return b == null ? List.of() : List.of(new Pair(null, b, feature, ComparisonSide.OTHER));
+                        if (b == null && (rule(feature) == MergeRule.GET_FROM_OTHER
+                            || rule(feature) == MergeRule.MERGE_PRIORITIZING_OTHER))
+                            return List.of();
+                        return List.of(new Pair(a, b, feature, ComparisonSide.MAIN));
+                    }
+                    EObject ancestorOwner = owner.node != null ? compared(owner.node, ComparisonSide.COMMON_ANCESTOR) : null;
+                    List<EObject> ancestor = values(ancestorOwner, name);
+                    boolean fromOther = takeOther(feature, a, b, ancestor.isEmpty() ? null : ancestor.get(0));
+                    return (fromOther ? b : a) == null ? List.of()
+                        : List.of(new Pair(a, b, feature, fromOther ? ComparisonSide.OTHER : ComparisonSide.MAIN));
+                }
+                List<Pair> result = new ArrayList<>(main.size() + other.size());
+                BitSet visited = new BitSet(main.size());
+                boolean containment = structural instanceof EReference ref && ref.isContainment();
+                for (ComparisonNode child : feature.getChildren())
+                {
+                    progress.checkCanceled();
+                    if (!(child instanceof CollectionElementComparisonNode element))
+                        continue;
+                    Integer mainIndex = element.getMainPosition();
+                    Integer otherIndex = element.getOtherPosition();
+                    EObject a = at(main, mainIndex);
+                    EObject b = at(other, otherIndex);
+                    if (a != null)
+                    {
+                        visited.set(mainIndex);
+                        if (b == null && isEnabled(child) && rule(child) == MergeRule.GET_FROM_OTHER)
+                            continue;
+                        result.add(new Pair(a, b, child, ComparisonSide.MAIN));
+                    }
+                    else if (b != null && isEnabled(child) && (!containment || !session.isThreeWay()
+                        || !child.isAncestorObjectExists() || rule(child) == MergeRule.GET_FROM_OTHER))
+                        result.add(new Pair(null, b, child, ComparisonSide.OTHER));
+                }
+                for (int i = 0; i < main.size(); i++)
+                    if (!visited.get(i))
+                        result.add(new Pair(main.get(i), null, null, ComparisonSide.MAIN));
+                return result;
+            }
+
+            private boolean takeOther(ComparisonNode node, EObject main, EObject other, EObject ancestor)
+            {
+                return takesOtherValue(node, referenceKey(main, ComparisonSide.MAIN),
+                    referenceKey(other, ComparisonSide.OTHER), referenceKey(ancestor, ComparisonSide.COMMON_ANCESTOR),
+                    session.isThreeWay() && node.isAncestorObjectExists());
+            }
+
+            private String referenceKey(EObject target, ComparisonSide side)
+            {
+                if (target == null)
+                    return null;
+                URI uri = EcoreUtil.getURI(target);
+                String name = fqn(uri);
+                if (side == ComparisonSide.OTHER)
+                    name = translate(name, otherToFinal);
+                else if (side == ComparisonSide.MAIN)
+                    name = translate(name, renamed);
+                return name + "#" + uri.fragment();
+            }
+
+            private boolean takesOtherValue(ComparisonNode node, Object main, Object other, Object ancestor,
+                boolean hasAncestor)
+            {
+                return switch (rule(node))
+                {
+                    case GET_FROM_OTHER, MERGE_PRIORITIZING_OTHER -> true;
+                    case MERGE_PRIORITIZING_MAIN -> session.isThreeWay() && hasAncestor
+                        && java.util.Objects.equals(main, ancestor);
+                    case DO_NOT_MERGE -> false;
+                    default -> throw new IllegalStateException("Не поддержано правило состава: " + rule(node));
+                };
+            }
+
+            private ComparisonNode featureNode(ComparisonNode node, String name)
+            {
+                for (ComparisonNode child : node.getChildren())
+                    if (child instanceof FeatureComparisonNode)
+                    {
+                        EStructuralFeature feature = session.getRelatedFeature(child);
+                        if (feature != null && name.equals(feature.getName()))
+                            return child;
+                    }
+                return null;
+            }
+
+            private static EObject at(List<EObject> values, Integer index)
+            {
+                return index != null && index >= 0 && index < values.size() ? values.get(index) : null;
+            }
+
+            private List<EObject> values(EObject object, String name)
+            {
+                if (object == null)
+                    return List.of();
+                EStructuralFeature feature = object.eClass().getEStructuralFeature(name);
+                if (feature == null)
+                    return List.of();
+                Object value = object.eGet(feature, false);
+                if (value instanceof EObject reference)
+                    return List.of(reference);
+                if (!(value instanceof List<?> list))
+                    return List.of();
+                List<EObject> result = new ArrayList<>(list.size());
+                for (int i = 0; i < list.size(); i++)
+                {
+                    progress.checkCanceled();
+                    Object entry = list instanceof InternalEList<?> raw ? raw.basicGet(i) : list.get(i);
+                    if (entry instanceof EObject reference)
+                        result.add(reference);
+                }
+                return result;
+            }
+
+            private static List<Pair> pairs(List<EObject> values, ComparisonSide side)
+            {
+                List<Pair> result = new ArrayList<>(values.size());
+                for (EObject value : values)
+                    result.add(new Pair(side == ComparisonSide.MAIN ? value : null,
+                        side == ComparisonSide.OTHER ? value : null, null, side));
+                return result;
+            }
+
+            private Resolution resolve(Reference reference, URI original, String target)
+            {
+                context.getDataSourceContext().getTransaction(reference.side);
+                IComparisonDataSource source = session.getDataSource(reference.side);
+                EObject object = source.getBmModel().getEngine().resolve(original, reference.target.eClass());
+                Resolution state = stateOf(object, reference.side);
+                return state != null ? state
+                    : exists(original, target, reference.target.eClass());
+            }
+
+            private Resolution stateOf(EObject object, ComparisonSide side)
+            {
+                Map<Long, ComparisonNode> identity = side == ComparisonSide.MAIN ? mainNodes : otherNodes;
+                // URI подчинённого объекта содержит путь внутри владельца. Сопоставление по BM id
+                // учитывает удаление реквизита/табличной части, даже когда URI начинается с имени каталога.
+                for (EObject current = object; current != null && !current.eIsProxy(); current = current.eContainer())
+                    if (current instanceof IBmObject bm)
+                    {
+                        ComparisonNode node = identity.get(bm.bmGetId());
+                        Resolution state = node != null ? targetStates.get(node.bmGetId()) : null;
+                        if (state != null)
+                        {
+                            Delta replacement = delta.get(state.target);
+                            return !state.exists && replacement != null && replacement.exists
+                                ? new Resolution(true, state.target, state.navigation) : state;
+                        }
+                    }
+                return null;
+            }
+
+            private Resolution exists(URI original, String target, org.eclipse.emf.ecore.EClass type)
+            {
+                Delta change = longest(target, delta);
+                if (change != null && !change.exists)
+                    return new Resolution(false, target, fqn(original));
+                ComparisonSide side = change != null ? change.source : ComparisonSide.MAIN;
+                String source = change != null ? rewriteFromDelta(target, change) : target;
+                IComparisonDataSource dataSource = session.getDataSource(side);
+                if (dataSource == null || dataSource.getBmModel() == null)
+                    throw new IllegalStateException("Недоступна модель стороны сравнения: " + side);
+                context.getDataSourceContext().getTransaction(side);
+                var engine = dataSource.getBmModel().getEngine();
+                // Стандартные типы и внешние ссылки разрешаются своим штатным провайдером URI.
+                URI uri = original;
+                if ("bm".equals(original.scheme()))
+                {
+                    IBmObject configuration = engine.getTopObjectByFqn("Configuration");
+                    if (configuration == null)
+                        throw new IllegalStateException("Не найдена конфигурация стороны сравнения: " + side);
+                    uri = EcoreUtil.getURI(configuration).trimFragment().trimSegments(1)
+                        .appendSegment(source).appendFragment(original.fragment());
+                }
+                EObject resolved = engine.resolve(uri, type);
+                Resolution state = stateOf(resolved, side);
+                return state != null ? state
+                    : new Resolution(resolved != null && !resolved.eIsProxy(), target, fqn(original));
+            }
+
+            private String rewriteFromDelta(String target, Delta change)
+            {
+                for (String prefix = target; prefix != null; prefix = parentName(prefix))
+                    if (delta.get(prefix) == change)
+                        return change.sourceFqn + target.substring(prefix.length());
+                return target;
+            }
+
+            private static <T> T longest(String name, Map<String, T> map)
+            {
+                for (String prefix = name; prefix != null; prefix = parentName(prefix))
+                    if (map.containsKey(prefix))
+                        return map.get(prefix);
+                return null;
+            }
+
+            private static String parentName(String name)
+            {
+                int dot = name.lastIndexOf('.');
+                return dot > 0 ? name.substring(0, dot) : null;
+            }
+
+            private static String translate(String name, Map<String, String> map)
+            {
+                if (name == null)
+                    return null;
+                for (String prefix = name; prefix != null; prefix = parentName(prefix))
+                    if (map.containsKey(prefix))
+                        return map.get(prefix) + name.substring(prefix.length());
+                return name;
+            }
+
+            private static String fqn(URI uri)
+            {
+                return uri.lastSegment() != null ? URI.decode(uri.lastSegment()) : uri.toString();
+            }
+
+            private static String localized(String name)
+            {
+                String result = MdTypeMapping.bmFqnToRuFullName(name);
+                return result != null ? result : name;
+            }
+        }
+    }
+
     // ---- IStartup ----
 
     @Override
     public void earlyStartup()
     {
+        MergePreflight.install();
         // До UI: сравнение может стартовать раньше, чем отработает asyncExec ниже.
         BslCompareParseErrorSuppressor.ensureInstalled();
         Display.getDefault().asyncExec(() ->

@@ -1094,7 +1094,8 @@ public final class GitHistoryHook implements IStartup
             KEY_COL_FILE_WIDTH, KEY_COL_TYPE_WIDTH, KEY_COL_PATH_WIDTH, KEY_COL_STATUS_WIDTH);
         interaction.install(hasSavedColumnWidths);
         interactionRef[0] = interaction;
-        ColumnVisibilityMenu visibility = ColumnVisibilityMenu.forTable(table, "GitHistory", interaction); //$NON-NLS-1$
+        ColumnVisibilityMenu visibility = ColumnVisibilityMenu.forTable(table, "GitHistory", interaction) //$NON-NLS-1$
+            .refreshOnShow(() -> fileViewer.refresh());
         visibility.add(typeCol, "type", "Тип"); //$NON-NLS-1$ //$NON-NLS-2$
         visibility.add(pathCol, "path", "Путь"); //$NON-NLS-1$ //$NON-NLS-2$
         visibility.add(statusCol, "status", "Статус"); //$NON-NLS-1$ //$NON-NLS-2$
@@ -1369,7 +1370,7 @@ public final class GitHistoryHook implements IStartup
         @Override
         public void update(ViewerCell cell)
         {
-            if (cell == null)
+            if (cell == null || ColumnVisibilityMenu.isHidden(cell))
                 return;
             int col = cell.getColumnIndex();
             if (col == 0 && origProvider != null)

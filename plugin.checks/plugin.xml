@@ -25,12 +25,19 @@
     <check
         category="tormozit.comfort.checks"
         class="tormozit.checks.BrokenFormPictureCheck"/>
+    <check
+        category="tormozit.comfort.checks"
+        class="tormozit.checks.BrokenMdCompositionCheck"/>
     <check category="tormozit.comfort.checks" class="tormozit.checks.StaticFeatureAccessChecks$Parameters"/>
     <check category="tormozit.comfort.checks" class="tormozit.checks.StaticFeatureAccessChecks$Obsolete"/>
     <check category="tormozit.comfort.checks" class="tormozit.checks.StaticFeatureAccessChecks$Compatibility"/>
     <check category="tormozit.comfort.checks" class="tormozit.checks.StaticFeatureAccessChecks$VariableAccess"/>
     <check category="tormozit.comfort.checks" class="tormozit.checks.StaticFeatureAccessChecks$EventHandler"/>
     <check category="tormozit.comfort.checks" class="tormozit.checks.BslPreprocessorStraddleCheck"/>
+  </extension>
+
+  <extension point="com.e1c.g5.v8.dt.check.fixes">
+    <fix class="tormozit.checks.BrokenMdCompositionFix"/>
   </extension>
 
 </plugin>

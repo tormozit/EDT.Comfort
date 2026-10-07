@@ -29,9 +29,9 @@
          version="0.0.0"
          unpack="false"/>
 
-   <!-- Хук разбора модулей BSL: стартует вместе с фреймворком (META-INF/p2.inf), см. plugin.bslparser/README.md -->
+   <!-- Бандл раннего старта: стартует вместе с фреймворком (META-INF/p2.inf), см. plugin.early/README.md -->
    <plugin
-         id="tormozit.comfort.bslparser"
+         id="tormozit.comfort.early"
          version="0.0.0"
          unpack="false"/>
 

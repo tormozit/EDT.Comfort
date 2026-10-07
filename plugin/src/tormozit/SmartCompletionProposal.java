@@ -1,6 +1,7 @@
 package tormozit;
 
 import org.eclipse.core.runtime.IProgressMonitor;
+import org.eclipse.core.runtime.ListenerList;
 import org.eclipse.core.runtime.NullProgressMonitor;
 import org.eclipse.jface.text.BadLocationException;
 import org.eclipse.jface.text.DocumentEvent;
@@ -19,6 +20,8 @@ import org.eclipse.jface.text.contentassist.ICompletionProposalExtension6;
 import org.eclipse.jface.text.contentassist.IContextInformation;
 import org.eclipse.jface.text.source.SourceViewer;
 import org.eclipse.jface.viewers.StyledString;
+import org.eclipse.jface.viewers.ISelectionChangedListener;
+import org.eclipse.jface.viewers.ISelectionProvider;
 import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.custom.CaretListener;
 import org.eclipse.swt.graphics.Image;
@@ -343,6 +346,7 @@ public class SmartCompletionProposal implements
             applyCaretProbe = new ApplyCaretProbe(this, viewer);
             applyCaretProbe.install(offset, trigger, stateMask);
         }
+        discardPreviousStockCaretRestore(viewer);
         IDocument document = viewer != null ? viewer.getDocument() : null;
         int caret = resolveApplyCaret(document, offset);
         EqualsSpacePad pad = EqualsSpacePad.install(document, caret, delegate);
@@ -393,6 +397,35 @@ public class SmartCompletionProposal implements
             }
             endProposalApply();
             pad.scheduleRestore();
+        }
+    }
+
+    /**
+     * EDT DataEvent.doIt после LinkedModeUI.enter ставит одноразовый слушатель
+     * BslProposalProvider$2 с координатами первого поля. Если событие выделения
+     * не пришло, слушатель переживает вставку и при следующем автодополнении
+     * возвращает каретку в старое поле (assist-caret, 07.10.2026: 19885 → 19841).
+     * Перед новой вставкой снимаем только оставшиеся слушатели прошлого DataEvent.
+     * Новые, созданные текущей вставкой, сохраняются для штатного LinkedMode.
+     * Класс и поля подтверждены в .tmp/bundles/bsl-ui-full-22 и исходниках JFace.
+     */
+    private void discardPreviousStockCaretRestore(ITextViewer viewer)
+    {
+        ISelectionProvider provider = viewer != null ? viewer.getSelectionProvider() : null;
+        if (!(Global.getField(provider, "selectionChangedListeners") instanceof ListenerList<?> listeners)) //$NON-NLS-1$
+            return;
+        for (Object listener : listeners.getListeners())
+        {
+            if (!(listener instanceof ISelectionChangedListener selectionListener)
+                || !listener.getClass().getName().equals(
+                    "com._1c.g5.v8.dt.bsl.ui.contentassist.BslProposalProvider$2") //$NON-NLS-1$
+                || Global.getField(listener, "val$viewer") != viewer) //$NON-NLS-1$
+                continue;
+            provider.removeSelectionChangedListener(selectionListener);
+            if (applyCaretProbe != null)
+                applyCaretProbe.log("stockCaretRestore.discard position=" //$NON-NLS-1$
+                    + Global.getField(listener, "val$posStart") //$NON-NLS-1$
+                    + " length=" + Global.getField(listener, "val$length")); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 

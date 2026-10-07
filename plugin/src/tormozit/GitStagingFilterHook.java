@@ -822,6 +822,7 @@ public final class GitStagingFilterHook implements IStartup
     {
         IDialogSettings settings = columnSettings();
         installColumns(tree, settings, view);
+        ColumnVisibilityMenu.forTree(tree, "GitStaging").refreshOnShow(() -> viewer.refresh()); //$NON-NLS-1$
 
         GitStagingTreeInteraction interaction = new GitStagingTreeInteraction(tree, viewer);
         interaction.install();
@@ -1797,7 +1798,7 @@ public final class GitStagingFilterHook implements IStartup
         @Override
         public void update(ViewerCell cell)
         {
-            if (cell == null)
+            if (cell == null || ColumnVisibilityMenu.isHidden(cell))
                 return;
             Object element = cell.getElement();
             int logical = logicalOfColumn(tree, cell.getColumnIndex());

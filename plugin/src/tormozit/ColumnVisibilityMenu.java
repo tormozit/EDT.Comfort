@@ -8,16 +8,19 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 
 import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.jface.layout.TreeColumnLayout;
 import org.eclipse.jface.resource.ImageDescriptor;
 import org.eclipse.jface.viewers.ColumnPixelData;
+import org.eclipse.jface.viewers.ViewerCell;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Item;
+import org.eclipse.swt.widgets.Table;
 import org.eclipse.swt.widgets.Menu;
 import org.eclipse.swt.widgets.MenuItem;
 import org.eclipse.swt.widgets.TableColumn;
@@ -35,6 +38,7 @@ final class ColumnVisibilityMenu
     private final IDialogSettings settings;
     private final List<Entry> columns = new ArrayList<>();
     private final BiConsumer<Entry, Integer> setWidth;
+    private Runnable refreshOnShow = () -> {};
 
     private ColumnVisibilityMenu(Control control, String scope, BiConsumer<Entry, Integer> setWidth)
     {
@@ -134,6 +138,35 @@ final class ColumnVisibilityMenu
     static boolean isHidden(Item column)
     {
         return column.getData(KEY) instanceof Entry entry && !entry.visible;
+    }
+
+    /** Проверка до расчёта текста, значка и оформления ячейки. */
+    static boolean isHidden(ViewerCell cell)
+    {
+        Control control = cell.getControl();
+        int index = cell.getColumnIndex();
+        if (control instanceof Tree tree && index >= 0 && index < tree.getColumnCount())
+            return isHidden(tree.getColumn(index)) || tree.getColumn(index).getWidth() <= 0;
+        if (control instanceof Table table && index >= 0 && index < table.getColumnCount())
+            return isHidden(table.getColumn(index)) || table.getColumn(index).getWidth() <= 0;
+        return false;
+    }
+
+    ColumnVisibilityMenu refreshOnShow(Runnable refresh)
+    {
+        refreshOnShow = refresh;
+        return this;
+    }
+
+    /** Фоновые расчёты колонки должны останавливаться вместе с её скрытием. */
+    static void onVisibilityChanged(Item column, Consumer<Boolean> listener)
+    {
+        if (column.getData(KEY) instanceof Entry entry)
+        {
+            entry.visibilityChanged = listener;
+            if (!entry.visible)
+                listener.accept(false);
+        }
     }
 
     private void hookMenu()
@@ -246,6 +279,7 @@ final class ColumnVisibilityMenu
             if (!scope.equals(menu.scope) || menu.control.isDisposed())
                 continue;
             menu.control.setRedraw(false);
+            boolean changed = false;
             try
             {
                 for (Entry entry : menu.columns)
@@ -255,8 +289,12 @@ final class ColumnVisibilityMenu
                     if (!visible)
                         entry.rememberWidth();
                     entry.visible = visible;
+                    changed = true;
                     entry.apply();
+                    entry.visibilityChanged.accept(visible);
                 }
+                if (visible && changed)
+                    menu.refreshOnShow.run();
                 menu.control.getParent().layout(true, true);
             }
             finally
@@ -277,6 +315,7 @@ final class ColumnVisibilityMenu
         private final boolean resizable;
         private int lastWidth;
         private boolean visible = true;
+        private Consumer<Boolean> visibilityChanged = visible -> {};
 
         Entry(ColumnVisibilityMenu owner, Item column, String id, String group, String label)
         {

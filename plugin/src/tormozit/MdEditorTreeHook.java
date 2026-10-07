@@ -55,6 +55,7 @@ import org.eclipse.jface.viewers.TreePath;
 import org.eclipse.jface.viewers.TreeSelection;
 import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.jface.viewers.TreeViewerColumn;
+import org.eclipse.jface.viewers.ViewerCell;
 import org.eclipse.jface.viewers.Viewer;
 import org.eclipse.jface.viewers.ViewerFilter;
 import org.eclipse.jface.util.LocalSelectionTransfer;
@@ -788,6 +789,13 @@ public final class MdEditorTreeHook
                 return object instanceof BasicFeature feature ? feature.getType() : null;
             }, element -> elementObject(tree, element), null)
         {
+            @Override
+            public void update(ViewerCell cell)
+            {
+                if (!ColumnVisibilityMenu.isHidden(cell))
+                    super.update(cell);
+            }
+
             // Подсказку JFace в этом дереве включает сама EDT (DtTreeView.configureTree →
             // ColumnViewerToolTipSupport.enableFor). Она находит ячейку только в выделенной строке:
             // с непустым текстом показывает там вторую подсказку поверх нативной и оставляет дереву
@@ -799,7 +807,8 @@ public final class MdEditorTreeHook
                 return null;
             }
         });
-        ColumnVisibilityMenu.forTree(tree, "MdAttributes").add(column, "type", "Тип"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        ColumnVisibilityMenu.forTree(tree, "MdAttributes").refreshOnShow(() -> viewer.refresh()) //$NON-NLS-1$
+            .add(column, "type", "Тип"); //$NON-NLS-1$ //$NON-NLS-2$
         installTypeColumnDoubleClick(tree, viewer);
         tree.setHeaderVisible(true);
         ThemeAwareColors.applyGridLines(tree);
@@ -914,10 +923,17 @@ public final class MdEditorTreeHook
                     + "». Двойной клик открывает элемент формы.")); //$NON-NLS-1$
             column.setMoveable(true);
             setFixedColumnWidth(tree, column, 90);
-            ColumnVisibilityMenu.forTree(tree, "MdAttributes") //$NON-NLS-1$
+            ColumnVisibilityMenu.forTree(tree, "MdAttributes").refreshOnShow(() -> viewer.refresh()) //$NON-NLS-1$
                 .add(column, "form." + form.title(), "forms", "<Формы>"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             viewerColumn.setLabelProvider(new ColumnLabelProvider()
             {
+                @Override
+                public void update(ViewerCell cell)
+                {
+                    if (!ColumnVisibilityMenu.isHidden(cell))
+                        super.update(cell);
+                }
+
                 @Override
                 public String getText(Object element)
                 {
@@ -1971,6 +1987,7 @@ public final class MdEditorTreeHook
             tree.getColumnCount() > 1 && Boolean.TRUE.equals(tree.getColumn(1).getData(TYPE_COLUMN_MARKER))
                 ? 2 : 1);
         TreeColumn swtColumn = column.getColumn();
+        swtColumn.setData(FO_COUNT_COLUMN_MARKER, Boolean.TRUE);
 //        swtColumn.setText("ФО"); //$NON-NLS-1$
         swtColumn.setImage(foSectionImage());
         swtColumn.setToolTipText(TooltipText.wrap(tree,
@@ -1980,10 +1997,17 @@ public final class MdEditorTreeHook
         setFixedColumnWidth(tree, swtColumn, ColumnWidthFit.headerIconColumnWidth());
         swtColumn.setResizable(false);
         swtColumn.setMoveable(false);
-        ColumnVisibilityMenu.forTree(tree, "MdAttributes") //$NON-NLS-1$
+        ColumnVisibilityMenu.forTree(tree, "MdAttributes").refreshOnShow(() -> viewer.refresh()) //$NON-NLS-1$
             .add(swtColumn, "functionalOptions", "Функциональные опции"); //$NON-NLS-1$ //$NON-NLS-2$
         column.setLabelProvider(new ColumnLabelProvider()
         {
+            @Override
+            public void update(ViewerCell cell)
+            {
+                if (!ColumnVisibilityMenu.isHidden(cell))
+                    super.update(cell);
+            }
+
             @Override
             public String getText(Object element)
             {
@@ -2002,6 +2026,12 @@ public final class MdEditorTreeHook
         tree.setHeaderVisible(true);
         ThemeAwareColors.applyGridLines(tree);
         disableNativeColumnStretch(tree);
+        ColumnVisibilityMenu.onVisibilityChanged(swtColumn, visible -> {
+            if (visible)
+                refreshFunctionalOptionsCount(tree, viewer, editor);
+            else if (tree.getData(FO_COUNT_JOB_KEY) instanceof Job previous)
+                previous.cancel();
+        });
         tree.addListener(SWT.FocusIn, event -> refreshFunctionalOptionsCount(tree, viewer, editor));
         refreshFunctionalOptionsCount(tree, viewer, editor);
     }
@@ -2019,6 +2049,10 @@ public final class MdEditorTreeHook
     {
         if (tree.isDisposed())
             return;
+        for (TreeColumn column : tree.getColumns())
+            if (Boolean.TRUE.equals(column.getData(FO_COUNT_COLUMN_MARKER))
+                && ColumnVisibilityMenu.isHidden(column))
+                return;
         if (tree.getData(FO_COUNT_JOB_KEY) instanceof Job previous)
             previous.cancel();
         Configuration configuration = foConfigurationOf(editor);
@@ -2029,7 +2063,7 @@ public final class MdEditorTreeHook
             {
                 if (monitor.isCanceled())
                     return Status.CANCEL_STATUS;
-                Map<EObject, Integer> counts = computeFunctionalOptionsCounts(configuration);
+                Map<EObject, Integer> counts = computeFunctionalOptionsCounts(configuration, monitor);
                 Display display = Display.getDefault();
                 if (display == null || display.isDisposed())
                     return Status.CANCEL_STATUS;
@@ -2050,18 +2084,25 @@ public final class MdEditorTreeHook
         job.schedule();
     }
 
-    private static Map<EObject, Integer> computeFunctionalOptionsCounts(Configuration configuration)
+    private static Map<EObject, Integer> computeFunctionalOptionsCounts(Configuration configuration,
+        IProgressMonitor monitor)
     {
         Map<EObject, Integer> counts = new HashMap<>();
         if (configuration != null)
         {
             for (FunctionalOption option : configuration.getFunctionalOptions())
             {
+                if (monitor.isCanceled())
+                    break;
                 if (option == null)
                     continue;
                 for (MdObject item : option.getContent())
+                {
+                    if (monitor.isCanceled())
+                        return counts;
                     if (item != null)
                         counts.merge(item, Integer.valueOf(1), Integer::sum);
+                }
             }
         }
         return counts;
@@ -2907,6 +2948,8 @@ public final class MdEditorTreeHook
         private Job job;
         private boolean scheduled;
         private boolean paintHooked;
+        private volatile boolean visible = true;
+        private volatile long visibilityVersion;
 
         private FormColumn(EStructuralFeature feature, BasicForm basicForm)
         {
@@ -2932,10 +2975,12 @@ public final class MdEditorTreeHook
             if (paintHooked || tree == null || tree.isDisposed())
                 return;
             paintHooked = true;
+            ColumnVisibilityMenu.onVisibilityChanged(column, this::visibilityChanged);
+            column.addListener(SWT.Dispose, event -> visibilityChanged(false));
             tree.addListener(SWT.PaintItem, event ->
             {
                 if (!(event.item instanceof TreeItem row) || column == null || column.isDisposed()
-                    || event.index != tree.indexOf(column))
+                    || !visible || event.index != tree.indexOf(column))
                     return;
                 EObject object = elementObject(tree, row.getData());
                 if (MdEditorAttributeMenuHook.isDataMember(object))
@@ -2962,9 +3007,27 @@ public final class MdEditorTreeHook
             return result.item != null ? "+" : "-"; //$NON-NLS-1$ //$NON-NLS-2$
         }
 
+        private void visibilityChanged(boolean shown)
+        {
+            visibilityVersion++;
+            visible = shown;
+            if (!shown)
+            {
+                Job previous;
+                synchronized (this)
+                {
+                    pending.clear();
+                    scheduled = false;
+                    previous = job;
+                }
+                if (previous != null)
+                    previous.cancel();
+            }
+        }
+
         private void request(EObject object, TreeViewer requestingViewer)
         {
-            if (object == null)
+            if (object == null || !visible)
                 return;
             boolean start = false;
             synchronized (this)
@@ -3005,6 +3068,9 @@ public final class MdEditorTreeHook
 
         private void runBatch(IProgressMonitor monitor)
         {
+            long version = visibilityVersion;
+            if (!visible || monitor.isCanceled())
+                return;
             List<EObject> batch = new ArrayList<>(BATCH_SIZE);
             synchronized (this)
             {
@@ -3020,7 +3086,10 @@ public final class MdEditorTreeHook
             Display display = Display.getDefault();
             if (display == null || display.isDisposed())
                 return;
-            display.asyncExec(() -> apply(batch, computed));
+            display.asyncExec(() -> {
+                if (!monitor.isCanceled() && version == visibilityVersion)
+                    apply(batch, computed);
+            });
         }
 
         private Map<EObject, CellResult> compute(List<EObject> batch, IProgressMonitor monitor)
@@ -3030,13 +3099,15 @@ public final class MdEditorTreeHook
                 result.put(object, ABSENT);
             try
             {
+                if (!visible || monitor.isCanceled())
+                    return result;
                 AbstractForm resolvedForm = basicForm.getForm();
                 if (resolvedForm != null && resolvedForm.eIsProxy())
                     resolvedForm = (AbstractForm)EcoreUtil.resolve(resolvedForm, basicForm);
                 if (!(resolvedForm instanceof Form form))
                     return result;
                 TreeIterator<EObject> contents = form.eAllContents();
-                while (contents.hasNext() && (monitor == null || !monitor.isCanceled()))
+                while (visible && contents.hasNext() && (monitor == null || !monitor.isCanceled()))
                 {
                     EObject value = contents.next();
                     if (!(value instanceof DataItem item))
@@ -3065,6 +3136,8 @@ public final class MdEditorTreeHook
 
         private void apply(List<EObject> batch, Map<EObject, CellResult> computed)
         {
+            if (!visible)
+                return;
             TreeViewer currentViewer;
             boolean again;
             synchronized (this)

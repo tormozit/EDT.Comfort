@@ -8243,7 +8243,8 @@ public class FormEditorHook implements IStartup
             // Ctrl+C оставляем штатным — это копирование элемента формы; в добавленных плагином
             // колонках копируем текст активной ячейки (см. copyActiveCellText).
             CopyCommandSupport.wireCopyOverride(tree, () -> copyActiveCellText(tree, interaction));
-            ColumnVisibilityMenu visibility = ColumnVisibilityMenu.forTree(tree, "FormItems"); //$NON-NLS-1$
+            ColumnVisibilityMenu visibility = ColumnVisibilityMenu.forTree(tree, "FormItems") //$NON-NLS-1$
+                .refreshOnShow(() -> viewer.refresh());
             String[] labels = { TITLE_TITLE, TITLE_HANDLERS, TITLE_APPEARANCE,
                 TITLE_INVISIBLE, TITLE_READ_ONLY, TITLE_HEIGHT, TITLE_WIDTH };
             for (int index = COLUMN_TITLE; index <= COLUMN_LAST; index++)
@@ -8811,6 +8812,8 @@ public class FormEditorHook implements IStartup
             Object element = row.getData();
             for (int column = COLUMN_TITLE; column <= COLUMN_LAST; column++)
             {
+                if (ColumnVisibilityMenu.isHidden(viewer.getTree().getColumn(column)))
+                    continue;
                 // «Заголовок» рисуется своим стилевым провайдером — у него текст и иконка отдельно.
                 if (viewer.getLabelProvider(column) instanceof TitleLabelProvider titleProvider)
                 {
@@ -10340,6 +10343,8 @@ public class FormEditorHook implements IStartup
             @Override
             public void update(ViewerCell cell)
             {
+                if (ColumnVisibilityMenu.isHidden(cell))
+                    return;
                 Object element = cell.getElement();
                 EffectiveTitle.Info info = EffectiveTitle.of(page, domainItem(element));
                 String text = info == null ? "" : info.text; //$NON-NLS-1$
@@ -10356,9 +10361,20 @@ public class FormEditorHook implements IStartup
             }
         }
 
+        /** Не вычислять свойства строки ради заполнения скрытой колонки. */
+        private static class VisibleColumnLabelProvider extends ColumnLabelProvider
+        {
+            @Override
+            public void update(ViewerCell cell)
+            {
+                if (!ColumnVisibilityMenu.isHidden(cell))
+                    super.update(cell);
+            }
+        }
+
         /** Число; ноль не показывается — колонка остаётся спокойной. */
         private static final class CountLabelProvider
-            extends ColumnLabelProvider
+            extends VisibleColumnLabelProvider
         {
             private final ToIntFunction<Object> counter;
 
@@ -10384,7 +10400,7 @@ public class FormEditorHook implements IStartup
          * элемента, а у реквизита или команды.
          */
         private static final class FlagLabelProvider
-            extends ColumnLabelProvider
+            extends VisibleColumnLabelProvider
         {
             private final Function<FormItem, FormItem> sourceFinder;
 

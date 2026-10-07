@@ -12,10 +12,12 @@ $script:ComfortPluginLocation = 'file:/C:/VC/EDT.Comfort/plugin/'
 # но в OSGi-профиле PDE он должен быть, иначе проверки «Комфорта» в запуске просто отсутствуют.
 $script:ComfortChecksManifestPath = Join-Path $script:ComfortRepoRoot 'plugin.checks\META-INF\MANIFEST.MF'
 $script:ComfortChecksLocation = 'file:/C:/VC/EDT.Comfort/plugin.checks/'
-# Хук разбора модулей BSL: должен стартовать вместе с фреймворком (последнее поле bundles.info = true),
-# иначе его WeavingHook не успевает до загрузки парсера BSL (см. plugin.bslparser/README.md).
-$script:ComfortBslParserManifestPath = Join-Path $script:ComfortRepoRoot 'plugin.bslparser\META-INF\MANIFEST.MF'
-$script:ComfortBslParserLocation = 'file:/C:/VC/EDT.Comfort/plugin.bslparser/'
+# Бандл раннего старта: должен стартовать вместе с фреймворком (последнее поле bundles.info = true),
+# иначе его WeavingHook не успевает до загрузки классов EDT и SWT (см. plugin.early/README.md).
+$script:ComfortEarlyManifestPath = Join-Path $script:ComfortRepoRoot 'plugin.early\META-INF\MANIFEST.MF'
+$script:ComfortEarlyLocation = 'file:/C:/VC/EDT.Comfort/plugin.early/'
+# Прежнее имя бандла раннего старта: его записи из профиля убираются, каталога больше нет.
+$script:ComfortEarlyOldName = 'tormozit.comfort.bslparser'
 
 function Get-ComfortReleaseFromVersionFile {
     param([string]$VersionFile = $script:ComfortVersionFile)
@@ -93,8 +95,8 @@ function Get-ComfortDevPropertiesStaleLines {
     return $stale.ToArray()
 }
 
-function Get-ComfortBslParserVersion {
-    return Get-ComfortChecksVersion -ManifestPath $script:ComfortBslParserManifestPath
+function Get-ComfortEarlyVersion {
+    return Get-ComfortChecksVersion -ManifestPath $script:ComfortEarlyManifestPath
 }
 
 # Запись бандла сразу после tormozit.comfort (или замена существующей).
@@ -121,13 +123,13 @@ function Set-ComfortExtraBundleLine {
     return , $result.ToArray()
 }
 
-function Get-ComfortBslParserBundlesInfoLine {
+function Get-ComfortEarlyBundlesInfoLine {
     param([string]$BundlesInfoPath)
     if (-not (Test-Path -LiteralPath $BundlesInfoPath)) {
         return $null
     }
     foreach ($line in [System.IO.File]::ReadAllLines($BundlesInfoPath)) {
-        if ($line -match '^tormozit\.comfort\.bslparser,') {
+        if ($line -match '^tormozit\.comfort\.early,') {
             return $line
         }
     }
@@ -174,21 +176,23 @@ function Update-PdeOsgiComfortVersion {
     $checksVersion = Get-ComfortChecksVersion
     $checksLine = "tormozit.comfort.checks,$checksVersion,$($script:ComfortChecksLocation),4,false"
     $bundleLines = Set-ComfortExtraBundleLine -BundleLines $bundleLines -SymbolicName 'tormozit.comfort.checks' -Line $checksLine
-    # Хук разбора BSL: started=true — стартует вместе с фреймворком, до загрузки парсера BSL.
-    $bslParserVersion = Get-ComfortBslParserVersion
-    $bslParserLine = "tormozit.comfort.bslparser,$bslParserVersion,$($script:ComfortBslParserLocation),4,true"
-    $bundleLines = Set-ComfortExtraBundleLine -BundleLines $bundleLines -SymbolicName 'tormozit.comfort.bslparser' -Line $bslParserLine
+    # Бандл раннего старта: started=true — стартует вместе с фреймворком, до загрузки классов EDT и SWT.
+    $oldEarlyPattern = '^' + [regex]::Escape($script:ComfortEarlyOldName) + ','
+    $bundleLines = @($bundleLines | Where-Object { $_ -notmatch $oldEarlyPattern })
+    $earlyVersion = Get-ComfortEarlyVersion
+    $earlyLine = "tormozit.comfort.early,$earlyVersion,$($script:ComfortEarlyLocation),4,true"
+    $bundleLines = Set-ComfortExtraBundleLine -BundleLines $bundleLines -SymbolicName 'tormozit.comfort.early' -Line $earlyLine
     [System.IO.File]::WriteAllLines($BundlesInfoPath, $bundleLines, $utf8NoBom)
     $devLines = @(
         '#',
         "#$(Get-Date -Format 'ddd MMM dd HH:mm:ss ''MSK'' yyyy')",
         "tormozit.comfort;$Qualifier=bin,lib/jacob.jar",
         "tormozit.comfort.checks;$checksVersion=bin",
-        "tormozit.comfort.bslparser;$bslParserVersion=bin",
+        "tormozit.comfort.early;$earlyVersion=bin",
         '@ignoredot@=true',
         'tormozit.comfort=bin,lib/jacob.jar',
         'tormozit.comfort.checks=bin',
-        'tormozit.comfort.bslparser=bin'
+        'tormozit.comfort.early=bin'
     )
     [System.IO.File]::WriteAllLines($DevPropertiesPath, $devLines, $utf8NoBom)
 }
@@ -204,8 +208,8 @@ function Test-ComfortOsgiVersionSync {
     $bundles = Get-ComfortBundlesInfoVersion -BundlesInfoPath $BundlesInfoPath
     $dev = Get-ComfortDevPropertiesVersion -DevPropertiesPath $DevPropertiesPath
     $stale = Get-ComfortDevPropertiesStaleLines -DevPropertiesPath $DevPropertiesPath
-    $bslParserLine = Get-ComfortBslParserBundlesInfoLine -BundlesInfoPath $BundlesInfoPath
-    $bslParserOk = [bool]$bslParserLine -and $bslParserLine.EndsWith(',true')
+    $earlyLine = Get-ComfortEarlyBundlesInfoLine -BundlesInfoPath $BundlesInfoPath
+    $earlyOk = [bool]$earlyLine -and $earlyLine.EndsWith(',true')
     # Версия бандла проверок в bundles.info обязана совпадать с его MANIFEST: при расхождении
     # simpleconfigurator молча не ставит бандл, и все проверки «Комфорта» пропадают.
     $checksExpected = Get-ComfortChecksVersion
@@ -218,7 +222,7 @@ function Test-ComfortOsgiVersionSync {
         }
     }
     $checksOk = $checksBundles -eq $checksExpected
-    $ok = ($manifest -eq $ExpectedQualifier) -and ($bundles -eq $ExpectedQualifier) -and ($dev -eq $ExpectedQualifier) -and ($stale.Count -eq 0) -and $bslParserOk -and $checksOk
+    $ok = ($manifest -eq $ExpectedQualifier) -and ($bundles -eq $ExpectedQualifier) -and ($dev -eq $ExpectedQualifier) -and ($stale.Count -eq 0) -and $earlyOk -and $checksOk
     return [PSCustomObject]@{
         Ok = $ok
         Expected = $ExpectedQualifier
@@ -226,7 +230,7 @@ function Test-ComfortOsgiVersionSync {
         BundlesInfo = $bundles
         DevProperties = $dev
         StaleDevLines = $stale
-        BslParserLine = $bslParserLine
+        EarlyLine = $earlyLine
         ChecksExpected = $checksExpected
         ChecksBundlesInfo = $checksBundles
     }
@@ -252,7 +256,7 @@ function Assert-ComfortOsgiVersionSync {
         "  MANIFEST.MF: $($state.Manifest)",
         "  bundles.info: $($state.BundlesInfo)",
         "  dev.properties: $($state.DevProperties)",
-        "  bundles.info tormozit.comfort.bslparser (expected ...,4,true): $($state.BslParserLine)",
+        "  bundles.info tormozit.comfort.early (expected ...,4,true): $($state.EarlyLine)",
         "  tormozit.comfort.checks: MANIFEST $($state.ChecksExpected), bundles.info $($state.ChecksBundlesInfo)"
     )
     if ($state.StaleDevLines.Count -gt 0) {

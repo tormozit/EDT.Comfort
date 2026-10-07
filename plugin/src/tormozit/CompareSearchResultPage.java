@@ -267,6 +267,24 @@ public class CompareSearchResultPage implements ISearchResultPage
         menuManager.setRemoveAllWhenShown(true);
         menuManager.addMenuListener(manager ->
         {
+            TableItem[] selection = table.getSelection();
+            if (selection.length == 1 && selection[0].getData() instanceof CompareSearchMatch match
+                && match.getReferenceFqn() != null)
+            {
+                Action followReference = new Action("Перейти по ссылке")
+                {
+                    @Override
+                    public void run()
+                    {
+                        if (searchResult != null)
+                            CompareConfigMenuHook.revealObjectInTree(searchResult.getEditorPart(),
+                                match.getReferenceFqn(), true);
+                    }
+                };
+                followReference.setToolTipText(TooltipText.wrap(table,
+                    "Активировать объект по ссылке в дереве сравнения" + Global.pluginSignForTooltip()));
+                manager.add(followReference);
+            }
             boolean hasCheckable = selectionHasCheckable();
             Action setMarks = new Action("Установить пометки")
             {
@@ -995,6 +1013,14 @@ public class CompareSearchResultPage implements ISearchResultPage
             return;
         IEditorPart editor = searchResult.getEditorPart();
         if (editor == null || editor.getSite() == null)
+            return;
+
+        if (match.getComparisonNode() instanceof String fqn)
+        {
+            CompareConfigMenuHook.revealObjectInTree(editor, fqn, true);
+            return;
+        }
+        if (match.getComparisonNode() == null)
             return;
 
         Object view = Global.getField(editor, "comparisonView");
