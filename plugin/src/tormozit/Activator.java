@@ -87,6 +87,7 @@ public class Activator extends AbstractUIPlugin
         MdEventHandlersPageHook.installWeavingHook();
         OpenHelperAttributePropertiesHook.installWeavingHook();
         WorkbenchTabsHook.installWeavingHook();
+        MoxelEditorHook.installColorResetHook();
         try
         {
             NaparnikManualModeHook.bootFromActivator();

@@ -9,6 +9,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.WeakHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 import org.eclipse.core.commands.AbstractHandler;
@@ -20,6 +22,8 @@ import org.eclipse.core.resources.IFile;
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.NullProgressMonitor;
 import org.eclipse.core.runtime.Platform;
+import org.eclipse.emf.ecore.EObject;
+import org.eclipse.emf.ecore.EStructuralFeature;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.events.MenuAdapter;
 import org.eclipse.swt.events.MenuEvent;
@@ -51,7 +55,17 @@ import org.eclipse.ui.commands.ICommandService;
 import org.eclipse.ui.handlers.IHandlerService;
 import org.eclipse.ui.handlers.IHandlerActivation;
 import org.osgi.framework.Bundle;
+import org.osgi.framework.BundleContext;
+import org.osgi.framework.FrameworkUtil;
 import org.osgi.framework.Version;
+import org.osgi.framework.hooks.weaving.WeavingHook;
+import org.osgi.framework.hooks.weaving.WovenClass;
+import org.objectweb.asm.ClassReader;
+import org.objectweb.asm.ClassVisitor;
+import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.Label;
+import org.objectweb.asm.MethodVisitor;
+import org.objectweb.asm.Opcodes;
 
 import com._1c.g5.v8.bm.core.IBmObject;
 import com._1c.g5.v8.bm.core.IBmTransaction;
@@ -63,6 +77,8 @@ import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorEmbeddedEditorPage;
 import com._1c.g5.v8.dt.moxel.Columns;
 import com._1c.g5.v8.dt.moxel.SpreadsheetDocument;
 import com._1c.g5.v8.dt.moxel.content.impl.TablePropertiesImpl;
+import com._1c.g5.v8.dt.moxel.content.BaseFormattingCellProperties;
+import com._1c.g5.v8.dt.moxel.content.ContentPackage;
 import com._1c.g5.v8.dt.moxel.sheet.CellsSelection;
 import com._1c.g5.v8.dt.moxel.sheet.Selection;
 import com._1c.g5.v8.dt.moxel.sheet.SheetAccessor;
@@ -81,6 +97,12 @@ import com._1c.g5.v8.dt.ui.MultiSelection;
  */
 public class MoxelEditorHook implements IStartup
 {
+    /** До первой загрузки ColorComponent, как остальные хуки из Activator.start. */
+    public static void installColorResetHook()
+    {
+        ColorResetSupport.install();
+    }
+
     private static final String SPREADSHEET_PAGE_ID = "editors.commontemplate.pages.spreadsheet"; //$NON-NLS-1$
     private static final String MENU_TEXT = "Редактор ИР"; //$NON-NLS-1$
     private static final String HOOK_MARKER = "tormozit.tabdocMenuHooked"; //$NON-NLS-1$
@@ -94,6 +116,7 @@ public class MoxelEditorHook implements IStartup
     @Override
     public void earlyStartup()
     {
+        installColorResetHook();
         Display.getDefault().asyncExec(() ->
         {
             PasteCacheRepair.install();
@@ -508,7 +531,6 @@ public class MoxelEditorHook implements IStartup
     private static final class InplaceCutSupport implements Listener
     {
         private static final String CUT_COMMAND = "org.eclipse.ui.edit.cut"; //$NON-NLS-1$
-        private static final String LOG_TOPIC = "moxel-cut-690"; //$NON-NLS-1$
 
         private final IHandlerService handlerService;
         private Text target;
@@ -550,10 +572,9 @@ public class MoxelEditorHook implements IStartup
             }
             else if (event.type == SWT.KeyDown && event.widget == target)
             {
-                Global.tempLog(LOG_TOPIC, "key code=" + event.keyCode + " mask=" + event.stateMask); //$NON-NLS-1$ //$NON-NLS-2$
                 if (event.keyCode == SWT.DEL && (event.stateMask & SWT.MODIFIER_MASK) == SWT.SHIFT)
                 {
-                    cut("Shift+Delete"); //$NON-NLS-1$
+                    cut();
                     event.doit = false;
                     event.type = SWT.None;
                 }
@@ -585,11 +606,10 @@ public class MoxelEditorHook implements IStartup
                 @Override
                 public Object execute(ExecutionEvent event)
                 {
-                    cut("command"); //$NON-NLS-1$
+                    cut();
                     return null;
                 }
             }, new ActiveShellExpression(editor.getShell()));
-            Global.tempLog(LOG_TOPIC, "activate"); //$NON-NLS-1$
         }
 
         private void deactivate()
@@ -597,19 +617,16 @@ public class MoxelEditorHook implements IStartup
             if (activation != null)
             {
                 handlerService.deactivateHandler(activation);
-                Global.tempLog(LOG_TOPIC, "deactivate"); //$NON-NLS-1$
             }
             activation = null;
             target = null;
         }
 
-        private void cut(String source)
+        private void cut()
         {
             Text editor = target;
-            Global.tempLog(LOG_TOPIC, "cut source=" + source + " active=" + isCellEditor(editor)); //$NON-NLS-1$ //$NON-NLS-2$
             if (!isCellEditor(editor) || !editor.isFocusControl() || !editor.getEditable())
                 return;
-            Global.tempLog(LOG_TOPIC, "cut selection=" + editor.getSelectionCount()); //$NON-NLS-1$
             editor.cut();
         }
     }
@@ -800,6 +817,138 @@ public class MoxelEditorHook implements IStartup
             {
                 org.eclipse.swt.internal.win32.OS.ValidateRect(control.handle, null);
             }
+        }
+    }
+
+    /**
+     * Очистка смешанного цвета (issue 689, EDT 2025/2026).
+     * ColorComponent вызывает model.set(null) и scene.commit(this), но EmfValue.getChange()
+     * возвращает NO_CHANGE для null → null. У смешанного выделения цвет уже null и unset,
+     * поэтому штатный CellsPropertiesAdapter не получает уведомление о явной очистке.
+     * После commit выполняем тот же eSet, что EmfValue.SetValueChange.apply(), только для
+     * unset-цвета агрегата выделения. Адаптер EDT применяет форматирование через OperationsHelper
+     * с сохранением штатной отмены. Для обычного цвета остаётся штатный commit.
+     */
+    private static final class ColorResetSupport implements WeavingHook
+    {
+        private static final String TARGET = "com._1c.g5.v8.dt.md.ui.aef.components.ColorComponent"; //$NON-NLS-1$
+        private static final String COLOR_MODEL = "com._1c.g5.v8.dt.moxel.internal.ui.properties.models.EmfMoxelColorModel"; //$NON-NLS-1$
+        private static final String PROP_RESET = "tormozit.moxel.clearMixedColor"; //$NON-NLS-1$
+        private static final AtomicBoolean installed = new AtomicBoolean();
+
+        static void install()
+        {
+            if (!installed.compareAndSet(false, true))
+                return;
+            System.getProperties().put(PROP_RESET, (Consumer<Object>) ColorResetSupport::clearMixedColor);
+            Bundle bundle = FrameworkUtil.getBundle(MoxelEditorHook.class);
+            BundleContext context = bundle != null ? bundle.getBundleContext() : null;
+            if (context != null)
+                context.registerService(WeavingHook.class, new ColorResetSupport(), null);
+        }
+
+        private static void clearMixedColor(Object model)
+        {
+            if (model == null || !COLOR_MODEL.equals(model.getClass().getName()))
+                return;
+            try
+            {
+                Object object = Global.invoke(model, "getObject"); //$NON-NLS-1$
+                Object property = Global.invoke(model, "getProperty"); //$NON-NLS-1$
+                if (!(object instanceof BaseFormattingCellProperties)
+                    || !(object instanceof EObject aggregate) || !(property instanceof EStructuralFeature feature))
+                    return;
+                boolean color = feature == ContentPackage.Literals.BASE_FORMATTING_CELL_PROPERTIES__TEXT_COLOR
+                    || feature == ContentPackage.Literals.BASE_FORMATTING_CELL_PROPERTIES__BACK_COLOR
+                    || feature == ContentPackage.Literals.BASE_FORMATTING_CELL_PROPERTIES__BORDER_COLOR
+                    || feature == ContentPackage.Literals.BASE_FORMATTING_CELL_PROPERTIES__PATTERN_COLOR;
+                if (!color)
+                    return;
+                boolean isSet = aggregate.eIsSet(feature);
+                Object current = aggregate.eGet(feature);
+                if (!isSet && current == null)
+                    aggregate.eSet(feature, null);
+            }
+            catch (RuntimeException | LinkageError e)
+            {
+                // Агрегат выделения уже недоступен — штатная обработка кнопки завершена.
+            }
+        }
+
+        @Override
+        public void weave(WovenClass wovenClass)
+        {
+            if (!TARGET.equals(wovenClass.getClassName()))
+                return;
+            try
+            {
+                ClassReader reader = new ClassReader(wovenClass.getBytes());
+                ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+                int[] patched = { 0 };
+                reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+                {
+                    @Override
+                    public MethodVisitor visitMethod(int access, String name, String descriptor,
+                        String signature, String[] exceptions)
+                    {
+                        MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                        if (!"handleButtonClicked".equals(name) //$NON-NLS-1$
+                            || !"(Lcom/_1c/g5/aef2/viewModels/IViewModel;)V".equals(descriptor)) //$NON-NLS-1$
+                            return mv;
+                        return new MethodVisitor(Opcodes.ASM9, mv)
+                        {
+                            @Override
+                            public void visitMethodInsn(int opcode, String owner, String method,
+                                String desc, boolean isInterface)
+                            {
+                                super.visitMethodInsn(opcode, owner, method, desc, isInterface);
+                                if (opcode == Opcodes.INVOKEINTERFACE
+                                    && "com/_1c/g5/aef2/scenes/IScene".equals(owner) //$NON-NLS-1$
+                                    && "commit".equals(method) //$NON-NLS-1$
+                                    && "(Lcom/_1c/g5/aef2/components/IComponent;)V".equals(desc)) //$NON-NLS-1$
+                                {
+                                    emitClearCallback(mv);
+                                    patched[0]++;
+                                }
+                            }
+                        };
+                    }
+                }, 0);
+                if (patched[0] == 1)
+                    wovenClass.setBytes(writer.toByteArray());
+            }
+            catch (RuntimeException | LinkageError e)
+            {
+                // При несовместимом классе EDT оставляем штатный обработчик.
+            }
+        }
+
+        /** Без зависимости бандла EDT от Комфорта, по принятому паттерну System.getProperties. */
+        private static void emitClearCallback(MethodVisitor mv)
+        {
+            mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", //$NON-NLS-1$ //$NON-NLS-2$
+                "()Ljava/util/Properties;", false); //$NON-NLS-1$
+            mv.visitLdcInsn(PROP_RESET);
+            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", //$NON-NLS-1$ //$NON-NLS-2$
+                "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$
+            mv.visitInsn(Opcodes.DUP);
+            mv.visitTypeInsn(Opcodes.INSTANCEOF, "java/util/function/Consumer"); //$NON-NLS-1$
+            Label skip = new Label();
+            Label end = new Label();
+            mv.visitJumpInsn(Opcodes.IFEQ, skip);
+            mv.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Consumer"); //$NON-NLS-1$
+            mv.visitVarInsn(Opcodes.ALOAD, 0);
+            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, TARGET.replace('.', '/'), "getModel", //$NON-NLS-1$
+                "()Lcom/_1c/g5/aef2/models/IModel;", false); //$NON-NLS-1$
+            mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Consumer", "accept", //$NON-NLS-1$ //$NON-NLS-2$
+                "(Ljava/lang/Object;)V", true); //$NON-NLS-1$
+            mv.visitJumpInsn(Opcodes.GOTO, end);
+            mv.visitLabel(skip);
+            mv.visitFrame(Opcodes.F_SAME1, 0, null, 1, new Object[] { "java/lang/Object" }); //$NON-NLS-1$
+            mv.visitInsn(Opcodes.POP);
+            mv.visitLabel(end);
+            // Обе ветви приходят с пустым стеком; локальные исходного метода не меняются.
+            mv.visitFrame(Opcodes.F_SAME, 0, null, 0, null);
         }
     }
 
@@ -1021,4 +1170,3 @@ public class MoxelEditorHook implements IStartup
     }
 
 }
-
