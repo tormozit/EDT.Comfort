@@ -634,6 +634,136 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
         resyncSelectionTheme();
     }
 
+    /** Полное состояние колонок для переключения между наборами данных одного viewer. */
+    static final class ColumnState
+    {
+        private final int[] order;
+        private final int[] widths;
+        private final boolean[] hidden;
+        private final boolean exactFill;
+        private final int activeColumn;
+        private final int sortColumn;
+        private final boolean ascending;
+        private final Map<Integer, String> filters;
+
+        private ColumnState(FormTableInteraction interaction)
+        {
+            Table table = interaction.table;
+            order = table.getColumnOrder();
+            widths = new int[table.getColumnCount()];
+            hidden = new boolean[widths.length];
+            for (int i = 0; i < widths.length; i++)
+            {
+                widths[i] = table.getColumn(i).getWidth();
+                hidden[i] = isHiddenColumn(table.getColumn(i));
+            }
+            exactFill = interaction.isColumnsExactFill();
+            activeColumn = interaction.activeColumnIndex();
+            sortColumn = interaction.headerSortColumn == null ? -1 : table.indexOf(interaction.headerSortColumn);
+            ascending = interaction.headerSortAscending;
+            filters = new LinkedHashMap<>(interaction.columnValueFilters);
+        }
+    }
+
+    ColumnState captureColumnState()
+    {
+        commitPendingResize();
+        return new ColumnState(this);
+    }
+
+    /** Применить сохранённые ширины без обработки программного resize как ручного drag. */
+    void restoreColumnWidths(int[] widths, boolean exactFill)
+    {
+        if (table.isDisposed() || widths.length != table.getColumnCount())
+            return;
+        cancelPendingResizeCommit();
+        pendingResizeColumn = null;
+        pendingResizeBaseline = null;
+        selfAdjusting = true;
+        try
+        {
+            for (int i = 0; i < widths.length; i++)
+                table.getColumn(i).setWidth(isHiddenColumn(table.getColumn(i)) ? 0 : widths[i]);
+            rebindColumnLayoutData();
+        }
+        finally
+        {
+            selfAdjusting = false;
+        }
+        updateFitState();
+        columnsExactFillBefore = exactFill;
+        columnsFitBefore = exactFill || columnsFitBefore;
+        rememberVisualWidths();
+        lastAutoFillClientWidth = exactFill ? -1 : table.getClientArea().width;
+        if (exactFill)
+            scheduleAutoFill();
+        scheduleHeaderOverlayUpdate();
+    }
+
+    void restoreColumnState(ColumnState state)
+    {
+        restoreColumnState(state, true);
+    }
+
+    /** false — видимость определяет текущая выборка, а не предыдущий узел дерева. */
+    void restoreColumnState(ColumnState state, boolean restoreVisibility)
+    {
+        if (state == null || table.isDisposed() || table.getColumnCount() != state.widths.length)
+            return;
+        cancelPendingResizeCommit();
+        pendingResizeColumn = null;
+        pendingResizeBaseline = null;
+        selfAdjusting = true;
+        try
+        {
+            table.setColumnOrder(state.order);
+            for (int i = 0; i < state.widths.length; i++)
+            {
+                TableColumn column = table.getColumn(i);
+                boolean hidden = restoreVisibility ? state.hidden[i] : isHiddenColumn(column);
+                int width = state.widths[i] > 0 ? state.widths[i] : column.getWidth();
+                column.setData(COLUMN_HIDDEN_KEY, hidden ? Boolean.TRUE : null);
+                column.setWidth(hidden ? 0 : width);
+            }
+            rebindColumnLayoutData();
+        }
+        finally
+        {
+            selfAdjusting = false;
+        }
+        updateFitState();
+        columnsExactFillBefore = state.exactFill;
+        columnsFitBefore = state.exactFill || columnsFitBefore;
+        rememberVisualWidths();
+        lastAutoFillClientWidth = state.exactFill ? -1 : table.getClientArea().width;
+        if (state.exactFill)
+            scheduleAutoFill();
+        activeColumnWidget = columnWidget(state.activeColumn);
+        columnValueFilters.clear();
+        columnValueFilters.putAll(state.filters);
+        installColumnValueViewerFilter();
+        updateFilterIndicators();
+        if (columnValueFilterHost != null)
+            columnValueFilterHost.applyFilters(new LinkedHashMap<>(columnValueFilters));
+        if (state.sortColumn >= 0 && headerSortEnabled)
+        {
+            headerSortColumn = table.getColumn(state.sortColumn);
+            headerSortAscending = !state.ascending;
+            sortByHeader(headerSortColumn);
+        }
+        else if (multiSelectViewer != null)
+        {
+            headerSortColumn = null;
+            headerSortAscending = true;
+            table.setSortColumn(null);
+            table.setSortDirection(SWT.NONE);
+            multiSelectViewer.setComparator(null);
+            multiSelectViewer.refresh();
+        }
+        resyncSelectionTheme();
+        scheduleHeaderOverlayUpdate();
+    }
+
     private String headerSortKey(Object element, TableColumn column)
     {
         if (element == null || column == null || column.isDisposed())
@@ -1057,6 +1187,13 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
     int activeColumn()
     {
         return activeColumnIndex();
+    }
+
+    void restoreActiveColumn(int column)
+    {
+        activeColumnWidget = columnWidget(column);
+        resyncSelectionTheme();
+        scheduleHeaderOverlayUpdate();
     }
 
     private int activeColumnIndex()

@@ -311,6 +311,162 @@ public final class ConfigSearchResultsHook implements IStartup
      */
     private static volatile int searchGeneration;
 
+    private static final Map<Object, SearchResultState> RESULT_STATES = new java.util.WeakHashMap<>();
+    private static final Map<String, FormTableInteraction.ColumnState> RESULT_COLUMN_STATES = new LinkedHashMap<>();
+    private static String activeResultColumnType;
+    private static boolean resultColumnsPending;
+
+    private static void restoreResultColumns(Object input)
+    {
+        FormTableInteraction interaction = cachedMatchTableInteraction;
+        TableViewer viewer = cachedMatchTableViewer;
+        if (input == null || interaction == null || viewer == null || viewer.getTable().isDisposed())
+            return;
+        FormTableInteraction.ColumnState state = RESULT_COLUMN_STATES.get(resultColumnType(input));
+        if (state != null)
+            interaction.restoreColumnState(state, false);
+        else
+        {
+            IDialogSettings settings = dialogSettings();
+            Table table = viewer.getTable();
+            FormTableColumnState.loadOrder(settings, KEY_COL_ORDER, table);
+            String[] keys = { KEY_COL_PATH_WIDTH, KEY_COL_PROPERTY_WIDTH, KEY_COL_LINE_WIDTH,
+                KEY_COL_PARENT_WIDTH, KEY_COL_PARENT_TYPE_WIDTH, KEY_COL_SYNTAX_WIDTH,
+                KEY_COL_SUITABLE_WIDTH, KEY_COL_TEXT_WIDTH };
+            int[] defaults = { MATCH_PATH_COLUMN_WIDTH, 140, 60, MATCH_PARENT_COLUMN_WIDTH,
+                MATCH_PARENT_TYPE_COLUMN_WIDTH, MATCH_SYNTAX_COLUMN_WIDTH,
+                MATCH_SUITABLE_COLUMN_WIDTH, MATCH_TEXT_COLUMN_WIDTH };
+            int[] widths = new int[keys.length];
+            for (int i = 0; i < keys.length; i++)
+                widths[i] = FormTableColumnState.readWidth(settings, keys[i], defaults[i], 1);
+            interaction.restoreColumnWidths(widths,
+                !FormTableColumnState.hasSavedColumnWidths(settings, KEY_COL_FILL_MODE, keys));
+        }
+        resultColumnsPending = false;
+    }
+
+    private static final class SearchResultState
+    {
+        final List<List<String>> treePaths;
+        final List<MatchRow> rows;
+        final int activeColumn;
+
+        SearchResultState(TreeViewer tree, TableViewer table, FormTableInteraction interaction)
+        {
+            treePaths = new ArrayList<>();
+            for (Object node : tree.getStructuredSelection().toList())
+            {
+                List<String> path = new ArrayList<>();
+                for (Object cur = node; cur != null; cur = Global.invoke(cur, "getParent")) //$NON-NLS-1$
+                    path.add(0, extractLabel(cur));
+                treePaths.add(path);
+            }
+            rows = new ArrayList<>();
+            for (Object row : table.getStructuredSelection().toList())
+                if (row instanceof MatchRow match)
+                    rows.add(match);
+            activeColumn = interaction.activeColumn();
+        }
+    }
+
+    private static String resultColumnType(Object input)
+    {
+        Object query = input instanceof ISearchResult result ? result.getQuery() : null;
+        Object searchInput = query != null ? Global.getField(query, "searchInput") : null; //$NON-NLS-1$
+        return searchInput != null ? searchInput.getClass().getName() : input.getClass().getName();
+    }
+
+    private static void saveSearchResultState(TreeViewer tree, Object input)
+    {
+        TableViewer table = cachedMatchTableViewer;
+        FormTableInteraction interaction = cachedMatchTableInteraction;
+        if (input == null || table == null || table.getTable().isDisposed() || interaction == null)
+            return;
+        RESULT_STATES.put(input, new SearchResultState(tree, table, interaction));
+        RESULT_COLUMN_STATES.put(resultColumnType(input), interaction.captureColumnState());
+        saveMatchColumnState();
+    }
+
+    private static void restoreSearchResultState(TreeViewer tree, Object input, SearchResultState state, int gen)
+    {
+        if (tree.getTree().isDisposed() || tree.getInput() != input || searchGeneration != gen)
+            return;
+        List<Object> nodes = new ArrayList<>();
+        ITreeContentProvider provider = (ITreeContentProvider) tree.getContentProvider();
+        for (List<String> path : state.treePaths)
+        {
+            Object[] children = provider.getElements(input);
+            Object found = null;
+            for (String label : path)
+            {
+                found = null;
+                for (Object child : children)
+                    if (label.equals(extractLabel(child)))
+                    {
+                        found = child;
+                        break;
+                    }
+                if (found == null)
+                    break;
+                children = provider.getChildren(found);
+            }
+            if (found != null)
+                nodes.add(found);
+        }
+        if (nodes.isEmpty())
+        {
+            guardFirstRootSelection = true;
+            startFirstRootWatch(0);
+            return;
+        }
+        tree.setSelection(new StructuredSelection(nodes), true);
+        syncMatchTableToTree(tree);
+        TableViewer table = cachedMatchTableViewer;
+        FormTableInteraction interaction = cachedMatchTableInteraction;
+        if (table == null || table.getTable().isDisposed() || interaction == null)
+            return;
+        restoreResultColumns(input);
+        restoreSearchRows(tree, input, state, gen, 0);
+    }
+
+    private static void restoreSearchRows(TreeViewer tree, Object input, SearchResultState state, int gen, int attempt)
+    {
+        TableViewer viewer = cachedMatchTableViewer;
+        if (tree.getTree().isDisposed() || tree.getInput() != input || searchGeneration != gen
+            || viewer == null || viewer.getTable().isDisposed())
+            return;
+        List<Object> selected = new ArrayList<>();
+        for (TableItem item : viewer.getTable().getItems())
+            if (item.getData() instanceof MatchRow row)
+                for (MatchRow saved : state.rows)
+                {
+                    Object match = row.tableItem != null ? Global.invoke(row.tableItem, "getData") : null; //$NON-NLS-1$
+                    boolean same = row.tableItem != null && saved.tableItem != null
+                        ? row.tableItem == saved.tableItem || match != null
+                            && match == Global.invoke(saved.tableItem, "getData") //$NON-NLS-1$
+                        : row.tableItem == null && saved.tableItem == null && row.directOffset == saved.directOffset
+                            && java.util.Objects.equals(row.file, saved.file);
+                    if (same)
+                    {
+                        selected.add(row);
+                        break;
+                    }
+                }
+        viewer.setSelection(new StructuredSelection(selected), true);
+        cachedMatchTableInteraction.restoreActiveColumn(state.activeColumn);
+        if (selected.size() < state.rows.size() && attempt < 60)
+        {
+            List<Object> context = new ArrayList<>(tree.getStructuredSelection().toList());
+            tree.getTree().getDisplay().timerExec(80,
+                () -> {
+                    if (!tree.getTree().isDisposed() && !viewer.getTable().isDisposed()
+                        && context.equals(tree.getStructuredSelection().toList())
+                        && selected.equals(viewer.getStructuredSelection().toList()))
+                        restoreSearchRows(tree, input, state, gen, attempt + 1);
+                });
+        }
+    }
+
     private static final class SearchViewViewers
     {
         final TreeViewer tree;
@@ -620,6 +776,9 @@ public final class ConfigSearchResultsHook implements IStartup
         }
         if (pageContainer.getData(MATCH_PANE_HOOKED_KEY) != null)
             return; // уже установлена для этого экземпляра страницы
+
+        if (treeViewer.getInput() != null)
+            activeResultColumnType = resultColumnType(treeViewer.getInput());
 
         Control[] children = pageContainer.getChildren();
         if (children.length != 1)
@@ -5367,9 +5526,34 @@ public final class ConfigSearchResultsHook implements IStartup
             @Override
             public void inputChanged(Viewer viewer, Object oldInput, Object newInput)
             {
+                if (newInput != oldInput)
+                    saveSearchResultState(treeViewer, oldInput);
+                if (newInput != null)
+                {
+                    activeResultColumnType = resultColumnType(newInput);
+                    resultColumnsPending = true;
+                }
+                else if (!searchQueryRunning && newInput != oldInput)
+                {
+                    searchGeneration++;
+                    guardFirstRootSelection = false;
+                }
                 original.inputChanged(viewer, oldInput, newInput);
                 if (newInput != null && newInput != oldInput)
-                    onTreeInputChanged();
+                {
+                    SearchResultState state = RESULT_STATES.get(newInput);
+                    if (state != null && !searchQueryRunning)
+                    {
+                        guardFirstRootSelection = false;
+                        int gen = ++searchGeneration;
+                        SAVED_TABLE_SELECTION_BY_VIEWER.clear();
+                        tree.getDisplay().asyncExec(() -> restoreSearchResultState(treeViewer, newInput, state, gen));
+                    }
+                    else
+                    {
+                        onTreeInputChanged();
+                    }
+                }
             }
 
             @Override
@@ -5512,6 +5696,7 @@ public final class ConfigSearchResultsHook implements IStartup
      */
     private static void startFirstRootWatch(int attempt)
     {
+        int gen = searchGeneration;
         if (!ComfortSettings.isReplaceListFiltersEnabled())
             return;
         if (!searchQueryRunning && !guardFirstRootSelection)
@@ -5521,6 +5706,8 @@ public final class ConfigSearchResultsHook implements IStartup
             return;
         int delay = attempt == 0 ? 0 : 80;
         display.timerExec(delay, () -> {
+            if (gen != searchGeneration)
+                return;
             if (!ComfortSettings.isReplaceListFiltersEnabled())
                 return;
             if (!searchQueryRunning && !guardFirstRootSelection)
@@ -5567,6 +5754,8 @@ public final class ConfigSearchResultsHook implements IStartup
             applyAggregationIfNeeded(viewers.tree, viewers.table,
                 Collections.singletonList(firstRoot), Collections.emptyList(), "watchLoop"); //$NON-NLS-1$
             syncMatchTableToTree(viewers.tree);
+            if (resultColumnsPending)
+                restoreResultColumns(viewers.tree.getInput());
 
             if (searchQueryRunning)
             {
@@ -8082,6 +8271,14 @@ public final class ConfigSearchResultsHook implements IStartup
         IDialogSettings section = top.getSection(SETTINGS_SECTION);
         if (section == null)
             section = top.addNewSection(SETTINGS_SECTION);
+        // Старый раздел оставляем текстовому поиску, чтобы сохранить прежние настройки.
+        if (activeResultColumnType != null && !activeResultColumnType.endsWith(".TextSearchInput")) //$NON-NLS-1$
+        {
+            IDialogSettings typed = section.getSection(activeResultColumnType);
+            if (typed == null)
+                typed = section.addNewSection(activeResultColumnType);
+            return typed;
+        }
         return section;
     }
 

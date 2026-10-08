@@ -120,6 +120,25 @@ public class CompareSearchResultPage implements ISearchResultPage
     private CompareSearchResult searchResult;
     private String queryText;
 
+    private final Map<Boolean, FormTableInteraction.ColumnState> columnStates = new java.util.HashMap<>();
+    private final Map<CompareSearchResult, ResultState> resultStates = new java.util.WeakHashMap<>();
+
+    private static final class ResultState
+    {
+        final List<Object> selection;
+        final List<String> treePath;
+        final String treeFilter;
+        final int activeColumn;
+
+        ResultState(List<Object> selection, List<String> treePath, String treeFilter, int activeColumn)
+        {
+            this.selection = selection;
+            this.treePath = treePath;
+            this.treeFilter = treeFilter;
+            this.activeColumn = activeColumn;
+        }
+    }
+
     private IMemento restoredState;
 
     private CheckboxTreeViewer hookedTreeViewer;
@@ -1420,6 +1439,11 @@ public class CompareSearchResultPage implements ISearchResultPage
         // Панель не закрывается при повторном «Найти все» — Dispose не вызовется;
         // зафиксировать текущие ширины до подмены набора результатов.
         saveColumnLayout();
+        if (searchResult != null && tableInteraction != null && table != null && !table.isDisposed())
+        {
+            columnStates.put(searchResult.getProject() != null, tableInteraction.captureColumnState());
+            resultStates.put(searchResult, captureResultState());
+        }
         if (search instanceof CompareSearchResult csr)
         {
             this.searchResult = csr;
@@ -1435,6 +1459,13 @@ public class CompareSearchResultPage implements ISearchResultPage
                 tableInteraction.setColumnHidden(table.getColumn(5), projectMode,
                     FormTableColumnState.readWidth(settings, KEY_COL_SIDE_WIDTH, 100, 1));
                 updateMissingObjectsTree(csr);
+                FormTableInteraction.ColumnState columns = columnStates.get(projectMode);
+                if (columns != null)
+                    tableInteraction.restoreColumnState(columns);
+                else
+                    restoreColumnLayout(settings);
+                ResultState state = uiState instanceof ResultState saved ? saved : resultStates.get(csr);
+                restoreResultState(state);
                 syncChecksFromTree();
                 if (tableInteraction != null)
                     tableInteraction.resyncSelectionTheme();
@@ -1479,7 +1510,64 @@ public class CompareSearchResultPage implements ISearchResultPage
     @Override
     public Object getUIState()
     {
-        return null;
+        return captureResultState();
+    }
+
+    private ResultState captureResultState()
+    {
+        if (tableViewer == null || table == null || table.isDisposed() || tableInteraction == null)
+            return null;
+        List<String> path = new ArrayList<>();
+        if (missingObjectsViewer != null && !missingObjectsTree.isDisposed()
+            && missingObjectsViewer.getStructuredSelection().getFirstElement() instanceof MissingObjectNode node)
+        {
+            while (node.parent != null)
+            {
+                path.add(0, node.label);
+                node = node.parent;
+            }
+        }
+        String filter = missingObjectsSearch != null && !missingObjectsSearch.isDisposed()
+            ? missingObjectsSearch.getText() : "";
+        return new ResultState(new ArrayList<>(tableViewer.getStructuredSelection().toList()), path,
+            filter, tableInteraction.activeColumn());
+    }
+
+    private void restoreResultState(ResultState state)
+    {
+        if (state == null)
+            return;
+        if (missingObjectsRoot != null)
+        {
+            missingObjectsSearch.setText(state.treeFilter);
+            applyMissingObjectsFilter();
+            MissingObjectNode node = missingObjectsRoot;
+            for (String label : state.treePath)
+            {
+                MissingObjectNode child = node.children.get(label);
+                if (child == null)
+                    break;
+                node = child;
+            }
+            missingObjectsViewer.setSelection(new StructuredSelection(node), true);
+            tableViewer.setInput(node.matches);
+        }
+        tableViewer.setSelection(new StructuredSelection(state.selection), true);
+        tableInteraction.restoreActiveColumn(state.activeColumn);
+    }
+
+    private void restoreColumnLayout(IDialogSettings settings)
+    {
+        FormTableColumnState.loadOrder(settings, KEY_COL_ORDER, table);
+        tableInteraction.restoreColumnWidths(new int[] { CHECK_COLUMN_WIDTH,
+            FormTableColumnState.readWidth(settings, KEY_COL_PATH_WIDTH, 360, 1),
+            FormTableColumnState.readWidth(settings, KEY_COL_PROPERTY_WIDTH, 200, 1),
+            FormTableColumnState.readWidth(settings, KEY_COL_TEXT_WIDTH, 250, 1),
+            FormTableColumnState.readWidth(settings, KEY_COL_STATUS_WIDTH, 100, 1),
+            FormTableColumnState.readWidth(settings, KEY_COL_SIDE_WIDTH, 100, 1) },
+            !FormTableColumnState.hasSavedColumnWidths(settings, KEY_COL_FILL_MODE,
+                KEY_COL_PATH_WIDTH, KEY_COL_PROPERTY_WIDTH, KEY_COL_TEXT_WIDTH,
+                KEY_COL_STATUS_WIDTH, KEY_COL_SIDE_WIDTH));
     }
 
     @Override
@@ -1586,6 +1674,7 @@ public class CompareSearchResultPage implements ISearchResultPage
     {
         if (memento == null || table == null || table.isDisposed())
             return;
+        saveColumnLayout();
         if (searchResult != null && searchResult.getProject() != null)
             return;
         org.eclipse.swt.widgets.TableColumn[] cols = table.getColumns();
@@ -1608,25 +1697,30 @@ public class CompareSearchResultPage implements ISearchResultPage
      */
     private void saveColumnLayout()
     {
-        if (table == null || table.isDisposed() || table.getColumnCount() < 6
-            || searchResult != null && searchResult.getProject() != null)
+        if (table == null || table.isDisposed() || table.getColumnCount() < 6 || searchResult == null)
             return;
         boolean fillMode = tableInteraction != null && tableInteraction.isColumnsExactFill();
         FormTableColumnState.saveOrderAndWidths(dialogSettings(), KEY_COL_ORDER, KEY_COL_FILL_MODE, fillMode,
             new String[] { KEY_COL_PATH_WIDTH, KEY_COL_PROPERTY_WIDTH, KEY_COL_TEXT_WIDTH,
                 KEY_COL_STATUS_WIDTH, KEY_COL_SIDE_WIDTH },
-            new TableColumn[] {
-                table.getColumn(1), table.getColumn(2), table.getColumn(3),
-                table.getColumn(4), table.getColumn(5) },
+            new int[] { table.getColumn(1).getWidth(), table.getColumn(2).getWidth(),
+                table.getColumn(3).getWidth(), table.getColumn(4).getWidth(), table.getColumn(5).getWidth() },
             table);
     }
 
-    private static IDialogSettings dialogSettings()
+    private IDialogSettings dialogSettings()
     {
         IDialogSettings top = Activator.getDefault().getDialogSettings();
         IDialogSettings section = top.getSection(SETTINGS_SECTION);
         if (section == null)
             section = top.addNewSection(SETTINGS_SECTION);
+        if (searchResult != null && searchResult.getProject() != null)
+        {
+            IDialogSettings project = section.getSection("project"); //$NON-NLS-1$
+            if (project == null)
+                project = section.addNewSection("project"); //$NON-NLS-1$
+            return project;
+        }
         return section;
     }
 }
