@@ -312,8 +312,6 @@ public final class BslOutlineEventsSupport
         BslXtextEditor editor = IrMethodListHandler.resolveBslEditor(popup);
         IDocument document = editor != null ? editor.getDocument() : null;
         return element -> {
-            Global.tempLog("outline-preprocessor", "label: document=" + (document != null) //$NON-NLS-1$ //$NON-NLS-2$
-                + ", element=" + (element != null ? element.getClass().getName() : "null")); //$NON-NLS-1$ //$NON-NLS-2$
             if (document == null || !(element instanceof IParentPreprocessor preprocessor))
                 return null;
             try
@@ -323,13 +321,10 @@ public final class BslOutlineEventsSupport
                     return null;
                 IRegion line = document.getLineInformationOfOffset(info.getFullRange().getOffset());
                 String text = document.get(line.getOffset(), line.getLength()).strip();
-                Global.tempLog("outline-preprocessor", "offset=" + info.getFullRange().getOffset() //$NON-NLS-1$ //$NON-NLS-2$
-                    + ", text=" + text); //$NON-NLS-1$
                 return text.startsWith("#") ? text : null; //$NON-NLS-1$
             }
             catch (CoreException | BadLocationException e)
             {
-                Global.tempLog("outline-preprocessor", "error=" + e); //$NON-NLS-1$ //$NON-NLS-2$
                 Global.logError(TAG, "preprocessor label", e); //$NON-NLS-1$
                 return null;
             }

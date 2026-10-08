@@ -75,7 +75,9 @@ import com._1c.g5.v8.dt.core.platform.IDtProject;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorEmbeddedEditorPage;
 import com._1c.g5.v8.dt.moxel.Columns;
+import com._1c.g5.v8.dt.moxel.MoxelFactory;
 import com._1c.g5.v8.dt.moxel.SpreadsheetDocument;
+import com._1c.g5.v8.dt.moxel.ViewSettings;
 import com._1c.g5.v8.dt.moxel.content.impl.TablePropertiesImpl;
 import com._1c.g5.v8.dt.moxel.content.BaseFormattingCellProperties;
 import com._1c.g5.v8.dt.moxel.content.ContentPackage;
@@ -120,6 +122,7 @@ public class MoxelEditorHook implements IStartup
         Display.getDefault().asyncExec(() ->
         {
             PasteCacheRepair.install();
+            FixTableSettingsOffer.install();
             InplaceCutSupport.install(Display.getDefault());
             SelectionRepaint.install(Display.getDefault());
             PlatformUI.getWorkbench().addWindowListener(new org.eclipse.ui.IWindowListener()
@@ -1167,6 +1170,134 @@ public class MoxelEditorHook implements IStartup
             control.redraw();
         }
 
+    }
+
+    /** Неблокирующее предложение сохранять фиксацию таблицы вместе с документом (issue 739). */
+    private static final class FixTableSettingsOffer implements IExecutionListener
+    {
+        private static final String COMMAND = "com._1c.g5.v8.dt.moxel.ui.editor.commands.fixTable"; //$NON-NLS-1$
+        private static final String TITLE = "Зафиксировать таблицу"; //$NON-NLS-1$
+        private final Map<MoxelControl, Shell> offers = new WeakHashMap<>();
+        private MoxelControl target;
+
+        static void install()
+        {
+            ICommandService service = PlatformUI.getWorkbench().getService(ICommandService.class);
+            if (service != null)
+                service.addExecutionListener(new FixTableSettingsOffer());
+        }
+
+        @Override
+        public void preExecute(String commandId, ExecutionEvent event)
+        {
+            if (!COMMAND.equals(commandId)) return;
+            target = getMoxelControl(PasteCacheRepair.activeMoxelEditor());
+        }
+
+        @Override
+        public void postExecuteSuccess(String commandId, Object returnValue)
+        {
+            if (!COMMAND.equals(commandId)) return;
+            MoxelControl control = target;
+            target = null;
+            if (control == null || control.isDisposed()) return;
+            try
+            {
+                boolean fixed = control.getFixedRow() != 0
+                    || (control.getFixedColumn() != 0 && control.getFixedColumnColumns() != null);
+                boolean saving = PasteCacheRepair.readInTask(control,
+                    () -> control.getSheet().getDocument().isSaveViewSettings());
+                if (!fixed || saving)
+                {
+                    Shell old = offers.remove(control);
+                    if (old != null && !old.isDisposed()) old.dispose();
+                    return;
+                }
+                Shell old = offers.get(control);
+                if (old != null && !old.isDisposed()) return;
+                SheetAccessor sheet = control.getSheet();
+                Shell offer = ToastNotification.show(TITLE,
+                    "Фиксация таблицы не сохранится после закрытия документа. Включить «Сохранять настройки»?", //$NON-NLS-1$
+                    10_000, () -> enableSaving(control, sheet), "Включить сохранение настроек"); //$NON-NLS-1$
+                if (offer != null && !offer.isDisposed())
+                {
+                    offers.put(control, offer);
+                    offer.addDisposeListener(e -> offers.remove(control, offer));
+                    control.addDisposeListener(e ->
+                    {
+                        if (!offer.isDisposed()) offer.dispose();
+                    });
+                }
+            }
+            catch (RuntimeException e)
+            {
+                // Предложение не должно мешать штатной команде фиксации.
+            }
+        }
+
+        private static void enableSaving(MoxelControl control, SheetAccessor sheet)
+        {
+            if (control.isDisposed() || control.getSheet() != sheet) return;
+            IEditingContext context = control.getEditingContext();
+            if (context == null) return;
+            try
+            {
+                context.execute(new AbstractBmTask<Void>("Сохранять настройки") //$NON-NLS-1$
+                {
+                    @Override
+                    public Void execute(IBmTransaction transaction, IProgressMonitor monitor)
+                    {
+                        SpreadsheetDocument document = transaction.toTransactionObject(sheet.getDocument());
+                        if (document.isSaveViewSettings()) return null;
+                        // Как MoxelEditor.updateViewSettings: переносим текущее представление,
+                        // иначе уведомление модели может восстановить прежнюю фиксацию.
+                        ViewSettings settings = document.getViewSettings();
+                        if (settings == null)
+                        {
+                            settings = MoxelFactory.eINSTANCE.createViewSettings();
+                            document.setViewSettings(settings);
+                        }
+                        settings.setFixedRow(control.getFixedRow());
+                        settings.setFixedColumn(control.getFixedColumn());
+                        Columns columns = control.getFixedColumnColumns();
+                        settings.setFixedColumnColumns(columns != null
+                            ? transaction.toTransactionObject(columns) : null);
+                        settings.setFixationPointRow(control.getFixationPointRow());
+                        settings.setFixationPointColumn(control.getFixationPointColumn());
+                        settings.setTopFixationPointRow(control.getTopFixationPointRow());
+                        settings.setTopFixationPointColumn(control.getTopFixationPointColumn());
+                        settings.setShowComments(control.getShowComments());
+                        settings.setShowGrid(control.getShowGrid());
+                        settings.setShowHeaders(control.getShowHeaders());
+                        settings.setShowGroups(control.getShowGroups());
+                        settings.setShowNames(control.getShowNamedCells());
+                        settings.setShowNamedRowsAndColumns(control.getShowNamedRowsColumns());
+                        settings.setBlackAndWhite(control.getBlackWhiteMode());
+                        document.setSaveViewSettings(true);
+                        return null;
+                    }
+                }, new NullProgressMonitor());
+                sheet.notifyChange(java.util.Collections.emptyList());
+            }
+            catch (RuntimeException e)
+            {
+                ToastNotification.show(TITLE, "Не удалось включить сохранение настроек документа"); //$NON-NLS-1$
+            }
+        }
+
+        @Override
+        public void postExecuteFailure(String commandId, ExecutionException exception)
+        {
+            if (!COMMAND.equals(commandId)) return;
+            target = null;
+        }
+
+        @Override
+        public void notHandled(String commandId, NotHandledException exception)
+        {
+            if (!COMMAND.equals(commandId)) return;
+            target = null;
+        }
     }
 
 }

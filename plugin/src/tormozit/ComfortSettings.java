@@ -630,6 +630,21 @@ public final class ComfortSettings
         return settings.preferenceStore.getBoolean(PREF_PROBLEM_VIEW_UPDATE_GATE);
     }
 
+    /** Однократно отключает тихий режим при первом открытии панели после обновления. */
+    static boolean resetProblemViewUpdateGateOnFirstOpen()
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return false;
+        String migrationKey = "comfort.problemView.updateGate.disabledOnFirstOpen.v1"; //$NON-NLS-1$
+        if (settings.preferenceStore.getBoolean(migrationKey))
+            return false;
+        settings.preferenceStore.setValue(PREF_PROBLEM_VIEW_UPDATE_GATE, false);
+        settings.preferenceStore.setValue(migrationKey, true);
+        saveQuietly(settings.preferenceStore, migrationKey);
+        return true;
+    }
+
     public static void setProblemViewUpdateGateEnabled(boolean enabled)
     {
         ComfortSettings settings = instance;
