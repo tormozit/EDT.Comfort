@@ -1,17 +1,29 @@
 package tormozit;
 
 import java.util.IdentityHashMap;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
+import java.util.Set;
+import java.util.Locale;
+import java.util.Comparator;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.eclipse.core.runtime.IProgressMonitor;
+import org.eclipse.core.runtime.Adapters;
+import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.IStatus;
 import org.eclipse.core.runtime.Status;
 import org.eclipse.core.runtime.jobs.Job;
+import org.eclipse.emf.ecore.EClass;
+import org.eclipse.emf.ecore.EReference;
 import org.eclipse.jface.action.Action;
 import org.eclipse.jface.action.MenuManager;
 import org.eclipse.jface.dialogs.IDialogSettings;
+import org.eclipse.jface.resource.ImageDescriptor;
+import org.eclipse.jface.resource.JFaceResources;
+import org.eclipse.jface.resource.LocalResourceManager;
 import org.eclipse.jface.viewers.ArrayContentProvider;
 import org.eclipse.jface.viewers.CheckStateChangedEvent;
 import org.eclipse.jface.viewers.CheckboxTreeViewer;
@@ -20,14 +32,22 @@ import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider.IStyledLabelProvider;
 import org.eclipse.jface.viewers.ICheckStateListener;
 import org.eclipse.jface.viewers.ILabelProviderListener;
+import org.eclipse.jface.viewers.ITreeContentProvider;
+import org.eclipse.jface.viewers.LabelProvider;
 import org.eclipse.jface.viewers.StructuredSelection;
 import org.eclipse.jface.viewers.StyledString;
 import org.eclipse.jface.viewers.TableViewer;
 import org.eclipse.jface.viewers.TableViewerColumn;
+import org.eclipse.jface.viewers.TreeViewer;
+import org.eclipse.jface.viewers.Viewer;
+import org.eclipse.jface.viewers.ViewerFilter;
 import org.eclipse.search.ui.ISearchResult;
 import org.eclipse.search.ui.ISearchResultPage;
 import org.eclipse.search.ui.ISearchResultViewPart;
 import org.eclipse.swt.SWT;
+import org.eclipse.swt.custom.SashForm;
+import org.eclipse.swt.layout.GridLayout;
+import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.events.ControlAdapter;
 import org.eclipse.swt.events.ControlEvent;
 import org.eclipse.swt.events.MouseAdapter;
@@ -45,16 +65,21 @@ import org.eclipse.swt.widgets.Menu;
 import org.eclipse.swt.widgets.Table;
 import org.eclipse.swt.widgets.TableColumn;
 import org.eclipse.swt.widgets.TableItem;
+import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.TreeItem;
 import org.eclipse.swt.widgets.Widget;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IActionBars;
 import org.eclipse.ui.IMemento;
 import org.eclipse.ui.part.IPageSite;
+import org.eclipse.ui.model.IWorkbenchAdapter;
 
 import com._1c.g5.v8.dt.compare.ui.editor.DtComparisonView;
 import com._1c.g5.v8.dt.compare.core.IComparisonSession;
 import com._1c.g5.v8.dt.compare.ui.partialmodel.node.IPartialModelNode;
+import com._1c.g5.v8.dt.metadata.mdclass.MdClassPackage;
+import com._1c.g5.v8.dt.md.ui.shared.MdUiSharedImages;
+import com._1c.g5.v8.dt.common.ui.controls.search.SearchBox;
 
 public class CompareSearchResultPage implements ISearchResultPage
 {
@@ -80,6 +105,13 @@ public class CompareSearchResultPage implements ISearchResultPage
     private ISearchResultViewPart viewPart;
     private IPageSite pageSite;
     private Composite tableStack;
+    private SashForm resultSplit;
+    private Tree missingObjectsTree;
+    private TreeViewer missingObjectsViewer;
+    private SearchBox missingObjectsSearch;
+    private MissingObjectNode missingObjectsRoot;
+    private LocalResourceManager missingObjectsResources;
+    private Action missingObjectGoAction;
     private Table table;
     private TableViewer tableViewer;
     private FormTableInteraction tableInteraction;
@@ -131,10 +163,101 @@ public class CompareSearchResultPage implements ISearchResultPage
     @Override
     public void createControl(Composite parent)
     {
+        resultSplit = new SashForm(parent, SWT.HORIZONTAL);
+        Composite treeHost = new Composite(resultSplit, SWT.NONE);
+        GridLayout treeLayout = new GridLayout(1, false);
+        treeLayout.marginWidth = 0;
+        treeLayout.marginHeight = 0;
+        treeLayout.verticalSpacing = 0;
+        treeHost.setLayout(treeLayout);
+        missingObjectsSearch = new SearchBox(treeHost);
+        missingObjectsSearch.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
+        missingObjectsSearch.setMessage("Поиск...");
+        missingObjectsSearch.setRunSearchOnTextChange(false);
+        missingObjectsSearch.setRunSearchOnUiThread(true);
+        missingObjectsSearch.setSearchListener((text, monitor) -> applyMissingObjectsFilter());
+        missingObjectsSearch.addModifyListener(event -> applyMissingObjectsFilter());
+        missingObjectsTree = new Tree(treeHost, SWT.SINGLE | SWT.BORDER | SWT.H_SCROLL | SWT.V_SCROLL);
+        CopyCommandSupport.wireCopyOverride(missingObjectsTree);
+        missingObjectsTree.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));
+        missingObjectsResources = new LocalResourceManager(JFaceResources.getResources(), missingObjectsTree);
+        missingObjectsViewer = new TreeViewer(missingObjectsTree);
+        missingObjectsViewer.setContentProvider(new ITreeContentProvider()
+        {
+            @Override
+            public Object[] getElements(Object inputElement) { return ((List<?>) inputElement).toArray(); }
+            @Override
+            public Object[] getChildren(Object parentElement)
+            {
+                return ((MissingObjectNode) parentElement).children.values().stream()
+                    .sorted(Comparator.comparingInt((MissingObjectNode node) -> node.order)
+                        .thenComparing(node -> node.label)).toArray();
+            }
+            @Override
+            public Object getParent(Object element) { return ((MissingObjectNode) element).parent; }
+            @Override
+            public boolean hasChildren(Object element) { return !((MissingObjectNode) element).children.isEmpty(); }
+        });
+        missingObjectsViewer.addFilter(new ViewerFilter()
+        {
+            @Override
+            public boolean select(Viewer viewer, Object parentElement, Object element)
+            {
+                return ((MissingObjectNode) element).visible;
+            }
+        });
+        missingObjectsViewer.setLabelProvider(new DelegatingStyledCellLabelProvider(new MissingObjectLabelProvider()));
+        missingObjectGoAction = new Action("Перейти")
+        {
+            @Override
+            public void run()
+            {
+                if (searchResult == null || searchResult.getProject() != null || missingObjectsTree.isDisposed())
+                    return;
+                TreeItem[] selection = missingObjectsTree.getSelection();
+                if (selection.length == 1 && selection[0].getData() instanceof MissingObjectNode node
+                    && node.referenceFqn != null)
+                {
+                    boolean revealed = CompareConfigMenuHook.revealObjectFeatureInTree(searchResult.getEditorPart(),
+                        node.referenceFqn, node.referenceFeature, true);
+                    Global.tempLog("broken-links-search-tree", "go target=" + node.referenceFqn
+                        + " feature=" + node.referenceFeature + " revealed=" + revealed);
+                }
+            }
+        };
+        missingObjectGoAction.setEnabled(false);
+        missingObjectGoAction.setToolTipText(TooltipText.wrap(missingObjectsTree,
+            "Активировать объект в дереве сравнения" + Global.pluginSignForTooltip()));
+        MenuManager treeMenu = new MenuManager();
+        treeMenu.add(missingObjectGoAction);
+        treeMenu.addMenuListener(manager ->
+        {
+            TreeItem[] selection = missingObjectsTree.getSelection();
+            missingObjectGoAction.setEnabled(selection.length == 1
+                && searchResult != null && searchResult.getProject() == null
+                && selection[0].getData() instanceof MissingObjectNode node && node.referenceFqn != null);
+        });
+        missingObjectsTree.setMenu(treeMenu.createContextMenu(missingObjectsTree));
+        missingObjectsTree.addDisposeListener(event -> treeMenu.dispose());
+        missingObjectsViewer.addDoubleClickListener(event -> missingObjectGoAction.run());
+        missingObjectsTree.addListener(SWT.Selection, event ->
+        {
+            if (event.item instanceof TreeItem item && item.getData() instanceof MissingObjectNode node)
+            {
+                missingObjectGoAction.setEnabled(node.referenceFqn != null && searchResult != null
+                    && searchResult.getProject() == null);
+                tableViewer.setInput(node.matches);
+                syncChecksFromTree();
+                if (tableInteraction != null)
+                    tableInteraction.resyncSelectionTheme();
+            }
+        });
         // FormTableInteraction (accent заголовка) требует родителя Table без layout
         // либо TableColumnLayout — эталон tableStack в ConfigSearchResultsHook / RecentPlacesView.
-        tableStack = new Composite(parent, SWT.NONE);
+        tableStack = new Composite(resultSplit, SWT.NONE);
         tableStack.setLayout(null);
+        resultSplit.setWeights(25, 75);
+        resultSplit.setMaximizedControl(tableStack);
 
         // Не SWT.CHECK: EraseItem + StyledCellLabelProvider включают owner-draw,
         // и нативные флажки Win32 не рисуются. Колонка — иконки + клик.
@@ -268,8 +391,40 @@ public class CompareSearchResultPage implements ISearchResultPage
         menuManager.addMenuListener(manager ->
         {
             TableItem[] selection = table.getSelection();
+            if (selection.length == 1 && selection[0].getData() instanceof CompareSearchMatch projectMatch
+                && projectMatch.getProjectLocation() != null)
+            {
+                Action openProperty = new Action("Перейти")
+                {
+                    @Override
+                    public void run() { navigateToNode(projectMatch); }
+                };
+                openProperty.setToolTipText(TooltipText.wrap(table,
+                    "Открыть свойство проекта с битой ссылкой" + Global.pluginSignForTooltip()));
+                manager.add(openProperty);
+            }
+            List<MdReferenceSupport.Location> brokenLocations = new ArrayList<>();
+            for (TableItem item : selection)
+                if (item.getData() instanceof CompareSearchMatch row && row.getProjectLocation() != null)
+                    brokenLocations.add(row.getProjectLocation());
+            if (!brokenLocations.isEmpty() && searchResult != null && searchResult.getProject() != null)
+            {
+                CompareSearchResult result = searchResult;
+                Action removeBroken = new Action("Удалить битые ссылки")
+                {
+                    @Override
+                    public void run()
+                    {
+                        MdReferenceSupport.removeBrokenReferences(result.getProject(), brokenLocations,
+                            () -> removeProjectMatches(result, brokenLocations));
+                    }
+                };
+                removeBroken.setToolTipText(TooltipText.wrap(table,
+                    "Удалить все битые ссылки свойств выделенных строк" + Global.pluginSignForTooltip()));
+                manager.add(removeBroken);
+            }
             if (selection.length == 1 && selection[0].getData() instanceof CompareSearchMatch match
-                && match.getReferenceFqn() != null)
+                && match.getReferenceFqn() != null && searchResult != null && searchResult.getProject() == null)
             {
                 Action followReference = new Action("Перейти по ссылке")
                 {
@@ -312,8 +467,11 @@ public class CompareSearchResultPage implements ISearchResultPage
             clearMarks.setToolTipText(
                     "Снять пометки с выделенных строк" + Global.pluginSignForTooltip());
 
-            manager.add(setMarks);
-            manager.add(clearMarks);
+            if (searchResult == null || searchResult.getProject() == null)
+            {
+                manager.add(setMarks);
+                manager.add(clearMarks);
+            }
         });
         Menu menu = menuManager.createContextMenu(table);
         table.setMenu(menu);
@@ -1007,36 +1165,253 @@ public class CompareSearchResultPage implements ISearchResultPage
         treeCheckDirty.set(false);
     }
 
+    /** Удаление очищает свойство целиком — уходят все строки этого свойства, не только выделенные. */
+    private void removeProjectMatches(CompareSearchResult result, List<MdReferenceSupport.Location> removed)
+    {
+        result.getMatches().removeIf(match -> removed.contains(match.getProjectLocation()));
+        if (searchResult != result || tableViewer == null || table.isDisposed())
+            return;
+        tableViewer.setInput(result.getMatches());
+        updateMissingObjectsTree(result);
+        if (tableInteraction != null)
+            tableInteraction.resyncSelectionTheme();
+    }
+
     private void navigateToNode(CompareSearchMatch match)
     {
         if (match == null || searchResult == null)
             return;
+        if (searchResult.getProject() != null)
+        {
+            MdReferenceSupport.open(searchResult.getProject(), match.getProjectLocation(), match.getReferenceFqn());
+            return;
+        }
         IEditorPart editor = searchResult.getEditorPart();
         if (editor == null || editor.getSite() == null)
             return;
 
         if (match.getComparisonNode() instanceof String fqn)
         {
-            CompareConfigMenuHook.revealObjectInTree(editor, fqn, true);
+            boolean revealed = CompareConfigMenuHook.revealObjectInTree(editor, fqn, true);
+            if (match.getReferenceFqn() != null)
+                Global.tempLog("broken-links-merge", "navigate owner=" + fqn + " revealed=" + revealed);
             return;
         }
         if (match.getComparisonNode() == null)
             return;
+        if (match.getComparisonNode() instanceof IPartialModelNode partial)
+        {
+            boolean revealed = CompareConfigMenuHook.revealComparisonNode(editor, partial);
+            if (match.getReferenceFqn() != null)
+                Global.tempLog("broken-links-merge", "navigate partial=" + partial.getNodeId() + " revealed=" + revealed);
+        }
+    }
 
-        Object view = Global.getField(editor, "comparisonView");
-        if (view == null)
-            return;
-        Object treeControl = Global.call(view, "getTreeControl");
-        if (treeControl == null)
-            return;
-        Object viewer = Global.call(treeControl, "getTreeViewer");
-        if (!(viewer instanceof org.eclipse.jface.viewers.AbstractTreeViewer treeViewer))
-            return;
+    private static final class MissingObjectNode
+    {
+        final String label;
+        final Image image;
+        MissingObjectNode parent;
+        EClass mdClass;
+        String referenceFqn;
+        String referenceFeature;
+        int order = Integer.MAX_VALUE;
+        boolean visible = true;
+        final Map<String, MissingObjectNode> children = new TreeMap<>(String.CASE_INSENSITIVE_ORDER.thenComparing(
+            java.util.Comparator.naturalOrder()));
+        final List<CompareSearchMatch> matches = new ArrayList<>();
 
-        treeViewer.setSelection(new StructuredSelection(match.getComparisonNode()), true);
-        treeViewer.reveal(match.getComparisonNode());
+        MissingObjectNode(String label, Image image)
+        {
+            this.label = label;
+            this.image = image;
+        }
+    }
 
-        editor.getSite().getPage().activate(editor);
+    // Состав CommonNavigatorAdapter.getChildren из EDT; Common — первый узел поиска.
+    private static final Set<String> COMMON_METADATA_TYPES = Set.of("Subsystem", "CommonModule", "SessionParameter",
+        "Role", "CommonAttribute", "ExchangePlan", "FilterCriterion", "EventSubscription", "ScheduledJob", "Bot",
+        "FunctionalOption", "FunctionalOptionsParameter", "DefinedType", "SettingsStorage", "CommonForm",
+        "CommonCommand", "CommandGroup", "CommonTemplate", "CommonPicture", "XDTOPackage", "WebService",
+        "HTTPService", "WSReference", "WebSocketClient", "IntegrationService", "PaletteColor", "StyleItem", "Style", "Language");
+
+    private void applyMissingObjectsFilter()
+    {
+        if (missingObjectsRoot == null || missingObjectsTree.isDisposed())
+            return;
+        String text = missingObjectsSearch.getText().strip().toLowerCase(Locale.ROOT);
+        filterMissingObjects(missingObjectsRoot, text, false);
+        missingObjectsRoot.visible = true;
+        missingObjectsViewer.refresh();
+        missingObjectsViewer.expandToLevel(text.isEmpty() ? 2 : TreeViewer.ALL_LEVELS);
+        if (missingObjectsTree.getSelectionCount() == 0)
+        {
+            missingObjectsViewer.setSelection(new StructuredSelection(missingObjectsRoot));
+            tableViewer.setInput(missingObjectsRoot.matches);
+            syncChecksFromTree();
+        }
+    }
+
+    private static boolean filterMissingObjects(MissingObjectNode node, String text, boolean parentMatches)
+    {
+        boolean ownMatch = parentMatches || text.isEmpty() || node.label.toLowerCase(Locale.ROOT).contains(text);
+        boolean visible = ownMatch;
+        for (MissingObjectNode child : node.children.values())
+            visible |= filterMissingObjects(child, text, ownMatch);
+        node.visible = visible;
+        return visible;
+    }
+
+    private static EReference missingObjectFeature(EClass ownerClass, String className)
+    {
+        if (ownerClass == null || className == null)
+            return null;
+        String featureName = MdTypeMapping.subObjectTypeToEmfFeature(className);
+        if (featureName != null && ownerClass.getEStructuralFeature(featureName) instanceof EReference reference)
+            return reference;
+        for (EReference reference : ownerClass.getEAllContainments())
+            if (className.equals(reference.getEReferenceType().getName()))
+                return reference;
+        return null;
+    }
+
+    private static final class MissingObjectLabelProvider extends LabelProvider implements IStyledLabelProvider
+    {
+        @Override
+        public StyledString getStyledText(Object element)
+        {
+            MissingObjectNode node = (MissingObjectNode) element;
+            Global.tempLog("broken-links-search-tree", "node=" + node.label + " matches=" + node.matches.size()
+                + " children=" + node.children.size() + " image=" + (node.image != null) + " counterStyled=true");
+            return new StyledString(node.label).append(" (" + node.matches.size() + " соответствий)",
+                StyledString.COUNTER_STYLER);
+        }
+
+        @Override
+        public Image getImage(Object element) { return ((MissingObjectNode) element).image; }
+    }
+
+    private void updateMissingObjectsTree(CompareSearchResult result)
+    {
+        if (missingObjectsTree == null || missingObjectsTree.isDisposed())
+            return;
+        boolean brokenLinks = result.getProject() != null || "битые ссылки".equals(result.getQueryText())
+            || result.getMatches().stream().anyMatch(match -> match.getReferenceFqn() != null);
+        missingObjectsTree.setRedraw(false);
+        try
+        {
+            missingObjectsViewer.setInput(null);
+            missingObjectsRoot = null;
+            missingObjectGoAction.setEnabled(false);
+            missingObjectsSearch.setText("");
+            if (!brokenLinks)
+            {
+                resultSplit.setMaximizedControl(tableStack);
+                return;
+            }
+            IProject project = result.getProject() != null ? result.getProject()
+                : Global.getActiveProject(result.getEditorPart(), false);
+            IWorkbenchAdapter adapter = project != null ? Adapters.adapt(project, IWorkbenchAdapter.class) : null;
+            ImageDescriptor projectIcon = adapter != null ? adapter.getImageDescriptor(project) : null;
+            MissingObjectNode root = new MissingObjectNode(project != null ? project.getName()
+                : "Отсутствующие объекты метаданных", projectIcon != null ? missingObjectsResources.createImage(projectIcon)
+                    : MdUiSharedImages.getImage(MdUiSharedImages.OBJS_CONFIGURATION));
+            root.mdClass = MdClassPackage.Literals.CONFIGURATION;
+            // В каждом узле готовая выборка в исходном порядке: выбор не сканирует таблицу.
+            for (CompareSearchMatch match : result.getMatches())
+            {
+                root.matches.add(match);
+                String name = match.getMatchText();
+                if (name == null || name.isBlank())
+                    name = match.getReferenceFqn();
+                if (name == null || name.isBlank())
+                    continue;
+                MissingObjectNode node = root;
+                String[] fragments = name.split("\\.");
+                Image objectImage = null;
+                for (int i = 0; i < fragments.length; i++)
+                {
+                    String fragment = fragments[i];
+                    if (fragment.isEmpty())
+                        continue;
+                    boolean group = i % 2 == 0;
+                    String label = fragment;
+                    EClass mdClass = node.mdClass;
+                    int order = Integer.MAX_VALUE;
+                    String referenceFeature = null;
+                    if (group)
+                    {
+                        String plural = MdTypeMapping.ruSingularToGroupPlural(fragment);
+                        if (plural != null)
+                            label = plural;
+                        if ("ТабличнаяЧасть".equals(fragment))
+                            label = "Табличные части";
+                        else if ("ЗначениеПеречисления".equals(fragment))
+                            label = "Значения перечисления";
+                        String className = MdTypeMapping.ruToEnSing(fragment);
+                        if (i == 0 && className != null && COMMON_METADATA_TYPES.contains(className))
+                        {
+                            MissingObjectNode common = root.children.get("Общие");
+                            if (common == null)
+                            {
+                                common = new MissingObjectNode("Общие", MdUiSharedImages.getImage(MdUiSharedImages.OBJS_COMMON));
+                                common.parent = root;
+                                common.mdClass = root.mdClass;
+                                common.order = 1;
+                                root.children.put(common.label, common);
+                            }
+                            common.matches.add(match);
+                            node = common;
+                        }
+                        EReference feature = missingObjectFeature(node.mdClass, className);
+                        mdClass = feature != null ? feature.getEReferenceType()
+                            : className != null && MdClassPackage.eINSTANCE.getEClassifier(className) instanceof EClass type
+                                ? type : null;
+                        if (feature != null)
+                        {
+                            order = feature.getFeatureID() + 2;
+                            referenceFeature = feature.getName();
+                        }
+                        objectImage = mdClass != null ? MdUiSharedImages.getMdClassImage(mdClass) : null;
+                        if ("Реквизит".equals(fragment))
+                            objectImage = MdUiSharedImages.getImage(MdUiSharedImages.OBJS_ATTRIBUTE);
+                    }
+                    MissingObjectNode child = node.children.get(label);
+                    if (child == null)
+                    {
+                        // Штатные папки метаданных в поиске используют значок вида объекта,
+                        // например CatalogNavigatorAdapter.Folder — catalog.png.
+                        child = new MissingObjectNode(label, objectImage);
+                        child.parent = node;
+                        child.mdClass = mdClass;
+                        child.order = order;
+                        if (!group)
+                            child.referenceFqn = i == fragments.length - 1 && match.getReferenceFqn() != null
+                                ? match.getReferenceFqn() : MdTypeMapping.anyFullNameToBmFqn(
+                                    String.join(".", java.util.Arrays.copyOf(fragments, i + 1)));
+                        else if (i > 0 && node.referenceFqn != null && referenceFeature != null)
+                        {
+                            child.referenceFqn = node.referenceFqn;
+                            child.referenceFeature = referenceFeature;
+                        }
+                        node.children.put(label, child);
+                    }
+                    node = child;
+                    node.matches.add(match);
+                }
+            }
+            missingObjectsRoot = root;
+            // Input — контейнер корней. Сам корень не должен совпадать с input:
+            // AbstractTreeViewer иначе снова запрашивает getElements вместо getChildren.
+            missingObjectsViewer.setInput(List.of(root));
+            applyMissingObjectsFilter();
+            missingObjectsViewer.setSelection(new StructuredSelection(root));
+            resultSplit.setMaximizedControl(null);
+        }
+        finally
+        {
+            missingObjectsTree.setRedraw(true);
+        }
     }
 
     @Override
@@ -1052,11 +1427,13 @@ public class CompareSearchResultPage implements ISearchResultPage
             if (tableViewer != null && !table.isDisposed())
             {
                 tableViewer.setInput(csr.getMatches());
+                checkColumn.setWidth(csr.getProject() != null ? 0 : CHECK_COLUMN_WIDTH);
+                updateMissingObjectsTree(csr);
                 syncChecksFromTree();
                 if (tableInteraction != null)
                     tableInteraction.resyncSelectionTheme();
-                if (tableStack != null && !tableStack.isDisposed())
-                    tableStack.setVisible(true);
+                if (resultSplit != null && !resultSplit.isDisposed())
+                    resultSplit.setVisible(true);
             }
             installTreeCheckListener();
         }
@@ -1076,7 +1453,7 @@ public class CompareSearchResultPage implements ISearchResultPage
                 // возвращает getVisible()=true без прохождения публичного Control.setVisible() (не
                 // ловится ни точечным, ни глобальным SWT.Show listener — проверено). Обходной путь —
                 // повторно скрывать её, пока страница остаётся деактивированной.
-                Control pageControl = tableStack != null ? tableStack : table;
+                Control pageControl = getControl();
                 pageControl.setVisible(false);
                 scheduleForceHide(pageControl, 50);
                 scheduleForceHide(pageControl, 200);
@@ -1112,6 +1489,13 @@ public class CompareSearchResultPage implements ISearchResultPage
         disposeCheckImages();
         tableInteraction = null;
         tableStack = null;
+        resultSplit = null;
+        missingObjectsTree = null;
+        missingObjectsViewer = null;
+        missingObjectsSearch = null;
+        missingObjectsRoot = null;
+        missingObjectsResources = null;
+        missingObjectGoAction = null;
         table = null;
         tableViewer = null;
         searchResult = null;
@@ -1133,7 +1517,7 @@ public class CompareSearchResultPage implements ISearchResultPage
     @Override
     public Control getControl()
     {
-        return tableStack != null ? tableStack : table;
+        return resultSplit != null ? resultSplit : tableStack != null ? tableStack : table;
     }
 
     @Override

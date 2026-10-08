@@ -72,6 +72,7 @@ public class Activator extends AbstractUIPlugin
 
         super.start(context);
         instance = this;
+        CommonNodeAlphabeticSorter.installGlobally();
         // Раньше всего остального: WeavingHook ловит только классы, загруженные после его
         // регистрации, а следующие ниже попытки присоединить агент стоят сотен миллисекунд
         // каждая — за это время BslDocumentationComment успевает загрузиться.

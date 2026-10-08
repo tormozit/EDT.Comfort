@@ -697,9 +697,7 @@ final class ObjectSetsItems
      */
     static List<String> collectGitChangedRefs(String projectName)
     {
-        long started = System.nanoTime();
         Set<String> result = new LinkedHashSet<>();
-        boolean pending = false;
         try
         {
             if (projectName == null || projectName.isBlank())
@@ -715,7 +713,6 @@ final class ObjectSetsItems
                 return new ArrayList<>();
             IndexDiffCacheEntry entry = IndexDiffCache.INSTANCE.getIndexDiffCacheEntry(repository);
             IndexDiffData status = entry != null ? entry.getIndexDiff() : null;
-            pending = entry != null && status == null;
             if (status == null)
                 return new ArrayList<>();
             String projectRepoPath = mapping.getRepoRelativePath(project);
@@ -726,14 +723,7 @@ final class ObjectSetsItems
         }
         catch (Exception e)
         {
-            Global.tempLogException("object-sets-git", "collectGitChangedRefs project=" + projectName, e); //$NON-NLS-1$ //$NON-NLS-2$
             ObjectSetsDebug.problem("collectGitChangedRefs: " + e); //$NON-NLS-1$
-        }
-        finally
-        {
-            Global.tempLog("object-sets-git", "collect project=" + projectName //$NON-NLS-1$ //$NON-NLS-2$
-                + " pending=" + pending + " thread=" + Thread.currentThread().getName() //$NON-NLS-1$ //$NON-NLS-2$
-                + " refs=" + result.size() + " ms=" + (System.nanoTime() - started) / 1_000_000); //$NON-NLS-1$ //$NON-NLS-2$
         }
         return new ArrayList<>(result);
     }

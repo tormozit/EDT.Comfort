@@ -100,6 +100,8 @@ import com._1c.g5.v8.dt.dcs.ui.EditorPage;
 import com._1c.g5.v8.dt.dcs.ui.settings.Settings;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorEmbeddedEditorPage;
+import com._1c.g5.v8.dt.md.ui.editor.base.EditorPageDescriptor;
+import com._1c.g5.v8.dt.md.ui.editor.base.IEditorPagesRegistry;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicFeature;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicForm;
 import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
@@ -4851,6 +4853,103 @@ public final class ConfigSearchResultsHook implements IStartup
      *
      * @return {@code true}, если открытие обработано здесь (штатный {@code handleOpen} не нужен)
      */
+    static void openMetadataReferenceProperty(EObject object, EStructuralFeature feature)
+    {
+        IWorkbenchPage page = Global.getActivePage();
+        if (page == null || object == null || feature == null)
+            return;
+        if (openNestedMdObjectMemberMatch(object, page, feature, List.of()))
+            return;
+        if (openEditorPageOfProperty(page, object, feature))
+            return;
+        try
+        {
+            page.showView(IPageLayout.ID_PROP_SHEET);
+            PropertyFieldFocus.schedule(page, object, feature, List.of());
+            if (new OpenHelper(page).openEditor(object) == null)
+                PropertyFieldFocus.cancel();
+        }
+        catch (Exception error)
+        {
+            PropertyFieldFocus.cancel();
+            Global.tempLog("broken-links-project", "open property failed uri=" + EcoreUtil.getURI(object)
+                + " feature=" + feature.getName() + " error=" + error);
+        }
+    }
+
+    /**
+     * Открывает редактор объекта на странице, которой EDT сопоставила свойство
+     * ({@code EditorPageDescriptor.getFeatures()}): «Состав» функциональной опции, «Владельцы»
+     * справочника. Для свойства вложенной записи состава страница ищется по свойству владельца,
+     * которое эту запись содержит.
+     *
+     * @return {@code false}, если у свойства нет своей страницы — его показывает панель «Свойства»
+     */
+    private static boolean openEditorPageOfProperty(IWorkbenchPage workbenchPage, EObject object,
+            EStructuralFeature feature)
+    {
+        try
+        {
+            EObject top = EcoreUtil.getRootContainer(object);
+            OpenHelper helper = new OpenHelper(workbenchPage);
+            var input = helper.getEditorInput(top, null, null);
+            String editorId = input != null ? helper.getEditorId(input) : null;
+            if (editorId == null)
+                return false;
+            // Тот же реестр, которым DtGranularEditor.addPages наполняет редактор.
+            List<EditorPageDescriptor> pages = IEditorPagesRegistry.INSTANCE.getEditorPages(editorId, top);
+            String pageId = null;
+            EObject owner = object;
+            for (EStructuralFeature property = feature; pageId == null && owner != null && property != null;
+                property = owner.eContainingFeature(), owner = owner.eContainer())
+                for (EditorPageDescriptor descriptor : pages)
+                    if (descriptor.getFeatures().contains(property))
+                    {
+                        pageId = descriptor.getPageId();
+                        break;
+                    }
+            if (pageId == null)
+                return false;
+            IEditorPart editor = helper.openEditor(top);
+            Global.tempLog("broken-links-project", "open page uri=" + EcoreUtil.getURI(object)
+                + " feature=" + feature.getName() + " page=" + pageId
+                + " editor=" + (editor != null ? editor.getClass().getName() : null));
+            if (!(editor instanceof DtGranularEditor<?> granular))
+                return false;
+            activateEditorPage(granular, pageId, 0);
+            return true;
+        }
+        catch (RuntimeException error)
+        {
+            Global.tempLog("broken-links-project", "open page failed uri=" + EcoreUtil.getURI(object)
+                + " feature=" + feature.getName() + " error=" + error);
+            return false;
+        }
+    }
+
+    /**
+     * Только что открытый редактор показывает страницу загрузки и добавляет свои страницы позже —
+     * до этого {@code setActivePage} возвращает {@code null}. Повтор до ~4 с.
+     */
+    private static void activateEditorPage(DtGranularEditor<?> editor, String pageId, int attempt)
+    {
+        boolean selected = editor.setActivePage(pageId) != null;
+        if (selected || attempt >= 40)
+        {
+            Global.tempLog("broken-links-project", "activate page=" + pageId + " selected=" + selected
+                + " attempt=" + attempt);
+            return;
+        }
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        display.timerExec(100, () -> {
+            if (editor.getSite() != null && editor.getSite().getPage() != null
+                && editor.getSite().getPage().findEditor(editor.getEditorInput()) == editor)
+                activateEditorPage(editor, pageId, attempt + 1);
+        });
+    }
+
     private static boolean openNestedMdObjectMemberMatch(EObject leaf, IWorkbenchPage workbenchPage,
             EStructuralFeature matchFeature, List<String> typeDialogTargets)
     {

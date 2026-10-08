@@ -714,12 +714,14 @@ public class ComfortPreferencePage
 
         BooleanFieldEditor alphabeticCommonNodeField = new BooleanFieldEditor(
             ComfortSettings.PREF_ALPHABETIC_COMMON_NODE_ENABLED,
-            "Сортировать по алфавиту ветку «Общие» в навигаторе", //$NON-NLS-1$
+            "Сортировать по алфавиту ветку «Общие» в деревьях конфигурации", //$NON-NLS-1$
             navigatorGroup);
         addField(alphabeticCommonNodeField);
         setFieldTooltip(alphabeticCommonNodeField,
             "Общие модули, Общие реквизиты, Роли, Подсистемы и другие папки внутри верхнего узла\n"
-            + "«Общие» показываются по алфавиту вместо фиксированного порядка EDT.\n"
+            + "«Общие» показываются по алфавиту в деревьях конфигурации: навигаторе,\n"
+            + "сравнении конфигураций и итогах поиска по конфигурации\n"
+            + "вместо фиксированного порядка EDT.\n"
             + "Требует включённого флажка «Улучшать списки».", //$NON-NLS-1$
             navigatorGroup);
 
@@ -1895,13 +1897,11 @@ public class ComfortPreferencePage
             appendFlag(sb, "Улучшать списки", ComfortSettings.isReplaceListFiltersEnabled()); //$NON-NLS-1$
             appendFlag(sb, "Улучшать окна отладчика", //$NON-NLS-1$
                 ComfortSettings.isImproveDebuggerWindowsEnabled());
-            appendFlag(sb, "Группировать общие модули в навигаторе по имени", //$NON-NLS-1$
-                ComfortSettings.isGroupCommonModulesEnabled());
             appendFlag(sb, "Вертикальные вкладки в редакторе объекта", //$NON-NLS-1$
                 ComfortSettings.isMdEditorVerticalTabsEnabled());
+            appendFlag(sb, "Группировать общие модули в навигаторе по имени", //$NON-NLS-1$
+                ComfortSettings.isGroupCommonModulesEnabled());
             appendFlag(sb, "Автооткрытие подсказок при вводе", isContentAssistAutoOpen()); //$NON-NLS-1$
-            appendFlag(sb, "Ctrl+клик выделяет слово", //$NON-NLS-1$
-                ComfortSettings.isCtrlClickSelectWordEnabled());
             appendFlag(sb, "Подсвечивать серверные вызовы", //$NON-NLS-1$
                 ComfortSettings.isServerCallHighlightingEnabled());
             appendFlag(sb, "Подсвечивать создаваемые переменные", //$NON-NLS-1$
@@ -1910,7 +1910,11 @@ public class ComfortPreferencePage
                 ComfortSettings.isBracketContentHintEnabled());
             appendFlag(sb, "Проверять орфографию в идентификаторах в видимой области", //$NON-NLS-1$
                 ComfortSettings.isSpellingCheckIdentifiersVisible());
+            appendFlag(sb, "Ctrl+клик выделяет слово", //$NON-NLS-1$
+                ComfortSettings.isCtrlClickSelectWordEnabled());
             appendFlag(sb, "Вести журнал", ComfortSettings.isDebugLogEnabled()); //$NON-NLS-1$
+            appendFlag(sb, "Включить направляющие отступов текстовых редакторов", //$NON-NLS-1$
+                ComfortSettings.isIndentGuideEnabled());
             appendFlag(sb, "Подсказки при наведении без Ctrl", //$NON-NLS-1$
                 ComfortSettings.isHoverHintsEnabled());
             appendFlag(sb, "Игнорировать сокращения в CamelCase", //$NON-NLS-1$

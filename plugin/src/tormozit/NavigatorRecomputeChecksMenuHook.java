@@ -8,6 +8,9 @@ import org.eclipse.core.resources.IResource;
 import org.eclipse.core.runtime.CoreException;
 import org.eclipse.core.runtime.NullProgressMonitor;
 import org.eclipse.emf.ecore.EObject;
+import org.eclipse.emf.common.util.URI;
+import org.eclipse.emf.ecore.util.EcoreUtil;
+import org.eclipse.jface.viewers.ITreeContentProvider;
 import org.eclipse.jface.viewers.ISelection;
 import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.swt.SWT;
@@ -160,7 +163,9 @@ public final class NavigatorRecomputeChecksMenuHook implements IStartup
                 ISelection selection = ComfortSubmenuHelper.menuSelection(comfortSub, viewer);
                 if (!(selection instanceof IStructuredSelection structured) || structured.isEmpty())
                     return;
-                if (NavigatorElementModels.resolveEObject(structured.getFirstElement()) == null)
+                if (NavigatorElementModels.resolveEObject(structured.getFirstElement()) == null
+                    && !(structured.getFirstElement() instanceof IProject)
+                    && !(viewer != null && NavigatorTreeElementLabels.isGroupNode(structured.getFirstElement())))
                     return;
 
                 MenuItem item = ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.PUSH, ITEM_TEXT);
@@ -177,6 +182,43 @@ public final class NavigatorRecomputeChecksMenuHook implements IStartup
                     }
                 });
                 added.add(item);
+                if (viewer != null)
+                {
+                    MenuItem find = ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.PUSH,
+                        "Найти битые ссылки метаданных");
+                    ComfortSubmenuHelper.setMenuItemTooltip(find,
+                        "Найти битые ссылки в выбранных объектах с вложенными и показать в панели Поиск");
+                    find.addSelectionListener(new SelectionAdapter()
+                    {
+                        @Override
+                        public void widgetSelected(SelectionEvent event)
+                        {
+                            ISelection selected = ComfortSubmenuHelper.menuSelection(comfortSub, viewer);
+                            if (selected instanceof IStructuredSelection objects)
+                            {
+                                IResource resource = NavigatorResourceResolver.resolveFirst(objects);
+                                IProject project = resource != null ? resource.getProject()
+                                    : objects.getFirstElement() instanceof IProject root ? root : null;
+                                if (project == null)
+                                    project = Global.getActiveProject(Global.getActivePage(), true);
+                                List<URI> roots = new ArrayList<>();
+                                java.util.Set<Object> visited = java.util.Collections.newSetFromMap(
+                                    new java.util.IdentityHashMap<>());
+                                boolean wholeProject = false;
+                                for (Object node : objects.toList())
+                                    wholeProject |= collectSearchRoots(viewer, node, roots, visited);
+                                Global.tempLog("broken-links-project", "navigator selection=" + objects.toList()
+                                    + " wholeProject=" + wholeProject + " roots=" + roots);
+                                if (wholeProject)
+                                    MdReferenceSupport.findInProject(project);
+                                else
+                                    MdReferenceSupport.findInObjects(project, roots,
+                                        searchScopeLabel(viewer, objects.toList()));
+                            }
+                        }
+                    });
+                    added.add(find);
+                }
             }
 
             @Override
@@ -200,6 +242,60 @@ public final class NavigatorRecomputeChecksMenuHook implements IStartup
             if (!comfortSub.isDisposed())
                 comfortSub.removeMenuListener(subListener);
         });
+    }
+
+    /** Подписи выбранных узлов для заголовка результата: «Справочники», «Справочник.Товары». */
+    private static String searchScopeLabel(CommonViewer viewer, List<?> nodes)
+    {
+        final int shown = 3;
+        List<String> labels = new ArrayList<>();
+        for (Object node : nodes)
+        {
+            boolean folder = NavigatorTreeElementLabels.isGroupNode(node)
+                || NavigatorTreeElementLabels.isInsideObjectCollectionFolder(node);
+            EObject object = folder ? null : NavigatorElementModels.resolveEObject(node);
+            String label = object != null ? MdReferenceSupport.localized(EcoreUtil.getURI(object))
+                : SmartTreeElementLabels.resolve(node, viewer.getLabelProvider());
+            // Декоратор Git ставит перед подписью изменённого узла «> ».
+            if (label != null && label.startsWith("> "))
+                label = label.substring(2);
+            if (label != null && !label.isBlank() && !labels.contains(label))
+                labels.add(label);
+        }
+        if (labels.isEmpty())
+            return "выбранных узлах";
+        String text = "«" + String.join("», «", labels.subList(0, Math.min(shown, labels.size()))) + "»";
+        return labels.size() > shown ? text + " и ещё " + (labels.size() - shown) : text;
+    }
+
+    private static boolean collectSearchRoots(CommonViewer viewer, Object node, List<URI> roots,
+        java.util.Set<Object> visited)
+    {
+        if (!visited.add(node))
+            return false;
+        if (node instanceof IProject)
+            return true;
+        boolean folder = NavigatorTreeElementLabels.isGroupNode(node)
+            || NavigatorTreeElementLabels.isInsideObjectCollectionFolder(node);
+        EObject object = folder ? null : NavigatorElementModels.resolveEObject(node);
+        if (object != null)
+        {
+            if (com._1c.g5.v8.dt.metadata.mdclass.MdClassPackage.Literals.CONFIGURATION.isSuperTypeOf(object.eClass()))
+                return true;
+            URI uri = EcoreUtil.getURI(object);
+            if (!roots.contains(uri))
+                roots.add(uri);
+            return false;
+        }
+        if (viewer.getContentProvider() instanceof ITreeContentProvider provider)
+        {
+            Object[] children = provider.getChildren(node);
+            if (children != null)
+                for (Object child : children)
+                    if (collectSearchRoots(viewer, child, roots, visited))
+                        return true;
+        }
+        return false;
     }
 
     private static void recomputeChecks(IStructuredSelection selection)

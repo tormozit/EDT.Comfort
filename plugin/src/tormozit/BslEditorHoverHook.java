@@ -699,6 +699,7 @@ public final class BslEditorHoverHook implements IStartup
         private final ITextHoverExtension2 delegateExt2;
         private final BslXtextEditor editor;
         private final boolean suppressPointerHover;
+        private final String platformAvailabilityColor;
         private final AtomicInteger fetchGeneration = new AtomicInteger();
         private volatile int lastScheduledOffset = -1;
         private volatile String lastIrHtml;
@@ -707,6 +708,7 @@ public final class BslEditorHoverHook implements IStartup
         private volatile String lastMethodLink;
         private volatile String lastMethodName;
         private volatile String lastFormHandlersHtml;
+        private volatile String lastPlatformAvailabilityHtml;
         private volatile Object lastDocumentationDescriptor;
         private volatile boolean lastCreationSite;
         private volatile HtmlIntegrityWatcher activeWatcher;
@@ -718,6 +720,9 @@ public final class BslEditorHoverHook implements IStartup
             this.delegateExt2 = delegate instanceof ITextHoverExtension2 ext2 ? ext2 : null;
             this.editor = editor;
             this.suppressPointerHover = suppressPointerHover;
+            // Обёртка создаётся при подключении редактора в UI-потоке,
+            // но EDT вызывает getHoverInfo2 из фонового TextViewerHoverManager.
+            this.platformAvailabilityColor = PlatformWordAvailability.recentColor();
         }
 
         @Override
@@ -798,6 +803,7 @@ public final class BslEditorHoverHook implements IStartup
             lastCreationSite = isImplicitVariableCreationAt(region);
             lastMethodLink = resolveMethodLink(region, info);
             lastFormHandlersHtml = resolveFormHandlersHtml(region);
+            lastPlatformAvailabilityHtml = PlatformWordAvailability.hoverBlock(info, platformAvailabilityColor);
         }
 
         /**
@@ -1007,7 +1013,7 @@ public final class BslEditorHoverHook implements IStartup
                     ? result.substring(0, insertAt) + handlersHtml + result.substring(insertAt)
                     : result + handlersHtml;
             }
-            return result;
+            return PlatformWordAvailability.injectHoverBlock(result, lastPlatformAvailabilityHtml);
         }
 
         /** Сбрасывает delayed input на штатный base, чтобы родный HTML обновлялся при смене слова. */

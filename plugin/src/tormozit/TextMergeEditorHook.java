@@ -71,8 +71,8 @@ import org.eclipse.ui.handlers.IHandlerService;
  * этому интерфейсу, а не по имени конкретного класса диалога.
  *
  * <p>Это не наши диалоги — встраиваем панель в уже существующее дерево виджетов
- * после открытия окна, а не через переопределение {@code createContents} (как в
- * {@link PasteWithCompareActions}).
+ * при {@code SWT.Show}, до показа окна средствами ОС, а не через переопределение
+ * {@code createContents} (как в {@link PasteWithCompareActions}).
  *
  * <p>Три стороны сравнения (левая/правая/итоговая со слиянием) вместо двух —
  * раскрашивается пара «сторона под кареткой ↔ итоговая» (или «левая ↔ итоговая»,
@@ -136,7 +136,9 @@ public final class TextMergeEditorHook
             return;
 
         shell.setData(SHELL_HANDLED_KEY, Boolean.TRUE);
-        scheduleAttach(shell, provider, 0);
+        // Синхронно до первой отрисовки; таймер нужен только для ещё не готового вьюера.
+        if (!tryAttach(provider))
+            scheduleAttach(shell, provider, 0);
     }
 
     private static void scheduleAttach(Shell shell, IThreeSideTextMergeViewerProvider provider, int attempt)

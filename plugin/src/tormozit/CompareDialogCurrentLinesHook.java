@@ -73,7 +73,9 @@ public final class CompareDialogCurrentLinesHook
         if (!isDtCompareEditorInput(editorInput))
             return;
         shell.setData(SHELL_HANDLED_KEY, Boolean.TRUE);
-        scheduleAttach(editorInput, shell, 0, false);
+        // SWT.Show приходит до показа окна средствами ОС: обе панели попадут в первый кадр.
+        if (tryAttach(editorInput, shell) == ATTACH_WAIT)
+            scheduleAttach(editorInput, shell, 0, false);
     }
 
     private static boolean isDtCompareEditorInput(Object input)

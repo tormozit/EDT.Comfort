@@ -17,10 +17,7 @@ public final class ComfortCheckIds
     /** {@code tormozit.checks.BslAstTruncationCheck} — обрыв разбора модуля. */
     public static final String BSL_AST_TRUNCATION = "comfort-bsl-ast-truncation"; //$NON-NLS-1$
 
-    /** {@code tormozit.checks.BrokenFormPictureCheck} — битая ссылка на картинку в форме. */
-    public static final String BROKEN_FORM_PICTURE = "comfort.check.brokenFormPicture"; //$NON-NLS-1$
-
-    /** Битые ссылки в составе общих объектов метаданных. */
+    /** Битые ссылки метаданных; прежний идентификатор сохраняет настройки проверки. */
     public static final String BROKEN_MD_COMPOSITION = "comfort.check.brokenMdComposition"; //$NON-NLS-1$
 
     public static final String STATIC_ACCESS_PARAMETERS = "comfort-bsl-static-access-parameters"; //$NON-NLS-1$

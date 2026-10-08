@@ -185,19 +185,28 @@ final class StructureToggleController
         if (initiallyVisible)
         {
             /*
-             * НЕ synchronously здесь — createToggleAction() вызывается прямо во время
-             * построения тулбара, когда leftText/rightText уже существуют, но реальный текст
-             * документа может ещё не быть загружен (тот же класс гонки, что и с фокусом —
-             * см. primeLineHighlightOnce). Из-за этого при персистентном "Структура включена"
-             * с прошлой сессии дерево иногда строилось по пустому/неполному содержимому (0
-             * отличий) — выключить/включить чинило, потому что к этому моменту текст уже
-             * успевал подгрузиться. Откладываем на asyncExec — та же причина, тот же приём.
+             * Область и её высота нужны уже в первом кадре. Документ при построении тулбара
+             * ещё может догружаться: после завершения создания вьюера перепроверяем тексты
+             * и перестраиваем дерево только при их изменении.
              */
+            setVisible(true);
+            CompareDialogStructurePanel initialPanel = panel;
+            String initialLeft = leftText != null && !leftText.isDisposed() ? leftText.getText() : null;
+            String initialRight = rightText != null && !rightText.isDisposed() ? rightText.getText() : null;
             Display display = wrapper != null && !wrapper.isDisposed() ? wrapper.getDisplay() : null;
             if (display != null && !display.isDisposed())
-                display.asyncExec(() -> setVisible(true));
-            else
-                setVisible(true);
+                display.asyncExec(() ->
+                {
+                    if (wrapper.isDisposed() || panel != initialPanel || !action.isChecked()
+                        || leftText == null || leftText.isDisposed() || rightText == null || rightText.isDisposed())
+                        return;
+                    if (initialPanel == null || !leftText.getText().equals(initialLeft)
+                        || !rightText.getText().equals(initialRight))
+                    {
+                        setVisible(false);
+                        setVisible(true);
+                    }
+                });
         }
         return action;
     }

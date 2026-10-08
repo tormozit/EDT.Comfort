@@ -123,6 +123,7 @@
     <startup class="tormozit.NavigatorCopyProjectMenuHook"/>
     <startup class="tormozit.NavigatorRecomputeChecksMenuHook"/>
     <startup class="tormozit.NavigatorCommandMenuHook"/>
+    <startup class="tormozit.NavigatorMenuHook"/>
     <startup class="tormozit.NavigatorExpandToMenuHook"/>
     <startup class="tormozit.OpenHelperAttributePropertiesHook"/>
     <startup class="tormozit.NavigatorAttributePropertiesHook"/>

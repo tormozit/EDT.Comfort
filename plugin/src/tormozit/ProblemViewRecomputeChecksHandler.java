@@ -86,12 +86,11 @@ public class ProblemViewRecomputeChecksHandler extends AbstractHandler
             return null;
         }
 
+        // Корневая «Конфигурация» в области объекта — тоже один объект: проверяется только она,
+        // весь проект перепроверяет область «Текущий проект».
         for (Map.Entry<IProject, Set<EObject>> entry : selectedObjects.entrySet())
         {
-            if (isWholeProject(entry.getValue()))
-                ComfortCheckRecompute.recomputeProject(entry.getKey());
-            else
-                ComfortCheckRecompute.recomputeObjects(entry.getKey(), entry.getValue());
+            ComfortCheckRecompute.recomputeObjects(entry.getKey(), entry.getValue());
         }
 
         return null;
@@ -166,21 +165,6 @@ public class ProblemViewRecomputeChecksHandler extends AbstractHandler
             if (Global.isLogEnabled())
                 Global.log(TAG, msg);
         }
-    }
-
-    /**
-     * Выбран корневой узел проекта: в области отбора стоит сама конфигурация. Точечная
-     * перепроверка такого объекта отрабатывает мгновенно и не проверяет ничего — на корне нужна
-     * полная проверка всех объектов проекта.
-     */
-    private static boolean isWholeProject(Set<EObject> objects)
-    {
-        for (EObject object : objects)
-        {
-            if (object instanceof Configuration)
-                return true;
-        }
-        return false;
     }
 
     /** Проекты области отбора панели. */

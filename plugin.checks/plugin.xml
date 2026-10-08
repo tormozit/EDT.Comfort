@@ -24,9 +24,6 @@
         class="tormozit.checks.BslAstTruncationCheck"/>
     <check
         category="tormozit.comfort.checks"
-        class="tormozit.checks.BrokenFormPictureCheck"/>
-    <check
-        category="tormozit.comfort.checks"
         class="tormozit.checks.BrokenMdCompositionCheck"/>
     <check category="tormozit.comfort.checks" class="tormozit.checks.StaticFeatureAccessChecks$Parameters"/>
     <check category="tormozit.comfort.checks" class="tormozit.checks.StaticFeatureAccessChecks$Obsolete"/>
@@ -38,6 +35,7 @@
 
   <extension point="com.e1c.g5.v8.dt.check.fixes">
     <fix class="tormozit.checks.BrokenMdCompositionFix"/>
+    <fix class="tormozit.checks.FindBrokenMdReferencesFix"/>
   </extension>
 
 </plugin>

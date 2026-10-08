@@ -52,7 +52,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 public final class ExternalOpenRequestHook implements IStartup
 {
     private static final String TAG = "ExternalOpenRequest"; //$NON-NLS-1$
-    private static final String TEMP_TOPIC = "external-open-request"; //$NON-NLS-1$
     private static final String REQUEST_FILE = "open-request.json"; //$NON-NLS-1$
     /** Реагируем только на файл, изменённый не раньше этого срока назад. */
     private static final long FRESH_MS = TimeUnit.SECONDS.toMillis(5);
@@ -70,10 +69,7 @@ public final class ExternalOpenRequestHook implements IStartup
         started = true;
         Path dir = requestDir();
         if (dir == null)
-        {
-            Global.tempLog(TEMP_TOPIC, "каталог запросов не определён (нет APPDATA/user.home)"); //$NON-NLS-1$
             return;
-        }
         Thread thread = new Thread(() -> watch(dir), "Comfort: external open request watcher"); //$NON-NLS-1$
         thread.setDaemon(true);
         thread.start();
@@ -93,7 +89,6 @@ public final class ExternalOpenRequestHook implements IStartup
         {
             Files.createDirectories(dir);
             dir.register(service, StandardWatchEventKinds.ENTRY_CREATE, StandardWatchEventKinds.ENTRY_MODIFY);
-            Global.tempLog(TEMP_TOPIC, "слежение запущено: " + dir); //$NON-NLS-1$
             while (true)
             {
                 WatchKey key = service.take();
@@ -109,10 +104,7 @@ public final class ExternalOpenRequestHook implements IStartup
                         handle(dir.resolve(name));
                 }
                 if (!key.reset())
-                {
-                    Global.tempLog(TEMP_TOPIC, "каталог недоступен, слежение остановлено"); //$NON-NLS-1$
                     return;
-                }
             }
         }
         catch (InterruptedException e)
@@ -121,7 +113,7 @@ public final class ExternalOpenRequestHook implements IStartup
         }
         catch (IOException | RuntimeException e)
         {
-            Global.tempLog(TEMP_TOPIC, "сбой слежения: " + e); //$NON-NLS-1$
+            Global.log(TAG, "сбой слежения: " + e); //$NON-NLS-1$
         }
     }
 
@@ -143,13 +135,10 @@ public final class ExternalOpenRequestHook implements IStartup
     private static void handle(Path file)
     {
         String fileName = file.getFileName().toString();
-        Global.tempLog(TEMP_TOPIC, "событие: " + fileName); //$NON-NLS-1$
         if (!REQUEST_FILE.equalsIgnoreCase(fileName))
             return;
         long modified = modifiedMillis(file);
         long age = System.currentTimeMillis() - modified;
-        Global.tempLog(TEMP_TOPIC, "возраст файла, мс: " + age + ", fresh=" + (modified >= 0 && age <= FRESH_MS) //$NON-NLS-1$ //$NON-NLS-2$
-            + ", повтор=" + (modified == lastHandledModified)); //$NON-NLS-1$
         if (modified < 0 || age > FRESH_MS)
             return;
         // Одну запись файла система сообщает несколькими событиями — повторно не открываем.
@@ -162,27 +151,19 @@ public final class ExternalOpenRequestHook implements IStartup
         String projectName = text(request, "Configuration"); //$NON-NLS-1$
         String fqn = text(request, "FullName"); //$NON-NLS-1$
         if (projectName == null || fqn == null)
-        {
-            Global.tempLog(TEMP_TOPIC, "пропуск " + fileName + ": нет полей Configuration/FullName"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
-        }
         List<IProject> projects = findProjects(projectName);
+        // пусто — конфигурации нет в этом процессе EDT
         if (projects.isEmpty())
-        {
-            // конфигурации нет в этом процессе EDT
-            Global.tempLog(TEMP_TOPIC, "нет открытого проекта с конфигурацией «" + projectName + "»"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
-        }
         for (IProject project : projects)
         {
-            Global.tempLog(TEMP_TOPIC, "принят запрос: проект=" + project.getName() + ", fqn=" + fqn); //$NON-NLS-1$ //$NON-NLS-2$
             try
             {
                 open(project, fqn);
             }
             catch (RuntimeException e)
             {
-                Global.tempLog(TEMP_TOPIC, "сбой открытия: " + e); //$NON-NLS-1$
                 Global.log(TAG, "сбой открытия " + fqn + ": " + e); //$NON-NLS-1$ //$NON-NLS-2$
             }
         }
@@ -235,7 +216,6 @@ public final class ExternalOpenRequestHook implements IStartup
                 }
             }
         }
-        Global.tempLog(TEMP_TOPIC, "не удалось прочитать " + file.getFileName()); //$NON-NLS-1$
         return null;
     }
 
@@ -255,29 +235,18 @@ public final class ExternalOpenRequestHook implements IStartup
         String[] parts = fqn.split("\\.", -1); //$NON-NLS-1$
         int formEnd = formNameEnd(parts);
         if (formEnd < 0)
-        {
-            Global.tempLog(TEMP_TOPIC, "в FQN не найдена форма: " + fqn); //$NON-NLS-1$
             return;
-        }
         String formFullName = String.join(".", java.util.Arrays.copyOf(parts, formEnd)); //$NON-NLS-1$
         String itemName = formEnd < parts.length ? parts[parts.length - 1] : null;
         if (!(Global.getServiceByClass(IV8ProjectManager.class) instanceof IV8ProjectManager manager))
             return;
         IV8Project v8Project = manager.getProject(project);
         if (v8Project == null)
-        {
-            Global.tempLog(TEMP_TOPIC, "проект не является проектом 1С: " + project.getName()); //$NON-NLS-1$
             return;
-        }
         EObject resolved = GoToDefinition.resolveEObjectByQualifiedName(formFullName, v8Project);
         if (!(resolved instanceof BasicForm basicForm))
-        {
-            Global.tempLog(TEMP_TOPIC, "форма не найдена: " + formFullName); //$NON-NLS-1$
             return;
-        }
         FormItem item = itemName == null ? null : findItem(basicForm.getForm(), itemName);
-        Global.tempLog(TEMP_TOPIC, "форма найдена: " + formFullName + ", элемент " //$NON-NLS-1$ //$NON-NLS-2$
-            + (itemName == null ? "не задан" : item != null ? "найден" : "НЕ найден: " + itemName)); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         Display display = PlatformUI.getWorkbench().getDisplay();
         display.asyncExec(() -> openOnUi(basicForm, item));
     }
@@ -327,11 +296,9 @@ public final class ExternalOpenRequestHook implements IStartup
                 helper.openEditor(basicForm, null, new StructuredSelection(item));
             else
                 helper.openEditor(basicForm);
-            Global.tempLog(TEMP_TOPIC, "редактор открыт"); //$NON-NLS-1$
         }
         catch (RuntimeException e)
         {
-            Global.tempLog(TEMP_TOPIC, "OpenHelper: " + e); //$NON-NLS-1$
             helper.openEditor(basicForm);
         }
         try
@@ -342,7 +309,7 @@ public final class ExternalOpenRequestHook implements IStartup
         }
         catch (RuntimeException | LinkageError e)
         {
-            Global.tempLog(TEMP_TOPIC, "активация окна: " + e); //$NON-NLS-1$
+            // Окно не вынесено вперёд — форма уже открыта.
         }
     }
 }

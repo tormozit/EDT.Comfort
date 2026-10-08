@@ -168,8 +168,6 @@ final class ColumnAutoFit
     static void setColumnWidth(TreeColumn column, int width)
     {
         Tree tree = column.getParent();
-        Global.tempLog("columnVisibility385", "tree.setColumnWidth column=" + tree.indexOf(column) //$NON-NLS-1$ //$NON-NLS-2$
-            + " before=" + column.getWidth() + " requested=" + width); //$NON-NLS-1$ //$NON-NLS-2$
         if (!(tree.getData(INSTALLED_KEY) instanceof ColumnAutoFit autoFit))
         {
             column.setWidth(width);
@@ -195,10 +193,6 @@ final class ColumnAutoFit
         }
         autoFit.rememberVisualWidths();
         autoFit.fit(exactFillBefore);
-        Global.tempLog("columnVisibility385", "tree.setColumnWidth totalBefore=" + totalBefore //$NON-NLS-1$ //$NON-NLS-2$
-            + " budgetBefore=" + budgetBefore + " exactFillBefore=" + exactFillBefore //$NON-NLS-1$ //$NON-NLS-2$
-            + " totalAfter=" + ColumnWidthFit.totalWidth(autoFit.columns) //$NON-NLS-1$
-            + " budgetAfter=" + autoFit.widthBudget()); //$NON-NLS-1$
     }
 
     void dispose()

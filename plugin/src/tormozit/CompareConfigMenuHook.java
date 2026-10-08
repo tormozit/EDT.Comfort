@@ -25,13 +25,11 @@ import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.EReference;
 import org.eclipse.emf.ecore.EStructuralFeature;
 import org.eclipse.emf.ecore.util.EcoreUtil;
-import org.eclipse.emf.ecore.util.InternalEList;
 import com._1c.g5.v8.bm.core.IBmObject;
 import com._1c.g5.v8.dt.compare.core.ComparisonContext;
 import com._1c.g5.v8.dt.compare.model.CollectionElementComparisonNode;
 import com._1c.g5.v8.dt.compare.model.MergeRule;
 import com._1c.g5.v8.dt.metadata.mdclass.MdClassPackage;
-import com._1c.g5.v8.dt.rights.model.RightsPackage;
 
 import org.eclipse.compare.CompareConfiguration;
 import org.eclipse.compare.CompareEditorInput;
@@ -272,20 +270,24 @@ public class CompareConfigMenuHook implements IStartup
     {
         private static final String TITLE = "Проверка битых ссылок";
         private static final String CALLBACK = "tormozit.compare.mergeConfirmation";
+        private static final String AFTER_MERGE = "tormozit.compare.afterMerge";
         private static final Set<IEditorPart> pending = Collections.newSetFromMap(new IdentityHashMap<>());
-        private static final Set<IEditorPart> approved = Collections.newSetFromMap(new IdentityHashMap<>());
+        private static final Map<IEditorPart, Boolean> approved = new IdentityHashMap<>();
+        private static final Map<IEditorPart, CleanupPlan> cleanupPlans = new IdentityHashMap<>();
 
         static void install()
         {
             System.getProperties().put(CALLBACK, (Function<Object, Object>) MergePreflight::beforeMerge);
+            System.getProperties().put(AFTER_MERGE, (Function<Object, Object>) MergePreflight::afterMerge);
         }
 
         private static Object beforeMerge(Object value)
         {
             if (!(value instanceof IEditorPart editor))
                 return Boolean.FALSE;
-            if (approved.remove(editor))
-                return Boolean.TRUE.equals(Global.invoke(editor, "openMergeConfirmationDialog"));
+            Boolean confirmed = approved.remove(editor);
+            if (confirmed != null)
+                return confirmed || Boolean.TRUE.equals(Global.invoke(editor, "openMergeConfirmationDialog"));
             if (!pending.add(editor))
                 return Boolean.FALSE;
             Global.tempLog("broken-links-merge", "start editor=" + editor.getTitle());
@@ -382,25 +384,62 @@ public class CompareConfigMenuHook implements IStartup
                         if (!findings.isEmpty())
                         {
                             AbstractTreeViewer viewer = getTreeViewerFromEditor(editor);
+                            NavigatorDropSupport.ensurePartialModel(editor);
+                            String objectColumn = CompareConfigSearchDialogHook.getObjectColumnHeader(editor);
                             List<CompareSearchMatch> matches = new ArrayList<>(findings.size());
                             for (Finding finding : findings)
                             {
                                 ComparisonNode node = finding.nodeId >= 0 ? finding.session.getNode(finding.nodeId) : null;
-                                TopComparisonNode top = node != null ? finding.session.getTopNodeOf(node) : null;
-                                Object partial = viewer != null && top != null
-                                    ? NavigatorDropSupport.resolvePartialNode(editor, viewer, top) : null;
-                                matches.add(new CompareSearchMatch(partial != null ? partial
-                                    : MdTypeMapping.anyFullNameToBmFqn(finding.owner), finding.owner, finding.property,
-                                    "Итог объединения", finding.reference, "Битая ссылка",
-                                    CompareSearchMatch.RowColorKind.NONE, false, finding.target));
+                                if (node == null)
+                                    node = NavigatorDropSupport.findTopNode(finding.session, finding.ownerFqn);
+                                IPartialModelNode partial = viewer != null && node != null
+                                    ? NavigatorDropSupport.resolvePartialNode(editor, viewer, node) : null;
+                                if (partial == null && viewer != null)
+                                {
+                                    TopComparisonNode owner = NavigatorDropSupport.findTopNode(finding.session, finding.ownerFqn);
+                                    if (owner == null && node != null)
+                                        owner = node instanceof TopComparisonNode top ? top : finding.session.getTopNodeOf(node);
+                                    if (owner != null)
+                                        partial = NavigatorDropSupport.resolvePartialNode(editor, viewer, owner);
+                                }
+                                // У ссылки может не быть собственной пометки — используем настраиваемого владельца.
+                                while (partial != null && !partial.isCheckable())
+                                    partial = partial.getParent();
+                                List<CompareSearchMatch> standard = partial != null
+                                    ? CompareConfigLowestCheckableFinder.buildMatches(List.of(partial), objectColumn) : List.of();
+                                if (!standard.isEmpty())
+                                {
+                                    CompareSearchMatch row = standard.get(0);
+                                    matches.add(new CompareSearchMatch(row.getComparisonNode(), row.getObjectPath(),
+                                        row.getPropertyName(), row.getColumnSide(), finding.reference,
+                                        row.getComparisonStatus(), row.getRowColorKind(), row.isCheckable(), finding.target));
+                                }
+                                else
+                                    matches.add(new CompareSearchMatch(finding.ownerFqn, finding.owner, finding.property,
+                                        objectColumn, finding.reference, "", CompareSearchMatch.RowColorKind.NONE,
+                                        false, finding.target));
+                                Global.tempLog("broken-links-merge", "result owner=" + finding.ownerFqn
+                                    + " comparisonNode=" + finding.nodeId + " partial="
+                                    + (partial != null ? partial.getNodeId() : "missing")
+                                    + " checkable=" + (!standard.isEmpty() && standard.get(0).isCheckable()));
                             }
+                            matches.sort(java.util.Comparator.comparing(CompareSearchMatch::getObjectPath,
+                                String.CASE_INSENSITIVE_ORDER).thenComparing(CompareSearchMatch::getPropertyName,
+                                    String.CASE_INSENSITIVE_ORDER).thenComparing(CompareSearchMatch::getMatchText,
+                                        String.CASE_INSENSITIVE_ORDER));
                             CompareConfigSearchDialogHook.showFindAllResults(editor, matches, "битые ссылки");
-                            if (!MessageDialog.openQuestion(editor.getSite().getShell(),
-                                Global.withPluginWindowTitle(TITLE),
-                                "Объединение приведет к появлению битых ссылок (показаны в панели Поиск). Продолжить объединение?"))
+                            int answer = new MessageDialog(editor.getSite().getShell(),
+                                Global.withPluginWindowTitle(TITLE), null,
+                                "Это объединение образует битые ссылки (показаны в панели Поиск). Как их обработать?",
+                                MessageDialog.QUESTION, new String[] { "Сохранить", "Очистить", "Отменить" }, 2).open();
+                            Global.tempLog("broken-links-merge", "answer=" + answer);
+                            if (answer < 0 || answer == 2)
                                 return;
+                            if (answer == 1)
+                                cleanupPlans.put(editor, new CleanupPlan(findings));
                         }
-                        approved.add(editor);
+                        // Выбор обработки битых ссылок уже подтверждает запуск объединения.
+                        approved.put(editor, !findings.isEmpty());
                         try
                         {
                             Global.invokeVoid(editor, "startMerge");
@@ -408,6 +447,7 @@ public class CompareConfigMenuHook implements IStartup
                         finally
                         {
                             approved.remove(editor);
+                            cleanupPlans.remove(editor);
                         }
                     });
                     return canceled ? Status.CANCEL_STATUS : error != null
@@ -419,8 +459,288 @@ public class CompareConfigMenuHook implements IStartup
             return Boolean.FALSE;
         }
 
-        private record Finding(IComparisonSession session, long nodeId, String owner, String property,
-            String reference, String target) {}
+        private static Object afterMerge(Object value)
+        {
+            if (!(value instanceof IEditorPart editor))
+                return null;
+            CleanupPlan plan = cleanupPlans.remove(editor);
+            if (plan == null)
+                return null;
+            Object status = Global.getField(editor, "mergeStatus");
+            // EDT закрывает редактор при начале основной фазы и в startMerge сама
+            // обходит проверку UI-статусов в этой ветви. runMergeProcess уже дождался конца пакета.
+            boolean closedByMerge = Boolean.TRUE.equals(Global.getField(editor, "isEditorBeingDisposedByMergeStart"));
+            boolean finished = closedByMerge || Boolean.TRUE.equals(Global.invoke(editor, "isMergeFinishedSuccessfully"));
+            boolean success = status instanceof IStatus mergeStatus && mergeStatus.isOK()
+                && finished;
+            Global.tempLog("broken-links-merge", "cleanup mergeSuccess=" + success + " closedByMerge=" + closedByMerge
+                + " finished=" + finished + " status=" + status);
+            if (!success)
+                return null;
+            try
+            {
+                new org.eclipse.jface.dialogs.ProgressMonitorDialog(editor.getSite().getShell()).run(true, false,
+                    monitor -> plan.clean(monitor));
+            }
+            catch (Throwable e)
+            {
+                Global.tempLogException("broken-links-merge", "cleanup failure", e);
+                Throwable cause = e;
+                while (cause.getCause() != null && cause.getCause() != cause)
+                    cause = cause.getCause();
+                MessageDialog.openError(editor.getSite().getShell(), Global.withPluginWindowTitle(TITLE),
+                    "Объединение выполнено, но не удалось очистить найденные битые ссылки.\n" + cause);
+            }
+            return null;
+        }
+
+        private static final class CleanupPlan
+        {
+            private final Map<com._1c.g5.v8.bm.integration.IBmModel, Map<String, Set<String>>> owners = new IdentityHashMap<>();
+
+            CleanupPlan(List<Finding> findings)
+            {
+                for (Finding finding : findings)
+                {
+                    var source = finding.session.getDataSource(ComparisonSide.MAIN);
+                    if (!owners.containsKey(source.getBmModel()))
+                        Global.tempLog("broken-links-merge", "cleanup plan project=" + source.getProjectName()
+                            + " source=" + source.getType() + " model=" + source.getBmModel().getId());
+                    owners.computeIfAbsent(source.getBmModel(),
+                        ignored -> new HashMap<>()).computeIfAbsent(finding.ownerFqn, ignored -> new HashSet<>())
+                        .add(finding.referenceKey);
+                }
+            }
+
+            void clean(IProgressMonitor monitor)
+            {
+                int total = owners.values().stream().mapToInt(Map::size).sum();
+                SubMonitor progress = SubMonitor.convert(monitor, "Очистка битых ссылок", Math.max(1, total));
+                try
+                {
+                    for (var model : owners.entrySet())
+                    {
+                        // Штатное объединение сохраняет затронутые файлы в endBatchSession.
+                        // Обычное execute недостаточно для завершённой записи результата на диск.
+                        // executeInBatchSession требует контроллер; beginBatchSession без аргумента
+                        // возвращает обычный Object. Контроллер сохраняет синхронно (default API).
+                        Object batch = model.getKey().beginBatchSession(new com._1c.g5.v8.bm.integration.IBatchSessionController()
+                        {
+                            @Override
+                            public void onBeforeEventProcessing()
+                            {
+                                Global.tempLog("broken-links-merge", "cleanup batch before events model=" + model.getKey().getId());
+                            }
+
+                            @Override
+                            public void onAfterEventProcessing()
+                            {
+                                Global.tempLog("broken-links-merge", "cleanup batch after events model=" + model.getKey().getId());
+                            }
+
+                            @Override
+                            public void onBeforeSave(int count)
+                            {
+                                progress.subTask("Сохранение очищенных объектов");
+                                Global.tempLog("broken-links-merge", "cleanup batch before save model=" + model.getKey().getId()
+                                    + " count=" + count);
+                            }
+
+                            @Override
+                            public void onAfterSave()
+                            {
+                                Global.tempLog("broken-links-merge", "cleanup batch after save model=" + model.getKey().getId());
+                            }
+
+                            @Override
+                            public boolean isParallelSaveAllowed()
+                            {
+                                return false;
+                            }
+                        });
+                        try
+                        {
+                            model.getKey().executeInBatchSession(batch, new AbstractBmTask<Void>("Очистка битых ссылок")
+                            {
+                                @Override
+                                public Void execute(IBmTransaction transaction, IProgressMonitor ignored)
+                                {
+                                    for (var entry : model.getValue().entrySet())
+                                    {
+                                        progress.subTask(entry.getKey());
+                                        EObject owner = transaction.getTopObjectByFqn(entry.getKey());
+                                        if (owner == null)
+                                            throw new IllegalStateException("Не найден объект после объединения: " + entry.getKey());
+                                        List<ReferenceSlot> broken = referenceSlots(owner, entry.getValue(), progress);
+                                        int removed = 0;
+                                        for (int i = broken.size() - 1; i >= 0; i--)
+                                        {
+                                            var reference = broken.get(i);
+                                            if (reference.target == null || !reference.target.eIsProxy())
+                                                continue;
+                                            URI uri = EcoreUtil.getURI(reference.target);
+                                            String key = FinalComposition.fqn(uri) + "#" + uri.fragment();
+                                            if (entry.getValue().contains(key))
+                                            {
+                                                reference.clear();
+                                                removed++;
+                                            }
+                                        }
+                                        Global.tempLog("broken-links-merge", "cleanup owner=" + entry.getKey() + " removed=" + removed);
+                                        progress.worked(1);
+                                    }
+                                    return null;
+                                }
+                            });
+                        }
+                        finally
+                        {
+                            model.getKey().endBatchSession(batch);
+                        }
+                        Global.tempLog("broken-links-merge", "cleanup write returned model=" + model.getKey().getId());
+                        model.getKey().executeReadonlyTask(new AbstractBmTask<Void>("Проверка результата очистки")
+                        {
+                            @Override
+                            public Void execute(IBmTransaction transaction, IProgressMonitor ignored)
+                            {
+                                for (var entry : model.getValue().entrySet())
+                                {
+                                    EObject owner = transaction.getTopObjectByFqn(entry.getKey());
+                                    int remaining = 0;
+                                    for (var reference : referenceSlots(owner, entry.getValue(), progress))
+                                    {
+                                        if (reference.target == null || !reference.target.eIsProxy())
+                                            continue;
+                                        URI uri = EcoreUtil.getURI(reference.target);
+                                        String key = FinalComposition.fqn(uri) + "#" + uri.fragment();
+                                        if (entry.getValue().contains(key))
+                                        {
+                                            remaining++;
+                                            Global.tempLog("broken-links-merge", "cleanup verify remaining owner="
+                                                + entry.getKey() + " reference=" + key);
+                                        }
+                                    }
+                                    Global.tempLog("broken-links-merge", "cleanup verify owner=" + entry.getKey()
+                                        + " exists=" + (owner != null) + " remaining=" + remaining);
+                                    if (remaining != 0)
+                                        throw new IllegalStateException("После очистки остались битые ссылки: " + entry.getKey());
+                                }
+                                return null;
+                            }
+                        });
+                    }
+                }
+                finally
+                {
+                    progress.done();
+                }
+            }
+        }
+
+        private record Finding(IComparisonSession session, long nodeId, String owner, String ownerFqn, String property,
+            String reference, String target, String referenceKey) {}
+
+        /** Адрес сохранённой ссылки: одиночное свойство или элемент списка. Проверки EDT не меняет. */
+        private record ReferenceSlot(EObject owner, EReference feature, int index, EObject target)
+        {
+            void clear()
+            {
+                if (!feature.isChangeable())
+                    throw new IllegalStateException("Нельзя очистить свойство: " + feature.getName());
+                // В составах с настройками удаляется запись целиком, как при прежней очистке.
+                if (owner instanceof com._1c.g5.v8.dt.metadata.mdclass.ExchangePlanContentItem && "mdObject".equals(feature.getName())
+                    || owner instanceof com._1c.g5.v8.dt.metadata.mdclass.CommonAttributeContentItem && "metadata".equals(feature.getName())
+                    || owner instanceof com._1c.g5.v8.dt.rights.model.ObjectRights && "object".equals(feature.getName()))
+                {
+                    EcoreUtil.remove(owner);
+                }
+                else if (feature.isMany())
+                {
+                    ((List<?>)owner.eGet(feature)).remove(index);
+                    if (owner instanceof com._1c.g5.v8.dt.mcore.TypeDescription description
+                        && "types".equals(feature.getName()) && description.getTypes().isEmpty()
+                        // Только свойство типа значения. Владельцы, регистраторы,
+                        // источник подписки и прочие наборы ссылок допускают пустой состав.
+                        && description.eContainingFeature() != null
+                        && "type".equals(description.eContainingFeature().getName()))
+                    {
+                        var provider = com._1c.g5.v8.dt.platform.IEObjectProvider.Registry.INSTANCE.get(
+                            com._1c.g5.v8.dt.mcore.McorePackage.Literals.TYPE_ITEM,
+                            com._1c.g5.v8.dt.platform.version.Version.LATEST);
+                        EObject string = provider != null ? provider.createProxy("String") : null;
+                        if (string == null)
+                            throw new IllegalStateException("Недоступен стандартный тип Строка");
+                        string = EcoreUtil.resolve(string, description);
+                        if (!(string instanceof com._1c.g5.v8.dt.mcore.TypeItem type) || string.eIsProxy())
+                            throw new IllegalStateException("Не удалось разрешить стандартный тип Строка");
+                        var qualifiers = com._1c.g5.v8.dt.mcore.McoreFactory.eINSTANCE.createStringQualifiers();
+                        qualifiers.setLength(10);
+                        qualifiers.setFixed(false);
+                        description.setStringQualifiers(qualifiers);
+                        description.getTypes().add(type);
+                        Global.tempLog("broken-links-merge", "cleanup empty value type replaced with String(10) owner="
+                            + EcoreUtil.getURI(description));
+                    }
+                }
+                else
+                    owner.eUnset(feature);
+            }
+        }
+
+        private static List<ReferenceSlot> referenceSlots(EObject root, Set<String> targets, IProgressMonitor monitor)
+        {
+            if (root == null)
+                return List.of();
+            List<ReferenceSlot> result = new ArrayList<>();
+            Deque<EObject> queue = new ArrayDeque<>();
+            queue.add(root);
+            while (!queue.isEmpty())
+            {
+                if (monitor.isCanceled())
+                    throw new OperationCanceledException();
+                EObject owner = queue.removeFirst();
+                for (EReference feature : owner.eClass().getEAllReferences())
+                {
+                    if (feature.isContainer() || feature.isDerived() || feature.isTransient() || feature.isVolatile())
+                        continue;
+                    Object value = owner.eGet(feature, true);
+                    if (value instanceof EObject target)
+                    {
+                        if (feature.isContainment())
+                        {
+                            target = EcoreUtil.resolve(target, owner);
+                            if (!(target instanceof IBmObject bm) || !bm.bmIsTop())
+                                queue.addLast(target);
+                        }
+                        else if (isPlannedTarget(target, targets))
+                            result.add(new ReferenceSlot(owner, feature, -1, (EObject)owner.eGet(feature, true)));
+                    }
+                    else if (value instanceof List<?> list)
+                        for (int index = 0; index < list.size(); index++)
+                        {
+                            Object item = list.get(index);
+                            if (item instanceof EObject target)
+                            {
+                                if (feature.isContainment())
+                                {
+                                    target = EcoreUtil.resolve(target, owner);
+                                    if (!(target instanceof IBmObject bm) || !bm.bmIsTop())
+                                        queue.addLast(target);
+                                }
+                                else if (isPlannedTarget(target, targets))
+                                    result.add(new ReferenceSlot(owner, feature, index, (EObject)list.get(index)));
+                            }
+                        }
+                }
+            }
+            return result;
+        }
+
+        private static boolean isPlannedTarget(EObject target, Set<String> targets)
+        {
+            URI uri = EcoreUtil.getURI(target);
+            return targets.contains(FinalComposition.fqn(uri) + "#" + uri.fragment());
+        }
 
         /** Только значения ссылок и наложение адресов: без пробного объединения и копирования проекта. */
         private static final class FinalComposition
@@ -432,17 +752,21 @@ public class CompareConfigMenuHook implements IStartup
             private final Map<String, Delta> delta = new HashMap<>();
             private final Map<String, String> otherToFinal = new HashMap<>();
             private final Map<String, String> renamed = new HashMap<>();
+            private final Set<String> membershipChanges = new HashSet<>();
+            private final Set<String> affectedReferenceKeys = new HashSet<>();
+            private final Map<URI, Boolean> affectedTargets = new HashMap<>();
             private final Map<Long, ComparisonNode> mainNodes = new HashMap<>();
             private final Map<Long, ComparisonNode> otherNodes = new HashMap<>();
             private final Map<String, Resolution> existence = new HashMap<>();
+            private final Map<URI, Boolean> initialMainExistence = new HashMap<>();
             private final Map<Long, Resolution> targetStates = new HashMap<>();
             private final Map<Long, Boolean> enabled = new HashMap<>();
             private final List<Reference> references = new ArrayList<>();
 
             private record Delta(boolean exists, ComparisonSide source, String sourceFqn) {}
             private record Pair(EObject main, EObject other, ComparisonNode node, ComparisonSide side) {}
-            private record Reference(long nodeId, String owner, String property, EObject target,
-                ComparisonSide side) {}
+            private record Reference(long nodeId, String owner, String ownerFqn, String property, EObject target,
+                ComparisonSide side, boolean imported) {}
             private record Resolution(boolean exists, String target, String navigation) {}
 
             FinalComposition(IComparisonSession session, ComparisonContext context, SubMonitor monitor)
@@ -456,6 +780,8 @@ public class CompareConfigMenuHook implements IStartup
             {
                 collectNodes(progress.split(20));
                 buildNamespace(progress.split(20));
+                if (membershipChanges.isEmpty())
+                    return;
                 collectReferences(progress.split(60), findings);
             }
 
@@ -470,15 +796,46 @@ public class CompareConfigMenuHook implements IStartup
                     String sourceFqn = fqn(uri);
                     String target = reference.side == ComparisonSide.OTHER
                         ? translate(sourceFqn, otherToFinal) : translate(sourceFqn, renamed);
+                    if (!reference.imported && !affectedReferenceKeys.contains(sourceFqn + "#" + uri.fragment()))
+                    {
+                        checking.worked(1);
+                        continue;
+                    }
                     String key = reference.side + ":" + uri + ":" + reference.target.eClass().getName();
                     Resolution resolution = existence.computeIfAbsent(key, ignored -> resolve(reference, uri, target));
-                    if (!resolution.exists)
-                        findings.add(new Finding(session, reference.nodeId, reference.owner, reference.property,
-                            localized(resolution.target) + (uri.fragment() != null && !"/".equals(uri.fragment())
-                                ? "#" + uri.fragment() : ""), resolution.navigation));
+                    Global.tempLog("broken-links-merge", "analyze composition reference owner=" + reference.owner
+                            + " side=" + reference.side + " imported=" + reference.imported + " uri=" + uri + " target=" + target
+                            + " exists=" + resolution.exists + " finalTarget=" + resolution.target);
+                    if (!resolution.exists && reference.side == ComparisonSide.MAIN && !reference.imported
+                        && !existedInMain(reference.target, uri))
+                    {
+                        Global.tempLog("broken-links-merge", "skip pre-existing broken reference owner="
+                            + reference.owner + " uri=" + uri + " affected="
+                            + affectedReferenceKeys.contains(sourceFqn + "#" + uri.fragment()));
+                    }
+                    else if (!resolution.exists)
+                        findings.add(new Finding(session, reference.nodeId, localized(reference.owner), reference.ownerFqn,
+                            reference.property,
+                            localized(resolution.target), resolution.navigation,
+                            referenceKey(reference.target, reference.side)));
                     checking.worked(1);
                 }
                 checking.done();
+            }
+
+            private boolean existedInMain(EObject target, URI uri)
+            {
+                return initialMainExistence.computeIfAbsent(uri, key ->
+                {
+                    var source = session.getDataSource(ComparisonSide.MAIN);
+                    if (source == null || source.getBmModel() == null)
+                        throw new IllegalStateException("Недоступна исходная модель основной конфигурации");
+                    // Исходный URI без наложения удалений и переименований итогового состава.
+                    EObject original = source.getBmModel().getEngine().resolve(key, target.eClass());
+                    boolean exists = original != null && !original.eIsProxy();
+                    Global.tempLog("broken-links-merge", "initial main target uri=" + key + " exists=" + exists);
+                    return exists;
+                });
             }
 
             private void collectNodes(SubMonitor monitor)
@@ -491,10 +848,8 @@ public class CompareConfigMenuHook implements IStartup
                     monitor.checkCanceled();
                     ComparisonNode node = queue.removeFirst();
                     nodes.add(node);
-                    var type = session.getMatchedObjectsEClass(node);
                     if (!(node instanceof com._1c.g5.v8.dt.compare.model.ReferenceFeatureComparisonNode)
-                        && (type == null || isMetadata(node) || Set.of("TypeDescription", "RoleDescription",
-                            "ObjectRights", "ExchangePlanContentItem", "CommonAttributeContentItem").contains(type.getName())))
+                        && !(node instanceof com._1c.g5.v8.dt.compare.model.ReferencedObjectsComparisonNode))
                         queue.addAll(node.getChildren());
                     monitor.setWorkRemaining(Math.max(1, queue.size() + 1));
                     monitor.worked(1);
@@ -550,6 +905,11 @@ public class CompareConfigMenuHook implements IStartup
                         : other != null && selected && (!session.isThreeWay() || !node.isAncestorObjectExists()
                             || rule(node) == MergeRule.GET_FROM_OTHER);
                     String result = main != null ? translate(main, renamed) : translate(other, otherToFinal);
+                    if (main != null && !survives || main == null && survives)
+                    {
+                        membershipChanges.add(main != null ? main : other);
+                        membershipChanges.add(result);
+                    }
                     targetStates.put(node.bmGetId(), new Resolution(survives, result, main != null ? main : other));
                     if (other != null && survives)
                         otherToFinal.put(other, result);
@@ -601,7 +961,9 @@ public class CompareConfigMenuHook implements IStartup
 
             private boolean deletedTop(ComparisonNode node, boolean hasOther, boolean selected)
             {
-                return !hasOther && selected && (rule(node) == MergeRule.GET_FROM_OTHER
+                // Корень сравнения — служебный контейнер, а не удаляемый объект конфигурации.
+                return !(node instanceof com._1c.g5.v8.dt.compare.model.RootComparisonNode)
+                    && !hasOther && selected && (rule(node) == MergeRule.GET_FROM_OTHER
                     || session.isThreeWay() && node.isAncestorObjectExists()
                         && rule(node) == MergeRule.MERGE_PRIORITIZING_OTHER);
             }
@@ -611,83 +973,161 @@ public class CompareConfigMenuHook implements IStartup
                 for (ComparisonNode parent = node.getParent(); parent != null; parent = parent.getParent())
                     if (parent instanceof TopComparisonNode top
                         && deletedTop(parent, top.getOtherSymlink() != null, isEnabled(parent)))
+                    {
+                        Global.tempLog("broken-links-merge", "deleted ancestor node=" + node.bmGetId()
+                            + " parent=" + parent.bmGetId() + " main=" + top.getMainSymlink()
+                            + " other=" + top.getOtherSymlink() + " rule=" + rule(parent));
                         return true;
+                    }
                 return false;
             }
 
             private void collectReferences(SubMonitor monitor, List<Finding> findings)
             {
-                monitor.subTask("Расчёт итоговых составов общих объектов");
-                List<Pair> owners = new ArrayList<>();
+                monitor.subTask("Чтение ссылок метаданных");
                 Object nativeTransaction = Global.call(context.getDataSourceContext().getTransaction(ComparisonSide.MAIN),
                     "getTransaction");
                 if (!(nativeTransaction instanceof IBmTransaction transaction))
                     throw new IllegalStateException("Не удалось открыть модель конфигурации для проверки");
+                Map<Long, Pair> candidates = new HashMap<>();
+                // Обратный индекс включает и ссылки неизменённой части, и уже неразрешимые URI.
+                // Подчинённые объекты и произведённые типы имеют отдельные URI.
+                Set<String> targetUris = affectedReferenceKeys;
+                Set<URI> visitedTargets = new HashSet<>();
+                SubMonitor reading = monitor.split(20).setWorkRemaining(Math.max(1, nodes.size()));
+                for (ComparisonNode changed : nodes)
                 {
-                    // Владельцев берём из всей основной модели, а не из помеченных узлов сравнения:
-                    // удаление цели может испортить ссылку в любом неизменённом составе.
-                    for (var type : List.of(MdClassPackage.Literals.FUNCTIONAL_OPTION,
-                        MdClassPackage.Literals.FILTER_CRITERION, MdClassPackage.Literals.DEFINED_TYPE,
-                        MdClassPackage.Literals.EVENT_SUBSCRIPTION, MdClassPackage.Literals.EXCHANGE_PLAN,
-                        MdClassPackage.Literals.COMMON_ATTRIBUTE, RightsPackage.Literals.ROLE_DESCRIPTION))
+                    monitor.checkCanceled();
+                    reading.worked(1);
+                    if (!(changed instanceof TopComparisonNode top) || !isMetadata(changed)
+                        || !(top.getMainSymlink() == null ? targetStates.get(changed.bmGetId()).exists
+                            : !targetStates.get(changed.bmGetId()).exists))
+                        continue;
+                    EObject target = compared(changed, top.getMainSymlink() != null ? ComparisonSide.MAIN : ComparisonSide.OTHER);
+                    if (target == null)
+                        continue;
+                    if (top.getMainSymlink() == null && target instanceof IBmObject bm)
                     {
-                        var iterator = transaction.getTopObjectIterator(type);
-                        while (iterator.hasNext())
+                        IBmObject root = bm.bmGetTopObject();
+                        ComparisonNode rootNode = otherNodes.get(root.bmGetId());
+                        EObject main = rootNode instanceof MatchedObjectsComparisonNode matched
+                            && matched.getMainObjectId() != null ? compared(rootNode, ComparisonSide.MAIN) : null;
+                        long key = main instanceof IBmObject existing ? existing.bmGetId() : -root.bmGetId();
+                        candidates.putIfAbsent(key, new Pair(main, root, rootNode,
+                            main != null ? ComparisonSide.MAIN : ComparisonSide.OTHER));
+                    }
+                    Deque<EObject> targets = new ArrayDeque<>();
+                    targets.add(target);
+                    while (!targets.isEmpty())
+                    {
+                        monitor.checkCanceled();
+                        EObject item = targets.removeFirst();
+                        URI uri = EcoreUtil.getURI(item);
+                        if (!visitedTargets.add(uri))
+                            continue;
+                        if (MdReferenceSupport.isMetadataReferenceTarget(item))
                         {
-                            monitor.checkCanceled();
-                            IBmObject object = iterator.next();
-                            ComparisonNode node = mainNodes.get(object.bmGetId());
-                            if (node != null && node instanceof TopComparisonNode top
-                                && deletedTop(node, top.getOtherSymlink() != null, isEnabled(node)))
+                            targetUris.add(fqn(uri) + "#" + uri.fragment());
+                            Global.tempLog("broken-links-merge", "affected target origin node=" + changed.bmGetId()
+                                + " main=" + top.getMainSymlink() + " other=" + top.getOtherSymlink()
+                                + " selected=" + isEnabled(changed) + " rule=" + rule(changed)
+                                + " survives=" + targetStates.get(changed.bmGetId()).exists + " uri=" + uri);
+                        }
+                        // Ссылка цвета/шрифта/рамки ведёт к вычисляемому представлению изменяемого элемента стиля.
+                        EObject appearance = item instanceof com._1c.g5.v8.dt.metadata.mdclass.StyleItem style
+                            ? style.getAppearanceItem()
+                            : item instanceof com._1c.g5.v8.dt.metadata.mdclass.PaletteColor color
+                                ? color.getAppearanceItem() : null;
+                        if (appearance != null && MdReferenceSupport.isMetadataReferenceTarget(appearance))
+                        {
+                            URI appearanceUri = EcoreUtil.getURI(appearance);
+                            targetUris.add(fqn(appearanceUri) + "#" + appearanceUri.fragment());
+                            Global.tempLog("broken-links-merge", "style target owner=" + uri + " appearance=" + appearanceUri);
+                        }
+                        // Вычисляемые контексты форм не дают целей ссылок метаданных.
+                        for (EReference feature : item.eClass().getEAllContainments())
+                        {
+                            if (feature.isDerived() || feature.isTransient() || feature.isVolatile())
                                 continue;
-                            EObject other = node != null ? compared(node, ComparisonSide.OTHER) : null;
-                            owners.add(new Pair(object, other, node, ComparisonSide.MAIN));
+                            Object contents = item.eGet(feature, true);
+                            if (contents instanceof EObject child)
+                                targets.addLast(child);
+                            else if (contents instanceof List<?> list)
+                                for (Object value : list)
+                                    if (value instanceof EObject child)
+                                        targets.addLast(child);
                         }
                     }
-                    for (ComparisonNode node : nodes)
-                    {
-                        monitor.checkCanceled();
-                        if (!(node instanceof MatchedObjectsComparisonNode matched)
-                            || matched.getMainObjectId() != null || !isEnabled(node))
-                            continue;
-                        var type = session.getMatchedObjectsEClass(node);
-                        if (type == null || !compositionType(type.getName()))
-                            continue;
-                        EObject other = compared(node, ComparisonSide.OTHER);
-                        if (other != null && (!(node instanceof TopComparisonNode)
-                            || !session.isThreeWay() || !node.isAncestorObjectExists()
-                            || rule(node) == MergeRule.GET_FROM_OTHER))
-                            owners.add(new Pair(null, other, node, ComparisonSide.OTHER));
-                    }
-                    long weight = 0;
-                    for (Pair owner : owners)
-                        weight += referenceWeight(owner);
-                    monitor.setWorkRemaining((int)Math.min(Integer.MAX_VALUE, Math.max(1, weight)));
-                    for (Pair owner : owners)
-                    {
-                        monitor.checkCanceled();
-                        SubMonitor checking = monitor.split(referenceWeight(owner));
-                        // В памяти остаются только ссылки текущего владельца, а не всей конфигурации.
-                        references.clear();
-                        collectOwner(owner);
-                        checkReferences(checking, findings);
-                    }
                 }
+                reading.done();
+                Object otherNative = Global.call(context.getDataSourceContext().getTransaction(ComparisonSide.OTHER),
+                    "getTransaction");
+                if (!(otherNative instanceof IBmTransaction otherTransaction))
+                    throw new IllegalStateException("Не удалось открыть вторую модель для проверки ссылок");
+                SubMonitor indexing = monitor.split(30).setWorkRemaining(Math.max(1, targetUris.size() * 2));
+                indexing.subTask("Поиск владельцев ссылок на изменяемые объекты");
+                collectReferringOwners(transaction, ComparisonSide.MAIN, targetUris, candidates, indexing);
+                collectReferringOwners(otherTransaction, ComparisonSide.OTHER, targetUris, candidates, indexing);
+                indexing.done();
+                List<Pair> owners = new ArrayList<>(candidates.values());
+                monitor.setWorkRemaining(Math.max(1, owners.size()));
+                for (Pair owner : owners)
+                {
+                    monitor.checkCanceled();
+                    references.clear();
+                    collectOwner(owner);
+                    checkReferences(monitor.split(1), findings);
+                }
+                Global.tempLog("broken-links-merge", "analyze all references owners=" + owners.size()
+                    + " targetUris=" + targetUris.size() + " changedTargets=" + membershipChanges.size()
+                    + " findings=" + findings.size());
                 monitor.done();
             }
 
-            private static int referenceWeight(Pair owner)
+            private void collectReferringOwners(IBmTransaction transaction, ComparisonSide side,
+                Set<String> targets, Map<Long, Pair> owners, SubMonitor monitor)
             {
-                var main = MdCompositionSupport.composition(owner.main);
-                var other = MdCompositionSupport.composition(owner.other);
-                return (int)Math.min(Integer.MAX_VALUE, Math.max(1,
-                    (long)(main != null ? main.entries().size() : 0) + (other != null ? other.entries().size() : 0)));
-            }
-
-            private static boolean compositionType(String name)
-            {
-                return Set.of("FunctionalOption", "FilterCriterion", "DefinedType", "EventSubscription",
-                    "ExchangePlan", "CommonAttribute", "RoleDescription").contains(name);
+                IBmObject configuration = transaction.getTopObjectByFqn("Configuration");
+                if (configuration == null)
+                    throw new IllegalStateException("Не найдена конфигурация: " + side);
+                URI base = EcoreUtil.getURI(configuration).trimFragment().trimSegments(1);
+                for (String key : targets)
+                {
+                    monitor.checkCanceled();
+                    int separator = key.indexOf('#');
+                    String fragment = key.substring(separator + 1);
+                    URI uri = base.appendSegment(key.substring(0, separator))
+                        .appendFragment("null".equals(fragment) ? null : fragment);
+                    for (var link : transaction.getReferences(uri))
+                    {
+                        if (!transaction.getNamespace().equals(link.getNamespace()))
+                            continue;
+                        IBmObject object = transaction.getObjectById(link.getObjectId());
+                        if (object == null)
+                            continue;
+                        IBmObject root = object.bmGetTopObject();
+                        // Тот же исключённый служебный объект, что в MdObjectComparisonParticipant.
+                        if ("command_interface_root".equals(root.bmGetFqn()))
+                            continue;
+                        ComparisonNode node = (side == ComparisonSide.MAIN ? mainNodes : otherNodes).get(root.bmGetId());
+                        if (node instanceof TopComparisonNode top
+                            && deletedTop(node, top.getOtherSymlink() != null, isEnabled(node)))
+                            continue;
+                        if (side == ComparisonSide.MAIN)
+                            owners.putIfAbsent(root.bmGetId(), new Pair(root,
+                                node != null ? compared(node, ComparisonSide.OTHER) : null, node, side));
+                        else if (node instanceof MatchedObjectsComparisonNode matched && matched.getMainObjectId() != null)
+                        {
+                            EObject main = compared(node, ComparisonSide.MAIN);
+                            if (main instanceof IBmObject bm)
+                                owners.put(bm.bmGetId(), new Pair(main, root, node, ComparisonSide.MAIN));
+                        }
+                        else if (node != null && isEnabled(node)
+                            && (!session.isThreeWay() || !node.isAncestorObjectExists() || rule(node) == MergeRule.GET_FROM_OTHER))
+                            owners.putIfAbsent(-root.bmGetId(), new Pair(null, root, node, ComparisonSide.OTHER));
+                    }
+                    monitor.worked(1);
+                }
             }
 
             private EObject compared(ComparisonNode node, ComparisonSide side)
@@ -698,58 +1138,129 @@ public class CompareConfigMenuHook implements IStartup
 
             private void collectOwner(Pair owner)
             {
-                EObject object = owner.main != null ? owner.main : owner.other;
-                MdCompositionSupport.Composition composition = MdCompositionSupport.composition(object);
-                if (composition == null)
-                    return;
-                if (owner.node != null && isEnabled(owner.node)
-                    && (rule(owner.node) == MergeRule.CUSTOM_MERGE || rule(owner.node) == MergeRule.MERGE_USING_EXTERNAL_TOOL))
-                    throw new IllegalStateException("Не удалось определить итоговый состав при ручном объединении");
-                String name = object instanceof IBmObject bm ? bm.bmGetFqn() : object.eClass().getName();
+                EObject root = owner.main != null ? owner.main : owner.other;
+                String name = ((IBmObject)root).bmGetFqn();
+                if (name == null)
+                    throw new IllegalStateException("Не определён адрес объекта метаданных");
                 String finalName = translate(name, owner.side == ComparisonSide.OTHER ? otherToFinal : renamed);
+                Global.tempLog("broken-links-merge", "collect owner exact target scope owner=" + name
+                    + " main=" + (owner.main != null) + " other=" + (owner.other != null) + " side=" + owner.side
+                    + " affectedReferenceKeys=" + affectedReferenceKeys.size());
                 Delta state = longest(finalName, delta);
                 if (state != null && !state.exists)
                     return;
-                long id = owner.node != null ? owner.node.bmGetId() : -1;
-                String feature = composition.feature().getName();
-                if ("DefinedType".equals(object.eClass().getName()) || "EventSubscription".equals(object.eClass().getName()))
+                Deque<Pair> queue = new ArrayDeque<>();
+                queue.add(owner);
+                while (!queue.isEmpty())
                 {
-                    for (Pair description : project(owner, feature))
-                        for (Pair reference : project(description, "types"))
-                            addReference(reference, id, finalName, feature);
-                }
-                else
-                {
-                    for (Pair entry : project(owner, feature))
+                    progress.checkCanceled();
+                    Pair current = queue.removeFirst();
+                    EObject object = current.main != null ? current.main : current.other;
+                    if (current.node != null && isEnabled(current.node)
+                        && (rule(current.node) == MergeRule.CUSTOM_MERGE
+                            || rule(current.node) == MergeRule.MERGE_USING_EXTERNAL_TOOL))
+                        throw new IllegalStateException("Не удалось определить итоговые ссылки при ручном объединении");
+                    String path = object instanceof IBmObject bm && bm.bmIsTop() && bm.bmGetFqn() != null
+                        ? translate(bm.bmGetFqn(), current.side == ComparisonSide.OTHER ? otherToFinal : renamed) : finalName;
+                    long id = current.node != null ? current.node.bmGetId()
+                        : owner.node != null ? owner.node.bmGetId() : -1;
+                    for (EReference feature : object.eClass().getEAllReferences())
                     {
-                        EObject value = entry.main != null ? entry.main : entry.other;
-                        String inner = switch (value.eClass().getName())
+                        if (feature.isContainer() || feature.isDerived() || feature.isTransient() || feature.isVolatile()
+                            || !feature.isContainment() && current.main != null && !mayAffect(current, feature))
+                            continue;
+                        for (Pair value : project(current, feature.getName()))
                         {
-                            case "ExchangePlanContentItem" -> "mdObject";
-                            case "CommonAttributeContentItem" -> "metadata";
-                            case "ObjectRights" -> "object";
-                            default -> null;
-                        };
-                        if (inner == null)
-                            addReference(entry, id, finalName, feature);
-                        else
-                            for (Pair reference : project(entry, inner))
-                                addReference(reference, id, finalName, feature);
+                            if (feature.isContainment())
+                            {
+                                EObject mainChild = value.main != null ? EcoreUtil.resolve(value.main, current.main) : null;
+                                EObject otherChild = value.other != null ? EcoreUtil.resolve(value.other, current.other) : null;
+                                EObject child = mainChild != null ? mainChild : otherChild;
+                                if (child.eIsProxy())
+                                    throw new IllegalStateException("Не удалось прочитать вложенный объект: " + EcoreUtil.getURI(child));
+                                if (child instanceof IBmObject bm && bm.bmIsTop())
+                                    continue;
+                                ComparisonNode node = value.node;
+                                if (node == null && child instanceof IBmObject bm)
+                                    node = (value.side == ComparisonSide.MAIN ? mainNodes : otherNodes).get(bm.bmGetId());
+                                queue.addLast(new Pair(mainChild, otherChild, node, value.side));
+                            }
+                            else
+                            {
+                                EObject target = value.side == ComparisonSide.OTHER ? value.other : value.main;
+                                if (target == null)
+                                    continue;
+                                // Внутренние связи форм/контекстов не являются ссылками метаданных.
+                                if (!MdReferenceSupport.isMetadataReferenceTarget(target))
+                                    continue;
+                                URI uri = EcoreUtil.getURI(target);
+                                if ("unresolved".equals(uri.scheme()))
+                                    Global.tempLog("broken-links-merge", "unresolved reference owner="
+                                        + EcoreUtil.getURI(object) + " feature=" + feature.getName()
+                                        + " targetClass=" + target.eClass().getName() + " uri=" + uri);
+                                String targetName = fqn(uri);
+                                boolean imported = current.main == null && value.side == ComparisonSide.OTHER;
+                                if (!imported && !affectedReferenceKeys.contains(targetName + "#" + uri.fragment()))
+                                    continue;
+                                String property = switch (feature.getName())
+                                {
+                                    case "types", "type" -> "Тип";
+                                    case "picture" -> "Картинка";
+                                    case "color" -> "Цвет";
+                                    case "font" -> "Шрифт";
+                                    case "border" -> "Рамка";
+                                    case "source" -> "Источник";
+                                    case "rights" -> "Права";
+                                    case "content", "metadata", "mdObject", "object" -> "Состав";
+                                    default -> feature.getName();
+                                };
+                                references.add(new Reference(value.node != null ? value.node.bmGetId() : id,
+                                    path, finalName, property, target, value.side, imported));
+                            }
+                        }
                     }
                 }
             }
 
-            private void addReference(Pair pair, long id, String owner, String property)
+            private boolean mayAffect(Pair owner, EReference feature)
             {
-                EObject target = pair.side == ComparisonSide.OTHER ? pair.other : pair.main;
-                if (target != null)
-                    references.add(new Reference(id, localized(owner), switch (property)
+                return mayAffect(owner.main, feature) || mayAffect(owner.other, feature);
+            }
+
+            private boolean mayAffect(EObject object, EReference feature)
+            {
+                if (object == null)
+                    return false;
+                EStructuralFeature actual = object.eClass().getEStructuralFeature(feature.getName());
+                if (actual == null)
+                    return false;
+                Object value = object.eGet(actual, true);
+                if (value instanceof EObject target)
+                    return affectedTarget(target);
+                if (value instanceof List<?> list)
+                {
+                    // Читаем ссылки штатным BM-геттером, не копируя список.
+                    for (int i = 0; i < list.size(); i++)
                     {
-                        case "type" -> "Тип";
-                        case "source" -> "Источник";
-                        case "rights" -> "Права";
-                        default -> "Состав";
-                    }, target, pair.side));
+                        Object entry = list.get(i);
+                        if (entry instanceof EObject target && affectedTarget(target))
+                            return true;
+                    }
+                }
+                return false;
+            }
+
+            private boolean affectedTarget(EObject target)
+            {
+                URI uri = EcoreUtil.getURI(target);
+                return affectedTargets.computeIfAbsent(uri, key ->
+                {
+                    String name = fqn(key);
+                    // Полный URI отличает изменённый реквизит от старой битой ссылки
+                    // на соседний реквизит того же справочника. Цели добавленных/удалённых
+                    // объектов, включая сохранённые подчинённые объекты и типы, собраны выше.
+                    return affectedReferenceKeys.contains(name + "#" + key.fragment());
+                });
             }
 
             /** Проекция одного свойства: неизменённые элементы MAIN сохраняются, пометки индивидуальны. */
@@ -894,7 +1405,7 @@ public class CompareConfigMenuHook implements IStartup
                 EStructuralFeature feature = object.eClass().getEStructuralFeature(name);
                 if (feature == null)
                     return List.of();
-                Object value = object.eGet(feature, false);
+                Object value = object.eGet(feature, true);
                 if (value instanceof EObject reference)
                     return List.of(reference);
                 if (!(value instanceof List<?> list))
@@ -903,7 +1414,7 @@ public class CompareConfigMenuHook implements IStartup
                 for (int i = 0; i < list.size(); i++)
                 {
                     progress.checkCanceled();
-                    Object entry = list instanceof InternalEList<?> raw ? raw.basicGet(i) : list.get(i);
+                    Object entry = list.get(i);
                     if (entry instanceof EObject reference)
                         result.add(reference);
                 }
@@ -1182,6 +1693,7 @@ public class CompareConfigMenuHook implements IStartup
             IEditorPart editor, CompareConfigSelectionListener listener, AbstractTreeViewer viewer)
     {
         listener.setTreeViewer(viewer);
+        CommonNodeAlphabeticSorter.installOn(viewer);
         // Разворот единственного корня и цепочек единственных потомков — общий механизм,
         // см. TreeExpander.installLoadAutoExpand (раньше был свой tryExpandCompareRoot/
         // scheduleExpandCompareRoot, теперь вынесено и обобщено на все деревья из белого списка).
@@ -1252,6 +1764,23 @@ public class CompareConfigMenuHook implements IStartup
         if (editor == null || fqn == null || fqn.isBlank())
             return false;
         return NavigatorDropSupport.revealFqn(editor, fqn, activateAndFocus)
+            == NavigatorDropSupport.RevealResult.OK;
+    }
+
+    static boolean revealObjectFeatureInTree(IEditorPart editor, String fqn, String feature, boolean activateAndFocus)
+    {
+        if (editor == null || fqn == null || fqn.isBlank())
+            return false;
+        return NavigatorDropSupport.revealFqn(editor, fqn, feature, activateAndFocus)
+            == NavigatorDropSupport.RevealResult.OK;
+    }
+
+    static boolean revealComparisonNode(IEditorPart editor, IPartialModelNode node)
+    {
+        if (editor == null || node == null)
+            return false;
+        AbstractTreeViewer viewer = getTreeViewerFromEditor(editor);
+        return viewer != null && NavigatorDropSupport.revealNode(editor, viewer, node, true)
             == NavigatorDropSupport.RevealResult.OK;
     }
 
@@ -7521,6 +8050,11 @@ public class CompareConfigMenuHook implements IStartup
          */
         static RevealResult revealFqn(IEditorPart editor, String fqn, boolean activateAndFocus)
         {
+            return revealFqn(editor, fqn, null, activateAndFocus);
+        }
+
+        static RevealResult revealFqn(IEditorPart editor, String fqn, String featureName, boolean activateAndFocus)
+        {
             AbstractTreeViewer viewer = getTreeViewerFromEditor(editor);
             IComparisonSession session = CompareConfigSelectionListener.getSession(editor);
             if (viewer == null || session == null)
@@ -7530,11 +8064,35 @@ public class CompareConfigMenuHook implements IStartup
             if (top == null)
                 return RevealResult.NOT_IN_COMPARISON;
 
+            ComparisonNode target = top;
+            if (featureName != null)
+            {
+                target = null;
+                for (ComparisonNode child : top.getChildren())
+                    if (child instanceof FeatureComparisonNode)
+                    {
+                        EStructuralFeature feature = session.getRelatedFeature(child);
+                        if (feature != null && featureName.equals(feature.getName()))
+                        {
+                            target = child;
+                            break;
+                        }
+                    }
+                if (target == null)
+                    return RevealResult.NOT_IN_COMPARISON;
+            }
+
             ensurePartialModel(editor);
-            IPartialModelNode node = resolvePartialNode(editor, viewer, top);
+            IPartialModelNode node = resolvePartialNode(editor, viewer, target);
             if (node == null)
                 return RevealResult.ROW_UNAVAILABLE;
 
+            return revealNode(editor, viewer, node, activateAndFocus);
+        }
+
+        private static RevealResult revealNode(IEditorPart editor, AbstractTreeViewer viewer,
+            IPartialModelNode node, boolean activateAndFocus)
+        {
             Control control = viewer.getControl();
             CompareConfigMultiMarkSupport multi =
                 control instanceof Tree t ? CompareConfigMultiMarkSupport.get(t) : null;
@@ -7629,7 +8187,7 @@ public class CompareConfigMenuHook implements IStartup
          * иначе материализует предков через {@link ITreeContentProvider#getChildren}.
          */
         private static IPartialModelNode resolvePartialNode(
-                IEditorPart editor, AbstractTreeViewer viewer, TopComparisonNode top)
+                IEditorPart editor, AbstractTreeViewer viewer, ComparisonNode top)
         {
             long targetId = top.bmGetId();
             IPartialModel pm = partialModelOf(editor);

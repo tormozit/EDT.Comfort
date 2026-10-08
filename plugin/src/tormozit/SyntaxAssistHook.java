@@ -1,10 +1,14 @@
 package tormozit;
 
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Proxy;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Deque;
 import java.util.IdentityHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
@@ -19,9 +23,13 @@ import org.eclipse.jface.viewers.ITreeContentProvider;
 import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.jface.viewers.Viewer;
 import org.eclipse.jface.viewers.ViewerFilter;
+import org.eclipse.swt.SWT;
+import org.eclipse.swt.custom.CTabFolder;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
+import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Tree;
+import org.eclipse.swt.widgets.TreeItem;
 import org.eclipse.ui.IPartListener2;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.IViewPart;
@@ -81,6 +89,10 @@ import com._1c.g5.v8.dt.common.ui.controls.search.SearchBox;
  * <p><b>3. История поиска страницы «Поиск» ({@link SearchHistory}).</b> Поле
  * полнотекстового поиска получает персистентную историю вместо штатной
  * {@code InMemorySearchHistory} — переживает закрытие панели и перезапуск EDT.
+ *
+ * <p><b>4. Состояние закрытой панели ({@link NavigationState}).</b> В пределах
+ * текущего сеанса EDT восстанавливаются статья, ветвящаяся история переходов,
+ * вкладка навигации, результаты поиска и позиция дерева содержания.
  */
 public final class SyntaxAssistHook implements IStartup
 {
@@ -114,7 +126,7 @@ public final class SyntaxAssistHook implements IStartup
                 @Override public void windowOpened(IWorkbenchWindow w)       { hookWindow(w); }
                 @Override public void windowActivated(IWorkbenchWindow w)    {}
                 @Override public void windowDeactivated(IWorkbenchWindow w)  {}
-                @Override public void windowClosed(IWorkbenchWindow w)       {}
+                @Override public void windowClosed(IWorkbenchWindow w)       { NavigationState.SAVED.remove(w); }
             });
             for (IWorkbenchWindow w : workbench.getWorkbenchWindows())
                 hookWindow(w);
@@ -152,6 +164,9 @@ public final class SyntaxAssistHook implements IStartup
         IWorkbenchPart part = ref != null ? ref.getPart(false) : null;
         if (!(part instanceof IViewPart viewPart) || !VIEW_ID.equals(viewPart.getViewSite().getId()))
             return;
+        // Синхронно: команда открытия статьи после showView должна иметь приоритет
+        // над восстановлением предыдущего состояния панели.
+        NavigationState.install(viewPart);
         scheduleTryPatch(viewPart, 0);
     }
 
@@ -672,6 +687,8 @@ public final class SyntaxAssistHook implements IStartup
             ClassLoader loader = listenerClass.getClassLoader();
             if (loader == null)
                 return null;
+            // Цвет читаем в SWT-потоке установки; notifyListener вызывается в FX-потоке.
+            String availabilityColor = PlatformWordAvailability.recentColor();
             return Proxy.newProxyInstance(loader, new Class<?>[] { listenerClass },
                 (proxy, method, args) ->
                 {
@@ -680,7 +697,7 @@ public final class SyntaxAssistHook implements IStartup
                         String name = method.getName();
                         if ("notifyListener".equals(name)) //$NON-NLS-1$
                         {
-                            onShowedPage(browser);
+                            onShowedPage(browser, availabilityColor);
                             return null;
                         }
                         if ("hashCode".equals(name) && (args == null || args.length == 0)) //$NON-NLS-1$
@@ -704,11 +721,12 @@ public final class SyntaxAssistHook implements IStartup
          * уже обновлён штатным слушателем (он добавлен раньше нашего), {@code executeScript}
          * из FX-потока легален.
          */
-        private static void onShowedPage(Object browser)
+        private static void onShowedPage(Object browser, String availabilityColor)
         {
             try
             {
                 Global.invoke(browser, "executeScript", STYLE_SCRIPT); //$NON-NLS-1$
+                PlatformWordAvailability.styleSyntaxPage(browser, availabilityColor);
             }
             catch (RuntimeException e)
             {
@@ -783,6 +801,302 @@ public final class SyntaxAssistHook implements IStartup
             {
                 Global.logError(TAG, "search-history: установка", e); //$NON-NLS-1$
                 return true;
+            }
+        }
+    }
+
+    /**
+     * Состояние закрытой панели в пределах окна и текущего сеанса EDT (issue 737).
+     * API и поля проверены по SyntaxAssistBrowser/HistoryNode/ContentsStore в бандле bsl.ui.
+     * Снимок не удерживает SWT/FX-контролы: дескрипторы результатов поиска сохраняются
+     * как аргументы конструктора, а при восстановлении получают новый targetBrowser
+     * и highlightersStore. История сохраняет все ветви и lastVisitedNext.
+     */
+    private static final class NavigationState
+    {
+        private static final String KEY = "tormozit.syntaxAssistNavigationState"; //$NON-NLS-1$
+        private static final String TOPIC = "syntax-assist-state"; //$NON-NLS-1$
+        private static final Map<IWorkbenchWindow, NavigationState> SAVED = new IdentityHashMap<>();
+
+        private Object version;
+        private int tab;
+        private NodePosition selection;
+        private NodePosition top;
+        private final List<NodePosition> expanded = new ArrayList<>();
+        private String query;
+        private BrowserHistory descriptionHistory;
+        private BrowserHistory searchHistory;
+
+        static void install(IViewPart view)
+        {
+            try
+            {
+                Object navigation = Global.invoke(view, "getNavigationPanel"); //$NON-NLS-1$
+                Object contents = Global.invoke(navigation, "getContentsPanel"); //$NON-NLS-1$
+                Object search = Global.invoke(navigation, "getSearchPanel"); //$NON-NLS-1$
+                Object description = Global.invoke(view, "getDescriptionPanel"); //$NON-NLS-1$
+                Object browser = Global.invoke(description, "getBrowser"); //$NON-NLS-1$
+                Object searchBrowser = Global.invoke(search, "getSearchResultsBrowser"); //$NON-NLS-1$
+                Object rootObject = Global.getField(view, "sashForm"); //$NON-NLS-1$
+                Object viewerObject = Global.getField(contents, "viewer"); //$NON-NLS-1$
+                if (!(rootObject instanceof Control root) || root.isDisposed()
+                    || !(viewerObject instanceof TreeViewer viewer) || browser == null || searchBrowser == null
+                    || Boolean.TRUE.equals(root.getData(KEY)))
+                    return;
+
+                IWorkbenchWindow window = view.getViewSite().getWorkbenchWindow();
+                root.setData(KEY, Boolean.TRUE);
+                // Dispose родителя приходит до уничтожения дочерних дерева и браузеров.
+                root.addDisposeListener(e ->
+                {
+                    try
+                    {
+                        NavigationState state = capture(navigation, contents, search, browser, searchBrowser, viewer);
+                        SAVED.put(window, state);
+                        Global.tempLog(TOPIC, "сохранено: вкладка=" + state.tab //$NON-NLS-1$
+                            + ", ветвей=" + state.expanded.size() //$NON-NLS-1$
+                            + ", статей=" + state.descriptionHistory.pages.size() //$NON-NLS-1$
+                            + ", страниц поиска=" + state.searchHistory.pages.size()); //$NON-NLS-1$
+                    }
+                    catch (Exception ex)
+                    {
+                        Global.tempLogException(TOPIC, "сохранение", ex); //$NON-NLS-1$
+                    }
+                });
+                NavigationState state = SAVED.get(window);
+                if (state != null)
+                    state.restore(navigation, contents, search, browser, searchBrowser, viewer);
+                Global.tempLog(TOPIC, "подключено: восстановление=" + (state != null)); //$NON-NLS-1$
+            }
+            catch (Exception e)
+            {
+                Global.tempLogException(TOPIC, "подключение/восстановление", e); //$NON-NLS-1$
+            }
+        }
+
+        private static NavigationState capture(Object navigation, Object contents, Object search,
+            Object browser, Object searchBrowser, TreeViewer viewer)
+        {
+            NavigationState state = new NavigationState();
+            Object store = Global.invoke(contents, "getContentsStore"); //$NON-NLS-1$
+            state.version = Global.invoke(store, "getVersion"); //$NON-NLS-1$
+            state.tab = (Integer)Global.invoke(navigation, "getSelectedTab"); //$NON-NLS-1$
+            state.selection = NodePosition.capture(viewer.getStructuredSelection().getFirstElement());
+            TreeItem topItem = viewer.getTree().getTopItem();
+            state.top = NodePosition.capture(topItem != null ? topItem.getData() : null);
+            for (Object node : viewer.getExpandedElements())
+                state.expanded.add(NodePosition.capture(node));
+            SearchBox box = (SearchBox)Global.getField(search, "fullTextSearchBox"); //$NON-NLS-1$
+            state.query = box.getText();
+            state.descriptionHistory = BrowserHistory.capture(browser);
+            state.searchHistory = BrowserHistory.capture(searchBrowser);
+            return state;
+        }
+
+        private void restore(Object navigation, Object contents, Object search, Object browser,
+            Object searchBrowser, TreeViewer viewer) throws ReflectiveOperationException
+        {
+            Object store = Global.invoke(contents, "getContentsStore"); //$NON-NLS-1$
+            if (version != null && !version.equals(Global.invoke(store, "getVersion"))) //$NON-NLS-1$
+                Global.invokeVoid(store, "setVersion", version); //$NON-NLS-1$
+            Object docTree = Global.invoke(store, "getDocumentationTree"); //$NON-NLS-1$
+            List<Object> nodes = new ArrayList<>();
+            for (NodePosition position : expanded)
+            {
+                Object node = position.resolve(docTree, viewer.getInput());
+                if (node != null)
+                    nodes.add(node);
+            }
+            viewer.setExpandedElements(nodes.toArray());
+            Object selected = selection.resolve(docTree, viewer.getInput());
+            if (selected != null)
+                Global.invokeVoid(contents, "setSelection", selected); //$NON-NLS-1$
+            Object topNode = top.resolve(docTree, viewer.getInput());
+            Deque<TreeItem> items = new ArrayDeque<>();
+            Collections.addAll(items, viewer.getTree().getItems());
+            while (topNode != null && !items.isEmpty())
+            {
+                TreeItem item = items.removeFirst();
+                if (item.getData() == topNode)
+                {
+                    viewer.getTree().setTopItem(item);
+                    break;
+                }
+                Collections.addAll(items, item.getItems());
+            }
+            SearchBox box = (SearchBox)Global.getField(search, "fullTextSearchBox"); //$NON-NLS-1$
+            boolean runOnChange = Boolean.TRUE.equals(Global.getField(box, "runSearchOnTextChange")); //$NON-NLS-1$
+            box.setRunSearchOnTextChange(false);
+            // SearchBox.setText запускает поиск даже при runSearchOnTextChange=false
+            // (флаг settingText). Возвращаем текст через API StyledText без этого флага.
+            try
+            {
+                if (!query.isEmpty())
+                {
+                    Global.invokeVoid(box, "hideMessage"); //$NON-NLS-1$
+                    box.replaceTextRange(0, box.getCharCount(), query);
+                }
+            }
+            finally { box.setRunSearchOnTextChange(runOnChange); }
+            Object highlighters = Global.getField(search, "highlightersStore"); //$NON-NLS-1$
+            descriptionHistory.restore(browser, browser, highlighters);
+            searchHistory.restore(searchBrowser, browser, highlighters);
+            Global.invokeVoid(navigation, "setSelectedTab", tab); //$NON-NLS-1$
+            // setSelectedTab сам не вызывает Selection: штатный слушатель включает
+            // подсветку поиска и обновляет previousTab только по этому событию.
+            CTabFolder folder = (CTabFolder)Global.getField(navigation, "tabFolder"); //$NON-NLS-1$
+            Event event = new Event();
+            event.item = folder.getSelection();
+            folder.notifyListeners(SWT.Selection, event);
+        }
+
+        /** Идентификатор для статей; маршрут от корня — для групп без идентификатора. */
+        private record NodePosition(Object id, int[] route)
+        {
+            static NodePosition capture(Object node)
+            {
+                Object id = Global.invoke(Global.invoke(node, "getId"), "toShortId"); //$NON-NLS-1$ //$NON-NLS-2$
+                List<Integer> reverse = new ArrayList<>();
+                Object current = node;
+                while (current != null)
+                {
+                    Object parent = Global.invoke(current, "getParent"); //$NON-NLS-1$
+                    if (parent == null)
+                        break;
+                    Object children = Global.invoke(parent, "getChildren"); //$NON-NLS-1$
+                    if (!(children instanceof Collection<?> collection))
+                        return new NodePosition(id, null);
+                    int index = new ArrayList<>(collection).indexOf(current);
+                    if (index < 0)
+                        return new NodePosition(id, null);
+                    reverse.add(index);
+                    current = parent;
+                }
+                int[] route = node != null ? new int[reverse.size()] : null;
+                if (route != null)
+                    for (int i = 0; i < route.length; i++)
+                        route[i] = reverse.get(route.length - 1 - i);
+                return new NodePosition(id, route);
+            }
+
+            Object resolve(Object tree, Object root)
+            {
+                if (id != null)
+                    return Global.invoke(tree, "getNode", id); //$NON-NLS-1$
+                if (route == null)
+                    return null;
+                Object node = root;
+                for (int index : route)
+                {
+                    Object children = Global.invoke(node, "getChildren"); //$NON-NLS-1$
+                    if (!(children instanceof Collection<?> collection) || index >= collection.size())
+                        return null;
+                    node = new ArrayList<>(collection).get(index);
+                }
+                return node;
+            }
+        }
+
+        private record BrowserHistory(Class<?> nodeClass, List<SavedPage> pages,
+            int[] parents, int[] next, int current)
+        {
+            static BrowserHistory capture(Object browser)
+            {
+                Object current = Global.invoke(browser, "getHistoryNode"); //$NON-NLS-1$
+                if (current == null)
+                    return new BrowserHistory(null, List.of(), new int[0], new int[0], -1);
+                Object root = current;
+                Object previous;
+                while ((previous = Global.invoke(root, "getPrevious")) != null) //$NON-NLS-1$
+                    root = previous;
+                List<Object> nodes = new ArrayList<>();
+                Map<Object, Integer> indexes = new IdentityHashMap<>();
+                nodes.add(root);
+                indexes.put(root, 0);
+                for (int i = 0; i < nodes.size(); i++)
+                {
+                    Object children = Global.invoke(nodes.get(i), "getNexts"); //$NON-NLS-1$
+                    if (children instanceof List<?> list)
+                        for (Object child : list)
+                            if (!indexes.containsKey(child))
+                            {
+                                indexes.put(child, nodes.size());
+                                nodes.add(child);
+                            }
+                }
+                // Новый узел попадает в nexts родителя только после успешной загрузки.
+                // Закрытие во время загрузки сохраняет и текущую запрошенную страницу.
+                if (!indexes.containsKey(current))
+                {
+                    indexes.put(current, nodes.size());
+                    nodes.add(current);
+                }
+                List<SavedPage> pages = new ArrayList<>();
+                int[] parents = new int[nodes.size()];
+                int[] next = new int[nodes.size()];
+                for (int i = 0; i < nodes.size(); i++)
+                {
+                    Object node = nodes.get(i);
+                    pages.add(SavedPage.capture(Global.invoke(node, "getPageDescriptor"))); //$NON-NLS-1$
+                    parents[i] = indexes.getOrDefault(Global.invoke(node, "getPrevious"), -1); //$NON-NLS-1$
+                    next[i] = indexes.getOrDefault(Global.invoke(node, "getLastVisitedNext"), -1); //$NON-NLS-1$
+                }
+                return new BrowserHistory(current.getClass(), pages, parents, next, indexes.get(current));
+            }
+
+            void restore(Object browser, Object targetBrowser, Object highlighters) throws ReflectiveOperationException
+            {
+                if (current < 0)
+                    return;
+                Class<?> descriptorClass = BslSyntaxAssist.bslUiClass(
+                    "com._1c.g5.v8.dt.internal.bsl.ui.syntaxassist.browser.ISyntaxAssistBrowserPageDescriptor"); //$NON-NLS-1$
+                Constructor<?> constructor = nodeClass.getConstructor(descriptorClass, nodeClass);
+                List<Object> nodes = new ArrayList<>();
+                for (int i = 0; i < pages.size(); i++)
+                {
+                    Object parent = parents[i] >= 0 ? nodes.get(parents[i]) : null;
+                    Object node = constructor.newInstance(pages.get(i).restore(targetBrowser, highlighters), parent);
+                    nodes.add(node);
+                    if (parent != null)
+                        Global.invokeVoid(parent, "add", node); //$NON-NLS-1$
+                }
+                for (int i = 0; i < nodes.size(); i++)
+                    if (next[i] >= 0 && !Global.setFieldForce(nodes.get(i), "lastVisitedNext", nodes.get(next[i]))) //$NON-NLS-1$
+                        throw new IllegalStateException("Не удалось восстановить ветвь истории");
+                Global.invokeVoid(browser, "openHistoryNode", nodes.get(current)); //$NON-NLS-1$
+            }
+        }
+
+        private record SavedPage(Object descriptor, Class<?> searchClass, Object[] arguments)
+        {
+            static SavedPage capture(Object descriptor)
+            {
+                String name = descriptor.getClass().getSimpleName();
+                if ("SearchResultsPageDescriptor".equals(name)) //$NON-NLS-1$
+                    return new SavedPage(null, descriptor.getClass(), new Object[] {
+                        Global.getField(descriptor, "query"), Global.getField(descriptor, "pageNumber"), //$NON-NLS-1$ //$NON-NLS-2$
+                        Global.getField(descriptor, "pageSize"), null, Global.getField(descriptor, "docProvider"), //$NON-NLS-1$ //$NON-NLS-2$
+                        null, Global.getField(descriptor, "platformDocProvider"), //$NON-NLS-1$
+                        Global.getField(descriptor, "queryLanguage"), Global.getField(descriptor, "version") }); //$NON-NLS-1$ //$NON-NLS-2$
+                // Эти три штатных дескриптора содержат только данные и провайдер документации.
+                if (!"DocumentationPageDescriptor".equals(name) && !"DocumentationPageGroupDescriptor".equals(name) //$NON-NLS-1$ //$NON-NLS-2$
+                    && !"SimplePageDescriptor".equals(name)) //$NON-NLS-1$
+                    throw new IllegalStateException("Неизвестный дескриптор: " + descriptor.getClass().getName());
+                return new SavedPage(descriptor, null, null);
+            }
+
+            Object restore(Object targetBrowser, Object highlighters) throws ReflectiveOperationException
+            {
+                if (searchClass == null)
+                    return descriptor;
+                Object[] args = arguments.clone();
+                args[3] = targetBrowser;
+                args[5] = highlighters;
+                // Единственный публичный конструктор SearchResultsPageDescriptor проверен в JAR.
+                for (Constructor<?> constructor : searchClass.getConstructors())
+                    if (constructor.getParameterCount() == args.length)
+                        return constructor.newInstance(args);
+                throw new NoSuchMethodException(searchClass.getName());
             }
         }
     }

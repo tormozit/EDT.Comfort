@@ -2,8 +2,11 @@ package tormozit;
 
 import java.util.function.Function;
 
+import org.eclipse.core.runtime.NullProgressMonitor;
 import org.eclipse.emf.ecore.EObject;
+import org.eclipse.emf.ecore.EReference;
 import org.eclipse.emf.ecore.EStructuralFeature;
+import org.eclipse.emf.ecore.util.EcoreUtil;
 import org.eclipse.jface.viewers.DoubleClickEvent;
 import org.eclipse.jface.viewers.IDoubleClickListener;
 import org.eclipse.jface.viewers.IOpenListener;
@@ -14,6 +17,8 @@ import org.eclipse.swt.SWT;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Listener;
+import org.eclipse.swt.widgets.Menu;
+import org.eclipse.swt.widgets.MenuItem;
 import org.eclipse.swt.widgets.Tree;
 import org.eclipse.ui.IPageLayout;
 import org.eclipse.ui.IPartListener2;
@@ -32,6 +37,7 @@ import com._1c.g5.v8.dt.form.model.FormCommand;
 import com._1c.g5.v8.dt.form.model.FormItem;
 import com._1c.g5.v8.dt.form.model.FormParameter;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicFeature;
+import com._1c.g5.v8.dt.metadata.mdclass.MdClassPackage;
 import com._1c.g5.v8.dt.validation.marker.Marker;
 import com._1c.g5.v8.dt.validation.marker.StandardExtraInfo;
 
@@ -43,6 +49,7 @@ import com._1c.g5.v8.dt.validation.marker.StandardExtraInfo;
  * {@code com._1c.g5.v8.dt.rights.model}) — открывает редактор роли на странице «Права», выделяет
  * строку объекта и прокручивает колонку права в видимую область
  * ({@link ConfigSearchResultsHook#revealRoleRightsRow}, issue #463);</li>
+ * <li><b>корневая конфигурация</b> — открывает Configuration.mdo в текстовом редакторе;</li>
  * <li><b>любая другая проблема на свойстве объекта панели «Свойства»</b> (элемент/реквизит/команда
  * формы, реквизит МД; объект проблемы может быть вложен в него — путь к данным, {@code ExtInfo}
  * картинки подменю) — показывает панель и активирует поле свойства
@@ -150,6 +157,7 @@ public final class ProblemViewOpenTargetHook implements IStartup
             viewer.setData(VIEWER_MARKER, Boolean.TRUE);
         }
         Tree tree = viewer.getTree();
+        RootBrokenReferencesFix.install(tree, viewer);
         if (tree != null && !tree.isDisposed() && !Boolean.TRUE.equals(tree.getData(TREE_MARKER)))
         {
             Listener treeListener = event -> {
@@ -255,6 +263,13 @@ public final class ProblemViewOpenTargetHook implements IStartup
         EObject markerObject = marker.provideObject(identity);
         if (markerObject == null)
             return;
+        if (MdClassPackage.Literals.CONFIGURATION.isSuperTypeOf(markerObject.eClass()))
+        {
+            Global.tempLog("broken-links-problem", "open configuration marker=" + marker.getClass().getName()
+                + " check=" + marker.getCheckId() + " feature=" + marker.getFeatureId());
+            Display.getDefault().asyncExec(() -> ProblemViewOpenInTextEditorHandler.openMarker(marker));
+            return;
+        }
         String rightName = roleRightName(markerObject, marker);
         if (ConfigSearchResultsHook.revealRoleRightsRow(page, markerObject, rightName, marker.getMessage()))
             return;
@@ -332,7 +347,7 @@ public final class ProblemViewOpenTargetHook implements IStartup
         return marker instanceof Marker m ? m : null;
     }
 
-    private static EStructuralFeature resolveFeature(EObject object, Marker marker)
+    static EStructuralFeature resolveFeature(EObject object, Marker marker)
     {
         int featureId = marker.getFeatureId();
         if (featureId >= 0)
@@ -362,5 +377,51 @@ public final class ProblemViewOpenTargetHook implements IStartup
     {
         return obj instanceof BasicFeature || obj instanceof FormItem || obj instanceof FormAttribute
             || obj instanceof FormCommand || obj instanceof FormParameter;
+    }
+
+    /** Исправление штатных маркеров модели, у которых нет идентификатора проверки. */
+    private static final class RootBrokenReferencesFix
+    {
+        private static final String MENU_KEY = "tormozit.configurationBrokenReferenceFix";
+
+        static void install(Tree tree, TreeViewer viewer)
+        {
+            if (tree == null || tree.isDisposed())
+                return;
+            Menu menu = tree.getMenu();
+            if (menu == null || Boolean.TRUE.equals(menu.getData(MENU_KEY)))
+                return;
+            menu.setData(MENU_KEY, Boolean.TRUE);
+            menu.addListener(SWT.Show, event ->
+            {
+                for (MenuItem item : menu.getItems())
+                    if (Boolean.TRUE.equals(item.getData(MENU_KEY)))
+                        item.dispose();
+                if (!(viewer.getSelection() instanceof IStructuredSelection selected) || selected.size() != 1)
+                    return;
+                Marker marker = resolveMarker(selected.getFirstElement());
+                if (marker == null)
+                    return;
+                Global.tempLog("broken-links-problem", "menu marker=" + marker.getClass().getName()
+                    + " check=" + marker.getCheckId() + " feature=" + marker.getFeatureId());
+                Function<EObject, MdReferenceSupport.Location> resolve = object ->
+                {
+                    if (object == null || !MdClassPackage.Literals.CONFIGURATION.isSuperTypeOf(object.eClass())
+                        || !(resolveFeature(object, marker) instanceof EReference feature)
+                        || MdReferenceSupport.findBrokenReferences(object, feature, new NullProgressMonitor()).isEmpty())
+                        return null;
+                    return new MdReferenceSupport.Location(EcoreUtil.getURI(object), object.eClass(), feature.getName());
+                };
+                MdReferenceSupport.Location location = marker.provideObject(resolve);
+                if (location == null || marker.getProject() == null)
+                    return;
+                MenuItem item = new MenuItem(menu, SWT.PUSH);
+                item.setData(MENU_KEY, Boolean.TRUE);
+                item.setText("Удалить битые ссылки");
+                ComfortSubmenuHelper.setMenuItemTooltip(item, "Удалить битые ссылки выбранного свойства конфигурации");
+                item.addListener(SWT.Selection, selection -> MdReferenceSupport.removeBrokenReferences(
+                    marker.getProject(), java.util.List.of(location), null));
+            });
+        }
     }
 }

@@ -2,6 +2,11 @@ package tormozit;
 
 import java.text.Collator;
 import java.util.Locale;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.Set;
+import java.util.WeakHashMap;
+import java.util.function.BiFunction;
 
 import org.eclipse.core.runtime.Platform;
 import org.eclipse.jface.viewers.StructuredViewer;
@@ -11,6 +16,9 @@ import org.eclipse.jface.viewers.Viewer;
 import org.eclipse.jface.viewers.ViewerComparator;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.ui.model.IWorkbenchAdapter;
+
+import com._1c.g5.v8.dt.compare.ui.partialmodel.node.IPartialModelNode;
+import com._1c.g5.v8.dt.compare.ui.partialmodel.node.VirtualFolderPartialModelNode;
 
 /**
  * Алфавитный порядок непосредственных детей верхнего узла «Общие» конфигурации
@@ -30,8 +38,43 @@ final class CommonNodeAlphabeticSorter extends TreePathViewerSorter
 {
     private static final String COMMON_NODE_CLASS_NAME =
             "com._1c.g5.v8.dt.md.ui.navigator.adapters.CommonNavigatorAdapter"; //$NON-NLS-1$
+    private static final String COMMON_FOLDER_DESCRIPTOR_CLASS_NAME =
+            "com._1c.g5.v8.dt.md.compare.ui.internal.CommonVirtualFolderDescriptor"; //$NON-NLS-1$
 
     private static final Collator RU_COLLATOR = createRuCollator();
+    private static final Set<Object> COMMON_SEARCH_NODES = Collections.newSetFromMap(new WeakHashMap<>());
+
+    /** Общая точка после штатной сортировки JFace; вплетение устанавливает ранний бандл. */
+    static void installGlobally()
+    {
+        System.getProperties().put("tormozit.commonNode.searchNode", //$NON-NLS-1$
+            (BiFunction<Object, Object, Object>) (adapter, node) -> {
+                if (adapter != null && COMMON_NODE_CLASS_NAME.equals(adapter.getClass().getName()) && node != null)
+                {
+                    synchronized (COMMON_SEARCH_NODES)
+                    {
+                        COMMON_SEARCH_NODES.add(node);
+                    }
+                }
+                return node;
+            });
+        System.getProperties().put("tormozit.commonNode.children", //$NON-NLS-1$
+            (BiFunction<Object, Object, Object>) (parent, children) -> {
+                Object element = parent instanceof TreePath path ? path.getLastSegment() : parent;
+                if (!(children instanceof Object[] elements) || !isEnabled()
+                        || !ComfortSettings.isReplaceListFiltersEnabled() || !isCommonNode(element))
+                    return children;
+                Object[] sorted = elements.clone();
+                // Collator не потокобезопасен; провайдер дерева может вызываться в фоне.
+                synchronized (RU_COLLATOR)
+                {
+                    Arrays.sort(sorted, (first, second) -> RU_COLLATOR.compare(labelOf(first), labelOf(second)));
+                }
+                Global.tempLog("common-node-sort", "parent=" + element.getClass().getName() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " children=" + sorted.length); //$NON-NLS-1$
+                return sorted;
+            });
+    }
 
     private final ViewerComparator delegate;
 
@@ -96,6 +139,10 @@ final class CommonNodeAlphabeticSorter extends TreePathViewerSorter
     @Override
     public int compare(Viewer viewer, Object e1, Object e2)
     {
+        // Обычный TreeViewer сравнения не передаёт TreePath: родитель есть в модели узла.
+        if (isEnabled() && e1 instanceof IPartialModelNode first && e2 instanceof IPartialModelNode second
+                && first.getParent() == second.getParent() && isCommonNode(first.getParent()))
+            return RU_COLLATOR.compare(labelOf(e1), labelOf(e2));
         if (delegate != null)
             return delegate.compare(viewer, e1, e2);
         return 0;
@@ -109,11 +156,31 @@ final class CommonNodeAlphabeticSorter extends TreePathViewerSorter
 
     private static boolean isCommonNode(Object element)
     {
+        synchronized (COMMON_SEARCH_NODES)
+        {
+            if (COMMON_SEARCH_NODES.contains(element))
+                return true;
+        }
+        if (element instanceof VirtualFolderPartialModelNode folder)
+            return ComfortSettings.isReplaceListFiltersEnabled()
+                    && COMMON_FOLDER_DESCRIPTOR_CLASS_NAME.equals(folder.getDescriptor().getClass().getName());
         return element != null && COMMON_NODE_CLASS_NAME.equals(element.getClass().getName());
     }
 
     private static String labelOf(Object element)
     {
+        if (element != null && "com._1c.g5.v8.dt.internal.search.ui.provider.MatchTreeItem".equals( //$NON-NLS-1$
+                element.getClass().getName()))
+        {
+            // Поле text подтверждено в MatchTreeItem: содержит название без счётчика совпадений.
+            Object text = Global.getField(element, "text"); //$NON-NLS-1$
+            return text instanceof String value ? value : ""; //$NON-NLS-1$
+        }
+        if (element instanceof IPartialModelNode node)
+        {
+            String label = node.getLabel();
+            return label != null ? label : ""; //$NON-NLS-1$
+        }
         Object adapterObj = Platform.getAdapterManager().getAdapter(element, IWorkbenchAdapter.class);
         if (adapterObj instanceof IWorkbenchAdapter adapter)
         {

@@ -233,7 +233,7 @@ final class BracketContentHintIndex
      * {@code ForEachStatement} — их первый лист уже сразу после {@code Для}
      * (переменная цикла для {@code ForToStatement}, {@code Каждого} для
      * {@code ForEachStatement}). Пропускать для них ничего не нужно — {@code Для}
-     * и так не попадает в подсказку. Подтверждено логами {@code bracket-hint.log}:
+     * и так не попадает в подсказку. Проверено по дереву разбора:
      * первый лист {@code ForToStatement} — {@code RuleCall(IDENT)=Индекс}, а не {@code Для}.
      */
     private static int leadingKeywordCount(EObject element)

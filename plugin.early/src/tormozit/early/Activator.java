@@ -111,13 +111,21 @@ public final class Activator
         private static final String COMPARISON_EDITOR =
             "com._1c.g5.v8.dt.internal.compare.ui.editor.DtComparisonEditor"; //$NON-NLS-1$
         static final String PROP_MERGE_CONFIRMATION = "tormozit.compare.mergeConfirmation"; //$NON-NLS-1$
+        private static final String PROP_AFTER_MERGE = "tormozit.compare.afterMerge"; //$NON-NLS-1$
         private static final String EDITOR_MATCHING = "com._1c.g5.v8.dt.ui.editor.DtEditorMatchingStrategy"; //$NON-NLS-1$
         private static final String GRANULAR_EDITOR = "com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor"; //$NON-NLS-1$
+        /** Совпадает с MdEditorTabsHook.PROP_PAGES_CREATED. */
+        private static final String PROP_PAGES_CREATED = "tormozit.mdEditor.pagesCreated"; //$NON-NLS-1$
+        private static final String TREE_VIEWER = "org.eclipse.jface.viewers.AbstractTreeViewer"; //$NON-NLS-1$
+        private static final String SEARCH_TREE_LAYOUT =
+            "com._1c.g5.v8.dt.internal.search.ui.provider.SearchResultTreeLayoutManager"; //$NON-NLS-1$
+        private static final String PROP_COMMON_CHILDREN = "tormozit.commonNode.children"; //$NON-NLS-1$
+        private static final String PROP_COMMON_SEARCH_NODE = "tormozit.commonNode.searchNode"; //$NON-NLS-1$
         /** Совпадает с WorkbenchTabsHook.EditorModelMatching.PROPERTY. */
         static final String PROP_EDITOR_MODEL_EQUALS = "tormozit.editor.modelEquals"; //$NON-NLS-1$
         private static final List<String> TARGETS = List.of(BSL_PARSER, CUSTOM_BSL_PARSER, HELPER,
             SUPPRESSION_PROVIDER, FOLDING_PROVIDER, TAB_FOLDER, PART_LIST_CONTROL, COMPARISON_EDITOR,
-            EDITOR_MATCHING, GRANULAR_EDITOR);
+            EDITOR_MATCHING, GRANULAR_EDITOR, TREE_VIEWER, SEARCH_TREE_LAYOUT);
 
         private static final String EXTRACT_SUPPRESSIONS_DESC = "(Lorg/eclipse/xtext/nodemodel/ILeafNode;)Ljava/util/Set;"; //$NON-NLS-1$
         private static final String ILEAF_NODE = "org/eclipse/xtext/nodemodel/ILeafNode"; //$NON-NLS-1$
@@ -132,6 +140,11 @@ public final class Activator
         /** Свойства ставятся до хука: вплетённый код вызывает их без проверки на {@code null}. */
         static void install(BundleContext context)
         {
+            System.getProperties().putIfAbsent(PROP_PAGES_CREATED, (Consumer<Object>) editor -> {});
+            System.getProperties().putIfAbsent(PROP_COMMON_CHILDREN,
+                (BiFunction<Object, Object, Object>) (parent, children) -> children);
+            System.getProperties().putIfAbsent(PROP_COMMON_SEARCH_NODE,
+                (BiFunction<Object, Object, Object>) (adapter, node) -> node);
             System.getProperties().put(PROP_BEFORE_CREATE_PARSER,
                 (Consumer<Object>) stream -> BslParserHook.beforeCreateParser(stream));
             System.getProperties().put(PROP_AFTER_CHUNK_PARSE,
@@ -156,6 +169,7 @@ public final class Activator
                     throw new IllegalStateException(e);
                 }
             });
+            System.getProperties().putIfAbsent(PROP_AFTER_MERGE, (Function<Object, Object>) editor -> null);
             context.registerService(WeavingHook.class, new EarlyWeaving(), null);
         }
 
@@ -188,7 +202,7 @@ public final class Activator
         {
             ClassReader reader = new ClassReader(bytes);
             ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
-            int[] touched = new int[1];
+            int[] touched = new int[2];
             reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
             {
                 @Override
@@ -221,6 +235,24 @@ public final class Activator
                                 super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/Boolean", "booleanValue", "()Z", false);
                                 touched[0]++;
                             }
+                            else if (opcode == Opcodes.INVOKEVIRTUAL
+                                && owner.equals(COMPARISON_EDITOR.replace('.', '/'))
+                                && "runMergeProcess".equals(method) && "(Z)V".equals(desc)) //$NON-NLS-1$ //$NON-NLS-2$
+                            {
+                                super.visitMethodInsn(opcode, owner, method, desc, isInterface);
+                                // После штатного процесса, до обработки результата и закрытия сравнения.
+                                super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties",
+                                    "()Ljava/util/Properties;", false);
+                                super.visitLdcInsn(PROP_AFTER_MERGE);
+                                super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get",
+                                    "(Ljava/lang/Object;)Ljava/lang/Object;", false);
+                                super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Function");
+                                super.visitVarInsn(Opcodes.ALOAD, 0);
+                                super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Function", "apply",
+                                    "(Ljava/lang/Object;)Ljava/lang/Object;", true);
+                                super.visitInsn(Opcodes.POP);
+                                touched[1]++;
+                            }
                             else
                                 super.visitMethodInsn(opcode, owner, method, desc, isInterface);
                         }
@@ -228,8 +260,8 @@ public final class Activator
                 }
             }, 0);
             System.setProperty("tormozit.compare.mergeConfirmationPatch",
-                touched[0] == 1 ? "woven" : "missing confirmation call");
-            return touched[0] == 1 ? writer.toByteArray() : null;
+                touched[0] == 1 && touched[1] == 1 ? "woven" : "missing merge call");
+            return touched[0] == 1 && touched[1] == 1 ? writer.toByteArray() : null;
         }
 
         /**
@@ -286,12 +318,12 @@ public final class Activator
             return touched[0] == 1 ? writer.toByteArray() : null;
         }
 
-        /** Сохранённое название вкладки действует и во время асинхронной загрузки редактора EDT. */
+        /** Сохранённое название и назначение значков вкладкам до showEditorInput и первой отрисовки. */
         private static byte[] transformGranularEditor(byte[] bytes)
         {
             ClassReader reader = new ClassReader(bytes);
             ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
-            int[] touched = new int[1];
+            int[] touched = new int[2];
             reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
             {
                 @Override
@@ -299,6 +331,25 @@ public final class Activator
                     String[] exceptions)
                 {
                     MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    if (mv != null && "createPages".equals(name) && "()V".equals(descriptor)) //$NON-NLS-1$ //$NON-NLS-2$
+                        return new MethodVisitor(Opcodes.ASM9, mv)
+                        {
+                            @Override
+                            public void visitMethodInsn(int opcode, String owner, String name, String descriptor,
+                                boolean isInterface)
+                            {
+                                super.visitMethodInsn(opcode, owner, name, descriptor, isInterface);
+                                if (opcode == Opcodes.INVOKESPECIAL && "org/eclipse/ui/forms/editor/FormEditor".equals(owner) //$NON-NLS-1$
+                                    && "createPages".equals(name) && "()V".equals(descriptor)) //$NON-NLS-1$ //$NON-NLS-2$
+                                {
+                                    emitGetProperty(this, PROP_PAGES_CREATED, "java/util/function/Consumer"); //$NON-NLS-1$
+                                    super.visitVarInsn(Opcodes.ALOAD, 0);
+                                    super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Consumer", "accept", //$NON-NLS-1$ //$NON-NLS-2$
+                                        "(Ljava/lang/Object;)V", true); //$NON-NLS-1$
+                                    touched[1]++;
+                                }
+                            }
+                        };
                     if (mv == null || !"init".equals(name) //$NON-NLS-1$
                         || !"(Lorg/eclipse/ui/IEditorSite;Lcom/_1c/g5/v8/dt/ui/editor/input/IDtEditorInput;)V".equals(descriptor)) //$NON-NLS-1$
                         return mv;
@@ -329,12 +380,14 @@ public final class Activator
                     };
                 }
             }, 0);
-            return touched[0] == 1 ? writer.toByteArray() : null;
+            return touched[0] == 1 && touched[1] == 1 ? writer.toByteArray() : null;
         }
 
         /** Кадры стека остаются исходными: вставки без ветвлений и не меняют высоту стека в точках кадров. */
         static byte[] transform(String className, byte[] bytes)
         {
+            if (TREE_VIEWER.equals(className) || SEARCH_TREE_LAYOUT.equals(className))
+                return transformCommonTree(className, bytes);
             if (GRANULAR_EDITOR.equals(className))
                 return transformGranularEditor(bytes);
             if (EDITOR_MATCHING.equals(className))
@@ -414,6 +467,52 @@ public final class Activator
                 }
             }, 0);
             return touched[0] > 0 ? writer.toByteArray() : null;
+        }
+
+        /** Обработка результата без новых ветвлений и локальных переменных. */
+        private static byte[] transformCommonTree(String className, byte[] bytes)
+        {
+            boolean tree = TREE_VIEWER.equals(className);
+            String method = tree ? "getSortedChildren" : "insertWorkbenchAdapter"; //$NON-NLS-1$ //$NON-NLS-2$
+            String descriptor = tree ? "(Ljava/lang/Object;)[Ljava/lang/Object;" //$NON-NLS-1$
+                : "(Lorg/eclipse/ui/model/IWorkbenchAdapter;Ljava/lang/Object;Lcom/_1c/g5/v8/bm/integration/IBmModel;)Lcom/_1c/g5/v8/dt/internal/search/ui/provider/MatchTreeItem;"; //$NON-NLS-1$
+            String property = tree ? PROP_COMMON_CHILDREN : PROP_COMMON_SEARCH_NODE;
+            ClassReader reader = new ClassReader(bytes);
+            ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+            int[] returns = { 0 };
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String desc, String signature,
+                    String[] exceptions)
+                {
+                    MethodVisitor original = super.visitMethod(access, name, desc, signature, exceptions);
+                    if (!method.equals(name) || !descriptor.equals(desc))
+                        return original;
+                    return new MethodVisitor(Opcodes.ASM9, original)
+                    {
+                        @Override
+                        public void visitInsn(int opcode)
+                        {
+                            if (opcode == Opcodes.ARETURN)
+                            {
+                                emitGetProperty(this, property, "java/util/function/BiFunction"); //$NON-NLS-1$
+                                super.visitInsn(Opcodes.SWAP);
+                                super.visitVarInsn(Opcodes.ALOAD, 1);
+                                super.visitInsn(Opcodes.SWAP);
+                                super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BiFunction", //$NON-NLS-1$
+                                    "apply", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$ //$NON-NLS-2$
+                                super.visitTypeInsn(Opcodes.CHECKCAST, tree ? "[Ljava/lang/Object;" //$NON-NLS-1$
+                                    : "com/_1c/g5/v8/dt/internal/search/ui/provider/MatchTreeItem"); //$NON-NLS-1$
+                                returns[0]++;
+                            }
+                            super.visitInsn(opcode);
+                        }
+                    };
+                }
+            }, 0);
+            System.setProperty(property + ".patch", "returns=" + returns[0]); //$NON-NLS-1$ //$NON-NLS-2$
+            return returns[0] > 0 ? writer.toByteArray() : null;
         }
 
         /**

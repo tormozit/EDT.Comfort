@@ -35,7 +35,6 @@ import org.eclipse.ui.IEditorReference;
 import org.eclipse.ui.IPartListener2;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.IWorkbenchPage;
-import org.eclipse.ui.IWorkbenchPart;
 import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
@@ -134,41 +133,6 @@ public final class WhitespaceToggleHook implements IStartup
             hookWindow(window);
     }
 
-    // #region agent log
-    /** Пишет число панелей с пустым id после события части — чтобы найти редактор, который её создаёт. */
-    private static void emptyIdToolBarDiag(IWorkbenchWindow w, String event, IWorkbenchPartReference ref)
-    {
-        final String topic = "empty-id-toolbar"; //$NON-NLS-1$
-        try
-        {
-            org.eclipse.e4.ui.model.application.ui.basic.MWindow mw =
-                w.getService(org.eclipse.e4.ui.model.application.ui.basic.MWindow.class);
-            org.eclipse.e4.ui.workbench.modeling.EModelService ms =
-                w.getService(org.eclipse.e4.ui.workbench.modeling.EModelService.class);
-            int empty = 0;
-            int total = 0;
-            if (mw != null && ms != null)
-                for (org.eclipse.e4.ui.model.application.ui.menu.MToolBar bar : ms.findElements(mw, null,
-                    org.eclipse.e4.ui.model.application.ui.menu.MToolBar.class, null))
-                {
-                    total++;
-                    if (bar.getElementId() == null || bar.getElementId().isEmpty())
-                        empty++;
-                }
-            IWorkbenchPart part = ref == null ? null : ref.getPart(false);
-            Global.tempLog(topic, event + " empty=" + empty + " total=" + total + " refId=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + (ref == null ? null : ref.getId()) + " partClass=" //$NON-NLS-1$
-                + (part == null ? null : part.getClass().getName())
-                + (part instanceof IEditorPart ep ? " editorInput=" + ep.getEditorInput() : "")); //$NON-NLS-1$ //$NON-NLS-2$
-        }
-        catch (Throwable t)
-        {
-            Global.tempLogException(topic, "diag failed", t); //$NON-NLS-1$
-        }
-    }
-
-    // #endregion
-
     private static void hookWindow(IWorkbenchWindow window)
     {
         IWorkbenchPage page = window.getActivePage();
@@ -187,15 +151,12 @@ public final class WhitespaceToggleHook implements IStartup
             @Override
             public void partOpened(IWorkbenchPartReference ref)
             {
-                emptyIdToolBarDiag(window, "partOpened", ref); //$NON-NLS-1$
                 hookFromPartRef(ref);
-                Display.getDefault().asyncExec(() -> emptyIdToolBarDiag(window, "partOpened+async", ref)); //$NON-NLS-1$
             }
 
             @Override
             public void partActivated(IWorkbenchPartReference ref)
             {
-                emptyIdToolBarDiag(window, "partActivated", ref); //$NON-NLS-1$
                 hookFromPartRef(ref);
                 Display.getDefault().asyncExec(WhitespaceToggleHook::updateToggleVisibility);
             }

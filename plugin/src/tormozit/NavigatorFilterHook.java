@@ -227,7 +227,9 @@ public final class NavigatorFilterHook implements IStartup
                 NavigatorFilterDebug.log("try#" + attempt + " WAIT " + lastGiveUpReason); //$NON-NLS-1$ //$NON-NLS-2$
             return false;
         }
-        SearchBoxFilterAccess searchInput = SearchBoxFilterAccess.resolve(navigator, searchBox);
+        // Подключение фильтра при запуске не должно активировать часть и менять фокус:
+        // штатный отбор проблем может обратиться к ещё не запущенной модели проекта.
+        SearchBoxFilterAccess searchInput = SearchBoxFilterAccess.resolveQuiet(navigator, searchBox);
         if (searchInput == null)
         {
             lastGiveUpReason = "searchInput=null"; //$NON-NLS-1$

@@ -216,7 +216,9 @@ public final class CompareEditorCurrentLinesHook
             return;
         if (!scheduledEditorInputs.add(editorInput))
             return; // уже запланировано другим вызовом (partOpened/partActivated/начальный обход)
-        scheduleAttach(editorInput, editor, 0, false);
+        // Готовый вьюер дополняем сразу, до возврата из partOpened/partActivated.
+        if (tryAttach(editorInput, editor) == ATTACH_WAIT)
+            scheduleAttach(editorInput, editor, 0, false);
     }
 
     private static boolean isSupportedGitCompareInput(Object input)
@@ -354,11 +356,11 @@ public final class CompareEditorCurrentLinesHook
          * меню, см. switchToBslViewerIfNeeded), иначе по умолчанию открывается plain-текстовое
          * сравнение. Переключение уничтожает и пересоздаёт этот же viewer/control (тот же
          * механизм, что штатная смена варианта пользователем — см. комментарий в attach() про
-         * wrapper.addDisposeListener) — поэтому ATTACH_WAIT, а не attach() сейчас: следующий
-         * повтор tryAttach подхватит уже новый (встроенный язык) viewer.
+         * wrapper.addDisposeListener). Повторно читаем pane сразу после переключения,
+         * чтобы дополнить новый вьюер до первой отрисовки; если он ещё не готов, ждём.
          */
         if (switchToBslViewerIfNeeded(editorInput, pane, mergeViewer))
-            return ATTACH_WAIT;
+            return tryAttach(editorInput, editor);
 
         attach(pane, viewerControl, editorInput, mergeViewer, editor);
         return ATTACH_DONE;
@@ -381,8 +383,8 @@ public final class CompareEditorCurrentLinesHook
      * {@code pane.fSelectedViewerDescriptor = vd; pane.setInput(oldViewer.getInput());} —
      * {@code fSelectedViewerDescriptor} приватное, отсюда рефлексия.
      *
-     * @return true, если переключение запущено (viewer будет пересоздан — вызывающий код должен
-     *         подождать следующего повтора, а не продолжать attach() на уже устаревшем viewer)
+     * @return true, если переключение запущено (вызывающий код должен повторно прочитать
+     *         вьюер из pane, а не продолжать attach() на уже устаревшем viewer)
      */
     private static boolean switchToBslViewerIfNeeded(CompareEditorInput editorInput,
         CompareViewerSwitchingPane pane, TextMergeViewer viewer)

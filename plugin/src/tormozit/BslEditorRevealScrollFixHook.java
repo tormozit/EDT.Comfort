@@ -9,7 +9,7 @@ import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.widgets.Display;
-import org.eclipse.swt.widgets.Listener;
+import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.ScrollBar;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IEditorReference;
@@ -55,10 +55,10 @@ import java.util.Set;
  * рассылки нет, сюда он долетает штатно вместе с остальными подписчиками того же события.
  *
  * <p>Для свежесозданного виджета (переход в модуль, который ещё не был открыт / переключение
- * страницы «Модуль» в granular-редакторе) наш {@code attachToBslEditor} выполняется через
- * {@code asyncExec} на тик позже, чем уже успевший отработать штатный reveal — сравнивать
- * {@code getHorizontalPixel()} не с чем, «прыжок» этим способом не поймать. Поэтому на самом
- * подключении текущее выделение сразу приводится к тому же виду, не дожидаясь очередного
+ * страницы «Модуль» в granular-редакторе) наш {@code attachToBslEditor} выполняется
+ * синхронно, но штатный reveal уже мог отработать — сравнивать
+ * {@code getHorizontalPixel()} не с чем, «прыжок» этим способом не поймать. Поэтому при
+ * первом рисовании текущее выделение приводится к тому же виду, не дожидаясь очередного
  * {@code selectionChanged}.
  *
  * <p>Восстановление редакторов при старте EDT — тот же штатный {@code selectAndReveal}, но
@@ -66,19 +66,18 @@ import java.util.Set;
  * {@code IEditorReference.getEditor(false)} (см. {@link BslModulePositionMemoryHook}),
  * вложенный BSL-редактор granular-страницы «Модуль» ещё не был создан, а
  * {@code applyLeftmost} при нулевой ширине клиентской области сам ставил прокрутку по каретке.
- * Подключение совпадает с соседними хуками; первое применение ждёт ненулевую ширину
- * ({@code SWT.Resize} + короткие {@code timerExec}, пока пользователь сам не сдвинул полосу).
+ * Подключение совпадает с соседними хуками; первое применение идёт при ненулевой ширине
+ * в фильтре {@code SWT.Paint}, который завершает коррекцию до внутреннего
+ * {@code StyledText.handlePaint}: первый кадр уже использует правильную прокрутку.
  */
 public class BslEditorRevealScrollFixHook implements IStartup
 {
     private static final String INSTALLED_MARKER = "tormozit.bslRevealScrollFixInstalled"; //$NON-NLS-1$
     private static final String LAST_SCROLL_MARKER = "tormozit.bslRevealScrollFixLastPixel"; //$NON-NLS-1$
     private static final String USER_HSCROLL_MARKER = "tormozit.bslRevealScrollFixUserHScroll"; //$NON-NLS-1$
-    private static final String RESIZE_LISTENER_MARKER = "tormozit.bslRevealScrollFixResize"; //$NON-NLS-1$
-    private static final String SETTLE_STARTED_MARKER = "tormozit.bslRevealScrollFixSettle"; //$NON-NLS-1$
+    private static final String INITIAL_PAINT_MARKER = "tormozit.bslRevealScrollFixInitialPaint"; //$NON-NLS-1$
+    private static final String SELECTION_PENDING_MARKER = "tormozit.bslRevealScrollFixSelectionPending"; //$NON-NLS-1$
     private static final int MAX_ATTACH_ATTEMPTS = 100;
-    /** Повтор apply после раскладки/отложенного reveal при restore (Xtext, позиция модуля). */
-    private static final int[] SETTLE_DELAYS_MS = { 0, 150, 500 };
 
     private final Set<DtGranularEditor<?>> hookedGranularEditors = new HashSet<>();
 
@@ -87,6 +86,7 @@ public class BslEditorRevealScrollFixHook implements IStartup
     {
         Display.getDefault().asyncExec(() ->
         {
+            Display.getDefault().addFilter(SWT.Paint, BslEditorRevealScrollFixHook::beforeTextPaint);
             for (IWorkbenchWindow window : PlatformUI.getWorkbench().getWorkbenchWindows())
                 hookWindow(window);
         });
@@ -172,7 +172,7 @@ public class BslEditorRevealScrollFixHook implements IStartup
         ITextEditor textEditor = TextEditor.resolveTextEditor(editor);
         if (textEditor == null)
             return;
-        Display.getDefault().asyncExec(() -> attachToTextEditor(textEditor, 0));
+        attachToTextEditor(textEditor, 0);
     }
 
     private void attachToTextEditor(ITextEditor editor, int attempt)
@@ -235,7 +235,8 @@ public class BslEditorRevealScrollFixHook implements IStartup
 
     private void hookBslEditor(BslXtextEditor editor)
     {
-        Display.getDefault().asyncExec(() -> attachToBslEditor(editor, 0));
+        // Готовый viewer подключаем до возврата из partOpened/pageChanged, без очереди UI.
+        attachToBslEditor(editor, 0);
     }
 
     private void attachToBslEditor(BslXtextEditor editor, int attempt)
@@ -265,6 +266,7 @@ public class BslEditorRevealScrollFixHook implements IStartup
         if (Boolean.TRUE.equals(textWidget.getData(INSTALLED_MARKER)))
             return;
         textWidget.setData(INSTALLED_MARKER, Boolean.TRUE);
+        textWidget.setData(INITIAL_PAINT_MARKER, Boolean.TRUE);
 
         if (viewer.getSelectionProvider() != null)
         {
@@ -286,19 +288,11 @@ public class BslEditorRevealScrollFixHook implements IStartup
             {
                 textWidget.setData(LAST_SCROLL_MARKER, textWidget.getHorizontalPixel());
                 textWidget.setData(USER_HSCROLL_MARKER, Boolean.TRUE);
-                removeResizeListener(textWidget);
             });
         }
 
-        // К моменту подключения штатный selectAndReveal у свежесозданного виджета уже мог
-        // отработать — сравнивать не с чем. При restore клиентская область часто ещё нулевая:
-        // applyLeftmost тогда сам ставит прокрутку по каретке. Ждём ширину и короткий settle.
-        Listener resizeListener = e -> applyLeftmostIfReady(textWidget);
-        textWidget.addListener(SWT.Resize, resizeListener);
-        textWidget.setData(RESIZE_LISTENER_MARKER, resizeListener);
-        textWidget.addDisposeListener(e -> removeResizeListener(textWidget));
-
-        applyLeftmostIfReady(textWidget);
+        // Не рассчитываем геометрию на attach/Resize: только один раз перед первым Paint,
+        // когда размеры уже известны и штатное восстановление позиции отработало.
     }
 
     private static boolean isWorkbenchClosing()
@@ -318,47 +312,42 @@ public class BslEditorRevealScrollFixHook implements IStartup
             return;
         if (textWidget.getClientArea().width <= 0)
             return;
+        // Уже самое левое положение: штатный reveal не сдвинул экран, исправлять нечего.
+        if (textWidget.getHorizontalPixel() == 0)
+        {
+            textWidget.setData(LAST_SCROLL_MARKER, 0);
+            return;
+        }
         Point selection = textWidget.getSelectionRange();
         if (selection == null)
             return;
         SearchMatchScrollSupport.applyLeftmost(textWidget, selection.x,
             selection.x + Math.max(0, selection.y));
         textWidget.setData(LAST_SCROLL_MARKER, textWidget.getHorizontalPixel());
-        startSettleIfNeeded(textWidget);
     }
 
-    private static void startSettleIfNeeded(StyledText textWidget)
+    private static void beforeTextPaint(Event event)
     {
-        if (Boolean.TRUE.equals(textWidget.getData(SETTLE_STARTED_MARKER)))
+        if (!(event.widget instanceof StyledText textWidget) || textWidget.isDisposed()
+            || !Boolean.TRUE.equals(textWidget.getData(INSTALLED_MARKER)))
             return;
-        textWidget.setData(SETTLE_STARTED_MARKER, Boolean.TRUE);
-        Display display = textWidget.getDisplay();
-        int lastDelay = SETTLE_DELAYS_MS[SETTLE_DELAYS_MS.length - 1];
-        for (int delay : SETTLE_DELAYS_MS)
+        if (Boolean.TRUE.equals(textWidget.getData(INITIAL_PAINT_MARKER)))
         {
-            int delayCopy = delay;
-            display.timerExec(delayCopy, () ->
-            {
-                applyLeftmostIfReady(textWidget);
-                if (delayCopy == lastDelay)
-                    removeResizeListener(textWidget);
-            });
+            if (textWidget.getClientArea().width <= 0 || event.width <= 0 || event.height <= 0)
+                return;
+            // Снимаем маркер до setHorizontalPixel: прокрутка может вызвать вложенную отрисовку.
+            textWidget.setData(INITIAL_PAINT_MARKER, null);
+            applyLeftmostIfReady(textWidget);
         }
-    }
-
-    private static void removeResizeListener(StyledText textWidget)
-    {
-        if (textWidget.isDisposed())
-            return;
-        Object listener = textWidget.getData(RESIZE_LISTENER_MARKER);
-        if (!(listener instanceof Listener))
-            return;
-        textWidget.removeListener(SWT.Resize, (Listener)listener);
-        textWidget.setData(RESIZE_LISTENER_MARKER, null);
+        if (Boolean.TRUE.equals(textWidget.getData(SELECTION_PENDING_MARKER)))
+            fixHorizontalScrollIfJumped(textWidget);
     }
 
     private static void onSelectionChanged(StyledText textWidget)
     {
+        textWidget.setData(SELECTION_PENDING_MARKER, Boolean.TRUE);
+        // Paint-фильтр успевает раньше внутреннего painter даже при занятой очереди asyncExec.
+        // Очередь остаётся резервом для переходов, которые не вызвали отрисовку.
         Display.getDefault().asyncExec(() -> fixHorizontalScrollIfJumped(textWidget));
     }
 
@@ -366,6 +355,11 @@ public class BslEditorRevealScrollFixHook implements IStartup
     {
         if (textWidget.isDisposed())
             return;
+        if (!Boolean.TRUE.equals(textWidget.getData(SELECTION_PENDING_MARKER)))
+            return;
+        if (textWidget.getClientArea().width <= 0)
+            return;
+        textWidget.setData(SELECTION_PENDING_MARKER, null);
         Point selection = textWidget.getSelectionRange(); // x=начало, y=длина
         if (selection == null)
             return;

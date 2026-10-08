@@ -725,16 +725,7 @@ public final class ObjectSetsView extends ViewPart
         {
             if (getViewSite() == null || getSite().getShell().isDisposed())
                 return;
-            long started = System.nanoTime();
-            try
-            {
-                refreshSetsTable();
-            }
-            finally
-            {
-                Global.tempLog("object-sets-git", "panelDeferredRefresh ms=" //$NON-NLS-1$ //$NON-NLS-2$
-                    + (System.nanoTime() - started) / 1_000_000);
-            }
+            refreshSetsTable();
         });
     }
 
@@ -865,19 +856,9 @@ public final class ObjectSetsView extends ViewPart
     {
         if (set == null)
             return;
-        long started = System.nanoTime();
-        try
-        {
-            ObjectSetsAddTargetState.getInstance().setAddTarget(set.id);
-            if (setsViewer != null && !setsViewer.getControl().isDisposed())
-                setsViewer.refresh();
-        }
-        finally
-        {
-            Global.tempLog("object-sets-git", "activateSet id=" + set.id //$NON-NLS-1$ //$NON-NLS-2$
-                + " navigatorFilter=" + ObjectSetsNavigatorFilterSupport.isActive() //$NON-NLS-1$
-                + " ms=" + (System.nanoTime() - started) / 1_000_000); //$NON-NLS-1$
-        }
+        ObjectSetsAddTargetState.getInstance().setAddTarget(set.id);
+        if (setsViewer != null && !setsViewer.getControl().isDisposed())
+            setsViewer.refresh();
     }
 
     private ObjectSets.SetDef addTargetSetForActiveProject()
@@ -1174,7 +1155,6 @@ public final class ObjectSetsView extends ViewPart
     {
         if (itemsViewer == null || itemsViewer.getControl().isDisposed())
             return;
-        long started = System.nanoTime();
         if (iconResolver != null)
             iconResolver.clearCache();
         Table table = itemsViewer.getTable();
@@ -1186,8 +1166,6 @@ public final class ObjectSetsView extends ViewPart
         finally
         {
             table.setRedraw(true);
-            Global.tempLog("object-sets-git", "itemIconsRefresh items=" + filteredItems.size() //$NON-NLS-1$ //$NON-NLS-2$
-                + " ms=" + (System.nanoTime() - started) / 1_000_000); //$NON-NLS-1$
         }
     }
 

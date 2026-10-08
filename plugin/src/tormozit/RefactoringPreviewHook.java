@@ -1821,7 +1821,9 @@ public final class RefactoringPreviewHook
                 return;
             shell.setData(SHELL_HANDLED_KEY, Boolean.TRUE);
             installShellSizeMemory(shell);
-            scheduleAttach(shell, 0, false);
+            // Если предпросмотр уже создан, вставляем панели до показа мастера.
+            if (tryAttach(shell) == ATTACH_WAIT)
+                scheduleAttach(shell, 0, false);
         }
 
         /**

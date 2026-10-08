@@ -233,6 +233,14 @@ public final class PasteWithCompareActions
             comparePane.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));
             currentLinesComposite.setLayoutData(new GridData(SWT.FILL, SWT.BEGINNING, true, false));
 
+            // super.createContents уже закончил создание вьюера и установил pane.content.
+            Object paneObj = Global.getField(this, "fContentInputPane"); //$NON-NLS-1$
+            if (paneObj instanceof CompareViewerPane pane && !pane.isDisposed())
+            {
+                IToolBarManager manager = CompareViewerPane.getToolBarManager(pane);
+                if (manager != null)
+                    installStructureToggle(pane, manager);
+            }
             return container;
         }
 
@@ -392,8 +400,8 @@ public final class PasteWithCompareActions
          * {@code findContentViewer}. Причина конкретная: репарентинг control'а вьюера
          * ({@code setParent}) и подмена {@code pane.setContent(...)} прямо посреди его создания
          * ломали конструкцию ({@code SWTException: Widget is disposed}), а {@code pane.getContent()}
-         * на тот момент ещё не указывал на новый вьюер. В {@code asyncExec} оба условия уже
-         * выполнены — тот же приём, что и для прочих гонок в этой задаче.
+         * на тот момент ещё не указывал на новый вьюер. Первую установку выполняем после
+         * {@code super.createContents}, до показа окна; {@code asyncExec} остаётся для смены вьюера.
          *
          * <p>Кнопку добавляем в тулбар через {@code insert(0, …)} — тулбар к этому моменту уже
          * собран, пересобирать его повторно не нужно.
@@ -407,41 +415,49 @@ public final class PasteWithCompareActions
                 return;
             display.asyncExec(() ->
             {
-                if (pane.isDisposed() || leftEditorText == null || leftEditorText.isDisposed()
-                    || rightEditorText == null || rightEditorText.isDisposed())
-                    return;
-                Control content = pane.getContent();
-                // ViewForm.setContent требует, чтобы control был ПРЯМЫМ ребёнком самого pane.
-                if (content == null || content.isDisposed() || content.getParent() != pane)
-                    return;
-                /*
-                 * Идемпотентность: при смене режима сравнения приходит новый control (маркера нет —
-                 * оборачиваем), при повторном срабатывании для того же — пропуск, чтобы не
-                 * наслаивать обёртки и не плодить StructureToggleController.
-                 */
-                if (Boolean.TRUE.equals(content.getData(STRUCTURE_WRAPPED_KEY)))
-                    return;
-                content.setData(STRUCTURE_WRAPPED_KEY, Boolean.TRUE);
-
-                Composite wrapper = new Composite(pane, SWT.NONE);
-                GridLayout wrapperLayout = new GridLayout(1, false);
-                wrapperLayout.marginWidth = 0;
-                wrapperLayout.marginHeight = 0;
-                wrapper.setLayout(wrapperLayout);
-                content.setParent(wrapper);
-                content.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));
-                pane.setContent(wrapper);
-                pane.layout(true, true);
-
-                StructureToggleController structureController = new StructureToggleController(wrapper,
-                    content, leftEditorText, rightEditorText,
-                    getCompareConfiguration().getLeftLabel(null), getCompareConfiguration().getRightLabel(null),
-                    "paste"); //$NON-NLS-1$
-                structureController.setSourceViewers(leftSourceViewer, rightSourceViewer);
-                ((ToolBarManager) toolBarManager).insert(0, 
-                    new ActionContributionItem(structureController.createToggleAction()));
-                toolBarManager.update(true);
+                installStructureToggle(pane, toolBarManager);
             });
+        }
+
+        private void installStructureToggle(CompareViewerPane pane, IToolBarManager toolBarManager)
+        {
+            if (!"bsl".equalsIgnoreCase(compareViewerType)) //$NON-NLS-1$
+                return;
+            if (pane.isDisposed() || leftEditorText == null || leftEditorText.isDisposed()
+                || rightEditorText == null || rightEditorText.isDisposed())
+                return;
+            Control content = pane.getContent();
+            // ViewForm.setContent требует, чтобы control был ПРЯМЫМ ребёнком самого pane.
+            if (content == null || content.isDisposed() || content.getParent() != pane)
+                return;
+            /*
+             * Идемпотентность: при смене режима сравнения приходит новый control (маркера нет —
+             * оборачиваем), при повторном срабатывании для того же — пропуск, чтобы не
+             * наслаивать обёртки и не плодить StructureToggleController.
+             */
+            if (Boolean.TRUE.equals(content.getData(STRUCTURE_WRAPPED_KEY)))
+                return;
+            content.setData(STRUCTURE_WRAPPED_KEY, Boolean.TRUE);
+
+            Composite wrapper = new Composite(pane, SWT.NONE);
+            wrapper.setData(STRUCTURE_WRAPPED_KEY, Boolean.TRUE);
+            GridLayout wrapperLayout = new GridLayout(1, false);
+            wrapperLayout.marginWidth = 0;
+            wrapperLayout.marginHeight = 0;
+            wrapper.setLayout(wrapperLayout);
+            content.setParent(wrapper);
+            content.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));
+            pane.setContent(wrapper);
+            pane.layout(true, true);
+
+            StructureToggleController structureController = new StructureToggleController(wrapper,
+                content, leftEditorText, rightEditorText,
+                getCompareConfiguration().getLeftLabel(null), getCompareConfiguration().getRightLabel(null),
+                "paste"); //$NON-NLS-1$
+            structureController.setSourceViewers(leftSourceViewer, rightSourceViewer);
+            ((ToolBarManager) toolBarManager).insert(0,
+                new ActionContributionItem(structureController.createToggleAction()));
+            toolBarManager.update(true);
         }
 
         private void addCompareInIrToolbarActionOnce()

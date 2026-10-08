@@ -2126,10 +2126,15 @@ public final class ProblemViewHook implements IStartup
         // Подпись обновляется по таймеру: исключение из чужого резолва оборвало бы цепочку тиков.
         try
         {
+            if (com._1c.g5.v8.dt.metadata.mdclass.MdClassPackage.Literals.CONFIGURATION.isSuperTypeOf(object.eClass()))
+                return "<Конфигурация>";
             Object top = liftToTopObject && manager != null
                 ? Global.invoke(manager, "getTopMdObject", object) //$NON-NLS-1$
                 : null;
-            return GetRef.eObjectToFullName(top instanceof EObject topObject ? topObject : object);
+            EObject target = top instanceof EObject topObject ? topObject : object;
+            if (com._1c.g5.v8.dt.metadata.mdclass.MdClassPackage.Literals.CONFIGURATION.isSuperTypeOf(target.eClass()))
+                return "<Конфигурация>";
+            return GetRef.eObjectToFullName(target);
         }
         catch (Exception e)
         {

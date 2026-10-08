@@ -58,10 +58,8 @@ import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorEmbeddedEditorPage;
 import com._1c.g5.v8.dt.moxel.Columns;
 import com._1c.g5.v8.dt.moxel.SpreadsheetDocument;
-import com._1c.g5.v8.dt.moxel.ViewSettings;
 import com._1c.g5.v8.dt.moxel.content.impl.TablePropertiesImpl;
 import com._1c.g5.v8.dt.moxel.sheet.CellsSelection;
-import com._1c.g5.v8.dt.moxel.sheet.ReadOnlyFormat;
 import com._1c.g5.v8.dt.moxel.sheet.Selection;
 import com._1c.g5.v8.dt.moxel.sheet.SheetAccessor;
 import com._1c.g5.v8.dt.moxel.sheet.TableSelection;
@@ -183,7 +181,6 @@ public class MoxelEditorHook implements IStartup
         if (!(embeddedEditor instanceof MoxelEditor))
             return;
         MoxelEditor moxelEditor = (MoxelEditor) embeddedEditor;
-        Global.tempLog(PasteCacheRepair.LOG_TOPIC, "подключение к редактору макета: " + granularEditor.getTitle()); //$NON-NLS-1$
         Control partControl = page.getPartControl();
         if (!(partControl instanceof Composite))
             return;
@@ -707,7 +704,6 @@ public class MoxelEditorHook implements IStartup
      */
     private static final class PasteCacheRepair implements IExecutionListener
     {
-        static final String LOG_TOPIC = "moxel-paste-691"; //$NON-NLS-1$
         private static final String PASTE_COMMAND = "org.eclipse.ui.edit.paste"; //$NON-NLS-1$
         private static final String UNDO_COMMAND = "org.eclipse.ui.edit.undo"; //$NON-NLS-1$
         private static final String REDO_COMMAND = "org.eclipse.ui.edit.redo"; //$NON-NLS-1$
@@ -732,25 +728,17 @@ public class MoxelEditorHook implements IStartup
         static void install()
         {
             if (!isAffectedEdt())
-            {
-                Global.tempLog(LOG_TOPIC, "старт: версия EDT не затронута, слушатель вставки не ставится"); //$NON-NLS-1$
                 return;
-            }
             ICommandService commandService = PlatformUI.getWorkbench().getService(ICommandService.class);
             if (commandService == null)
-            {
-                Global.tempLog(LOG_TOPIC, "старт: нет ICommandService, слушатель вставки не установлен"); //$NON-NLS-1$
                 return;
-            }
             commandService.addExecutionListener(new PasteCacheRepair());
-            Global.tempLog(LOG_TOPIC, "старт: слушатель вставки установлен"); //$NON-NLS-1$
         }
 
         @Override
         public void preExecute(String commandId, ExecutionEvent event)
         {
-            String label = commandLabel(commandId);
-            if (label == null) return;
+            if (!isWatched(commandId)) return;
             target = activeMoxelEditor();
             fixedWasMain = false;
             fixedColumnsId = null;
@@ -766,82 +754,65 @@ public class MoxelEditorHook implements IStartup
                 }
                 catch (RuntimeException e)
                 {
-                    Global.tempLog(LOG_TOPIC, "перед (" + label + "): столбцы контрола не прочитаны: " + e); //$NON-NLS-1$ //$NON-NLS-2$
+                    // Столбцы контрола не прочитаны — чинить будет нечего.
                 }
             }
-            Global.tempLog(LOG_TOPIC, "перед (" + label + "): " //$NON-NLS-1$ //$NON-NLS-2$
-                + (control == null ? "активен не редактор макета" : describe(control))); //$NON-NLS-1$
             // Отмена и повтор читают форматы уже по ходу команды, сразу после изменения модели:
             // кэш к этому моменту должен быть пуст, иначе сама команда падает с «Object is removed».
             if (control != null && !PASTE_COMMAND.equals(commandId))
-            {
-                String error = clearFormatCache(control.getSheet());
-                if (!error.isEmpty())
-                    Global.tempLog(LOG_TOPIC, "перед (" + label + "):" + error); //$NON-NLS-1$ //$NON-NLS-2$
-            }
+                clearFormatCache(control.getSheet());
         }
 
-        /** Название команды для лога; {@code null} — команда нас не интересует. */
-        private static String commandLabel(String commandId)
+        /** Команды, после которых нужно починить кэши контрола. */
+        private static boolean isWatched(String commandId)
         {
-            if (PASTE_COMMAND.equals(commandId)) return "вставка"; //$NON-NLS-1$
-            if (UNDO_COMMAND.equals(commandId)) return "отмена"; //$NON-NLS-1$
-            if (REDO_COMMAND.equals(commandId)) return "повтор"; //$NON-NLS-1$
-            return null;
+            return PASTE_COMMAND.equals(commandId) || UNDO_COMMAND.equals(commandId)
+                || REDO_COMMAND.equals(commandId);
         }
 
-        /** Сбрасывает ленивые кэши форматов {@link SheetAccessor}; возвращает текст ошибки либо пустую строку. */
-        private static String clearFormatCache(SheetAccessor sheet)
+        /** Сбрасывает ленивые кэши форматов {@link SheetAccessor}. */
+        private static void clearFormatCache(SheetAccessor sheet)
         {
-            String error = ""; //$NON-NLS-1$
             Object formatCache = Global.getField(sheet, "formatCache"); //$NON-NLS-1$
             if (formatCache instanceof Map<?, ?>)
                 ((Map<?, ?>) formatCache).clear();
-            else
-                error += " formatCache: поле не найдено"; //$NON-NLS-1$
-            if (Global.getField(sheet, "formatsMap") != null //$NON-NLS-1$
-                && !Global.setFieldForce(sheet, "formatsMap", null)) //$NON-NLS-1$
-                error += " formatsMap: не сброшено"; //$NON-NLS-1$
-            return error;
+            if (Global.getField(sheet, "formatsMap") != null) //$NON-NLS-1$
+                Global.setFieldForce(sheet, "formatsMap", null); //$NON-NLS-1$
         }
 
         @Override
         public void postExecuteSuccess(String commandId, Object returnValue)
         {
-            finish(commandId, "успех", null); //$NON-NLS-1$
+            finish(commandId);
         }
 
         @Override
         public void postExecuteFailure(String commandId, ExecutionException exception)
         {
-            finish(commandId, "ошибка команды", exception); //$NON-NLS-1$
+            finish(commandId);
         }
 
         @Override
         public void notHandled(String commandId, NotHandledException exception)
         {
-            finish(commandId, "нет обработчика", exception); //$NON-NLS-1$
+            finish(commandId);
         }
 
-        private void finish(String commandId, String result, Exception exception)
+        private void finish(String commandId)
         {
-            String label = commandLabel(commandId);
-            if (label == null) return;
-            String outcome = label + ", " + result; //$NON-NLS-1$
+            if (!isWatched(commandId)) return;
             MoxelEditor editor = target;
             boolean wasMain = fixedWasMain;
             UUID columnsId = fixedColumnsId;
             target = null;
             fixedWasMain = false;
             fixedColumnsId = null;
-            if (exception != null)
-                Global.tempLog(LOG_TOPIC, outcome + ": " + exception); //$NON-NLS-1$
             if (editor == null) return;
-            repair(editor, wasMain, columnsId, outcome);
+            repair(editor, wasMain, columnsId);
             // Операция вставки могла завершиться (или откатиться) позже самой команды.
             Display display = Display.getCurrent();
             if (display != null)
-                display.asyncExec(() -> repair(editor, wasMain, columnsId, outcome + ", отложенно")); //$NON-NLS-1$
+                display.asyncExec(() -> repair(editor, wasMain, columnsId));
         }
 
         /** Один и тот же объект модели BM (экземпляры Java вне и внутри транзакции различаются). */
@@ -856,18 +827,18 @@ public class MoxelEditorHook implements IStartup
          * актуальные. Пишем в поле контрола, а не через {@link MoxelControl#setFixedColumnColumns}: тот
          * сразу меняет модель вне транзакции. В настройки документа живой объект запишет штатное сохранение.
          */
-        private static String restoreFixedColumns(MoxelControl control, boolean wasMain, UUID columnsId)
+        private static void restoreFixedColumns(MoxelControl control, boolean wasMain, UUID columnsId)
         {
             try
             {
                 Columns current = control.getFixedColumnColumns();
                 if (current == null)
-                    return " закреплённых столбцов в контроле нет"; //$NON-NLS-1$
+                    return;
                 SpreadsheetDocument document = control.getSheet().getDocument();
                 List<Columns> all = new ArrayList<>(document.getAllColumns());
                 for (Columns each : all)
                     if (sameBmObject(current, each))
-                        return " столбцы контрола на месте"; //$NON-NLS-1$
+                        return;
                 Columns fresh = null;
                 if (!wasMain && columnsId != null)
                     for (Columns each : all)
@@ -879,17 +850,15 @@ public class MoxelEditorHook implements IStartup
                 if (fresh == null)
                     fresh = document.getColumns();
                 if (fresh == null)
-                    return " столбцов контрола в документе нет, замены нет — не тронуты"; //$NON-NLS-1$
+                    return;
                 Object viewParameters = Global.getField(control, "viewParameters"); //$NON-NLS-1$
                 if (viewParameters == null)
-                    return " столбцов контрола в документе нет, поле viewParameters не найдено"; //$NON-NLS-1$
-                if (!Global.setFieldForce(viewParameters, "fixedColumnColumns", fresh)) //$NON-NLS-1$
-                    return " столбцов контрола в документе нет, поле fixedColumnColumns не записано"; //$NON-NLS-1$
-                return " столбцы контрола заменены (были основными=" + wasMain + ")"; //$NON-NLS-1$ //$NON-NLS-2$
+                    return;
+                Global.setFieldForce(viewParameters, "fixedColumnColumns", fresh); //$NON-NLS-1$
             }
             catch (RuntimeException e)
             {
-                return " столбцы контрола: " + e; //$NON-NLS-1$
+                // Столбцы документа недоступны — оставляем контрол как есть.
             }
         }
 
@@ -918,122 +887,16 @@ public class MoxelEditorHook implements IStartup
             return null;
         }
 
-        private static void repair(MoxelEditor editor, boolean wasMain, UUID columnsId, String phase)
+        private static void repair(MoxelEditor editor, boolean wasMain, UUID columnsId)
         {
             MoxelControl control = getMoxelControl(editor);
             if (control == null || control.isDisposed())
-            {
-                Global.tempLog(LOG_TOPIC, "после (" + phase + "): нет контрола макета"); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
-            }
-            String before = describe(control);
-            String error = restoreFixedColumns(control, wasMain, columnsId);
-            error += clearFormatCache(control.getSheet());
+            restoreFixedColumns(control, wasMain, columnsId);
+            clearFormatCache(control.getSheet());
             control.redraw();
-            Global.tempLog(LOG_TOPIC, "после (" + phase + "): было " + before //$NON-NLS-1$ //$NON-NLS-2$
-                + "; стало " + describe(control) + error); //$NON-NLS-1$
         }
 
-        /**
-         * Состояние кэшей контрола: сколько в них объектов, к которым модель уже не даёт обратиться.
-         * Читаем внутри задачи чтения BM, как это делает отрисовка: вне транзакции обращение к удалённому
-         * объекту исключения не даёт.
-         */
-        private static String describe(MoxelControl control)
-        {
-            try
-            {
-                return readInTask(control, () -> describeInTask(control));
-            }
-            catch (RuntimeException e)
-            {
-                return "вне задачи BM (" + e + "): " + describeInTask(control); //$NON-NLS-1$ //$NON-NLS-2$
-            }
-        }
-
-        /** Объект столбцов: хеш (как в сообщениях BM), жив ли, числится ли в документе. */
-        private static String columnsInfo(SpreadsheetDocument document, Columns columns)
-        {
-            if (columns == null) return "нет"; //$NON-NLS-1$
-            StringBuilder sb = new StringBuilder("@").append(Integer.toHexString(columns.hashCode())); //$NON-NLS-1$
-            if (columns instanceof IBmObject)
-                sb.append(" bm=").append(((IBmObject) columns).bmGetId()); //$NON-NLS-1$
-            try
-            {
-                sb.append(" id=").append(columns.getColumnsId()); //$NON-NLS-1$
-            }
-            catch (RuntimeException e)
-            {
-                sb.append(" мёртвые [").append(e.getMessage()).append(']'); //$NON-NLS-1$
-            }
-            try
-            {
-                sb.append(" контейнер=").append(columns.eContainer() != null ? "есть" : "нет"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                boolean listed = false;
-                for (Columns each : document.getAllColumns())
-                    if (each == columns) listed = true;
-                sb.append(" в документе=").append(listed ? "да" : "нет"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            }
-            catch (RuntimeException e)
-            {
-                sb.append(" [").append(e.getMessage()).append(']'); //$NON-NLS-1$
-            }
-            return sb.toString();
-        }
-
-        private static String describeInTask(MoxelControl control)
-        {
-            SheetAccessor sheet = control.getSheet();
-            StringBuilder sb = new StringBuilder();
-            try
-            {
-                sb.append("форматов в модели=").append(sheet.getDocument().getFormats().size()); //$NON-NLS-1$
-            }
-            catch (RuntimeException e)
-            {
-                sb.append("форматы модели: ").append(e); //$NON-NLS-1$
-            }
-            Object formatCache = Global.getField(sheet, "formatCache"); //$NON-NLS-1$
-            if (formatCache instanceof Map<?, ?>)
-            {
-                int dead = 0;
-                String firstError = null;
-                for (Object value : new ArrayList<>(((Map<?, ?>) formatCache).values()))
-                {
-                    if (!(value instanceof ReadOnlyFormat)) continue;
-                    try
-                    {
-                        ((ReadOnlyFormat) value).isSetLeftBorder();
-                    }
-                    catch (RuntimeException e)
-                    {
-                        dead++;
-                        if (firstError == null) firstError = e.getMessage();
-                    }
-                }
-                sb.append(", кэш форматов=").append(((Map<?, ?>) formatCache).size()) //$NON-NLS-1$
-                    .append(", из них мёртвых=").append(dead); //$NON-NLS-1$
-                if (firstError != null) sb.append(" [").append(firstError).append(']'); //$NON-NLS-1$
-            }
-            else
-                sb.append(", кэш форматов: поле не найдено"); //$NON-NLS-1$
-            sb.append(", formatsMap=").append(Global.getField(sheet, "formatsMap") != null ? "есть" : "нет"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-            try
-            {
-                SpreadsheetDocument document = sheet.getDocument();
-                sb.append(", столбцы контрола=").append(columnsInfo(document, control.getFixedColumnColumns())); //$NON-NLS-1$
-                ViewSettings viewSettings = document.getViewSettings();
-                sb.append(", столбцы настроек документа=").append(viewSettings == null ? "нет настроек" //$NON-NLS-1$ //$NON-NLS-2$
-                    : columnsInfo(document, viewSettings.getFixedColumnColumns()));
-                sb.append(", основные столбцы документа=").append(columnsInfo(document, document.getColumns())); //$NON-NLS-1$
-                sb.append(", всего столбцов=").append(document.getAllColumns().size()); //$NON-NLS-1$
-            }
-            catch (RuntimeException e)
-            {
-                sb.append(", столбцы: ").append(e); //$NON-NLS-1$
-            }
-            return sb.toString();
-        }
     }
 
 }

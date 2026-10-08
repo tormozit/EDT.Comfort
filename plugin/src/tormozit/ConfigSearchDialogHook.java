@@ -1217,7 +1217,6 @@ public class ConfigSearchDialogHook implements IStartup
     /** Добавляет имя параметра выбора к полям, просматриваемым штатным поиском элементов языка. */
     private static final class ChoiceParameterSearchPatch
     {
-        private static final String TOPIC = "search-choice-655"; //$NON-NLS-1$
         private static final String TARGET =
             "com._1c.g5.v8.dt.internal.search.core.SearchForPredicatesProvider"; //$NON-NLS-1$
         private static final String TARGET_INTERNAL = TARGET.replace('.', '/');
@@ -1239,12 +1238,8 @@ public class ConfigSearchDialogHook implements IStartup
             Bundle bundle = FrameworkUtil.getBundle(ConfigSearchDialogHook.class);
             BundleContext context = bundle != null ? bundle.getBundleContext() : null;
             if (context == null)
-            {
-                Global.tempLog(TOPIC, "weaving unavailable: no bundle context"); //$NON-NLS-1$
                 return;
-            }
             context.registerService(WeavingHook.class, new SearchWeavingHook(), null);
-            Global.tempLog(TOPIC, "weaving registered"); //$NON-NLS-1$
         }
 
         static void installFallback()
@@ -1252,10 +1247,7 @@ public class ConfigSearchDialogHook implements IStartup
             install();
             if (woven)
                 return;
-            boolean registered = BslDocCommentDescriptionFix.registerExtraTransformer(
-                new SearchTransformer(), TARGET);
-            Global.tempLog(TOPIC, "instrumentation fallback registered=" + registered //$NON-NLS-1$
-                + " woven=" + woven); //$NON-NLS-1$
+            BslDocCommentDescriptionFix.registerExtraTransformer(new SearchTransformer(), TARGET);
         }
 
         private static byte[] transform(byte[] original)
@@ -1286,11 +1278,7 @@ public class ConfigSearchDialogHook implements IStartup
                 }
             }, ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
             if (!found.get() || alreadyPatched.get())
-            {
-                Global.tempLog(TOPIC, "predicate found=" + found.get() //$NON-NLS-1$
-                    + " alreadyPatched=" + alreadyPatched.get()); //$NON-NLS-1$
                 return null;
-            }
 
             ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_FRAMES)
             {
@@ -1328,7 +1316,6 @@ public class ConfigSearchDialogHook implements IStartup
                     };
                 }
             }, ClassReader.EXPAND_FRAMES);
-            Global.tempLog(TOPIC, "predicate patched"); //$NON-NLS-1$
             return writer.toByteArray();
         }
 
@@ -1351,7 +1338,7 @@ public class ConfigSearchDialogHook implements IStartup
                 }
                 catch (Throwable t)
                 {
-                    Global.tempLog(TOPIC, "weaving failed: " + t); //$NON-NLS-1$
+                    // Сбой подмены не должен мешать загрузке класса.
                 }
             }
         }
@@ -1373,7 +1360,6 @@ public class ConfigSearchDialogHook implements IStartup
                 }
                 catch (Throwable t)
                 {
-                    Global.tempLog(TOPIC, "instrumentation failed: " + t); //$NON-NLS-1$
                     return null;
                 }
             }

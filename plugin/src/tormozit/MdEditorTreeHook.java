@@ -1185,21 +1185,10 @@ public final class MdEditorTreeHook
                 Object swtControl = nativeControl instanceof Control ? nativeControl
                     : Global.invoke(nativeControl, "getSwtControl"); //$NON-NLS-1$
                 Control control = swtControl instanceof Control swt && !swt.isDisposed() ? swt : null;
-                boolean matches = false;
                 if (control != null)
                     for (Control current = tree; current != null; current = current.getParent())
                         if (current == control)
-                        {
-                            matches = true;
-                            break;
-                        }
-                Global.tempLog("md-standard-attributes-filter", //$NON-NLS-1$
-                    "component=" + component.getClass().getName() //$NON-NLS-1$
-                        + " native=" + nativeControl.getClass().getName() //$NON-NLS-1$
-                        + " swt=" + (control != null ? control.getClass().getName() : "null") //$NON-NLS-1$ //$NON-NLS-2$
-                        + " tree=" + System.identityHashCode(tree) + " matches=" + matches); //$NON-NLS-1$ //$NON-NLS-2$
-                if (matches)
-                    return true;
+                            return true;
             }
             return false;
         }
@@ -1281,14 +1270,7 @@ public final class MdEditorTreeHook
         if (!MdEditorAttributeMenuHook.isDataPageAttributesTree(tree))
             return;
         installFoColumnGuard(viewer);
-        boolean standardAttributes = isStandardAttributesTree(tree);
-        boolean classifiableRow = hasClassifiableRow(tree);
-        // Временная безусловная диагностика: снять только после подтверждения в EDT.
-        Global.tempLog("md-standard-attributes-filter", //$NON-NLS-1$
-            "tree=" + System.identityHashCode(tree) + " standardAttributes=" + standardAttributes //$NON-NLS-1$ //$NON-NLS-2$
-                + " classifiableRow=" + classifiableRow + " items=" + tree.getItemCount() //$NON-NLS-1$ //$NON-NLS-2$
-                + " filterInstalled=" + tree.getData(ATTR_FILTER_MARKER)); //$NON-NLS-1$
-        if (!classifiableRow || standardAttributes)
+        if (!hasClassifiableRow(tree) || isStandardAttributesTree(tree))
             return;
         DtGranularEditor<?> editor = MdEditorAttributeMenuHook.editorOf(tree);
         if (editor == null)

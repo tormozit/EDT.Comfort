@@ -7,19 +7,33 @@ import org.eclipse.search.ui.ISearchQuery;
 import org.eclipse.search.ui.ISearchResult;
 import org.eclipse.search.ui.ISearchResultListener;
 import org.eclipse.ui.IEditorPart;
+import org.eclipse.core.resources.IProject;
 
 public class CompareSearchResult implements ISearchResult
 {
     private CompareSearchQuery query;
     private final List<CompareSearchMatch> matches;
     private final IEditorPart editorPart;
+    private final IProject project;
     private String queryText;
+    private String scopeLabel;
 
     public CompareSearchResult(List<CompareSearchMatch> matches, IEditorPart editorPart)
     {
+        this(matches, editorPart, null);
+    }
+
+    public CompareSearchResult(List<CompareSearchMatch> matches, IEditorPart editorPart, IProject project)
+    {
         this.matches = matches;
         this.editorPart = editorPart;
+        this.project = project;
     }
+
+    public IProject getProject() { return project; }
+
+    /** Узлы проекта, внутри которых шёл поиск; {@code null} — искали во всём проекте. */
+    public void setScopeLabel(String scopeLabel) { this.scopeLabel = scopeLabel; }
 
     public void setQuery(CompareSearchQuery query)
     {
@@ -52,6 +66,9 @@ public class CompareSearchResult implements ISearchResult
     {
         int count = matches != null ? matches.size() : 0;
         String q = queryText != null ? queryText.trim() : "";
+        if (project != null)
+            return "'" + q + "' в " + (scopeLabel != null ? scopeLabel + " проекта " : "проекте ")
+                + project.getName() + " - " + count + " совпадений";
         String comparisonTitle = editorPart != null ? editorPart.getTitle() : null;
         // Заголовок редактора сравнения сам начинается с "Сравнение/объединение (...)" — не дублируем
         // это слово после нашего "в сравнении", оставляем только скобочную часть (см. репорт: было

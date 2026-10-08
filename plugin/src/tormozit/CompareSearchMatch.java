@@ -23,6 +23,16 @@ public class CompareSearchMatch
     final RowColorKind rowColorKind;
     final boolean checkable;
     final String referenceFqn;
+    private MdReferenceSupport.Location projectLocation;
+
+    public CompareSearchMatch(MdReferenceSupport.Location location, String path, String property, String text,
+        String referenceFqn)
+    {
+        this(null, path, property, "Свойство проекта", text, "Битая ссылка", RowColorKind.NONE, false, referenceFqn);
+        this.projectLocation = location;
+    }
+
+    public MdReferenceSupport.Location getProjectLocation() { return projectLocation; }
 
     public CompareSearchMatch(Object comparisonNode, String objectPath, String propertyName,
             String columnSide, String matchText, String comparisonStatus, RowColorKind rowColorKind,

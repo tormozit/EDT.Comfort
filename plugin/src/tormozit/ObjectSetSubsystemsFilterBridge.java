@@ -458,7 +458,6 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
         Display display = Display.getDefault();
         IndexDiffChangedListener listener = (repository, data) ->
         {
-            Global.tempLog("object-sets-git", "indexDiffChanged repository=" + repository.getDirectory()); //$NON-NLS-1$ //$NON-NLS-2$
             if (display.isDisposed())
                 return;
             display.asyncExec(() ->
@@ -523,16 +522,8 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
         installBridge(navigator, viewer);
         if (NavigatorAddToObjectSetMenuHook.deferNavigatorRefresh())
             return;
-        long started = System.nanoTime();
-        try
-        {
-            viewer.refresh();
-            syncGroupExpandIndicators(viewer);
-        }
-        finally
-        {
-            Global.tempLog("object-sets-git", "navigatorRefresh ms=" + (System.nanoTime() - started) / 1_000_000); //$NON-NLS-1$ //$NON-NLS-2$
-        }
+        viewer.refresh();
+        syncGroupExpandIndicators(viewer);
     }
 
     private static void hookWindow(IWorkbenchWindow window)

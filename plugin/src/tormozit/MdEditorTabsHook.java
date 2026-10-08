@@ -96,8 +96,8 @@ import com._1c.g5.v8.dt.validation.marker.MarkerSeverity;
  * без «Модуль» («Объект», «Менеджер», …). «+» если файл не пустой, «-» если файла нет или размер 0.
  * Вкладки модулей следуют сразу за «Макеты», сохраняя взаимный порядок.
  * У вкладок — картинка EDT (как в навигаторе); значок ошибки/предупреждения штатной
- * вкладки не затирается. Сброс картинки EDT восстанавливается без повторного
- * {@code setImage}. В меню «>>» скрытые вкладки в порядке полосы, между левыми и
+ * вкладки не затирается. Наш рендерер восстанавливает картинку EDT до расчёта ширины;
+ * с рендерером темы восстановление запускает штатный пересчёт. В меню «>>» скрытые вкладки в порядке полосы, между левыми и
  * правыми — пометка {@code <Видимые вкладки>}; выбор прокручивает полосу.
  * Вертикальный список слева — флажок {@link ComfortSettings#PREF_MD_EDITOR_VERTICAL_TABS}
  * и больше 10 вкладок.
@@ -105,6 +105,8 @@ import com._1c.g5.v8.dt.validation.marker.MarkerSeverity;
 public final class MdEditorTabsHook implements IStartup
 {
     private static final String TAG = "MdEditorTabsHook"; //$NON-NLS-1$
+    /** Вызов раннего вплетения сразу после FormEditor.createPages(), до showEditorInput(). */
+    private static final String PROP_PAGES_CREATED = "tormozit.mdEditor.pagesCreated"; //$NON-NLS-1$
 
     private static final String KEY_FOLDER = "tormozit.mdListTabCount.folder"; //$NON-NLS-1$
 
@@ -195,6 +197,8 @@ public final class MdEditorTabsHook implements IStartup
     @Override
     public void earlyStartup()
     {
+        System.getProperties().put(PROP_PAGES_CREATED,
+            (java.util.function.Consumer<Object>) MdEditorTabsHook::onPagesCreated);
         Display.getDefault().asyncExec(() ->
         {
             IWorkbench workbench = PlatformUI.getWorkbench();
@@ -220,6 +224,36 @@ public final class MdEditorTabsHook implements IStartup
                 });
             }
         });
+    }
+
+    private static void onPagesCreated(Object value)
+    {
+        if (!(value instanceof DtGranularEditor<?> editor))
+            return;
+        try
+        {
+            Object container = Global.invoke(editor, "getContainer"); //$NON-NLS-1$
+            if (!(container instanceof CTabFolder folder) || folder.isDisposed())
+                return;
+            folder.setData(KEY_EDITOR, editor);
+            installFolderWatch(editor);
+            folder.setRedraw(false);
+            try
+            {
+                Object pagesObj = Global.getField(editor, "pages"); //$NON-NLS-1$
+                List<?> pages = pagesObj instanceof List<?> list ? list : List.of();
+                refreshTabTitles(editor, folder, pages);
+                applyTabImages(editor, folder);
+            }
+            finally
+            {
+                folder.setRedraw(true);
+            }
+        }
+        catch (RuntimeException ex)
+        {
+            Global.logError(TAG, "pages created", ex); //$NON-NLS-1$
+        }
     }
 
     private void refreshAllHookedEditors()
@@ -364,7 +398,9 @@ public final class MdEditorTabsHook implements IStartup
         if (folder.getData(KEY_FOLDER) != null)
             return;
         folder.setData(KEY_FOLDER, Boolean.TRUE);
-        if (!(folder.getRenderer() instanceof ComfortTabRenderer))
+        // Сохраняем рендерер темы EDT: замена на базовый меняет фон и оформление
+        // до следующего применения темы. Для него значки возвращаются через setImage().
+        if (folder.getRenderer().getClass() == CTabFolderRenderer.class)
             folder.setRenderer(new ComfortTabRenderer(folder));
         installImageRestorePaintFilter();
         folder.setUnselectedImageVisible(true);
@@ -676,16 +712,7 @@ public final class MdEditorTabsHook implements IStartup
                 Object pagesObj = Global.getField(editor, "pages"); //$NON-NLS-1$
                 List<?> pages = pagesObj instanceof List<?> list ? list : List.of();
                 placeModulesAfterTemplates(editor, folder, pages);
-                CTabItem[] items = folder.getItems();
-                for (int i = 0; i < items.length; i++)
-                {
-                    CTabItem item = items[i];
-                    if (item == null || item.isDisposed())
-                        continue;
-                    Object pageObj = i < pages.size() ? pages.get(i) : null;
-                    IFormPage page = pageObj instanceof IFormPage formPage ? formPage : null;
-                    refreshTab(editor, item, page, 0);
-                }
+                refreshTabTitles(editor, folder, pages);
                 applyTabImages(editor, folder);
                 applyTabPlacement(editor, folder);
             }
@@ -982,8 +1009,10 @@ public final class MdEditorTabsHook implements IStartup
 
     /**
      * EDT обнуляет image и ставит в очередь {@code updateFolder}. Если ответить
-     * {@code setImage}, будет второй пересчёт полосы — мигание. Возвращаем ссылку
-     * в поле до {@code computeSize}/{@code draw}, без {@code updateFolder}.
+     * {@code setImage}, будет второй пересчёт полосы — мигание. Наш рендерер возвращает
+     * ссылку в поле до {@code computeSize}/{@code draw}, без {@code updateFolder}.
+     * Если тема заменила рендерер, Paint приходит уже после расчёта без картинки:
+     * здесь нужен {@code setImage}, иначе ширина остаётся меньше на размер значка.
      */
     private static void installImageRestorePaintFilter()
     {
@@ -1005,6 +1034,7 @@ public final class MdEditorTabsHook implements IStartup
     {
         if (folder == null || folder.isDisposed())
             return;
+        boolean restoreBeforeSize = folder.getRenderer() instanceof ComfortTabRenderer;
         for (CTabItem item : folder.getItems())
         {
             if (item == null || item.isDisposed())
@@ -1016,7 +1046,10 @@ public final class MdEditorTabsHook implements IStartup
                 continue;
             Image before = item.getImage();
             Image wanted = withSeverityOverlay(comfort, before);
-            Global.setField(item, "image", wanted); //$NON-NLS-1$
+            if (restoreBeforeSize)
+                Global.setField(item, "image", wanted); //$NON-NLS-1$
+            else
+                item.setImage(wanted);
         }
     }
 
@@ -1044,6 +1077,20 @@ public final class MdEditorTabsHook implements IStartup
         {
             restoreTabImagesQuiet(parent);
             super.draw(part, state, bounds, gc);
+        }
+    }
+
+    private static void refreshTabTitles(DtGranularEditor<?> editor, CTabFolder folder, List<?> pages)
+    {
+        CTabItem[] items = folder.getItems();
+        for (int i = 0; i < items.length; i++)
+        {
+            CTabItem item = items[i];
+            if (item == null || item.isDisposed())
+                continue;
+            Object pageObj = i < pages.size() ? pages.get(i) : null;
+            IFormPage page = pageObj instanceof IFormPage formPage ? formPage : null;
+            refreshTab(editor, item, page, 0);
         }
     }
 

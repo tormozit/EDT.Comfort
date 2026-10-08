@@ -1507,7 +1507,8 @@ public final class Global
     // Приватные утилиты
     // =========================================================================
 
-    private static IWorkbenchPage getActivePage()
+    /** Активная рабочая страница IDE; null, если активного окна нет. */
+    public static IWorkbenchPage getActivePage()
     {
         IWorkbenchWindow w = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
         return w != null ? w.getActivePage() : null;

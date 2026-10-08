@@ -55,7 +55,6 @@ import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorXtextEditorPage;
 public final class BracketContentHintHook implements IStartup
 {
     private static final String TAG = "BracketHint"; //$NON-NLS-1$
-    private static final String TEMP_LOG_TOPIC = "bracket-hint"; //$NON-NLS-1$
     /**
      * Задержка перед пересчётом индекса после {@code modelChanged} — коалесцирует
      * серию быстрых правок (например, ввод текста) в один пересчёт вместо одного
@@ -69,7 +68,6 @@ public final class BracketContentHintHook implements IStartup
     @Override
     public void earlyStartup()
     {
-        Global.tempLog(TEMP_LOG_TOPIC, "earlyStartup installed=" + installed.get()); //$NON-NLS-1$
         if (!installed.compareAndSet(false, true))
         {
             Global.log(TAG, "earlyStartup already installed, skipping"); //$NON-NLS-1$
@@ -93,7 +91,6 @@ public final class BracketContentHintHook implements IStartup
                     || ComfortSettings.PREF_BRACKET_CONTENT_HINT_MIN_LINES.equals(prop))
                 {
                     Global.log(TAG, "property changed: " + prop); //$NON-NLS-1$
-                    Global.tempLog(TEMP_LOG_TOPIC, "preference " + prop + "=" + event.getNewValue()); //$NON-NLS-1$ //$NON-NLS-2$
                     boolean rebuildIndex = ComfortSettings.PREF_BRACKET_CONTENT_HINT_ENABLED.equals(prop)
                         && ComfortSettings.isBracketContentHintEnabled();
                     PlatformUI.getWorkbench().getDisplay().asyncExec(() -> refreshAllEditors(rebuildIndex));
@@ -109,8 +106,6 @@ public final class BracketContentHintHook implements IStartup
 
     private static void refreshAllEditors(boolean rebuildIndex)
     {
-        Global.tempLog(TEMP_LOG_TOPIC, "refresh installed=" + installed.get() //$NON-NLS-1$
-            + " enabled=" + ComfortSettings.isBracketContentHintEnabled() + " widgets=" + patched.size()); //$NON-NLS-1$ //$NON-NLS-2$
         if (!installed.get())
         {
             Global.log(TAG, "refreshAllEditors: not installed"); //$NON-NLS-1$
@@ -235,15 +230,12 @@ public final class BracketContentHintHook implements IStartup
             // Документ уже мог быть разобран до подключения modelListener, поэтому
             // ждать только следующего modelChanged нельзя. document.readOnly()
             // остаётся в PatchState.rebuildJob, вне UI-потока.
-            Global.tempLog(TEMP_LOG_TOPIC, "patchEditor OK widget=" + System.identityHashCode(widget) //$NON-NLS-1$
-                + " enabled=" + ComfortSettings.isBracketContentHintEnabled()); //$NON-NLS-1$
             if (ComfortSettings.isBracketContentHintEnabled())
                 scheduleRebuild(state);
             Global.log(TAG, "patchEditor: OK, patched=" + patched.size()); //$NON-NLS-1$
         }
         catch (Exception e)
         {
-            Global.tempLogException(TEMP_LOG_TOPIC, "patchEditor failed", e); //$NON-NLS-1$
             Global.log(TAG, "patchEditor failed: " + e.getClass().getSimpleName() + " " + e.getMessage()); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
@@ -281,7 +273,6 @@ public final class BracketContentHintHook implements IStartup
      */
     private static void scheduleRebuild(PatchState state)
     {
-        Global.tempLog(TEMP_LOG_TOPIC, "scheduleRebuild widget=" + System.identityHashCode(state.widget)); //$NON-NLS-1$
         state.rebuildJob.cancel();
         state.rebuildJob.schedule(REBUILD_DEBOUNCE_MS);
     }
@@ -338,8 +329,6 @@ public final class BracketContentHintHook implements IStartup
                 }
             };
             this.modelListener = resource -> {
-                Global.tempLog(TEMP_LOG_TOPIC, "modelChanged widget=" + System.identityHashCode(widget) //$NON-NLS-1$
-                    + " enabled=" + ComfortSettings.isBracketContentHintEnabled()); //$NON-NLS-1$
                 // Не тратим время на пересчёт (даже фоновый), пока фича выключена
                 // в настройках (выключена по умолчанию) — это большинство
                 // пользователей плагина.
@@ -375,7 +364,6 @@ public final class BracketContentHintHook implements IStartup
                 @Override
                 protected IStatus run(IProgressMonitor monitor)
                 {
-                    Global.tempLog(TEMP_LOG_TOPIC, "rebuild start widget=" + System.identityHashCode(widget)); //$NON-NLS-1$
                     List<BracketContentHintIndex.Entry> result;
                     try
                     {
@@ -387,12 +375,9 @@ public final class BracketContentHintHook implements IStartup
                     }
                     catch (Exception e)
                     {
-                        Global.tempLogException(TEMP_LOG_TOPIC, "rebuild failed", e); //$NON-NLS-1$
                         Global.log(TAG, "rebuildJob failed: " + e.getMessage()); //$NON-NLS-1$
                         return Status.CANCEL_STATUS;
                     }
-                    Global.tempLog(TEMP_LOG_TOPIC, "rebuild done widget=" + System.identityHashCode(widget) //$NON-NLS-1$
-                        + " entries=" + result.size() + " canceled=" + monitor.isCanceled()); //$NON-NLS-1$ //$NON-NLS-2$
                     if (monitor.isCanceled())
                         return Status.CANCEL_STATUS;
 

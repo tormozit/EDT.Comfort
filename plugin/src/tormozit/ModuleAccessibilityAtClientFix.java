@@ -62,17 +62,10 @@ public final class ModuleAccessibilityAtClientFix extends AbstractExternalQuickf
 {
     private static final String CONDITION =
         "#Если Сервер Или ТолстыйКлиентОбычноеПриложение Или ВнешнееСоединение Тогда";
-    private static final String LOG_TOPIC = "module-accessibility-711";
     private static final String BUNDLE = "com.e1c.g5.v8.dt.bsl.check";
     private static final String API = BUNDLE + ".qfix.";
     private static final CheckUid CHECK_UID =
         new CheckUid("module-accessibility-at-client", "com.e1c.v8codestyle.bsl");
-
-    public ModuleAccessibilityAtClientFix()
-    {
-        // Реестр ещё инициализируется: запросы к ICheckRepository здесь недопустимы.
-        Global.tempLog(LOG_TOPIC, "fix created; diagnostic=method-node-v7");
-    }
 
     @Override
     public CheckUid getCheckId()
@@ -90,7 +83,6 @@ public final class ModuleAccessibilityAtClientFix extends AbstractExternalQuickf
         }
         catch (ReflectiveOperationException e)
         {
-            Global.tempLog(LOG_TOPIC, "context API unavailable: " + e);
             return IFixContext.class;
         }
     }
@@ -99,19 +91,13 @@ public final class ModuleAccessibilityAtClientFix extends AbstractExternalQuickf
     public void onRegistration(FixDescriptor descriptor)
     {
         descriptor.setChangeProcessor(this);
-        Global.tempLog(LOG_TOPIC, "registered check=" + CHECK_UID);
     }
 
     @Override
     public Collection<IFixVariant<IFixContext>> getVariants(IFixContext context, IFixSession session)
     {
-        Global.tempLog(LOG_TOPIC, "getVariants context=" + context.getClass().getName());
-        logCheckIds();
-        Object model = getModel(context, session, false);
-        Method method = modelMethod(model);
-        boolean applicable = method != null && canFix(method);
-        Global.tempLog(LOG_TOPIC, "applicable=" + applicable + " element=" + method);
-        return applicable ? List.of(this) : List.of();
+        Method method = modelMethod(getModel(context, session, false));
+        return method != null && canFix(method) ? List.of(this) : List.of();
     }
 
     @Override
@@ -125,7 +111,6 @@ public final class ModuleAccessibilityAtClientFix extends AbstractExternalQuickf
         String details = move ? "Переместить метод вместе с описанием в первую серверную ветку модуля." :
             "Ограничить компиляцию всего модуля сервером, толстым клиентом обычного приложения "
                 + "и внешним соединением.";
-        Global.tempLog(LOG_TOPIC, "offered: " + title);
         return new FixVariantDescriptor(title, details + Global.pluginSignForTooltip());
     }
 
@@ -136,7 +121,6 @@ public final class ModuleAccessibilityAtClientFix extends AbstractExternalQuickf
         if (method == null || !canFix(method))
             return List.of();
         boolean move = findServerBranch(EcoreUtil2.getContainerOfType(method, Module.class)) != null;
-        Global.tempLog(LOG_TOPIC, "prepareChanges move=" + move);
         return List.of(new Change(move));
     }
 
@@ -151,10 +135,8 @@ public final class ModuleAccessibilityAtClientFix extends AbstractExternalQuickf
     @Override
     public void applyFix(IFixChange fixChange, IFixContext context, IFixSession session)
     {
-        Global.tempLog(LOG_TOPIC, "applyFix change=" + fixChange);
         if (!(fixChange instanceof Change change))
             return;
-        Global.tempLog(LOG_TOPIC, "applyFix move=" + change.move);
         Object model = getModel(context, session, true);
         if (model == null)
             return;
@@ -162,10 +144,7 @@ public final class ModuleAccessibilityAtClientFix extends AbstractExternalQuickf
         {
             Class<?> interactiveApi = loadApi("IXtextInteractiveBslModuleFixModel");
             if (!interactiveApi.isInstance(model))
-            {
-                Global.tempLog(LOG_TOPIC, "apply skipped: interactive model unavailable");
                 return;
-            }
             IModificationContext modificationContext = (IModificationContext)
                 interactiveApi.getMethod("getModificationContext").invoke(model);
             Issue issue = (Issue)loadApi("IXtextBslModuleFixModel").getMethod("getIssue").invoke(model);
@@ -173,29 +152,24 @@ public final class ModuleAccessibilityAtClientFix extends AbstractExternalQuickf
             // Как SingleVariantXtextBslModuleFix: актуальный метод и TextEdit под readOnly,
             // применение через штатный ExternalQuickfixModification с поддержкой отмены.
             new ExternalQuickfixModification<Method>(issue, Method.class, method -> {
-                Global.tempLog(LOG_TOPIC, "apply method=" + method.getName());
                 if (!canFix(method))
                     return null;
                 Module module = EcoreUtil2.getContainerOfType(method, Module.class);
                 if ((findServerBranch(module) != null) != change.move)
-                {
-                    Global.tempLog(LOG_TOPIC, "apply skipped: compilation conditions changed");
                     return null;
-                }
                 try
                 {
                     return createEdits(method, document);
                 }
                 catch (BadLocationException e)
                 {
-                    Global.tempLog(LOG_TOPIC, "apply failed: " + e);
                     return null;
                 }
             }).apply(modificationContext);
         }
         catch (Exception e)
         {
-            Global.tempLog(LOG_TOPIC, "applyFix failed: " + e);
+            // Исправление не применено — документ остался прежним.
         }
     }
 
@@ -208,8 +182,6 @@ public final class ModuleAccessibilityAtClientFix extends AbstractExternalQuickf
         if (issue == null || document == null || issue.getCode() == null
             || !issue.getCode().startsWith("SU"))
             return base;
-        Global.tempLog(LOG_TOPIC, "live annotation code=" + issue.getCode()
-            + " offset=" + issue.getOffset() + " uri=" + issue.getUriToProblem());
         try
         {
             ICompletionProposal proposal = document.readOnly(resource -> {
@@ -224,9 +196,7 @@ public final class ModuleAccessibilityAtClientFix extends AbstractExternalQuickf
                 if (!CHECK_UID.equals(uid))
                     return null;
                 Method method = liveMethod(resource, issue);
-                boolean applicable = method != null && canFix(method);
-                Global.tempLog(LOG_TOPIC, "live applicable=" + applicable + " method=" + method);
-                if (!applicable)
+                if (method == null || !canFix(method))
                     return null;
                 boolean move = findServerBranch(EcoreUtil2.getContainerOfType(method, Module.class)) != null;
                 return new LiveProposal(document, issue, method.getName(), move, icon);
@@ -241,12 +211,10 @@ public final class ModuleAccessibilityAtClientFix extends AbstractExternalQuickf
             }
             ICompletionProposal[] result = java.util.Arrays.copyOf(base, base.length + 1);
             result[base.length] = proposal;
-            Global.tempLog(LOG_TOPIC, "live offered: " + proposal.getDisplayString());
             return result;
         }
         catch (Exception e)
         {
-            Global.tempLog(LOG_TOPIC, "live proposal failed: " + e);
             return base;
         }
     }
@@ -280,13 +248,11 @@ public final class ModuleAccessibilityAtClientFix extends AbstractExternalQuickf
         @Override
         public void apply(IDocument target)
         {
-            Global.tempLog(LOG_TOPIC, "live apply method=" + methodName + " sameDocument=" + (target == document));
             if (target != document)
                 return;
             try
             {
                 new ExternalQuickfixModification<Method>(issue, Method.class, method -> {
-                    Global.tempLog(LOG_TOPIC, "live apply resolved=" + method.getName());
                     if (!methodName.equals(method.getName()) || !canFix(method))
                         return null;
                     try
@@ -295,7 +261,6 @@ public final class ModuleAccessibilityAtClientFix extends AbstractExternalQuickf
                     }
                     catch (BadLocationException e)
                     {
-                        Global.tempLog(LOG_TOPIC, "live edits failed: " + e);
                         return null;
                     }
                 }).apply(new IModificationContext() {
@@ -311,11 +276,10 @@ public final class ModuleAccessibilityAtClientFix extends AbstractExternalQuickf
                         return document;
                     }
                 });
-                Global.tempLog(LOG_TOPIC, "live apply finished");
             }
             catch (Exception e)
             {
-                Global.tempLog(LOG_TOPIC, "live apply failed: " + e);
+                // Исправление не применено — документ остался прежним.
             }
         }
 
@@ -370,7 +334,6 @@ public final class ModuleAccessibilityAtClientFix extends AbstractExternalQuickf
         }
         catch (ReflectiveOperationException e)
         {
-            Global.tempLog(LOG_TOPIC, "getModel failed: " + e);
             return null;
         }
     }
@@ -382,40 +345,11 @@ public final class ModuleAccessibilityAtClientFix extends AbstractExternalQuickf
         try
         {
             Object element = loadApi("IXtextBslModuleFixModel").getMethod("getElement").invoke(model);
-            Global.tempLog(LOG_TOPIC, "model element=" + element);
             return element instanceof Method method ? method : null;
         }
         catch (ReflectiveOperationException e)
         {
-            Global.tempLog(LOG_TOPIC, "model element failed: " + e);
             return null;
-        }
-    }
-
-    private static void logCheckIds()
-    {
-        try
-        {
-            ICheckRepository repository = Global.getOsgiService(ICheckRepository.class);
-            Global.tempLog(LOG_TOPIC, "check repository=" + repository);
-            if (repository != null)
-            {
-                int found = 0;
-                for (CheckUid uid : repository.getChecksWithDescriptions().keySet())
-                {
-                    if (!CHECK_UID.getCheckId().equals(uid.getCheckId()))
-                        continue;
-                    found++;
-                    Global.tempLog(LOG_TOPIC, "check id=" + uid.getCheckId()
-                        + " contributor=" + uid.getContributorId()
-                        + " projectCodes=" + repository.getShortUid(uid));
-                }
-                Global.tempLog(LOG_TOPIC, "matching checks=" + found);
-            }
-        }
-        catch (Throwable e)
-        {
-            Global.tempLog(LOG_TOPIC, "check UID diagnostic failed: " + e);
         }
     }
 
@@ -433,37 +367,12 @@ public final class ModuleAccessibilityAtClientFix extends AbstractExternalQuickf
     {
         Module module = EcoreUtil2.getContainerOfType(method, Module.class);
         boolean objectModule = module != null && isObjectModule(module);
-        Environments environments = method.environments();
-        boolean atClient = environments.containsAny(Environments.MNG_CLIENTS);
+        boolean atClient = method.environments().containsAny(Environments.MNG_CLIENTS);
         XtextResource resource = module != null && module.eResource() instanceof XtextResource xtext
             ? xtext : null;
         boolean parsed = resource != null && resource.getParseResult() != null;
-        boolean syntaxErrors = parsed && resource.getParseResult().hasSyntaxErrors();
         ICompositeNode methodNode = NodeModelUtils.findActualNodeFor(method);
         boolean methodSyntaxErrors = methodNode == null || hasMethodSyntaxErrors(methodNode);
-        if (parsed)
-        {
-            for (INode error : resource.getParseResult().getSyntaxErrors())
-            {
-                Global.tempLog(LOG_TOPIC, "parse error offset=" + error.getOffset()
-                    + " length=" + error.getLength() + " message=" + error.getSyntaxErrorMessage());
-            }
-        }
-        Global.tempLog(LOG_TOPIC, "canFix method=" + method.getName()
-            + " moduleType=" + (module == null ? null : module.getModuleType())
-            + " objectModule=" + objectModule + " environments=" + environments
-            + " atClient=" + atClient + " resource=" + (resource == null ? null : resource.getURI())
-            + " parsed=" + parsed + " syntaxErrors=" + syntaxErrors + " methodSyntaxErrors=" + methodSyntaxErrors
-            + " errors=" + (resource == null ? null : resource.getErrors()));
-        for (EObject parent = method; parent != null; parent = parent.eContainer())
-        {
-            Global.tempLog(LOG_TOPIC, "environment parent=" + parent.eClass().getName()
-                + " feature=" + (parent.eContainingFeature() == null ? null : parent.eContainingFeature().getName())
-                + (parent instanceof com._1c.g5.v8.dt.mcore.Environmental environmental
-                    ? " own=" + environmental.getEnvironments() + " effective=" + environmental.environments() : ""));
-            if (parent == module)
-                break;
-        }
         // Условие переносит целый метод; ошибки разбора вне него не меняют его границы.
         // Общий hasSyntaxErrors() скрывал исправление для метода после #КонецЕсли (itemAfter).
         return objectModule && atClient && parsed && !methodSyntaxErrors;
@@ -477,8 +386,7 @@ public final class ModuleAccessibilityAtClientFix extends AbstractExternalQuickf
             if (node.getSyntaxErrorMessage() != null)
             {
                 found = true;
-                Global.tempLog(LOG_TOPIC, "method parse error offset=" + node.getOffset()
-                    + " message=" + node.getSyntaxErrorMessage());
+                break;
             }
         }
         return found;
@@ -508,7 +416,6 @@ public final class ModuleAccessibilityAtClientFix extends AbstractExternalQuickf
             edits.addChild(new ReplaceEdit(0, contentStart, CONDITION + separator + separator));
             edits.addChild(new ReplaceEdit(contentEnd, document.getLength() - contentEnd,
                 separator + separator + "#КонецЕсли" + separator));
-            Global.tempLog(LOG_TOPIC, "wrap contentStart=" + contentStart + " contentEnd=" + contentEnd);
             return edits;
         }
 
