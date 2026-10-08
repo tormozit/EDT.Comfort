@@ -391,7 +391,7 @@ public final class BslDocCommentTypeMerge
         return !parts.isEmpty() && isCommaSeparatedTypeLine(parts.subList(0, 1));
     }
 
-    /** Передаём строку «- Тип1, Тип2:» штатному разбору EDT в форме «- Тип1, Тип2 - :». */
+    /** Передаём типы штатному разбору EDT, сохраняя наличие разделителя и координаты текста. */
     private static Object createNativeFieldTypeSection(Object comment, Object field)
     {
         List<Object> parts = descriptionParts(Global.invoke(field, "getDescription")); //$NON-NLS-1$
@@ -404,8 +404,12 @@ public final class BslDocCommentTypeMerge
         if (raw == null)
             return null;
         String line = raw.trim();
-        if (!line.startsWith("-") || line.indexOf(',') < 0) //$NON-NLS-1$
+        if (line.indexOf(',') < 0)
             return null;
+        // В описании параметра EDT может уже убрать разделитель после его имени.
+        // Последний аргумент createTypeSection означает «снять ведущий -», а не формат
+        // комментария: без разделителя передаём false, чтобы не потерять первый символ типа.
+        boolean hasLeadingDash = line.startsWith("-"); //$NON-NLS-1$
         int lineNumber = intValue(Global.invoke(first, "getLineNumber")); //$NON-NLS-1$
         int offset = intValue(Global.invoke(first, "getOffset")) + raw.indexOf(line); //$NON-NLS-1$
         String normalized = line.endsWith(":") //$NON-NLS-1$
@@ -416,7 +420,7 @@ public final class BslDocCommentTypeMerge
             Object section = Global.invoke(comment, "createTypeSection", field, //$NON-NLS-1$
                 Tuples.create(normalized, Integer.valueOf(offset), Integer.valueOf(0)),
                 Integer.valueOf(normalized.lastIndexOf('-')), Integer.valueOf(lineNumber),
-                Boolean.TRUE);
+                Boolean.valueOf(hasLeadingDash));
             if (section == null)
                 return null;
             Deque<Object> stack = new ArrayDeque<>();
