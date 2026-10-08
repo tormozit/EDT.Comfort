@@ -29,8 +29,8 @@ public final class ComfortSettings
      */
     public static final String PREF_PROBLEM_VIEW_UPDATE_GATE = "comfort.problemView.updateGate"; //$NON-NLS-1$
 
-    /** Заслонка обновлений панели проблем включена по умолчанию. */
-    public static final boolean DEFAULT_PROBLEM_VIEW_UPDATE_GATE = true;
+    /** Заслонка обновлений панели проблем выключена по умолчанию. */
+    public static final boolean DEFAULT_PROBLEM_VIEW_UPDATE_GATE = false;
 
     /** Ключ: общий отладочный журнал ({@link GlobalLogView}). */
     public static final String PREF_DEBUG_LOG = "comfort.debugLog"; //$NON-NLS-1$

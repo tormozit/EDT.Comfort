@@ -18,6 +18,7 @@ public final class SmartStyledCellLabelWrapper extends StyledCellLabelProvider
         implements SmartLabelHighlight, ILabelProvider
 {
     private final StyledCellLabelProvider base;
+    private java.util.function.Function<Object, String> textOverride;
     private SmartMatcher highlightMatcher = new SmartMatcher(""); //$NON-NLS-1$
     private SmartOutlineFilter bslFlatFilter;
     private IBaseLabelProvider bslFlatLabelSource;
@@ -61,6 +62,12 @@ public final class SmartStyledCellLabelWrapper extends StyledCellLabelProvider
             String flat = resolveSubscriptionLabelOverride(cell.getElement());
             if (flat != null)
                 text = flat;
+            String replacement = textOverride != null ? textOverride.apply(cell.getElement()) : null;
+            if (replacement != null)
+            {
+                text = replacement;
+                cell.setStyleRanges(null);
+            }
             if (text != null)
                 cell.setText(text);
         }
@@ -75,6 +82,11 @@ public final class SmartStyledCellLabelWrapper extends StyledCellLabelProvider
         SmartMatchHighlight.appendMatchRanges(cell, highlightMatcher.getHighlightRanges(text));
     }
 
+    public void setTextOverride(java.util.function.Function<Object, String> textOverride)
+    {
+        this.textOverride = textOverride;
+    }
+
     @Override
     public String getText(Object element)
     {
@@ -87,6 +99,9 @@ public final class SmartStyledCellLabelWrapper extends StyledCellLabelProvider
             baseText = text instanceof String ? (String) text : ""; //$NON-NLS-1$
         }
         String flat = resolveSubscriptionLabelOverride(element);
+        String replacement = textOverride != null ? textOverride.apply(element) : null;
+        if (replacement != null)
+            return replacement;
         return flat != null ? flat : baseText;
     }
 

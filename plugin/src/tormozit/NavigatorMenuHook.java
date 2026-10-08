@@ -80,7 +80,6 @@ public final class NavigatorMenuHook implements IStartup
 
     private static void flattenSingleCreate(Menu menu)
     {
-        Global.tempLog("navigator-menu", "show items=" + menu.getItemCount()); //$NON-NLS-1$ //$NON-NLS-2$
         for (MenuItem item : menu.getItems())
         {
             if (!(item.getData() instanceof MenuManager submenu)
@@ -115,10 +114,6 @@ public final class NavigatorMenuHook implements IStartup
             }
             ActionContributionItem direct = new SingleCreateContribution(
                 actionItem.getAction(), submenu.getMenuText(), imageData);
-            Global.tempLog("navigator-menu", "flatten action=" + actionItem.getAction().getId() //$NON-NLS-1$ //$NON-NLS-2$
-                + " text=" + actionItem.getAction().getText() //$NON-NLS-1$
-                + " enabled=" + actionItem.getAction().isEnabled() //$NON-NLS-1$
-                + " image=" + (imageData != null)); //$NON-NLS-1$
             parent.insertBefore(NEW_MENU_ID, direct);
             parent.remove(submenu);
             // Меняем только этот SWT-пункт. parent.update удалил бы пункты,

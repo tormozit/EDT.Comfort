@@ -44,7 +44,42 @@ public final class MdReferenceSupport
 {
     public record BrokenReference(EObject owner, EReference feature, int index, EObject target) {}
     /** В результатах не сохраняются объекты завершённой BM-транзакции. */
-    public record Location(URI owner, EClass ownerClass, String feature) {}
+    public record Location(URI owner, EClass ownerClass, String feature, URI root, EClass rootClass,
+        String containmentPath)
+    {
+        public Location(URI owner, EClass ownerClass, String feature)
+        {
+            this(owner, ownerClass, feature, null, null, null);
+        }
+    }
+
+    private static Location locationOf(EObject owner, EReference feature)
+    {
+        EObject root = EcoreUtil.getRootContainer(owner);
+        String path = EcoreUtil.getRelativeURIFragmentPath(root, owner);
+        Global.tempLog("broken-links-project", "location path validation root=" + EcoreUtil.getURI(root)
+            + " path=" + path + " ownerClass=" + owner.eClass().getName());
+        if (resolveContainment(root, path) != owner)
+            throw new IllegalStateException("Не удалось проверить путь свойства " + feature.getName());
+        Global.tempLog("broken-links-project", "location root=" + EcoreUtil.getURI(root) + " path=" + path
+            + " owner=" + EcoreUtil.getURI(owner));
+        return new Location(EcoreUtil.getURI(owner), owner.eClass(), feature.getName(),
+            EcoreUtil.getURI(root), root.eClass(), path);
+    }
+
+    /** Пустой относительный путь обозначает сам корень, а не URI-сегмент. */
+    private static EObject resolveContainment(EObject root, String path)
+    {
+        return path.isEmpty() ? root : EcoreUtil.getEObject(root, path);
+    }
+
+    private static EObject resolveLocation(IBmTransaction transaction, Location location)
+    {
+        if (location.root() == null)
+            return transaction.getObjectByUri(location.owner());
+        EObject root = transaction.getObjectByUri(location.root());
+        return root != null && !root.eIsProxy() ? resolveContainment(root, location.containmentPath()) : null;
+    }
 
     private static final Map<EClass, List<EReference>> FEATURES = new ConcurrentHashMap<>();
 
@@ -380,7 +415,7 @@ public final class MdReferenceSupport
                                 List<EReference> features = new ArrayList<>(targets.size());
                                 for (Location location : targets)
                                 {
-                                    EObject owner = transaction.getObjectByUri(location.owner());
+                                    EObject owner = resolveLocation(transaction, location);
                                     if (owner == null || owner.eIsProxy()
                                         || !(owner.eClass().getEStructuralFeature(location.feature())
                                             instanceof EReference feature))
@@ -434,7 +469,17 @@ public final class MdReferenceSupport
         IBmModel model = manager != null ? manager.getModel(project) : null;
         if (model == null)
             return;
-        EObject owner = model.getEngine().resolve(location.owner(), location.ownerClass());
+        EObject owner;
+        if (location.root() != null)
+        {
+            EObject root = model.getEngine().resolve(location.root(), location.rootClass());
+            owner = root != null && !root.eIsProxy() ? resolveContainment(root, location.containmentPath()) : null;
+        }
+        else
+            owner = model.getEngine().resolve(location.owner(), location.ownerClass());
+        Global.tempLog("broken-links-project", "resolve property location=" + location
+            + " resolved=" + (owner != null ? owner.eClass().getName() : null)
+            + " proxy=" + (owner != null && owner.eIsProxy()));
         if (owner == null || owner.eIsProxy())
             return;
         ConfigSearchResultsHook.openMetadataReferenceProperty(owner,
@@ -499,7 +544,7 @@ public final class MdReferenceSupport
                             SubMonitor indexing = progress.split(20);
                             if (location != null)
                             {
-                                EObject owner = transaction.getObjectByUri(location.owner());
+                                EObject owner = resolveLocation(transaction, location);
                                 if (owner != null && !owner.eIsProxy())
                                     owners.add(owner);
                                 indexing.done();
@@ -530,10 +575,18 @@ public final class MdReferenceSupport
                                 checking.checkCanceled();
                                 for (BrokenReference reference : findBrokenReferences(owner, checking, unresolved,
                                     location != null ? location.feature() : null))
-                                    rows.add(new CompareSearchMatch(new Location(EcoreUtil.getURI(owner), owner.eClass(),
-                                        reference.feature().getName()), localized(EcoreUtil.getURI(owner)),
-                                        propertyName(reference.feature()), localized(EcoreUtil.getURI(reference.target())),
+                                {
+                                    String property = ConfigSearchResultsHook.metadataPropertyPath(owner,
+                                        reference.feature(), EcoreUtil.getRootContainer(owner));
+                                    if (property == null || property.isBlank())
+                                        property = propertyName(reference.feature());
+                                    Global.tempLog("broken-links-project", "match owner=" + EcoreUtil.getURI(owner)
+                                        + " class=" + owner.eClass().getName() + " feature=" + reference.feature().getName()
+                                        + " property=" + property);
+                                    rows.add(new CompareSearchMatch(locationOf(owner, reference.feature()), localized(EcoreUtil.getURI(owner)),
+                                        property, localized(EcoreUtil.getURI(reference.target())),
                                         fullName(EcoreUtil.getURI(reference.target()))));
+                                }
                                 checking.worked(1);
                             }
                             checking.done();

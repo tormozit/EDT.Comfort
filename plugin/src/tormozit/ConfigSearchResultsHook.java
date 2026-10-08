@@ -4858,14 +4858,31 @@ public final class ConfigSearchResultsHook implements IStartup
         IWorkbenchPage page = Global.getActivePage();
         if (page == null || object == null || feature == null)
             return;
-        if (openNestedMdObjectMemberMatch(object, page, feature, List.of()))
+        if (openNestedMdObjectMemberMatch(object, page, feature, null))
             return;
+        Global.tempLog("broken-links-project", "open property uri=" + EcoreUtil.getURI(object)
+            + " class=" + object.eClass().getName() + " feature=" + feature.getName());
+        if (openChildFormPropertyMatch(object, page, feature, null))
+            return;
+        if (isInsideForm(object) && FormEditorHook.openFormElement(page, object) != null)
+        {
+            try
+            {
+                page.showView(IPageLayout.ID_PROP_SHEET);
+                PropertyFieldFocus.schedule(page, object, feature, null);
+            }
+            catch (Exception error)
+            {
+                Global.tempLog("broken-links-project", "open form property failed " + error);
+            }
+            return;
+        }
         if (openEditorPageOfProperty(page, object, feature))
             return;
         try
         {
             page.showView(IPageLayout.ID_PROP_SHEET);
-            PropertyFieldFocus.schedule(page, object, feature, List.of());
+            PropertyFieldFocus.schedule(page, object, feature, null);
             if (new OpenHelper(page).openEditor(object) == null)
                 PropertyFieldFocus.cancel();
         }
@@ -4916,10 +4933,10 @@ public final class ConfigSearchResultsHook implements IStartup
                 + " editor=" + (editor != null ? editor.getClass().getName() : null));
             if (!(editor instanceof DtGranularEditor<?> granular))
                 return false;
-            activateEditorPage(granular, pageId, 0);
+            activateEditorPage(granular, pageId, feature, 0);
             return true;
         }
-        catch (RuntimeException error)
+        catch (Exception error)
         {
             Global.tempLog("broken-links-project", "open page failed uri=" + EcoreUtil.getURI(object)
                 + " feature=" + feature.getName() + " error=" + error);
@@ -4931,10 +4948,21 @@ public final class ConfigSearchResultsHook implements IStartup
      * Только что открытый редактор показывает страницу загрузки и добавляет свои страницы позже —
      * до этого {@code setActivePage} возвращает {@code null}. Повтор до ~4 с.
      */
-    private static void activateEditorPage(DtGranularEditor<?> editor, String pageId, int attempt)
+    private static void activateEditorPage(DtGranularEditor<?> editor, String pageId,
+        EStructuralFeature feature, int attempt)
     {
         boolean selected = editor.setActivePage(pageId) != null;
-        if (selected || attempt >= 40)
+        boolean focused = false;
+        if (selected)
+        {
+            Object pageInstance = Global.invoke(editor, "getActivePageInstance");
+            Object scene = pageInstance != null ? Global.invoke(pageInstance, "getScene") : null;
+            Object field = scene != null ? PropertyFieldFocus.findFieldComponent(scene, List.of(feature)) : null;
+            focused = field != null && AefFieldFocus.focusComponent(scene, field);
+        }
+        Global.tempLog("broken-links-project", "focus editor page=" + pageId + " feature=" + feature.getName()
+            + " selected=" + selected + " focused=" + focused + " attempt=" + attempt);
+        if (focused || attempt >= 40)
         {
             Global.tempLog("broken-links-project", "activate page=" + pageId + " selected=" + selected
                 + " attempt=" + attempt);
@@ -4946,7 +4974,7 @@ public final class ConfigSearchResultsHook implements IStartup
         display.timerExec(100, () -> {
             if (editor.getSite() != null && editor.getSite().getPage() != null
                 && editor.getSite().getPage().findEditor(editor.getEditorInput()) == editor)
-                activateEditorPage(editor, pageId, attempt + 1);
+                activateEditorPage(editor, pageId, feature, attempt + 1);
         });
     }
 
@@ -7054,6 +7082,20 @@ public final class ConfigSearchResultsHook implements IStartup
             // так что обход останавливается там раньше, до Справочника, независимо от top.
             EObject top = resolveMatchTopMdObject(matchObj);
 
+            return metadataPropertyPath(leaf, resolveMatchFeature(matchObj), top);
+        }
+        catch (Exception e)
+        {
+            log("hierarchicalPropertyPath: " + e); //$NON-NLS-1$
+            return null;
+        }
+    }
+
+    /** Общий путь свойства для штатного поиска и поиска битых ссылок. */
+    static String metadataPropertyPath(EObject leaf, EStructuralFeature feature, EObject top)
+    {
+        try
+        {
             List<String> terminal = new ArrayList<>();
             EObject walkStart;
             if (leaf instanceof java.util.Map.Entry<?, ?> entry)
@@ -7078,7 +7120,7 @@ public final class ConfigSearchResultsHook implements IStartup
             }
             else
             {
-                String featureLabel = dcsFeatureLabel(resolveMatchFeature(matchObj));
+                String featureLabel = dcsFeatureLabel(feature);
                 if (featureLabel != null)
                     terminal.add(featureLabel);
                 walkStart = leaf;
@@ -7143,9 +7185,10 @@ public final class ConfigSearchResultsHook implements IStartup
             path.addAll(terminal);
             return path.isEmpty() ? null : String.join(".", path); //$NON-NLS-1$
         }
-        catch (Exception e)
+        catch (Exception error)
         {
-            log("hierarchicalPropertyPath: " + e); //$NON-NLS-1$
+            Global.tempLog("broken-links-project", "property path failed uri=" + EcoreUtil.getURI(leaf)
+                + " feature=" + feature + " error=" + error);
             return null;
         }
     }

@@ -154,9 +154,8 @@ public final class NavigatorExpandToMenuHook implements IStartup
 
     private static void hookComfortSubmenu(Menu contextMenu, CommonViewer viewer)
     {
-        MenuItem anchor = ComfortSubmenuHelper.findAnchorAfterEditGroup(contextMenu);
-        Menu comfortSub = ComfortSubmenuHelper.findOrCreateComfortSubmenu(
-            contextMenu, contextMenu.getShell(), anchor);
+        Menu comfortSub = ComfortSubmenuHelper.findOrCreateNavigatorComfortSubmenu(
+            contextMenu, contextMenu.getShell());
         if (comfortSub == null || comfortSub.isDisposed())
             return;
         if (Boolean.TRUE.equals(comfortSub.getData(HOOK_MARKER)))

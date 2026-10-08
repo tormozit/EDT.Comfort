@@ -155,7 +155,6 @@ public final class MdEditorAttributeMenuHook implements IStartup
         if (!(viewModel instanceof CharacteristicsTableViewModel))
             return style;
         int result = (style & ~SWT.SINGLE) | SWT.MULTI;
-        Global.tempLog("characteristics-clipboard", "table style=" + style + " result=" + result); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         return result;
     }
 
@@ -196,7 +195,6 @@ public final class MdEditorAttributeMenuHook implements IStartup
         // Не подменяем события другого компонента или уже сменившейся строки.
         if (!selected.contains(original[0]))
             return original;
-        Global.tempLog("characteristics-clipboard", "selection count=" + selected.size()); //$NON-NLS-1$ //$NON-NLS-2$
         return selected.toArray();
     }
 
@@ -213,8 +211,6 @@ public final class MdEditorAttributeMenuHook implements IStartup
         List<EObject> selected = clipboard.selectedCharacteristics();
         boolean unchanged = firstUnchanged && selected.equals(clipboard.lastSelection);
         clipboard.lastSelection = List.copyOf(selected);
-        Global.tempLog("characteristics-clipboard", "selection compare count=" + selected.size() //$NON-NLS-1$ //$NON-NLS-2$
-            + " unchanged=" + unchanged); //$NON-NLS-1$
         return unchanged;
     }
 
@@ -243,7 +239,6 @@ public final class MdEditorAttributeMenuHook implements IStartup
 
         private void install()
         {
-            Global.tempLog("characteristics-clipboard", "install style=" + table.getStyle()); //$NON-NLS-1$ //$NON-NLS-2$
             CopyCommandSupport.wireCopyOverride(table, (Runnable) this::copy);
             table.addListener(SWT.FocusIn, event -> activatePaste());
             table.addListener(SWT.FocusOut, event -> deactivatePaste());
@@ -325,8 +320,6 @@ public final class MdEditorAttributeMenuHook implements IStartup
         private void copy()
         {
             List<EObject> objects = selectedCharacteristics();
-            Global.tempLog("characteristics-clipboard", "copy selected=" + table.getSelectionCount() //$NON-NLS-1$ //$NON-NLS-2$
-                + " mapped=" + objects.size()); //$NON-NLS-1$
             if (objects.isEmpty())
                 return;
             Clipboard clipboard = new Clipboard(table.getDisplay());
@@ -381,7 +374,6 @@ public final class MdEditorAttributeMenuHook implements IStartup
         private void paste()
         {
             boolean enabled = canPaste();
-            Global.tempLog("characteristics-clipboard", "paste requested enabled=" + enabled); //$NON-NLS-1$ //$NON-NLS-2$
             if (!enabled)
                 return;
             List<EObject> objects = copiedCharacteristics();
@@ -390,8 +382,6 @@ public final class MdEditorAttributeMenuHook implements IStartup
             IModelObjectCopySupport support = getInjector().getInstance(IModelObjectCopySupport.class);
             AtomicReference<List<EObject>> inserted = new AtomicReference<>(List.of());
             int generation = ++pasteGeneration;
-            Global.tempLog("characteristics-clipboard", "paste count=" + objects.size() //$NON-NLS-1$ //$NON-NLS-2$
-                + " target=" + EcoreUtil.getURI(target)); //$NON-NLS-1$
             try
             {
                 new ProgressMonitorDialog(table.getShell()).run(true, false, monitor ->
@@ -400,7 +390,6 @@ public final class MdEditorAttributeMenuHook implements IStartup
                     {
                         List<EObject> copied = support.copyAndAttach(objects, target, feature, monitor);
                         inserted.set(List.copyOf(copied));
-                        Global.tempLog("characteristics-clipboard", "paste copied=" + copied.size()); //$NON-NLS-1$ //$NON-NLS-2$
                     }
                     catch (org.eclipse.core.runtime.CoreException | RuntimeException e)
                     {
@@ -413,7 +402,6 @@ public final class MdEditorAttributeMenuHook implements IStartup
             catch (InvocationTargetException e)
             {
                 Throwable cause = e.getCause();
-                Global.tempLog("characteristics-clipboard", "paste failed=" + cause); //$NON-NLS-1$ //$NON-NLS-2$
                 Global.logError(TAG, "Вставка характеристик", cause); //$NON-NLS-1$
                 MessageDialog.openError(table.getShell(), Global.withPluginWindowTitle("Вставка характеристик"), //$NON-NLS-1$
                     "Не удалось вставить характеристики: " + cause.getMessage()); //$NON-NLS-1$
@@ -421,7 +409,6 @@ public final class MdEditorAttributeMenuHook implements IStartup
             catch (InterruptedException e)
             {
                 Thread.currentThread().interrupt();
-                Global.tempLog("characteristics-clipboard", "paste interrupted=" + e); //$NON-NLS-1$ //$NON-NLS-2$
             }
         }
 
@@ -449,8 +436,6 @@ public final class MdEditorAttributeMenuHook implements IStartup
                         break;
                     }
             }
-            Global.tempLog("characteristics-clipboard", "select inserted attempt=" + attempt //$NON-NLS-1$ //$NON-NLS-2$
-                + " found=" + rows.size() + " expected=" + objects.size() + " viewer=" + (viewer != null)); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             if (viewer != null && rows.size() == objects.size())
             {
                 viewer.setSelection(new StructuredSelection(rows), true);

@@ -12,9 +12,14 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
+import org.eclipse.core.runtime.CoreException;
+import org.eclipse.handly.model.ISourceElementInfo;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.emf.common.util.URI;
 import org.eclipse.jface.text.BadLocationException;
+import org.eclipse.jface.text.IDocument;
+import org.eclipse.jface.text.IRegion;
 import org.eclipse.jface.text.ITextViewer;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider.IStyledLabelProvider;
 import org.eclipse.jface.viewers.IBaseLabelProvider;
@@ -50,6 +55,7 @@ import com._1c.g5.v8.dt.bsl.common.IBslModuleTextInsertInfo;
 import com._1c.g5.v8.dt.bsl.common.IModuleExtensionService;
 import com._1c.g5.v8.dt.bsl.common.IModuleExtensionServiceProvider;
 import com._1c.g5.v8.dt.bsl.contextdef.IBslModuleContextDefService;
+import com._1c.g5.v8.dt.bsl.core.IParentPreprocessor;
 import com._1c.g5.v8.dt.bsl.model.Module;
 import com._1c.g5.v8.dt.bsl.model.ModuleType;
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
@@ -298,6 +304,36 @@ public final class BslOutlineEventsSupport
             cls = cls.getSuperclass();
         }
         return false;
+    }
+
+    /** Исходная директива вместо пустой штатной подписи родительского узла #Если. */
+    static Function<Object, String> preprocessorLabels(Object popup)
+    {
+        BslXtextEditor editor = IrMethodListHandler.resolveBslEditor(popup);
+        IDocument document = editor != null ? editor.getDocument() : null;
+        return element -> {
+            Global.tempLog("outline-preprocessor", "label: document=" + (document != null) //$NON-NLS-1$ //$NON-NLS-2$
+                + ", element=" + (element != null ? element.getClass().getName() : "null")); //$NON-NLS-1$ //$NON-NLS-2$
+            if (document == null || !(element instanceof IParentPreprocessor preprocessor))
+                return null;
+            try
+            {
+                ISourceElementInfo info = preprocessor.getSourceElementInfo();
+                if (info == null || info.getFullRange() == null)
+                    return null;
+                IRegion line = document.getLineInformationOfOffset(info.getFullRange().getOffset());
+                String text = document.get(line.getOffset(), line.getLength()).strip();
+                Global.tempLog("outline-preprocessor", "offset=" + info.getFullRange().getOffset() //$NON-NLS-1$ //$NON-NLS-2$
+                    + ", text=" + text); //$NON-NLS-1$
+                return text.startsWith("#") ? text : null; //$NON-NLS-1$
+            }
+            catch (CoreException | BadLocationException e)
+            {
+                Global.tempLog("outline-preprocessor", "error=" + e); //$NON-NLS-1$ //$NON-NLS-2$
+                Global.logError(TAG, "preprocessor label", e); //$NON-NLS-1$
+                return null;
+            }
+        };
     }
 
     /** {@code BslOutlineLabelProvider} из popup — для фильтра и иконок. */

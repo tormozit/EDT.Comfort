@@ -15,6 +15,7 @@ public class SmartOutlineLabelProvider extends LabelProvider implements IStyledL
     private final Object imageSource;
     private final Function<Object, String> matchTextFn;
     private final Predicate<Object> skipHighlight;
+    private Function<Object, String> textOverride;
     private SmartMatcher highlightMatcher = new SmartMatcher(""); //$NON-NLS-1$
     public SmartOutlineLabelProvider(IStyledLabelProvider baseStyled) {
 
@@ -64,8 +65,16 @@ public class SmartOutlineLabelProvider extends LabelProvider implements IStyledL
     public StyledString getStyledText(Object element) {
 
         StyledString styledString = obtainBaseStyledText(element);
+        String replacement = textOverride != null ? textOverride.apply(element) : null;
+        if (replacement != null)
+            styledString = new StyledString(replacement);
         applyHighlightIfNeeded(element, styledString);
         return styledString;
+    }
+
+    public void setTextOverride(Function<Object, String> textOverride)
+    {
+        this.textOverride = textOverride;
     }
 
     protected StyledString obtainBaseStyledText(Object element)
@@ -106,6 +115,8 @@ public class SmartOutlineLabelProvider extends LabelProvider implements IStyledL
 
     protected String resolveMatchText(Object element, String plainText)
     {
+        if (textOverride != null && textOverride.apply(element) != null)
+            return plainText;
         if (matchTextFn != null)
             return matchTextFn.apply(element);
         if (basePlain != null)
@@ -149,4 +160,3 @@ public class SmartOutlineLabelProvider extends LabelProvider implements IStyledL
     }
 
 }
-

@@ -198,9 +198,8 @@ public final class NavigatorAddToObjectSetMenuHook implements IStartup
             return;
         if (contextMenu == null || contextMenu.isDisposed())
             return;
-        MenuItem anchor = ComfortSubmenuHelper.findAnchorAfterEditGroup(contextMenu);
-        Menu comfortMenu = ComfortSubmenuHelper.findOrCreateComfortSubmenu(
-            contextMenu, contextMenu.getShell(), anchor);
+        Menu comfortMenu = ComfortSubmenuHelper.findOrCreateNavigatorComfortSubmenu(
+            contextMenu, contextMenu.getShell());
         if (comfortMenu == null)
             return;
         MenuItem item = findOrCreateItem(navigator, comfortMenu);

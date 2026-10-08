@@ -3191,12 +3191,6 @@ public final class MdEditorTreeHook
                         : characteristics ? transformCharacteristicsSelection(wovenClass.getBytes())
                             : copySupport ? transformCopyResult(wovenClass.getBytes())
                                 : transformTreeProvider(wovenClass.getBytes());
-                if (characteristics)
-                    Global.tempLog("characteristics-clipboard", "weave CharacteristicsTableComponent transformed=" //$NON-NLS-1$ //$NON-NLS-2$
-                        + (transformed != null));
-                if (tableView)
-                    Global.tempLog("characteristics-clipboard", "weave DtTableView transformed=" //$NON-NLS-1$ //$NON-NLS-2$
-                        + (transformed != null));
                 if (transformed == null)
                     return;
                 wovenClass.getDynamicImports().add("tormozit"); //$NON-NLS-1$
@@ -3204,10 +3198,6 @@ public final class MdEditorTreeHook
             }
             catch (Throwable ignored)
             {
-                if (tableView)
-                    Global.tempLog("characteristics-clipboard", "weave DtTableView failed=" + ignored); //$NON-NLS-1$ //$NON-NLS-2$
-                if (characteristics)
-                    Global.tempLog("characteristics-clipboard", "weave CharacteristicsTableComponent failed=" + ignored); //$NON-NLS-1$ //$NON-NLS-2$
             }
         }
     }

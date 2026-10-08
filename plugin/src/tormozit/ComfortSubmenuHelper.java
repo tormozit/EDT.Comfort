@@ -360,6 +360,46 @@ final class ComfortSubmenuHelper
         return findOrCreateComfortSubmenu(parentMenu, shell, null);
     }
 
+    /**
+     * Подменю навигатора всегда завершает контекстное меню отдельной группой.
+     * Сохраняем экземпляр Menu: на нём уже зарегистрированы наполнители других хуков.
+     */
+    static Menu findOrCreateNavigatorComfortSubmenu(Menu parentMenu, Shell shell)
+    {
+        Menu sub = findOrCreateComfortSubmenu(parentMenu, shell);
+        if (sub == null || sub.isDisposed() || sub == parentMenu)
+            return sub;
+        MenuItem root = sub.getParentItem();
+        if (root == null || root.isDisposed())
+            return sub;
+
+        final String separatorMarker = "tormozit.navigatorComfortSeparator"; //$NON-NLS-1$
+        // Удаляем только свой разделитель, если он остался на прежнем месте.
+        for (MenuItem item : parentMenu.getItems())
+            if (Boolean.TRUE.equals(item.getData(separatorMarker)))
+                item.dispose();
+
+        if (parentMenu.indexOf(root) != parentMenu.getItemCount() - 1)
+        {
+            root.setMenu(null);
+            root.dispose();
+            root = new MenuItem(parentMenu, SWT.CASCADE);
+            root.setText(SUBMENU_TEXT);
+            Image icon = Global.comfortIcon();
+            if (icon != null)
+                root.setImage(icon);
+            root.setData(SUBMENU_MARKER, Boolean.TRUE);
+            root.setMenu(sub);
+        }
+        int index = parentMenu.indexOf(root);
+        if (index > 0 && (parentMenu.getItem(index - 1).getStyle() & SWT.SEPARATOR) == 0)
+        {
+            MenuItem separator = new MenuItem(parentMenu, SWT.SEPARATOR, index);
+            separator.setData(separatorMarker, Boolean.TRUE);
+        }
+        return sub;
+    }
+
     /** Все команды меню добавлены плагином: размещаем их в корне без каскадного пункта. */
     static void useRootForComfortCommands(Menu menu)
     {

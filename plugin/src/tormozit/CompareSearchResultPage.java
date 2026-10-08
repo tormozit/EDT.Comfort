@@ -1427,7 +1427,13 @@ public class CompareSearchResultPage implements ISearchResultPage
             if (tableViewer != null && !table.isDisposed())
             {
                 tableViewer.setInput(csr.getMatches());
-                checkColumn.setWidth(csr.getProject() != null ? 0 : CHECK_COLUMN_WIDTH);
+                boolean projectMode = csr.getProject() != null;
+                IDialogSettings settings = dialogSettings();
+                tableInteraction.setColumnHidden(checkColumn, projectMode, CHECK_COLUMN_WIDTH);
+                tableInteraction.setColumnHidden(table.getColumn(4), projectMode,
+                    FormTableColumnState.readWidth(settings, KEY_COL_STATUS_WIDTH, 100, 1));
+                tableInteraction.setColumnHidden(table.getColumn(5), projectMode,
+                    FormTableColumnState.readWidth(settings, KEY_COL_SIDE_WIDTH, 100, 1));
                 updateMissingObjectsTree(csr);
                 syncChecksFromTree();
                 if (tableInteraction != null)
@@ -1580,6 +1586,8 @@ public class CompareSearchResultPage implements ISearchResultPage
     {
         if (memento == null || table == null || table.isDisposed())
             return;
+        if (searchResult != null && searchResult.getProject() != null)
+            return;
         org.eclipse.swt.widgets.TableColumn[] cols = table.getColumns();
         for (int i = 0; i < cols.length; i++)
         {
@@ -1600,7 +1608,8 @@ public class CompareSearchResultPage implements ISearchResultPage
      */
     private void saveColumnLayout()
     {
-        if (table == null || table.isDisposed() || table.getColumnCount() < 6)
+        if (table == null || table.isDisposed() || table.getColumnCount() < 6
+            || searchResult != null && searchResult.getProject() != null)
             return;
         boolean fillMode = tableInteraction != null && tableInteraction.isColumnsExactFill();
         FormTableColumnState.saveOrderAndWidths(dialogSettings(), KEY_COL_ORDER, KEY_COL_FILL_MODE, fillMode,

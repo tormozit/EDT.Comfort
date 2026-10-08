@@ -1743,6 +1743,7 @@ public class SmartOutlineHook implements IStartup {
             IStyledLabelProvider styledForTree = new BslFlatSubscriptionStyledLabelWrapper(innerStyledLp,
                     smartFilter, bslLabelSourceForFlat, subscriptionFlatLabels);
             SmartOutlineLabelProvider smartLabelProvider = new SmartOutlineLabelProvider(styledForTree, baseLp);
+            smartLabelProvider.setTextOverride(BslOutlineEventsSupport.preprocessorLabels(dialog));
             smartLabelProvider.setHighlightPattern(initialPattern);
             injectStyledStringProvider((DelegatingStyledCellLabelProvider) rawLp, smartLabelProvider);
             SmartMatchHighlight.enableColorsOnSelection((DelegatingStyledCellLabelProvider) rawLp);
@@ -1758,6 +1759,7 @@ public class SmartOutlineHook implements IStartup {
             if (styledBase != null)
             {
                 SmartStyledCellLabelWrapper wrapper = new SmartStyledCellLabelWrapper(styledBase);
+                wrapper.setTextOverride(BslOutlineEventsSupport.preprocessorLabels(dialog));
                 wrapper.setHighlightPattern(initialPattern);
                 if (smartFilter != null && bslLabelSourceForFlat != null)
                     wrapper.setBslFlatSubscriptionLabels(smartFilter, bslLabelSourceForFlat, subscriptionFlatLabels);
@@ -1780,6 +1782,8 @@ public class SmartOutlineHook implements IStartup {
         SmartOutlineLabelProvider smartLabelProvider = innerStyledLp != null
                 ? new SmartOutlineLabelProvider(innerStyledLp, null)
                 : new SmartOutlineLabelProvider(null, baseLp);
+        if (bslQuickOutline)
+            smartLabelProvider.setTextOverride(BslOutlineEventsSupport.preprocessorLabels(dialog));
         smartLabelProvider.setHighlightPattern(initialPattern);
 
         if (innerStyledLp != null && rawLp instanceof DelegatingStyledCellLabelProvider)
