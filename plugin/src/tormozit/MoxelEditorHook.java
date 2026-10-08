@@ -11,6 +11,7 @@ import java.util.UUID;
 import java.util.WeakHashMap;
 import java.util.function.Supplier;
 
+import org.eclipse.core.commands.AbstractHandler;
 import org.eclipse.core.commands.ExecutionEvent;
 import org.eclipse.core.commands.ExecutionException;
 import org.eclipse.core.commands.IExecutionListener;
@@ -35,6 +36,8 @@ import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Menu;
 import org.eclipse.swt.widgets.MenuItem;
 import org.eclipse.swt.widgets.Shell;
+import org.eclipse.swt.widgets.Text;
+import org.eclipse.ui.ActiveShellExpression;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.forms.editor.IFormPage;
 import org.eclipse.ui.IPartListener2;
@@ -46,6 +49,7 @@ import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.commands.ICommandService;
 import org.eclipse.ui.handlers.IHandlerService;
+import org.eclipse.ui.handlers.IHandlerActivation;
 import org.osgi.framework.Bundle;
 import org.osgi.framework.Version;
 
@@ -93,6 +97,7 @@ public class MoxelEditorHook implements IStartup
         Display.getDefault().asyncExec(() ->
         {
             PasteCacheRepair.install();
+            InplaceCutSupport.install(Display.getDefault());
             SelectionRepaint.install(Display.getDefault());
             PlatformUI.getWorkbench().addWindowListener(new org.eclipse.ui.IWindowListener()
             {
@@ -491,6 +496,122 @@ public class MoxelEditorHook implements IStartup
             }
         });
         return ok[0];
+    }
+
+    /**
+     * Вырезание текста редактора ячейки (issue 690). MoxelControl.startInplaceEdit создаёт
+     * Text непосредственно внутри MoxelControl, а штатный CutCommandHandler активен только
+     * вне inplace-редактирования (moxel.nonInplaceEdit в plugin.xml EDT).
+     * Команда нужна и для Win32-акселератора, который может не дать SWT.KeyDown;
+     * фильтр клавиши обслуживает Shift+Delete, когда оно дошло до виджета.
+     */
+    private static final class InplaceCutSupport implements Listener
+    {
+        private static final String CUT_COMMAND = "org.eclipse.ui.edit.cut"; //$NON-NLS-1$
+        private static final String LOG_TOPIC = "moxel-cut-690"; //$NON-NLS-1$
+
+        private final IHandlerService handlerService;
+        private Text target;
+        private IHandlerActivation activation;
+
+        private InplaceCutSupport(IHandlerService handlerService)
+        {
+            this.handlerService = handlerService;
+        }
+
+        static void install(Display display)
+        {
+            IHandlerService service = PlatformUI.getWorkbench().getService(IHandlerService.class);
+            if (service == null)
+                return;
+            InplaceCutSupport support = new InplaceCutSupport(service);
+            display.addFilter(SWT.FocusIn, support);
+            display.addFilter(SWT.FocusOut, support);
+            display.addFilter(SWT.KeyDown, support);
+            support.activate(display.getFocusControl());
+        }
+
+        private static boolean isCellEditor(Control control)
+        {
+            return control instanceof Text && !control.isDisposed()
+                && control.getParent() instanceof MoxelControl moxel && moxel.isInplaceEdit();
+        }
+
+        @Override
+        public void handleEvent(Event event)
+        {
+            if (event.type == SWT.FocusIn)
+            {
+                activate(event.widget instanceof Control control ? control : null);
+            }
+            else if (event.type == SWT.FocusOut && event.widget == target)
+            {
+                deactivate();
+            }
+            else if (event.type == SWT.KeyDown && event.widget == target)
+            {
+                Global.tempLog(LOG_TOPIC, "key code=" + event.keyCode + " mask=" + event.stateMask); //$NON-NLS-1$ //$NON-NLS-2$
+                if (event.keyCode == SWT.DEL && (event.stateMask & SWT.MODIFIER_MASK) == SWT.SHIFT)
+                {
+                    cut("Shift+Delete"); //$NON-NLS-1$
+                    event.doit = false;
+                    event.type = SWT.None;
+                }
+            }
+        }
+
+        private void activate(Control control)
+        {
+            if (control == target)
+                return;
+            deactivate();
+            if (!isCellEditor(control))
+                return;
+            target = (Text) control;
+            Text editor = target;
+            editor.addDisposeListener(e ->
+            {
+                if (target == editor)
+                    deactivate();
+            });
+            activation = handlerService.activateHandler(CUT_COMMAND, new AbstractHandler()
+            {
+                @Override
+                public boolean isEnabled()
+                {
+                    return isCellEditor(target) && target.isFocusControl() && target.getEditable();
+                }
+
+                @Override
+                public Object execute(ExecutionEvent event)
+                {
+                    cut("command"); //$NON-NLS-1$
+                    return null;
+                }
+            }, new ActiveShellExpression(editor.getShell()));
+            Global.tempLog(LOG_TOPIC, "activate"); //$NON-NLS-1$
+        }
+
+        private void deactivate()
+        {
+            if (activation != null)
+            {
+                handlerService.deactivateHandler(activation);
+                Global.tempLog(LOG_TOPIC, "deactivate"); //$NON-NLS-1$
+            }
+            activation = null;
+            target = null;
+        }
+
+        private void cut(String source)
+        {
+            Text editor = target;
+            Global.tempLog(LOG_TOPIC, "cut source=" + source + " active=" + isCellEditor(editor)); //$NON-NLS-1$ //$NON-NLS-2$
+            if (!isCellEditor(editor) || !editor.isFocusControl() || !editor.getEditable())
+                return;
+            Global.tempLog(LOG_TOPIC, "cut selection=" + editor.getSelectionCount()); //$NON-NLS-1$
+            editor.cut();
+        }
     }
 
     /**
