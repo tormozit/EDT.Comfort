@@ -165,6 +165,7 @@
     <startup class="tormozit.FilterBySubsystemsDialogHook"/>
     <startup class="tormozit.GitChangedFileMenuHook"/>
     <startup class="tormozit.GitStagingFilterHook"/>
+    <startup class="tormozit.GitStagingViewHook"/>
     <startup class="tormozit.FetchResultDialogHook"/>
     <startup class="tormozit.ValidationChecksFilterHook"/>
     <startup class="tormozit.ProblemFiltersDialogHook"/>
@@ -1452,6 +1453,11 @@
         class="tormozit.ComfortPreferencePage"
         id="tormozit.ComfortPreferencePages"
         name="Комфорт"/>
+    <page
+        class="tormozit.CodeEditorPreferencePage"
+        id="tormozit.CodeEditorPreferencePage"
+        category="tormozit.ComfortPreferencePages"
+        name="Редактор кода"/>
     <page
         class="tormozit.IndentGuidePreferencePage"
         id="tormozit.IndentGuidePreferencePage"

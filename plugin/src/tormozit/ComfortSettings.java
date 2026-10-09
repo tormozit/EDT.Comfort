@@ -387,8 +387,12 @@ public final class ComfortSettings
      */
     public static final String PREF_MOXEL_FAST_CELL_NAVIGATION = "comfort.moxel.fastCellNavigation"; //$NON-NLS-1$
 
-    /** Ускоренный переход по ячейкам вмешивается в отрисовку EDT, поэтому по умолчанию выключен. */
-    public static final boolean DEFAULT_MOXEL_FAST_CELL_NAVIGATION = false;
+    /** Ускоренный переход по ячейкам включён по умолчанию. */
+    public static final boolean DEFAULT_MOXEL_FAST_CELL_NAVIGATION = true;
+
+    /** Однократное включение после обновления; последующий выбор пользователя сохраняется. */
+    private static final String PREF_MOXEL_FAST_CELL_NAVIGATION_ENABLED_ONCE =
+        "comfort.moxel.fastCellNavigation.enabledOnce.v1"; //$NON-NLS-1$
 
     // ---- Hover hints (подсказки при наведении) ----
 
@@ -548,7 +552,10 @@ public final class ComfortSettings
     public static synchronized ComfortSettings init(String pluginId)
     {
         if (instance == null)
+        {
             instance = new ComfortSettings(pluginId);
+            instance.enableMoxelFastCellNavigationOnce();
+        }
         return instance;
     }
 
@@ -1278,6 +1285,16 @@ public final class ComfortSettings
         if (settings == null)
             return DEFAULT_CTRL_CLICK_SELECT_WORD;
         return settings.preferenceStore.getBoolean(PREF_CTRL_CLICK_SELECT_WORD);
+    }
+
+    /** Включает ускорение один раз в каждом рабочем пространстве, включая прежнее явное отключение. */
+    private void enableMoxelFastCellNavigationOnce()
+    {
+        if (preferenceStore.getBoolean(PREF_MOXEL_FAST_CELL_NAVIGATION_ENABLED_ONCE))
+            return;
+        preferenceStore.setValue(PREF_MOXEL_FAST_CELL_NAVIGATION, true);
+        preferenceStore.setValue(PREF_MOXEL_FAST_CELL_NAVIGATION_ENABLED_ONCE, true);
+        saveQuietly(preferenceStore, PREF_MOXEL_FAST_CELL_NAVIGATION_ENABLED_ONCE);
     }
 
     /** Ускоренный переход по ячейкам табличного документа. */

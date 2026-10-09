@@ -635,9 +635,9 @@ public class MoxelEditorHook implements IStartup
     }
 
     /**
-     * Ускорение перехода по ячейкам (только Windows), по флажку «Ускорить переход по ячейкам
+     * Ускорение перехода по ячейкам (только Windows), по флажку «Ускорить перерисовку
      * табличного документа» ({@link ComfortSettings#isMoxelFastCellNavigationEnabled()}; по умолчанию
-     * выключен — вмешательство в отрисовку EDT). При смене выделения EDT помечает к перерисовке
+     * включён). При смене выделения EDT помечает к перерисовке
      * шапку столбцов и шапку строк целиком плюс прямоугольник выделения
      * ({@link MoxelControl#invalidateSelection()}). Windows отдаёт в событие отрисовки один
      * охватывающий прямоугольник — полоса сверху и полоса слева дают весь контрол, и макет рисуется
@@ -748,10 +748,12 @@ public class MoxelEditorHook implements IStartup
                 List<Rectangle> pieces = new ArrayList<>();
                 addPiece(pieces, oldPlace, 1);
                 addPiece(pieces, newPlace, 1);
-                int cells = pieces.size();
-                for (int i = 0; i < cells; i++)
+                // Расширение на 1 px нужно только рамке ячейки. Его проекция на шапки
+                // создаёт лишние полосы на всю высоту/ширину соседней шапки.
+                for (Rectangle cell : new Rectangle[] { oldPlace, newPlace })
                 {
-                    Rectangle cell = pieces.get(i);
+                    if (cell.width <= 0 || cell.height <= 0)
+                        continue;
                     for (Rectangle header : headers)
                     {
                         addPiece(pieces, header.intersection(new Rectangle(cell.x, header.y, cell.width, header.height)), 0);
@@ -784,7 +786,12 @@ public class MoxelEditorHook implements IStartup
         {
             if (rect == null || rect.width <= 0 || rect.height <= 0)
                 return;
-            pieces.add(new Rectangle(rect.x - inflate, rect.y - inflate, rect.width + 2 * inflate, rect.height + 2 * inflate));
+            Rectangle piece = new Rectangle(rect.x - inflate, rect.y - inflate,
+                rect.width + 2 * inflate, rect.height + 2 * inflate);
+            // При переходе по строкам обе ячейки проецируются в одну шапку столбца;
+            // при переходе по столбцам — в одну шапку строки. Рисуем такой участок один раз.
+            if (!pieces.contains(piece))
+                pieces.add(piece);
         }
 
         /** Области шапок строк и столбцов в координатах контрола; пусто, если поле EDT недоступно. */

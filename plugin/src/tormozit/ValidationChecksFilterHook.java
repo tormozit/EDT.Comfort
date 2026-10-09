@@ -379,7 +379,7 @@ public final class ValidationChecksFilterHook implements IStartup
             registerCheckReferencesMenu(control, treeViewer.getTree(), () ->
                 treeViewer.getStructuredSelection().getFirstElement() instanceof IChecksTreeNode node
                     && node.getValue() instanceof ICheckSettings settings ? settings : null);
-            installStaticFeatureAccessDescription(control, pageControl);
+            installBuiltinCheckDescriptions(control, pageControl);
             TreeExpander.installWhitelisted(TreeExpander.Target.VALIDATION_CHECKS, treeViewer);
             installAutoExpandOnReset(treeViewer, filter);
 
@@ -469,8 +469,8 @@ public final class ValidationChecksFilterHook implements IStartup
         }
     }
 
-    /** Описание встроенной проверки в правой панели страницы «Валидация». */
-    private static void installStaticFeatureAccessDescription(ChecksViewerControl control, Control pageControl)
+    /** Описания встроенных проверок в правой панели страницы «Валидация». */
+    private static void installBuiltinCheckDescriptions(ChecksViewerControl control, Control pageControl)
     {
         if (pageControl == null)
             return;
@@ -481,15 +481,17 @@ public final class ValidationChecksFilterHook implements IStartup
             Object selected = control.getSelectedCheckObjects().getValue();
             if (!(selected instanceof IChecksTreeNode node)
                 || !(node.getValue() instanceof ICheckSettings settings)
-                || settings.getId() == null
-                || !STATIC_FEATURE_ACCESS_CHECK_ID.equals(settings.getId().getCheckId()))
+                || settings.getId() == null)
+                return;
+            String description = builtinCheckDescription(settings);
+            if (description == null)
                 return;
 
             ICheckSettings described = (ICheckSettings)Proxy.newProxyInstance(
                 ICheckSettings.class.getClassLoader(), new Class<?>[] { ICheckSettings.class },
                 (proxy, method, args) -> {
                     if ("getDescription".equals(method.getName())) //$NON-NLS-1$
-                        return STATIC_FEATURE_ACCESS_DESCRIPTION;
+                        return description;
                     try
                     {
                         return method.invoke(settings, args);
@@ -504,6 +506,27 @@ public final class ValidationChecksFilterHook implements IStartup
         };
         control.getSelectedCheckObjects().addChangeListener(event -> update.run());
         update.run();
+    }
+
+    private static String builtinCheckDescription(ICheckSettings settings)
+    {
+        String checkId = settings.getId().getCheckId();
+        if (STATIC_FEATURE_ACCESS_CHECK_ID.equals(checkId))
+            return STATIC_FEATURE_ACCESS_DESCRIPTION;
+        boolean critical = "reference-value-resolving".equals(checkId); //$NON-NLS-1$
+        if (!critical && !"reference-value-resolving-non-critical".equals(checkId)) //$NON-NLS-1$
+            return null;
+        var bundle = org.eclipse.core.runtime.Platform.getBundle("com.e1c.g5.v8.dt.md.check"); //$NON-NLS-1$
+        if (bundle == null)
+            return null;
+        // Область и условия подтверждены по байткоду обеих проверок именно этих сборок EDT.
+        // На непроверенных версиях сохраняем штатное описание.
+        String version = bundle.getVersion().toString();
+        if (!"1.0.700.v202605050943".equals(version) //$NON-NLS-1$
+            && !"1.0.701.v202607090722".equals(version)) //$NON-NLS-1$
+            return null;
+        return settings.getDescription()
+            + "<p>Проверяются только ссылочные значения свойства «Значение заполнения» стандартных реквизитов.</p>"; //$NON-NLS-1$
     }
 
     private static Control findCheckViewer(Control root)

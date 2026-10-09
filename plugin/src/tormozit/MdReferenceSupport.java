@@ -37,6 +37,7 @@ import com._1c.g5.v8.dt.core.platform.IBmModelManager;
 import com._1c.g5.v8.dt.form.model.FormPackage;
 import com._1c.g5.v8.dt.mcore.McorePackage;
 import com._1c.g5.v8.dt.metadata.mdclass.MdClassPackage;
+import com._1c.g5.v8.dt.compare.datasource.IComparisonDataSource;
 import com._1c.g5.v8.dt.rights.model.RightsPackage;
 
 /** Сохранённые ссылки метаданных: общий анализатор проверки и поиска по проекту. */
@@ -626,8 +627,145 @@ public final class MdReferenceSupport
         }.schedule();
     }
 
+    /** Проверка изолированной модели Git; адреса результата относятся к исходному проекту. */
+    public static List<CompareSearchMatch> findInModel(IComparisonDataSource source, URI navigationBase,
+        Set<String> changedFiles, IProgressMonitor monitor)
+    {
+        return source.getBmModel().executeReadonlyTask(new AbstractBmTask<List<CompareSearchMatch>>(
+            "Проверка ссылок коммита")
+        {
+            @Override
+            public List<CompareSearchMatch> execute(IBmTransaction transaction, IProgressMonitor taskMonitor)
+            {
+                SubMonitor progress = SubMonitor.convert(monitor, 100);
+                List<EObject> owners = new ArrayList<>();
+                List<URI> unreadable = new ArrayList<>();
+                collect(transaction.getTopObjectIterator(), new HashSet<>(), owners, unreadable,
+                    progress.split(30), object -> changedFiles == null || inChangedFile(source, object, changedFiles));
+                if (!unreadable.isEmpty())
+                    throw new IllegalStateException("Не удалось прочитать вложенный объект из индекса Git: "
+                        + localized(unreadable.get(0)));
+                List<CompareSearchMatch> rows = new ArrayList<>();
+                Map<URI, Boolean> unresolved = new HashMap<>();
+                SubMonitor checking = progress.split(70).setWorkRemaining(Math.max(1, owners.size()));
+                for (EObject owner : owners)
+                {
+                    checking.checkCanceled();
+                    if (changedFiles != null && !inChangedFile(source, owner, changedFiles))
+                    {
+                        checking.worked(1);
+                        continue;
+                    }
+                    for (BrokenReference reference : findBrokenReferences(owner, checking, unresolved))
+                    {
+                        Location location = locationOf(owner, reference.feature());
+                        URI root = navigationBase.appendSegment(location.root().lastSegment())
+                            .appendFragment(location.root().fragment());
+                        URI address = navigationBase.appendSegment(location.owner().lastSegment())
+                            .appendFragment(location.owner().fragment());
+                        Location navigation = new Location(address, location.ownerClass(), location.feature(),
+                            root, location.rootClass(), location.containmentPath());
+                        String property = ConfigSearchResultsHook.metadataPropertyPath(owner,
+                            reference.feature(), EcoreUtil.getRootContainer(owner));
+                        if (property == null || property.isBlank())
+                            property = propertyName(reference.feature());
+                        rows.add(new CompareSearchMatch(navigation, localized(EcoreUtil.getURI(owner)),
+                            property, localized(EcoreUtil.getURI(reference.target())),
+                            fullName(EcoreUtil.getURI(reference.target()))));
+                    }
+                    checking.worked(1);
+                }
+                return rows;
+            }
+        });
+    }
+
+    /** В том числе удаление реквизита/команды внутри изменённого файла, без удаления самого .mdo. */
+    public static boolean hasDeletedObjects(IComparisonDataSource previous, IComparisonDataSource current,
+        Set<String> changedFiles, IProgressMonitor monitor)
+    {
+        var configuration = current.getBmModel().getEngine().getTopObjectByFqn("Configuration");
+        if (configuration == null)
+            throw new IllegalStateException("Не найдена конфигурация в модели индекса Git");
+        URI currentBase = EcoreUtil.getURI(configuration).trimFragment().trimSegments(1);
+        return previous.getBmModel().executeReadonlyTask(new AbstractBmTask<Boolean>(
+            "Поиск удалённых объектов коммита")
+        {
+            @Override
+            public Boolean execute(IBmTransaction transaction, IProgressMonitor taskMonitor)
+            {
+                ArrayDeque<EObject> pending = new ArrayDeque<>();
+                var roots = transaction.getTopObjectIterator();
+                while (roots.hasNext())
+                {
+                    if (monitor.isCanceled())
+                        throw new OperationCanceledException();
+                    EObject root = roots.next();
+                    if (inChangedFile(previous, root, changedFiles))
+                        pending.add(root);
+                }
+                Set<EObject> visited = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+                Set<Long> ids = new HashSet<>();
+                while (!pending.isEmpty())
+                {
+                    if (monitor.isCanceled())
+                        throw new OperationCanceledException();
+                    EObject object = pending.remove();
+                    if (object.eIsProxy())
+                        throw new IllegalStateException("Не удалось прочитать исходный объект: "
+                            + localized(EcoreUtil.getURI(object)));
+                    if (!visited.add(object) || object instanceof IBmObject bm && !ids.add(bm.bmGetId()))
+                        continue;
+                    if (isMetadataReferenceTarget(object))
+                    {
+                        URI old = EcoreUtil.getURI(object);
+                        URI address = currentBase.appendSegment(old.lastSegment()).appendFragment(old.fragment());
+                        EObject after = current.getBmModel().getEngine().resolve(address, object.eClass());
+                        if (after == null || after.eIsProxy())
+                        {
+                            Global.tempLog("broken-links-commit", "deleted object=" + old);
+                            return true;
+                        }
+                    }
+                    if (object instanceof com._1c.g5.v8.dt.metadata.mdclass.BasicForm form && form.getForm() != null)
+                        pending.add(form.getForm());
+                    for (EReference containment : object.eClass().getEAllContainments())
+                    {
+                        if (containment.isDerived() || containment.isTransient() || containment.isVolatile())
+                            continue;
+                        Object value = object.eGet(containment, true);
+                        if (value instanceof EObject child)
+                            pending.add(child);
+                        else if (value instanceof List<?> children)
+                            for (Object child : children)
+                                if (child instanceof EObject nested)
+                                    pending.add(nested);
+                    }
+                }
+                return false;
+            }
+        });
+    }
+
+    private static boolean inChangedFile(IComparisonDataSource source, EObject object, Set<String> changedFiles)
+    {
+        EObject root = EcoreUtil.getRootContainer(object);
+        if (root instanceof IBmObject bm && "command_interface_root".equals(bm.bmGetTopObject().bmGetFqn())
+            || !scopes().containsKey(root.eClass()) && !isMetadataReferenceTarget(root))
+            return false;
+        String fqn = EcoreUtil.getURI(root).lastSegment();
+        String path = source.getPath(fqn, root.eClass());
+        return path != null && changedFiles.contains(path.replace('\\', '/'));
+    }
+
     private static void collect(Iterator<? extends EObject> iterator, Set<Long> ids, List<EObject> owners,
         List<URI> unreadable, SubMonitor monitor)
+    {
+        collect(iterator, ids, owners, unreadable, monitor, object -> true);
+    }
+
+    private static void collect(Iterator<? extends EObject> iterator, Set<Long> ids, List<EObject> owners,
+        List<URI> unreadable, SubMonitor monitor, java.util.function.Predicate<EObject> include)
     {
         Map<EClass, Set<EClass>> ownerScopes = scopes();
         Set<EObject> visitedObjects = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
@@ -644,13 +782,15 @@ public final class MdReferenceSupport
             EObject object = pending.remove();
             monitor.setWorkRemaining(Math.max(1, pending.size() + 1));
             monitor.worked(1);
+            if (!include.test(object))
+                continue;
             if (!visitedObjects.add(object)
                 || object instanceof IBmObject bm && (!ids.add(bm.bmGetId())
                     || "command_interface_root".equals(bm.bmGetTopObject().bmGetFqn())))
                 continue;
             // Тело формы — внешний самостоятельный BM-объект, а не сохранённый containment.
             if (object instanceof com._1c.g5.v8.dt.metadata.mdclass.BasicForm form && form.getForm() != null)
-                enqueueSavedChild(form.getForm(), pending, unreadable);
+                enqueueSavedChild(form.getForm(), pending, unreadable, include);
             if (!ownerScopes.containsKey(object.eClass()))
                 continue;
             visited++;
@@ -662,13 +802,13 @@ public final class MdReferenceSupport
                     continue;
                 Object value = object.eGet(containment, true);
                 if (value instanceof EObject child)
-                    enqueueSavedChild(child, pending, unreadable);
+                    enqueueSavedChild(child, pending, unreadable, include);
                 else if (value instanceof List<?> children)
                     for (Object child : children)
                     {
                         monitor.checkCanceled();
                         if (child instanceof EObject nested)
-                            enqueueSavedChild(nested, pending, unreadable);
+                            enqueueSavedChild(nested, pending, unreadable, include);
                     }
             }
         }
@@ -679,8 +819,11 @@ public final class MdReferenceSupport
      * Вложенный объект без данных в модели (например, форма без файла Form.form) пропускается:
      * один такой объект не должен срывать поиск по всему проекту.
      */
-    private static void enqueueSavedChild(EObject child, ArrayDeque<EObject> pending, List<URI> unreadable)
+    private static void enqueueSavedChild(EObject child, ArrayDeque<EObject> pending, List<URI> unreadable,
+        java.util.function.Predicate<EObject> include)
     {
+        if (!include.test(child))
+            return;
         if (child.eIsProxy())
         {
             unreadable.add(EcoreUtil.getURI(child));

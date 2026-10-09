@@ -36,11 +36,13 @@ import org.eclipse.ui.internal.dialogs.PropertyDialog;
 
 import com._1c.g5.v8.dt.core.platform.IDtProject;
 
-/** Переключение проекта в штатном окне «Свойства проекта» с сохранением выбранной страницы. */
+/** Раскрытие разделов и переключение проекта в штатном окне параметров с сохранением выбранной страницы. */
 public final class ProjectPropertyDialogHook implements IStartup
 {
     private static final String PROJECT_SELECTOR_KEY =
         "tormozit.comfort.projectPropertyDialog.selector"; //$NON-NLS-1$
+    private static final String TREE_EXPANDED_KEY =
+        "tormozit.comfort.projectPropertyDialog.treeExpanded"; //$NON-NLS-1$
     private static final String PENDING_KEY =
         "tormozit.comfort.projectPropertyDialog.pending"; //$NON-NLS-1$
 
@@ -100,6 +102,16 @@ public final class ProjectPropertyDialogHook implements IStartup
         if (current == null)
             return true;
 
+        TreeViewer tree = dialog.getTreeViewer();
+        if (tree == null || tree.getControl() == null || tree.getControl().isDisposed())
+            return false;
+        if (shell.getData(TREE_EXPANDED_KEY) == null)
+        {
+            // Уровень 1 — невидимый корень viewer, уровень 2 — корневые разделы страниц.
+            tree.expandToLevel(2);
+            shell.setData(TREE_EXPANDED_KEY, Boolean.TRUE);
+        }
+
         List<IProject> projects = new ArrayList<>();
         for (IProject project : ResourcesPlugin.getWorkspace().getRoot().getProjects())
             if (project.isOpen() && Global.getDtProjectFromWorkspaceProject(project) != null)
@@ -108,9 +120,6 @@ public final class ProjectPropertyDialogHook implements IStartup
             return true;
         projects.sort(Comparator.comparing(IProject::getName, String.CASE_INSENSITIVE_ORDER));
 
-        TreeViewer tree = dialog.getTreeViewer();
-        if (tree == null || tree.getControl() == null)
-            return false;
         FilteredTree filteredTree = findFilteredTree(tree.getControl());
         if (filteredTree == null)
             return false;

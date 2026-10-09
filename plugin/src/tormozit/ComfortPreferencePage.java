@@ -26,7 +26,6 @@ import org.eclipse.jface.preference.FieldEditor;
 import org.eclipse.jface.preference.FieldEditorPreferencePage;
 import org.eclipse.jface.preference.IPreferencePageContainer;
 import org.eclipse.jface.preference.IPreferenceStore;
-import org.eclipse.jface.preference.IntegerFieldEditor;
 import org.eclipse.jface.preference.PreferenceConverter;
 import org.eclipse.jface.preference.StringFieldEditor;
 import org.eclipse.swt.SWT;
@@ -119,15 +118,15 @@ public class ComfortPreferencePage
             "Цвет подсветки найденных фрагментов в списках с улучшенным фильтром.\n"
             + THEME_AWARE_COLOR_TOOLTIP;
 
-    private static final String SERVER_CALL_COLOR_TOOLTIP =
+    protected static final String SERVER_CALL_COLOR_TOOLTIP =
             "Цвет подсветки серверных вызовов в клиентском коде.\n"
             + THEME_AWARE_COLOR_TOOLTIP;
 
-    private static final String SERVER_CALL_CONTEXT_COLOR_TOOLTIP =
+    protected static final String SERVER_CALL_CONTEXT_COLOR_TOOLTIP =
             "Цвет подсветки серверных вызовов с контекстом (&НаСервере).\n"
             + THEME_AWARE_COLOR_TOOLTIP;
 
-    private static final String IMPLICIT_VARIABLE_COLOR_TOOLTIP =
+    protected static final String IMPLICIT_VARIABLE_COLOR_TOOLTIP =
             "Цвет имени переменной в месте создания: первое присваивание и переменная цикла Для / Для Каждого.\n"
             + THEME_AWARE_COLOR_TOOLTIP;
 
@@ -191,7 +190,7 @@ public class ComfortPreferencePage
     {
         ensurePreferenceStore();
         super.createControl(parent);
-        if (!isProjectPreferencePage())
+        if (!isProjectPreferencePage() && installedVersionText != null)
         {
             refreshVersionSection();
             ComfortUpdateChecker.checkAsync(true, this::refreshVersionSection);
@@ -256,197 +255,14 @@ public class ComfortPreferencePage
 
         createNavigatorGroup();
 
-        // === Группа «Редактор кода» ===
-        Group codeEditorGroup = new Group(getFieldEditorParent(), SWT.NONE);
-        codeEditorGroup.setText("Редактор кода");
-        GridData groupData = new GridData(SWT.FILL, SWT.TOP, true, false);
-        groupData.horizontalSpan = 2;
-        groupData.verticalIndent = 8;        // отступ сверху от предыдущего поля
-        codeEditorGroup.setLayoutData(groupData);
-
-        GridLayout groupLayout = new GridLayout(2, false);
-        groupLayout.marginWidth = 10;       // внутренние отступы по горизонтали
-        groupLayout.marginHeight = 8;       // внутренние отступы по вертикали
-        groupLayout.marginTop = 6;          // чтобы заголовок группы не сливался с первым элементом
-        groupLayout.horizontalSpacing = 8;  // расстояние между колонками
-        groupLayout.verticalSpacing = 4;    // расстояние между строками
-        codeEditorGroup.setLayout(groupLayout);
-
-        BooleanFieldEditor autoOpenField = new BooleanFieldEditor(
-            ContentAssistSettings.PREF_ENABLED,
-            "Автооткрытие подсказок при вводе",
-            codeEditorGroup);
-        addField(autoOpenField);
-        setFieldTooltip(autoOpenField,
-            "Открывать список автодополнения и описание параметров метода при вводе символов", //$NON-NLS-1$
-            codeEditorGroup);
-
-        IntegerFieldEditor timeoutField = new IntegerFieldEditor(
-            ContentAssistSettings.PREF_TIMEOUT,
-            "Автооткрытие: Задержка (мс)",
-            codeEditorGroup,
-            5);
-        timeoutField.setValidRange(0, 10_000);
-        addField(timeoutField);
-        Text timeoutText = timeoutField.getTextControl(codeEditorGroup);
-        GridData timeoutTextData = new GridData();
-        timeoutTextData.widthHint = 40;
-        timeoutTextData.grabExcessHorizontalSpace = false;
-        timeoutTextData.horizontalAlignment = SWT.LEFT;
-        timeoutText.setLayoutData(timeoutTextData);
-        // Смещение вправо: поле зависит от флажка выше.
-        GridData timeoutLabelData = new GridData(SWT.BEGINNING, SWT.CENTER, false, false);
-        timeoutLabelData.horizontalIndent = 20;
-        timeoutField.getLabelControl(codeEditorGroup).setLayoutData(timeoutLabelData);
-
-        BooleanFieldEditor serverCallField = new BooleanFieldEditor(
-            ComfortSettings.PREF_SERVER_CALL_HIGHLIGHTING_ENABLED,
-            "Подсвечивать серверные вызовы", //$NON-NLS-1$
-            codeEditorGroup);
-        addField(serverCallField);
-        setFieldTooltip(serverCallField,
-            "Подсвечивать серверные вызовы в клиентском коде особыми цветами", //$NON-NLS-1$
-            codeEditorGroup);
-
-        ThemeAwareColorFieldEditor serverCallColorField = new ThemeAwareColorFieldEditor(
-            ComfortSettings.PREF_SERVER_CALL_HIGHLIGHTING_COLOR,
-            "Цвет серверных вызовов:", //$NON-NLS-1$
-            codeEditorGroup);
-        addField(serverCallColorField);
-        setFieldTooltip(serverCallColorField, SERVER_CALL_COLOR_TOOLTIP, codeEditorGroup);
-        indentUnderCheckbox(serverCallColorField, codeEditorGroup);
-
-        ThemeAwareColorFieldEditor serverCallContextColorField = new ThemeAwareColorFieldEditor(
-            ComfortSettings.PREF_SERVER_CALL_CONTEXT_HIGHLIGHTING_COLOR,
-            "Цвет серверных вызовов с контекстом:", //$NON-NLS-1$
-            codeEditorGroup);
-        addField(serverCallContextColorField);
-        setFieldTooltip(serverCallContextColorField, SERVER_CALL_CONTEXT_COLOR_TOOLTIP, codeEditorGroup);
-        indentUnderCheckbox(serverCallContextColorField, codeEditorGroup);
-
-        BooleanFieldEditor implicitVariableField = new BooleanFieldEditor(
-            ComfortSettings.PREF_IMPLICIT_VARIABLE_HIGHLIGHTING_ENABLED,
-            "Подсвечивать создаваемые переменные", //$NON-NLS-1$
-            codeEditorGroup);
-        addField(implicitVariableField);
-        setFieldTooltip(implicitVariableField,
-            "Подсвечивать особым цветом имя переменной в месте создания: первое присваивание и переменная цикла Для / Для Каждого", //$NON-NLS-1$
-            codeEditorGroup);
-
-        ThemeAwareColorFieldEditor implicitVariableColorField = new ThemeAwareColorFieldEditor(
-            ComfortSettings.PREF_IMPLICIT_VARIABLE_HIGHLIGHTING_COLOR,
-            "Цвет создаваемых переменных:", //$NON-NLS-1$
-            codeEditorGroup);
-        addField(implicitVariableColorField);
-        setFieldTooltip(implicitVariableColorField, IMPLICIT_VARIABLE_COLOR_TOOLTIP, codeEditorGroup);
-        indentUnderCheckbox(implicitVariableColorField, codeEditorGroup);
-
-        BooleanFieldEditor bracketHintField = new BooleanFieldEditor(
-            ComfortSettings.PREF_BRACKET_CONTENT_HINT_ENABLED,
-            "Отображать начало конструкции в её конце", //$NON-NLS-1$
-            codeEditorGroup);
-        addField(bracketHintField);
-        setFieldTooltip(bracketHintField,
-            "Показывать начало блочной конструкции (Процедура, Если, Пока, Для, Попытка, #Область, #Если)\n"
-            + "полупрозрачным текстом рядом с её закрывающим словом (КонецПроцедуры, КонецЕсли и т.д.),\n"
-            + "если конструкция занимает много видимых строк.", //$NON-NLS-1$
-            codeEditorGroup);
-
-        IntegerFieldEditor bracketHintMinLinesField = new IntegerFieldEditor(
-            ComfortSettings.PREF_BRACKET_CONTENT_HINT_MIN_LINES,
-            "Минимальное расстояние в строках", //$NON-NLS-1$
-            codeEditorGroup,
-            5);
-        bracketHintMinLinesField.setValidRange(0, 10_000);
-        addField(bracketHintMinLinesField);
-        String bracketHintMinLinesTooltip =
-            "Минимальное количество ВИДИМЫХ строк (с учётом свёрнутых блоков) между началом\n"
-            + "и концом конструкции, при котором показывается подсказка. Если открывающая часть\n"
-            + "вообще не видна, подсказка показывается всегда."; //$NON-NLS-1$
-        setFieldTooltip(bracketHintMinLinesField, bracketHintMinLinesTooltip, codeEditorGroup);
-        Text bracketHintMinLinesText = bracketHintMinLinesField.getTextControl(codeEditorGroup);
-        bracketHintMinLinesText.setToolTipText(bracketHintMinLinesTooltip);
-        GridData bracketHintMinLinesTextData = new GridData();
-        bracketHintMinLinesTextData.widthHint = 40;
-        bracketHintMinLinesTextData.grabExcessHorizontalSpace = false;
-        bracketHintMinLinesTextData.horizontalAlignment = SWT.LEFT;
-        bracketHintMinLinesText.setLayoutData(bracketHintMinLinesTextData);
-        // Смещение вправо: поле зависит от флажка выше.
-        GridData bracketHintMinLinesLabelData = new GridData(SWT.BEGINNING, SWT.CENTER, false, false);
-        bracketHintMinLinesLabelData.horizontalIndent = 20;
-        bracketHintMinLinesField.getLabelControl(codeEditorGroup).setLayoutData(bracketHintMinLinesLabelData);
-
-        IntegerFieldEditor compileContextWidthField = new IntegerFieldEditor(
-            ComfortSettings.PREF_COMPILE_CONTEXT_STATUS_WIDTH,
-            "Ширина индикатора условий компиляции", //$NON-NLS-1$
-            codeEditorGroup,
-            3);
-        compileContextWidthField.setValidRange(0, 200);
-        addField(compileContextWidthField);
-        String compileContextWidthTooltip =
-            "Ширина в символах поля строки состояния, которое показывает условия препроцессора\n"
-            + "и директиву компиляции для позиции каретки в модуле. 0 — не показывать."; //$NON-NLS-1$
-        setFieldTooltip(compileContextWidthField, compileContextWidthTooltip, codeEditorGroup);
-        Text compileContextWidthText = compileContextWidthField.getTextControl(codeEditorGroup);
-        compileContextWidthText.setToolTipText(compileContextWidthTooltip);
-        GridData compileContextWidthTextData = new GridData();
-        compileContextWidthTextData.widthHint = 40;
-        compileContextWidthTextData.grabExcessHorizontalSpace = false;
-        compileContextWidthTextData.horizontalAlignment = SWT.LEFT;
-        compileContextWidthText.setLayoutData(compileContextWidthTextData);
-
-        StringFieldEditor autoCollapseRegionsField = new StringFieldEditor(
-            ComfortSettings.PREF_AUTO_COLLAPSE_REGIONS,
-            "Автоматически сворачиваемые области", //$NON-NLS-1$
-            codeEditorGroup);
-        addField(autoCollapseRegionsField);
-        String autoCollapseRegionsTooltip =
-            "Имена областей (#Область) через запятую, например: АФВ, БСП.\n"
-            + "Такие области сворачиваются при открытии модуля и по команде\n"
-            + "«Сбросить сворачиваемые группы»."; //$NON-NLS-1$
-        setFieldTooltip(autoCollapseRegionsField, autoCollapseRegionsTooltip, codeEditorGroup);
-        Text autoCollapseRegionsText = autoCollapseRegionsField.getTextControl(codeEditorGroup);
-        autoCollapseRegionsText.setToolTipText(TooltipText.wrap(autoCollapseRegionsText, autoCollapseRegionsTooltip));
-        GridData autoCollapseRegionsTextData = new GridData(SWT.FILL, SWT.CENTER, true, false);
-        autoCollapseRegionsTextData.widthHint = 200;
-        autoCollapseRegionsText.setLayoutData(autoCollapseRegionsTextData);
-
-        // BooleanFieldEditor.createControl() подменяет layout родителя на GridLayout —
-        // отдельный host, иначе ломается сетка группы «Редактор кода».
         if (ComfortJdtAvailability.isJdtUiAvailable())
-        {
-            Composite spellingIdentsHost = new Composite(codeEditorGroup, SWT.NONE);
-            GridData spellingIdentsHostData = new GridData(SWT.FILL, SWT.CENTER, true, false);
-            spellingIdentsHostData.horizontalSpan = 2;
-            spellingIdentsHost.setLayoutData(spellingIdentsHostData);
-            BooleanFieldEditor spellingIdentsField = new BooleanFieldEditor(
-                ComfortSettings.PREF_SPELLING_CHECK_IDENTIFIERS_VISIBLE,
-                "Проверять орфографию в идентификаторах в видимой области", //$NON-NLS-1$
-                spellingIdentsHost);
-            addField(spellingIdentsField);
-            setFieldTooltip(spellingIdentsField,
-                "При включённой орфографии Comfort (словарь «Русский/Английский (Комфорт-HUNSPELL)»)\n"
-                + "проверять в видимой области модуля имена (идентификаторы) и строковые литералы.\n"
-                + "Если выключено — проверяются только обычные слова в комментариях;\n"
-                + "слова с заглавной буквой не на первой позиции (как в CamelCase) пропускаются.", //$NON-NLS-1$
-                spellingIdentsHost);
             createCommonDictionaryLink();
-        }
-        else
-            createInstallJdtSpellingLink(codeEditorGroup);
-
-        // FieldEditor в конструкторе обнуляет margin* группы — вернуть отступ
-        // под заголовком «Редактор кода», иначе первое поле слипается с рамкой.
-        restoreGroupContentInsets(codeEditorGroup);
 
         createTextEditorsGroup();
 
         createMoxelCheckbox();
 
         createLoggingCheckbox();
-
-        // Поле «Символы» намеренно не добавляется:
-        // значение задано константой ContentAssistSettings.CHARSET_VALUE
     }
 
     /**
@@ -480,7 +296,7 @@ public class ComfortPreferencePage
     }
 
     /** Ссылка установки Eclipse JDT — без него орфография Comfort недоступна. */
-    private void createInstallJdtSpellingLink(Composite parent)
+    protected void createInstallJdtSpellingLink(Composite parent)
     {
         Link link = new Link(parent, SWT.NONE);
         link.setText("<a>Установить модуль орфографии (JDT)</a>"); //$NON-NLS-1$
@@ -756,14 +572,14 @@ public class ComfortPreferencePage
      * при Save из контрола — обратный invert → светлый в store.
      */
     /** Сдвигает подпись поля цвета вправо: поле зависит от флажка выше. */
-    private static void indentUnderCheckbox(ColorFieldEditor field, Composite parent)
+    protected static void indentUnderCheckbox(ColorFieldEditor field, Composite parent)
     {
         // ColorFieldEditor.doFillIntoGrid кладёт GridData (с horizontalSpan) прямо на саму подпись.
         if (field.getLabelControl(parent).getLayoutData() instanceof GridData data)
             data.horizontalIndent = 20;
     }
 
-    private static final class ThemeAwareColorFieldEditor extends ColorFieldEditor
+    protected static final class ThemeAwareColorFieldEditor extends ColorFieldEditor
     {
         /** Страница открыта в тёмной теме → в контроле должен быть effective. */
         private boolean controlShowsDarkEffective;
@@ -924,7 +740,7 @@ public class ComfortPreferencePage
 
         BooleanFieldEditor moxelField = new BooleanFieldEditor(
             ComfortSettings.PREF_MOXEL_FAST_CELL_NAVIGATION,
-            "Ускорить переход по ячейкам табличного документа", //$NON-NLS-1$
+            "Ускорить перерисовку табличного документа", //$NON-NLS-1$
             moxelHost);
         addField(moxelField);
         setFieldTooltip(moxelField,
@@ -1347,7 +1163,7 @@ public class ComfortPreferencePage
         applyFieldTooltip(field, tooltip);
     }
 
-    private void setFieldTooltip(FieldEditor field, String tooltip, Composite parent)
+    protected void setFieldTooltip(FieldEditor field, String tooltip, Composite parent)
     {
         if (parent != null && parent.isDisposed())
             return;
