@@ -7,23 +7,38 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.IdentityHashMap;
+import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.IntSupplier;
 
 import org.eclipse.core.resources.IFile;
+import org.eclipse.core.resources.IMarker;
+import org.eclipse.core.resources.IResource;
+import org.eclipse.core.resources.IResourceChangeEvent;
+import org.eclipse.core.resources.IResourceChangeListener;
+import org.eclipse.core.resources.ResourcesPlugin;
+import org.eclipse.core.runtime.CoreException;
+import org.eclipse.core.runtime.ICoreRunnable;
 import org.eclipse.core.runtime.IPath;
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.IStatus;
 import org.eclipse.core.runtime.Status;
 import org.eclipse.core.runtime.jobs.Job;
+import org.eclipse.jface.resource.JFaceResources;
+import org.eclipse.jface.resource.LocalResourceManager;
+import org.eclipse.emf.common.util.URI;
+import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.egit.ui.Activator;
 import org.eclipse.jface.util.IPropertyChangeListener;
 import org.eclipse.jface.util.LocalSelectionTransfer;
 import org.eclipse.jface.viewers.CellLabelProvider;
 import org.eclipse.jface.viewers.ColumnLabelProvider;
+import org.eclipse.jface.viewers.DecorationOverlayIcon;
+import org.eclipse.jface.viewers.IDecoration;
 import org.eclipse.jface.viewers.IBaseLabelProvider;
 import org.eclipse.jface.viewers.ILabelProvider;
 import org.eclipse.jface.viewers.ILabelProviderListener;
@@ -64,6 +79,7 @@ import org.eclipse.swt.widgets.TreeColumn;
 import org.eclipse.swt.widgets.TreeItem;
 import org.eclipse.ui.IPartListener2;
 import org.eclipse.ui.IStartup;
+import org.eclipse.ui.ISharedImages;
 import org.eclipse.ui.IViewPart;
 import org.eclipse.ui.IViewReference;
 import org.eclipse.ui.IWorkbench;
@@ -73,6 +89,14 @@ import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchPartSite;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
+
+import com._1c.g5.v8.dt.ui.validation.ProblemsDecorationHelper;
+import com._1c.g5.v8.bm.core.IBmObject;
+import com._1c.g5.v8.dt.validation.ValidationUtil;
+import com._1c.g5.v8.dt.validation.marker.v2.IMarkerManagerV2;
+import com._1c.g5.v8.dt.validation.marker.IMarkerUpdateListener;
+import com._1c.g5.v8.dt.validation.marker.MarkerFilter;
+import com._1c.g5.v8.dt.validation.marker.MarkerSeverity;
 
 /**
  * Многословный фильтр ({@link SmartMatcher}, AND по словам) в панели «Индексирование Git»
@@ -813,6 +837,22 @@ public final class GitStagingFilterHook implements IStartup
 
         Tree tree = viewer.getTree();
         viewer.setLabelProvider(new GitStagingLabelProvider(cellLp, tree));
+        // Источник индикатора — маркеры самого файла, как у StagingEntry.getProblemSeverity().
+        Display display = tree.getDisplay();
+        IResourceChangeListener markerListener = event ->
+        {
+            if (event.findMarkerDeltas(IMarker.PROBLEM, true).length == 0)
+                return;
+            if (display.isDisposed())
+                return;
+            display.asyncExec(() ->
+            {
+                if (!tree.isDisposed())
+                    viewer.refresh(true);
+            });
+        };
+        ResourcesPlugin.getWorkspace().addResourceChangeListener(markerListener, IResourceChangeEvent.POST_CHANGE);
+        tree.addDisposeListener(event -> ResourcesPlugin.getWorkspace().removeResourceChangeListener(markerListener));
         installColumnsAndInteraction(view, viewer, tree, viewerField);
         return attachFilter(viewer);
     }
@@ -1777,7 +1817,15 @@ public final class GitStagingFilterHook implements IStartup
         implements ILabelProvider
     {
         private final CellLabelProvider base;
+        private final ILabelProvider gitImages;
+        private final LocalResourceManager problemImages = new LocalResourceManager(JFaceResources.getResources());
         private final Tree tree;
+        /** Доступ только из UI; NONE также означает, что фоновый расчёт уже запрошен. */
+        private final Map<IFile, MarkerSeverity> fileSeverities = new HashMap<>();
+        private final IMarkerManagerV2 edtMarkers = Global.getOsgiService(IMarkerManagerV2.class);
+        private final IMarkerUpdateListener edtMarkerListener;
+        private int markerGeneration;
+        private boolean imageRefreshPending;
         private SmartMatcher highlightMatcher = new SmartMatcher(""); //$NON-NLS-1$
 
         GitStagingLabelProvider(CellLabelProvider base, Tree tree)
@@ -1788,6 +1836,25 @@ public final class GitStagingFilterHook implements IStartup
             super(COLORS_ON_SELECTION);
             this.base = base;
             this.tree = tree;
+            // TreeDecoratingLabelProvider добавляет грубый индикатор ProblemLabelDecorator.
+            // Его базовый провайдер оставляет только иконку файла и значок состояния Git.
+            Object undecorated = Global.invoke(base, "getBaseLabelProvider"); //$NON-NLS-1$
+            this.gitImages = undecorated instanceof ILabelProvider labels ? labels : null;
+            Display display = tree.getDisplay();
+            edtMarkerListener = event ->
+            {
+                if (!display.isDisposed())
+                    display.asyncExec(() ->
+                    {
+                        if (tree.isDisposed())
+                            return;
+                        markerGeneration++;
+                        fileSeverities.clear();
+                        requestImageRefresh();
+                    });
+            };
+            if (edtMarkers != null)
+                edtMarkers.addListener(edtMarkerListener);
         }
 
         void setHighlightPattern(String pattern)
@@ -1864,10 +1931,129 @@ public final class GitStagingFilterHook implements IStartup
         @Override
         public Image getImage(Object element)
         {
+            if (gitImages != null)
+            {
+                Object resource = Global.invoke(element, "getFile"); //$NON-NLS-1$
+                if (resource instanceof IFile file)
+                {
+                    Image image = gitImages.getImage(element);
+                    if (image != null && !image.isDisposed())
+                    {
+                        try
+                        {
+                            if (edtMarkers != null)
+                            {
+                                MarkerSeverity severity = edtFileSeverity(file);
+                                // Тот же механизм наложения, что в MdEditorTabsHook.withSeverityOverlay.
+                                Image decorated = ProblemsDecorationHelper.decorateImage(image, severity);
+                                return decorated != null ? decorated : image;
+                            }
+                            int severity = file.isAccessible()
+                                ? file.findMaxProblemSeverity(IMarker.PROBLEM, true, IResource.DEPTH_ZERO) : -1;
+                            String overlay = switch (severity)
+                            {
+                                case IMarker.SEVERITY_ERROR -> ISharedImages.IMG_DEC_FIELD_ERROR;
+                                case IMarker.SEVERITY_WARNING -> ISharedImages.IMG_DEC_FIELD_WARNING;
+                                default -> null;
+                            };
+                            if (overlay == null)
+                                return image;
+                            return (Image)problemImages.get(new DecorationOverlayIcon(image,
+                                PlatformUI.getWorkbench().getSharedImages().getImageDescriptor(overlay),
+                                IDecoration.BOTTOM_LEFT));
+                        }
+                        catch (CoreException e)
+                        {
+                            return image;
+                        }
+                    }
+                }
+            }
             if (base instanceof ILabelProvider bl)
                 return bl.getImage(element);
             Object img = Global.invoke(base, "getImage", element); //$NON-NLS-1$
             return img instanceof Image ? (Image) img : null;
+        }
+
+        /** Только идентификаторы этого файла — тот же набор, что в LaunchSaveDirtyEditorsHook.addFileIds. */
+        private MarkerSeverity edtFileSeverity(IFile file)
+        {
+            MarkerSeverity cached = fileSeverities.get(file);
+            if (cached != null)
+                return cached;
+            fileSeverities.put(file, MarkerSeverity.NONE);
+            int generation = markerGeneration;
+            Display display = tree.getDisplay();
+            Job job = Job.create("Комфорт: проблемы файла Git", (ICoreRunnable)monitor -> //$NON-NLS-1$
+            {
+                try
+                {
+                    String path = file.getFullPath().toString();
+                    URI uri = URI.createPlatformResourceURI(path, true);
+                    Set<Object> ids = new LinkedHashSet<>();
+                    ids.add(path);
+                    ids.add(uri.toPlatformString(true));
+                    ids.add(uri.toPlatformString(false));
+                    ids.add(uri.toString());
+                    MarkerFilter filter = MarkerFilter.createObjectFilter(file.getProject(), ids);
+                    List<com._1c.g5.v8.dt.validation.marker.Marker> markers;
+                    var reader = edtMarkers.createReader(file.getProject());
+                    // Reader не инициирует commit: расчёт иконки не должен вызывать новые
+                    // события маркеров. Так читает и штатный DtGranularEditorMarkerSupport.
+                    try (var stream = reader.markers(filter))
+                    {
+                        markers = new ArrayList<>(stream.toList());
+                    }
+                    if ("form".equalsIgnoreCase(file.getFileExtension())) //$NON-NLS-1$
+                    {
+                        // Проблемы формы — BM-маркеры её элементов, а не языковые маркеры пути.
+                        // Редактор тоже читает nestedMarkers владельца. Отбираем только те,
+                        // чей исходник — этот Form.form, без проблем соседнего Module.bsl.
+                        EObject owner = GitChangedFileMenuHook.resolveEObject(file);
+                        if (owner instanceof IBmObject bmObject)
+                        {
+                            java.util.function.Function<EObject, IFile> sourceFile =
+                                ProblemViewOpenInTextEditorHandler::resolveSourceFile;
+                            try (var stream = reader.nestedMarkers(file.getProject(), Long.valueOf(bmObject.bmGetId())))
+                            {
+                                stream.filter(marker -> file.equals(marker.provideObject(sourceFile)))
+                                    .forEach(markers::add);
+                            }
+                        }
+                    }
+                    MarkerSeverity maximum = ValidationUtil.getMaxMarkerSeverity(markers);
+                    MarkerSeverity severity = maximum != null ? maximum : MarkerSeverity.NONE;
+                    if (!display.isDisposed())
+                        display.asyncExec(() ->
+                        {
+                            if (tree.isDisposed() || generation != markerGeneration)
+                                return;
+                            fileSeverities.put(file, severity);
+                            requestImageRefresh();
+                        });
+                }
+                catch (RuntimeException e)
+                {
+                }
+            });
+            job.setSystem(true);
+            job.schedule();
+            return MarkerSeverity.NONE;
+        }
+
+        /** Объединяет результаты расчётов файлов в одну перерисовку списка. Только UI. */
+        private void requestImageRefresh()
+        {
+            if (imageRefreshPending)
+                return;
+            imageRefreshPending = true;
+            tree.getDisplay().timerExec(50, () ->
+            {
+                imageRefreshPending = false;
+                if (!tree.isDisposed()
+                    && tree.getData(INTERACTION_KEY) instanceof GitStagingTreeInteraction interaction)
+                    interaction.viewer.refresh(true);
+            });
         }
 
         @Override
@@ -1891,6 +2077,10 @@ public final class GitStagingFilterHook implements IStartup
         @Override
         public void dispose()
         {
+            markerGeneration++;
+            if (edtMarkers != null)
+                edtMarkers.removeListener(edtMarkerListener);
+            problemImages.dispose();
             statusColors.dispose();
             base.dispose();
         }

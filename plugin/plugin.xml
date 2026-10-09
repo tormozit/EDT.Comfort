@@ -193,6 +193,7 @@
     <startup class="tormozit.NewCommandWizardHook"/>
     <startup class="tormozit.PropertyNameIdentifierHook"/>
     <startup class="tormozit.PropertySheetActivePropertyHook"/>
+    <startup class="tormozit.LwtTextSaveHook"/>
     <startup class="tormozit.PropertySheetNonDefaultHighlightHook"/>
     <startup class="tormozit.PropertySheetHandlerRenameHook"/>
     <startup class="tormozit.BslEditorHighlightingHook"/>

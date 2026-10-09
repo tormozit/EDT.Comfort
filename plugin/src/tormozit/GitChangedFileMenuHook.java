@@ -686,6 +686,7 @@ public final class GitChangedFileMenuHook implements IStartup
                     ? clickedSelection : selectionOf(view);
                 if (selection instanceof IStructuredSelection structured && !structured.isEmpty())
                 {
+                    patchOpenWorkingCopyItem(contextMenu, structured, view);
                     List<IFile> headReplaceFiles = computeHeadReplaceFiles(structured, view);
                     if (!headReplaceFiles.isEmpty())
                     {
@@ -765,6 +766,102 @@ public final class GitChangedFileMenuHook implements IStartup
             }
         }
         return -1;
+    }
+
+    /** Штатный пункт EGit сохраняет текст, значок и доступность; модули и формы открываются на своей странице. */
+    private static void patchOpenWorkingCopyItem(Menu menu, IStructuredSelection selection, IViewPart view)
+    {
+        if (!DT_STAGING_VIEW_ID.equals(view.getSite().getId())
+            && !EGIT_STAGING_VIEW_ID.equals(view.getSite().getId()))
+            return;
+        List<IFile> files = new ArrayList<>();
+        boolean hasModule = false;
+        for (Object element : selection.toList())
+        {
+            IFile file = resolveFile(view, element);
+            if (file == null)
+                return;
+            if (file.exists())
+            {
+                files.add(file);
+                hasModule |= isEdtObjectFile(file);
+            }
+        }
+        if (!hasModule)
+            return;
+        try
+        {
+            Bundle bundle = Platform.getBundle(EGIT_UI_BUNDLE_ID);
+            if (bundle == null)
+                return;
+            String text = (String) bundle.loadClass(EGIT_UITEXT_CLASS)
+                .getField("CommitFileDiffViewer_OpenWorkingTreeVersionInEditorMenuLabel").get(null); //$NON-NLS-1$
+            for (MenuItem item : menu.getItems())
+            {
+                if (!text.equals(item.getText()))
+                    continue;
+                for (var listener : item.getListeners(SWT.Selection))
+                    item.removeListener(SWT.Selection, listener);
+                item.addListener(SWT.Selection, event ->
+                {
+                    for (IFile file : files)
+                    {
+                        try
+                        {
+                            Global.tempLog("git-working-copy-open", "open file=" + file.getFullPath()); //$NON-NLS-1$ //$NON-NLS-2$
+                            if (isEdtObjectFile(file))
+                            {
+                                URI uri = URI.createPlatformResourceURI(file.getFullPath().toString(), true)
+                                    .appendFragment("/0"); //$NON-NLS-1$
+                                IEditorPart editor = new com._1c.g5.v8.dt.ui.util.OpenHelper(view.getSite().getPage())
+                                    .openEditor(uri, null);
+                                Global.tempLog("git-working-copy-open", "opened editor=" //$NON-NLS-1$ //$NON-NLS-2$
+                                    + (editor == null ? null : editor.getClass().getName()));
+                                if ("form".equalsIgnoreCase(file.getFileExtension()) //$NON-NLS-1$
+                                    && editor instanceof com._1c.g5.v8.dt.form.ui.editor.FormEditor formEditor)
+                                    activateWorkingCopyFormPage(formEditor, 0);
+                            }
+                            else
+                                org.eclipse.egit.ui.internal.commit.DiffViewer.openFileInEditor(
+                                    file.getLocation().toFile(), 0);
+                        }
+                        catch (Exception error)
+                        {
+                            Global.tempLogException("git-working-copy-open", //$NON-NLS-1$
+                                "open failed file=" + file.getFullPath(), error); //$NON-NLS-1$
+                        }
+                    }
+                });
+                return;
+            }
+        }
+        catch (Exception error)
+        {
+            Global.tempLogException("git-working-copy-open", "menu patch failed", error); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    /** Файлы, которые открываются штатным редактором EDT по URI корневого объекта: модуль, форма, объект метаданных. */
+    private static boolean isEdtObjectFile(IFile file)
+    {
+        String extension = file.getFileExtension();
+        return "bsl".equalsIgnoreCase(extension) //$NON-NLS-1$
+            || "form".equalsIgnoreCase(extension) //$NON-NLS-1$
+            || "mdo".equalsIgnoreCase(extension); //$NON-NLS-1$
+    }
+
+    /** Страницы нового редактора появляются после завершения загрузки. */
+    private static void activateWorkingCopyFormPage(
+        com._1c.g5.v8.dt.form.ui.editor.FormEditor editor, int attempt)
+    {
+        boolean selected = editor.setActivePage(com._1c.g5.v8.dt.form.ui.editor.FormEditorPage.PAGE_ID) != null;
+        Global.tempLog("git-working-copy-open", "form page selected=" + selected + " attempt=" + attempt); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        if (!selected && attempt < 40)
+            Display.getDefault().timerExec(100, () ->
+            {
+                if (editor.getSite().getPage().getReference(editor) != null)
+                    activateWorkingCopyFormPage(editor, attempt + 1);
+            });
     }
 
     private static String nativeReplaceWithHeadRevisionText()
@@ -1134,6 +1231,24 @@ public final class GitChangedFileMenuHook implements IStartup
                     }
                 });
                 addedItems.add(addToSetItem);
+
+                // В истории строки — версии из коммита, а поиск идёт по текущей модели проекта.
+                if (!isHistoryView(view))
+                {
+                    MenuItem brokenItem = ComfortSubmenuHelper.createSortedMenuItem(submenu, SWT.PUSH,
+                        "Найти битые ссылки метаданных");
+                    ComfortSubmenuHelper.setMenuItemTooltip(brokenItem,
+                        "Найти битые ссылки в объектах выбранных файлов с вложенными и показать в панели Поиск");
+                    brokenItem.addSelectionListener(new SelectionAdapter()
+                    {
+                        @Override
+                        public void widgetSelected(SelectionEvent ev)
+                        {
+                            findBrokenReferences(view, structured);
+                        }
+                    });
+                    addedItems.add(brokenItem);
+                }
             }
 
             @Override
@@ -1151,6 +1266,49 @@ public final class GitChangedFileMenuHook implements IStartup
                 });
             }
         };
+    }
+
+    /**
+     * Поиск битых ссылок в объектах выбранных файлов. Файл модуля или формы относится к своему
+     * верхнему объекту; несколько файлов одного объекта дают один корень поиска. Проект берётся
+     * у первого разрешённого файла — остальные проекты выделения в этот запуск не входят.
+     */
+    private static void findBrokenReferences(IViewPart view, IStructuredSelection selection)
+    {
+        IProject project = null;
+        List<URI> roots = new ArrayList<>();
+        List<String> labels = new ArrayList<>();
+        for (Object element : selection.toList())
+        {
+            IFile file = resolveFile(view, element);
+            if (file == null || !file.exists() || project != null && !project.equals(file.getProject()))
+                continue;
+            EObject object = resolveEObject(file);
+            // Файлы корня (Configuration.mdo и его модули) resolveEObject намеренно не разрешает.
+            if (object == null && GetRef.isConfigurationRootPath(file.getProjectRelativePath().toString())
+                && Global.getServiceByClass(IV8ProjectManager.class) instanceof IV8ProjectManager manager
+                && manager.getProject(file.getProject())
+                    instanceof com._1c.g5.v8.dt.core.platform.IConfigurationProject configurationProject)
+                object = configurationProject.getConfiguration();
+            if (!(object instanceof com._1c.g5.v8.bm.core.IBmObject bmObject))
+                continue;
+            EObject top = bmObject.bmIsTop() ? bmObject : bmObject.bmGetTopObject();
+            if (top == null)
+                continue;
+            URI uri = org.eclipse.emf.ecore.util.EcoreUtil.getURI(top);
+            if (roots.contains(uri))
+                continue;
+            project = file.getProject();
+            roots.add(uri);
+            labels.add(MdReferenceSupport.localized(uri));
+        }
+        if (project == null)
+        {
+            ToastNotification.show("Найти битые ссылки метаданных",
+                "Среди выбранных файлов нет объектов метаданных.", 5_000);
+            return;
+        }
+        MdReferenceSupport.findInObjects(project, roots, MdReferenceSupport.scopeLabel(labels));
     }
 
     // ========================================================================

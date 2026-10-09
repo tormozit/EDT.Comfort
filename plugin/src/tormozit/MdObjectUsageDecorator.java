@@ -18,7 +18,7 @@ import org.eclipse.ui.PlatformUI;
  * <li>{@code <объект>} — объект привязан к конфигурации: его полное имя встречается
  * в {@code Configuration.mdo}
  * (см. {@link GitChangedFileMenuHook#isAttachedToConfiguration});</li>
- * <li>{@code <?>} — mdo-файл есть на диске, но объекта в конфигурации нет.</li>
+ * <li>{@code <?>} — папка объекта есть на диске, но объекта в конфигурации нет.</li>
  * </ul>
  * Папки дочерних объектов (внутри {@code Forms} / {@code Commands} / {@code Templates})
  * своего mdo не имеют — для них связь определяется по mdo объекта-владельца
@@ -87,6 +87,12 @@ public final class MdObjectUsageDecorator extends LabelProvider implements ILigh
         {
             if (resource instanceof IFolder folder)
             {
+                IFile expectedMdo = expectedTopLevelMdo(folder);
+                if (expectedMdo != null && !isIntegrated(expectedMdo))
+                {
+                    decoration.addSuffix(" <?>"); //$NON-NLS-1$
+                    return;
+                }
                 Boolean childIntegrated = isChildObjectIntegrated(folder);
                 if (childIntegrated != null)
                 {
@@ -136,6 +142,22 @@ public final class MdObjectUsageDecorator extends LabelProvider implements ILigh
     private static String groupLabelFor(IFolder folder)
     {
         return MdTypeMapping.folderToGroupPlural(folder.getName());
+    }
+
+    /** Путь описателя объекта верхнего уровня, даже если сам файл уже отсутствует. */
+    private static IFile expectedTopLevelMdo(IFolder folder)
+    {
+        org.eclipse.core.runtime.IPath path = folder.getProjectRelativePath();
+        int count = path.segmentCount();
+        boolean configurationObject = count == 3 && "src".equals(path.segment(0)); //$NON-NLS-1$
+        boolean extensionObject = count == 5 && "src".equals(path.segment(0)) //$NON-NLS-1$
+            && "ext".equals(path.segment(1)); //$NON-NLS-1$
+        if (!configurationObject && !extensionObject)
+            return null;
+        String type = MdTypeMapping.folderToEnSing(path.segment(count - 2));
+        if (type == null || MdTypeMapping.subObjectTypeToEmfFeature(type) != null)
+            return null;
+        return folder.getFile(folder.getName() + ".mdo"); //$NON-NLS-1$
     }
 
     private static IFile findMdoFile(IResource resource)

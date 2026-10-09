@@ -254,10 +254,11 @@ public final class FilterBySubsystemsDialogHook implements IStartup
         installComfortToolbarActions(dialog, panel, viewer);
         installTreeContextMarkMenu(panel, viewer);
         installLastChildCheckGuard(panel, viewer);
-        installGrayAncestorMarks(dialog, panel, viewer);
         installTreeCellCopy(viewer);
         installDeselectAllAlwaysEnabled(dialog, panel, viewer);
         installCompareBothSidesMode(dialog, panel, viewer);
+        // После BothSidesCheckStateProvider: в диалоге сравнения обёртка серых предков идёт поверх него.
+        installGrayAncestorMarks(dialog, panel, viewer);
         installGrayMarkHint(panel);
         installBlacklistCheckbox(dialog, panel);
         installStandardCheckboxLabels(shell, panel);
@@ -2725,16 +2726,16 @@ public final class FilterBySubsystemsDialogHook implements IStartup
      * <p>Серые пометки в сохранение не попадают: {@code AbstractViewerPanel.getOnlyCheckedElements()}
      * вычитает {@code getGrayedElements()} до вызова {@code setSubsystemChecked}.
      *
-     * <p>Диалог сравнения не трогаем — там своя обёртка {@link BothSidesCheckStateProvider}.
+     * <p>Диалог сравнения: обёртка ставится поверх {@link BothSidesCheckStateProvider}, а при
+     * включённых «Включать …» не отключается — штатный {@code grayNodes()} там предков не
+     * красит (два проекта с одним именем).
      */
     private static void installGrayAncestorMarks(Object dialog, Object panel, CheckboxTreeViewer viewer)
     {
         if (dialog == null || panel == null || viewer == null)
             return;
-        // Диалог сравнения (в т.ч. git-сторона OTHER) — своя обёртка BothSidesCheckStateProvider.
-        if (isCompareFilterDialog(dialog)
-            || dialog.getClass().getName().contains(".compare.")) //$NON-NLS-1$
-            return;
+        boolean compare = isCompareFilterDialog(dialog)
+            || dialog.getClass().getName().contains(".compare."); //$NON-NLS-1$
         Tree tree = viewer.getTree();
         if (tree == null || tree.isDisposed())
             return;
@@ -2752,7 +2753,7 @@ public final class FilterBySubsystemsDialogHook implements IStartup
             return;
 
         GrayAncestorsCheckStateProvider wrapped =
-            new GrayAncestorsCheckStateProvider(panel, viewer, nativeProvider);
+            new GrayAncestorsCheckStateProvider(panel, viewer, nativeProvider, compare);
         viewer.setCheckStateProvider(wrapped);
         // ImprovedCheckboxTreeViewer дублирует provider в customized*.
         Object customized = Global.getField(viewer, "customizedCheckStateProvider"); //$NON-NLS-1$
@@ -2806,12 +2807,16 @@ public final class FilterBySubsystemsDialogHook implements IStartup
         /** Узлы, которым пометку поставили мы сами — только их и снимаем при пересчёте. */
         private volatile Set<Object> appliedMarks = new HashSet<>();
 
+        /** Диалог сравнения: штатная серая динамика не работает, считаем предков и при include*. */
+        private final boolean compare;
+
         GrayAncestorsCheckStateProvider(Object panel, CheckboxTreeViewer viewer,
-            org.eclipse.jface.viewers.ICheckStateProvider delegate)
+            org.eclipse.jface.viewers.ICheckStateProvider delegate, boolean compare)
         {
             this.panel = panel;
             this.viewer = viewer;
             this.delegate = delegate;
+            this.compare = compare;
         }
 
         @Override
@@ -2842,7 +2847,7 @@ public final class FilterBySubsystemsDialogHook implements IStartup
             Set<Object> ancestors = new HashSet<>();
             try
             {
-                if (Boolean.TRUE.equals(Global.invoke(panel,
+                if (!compare && Boolean.TRUE.equals(Global.invoke(panel,
                     "doesIncludeFromSubordinateOrParentParameterSet"))) //$NON-NLS-1$
                 {
                     grayAncestors = ancestors;

@@ -112,6 +112,11 @@ public final class Activator
             "com._1c.g5.v8.dt.internal.compare.ui.editor.DtComparisonEditor"; //$NON-NLS-1$
         static final String PROP_MERGE_CONFIRMATION = "tormozit.compare.mergeConfirmation"; //$NON-NLS-1$
         private static final String PROP_AFTER_MERGE = "tormozit.compare.afterMerge"; //$NON-NLS-1$
+        /** Задание штатного объединения Git: индексирует изменённые файлы и создаёт коммит слияния. */
+        private static final String MERGE_COMMIT_CALLBACK =
+            "com._1c.g5.v8.dt.compare.git.merge.AbstractMergePerformer$MergeCallback"; //$NON-NLS-1$
+        /** Совпадает с CompareConfigMenuHook.MergePreflight.BEFORE_COMMIT. */
+        private static final String PROP_BEFORE_MERGE_COMMIT = "tormozit.compare.beforeMergeCommit"; //$NON-NLS-1$
         private static final String EDITOR_MATCHING = "com._1c.g5.v8.dt.ui.editor.DtEditorMatchingStrategy"; //$NON-NLS-1$
         private static final String GRANULAR_EDITOR = "com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor"; //$NON-NLS-1$
         /** Совпадает с MdEditorTabsHook.PROP_PAGES_CREATED. */
@@ -125,7 +130,7 @@ public final class Activator
         static final String PROP_EDITOR_MODEL_EQUALS = "tormozit.editor.modelEquals"; //$NON-NLS-1$
         private static final List<String> TARGETS = List.of(BSL_PARSER, CUSTOM_BSL_PARSER, HELPER,
             SUPPRESSION_PROVIDER, FOLDING_PROVIDER, TAB_FOLDER, PART_LIST_CONTROL, COMPARISON_EDITOR,
-            EDITOR_MATCHING, GRANULAR_EDITOR, TREE_VIEWER, SEARCH_TREE_LAYOUT);
+            MERGE_COMMIT_CALLBACK, EDITOR_MATCHING, GRANULAR_EDITOR, TREE_VIEWER, SEARCH_TREE_LAYOUT);
 
         private static final String EXTRACT_SUPPRESSIONS_DESC = "(Lorg/eclipse/xtext/nodemodel/ILeafNode;)Ljava/util/Set;"; //$NON-NLS-1$
         private static final String ILEAF_NODE = "org/eclipse/xtext/nodemodel/ILeafNode"; //$NON-NLS-1$
@@ -170,6 +175,7 @@ public final class Activator
                 }
             });
             System.getProperties().putIfAbsent(PROP_AFTER_MERGE, (Function<Object, Object>) editor -> null);
+            System.getProperties().putIfAbsent(PROP_BEFORE_MERGE_COMMIT, (Function<Object, Object>) callback -> null);
             context.registerService(WeavingHook.class, new EarlyWeaving(), null);
         }
 
@@ -262,6 +268,50 @@ public final class Activator
             System.setProperty("tormozit.compare.mergeConfirmationPatch",
                 touched[0] == 1 && touched[1] == 1 ? "woven" : "missing merge call");
             return touched[0] == 1 && touched[1] == 1 ? writer.toByteArray() : null;
+        }
+
+        /**
+         * Вызов в начале задания, до сбора изменённых файлов в индекс: всё, что основной бандл
+         * запишет на диск в этой точке, попадает в коммит слияния.
+         */
+        private static byte[] transformMergeCommitCallback(byte[] bytes)
+        {
+            ClassReader reader = new ClassReader(bytes);
+            ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+            int[] touched = new int[1];
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor, String signature,
+                    String[] exceptions)
+                {
+                    MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    if (mv == null || !"addChangesToIndexAndMergeAdditionalFiles".equals(name) //$NON-NLS-1$
+                        || !"(Lorg/eclipse/core/runtime/IProgressMonitor;)V".equals(descriptor)) //$NON-NLS-1$
+                        return mv;
+                    return new MethodVisitor(Opcodes.ASM9, mv)
+                    {
+                        @Override
+                        public void visitCode()
+                        {
+                            super.visitCode();
+                            super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", //$NON-NLS-1$ //$NON-NLS-2$
+                                "()Ljava/util/Properties;", false); //$NON-NLS-1$
+                            super.visitLdcInsn(PROP_BEFORE_MERGE_COMMIT);
+                            super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", //$NON-NLS-1$ //$NON-NLS-2$
+                                "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$
+                            super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Function"); //$NON-NLS-1$
+                            super.visitVarInsn(Opcodes.ALOAD, 0);
+                            super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Function", "apply", //$NON-NLS-1$ //$NON-NLS-2$
+                                "(Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$
+                            super.visitInsn(Opcodes.POP);
+                            touched[0]++;
+                        }
+                    };
+                }
+            }, 0);
+            System.setProperty("tormozit.compare.mergeCommitPatch", touched[0] == 1 ? "woven" : "missing method"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            return touched[0] == 1 ? writer.toByteArray() : null;
         }
 
         /**
@@ -394,6 +444,8 @@ public final class Activator
                 return transformEditorMatching(bytes);
             if (COMPARISON_EDITOR.equals(className))
                 return transformComparisonEditor(bytes);
+            if (MERGE_COMMIT_CALLBACK.equals(className))
+                return transformMergeCommitCallback(bytes);
             if (FOLDING_PROVIDER.equals(className))
                 return transformFoldingProvider(bytes);
             if (TAB_FOLDER.equals(className))

@@ -246,7 +246,6 @@ public final class NavigatorRecomputeChecksMenuHook implements IStartup
     /** Подписи выбранных узлов для заголовка результата: «Справочники», «Справочник.Товары». */
     private static String searchScopeLabel(CommonViewer viewer, List<?> nodes)
     {
-        final int shown = 3;
         List<String> labels = new ArrayList<>();
         for (Object node : nodes)
         {
@@ -261,10 +260,7 @@ public final class NavigatorRecomputeChecksMenuHook implements IStartup
             if (label != null && !label.isBlank() && !labels.contains(label))
                 labels.add(label);
         }
-        if (labels.isEmpty())
-            return "выбранных узлах";
-        String text = "«" + String.join("», «", labels.subList(0, Math.min(shown, labels.size()))) + "»";
-        return labels.size() > shown ? text + " и ещё " + (labels.size() - shown) : text;
+        return MdReferenceSupport.scopeLabel(labels);
     }
 
     private static boolean collectSearchRoots(CommonViewer viewer, Object node, List<URI> roots,

@@ -18,6 +18,7 @@ import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.jface.layout.TableColumnLayout;
 import org.eclipse.jface.preference.IPreferenceStore;
+import org.eclipse.jface.util.IPropertyChangeListener;
 import org.eclipse.jface.viewers.CellLabelProvider;
 import org.eclipse.jface.viewers.ColumnLabelProvider;
 import org.eclipse.jface.viewers.ColumnPixelData;
@@ -133,6 +134,8 @@ public final class GitHistoryHook implements IStartup
     private static final String SORT_STATE_KEY = "tormozit.gitHistorySortState"; //$NON-NLS-1$
     private static final String SETTINGS_SECTION = "GitHistoryFileColumns"; //$NON-NLS-1$
     private static final String KEY_LAST_REPO = "lastRepoGitDir"; //$NON-NLS-1$
+    private static final String REPOSITORY_MEMORY_KEY = "tormozit.gitHistoryRepositoryMemory";
+    private static final String REPOSITORY_LOG = "git-history-repository";
     /** Второстепенные данные (положение разделителя) — в {@link IDialogSettings}, сохраняются при
      * закрытии/пересоздании панели, а не живьём при каждом драге. */
     private static final String KEY_SASH_LEFT = "sashLeft"; //$NON-NLS-1$
@@ -310,11 +313,6 @@ public final class GitHistoryHook implements IStartup
                 return false;
 
             boolean patched = Boolean.TRUE.equals(table.getData(PATCHED_KEY));
-            // #region agent log #599
-            Global.tempLog("gitHistory599", "tryPatch attempt=" + attempt + " patched=" + patched //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " columns=" + table.getColumnCount() + " items=" + table.getItemCount() //$NON-NLS-1$ //$NON-NLS-2$
-                + " lp=" + describe(fileViewer.getLabelProvider()) + " table=" + System.identityHashCode(table)); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
             if (patched)
             {
                 Debug.logColumnsIfChanged(table, "partEvent"); //$NON-NLS-1$
@@ -363,9 +361,6 @@ public final class GitHistoryHook implements IStartup
             }
             catch (RuntimeException e)
             {
-                // #region agent log #599
-                Global.tempLogException("gitHistory599", "installFilterComposite attempt=" + attempt, e); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
                 Debug.log("[!] install failed table=" + System.identityHashCode(table) //$NON-NLS-1$
                     + " reparented=" + (table.getParent() != originalParent) + " " + Debug.shortStack(e)); //$NON-NLS-1$ //$NON-NLS-2$
                 // Таблица ещё на прежнем месте — убираем колонки этого прохода, вид остаётся штатным.
@@ -387,9 +382,6 @@ public final class GitHistoryHook implements IStartup
         }
         catch (Exception e)
         {
-            // #region agent log #599
-            Global.tempLogException("gitHistory599", "tryPatch attempt=" + attempt, e); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
             Debug.log("[!] tryPatch attempt=" + attempt + " " + Debug.shortStack(e)); //$NON-NLS-1$ //$NON-NLS-2$
             return false;
         }
@@ -415,7 +407,7 @@ public final class GitHistoryHook implements IStartup
 
     /**
      * Новый экземпляр штатного {@code FileDiffLabelProvider(RGB)} с тем же приглушённым цветом.
-     * Не удалось — {@code orig} (прежнее поведение; ошибка — во временный лог).
+     * Не удалось — {@code orig} (прежнее поведение; ошибка — в журнал «Комфорт»).
      */
     private static CellLabelProvider ownFileDiffLabelProvider(CellLabelProvider orig)
     {
@@ -425,10 +417,6 @@ public final class GitHistoryHook implements IStartup
         Object copy = dimmed instanceof Color c && !c.isDisposed()
             ? Global.newInstance(orig.getClass(), c.getRGB())
             : null;
-        // #region agent log #599
-        Global.tempLog("gitHistory599", "ownFileDiffLabelProvider orig=" + describe(orig) //$NON-NLS-1$ //$NON-NLS-2$
-            + " dimmed=" + describe(dimmed) + " copy=" + describe(copy)); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
         if (!(copy instanceof CellLabelProvider))
             Debug.log("[!] own FileDiffLabelProvider not created, using stock orig=" + describe(orig) //$NON-NLS-1$
                 + " dimmed=" + describe(dimmed)); //$NON-NLS-1$
@@ -462,12 +450,17 @@ public final class GitHistoryHook implements IStartup
         if (!isHistoryView(view))
             return true;
         Object page = Global.call(view, "getHistoryPage"); //$NON-NLS-1$
+        Global.tempLog(REPOSITORY_LOG, "ensure page=" + describe(page));
         if (isGitHistoryPage(page))
         {
+            installRepositoryMemory(view, page);
             rememberLastRepo(page);
             return true;
         }
-        if (page != null)
+        // GenericHistoryView создаёт непустой объект штатной пустой страницы:
+        // GenericHistoryViewDefaultPage.getInput() всегда возвращает null (подтверждено в бандле).
+        if (page != null && !"org.eclipse.team.internal.ui.history.GenericHistoryViewDefaultPage"
+            .equals(page.getClass().getName()))
         {
             Debug.log("ensureGitHistoryPage: skip existing page=" + page.getClass().getName()); //$NON-NLS-1$
             return true;
@@ -494,11 +487,16 @@ public final class GitHistoryHook implements IStartup
                 + " shown=" + (shown == null ? "null" : shown.getClass().getSimpleName()) //$NON-NLS-1$ //$NON-NLS-2$
                 + " ok=" + ok); //$NON-NLS-1$
             if (ok)
+            {
+                installRepositoryMemory(view, shown);
                 rememberLastRepo(shown);
+            }
+            Global.tempLog(REPOSITORY_LOG, "restore repository=" + repo.getDirectory() + " ok=" + ok);
             return ok;
         }
         catch (Exception e)
         {
+            Global.tempLogException(REPOSITORY_LOG, "restore failed", e);
             Debug.log("ensureGitHistoryPage EXCEPTION: " + e); //$NON-NLS-1$
             return false;
         }
@@ -552,6 +550,49 @@ public final class GitHistoryHook implements IStartup
         }
     }
 
+    /** Событие GitHistoryPage.Repository и методы HistoryPage подтверждены в целевых бандлах. */
+    private static void installRepositoryMemory(IViewPart view, Object page)
+    {
+        Object widget = Global.call(page, "getControl");
+        if (!(widget instanceof Control control) || control.isDisposed()
+            || control.getData(REPOSITORY_MEMORY_KEY) != null)
+            return;
+        IPropertyChangeListener listener = event ->
+        {
+            if (!"GitHistoryPage.Repository".equals(event.getProperty()))
+                return;
+            Global.tempLog(REPOSITORY_LOG, "repository changed new=" + event.getNewValue());
+            Runnable remember = () ->
+            {
+                // У панели могут быть неактивные страницы других репозиториев.
+                if (!control.isDisposed() && Global.call(view, "getHistoryPage") == page)
+                    rememberLastRepo(page);
+            };
+            Display display = control.getDisplay();
+            if (Display.getCurrent() == display)
+                remember.run();
+            else if (!display.isDisposed())
+                display.asyncExec(remember);
+        };
+        try
+        {
+            page.getClass().getMethod("addPropertyChangeListener", IPropertyChangeListener.class)
+                .invoke(page, listener);
+            control.setData(REPOSITORY_MEMORY_KEY, listener);
+            control.addDisposeListener(event ->
+            {
+                try
+                {
+                    page.getClass().getMethod("removePropertyChangeListener", IPropertyChangeListener.class)
+                        .invoke(page, listener);
+                }
+                catch (Exception error) { Global.tempLogException(REPOSITORY_LOG, "remove listener failed", error); }
+            });
+            Global.tempLog(REPOSITORY_LOG, "listener installed page=" + describe(page));
+        }
+        catch (Exception error) { Global.tempLogException(REPOSITORY_LOG, "install listener failed", error); }
+    }
+
     private static void rememberLastRepo(Object historyPage)
     {
         Object repoObj = Global.getField(historyPage, "currentRepo"); //$NON-NLS-1$
@@ -562,9 +603,26 @@ public final class GitHistoryHook implements IStartup
 
     private static Repository resolveRepoToShow(IViewPart view)
     {
-        Repository last = repoFromGitDir(dialogSettings().get(KEY_LAST_REPO));
-        if (last != null)
-            return last;
+        List<String> configured = RepositoryUtil.INSTANCE.getConfiguredRepositories();
+        List<File> directories = new ArrayList<>();
+        if (configured != null)
+            for (String path : configured)
+            {
+                String absolute = RepositoryUtil.INSTANCE.getAbsoluteRepositoryPath(path);
+                File directory = new File(absolute != null && !absolute.isBlank() ? absolute : path);
+                if (directory.isDirectory() && !directories.contains(directory))
+                    directories.add(directory);
+            }
+        if (directories.size() == 1)
+            return repoFromGitDir(directories.get(0).getAbsolutePath());
+
+        String lastPath = dialogSettings().get(KEY_LAST_REPO);
+        if (lastPath != null && directories.contains(new File(lastPath)))
+        {
+            Repository last = repoFromGitDir(lastPath);
+            if (last != null)
+                return last;
+        }
 
         IProject project = Global.getActiveProject(view, false);
         if (project != null)
@@ -574,19 +632,11 @@ public final class GitHistoryHook implements IStartup
                 return mapping.getRepository();
         }
 
-        Repository[] all = RepositoryCache.INSTANCE.getAllRepositories();
-        if (all != null && all.length > 0)
-            return all[0];
-
-        List<String> configured = RepositoryUtil.INSTANCE.getConfiguredRepositories();
-        if (configured != null)
+        for (File directory : directories)
         {
-            for (String path : configured)
-            {
-                Repository repo = repoFromGitDir(path);
-                if (repo != null)
-                    return repo;
-            }
+            Repository repo = repoFromGitDir(directory.getAbsolutePath());
+            if (repo != null)
+                return repo;
         }
         return null;
     }

@@ -213,21 +213,33 @@ public final class MdReferenceSupport
         if (removed && owner instanceof com._1c.g5.v8.dt.mcore.TypeDescription description && "types".equals(feature.getName())
             && description.getTypes().isEmpty() && description.eContainingFeature() != null
             && "type".equals(description.eContainingFeature().getName()))
-        {
-            var provider = com._1c.g5.v8.dt.platform.IEObjectProvider.Registry.INSTANCE.get(
-                McorePackage.Literals.TYPE_ITEM, com._1c.g5.v8.dt.platform.version.Version.LATEST);
-            EObject string = provider != null ? provider.createProxy("String") : null;
-            if (string == null)
-                throw new IllegalStateException("Недоступен стандартный тип Строка");
-            string = EcoreUtil.resolve(string, description);
-            if (!(string instanceof com._1c.g5.v8.dt.mcore.TypeItem type) || string.eIsProxy())
-                throw new IllegalStateException("Не удалось разрешить стандартный тип Строка");
-            var qualifiers = com._1c.g5.v8.dt.mcore.McoreFactory.eINSTANCE.createStringQualifiers();
-            qualifiers.setLength(10);
-            qualifiers.setFixed(false);
-            description.setStringQualifiers(qualifiers);
-            description.getTypes().add(type);
-        }
+            replaceEmptyValueTypeWithString(description);
+    }
+
+    /**
+     * Опустевший тип значения заменяется на «Строка(10)». Стандартный тип берётся для версии
+     * платформы самого проекта: {@code Version.LATEST} в модели проекта может быть не
+     * зарегистрирована (EDT 2026: «Version is not registered: 8.5.1»).
+     */
+    static void replaceEmptyValueTypeWithString(com._1c.g5.v8.dt.mcore.TypeDescription description)
+    {
+        var support = Global.getOsgiService(com._1c.g5.v8.dt.platform.version.IRuntimeVersionSupport.class);
+        var version = support != null ? support.getRuntimeVersion(description) : null;
+        if (version == null)
+            throw new IllegalStateException("Не определена версия платформы проекта для типа Строка");
+        var provider = com._1c.g5.v8.dt.platform.IEObjectProvider.Registry.INSTANCE.get(
+            McorePackage.Literals.TYPE_ITEM, version);
+        EObject string = provider != null ? provider.createProxy("String") : null;
+        if (string == null)
+            throw new IllegalStateException("Недоступен стандартный тип Строка для версии " + version);
+        string = EcoreUtil.resolve(string, description);
+        if (!(string instanceof com._1c.g5.v8.dt.mcore.TypeItem type) || string.eIsProxy())
+            throw new IllegalStateException("Не удалось разрешить стандартный тип Строка для версии " + version);
+        var qualifiers = com._1c.g5.v8.dt.mcore.McoreFactory.eINSTANCE.createStringQualifiers();
+        qualifiers.setLength(10);
+        qualifiers.setFixed(false);
+        description.setStringQualifiers(qualifiers);
+        description.getTypes().add(type);
     }
 
     public static List<BrokenReference> findBrokenReferences(EObject owner, IProgressMonitor monitor)
@@ -250,7 +262,18 @@ public final class MdReferenceSupport
     private static List<BrokenReference> findBrokenReferences(EObject owner, IProgressMonitor monitor,
         Map<URI, Boolean> unresolved, String property)
     {
+        return findBrokenReferences(owner, monitor, unresolved, property, reference -> {});
+    }
+
+    private static List<BrokenReference> findBrokenReferences(EObject owner, IProgressMonitor monitor,
+        Map<URI, Boolean> unresolved, String property, java.util.function.Consumer<BrokenReference> onReference)
+    {
         List<BrokenReference> result = new ArrayList<>();
+        java.util.function.Consumer<BrokenReference> found = reference ->
+        {
+            result.add(reference);
+            onReference.accept(reference);
+        };
         for (EReference feature : features(owner.eClass()))
         {
             if (property != null && !property.equals(feature.getName()))
@@ -263,7 +286,7 @@ public final class MdReferenceSupport
             if (compositionReferences != null)
             {
                 for (MdCompositionSupport.BrokenReference reference : compositionReferences)
-                    result.add(new BrokenReference(owner, feature, reference.index(), reference.reference()));
+                    found.accept(new BrokenReference(owner, feature, reference.index(), reference.reference()));
                 continue;
             }
             // Штатные геттеры BM разрешают значения ссылок перед проверкой eIsProxy.
@@ -276,11 +299,11 @@ public final class MdReferenceSupport
                         throw new OperationCanceledException();
                     Object element = list.get(i);
                     if (element instanceof EObject target && broken(owner, target, unresolved))
-                        result.add(new BrokenReference(owner, feature, i, target));
+                        found.accept(new BrokenReference(owner, feature, i, target));
                 }
             }
             else if (value instanceof EObject target && broken(owner, target, unresolved))
-                result.add(new BrokenReference(owner, feature, -1, target));
+                found.accept(new BrokenReference(owner, feature, -1, target));
         }
         return result;
     }
@@ -515,6 +538,16 @@ public final class MdReferenceSupport
         findInProject(project, null, List.copyOf(roots), scope);
     }
 
+    /** Область поиска для заголовка результата: первые три подписи и число остальных. */
+    public static String scopeLabel(List<String> labels)
+    {
+        final int shown = 3;
+        if (labels.isEmpty())
+            return "выбранных узлах";
+        String text = "«" + String.join("», «", labels.subList(0, Math.min(shown, labels.size()))) + "»";
+        return labels.size() > shown ? text + " и ещё " + (labels.size() - shown) : text;
+    }
+
     private static void findInProject(IProject project, Location location, List<URI> roots, String scope)
     {
         if (project == null)
@@ -631,6 +664,13 @@ public final class MdReferenceSupport
     public static List<CompareSearchMatch> findInModel(IComparisonDataSource source, URI navigationBase,
         Set<String> changedFiles, IProgressMonitor monitor)
     {
+        return findInModel(source, navigationBase, changedFiles, monitor, match -> {});
+    }
+
+    /** Передаёт каждую найденную ссылку сразу, сохраняя частичные результаты при отмене. */
+    public static List<CompareSearchMatch> findInModel(IComparisonDataSource source, URI navigationBase,
+        Set<String> changedFiles, IProgressMonitor monitor, java.util.function.Consumer<CompareSearchMatch> onMatch)
+    {
         return source.getBmModel().executeReadonlyTask(new AbstractBmTask<List<CompareSearchMatch>>(
             "Проверка ссылок коммита")
         {
@@ -656,7 +696,7 @@ public final class MdReferenceSupport
                         checking.worked(1);
                         continue;
                     }
-                    for (BrokenReference reference : findBrokenReferences(owner, checking, unresolved))
+                    findBrokenReferences(owner, checking, unresolved, null, reference ->
                     {
                         Location location = locationOf(owner, reference.feature());
                         URI root = navigationBase.appendSegment(location.root().lastSegment())
@@ -669,10 +709,12 @@ public final class MdReferenceSupport
                             reference.feature(), EcoreUtil.getRootContainer(owner));
                         if (property == null || property.isBlank())
                             property = propertyName(reference.feature());
-                        rows.add(new CompareSearchMatch(navigation, localized(EcoreUtil.getURI(owner)),
+                        CompareSearchMatch row = new CompareSearchMatch(navigation, localized(EcoreUtil.getURI(owner)),
                             property, localized(EcoreUtil.getURI(reference.target())),
-                            fullName(EcoreUtil.getURI(reference.target()))));
-                    }
+                            fullName(EcoreUtil.getURI(reference.target())));
+                        rows.add(row);
+                        onMatch.accept(row);
+                    });
                     checking.worked(1);
                 }
                 return rows;

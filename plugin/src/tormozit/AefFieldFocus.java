@@ -300,10 +300,6 @@ final class AefFieldFocus
                 collectEditorNativeControls(viewModelToView, child, out, depth + 1);
     }
 
-    /** Временная диагностика {@link #logEarlyRead}: уже записанные пары «компонент — кто спросил». */
-    private static final java.util.Set<String> EARLY_VIEW_MODEL_READS =
-        java.util.concurrent.ConcurrentHashMap.newKeySet();
-
     /**
      * Уже созданные модели представления компонента; пусто, если их ещё нет. Замена
      * {@code IComponent.getViewModels()} для любого нашего обхода дерева компонентов.
@@ -327,7 +323,6 @@ final class AefFieldFocus
             return java.util.Collections.emptyList();
         if (Global.getField(component, "viewModels") instanceof Iterable<?> created) //$NON-NLS-1$
             return created;
-        logEarlyRead(component, "моделей представления ещё нет"); //$NON-NLS-1$
         return java.util.Collections.emptyList();
     }
 
@@ -349,22 +344,7 @@ final class AefFieldFocus
             return java.util.Collections.emptyList();
         if (Global.getField(component, "components") instanceof Iterable<?> created) //$NON-NLS-1$
             return created;
-        logEarlyRead(component, "детей ещё нет"); //$NON-NLS-1$
         return java.util.Collections.emptyList();
-    }
-
-    /**
-     * ВРЕМЕННО: каждое попадание сюда — момент, когда прежний ленивый вызов создал бы детей или
-     * модели раньше рендерера. Пишется раз на пару «класс компонента — вызывающий».
-     */
-    private static void logEarlyRead(Object component, String what)
-    {
-        StackTraceElement[] stack = new Throwable().getStackTrace();
-        String caller = stack.length > 2 ? stack[2].getClassName() + '.' + stack[2].getMethodName() : "?"; //$NON-NLS-1$
-        String key = what + ": " + component.getClass().getName() + " <- " + caller; //$NON-NLS-1$ //$NON-NLS-2$
-        if (EARLY_VIEW_MODEL_READS.add(key))
-            Global.tempLog("aef-early-view-models", key //$NON-NLS-1$
-                + " родитель=" + Global.invoke(component, "getParent")); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     static List<Object> childComponents(Object component)

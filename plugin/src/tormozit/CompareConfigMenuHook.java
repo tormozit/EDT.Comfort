@@ -271,14 +271,18 @@ public class CompareConfigMenuHook implements IStartup
         private static final String TITLE = "Проверка битых ссылок";
         private static final String CALLBACK = "tormozit.compare.mergeConfirmation";
         private static final String AFTER_MERGE = "tormozit.compare.afterMerge";
+        /** Совпадает с PROP_BEFORE_MERGE_COMMIT раннего бандла. */
+        private static final String BEFORE_COMMIT = "tormozit.compare.beforeMergeCommit";
         private static final Set<IEditorPart> pending = Collections.newSetFromMap(new IdentityHashMap<>());
         private static final Map<IEditorPart, Boolean> approved = new IdentityHashMap<>();
+        /** Читается и из задания коммита слияния — доступ только под блокировкой самой карты. */
         private static final Map<IEditorPart, CleanupPlan> cleanupPlans = new IdentityHashMap<>();
 
         static void install()
         {
             System.getProperties().put(CALLBACK, (Function<Object, Object>) MergePreflight::beforeMerge);
             System.getProperties().put(AFTER_MERGE, (Function<Object, Object>) MergePreflight::afterMerge);
+            System.getProperties().put(BEFORE_COMMIT, (Function<Object, Object>) MergePreflight::beforeCommit);
         }
 
         private static Object beforeMerge(Object value)
@@ -436,7 +440,10 @@ public class CompareConfigMenuHook implements IStartup
                             if (answer < 0 || answer == 2)
                                 return;
                             if (answer == 1)
-                                cleanupPlans.put(editor, new CleanupPlan(findings));
+                                synchronized (cleanupPlans)
+                                {
+                                    cleanupPlans.put(editor, new CleanupPlan(findings));
+                                }
                         }
                         // Выбор обработки битых ссылок уже подтверждает запуск объединения.
                         approved.put(editor, !findings.isEmpty());
@@ -447,7 +454,10 @@ public class CompareConfigMenuHook implements IStartup
                         finally
                         {
                             approved.remove(editor);
-                            cleanupPlans.remove(editor);
+                            synchronized (cleanupPlans)
+                            {
+                                cleanupPlans.remove(editor);
+                            }
                         }
                     });
                     return canceled ? Status.CANCEL_STATUS : error != null
@@ -463,8 +473,14 @@ public class CompareConfigMenuHook implements IStartup
         {
             if (!(value instanceof IEditorPart editor))
                 return null;
-            CleanupPlan plan = cleanupPlans.remove(editor);
-            if (plan == null)
+            // План остаётся в карте до конца startMerge: задание коммита слияния должно найти его
+            // и дождаться очистки, даже если она уже идёт отсюда.
+            CleanupPlan plan;
+            synchronized (cleanupPlans)
+            {
+                plan = cleanupPlans.get(editor);
+            }
+            if (plan == null || plan.isStarted())
                 return null;
             Object status = Global.getField(editor, "mergeStatus");
             // EDT закрывает редактор при начале основной фазы и в startMerge сама
@@ -480,7 +496,7 @@ public class CompareConfigMenuHook implements IStartup
             try
             {
                 new org.eclipse.jface.dialogs.ProgressMonitorDialog(editor.getSite().getShell()).run(true, false,
-                    monitor -> plan.clean(monitor));
+                    monitor -> plan.cleanOnce(monitor));
             }
             catch (Throwable e)
             {
@@ -494,15 +510,61 @@ public class CompareConfigMenuHook implements IStartup
             return null;
         }
 
+        /**
+         * Задание штатного объединения Git, до сбора изменённых файлов в индекс. Очистка должна
+         * попасть в коммит слияния, поэтому выполняется (или дожидается выполнения) здесь.
+         */
+        private static Object beforeCommit(Object callback)
+        {
+            Set<String> projects = new HashSet<>();
+            if (Global.getField(callback, "dtProjects") instanceof List<?> list)
+                for (Object project : list)
+                    if (project instanceof IDtProject dtProject)
+                        projects.add(dtProject.getName());
+            List<CleanupPlan> plans;
+            synchronized (cleanupPlans)
+            {
+                plans = new ArrayList<>(cleanupPlans.values());
+            }
+            Global.tempLog("broken-links-merge", "before commit projects=" + projects + " plans=" + plans.size());
+            for (CleanupPlan plan : plans)
+            {
+                // Проекты задания не прочитаны — чистим все планы: лучше лишняя очистка, чем коммит с битой ссылкой.
+                if (!projects.isEmpty() && Collections.disjoint(projects, plan.projects))
+                    continue;
+                try
+                {
+                    plan.cleanOnce(new NullProgressMonitor());
+                    Global.tempLog("broken-links-merge", "before commit cleanup done projects=" + plan.projects);
+                }
+                catch (Throwable e)
+                {
+                    Global.tempLogException("broken-links-merge", "before commit cleanup failure", e);
+                    Display.getDefault().asyncExec(() ->
+                    {
+                        var window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+                        MessageDialog.openError(window != null ? window.getShell() : null,
+                            Global.withPluginWindowTitle(TITLE),
+                            "Не удалось очистить найденные битые ссылки до фиксации объединения.\n" + e);
+                    });
+                }
+            }
+            return null;
+        }
+
         private static final class CleanupPlan
         {
             private final Map<com._1c.g5.v8.bm.integration.IBmModel, Map<String, Set<String>>> owners = new IdentityHashMap<>();
+            final Set<String> projects = new HashSet<>();
+            /** Читается без блокировки плана: поток интерфейса не должен ждать очистку. */
+            private volatile boolean started;
 
             CleanupPlan(List<Finding> findings)
             {
                 for (Finding finding : findings)
                 {
                     var source = finding.session.getDataSource(ComparisonSide.MAIN);
+                    projects.add(source.getProjectName());
                     if (!owners.containsKey(source.getBmModel()))
                         Global.tempLog("broken-links-merge", "cleanup plan project=" + source.getProjectName()
                             + " source=" + source.getType() + " model=" + source.getBmModel().getId());
@@ -512,7 +574,25 @@ public class CompareConfigMenuHook implements IStartup
                 }
             }
 
-            void clean(IProgressMonitor monitor)
+            boolean isStarted()
+            {
+                return started;
+            }
+
+            /**
+             * Один раз на план. Второй вызывающий (редактор или задание коммита слияния) ждёт
+             * конца очистки и выходит: оба должны продолжать только после записи файлов.
+             */
+            synchronized void cleanOnce(IProgressMonitor monitor)
+            {
+                if (started)
+                    return;
+                // Повтор после сбоя не нужен: причина та же, а сообщение уже показано.
+                started = true;
+                clean(monitor);
+            }
+
+            private void clean(IProgressMonitor monitor)
             {
                 int total = owners.values().stream().mapToInt(Map::size).sum();
                 SubMonitor progress = SubMonitor.convert(monitor, "Очистка битых ссылок", Math.max(1, total));
@@ -520,47 +600,16 @@ public class CompareConfigMenuHook implements IStartup
                 {
                     for (var model : owners.entrySet())
                     {
-                        // Штатное объединение сохраняет затронутые файлы в endBatchSession.
-                        // Обычное execute недостаточно для завершённой записи результата на диск.
-                        // executeInBatchSession требует контроллер; beginBatchSession без аргумента
-                        // возвращает обычный Object. Контроллер сохраняет синхронно (default API).
-                        Object batch = model.getKey().beginBatchSession(new com._1c.g5.v8.bm.integration.IBatchSessionController()
-                        {
-                            @Override
-                            public void onBeforeEventProcessing()
-                            {
-                                Global.tempLog("broken-links-merge", "cleanup batch before events model=" + model.getKey().getId());
-                            }
-
-                            @Override
-                            public void onAfterEventProcessing()
-                            {
-                                Global.tempLog("broken-links-merge", "cleanup batch after events model=" + model.getKey().getId());
-                            }
-
-                            @Override
-                            public void onBeforeSave(int count)
-                            {
-                                progress.subTask("Сохранение очищенных объектов");
-                                Global.tempLog("broken-links-merge", "cleanup batch before save model=" + model.getKey().getId()
-                                    + " count=" + count);
-                            }
-
-                            @Override
-                            public void onAfterSave()
-                            {
-                                Global.tempLog("broken-links-merge", "cleanup batch after save model=" + model.getKey().getId());
-                            }
-
-                            @Override
-                            public boolean isParallelSaveAllowed()
-                            {
-                                return false;
-                            }
-                        });
+                        // IBmModel.execute только фиксирует транзакцию: файл на диске остаётся прежним
+                        // (тест 09.10.2026). На диск пишут контексты редактирования; save(true) —
+                        // синхронно, до возврата. Пакетная сессия здесь запрещена: endBatchSession
+                        // ждёт окончания фоновых расчётов, удерживая блокировку модели, а штатная
+                        // «Сортировка объектов метаданных» после объединения ждёт ту же блокировку —
+                        // взаимная блокировка (дамп потоков 09.10.2026).
+                        var editing = model.getKey().createLocalContext("Очистка битых ссылок");
                         try
                         {
-                            model.getKey().executeInBatchSession(batch, new AbstractBmTask<Void>("Очистка битых ссылок")
+                            editing.execute(new AbstractBmTask<Void>("Очистка битых ссылок")
                             {
                                 @Override
                                 public Void execute(IBmTransaction transaction, IProgressMonitor ignored)
@@ -592,10 +641,13 @@ public class CompareConfigMenuHook implements IStartup
                                     return null;
                                 }
                             });
+                            Global.tempLog("broken-links-merge", "cleanup save start model=" + model.getKey().getId()
+                                + " dirty=" + editing.isDirty());
+                            editing.save(true);
                         }
                         finally
                         {
-                            model.getKey().endBatchSession(batch);
+                            editing.dispose();
                         }
                         Global.tempLog("broken-links-merge", "cleanup write returned model=" + model.getKey().getId());
                         model.getKey().executeReadonlyTask(new AbstractBmTask<Void>("Проверка результата очистки")
@@ -664,20 +716,7 @@ public class CompareConfigMenuHook implements IStartup
                         && description.eContainingFeature() != null
                         && "type".equals(description.eContainingFeature().getName()))
                     {
-                        var provider = com._1c.g5.v8.dt.platform.IEObjectProvider.Registry.INSTANCE.get(
-                            com._1c.g5.v8.dt.mcore.McorePackage.Literals.TYPE_ITEM,
-                            com._1c.g5.v8.dt.platform.version.Version.LATEST);
-                        EObject string = provider != null ? provider.createProxy("String") : null;
-                        if (string == null)
-                            throw new IllegalStateException("Недоступен стандартный тип Строка");
-                        string = EcoreUtil.resolve(string, description);
-                        if (!(string instanceof com._1c.g5.v8.dt.mcore.TypeItem type) || string.eIsProxy())
-                            throw new IllegalStateException("Не удалось разрешить стандартный тип Строка");
-                        var qualifiers = com._1c.g5.v8.dt.mcore.McoreFactory.eINSTANCE.createStringQualifiers();
-                        qualifiers.setLength(10);
-                        qualifiers.setFixed(false);
-                        description.setStringQualifiers(qualifiers);
-                        description.getTypes().add(type);
+                        MdReferenceSupport.replaceEmptyValueTypeWithString(description);
                         Global.tempLog("broken-links-merge", "cleanup empty value type replaced with String(10) owner="
                             + EcoreUtil.getURI(description));
                     }

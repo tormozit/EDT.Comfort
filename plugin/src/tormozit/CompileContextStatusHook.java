@@ -442,7 +442,9 @@ public final class CompileContextStatusHook implements IStartup
                 return;
 
             int width = ComfortSettings.getCompileContextStatusWidth();
-            BslXtextEditor bsl = width > 0 ? GetRef.getActiveBslEditor(active) : null;
+            // Фокус в другой панели (Git, навигатор...) — поле скрыто, хотя редактор остаётся активным.
+            boolean editorFocused = page != null && active != null && page.getActivePart() == active;
+            BslXtextEditor bsl = width > 0 && editorFocused ? GetRef.getActiveBslEditor(active) : null;
             XtextSourceViewer newViewer = null;
             StyledText newWidget = null;
             IXtextDocument newDocument = null;
@@ -458,7 +460,8 @@ public final class CompileContextStatusHook implements IStartup
                 if (newWidget == null || newWidget.isDisposed() || newDocument == null)
                     bsl = null;
             }
-            if (bsl == null && width > 0 && active instanceof DtGranularEditor<?> && attempt < MAX_BIND_ATTEMPTS)
+            if (bsl == null && width > 0 && editorFocused && active instanceof DtGranularEditor<?>
+                && attempt < MAX_BIND_ATTEMPTS)
                 shell.getDisplay().timerExec(RETRY_DELAY_MS, () -> rebind(attempt + 1));
 
             if (bsl == null)

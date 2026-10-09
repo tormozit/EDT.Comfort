@@ -127,7 +127,7 @@ public class ProblemViewOpenInTextEditorHandler extends AbstractHandler
     }
 
     /** Файл-исходник объекта ошибки; для вложенных объектов поднимается вверх по контейнерам. */
-    private static IFile resolveSourceFile(EObject object)
+    static IFile resolveSourceFile(EObject object)
     {
         IResourceLookup lookup = Global.getOsgiService(IResourceLookup.class);
         if (lookup == null)

@@ -47,7 +47,6 @@ import com.google.inject.Injector;
  */
 final class PropertySheetPlatformPropertyResolver
 {
-    private static final String TEMP_TOPIC = "свойства-имя-платформы"; //$NON-NLS-1$
     private static final String FORM_BUNDLE = "com._1c.g5.v8.dt.form"; //$NON-NLS-1$
     private static final String FORM_PLUGIN =
             "com._1c.g5.v8.dt.internal.form.FormPlugin"; //$NON-NLS-1$
@@ -182,19 +181,14 @@ final class PropertySheetPlatformPropertyResolver
                     .resolveCopyNameContext(page, scene, lwtView, displayName);
             String english = preferredEnglish(ctx.english, englishHint);
             EObject owner = ctx.owner();
-            boolean fromBinding = owner != null;
             if (owner == null)
                 owner = PropertySheetControlInterop.selectionEObjectForCopy(page);
-            Global.tempLog(TEMP_TOPIC, "контекст «" + displayName + "»: признак=" + english //$NON-NLS-1$ //$NON-NLS-2$
-                    + ", владелец=" + (owner == null ? "<null>" : owner.eClass().getName()) //$NON-NLS-1$ //$NON-NLS-2$
-                    + (fromBinding ? " (из привязки)" : " (из выделения панели)")); //$NON-NLS-1$ //$NON-NLS-2$
 
             if (english == null || english.isEmpty())
             {
                 ResolvedEvent eventResolved = resolveEvent(page, scene, lwtView, displayName, englishHint);
                 if (eventResolved != null)
                     return null;
-                Global.tempLog(TEMP_TOPIC, "пустой признак для «" + displayName + "»"); //$NON-NLS-1$ //$NON-NLS-2$
                 return null;
             }
 
@@ -211,9 +205,6 @@ final class PropertySheetPlatformPropertyResolver
                 Resolved resolved = resolveByEClassType(owner, feature, english);
                 if (resolved != null)
                 {
-                    Global.tempLog(TEMP_TOPIC, "форма (по классу объекта): " //$NON-NLS-1$
-                            + McoreUtil.getTypeName(resolved.ownerType) + '.' + resolved.englishName()
-                            + " → " + resolved.russianName()); //$NON-NLS-1$
                     return resolved;
                 }
                 // К типу формы намеренно НЕ откатываемся: чужой тип даёт ложные совпадения.
@@ -229,14 +220,9 @@ final class PropertySheetPlatformPropertyResolver
                     Resolved viaItem = resolveFormProperty(containingItem, page, feature, english);
                     if (viaItem != null)
                     {
-                        Global.tempLog(TEMP_TOPIC, "форма (расширение поля, по элементу): " //$NON-NLS-1$
-                                + McoreUtil.getTypeName(viaItem.ownerType) + '.' + viaItem.englishName()
-                                + " → " + viaItem.russianName()); //$NON-NLS-1$
                         return viaItem;
                     }
                 }
-                Global.tempLog(TEMP_TOPIC, "форма: у типа " + owner.eClass().getName() //$NON-NLS-1$
-                        + " нет свойства " + english + " (подпись «" + displayName + "»)"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 return null;
             }
 
@@ -245,12 +231,8 @@ final class PropertySheetPlatformPropertyResolver
                 Resolved resolved = resolveFormProperty(owner, page, feature, english);
                 if (resolved != null)
                 {
-                    Global.tempLog(TEMP_TOPIC, "форма: " + McoreUtil.getTypeName(resolved.ownerType) //$NON-NLS-1$
-                            + '.' + resolved.englishName() + " → " + resolved.russianName()); //$NON-NLS-1$
                     return resolved;
                 }
-                Global.tempLog(TEMP_TOPIC, "форма: не найдено для признака " + english //$NON-NLS-1$
-                        + " (подпись «" + displayName + "»)"); //$NON-NLS-1$ //$NON-NLS-2$
                 return null;
             }
 
@@ -260,13 +242,8 @@ final class PropertySheetPlatformPropertyResolver
                 Resolved resolved = resolveMoxelProperty(owner, moxelType, english);
                 if (resolved != null)
                 {
-                    Global.tempLog(TEMP_TOPIC, "макет: " + McoreUtil.getTypeName(resolved.ownerType) //$NON-NLS-1$
-                            + '.' + resolved.englishName() + " → " + resolved.russianName()); //$NON-NLS-1$
                     return resolved;
                 }
-                Global.tempLog(TEMP_TOPIC, "макет: у типа " + moxelType + " нет свойства для признака " //$NON-NLS-1$ //$NON-NLS-2$
-                        + english + " (подпись «" + displayName + "», " + owner.eClass().getName() //$NON-NLS-1$ //$NON-NLS-2$
-                        + ")"); //$NON-NLS-1$
                 return null;
             }
 
@@ -280,9 +257,6 @@ final class PropertySheetPlatformPropertyResolver
                     Resolved direct = resolveMdProperty(mdDirect, feature, english);
                     if (direct != null)
                     {
-                        Global.tempLog(TEMP_TOPIC, "мд (прямой): " //$NON-NLS-1$
-                            + McoreUtil.getTypeName(direct.ownerType) + '.' + direct.englishName()
-                            + " → " + direct.russianName()); //$NON-NLS-1$
                         return direct;
                     }
                 }
@@ -291,28 +265,19 @@ final class PropertySheetPlatformPropertyResolver
                     Resolved byClass = resolveByEClassType(owner, feature, english);
                     if (byClass != null)
                     {
-                        Global.tempLog(TEMP_TOPIC, "мд (класс " + owner.eClass().getName() + "): " //$NON-NLS-1$ //$NON-NLS-2$
-                            + McoreUtil.getTypeName(byClass.ownerType) + '.' + byClass.englishName()
-                            + " → " + byClass.russianName()); //$NON-NLS-1$
                         return byClass;
                     }
                 }
                 Resolved resolved = resolveMdProperty(mdOwner, feature, english);
                 if (resolved != null)
                 {
-                    Global.tempLog(TEMP_TOPIC, "мд: " + McoreUtil.getTypeName(resolved.ownerType) //$NON-NLS-1$
-                            + '.' + resolved.englishName() + " → " + resolved.russianName()); //$NON-NLS-1$
                     return resolved;
                 }
-                Global.tempLog(TEMP_TOPIC, "мд: не найдено для признака " + english //$NON-NLS-1$
-                        + " (подпись «" + displayName + "», " + mdOwner.eClass().getName() //$NON-NLS-1$ //$NON-NLS-2$
-                        + ")"); //$NON-NLS-1$
                 return null;
             }
         }
         catch (Exception e)
         {
-            Global.tempLogException(TEMP_TOPIC, "resolve «" + displayName + "»", e); //$NON-NLS-1$ //$NON-NLS-2$
         }
         return null;
     }
@@ -345,14 +310,10 @@ final class PropertySheetPlatformPropertyResolver
                 if (service != null)
                     ownerType = service.getTypeOfFormItem(formItem);
             }
-            Global.tempLog(TEMP_TOPIC, "событие: " + (ownerType != null //$NON-NLS-1$
-                    ? McoreUtil.getTypeName(ownerType) + '.' : "") //$NON-NLS-1$
-                    + event.getName() + " → " + event.getNameRu()); //$NON-NLS-1$
             return new ResolvedEvent(ownerType, event);
         }
         catch (Exception e)
         {
-            Global.tempLogException(TEMP_TOPIC, "resolveEvent «" + displayName + "»", e); //$NON-NLS-1$ //$NON-NLS-2$
         }
         return null;
     }
@@ -373,7 +334,6 @@ final class PropertySheetPlatformPropertyResolver
         }
         catch (Exception e)
         {
-            Global.tempLogException(TEMP_TOPIC, "russianNameForCopy resolve", e); //$NON-NLS-1$
         }
 
         PropertySheetControlInterop.CopyNameContext ctx = PropertySheetControlInterop
@@ -396,7 +356,6 @@ final class PropertySheetPlatformPropertyResolver
         }
         catch (Exception e)
         {
-            Global.tempLogException(TEMP_TOPIC, "russianNameForCopy fallback", e); //$NON-NLS-1$
         }
 
         if (!english.isEmpty())
@@ -444,8 +403,6 @@ final class PropertySheetPlatformPropertyResolver
             {
                 // Сужение — необязательный шаг: даже если сервис EDT на нём споткнулся,
                 // поиск по всем типам элемента ниже отработать обязан.
-                Global.tempLog(TEMP_TOPIC, "форма: сужение по признаку " + english //$NON-NLS-1$
-                        + " не удалось (" + e.getClass().getSimpleName() + ": " + e.getMessage() + ")"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 allowed = null;
             }
             if (allowed != null && !allowed.isEmpty())
@@ -482,51 +439,10 @@ final class PropertySheetPlatformPropertyResolver
             Property property = findFormPlatformPropertyFallback(type, feature, english);
             if (property != null)
             {
-                Global.tempLog(TEMP_TOPIC, "форма: признак " + english + " → свойство " //$NON-NLS-1$ //$NON-NLS-2$
-                        + property.getName() + " (запасная стратегия)"); //$NON-NLS-1$
                 return new Resolved(type, property);
             }
         }
-        logSimilarProperties(formItem, types, english);
         return null;
-    }
-
-    /**
-     * Что вообще есть у типа-владельца рядом по имени — чтобы промах было видно по логу, а не
-     * гадать: свойство названо иначе или его во встроенном языке нет вовсе.
-     */
-    private static void logSimilarProperties(FormVisualEntity formItem, List<Type> types, String english)
-    {
-        String needle = english.toLowerCase(Locale.ROOT);
-        StringBuilder similar = new StringBuilder();
-        StringBuilder typeNames = new StringBuilder();
-        int total = 0;
-        for (Type type : types)
-        {
-            if (typeNames.length() > 0)
-                typeNames.append('+');
-            typeNames.append(McoreUtil.getTypeName(type));
-            ContextDef contextDef = type != null ? type.getContextDef() : null;
-            if (contextDef == null)
-                continue;
-            for (Property property : contextDef.allProperties())
-            {
-                String name = property != null ? property.getName() : null;
-                if (name == null || name.isEmpty())
-                    continue;
-                total++;
-                String lower = name.toLowerCase(Locale.ROOT);
-                if (!lower.contains(needle) && !needle.contains(lower))
-                    continue;
-                if (similar.length() > 0)
-                    similar.append(", "); //$NON-NLS-1$
-                similar.append(McoreUtil.getTypeName(type)).append('.').append(name);
-            }
-        }
-        Global.tempLog(TEMP_TOPIC, "форма: объект " //$NON-NLS-1$
-                + (formItem != null ? formItem.eClass().getName() : "<null>") //$NON-NLS-1$
-                + ", тип " + typeNames + "; похожих на " + english + " среди " + total //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " свойств: " + (similar.length() > 0 ? similar.toString() : "нет")); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private static boolean contextDefIn(List<ContextDef> allowed, ContextDef candidate)
@@ -566,7 +482,6 @@ final class PropertySheetPlatformPropertyResolver
             type = loadResolvedPlatformType(owner, typeName, McorePackage.Literals.TYPE_ITEM);
         if (type == null)
         {
-            Global.tempLog(TEMP_TOPIC, "тип платформы не загружен: " + typeName); //$NON-NLS-1$
             return null;
         }
         Property property = findProperty(type, english);
@@ -678,7 +593,6 @@ final class PropertySheetPlatformPropertyResolver
         }
         catch (Exception e)
         {
-            Global.tempLogException(TEMP_TOPIC, "локализация события " + event.getName(), e); //$NON-NLS-1$
         }
         return false;
     }
@@ -693,8 +607,6 @@ final class PropertySheetPlatformPropertyResolver
             Bundle bundle = Platform.getBundle(FORM_BUNDLE);
             if (bundle == null)
             {
-                Global.tempLog(TEMP_TOPIC, "FormItemInformationService: бандл " + FORM_BUNDLE //$NON-NLS-1$
-                        + " недоступен"); //$NON-NLS-1$
                 return null;
             }
             Class<?> pluginClass = bundle.loadClass(FORM_PLUGIN);
@@ -706,15 +618,12 @@ final class PropertySheetPlatformPropertyResolver
                 {
                     cached = guice.getInstance(FormItemInformationService.class);
                     FORM_ITEM_INFO = cached;
-                    Global.tempLog(TEMP_TOPIC, "FormItemInformationService: FormPlugin injector"); //$NON-NLS-1$
                     return cached;
                 }
             }
-            Global.tempLog(TEMP_TOPIC, "FormItemInformationService: injector недоступен"); //$NON-NLS-1$
         }
         catch (Exception e)
         {
-            Global.tempLogException(TEMP_TOPIC, "FormItemInformationService", e); //$NON-NLS-1$
         }
         return null;
     }
@@ -743,16 +652,11 @@ final class PropertySheetPlatformPropertyResolver
         Type type = loadPlatformTypeNamed(context != null ? context : owner, typeName);
         if (type == null)
         {
-            Global.tempLog(TEMP_TOPIC, "макет: тип платформы не загружен: " + typeName //$NON-NLS-1$
-                    + ", контекст=" + (context == null ? "<null>" : context.eClass().getName())); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
         }
         Property property = findProperty(type, moxelPlatformPropertyName(english));
         if (property == null)
         {
-            ContextDef contextDef = type.getContextDef();
-            Global.tempLog(TEMP_TOPIC, "макет: тип " + typeName + ", proxy=" + type.eIsProxy() //$NON-NLS-1$ //$NON-NLS-2$
-                    + ", свойств=" + (contextDef != null ? contextDef.allProperties().size() : -1)); //$NON-NLS-1$
             return null;
         }
         return new Resolved(type, property);
@@ -851,11 +755,9 @@ final class PropertySheetPlatformPropertyResolver
                 if (type != null)
                     return type;
             }
-            Global.tempLog(TEMP_TOPIC, "мд-тип: не загружен " + METADATA_OBJECT_TYPE_PREFIX + className); //$NON-NLS-1$
         }
         catch (Exception e)
         {
-            Global.tempLogException(TEMP_TOPIC, "metadataObjectPlatformType " + className, e); //$NON-NLS-1$
         }
         return null;
     }
@@ -868,8 +770,6 @@ final class PropertySheetPlatformPropertyResolver
             return null;
         ContextDef contextDef = type.getContextDef();
         int propCount = contextDef != null ? contextDef.allProperties().size() : 0;
-        Global.tempLog(TEMP_TOPIC, "мд-тип: " + typeName + ", свойств=" + propCount //$NON-NLS-1$ //$NON-NLS-2$
-                + ", proxy=" + type.eIsProxy()); //$NON-NLS-1$
         return propCount > 0 ? type : null;
     }
 
@@ -938,7 +838,6 @@ final class PropertySheetPlatformPropertyResolver
         }
         catch (Exception e)
         {
-            Global.tempLogException(TEMP_TOPIC, "platformVersion", e); //$NON-NLS-1$
         }
         return null;
     }

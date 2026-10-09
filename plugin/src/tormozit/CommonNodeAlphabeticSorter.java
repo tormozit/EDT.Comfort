@@ -70,8 +70,6 @@ final class CommonNodeAlphabeticSorter extends TreePathViewerSorter
                 {
                     Arrays.sort(sorted, (first, second) -> RU_COLLATOR.compare(labelOf(first), labelOf(second)));
                 }
-                Global.tempLog("common-node-sort", "parent=" + element.getClass().getName() //$NON-NLS-1$ //$NON-NLS-2$
-                    + " children=" + sorted.length); //$NON-NLS-1$
                 return sorted;
             });
     }

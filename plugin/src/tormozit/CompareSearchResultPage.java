@@ -868,9 +868,16 @@ public class CompareSearchResultPage implements ISearchResultPage
         Object provider = Global.getField(treeControl, "firstColumnLabelProvider"); //$NON-NLS-1$
         if (provider instanceof ColumnLabelProvider labels)
         {
-            Color background = labels.getBackground(m.getComparisonNode());
-            // null — штатный фон равного узла, а не повод вернуться к старому статусу.
-            return background;
+            try
+            {
+                // null — штатный фон равного узла, а не повод вернуться к старому статусу.
+                return labels.getBackground(m.getComparisonNode());
+            }
+            catch (RuntimeException stale)
+            {
+                // После объединения узел результата уже удалён из дерева сравнения, и штатный
+                // провайдер падает на нём при каждой перерисовке строки. Остаётся цвет, запомненный в строке.
+            }
         }
         CompareSearchMatch.RowColorKind kind = m.getRowColorKind();
         if (kind == null || kind == CompareSearchMatch.RowColorKind.NONE)

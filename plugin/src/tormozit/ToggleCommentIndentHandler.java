@@ -4,10 +4,7 @@ import org.eclipse.core.commands.AbstractHandler;
 import org.eclipse.core.commands.ExecutionEvent;
 import org.eclipse.core.commands.ExecutionException;
 import org.eclipse.jface.text.BadLocationException;
-import org.eclipse.jface.text.BadPositionCategoryException;
-import org.eclipse.jface.text.DefaultPositionUpdater;
 import org.eclipse.jface.text.IDocument;
-import org.eclipse.jface.text.IPositionUpdater;
 import org.eclipse.jface.text.IRegion;
 import org.eclipse.jface.text.IRewriteTarget;
 import org.eclipse.jface.text.ITextOperationTarget;
@@ -27,10 +24,9 @@ import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 /**
  * Штатная команда «Переключить комментарий» (org.eclipse.xtext.ui.ToggleCommentAction) при
  * включении комментария вставляет "//" в начало каждой строки (0-я колонка), не учитывая отступ —
- * см. {@code TextViewer.shiftRight}. Снятие комментария ({@code STRIP_PREFIX}) в штатной
- * реализации уже игнорирует отступ корректно, поэтому здесь не дублируется: делегируется тому же
- * {@link ITextOperationTarget}, которым пользуется штатный обработчик. Переопределяется только
- * включение комментария — вставка в колонку минимального отступа среди выделенных строк.
+ * см. {@code TextViewer.shiftRight}. Включение комментария вставляет префикс в колонку
+ * минимального отступа среди выделенных строк. Обе операции заменяют блок одним изменением
+ * документа, чтобы не запускать слушателей BSL-редактора отдельно для каждой строки.
  */
 public class ToggleCommentIndentHandler extends AbstractHandler {
 
@@ -64,16 +60,11 @@ public class ToggleCommentIndentHandler extends AbstractHandler {
 			return null;
 
 		try {
-			if (isRangeCommented(document, startLine, endLine)) {
-				// штатное снятие комментария уже учитывает отступ каждой строки индивидуально —
-				// используем ту же реализацию, что и оригинальная команда, а не свою копию.
-				if (operationTarget.canDoOperation(ITextOperationTarget.STRIP_PREFIX))
-					operationTarget.doOperation(ITextOperationTarget.STRIP_PREFIX);
-			} else {
-				commentWithMinIndent(editor, document, textSelection, startLine, endLine);
-			}
+			boolean uncomment = isRangeCommented(document, startLine, endLine);
+			if (!uncomment || operationTarget.canDoOperation(ITextOperationTarget.STRIP_PREFIX))
+				toggleLineBlock(editor, document, textSelection, startLine, endLine, uncomment);
 		} catch (BadLocationException e) {
-			// не должно происходить: диапазон строк взят из актуального выделения
+			// Диапазон строк взят из актуального выделения.
 		}
 		return null;
 	}
@@ -95,8 +86,8 @@ public class ToggleCommentIndentHandler extends AbstractHandler {
 		return col;
 	}
 
-	private void commentWithMinIndent(ITextEditor editor, IDocument document, ITextSelection textSelection,
-			int startLine, int endLine) throws BadLocationException {
+	private void toggleLineBlock(ITextEditor editor, IDocument document, ITextSelection textSelection,
+			int startLine, int endLine, boolean uncomment) throws BadLocationException {
 		int tabWidth = 4;
 		ITextOperationTarget operationTarget = editor.getAdapter(ITextOperationTarget.class);
 		if (operationTarget instanceof ITextViewer) {
@@ -109,7 +100,7 @@ public class ToggleCommentIndentHandler extends AbstractHandler {
 		// чтобы "//" встали в одну колонку и при смеси табуляций с пробелами
 		int minIndent = Integer.MAX_VALUE;
 		boolean padWithTabs = false;
-		for (int line = startLine; line <= endLine; line++) {
+		for (int line = startLine; !uncomment && line <= endLine; line++) {
 			IRegion region = document.getLineInformation(line);
 			String text = document.get(region.getOffset(), region.getLength());
 			if (text.isBlank())
@@ -124,17 +115,12 @@ public class ToggleCommentIndentHandler extends AbstractHandler {
 		if (minIndent == Integer.MAX_VALUE)
 			minIndent = 0;
 
-		String selectionCategory = "tormozit.toggleComment.selection";
 		Position selectionPosition = new Position(textSelection.getOffset(), textSelection.getLength());
-		IPositionUpdater selectionUpdater = new DefaultPositionUpdater(selectionCategory);
-		boolean positionTracked = true;
-		try {
-			document.addPositionCategory(selectionCategory);
-			document.addPositionUpdater(selectionUpdater);
-			document.addPosition(selectionCategory, selectionPosition);
-		} catch (BadLocationException | BadPositionCategoryException e) {
-			positionTracked = false;
-		}
+		int blockStart = document.getLineOffset(startLine);
+		IRegion lastLine = document.getLineInformation(endLine);
+		int blockEnd = lastLine.getOffset() + lastLine.getLength();
+		StringBuilder replacement = new StringBuilder(blockEnd - blockStart);
+		int delta = 0;
 
 		IRewriteTarget rewriteTarget = editor.getAdapter(IRewriteTarget.class);
 		if (rewriteTarget != null)
@@ -143,6 +129,20 @@ public class ToggleCommentIndentHandler extends AbstractHandler {
 			for (int line = startLine; line <= endLine; line++) {
 				IRegion region = document.getLineInformation(line);
 				String text = document.get(region.getOffset(), region.getLength());
+				if (uncomment) {
+					int prefixAt = text.indexOf(COMMENT_PREFIX);
+					replacement.append(text, 0, prefixAt).append(text, prefixAt + COMMENT_PREFIX.length(), text.length());
+					int at = region.getOffset() + prefixAt + delta;
+					int selectionEnd = selectionPosition.getOffset() + selectionPosition.getLength();
+					int mappedStart = mapRemovedOffset(selectionPosition.getOffset(), at, COMMENT_PREFIX.length());
+					int mappedEnd = mapRemovedOffset(selectionEnd, at, COMMENT_PREFIX.length());
+					selectionPosition.setOffset(mappedStart);
+					selectionPosition.setLength(mappedEnd - mappedStart);
+					delta -= COMMENT_PREFIX.length();
+					if (line < endLine)
+						replacement.append(document.getLineDelimiter(line));
+					continue;
+				}
 				int pos = 0;
 				int col = 0;
 				boolean straddle = false;
@@ -173,23 +173,29 @@ public class ToggleCommentIndentHandler extends AbstractHandler {
 					}
 				}
 				insert.append(COMMENT_PREFIX);
-				document.replace(region.getOffset() + pos, 0, insert.toString());
+				replacement.append(text, 0, pos).append(insert).append(text, pos, text.length());
+				// Та же привязка границ, что у DefaultPositionUpdater при построчной вставке:
+				// вставка на начале сдвигает выделение, на конце не расширяет его.
+				int at = region.getOffset() + pos + delta;
+				int selectionStart = selectionPosition.getOffset();
+				if (at <= selectionStart)
+					selectionPosition.setOffset(selectionStart + insert.length());
+				else if (at < selectionStart + selectionPosition.getLength())
+					selectionPosition.setLength(selectionPosition.getLength() + insert.length());
+				delta += insert.length();
+				if (line < endLine)
+					replacement.append(document.getLineDelimiter(line));
 			}
+			document.replace(blockStart, blockEnd - blockStart, replacement.toString());
+			editor.getSelectionProvider().setSelection(
+					new TextSelection(document, selectionPosition.getOffset(), selectionPosition.getLength()));
 		} finally {
 			if (rewriteTarget != null)
 				rewriteTarget.endCompoundChange();
-			if (positionTracked) {
-				document.removePositionUpdater(selectionUpdater);
-				try {
-					document.removePosition(selectionCategory, selectionPosition);
-					document.removePositionCategory(selectionCategory);
-				} catch (BadPositionCategoryException e) {
-					// категория уже снята — нечего восстанавливать
-				}
-				if (!selectionPosition.isDeleted())
-					editor.getSelectionProvider()
-						.setSelection(new TextSelection(document, selectionPosition.getOffset(), selectionPosition.getLength()));
-			}
 		}
+	}
+
+	private static int mapRemovedOffset(int offset, int at, int length) {
+		return offset <= at ? offset : offset - Math.min(offset - at, length);
 	}
 }

@@ -2612,6 +2612,84 @@ boolean inLiteral = endCaret >= 0
         volatile long changedAt;
         volatile long validatedAt;
         org.eclipse.core.runtime.jobs.Job job;
+        /** Слабая ссылка: сам объект — значение слабой карты с этим документом в ключе. */
+        java.lang.ref.WeakReference<IDocument> document;
+        /** Отложенная проверка сторожа уже запланирована — вторую не ставим. */
+        final java.util.concurrent.atomic.AtomicBoolean guardPending =
+            new java.util.concurrent.atomic.AtomicBoolean();
+        /** Сколько раз сторож откладывал решение и сколько раз перезапускал после правки. */
+        final java.util.concurrent.atomic.AtomicInteger guardChecks =
+            new java.util.concurrent.atomic.AtomicInteger();
+        final java.util.concurrent.atomic.AtomicInteger guardRestarts =
+            new java.util.concurrent.atomic.AtomicInteger();
+    }
+
+    /** Через сколько после отмены проверки сторож смотрит, чем кончилось. */
+    private static final int VALIDATION_GUARD_DELAY_MS = 500;
+    /** Предел перезапусков и предел отложенных проверок сторожа на одну правку текста. */
+    private static final int VALIDATION_GUARD_MAX_RESTARTS = 3;
+    private static final int VALIDATION_GUARD_MAX_CHECKS = 8;
+
+    /**
+     * Сторож проверки модуля. Проверка может завершиться отменой, после которой её никто
+     * не перепланирует (лог 09.10.2026: 1432 пары «запланировано — отменено» подряд, последней
+     * оказалась отмена) — маркер уже исправленной ошибки остаётся до следующей правки.
+     *
+     * <p>Экономно: слушатель отмены лишь взводит один отложенный вызов на документ, сколько бы
+     * отмен ни пришло. Через {@link #VALIDATION_GUARD_DELAY_MS} сторож перезапускает проверку
+     * штатным {@code checkAndUpdateAnnotations}, только если после последней правки успешной
+     * проверки не было, задание простаивает, признак пропуска снят и модель догнала текст.
+     * Запланированное или идущее задание не трогаем: его завершение само придёт сюда.
+     */
+    private static void armValidationGuard(ValidationWatch watch)
+    {
+        if (watch.validatedAt >= watch.changedAt
+            || watch.guardChecks.get() >= VALIDATION_GUARD_MAX_CHECKS
+            || !watch.guardPending.compareAndSet(false, true))
+            return;
+        org.eclipse.core.runtime.jobs.Job guard = org.eclipse.core.runtime.jobs.Job.create(
+            "Комфорт: сторож проверки модуля", //$NON-NLS-1$
+            (org.eclipse.core.runtime.ICoreRunnable)monitor -> runValidationGuard(watch));
+        guard.setSystem(true);
+        guard.schedule(VALIDATION_GUARD_DELAY_MS);
+    }
+
+    private static void runValidationGuard(ValidationWatch watch)
+    {
+        watch.guardPending.set(false);
+        IDocument doc = watch.document == null ? null : watch.document.get();
+        if (doc == null || watch.validatedAt >= watch.changedAt)
+            return;
+        Object jobObject = Global.invoke(doc, "getValidationJob"); //$NON-NLS-1$
+        if (!(jobObject instanceof org.eclipse.core.runtime.jobs.Job job)
+            || job.getState() != org.eclipse.core.runtime.jobs.Job.NONE)
+            return;
+        watch.guardChecks.incrementAndGet();
+        boolean skip = Boolean.TRUE.equals(Global.invoke(job, "isSkip")); //$NON-NLS-1$
+        Object indicator = Global.invoke(doc, "getCancelIndicator"); //$NON-NLS-1$
+        boolean outdated = indicator instanceof org.eclipse.xtext.util.CancelIndicator cancel
+            && cancel.isCanceled();
+        boolean restart = !skip && !outdated
+            && watch.guardRestarts.get() < VALIDATION_GUARD_MAX_RESTARTS;
+        // #region agent log
+        if (STALE_MARKERS_LOG)
+            Global.tempLog("stale-markers", "сторож: проверка после правки не отработала," //$NON-NLS-1$ //$NON-NLS-2$
+                + " перезапуск=" + restart + " skip=" + skip + " outdated=" + outdated //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " проверок=" + watch.guardChecks.get() //$NON-NLS-1$
+                + " перезапусков=" + watch.guardRestarts.get() //$NON-NLS-1$
+                + " " + describeValidationJob(job)); //$NON-NLS-1$
+        // #endregion
+        if (restart)
+        {
+            watch.guardRestarts.incrementAndGet();
+            Global.invokeVoid(doc, "checkAndUpdateAnnotations"); //$NON-NLS-1$
+        }
+        else if (skip || outdated)
+        {
+            // Чтение автодополнения ещё идёт или модель не догнала текст: EDT сейчас
+            // проверку не запланирует, а события об окончании этого состояния нет.
+            armValidationGuard(watch);
+        }
     }
 
     /**
@@ -2650,6 +2728,9 @@ boolean inLiteral = endCaret >= 0
             return;
         ValidationWatch watch = VALIDATION_WATCHES.computeIfAbsent(doc, key -> new ValidationWatch());
         watch.changedAt = System.nanoTime();
+        // Новая правка — новый запас сторожа
+        watch.guardChecks.set(0);
+        watch.guardRestarts.set(0);
         Object jobObject = Global.invoke(doc, "getValidationJob"); //$NON-NLS-1$
         if (!(jobObject instanceof org.eclipse.core.runtime.jobs.Job job))
             return;
@@ -2658,6 +2739,7 @@ boolean inLiteral = endCaret >= 0
             if (watch.job == job)
                 return;
             watch.job = job;
+            watch.document = new java.lang.ref.WeakReference<>(doc);
         }
         job.addJobChangeListener(new org.eclipse.core.runtime.jobs.JobChangeAdapter()
         {
@@ -2668,6 +2750,8 @@ boolean inLiteral = endCaret >= 0
                 if (done.getResult() != null && done.getResult().isOK()
                     && !Boolean.TRUE.equals(Global.invoke(done.getJob(), "isSkip"))) //$NON-NLS-1$
                     watch.validatedAt = System.nanoTime();
+                else
+                    armValidationGuard(watch);
             }
         });
     }
@@ -2769,6 +2853,11 @@ boolean inLiteral = endCaret >= 0
                         + " " + describeReconciler(viewer) + " " + describeOutdated(doc)); //$NON-NLS-1$ //$NON-NLS-2$
                     Global.tempLog("stale-markers", "painter+" + delaySeconds + "s " //$NON-NLS-1$ //$NON-NLS-2$
                         + describePainterVsModel(viewer));
+                    // Цикл, который так и не закончился успехом, виден только отсюда
+                    if (Global.invoke(doc, "getValidationJob") //$NON-NLS-1$
+                        instanceof org.eclipse.core.runtime.jobs.Job loopJob)
+                        validationRunsSinceOk(loopJob).logLoopStacks(
+                            "проба +" + delaySeconds + " с, успеха не было", loopJob); //$NON-NLS-1$ //$NON-NLS-2$
                 });
             probe.setSystem(true);
             probe.schedule(delaySeconds * 1000L);
@@ -2949,7 +3038,10 @@ boolean inLiteral = endCaret >= 0
                 @Override
                 public void scheduled(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
                 {
-                    validationRunsSinceOk(event.getJob()).scheduled(Thread.currentThread().getName());
+                    // Слушатель зовётся в потоке, вызвавшем schedule(): стек показывает, кто
+                    // планирует проверку в тысячном цикле.
+                    validationRunsSinceOk(event.getJob()).scheduled(Thread.currentThread().getName(),
+                        callerStack());
                 }
 
                 @Override
@@ -2961,11 +3053,14 @@ boolean inLiteral = endCaret >= 0
                     ValidationRuns runs = validationRunsSinceOk(event.getJob());
                     if (event.getResult() == null || !event.getResult().isOK())
                     {
-                        runs.canceled();
+                        // Ожидавшее задание отменяется в потоке отменившего — его стек и нужен;
+                        // у выполнявшегося здесь будет только рабочий поток задания.
+                        runs.canceled(callerStack());
                         return;
                     }
                     Global.tempLog("stale-markers", "validation.done OK " //$NON-NLS-1$ //$NON-NLS-2$
                         + describeValidationJob(event.getJob()));
+                    runs.logLoopStacks("цикл закончился успехом", event.getJob()); //$NON-NLS-1$
                     runs.reset();
                     // Аннотации попадают в модель чуть позже завершения задания
                     org.eclipse.core.runtime.jobs.Job report = org.eclipse.core.runtime.jobs.Job.create(
@@ -3103,6 +3198,31 @@ boolean inLiteral = endCaret >= 0
     private static final java.util.Map<org.eclipse.core.runtime.jobs.Job, ValidationRuns> VALIDATION_RUNS =
         java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
 
+    /**
+     * Стек вызвавшего без кадров менеджера заданий и самой диагностики: до 40 кадров,
+     * каждый с новой строки. Служит и ключом для подсчёта одинаковых стеков.
+     */
+    private static String callerStack()
+    {
+        StringBuilder text = new StringBuilder();
+        int frames = 0;
+        for (StackTraceElement frame : new Throwable().getStackTrace())
+        {
+            String owner = frame.getClassName();
+            if (owner.startsWith("tormozit.ContentAssistSessionReloader") //$NON-NLS-1$
+                && (frame.getMethodName().equals("callerStack") //$NON-NLS-1$
+                    || frame.getMethodName().equals("scheduled") //$NON-NLS-1$
+                    || frame.getMethodName().equals("done")) //$NON-NLS-1$
+                || owner.startsWith("org.eclipse.core.internal.jobs.JobListeners")) //$NON-NLS-1$
+                continue;
+            text.append(System.lineSeparator()).append("      ").append(owner).append('.') //$NON-NLS-1$
+                .append(frame.getMethodName()).append(':').append(frame.getLineNumber());
+            if (++frames >= 40)
+                break;
+        }
+        return text.toString();
+    }
+
     private static ValidationRuns validationRunsSinceOk(org.eclipse.core.runtime.jobs.Job job)
     {
         return VALIDATION_RUNS.computeIfAbsent(job, key -> new ValidationRuns());
@@ -3118,18 +3238,73 @@ boolean inLiteral = endCaret >= 0
         private int canceled;
         private String firstScheduler;
         private String lastScheduler;
+        private long firstAt;
+        private long lastAt;
+        private int loggedAtScheduled;
+        /** Разные стеки планирования и отмены со счётчиками и порядком первого появления. */
+        private final java.util.Map<String, int[]> scheduleStacks = new java.util.LinkedHashMap<>();
+        private final java.util.Map<String, int[]> cancelStacks = new java.util.LinkedHashMap<>();
+        private String lastScheduleStack;
+        private String lastCancelStack;
 
-        synchronized void scheduled(String thread)
+        synchronized void scheduled(String thread, String stack)
         {
             scheduled++;
             if (firstScheduler == null)
+            {
                 firstScheduler = thread;
+                firstAt = System.nanoTime();
+            }
             lastScheduler = thread;
+            lastAt = System.nanoTime();
+            lastScheduleStack = stack;
+            count(scheduleStacks, stack);
         }
 
-        synchronized void canceled()
+        synchronized void canceled(String stack)
         {
             canceled++;
+            lastAt = System.nanoTime();
+            lastCancelStack = stack;
+            count(cancelStacks, stack);
+        }
+
+        private static void count(java.util.Map<String, int[]> stacks, String stack)
+        {
+            int[] counter = stacks.get(stack);
+            if (counter != null)
+                counter[0]++;
+            else if (stacks.size() < 12)
+                stacks.put(stack, new int[] { 1 });
+        }
+
+        /**
+         * Стеки цикла «запланировано → отменено» одной записью: каждый разный стек один раз
+         * со счётчиком. Пишется, только если с прошлого успеха набралось от 10 планирований
+         * и с прошлой записи прибавилось столько же — обычная правка сюда не попадает.
+         */
+        synchronized void logLoopStacks(String when, org.eclipse.core.runtime.jobs.Job job)
+        {
+            if (scheduled < 10 || scheduled - loggedAtScheduled < 10)
+                return;
+            loggedAtScheduled = scheduled;
+            StringBuilder text = new StringBuilder("цикл проверки (" + when + ") job=" //$NON-NLS-1$ //$NON-NLS-2$
+                + System.identityHashCode(job) + " scheduled=" + scheduled + " canceled=" + canceled //$NON-NLS-1$ //$NON-NLS-2$
+                + " длительность_мс=" + (lastAt - firstAt) / 1_000_000L); //$NON-NLS-1$
+            append(text, "ПЛАНИРОВАНИЕ", scheduleStacks); //$NON-NLS-1$
+            append(text, "ОТМЕНА", cancelStacks); //$NON-NLS-1$
+            text.append(System.lineSeparator()).append("  ПОСЛЕДНЕЕ ПЛАНИРОВАНИЕ:") //$NON-NLS-1$
+                .append(lastScheduleStack)
+                .append(System.lineSeparator()).append("  ПОСЛЕДНЯЯ ОТМЕНА:") //$NON-NLS-1$
+                .append(lastCancelStack);
+            Global.tempLog("stale-markers", text.toString()); //$NON-NLS-1$
+        }
+
+        private static void append(StringBuilder text, String title, java.util.Map<String, int[]> stacks)
+        {
+            for (java.util.Map.Entry<String, int[]> entry : stacks.entrySet())
+                text.append(System.lineSeparator()).append("  ").append(title).append(" ×") //$NON-NLS-1$ //$NON-NLS-2$
+                    .append(entry.getValue()[0]).append(':').append(entry.getKey());
         }
 
         synchronized void reset()
@@ -3138,6 +3313,13 @@ boolean inLiteral = endCaret >= 0
             canceled = 0;
             firstScheduler = null;
             lastScheduler = null;
+            firstAt = 0;
+            lastAt = 0;
+            loggedAtScheduled = 0;
+            scheduleStacks.clear();
+            cancelStacks.clear();
+            lastScheduleStack = null;
+            lastCancelStack = null;
         }
 
         @Override

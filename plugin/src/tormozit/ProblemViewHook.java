@@ -3494,23 +3494,11 @@ public final class ProblemViewHook implements IStartup
                     return method.invoke(origin, args);
                 try
                 {
-                    boolean markerInfoCall = "getMarkerInfo".equals(method.getName()); //$NON-NLS-1$
-                    String filterBefore = markerInfoCall ? java.util.Arrays.deepToString(args) : null;
                     if (argsContainMarkerFilter(args))
                         restoreModulePaths(view, args);
-                    if (markerInfoCall)
-                    {
-                        Object filters = problemFilters(view.getClass().getClassLoader());
-                        Global.tempLog("problem-view-scope", "request thread=" + Thread.currentThread().getName() //$NON-NLS-1$ //$NON-NLS-2$
-                            + ", showAll=" + Global.invoke(filters, "isShowAll") //$NON-NLS-1$ //$NON-NLS-2$
-                            + ", scope=" + Global.invoke(filters, "getScope") //$NON-NLS-1$ //$NON-NLS-2$
-                            + ", before=" + filterBefore + ", after=" + java.util.Arrays.deepToString(args)); //$NON-NLS-1$ //$NON-NLS-2$
-                    }
                     Object result = method.invoke(origin, args == null ? new Object[0] : args);
                     if ("getMarkerInfo".equals(method.getName()) && result instanceof IMarkerInfo info) //$NON-NLS-1$
                     {
-                        Global.tempLog("problem-view-scope", "result total=" + info.getTotalCount() //$NON-NLS-1$ //$NON-NLS-2$
-                            + ", filter=" + java.util.Arrays.deepToString(args)); //$NON-NLS-1$
                         Object filterArg = args != null && args.length > 0 ? args[0] : null;
                         boolean empty = info.getTotalCount() == 0;
                         rememberGoodFilter(view, filterArg, empty);
@@ -3520,9 +3508,6 @@ public final class ProblemViewHook implements IStartup
                 }
                 catch (InvocationTargetException e)
                 {
-                    if ("getMarkerInfo".equals(method.getName())) //$NON-NLS-1$
-                        Global.tempLog("problem-view-scope", "failure=" + e.getCause() //$NON-NLS-1$ //$NON-NLS-2$
-                            + ", filter=" + java.util.Arrays.deepToString(args)); //$NON-NLS-1$
                     Throwable cause = e.getCause();
                     if (cause instanceof RuntimeException runtime)
                         throw runtime;

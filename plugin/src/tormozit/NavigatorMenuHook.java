@@ -1,5 +1,26 @@
 package tormozit;
 
+import java.util.ArrayList;
+import java.util.List;
+
+import org.eclipse.core.commands.AbstractHandler;
+import org.eclipse.core.commands.Command;
+import org.eclipse.core.commands.ExecutionEvent;
+import org.eclipse.core.commands.ExecutionException;
+import org.eclipse.core.commands.IExecutionListenerWithChecks;
+import org.eclipse.core.commands.IHandler;
+import org.eclipse.core.commands.IHandler2;
+import org.eclipse.core.commands.NotEnabledException;
+import org.eclipse.core.commands.NotHandledException;
+import org.eclipse.core.commands.common.NotDefinedException;
+import org.eclipse.core.runtime.CoreException;
+import org.eclipse.core.runtime.IConfigurationElement;
+import org.eclipse.core.runtime.Platform;
+import org.eclipse.core.expressions.EvaluationContext;
+import org.eclipse.core.expressions.IEvaluationContext;
+import org.eclipse.core.resources.IProject;
+import org.eclipse.jface.viewers.IStructuredSelection;
+import org.eclipse.jface.viewers.StructuredSelection;
 import org.eclipse.jface.action.ActionContributionItem;
 import org.eclipse.jface.action.IAction;
 import org.eclipse.jface.action.IContributionItem;
@@ -13,6 +34,9 @@ import org.eclipse.swt.widgets.Menu;
 import org.eclipse.swt.widgets.MenuItem;
 import org.eclipse.ui.IPartListener2;
 import org.eclipse.ui.IStartup;
+import org.eclipse.ui.ISources;
+import org.eclipse.ui.commands.ICommandService;
+import org.eclipse.ui.handlers.HandlerUtil;
 import org.eclipse.ui.IViewReference;
 import org.eclipse.ui.IWorkbench;
 import org.eclipse.ui.IWorkbenchPage;
@@ -28,6 +52,11 @@ public final class NavigatorMenuHook implements IStartup
 {
     private static final String HOOK_MARKER = "tormozit.navigatorMenuHook"; //$NON-NLS-1$
     private static final String NEW_MENU_ID = "new.menu"; //$NON-NLS-1$
+    private static final String COMPARE_COMMAND_ID =
+        "com._1c.g5.v8.dt.compare.ui.openCompareWizard"; //$NON-NLS-1$
+    private static final String SELECTION_ORDER = "tormozit.navigatorProjectSelectionOrder"; //$NON-NLS-1$
+    private static boolean compareListenerInstalled;
+    private static IHandler nativeCompareHandler;
 
     @Override
     public void earlyStartup()
@@ -35,6 +64,7 @@ public final class NavigatorMenuHook implements IStartup
         Display.getDefault().asyncExec(() ->
         {
             IWorkbench workbench = PlatformUI.getWorkbench();
+            installCompareSelectionOrder(workbench);
             for (IWorkbenchWindow window : workbench.getWorkbenchWindows())
                 hookWindow(window);
             workbench.addWindowListener(new IWindowListener()
@@ -69,13 +99,180 @@ public final class NavigatorMenuHook implements IStartup
     {
         if (!Global.isNavigatorPart(part) || !(part instanceof CommonNavigator navigator))
             return;
-        Menu menu = navigator.getCommonViewer().getTree().getMenu();
+        var viewer = navigator.getCommonViewer();
+        var tree = viewer.getTree();
+        if (tree.getData(SELECTION_ORDER) == null)
+        {
+            ProjectSelectionOrder order = new ProjectSelectionOrder();
+            tree.setData(SELECTION_ORDER, order);
+            order.update(viewer.getStructuredSelection());
+            viewer.addSelectionChangedListener(event ->
+            {
+                if (event.getSelection() instanceof IStructuredSelection selection)
+                    order.update(selection);
+            });
+        }
+        Menu menu = tree.getMenu();
         if (menu == null || menu.isDisposed() || Boolean.TRUE.equals(menu.getData(HOOK_MARKER)))
             return;
         // Слушатель JFace уже зарегистрирован: к этому моменту EDT наполнила меню
         // для текущего выделения, включая доступность действий создания.
         menu.addListener(SWT.Show, event -> flattenSingleCreate(menu));
         menu.setData(HOOK_MARKER, Boolean.TRUE);
+    }
+
+    /** Порядок добавления проектов в выделение, независимо от сортировки дерева SWT. */
+    private static final class ProjectSelectionOrder
+    {
+        private final List<IProject> projects = new ArrayList<>();
+
+        void update(IStructuredSelection selection)
+        {
+            List<IProject> selected = new ArrayList<>();
+            for (Object element : selection.toList())
+                if (element instanceof IProject project)
+                    selected.add(project);
+            projects.removeIf(project -> !selected.contains(project));
+            for (IProject project : selected)
+                if (!projects.contains(project))
+                    projects.add(project);
+        }
+
+        IStructuredSelection ordered(IStructuredSelection selection)
+        {
+            if (selection.size() < 2 || selection.size() > 3
+                || selection.size() != projects.size()
+                || !projects.containsAll(selection.toList()))
+                return null;
+            return new StructuredSelection(new ArrayList<>(projects));
+        }
+    }
+
+    private static void installCompareSelectionOrder(IWorkbench workbench)
+    {
+        if (compareListenerInstalled)
+            return;
+        ICommandService service = workbench.getService(ICommandService.class);
+        if (service == null)
+            return;
+        service.addExecutionListener(new IExecutionListenerWithChecks()
+        {
+            @Override
+            public void preExecute(String commandId, ExecutionEvent event)
+            {
+                if (!COMPARE_COMMAND_ID.equals(commandId))
+                    return;
+                if (!(HandlerUtil.getActivePart(event) instanceof CommonNavigator navigator)
+                    || !Global.isNavigatorPart(navigator)
+                    || !(event.getApplicationContext() instanceof IEvaluationContext context))
+                    return;
+                Object data = navigator.getCommonViewer().getTree().getData(SELECTION_ORDER);
+                if (!(data instanceof ProjectSelectionOrder order))
+                    return;
+                IStructuredSelection selection = order.ordered(HandlerUtil.getCurrentStructuredSelection(event));
+                if (selection == null)
+                    return;
+                Command command = event.getCommand();
+                if (command.getHandler() == null || command.getHandler() instanceof OrderedCompareHandler)
+                    return;
+                command.setHandler(new OrderedCompareHandler(command, context, selection));
+            }
+
+            private void restore(String commandId)
+            {
+                if (COMPARE_COMMAND_ID.equals(commandId)
+                    && service.getCommand(commandId).getHandler() instanceof OrderedCompareHandler handler)
+                    handler.restore();
+            }
+
+            @Override public void postExecuteSuccess(String commandId, Object result) { restore(commandId); }
+            @Override public void postExecuteFailure(String commandId, ExecutionException error) { restore(commandId); }
+            @Override public void notHandled(String commandId, NotHandledException error) { restore(commandId); }
+            @Override public void notEnabled(String commandId, NotEnabledException error) { restore(commandId); }
+            @Override public void notDefined(String commandId, NotDefinedException error) { restore(commandId); }
+        });
+        compareListenerInstalled = true;
+    }
+
+    private static IHandler nativeCompareHandler() throws ExecutionException
+    {
+        if (nativeCompareHandler != null)
+            return nativeCompareHandler;
+        // Ровно тот defaultHandler и Guice-фабрика, которые объявлены самой EDT.
+        // Command.getHandler() возвращает e4-прослойку, теряющую наш контекст.
+        for (IConfigurationElement element : Platform.getExtensionRegistry()
+            .getConfigurationElementsFor("org.eclipse.ui.commands")) //$NON-NLS-1$
+        {
+            if (!"command".equals(element.getName()) //$NON-NLS-1$
+                || !COMPARE_COMMAND_ID.equals(element.getAttribute("id"))) //$NON-NLS-1$
+                continue;
+            try
+            {
+                Object handler = element.createExecutableExtension("defaultHandler"); //$NON-NLS-1$
+                if (handler instanceof IHandler nativeHandler)
+                {
+                    nativeCompareHandler = nativeHandler;
+                    return nativeHandler;
+                }
+            }
+            catch (CoreException error)
+            {
+                throw new ExecutionException("Не удалось получить обработчик сравнения EDT", error); //$NON-NLS-1$
+            }
+        }
+        throw new ExecutionException("Не найден обработчик сравнения EDT"); //$NON-NLS-1$
+    }
+
+    /** Подменяет контекст одного вызова, сохраняя штатный мастер EDT. */
+    private static final class OrderedCompareHandler extends AbstractHandler
+    {
+        private final Command command;
+        private final IHandler original;
+        private final IEvaluationContext context;
+        private final IStructuredSelection selection;
+
+        OrderedCompareHandler(Command command, IEvaluationContext context, IStructuredSelection selection)
+        {
+            this.command = command;
+            this.original = command.getHandler();
+            this.context = context;
+            this.selection = selection;
+        }
+
+        @Override public boolean isEnabled() { return original.isEnabled(); }
+        @Override public boolean isHandled() { return original.isHandled(); }
+
+        @Override
+        public void setEnabled(Object evaluationContext)
+        {
+            if (original instanceof IHandler2 handler)
+                handler.setEnabled(evaluationContext);
+        }
+
+        @Override
+        public Object execute(ExecutionEvent event) throws ExecutionException
+        {
+            // Восстанавливаем до модального мастера: вложенные команды обычные.
+            restore();
+            IEvaluationContext orderedContext = new EvaluationContext(context, selection);
+            orderedContext.addVariable(ISources.ACTIVE_CURRENT_SELECTION_NAME, selection);
+            try
+            {
+                IHandler handler = nativeCompareHandler();
+                return handler.execute(new ExecutionEvent(command, event.getParameters(),
+                    event.getTrigger(), orderedContext));
+            }
+            catch (Exception error)
+            {
+                throw new ExecutionException("Не удалось открыть сравнение проектов", error); //$NON-NLS-1$
+            }
+        }
+
+        void restore()
+        {
+            if (command.getHandler() == this)
+                command.setHandler(original);
+        }
     }
 
     private static void flattenSingleCreate(Menu menu)
