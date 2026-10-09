@@ -41,15 +41,12 @@ import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.forms.editor.FormEditor;
 import org.osgi.framework.Bundle;
 
-import com._1c.g5.v8.bm.core.IBmObject;
-import com._1c.g5.v8.dt.core.platform.IResourceLookup;
 import com._1c.g5.v8.dt.md.ui.aef.providers.AdoptedMdObjectDecorator;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com._1c.g5.v8.dt.metadata.mdclass.ObjectBelonging;
-import com._1c.g5.v8.dt.validation.ValidationUtil;
-import com._1c.g5.v8.dt.validation.marker.IMarkerManager;
-import com._1c.g5.v8.dt.validation.marker.Marker;
+import com._1c.g5.v8.dt.validation.marker.IMarkerUpdateListener;
+import com._1c.g5.v8.dt.validation.marker.v2.IMarkerManagerV2;
 import com._1c.g5.v8.dt.validation.marker.MarkerSeverity;
 
 /**
@@ -86,6 +83,27 @@ public final class EditorTabIconDiagHook implements IStartup
         Point dpi = display.getDPI();
         log("start dpi=" + dpi.x + "," + dpi.y + " zoom=" + zoomOf(display)); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         IWorkbench workbench = PlatformUI.getWorkbench();
+        ProblemIndicatorDebug.install();
+        IMarkerManagerV2 markers = Global.getOsgiService(IMarkerManagerV2.class);
+        ProblemIndicatorDebug.log("workbench marker listener install manager=" + ProblemIndicatorDebug.id(markers));
+        if (markers != null)
+        {
+            IMarkerUpdateListener listener = event ->
+            {
+                ProblemIndicatorDebug.log("workbench markers changed projects=" + event.getChangedProjects());
+                if (!display.isDisposed())
+                    display.asyncExec(() ->
+                    {
+                        if (display.isDisposed() || workbench.isClosing())
+                            return;
+                        for (IWorkbenchPart part : new ArrayList<>(TITLE_LISTENERS.keySet()))
+                            if (part instanceof IEditorPart editor)
+                                applyTitleImage(editor, titleImageOf(editor));
+                    });
+            };
+            markers.addListener(listener);
+            display.disposeExec(() -> markers.removeListener(listener));
+        }
         for (IWorkbenchWindow window : workbench.getWorkbenchWindows())
             hookWindow(window);
         workbench.addWindowListener(new IWindowListener()
@@ -186,13 +204,15 @@ public final class EditorTabIconDiagHook implements IStartup
                 {
                     if (propId != IWorkbenchPartConstants.PROP_TITLE)
                         return;
+                    ProblemIndicatorDebug.log("workbench PROP_TITLE editor=" + ProblemIndicatorDebug.id(editor)
+                        + " title=" + editor.getTitle() + " stored="
+                        + ProblemIndicatorDebug.id(Global.getField(editor, "titleImage")));
                     MPart mpart = mpartOf(editor);
                     clearDisposedOverride(mpart);
                     // Наш слушатель идёт после штатного, что ставит на вкладку картинку с значком
                     // проблемы: исправляем сразу, а не после asyncExec, иначе значок расширения мигает.
                     Image decorated = titleImageOf(editor);
-                    if (extensionWinsImage(editor, decorated) != null)
-                        applyTitleImage(editor, decorated);
+                    applyTitleImage(editor, decorated);
                     Display display = Display.getCurrent();
                     if (display != null)
                         display.asyncExec(() -> restoreAfterTitleChange(editor));
@@ -200,6 +220,7 @@ public final class EditorTabIconDiagHook implements IStartup
                 TITLE_LISTENERS.put(editor, listener);
                 editor.addPropertyListener(listener);
             }
+            applyTitleImage(editor, titleImageOf(editor));
         }
         catch (RuntimeException ex)
         {
@@ -367,6 +388,16 @@ public final class EditorTabIconDiagHook implements IStartup
         applyTitleImage(editor, image);
     }
 
+    /** Только чтение фактической картинки вкладки и override модели e4 для временной диагностики. */
+    static void logProblemIndicatorSnapshot(IEditorPart editor, String reason)
+    {
+        CTabItem item = itemOf(editor, folderOf(editor));
+        MPart part = mpartOf(editor);
+        ProblemIndicatorDebug.log("workbench snapshot reason=" + reason + " editor=" + ProblemIndicatorDebug.id(editor)
+            + " shown=" + (item != null && !item.isDisposed() ? ProblemIndicatorDebug.image(item.getImage()) : "no-tab")
+            + " override=" + ProblemIndicatorDebug.id(part != null ? part.getTransientData().get(OVERRIDE_ICON_KEY) : null));
+    }
+
     static void applyLiveProblemOverlay(IEditorPart editor, Image overlay)
     {
         if (!usableImage(overlay)
@@ -379,11 +410,16 @@ public final class EditorTabIconDiagHook implements IStartup
     {
         if (editor == null || !usableImage(image))
             return;
+        image = currentProblemImage(editor, image);
         Image extension = extensionWinsImage(editor, image);
         if (extension != null)
             image = extension;
         CTabFolder folder = folderOf(editor);
         CTabItem item = itemOf(editor, folder);
+        ProblemIndicatorDebug.log("workbench apply editor=" + ProblemIndicatorDebug.id(editor)
+            + " title=" + editor.getTitle() + " wanted=" + ProblemIndicatorDebug.image(image)
+            + " extension=" + ProblemIndicatorDebug.image(extension)
+            + " before=" + (item != null && !item.isDisposed() ? ProblemIndicatorDebug.image(item.getImage()) : "no-tab"));
         if (item == null || item.isDisposed())
             return;
         MPart mpart = mpartOf(editor);
@@ -438,32 +474,45 @@ public final class EditorTabIconDiagHook implements IStartup
 
     private static final AdoptedMdObjectDecorator ADOPTED_DECORATOR = new AdoptedMdObjectDecorator();
 
+    /** Читаем маркеры по стабильному BM-id, не ждём асинхронного кэша разных экземпляров getModel(). */
+    private static Image currentProblemImage(IEditorPart editor, Image fallback)
+    {
+        if (!(editor instanceof DtGranularEditor<?> granular) || SUPER_TITLE_IMAGE == null
+            || PlatformUI.getWorkbench().isClosing())
+            return fallback;
+        try
+        {
+            if (!(granular.getModel() instanceof MdObject model))
+                return fallback;
+            MarkerSeverity severity = maxSeverity(model);
+            if (severity == null)
+                return fallback;
+            Image base = (Image) SUPER_TITLE_IMAGE.invoke(granular);
+            if (!usableImage(base))
+                return fallback;
+            if (model.getObjectBelonging() == ObjectBelonging.ADOPTED)
+            {
+                Image adopted = ADOPTED_DECORATOR.decorateImage(base, model);
+                if (usableImage(adopted))
+                    base = adopted;
+            }
+            Image result = ProblemIndicatorSupport.decorate(base, severity);
+            ProblemIndicatorDebug.log("workbench current severity editor=" + ProblemIndicatorDebug.id(editor)
+                + " severity=" + severity + " result=" + ProblemIndicatorDebug.image(result));
+            return usableImage(result) ? result : base;
+        }
+        catch (Throwable ex)
+        {
+            Global.tempLogException("problem-indicators", "workbench current severity editor="
+                + ProblemIndicatorDebug.id(editor), ex);
+            return fallback;
+        }
+    }
+
     /** Максимум по маркерам объекта и вложенных в него — как у штатной иконки вкладки. */
     private static MarkerSeverity maxSeverity(MdObject model)
     {
-        if (!(model instanceof IBmObject bmObject) || PlatformUI.getWorkbench().isClosing())
-            return null;
-        IResourceLookup lookup = Global.getOsgiService(IResourceLookup.class);
-        IMarkerManager markers = Global.getOsgiService(IMarkerManager.class);
-        if (lookup == null || markers == null)
-            return null;
-        var project = lookup.getProject(model);
-        if (project == null)
-            return null;
-        Long id = Long.valueOf(bmObject.bmGetId());
-        List<Marker> found = new ArrayList<>();
-        for (Marker[] batch : new Marker[][] { markers.getNestedMarkers(project, id),
-            markers.getMarkers(project, id) })
-        {
-            if (batch == null)
-                continue;
-            for (Marker marker : batch)
-            {
-                if (marker != null)
-                    found.add(marker);
-            }
-        }
-        return found.isEmpty() ? null : ValidationUtil.getMaxMarkerSeverity(found);
+        return PlatformUI.getWorkbench().isClosing() ? null : ProblemIndicatorSupport.severity(model);
     }
 
     /** {@code FormEditor.getTitleImage()} без декораторов {@code DtGranularEditor}. */

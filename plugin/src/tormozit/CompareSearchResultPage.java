@@ -870,13 +870,25 @@ public class CompareSearchResultPage implements ISearchResultPage
         {
             try
             {
+                Object node = m.getComparisonNode();
+                // После объединения partial-узел может остаться в результатах поиска,
+                // хотя session.getNode(id) уже возвращает null. EDT.hasDifferences()
+                // разыменовывает его без проверки — не вызываем провайдер для такого узла.
+                boolean available = node != null && (!(node instanceof IPartialModelNode partial)
+                    || partial.retrieveComparisonNode() != null);
+                Global.tempLog("compare-search-row-background", "path=" + m.getObjectPath()
+                    + " property=" + m.getPropertyName() + " node="
+                    + (node == null ? "null" : node.getClass().getName())
+                    + " available=" + available + " fallback=" + m.getRowColorKind());
                 // null — штатный фон равного узла, а не повод вернуться к старому статусу.
-                return labels.getBackground(m.getComparisonNode());
+                if (available)
+                    return labels.getBackground(node);
             }
             catch (RuntimeException stale)
             {
-                // После объединения узел результата уже удалён из дерева сравнения, и штатный
-                // провайдер падает на нём при каждой перерисовке строки. Остаётся цвет, запомненный в строке.
+                // Сохраняем резерв и на случай изменения модели между проверкой и вызовом EDT.
+                Global.tempLogException("compare-search-row-background", "path=" + m.getObjectPath()
+                    + " property=" + m.getPropertyName(), stale);
             }
         }
         CompareSearchMatch.RowColorKind kind = m.getRowColorKind();

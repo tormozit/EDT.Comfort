@@ -84,6 +84,7 @@ public class Activator extends AbstractUIPlugin
         ConfigSearchDialogHook.installWeavingHook();
         DtGranularEditorHook.installWeavingHook();
         MdEditorTreeHook.installWeavingHook();
+        NavigatorFilterHook.installProblemSeverityWeaving();
         MdEventHandlersPageHook.installWeavingHook();
         OpenHelperAttributePropertiesHook.installWeavingHook();
         WorkbenchTabsHook.installWeavingHook();

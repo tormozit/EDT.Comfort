@@ -66,6 +66,8 @@ import org.eclipse.ui.plugin.AbstractUIPlugin;
 import org.eclipse.ui.services.IServiceLocator;
 
 import com._1c.g5.v8.dt.core.platform.IV8Project;
+import com._1c.g5.v8.bm.core.IBmObject;
+import com._1c.g5.v8.dt.core.platform.IResourceLookup;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicForm;
@@ -516,6 +518,9 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
         @Override
         public void labelProviderChanged(LabelProviderChangedEvent event)
         {
+            ProblemIndicatorDebug.log("title decorator received editor=" + ProblemIndicatorDebug.id(editor)
+                + " source=" + ProblemIndicatorDebug.id(event.getSource())
+                + " elements=" + ProblemIndicatorDebug.elements(event.getElements()));
             Display display = Display.getCurrent();
             if (display == null)
             {
@@ -531,11 +536,17 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
         private void handleDecoratorEvent(LabelProviderChangedEvent event)
         {
             if (editor.getSite() == null)
+            {
+                ProblemIndicatorDebug.log("title skipped no-site editor=" + ProblemIndicatorDebug.id(editor));
                 return;
+            }
             // Подсказка формы читает BM. При закрытии EDT деактивация проекта держит новые
             // транзакции, и UI-поток встал бы в ожидание (issue 530); обновлять вкладку незачем.
             if (PlatformUI.getWorkbench().isClosing())
+            {
+                ProblemIndicatorDebug.log("title skipped closing editor=" + ProblemIndicatorDebug.id(editor));
                 return;
+            }
             String nowTitle;
             Image nowImage;
             try
@@ -543,8 +554,9 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
                 nowTitle = editor.getTitle() + ' ' + editor.getTitleToolTip();
                 nowImage = editor.getTitleImage();
             }
-            catch (RuntimeException ignored)
+            catch (RuntimeException ex)
             {
+                Global.tempLogException("problem-indicators", "title read editor=" + ProblemIndicatorDebug.id(editor), ex);
                 return;
             }
             boolean titleChanged = lastTitle == null || !nowTitle.equals(lastTitle);
@@ -552,12 +564,25 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
             boolean drop = isTransientOverlayDrop(editor, lastImage, nowImage);
             boolean targeted = eventTargetsEditor(event, editor);
             boolean liveOverlay = isLiveProblemOverlay(editor, nowImage);
+            ProblemIndicatorDebug.log("title decision editor=" + ProblemIndicatorDebug.id(editor)
+                + " title=" + nowTitle + " titleChanged=" + titleChanged + " imageChanged=" + imageChanged
+                + " drop=" + drop + " targeted=" + targeted + " live=" + liveOverlay
+                + " innerOverlay=" + MdEditorTabsHook.innerTabsShowProblemOverlay(editor)
+                + " previous=" + ProblemIndicatorDebug.image(lastImage) + " now=" + ProblemIndicatorDebug.image(nowImage)
+                + " held=" + ProblemIndicatorDebug.image(heldWorkbenchOverlay(editor)));
             if (!titleChanged && !imageChanged)
             {
-                if (liveOverlay && MdEditorTabsHook.innerTabsShowProblemOverlay(editor))
+                if (liveOverlay)
                 {
                     rememberWorkbenchOverlay(editor, nowImage);
                     EditorTabIconDiagHook.applyLiveProblemOverlay(editor, nowImage);
+                }
+                else if (targeted)
+                {
+                    // Событие готового результата относится к нашему BM-объекту: пустой результат
+                    // тоже проталкиваем, даже если getTitleImage уже отдавал его до уведомления.
+                    clearWorkbenchOverlay(editor);
+                    EditorTabIconDiagHook.applyWorkbenchTabImage(editor, nowImage);
                 }
                 return;
             }
@@ -583,7 +608,7 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
             }
             if (imageChanged && drop && targeted)
                 clearWorkbenchOverlay(editor);
-            else if (liveOverlay && MdEditorTabsHook.innerTabsShowProblemOverlay(editor))
+            else if (liveOverlay)
                 rememberWorkbenchOverlay(editor, nowImage);
             lastTitle = nowTitle;
             lastImage = nowImage;
@@ -594,8 +619,7 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
                     Integer.valueOf(IWorkbenchPartConstants.PROP_TITLE));
             if (liveOverlay)
             {
-                if (MdEditorTabsHook.innerTabsShowProblemOverlay(editor))
-                    EditorTabIconDiagHook.applyLiveProblemOverlay(editor, nowImage);
+                EditorTabIconDiagHook.applyLiveProblemOverlay(editor, nowImage);
             }
         }
     }
@@ -619,12 +643,18 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
             return;
         }
         HELD_WORKBENCH_OVERLAY.put(editor, overlay);
+        ProblemIndicatorDebug.log("workbench hold editor=" + ProblemIndicatorDebug.id(editor)
+            + " image=" + ProblemIndicatorDebug.image(overlay));
     }
 
     private static void clearWorkbenchOverlay(IEditorPart editor)
     {
         if (editor != null)
+        {
+            ProblemIndicatorDebug.log("workbench clear-held editor=" + ProblemIndicatorDebug.id(editor)
+                + " previous=" + ProblemIndicatorDebug.image(HELD_WORKBENCH_OVERLAY.get(editor)));
             HELD_WORKBENCH_OVERLAY.remove(editor);
+        }
     }
 
     /**
@@ -663,10 +693,19 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
         EObject model = granular.getModel();
         if (model == null)
             return false;
+        IResourceLookup lookup = Global.getOsgiService(IResourceLookup.class);
         for (Object element : elements)
         {
             if (element == model)
                 return true;
+            if (model instanceof IBmObject modelBm && element instanceof IBmObject elementBm
+                && element instanceof EObject object && lookup != null
+                && modelBm.bmGetId() >= 0 && modelBm.bmGetId() == elementBm.bmGetId())
+            {
+                IProject project = lookup.getProject(model);
+                if (project != null && project.equals(lookup.getProject(object)))
+                    return true;
+            }
         }
         return false;
     }

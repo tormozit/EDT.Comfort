@@ -75,7 +75,6 @@ import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com._1c.g5.v8.dt.metadata.mdclass.Predefined;
 import com._1c.g5.v8.dt.metadata.mdclass.Subsystem;
 import com._1c.g5.v8.dt.ui.DtUiUtil;
-import com._1c.g5.v8.dt.ui.validation.ProblemsDecorationHelper;
 import com._1c.g5.v8.dt.validation.marker.MarkerSeverity;
 
 /**
@@ -127,6 +126,9 @@ public final class MdEditorTabsHook implements IStartup
     private static final String KEY_REFRESH_PENDING = "tormozit.mdListTabCount.refreshPending"; //$NON-NLS-1$
 
     private static final String KEY_COMFORT_IMAGE = "tormozit.mdListTabCount.comfortImage"; //$NON-NLS-1$
+
+    /** Критичность наших готовых наложений: отличие картинки от базовой само по себе не означает проблему. */
+    private static final Map<Image, MarkerSeverity> OVERLAY_SEVERITIES = new WeakHashMap<>();
 
     private static final String KEY_EDITOR = "tormozit.mdListTabCount.editor"; //$NON-NLS-1$
 
@@ -1046,6 +1048,9 @@ public final class MdEditorTabsHook implements IStartup
                 continue;
             Image before = item.getImage();
             Image wanted = withSeverityOverlay(comfort, before);
+            ProblemIndicatorDebug.log("inner restore editor=" + ProblemIndicatorDebug.id(folder.getData(KEY_EDITOR))
+                + " tab=" + item.getText() + " stockSeverity=" + severityOfImage(before)
+                + " before=" + ProblemIndicatorDebug.image(before) + " wanted=" + ProblemIndicatorDebug.image(wanted));
             if (restoreBeforeSize)
                 Global.setField(item, "image", wanted); //$NON-NLS-1$
             else
@@ -1960,6 +1965,10 @@ public final class MdEditorTabsHook implements IStartup
         if (current == null && comfort != null)
             item.setImage(withSeverityOverlay(comfort, before));
 
+        ProblemIndicatorDebug.log("inner update editor=" + ProblemIndicatorDebug.id(editor)
+            + " tab=" + item.getText() + " stockSeverity=" + severityOfImage(before)
+            + " before=" + ProblemIndicatorDebug.image(before) + " after=" + ProblemIndicatorDebug.image(item.getImage()));
+
         CTabFolder folder = item.getParent();
         Table nav = leftNavOf(folder);
         if (nav == null || nav.isDisposed())
@@ -2145,7 +2154,7 @@ public final class MdEditorTabsHook implements IStartup
      */
     private static boolean stockImageWins(Image image)
     {
-        return usableImage(image) && severityOfImage(image) == null;
+        return usableImage(image) && (OVERLAY_SEVERITIES.containsKey(image) || severityOfImage(image) == null);
     }
 
     /**
@@ -2161,7 +2170,9 @@ public final class MdEditorTabsHook implements IStartup
             return comfort;
         try
         {
-            Image decorated = ProblemsDecorationHelper.decorateImage(comfort, severity);
+            Image decorated = ProblemIndicatorSupport.decorate(comfort, severity);
+            if (decorated != null && decorated != comfort)
+                OVERLAY_SEVERITIES.put(decorated, severity);
             return decorated != null ? decorated : comfort;
         }
         catch (RuntimeException ignored)
@@ -2175,6 +2186,9 @@ public final class MdEditorTabsHook implements IStartup
     {
         if (image == null)
             return null;
+        MarkerSeverity overlay = OVERLAY_SEVERITIES.get(image);
+        if (overlay != null)
+            return overlay;
         for (MarkerSeverity severity : MarkerSeverity.values())
         {
             if (severity != MarkerSeverity.NONE && severityImage(severity) == image)
@@ -2216,9 +2230,6 @@ public final class MdEditorTabsHook implements IStartup
                 continue;
             Image shown = item.getImage();
             if (severityOfImage(shown) != null)
-                return true;
-            Image comfort = dataImage(item, KEY_COMFORT_IMAGE);
-            if (shown != null && comfort != null && shown != comfort)
                 return true;
         }
         return false;

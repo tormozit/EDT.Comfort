@@ -3,6 +3,7 @@ package tormozit;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider.IStyledLabelProvider;
 import org.eclipse.jface.viewers.IBaseLabelProvider;
+import org.eclipse.jface.viewers.ILabelProviderListener;
 import org.eclipse.jface.viewers.ILabelProvider;
 import org.eclipse.jface.viewers.StyledCellLabelProvider;
 import org.eclipse.jface.viewers.ViewerComparator;
@@ -20,6 +21,22 @@ import org.eclipse.ui.IWorkbenchPart;
 import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
+import org.eclipse.emf.ecore.EObject;
+import com._1c.g5.v8.bm.core.IBmObject;
+import com._1c.g5.v8.dt.core.platform.IResourceLookup;
+import java.util.ArrayList;
+import java.util.List;
+import java.lang.instrument.ClassFileTransformer;
+import java.security.ProtectionDomain;
+import java.util.concurrent.atomic.AtomicBoolean;
+import org.objectweb.asm.ClassReader;
+import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.ClassVisitor;
+import org.objectweb.asm.MethodVisitor;
+import org.objectweb.asm.Opcodes;
+import org.osgi.framework.FrameworkUtil;
+import org.osgi.framework.hooks.weaving.WeavingHook;
+import org.osgi.framework.hooks.weaving.WovenClass;
 import org.eclipse.ui.navigator.CommonViewer;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import java.util.function.Function;
@@ -77,6 +94,9 @@ public final class NavigatorFilterHook implements IStartup
     @Override
     public void earlyStartup()
     {
+        if (!ProblemSeverityWeaving.woven)
+            BslDocCommentDescriptionFix.registerExtraTransformer(new ProblemSeverityWeaving(),
+                ProblemSeverityWeaving.TARGET.replace('/', '.'));
         Display.getDefault().asyncExec(() -> {
             IWorkbench wb = PlatformUI.getWorkbench();
             if (wb == null)
@@ -97,6 +117,132 @@ public final class NavigatorFilterHook implements IStartup
                 @Override public void windowClosed(IWorkbenchWindow window) {}
             });
         });
+    }
+
+    static void installProblemSeverityWeaving()
+    {
+        if (!ProblemSeverityWeaving.installed.compareAndSet(false, true))
+            return;
+        var bundle = FrameworkUtil.getBundle(NavigatorFilterHook.class);
+        var context = bundle != null ? bundle.getBundleContext() : null;
+        if (context != null)
+            context.registerService(WeavingHook.class, new ProblemSeverityWeaving(), null);
+    }
+
+    /** Неприсоединённый сосед не имеет FQN и не должен обрывать расчёт значков всей группы. */
+    public static boolean isAttachedProblemObject(IBmObject object)
+    {
+        long id = object.bmGetId();
+        boolean top = object.bmIsTop();
+        boolean include = id != -1 && top;
+        ProblemIndicatorDebug.log("native severity sibling=" + ProblemIndicatorDebug.id(object)
+            + " bmId=" + id + " top=" + top + " include=" + include);
+        return include;
+    }
+
+    /** Сохраняем штатную агрегацию, кэш и события; дополняем проверку соседа перед bmGetFqn(). */
+    private static final class ProblemSeverityWeaving implements WeavingHook, ClassFileTransformer
+    {
+        private static final String TARGET = "com/_1c/g5/v8/dt/navigator/ui/NavigatorProblemsLabelDecorator";
+        private static final String BM_OBJECT = "com/_1c/g5/v8/bm/core/IBmObject";
+        private static final AtomicBoolean installed = new AtomicBoolean();
+        private static volatile boolean woven;
+
+        private static byte[] rewrite(byte[] bytes)
+        {
+            ClassReader reader = new ClassReader(bytes);
+            AtomicBoolean already = new AtomicBoolean();
+            reader.accept(new ClassVisitor(Opcodes.ASM9)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String desc, String signature, String[] exceptions)
+                {
+                    return new MethodVisitor(Opcodes.ASM9)
+                    {
+                        @Override
+                        public void visitMethodInsn(int opcode, String owner, String method, String descriptor, boolean isInterface)
+                        {
+                            if ("tormozit/NavigatorFilterHook".equals(owner) && "isAttachedProblemObject".equals(method))
+                                already.set(true);
+                        }
+                    };
+                }
+            }, ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+            if (already.get())
+            {
+                ProblemIndicatorDebug.log("native severity weave already installed");
+                return null;
+            }
+            ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+            AtomicBoolean touched = new AtomicBoolean();
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String desc, String signature, String[] exceptions)
+                {
+                    MethodVisitor visitor = super.visitMethod(access, name, desc, signature, exceptions);
+                    if (!"computeTopBmElementSeverity".equals(name)
+                        || !("(Lorg/eclipse/core/resources/IProject;L" + BM_OBJECT
+                            + ";)Lcom/_1c/g5/v8/dt/validation/marker/MarkerSeverity;").equals(desc))
+                        return visitor;
+                    return new MethodVisitor(Opcodes.ASM9, visitor)
+                    {
+                        @Override
+                        public void visitMethodInsn(int opcode, String owner, String method, String descriptor, boolean isInterface)
+                        {
+                            if (opcode == Opcodes.INVOKEINTERFACE && BM_OBJECT.equals(owner)
+                                && "bmIsTop".equals(method) && "()Z".equals(descriptor))
+                            {
+                                super.visitMethodInsn(Opcodes.INVOKESTATIC, "tormozit/NavigatorFilterHook", "isAttachedProblemObject",
+                                    "(L" + BM_OBJECT + ";)Z", false);
+                                touched.set(true);
+                                return;
+                            }
+                            super.visitMethodInsn(opcode, owner, method, descriptor, isInterface);
+                        }
+                    };
+                }
+            }, 0);
+            ProblemIndicatorDebug.log("native severity weave touched=" + touched.get());
+            return touched.get() ? writer.toByteArray() : null;
+        }
+
+        @Override
+        public void weave(WovenClass woven)
+        {
+            if (!TARGET.replace('/', '.').equals(woven.getClassName()) || woven.getState() != WovenClass.TRANSFORMING)
+                return;
+            try
+            {
+                byte[] bytes = rewrite(woven.getBytes());
+                if (bytes != null)
+                {
+                    woven.getDynamicImports().add("tormozit");
+                    woven.setBytes(bytes);
+                    ProblemSeverityWeaving.woven = true;
+                }
+            }
+            catch (RuntimeException ex)
+            {
+                Global.tempLogException("problem-indicators", "native severity weave failed", ex);
+            }
+        }
+
+        @Override
+        public byte[] transform(ClassLoader loader, String name, Class<?> redefined, ProtectionDomain domain, byte[] bytes)
+        {
+            if (!TARGET.equals(name))
+                return null;
+            try
+            {
+                return rewrite(bytes);
+            }
+            catch (RuntimeException ex)
+            {
+                Global.tempLogException("problem-indicators", "native severity transform failed", ex);
+                return null;
+            }
+        }
     }
 
     private static void hookWindow(IWorkbenchWindow window)
@@ -359,6 +505,8 @@ public final class NavigatorFilterHook implements IStartup
         }
 
         storeNavigatorHookState(tree, viewer, highlight, rawLp);
+        ProblemIndicatorDebug.watchNavigator(viewer);
+        DecorationRelay.install(viewer);
         FolderItemCountDecoration.installExpandRefresh(viewer, tree);
         CommonNodeAlphabeticSorter.installOn(viewer);
         tree.setData(PATCHED_KEY, Boolean.TRUE);
@@ -366,6 +514,75 @@ public final class NavigatorFilterHook implements IStartup
         tree.setData(HIGHLIGHT_KEY, highlight);
         NavigatorAttributePropertiesHook.ensureInstalled(navigator, viewer);
         return true;
+    }
+
+    /** Пересылка событий для других экземпляров BM-модели; viewer обновляет свои элементы по экземпляру. */
+    private static final class DecorationRelay
+    {
+        private static final String KEY = "tormozit.navigator.problemDecorationRelay"; //$NON-NLS-1$
+
+        static void install(CommonViewer viewer)
+        {
+            Tree tree = viewer.getTree();
+            if (tree.getData(KEY) != null)
+                return;
+            tree.setData(KEY, Boolean.TRUE);
+            var decorators = PlatformUI.getWorkbench().getDecoratorManager();
+            ILabelProviderListener listener = event ->
+            {
+                Object[] changed = event.getElements();
+                Display display = tree.getDisplay();
+                if (!display.isDisposed())
+                    display.asyncExec(() ->
+                    {
+                        if (tree.isDisposed() || PlatformUI.getWorkbench().isClosing())
+                            return;
+                        List<Object> elements = new ArrayList<>();
+                        IResourceLookup lookup = Global.getOsgiService(IResourceLookup.class);
+                        collect(tree.getItems(), changed, lookup, elements);
+                        ProblemIndicatorDebug.log("navigator relay source=" + ProblemIndicatorDebug.id(event.getSource())
+                            + " updated=" + elements.size());
+                        if (!elements.isEmpty())
+                            viewer.update(elements.toArray(), null);
+                    });
+            };
+            decorators.addListener(listener);
+            tree.addDisposeListener(event -> decorators.removeListener(listener));
+        }
+
+        private static void collect(TreeItem[] items, Object[] changed, IResourceLookup lookup, List<Object> result)
+        {
+            for (TreeItem item : items)
+            {
+                Object element = item.getData();
+                if (element != null && needsUpdate(element, changed, lookup))
+                    result.add(element);
+                if (item.getExpanded())
+                    collect(item.getItems(), changed, lookup, result);
+            }
+        }
+
+        private static boolean needsUpdate(Object element, Object[] changed, IResourceLookup lookup)
+        {
+            if (changed == null)
+                return true;
+            // Штатный viewer сам обработает событие со своим экземпляром — не запускаем повторный расчёт.
+            for (Object candidate : changed)
+                if (candidate == element)
+                    return false;
+            if (!(element instanceof EObject object) || !(element instanceof IBmObject bm)
+                || bm.bmGetId() < 0 || lookup == null)
+                return false;
+            for (Object candidate : changed)
+                if (candidate instanceof IBmObject other && candidate instanceof EObject otherObject
+                    && bm.bmGetId() == other.bmGetId())
+                {
+                    var project = lookup.getProject(object);
+                    if (project != null && project.equals(lookup.getProject(otherObject)))
+                        return true;
+                }
+            return false;
+        }
     }
 
     /** Только подсветка на UI; фильтрация — штатный SearchJob (не блокирует ввод). */

@@ -7,6 +7,10 @@ import java.util.List;
 import java.util.Map;
 
 import org.eclipse.core.resources.IProject;
+import org.eclipse.core.runtime.jobs.Job;
+import org.eclipse.core.runtime.ICoreRunnable;
+import com._1c.g5.v8.dt.validation.marker.IMarkerUpdateListener;
+import com._1c.g5.v8.dt.validation.marker.v2.IMarkerManagerV2;
 import org.eclipse.jface.dialogs.InputDialog;
 import org.eclipse.jface.window.Window;
 import org.eclipse.emf.ecore.EObject;
@@ -330,6 +334,27 @@ public final class RecentPlacesView extends ViewPart
         installRememberFocus(table);
 
         RecentPlaces.getInstance().addChangeListener(storeChangeListener);
+        IMarkerManagerV2 markers = Global.getOsgiService(IMarkerManagerV2.class);
+        ProblemIndicatorDebug.log("recent places marker listener install manager=" + ProblemIndicatorDebug.id(markers));
+        if (markers != null)
+        {
+            Display display = listViewer.getControl().getDisplay();
+            IMarkerUpdateListener listener = event ->
+            {
+                ProblemIndicatorDebug.log("recent places markers changed projects=" + event.getChangedProjects());
+                if (!display.isDisposed())
+                    display.asyncExec(() ->
+                    {
+                        if (listViewer.getControl().isDisposed())
+                            return;
+                        entryIconResolver.clearCache();
+                        listViewer.update(java.util.Arrays.stream(listViewer.getTable().getItems())
+                            .map(TableItem::getData).toArray(), null);
+                    });
+            };
+            markers.addListener(listener);
+            listViewer.getControl().addDisposeListener(event -> markers.removeListener(listener));
+        }
         refreshFromStore();
     }
 
@@ -1406,10 +1431,12 @@ public final class RecentPlacesView extends ViewPart
     {
         private static Image methodImage;
         private final Map<String, Image> cache = new HashMap<>();
+        private int generation;
 
         void clearCache()
         {
             cache.clear();
+            generation++;
         }
 
         Image imageFor(RecentPlaces.Entry entry, IWorkbenchPage page)
@@ -1418,13 +1445,58 @@ public final class RecentPlacesView extends ViewPart
                 return null;
             String cacheKey = cacheKey(entry);
             Image cached = cache.get(cacheKey);
-            if (cached != null)
+            if (cached != null && !cached.isDisposed())
                 return cached;
 
             Image image = resolveImage(entry, page);
             if (image != null)
+            {
                 cache.put(cacheKey, image);
+                IProject project = RecentPlacesHandler.resolveProject(entry, page);
+                if (project != null && project.isAccessible())
+                {
+                    Image base = image;
+                    int requestedGeneration = generation;
+                    Display display = Display.getCurrent();
+                    Job job = Job.create("Комфорт: проблемы последнего места", (ICoreRunnable)monitor ->
+                    {
+                        try
+                        {
+                            EObject owner = GoToDefinition.resolveEObjectForFullName(
+                                RecentPlacesKeys.mdObjectRef(entry), page, project, false);
+                            int separator = entry.key.indexOf(": ");
+                            var severity = separator < 0 ? ProblemIndicatorSupport.severity(owner)
+                                : ProblemIndicatorSupport.methodSeverity(moduleFile(entry, project),
+                                    entry.key.substring(separator + 2).trim(), owner);
+                            ProblemIndicatorDebug.log("recent places severity key=" + cacheKey + " severity=" + severity);
+                            if (!display.isDisposed())
+                                display.asyncExec(() ->
+                                {
+                                    if (requestedGeneration != generation || activeInstance == null
+                                        || activeInstance.entryIconResolver != this
+                                        || activeInstance.listViewer.getControl().isDisposed())
+                                        return;
+                                    cache.put(cacheKey, ProblemIndicatorSupport.decorate(base, severity));
+                                    activeInstance.listViewer.update(entry, null);
+                                });
+                        }
+                        catch (RuntimeException ex)
+                        {
+                            Global.tempLogException("problem-indicators", "recent places key=" + cacheKey, ex);
+                        }
+                    });
+                    job.setSystem(true);
+                    job.schedule();
+                }
+            }
             return image;
+        }
+
+        private static org.eclipse.core.resources.IFile moduleFile(RecentPlaces.Entry entry, IProject project)
+        {
+            String module = entry.key.substring(0, entry.key.indexOf(": ")).trim();
+            String path = GoToDefinition.moduleToBslPath(module, null);
+            return path != null ? project.getFile(path) : null;
         }
 
         private static String cacheKey(RecentPlaces.Entry entry)
