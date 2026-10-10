@@ -289,6 +289,9 @@ public class CompareConfigMenuHook implements IStartup
         {
             if (!(value instanceof IEditorPart editor))
                 return Boolean.FALSE;
+            // Флажок выключен — штатное подтверждение EDT без проверки итогового состава.
+            if (!ComfortSettings.isControlMdReferencesEnabled())
+                return Boolean.TRUE.equals(Global.invoke(editor, "openMergeConfirmationDialog"));
             Boolean confirmed = approved.remove(editor);
             if (confirmed != null)
                 return confirmed || Boolean.TRUE.equals(Global.invoke(editor, "openMergeConfirmationDialog"));

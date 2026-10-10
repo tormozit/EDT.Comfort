@@ -124,6 +124,9 @@ public class Activator extends AbstractUIPlugin
             ComfortSettings.PREF_IMPROVE_DEBUGGER_WINDOWS,
             ComfortSettings.DEFAULT_IMPROVE_DEBUGGER_WINDOWS);
         settings.getPreferenceStore().setDefault(
+            ComfortSettings.PREF_CONTROL_MD_REFERENCES,
+            ComfortSettings.DEFAULT_CONTROL_MD_REFERENCES);
+        settings.getPreferenceStore().setDefault(
             ComfortSettings.PREF_SERVER_CALL_HIGHLIGHTING_ENABLED,
             ComfortSettings.DEFAULT_SERVER_CALL_HIGHLIGHTING_ENABLED);
         settings.getPreferenceStore().setDefault(

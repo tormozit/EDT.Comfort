@@ -368,7 +368,8 @@ public final class MdReachability
             {
                 try
                 {
-                    if (status != ComparisonProcessStatus.COMPARISON_PROCESS_INITIALIZATION_STARTED)
+                    if (status != ComparisonProcessStatus.COMPARISON_PROCESS_INITIALIZATION_STARTED
+                        || !ComfortSettings.isControlMdReferencesEnabled())
                         return;
                     checkCompared(handle.getMainDescriptor());
                     checkCompared(handle.getOtherDescriptor());

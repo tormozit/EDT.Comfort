@@ -639,7 +639,8 @@ public final class GitStagingViewHook implements IStartup
 
     /**
      * Проверяет битые ссылки, которые появятся после операции над файлами рабочего каталога, и только
-     * затем выполняет её. Без файлов метаданных операция выполняется сразу. Ошибка и пропуск проверки
+     * затем выполняет её. Без файлов метаданных и при выключенном флажке
+     * {@link ComfortSettings#PREF_CONTROL_MD_REFERENCES} операция выполняется сразу. Ошибка и пропуск проверки
      * операцию не отменяют — как и при фиксации.
      *
      * @param paths пути файлов от корня рабочего каталога репозитория
@@ -661,8 +662,8 @@ public final class GitStagingViewHook implements IStartup
                 files.add(path);
         Global.tempLog(LOG, "work tree operation delete=" + delete + " paths=" + paths.size()
             + " metadata=" + metadata + " sources=" + files.size() + " repository=" + repository
-            + " running=" + WorkTreeSource.running);
-        if (repository == null || files.isEmpty())
+            + " running=" + WorkTreeSource.running + " control=" + ComfortSettings.isControlMdReferencesEnabled());
+        if (repository == null || files.isEmpty() || !ComfortSettings.isControlMdReferencesEnabled())
         {
             operation.run();
             return;
@@ -869,9 +870,16 @@ public final class GitStagingViewHook implements IStartup
 
         private void selected(Button button, Event event, Listener[] original)
         {
-            Global.tempLog(LOG, "selection button=" + button.getText() + " running=" + running);
+            Global.tempLog(LOG, "selection button=" + button.getText() + " running=" + running
+                + " control=" + ComfortSettings.isControlMdReferencesEnabled());
             if (running)
                 return;
+            if (!ComfortSettings.isControlMdReferencesEnabled())
+            {
+                for (Listener listener : original)
+                    listener.handleEvent(event);
+                return;
+            }
             running = true;
             boolean commitEnabled = commit.getEnabled();
             boolean pushEnabled = push.getEnabled();

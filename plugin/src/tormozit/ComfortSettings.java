@@ -200,6 +200,18 @@ public final class ComfortSettings
     /** Подавление требования минимальной сборки выключено по умолчанию. */
     public static final boolean DEFAULT_SUPPRESS_MIN_PLATFORM_BUILD = false;
 
+    // ---- Контроль ссылок метаданных в ключевых операциях ----
+
+    /**
+     * Ключ: проверять битые ссылки метаданных и достижимость файлов в операциях Git (фиксация,
+     * замена на HEAD-ревизию, удаление файла — {@link GitStagingViewHook}) и сравнения конфигураций
+     * (запуск сравнения — {@link MdReachability}, объединение — {@link CompareConfigMenuHook}).
+     */
+    public static final String PREF_CONTROL_MD_REFERENCES = "comfort.metadata.controlReferencesInKeyOperations"; //$NON-NLS-1$
+
+    /** Контроль ссылок метаданных в ключевых операциях включён по умолчанию. */
+    public static final boolean DEFAULT_CONTROL_MD_REFERENCES = true;
+
     // ---- Вопрос о проблемах конфигурации перед запуском клиента ----
 
     /**
@@ -799,6 +811,15 @@ public final class ComfortSettings
         if (settings == null)
             return DEFAULT_SUPPRESS_MIN_PLATFORM_BUILD;
         return settings.preferenceStore.getBoolean(PREF_SUPPRESS_MIN_PLATFORM_BUILD);
+    }
+
+    /** Проверять битые ссылки метаданных и достижимость файлов в операциях Git и сравнения конфигураций. */
+    public static boolean isControlMdReferencesEnabled()
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return DEFAULT_CONTROL_MD_REFERENCES;
+        return settings.preferenceStore.getBoolean(PREF_CONTROL_MD_REFERENCES);
     }
 
     public static boolean isDebugLogEnabled()

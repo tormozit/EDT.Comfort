@@ -112,5 +112,8 @@ public class ComfortInitializer extends AbstractPreferenceInitializer
         store.setDefault(
             ComfortSettings.PREF_MD_EDITOR_VERTICAL_TABS,
             ComfortSettings.DEFAULT_MD_EDITOR_VERTICAL_TABS);
+        store.setDefault(
+            ComfortSettings.PREF_CONTROL_MD_REFERENCES,
+            ComfortSettings.DEFAULT_CONTROL_MD_REFERENCES);
     }
 }

@@ -105,6 +105,12 @@ public class ComfortPreferencePage
             "Если вкладок больше 10, их список показывается слева.\n"
             + "При выключенном флажке вкладки остаются снизу."; //$NON-NLS-1$
 
+    private static final String CONTROL_MD_REFERENCES_TOOLTIP =
+            "Проверяет битые ссылки метаданных и недостижимые файлы метаданных:\n"
+            + "• перед фиксацией, заменой на HEAD-ревизию и удалением файла в Git;\n"
+            + "• при запуске сравнения конфигураций и перед объединением.\n"
+            + "При выключенном флажке эти операции выполняются без проверок."; //$NON-NLS-1$
+
     private static final String SUPPRESS_MIN_PLATFORM_BUILD_TOOLTIP =
             "Отключает требование ЕДТ к минимальной сборке внутри уже поддерживаемого релиза\n"
             + "платформы (панель «Версии платформы», запуск клиента/сервера). Поддерживаемые\n"
@@ -245,6 +251,13 @@ public class ComfortPreferencePage
             getFieldEditorParent());
         addField(suppressMinBuildField);
         setFieldTooltip(suppressMinBuildField, SUPPRESS_MIN_PLATFORM_BUILD_TOOLTIP);
+
+        BooleanFieldEditor controlMdReferencesField = new BooleanFieldEditor(
+            ComfortSettings.PREF_CONTROL_MD_REFERENCES,
+            "Контролировать ссылки метаданных в ключевых операциях", //$NON-NLS-1$
+            getFieldEditorParent());
+        addField(controlMdReferencesField);
+        setFieldTooltip(controlMdReferencesField, CONTROL_MD_REFERENCES_TOOLTIP);
 
         BooleanFieldEditor verticalTabsField = new BooleanFieldEditor(
             ComfortSettings.PREF_MD_EDITOR_VERTICAL_TABS,
@@ -1725,6 +1738,8 @@ public class ComfortPreferencePage
                 ComfortSettings.isImproveDebuggerWindowsEnabled());
             appendFlag(sb, "Вертикальные вкладки в редакторе объекта", //$NON-NLS-1$
                 ComfortSettings.isMdEditorVerticalTabsEnabled());
+            appendFlag(sb, "Контролировать ссылки метаданных в ключевых операциях", //$NON-NLS-1$
+                ComfortSettings.isControlMdReferencesEnabled());
             appendFlag(sb, "Группировать общие модули в навигаторе по имени", //$NON-NLS-1$
                 ComfortSettings.isGroupCommonModulesEnabled());
             appendFlag(sb, "Автооткрытие подсказок при вводе", isContentAssistAutoOpen()); //$NON-NLS-1$
