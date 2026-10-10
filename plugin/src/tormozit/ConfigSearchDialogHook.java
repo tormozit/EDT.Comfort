@@ -6,16 +6,20 @@ import java.security.ProtectionDomain;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Predicate;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.Status;
+import org.eclipse.emf.ecore.EAttribute;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.swt.SWT;
@@ -50,7 +54,9 @@ import com._1c.g5.v8.bm.integration.IBmModel;
 import com._1c.g5.v8.dt.core.platform.IV8Project;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
 import com._1c.g5.v8.dt.search.core.Match;
+import com._1c.g5.v8.dt.search.core.SearchFor;
 import com._1c.g5.v8.dt.search.core.text.TextSearchFileMatch;
+import com._1c.g5.v8.dt.search.core.text.TextSearchModelMatch;
 
 public class ConfigSearchDialogHook implements IStartup
 {
@@ -264,6 +270,7 @@ public class ConfigSearchDialogHook implements IStartup
         restoreScopeTableSizes(page);
         installObjectTypesCountLabel(page);
         SearchScopeGroup.patch(shell, page);
+        NStrCategory.patchLabels(page);
         hideForeignSearchTabs(shell, dialog);
         scheduleRestoreShellSize(shell);
 
@@ -970,17 +977,29 @@ public class ConfigSearchDialogHook implements IStartup
                 {
                     boolean wholeWord = getDialogSettings().getBoolean(KEY_WHOLE_WORD);
                     Map<String, List<String>> scopeRefs = SearchScopeGroup.refs();
-                    if (wholeWord || scopeRefs != null)
+                    Object input = args[0];
+                    NStrCategory nstr = NStrCategory.forInput(input);
+                    try
                     {
-                        Object input = args[0];
-                        String sq = (String) Global.invoke(input, "getSearchString");
-                        boolean wildcards = sq != null && (sq.contains("?") || sq.contains("*"));
-                        String wordFilter = wholeWord && sq != null && !wildcards ? sq : null;
-                        boolean caseSensitive =
-                            Boolean.TRUE.equals(Global.invoke(input, "isCaseSensitive"));
-                        if (wordFilter != null || scopeRefs != null)
+                        String wordFilter = null;
+                        boolean caseSensitive = false;
+                        if (wholeWord || scopeRefs != null)
+                        {
+                            String sq = (String) Global.invoke(input, "getSearchString");
+                            boolean wildcards = sq != null && (sq.contains("?") || sq.contains("*"));
+                            wordFilter = wholeWord && sq != null && !wildcards ? sq : null;
+                            caseSensitive =
+                                Boolean.TRUE.equals(Global.invoke(input, "isCaseSensitive"));
+                        }
+                        if (wordFilter != null || scopeRefs != null || nstr != null)
                             args[1] = createFilteredCollector(
-                                args[1], wordFilter, caseSensitive, scopeRefs, executorCL);
+                                args[1], wordFilter, caseSensitive, scopeRefs, nstr, executorCL);
+                        return method.invoke(executor, args);
+                    }
+                    finally
+                    {
+                        if (nstr != null)
+                            nstr.restore(input);
                     }
                 }
                 return method.invoke(executor, args);
@@ -988,7 +1007,8 @@ public class ConfigSearchDialogHook implements IStartup
     }
 
     private static Object createFilteredCollector(Object origCollector, String searchString,
-        boolean caseSensitive, Map<String, List<String>> scopeRefs, ClassLoader cl) throws Exception
+        boolean caseSensitive, Map<String, List<String>> scopeRefs, NStrCategory nstr, ClassLoader cl)
+        throws Exception
     {
         Class<?> iface = Class.forName(
             "com._1c.g5.v8.dt.search.core.ISearchResultCollector");
@@ -1001,7 +1021,7 @@ public class ConfigSearchDialogHook implements IStartup
             {
                 if ("addMatch".equals(method.getName()) && args != null && args.length == 1)
                 {
-                    if (accept(args[0], searchString, caseSensitive, membership))
+                    if (accept(args[0], searchString, caseSensitive, membership, nstr))
                         return method.invoke(origCollector, args);
                     return null;
                 }
@@ -1010,7 +1030,7 @@ public class ConfigSearchDialogHook implements IStartup
                     Collection<?> matches = (Collection<?>) args[0];
                     List<Object> filtered = new ArrayList<>();
                     for (Object m : matches)
-                        if (accept(m, searchString, caseSensitive, membership))
+                        if (accept(m, searchString, caseSensitive, membership, nstr))
                             filtered.add(m);
                     if (filtered.size() == matches.size())
                         return method.invoke(origCollector, args);
@@ -1021,13 +1041,345 @@ public class ConfigSearchDialogHook implements IStartup
     }
 
     private static boolean accept(Object match, String searchString, boolean caseSensitive,
-        SearchSetMembership membership) throws Exception
+        SearchSetMembership membership, NStrCategory nstr) throws Exception
     {
         if (searchString != null && !isWholeWordMatch(match, searchString, caseSensitive))
+            return false;
+        if (nstr != null && !nstr.allows(match))
             return false;
         if (membership != null && !membership.allows(match))
             return false;
         return true;
+    }
+
+    /**
+     * Строковые литералы — аргументы {@code НСтр()} в модулях относятся к категории «Строки
+     * пользовательского интерфейса», а не «Языковые элементы» (issue #454).
+     *
+     * <p>Штатный индекс категорий внутри модуля не различает: каждая строка любого файла записана
+     * с {@code searchFor = LANGUAGE_ELEMENTS} ({@code BaseTextSearchIndex.indexFile}), а категория
+     * «Строки пользовательского интерфейса» модули не просматривает вовсе. Поэтому:
+     * <ul>
+     *   <li>отмечены только «Языковые элементы» — из результатов убираются вхождения внутри
+     *       литералов {@code НСтр()};</li>
+     *   <li>отмечены только «Строки пользовательского интерфейса» — на время поиска в запрос
+     *       добавляется {@code LANGUAGE_ELEMENTS} (иначе модули не попадут в выборку), а сборщик
+     *       оставляет из файлов только литералы {@code НСтр()}, из модели — только реквизиты,
+     *       проходящие штатный предикат исходного набора категорий;</li>
+     *   <li>отмечены обе либо ни одна из двух — поиск не меняется.</li>
+     * </ul>
+     * Принадлежность литералу — лексически по тексту модуля (согласовано): Xtext-разбор каждого
+     * модуля с вхождениями замедлил бы поиск в разы.
+     */
+    private static final class NStrCategory
+    {
+        private static final String INPUT_CLASS =
+            "com._1c.g5.v8.dt.internal.search.ui.text.TextSearchInput"; //$NON-NLS-1$
+        private static final String INPUT_FIELD = "searchFors"; //$NON-NLS-1$
+        private static final String PREDICATES_CLASS =
+            "com._1c.g5.v8.dt.internal.search.core.SearchForPredicatesProvider"; //$NON-NLS-1$
+        private static final String LABELS_CLASS = "com._1c.g5.v8.dt.search.ui.SearchLabels"; //$NON-NLS-1$
+
+        /** {@code true} — из модулей нужны только литералы НСтр(); {@code false} — всё, кроме них. */
+        private final boolean onlyNStr;
+        /** Исходный набор категорий, подменённый на время поиска; {@code null} — не подменялся. */
+        private final Object originalSearchFors;
+        /** Штатный предикат реквизитов исходного набора категорий (только при {@link #onlyNStr}). */
+        private final Predicate<EAttribute> originalAttributes;
+
+        private NStrCategory(boolean onlyNStr, Object originalSearchFors,
+            Predicate<EAttribute> originalAttributes)
+        {
+            this.onlyNStr = onlyNStr;
+            this.originalSearchFors = originalSearchFors;
+            this.originalAttributes = originalAttributes;
+        }
+
+        /** @return {@code null}, если для этого поиска разделять литералы НСтр() не требуется */
+        static NStrCategory forInput(Object input)
+        {
+            if (input == null || !INPUT_CLASS.equals(input.getClass().getName()))
+                return null;
+            if (!(Global.getField(input, INPUT_FIELD) instanceof Set<?> searchFors))
+                return null;
+            boolean language = searchFors.contains(SearchFor.LANGUAGE_ELEMENTS);
+            boolean uiStrings = searchFors.contains(SearchFor.UI_STRINGS);
+            if (language == uiStrings)
+                return null;
+            if (language)
+                return new NStrCategory(false, null, null);
+
+            Predicate<EAttribute> attributes = attributePredicate(searchFors);
+            if (attributes == null)
+                return null;
+            Set<Object> broadened = new HashSet<>(searchFors);
+            broadened.add(SearchFor.LANGUAGE_ELEMENTS);
+            if (!Global.setFieldForce(input, INPUT_FIELD, broadened))
+                return null;
+            return new NStrCategory(true, searchFors, attributes);
+        }
+
+        /** Вернуть исходный набор категорий — запрос можно выполнить повторно («Искать снова»). */
+        void restore(Object input)
+        {
+            if (originalSearchFors != null)
+                Global.setFieldForce(input, INPUT_FIELD, originalSearchFors);
+        }
+
+        boolean allows(Object match)
+        {
+            if (match instanceof TextSearchFileMatch fileMatch)
+            {
+                Boolean inside = insideNStr(fileMatch);
+                return inside == null ? !onlyNStr : inside.booleanValue() == onlyNStr;
+            }
+            if (onlyNStr && match instanceof TextSearchModelMatch modelMatch)
+                return !(modelMatch.getFeature() instanceof EAttribute attribute)
+                    || originalAttributes.test(attribute);
+            return true;
+        }
+
+        @SuppressWarnings("unchecked")
+        private static Predicate<EAttribute> attributePredicate(Set<?> searchFors)
+        {
+            try
+            {
+                Class<?> provider = Class.forName(PREDICATES_CLASS, true, Match.class.getClassLoader());
+                return (Predicate<EAttribute>) provider
+                    .getMethod("getEAttributeSearchForPredicate", Collection.class) //$NON-NLS-1$
+                    .invoke(null, searchFors);
+            }
+            catch (Exception e)
+            {
+                log("NStrCategory.attributePredicate: " + e);
+                return null;
+            }
+        }
+
+        /** @return {@code null} — не модуль либо позицию вхождения в тексте определить не удалось */
+        private static Boolean insideNStr(TextSearchFileMatch match)
+        {
+            String content = BslModuleMethodResolver.moduleText(match.getFile());
+            if (content == null)
+                return null;
+            int offset = locate(content, match);
+            if (offset < 0)
+                return null;
+            return Boolean.valueOf(isNStrLiteral(content, offset));
+        }
+
+        /** Смещение вхождения в {@code content}, сверенное с текстом самого вхождения. */
+        private static int locate(String content, TextSearchFileMatch match)
+        {
+            String line = match.getText();
+            int inLine = match.getTextOffset();
+            int length = match.getTextLength();
+            if (line == null || inLine < 0 || length <= 0 || inLine + length > line.length())
+                return -1;
+            int fileOffset = match.getFileOffset();
+            if (fileOffset >= 0 && content.regionMatches(fileOffset, line, inLine, length))
+                return fileOffset;
+
+            long lineNumber = match.getLineNumber();
+            int lineStart = 0;
+            for (long current = 1; current < lineNumber; current++)
+            {
+                int eol = content.indexOf('\n', lineStart);
+                if (eol < 0)
+                    return -1;
+                lineStart = eol + 1;
+            }
+            int byLine = lineStart + inLine;
+            return content.regionMatches(byLine, line, inLine, length) ? byLine : -1;
+        }
+
+        private static boolean isNStrLiteral(String content, int offset)
+        {
+            int openQuote = literalOpenQuote(content, offset);
+            if (openQuote < 0)
+                return false;
+            int paren = skipBlankBack(content, openQuote);
+            if (paren == 0 || content.charAt(paren - 1) != '(')
+                return false;
+            int nameEnd = skipBlankBack(content, paren - 1);
+            int nameStart = nameEnd;
+            while (nameStart > 0 && isIdentifierChar(content.charAt(nameStart - 1)))
+                nameStart--;
+            String name = content.substring(nameStart, nameEnd);
+            if (!"НСтр".equalsIgnoreCase(name) && !"NStr".equalsIgnoreCase(name)) //$NON-NLS-1$
+                return false;
+            int before = skipBlankBack(content, nameStart);
+            return before == 0 || content.charAt(before - 1) != '.';
+        }
+
+        /**
+         * Смещение открывающей кавычки литерала, внутри которого лежит {@code offset}, либо
+         * {@code -1}. Многострочный литерал: строки продолжения начинаются с {@code |}, между
+         * ними допустимы строки-комментарии; {@code ""} внутри литерала — экранированная кавычка.
+         */
+        private static int literalOpenQuote(String content, int offset)
+        {
+            int length = content.length();
+            int start = lineStart(content, offset);
+            while (start > 0 && isContinuationOrComment(content, start))
+                start = lineStart(content, previousLineEnd(content, start));
+
+            boolean inside = false;
+            int openQuote = -1;
+            int pos = start;
+            while (pos < offset)
+            {
+                char c = content.charAt(pos);
+                if (!inside)
+                {
+                    if (c == '"')
+                    {
+                        inside = true;
+                        openQuote = pos;
+                    }
+                    else if (c == '/' && pos + 1 < length && content.charAt(pos + 1) == '/')
+                    {
+                        pos = lineEnd(content, pos);
+                        continue;
+                    }
+                }
+                else if (c == '"')
+                {
+                    if (pos + 1 < length && content.charAt(pos + 1) == '"')
+                    {
+                        pos += 2;
+                        continue;
+                    }
+                    inside = false;
+                }
+                else if (c == '\n')
+                {
+                    int next = skipInlineBlank(content, pos + 1);
+                    if (next < length && content.charAt(next) == '|')
+                    {
+                        pos = next + 1;
+                        continue;
+                    }
+                    if (next + 1 < length && content.charAt(next) == '/' && content.charAt(next + 1) == '/')
+                    {
+                        pos = lineEnd(content, next);
+                        if (pos >= offset)
+                            return -1;
+                        continue;
+                    }
+                    inside = false;
+                }
+                pos++;
+            }
+            return inside ? openQuote : -1;
+        }
+
+        private static boolean isContinuationOrComment(String content, int lineStart)
+        {
+            int pos = skipInlineBlank(content, lineStart);
+            if (pos >= content.length())
+                return false;
+            char c = content.charAt(pos);
+            return c == '|'
+                || c == '/' && pos + 1 < content.length() && content.charAt(pos + 1) == '/';
+        }
+
+        private static int lineStart(String content, int offset)
+        {
+            int pos = Math.min(offset, content.length());
+            while (pos > 0 && content.charAt(pos - 1) != '\n')
+                pos--;
+            return pos;
+        }
+
+        /** Позиция внутри предыдущей строки (перед её разделителем) для строки с началом {@code lineStart}. */
+        private static int previousLineEnd(String content, int lineStart)
+        {
+            int pos = lineStart - 1;
+            if (pos > 0 && content.charAt(pos - 1) == '\r')
+                pos--;
+            return pos;
+        }
+
+        private static int lineEnd(String content, int offset)
+        {
+            int pos = offset;
+            while (pos < content.length() && content.charAt(pos) != '\n')
+                pos++;
+            return pos;
+        }
+
+        private static int skipInlineBlank(String content, int offset)
+        {
+            int pos = offset;
+            while (pos < content.length() && (content.charAt(pos) == ' ' || content.charAt(pos) == '\t'))
+                pos++;
+            return pos;
+        }
+
+        private static int skipBlankBack(String content, int offset)
+        {
+            int pos = offset;
+            while (pos > 0 && Character.isWhitespace(content.charAt(pos - 1)))
+                pos--;
+            return pos;
+        }
+
+        private static boolean isIdentifierChar(char c)
+        {
+            return Character.isLetterOrDigit(c) || c == '_';
+        }
+
+        /** Надпись и подсказки пометок категорий в группе «Искать». */
+        static void patchLabels(Object page)
+        {
+            Object control = Global.invoke(page, "getControl"); //$NON-NLS-1$
+            if (!(control instanceof Composite pageControl) || pageControl.isDisposed())
+                return;
+            Button language = findCategory(page, pageControl, SearchFor.LANGUAGE_ELEMENTS);
+            Button uiStrings = findCategory(page, pageControl, SearchFor.UI_STRINGS);
+            Button comments = findCategory(page, pageControl, SearchFor.COMMENTS);
+            if (language == null || uiStrings == null)
+                return;
+            String uiStringsLabel = uiStrings.getText();
+            language.setText("Языковые элементы кроме НСтр()");
+            if (comments != null)
+            {
+                comments.setText("Комментарии метаданных");
+                comments.setToolTipText(TooltipText.wrap(comments,
+                    "Свойство «Комментарий» объектов метаданных, реквизитов, команд и параметров "
+                        + "форм" + Global.pluginSignForTooltip()));
+            }
+            language.setToolTipText(TooltipText.wrap(language,
+                "Имена и другие служебные строки объектов метаданных, тексты модулей и макетов. "
+                    + "Строковые литералы внутри НСтр() сюда не входят — они ищутся по пометке «"
+                    + uiStringsLabel + "»" + Global.pluginSignForTooltip()));
+            uiStrings.setToolTipText(TooltipText.wrap(uiStrings,
+                "Синонимы, заголовки, подсказки и другие тексты, которые видит пользователь, "
+                    + "а также строковые литералы внутри НСтр() в модулях"
+                    + Global.pluginSignForTooltip()));
+            pageControl.layout(true, true);
+        }
+
+        private static Button findCategory(Object page, Composite pageControl, SearchFor category)
+        {
+            String label;
+            try
+            {
+                label = (String) Class.forName(LABELS_CLASS, true, page.getClass().getClassLoader())
+                    .getMethod("getSearchForText", SearchFor.class) //$NON-NLS-1$
+                    .invoke(null, category);
+            }
+            catch (Exception e)
+            {
+                log("NStrCategory.findCategory " + category + ": " + e);
+                return null;
+            }
+            if (label == null)
+                return null;
+            return Global.findControl(pageControl, Button.class,
+                button -> (button.getStyle() & SWT.CHECK) != 0 && label.equals(button.getText()));
+        }
     }
 
     /**
