@@ -83,14 +83,11 @@ public final class EditorTabIconDiagHook implements IStartup
         Point dpi = display.getDPI();
         log("start dpi=" + dpi.x + "," + dpi.y + " zoom=" + zoomOf(display)); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         IWorkbench workbench = PlatformUI.getWorkbench();
-        ProblemIndicatorDebug.install();
         IMarkerManagerV2 markers = Global.getOsgiService(IMarkerManagerV2.class);
-        ProblemIndicatorDebug.log("workbench marker listener install manager=" + ProblemIndicatorDebug.id(markers));
         if (markers != null)
         {
             IMarkerUpdateListener listener = event ->
             {
-                ProblemIndicatorDebug.log("workbench markers changed projects=" + event.getChangedProjects());
                 if (!display.isDisposed())
                     display.asyncExec(() ->
                     {
@@ -204,9 +201,6 @@ public final class EditorTabIconDiagHook implements IStartup
                 {
                     if (propId != IWorkbenchPartConstants.PROP_TITLE)
                         return;
-                    ProblemIndicatorDebug.log("workbench PROP_TITLE editor=" + ProblemIndicatorDebug.id(editor)
-                        + " title=" + editor.getTitle() + " stored="
-                        + ProblemIndicatorDebug.id(Global.getField(editor, "titleImage")));
                     MPart mpart = mpartOf(editor);
                     clearDisposedOverride(mpart);
                     // Наш слушатель идёт после штатного, что ставит на вкладку картинку с значком
@@ -388,16 +382,6 @@ public final class EditorTabIconDiagHook implements IStartup
         applyTitleImage(editor, image);
     }
 
-    /** Только чтение фактической картинки вкладки и override модели e4 для временной диагностики. */
-    static void logProblemIndicatorSnapshot(IEditorPart editor, String reason)
-    {
-        CTabItem item = itemOf(editor, folderOf(editor));
-        MPart part = mpartOf(editor);
-        ProblemIndicatorDebug.log("workbench snapshot reason=" + reason + " editor=" + ProblemIndicatorDebug.id(editor)
-            + " shown=" + (item != null && !item.isDisposed() ? ProblemIndicatorDebug.image(item.getImage()) : "no-tab")
-            + " override=" + ProblemIndicatorDebug.id(part != null ? part.getTransientData().get(OVERRIDE_ICON_KEY) : null));
-    }
-
     static void applyLiveProblemOverlay(IEditorPart editor, Image overlay)
     {
         if (!usableImage(overlay)
@@ -416,10 +400,6 @@ public final class EditorTabIconDiagHook implements IStartup
             image = extension;
         CTabFolder folder = folderOf(editor);
         CTabItem item = itemOf(editor, folder);
-        ProblemIndicatorDebug.log("workbench apply editor=" + ProblemIndicatorDebug.id(editor)
-            + " title=" + editor.getTitle() + " wanted=" + ProblemIndicatorDebug.image(image)
-            + " extension=" + ProblemIndicatorDebug.image(extension)
-            + " before=" + (item != null && !item.isDisposed() ? ProblemIndicatorDebug.image(item.getImage()) : "no-tab"));
         if (item == null || item.isDisposed())
             return;
         MPart mpart = mpartOf(editor);
@@ -497,14 +477,10 @@ public final class EditorTabIconDiagHook implements IStartup
                     base = adopted;
             }
             Image result = ProblemIndicatorSupport.decorate(base, severity);
-            ProblemIndicatorDebug.log("workbench current severity editor=" + ProblemIndicatorDebug.id(editor)
-                + " severity=" + severity + " result=" + ProblemIndicatorDebug.image(result));
             return usableImage(result) ? result : base;
         }
         catch (Throwable ex)
         {
-            Global.tempLogException("problem-indicators", "workbench current severity editor="
-                + ProblemIndicatorDebug.id(editor), ex);
             return fallback;
         }
     }

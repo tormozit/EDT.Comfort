@@ -110,6 +110,6 @@ public final class ProblemViewMarkers
     public static MarkerFilter currentFilter(IWorkbenchPart part)
     {
         Object result = Global.invoke(part, "getMarkerFilter"); //$NON-NLS-1$
-        return result instanceof MarkerFilter filter ? filter : null;
+        return result instanceof MarkerFilter filter ? ProblemViewHook.withCheckCode(part, filter) : null;
     }
 }

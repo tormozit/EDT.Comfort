@@ -88,6 +88,7 @@ public class Activator extends AbstractUIPlugin
         MdEventHandlersPageHook.installWeavingHook();
         OpenHelperAttributePropertiesHook.installWeavingHook();
         WorkbenchTabsHook.installWeavingHook();
+        ProblemViewHook.installWeavingHook();
         MoxelEditorHook.installColorResetHook();
         try
         {

@@ -1048,9 +1048,6 @@ public final class MdEditorTabsHook implements IStartup
                 continue;
             Image before = item.getImage();
             Image wanted = withSeverityOverlay(comfort, before);
-            ProblemIndicatorDebug.log("inner restore editor=" + ProblemIndicatorDebug.id(folder.getData(KEY_EDITOR))
-                + " tab=" + item.getText() + " stockSeverity=" + severityOfImage(before)
-                + " before=" + ProblemIndicatorDebug.image(before) + " wanted=" + ProblemIndicatorDebug.image(wanted));
             if (restoreBeforeSize)
                 Global.setField(item, "image", wanted); //$NON-NLS-1$
             else
@@ -1965,9 +1962,6 @@ public final class MdEditorTabsHook implements IStartup
         if (current == null && comfort != null)
             item.setImage(withSeverityOverlay(comfort, before));
 
-        ProblemIndicatorDebug.log("inner update editor=" + ProblemIndicatorDebug.id(editor)
-            + " tab=" + item.getText() + " stockSeverity=" + severityOfImage(before)
-            + " before=" + ProblemIndicatorDebug.image(before) + " after=" + ProblemIndicatorDebug.image(item.getImage()));
 
         CTabFolder folder = item.getParent();
         Table nav = leftNavOf(folder);

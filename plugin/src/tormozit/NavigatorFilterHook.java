@@ -135,8 +135,6 @@ public final class NavigatorFilterHook implements IStartup
         long id = object.bmGetId();
         boolean top = object.bmIsTop();
         boolean include = id != -1 && top;
-        ProblemIndicatorDebug.log("native severity sibling=" + ProblemIndicatorDebug.id(object)
-            + " bmId=" + id + " top=" + top + " include=" + include);
         return include;
     }
 
@@ -170,7 +168,6 @@ public final class NavigatorFilterHook implements IStartup
             }, ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
             if (already.get())
             {
-                ProblemIndicatorDebug.log("native severity weave already installed");
                 return null;
             }
             ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
@@ -203,7 +200,6 @@ public final class NavigatorFilterHook implements IStartup
                     };
                 }
             }, 0);
-            ProblemIndicatorDebug.log("native severity weave touched=" + touched.get());
             return touched.get() ? writer.toByteArray() : null;
         }
 
@@ -224,7 +220,6 @@ public final class NavigatorFilterHook implements IStartup
             }
             catch (RuntimeException ex)
             {
-                Global.tempLogException("problem-indicators", "native severity weave failed", ex);
             }
         }
 
@@ -239,7 +234,6 @@ public final class NavigatorFilterHook implements IStartup
             }
             catch (RuntimeException ex)
             {
-                Global.tempLogException("problem-indicators", "native severity transform failed", ex);
                 return null;
             }
         }
@@ -505,7 +499,6 @@ public final class NavigatorFilterHook implements IStartup
         }
 
         storeNavigatorHookState(tree, viewer, highlight, rawLp);
-        ProblemIndicatorDebug.watchNavigator(viewer);
         DecorationRelay.install(viewer);
         FolderItemCountDecoration.installExpandRefresh(viewer, tree);
         CommonNodeAlphabeticSorter.installOn(viewer);
@@ -540,8 +533,6 @@ public final class NavigatorFilterHook implements IStartup
                         List<Object> elements = new ArrayList<>();
                         IResourceLookup lookup = Global.getOsgiService(IResourceLookup.class);
                         collect(tree.getItems(), changed, lookup, elements);
-                        ProblemIndicatorDebug.log("navigator relay source=" + ProblemIndicatorDebug.id(event.getSource())
-                            + " updated=" + elements.size());
                         if (!elements.isEmpty())
                             viewer.update(elements.toArray(), null);
                     });

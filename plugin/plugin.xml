@@ -157,6 +157,7 @@
     <startup class="tormozit.DeployConfigurationFixHook"/>
     <startup class="tormozit.DeployChangesColumnHook"/>
     <startup class="tormozit.LongOperationNotifyHook"/>
+    <startup class="tormozit.GitBranchSwitchHook"/>
     <startup class="tormozit.LaunchConfigurationHook"/>
     <startup class="tormozit.LaunchSaveDirtyEditorsHook"/>
     <startup class="tormozit.SaveResourceDialogHook"/>

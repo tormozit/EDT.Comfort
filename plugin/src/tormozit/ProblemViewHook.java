@@ -54,7 +54,11 @@ import org.eclipse.jface.viewers.ViewerCell;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.browser.Browser;
 import org.eclipse.swt.browser.ProgressListener;
+import org.eclipse.swt.custom.CCombo;
 import org.eclipse.swt.graphics.Point;
+import org.eclipse.swt.layout.GridData;
+import org.eclipse.swt.layout.GridLayout;
+import org.eclipse.swt.widgets.Canvas;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
@@ -89,6 +93,7 @@ import com._1c.g5.v8.bm.core.IBmObject;
 import com._1c.g5.v8.dt.core.platform.IBmModelManager;
 import com._1c.g5.v8.dt.core.platform.IV8Project;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
+import com._1c.g5.v8.dt.common.ui.controls.search.SearchBox;
 import com._1c.g5.v8.dt.md.MdUtil;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
@@ -111,6 +116,15 @@ import com.e1c.g5.v8.dt.check.settings.ISuppressSettingsManager;
 import com.e1c.g5.v8.dt.check.settings.IssueType;
 
 import org.osgi.framework.Bundle;
+import org.osgi.framework.BundleContext;
+import org.osgi.framework.FrameworkUtil;
+import org.osgi.framework.hooks.weaving.WeavingHook;
+import org.osgi.framework.hooks.weaving.WovenClass;
+import org.objectweb.asm.ClassReader;
+import org.objectweb.asm.ClassVisitor;
+import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.MethodVisitor;
+import org.objectweb.asm.Opcodes;
 
 /**
  * Панель проблем конфигурации ({@code com._1c.g5.v8.dt.ui.problemView}), issue 401.
@@ -158,8 +172,6 @@ public final class ProblemViewHook implements IStartup
 {
     /** Страница «Проверки» в свойствах проекта ({@code ValidationPreferencePage.PROPERTIES_PAGE_ID}). */
     private static final String CHECKS_PAGE_ID = "com.e1c.g5.v8.dt.checks.properties"; //$NON-NLS-1$
-    /** Ключ {@code ValidationPreferencePage.DATA_PROPERTY_CHECK_ID}: короткий код проверки. */
-    private static final String CHECK_ID_DATA_KEY = "ValidationPreferencePage.checkId"; //$NON-NLS-1$
     private static final String CODE_COLUMN_TITLE = "Код проверки"; //$NON-NLS-1$
     private static final String VIEW_TITLE = "Проблемы конфигурации"; //$NON-NLS-1$
     private static final String SUPPRESS_ISSUE_COMMAND_ID =
@@ -227,6 +239,109 @@ public final class ProblemViewHook implements IStartup
     private static final Map<Object, String> stockLabels = new WeakHashMap<>();
 
     private static volatile boolean installed;
+
+    /** Регистрируется до загрузки панели: поле создаётся до первого layout и кадра. */
+    public static void installWeavingHook()
+    {
+        CheckSelectorCreation.install();
+    }
+
+    private static final class CheckSelectorCreation implements WeavingHook
+    {
+        private static final String TARGET =
+            "com._1c.g5.v8.dt.internal.ui.validation.lazytree.LazyProblemView"; //$NON-NLS-1$
+        private static final String CALLBACK = "tormozit.problemView.created"; //$NON-NLS-1$
+        private static boolean registered;
+
+        static synchronized void install()
+        {
+            if (registered)
+                return;
+            Bundle bundle = FrameworkUtil.getBundle(ProblemViewHook.class);
+            BundleContext context = bundle != null ? bundle.getBundleContext() : null;
+            if (context == null)
+                return;
+            System.getProperties().put(CALLBACK, (java.util.function.Consumer<Object>) part ->
+            {
+                Global.tempLog("check-problems", "panel controls created: " + identity(part)); //$NON-NLS-1$ //$NON-NLS-2$
+                if (part instanceof IViewPart view)
+                {
+                    try
+                    {
+                        UpdateWaitIndicator.install(view);
+                    }
+                    catch (RuntimeException error)
+                    {
+                        Global.tempLogException("check-problems", "panel controls hook", error); //$NON-NLS-1$ //$NON-NLS-2$
+                    }
+                }
+            });
+            context.registerService(WeavingHook.class, new CheckSelectorCreation(), null);
+            registered = true;
+            Global.tempLog("check-problems", "panel creation hook registered"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        @Override
+        public void weave(WovenClass woven)
+        {
+            if (!TARGET.equals(woven.getClassName()) || woven.getState() != WovenClass.TRANSFORMING)
+                return;
+            try
+            {
+                byte[] transformed = transform(woven.getBytes());
+                if (transformed != null)
+                    woven.setBytes(transformed);
+                Global.tempLog("check-problems", "panel creation hook woven=" + (transformed != null)); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            catch (RuntimeException error)
+            {
+                Global.tempLogException("check-problems", "panel creation weaving", error); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+
+        private static byte[] transform(byte[] original)
+        {
+            ClassReader reader = new ClassReader(original);
+            ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+            boolean[] touched = { false };
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor,
+                    String signature, String[] exceptions)
+                {
+                    MethodVisitor method = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    if (!"createPartControl".equals(name) //$NON-NLS-1$
+                        || !"(Lorg/eclipse/swt/widgets/Composite;)V".equals(descriptor)) //$NON-NLS-1$
+                        return method;
+                    return new MethodVisitor(Opcodes.ASM9, method)
+                    {
+                        @Override
+                        public void visitInsn(int opcode)
+                        {
+                            if (opcode == Opcodes.RETURN)
+                            {
+                                // Мост через JDK Consumer — существующий паттерн репозитория.
+                                // У EDT нет зависимости от бандла Комфорт; кадры стека не меняются.
+                                super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "()Ljava/util/Properties;", false); //$NON-NLS-1$
+                                super.visitLdcInsn(CALLBACK);
+                                super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$
+                                super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Consumer"); //$NON-NLS-1$
+                                super.visitVarInsn(Opcodes.ALOAD, 0);
+                                super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Consumer", "accept", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "(Ljava/lang/Object;)V", true); //$NON-NLS-1$
+                                touched[0] = true;
+                            }
+                            super.visitInsn(opcode);
+                        }
+                    };
+                }
+            }, 0);
+            return touched[0] ? writer.toByteArray() : null;
+        }
+    }
 
     @Override
     public void earlyStartup()
@@ -435,6 +550,46 @@ public final class ProblemViewHook implements IStartup
         installComfortScope(view);
         UpdateWaitIndicator.install(view);
         refreshComfortScope(view);
+    }
+
+    /** Открывает панель с точным отбором по коду проверки (issue 750). */
+    static void showForCheck(CheckUid uid, IProject project)
+    {
+        Global.tempLog("check-problems", "showForCheck uid=" + uid + ", project=" + project); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        if (uid == null)
+            return;
+        IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+        IWorkbenchPage page = window != null ? window.getActivePage() : null;
+        if (page == null)
+            return;
+        try
+        {
+            // Инициализируем метаданные проекта, из настроек которого вызвана команда.
+            // Выбор хранит CheckUid; внутренние коды получаем для всех проектов отдельно.
+            ICheckRepository checks = Global.getOsgiService(ICheckRepository.class);
+            if (project != null && checks == null && !ValidationChecksFilterHook.isInternalBslCheckUid(uid))
+                throw new IllegalStateException("Служба проверок недоступна"); //$NON-NLS-1$
+            if (project != null && !ValidationChecksFilterHook.isInternalBslCheckUid(uid))
+                checks.getShortUid(uid, project);
+            IViewPart view = page.showView(ProblemViewMarkers.PROBLEM_VIEW_ID);
+            UpdateWaitIndicator.install(view);
+            // partOpened может прийти до создания контролов; после showView поля уже готовы.
+            UpdateWaitIndicator.wrapMarkerManager(view);
+            UpdateWaitIndicator.setCheckCode(view, uid);
+        }
+        catch (PartInitException | RuntimeException e)
+        {
+            Global.tempLog("check-problems", "showForCheck " + uid + ": " + e); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            ToastNotification.show("Найти проблемы", "Не удалось установить отбор: " + e.getMessage(), 8_000); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    /** Точный отбор нужен и потребителям currentFilter(), который EDT строит заново. */
+    static MarkerFilter withCheckCode(IWorkbenchPart part, MarkerFilter filter)
+    {
+        UpdateWaitIndicator.State state = part instanceof IViewPart view ? UpdateWaitIndicator.stateOf(view) : null;
+        String checkId = state != null ? state.checkId : null;
+        return checkId != null ? UpdateWaitIndicator.applyCheckCode(filter, state.checkCodes) : filter;
     }
 
     /**
@@ -2769,10 +2924,11 @@ public final class ProblemViewHook implements IStartup
     }
 
     /**
-     * {@code Marker.getCheckId()} — короткий код проверки в пределах проекта
-     * ({@code SU47}), и страница проверок ждёт в {@code applyData} именно его:
-     * она сама превращает его в полный {@link CheckUid} через
-     * {@link ICheckRepository#getUidForShortUid}.
+     * Код проверки может быть обычным ({@code undefined-variable}) или коротким
+     * в пределах проекта ({@code SU47}). Все команды открытия передают его в
+     * {@link ValidationChecksFilterHook}, который разрешает полный {@link CheckUid}
+     * и назначает текущую строку после создания списка. Штатный {@code applyData}
+     * не получает цель, чтобы не было второго назначения строки.
      */
     static void openCheckSettings(Shell shell, Marker marker)
     {
@@ -2781,17 +2937,17 @@ public final class ProblemViewHook implements IStartup
         openCheckSettings(shell, marker.getProject(), marker.getCheckId());
     }
 
-    /** То же по проекту и короткому коду проверки — без маркера (подсказка редактора модуля). */
-    static void openCheckSettings(Shell shell, IProject project, String shortUid)
+    /** То же по проекту и коду проверки — без маркера (подсказка редактора модуля). */
+    static void openCheckSettings(Shell shell, IProject project, String code)
     {
-        if (shortUid == null || shortUid.isBlank() || project == null)
+        if (code == null || code.isBlank() || project == null)
         {
             Debug.log("openCheckSettings: no check id or project"); //$NON-NLS-1$
             return;
         }
         Map<String, Object> data = new HashMap<>();
-        data.put(CHECK_ID_DATA_KEY, shortUid);
-        Debug.log("openCheckSettings: " + shortUid); //$NON-NLS-1$
+        data.put(ValidationChecksFilterHook.OPEN_CHECK_DATA_KEY, code);
+        Debug.log("openCheckSettings: " + code); //$NON-NLS-1$
         Shell target = normalizeParentShell(shell != null ? shell : Display.getDefault().getActiveShell());
         PreferenceDialog dialog =
             PreferencesUtil.createPropertyDialogOn(target, project, CHECKS_PAGE_ID, null, data);
@@ -2891,19 +3047,29 @@ public final class ProblemViewHook implements IStartup
         {
             if (view.getSite() == null)
                 return;
+            State existing;
             synchronized (views)
             {
-                if (views.containsKey(view))
-                    return;
-                views.put(view, new State());
+                existing = views.get(view);
+                if (existing == null)
+                    views.put(view, new State());
+            }
+            if (existing != null)
+            {
+                // Ранний partOpened мог прийти до контролов. Вызов из конца
+                // createPartControl подключает поле синхронно, без ожидания таймера.
+                installCheckSelector(view, existing);
+                return;
             }
             rememberJobNames(view.getClass().getClassLoader());
             wrapMarkerManager(view);
+            installCheckCodeReset(view);
             installJobListener();
             TreeViewer viewer = view.getAdapter(TreeViewer.class);
             Tree tree = viewer != null ? viewer.getTree() : null;
             if (tree != null && !tree.isDisposed())
             {
+                installCheckSelector(view, stateOf(view));
                 tree.addDisposeListener(e ->
                 {
                     State disposed;
@@ -2929,6 +3095,7 @@ public final class ProblemViewHook implements IStartup
             }
             if (state == null)
                 return;
+            applyRootCheckCode(view, state, false);
             boolean waiting = ComfortSettings.isReplaceListFiltersEnabled()
                 && (state.waitingForIndex || !tracked.isEmpty());
             String original = status.getText();
@@ -2954,6 +3121,11 @@ public final class ProblemViewHook implements IStartup
 
         private static void applyAll()
         {
+            applyAll(false);
+        }
+
+        private static void applyAll(boolean updateFinished)
+        {
             Display display = Display.getDefault();
             if (display == null || display.isDisposed())
                 return;
@@ -2965,7 +3137,12 @@ public final class ProblemViewHook implements IStartup
                     snapshot = List.copyOf(views.keySet());
                 }
                 for (IViewPart view : snapshot)
+                {
+                    State state = stateOf(view);
+                    if (updateFinished && state != null)
+                        applyRootCheckCode(view, state, true);
                     apply(view, statusLabel(view));
+                }
             });
         }
 
@@ -3097,7 +3274,9 @@ public final class ProblemViewHook implements IStartup
                     Job job = event.getJob();
                     if (job == null || !tracked.remove(job))
                         return;
-                    applyAll();
+                    // update() ждёт окончания UI-обновления корня через CountDownLatch.
+                    // Его done — точка, где пересозданный корень уже можно переотобрать.
+                    applyAll(job.getName().equals(updateJobName));
                 }
             });
         }
@@ -3105,17 +3284,25 @@ public final class ProblemViewHook implements IStartup
         private static void wrapMarkerManager(IViewPart view)
         {
             Object manager = Global.getField(view, "markerManager"); //$NON-NLS-1$
+            Global.tempLog("check-problems", "wrapMarkerManager view=" + identity(view) //$NON-NLS-1$ //$NON-NLS-2$
+                + ", manager=" + tapIdentity(manager) //$NON-NLS-1$
+                + ", reader=" + tapIdentity(Global.getField(view, "markerReader"))); //$NON-NLS-1$ //$NON-NLS-2$
             if (!(manager instanceof IMarkerManagerV2 origin))
                 return;
-            if (Proxy.isProxyClass(origin.getClass())
-                && Proxy.getInvocationHandler(origin) instanceof ManagerTap)
-                return;
-            IMarkerManagerV2 wrapped = (IMarkerManagerV2)Proxy.newProxyInstance(
-                IMarkerManagerV2.class.getClassLoader(),
-                new Class<?>[] { IMarkerManagerV2.class },
-                new ManagerTap(origin, view));
-            if (!Global.setFieldForce(view, "markerManager", wrapped)) //$NON-NLS-1$
-                return;
+            if (!(Proxy.isProxyClass(origin.getClass())
+                && Proxy.getInvocationHandler(origin) instanceof ManagerTap))
+            {
+                IMarkerManagerV2 wrapped = (IMarkerManagerV2)Proxy.newProxyInstance(
+                    IMarkerManagerV2.class.getClassLoader(),
+                    new Class<?>[] { IMarkerManagerV2.class },
+                    new ManagerTap(origin, view));
+                boolean installed = Global.setFieldForce(view, "markerManager", wrapped); //$NON-NLS-1$
+                Global.tempLog("check-problems", "wrapMarkerManager manager installed=" + installed); //$NON-NLS-1$ //$NON-NLS-2$
+                if (!installed)
+                    return;
+            }
+            // Менеджер и текущий читатель имеют независимый жизненный цикл:
+            // уже обёрнутый менеджер не означает, что поле markerReader тоже обёрнуто.
             Object current = Global.getField(view, "markerReader"); //$NON-NLS-1$
             if (current instanceof IMarkerReader reader
                 && !(Proxy.isProxyClass(reader.getClass())
@@ -3125,8 +3312,101 @@ public final class ProblemViewHook implements IStartup
                     IMarkerReader.class.getClassLoader(),
                     new Class<?>[] { IMarkerReader.class },
                     new ReaderTap(reader, view));
-                Global.setFieldForce(view, "markerReader", wrappedReader); //$NON-NLS-1$
+                boolean installed = Global.setFieldForce(view, "markerReader", wrappedReader); //$NON-NLS-1$
+                Global.tempLog("check-problems", "wrapMarkerManager reader installed=" + installed); //$NON-NLS-1$ //$NON-NLS-2$
             }
+        }
+
+        private static String tapIdentity(Object value)
+        {
+            return identity(value) + (value != null && Proxy.isProxyClass(value.getClass())
+                ? "/" + identity(Proxy.getInvocationHandler(value)) : ""); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        /** Штатное «Показывать все» снимает также отбор, установленный нашей командой. */
+        private static void installCheckCodeReset(IViewPart view)
+        {
+            ICommandService commands = view.getSite().getService(ICommandService.class);
+            IExecutionListener listener = new IExecutionListener()
+            {
+                @Override public void preExecute(String commandId, ExecutionEvent event)
+                {
+                    if (NATIVE_SCOPE_COMMAND_ID.equals(commandId)
+                        && SCOPE_ALL.equals(event.getParameter("org.eclipse.ui.commands.radioStateParameter"))) //$NON-NLS-1$
+                        clearCheckCodeForReset(view);
+                }
+                @Override public void postExecuteSuccess(String commandId, Object result) {}
+                @Override public void postExecuteFailure(String commandId, ExecutionException error) {}
+                @Override public void notHandled(String commandId, NotHandledException error) {}
+            };
+            if (commands != null)
+                commands.addExecutionListener(listener);
+            ClassLoader loader = view.getClass().getClassLoader();
+            Object filters = problemFilters(loader);
+            Object filterListener = null;
+            State state = stateOf(view);
+            if (state != null)
+                state.checkCodeShowAll = Boolean.TRUE.equals(Global.invoke(filters, "isShowAll")); //$NON-NLS-1$
+            try
+            {
+                Class<?> listenerType = loader.loadClass(CHANGE_LISTENER_CLASS);
+                filterListener = Proxy.newProxyInstance(loader, new Class<?>[] { listenerType },
+                    (proxy, method, args) ->
+                    {
+                        if ("accept".equals(method.getName())) //$NON-NLS-1$
+                            Display.getDefault().asyncExec(() ->
+                            {
+                                State current = stateOf(view);
+                                if (current == null)
+                                    return;
+                                boolean showAll = Boolean.TRUE.equals(Global.invoke(filters, "isShowAll")); //$NON-NLS-1$
+                                boolean reset = showAll && !current.checkCodeShowAll;
+                                current.checkCodeShowAll = showAll;
+                                if (reset)
+                                    clearCheckCodeForReset(view);
+                            });
+                        return defaultProxyResult(method, args, proxy);
+                    });
+                Global.invokeVoid(filters, "addChangeListener", filterListener); //$NON-NLS-1$
+            }
+            catch (ClassNotFoundException e)
+            {
+                Global.tempLog("check-problems", "install reset listener failed: " + e); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            Object installedFilterListener = filterListener;
+            TreeViewer viewer = view.getAdapter(TreeViewer.class);
+            if (viewer != null)
+                viewer.getTree().addDisposeListener(event ->
+                {
+                    if (commands != null)
+                        commands.removeExecutionListener(listener);
+                    if (installedFilterListener != null)
+                        Global.invokeVoid(filters, "removeChangeListener", installedFilterListener); //$NON-NLS-1$
+                });
+        }
+
+        private static void clearCheckCodeForReset(IViewPart view)
+        {
+            State state = stateOf(view);
+            Global.tempLog("check-problems", "native reset view=" + identity(view) //$NON-NLS-1$ //$NON-NLS-2$
+                + ", code=" + (state != null ? state.checkId : null)); //$NON-NLS-1$
+            if (state != null && state.checkId != null)
+                setCheckCode(view, null);
+        }
+
+        private static String filterDescription(Object[] args)
+        {
+            StringBuilder text = new StringBuilder();
+            if (args != null)
+                for (Object arg : args)
+                {
+                    if (arg instanceof MarkerFilter filter)
+                        text.append(identity(filter)).append('=').append(filter).append(';');
+                    else if (arg instanceof MarkerFilter[] filters)
+                        for (MarkerFilter filter : filters)
+                            text.append(identity(filter)).append('=').append(filter).append(';');
+                }
+            return text.toString();
         }
 
         private static final class State
@@ -3146,6 +3426,608 @@ public final class ProblemViewHook implements IStartup
             volatile Set<Object> liveNumericIds = Set.of();
 
             WaitSpinner spinner;
+
+            volatile String checkId;
+            volatile CheckUid checkUid;
+            volatile Map<IProject, String> checkCodes = Map.of();
+
+            CCombo checkSelector;
+
+            Canvas clearCheckCode;
+            org.eclipse.swt.graphics.Color checkTextColor;
+            org.eclipse.swt.graphics.Color checkMessageColor;
+
+            List<CheckChoice> checkChoices = List.of();
+
+            Object checkCodeRoot;
+
+            MarkerFilter checkCodeRootSource;
+
+            String checkCodeRootApplied;
+
+            boolean checkCodeShowAll;
+        }
+
+        private record CheckChoice(CheckUid uid, String label) {}
+
+        /** Отбор по проверке всегда виден рядом со штатным поиском и имеет свой сброс. */
+        private static void installCheckSelector(IViewPart view, State state)
+        {
+            if (state == null || state.checkSelector != null && !state.checkSelector.isDisposed())
+                return;
+            TreeViewer viewer = view.getAdapter(TreeViewer.class);
+            if (viewer == null || viewer.getTree().isDisposed())
+                return;
+            SearchBox search = findProblemSearchBox(viewer.getTree().getParent());
+            if (search == null || !(search.getParent().getLayout() instanceof GridLayout layout))
+                return;
+            Composite header = search.getParent();
+            Label status = statusLabel(view);
+            if (status == null || status.getParent() != header)
+                return;
+            // Итоги, поиск и выбор проверки — одна строка; сброс внутри поля.
+            layout.numColumns = 4;
+            layout.makeColumnsEqualWidth = false;
+            if (status.getLayoutData() instanceof GridData data)
+            {
+                data.horizontalSpan = 1;
+                data.grabExcessHorizontalSpace = true;
+                data.widthHint = 450;
+            }
+            if (search.getLayoutData() instanceof GridData data)
+            {
+                data.horizontalSpan = 1;
+                data.grabExcessHorizontalSpace = false;
+                data.widthHint = 200;
+                data.minimumWidth = 100;
+            }
+            Label label = new Label(header, SWT.NONE);
+            label.setText("Проверка:"); //$NON-NLS-1$
+            CCombo selector = new CCombo(header, SWT.BORDER | SWT.FLAT | SWT.READ_ONLY);
+            // SearchBox использует курсив для приглашения «Поиск…».
+            // Шрифт значений и списка берём у строки панели, а не у приглашения.
+            selector.setFont(header.getFont());
+            selector.setBackground(search.getBackground());
+            // Цвет SearchBox при пустом поиске — цвет приглашения, не значения.
+            selector.setForeground(header.getForeground());
+            // Берём обычный цвет текста, а не серый цвет приглашения SearchBox.
+            if (Global.getField(search, "textColor") instanceof org.eclipse.swt.graphics.Color color) //$NON-NLS-1$
+                selector.setForeground(color);
+            state.checkTextColor = selector.getForeground();
+            state.checkMessageColor = Global.getField(search, "messageColor") instanceof org.eclipse.swt.graphics.Color color //$NON-NLS-1$
+                ? color : state.checkTextColor;
+            GridData selectorData = new GridData(SWT.FILL, SWT.FILL, false, false);
+            selectorData.widthHint = 240;
+            selector.setLayoutData(selectorData);
+            selector.setToolTipText(TooltipText.wrap(selector,
+                "Отбор по проверке. «Все проверки» снимает этот отбор." + Global.pluginSignForTooltip())); //$NON-NLS-1$
+            Canvas clear = new Canvas(selector, SWT.DOUBLE_BUFFERED);
+            clear.setBackground(search.getBackground());
+            clear.addPaintListener(event ->
+            {
+                paintSearchButton(clear, search, event.gc,
+                    state.checkUid != null ? "clearButtonImage" : "disabledClearButtonImage"); //$NON-NLS-1$ //$NON-NLS-2$
+            });
+            clear.setToolTipText(TooltipText.wrap(clear,
+                "Снять отбор по проверке" + Global.pluginSignForTooltip())); //$NON-NLS-1$
+            state.checkSelector = selector;
+            state.clearCheckCode = clear;
+            installCheckSelectorInteraction(view, state, search);
+            selector.addListener(SWT.Selection, event ->
+            {
+                int selected = selector.getSelectionIndex();
+                CheckUid uid = selected > 0 && selected <= state.checkChoices.size()
+                    ? state.checkChoices.get(selected - 1).uid() : null;
+                setCheckCodeFromSelector(view, uid);
+            });
+            clear.addListener(SWT.MouseUp, event ->
+            {
+                if (event.button == 1)
+                {
+                    Global.tempLog("check-problems", "inline check clear: " + state.checkId); //$NON-NLS-1$ //$NON-NLS-2$
+                    setCheckCodeFromSelector(view, null);
+                }
+            });
+            selector.add("Все проверки"); //$NON-NLS-1$
+            updateCheckSelectorValue(state);
+            header.requestLayout();
+            Global.tempLog("check-problems", "check selector installed view=" + identity(view)); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        /** Поля text/arrow/list/popup и порядок Resize подтверждены в исходнике SWT CCombo. */
+        private static void installCheckSelectorInteraction(IViewPart view, State state, SearchBox search)
+        {
+            CCombo selector = state.checkSelector;
+            // Нативный Button стрелки CCombo имеет собственную палитру Windows.
+            // Его поведение остаётся, а видимая кнопка рисует тот же ресурс, что SearchBox.
+            Canvas arrowFace = new Canvas(selector, SWT.DOUBLE_BUFFERED);
+            arrowFace.setBackground(search.getBackground());
+            arrowFace.setToolTipText(TooltipText.wrap(arrowFace,
+                "Выбрать проверку" + Global.pluginSignForTooltip())); //$NON-NLS-1$
+            arrowFace.addPaintListener(event ->
+            {
+                if (Boolean.TRUE.equals(arrowFace.getData("hot")) || selector.isFocusControl()) //$NON-NLS-1$
+                {
+                    Object painter = Global.getField(search, "borderPainter"); //$NON-NLS-1$
+                    if (Global.invoke(painter, "getBorderColor") instanceof org.eclipse.swt.graphics.Color color) //$NON-NLS-1$
+                    {
+                        event.gc.setBackground(color);
+                        var area = arrowFace.getClientArea();
+                        event.gc.fillRectangle(0, 1, area.width, Math.max(0, area.height - 1));
+                    }
+                }
+                paintSearchButton(arrowFace, search, event.gc, "downArrowImage"); //$NON-NLS-1$
+            });
+            arrowFace.addListener(SWT.MouseEnter, event ->
+            {
+                arrowFace.setData("hot", Boolean.TRUE); //$NON-NLS-1$
+                arrowFace.redraw();
+            });
+            arrowFace.addListener(SWT.MouseExit, event ->
+            {
+                arrowFace.setData("hot", null); //$NON-NLS-1$
+                arrowFace.redraw();
+            });
+            selector.addListener(SWT.FocusIn, event -> arrowFace.redraw());
+            selector.addListener(SWT.FocusOut, event -> arrowFace.redraw());
+            arrowFace.addListener(SWT.MouseUp, event ->
+            {
+                if (event.button != 1)
+                    return;
+                boolean opening = !selector.getListVisible();
+                if (opening)
+                    refreshCheckChoices(view, state);
+                selector.setFocus();
+                selector.setListVisible(opening);
+                Global.tempLog("check-problems", "search-style arrow opening=" + opening); //$NON-NLS-1$ //$NON-NLS-2$
+            });
+            Runnable positionClear = () ->
+            {
+                if (selector.isDisposed())
+                    return;
+                Object text = Global.getField(selector, "text"); //$NON-NLS-1$
+                Object arrow = Global.getField(selector, "arrow"); //$NON-NLS-1$
+                if (text instanceof Control field && arrow instanceof Control button)
+                {
+                    int height = selector.getClientArea().height;
+                    Object size = Global.getField(search, "buttonSize"); //$NON-NLS-1$
+                    int buttonWidth = size instanceof Integer width ? width : button.getBounds().width;
+                    int arrowX = Math.max(0, selector.getClientArea().width - buttonWidth);
+                    button.setBounds(arrowX, 0, buttonWidth, height);
+                    arrowFace.setBounds(button.getBounds());
+                    arrowFace.moveAbove(null);
+                    int x = Math.max(0, arrowX - buttonWidth);
+                    field.setBounds(0, 0, x, height);
+                    state.clearCheckCode.setBounds(x, 0, buttonWidth, height);
+                    state.clearCheckCode.moveAbove(null);
+                    Global.tempLog("check-problems", "inline check clear layout x=" + x + ", height=" + height); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                }
+            };
+            // Штатный Resize CCombo уже разложил text/arrow; оставляем место крестика.
+            selector.addListener(SWT.Resize, event -> positionClear.run());
+            positionClear.run();
+            org.eclipse.swt.widgets.Listener hover = event ->
+            {
+                if (event.widget != Global.getField(selector, "list") //$NON-NLS-1$
+                    || !(event.widget instanceof org.eclipse.swt.widgets.List list))
+                    return;
+                var area = list.getClientArea();
+                int index = event.x >= 0 && event.x < area.width && event.y >= 0 && event.y < area.height
+                    ? list.getTopIndex() + event.y / list.getItemHeight() : -1;
+                Global.tempLog("check-problems", "check list hover index=" + index + ", selected=" + state.checkId); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                if (index >= 0 && index < list.getItemCount())
+                    list.setSelection(index);
+                // setSelection не посылает Selection: наведение не меняет отбор.
+            };
+            org.eclipse.swt.widgets.Listener commit = event ->
+            {
+                if (event.widget != Global.getField(selector, "list") //$NON-NLS-1$
+                    || !(event.widget instanceof org.eclipse.swt.widgets.List list)
+                    || !(event.type == SWT.MouseUp && event.button == 1
+                        || event.type == SWT.KeyDown && event.character == SWT.CR))
+                    return;
+                int index = list.getSelectionIndex();
+                CheckUid uid = index > 0 && index <= state.checkChoices.size()
+                    ? state.checkChoices.get(index - 1).uid() : null;
+                Global.tempLog("check-problems", "check list commit index=" + index + ", uid=" + uid); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                // После подсветки наведением Windows не посылает Selection при
+                // клике в ту же строку. Подтверждаем её до штатного закрытия popup.
+                if (index >= 0 && !java.util.Objects.equals(uid, state.checkUid))
+                {
+                    org.eclipse.swt.widgets.Event selection = new org.eclipse.swt.widgets.Event();
+                    selection.time = event.time;
+                    selection.stateMask = event.stateMask;
+                    list.notifyListeners(SWT.Selection, selection);
+                }
+            };
+            org.eclipse.swt.widgets.Listener closed = event ->
+            {
+                if (event.widget != Global.getField(selector, "popup")) //$NON-NLS-1$
+                    return;
+                updateCheckSelectorValue(state);
+                Global.tempLog("check-problems", "check list closed selected=" + state.checkId); //$NON-NLS-1$ //$NON-NLS-2$
+            };
+            org.eclipse.swt.widgets.Listener opening = event ->
+            {
+                if (selector.getListVisible())
+                    return;
+                boolean arrow = event.type == SWT.Selection
+                    && event.widget == Global.getField(selector, "arrow"); //$NON-NLS-1$
+                boolean text = event.widget == Global.getField(selector, "text") //$NON-NLS-1$
+                    && (event.type == SWT.MouseDown && event.button == 1
+                        || event.type == SWT.KeyDown && (event.stateMask & SWT.ALT) != 0
+                            && (event.keyCode == SWT.ARROW_UP || event.keyCode == SWT.ARROW_DOWN));
+                if (arrow || text)
+                    refreshCheckChoices(view, state);
+            };
+            Display display = selector.getDisplay();
+            display.addFilter(SWT.MouseMove, hover);
+            display.addFilter(SWT.MouseUp, commit);
+            display.addFilter(SWT.KeyDown, commit);
+            display.addFilter(SWT.Hide, closed);
+            // До dropDown(): список и его размеры готовы к первому кадру popup.
+            display.addFilter(SWT.Selection, opening);
+            display.addFilter(SWT.MouseDown, opening);
+            display.addFilter(SWT.KeyDown, opening);
+            selector.addDisposeListener(event ->
+            {
+                display.removeFilter(SWT.MouseMove, hover);
+                display.removeFilter(SWT.MouseUp, commit);
+                display.removeFilter(SWT.KeyDown, commit);
+                display.removeFilter(SWT.Hide, closed);
+                display.removeFilter(SWT.Selection, opening);
+                display.removeFilter(SWT.MouseDown, opening);
+                display.removeFilter(SWT.KeyDown, opening);
+            });
+        }
+
+        /** Ресурсы принадлежат SearchBox: повторно используем их, не создаём и не освобождаем. */
+        private static void paintSearchButton(Canvas button, SearchBox search,
+            org.eclipse.swt.graphics.GC gc, String imageField)
+        {
+            if (Global.getField(search, imageField) instanceof org.eclipse.swt.graphics.Image image
+                && !image.isDisposed())
+            {
+                var area = button.getClientArea();
+                var bounds = image.getBounds();
+                gc.drawImage(image, (area.width - bounds.width) / 2, (area.height - bounds.height) / 2);
+            }
+        }
+
+        private static SearchBox findProblemSearchBox(Composite parent)
+        {
+            for (Control child : parent.getChildren())
+            {
+                if (child instanceof SearchBox search)
+                    return search;
+                if (child instanceof Composite nested)
+                {
+                    SearchBox found = findProblemSearchBox(nested);
+                    if (found != null)
+                        return found;
+                }
+            }
+            return null;
+        }
+
+        /** Считаем только перед раскрытием и без нашего отбора по выбранной проверке. */
+        private static void refreshCheckChoices(IViewPart view, State state)
+        {
+            if (state.checkSelector == null || state.checkSelector.isDisposed())
+                return;
+            ICheckRepository checks = Global.getOsgiService(ICheckRepository.class);
+            List<CheckChoice> choices = new java.util.ArrayList<>();
+            try
+            {
+                if (checks == null)
+                    throw new IllegalStateException("Служба проверок недоступна"); //$NON-NLS-1$
+                Object result = Global.invoke(view, "getMarkerFilter"); //$NON-NLS-1$
+                Object readerValue = Global.getField(view, "markerReader"); //$NON-NLS-1$
+                if (!(result instanceof MarkerFilter filter) || !(readerValue instanceof IMarkerReader reader))
+                    throw new IllegalStateException("Панель проблем ещё не готова"); //$NON-NLS-1$
+                if (Proxy.isProxyClass(reader.getClass())
+                    && Proxy.getInvocationHandler(reader) instanceof ReaderTap tap)
+                    reader = tap.origin;
+                restoreModulePaths(view, filter);
+                var descriptions = checks.getChecksWithDescriptions();
+                Map<CheckUid, Long> counts = new LinkedHashMap<>();
+                Set<Object> projects = filter.getValues(MarkerIndex.PROJECT);
+                Global.tempLog("check-problems", "check list count start filter=" + filter); //$NON-NLS-1$ //$NON-NLS-2$
+                for (IProject project : ResourcesPlugin.getWorkspace().getRoot().getProjects())
+                {
+                    if (!project.isOpen() || !projects.isEmpty() && !projects.contains(project))
+                        continue;
+                    MarkerFilter projectFilter = forCheckCountProject(filter, project);
+                    int groupLimit = Math.max(1, descriptions.size() + 1);
+                    var groups = reader.getGroupInfos(MarkerIndex.CHECK_ID, groupLimit, projectFilter);
+                    while (groups.size() == groupLimit)
+                    {
+                        groupLimit = Math.multiplyExact(groupLimit, 2);
+                        groups = reader.getGroupInfos(MarkerIndex.CHECK_ID, groupLimit, projectFilter);
+                    }
+                    for (var group : groups)
+                    {
+                        String code = group.getRepresentative().getCheckId();
+                        CheckUid uid = code != null ? checks.getUidForShortUid(code, project) : null;
+                        var internal = ValidationChecksFilterHook.getInternalBslCheck(code);
+                        if (uid == null && internal != null)
+                            uid = internal.getId();
+                        Global.tempLog("check-problems", "check list count project=" + project.getName() //$NON-NLS-1$ //$NON-NLS-2$
+                            + ", code=" + code + ", uid=" + uid + ", count=" + group.getSize()); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        if (uid != null && group.getSize() > 0)
+                            counts.merge(uid, (long)group.getSize(), Long::sum);
+                    }
+                }
+                counts.forEach((uid, count) ->
+                {
+                    var description = descriptions.get(uid);
+                    var internal = ValidationChecksFilterHook.getInternalBslCheck(uid.getCheckId());
+                    String title = description != null ? description.getTitle()
+                        : internal != null ? internal.getTitle() : uid.getCheckId();
+                    choices.add(new CheckChoice(uid, title + " [" + uid.getCheckId() + "] — " + count)); //$NON-NLS-1$ //$NON-NLS-2$
+                });
+            }
+            catch (RuntimeException error)
+            {
+                Global.tempLog("check-problems", "check choices failed: " + error); //$NON-NLS-1$ //$NON-NLS-2$
+                ToastNotification.show("Отбор по проверке", "Не удалось посчитать проблемы: " + error.getMessage(), 8_000); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            choices.sort(java.util.Comparator.comparing(CheckChoice::label, String.CASE_INSENSITIVE_ORDER));
+            boolean changed = !state.checkChoices.equals(choices) || state.checkSelector.getItemCount() == 0;
+            Global.tempLog("check-problems", "check choices refresh changed=" + changed + ", code=" + state.checkId //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + ", size=" + choices.size() + ", repository=" + identity(checks)); //$NON-NLS-1$ //$NON-NLS-2$
+            if (changed)
+            {
+                state.checkChoices = List.copyOf(choices);
+                state.checkSelector.removeAll();
+                state.checkSelector.add("Все проверки"); //$NON-NLS-1$
+                for (CheckChoice choice : choices)
+                    state.checkSelector.add(choice.label());
+            }
+            updateCheckSelectorValue(state);
+        }
+
+        private static MarkerFilter forCheckCountProject(MarkerFilter source, IProject project)
+        {
+            MarkerFilter filter = MarkerFilter.createProjectFilter(project).setSearchPattern(source.getSearchPattern());
+            for (MarkerIndex index : source.getIndexes())
+            {
+                if (index != MarkerIndex.PROJECT)
+                    for (Object value : source.getValues(index))
+                        filter.addValue(index, value);
+                source.getConditions(index).getValues().forEach((value, dependent) ->
+                {
+                    if (index != MarkerIndex.PROJECT || project.equals(value))
+                        dependent.indexes().forEach(dependentIndex ->
+                        {
+                            for (Object dependentValue : dependent.getValues(dependentIndex))
+                                filter.addCondition(index, value, dependentIndex, dependentValue);
+                        });
+                });
+            }
+            return filter;
+        }
+
+        /** Обновление закрытого поля не запускает подсчёт и не добавляет нулевые строки в список. */
+        private static void updateCheckSelectorValue(State state)
+        {
+            if (state.checkSelector == null || state.checkSelector.isDisposed())
+                return;
+            int selected = state.checkUid == null ? 0 : -1;
+            for (int i = 0; i < state.checkChoices.size(); i++)
+            {
+                CheckChoice choice = state.checkChoices.get(i);
+                if (choice.uid().equals(state.checkUid))
+                    selected = i + 1;
+            }
+            if (selected >= 0)
+                state.checkSelector.select(selected);
+            else
+            {
+                state.checkSelector.deselectAll();
+                ICheckRepository checks = Global.getOsgiService(ICheckRepository.class);
+                var description = checks != null ? checks.getChecksWithDescriptions().get(state.checkUid) : null;
+                var internal = ValidationChecksFilterHook.getInternalBslCheck(state.checkUid.getCheckId());
+                String title = description != null ? description.getTitle()
+                    : internal != null ? internal.getTitle() : state.checkUid.getCheckId();
+                state.checkSelector.setText(title + " [" + state.checkUid.getCheckId() + "]"); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            // Меняем только закрытое поле: строки выпадающего списка остаются обычного цвета.
+            if (Global.getField(state.checkSelector, "text") instanceof Control field) //$NON-NLS-1$
+                field.setForeground(state.checkUid == null ? state.checkMessageColor : state.checkTextColor);
+            state.clearCheckCode.setEnabled(state.checkId != null);
+            // Canvas не меняет нарисованное изображение при setEnabled(): обновляем явно.
+            state.clearCheckCode.redraw();
+        }
+
+        private static void setCheckCodeFromSelector(IViewPart view, CheckUid code)
+        {
+            try
+            {
+                setCheckCode(view, code);
+            }
+            catch (RuntimeException error)
+            {
+                Global.tempLog("check-problems", "check selector failed: " + error); //$NON-NLS-1$ //$NON-NLS-2$
+                ToastNotification.show("Отбор по проверке", error.getMessage(), 8_000); //$NON-NLS-1$
+            }
+        }
+
+        /**
+         * LazyTreeNode получает свой читатель напрямую из V8UiValidationPlugin,
+         * в обход markerReader панели. Его отбор берётся из RootNode.treeFilter.
+         * Поле и unload() подтверждены в LazyProblemView$RootNode / LazyTreeNode.
+         */
+        private static void applyRootCheckCode(IViewPart view, State state, boolean force)
+        {
+            TreeViewer viewer = view.getAdapter(TreeViewer.class);
+            Object root = viewer != null ? viewer.getInput() : null;
+            Global.tempLog("check-problems", "root filter view=" + identity(view) + ", root=" + identity(root) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + ", code=" + state.checkId + ", applied=" + state.checkCodeRootApplied + ", force=" + force); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            if (viewer == null || viewer.getTree().isDisposed() || root == null
+                || Global.getField(root, "this$0") != view) //$NON-NLS-1$
+                return;
+            if (root != state.checkCodeRoot)
+            {
+                Object source = Global.getField(root, "treeFilter"); //$NON-NLS-1$
+                if (!(source instanceof MarkerFilter filter))
+                    return;
+                state.checkCodeRoot = root;
+                state.checkCodeRootSource = filter;
+                state.checkCodeRootApplied = null;
+            }
+            String checkId = state.checkId;
+            if (java.util.Objects.equals(checkId, state.checkCodeRootApplied)
+                && (!force || checkId == null))
+                return;
+            MarkerFilter wanted = checkId != null ? applyCheckCode(state.checkCodeRootSource, state.checkCodes)
+                : state.checkCodeRootSource;
+            boolean installed = Global.setFieldForce(root, "treeFilter", wanted); //$NON-NLS-1$
+            Global.tempLog("check-problems", "root filter installed=" + installed + ", filter=" + wanted); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            if (!installed)
+                return;
+            // Сохраняем исходный фильтр отдельно: смена A → B и снятие отбора
+            // не пересекаются с кодом, ранее установленным в этом же корне.
+            state.checkCodeRootApplied = checkId;
+            boolean unloaded = Global.invokeVoid(root, "unload"); //$NON-NLS-1$
+            Global.tempLog("check-problems", "root unloaded=" + unloaded + ", root=" + identity(root)); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            if (unloaded)
+            {
+                // Штатный LazyTreeNodeContentProvider сбрасывает виртуальные строки
+                // через setHasChildren(false), затем заново запрашивает их число.
+                // refresh() сохраняет старые TreeItem и их уже загруженные узлы.
+                viewer.setHasChildren(root, false);
+                boolean hasChildren = Boolean.TRUE.equals(Global.invoke(root, "hasChildren")); //$NON-NLS-1$
+                viewer.setHasChildren(root, hasChildren);
+                Global.tempLog("check-problems", "root rows reset hasChildren=" + hasChildren //$NON-NLS-1$ //$NON-NLS-2$
+                    + ", effectiveFilter=" + Global.invoke(root, "getTreeFilter") //$NON-NLS-1$ //$NON-NLS-2$
+                    + ", items=" + viewer.getTree().getItemCount()); //$NON-NLS-1$
+            }
+        }
+
+        static void setCheckCode(IViewPart view, CheckUid uid)
+        {
+            String checkId = uid != null ? uid.toString() : null;
+            State state = stateOf(view);
+            Global.tempLog("check-problems", "setCheckCode view=" + identity(view) //$NON-NLS-1$ //$NON-NLS-2$
+                + ", previous=" + (state != null ? state.checkId : "no-state") + ", requested=" + checkId); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            if (state == null)
+                throw new IllegalStateException("Панель проблем ещё не готова"); //$NON-NLS-1$
+            installCheckSelector(view, state);
+            if (checkId != null && (state.checkSelector == null || state.checkSelector.isDisposed()))
+                throw new IllegalStateException("Поле отбора по проверке недоступно"); //$NON-NLS-1$
+            // Снятие отбора не должно зависеть от подключения читателя:
+            // обёртка читает checkId при каждом запросе, null снимает ограничение сразу.
+            if (checkId == null)
+            {
+                state.checkId = null;
+                state.checkUid = null;
+                state.checkCodes = Map.of();
+            }
+            else
+                wrapMarkerManager(view);
+            Object reader = Global.getField(view, "markerReader"); //$NON-NLS-1$
+            if (checkId != null && (reader == null || !Proxy.isProxyClass(reader.getClass())
+                || !(Proxy.getInvocationHandler(reader) instanceof ReaderTap)))
+                throw new IllegalStateException("Отбор панели проблем не подключён"); //$NON-NLS-1$
+            Object updateListener = Global.getField(view, "updateListener"); //$NON-NLS-1$
+            if (checkId != null && !(updateListener instanceof DelayedMarkerUpdateListener))
+                throw new IllegalStateException("Не удалось обновить панель проблем"); //$NON-NLS-1$
+            Map<IProject, String> checkCodes = new LinkedHashMap<>();
+            if (uid != null)
+            {
+                if (ValidationChecksFilterHook.isInternalBslCheckUid(uid))
+                {
+                    // Внутренний код одинаков во всех проектах; короткого UID в репозитории EDT нет.
+                    for (IProject project : ResourcesPlugin.getWorkspace().getRoot().getProjects())
+                        checkCodes.put(project, uid.getCheckId());
+                }
+                else
+                {
+                    ICheckRepository checks = Global.getOsgiService(ICheckRepository.class);
+                    if (checks == null)
+                        throw new IllegalStateException("Служба проверок недоступна"); //$NON-NLS-1$
+                    checks.getShortUid(uid).forEach((project, code) ->
+                        checkCodes.put(project.getWorkspaceProject(), code));
+                }
+            }
+            boolean mappingChanged = !state.checkCodes.equals(checkCodes);
+            state.checkCodes = Map.copyOf(checkCodes);
+            state.checkUid = uid;
+            state.checkId = checkId;
+            Global.tempLog("check-problems", "selected check=" + uid + ", project codes=" + checkCodes); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            applyRootCheckCode(view, state, mappingChanged);
+            updateCheckSelectorValue(state);
+            if (updateListener instanceof DelayedMarkerUpdateListener listener)
+                listener.scheduleUpdateJob(true);
+            Global.tempLog("check-problems", "setCheckCode scheduled view=" + identity(view) + ", code=" + checkId); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        }
+
+        /** Тот же фильтр используется для итогов и всех уровней дерева. */
+        private static void applyCheckCode(IViewPart view, Object[] args)
+        {
+            State state = stateOf(view);
+            String checkId = state != null ? state.checkId : null;
+            if (checkId == null || args == null)
+                return;
+            for (int index = 0; index < args.length; index++)
+            {
+                if (args[index] instanceof MarkerFilter filter)
+                    args[index] = applyCheckCode(filter, state.checkCodes);
+                else if (args[index] instanceof MarkerFilter[] filters)
+                {
+                    MarkerFilter[] narrowed = filters.clone();
+                    for (int position = 0; position < narrowed.length; position++)
+                        narrowed[position] = applyCheckCode(narrowed[position], state.checkCodes);
+                    args[index] = narrowed;
+                }
+            }
+        }
+
+        private static MarkerFilter applyCheckCode(MarkerFilter filter, Map<IProject, String> projectCodes)
+        {
+            if (filter == null)
+                return null;
+            Set<Object> codes = filter.getValues(MarkerIndex.CHECK_ID);
+            Set<Object> projects = filter.getValues(MarkerIndex.PROJECT);
+            // Фильтры EDT живут в узлах и отложенных запросах дерева. Нельзя добавлять
+            // в них код на месте: прежний код останется после смены/снятия нашего отбора.
+            MarkerFilter narrowed = new MarkerFilter().setSearchPattern(filter.getSearchPattern());
+            for (MarkerIndex index : filter.getIndexes())
+            {
+                if (index != MarkerIndex.CHECK_ID)
+                    for (Object value : filter.getValues(index))
+                        narrowed.addValue(index, value);
+                MarkerFilter.Conditions conditions = filter.getConditions(index);
+                conditions.getValues().forEach((value, dependent) ->
+                {
+                    if (index != MarkerIndex.CHECK_ID)
+                        dependent.indexes().forEach(dependentIndex ->
+                        {
+                            for (Object dependentValue : dependent.getValues(dependentIndex))
+                                narrowed.addCondition(index, value, dependentIndex, dependentValue);
+                        });
+                });
+            }
+            // ShortUid — локальный код проекта, а не идентификатор проверки.
+            // Условие связывает каждый код с его проектом: совпавший SUxx другого
+            // проекта не подмешивает чужую проверку. API и пары подтверждены в QueryBuilder.
+            boolean matched = false;
+            for (Map.Entry<IProject, String> entry : projectCodes.entrySet())
+            {
+                IProject project = entry.getKey();
+                String code = entry.getValue();
+                if ((!codes.isEmpty() && !codes.contains(code))
+                    || (!projects.isEmpty() && !projects.contains(project)))
+                    continue;
+                var dependent = filter.getConditions(MarkerIndex.CHECK_ID).getValues().get(code);
+                if (dependent != null && !dependent.getValues(MarkerIndex.PROJECT).isEmpty()
+                    && !dependent.getValues(MarkerIndex.PROJECT).contains(project))
+                    continue;
+                narrowed.addCondition(MarkerIndex.CHECK_ID, code, MarkerIndex.PROJECT, project);
+                matched = true;
+            }
+            return matched ? narrowed : MarkerFilter.createAlwaysFalseFilter();
         }
 
         static void setWaitingForIndex(IViewPart view, boolean waiting)
@@ -3450,9 +4332,12 @@ public final class ProblemViewHook implements IStartup
             {
                 if (method.getDeclaringClass() == Object.class)
                     return method.invoke(origin, args);
+                Global.tempLog("check-problems", "manager begin view=" + identity(view) //$NON-NLS-1$ //$NON-NLS-2$
+                    + ", method=" + method.getName() + ", origin=" + tapIdentity(origin)); //$NON-NLS-1$ //$NON-NLS-2$
                 try
                 {
                     Object result = method.invoke(origin, args == null ? new Object[0] : args);
+                    Global.tempLog("check-problems", "manager result method=" + method.getName() + ", result=" + tapIdentity(result)); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                     if (result instanceof IMarkerReader reader
                         && !(Proxy.isProxyClass(reader.getClass())
                             && Proxy.getInvocationHandler(reader) instanceof ReaderTap))
@@ -3464,6 +4349,7 @@ public final class ProblemViewHook implements IStartup
                 }
                 catch (InvocationTargetException e)
                 {
+                    Global.tempLog("check-problems", "manager failed method=" + method.getName() + ": " + e.getCause()); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                     Throwable cause = e.getCause();
                     if (cause instanceof RuntimeException runtime)
                         throw runtime;
@@ -3492,13 +4378,56 @@ public final class ProblemViewHook implements IStartup
             {
                 if (method.getDeclaringClass() == Object.class)
                     return method.invoke(origin, args);
+                Global.tempLog("check-problems", "reader begin view=" + identity(view) //$NON-NLS-1$ //$NON-NLS-2$
+                    + ", method=" + method.getName() + ", origin=" + tapIdentity(origin) //$NON-NLS-1$ //$NON-NLS-2$
+                    + ", filters=" + filterDescription(args)); //$NON-NLS-1$
                 try
                 {
+                    MarkerFilter[] nativeFilters = "getMarkerInfo".equals(method.getName()) //$NON-NLS-1$
+                        && args != null && args.length > 0 && args[0] instanceof MarkerFilter[] filters
+                            ? filters.clone() : null;
                     if (argsContainMarkerFilter(args))
+                    {
                         restoreModulePaths(view, args);
+                        applyCheckCode(view, args);
+                    }
+                    Global.tempLog("check-problems", "reader query method=" + method.getName() //$NON-NLS-1$ //$NON-NLS-2$
+                        + ", filters=" + filterDescription(args)); //$NON-NLS-1$
                     Object result = method.invoke(origin, args == null ? new Object[0] : args);
+                    Global.tempLog("check-problems", "reader result method=" + method.getName() //$NON-NLS-1$ //$NON-NLS-2$
+                        + ", result=" + identity(result) //$NON-NLS-1$
+                        + (result instanceof IMarkerInfo info ? ", count=" + info.getTotalCount() : "")); //$NON-NLS-1$ //$NON-NLS-2$
                     if ("getMarkerInfo".equals(method.getName()) && result instanceof IMarkerInfo info) //$NON-NLS-1$
                     {
+                        State state = stateOf(view);
+                        String code = state != null ? state.checkId : null;
+                        if (code != null && nativeFilters != null)
+                        {
+                            // Диагностика читает тот же индекс напрямую, без ReaderTap:
+                            // отличаем отсутствие кода в индексе от пересечения с областью.
+                            try
+                            {
+                                Global.tempLog("check-problems", "index diagnostic check=" + code //$NON-NLS-1$ //$NON-NLS-2$
+                                    + ", nativeCount=" + origin.getMarkerInfo(nativeFilters).getTotalCount()); //$NON-NLS-1$
+                                for (var entry : state.checkCodes.entrySet())
+                                {
+                                    MarkerFilter projectFilter = MarkerFilter.createProjectFilter(entry.getKey());
+                                    MarkerFilter selected = MarkerFilter.createProjectFilter(entry.getKey())
+                                        .addValue(MarkerIndex.CHECK_ID, entry.getValue());
+                                    Global.tempLog("check-problems", "index diagnostic project=" + entry.getKey().getName() //$NON-NLS-1$ //$NON-NLS-2$
+                                        + ", code=" + entry.getValue() + ", selectedCount=" //$NON-NLS-1$ //$NON-NLS-2$
+                                        + origin.getMarkerInfo(selected).getTotalCount());
+                                    Global.tempLog("check-problems", "index diagnostic storedCodes=" //$NON-NLS-1$ //$NON-NLS-2$
+                                        + origin.getGroupInfos(MarkerIndex.CHECK_ID, 1000, projectFilter)
+                                            .stream().map(group -> group.getRepresentative().getCheckId()
+                                                + "=" + group.getSize()).collect(Collectors.joining(","))); //$NON-NLS-1$ //$NON-NLS-2$
+                                }
+                            }
+                            catch (RuntimeException diagnosticError)
+                            {
+                                Global.tempLog("check-problems", "index diagnostic failed: " + diagnosticError); //$NON-NLS-1$ //$NON-NLS-2$
+                            }
+                        }
                         Object filterArg = args != null && args.length > 0 ? args[0] : null;
                         boolean empty = info.getTotalCount() == 0;
                         rememberGoodFilter(view, filterArg, empty);
@@ -3508,6 +4437,7 @@ public final class ProblemViewHook implements IStartup
                 }
                 catch (InvocationTargetException e)
                 {
+                    Global.tempLog("check-problems", "reader failed method=" + method.getName() + ": " + e.getCause()); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                     Throwable cause = e.getCause();
                     if (cause instanceof RuntimeException runtime)
                         throw runtime;

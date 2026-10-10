@@ -518,9 +518,6 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
         @Override
         public void labelProviderChanged(LabelProviderChangedEvent event)
         {
-            ProblemIndicatorDebug.log("title decorator received editor=" + ProblemIndicatorDebug.id(editor)
-                + " source=" + ProblemIndicatorDebug.id(event.getSource())
-                + " elements=" + ProblemIndicatorDebug.elements(event.getElements()));
             Display display = Display.getCurrent();
             if (display == null)
             {
@@ -537,14 +534,12 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
         {
             if (editor.getSite() == null)
             {
-                ProblemIndicatorDebug.log("title skipped no-site editor=" + ProblemIndicatorDebug.id(editor));
                 return;
             }
             // Подсказка формы читает BM. При закрытии EDT деактивация проекта держит новые
             // транзакции, и UI-поток встал бы в ожидание (issue 530); обновлять вкладку незачем.
             if (PlatformUI.getWorkbench().isClosing())
             {
-                ProblemIndicatorDebug.log("title skipped closing editor=" + ProblemIndicatorDebug.id(editor));
                 return;
             }
             String nowTitle;
@@ -556,7 +551,6 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
             }
             catch (RuntimeException ex)
             {
-                Global.tempLogException("problem-indicators", "title read editor=" + ProblemIndicatorDebug.id(editor), ex);
                 return;
             }
             boolean titleChanged = lastTitle == null || !nowTitle.equals(lastTitle);
@@ -564,12 +558,6 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
             boolean drop = isTransientOverlayDrop(editor, lastImage, nowImage);
             boolean targeted = eventTargetsEditor(event, editor);
             boolean liveOverlay = isLiveProblemOverlay(editor, nowImage);
-            ProblemIndicatorDebug.log("title decision editor=" + ProblemIndicatorDebug.id(editor)
-                + " title=" + nowTitle + " titleChanged=" + titleChanged + " imageChanged=" + imageChanged
-                + " drop=" + drop + " targeted=" + targeted + " live=" + liveOverlay
-                + " innerOverlay=" + MdEditorTabsHook.innerTabsShowProblemOverlay(editor)
-                + " previous=" + ProblemIndicatorDebug.image(lastImage) + " now=" + ProblemIndicatorDebug.image(nowImage)
-                + " held=" + ProblemIndicatorDebug.image(heldWorkbenchOverlay(editor)));
             if (!titleChanged && !imageChanged)
             {
                 if (liveOverlay)
@@ -643,16 +631,12 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
             return;
         }
         HELD_WORKBENCH_OVERLAY.put(editor, overlay);
-        ProblemIndicatorDebug.log("workbench hold editor=" + ProblemIndicatorDebug.id(editor)
-            + " image=" + ProblemIndicatorDebug.image(overlay));
     }
 
     private static void clearWorkbenchOverlay(IEditorPart editor)
     {
         if (editor != null)
         {
-            ProblemIndicatorDebug.log("workbench clear-held editor=" + ProblemIndicatorDebug.id(editor)
-                + " previous=" + ProblemIndicatorDebug.image(HELD_WORKBENCH_OVERLAY.get(editor)));
             HELD_WORKBENCH_OVERLAY.remove(editor);
         }
     }

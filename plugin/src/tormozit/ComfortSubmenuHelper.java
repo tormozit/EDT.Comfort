@@ -406,7 +406,7 @@ final class ComfortSubmenuHelper
         if (menu == null || menu.isDisposed())
             return;
         menu.setData(ROOT_COMMANDS_MARKER, Boolean.TRUE);
-        menu.setData(SUBMENU_MARKER, Boolean.TRUE);
+        // Корень меню не является подменю «Комфорт»: подпись в подсказках сохраняется.
         // Меню могло получить каскадный пункт до подключения страницы; следующие наполнители уже используют корень.
         for (MenuItem item : menu.getItems())
             if ((item.getStyle() & SWT.CASCADE) != 0 && Boolean.TRUE.equals(item.getData(SUBMENU_MARKER)))

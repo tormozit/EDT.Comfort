@@ -5,10 +5,13 @@ import java.util.Arrays;
 import java.util.EnumMap;
 import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.WeakHashMap;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
+import java.text.Collator;
 import java.util.function.Function;
 import java.util.function.Predicate;
 
@@ -22,10 +25,12 @@ import org.eclipse.jface.preference.PreferenceDialog;
 import org.eclipse.jface.viewers.ArrayContentProvider;
 import org.eclipse.jface.viewers.CellLabelProvider;
 import org.eclipse.jface.viewers.CheckboxTableViewer;
+import org.eclipse.jface.viewers.CheckboxTreeViewer;
 import org.eclipse.jface.viewers.ColumnLabelProvider;
 import org.eclipse.jface.viewers.ColumnPixelData;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider.IStyledLabelProvider;
 import org.eclipse.jface.viewers.ICheckStateProvider;
+import org.eclipse.jface.viewers.ILabelProvider;
 import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.jface.viewers.ITreeContentProvider;
 import org.eclipse.jface.viewers.LabelProvider;
@@ -36,6 +41,7 @@ import org.eclipse.jface.viewers.TableViewerColumn;
 import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.jface.viewers.TreeViewerColumn;
 import org.eclipse.jface.viewers.Viewer;
+import org.eclipse.jface.viewers.ViewerCell;
 import org.eclipse.jface.viewers.ViewerFilter;
 import org.eclipse.emf.common.util.Diagnostic;
 import org.eclipse.swt.SWT;
@@ -68,8 +74,11 @@ import org.eclipse.swt.widgets.Text;
 import org.eclipse.swt.widgets.ToolBar;
 import org.eclipse.swt.widgets.ToolItem;
 import org.eclipse.swt.widgets.Tree;
+import org.eclipse.swt.widgets.TreeItem;
 import org.eclipse.swt.widgets.Widget;
 import org.eclipse.ui.IStartup;
+import org.eclipse.ui.ISharedImages;
+import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.dialogs.PreferencesUtil;
 import org.eclipse.ui.editors.text.EditorsUI;
 import org.eclipse.ui.texteditor.AnnotationPreference;
@@ -151,6 +160,8 @@ public final class ValidationChecksFilterHook implements IStartup
         "com._1c.g5.v8.dt.internal.ui.validation.ValidationPreferencePage"; //$NON-NLS-1$
     /** Новое название страницы (issue 401): «Валидация» → «Проверки». */
     static final String PAGE_TITLE = "Проверки"; //$NON-NLS-1$
+    /** Цель открытия для нашего хука; штатный applyData EDT этот ключ не обрабатывает. */
+    static final String OPEN_CHECK_DATA_KEY = "tormozit.validationCheckToOpen"; //$NON-NLS-1$
     private static final String PATCHED_KEY = "tormozit.validationChecksFilterPatched"; //$NON-NLS-1$
     private static final String PAGE_COPY_ROOT_KEY = "tormozit.validationPageCopyRoot"; //$NON-NLS-1$
     private static final String COPY_WIRED_KEY = "tormozit.validationCopyWired"; //$NON-NLS-1$
@@ -222,10 +233,10 @@ public final class ValidationChecksFilterHook implements IStartup
 
         Listener listener = event ->
         {
-            if (!ComfortSettings.isReplaceListFiltersEnabled())
-                return;
             if (event.widget instanceof Menu menu)
             {
+                if (!ComfortSettings.isReplaceListFiltersEnabled())
+                    return;
                 patchTypeMenu(menu);
                 patchCheckReferencesMenu(menu);
                 return;
@@ -353,6 +364,15 @@ public final class ValidationChecksFilterHook implements IStartup
                 Debug.log("tryPatch WAIT: checksViewer not ready"); //$NON-NLS-1$
                 return false;
             }
+            // Назначение строки при открытии не зависит от замены фильтров:
+            // команды передают цель только сюда, а не в штатный applyData EDT.
+            InternalBslChecks.install(control, treeViewer);
+            if (!ComfortSettings.isReplaceListFiltersEnabled())
+            {
+                InternalBslChecks.installDetails(control);
+                ChecksSelectionMemory.install(control, treeViewer, dialog);
+                return true;
+            }
             if (Boolean.TRUE.equals(treeViewer.getControl().getData(PATCHED_KEY)))
                 return true;
 
@@ -378,7 +398,7 @@ public final class ValidationChecksFilterHook implements IStartup
             ChecksTablePane.install(control, treeViewer, filter, pageControl);
             registerCheckReferencesMenu(control, treeViewer.getTree(), () ->
                 treeViewer.getStructuredSelection().getFirstElement() instanceof IChecksTreeNode node
-                    && node.getValue() instanceof ICheckSettings settings ? settings : null);
+                    ? node.getValue() : null);
             installBuiltinCheckDescriptions(control, pageControl);
             TreeExpander.installWhitelisted(TreeExpander.Target.VALIDATION_CHECKS, treeViewer);
             installAutoExpandOnReset(treeViewer, filter);
@@ -396,7 +416,8 @@ public final class ValidationChecksFilterHook implements IStartup
 
             applyPageTitle(page, dialog);
             compactSettingsRow(control);
-
+            InternalBslChecks.installDetails(control);
+            ChecksSelectionMemory.install(control, treeViewer, dialog);
 
             openPages++;
             treeViewer.getControl().addDisposeListener(event -> openPages--);
@@ -419,10 +440,10 @@ public final class ValidationChecksFilterHook implements IStartup
     private static final Map<Control, CheckReferencesMenu> CHECK_REFERENCES_MENUS = new WeakHashMap<>();
 
     private record CheckReferencesMenu(ChecksViewerControl control,
-        java.util.function.Supplier<ICheckSettings> selection) {}
+        java.util.function.Supplier<INamedElement> selection) {}
 
     private static void registerCheckReferencesMenu(ChecksViewerControl control, Control widget,
-        java.util.function.Supplier<ICheckSettings> selection)
+        java.util.function.Supplier<INamedElement> selection)
     {
         CHECK_REFERENCES_MENUS.put(widget, new CheckReferencesMenu(control, selection));
         widget.addDisposeListener(event -> CHECK_REFERENCES_MENUS.remove(widget));
@@ -455,16 +476,39 @@ public final class ValidationChecksFilterHook implements IStartup
                     "Найти эту проверку в настройках подавления проверок текущего проекта"); //$NON-NLS-1$
                 item.addListener(SWT.Selection, event ->
                 {
-                    ICheckSettings settings = context.selection().get();
+                    INamedElement settings = context.selection().get();
                     CheckUid uid = settings != null ? settings.getId() : null;
                     if (uid != null)
                         SuppressionReferencesSearch.findReferences(
                             context.control().getChecksViewerProvider().getProject(), uid);
                 });
             }
-            ICheckSettings selected = context.selection().get();
-            item.setEnabled(selected != null && selected.getId() != null
+            INamedElement selected = context.selection().get();
+            item.setEnabled(selected instanceof ICheckSettings && selected.getId() != null
                 && context.control().getChecksViewerProvider().getProject() != null);
+            String problemsMarker = "tormozit.checkProblems"; //$NON-NLS-1$
+            MenuItem problemsItem = null;
+            for (MenuItem candidate : menu.getItems())
+                if (Boolean.TRUE.equals(candidate.getData(problemsMarker)))
+                    problemsItem = candidate;
+            if (problemsItem == null)
+            {
+                problemsItem = new MenuItem(menu, SWT.PUSH, 0);
+                problemsItem.setData(problemsMarker, Boolean.TRUE);
+                problemsItem.setData(ComfortSubmenuHelper.FIRST_ITEM_MARKER, Boolean.TRUE);
+                problemsItem.setText("Найти проблемы"); //$NON-NLS-1$
+                ComfortSubmenuHelper.setMenuItemTooltip(problemsItem,
+                    "Открыть панель проблем конфигурации и установить отбор по коду этой проверки"); //$NON-NLS-1$
+                problemsItem.addListener(SWT.Selection, event ->
+                {
+                    INamedElement settings = context.selection().get();
+                    if (settings != null && settings.getId() != null)
+                        ProblemViewHook.showForCheck(settings.getId(),
+                            context.control().getChecksViewerProvider().getProject());
+                });
+            }
+            problemsItem.setEnabled(selected != null && selected.getId() != null
+                && (selected instanceof ICheckSettings || isInternalBslCheckUid(selected.getId())));
             return;
         }
     }
@@ -744,6 +788,10 @@ public final class ValidationChecksFilterHook implements IStartup
                 return;
             if (icon.getData(MODULE_SEVERITY_KEY) instanceof IssueSeverity severity)
                 openModuleAnnotationSettings(icon.getShell(), severity);
+            else if (icon.getData(MODULE_SEVERITY_KEY) instanceof ModuleAnnotation annotation)
+            {
+                openModuleAnnotationSettings(icon.getShell(), annotation);
+            }
         });
     }
 
@@ -762,7 +810,12 @@ public final class ValidationChecksFilterHook implements IStartup
      */
     private static void openModuleAnnotationSettings(Shell shell, IssueSeverity severity)
     {
-        String annotationType = switch (moduleAnnotation(severity))
+        openModuleAnnotationSettings(shell, moduleAnnotation(severity));
+    }
+
+    private static void openModuleAnnotationSettings(Shell shell, ModuleAnnotation annotation)
+    {
+        String annotationType = switch (annotation)
         {
             case ERROR -> "org.eclipse.ui.workbench.texteditor.error"; //$NON-NLS-1$
             case WARNING -> "org.eclipse.ui.workbench.texteditor.warning"; //$NON-NLS-1$
@@ -895,7 +948,12 @@ public final class ValidationChecksFilterHook implements IStartup
     /** Подсказка значка: чем эта критичность обернётся в редакторе модуля. */
     static String moduleSeverityTooltip(IssueSeverity severity)
     {
-        String annotation = switch (moduleAnnotation(severity))
+        return moduleAnnotationTooltip(moduleAnnotation(severity));
+    }
+
+    private static String moduleAnnotationTooltip(ModuleAnnotation type)
+    {
+        String annotation = switch (type)
         {
             case ERROR -> "Ошибка"; //$NON-NLS-1$
             case WARNING -> "Предупреждение"; //$NON-NLS-1$
@@ -1057,6 +1115,585 @@ public final class ValidationChecksFilterHook implements IStartup
                 treeViewer.getControl().setRedraw(true);
             }
         });
+    }
+
+    /** Коды внутренних диагностик, для которых на странице «Проверки» есть строка просмотра. */
+    static boolean isInternalBslCheckCode(String code)
+    {
+        return code != null && InternalBslChecks.CODES.contains(code);
+    }
+
+    /** Общий каталог для страницы «Проверки» и отбора панели «Проблемы». */
+    static INamedElement getInternalBslCheck(String code)
+    {
+        return code != null ? InternalBslChecks.ENTRIES.get(code) : null;
+    }
+
+    static boolean isInternalBslCheckUid(CheckUid uid)
+    {
+        return uid != null && InternalBslChecks.CONTRIBUTOR.equals(uid.getContributorId())
+            && isInternalBslCheckCode(uid.getCheckId());
+    }
+
+    /** Информационные узлы: не ICheckSettings, поэтому EDT не сохраняет их в профили проверок. */
+    private static final class InternalBslChecks implements ITreeContentProvider
+    {
+        private static final String CONTRIBUTOR = "tormozit.internal-bsl-information"; //$NON-NLS-1$
+        private static final String TITLE = "Внутренние проверки BSL"; //$NON-NLS-1$
+        private static final CheckUid ROOT = new CheckUid("internal-bsl", CONTRIBUTOR); //$NON-NLS-1$
+        private final ITreeContentProvider delegate;
+        private final IChecksTreeNode root;
+        private final Map<Object, Object[]> children = new IdentityHashMap<>();
+        private final Map<Object, Object> parents = new IdentityHashMap<>();
+
+        private InternalBslChecks(ITreeContentProvider delegate, Object nativeProvider) throws ReflectiveOperationException
+        {
+            this.delegate = delegate;
+            Class<?> nodeClass = Class.forName(nativeProvider.getClass().getName() + "$ChecksTreeNode", //$NON-NLS-1$
+                true, nativeProvider.getClass().getClassLoader());
+            var constructor = nodeClass.getConstructor(nativeProvider.getClass());
+            root = (IChecksTreeNode)constructor.newInstance(nativeProvider);
+            Global.setField(root, "value", new Entry(null, TITLE, "?")); //$NON-NLS-1$
+            Global.setField(root, "children", new ArrayList<>()); //$NON-NLS-1$
+            List<Object> leaves = new ArrayList<>();
+            for (String line : CATALOG.strip().split("\n")) //$NON-NLS-1$
+            {
+                String[] fields = line.strip().split("\\|", 3); //$NON-NLS-1$
+                Entry entry = new Entry(fields[0], fields[1], fields[2]);
+                IChecksTreeNode leaf = (IChecksTreeNode)constructor.newInstance(nativeProvider);
+                Global.setField(leaf, "value", entry); //$NON-NLS-1$
+                Global.setField(leaf, "parent", root); //$NON-NLS-1$
+                Global.setField(leaf, "children", new ArrayList<>()); //$NON-NLS-1$
+                leaves.add(leaf);
+                children.put(leaf, new Object[0]);
+                parents.put(leaf, root);
+            }
+            Collator collator = Collator.getInstance(Locale.forLanguageTag("ru")); //$NON-NLS-1$
+            leaves.sort((left, right) -> collator.compare(
+                ((IChecksTreeNode)left).getValue().getTitle(), ((IChecksTreeNode)right).getValue().getTitle()));
+            // Родное getChecks() видит только ICheckSettings: здесь коллекция пуста.
+            Global.setField(root, "children", leaves); //$NON-NLS-1$
+            children.put(root, leaves.toArray());
+        }
+
+        static void install(ChecksViewerControl control, TreeViewer viewer) throws ReflectiveOperationException
+        {
+            if (viewer.getContentProvider() instanceof InternalBslChecks
+                || !(viewer.getContentProvider() instanceof ITreeContentProvider provider))
+                return;
+            Object nativeProvider = Global.invoke(control.getChecksViewerProvider(), "getChecksTreeProvider"); //$NON-NLS-1$
+            InternalBslChecks content = new InternalBslChecks(provider, nativeProvider);
+            viewer.setContentProvider(content);
+            Object columnObj = Global.invoke(viewer, "getViewerColumn", Integer.valueOf(0)); //$NON-NLS-1$
+            if (columnObj instanceof TreeViewerColumn column
+                && Global.invoke(column, "getLabelProvider") instanceof CellLabelProvider labels) //$NON-NLS-1$
+                column.setLabelProvider(new InternalLabels(labels, viewer));
+            if (viewer instanceof CheckboxTreeViewer checks && nativeProvider instanceof ICheckStateProvider state)
+                checks.setCheckStateProvider(new ICheckStateProvider()
+                {
+                    @Override public boolean isChecked(Object element)
+                    {
+                        return !content.children.containsKey(element) && state.isChecked(element);
+                    }
+                    @Override public boolean isGrayed(Object element)
+                    {
+                        return content.children.containsKey(element) || state.isGrayed(element);
+                    }
+                });
+            // Фильтр Display отрабатывает раньше штатного переключения пометки,
+            // в том числе по пробелу и двойному клику. Информационные строки
+            // не должны даже помечать страницу изменённой.
+            Tree tree = viewer.getTree();
+            Display display = tree.getDisplay();
+            Listener readOnly = event -> {
+                if (event.widget != tree)
+                    return;
+                if (event.type == SWT.Selection && event.detail == SWT.CHECK
+                    && event.item instanceof TreeItem item && content.children.containsKey(item.getData()))
+                {
+                    item.setChecked(false);
+                    event.type = SWT.NONE;
+                    viewer.setSelection(new StructuredSelection(item.getData()), true);
+                }
+                else if ((event.type == SWT.KeyDown && event.keyCode == ' '
+                    || event.type == SWT.MouseDoubleClick) && !viewer.getStructuredSelection().isEmpty()
+                    && viewer.getStructuredSelection().toList().stream().allMatch(content.children::containsKey))
+                {
+                    event.doit = false;
+                    event.type = SWT.NONE;
+                }
+            };
+            int[] eventTypes = { SWT.Selection, SWT.KeyDown, SWT.MouseDoubleClick };
+            for (int eventType : eventTypes)
+                display.addFilter(eventType, readOnly);
+            tree.addDisposeListener(event -> {
+                for (int eventType : eventTypes)
+                    display.removeFilter(eventType, readOnly);
+            });
+            viewer.refresh();
+        }
+
+        @Override
+        public Object[] getElements(Object input)
+        {
+            Object[] original = delegate.getElements(input);
+            Object[] result = Arrays.copyOf(original, original.length + 1);
+            result[original.length] = root;
+            return result;
+        }
+
+        @Override
+        public Object[] getChildren(Object element)
+        {
+            Object[] own = children.get(element);
+            return own != null ? own : delegate.getChildren(element);
+        }
+
+        @Override
+        public Object getParent(Object element)
+        {
+            return element == root ? null : parents.containsKey(element) ? parents.get(element) : delegate.getParent(element);
+        }
+
+        @Override
+        public boolean hasChildren(Object element)
+        {
+            Object[] own = children.get(element);
+            return own != null ? own.length > 0 : delegate.hasChildren(element);
+        }
+
+        @Override public void inputChanged(Viewer viewer, Object oldInput, Object newInput)
+        {
+            delegate.inputChanged(viewer, oldInput, newInput);
+        }
+
+        @Override public void dispose()
+        {
+            delegate.dispose();
+        }
+
+        /** Отдельные поля просмотра: штатный updateMainDetails скрывает все поля для INamedElement. */
+        static void installDetails(ChecksViewerControl control)
+        {
+            if (!(Global.getField(control, "idTxt") instanceof StyledText nativeCode)
+                || nativeCode.isDisposed() || nativeCode.getData("tormozit.internalDetails") != null)
+                return;
+            Composite nativeRow = nativeCode.getParent();
+            Composite details = new Composite(nativeRow.getParent(), SWT.NONE);
+            details.moveAbove(nativeRow);
+            GridLayout layout = new GridLayout(4, false);
+            layout.marginWidth = 0;
+            layout.marginHeight = 0;
+            details.setLayout(layout);
+            details.setLayoutData(new GridData(SWT.FILL, SWT.TOP, true, false));
+            nativeCode.setData("tormozit.internalDetails", details);
+            Composite problemTypes = new Composite(details, SWT.NONE);
+            GridLayout typeLayout = new GridLayout(1, false);
+            typeLayout.marginWidth = 0;
+            typeLayout.marginHeight = 0;
+            problemTypes.setLayout(typeLayout);
+            problemTypes.setLayoutData(new GridData(SWT.CENTER, SWT.CENTER, false, false));
+            StyledText code = new StyledText(details, SWT.BORDER | SWT.READ_ONLY | SWT.SINGLE);
+            code.setFont(nativeCode.getFont());
+            GridData codeData = new GridData(SWT.FILL, SWT.CENTER, true, false, 2, 1);
+            codeData.widthHint = NARROW_FIELD_WIDTH;
+            codeData.minimumWidth = NARROW_FIELD_WIDTH;
+            code.setLayoutData(codeData);
+            CopyCommandSupport.wireCopyOverride(code);
+            // Место штатной кнопки сброса; у внутренних проверок нет изменяемых настроек.
+            new Label(details, SWT.NONE).setLayoutData(new GridData(16, SWT.DEFAULT));
+            new Label(details, SWT.NONE).setLayoutData(new GridData(16, SWT.DEFAULT));
+            Composite annotations = new Composite(details, SWT.NONE);
+            GridLayout annotationLayout = new GridLayout(2, false);
+            annotationLayout.marginWidth = 0;
+            annotationLayout.marginHeight = 0;
+            annotations.setLayout(annotationLayout);
+            annotations.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false, 3, 1));
+            Runnable update = () -> {
+                if (details.isDisposed())
+                    return;
+                Object selected = control.getSelectedCheckObjects().getValue();
+                Entry entry = selected instanceof IChecksTreeNode node && node.getValue() instanceof Entry value
+                    && value.code != null ? value : null;
+                visible(details, entry != null);
+                visible(nativeRow, entry == null);
+                if (entry != null)
+                {
+                    code.setText(entry.code);
+                    for (Control child : problemTypes.getChildren())
+                        child.dispose();
+                    for (Control child : annotations.getChildren())
+                        child.dispose();
+                    String kinds = entry.kinds;
+                    if (kinds.equals("?"))
+                    {
+                        Label unknownType = new Label(problemTypes, SWT.NONE);
+                        unknownType.setImage(PlatformUI.getWorkbench().getSharedImages().getImage(ISharedImages.IMG_OBJS_INFO_TSK));
+                        unknownType.setLayoutData(new GridData(16, SWT.DEFAULT));
+                        unknownType.setToolTipText(TooltipText.wrap(unknownType, "Тип проблемы: нет данных"));
+                        new Label(annotations, SWT.NONE).setText("Нет данных");
+                    }
+                    else
+                    {
+                        for (String kind : kinds.split(","))
+                        {
+                            boolean error = kind.equals("ERROR");
+                            IssueType type = error ? IssueType.ERROR : IssueType.WARNING;
+                            Label typeIcon = new Label(problemTypes, SWT.NONE);
+                            typeIcon.setImage(typeImage(details.getDisplay(), type));
+                            typeIcon.setLayoutData(new GridData(16, SWT.DEFAULT));
+                            typeIcon.setToolTipText(TooltipText.wrap(typeIcon, "Тип: " + localizedType(type)));
+                            Label annotationIcon = new Label(annotations, SWT.NONE);
+                            annotationIcon.setImage(V8UiSharedImages.getImage(error
+                                ? "/icons/markers16/error.png" : "/icons/markers16/warning.gif"));
+                            ModuleAnnotation annotation = error ? ModuleAnnotation.ERROR : ModuleAnnotation.WARNING;
+                            annotationIcon.setData(MODULE_SEVERITY_KEY, annotation);
+                            annotationIcon.setLayoutData(new GridData(16, SWT.DEFAULT));
+                            annotationIcon.setToolTipText(TooltipText.wrap(annotationIcon, moduleAnnotationTooltip(annotation)));
+                            wireModuleAnnotationSettings(annotationIcon);
+                            new Label(annotations, SWT.NONE).setText(error ? "Ошибка" : "Предупреждение");
+                        }
+                    }
+                }
+                // Состав вложенных областей изменился: requestLayout родителя не сбрасывает
+                // кэш GridData у их детей. Полный layout пересчитывает обе области и строку
+                // аннотации, даже если предыдущая проверка имела другой набор значков.
+                details.getParent().layout(true, true);
+                Global.invoke(control, "reflowParent", nativeCode);
+            };
+            // Подписка после штатных слушателей и compactSettingsRow: одна смена выбранного узла
+            // сначала обновляет EDT, затем переключает панели, без отложенных назначений строки.
+            control.getSelectedCheckObjects().addChangeListener(event -> update.run());
+            update.run();
+        }
+
+        private static void visible(Control control, boolean value)
+        {
+            control.setVisible(value);
+            if (control.getLayoutData() instanceof GridData data)
+                data.exclude = !value;
+        }
+
+        private static Image image(Object element)
+        {
+            if (!(element instanceof IChecksTreeNode node) || !(node.getValue() instanceof Entry entry))
+                return null;
+            return PlatformUI.getWorkbench().getSharedImages().getImage(entry.code == null
+                ? ISharedImages.IMG_OBJ_FOLDER : ISharedImages.IMG_OBJS_INFO_TSK);
+        }
+
+        /** Иконки информационных узлов; штатная отрисовка остальных проверок сохраняется. */
+        private static final class InternalLabels extends CellLabelProvider implements ILabelProvider
+        {
+            private final CellLabelProvider delegate;
+            private final TreeViewer viewer;
+
+            InternalLabels(CellLabelProvider delegate, TreeViewer viewer)
+            {
+                this.delegate = delegate;
+                this.viewer = viewer;
+            }
+
+            @Override public void update(ViewerCell cell)
+            {
+                delegate.update(cell);
+                Image image = InternalBslChecks.image(cell.getElement());
+                if (image != null)
+                    cell.setImage(image);
+            }
+
+            @Override public String getText(Object element)
+            {
+                if (delegate instanceof ILabelProvider labels)
+                    return labels.getText(element);
+                Object text = Global.invoke(delegate, "getText", element); //$NON-NLS-1$
+                return text instanceof String value ? value : ""; //$NON-NLS-1$
+            }
+
+            @Override public Image getImage(Object element)
+            {
+                Image image = InternalBslChecks.image(element);
+                if (image != null)
+                    return image;
+                if (delegate instanceof ILabelProvider labels)
+                    return labels.getImage(element);
+                Object original = Global.invoke(delegate, "getImage", element); //$NON-NLS-1$
+                return original instanceof Image value ? value : null;
+            }
+
+            @Override public String getToolTipText(Object element)
+            {
+                Tree tree = viewer.getTree();
+                if (tree.isDisposed())
+                    return null;
+                ViewerCell cell = viewer.getCell(tree.toControl(tree.getDisplay().getCursorLocation()));
+                if (cell == null || cell.getElement() != element || !(cell.getItem() instanceof TreeItem item))
+                    return null;
+                String text = cell.getText();
+                if (text == null || text.isEmpty())
+                    return null;
+                Rectangle textBounds = item.getTextBounds(cell.getColumnIndex());
+                Rectangle cellBounds = cell.getBounds();
+                Rectangle client = tree.getClientArea();
+                int right = Math.min(cellBounds.x + cellBounds.width, client.x + client.width);
+                GC gc = new GC(tree);
+                try
+                {
+                    gc.setFont(item.getFont(cell.getColumnIndex()));
+                    int fullWidth = gc.textExtent(text).x;
+                    boolean clipped = textBounds.x < client.x
+                        || fullWidth > Math.min(textBounds.width, Math.max(0, right - textBounds.x));
+                    return clipped ? TooltipText.wrap(tree, text) : null;
+                }
+                finally
+                {
+                    gc.dispose();
+                }
+            }
+
+            @Override public void dispose()
+            {
+                delegate.dispose();
+                super.dispose();
+            }
+        }
+
+        /** Код и описание; аннотации подтверждены вызовами error/warning в валидаторе и линкере EDT.
+         * «?» — в текущем валидаторе тип для этого кода не найден. */
+        private static final String CATALOG = """
+            undefined-variable|Переменная не определена в доступном контексте модуля.|ERROR
+            undefined-function-or-procedure|Процедура или функция не определена в доступном контексте.|ERROR
+            undefined-function|Функция не определена в доступном контексте.|ERROR
+            undefined-type|Тип не определён в доступном контексте.|ERROR
+            undefined-label|Метка перехода не определена.|ERROR
+            wrong-grammar-order|Нарушен порядок разделов и объявлений модуля.|ERROR
+            unreachable-statement|Оператор недостижим при выполнении программы.|WARNING
+            wrong-string-literal-content|Недопустимое содержимое строкового литерала.|WARNING
+            unknown-pragma|Неизвестная директива компиляции.|ERROR,WARNING
+            not-allowed-pragma|Директива компиляции недопустима в этом месте.|ERROR,WARNING
+            not-allowed-pragma-common-module|Директива компиляции недопустима для общего модуля.|ERROR,WARNING
+            wrong-number-literal|Неверный формат числового литерала.|ERROR
+            expression-not-collection|Выражение обхода не является коллекцией.|WARNING
+            type-not-used-in-operator-new|Тип не поддерживает создание оператором «Новый».|WARNING
+            operator-[]-not-supported|Тип выражения не поддерживает обращение по индексу.|WARNING
+            variable-already-defined|Переменная с таким именем уже объявлена.|ERROR
+            unused-local-variable|Объявленная локальная переменная не используется.|?
+            variable-not-initialized|Значение переменной используется до её инициализации.|?
+            variable-never-initialized|Переменная используется, но ей не присваивается значение.|?
+            global-element-with-the-same-name|Имя объявления совпадает с именем элемента глобального контекста.|WARNING
+            function-should-return-value|Функция должна возвращать значение.|WARNING
+            assign-form-attribute-with-arbitrary-type|Недопустимое присваивание реквизиту формы произвольного типа.|WARNING
+            assign-form-attribute|Недопустимый тип значения при присваивании реквизиту формы.|ERROR,WARNING
+            property-not-writable|Свойство недоступно для записи.|ERROR
+            wrong-type-expression|Тип выражения не соответствует ожидаемому.|WARNING
+            label-already-defined|Метка с таким именем уже объявлена.|ERROR
+            method-already-defined|Процедура или функция с таким именем уже объявлена.|ERROR
+            exported-local-variable|Локальная переменная не может быть экспортной.|ERROR
+            unused-method|Процедура или функция не используется.|?
+            empty-method|Тело процедуры или функции пустое.|?
+            wrong-number-constructor-parameters|Количество параметров конструктора не соответствует его сигнатуре.|ERROR
+            type-not-defined|Тип не определён.|ERROR
+            break-without-loop|Оператор «Прервать» используется вне цикла.|ERROR
+            continue-without-loop|Оператор «Продолжить» используется вне цикла.|ERROR
+            return-without-method|Оператор «Возврат» используется вне процедуры или функции.|ERROR
+            return-without-expression|Возврат из функции не содержит выражения.|ERROR
+            procedure-return-value|Процедура не может возвращать значение.|ERROR
+            raise-operator-without-expression|Оператор «ВызватьИсключение» без аргумента недопустим в этом месте.|ERROR
+            wrong-goto-label|Переход ссылается на недоступную или неизвестную метку.|ERROR
+            expression-not-event|Выражение не является событием.|ERROR
+            handler-not-method|Обработчик события должен быть методом.|ERROR
+            handler-not-function|Обработчик события должен быть функцией.|ERROR
+            handler-wrong-number-parameters|Количество параметров обработчика не соответствует событию.|ERROR
+            unreachable-code|Код недостижим при выполнении программы.|ERROR
+            code-never-compiled|Код не компилируется ни в одном из доступных контекстов.|ERROR
+            only-mehtods-in-module|В этом модуле разрешены только процедуры и функции.|ERROR
+            parameter-already-defined|Формальный параметр с таким именем уже объявлен.|ERROR
+            many-actual-parameters|В вызов передано слишком много параметров.|ERROR
+            not-enough-parameters|В вызов передано недостаточно параметров.|ERROR
+            procedure-call-as-function|Вызов процедуры используется как выражение, возвращающее значение.|ERROR
+            wrong-event-handler|Неверное описание обработчика события.|ERROR
+            property-not-readable|Свойство недоступно для чтения.|ERROR
+            illegal-date-format|Неверный формат литерала даты.|ERROR
+            return-value-different-environment|Типы возвращаемого значения относятся к разным контекстам выполнения.|WARNING
+            expression-preprocessor-line-left|Перед директивой препроцессора в той же строке находится выражение.|ERROR
+            expression-preprocessor-line-right|После директивы препроцессора в той же строке находится выражение.|ERROR
+            one-line-preprocessor-expression|Выражение препроцессора должно занимать одну строку.|ERROR
+            new-line-before-preprocessor-part|Недопустимый перенос строки перед частью директивы препроцессора.|ERROR
+            no-context-directive-for-variables|Директива «БезКонтекста» недопустима для переменной.|ERROR
+            invalid-access-system-enum-value|Недопустимое обращение к значению системного перечисления.|?
+            annotation-symbols-declare-statements|Аннотация недопустима для этого объявления.|ERROR
+            expected-method-annotation|В аннотации ожидается имя метода.|ERROR
+            repeated-annotation-symbol|Аннотация указана повторно.|WARNING
+            annotation-symbols-function|Аннотация недопустима для функции.|ERROR
+            annotation-symbols-around-with-another|Аннотация «Вместо» несовместима с другой указанной аннотацией.|ERROR
+            invalid-variable-name|Недопустимое имя переменной.|ERROR
+            transfer-object-between-client-server|Тип объекта не поддерживает передачу между клиентом и сервером.|WARNING
+            access-metadata-object-enumerated-properties-through-system-enums|К свойству метаданных рекомендуется обращаться через системное перечисление.|WARNING
+            environments-method-not-set|Для метода не определён контекст выполнения.|WARNING
+            duplicate-method-extension-module|В модуле расширения повторяется имя метода.|ERROR
+            unknown-adoptable-method|Расширяемый метод не найден.|ERROR
+            not-use-annotation-form-event-handlers|Недопустимая аннотация обработчика события формы или сигнатура расширяющего метода.|ERROR
+            another-method-with-the-same-annotation-for-adoptable-method|Для расширяемого метода уже есть метод с такой аннотацией.|ERROR
+            adoptable-method-not-annotated-as-after-around-same-time|Расширяющий метод нельзя одновременно помечать аннотациями «После» и «Вместо».|ERROR
+            adoptable-method-not-annotated-as-before-around-same-time|Расширяющий метод нельзя одновременно помечать аннотациями «Перед» и «Вместо».|ERROR
+            unknown-operator|Неизвестный оператор.|ERROR
+            object-not-accessible-concrete-compatiblity-mode|Объект недоступен в выбранном режиме совместимости.|ERROR
+            object-deprecated|Используется устаревший объект.|WARNING
+            built-in-function-used-in-expression|Недопустимое использование встроенной функции в выражении.|ERROR
+            unknown-method-property|Метод или свойство не найдено в доступном контексте.|WARNING
+            preprocessor-instruction-not-allowed|Инструкция препроцессора недопустима в этом контексте.|ERROR
+            preprocessor-instructions-delete-insert-cannot-nested|Инструкции препроцессора «Удаление» и «Вставка» нельзя вкладывать друг в друга.|ERROR
+            method-text-has-differences-base-method|Текст метода отличается от текста метода основной конфигурации.|ERROR
+            record-manager-used-subordinate-recorder|Менеджер записи используется для регистра, подчинённого регистратору.|WARNING
+            async-methods-available-since|Асинхронные методы недоступны в выбранной версии платформы.|ERROR
+            async-methods-available-client-context|Асинхронные методы доступны только в клиентском контексте.|ERROR
+            await-expression-allowed-async-methods|Оператор «Ждать» допустим только в асинхронном методе.|ERROR
+            mobile-standalone-server-available-since|Мобильный автономный сервер недоступен в выбранной версии платформы.|ERROR
+            operator-raise(,,,,)-available-since|Расширенная форма оператора «ВызватьИсключение» недоступна в выбранной версии платформы.|ERROR
+            unsupported-operator|Оператор не поддерживается в этом контексте.|ERROR
+            """;
+
+        private static final Map<String, Entry> ENTRIES = CATALOG.lines()
+            .map(line -> line.split("\\|", 3)) //$NON-NLS-1$
+            .collect(java.util.stream.Collectors.toUnmodifiableMap(fields -> fields[0],
+                fields -> new Entry(fields[0], fields[1], fields[2])));
+        private static final Set<String> CODES = ENTRIES.keySet();
+
+        private record Entry(String code, String text, String kinds) implements INamedElement
+        {
+            @Override public CheckUid getId() { return code != null ? new CheckUid(code, CONTRIBUTOR) : ROOT; }
+            @Override public CheckUid getParentId() { return code != null ? ROOT : INamedElement.ROOT_ID; }
+            @Override public String getTitle() { return text; }
+            @Override public String getDescription()
+            {
+                return "<h3>" + escape(text) + "</h3>" //$NON-NLS-1$ //$NON-NLS-2$
+                    + "<p>Внутренняя диагностика анализатора BSL в EDT.</p>"; //$NON-NLS-1$
+            }
+            private static String escape(String text)
+            {
+                return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
+            }
+        }
+    }
+
+    /** Последняя проверка проекта сохраняется между открытиями окна и запусками EDT. */
+    private static final class ChecksSelectionMemory
+    {
+        private static final String SETTINGS_SECTION = "validationChecksSelection"; //$NON-NLS-1$
+        private static final String KEY_CHECK_ID = "checkId"; //$NON-NLS-1$
+        private static final String KEY_CONTRIBUTOR_ID = "contributorId"; //$NON-NLS-1$
+        private static final String INSTALLED_KEY = "tormozit.validationChecksSelectionInstalled"; //$NON-NLS-1$
+
+        static void install(ChecksViewerControl control, TreeViewer viewer, PreferenceDialog dialog)
+        {
+            if (Boolean.TRUE.equals(viewer.getControl().getData(INSTALLED_KEY)))
+                return;
+            IDialogSettings settings = projectSettings(control);
+            if (settings == null)
+                return;
+            viewer.getControl().setData(INSTALLED_KEY, Boolean.TRUE);
+            viewer.addSelectionChangedListener(event -> remember(control,
+                viewer.getStructuredSelection().getFirstElement()));
+
+            // Все сценарии открытия только передают цель. Назначение строки
+            // происходит здесь, один раз, после создания списка.
+            CheckUid uid = selectionOnOpen(control, viewer, dialog, settings);
+            if (uid != null)
+                select(viewer, uid);
+        }
+
+        private static CheckUid selectionOnOpen(ChecksViewerControl control, TreeViewer viewer,
+            PreferenceDialog dialog, IDialogSettings settings)
+        {
+            // FilteredPreferenceDialog хранит данные перехода в pageData.
+            // Собственный ключ не запускает параллельный выбор в applyData EDT.
+            Object pageData = Global.getField(dialog, "pageData"); //$NON-NLS-1$
+            if (pageData instanceof Map<?, ?> data
+                && data.get(OPEN_CHECK_DATA_KEY) instanceof String code)
+            {
+                ChecksViewerProvider checks = control.getChecksViewerProvider();
+                ICheckRepository repository = checks.getCheckRepository();
+                CheckUid requested = repository.getUidForShortUid(code, checks.getProject());
+                // Маркеры и подсказки могут передать обычный checkId (например,
+                // undefined-variable), а команды подавления — короткий код SU47.
+                // toUid разрешает обычный код; неоднозначный результат не выбираем.
+                if (requested == null)
+                {
+                    Set<CheckUid> candidates = repository.toUid(code, checks.getProject());
+                    if (candidates.size() == 1)
+                        requested = candidates.iterator().next();
+                }
+                if (requested == null && viewer.getContentProvider() instanceof InternalBslChecks content)
+                {
+                    CheckUid internal = new CheckUid(code, InternalBslChecks.CONTRIBUTOR);
+                    if (find(content, content.getElements(viewer.getInput()), internal) != null)
+                        requested = internal;
+                }
+                return requested;
+            }
+
+            // Сохранить приоритет выбора, который уже сделал внешний код EDT.
+            Object selected = viewer.getStructuredSelection().getFirstElement();
+            if (selected instanceof IChecksTreeNode node
+                && (node.getValue() instanceof ICheckSettings || node.getValue() instanceof InternalBslChecks.Entry))
+                return node.getValue().getId();
+            String checkId = settings.get(KEY_CHECK_ID);
+            String contributorId = settings.get(KEY_CONTRIBUTOR_ID);
+            return checkId != null && contributorId != null ? new CheckUid(checkId, contributorId) : null;
+        }
+
+        private static void select(TreeViewer viewer, CheckUid uid)
+        {
+            if (!(viewer.getContentProvider() instanceof ITreeContentProvider provider))
+                return;
+            Object node = find(provider, provider.getElements(viewer.getInput()), uid);
+            if (node != null)
+            {
+                expandAncestors(viewer, node);
+                viewer.setSelection(new StructuredSelection(node), true);
+            }
+        }
+
+        static void remember(ChecksViewerControl control, Object element)
+        {
+            if (!(element instanceof IChecksTreeNode node)
+                || !(node.getValue() instanceof ICheckSettings || node.getValue() instanceof InternalBslChecks.Entry)
+                || node.getValue().getId() == null)
+                return;
+            IDialogSettings settings = projectSettings(control);
+            if (settings == null)
+                return;
+            settings.put(KEY_CHECK_ID, node.getValue().getId().getCheckId());
+            settings.put(KEY_CONTRIBUTOR_ID, node.getValue().getId().getContributorId());
+        }
+
+        private static IDialogSettings projectSettings(ChecksViewerControl control)
+        {
+            ChecksViewerProvider provider = control.getChecksViewerProvider();
+            if (provider == null || provider.getProject() == null)
+                return null;
+            IDialogSettings root = Activator.getDefault().getDialogSettings();
+            IDialogSettings section = root.getSection(SETTINGS_SECTION);
+            if (section == null)
+                section = root.addNewSection(SETTINGS_SECTION);
+            String projectName = provider.getProject().getName();
+            IDialogSettings project = section.getSection(projectName);
+            return project != null ? project : section.addNewSection(projectName);
+        }
+
+        private static Object find(ITreeContentProvider provider, Object[] elements, CheckUid uid)
+        {
+            for (Object element : elements)
+            {
+                if (element instanceof IChecksTreeNode node
+                    && node.getValue() != null && uid.equals(node.getValue().getId()))
+                    return element;
+                Object found = find(provider, provider.getChildren(element), uid);
+                if (found != null)
+                    return found;
+            }
+            return null;
+        }
     }
 
     /** Раскрывает цепочку родителей элемента через {@link ITreeContentProvider#getParent}. */
@@ -1352,7 +1989,10 @@ public final class ValidationChecksFilterHook implements IStartup
 
             boolean result;
             ICheckSettings settings = settingsOf(element);
-            if (settings != null)
+            if (element instanceof IChecksTreeNode node && node.getValue() instanceof InternalBslChecks.Entry entry
+                && entry.code != null)
+                result = matcher.isEmpty || matcher.matches(entry.getTitle()) || matcher.matches(entry.code);
+            else if (settings != null)
             {
                 String text = titleOf(element);
                 String checkId = settings.getId() != null ? settings.getId().getCheckId() : null;
@@ -1381,9 +2021,11 @@ public final class ValidationChecksFilterHook implements IStartup
                 return memo.booleanValue();
 
             ICheckSettings settings = settingsOf(element);
-            boolean result = settings != null
+            boolean result = element instanceof IChecksTreeNode node
+                && node.getValue() instanceof InternalBslChecks.Entry entry && entry.code != null
+                || (settings != null
                 ? state.accepts(settings)
-                : anyChild(viewer, element, child -> acceptsAnyCheck(viewer, child));
+                : anyChild(viewer, element, child -> acceptsAnyCheck(viewer, child)));
             acceptsMemo.put(element, result);
             return result;
         }
@@ -1821,13 +2463,13 @@ public final class ValidationChecksFilterHook implements IStartup
                 @Override
                 public boolean isChecked(Object element)
                 {
-                    return element instanceof CheckRow row && row.settings.isEnabled();
+                    return element instanceof CheckRow row && row.settings != null && row.settings.isEnabled();
                 }
 
                 @Override
                 public boolean isGrayed(Object element)
                 {
-                    return false;
+                    return element instanceof CheckRow row && row.settings == null;
                 }
             });
             viewer.setInput(rows);
@@ -1843,7 +2485,7 @@ public final class ValidationChecksFilterHook implements IStartup
             interaction.enableHeaderSort();
             installSeverityMenu();
             registerCheckReferencesMenu(control, table, () ->
-                viewer.getStructuredSelection().getFirstElement() instanceof CheckRow row ? row.settings : null);
+                viewer.getStructuredSelection().getFirstElement() instanceof CheckRow row ? row.node.getValue() : null);
         }
 
         /**
@@ -1873,7 +2515,8 @@ public final class ValidationChecksFilterHook implements IStartup
             }
             new MenuItem(menu, SWT.SEPARATOR);
             menu.addListener(SWT.Show,
-                event -> severityItem.setEnabled(!viewer.getStructuredSelection().isEmpty()));
+                event -> severityItem.setEnabled(viewer.getStructuredSelection().toList().stream()
+                    .anyMatch(element -> element instanceof CheckRow row && row.settings != null)));
         }
 
         /** Применяет критичность ко всем проверкам из текущего выделения строк таблицы. */
@@ -1884,7 +2527,7 @@ public final class ValidationChecksFilterHook implements IStartup
                 return;
             for (Object element : selection.toList())
             {
-                if (element instanceof CheckRow row)
+                if (element instanceof CheckRow row && row.settings != null)
                     row.settings.setSeverity(severity);
             }
             // Как и штатный список критичности в панели справа (см. javadoc
@@ -1929,6 +2572,13 @@ public final class ValidationChecksFilterHook implements IStartup
                     table.getDisplay().asyncExec(this::syncSelectionToTree);
                 }
             });
+            // JFace сообщает и о выборе мышью/клавиатурой, и о выборе через
+            // FormTableInteraction. Сохранить до отложенной синхронизации с деревом.
+            viewer.addSelectionChangedListener(event ->
+            {
+                if (viewer.getStructuredSelection().getFirstElement() instanceof CheckRow row)
+                    ChecksSelectionMemory.remember(control, row.node);
+            });
             treeViewer.addSelectionChangedListener(event -> syncSelectionFromTree());
 
             // Смена критичности выпадающим списком справа меняет иконку строки.
@@ -1950,6 +2600,11 @@ public final class ValidationChecksFilterHook implements IStartup
         {
             if (!(item instanceof TableItem tableItem) || !(tableItem.getData() instanceof CheckRow row))
                 return;
+            if (row.settings == null)
+            {
+                tableItem.setChecked(false);
+                return;
+            }
             Global.invoke(treeViewer, "setItemChecked", row.node, Boolean.valueOf(tableItem.getChecked())); //$NON-NLS-1$
             // При отборе «только включённые»/«только выключенные» строка после
             // переключения перестаёт проходить отбор — тогда пересобираем состав,
@@ -2176,6 +2831,13 @@ public final class ValidationChecksFilterHook implements IStartup
 
         private void collect(ITreeContentProvider tcp, Object element, String categoryTitle)
         {
+            if (element instanceof IChecksTreeNode node && node.getValue() instanceof InternalBslChecks.Entry entry
+                && entry.code != null)
+            {
+                if (filter.accepts(treeViewer, element))
+                    rows.add(new CheckRow(node, null, categoryTitle));
+                return;
+            }
             ICheckSettings settings = ValidationSearchFilter.settingsOf(element);
             if (settings != null)
             {
@@ -2211,8 +2873,8 @@ public final class ValidationChecksFilterHook implements IStartup
                 return ""; //$NON-NLS-1$
             return switch (column)
             {
-                case 0 -> localizedType(row.settings.getType());
-                case 1 -> localizedSeverity(row.settings.getSeverity());
+                case 0 -> row.settings != null ? localizedType(row.settings.getType()) : ""; //$NON-NLS-1$
+                case 1 -> row.settings != null ? localizedSeverity(row.settings.getSeverity()) : ""; //$NON-NLS-1$
                 case 2 -> row.title();
                 case 3 -> row.category != null ? row.category : ""; //$NON-NLS-1$
                 default -> ""; //$NON-NLS-1$
@@ -2291,7 +2953,7 @@ public final class ValidationChecksFilterHook implements IStartup
 
             String title()
             {
-                String title = settings.getTitle();
+                String title = node.getValue().getTitle();
                 return title != null ? title : ""; //$NON-NLS-1$
             }
         }
@@ -2319,14 +2981,16 @@ public final class ValidationChecksFilterHook implements IStartup
                     @Override
                     public Image getImage(Object element)
                     {
-                        return element instanceof CheckRow row ? typeImage(table.getDisplay(), row.settings.getType())
-                            : null;
+                        if (!(element instanceof CheckRow row))
+                            return null;
+                        return row.settings != null ? typeImage(table.getDisplay(), row.settings.getType())
+                            : InternalBslChecks.image(row.node);
                     }
 
                     @Override
                     public String getToolTipText(Object element)
                     {
-                        return element instanceof CheckRow row ? localizedType(row.settings.getType()) : null;
+                        return element instanceof CheckRow row && row.settings != null ? localizedType(row.settings.getType()) : null;
                     }
                 };
             }
@@ -2344,13 +3008,13 @@ public final class ValidationChecksFilterHook implements IStartup
                     @Override
                     public Image getImage(Object element)
                     {
-                        return element instanceof CheckRow row ? severityImage(row.settings.getSeverity()) : null;
+                        return element instanceof CheckRow row && row.settings != null ? severityImage(row.settings.getSeverity()) : null;
                     }
 
                     @Override
                     public String getToolTipText(Object element)
                     {
-                        return element instanceof CheckRow row ? localizedSeverity(row.settings.getSeverity()) : null;
+                        return element instanceof CheckRow row && row.settings != null ? localizedSeverity(row.settings.getSeverity()) : null;
                     }
                 };
             }

@@ -41,7 +41,8 @@ import org.eclipse.xtext.ui.editor.validation.XtextAnnotation;
  * <p>Регистрируется extension point'ом EDT
  * {@code com._1c.g5.v8.dt.bsl.ui.bslHoverContributor}. Предупреждения проверок
  * приходят в подсказку как {@link XtextAnnotation} с кодом {@code SU...}
- * (короткий код проверки в пределах проекта).
+ * (короткий код проверки в пределах проекта). Для внутренних диагностик BSL
+ * используется исходный код из каталога страницы «Проверки».
  *
  * <p>Отдельный файл, а не вложенный класс: точка входа из {@code plugin.xml}.
  */
@@ -169,13 +170,15 @@ public final class BslCheckSettingsHoverContributor implements IBslHoverContribu
         }
     }
 
-    /** Код проверки аннотации ({@code SU...}) или {@code null}. */
+    /** Короткий UID проверки EDT или код внутренней диагностики из каталога. */
     private static String checkCode(Annotation annotation)
     {
         if (!(annotation instanceof XtextAnnotation xtext) || xtext.getUriToProblem() == null)
             return null;
         String code = xtext.getIssueCode();
-        return code != null && !code.isBlank() && code.startsWith(CHECK_ISSUE_PREFIX) ? code : null;
+        return code != null && !code.isBlank()
+            && (code.startsWith(CHECK_ISSUE_PREFIX) || ValidationChecksFilterHook.isInternalBslCheckCode(code))
+            ? code : null;
     }
 
     /**
@@ -205,7 +208,7 @@ public final class BslCheckSettingsHoverContributor implements IBslHoverContribu
         manager.add(contribution);
     }
 
-    /** Уникальные короткие коды проверок ({@code SU...}) из аннотаций подсказки, в порядке появления. */
+    /** Уникальные коды проверок и внутренних диагностик, в порядке появления. */
     private static Set<String> collectCheckCodes(Collection<Annotation> annotations)
     {
         Set<String> codes = new LinkedHashSet<>();

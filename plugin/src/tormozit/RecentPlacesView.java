@@ -335,13 +335,11 @@ public final class RecentPlacesView extends ViewPart
 
         RecentPlaces.getInstance().addChangeListener(storeChangeListener);
         IMarkerManagerV2 markers = Global.getOsgiService(IMarkerManagerV2.class);
-        ProblemIndicatorDebug.log("recent places marker listener install manager=" + ProblemIndicatorDebug.id(markers));
         if (markers != null)
         {
             Display display = listViewer.getControl().getDisplay();
             IMarkerUpdateListener listener = event ->
             {
-                ProblemIndicatorDebug.log("recent places markers changed projects=" + event.getChangedProjects());
                 if (!display.isDisposed())
                     display.asyncExec(() ->
                     {
@@ -1468,7 +1466,6 @@ public final class RecentPlacesView extends ViewPart
                             var severity = separator < 0 ? ProblemIndicatorSupport.severity(owner)
                                 : ProblemIndicatorSupport.methodSeverity(moduleFile(entry, project),
                                     entry.key.substring(separator + 2).trim(), owner);
-                            ProblemIndicatorDebug.log("recent places severity key=" + cacheKey + " severity=" + severity);
                             if (!display.isDisposed())
                                 display.asyncExec(() ->
                                 {
@@ -1482,7 +1479,6 @@ public final class RecentPlacesView extends ViewPart
                         }
                         catch (RuntimeException ex)
                         {
-                            Global.tempLogException("problem-indicators", "recent places key=" + cacheKey, ex);
                         }
                     });
                     job.setSystem(true);

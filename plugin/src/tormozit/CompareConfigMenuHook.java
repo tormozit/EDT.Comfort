@@ -8094,10 +8094,27 @@ public class CompareConfigMenuHook implements IStartup
 
         static RevealResult revealFqn(IEditorPart editor, String fqn, String featureName, boolean activateAndFocus)
         {
+            RevealResult result;
+            try
+            {
+                result = revealFqnInModel(editor, fqn, featureName, activateAndFocus);
+            }
+            catch (IllegalStateException unavailable)
+            {
+                result = RevealResult.COMPARISON_UNAVAILABLE;
+            }
+            return result;
+        }
+
+        private static RevealResult revealFqnInModel(IEditorPart editor, String fqn, String featureName,
+            boolean activateAndFocus)
+        {
             AbstractTreeViewer viewer = getTreeViewerFromEditor(editor);
+            if (viewer == null || viewer.getControl() == null || viewer.getControl().isDisposed())
+                return RevealResult.COMPARISON_UNAVAILABLE;
             IComparisonSession session = CompareConfigSelectionListener.getSession(editor);
-            if (viewer == null || session == null)
-                return RevealResult.NOT_IN_COMPARISON;
+            if (session == null)
+                return RevealResult.COMPARISON_UNAVAILABLE;
 
             TopComparisonNode top = findTopNode(session, fqn);
             if (top == null)
@@ -8157,10 +8174,10 @@ public class CompareConfigMenuHook implements IStartup
             return RevealResult.OK;
         }
 
-        /** Итог {@link #revealFqn}: строка активирована / объекта нет в сравнении / строка недоступна. */
+        /** Итог {@link #revealFqn}: строка активирована / объекта нет / строка или сравнение недоступны. */
         enum RevealResult
         {
-            OK, NOT_IN_COMPARISON, ROW_UNAVAILABLE
+            OK, NOT_IN_COMPARISON, ROW_UNAVAILABLE, COMPARISON_UNAVAILABLE
         }
 
         /** Развернуть цепочку родителей, не трогая сам {@code node}. */
