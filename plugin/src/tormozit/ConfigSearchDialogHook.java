@@ -25,6 +25,7 @@ import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.CTabFolder;
 import org.eclipse.swt.custom.CTabItem;
+import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.layout.GridLayout;
@@ -32,9 +33,12 @@ import org.eclipse.swt.widgets.Button;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
+import org.eclipse.swt.widgets.Group;
 import org.eclipse.swt.widgets.Label;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Table;
+import org.eclipse.swt.widgets.ToolBar;
+import org.eclipse.swt.widgets.ToolItem;
 import org.eclipse.ui.IStartup;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassVisitor;
@@ -55,6 +59,7 @@ import com._1c.g5.v8.dt.core.platform.IV8Project;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
 import com._1c.g5.v8.dt.search.core.Match;
 import com._1c.g5.v8.dt.search.core.SearchFor;
+import com._1c.g5.v8.dt.search.core.SearchIn;
 import com._1c.g5.v8.dt.search.core.text.TextSearchFileMatch;
 import com._1c.g5.v8.dt.search.core.text.TextSearchModelMatch;
 
@@ -74,7 +79,10 @@ public class ConfigSearchDialogHook implements IStartup
     private static final String LISTENER_KEY = "tormozit.configSearchListener";
     private static final String SIZE_MEMORY_KEY = "tormozit.configSearchSizeMemory";
     private static final String OBJECT_TYPES_COUNT_KEY = "tormozit.configSearchObjectTypesCount";
-    private static final String OBJECT_TYPES_TITLE_RU = "среди типов объектов";
+    private static final String SEARCH_IN_COUNT_KEY = "tormozit.configSearchSearchInCount";
+    private static final String SEARCH_IN_TITLE_RU = "Искать в";
+    private static final String SEARCH_IN_TITLE_EN = "Search In";
+    private static final String OBJECT_TYPES_TITLE_RU ="среди типов объектов";
     private static final String OBJECT_TYPES_TITLE_EN = "within object types";
     private static final String PROJECTS_TITLE_RU = "среди проектов";
     private static final String PROJECTS_TITLE_EN = "within projects";
@@ -269,6 +277,7 @@ public class ConfigSearchDialogHook implements IStartup
         parent.layout(true, true);
         restoreScopeTableSizes(page);
         installObjectTypesCountLabel(page);
+        installSearchInCountTitle(page);
         SearchScopeGroup.patch(shell, page);
         NStrCategory.patchLabels(page);
         hideForeignSearchTabs(shell, dialog);
@@ -621,6 +630,129 @@ public class ConfigSearchDialogHook implements IStartup
         {
             log("addSearchTypeScopeListener error: " + e);
         }
+    }
+
+    /** Счётчик включённых пометок в заголовке группы «Искать в». */
+    private static void installSearchInCountTitle(Object page)
+    {
+        Control pageControl = (Control) Global.invoke(page, "getControl");
+        if (!(pageControl instanceof Composite root) || root.isDisposed())
+            return;
+        Group group = Global.findControl(root, Group.class,
+            g -> isScopeListTitle(g.getText(), SEARCH_IN_TITLE_RU, SEARCH_IN_TITLE_EN));
+        if (group == null || Boolean.TRUE.equals(group.getData(SEARCH_IN_COUNT_KEY)))
+            return;
+        group.setData(SEARCH_IN_COUNT_KEY, Boolean.TRUE);
+
+        final String baseTitle = stripCountSuffix(group.getText()).trim();
+        Runnable refresh = () -> {
+            if (group.isDisposed())
+                return;
+            int checked = 0;
+            for (Control child : group.getChildren())
+            {
+                if (child instanceof Button button && (button.getStyle() & SWT.CHECK) != 0
+                    && button.getSelection())
+                    checked++;
+            }
+            String title = baseTitle + " (" + checked + ")";
+            if (!title.equals(group.getText()))
+                group.setText(title);
+        };
+
+        for (Control child : group.getChildren())
+        {
+            if (child instanceof Button button && (button.getStyle() & SWT.CHECK) != 0)
+                button.addListener(SWT.Selection, e -> refresh.run());
+        }
+        // Пометки меняет и сама EDT (подстановка прошлого запроса из истории) — без события Selection.
+        Object searchData = Global.getField(page, "searchData");
+        Object searchIn = searchData != null ? Global.invoke(searchData, "getSearchIn") : null;
+        if (searchIn instanceof Map<?, ?> searchInMap)
+            addSearchInCheckAllButtons(root, group, searchInMap, refresh);
+        if (searchIn != null)
+        {
+            try
+            {
+                // интерфейс — загрузчиком самой модели: пакет databinding плагину не виден
+                Class<?> listenerClass = Class.forName(
+                    "org.eclipse.core.databinding.observable.map.IMapChangeListener", true,
+                    searchIn.getClass().getClassLoader());
+                Object listener = Proxy.newProxyInstance(
+                    listenerClass.getClassLoader(),
+                    new Class[] { listenerClass },
+                    (proxy, method, args) -> {
+                        // список слушателей сравнивает их через equals/hashCode: null здесь = NPE
+                        switch (method.getName())
+                        {
+                        case "equals": //$NON-NLS-1$
+                            return Boolean.valueOf(proxy == args[0]);
+                        case "hashCode": //$NON-NLS-1$
+                            return Integer.valueOf(System.identityHashCode(proxy));
+                        case "toString": //$NON-NLS-1$
+                            return "ConfigSearchDialogHook.searchInListener"; //$NON-NLS-1$
+                        case "handleMapChange": //$NON-NLS-1$
+                            if (!group.isDisposed())
+                                group.getDisplay().asyncExec(refresh);
+                            return null;
+                        default:
+                            return null;
+                        }
+                    });
+                searchIn.getClass().getMethod("addMapChangeListener", listenerClass)
+                    .invoke(searchIn, listener);
+            }
+            catch (Exception e)
+            {
+                log("installSearchInCountTitle error: " + e + " cause=" + e.getCause());
+            }
+        }
+        refresh.run();
+        root.getDisplay().timerExec(100, refresh);
+    }
+
+    /**
+     * Кнопки «установить / снять все флажки» в группе «Искать в». Меняется модель диалога
+     * ({@code ConfigurationSearchData.getSearchIn()}), флажки обновляет штатная привязка —
+     * {@code Button.setSelection} события не шлёт, и модель осталась бы прежней.
+     */
+    private static void addSearchInCheckAllButtons(Composite root, Group group, Map<?, ?> searchIn,
+        Runnable refreshCount)
+    {
+        // значки — как у штатных кнопок над списками «среди проектов» / «среди типов объектов»
+        ToolBar stock = Global.findControl(root, ToolBar.class, bar -> bar.getItemCount() == 2);
+        // кнопки — в начале последней колонки последней строки (под её флажками)
+        if (group.getLayout() instanceof GridLayout grid && grid.numColumns > 0)
+        {
+            int cells = group.getChildren().length;
+            for (int filler = grid.numColumns - 1 - cells % grid.numColumns; filler > 0; filler--)
+                new Label(group, SWT.NONE);
+        }
+        ToolBar toolBar = new ToolBar(group, SWT.FLAT | SWT.HORIZONTAL);
+        addSearchInCheckAllItem(toolBar, searchIn, true, "Установить все флажки",
+            stock != null ? stock.getItem(0).getImage() : null, "Все", refreshCount);
+        addSearchInCheckAllItem(toolBar, searchIn, false, "Снять все флажки",
+            stock != null ? stock.getItem(1).getImage() : null, "Ничего", refreshCount);
+
+        toolBar.setLayoutData(new GridData(SWT.BEGINNING, SWT.CENTER, false, false));
+        root.layout(true, true);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void addSearchInCheckAllItem(ToolBar toolBar, Map<?, ?> searchIn, boolean check,
+        String tooltip, Image image, String fallbackText, Runnable refreshCount)
+    {
+        ToolItem item = new ToolItem(toolBar, SWT.PUSH);
+        if (image != null && !image.isDisposed())
+            item.setImage(image);
+        else
+            item.setText(fallbackText);
+        item.setToolTipText(TooltipText.wrap(toolBar, tooltip + Global.pluginSignForTooltip()));
+        item.addListener(SWT.Selection, e -> {
+            for (SearchIn value : SearchIn.values())
+                ((Map<Object, Object>) searchIn).put(value, Boolean.valueOf(check));
+            toolBar.getDisplay().asyncExec(refreshCount);
+        });
     }
 
     private static int countCheckedItems(Table table)
