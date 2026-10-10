@@ -7,12 +7,15 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.WeakHashMap;
 
 import org.osgi.framework.Bundle;
@@ -72,6 +75,7 @@ import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.contentassist.CompletionProposal;
 import org.eclipse.jface.text.contentassist.ContentAssistant;
 import org.eclipse.jface.text.contentassist.ICompletionProposal;
+import org.eclipse.jface.text.contentassist.IContextInformation;
 import org.eclipse.jface.text.contentassist.IContentAssistProcessor;
 import org.eclipse.jface.text.quickassist.IQuickAssistInvocationContext;
 import org.eclipse.jface.text.source.Annotation;
@@ -154,6 +158,19 @@ import com._1c.g5.v8.dt.bsl.model.FeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.FeatureEntry;
 import com._1c.g5.v8.dt.bsl.model.FormalParam;
 import com._1c.g5.v8.dt.bsl.model.ImplicitVariable;
+import com._1c.g5.v8.dt.bsl.model.Invocation;
+import com._1c.g5.v8.dt.bsl.resource.TypesComputer;
+import com._1c.g5.v8.dt.mcore.TypeItem;
+import com._1c.g5.v8.dt.mcore.util.McoreUtil;
+import com._1c.g5.v8.dt.metadata.mdclass.CommonModule;
+import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
+import com._1c.g5.v8.dt.metadata.mdtype.MdManagerType;
+import com._1c.g5.v8.dt.metadata.mdtype.MdObjectType;
+import com._1c.g5.v8.dt.metadata.mdtype.MdRecordSetType;
+import com._1c.g5.v8.dt.metadata.mdtype.MdValueManagerType;
+import com.e1c.g5.v8.dt.check.settings.CheckUid;
+import com.e1c.g5.v8.dt.check.settings.ICheckRepository;
+import com._1c.g5.v8.dt.bsl.model.SimpleStatement;
 import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.Variable;
 import com._1c.g5.v8.dt.bsl.resource.DynamicFeatureAccessComputer;
@@ -2504,6 +2521,469 @@ public final class BslModuleSpellCheckHook implements IStartup
         return kept.toArray(new ICompletionProposal[0]);
     }
 
+    /**
+     * issue #709: «Создать метод» для вызова несуществующего метода модуля через точку
+     * (проблема «Свойство (метод) объекта не обнаружено»). Целевой модуль определяется по выражению слева от точки: общий модуль — по
+     * признаку объекта метаданных, остальные (менеджер, объект, набор записей, менеджер значения) —
+     * по вычисленному типу выражения. Метод дописывается в открытый редактор целевого модуля.
+     */
+    private static final class CreateMethodFix
+    {
+        private static final String TOPIC = "709"; //$NON-NLS-1$
+        /**
+         * Проверки «Свойство (метод) объекта не обнаружено»: идентификатор — префикс
+         * {@code bsl-legacy-} плюс имя метода {@code BslJavaValidator}. Короткий код SU… у каждого
+         * проекта свой, по нему проблему не узнать — только через реестр проверок.
+         */
+        private static final Set<String> CHECK_IDS = Set.of(
+            "bsl-legacy-check-static-feature-access-for-unknown-left-part", //$NON-NLS-1$
+            "bsl-legacy-check-dynamic-feature-access-for-unknown-left-part"); //$NON-NLS-1$
+        /** Код той же проблемы в самом валидаторе — на случай, когда реестр не подменил его коротким. */
+        private static final String VALIDATOR_CODE = "unknown-method-property"; //$NON-NLS-1$
+        /** Имя типа объекта метаданных в модели EDT: {@code CatalogManager.Имя}. */
+        private static final Pattern MD_TYPE_NAME =
+            Pattern.compile("^(\\w+?)(ValueManager|Manager|Object|RecordSet)\\.(.+)$"); //$NON-NLS-1$
+        private static final String COMMON_MODULE_TYPE_PREFIX = "CommonModule."; //$NON-NLS-1$
+        private static final int MAX_TARGETS = 5;
+
+        private CreateMethodFix()
+        {
+        }
+
+        static List<ICompletionProposal> proposals(XtextAnnotation annotation, Image icon)
+        {
+            Issue issue = annotation.getIssue();
+            IXtextDocument document = annotation.getDocument();
+            if (issue == null || document == null || issue.getOffset() == null || issue.getCode() == null)
+                return List.of();
+            int offset = issue.getOffset();
+            String code = issue.getCode();
+            try
+            {
+                List<Target> targets = document.readOnly(
+                    (IUnitOfWork<List<Target>, XtextResource>) resource -> findTargets(resource, offset, code));
+                List<ICompletionProposal> result = new ArrayList<>();
+                for (Target target : targets)
+                    result.add(new Proposal(target, icon));
+                return result;
+            }
+            catch (RuntimeException e)
+            {
+                Global.tempLog(TOPIC, "proposals failed: " + e); //$NON-NLS-1$
+                return List.of();
+            }
+        }
+
+        private static boolean isUnknownMethodCheck(String code, IProject project)
+        {
+            if (VALIDATOR_CODE.equals(code))
+                return true;
+            ICheckRepository repository = Global.getOsgiService(ICheckRepository.class);
+            CheckUid uid = repository == null ? null : repository.getUidForShortUid(code, project);
+            Global.tempLog(TOPIC, "code=" + code + " uid=" + uid); //$NON-NLS-1$ //$NON-NLS-2$
+            return uid != null && CHECK_IDS.contains(uid.getCheckId());
+        }
+
+        private static List<Target> findTargets(XtextResource resource, int offset, String code)
+        {
+            URI uri = resource.getURI();
+            ILeafNode leaf = NodeModelUtils.findLeafNodeAtOffset(resource.getParseResult().getRootNode(), offset);
+            if (uri == null || !uri.isPlatformResource() || leaf == null)
+                return List.of();
+            IProject project = ResourcesPlugin.getWorkspace().getRoot()
+                .getFile(new Path(uri.toPlatformString(true))).getProject();
+            if (!isUnknownMethodCheck(code, project))
+                return List.of();
+            EObject semantic = NodeModelUtils.findActualSemanticObjectFor(leaf);
+            Global.tempLog(TOPIC, "leaf=" + leaf.getText() + " semantic=" //$NON-NLS-1$ //$NON-NLS-2$
+                + (semantic == null ? "null" : semantic.eClass().getName()) + " container=" //$NON-NLS-1$ //$NON-NLS-2$
+                + (semantic == null || semantic.eContainer() == null ? "null" : semantic.eContainer().eClass().getName())); //$NON-NLS-1$
+            DynamicFeatureAccess access = semantic instanceof DynamicFeatureAccess dynamic ? dynamic
+                : EcoreUtil2.getContainerOfType(semantic, DynamicFeatureAccess.class);
+            if (access == null || access.getName() == null || access.getSource() == null
+                || !(access.eContainer() instanceof Invocation invocation)
+                || invocation.getMethodAccess() != access || !access.getName().equals(leaf.getText()))
+                return List.of();
+            Map<String, String> modules = targetModules(resource, project, access.getSource());
+            Global.tempLog(TOPIC, "name=" + access.getName() + " source=" //$NON-NLS-1$ //$NON-NLS-2$
+                + access.getSource().eClass().getName() + " modules=" + modules.keySet()); //$NON-NLS-1$
+            boolean function = !(invocation.eContainer() instanceof SimpleStatement statement
+                && statement.getLeft() == invocation && statement.getRight() == null);
+            List<String> params = parameterNames(invocation);
+            List<String> paramTypes = parameterTypes(resource, invocation);
+            List<Target> result = new ArrayList<>();
+            for (Map.Entry<String, String> module : modules.entrySet())
+            {
+                IFile file = project.getFile(module.getKey());
+                // Файла модуля может ещё не быть — тогда он создаётся при применении; каталог объекта
+                // существует всегда, по нему отсекаются несуществующие объекты.
+                boolean available = file.exists() || file.getParent().exists();
+                Global.tempLog(TOPIC, "file=" + module.getKey() + " exists=" + file.exists() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " available=" + available); //$NON-NLS-1$
+                if (available && result.size() < MAX_TARGETS)
+                    result.add(new Target(file, module.getValue(), access.getName(), params, paramTypes, function));
+            }
+            return result;
+        }
+
+        /**
+         * Модули, в которых может жить метод выражения слева от точки: путь относительно проекта →
+         * подпись. Источник — модель EDT: тип выражения лежит внутри объекта метаданных, его вид
+         * (менеджер, объект, набор записей, менеджер значения) задаёт модуль.
+         */
+        private static Map<String, String> targetModules(XtextResource resource, IProject project, EObject source)
+        {
+            Map<String, String> result = new LinkedHashMap<>();
+            boolean variable = false;
+            if (source instanceof FeatureAccess featureAccess)
+            {
+                EList<FeatureEntry> entries = featureAccess instanceof StaticFeatureAccess staticAccess
+                    ? staticAccess.getFeatureEntries()
+                    : featureAccess instanceof DynamicFeatureAccess dynamicAccess
+                        ? dynamicAccess.getFeatureEntries() : null;
+                if (entries != null)
+                {
+                    for (FeatureEntry entry : entries)
+                    {
+                        EObject feature = entry == null ? null : entry.getFeature();
+                        variable |= feature instanceof Variable;
+                        addOwnerModule(result, feature, resource);
+                    }
+                }
+            }
+            if (source instanceof com._1c.g5.v8.dt.bsl.model.Expression expression)
+            {
+                for (TypeItem type : types(resource, expression))
+                {
+                    Global.tempLog(TOPIC, "type=" + McoreUtil.getTypeName(type) + " class=" //$NON-NLS-1$ //$NON-NLS-2$
+                        + (type == null ? "null" : type.eClass().getName())); //$NON-NLS-1$
+                    int before = result.size();
+                    addOwnerModule(result, type, resource);
+                    if (result.size() == before)
+                        addModuleByTypeName(result, McoreUtil.getTypeName(type));
+                }
+            }
+            // Общий модуль: его каталог существует под именем самого выражения.
+            if (result.isEmpty() && !variable && source instanceof StaticFeatureAccess staticAccess
+                && staticAccess.getName() != null)
+            {
+                String path = commonModulePath(staticAccess.getName());
+                if (project.getFile(path).exists())
+                    result.put(path, commonModuleLabel(staticAccess.getName()));
+            }
+            return result;
+        }
+
+        private static List<TypeItem> types(XtextResource resource, com._1c.g5.v8.dt.bsl.model.Expression expression)
+        {
+            if (!expression.getTypes().isEmpty())
+                return new ArrayList<>(expression.getTypes());
+            TypesComputer computer = resource.getResourceServiceProvider().get(TypesComputer.class);
+            Environmental owner = EcoreUtil2.getContainerOfType(expression, Environmental.class);
+            Environments environments = owner == null ? null : owner.environments();
+            if (computer == null || environments == null)
+                return List.of();
+            List<TypeItem> computed = computer.computeTypes(expression, environments);
+            return computed == null ? List.of() : computed;
+        }
+
+        /** Поднимается от типа или признака к объекту метаданных-владельцу и добавляет его модуль. */
+        private static void addOwnerModule(Map<String, String> result, EObject object, XtextResource resource)
+        {
+            if (object == null)
+                return;
+            String file = null;
+            for (EObject current = EcoreUtil.resolve(object, resource); current != null; current = current.eContainer())
+            {
+                if (current instanceof MdValueManagerType)
+                    file = "ValueManagerModule.bsl"; //$NON-NLS-1$
+                else if (current instanceof MdManagerType)
+                    file = "ManagerModule.bsl"; //$NON-NLS-1$
+                else if (current instanceof MdObjectType)
+                    file = "ObjectModule.bsl"; //$NON-NLS-1$
+                else if (current instanceof MdRecordSetType)
+                    file = "RecordSetModule.bsl"; //$NON-NLS-1$
+                else if (current instanceof CommonModule common)
+                {
+                    if (common.getName() != null)
+                        result.put(commonModulePath(common.getName()), commonModuleLabel(common.getName()));
+                    return;
+                }
+                else if (current instanceof MdObject mdObject)
+                {
+                    if (file != null && mdObject.getName() != null)
+                        addMdModule(result, mdObject.eClass().getName(), mdObject.getName(), file);
+                    return;
+                }
+            }
+        }
+
+        /** Запасной путь, когда тип не привёл к объекту метаданных: имя типа модели {@code CatalogManager.Имя}. */
+        private static void addModuleByTypeName(Map<String, String> result, String typeName)
+        {
+            if (typeName == null)
+                return;
+            if (typeName.startsWith(COMMON_MODULE_TYPE_PREFIX))
+            {
+                String name = typeName.substring(COMMON_MODULE_TYPE_PREFIX.length());
+                result.put(commonModulePath(name), commonModuleLabel(name));
+                return;
+            }
+            Matcher matcher = MD_TYPE_NAME.matcher(typeName);
+            if (!matcher.matches())
+                return;
+            String file = switch (matcher.group(2))
+            {
+                case "ValueManager" -> "ValueManagerModule.bsl"; //$NON-NLS-1$ //$NON-NLS-2$
+                case "Manager" -> "ManagerModule.bsl"; //$NON-NLS-1$ //$NON-NLS-2$
+                case "Object" -> "ObjectModule.bsl"; //$NON-NLS-1$ //$NON-NLS-2$
+                default -> "RecordSetModule.bsl"; //$NON-NLS-1$
+            };
+            addMdModule(result, matcher.group(1), matcher.group(3), file);
+        }
+
+        private static void addMdModule(Map<String, String> result, String mdClass, String name, String file)
+        {
+            String folder = MdTypeMapping.anyToFolder(mdClass);
+            if (folder == null)
+                return;
+            String moduleRu = MdTypeMapping.bslFilenameToModuleRu(file);
+            result.put("src/" + folder + "/" + name + "/" + file, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                MdTypeMapping.ru(mdClass) + "." + name + (moduleRu == null ? "" : "." + moduleRu)); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        }
+
+        private static String commonModulePath(String name)
+        {
+            return "src/CommonModules/" + name + "/Module.bsl"; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        private static String commonModuleLabel(String name)
+        {
+            return "ОбщийМодуль." + name; //$NON-NLS-1$
+        }
+
+        /** Имена параметров: имя переменной из вызова, иначе «ПараметрN»; повторы получают номер. */
+        private static List<String> parameterNames(Invocation invocation)
+        {
+            List<String> names = new ArrayList<>();
+            Set<String> used = new LinkedHashSet<>();
+            int index = 1;
+            for (com._1c.g5.v8.dt.bsl.model.Expression param : invocation.getParams())
+            {
+                String name = param instanceof StaticFeatureAccess staticAccess && staticAccess.getName() != null
+                    ? staticAccess.getName() : "Параметр" + index; //$NON-NLS-1$
+                String unique = name;
+                for (int n = 2; !used.add(unique.toLowerCase()); n++)
+                    unique = name + n;
+                names.add(unique);
+                index++;
+            }
+            return names;
+        }
+
+        /**
+         * Типы фактических аргументов для описания метода: по одной строке на параметр, составной
+         * тип — через запятую. Тип не вычислился — «Произвольный».
+         */
+        private static List<String> parameterTypes(XtextResource resource, Invocation invocation)
+        {
+            List<String> result = new ArrayList<>();
+            for (com._1c.g5.v8.dt.bsl.model.Expression param : invocation.getParams())
+            {
+                Set<String> names = new LinkedHashSet<>();
+                if (param != null)
+                {
+                    for (TypeItem type : types(resource, param))
+                    {
+                        String name = McoreUtil.getTypeNameRu(type);
+                        if (name == null || name.isBlank())
+                            name = McoreUtil.getTypeName(type);
+                        if (name != null && !name.isBlank())
+                            names.add(name);
+                    }
+                }
+                result.add(names.isEmpty() ? "Произвольный" : String.join(", ", names)); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            Global.tempLog(TOPIC, "paramTypes=" + result); //$NON-NLS-1$
+            return result;
+        }
+
+        private record Target(IFile file, String label, String name, List<String> params, List<String> paramTypes,
+            boolean function)
+        {
+            /** Описание метода с типами параметров; параметров нет — пусто. */
+            String description(String delimiter)
+            {
+                if (params.isEmpty())
+                    return ""; //$NON-NLS-1$
+                StringBuilder text = new StringBuilder("// Параметры:").append(delimiter); //$NON-NLS-1$
+                for (int i = 0; i < params.size(); i++)
+                    text.append("//  ").append(params.get(i)).append(" - ").append(paramTypes.get(i)) //$NON-NLS-1$ //$NON-NLS-2$
+                        .append(delimiter);
+                return text.toString();
+            }
+        }
+
+        private static final class Proposal implements ICompletionProposal
+        {
+            private final Target target;
+            private final Image icon;
+
+            Proposal(Target target, Image icon)
+            {
+                this.target = target;
+                this.icon = icon;
+            }
+
+            @Override
+            public void apply(IDocument ignored)
+            {
+                try
+                {
+                    IFile file = target.file();
+                    if (!file.exists())
+                    {
+                        // Так же недостающий модуль создаёт сама EDT (OpenHelper.getFile): пустой файл.
+                        file.create(new java.io.ByteArrayInputStream(new byte[0]), true, new org.eclipse.core.runtime.NullProgressMonitor());
+                    }
+                    // Тот же путь, что у «Перейти к определению»: редактор объекта со страницей модуля.
+                    XtextEditor editor = GoToDefinition.openBslModuleGranularEditor(file);
+                    Global.tempLog(TOPIC, "apply editor=" + (editor == null ? "null" : editor.getClass().getName())); //$NON-NLS-1$ //$NON-NLS-2$
+                    if (editor != null)
+                        insert(editor);
+                }
+                catch (Exception e)
+                {
+                    Global.tempLog(TOPIC, "apply failed: " + e); //$NON-NLS-1$
+                }
+            }
+
+            private void insert(XtextEditor editor)
+            {
+                IDocument document = editor.getDocument();
+                Global.tempLog(TOPIC, "insert document=" + (document == null ? "null" : document.getClass().getName())); //$NON-NLS-1$ //$NON-NLS-2$
+                if (document == null)
+                    return;
+                String delimiter = org.eclipse.jface.text.TextUtilities.getDefaultLineDelimiter(document);
+                String keyword = target.function() ? "Функция" : "Процедура"; //$NON-NLS-1$ //$NON-NLS-2$
+                // Описание входит в «шапку», чтобы каретка считалась от конца строки заголовка.
+                String header = target.description(delimiter) + keyword + " " + target.name() + "(" //$NON-NLS-1$ //$NON-NLS-2$
+                    + String.join(", ", target.params()) + ") Экспорт" + delimiter; //$NON-NLS-1$ //$NON-NLS-2$
+                String body = target.function() ? "\tВозврат Неопределено;" : "\t"; //$NON-NLS-1$ //$NON-NLS-2$
+                String method = header + body + delimiter + (target.function() ? "КонецФункции" : "КонецПроцедуры"); //$NON-NLS-1$ //$NON-NLS-2$
+                try
+                {
+                    int[] place = insertionPlace(document);
+                    int offset = place[1];
+                    String lead = ""; //$NON-NLS-1$
+                    int replaced = 0;
+                    String insertion;
+                    if (place[0] == AFTER_METHOD)
+                    {
+                        lead = delimiter + delimiter;
+                        insertion = lead + method;
+                    }
+                    else if (place[0] == BEFORE_STATEMENT)
+                        insertion = method + delimiter + delimiter;
+                    else
+                    {
+                        lead = offset == 0 ? "" : delimiter + delimiter; //$NON-NLS-1$
+                        insertion = lead + method + delimiter;
+                        replaced = document.getLength() - offset;
+                    }
+                    document.replace(offset, replaced, insertion);
+                    Global.tempLog(TOPIC, "inserted place=" + place[0] + " offset=" + offset); //$NON-NLS-1$ //$NON-NLS-2$
+                    // Каретка — в тело метода, сразу за отступом.
+                    editor.selectAndReveal(offset + lead.length() + header.length() + 1, 0);
+                }
+                catch (org.eclipse.jface.text.BadLocationException e)
+                {
+                    Global.tempLog(TOPIC, "insert failed: " + e); //$NON-NLS-1$
+                }
+            }
+
+            private static final int AFTER_METHOD = 0;
+            private static final int BEFORE_STATEMENT = 1;
+            private static final int AT_END = 2;
+
+            /**
+             * Место вставки: {@code [вид, смещение]}. После последнего экспортного метода (без них —
+             * последнего метода): так новый метод остаётся в той же области и под тем же условием
+             * компиляции. Методов нет — перед первым оператором модуля, иначе в конец текста.
+             */
+            private static int[] insertionPlace(IDocument document) throws org.eclipse.jface.text.BadLocationException
+            {
+                int[] place = !(document instanceof IXtextDocument xtextDocument) ? null
+                    : xtextDocument.readOnly((IUnitOfWork<int[], XtextResource>) resource ->
+                    {
+                        if (resource.getContents().isEmpty()
+                            || !(resource.getContents().get(0) instanceof com._1c.g5.v8.dt.bsl.model.Module module))
+                            return null;
+                        ICompositeNode anchor = null;
+                        boolean anchorExport = false;
+                        for (com._1c.g5.v8.dt.bsl.model.Method method : module.allMethods())
+                        {
+                            ICompositeNode node = method == null ? null : NodeModelUtils.findActualNodeFor(method);
+                            if (node == null || anchorExport && !method.isExport())
+                                continue;
+                            if (anchor == null || method.isExport() && !anchorExport
+                                || node.getEndOffset() > anchor.getEndOffset())
+                            {
+                                anchor = node;
+                                anchorExport = method.isExport();
+                            }
+                        }
+                        if (anchor != null)
+                            return new int[] { AFTER_METHOD, anchor.getEndOffset() };
+                        if (module.getStatements().isEmpty())
+                            return null;
+                        ICompositeNode node = NodeModelUtils.findActualNodeFor(module.getStatements().get(0));
+                        return node == null ? null : new int[] { BEFORE_STATEMENT, node.getOffset() };
+                    });
+                if (place == null)
+                    return new int[] { AT_END, document.get().stripTrailing().length() };
+                int line = document.getLineOfOffset(place[1]);
+                // После метода — в конец его строки (за возможный комментарий), перед оператором — в начало строки.
+                place[1] = place[0] == AFTER_METHOD
+                    ? document.getLineOffset(line) + document.getLineInformation(line).getLength()
+                    : document.getLineOffset(line);
+                return place;
+            }
+
+            @Override
+            public String getDisplayString()
+            {
+                return "Создать метод «" + target.name() + "» в модуле «" + target.label() + "»" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + (target.file().exists() ? "" : " (модуль будет создан)"); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+
+            @Override
+            public String getAdditionalProposalInfo()
+            {
+                return "Добавить экспортную " + (target.function() ? "функцию" : "процедуру") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + " в целевой модуль и перейти к ней." + Global.pluginSignForTooltip(); //$NON-NLS-1$
+            }
+
+            @Override
+            public Image getImage()
+            {
+                return icon;
+            }
+
+            @Override
+            public Point getSelection(IDocument document)
+            {
+                return null;
+            }
+
+            @Override
+            public IContextInformation getContextInformation()
+            {
+                return null;
+            }
+        }
+    }
+
     static ICompletionProposal[] proposalsForAnnotation(Annotation annotation, ISourceViewer viewer,
         ICompletionProposal[] nonSpellingFallback)
     {
@@ -2528,6 +3008,18 @@ public final class BslModuleSpellCheckHook implements IStartup
         }
         if (annotation instanceof XtextAnnotation liveAnnotation)
             base = ModuleAccessibilityAtClientFix.withLiveProposal(base, liveAnnotation, fallbackIcon);
+        Global.tempLog(CreateMethodFix.TOPIC, "annotation=" + (annotation == null ? "null" : annotation.getClass().getName()) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " text=" + (annotation == null ? "" : annotation.getText()) //$NON-NLS-1$ //$NON-NLS-2$
+            + " code=" + (annotation instanceof XtextAnnotation logged && logged.getIssue() != null //$NON-NLS-1$
+                ? logged.getIssue().getCode() : "-")); //$NON-NLS-1$
+        if (annotation instanceof XtextAnnotation createAnnotation)
+        {
+            for (ICompletionProposal create : CreateMethodFix.proposals(createAnnotation, fallbackIcon))
+            {
+                base = Arrays.copyOf(base, base.length + 1);
+                base[base.length - 1] = create;
+            }
+        }
         ICompletionProposal extra = null;
         if (annotation instanceof XtextAnnotation xa)
             extra = similarNameProposalForUnresolvedReference(xa, viewer, fallbackIcon);

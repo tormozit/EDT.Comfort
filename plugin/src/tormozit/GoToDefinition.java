@@ -1358,9 +1358,12 @@ public class GoToDefinition extends AbstractHandler
      * это проявлялось как задвоение видимых строк / урезанное содержимое в открывшемся редакторе
      * (issue 556: то же самое через {@code IDE.openEditor} в {@code ConfigSearchResultsHook}).
      *
+     * <p>Не {@code private} — переиспользуется исправлением «Создать метод»
+     * ({@code BslModuleSpellCheckHook.CreateMethodFix}), которому нужен сам редактор модуля.
+     *
      * @return {@code null}, если открыть не удалось
      */
-    private static XtextEditor openBslModuleGranularEditor(IFile file)
+    static XtextEditor openBslModuleGranularEditor(IFile file)
     {
         if (file == null)
             return null;
