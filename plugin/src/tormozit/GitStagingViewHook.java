@@ -23,9 +23,21 @@ import org.eclipse.core.runtime.SubMonitor;
 import org.eclipse.egit.core.project.RepositoryMapping;
 import org.eclipse.egit.core.RepositoryCache;
 import org.eclipse.egit.core.RepositoryUtil;
+import org.eclipse.egit.core.internal.indexdiff.IndexDiffCache;
+import org.eclipse.egit.core.internal.indexdiff.IndexDiffCacheEntry;
+import org.eclipse.egit.core.internal.indexdiff.IndexDiffData;
 import org.eclipse.egit.ui.UIUtils;
 import org.eclipse.egit.ui.internal.dialogs.CommitDialog;
+import org.eclipse.egit.ui.internal.operations.DeletePathsOperationUI;
+import org.eclipse.egit.ui.internal.staging.StagingEntry;
 import org.eclipse.egit.ui.internal.staging.StagingView;
+import org.eclipse.jface.action.Action;
+import org.eclipse.jface.action.IAction;
+import org.eclipse.jface.viewers.IStructuredSelection;
+import org.eclipse.jface.viewers.TreeViewer;
+import org.eclipse.ui.actions.ActionFactory;
+import org.eclipse.core.runtime.IPath;
+import java.util.Collection;
 import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.EReference;
@@ -102,6 +114,8 @@ import org.eclipse.xtext.naming.QualifiedName;
  * Фильтр файлов и его настройка живут отдельно в GitStagingFilterHook.
  * Та же проверка подключается к окну EGit «Фиксировать изменения» ({@link CommitDialog}): там в коммит
  * идут помеченные файлы рабочего каталога поверх HEAD, поэтому состав собирается в памяти.
+ * Операции панели над рабочим каталогом (замена на HEAD-ревизию, удаление файла) проверяются так же:
+ * проверяемый состав — рабочий каталог после операции, см. {@link #checkWorkTreeOperation}.
  */
 public final class GitStagingViewHook implements IStartup
 {
@@ -179,6 +193,7 @@ public final class GitStagingViewHook implements IStartup
             if (commit.isDisposed() || push.isDisposed())
                 return;
             RepositorySelection.install(view, commit);
+            DeleteCheckAction.install(view);
             CommitButtons session = new CommitButtons(new StagingSource(view), commit, push);
             session.install(commit);
             session.install(push);
@@ -218,12 +233,67 @@ public final class GitStagingViewHook implements IStartup
     /**
      * Состав будущего коммита на момент нажатия кнопки. {@code workTree} — содержимое файлов,
      * которых в Git ещё нет (окно фиксации берёт их из рабочего каталога), по идентификатору blob.
+     * Для операции над рабочим каталогом: {@code index} — каталог после неё, {@code previous} — до неё
+     * (иначе {@code null}: исходное состояние — HEAD), {@code changed} — файлы, которые она меняет
+     * (иначе {@code null}: отличия индекса от HEAD).
+     * <p>
+     * Для проверки достижимости файлов: {@code appearing} — файлы, которые действие создаёт (иначе
+     * {@code null}: файлы индекса, которых нет в HEAD), {@code loose} — файлы рабочего каталога,
+     * не попавшие в {@code index} и {@code previous}: содержимое остальных файлов проверка ссылок
+     * не читает, но для достижимости важно само их наличие.
      */
-    private static record Snapshot(DirCache index, ObjectId head, Map<ObjectId, byte[]> workTree) {}
+    private static record Snapshot(DirCache index, ObjectId head, Map<ObjectId, byte[]> workTree,
+        DirCache previous, Set<String> changed, Set<String> appearing, Set<String> loose) {}
 
-    /** Место интерактивной фиксации: панель «Индексирование Git» или окно «Фиксировать изменения». */
-    private interface CommitSource
+    /** Слова проверяемого действия в сообщениях проверки. */
+    private static record Wording(String title, String scope, String question, String cancel, String proceeds,
+        String canceled, String changed)
     {
+        static final Wording COMMIT = new Wording(TITLE, "составе коммита",
+            "Коммит содержит битые ссылки на метаданные (показаны в панели Поиск). Продолжить?",
+            "Отменить фиксацию", "Продолжается штатная фиксация.", "Фиксация отменена.",
+            "Состав коммита изменился во время проверки");
+        private static final String OPERATION_QUESTION =
+            "Операция приведет к появлению битых ссылок на метаданные (показаны в панели Поиск). Продолжить?";
+        static final Wording REPLACE = new Wording("Проверка ссылок замены на HEAD-ревизию",
+            "результате замены на HEAD-ревизию", OPERATION_QUESTION, "Отменить замену",
+            "Продолжается замена на HEAD-ревизию.", "Замена отменена.",
+            "Рабочий каталог изменился во время проверки");
+        static final Wording DELETE = new Wording("Проверка ссылок удаления файлов",
+            "результате удаления файлов", OPERATION_QUESTION, "Отменить удаление",
+            "Продолжается удаление.", "Удаление отменено.",
+            "Рабочий каталог изменился во время проверки");
+
+        /** Вопрос о недостижимых файлах метаданных, см. {@link MdReachability}. */
+        String unreachableQuestion()
+        {
+            return this == COMMIT
+                ? "Коммит содержит недостижимые файлы метаданных (показаны в панели Поиск). Продолжить?"
+                : "Операция приведет к появлению недостижимых файлов метаданных (показаны в панели Поиск). Продолжить?";
+        }
+    }
+
+    /** Кто запросил проверку: на её время запрещает повторный запуск, после неё выполняет действие. */
+    private interface Requester
+    {
+        void lock();
+
+        void unlock();
+
+        /** Выполнять действие уже негде: результат не показывается. */
+        boolean gone();
+
+        void proceed();
+    }
+
+    /**
+     * Источник проверяемого состава: панель «Индексирование Git», окно «Фиксировать изменения»
+     * или операция над рабочим каталогом.
+     */
+    private interface CheckSource
+    {
+        default Wording wording() { return Wording.COMMIT; }
+
         Shell shell();
 
         /** {@code null} — проверять нечего, выполняется штатная обработка кнопки. */
@@ -239,7 +309,7 @@ public final class GitStagingViewHook implements IStartup
         boolean unchanged(Repository repository, Snapshot snapshot) throws IOException;
     }
 
-    private static final class StagingSource implements CommitSource
+    private static final class StagingSource implements CheckSource
     {
         private final IViewPart view;
 
@@ -277,7 +347,8 @@ public final class GitStagingViewHook implements IStartup
         public java.util.concurrent.Callable<Snapshot> reader(Repository repository)
         {
             // Только чтение: фоновый импорт никогда не удерживает блокировку индекса Git.
-            return () -> new Snapshot(repository.readDirCache(), repository.resolve("HEAD"), Map.of());
+            return () -> new Snapshot(repository.readDirCache(), repository.resolve("HEAD"), Map.of(), null, null,
+                null, Set.of());
         }
 
         @Override
@@ -309,7 +380,7 @@ public final class GitStagingViewHook implements IStartup
      * каталога поверх HEAD (остальные изменения индекса в коммит не идут), поэтому состав —
      * дерево HEAD с заменой помеченных файлов их текущим содержимым, только в памяти.
      */
-    private static final class DialogSource implements CommitSource
+    private static final class DialogSource implements CheckSource
     {
         private final CommitDialog dialog;
         private final Shell shell;
@@ -378,15 +449,23 @@ public final class GitStagingViewHook implements IStartup
                 builder.finish();
             }
             Map<ObjectId, byte[]> workTree = new HashMap<>();
+            Set<String> appearing = new HashSet<>();
+            Set<String> loose = new HashSet<>();
             DirCacheEditor editor = index.editor();
             try (ObjectInserter.Formatter formatter = new ObjectInserter.Formatter())
             {
                 for (String file : files)
                 {
+                    File source = new File(repository.getWorkTree(), file);
+                    if (source.isFile() && index.getEntry(file) == null)
+                    {
+                        appearing.add(file);
+                        if (!IndexSource.metadataFile(file))
+                            loose.add(file);
+                    }
                     // Остальные файлы проверка не читает: их содержимое остаётся как в HEAD.
                     if (!IndexSource.metadataFile(file))
                         continue;
-                    File source = new File(repository.getWorkTree(), file);
                     if (!source.isFile())
                     {
                         editor.add(new DirCacheEditor.DeletePath(file));
@@ -409,7 +488,255 @@ public final class GitStagingViewHook implements IStartup
             editor.finish();
             Global.tempLog(LOG, "dialog snapshot entries=" + index.getEntryCount() + " workTree=" + workTree.size()
                 + " head=" + head);
-            return new Snapshot(index, head, workTree);
+            return new Snapshot(index, head, workTree, null, null, appearing, loose);
+        }
+    }
+
+    /**
+     * Операция панели над файлами рабочего каталога: замена на HEAD-ревизию или удаление. Проверяется
+     * рабочий каталог после операции; исходное состояние — он же до операции, а не HEAD. Оба состава
+     * собираются в памяти из индекса и неиндексированных изменений (кэш EGit), в Git ничего не пишется.
+     */
+    private static final class WorkTreeSource implements CheckSource, Requester
+    {
+        /** Проверка одна на все панели: повторный запуск операции во время неё отклоняется. */
+        private static boolean running;
+        private final Shell shell;
+        private final Repository repository;
+        private final Set<String> paths;
+        private final boolean delete;
+        private final Runnable operation;
+
+        WorkTreeSource(Shell shell, Repository repository, Set<String> paths, boolean delete, Runnable operation)
+        {
+            this.shell = shell;
+            this.repository = repository;
+            this.paths = paths;
+            this.delete = delete;
+            this.operation = operation;
+        }
+
+        @Override public Wording wording() { return delete ? Wording.DELETE : Wording.REPLACE; }
+
+        @Override public Shell shell() { return shell; }
+
+        @Override public Repository repository() { return repository; }
+
+        @Override public boolean commitPossible(Repository repository) { return true; }
+
+        // Проверяется содержимое файлов на диске, как его увидит сама операция.
+        @Override public boolean saveEditors(Repository repository) { return true; }
+
+        @Override
+        public java.util.concurrent.Callable<Snapshot> reader(Repository repository) { return this::snapshot; }
+
+        @Override
+        public boolean unchanged(Repository repository, Snapshot snapshot) throws IOException
+        {
+            return java.util.Objects.equals(snapshot.head(), repository.resolve("HEAD"));
+        }
+
+        @Override public void lock() { running = true; }
+
+        @Override public void unlock() { running = false; }
+
+        @Override public boolean gone() { return shell != null && shell.isDisposed(); }
+
+        @Override public void proceed() { operation.run(); }
+
+        private Snapshot snapshot() throws IOException
+        {
+            ObjectId head = repository.resolve("HEAD");
+            IndexDiffCacheEntry cache = IndexDiffCache.INSTANCE.getIndexDiffCacheEntry(repository);
+            IndexDiffData diff = cache != null ? cache.getIndexDiff() : null;
+            if (diff == null)
+                throw new IllegalStateException("Недоступно состояние рабочего каталога Git");
+            // Прочитанный индекс правится только в памяти: без блокировки и записи.
+            DirCache before = repository.readDirCache();
+            if (before.hasUnmergedPaths())
+                throw new IllegalStateException("В индексе Git есть неразрешённые конфликты");
+            Map<ObjectId, byte[]> workTree = new HashMap<>();
+            DirCacheEditor editor = before.editor();
+            try (ObjectInserter.Formatter formatter = new ObjectInserter.Formatter())
+            {
+                for (String file : diff.getMissing())
+                    if (IndexSource.metadataFile(file))
+                        editor.add(new DirCacheEditor.DeletePath(file));
+                for (Collection<String> files : List.of(diff.getModified(), diff.getUntracked()))
+                    for (String file : files)
+                    {
+                        // Остальные файлы проверка не читает: их содержимое остаётся как в индексе.
+                        if (!IndexSource.metadataFile(file))
+                            continue;
+                        File source = new File(repository.getWorkTree(), file);
+                        if (!source.isFile())
+                        {
+                            editor.add(new DirCacheEditor.DeletePath(file));
+                            continue;
+                        }
+                        byte[] content = java.nio.file.Files.readAllBytes(source.toPath());
+                        ObjectId id = formatter.idFor(Constants.OBJ_BLOB, content);
+                        workTree.put(id, content);
+                        editor.add(replacement(file, id));
+                    }
+            }
+            editor.finish();
+            Set<String> loose = new HashSet<>();
+            for (String file : diff.getUntracked())
+                if (!IndexSource.metadataFile(file) && new File(repository.getWorkTree(), file).isFile())
+                    loose.add(file);
+            Set<String> appearing = new HashSet<>();
+            DirCache after = DirCache.newInCore();
+            DirCacheBuilder builder = after.builder();
+            for (int i = 0; i < before.getEntryCount(); i++)
+            {
+                // Копии записей: правка итогового состава не должна менять исходный.
+                DirCacheEntry entry = before.getEntry(i);
+                DirCacheEntry copy = new DirCacheEntry(entry.getRawPath());
+                copy.setFileMode(entry.getFileMode());
+                copy.setObjectId(entry.getObjectId());
+                builder.add(copy);
+            }
+            builder.finish();
+            DirCacheEditor result = after.editor();
+            if (delete)
+                for (String file : paths)
+                    result.add(new DirCacheEditor.DeletePath(file));
+            else
+                try (RevWalk revisions = new RevWalk(repository))
+                {
+                    var tree = head == null ? null : revisions.parseCommit(head).getTree();
+                    for (String file : paths)
+                        try (TreeWalk walk = tree == null ? null : TreeWalk.forPath(repository, file, tree))
+                        {
+                            result.add(walk == null ? new DirCacheEditor.DeletePath(file)
+                                : replacement(file, walk.getObjectId(0)));
+                            if (walk != null && !new File(repository.getWorkTree(), file).isFile())
+                                appearing.add(file);
+                        }
+                }
+            result.finish();
+            Global.tempLog(LOG, "work tree snapshot delete=" + delete + " paths=" + paths
+                + " before=" + before.getEntryCount() + " after=" + after.getEntryCount()
+                + " modified=" + diff.getModified().size() + " untracked=" + diff.getUntracked().size()
+                + " missing=" + diff.getMissing().size() + " read=" + workTree.size() + " head=" + head);
+            return new Snapshot(after, head, workTree, before, paths, appearing, loose);
+        }
+
+        private static DirCacheEditor.PathEdit replacement(String file, ObjectId id)
+        {
+            return new DirCacheEditor.PathEdit(file)
+            {
+                @Override
+                public void apply(DirCacheEntry entry)
+                {
+                    entry.setFileMode(FileMode.REGULAR_FILE);
+                    entry.setObjectId(id);
+                }
+            };
+        }
+    }
+
+    /**
+     * Проверяет битые ссылки, которые появятся после операции над файлами рабочего каталога, и только
+     * затем выполняет её. Без файлов метаданных операция выполняется сразу. Ошибка и пропуск проверки
+     * операцию не отменяют — как и при фиксации.
+     *
+     * @param paths пути файлов от корня рабочего каталога репозитория
+     * @param delete файлы удаляются; иначе их содержимое заменяется состоянием HEAD
+     */
+    static void checkWorkTreeOperation(Shell shell, Repository repository, Collection<String> paths,
+        boolean delete, Runnable operation)
+    {
+        // Достижимость проверяется для любых файлов исходников конфигурации, не только метаданных.
+        Set<String> files = new HashSet<>();
+        int metadata = 0;
+        for (String path : paths)
+            if (IndexSource.metadataFile(path))
+            {
+                files.add(path);
+                metadata++;
+            }
+            else if (path.startsWith("src/") || path.contains("/src/"))
+                files.add(path);
+        Global.tempLog(LOG, "work tree operation delete=" + delete + " paths=" + paths.size()
+            + " metadata=" + metadata + " sources=" + files.size() + " repository=" + repository
+            + " running=" + WorkTreeSource.running);
+        if (repository == null || files.isEmpty())
+        {
+            operation.run();
+            return;
+        }
+        WorkTreeSource source = new WorkTreeSource(shell, repository, files, delete, operation);
+        if (WorkTreeSource.running)
+        {
+            ToastNotification.show(source.wording().title(), "Предыдущая проверка ссылок ещё выполняется.", 5_000);
+            return;
+        }
+        source.lock();
+        CommitButtons.CheckAttempt attempt = new CommitButtons.CheckAttempt(source, source);
+        try { attempt.begin(); }
+        catch (Throwable error) { attempt.finish(error); }
+    }
+
+    /** Штатное удаление файлов EGit ({@code StagingView.DeleteAction}) с предварительной проверкой ссылок. */
+    static void deleteWithCheck(IViewPart view, IStructuredSelection selection)
+    {
+        List<IPath> locations = new ArrayList<>();
+        List<String> paths = new ArrayList<>();
+        Repository repository = null;
+        for (Object element : selection.toList())
+            if (element instanceof StagingEntry entry)
+            {
+                locations.add(entry.getLocation());
+                paths.add(entry.getPath());
+                repository = entry.getRepository();
+            }
+        if (locations.isEmpty())
+            return;
+        checkWorkTreeOperation(view.getSite().getShell(), repository, paths, true,
+            () -> new DeletePathsOperationUI(locations, view.getSite()).run());
+    }
+
+    /**
+     * Клавиша Delete в списке «Неиндексированные изменения». Штатный обработчик
+     * ({@code StagingView.GlobalDeleteActionHandler}, ставится в {@code updateToolbar}) решает только
+     * доступность; удаление идёт через {@link #deleteWithCheck}.
+     */
+    private static final class DeleteCheckAction extends Action
+    {
+        private final IViewPart view;
+        private final IAction original;
+
+        private DeleteCheckAction(IViewPart view, IAction original)
+        {
+            this.view = view;
+            this.original = original;
+        }
+
+        static void install(IViewPart view)
+        {
+            var bars = view.getViewSite().getActionBars();
+            String id = ActionFactory.DELETE.getId();
+            IAction original = bars.getGlobalActionHandler(id);
+            if (original instanceof DeleteCheckAction)
+                return;
+            Global.tempLog(LOG, "delete handler original=" + (original == null ? null : original.getClass().getName()));
+            if (original == null)
+                return;
+            bars.setGlobalActionHandler(id, new DeleteCheckAction(view, original));
+            bars.updateActionBars();
+        }
+
+        @Override public boolean isEnabled() { return original.isEnabled(); }
+
+        @Override
+        public void run()
+        {
+            if (Global.getField(view, "unstagedViewer") instanceof TreeViewer viewer)
+                deleteWithCheck(view, viewer.getStructuredSelection());
+            else
+                original.run();
         }
     }
 
@@ -514,12 +841,12 @@ public final class GitStagingViewHook implements IStartup
 
     private static final class CommitButtons
     {
-        private final CommitSource source;
+        private final CheckSource source;
         private final Button commit;
         private final Button push;
         private boolean running;
 
-        CommitButtons(CommitSource source, Button commit, Button push)
+        CommitButtons(CheckSource source, Button commit, Button push)
         {
             this.source = source;
             this.commit = commit;
@@ -546,12 +873,41 @@ public final class GitStagingViewHook implements IStartup
             if (running)
                 return;
             running = true;
-            CommitAttempt attempt = new CommitAttempt(this, button, event, original);
+            boolean commitEnabled = commit.getEnabled();
+            boolean pushEnabled = push.getEnabled();
+            CheckAttempt attempt = new CheckAttempt(source, new Requester()
+            {
+                @Override
+                public void lock()
+                {
+                    commit.setEnabled(false);
+                    push.setEnabled(false);
+                }
+
+                @Override
+                public void unlock()
+                {
+                    try { if (!commit.isDisposed()) commit.setEnabled(commitEnabled); }
+                    catch (Throwable ignored) { /* Штатная операция должна продолжиться. */ }
+                    try { if (!push.isDisposed()) push.setEnabled(pushEnabled); }
+                    catch (Throwable ignored) { /* Штатная операция должна продолжиться. */ }
+                    running = false;
+                }
+
+                @Override public boolean gone() { return button.isDisposed(); }
+
+                @Override
+                public void proceed()
+                {
+                    for (Listener listener : original)
+                        listener.handleEvent(event);
+                }
+            });
             try { attempt.begin(); }
-            catch (Throwable error) { attempt.finish(error, false); }
+            catch (Throwable error) { attempt.finish(error); }
         }
 
-        private void reportSkipped(String message, Throwable error)
+        private static void reportSkipped(String title, String message, Throwable error)
         {
             try
             {
@@ -565,32 +921,22 @@ public final class GitStagingViewHook implements IStartup
             {
                 Display.getDefault().asyncExec(() ->
                 {
-                    try { ToastNotification.show(TITLE, message); }
+                    try { ToastNotification.show(title, message); }
                     catch (Throwable notificationError) { /* Уведомление не влияет на фиксацию. */ }
                 });
             }
             catch (Throwable notificationError) { /* Уведомление не влияет на фиксацию. */ }
         }
 
-        private static final class CommitAttempt
+        /** Одна проверка перед действием: фиксацией или операцией над рабочим каталогом. */
+        private static final class CheckAttempt
         {
-            private final CommitButtons session;
-            private final CommitSource source;
-            private final Button commit;
-            private final Button push;
-            private final Button button;
-            private final Event event;
-            private final Listener[] original;
-            private final boolean commitEnabled;
-            private final boolean pushEnabled;
+            private final CheckSource source;
+            private final Requester requester;
+            private final Wording words;
             private final List<Findings> findings = Collections.synchronizedList(new ArrayList<>());
+            private final List<UnreachableFilesSearchResult> unreachable = Collections.synchronizedList(new ArrayList<>());
             private final IProgressMonitor cancellation = new NullProgressMonitor();
-            private volatile long fullSearchStarted;
-            private final Runnable timeout = () ->
-            {
-                if (fullSearchStarted == 0)
-                    finish(null, true);
-            };
             private final Runnable askCancellation = this::askCancellation;
             private boolean askingCancellation;
             private boolean commitCanceled;
@@ -600,17 +946,16 @@ public final class GitStagingViewHook implements IStartup
             private long started;
             private boolean finished;
 
-            CommitAttempt(CommitButtons session, Button button, Event event, Listener[] original)
+            CheckAttempt(CheckSource source, Requester requester)
             {
-                this.session = session;
-                this.source = session.source;
-                this.commit = session.commit;
-                this.push = session.push;
-                this.commitEnabled = commit.getEnabled();
-                this.pushEnabled = push.getEnabled();
-                this.button = button;
-                this.event = event;
-                this.original = original;
+                this.source = source;
+                this.requester = requester;
+                this.words = source.wording();
+            }
+
+            private void skipped(String message, Throwable error)
+            {
+                reportSkipped(words.title(), message, error);
             }
 
             void begin() throws Exception
@@ -619,27 +964,27 @@ public final class GitStagingViewHook implements IStartup
                 Global.tempLog(LOG, "begin source=" + source.getClass().getSimpleName() + " repository=" + selected);
                 if (selected == null)
                 {
-                    Display.getDefault().asyncExec(() -> finish(null, false));
+                    Display.getDefault().asyncExec(() -> finish(null));
                     return;
                 }
                 repository = selected;
                 if (!source.commitPossible(repository))
                 {
-                    Display.getDefault().asyncExec(() -> finish(null, false));
+                    Display.getDefault().asyncExec(() -> finish(null));
                     return;
                 }
                 if (!source.saveEditors(repository))
                 {
                     finished = true;
-                    session.running = false;
+                    requester.unlock();
                     return;
                 }
                 java.util.concurrent.Callable<Snapshot> reader = source.reader(repository);
                 started = System.nanoTime();
-                commit.setEnabled(false);
-                push.setEnabled(false);
-                Display.getDefault().timerExec(20_000, timeout);
-                new Job(TITLE)
+                requester.lock();
+                // Один вопрос на любую проверку, частичную и полную: ограничения по времени нет.
+                Display.getDefault().timerExec(ASK_AFTER_MS, askCancellation);
+                new Job(words.title())
                 {
                     @Override protected IStatus run(IProgressMonitor monitor)
                     {
@@ -655,31 +1000,30 @@ public final class GitStagingViewHook implements IStartup
                             List<ProjectCheck> selectedProjects = projects(repository);
                             Global.tempLog(LOG, "index read entries=" + index.getEntryCount()
                                 + " projects=" + selectedProjects.size() + " head=" + head);
-                            check(repository, content, selectedProjects, findings,
-                                changedFiles(repository, index, head), cancellation, CommitAttempt.this::startFullSearch);
+                            try
+                            {
+                                check(repository, content, selectedProjects, findings,
+                                    content.changed() != null ? content.changed() : changedFiles(repository, index, head),
+                                    cancellation);
+                            }
+                            finally
+                            {
+                                // Достижимость файлов не зависит от исхода проверки ссылок.
+                                if (!cancellation.isCanceled())
+                                    try
+                                    {
+                                        findUnreachable(repository, content, selectedProjects, words.scope(),
+                                            unreachable, cancellation);
+                                    }
+                                    catch (Throwable error) { Global.logError("MdReachability", "commit check failed", error); }
+                            }
                         }
                         catch (Throwable error) { failure = error; }
                         final Throwable result = failure;
-                        Display.getDefault().asyncExec(() -> finish(result, false));
+                        Display.getDefault().asyncExec(() -> finish(result));
                         return Status.OK_STATUS;
                     }
                 }.schedule();
-            }
-
-            private void startFullSearch()
-            {
-                if (fullSearchStarted != 0)
-                    return;
-                fullSearchStarted = System.nanoTime();
-                Global.tempLog(LOG, "full search started; ask cancellation after 10 seconds");
-                Display.getDefault().asyncExec(() ->
-                {
-                    if (finished)
-                        return;
-                    Display.getDefault().timerExec(-1, timeout);
-                    long elapsed = (System.nanoTime() - fullSearchStarted) / 1_000_000;
-                    Display.getDefault().timerExec((int) Math.max(0, 10_000 - elapsed), askCancellation);
-                });
             }
 
             private void askCancellation()
@@ -691,15 +1035,15 @@ public final class GitStagingViewHook implements IStartup
                 try
                 {
                     showFindings();
-                    choice = new MessageDialog(shell(), Global.withPluginWindowTitle(TITLE),
-                        null, "Проверка битых ссылок на удаленные объекты может занять длительное время",
+                    choice = new MessageDialog(shell(), Global.withPluginWindowTitle(words.title()),
+                        null, "Проверка битых ссылок может занять длительное время",
                         MessageDialog.QUESTION, new String[] { "Продолжить проверку", "Пропустить проверку",
-                            "Отменить фиксацию" }, 0).open();
-                    Global.tempLog(LOG, "full search choice=" + choice);
+                            words.cancel() }, 0).open();
+                    Global.tempLog(LOG, "long check choice=" + choice);
                 }
                 catch (Throwable failure)
                 {
-                    session.reportSkipped("Не удалось запросить продолжение проверки ссылок.", failure);
+                    skipped("Не удалось запросить продолжение проверки ссылок.", failure);
                 }
                 finally { askingCancellation = false; }
                 if (choice != 0)
@@ -707,7 +1051,7 @@ public final class GitStagingViewHook implements IStartup
                     // Закрытие диалога также отменяет фиксацию; ошибка показа пропускает проверку.
                     commitCanceled = choice != 1;
                     deferredFinish = null;
-                    finish(new OperationCanceledException(), false);
+                    finish(new OperationCanceledException());
                 }
                 else if (deferredFinish != null)
                 {
@@ -717,66 +1061,54 @@ public final class GitStagingViewHook implements IStartup
                 }
             }
 
-            void finish(Throwable error, boolean expired)
+            void finish(Throwable error)
             {
-                // Оба завершения выполняются в UI: таймер и ответ фоновой проверки конкурируют только здесь.
+                // Оба завершения выполняются в UI: вопрос и ответ фоновой проверки конкурируют только здесь.
                 if (finished)
                     return;
                 if (askingCancellation)
                 {
-                    final boolean timeoutResult = expired;
-                    deferredFinish = () -> finish(error, timeoutResult);
+                    deferredFinish = () -> finish(error);
                     return;
                 }
                 finished = true;
-                double seconds = started == 0 ? 0 : (System.nanoTime() - started) / 1_000_000_000.0;
-                expired |= fullSearchStarted == 0 && started != 0 && seconds >= 20;
+                Global.tempLog(LOG, "finish ms=" + (started == 0 ? 0 : (System.nanoTime() - started) / 1_000_000)
+                    + " error=" + error);
                 cancellation.setCanceled(true);
                 boolean proceed = !commitCanceled;
                 try
                 {
-                    Display.getDefault().timerExec(-1, timeout);
                     Display.getDefault().timerExec(-1, askCancellation);
                     // Окно фиксации закрыли во время проверки: фиксации не будет, показывать нечего.
-                    if (button.isDisposed())
+                    if (requester.gone())
                         return;
                     if (repository != null && snapshot != null && !source.unchanged(repository, snapshot))
-                        throw new IllegalStateException("Состав коммита изменился во время проверки");
+                        throw new IllegalStateException(words.changed());
                     int count = showFindings();
-                    if (expired)
-                        session.reportSkipped("Проверка битых ссылок прервана по длительности "
-                            + String.format(java.util.Locale.forLanguageTag("ru"), "%.1f", seconds) + " секунд", error);
-                    else if (error instanceof OperationCanceledException)
+                    if (error instanceof OperationCanceledException)
                     {
                         if (!commitCanceled)
-                            session.reportSkipped("Проверка битых ссылок пропущена. Продолжается штатная фиксация.", null);
+                            skipped("Проверка битых ссылок пропущена. " + words.proceeds(), null);
                     }
                     else if (error != null)
-                        session.reportSkipped("Проверка ссылок недоступна. Продолжается штатная фиксация.", error);
+                        skipped("Проверка ссылок недоступна. " + words.proceeds(), error);
                     else if (count > 0 && !commitCanceled)
                         proceed = MessageDialog.openQuestion(shell(),
-                            Global.withPluginWindowTitle(TITLE),
-                            "Коммит содержит битые ссылки на метаданные (показаны в панели Поиск). Продолжить?");
+                            Global.withPluginWindowTitle(words.title()), words.question());
+                    // Пропущенная проверка ничего не показывает; ошибка проверки ссылок этой не мешает.
+                    if (proceed && !(error instanceof OperationCanceledException) && showUnreachable())
+                        proceed = MessageDialog.openQuestion(shell(),
+                            Global.withPluginWindowTitle(words.title()), words.unreachableQuestion());
                 }
                 catch (Throwable failure)
                 {
-                    session.reportSkipped(commitCanceled ? "Фиксация отменена. Не удалось завершить проверку ссылок."
-                        : expired ? "Проверка битых ссылок прервана по длительности "
-                        + String.format(java.util.Locale.forLanguageTag("ru"), "%.1f", seconds) + " секунд"
-                        : "Проверка ссылок недоступна. Продолжается штатная фиксация.", failure);
+                    skipped(commitCanceled ? words.canceled() + " Не удалось завершить проверку ссылок."
+                        : "Проверка ссылок недоступна. " + words.proceeds(), failure);
                 }
-                finally
-                {
-                    try { if (!commit.isDisposed()) commit.setEnabled(commitEnabled); }
-                    catch (Throwable ignored) { /* Штатная операция должна продолжиться. */ }
-                    try { if (!push.isDisposed()) push.setEnabled(pushEnabled); }
-                    catch (Throwable ignored) { /* Штатная операция должна продолжиться. */ }
-                    session.running = false;
-                }
+                finally { requester.unlock(); }
                 // Исключения штатных обработчиков не перехватываются как ошибки нашей проверки.
-                if (proceed && !commitCanceled && !button.isDisposed())
-                    for (Listener listener : original)
-                        listener.handleEvent(event);
+                if (proceed && !commitCanceled && !requester.gone())
+                    requester.proceed();
             }
 
             /** Окно фиксации может быть уже закрыто — тогда родителем служит окно приложения. */
@@ -787,6 +1119,15 @@ public final class GitStagingViewHook implements IStartup
                     return shell;
                 IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
                 return window != null ? window.getShell() : null;
+            }
+
+            private boolean showUnreachable()
+            {
+                List<UnreachableFilesSearchResult> results;
+                synchronized (unreachable) { results = new ArrayList<>(unreachable); }
+                for (UnreachableFilesSearchResult result : results)
+                    result.show(true);
+                return !results.isEmpty();
             }
 
             private int showFindings()
@@ -803,7 +1144,7 @@ public final class GitStagingViewHook implements IStartup
                     count += rows.size();
                     CompareSearchResult search = new CompareSearchResult(rows, null, result.project());
                     search.setQueryText("битые ссылки метаданных");
-                    search.setScopeLabel("составе коммита");
+                    search.setScopeLabel(words.scope());
                     CompareSearchQuery query = new CompareSearchQuery();
                     search.setQuery(query);
                     query.setSearchResult(search);
@@ -864,6 +1205,111 @@ public final class GitStagingViewHook implements IStartup
             return result;
         }
 
+        /**
+         * Недостижимые папки метаданных, которые образует действие ({@link MdReachability#findNew}).
+         * Модель EDT не нужна: читаются только пути состава и тексты описателей.
+         */
+        private static void findUnreachable(Repository repository, Snapshot content, List<ProjectCheck> projects,
+            String scope, List<UnreachableFilesSearchResult> results, IProgressMonitor monitor) throws IOException
+        {
+            DirCache index = content.index();
+            DirCache before = content.previous();
+            Set<String> appearing = content.appearing();
+            if (appearing == null)
+            {
+                appearing = new HashSet<>();
+                try (RevWalk revisions = new RevWalk(repository); TreeWalk tree = new TreeWalk(repository))
+                {
+                    if (content.head() == null)
+                        tree.addTree(new EmptyTreeIterator());
+                    else
+                        tree.addTree(revisions.parseCommit(content.head()).getTree());
+                    tree.addTree(new DirCacheIterator(index));
+                    tree.setRecursive(true);
+                    tree.setFilter(TreeFilter.ANY_DIFF);
+                    while (tree.next())
+                        if (tree.getRawMode(0) == 0)
+                            appearing.add(tree.getPathString());
+                }
+            }
+            for (ProjectCheck project : projects)
+            {
+                String root = repository.getWorkTree().toPath()
+                    .relativize(project.project().getLocation().toFile().toPath()).toString().replace('\\', '/');
+                String prefix = root.isEmpty() ? "" : root + "/";
+                String sources = prefix + "src/";
+                // Удаляемые операцией файлы рабочего каталога после неё отсутствуют.
+                Set<String> looseAfter = new HashSet<>(content.loose());
+                if (content.changed() != null)
+                    looseAfter.removeIf(file -> content.changed().contains(file) && index.getEntry(file) == null);
+                List<String> files = sourceFiles(index, looseAfter, sources, prefix);
+                List<String> added = new ArrayList<>();
+                for (String file : appearing)
+                    if (file.startsWith(sources))
+                        added.add(file.substring(prefix.length()));
+                IndexSource after = new IndexSource(repository, index, prefix, null, content.workTree());
+                IndexSource previous = before != null
+                    ? new IndexSource(repository, before, prefix, null, content.workTree())
+                    : new IndexSource(repository, index, prefix, content.head(), Map.of());
+                List<MdReachability.Item> items = MdReachability.findNew(project.project(), new MdReachability.Change(
+                    files, before != null ? sourceFiles(before, content.loose(), sources, prefix) : null, added,
+                    reachabilityFiles(previous, content.loose(), prefix),
+                    reachabilityFiles(after, looseAfter, prefix)), monitor);
+                // Восстанавливаемый описатель «Заменить на HEAD-ревизию» сама прописывает в Configuration.mdo.
+                if (before != null)
+                    items.removeIf(item -> item.mdo() != null && content.appearing().contains(prefix + item.mdo()));
+                if (!items.isEmpty())
+                {
+                    items.sort(java.util.Comparator.comparing(MdReachability.Item::fullName, String.CASE_INSENSITIVE_ORDER));
+                    UnreachableFilesSearchResult result =
+                        new UnreachableFilesSearchResult(project.project(), items, scope);
+                    // Только панель «Индексирование Git» фиксирует сам индекс: состав без своих
+                    // списков создаваемых файлов и без исходного каталога.
+                    result.setIndexed(before == null && content.appearing() == null);
+                    results.add(result);
+                }
+            }
+        }
+
+        /** Файлы исходников проекта в составе; пути — от корня проекта. */
+        private static List<String> sourceFiles(DirCache index, Set<String> loose, String sources, String prefix)
+        {
+            List<String> files = new ArrayList<>();
+            for (int i = 0; i < index.getEntryCount(); i++)
+            {
+                String file = index.getEntry(i).getPathString();
+                if (file.startsWith(sources))
+                    files.add(file.substring(prefix.length()));
+            }
+            for (String file : loose)
+                if (file.startsWith(sources))
+                    files.add(file.substring(prefix.length()));
+            return files;
+        }
+
+        private static MdReachability.Files reachabilityFiles(IndexSource source, Set<String> loose, String prefix)
+        {
+            return MdReachability.cached(new MdReachability.Files()
+            {
+                @Override
+                public boolean exists(String file)
+                {
+                    return source.fileExists(Path.of(file)) || loose.contains(prefix + file);
+                }
+
+                @Override
+                public String content(String file)
+                {
+                    try (InputStream stream = source.getFileStream(Path.of(file)))
+                    {
+                        return stream == null ? null
+                            : new String(stream.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+                    }
+                    catch (IOException error) { throw new UncheckedIOException(error); }
+                }
+            });
+        }
+
         private static boolean existed(Repository repository, ObjectId head, String path)
             throws java.io.IOException
         {
@@ -877,7 +1323,7 @@ public final class GitStagingViewHook implements IStartup
         }
 
         private static void check(Repository repository, Snapshot content, List<ProjectCheck> projects,
-            List<Findings> findings, Set<String> changedFiles, IProgressMonitor monitor, Runnable startFullSearch)
+            List<Findings> findings, Set<String> changedFiles, IProgressMonitor monitor)
             throws IOException
         {
             DirCache index = content.index();
@@ -909,7 +1355,11 @@ public final class GitStagingViewHook implements IStartup
                 SubMonitor checking = progress.split(1).setWorkRemaining(100);
                 checking.subTask(project.project().getName());
                 IndexSource staged = new IndexSource(repository, index, prefix, null, content.workTree());
-                IndexSource previousFiles = new IndexSource(repository, index, prefix, head, Map.of());
+                // Исходное состояние операции над рабочим каталогом — он сам, а не HEAD.
+                DirCache before = content.previous();
+                IndexSource previousFiles = before != null
+                    ? new IndexSource(repository, before, prefix, null, content.workTree())
+                    : new IndexSource(repository, index, prefix, head, Map.of());
                 boolean deleted = false;
                 for (String file : projectFiles)
                 {
@@ -926,7 +1376,7 @@ public final class GitStagingViewHook implements IStartup
                     throw new IllegalStateException("Недоступна модель проекта " + project.project().getName());
                 if (deleted)
                 {
-                    startFullSearch.run();
+                    Global.tempLog(LOG, "full search started project=" + project.project().getName());
                     staged.selectAll();
                 }
                 else
@@ -935,8 +1385,9 @@ public final class GitStagingViewHook implements IStartup
                 try
                 {
                     start(source, checking.split(30));
-                    if (!deleted && head != null
-                        && existed(repository, head, prefix + "src/Configuration/Configuration.mdo"))
+                    String configuration = prefix + "src/Configuration/Configuration.mdo";
+                    if (!deleted && (before != null ? before.getEntry(configuration) != null
+                        : head != null && existed(repository, head, configuration)))
                     {
                         previousFiles.select(projectFiles, converter);
                         IComparisonDataSource previous = createSource(factory, previousFiles);
@@ -950,7 +1401,7 @@ public final class GitStagingViewHook implements IStartup
                     }
                     if (deleted && !staged.full)
                     {
-                        startFullSearch.run();
+                        Global.tempLog(LOG, "full search started project=" + project.project().getName());
                         stopDeferred(source);
                         staged.selectAll();
                         source = createSource(factory, staged);
@@ -960,9 +1411,23 @@ public final class GitStagingViewHook implements IStartup
                         + " changed=" + projectFiles.size() + " imported=" + staged.files.size()
                         + " previous=" + previousFiles.files.size());
                     List<CompareSearchMatch> rows = Collections.synchronizedList(new ArrayList<>());
-                    findings.add(new Findings(project.project(), rows));
-                    MdReferenceSupport.findInModel(source, project.navigationBase(),
-                        deleted ? null : projectFiles, checking.split(20), rows::add);
+                    if (before == null)
+                    {
+                        findings.add(new Findings(project.project(), rows));
+                        MdReferenceSupport.findInModel(source, project.navigationBase(),
+                            deleted ? null : projectFiles, checking.split(20), rows::add);
+                    }
+                    else
+                    {
+                        // Операция отвечает только за ссылки, которые ломает она сама: битые и без неё
+                        // отсеиваются по рабочей модели проекта, поэтому результат показывается целиком в конце.
+                        List<CompareSearchMatch> found = MdReferenceSupport.findInModel(source,
+                            project.navigationBase(), deleted ? null : projectFiles, checking.split(15));
+                        rows.addAll(MdReferenceSupport.newInProject(project.project(), found, checking.split(5)));
+                        Global.tempLog(LOG, "new links project=" + project.project().getName()
+                            + " found=" + found.size() + " new=" + rows.size());
+                        findings.add(new Findings(project.project(), rows));
+                    }
                 }
                 finally { stopDeferred(source); }
                 checking.done();
@@ -974,6 +1439,8 @@ public final class GitStagingViewHook implements IStartup
         private static final String EDITOR_STATE_JOB =
             "org.eclipse.xtext.ui.editor.DirtyStateEditorSupport$UpdateEditorStateJob";
         private static final long STOP_WAIT_MS = 30_000;
+        /** Через сколько после начала проверки спрашивать, продолжать ли её. */
+        private static final int ASK_AFTER_MS = 10_000;
 
         /**
          * Останавливает временную модель фоновым заданием, не задерживая фиксацию. Импорт в неё

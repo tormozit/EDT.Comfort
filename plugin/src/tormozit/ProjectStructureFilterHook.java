@@ -84,7 +84,7 @@ import com._1c.g5.v8.dt.common.ui.controls.search.SearchBox;
  * сравниваются с конца пути (родитель.узел). Имя файла — одна секция, точка
  * расширения иерархию не режет. Текст узла —
  * имя ресурса и русское название папки-группы из {@link MdObjectUsageDecorator}.
- * Обезличенный суффикс {@code <объект>} (и {@code <?>}) в поиск не входит.
+ * Суффикс {@code <?>} в поиск входит, {@code <объект>} — нет.
  * В дереве остаются совпавшие узлы и их родители.
  *
  * <p>Обход дерева — в фоновом {@link Job} (конфигурация 1С — тысячи файлов),
@@ -469,21 +469,13 @@ public final class ProjectStructureFilterHook implements IStartup
             SmartMatchHighlight.paintTreeItemMatchOverlay(e, tree, item, searchable, suffix);
     }
 
-    /** Видимый текст без {@code <объект>}/{@code <?>} — эти суффиксы в подсветку не входят. */
+    /** Видимый текст без {@code <объект>} — этот суффикс в подсветку не входит ({@code <?>} входит). */
     static String stripDepersonalizedSuffix(String text)
     {
         if (text == null || text.isEmpty())
             return text;
         int obj = text.indexOf(OBJECT_SUFFIX);
-        int orphan = text.indexOf(ORPHAN_SUFFIX);
-        int cut = -1;
-        if (obj >= 0 && orphan >= 0)
-            cut = Math.min(obj, orphan);
-        else if (obj >= 0)
-            cut = obj;
-        else if (orphan >= 0)
-            cut = orphan;
-        return cut >= 0 ? text.substring(0, cut) : text;
+        return obj >= 0 ? text.substring(0, obj) : text;
     }
 
     private static String layoutName(Composite composite)
@@ -786,9 +778,8 @@ public final class ProjectStructureFilterHook implements IStartup
         if (!(resource instanceof IFolder) && !(resource instanceof IProject))
             return name;
         String ru = MdTypeMapping.folderToGroupPlural(name);
-        if (ru == null || ru.isEmpty() || ru.equalsIgnoreCase(name))
-            return name;
-        return name + " " + ru; //$NON-NLS-1$
+        String text = ru == null || ru.isEmpty() || ru.equalsIgnoreCase(name) ? name : name + " " + ru; //$NON-NLS-1$
+        return MdObjectUsageDecorator.isOrphan(resource) ? text + ORPHAN_SUFFIX : text;
     }
 
     /** Имена узлов от корня к ресурсу: каждый файл/папка — одна секция, точка в имени не режет путь. */

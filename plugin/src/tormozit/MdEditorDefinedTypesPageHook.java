@@ -65,7 +65,6 @@ import com._1c.g5.v8.dt.mcore.TypeDescription;
 import com._1c.g5.v8.dt.mcore.TypeItem;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorPage;
-import com._1c.g5.v8.dt.md.ui.shared.MdUiSharedImages;
 import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
 import com._1c.g5.v8.dt.metadata.mdclass.DefinedType;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
@@ -412,7 +411,7 @@ public final class MdEditorDefinedTypesPageHook implements IStartup
             {
                 if (!(element instanceof DefinedType definedType))
                     return null;
-                Image image = MdUiSharedImages.getMdClassImage(definedType.eClass());
+                Image image = Global.mdClassImage(definedType.eClass());
                 Image decorated = image != null ? decorator.decorateImage(image, element) : null;
                 return decorated != null ? decorated : image;
             }

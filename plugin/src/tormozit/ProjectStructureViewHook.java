@@ -340,6 +340,26 @@ public final class ProjectStructureViewHook implements IStartup
             public void menuShown(MenuEvent e)
             {
                 ISelection selection = ComfortSubmenuHelper.menuSelection(comfortSub, viewer);
+                // Только в самой панели: в сторонние меню объекта команду добавляет навигатор.
+                if (viewer != null && selection instanceof IStructuredSelection resources && !resources.isEmpty())
+                {
+                    MenuItem unreachable = ComfortSubmenuHelper.createSortedMenuItem(
+                        comfortSub, SWT.PUSH, MdReachability.TITLE);
+                    ComfortSubmenuHelper.setMenuItemTooltip(unreachable,
+                        NavigatorRecomputeChecksMenuHook.UNREACHABLE_TOOLTIP);
+                    unreachable.addSelectionListener(new SelectionAdapter()
+                    {
+                        @Override
+                        public void widgetSelected(SelectionEvent ev)
+                        {
+                            java.util.Set<org.eclipse.core.resources.IContainer> folders = new java.util.LinkedHashSet<>();
+                            for (Object element : resources.toList())
+                                folders.add(MdReachability.folderOf(NavigatorResourceResolver.resolve(element)));
+                            MdReachability.findIn(folders);
+                        }
+                    });
+                    added.add(unreachable);
+                }
                 EObject eObject = resolveEObjectFromSelection(selection);
                 if (eObject == null)
                     return;

@@ -84,6 +84,20 @@ public final class Global
      *
      * @return кэшированная иконка или {@code null}, если бандл ещё не запущен либо файла нет
      */
+    /**
+     * Значок вида метаданных — единая для плагина пара «вид — значок». Брать значок здесь, а не
+     * прямо из {@code MdUiSharedImages.getMdClassImage}: штатный значок общего макета почти
+     * неотличим от значка формы, поэтому общий макет показывается значком макета объекта.
+     *
+     * @return штатный значок EDT (освобождать не нужно) или {@code null}
+     */
+    public static Image mdClassImage(org.eclipse.emf.ecore.EClass type)
+    {
+        return com._1c.g5.v8.dt.md.ui.shared.MdUiSharedImages.getMdClassImage(
+            type == com._1c.g5.v8.dt.metadata.mdclass.MdClassPackage.Literals.COMMON_TEMPLATE
+                ? com._1c.g5.v8.dt.metadata.mdclass.MdClassPackage.Literals.TEMPLATE : type);
+    }
+
     public static Image comfortIcon()
     {
         if (comfortIcon != null && !comfortIcon.isDisposed())

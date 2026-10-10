@@ -687,6 +687,7 @@ public final class GitChangedFileMenuHook implements IStartup
                 if (selection instanceof IStructuredSelection structured && !structured.isEmpty())
                 {
                     patchOpenWorkingCopyItem(contextMenu, structured, view);
+                    patchDeleteItem(contextMenu, structured, view);
                     List<IFile> headReplaceFiles = computeHeadReplaceFiles(structured, view);
                     if (!headReplaceFiles.isEmpty())
                     {
@@ -838,6 +839,39 @@ public final class GitChangedFileMenuHook implements IStartup
         catch (Exception error)
         {
             Global.tempLogException("git-working-copy-open", "menu patch failed", error); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    /**
+     * Штатный пункт EGit «Удалить» ({@code StagingView$DeleteAction}) сохраняет текст и значок, но перед
+     * удалением проверяются битые ссылки. Штатный обработчик не вызывается отложенно: к концу проверки
+     * пункт меню уже может быть уничтожен, поэтому удаление запускает {@link GitStagingViewHook#deleteWithCheck}.
+     */
+    private static void patchDeleteItem(Menu menu, IStructuredSelection selection, IViewPart view)
+    {
+        if (!DT_STAGING_VIEW_ID.equals(view.getSite().getId())
+            && !EGIT_STAGING_VIEW_ID.equals(view.getSite().getId()))
+            return;
+        try
+        {
+            Bundle bundle = Platform.getBundle(EGIT_UI_BUNDLE_ID);
+            if (bundle == null)
+                return;
+            String text = (String) bundle.loadClass(EGIT_UITEXT_CLASS)
+                .getField("StagingView_DeleteItemMenuLabel").get(null); //$NON-NLS-1$
+            for (MenuItem item : menu.getItems())
+            {
+                if (!text.equals(item.getText()))
+                    continue;
+                for (var listener : item.getListeners(SWT.Selection))
+                    item.removeListener(SWT.Selection, listener);
+                item.addListener(SWT.Selection, event -> GitStagingViewHook.deleteWithCheck(view, selection));
+                return;
+            }
+        }
+        catch (Exception error)
+        {
+            Global.tempLogException("broken-links-commit", "delete menu patch failed", error); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 
@@ -1364,7 +1398,18 @@ public final class GitChangedFileMenuHook implements IStartup
             }
         };
         job.setUser(true);
-        job.schedule();
+        Repository repository = null;
+        List<String> paths = new ArrayList<>();
+        for (IFile file : files)
+        {
+            RepositoryMapping mapping = RepositoryMapping.getMapping(file);
+            String path = mapping != null ? mapping.getRepoRelativePath(file) : null;
+            if (path == null)
+                continue;
+            paths.add(path);
+            repository = mapping.getRepository();
+        }
+        GitStagingViewHook.checkWorkTreeOperation(shell, repository, paths, false, job::schedule);
     }
 
     /** Объектный mdo, отсутствующий в {@code Configuration.mdo} — данные для автопривязки. */
@@ -1453,6 +1498,27 @@ public final class GitChangedFileMenuHook implements IStartup
         }
         for (Map.Entry<IFile, List<OrphanedMdo>> entry : byConfig.entrySet())
             applyOrphanFixesToOneConfiguration(entry.getKey(), entry.getValue(), errors);
+    }
+
+    /**
+     * Прописывает существующие описатели объектов в их {@code Configuration.mdo} — та же правка,
+     * что после «Заменить на HEAD-ревизию». Описатели, для которых объект или его конфигурацию
+     * определить не удалось, пропускаются.
+     */
+    static void attachToConfiguration(List<IFile> objectFiles, MultiStatus errors)
+    {
+        List<OrphanedMdo> orphaned = new ArrayList<>();
+        for (IFile file : objectFiles)
+        {
+            String ruFullName = GetRef.pathToFullName(file.getProjectRelativePath().toString());
+            int dot = ruFullName != null ? ruFullName.indexOf('.') : -1;
+            String typeEn = dot < 0 ? null : MdTypeMapping.ruToEnSingRequired(ruFullName.substring(0, dot));
+            IFile configurationMdo = findConfigurationMdo(file);
+            if (typeEn != null && configurationMdo != null)
+                orphaned.add(new OrphanedMdo(file, ruFullName, typeEn,
+                    typeEn + "." + ruFullName.substring(dot + 1), configurationMdo)); //$NON-NLS-1$
+        }
+        applyOrphanFixes(orphaned, errors);
     }
 
     /**
@@ -1571,7 +1637,7 @@ public final class GitChangedFileMenuHook implements IStartup
      * результата текстовой вставки строки в {@code Configuration.mdo}. DOCTYPE запрещён
      * (защита от XXE) — самому файлу он не нужен, у него только XML-декларация.
      */
-    private static boolean isWellFormedXml(String content)
+    static boolean isWellFormedXml(String content)
     {
         try
         {
@@ -1651,7 +1717,12 @@ public final class GitChangedFileMenuHook implements IStartup
         String content = readMdoContentCached(ownerMdo);
         if (content == null)
             return true;
+        return isChildObjectDeclared(content, containerTag, childName);
+    }
 
+    /** То же по тексту описателя владельца: для состава, которого нет в рабочей области. */
+    static boolean isChildObjectDeclared(String content, String containerTag, String childName)
+    {
         String closeTag = "</" + containerTag + ">"; //$NON-NLS-1$ //$NON-NLS-2$
         int from = 0;
         while (true)
@@ -1731,7 +1802,7 @@ public final class GitChangedFileMenuHook implements IStartup
         return null;
     }
 
-    private static String readWorkingCopyContent(IFile file)
+    static String readWorkingCopyContent(IFile file)
     {
         if (!file.exists())
             return null;

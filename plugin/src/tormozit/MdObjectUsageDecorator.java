@@ -110,6 +110,21 @@ public final class MdObjectUsageDecorator extends LabelProvider implements ILigh
         decoration.addSuffix(integrated ? " <объект>" : " <?>"); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
+    /** Получит ли ресурс суффикс {@code <?>} (те же условия, что в {@link #decorate}). */
+    static boolean isOrphan(IResource resource)
+    {
+        if (!(resource instanceof IFolder folder))
+            return false;
+        IFile mdoFile = findMdoFile(folder);
+        if (mdoFile != null)
+            return !isIntegrated(mdoFile);
+        IFile expectedMdo = expectedTopLevelMdo(folder);
+        if (expectedMdo != null && !isIntegrated(expectedMdo))
+            return true;
+        Boolean childIntegrated = isChildObjectIntegrated(folder);
+        return childIntegrated != null && !childIntegrated.booleanValue();
+    }
+
     /**
      * Папка дочернего объекта — формы, команды или макета (лежит внутри {@code Forms} /
      * {@code Commands} / {@code Templates} папки объекта-владельца). Своего mdo у неё нет,
@@ -127,8 +142,14 @@ public final class MdObjectUsageDecorator extends LabelProvider implements ILigh
         String containerTag = enSing != null ? MdTypeMapping.subObjectTypeToEmfFeature(enSing) : null;
         if (containerTag == null)
             return null;
+        // Реквизиты формы (и её команды) лежат в Form.form, а не в mdo владельца — по mdo судить нельзя.
+        if (!"forms".equals(containerTag) && !"templates".equals(containerTag) //$NON-NLS-1$ //$NON-NLS-2$
+            && !"commands".equals(containerTag)) //$NON-NLS-1$
+            return null;
 
         if (!(collectionFolder.getParent() instanceof IFolder ownerFolder))
+            return null;
+        if (ownerFolder.getParent() instanceof IFolder ownerGroup && "CommonForms".equals(ownerGroup.getName())) //$NON-NLS-1$
             return null;
         IFile ownerMdo = NavigatorResourceResolver.findMdoFileInFolder(ownerFolder);
         if (ownerMdo == null)

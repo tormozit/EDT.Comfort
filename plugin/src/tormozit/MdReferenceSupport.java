@@ -722,6 +722,58 @@ public final class MdReferenceSupport
         });
     }
 
+    /**
+     * Оставляет ссылки, которые в рабочей модели проекта ещё не битые: то же свойство того же объекта
+     * с той же целью. Для проверки будущего состояния рабочего каталога — отсев битых ссылок, которые
+     * существуют и без проверяемой операции. Читаются только объекты найденных ссылок.
+     */
+    public static List<CompareSearchMatch> newInProject(IProject project, List<CompareSearchMatch> matches,
+        IProgressMonitor monitor)
+    {
+        if (matches.isEmpty())
+            return matches;
+        IBmModelManager manager = Global.getOsgiService(IBmModelManager.class);
+        IBmModel model = manager != null ? manager.getModel(project) : null;
+        if (model == null)
+            throw new IllegalStateException("Не найдена модель проекта " + project.getName());
+        return model.executeReadonlyTask(new AbstractBmTask<List<CompareSearchMatch>>(
+            "Отбор новых битых ссылок")
+        {
+            @Override
+            public List<CompareSearchMatch> execute(IBmTransaction transaction, IProgressMonitor taskMonitor)
+            {
+                Map<Location, Set<String>> known = new HashMap<>();
+                List<CompareSearchMatch> result = new ArrayList<>();
+                for (CompareSearchMatch match : matches)
+                {
+                    if (monitor.isCanceled())
+                        throw new OperationCanceledException();
+                    Location location = match.getProjectLocation();
+                    Set<String> existing = known.get(location);
+                    if (existing == null)
+                    {
+                        existing = new HashSet<>();
+                        EObject owner = resolveLocation(transaction, location);
+                        // Путь вложенности позиционный: после удаления соседа он может указать на другой объект.
+                        if (owner != null && !owner.eIsProxy() && owner.eClass() == location.ownerClass()
+                            && localized(EcoreUtil.getURI(owner)).equals(match.getObjectPath())
+                            && owner.eClass().getEStructuralFeature(location.feature()) instanceof EReference feature)
+                            for (BrokenReference reference : findBrokenReferences(owner, feature, monitor))
+                                existing.add(fullName(EcoreUtil.getURI(reference.target())));
+                        known.put(location, existing);
+                    }
+                    boolean old = existing.contains(match.getReferenceFqn());
+                    Global.tempLog("broken-links-commit", "match old=" + old + " owner=" + match.getObjectPath()
+                        + " property=" + location.feature() + " target=" + match.getReferenceFqn()
+                        + " existing=" + existing);
+                    if (!old)
+                        result.add(match);
+                }
+                return result;
+            }
+        });
+    }
+
     /** В том числе удаление реквизита/команды внутри изменённого файла, без удаления самого .mdo. */
     public static boolean hasDeletedObjects(IComparisonDataSource previous, IComparisonDataSource current,
         Set<String> changedFiles, IProgressMonitor monitor)

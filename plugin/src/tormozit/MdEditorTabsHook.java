@@ -2040,7 +2040,7 @@ public final class MdEditorTabsHook implements IStartup
             return null;
         try
         {
-            return MdUiSharedImages.getMdClassImage(type);
+            return Global.mdClassImage(type);
         }
         catch (RuntimeException ignored)
         {
@@ -2058,7 +2058,7 @@ public final class MdEditorTabsHook implements IStartup
         {
             try
             {
-                return MdUiSharedImages.getMdClassImage(MdClassPackage.Literals.DEFINED_TYPE);
+                return Global.mdClassImage(MdClassPackage.Literals.DEFINED_TYPE);
             }
             catch (RuntimeException ignored)
             {
@@ -2069,7 +2069,7 @@ public final class MdEditorTabsHook implements IStartup
         {
             try
             {
-                return MdUiSharedImages.getMdClassImage(MdClassPackage.Literals.COMMON_COMMAND);
+                return Global.mdClassImage(MdClassPackage.Literals.COMMON_COMMAND);
             }
             catch (RuntimeException ignored)
             {
@@ -2113,7 +2113,7 @@ public final class MdEditorTabsHook implements IStartup
             return null;
         try
         {
-            return MdUiSharedImages.getMdClassImage(model.eClass());
+            return Global.mdClassImage(model.eClass());
         }
         catch (RuntimeException ignored)
         {

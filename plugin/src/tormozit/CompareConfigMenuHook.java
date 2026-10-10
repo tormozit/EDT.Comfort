@@ -1583,6 +1583,7 @@ public class CompareConfigMenuHook implements IStartup
         Display.getDefault().asyncExec(() ->
         {
 //          Activator.getDefault().getInjector().injectMembers(this); // Слишком рано?
+            MdReachability.watchComparisons();
             CompareConfigSearchDialogHook.install(Display.getDefault());
             CompareConfigOpenModuleMergeHandler.install(Display.getDefault());
             RightsDialogFilterHook.install(Display.getDefault());

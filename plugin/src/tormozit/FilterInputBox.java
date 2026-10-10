@@ -168,7 +168,10 @@ final class FilterInputBox
             "comfort.allPicturesEditor.filter.history."), //$NON-NLS-1$
         MOVE_METHOD_TARGET(
             "comfort.moveMethodTarget.filter.history.count", //$NON-NLS-1$
-            "comfort.moveMethodTarget.filter.history."); //$NON-NLS-1$
+            "comfort.moveMethodTarget.filter.history."), //$NON-NLS-1$
+        DECORATORS(
+            "comfort.decorators.filter.history.count", //$NON-NLS-1$
+            "comfort.decorators.filter.history."); //$NON-NLS-1$
 
         final String prefCountKey;
         final String prefItemPrefix;
@@ -257,6 +260,17 @@ final class FilterInputBox
         opts.layoutData = objectSetsLayoutData();
         opts.message = "Фильтр..."; //$NON-NLS-1$
         opts.tooltip = FLAT_FILTER_TOOLTIP; //$NON-NLS-1$
+        return create(parent, opts, onSearch);
+    }
+
+    /** Страница «Оформление меток» окна параметров. */
+    static FilterInputBox forDecorators(Composite parent, Runnable onSearch)
+    {
+        Options opts = new Options();
+        opts.scope = Scope.DECORATORS;
+        opts.layoutData = compactLayoutData();
+        opts.message = "Фильтр..."; //$NON-NLS-1$
+        opts.tooltip = FLAT_FILTER_TOOLTIP;
         return create(parent, opts, onSearch);
     }
 
@@ -576,6 +590,7 @@ final class FilterInputBox
             case SYNTAX_SEARCH -> throw new IllegalStateException("SYNTAX_SEARCH: use attachHistoryKeepLayout(SearchBox, Scope.SYNTAX_SEARCH)"); //$NON-NLS-1$
             case ALL_PICTURES -> throw new IllegalStateException("ALL_PICTURES: use attachHistory(SearchBox, Scope.ALL_PICTURES)"); //$NON-NLS-1$
             case MOVE_METHOD_TARGET -> forMoveMethodTarget(parent, onSearch);
+            case DECORATORS -> forDecorators(parent, onSearch);
         };
     }
 

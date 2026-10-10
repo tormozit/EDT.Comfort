@@ -18,7 +18,10 @@ public final class ComfortCheckIds
     public static final String BSL_AST_TRUNCATION = "comfort-bsl-ast-truncation"; //$NON-NLS-1$
 
     /** Битые ссылки метаданных; прежний идентификатор сохраняет настройки проверки. */
-    public static final String BROKEN_MD_COMPOSITION = "comfort.check.brokenMdComposition"; //$NON-NLS-1$
+    public static final String BROKEN_MD_REFERENCE = "comfort-md-broken-reference"; //$NON-NLS-1$
+
+    /** {@code tormozit.checks.UnreachableMdObjectCheck} — объекта нет в составе конфигурации. */
+    public static final String UNREACHABLE_MD_OBJECT = "comfort-md-unreachable-object"; //$NON-NLS-1$
 
     public static final String STATIC_ACCESS_PARAMETERS = "comfort-bsl-static-access-parameters"; //$NON-NLS-1$
     public static final String STATIC_ACCESS_OBSOLETE = "comfort-bsl-static-access-obsolete"; //$NON-NLS-1$

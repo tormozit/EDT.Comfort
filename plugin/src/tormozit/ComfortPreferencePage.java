@@ -1016,6 +1016,16 @@ public class ComfortPreferencePage
             }
         });
 
+        Link decoratorsLink = new Link(row, SWT.NONE);
+        decoratorsLink.setText("<a>Оформление меток</a>"); //$NON-NLS-1$
+        decoratorsLink.setToolTipText(TooltipText.wrap(decoratorsLink,
+            "Какие суффиксы Комфорт добавляет к именам объектов (фильтр «Комфорт»)")); //$NON-NLS-1$
+        decoratorsLink.addListener(SWT.Selection, e -> {
+            if (!"Оформление меток".equals(e.text)) //$NON-NLS-1$
+                return;
+            DecoratorsPageHook.open(getContainer(), "Комфорт"); //$NON-NLS-1$
+        });
+
         Image newIssueIcon = loadBundleImage("icons/obj16/new_issue.png"); //$NON-NLS-1$
         if (newIssueIcon != null)
         {

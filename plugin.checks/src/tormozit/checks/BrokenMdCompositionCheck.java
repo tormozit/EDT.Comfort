@@ -19,7 +19,7 @@ public final class BrokenMdCompositionCheck extends BasicCheck<Void>
     @Override
     public String getCheckId()
     {
-        return ComfortCheckIds.BROKEN_MD_COMPOSITION;
+        return ComfortCheckIds.BROKEN_MD_REFERENCE;
     }
 
     @Override

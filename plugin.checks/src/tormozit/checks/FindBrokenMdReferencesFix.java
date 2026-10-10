@@ -9,13 +9,10 @@ import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.EReference;
 import org.eclipse.emf.ecore.util.EcoreUtil;
 
-import com._1c.g5.v8.dt.validation.marker.BmObjectMarker;
-import com._1c.g5.v8.dt.validation.marker.Marker;
 import com.e1c.g5.v8.dt.check.qfix.FixDescriptor;
 import com.e1c.g5.v8.dt.check.qfix.FixVariantDescriptor;
 import com.e1c.g5.v8.dt.check.qfix.IFixChange;
 import com.e1c.g5.v8.dt.check.qfix.IFixChangeProcessor;
-import com.e1c.g5.v8.dt.check.qfix.IFixContextFactory;
 import com.e1c.g5.v8.dt.check.qfix.IFixSession;
 import com.e1c.g5.v8.dt.check.qfix.components.BasicModelFixContext;
 import com.e1c.g5.v8.dt.check.qfix.components.SingleVariantBasicFix;
@@ -33,7 +30,7 @@ public final class FindBrokenMdReferencesFix extends SingleVariantBasicFix<Basic
     @Override
     public CheckUid getCheckId()
     {
-        return new CheckUid(ComfortCheckIds.BROKEN_MD_COMPOSITION, "tormozit.comfort.checks");
+        return new CheckUid(ComfortCheckIds.BROKEN_MD_REFERENCE, "tormozit.comfort.checks");
     }
 
     @Override
@@ -42,7 +39,7 @@ public final class FindBrokenMdReferencesFix extends SingleVariantBasicFix<Basic
     @Override
     public void onRegistration(FixDescriptor descriptor)
     {
-        descriptor.setContextFactory(new ContextFactory());
+        descriptor.setContextFactory(new ModelFixContextFactory());
         descriptor.setChangeProcessor(this);
     }
 
@@ -85,19 +82,5 @@ public final class FindBrokenMdReferencesFix extends SingleVariantBasicFix<Basic
     {
         if (change instanceof FindChange find)
             MdReferenceSupport.findInProject(find.project(), find.location());
-    }
-
-    private static final class ContextFactory implements IFixContextFactory<BasicModelFixContext>
-    {
-        @Override
-        public BasicModelFixContext createContext(Marker marker, IFixSession session)
-        {
-            return marker instanceof BmObjectMarker modelMarker
-                ? new BasicModelFixContext(modelMarker.getObjectId(), modelMarker.getFeatureId(), session.getDtProject())
-                : null;
-        }
-
-        @Override
-        public Class<BasicModelFixContext> getProvidedContextType() { return BasicModelFixContext.class; }
     }
 }

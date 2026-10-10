@@ -19,23 +19,21 @@
         title="Комфорт"
         description="Проверки, добавленные плагином «Комфорт»."
         category="com.e1c.g5.v8.dt.check.edt.checks"/>
-    <check
-        category="tormozit.comfort.checks"
-        class="tormozit.checks.BslAstTruncationCheck"/>
-    <check
-        category="tormozit.comfort.checks"
-        class="tormozit.checks.BrokenMdCompositionCheck"/>
     <check category="tormozit.comfort.checks" class="tormozit.checks.StaticFeatureAccessChecks$Parameters"/>
     <check category="tormozit.comfort.checks" class="tormozit.checks.StaticFeatureAccessChecks$Obsolete"/>
     <check category="tormozit.comfort.checks" class="tormozit.checks.StaticFeatureAccessChecks$Compatibility"/>
     <check category="tormozit.comfort.checks" class="tormozit.checks.StaticFeatureAccessChecks$VariableAccess"/>
     <check category="tormozit.comfort.checks" class="tormozit.checks.StaticFeatureAccessChecks$EventHandler"/>
+    <check category="tormozit.comfort.checks" class="tormozit.checks.BslAstTruncationCheck"/>
     <check category="tormozit.comfort.checks" class="tormozit.checks.BslPreprocessorStraddleCheck"/>
+    <check category="tormozit.comfort.checks" class="tormozit.checks.BrokenMdCompositionCheck"/>
+    <check category="tormozit.comfort.checks" class="tormozit.checks.UnreachableMdObjectCheck"/>
   </extension>
 
   <extension point="com.e1c.g5.v8.dt.check.fixes">
     <fix class="tormozit.checks.BrokenMdCompositionFix"/>
     <fix class="tormozit.checks.FindBrokenMdReferencesFix"/>
+    <fix class="tormozit.checks.UnreachableMdObjectFix"/>
   </extension>
 
 </plugin>

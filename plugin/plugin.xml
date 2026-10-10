@@ -212,6 +212,7 @@
     <startup class="tormozit.FindReplaceDialogHook"/>
     <startup class="tormozit.AnnotationsPreferenceHook"/>
     <startup class="tormozit.CheckDevelopmentPageHook"/>
+    <startup class="tormozit.DecoratorsPageHook"/>
     <startup class="tormozit.SuppressionSettingsDialogHook"/>
     <startup class="tormozit.BslLanguageRootPageHook"/>
     <startup class="tormozit.MassiveChecksExemptionHook"/>
@@ -1553,6 +1554,11 @@
         searchResultClass="tormozit.CompareSearchResult"
         class="tormozit.CompareSearchResultPage">
     </viewPage>
+    <viewPage
+        id="tormozit.unreachableFilesResultPage"
+        searchResultClass="tormozit.UnreachableFilesSearchResult"
+        class="tormozit.UnreachableFilesResultPage">
+    </viewPage>
   </extension>
 
   <extension point="com._1c.g5.v8.dt.bsl.ui.bslHoverContributor">
@@ -1563,10 +1569,10 @@
     <decorator
         id="tormozit.templateTypeSuffixDecorator"
         label="Тип макета (Комфорт)"
-        description="К имени макета добавляется краткий суффикс типа (HTML, табличный документ и др.) в навигаторе и в дереве макетов редактора объекта."
         lightweight="true"
         state="true"
         class="tormozit.TemplateTypeSuffixDecorator">
+      <description>К имени макета добавляется краткий суффикс типа (HTML, табличный документ и др.) в навигаторе и в дереве макетов редактора объекта.</description>
       <enablement>
         <or>
           <objectClass name="com._1c.g5.v8.dt.metadata.mdclass.Template"/>
@@ -1577,10 +1583,10 @@
     <decorator
         id="tormozit.formMainAttributeTypeDecorator"
         label="Тип основного реквизита формы (Комфорт)"
-        description="К имени формы добавляется суффикс типа основного реквизита (первый фрагмент до точки) в навигаторе и в дереве форм редактора объекта."
         lightweight="true"
         state="true"
         class="tormozit.FormMainAttributeTypeDecorator">
+      <description>К имени формы добавляется суффикс типа основного реквизита (первый фрагмент до точки) в навигаторе и в дереве форм редактора объекта.</description>
       <enablement>
         <objectClass name="com._1c.g5.v8.dt.metadata.mdclass.BasicForm"/>
       </enablement>
@@ -1588,10 +1594,10 @@
     <decorator
         id="tormozit.definedTypeDecorator"
         label="Вид типа определяемого типа (Комфорт)"
-        description="К имени определяемого типа добавляется серый суффикс «Объект» или «Менеджер» по первому типу в составе."
         lightweight="true"
         state="true"
         class="tormozit.DefinedTypeDecorator">
+      <description>К имени определяемого типа добавляется серый суффикс «Объект» или «Менеджер» по первому типу в составе.</description>
       <enablement>
         <objectClass name="com._1c.g5.v8.dt.metadata.mdclass.DefinedType"/>
       </enablement>
@@ -1599,10 +1605,10 @@
     <decorator
         id="tormozit.commandParameterDecorator"
         label="Признак параметризуемой команды (Комфорт)"
-        description="К имени команды добавляется суффикс «(Парам)», если у команды задан тип параметра, в навигаторе и в дереве команд редактора объекта."
         lightweight="true"
         state="true"
         class="tormozit.CommandDecorator">
+      <description>К имени команды добавляется суффикс «(Парам)», если у команды задан тип параметра, в навигаторе и в дереве команд редактора объекта.</description>
       <enablement>
         <objectClass name="com._1c.g5.v8.dt.metadata.mdclass.BasicCommand"/>
       </enablement>
@@ -1610,10 +1616,10 @@
     <decorator
         id="tormozit.mdObjectUsageDecorator"
         label="Признак интегрированного объекта (Комфорт)"
-        description="В структуре проекта и в результатах поиска по файлам: «&lt;объект&gt;» — папка привязана к Configuration.mdo, «&lt;?&gt;» — mdo есть, но объекта в конфигурации нет; у групповых папок — русское название типа метаданных."
         lightweight="true"
         state="true"
         class="tormozit.MdObjectUsageDecorator">
+      <description>В структуре проекта и в результатах поиска по файлам: «&lt;объект&gt;» — папка привязана к Configuration.mdo, «&lt;?&gt;» — mdo есть, но объекта в конфигурации нет; у групповых папок — русское название типа метаданных.</description>
       <enablement>
         <objectClass name="org.eclipse.core.runtime.IAdaptable"/>
       </enablement>

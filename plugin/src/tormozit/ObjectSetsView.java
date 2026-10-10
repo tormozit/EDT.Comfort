@@ -2365,7 +2365,7 @@ public final class ObjectSetsView extends ViewPart
                     EObject eObject = GoToDefinition.resolveEObjectForFullName(mdRef, page, project, false);
                     if (eObject != null)
                     {
-                        Image img = MdUiSharedImages.getMdClassImage(eObject.eClass());
+                        Image img = Global.mdClassImage(eObject.eClass());
                         if (img != null)
                             return img;
                     }

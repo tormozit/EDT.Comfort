@@ -3,6 +3,7 @@ package tormozit;
 import java.util.ArrayList;
 import java.util.List;
 
+import org.eclipse.core.resources.IContainer;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.IResource;
 import org.eclipse.core.runtime.CoreException;
@@ -46,6 +47,8 @@ public final class NavigatorRecomputeChecksMenuHook implements IStartup
     private static final String ITEM_TEXT = "Проверить"; //$NON-NLS-1$
     private static final String ITEM_TOOLTIP =
             "Пересчитать все проверки по объекту с вложенными"; //$NON-NLS-1$
+    static final String UNREACHABLE_TOOLTIP =
+            "Найти в папках выбранных узлов папки объектов, не связанные с конфигурацией, и показать в панели Поиск";
 
     @Override
     public void earlyStartup()
@@ -217,6 +220,27 @@ public final class NavigatorRecomputeChecksMenuHook implements IStartup
                         }
                     });
                     added.add(find);
+
+                    MenuItem unreachable = ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.PUSH,
+                        MdReachability.TITLE);
+                    ComfortSubmenuHelper.setMenuItemTooltip(unreachable, UNREACHABLE_TOOLTIP);
+                    unreachable.addSelectionListener(new SelectionAdapter()
+                    {
+                        @Override
+                        public void widgetSelected(SelectionEvent event)
+                        {
+                            ISelection selected = ComfortSubmenuHelper.menuSelection(comfortSub, viewer);
+                            if (!(selected instanceof IStructuredSelection objects))
+                                return;
+                            java.util.Set<IContainer> folders = new java.util.LinkedHashSet<>();
+                            java.util.Set<Object> visited = java.util.Collections.newSetFromMap(
+                                new java.util.IdentityHashMap<>());
+                            for (Object node : objects.toList())
+                                collectFolders(viewer, node, folders, visited);
+                            MdReachability.findIn(folders);
+                        }
+                    });
+                    added.add(unreachable);
                 }
             }
 
@@ -261,6 +285,63 @@ public final class NavigatorRecomputeChecksMenuHook implements IStartup
                 labels.add(label);
         }
         return MdReferenceSupport.scopeLabel(labels);
+    }
+
+    /**
+     * Папки проекта для узлов навигатора. Объект даёт свою папку, конфигурация и проект — весь
+     * проект. Узел-группа своей папки в модели не имеет: её дают потомки — папку вида объектов
+     * (или папку объекта-владельца для группы внутри объекта).
+     */
+    private static void collectFolders(CommonViewer viewer, Object node, java.util.Set<IContainer> folders,
+        java.util.Set<Object> visited)
+    {
+        if (!visited.add(node))
+            return;
+        if (node instanceof IProject project)
+        {
+            folders.add(project);
+            return;
+        }
+        boolean group = NavigatorTreeElementLabels.isGroupNode(node)
+            || NavigatorTreeElementLabels.isInsideObjectCollectionFolder(node);
+        if (!group && NavigatorElementModels.resolveEObject(node) != null)
+        {
+            IContainer folder = MdReachability.folderOf(NavigatorResourceResolver.resolve(node));
+            if (folder != null)
+                folders.add(folder);
+            return;
+        }
+        if (!(viewer.getContentProvider() instanceof ITreeContentProvider provider))
+            return;
+        Object[] children = provider.getChildren(node);
+        if (children == null)
+            return;
+        boolean parentAdded = false;
+        for (Object child : children)
+        {
+            if (NavigatorTreeElementLabels.isGroupNode(child)
+                || NavigatorTreeElementLabels.isInsideObjectCollectionFolder(child))
+            {
+                collectFolders(viewer, child, folders, visited);
+                continue;
+            }
+            // Все объекты одной группы лежат в одной папке: достаточно первого.
+            if (parentAdded)
+                continue;
+            IResource resource = NavigatorResourceResolver.resolve(child);
+            EObject object = NavigatorElementModels.resolveEObject(child);
+            if (resource == null || object == null)
+                continue;
+            // Вложенный объект без своей папки (реквизит) разрешается в описатель владельца.
+            boolean own = resource instanceof IContainer || object instanceof IBmObject top && top.bmIsTop();
+            IContainer folder = resource instanceof IContainer container ? container : resource.getParent();
+            IContainer parent = own ? folder.getParent() : folder;
+            if (parent != null && parent.getType() != IResource.ROOT)
+            {
+                folders.add(parent);
+                parentAdded = true;
+            }
+        }
     }
 
     private static boolean collectSearchRoots(CommonViewer viewer, Object node, List<URI> roots,

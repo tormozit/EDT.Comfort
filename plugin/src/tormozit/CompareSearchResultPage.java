@@ -1404,7 +1404,7 @@ public class CompareSearchResultPage implements ISearchResultPage
                             order = feature.getFeatureID() + 2;
                             referenceFeature = feature.getName();
                         }
-                        objectImage = mdClass != null ? MdUiSharedImages.getMdClassImage(mdClass) : null;
+                        objectImage = mdClass != null ? Global.mdClassImage(mdClass) : null;
                         if ("Реквизит".equals(fragment))
                             objectImage = MdUiSharedImages.getImage(MdUiSharedImages.OBJS_ATTRIBUTE);
                     }

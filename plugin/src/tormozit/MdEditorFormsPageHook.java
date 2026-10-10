@@ -46,7 +46,6 @@ import org.eclipse.ui.forms.editor.IFormPage;
 import com._1c.g5.v8.bm.core.IBmObject;
 import com._1c.g5.v8.dt.core.platform.IResourceLookup;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
-import com._1c.g5.v8.dt.md.ui.shared.MdUiSharedImages;
 import com._1c.g5.v8.dt.metadata.mdclass.AbstractForm;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicForm;
 import com._1c.g5.v8.dt.metadata.mdclass.FormType;
@@ -506,7 +505,7 @@ public final class MdEditorFormsPageHook implements IStartup
                 return null;
             try
             {
-                return MdUiSharedImages.getMdClassImage(form.eClass());
+                return Global.mdClassImage(form.eClass());
             }
             catch (RuntimeException e)
             {

@@ -44,7 +44,6 @@ import com._1c.g5.v8.dt.mcore.TypeDescription;
 import com._1c.g5.v8.dt.mcore.TypeItem;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorPage;
-import com._1c.g5.v8.dt.md.ui.shared.MdUiSharedImages;
 import com._1c.g5.v8.dt.metadata.mdclass.CommonCommand;
 import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
 import com._1c.g5.v8.dt.metadata.mdclass.DefinedType;
@@ -254,7 +253,7 @@ public final class MdEditorGlobalCommandsPageHook implements IStartup
                 public Image getImage(Object element)
                 {
                     return element instanceof CommonCommand command
-                        ? MdUiSharedImages.getMdClassImage(command.eClass()) : null;
+                        ? Global.mdClassImage(command.eClass()) : null;
                 }
             });
             tableLayout.setColumnData(nameColumn.getColumn(), new ColumnPixelData(300, true, true));

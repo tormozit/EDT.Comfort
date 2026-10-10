@@ -19,7 +19,7 @@ public final class BrokenMdCompositionFix extends SingleVariantModelBasicFix<EOb
     @Override
     public CheckUid getCheckId()
     {
-        return new CheckUid(ComfortCheckIds.BROKEN_MD_COMPOSITION, "tormozit.comfort.checks");
+        return new CheckUid(ComfortCheckIds.BROKEN_MD_REFERENCE, "tormozit.comfort.checks");
     }
 
     @Override
