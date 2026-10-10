@@ -605,8 +605,7 @@ public final class BslReferenceSearchTableHook implements IStartup
             item.setMode(org.eclipse.jface.action.ActionContributionItem.MODE_FORCE_TEXT);
             org.eclipse.jface.action.Separator separator =
                 new org.eclipse.jface.action.Separator(COMPUTE_TYPES_ACTION_ID + ".sep"); //$NON-NLS-1$
-            actionBars.getToolBarManager().add(separator);
-            actionBars.getToolBarManager().add(item);
+            ToolBarContributionSupport.prepend(actionBars.getToolBarManager(), item, separator);
             actionBars.getToolBarManager().update(true);
             actionBars.updateActionBars();
             refreshComputeTypesAction();

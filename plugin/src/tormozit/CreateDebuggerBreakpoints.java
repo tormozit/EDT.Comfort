@@ -14,6 +14,7 @@ import org.eclipse.debug.core.model.IBreakpoint;
 import org.eclipse.debug.ui.DebugUITools;
 import org.eclipse.debug.ui.IDebugUIConstants;
 import org.eclipse.jface.action.Action;
+import org.eclipse.jface.action.ActionContributionItem;
 import org.eclipse.jface.action.IAction;
 import org.eclipse.jface.action.IToolBarManager;
 import org.eclipse.jface.action.Separator;
@@ -90,8 +91,8 @@ final class CreateDebuggerBreakpoints
         action.setImageDescriptor(DebugUITools.getImageDescriptor(IDebugUIConstants.IMG_OBJS_BREAKPOINT));
         action.setToolTipText("Создает одинаковые точки останова для всех выделенных строк модулей"
             + Global.pluginSignForTooltip());
-        toolBar.add(new Separator());
-        toolBar.add(action);
+        ToolBarContributionSupport.prepend(toolBar, new ActionContributionItem(action),
+            new Separator(TOOLBAR_ACTION_ID + ".sep")); //$NON-NLS-1$
         bars.updateActionBars();
     }
 

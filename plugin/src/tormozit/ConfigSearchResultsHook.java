@@ -68,6 +68,7 @@ import org.eclipse.search.ui.NewSearchUI;
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.common.Functions;
 import com._1c.g5.v8.dt.common.localization.LocalizationManager;
+import com._1c.g5.v8.dt.core.platform.IBmModelManager;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
 import com._1c.g5.v8.dt.core.platform.IV8Project;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
@@ -117,6 +118,8 @@ import com._1c.g5.v8.dt.ui.util.OpenHelper;
 import com._1c.g5.v8.dt.search.core.BmObjectMatch;
 import com._1c.g5.v8.dt.search.core.refs.BmReferenceMatch;
 import com._1c.g5.v8.dt.search.core.refs.BslReferenceMatch;
+import com._1c.g5.v8.dt.search.core.ISearchResultCollector;
+import com._1c.g5.v8.dt.search.core.Match;
 import com._1c.g5.v8.dt.search.core.text.TextSearchFileMatch;
 import com._1c.g5.v8.dt.search.core.text.TextSearchModelMatch;
 import org.eclipse.swt.SWT;
@@ -622,12 +625,12 @@ public final class ConfigSearchResultsHook implements IStartup
         volatile int contextOffset = -1;
         volatile int contextLength;
         /**
-         * Прямые координаты вхождения в тексте модуля для синтетических строк полнотекстового
-         * прохода (у них нет ни {@code tableItem}, ни {@code sourceUri}); {@code -1} — обычная строка.
+         * Прямые координаты полнотекстового вхождения в модуле; {@code -1} — координаты
+         * берутся из {@code sourceUri} индексированной ссылки.
          */
         volatile int directOffset = -1;
         volatile int directLength;
-        /** Диапазон подсветки вхождения внутри {@code styledText} — для синтетических строк. */
+        /** Диапазон подсветки полнотекстового вхождения внутри {@code styledText}. */
         volatile int directHlStart = -1;
         volatile int directHlLen;
 
@@ -1179,6 +1182,13 @@ public final class ConfigSearchResultsHook implements IStartup
             MatchRow row = new MatchRow(path, extractPropertyText(tableItem), lineNumber,
                 extractMatchStyledText(tableItem), file, tableItem, segment, sourceUri, sourceReference,
                 sourceIndexInList);
+            if (match instanceof TextSearchFileMatch fm && isReferenceSearchResult(treeViewer))
+            {
+                row.directOffset = fm.getFileOffset();
+                row.directLength = fm.getTextLength();
+                row.directHlStart = fm.getTextOffset();
+                row.directHlLen = fm.getTextLength();
+            }
             // Значение из кэша резолвера — сразу, без чтения файла: при потоковом обновлении списка
             // во время поиска строки пересоздаются постоянно, без этого ячейка мигала бы «пусто → имя».
             if (file != null && lineNumber > 0)
@@ -1195,7 +1205,6 @@ public final class ConfigSearchResultsHook implements IStartup
         // «Найти ссылки» видит только индексированные ссылки — литералы/комментарии мимо. Догоняем
         // их полнотекстовым проходом самого рефакторинга (мастер переименования делает так же).
         applyFullTextAugmentation(treeViewer, matchViewer, rows);
-        patchHeaderTotalLabel(treeViewer);
 
         // При терминальном узле путь у всех строк одинаковый (сам узел и есть этот путь) — как и
         // у штатной таблицы (см. hidePathColumn/showPathColumn), колонку тогда прячем.
@@ -1906,8 +1915,8 @@ public final class ConfigSearchResultsHook implements IStartup
             && cachedMatchTableViewer.getInput() instanceof List<?>;
         if (available && !matchSuitableActionAdded)
         {
-            cachedMatchToolBar.add(new Separator(MATCH_SUITABLE_ONLY_ID + ".sep")); //$NON-NLS-1$
-            cachedMatchToolBar.add(cachedMatchSuitableOnlyItem);
+            ToolBarContributionSupport.prepend(cachedMatchToolBar, cachedMatchSuitableOnlyItem,
+                new Separator(MATCH_SUITABLE_ONLY_ID + ".sep")); //$NON-NLS-1$
             matchSuitableActionAdded = true;
         }
         else if (!available && matchSuitableActionAdded)
@@ -1996,32 +2005,14 @@ public final class ConfigSearchResultsHook implements IStartup
     private static final String BSL_BM_UI_SUPPLIER =
         "com._1c.g5.v8.dt.bsl.bm.ui.refactoring.BslTextSearchRefactoringSupplier"; //$NON-NLS-1$
     private static volatile boolean fullTextAugmentRunning;
-    /** Полное имя объекта, для которого посчитаны полнотекстовые вхождения ({@link #fullTextRowsCache}). */
-    private static volatile String fullTextRowsKey;
-    /** Готовые синтетические строки полнотекстового прохода — переживают пересборку таблицы. */
-    private static volatile List<MatchRow> fullTextRowsCache;
-    /** {@code файл → сколько синтетических полнотекстовых вхождений} — для счётчиков в ветках дерева. */
-    private static volatile Map<String, Long> syntheticCountByFilePath;
-    /** Текст подписи-шапки, который мы сами туда записали — чтобы не патчить повторно. */
-    private static volatile String headerLabelPatchedText;
-    /** Виджет подписи-шапки, на который уже повешен сторож (см. {@link #installHeaderCountGuard}). */
-    private static Control headerCountControl;
-    /** Патч шапки уже запланирован — не плодить {@code asyncExec} на каждую перерисовку. */
-    private static boolean headerRepatchPending;
-    private static final java.util.regex.Pattern HEADER_COUNT_PATTERN =
-        java.util.regex.Pattern.compile("(\\d+)(\\s*(?:совпад|соответ|match))"); //$NON-NLS-1$
+    /** Результат, в который уже опубликован полнотекстовый проход. */
+    private static Object fullTextRowsResult;
+    private static String fullTextRowsKey;
+    private static int fullTextRowsGeneration = -1;
 
     /**
-     * Догоняет результаты «Найти ссылки на объект» вхождениями в строковых литералах и комментариях
-     * тем же полнотекстовым проходом, что делает мастер переименования: строки для поиска даёт
-     * {@code BslTextSearchRefactoringSupplier.getSearchStrings}, ищет {@code TextSearcher} (код EDT),
-     * лишнее отсекает {@code filterSearchResult}. Синтетические строки получают прямые координаты
-     * вхождения ({@link MatchRow#directOffset}) — «Родитель»/«Тип родителя»/«Подходит» считаются
-     * как для остальных BSL-вхождений.
-     *
-     * <p>Результат кэшируется по имени объекта и дописывается в таблицу при каждой её пересборке
-     * ({@link #refreshMatchTable}) — иначе поток обновлений во время поиска затирал бы синтетические
-     * строки. Тяжёлый проход запускается один раз на объект.
+     * Полнотекстовые вхождения добавляются в штатный результат EDT через ISearchResultCollector.
+     * Дерево, таблица, фильтры и счётчики используют одну модель совпадений.
      */
     private static void applyFullTextAugmentation(TreeViewer treeViewer, TableViewer matchViewer,
         List<MatchRow> rows)
@@ -2031,22 +2022,20 @@ public final class ConfigSearchResultsHook implements IStartup
         String qualifiedName = extractSearchedObjectQualifiedName(treeViewer);
         if (qualifiedName == null || qualifiedName.isBlank())
             return;
-        if (qualifiedName.equals(fullTextRowsKey))
-        {
-            if (fullTextRowsCache != null && !fullTextRowsCache.isEmpty())
-                appendFullTextRows(matchViewer, rows, fullTextRowsCache);
+        Object searchResult = treeViewer.getInput();
+        if (!(searchResult instanceof ISearchResultCollector collector))
             return;
-        }
+        if (searchResult == fullTextRowsResult && qualifiedName.equals(fullTextRowsKey)
+            && searchGeneration == fullTextRowsGeneration)
+            return;
         if (fullTextAugmentRunning)
             return;
         IProject project = fullTextSearchProject(treeViewer, rows);
         if (project == null)
             return;
-        // Новый объект — сбрасываем кэш прошлого поиска.
-        fullTextRowsCache = null;
-        syntheticCountByFilePath = null;
-        headerLabelPatchedText = null;
         String simpleName = new Path(qualifiedName.replace('.', '/')).lastSegment();
+        int generation = searchGeneration;
+        List<MatchRow> nativeRows = new ArrayList<>(rows);
         fullTextAugmentRunning = true;
         Job job = new Job("Комфорт: полнотекстовые вхождения ссылок") //$NON-NLS-1$
         {
@@ -2057,21 +2046,60 @@ public final class ConfigSearchResultsHook implements IStartup
                 {
                     List<MatchRow> extra = collectFullTextRows(project, qualifiedName, simpleName,
                         new java.util.HashSet<>(), monitor);
-                    fullTextRowsCache = extra;
-                    fullTextRowsKey = qualifiedName; // syntheticCountByFilePath заполнит appendFullTextRows
+                    var manager = (IBmModelManager)
+                        Global.getServiceByClass(IBmModelManager.class);
+                    var model = manager != null ? manager.getModel(project) : null;
+                    if (model == null)
+                        throw new IllegalStateException("Не найдена модель проекта " + project.getName());
+                    List<Match> matches = new ArrayList<>();
+                    java.util.Set<String> nativeLines = new java.util.HashSet<>();
+                    java.util.Set<String> offsets = new java.util.HashSet<>();
+                    for (MatchRow row : nativeRows)
+                    {
+                        if (row.file == null)
+                            continue;
+                        if (row.directOffset >= 0)
+                            offsets.add(row.file.getFullPath() + "@" + row.directOffset);
+                        else if (row.lineNumber > 0)
+                            nativeLines.add(row.file.getFullPath() + "#" + row.lineNumber);
+                    }
+                    for (MatchRow row : extra)
+                    {
+                        boolean code = BslOccurrenceContextResolver.KIND_METHOD.equals(row.syntaxKind)
+                            || BslOccurrenceContextResolver.KIND_PROPERTY.equals(row.syntaxKind);
+                        if (code && nativeLines.contains(row.file.getFullPath() + "#" + row.lineNumber))
+                            continue;
+                        if (!offsets.add(row.file.getFullPath() + "@" + row.directOffset))
+                            continue;
+                        matches.add(new TextSearchFileMatch(model, row.file, row.text,
+                            Math.max(0, row.directHlStart), row.directLength, row.directOffset, row.lineNumber));
+                    }
                     runOnUi(() -> {
-                        if (matchViewer.getTable().isDisposed())
+                        fullTextAugmentRunning = false;
+                        if (matchViewer.getTable().isDisposed() || treeViewer.getTree().isDisposed()
+                            || treeViewer.getInput() != searchResult || searchGeneration != generation)
+                        {
+                            if (!treeViewer.getTree().isDisposed())
+                                syncMatchTableToTree(treeViewer);
                             return;
-                        refreshMatchTable(treeViewer, matchViewer);
-                        // Счётчики в ветках дерева и в шапке — пересчитать под новые вхождения.
-                        if (!treeViewer.getTree().isDisposed())
-                            treeViewer.refresh(true);
+                        }
+                        // До события Added: обновление дерева не должно запустить тот же проход снова.
+                        fullTextRowsResult = searchResult;
+                        fullTextRowsKey = qualifiedName;
+                        fullTextRowsGeneration = generation;
+                        try
+                        {
+                            collector.addMatches(matches);
+                        }
+                        catch (RuntimeException | LinkageError error)
+                        {
+                            fullTextRowsResult = null;
+                            return;
+                        }
+                        startFirstRootWatch(0);
                     });
                 }
                 catch (Exception | LinkageError e)
-                {
-                }
-                finally
                 {
                     fullTextAugmentRunning = false;
                 }
@@ -2080,182 +2108,6 @@ public final class ConfigSearchResultsHook implements IStartup
         };
         job.setSystem(true);
         job.schedule();
-    }
-
-    /** Дописывает кэшированные синтетические строки в текущий список строк таблицы (с дедупом). */
-    private static void appendFullTextRows(TableViewer matchViewer, List<MatchRow> rows, List<MatchRow> cache)
-    {
-        // Дедуп по файл@смещение — ТОЧНОЕ вхождение (несколько на одной строке не схлопываем).
-        // Обращения по коду, которые индекс уже нашёл на этой строке, не дублируем; литералы и
-        // комментарии оставляем всегда (индекс их не берёт).
-        java.util.Set<String> occKeys = new java.util.HashSet<>();
-        java.util.Set<String> nativeLines = new java.util.HashSet<>();
-        for (MatchRow r : rows)
-        {
-            if (r.file == null)
-                continue;
-            String fp = r.file.getFullPath().toString();
-            if (r.directOffset >= 0)
-                occKeys.add(fp + "@" + r.directOffset); //$NON-NLS-1$
-            else if (r.lineNumber > 0)
-                nativeLines.add(fp + "#" + r.lineNumber); //$NON-NLS-1$
-        }
-        int added = 0;
-        Map<String, Long> byFile = new java.util.HashMap<>();
-        for (MatchRow r : cache)
-        {
-            if (r.file == null)
-                continue;
-            String fp = r.file.getFullPath().toString();
-            boolean codeKind = BslOccurrenceContextResolver.KIND_METHOD.equals(r.syntaxKind)
-                || BslOccurrenceContextResolver.KIND_PROPERTY.equals(r.syntaxKind);
-            if (codeKind && nativeLines.contains(fp + "#" + r.lineNumber)) //$NON-NLS-1$
-                continue;
-            if (!occKeys.add(fp + "@" + r.directOffset)) //$NON-NLS-1$
-                continue;
-            rows.add(r);
-            byFile.merge(fp, 1L, Long::sum);
-            added++;
-        }
-        syntheticCountByFilePath = byFile; // ровно то, что реально добавлено (после дедупа)
-        if (added == 0)
-        {
-            updateMatchSuitableOnly();
-            return;
-        }
-        if (matchViewer.getInput() == rows)
-            matchViewer.refresh();
-        if (cachedMatchTextColumn != null && !cachedMatchTextColumn.isDisposed()
-            && cachedMatchTableInteraction != null)
-        {
-            int w = cachedMatchTextColumn.getWidth() > 0 ? cachedMatchTextColumn.getWidth()
-                : FormTableColumnState.readWidth(dialogSettings(), KEY_COL_TEXT_WIDTH, MATCH_TEXT_COLUMN_WIDTH, 1);
-            cachedMatchTableInteraction.setColumnHidden(cachedMatchTextColumn, false, w);
-        }
-        scheduleMatchMethodResolution(matchViewer, rows);
-        scheduleMatchContextResolution(matchViewer, rows);
-        scheduleVisibleLiteralIrTypes(matchViewer);
-        updateMatchSuitableOnly();
-    }
-
-    /**
-     * Подпись «Ссылки на "…" - N совпадений» над деревом — не {@code getContentDescription} и не
-     * заголовок панели (там пусто / «Поиск»), а отдельный текстовый виджет в
-     * дереве контролов панели. Находим его по тексту и дописываем к числу количество синтетических
-     * полнотекстовых вхождений. Идемпотентно ({@link #headerLabelPatchedText}); EDT перезапишет
-     * подпись при изменении результата — следующий {@link #refreshMatchTable} пропатчит снова.
-     */
-    private static void patchHeaderTotalLabel(TreeViewer treeViewer)
-    {
-        Map<String, Long> byFile = syntheticCountByFilePath;
-        if (byFile == null || byFile.isEmpty() || treeViewer.getTree().isDisposed())
-            return;
-        long syntheticTotal = byFile.values().stream().mapToLong(Long::longValue).sum();
-        if (syntheticTotal <= 0)
-            return;
-        // Ищем по всему дереву контролов панели поиска (от Shell): надпись — отдельный виджет
-        // ({@code Link}), не getContentDescription и не заголовок вкладки.
-        Composite root = treeViewer.getTree().getShell();
-        Object[] found = new Object[1];
-        String[] curText = new String[1];
-        findHeaderCountLabel(root, found, curText);
-        if (found[0] == null)
-            return;
-        Control c = (Control) found[0];
-        installHeaderCountGuard(c);
-        applyHeaderPatch(c, curText[0], syntheticTotal);
-    }
-
-    /**
-     * EDT перезаписывает подпись-шапку своим значением после каждого обновления результата, поэтому
-     * одного патча мало: держим на самом виджете сторож, который возвращает наше число сразу после
-     * любой чужой записи (перерисовка — единственное событие, которое SWT даёт после {@code setText}).
-     * Сам патч выполняется вне обработчика перерисовки ({@code asyncExec}), чтобы не менять текст
-     * прямо во время отрисовки.
-     */
-    private static void installHeaderCountGuard(Control c)
-    {
-        if (c == null || c.isDisposed() || c == headerCountControl)
-            return;
-        headerCountControl = c;
-        c.addListener(SWT.Paint, event -> {
-            Map<String, Long> byFile = syntheticCountByFilePath;
-            if (byFile == null || byFile.isEmpty() || headerRepatchPending)
-                return;
-            long total = byFile.values().stream().mapToLong(Long::longValue).sum();
-            if (total <= 0)
-                return;
-            String t = controlText(c);
-            if (t == null || t.equals(headerLabelPatchedText))
-                return;
-            headerRepatchPending = true;
-            c.getDisplay().asyncExec(() -> {
-                headerRepatchPending = false;
-                if (!c.isDisposed())
-                    applyHeaderPatch(c, controlText(c), total);
-            });
-        });
-        c.addListener(SWT.Dispose, event -> headerCountControl = null);
-    }
-
-    /** Заменяет число в подписи-шапке на «штатное + синтетическое»; идемпотентно. */
-    private static void applyHeaderPatch(Control c, String text, long syntheticTotal)
-    {
-        if (c == null || c.isDisposed() || text == null || text.equals(headerLabelPatchedText))
-            return;
-        java.util.regex.Matcher m = HEADER_COUNT_PATTERN.matcher(text);
-        if (!m.find())
-            return;
-        long base;
-        try
-        {
-            base = Long.parseLong(m.group(1));
-        }
-        catch (NumberFormatException e)
-        {
-            return;
-        }
-        String patched = text.substring(0, m.start(1)) + (base + syntheticTotal) + text.substring(m.end(1));
-        try
-        {
-            c.getClass().getMethod("setText", String.class).invoke(c, patched); //$NON-NLS-1$
-            c.requestLayout();
-            headerLabelPatchedText = patched;
-        }
-        catch (Exception ignored)
-        {
-        }
-    }
-
-    private static void findHeaderCountLabel(Control control, Object[] found, String[] text)
-    {
-        if (found[0] != null || control == null || control.isDisposed())
-            return;
-        String t = controlText(control);
-        if (t != null && !t.isBlank() && HEADER_COUNT_PATTERN.matcher(t).find())
-        {
-            found[0] = control;
-            text[0] = t;
-            return;
-        }
-        if (control instanceof Composite comp)
-            for (Control child : comp.getChildren())
-                findHeaderCountLabel(child, found, text);
-    }
-
-    /** Текст произвольного контрола ({@code getText()} рефлексией) — надпись-шапка может быть любым виджетом. */
-    private static String controlText(Control control)
-    {
-        try
-        {
-            java.lang.reflect.Method m = control.getClass().getMethod("getText"); //$NON-NLS-1$
-            Object r = m.invoke(control);
-            return r instanceof String s ? s : null;
-        }
-        catch (Exception e)
-        {
-            return null;
-        }
     }
 
     private static IProject fullTextSearchProject(TreeViewer treeViewer, List<MatchRow> rows)
@@ -5646,7 +5498,12 @@ public final class ConfigSearchResultsHook implements IStartup
         // #165 триггерится двойным кликом по строке результата, не завершением поиска —
         // автофикс только в open/panelHealth/watchdog, здесь не лечим.
         display.asyncExec(() -> {
+            SearchViewViewers viewers = resolveViewers(findSearchViewPart());
             startFirstRootWatch(0);
+            // Полнотекстовый проход нужен и при нуле штатных совпадений: в пустом дереве
+            // сторож первого узла не вызовет обновление таблицы.
+            if (viewers != null)
+                syncMatchTableToTree(viewers.tree);
             // Во время поиска расчёт контекста был отложен (модель ради каждой пересборки строк не
             // поднимаем) — запускаем его теперь по накопленным строкам.
             TableViewer matchViewer = cachedMatchTableViewer;
@@ -8081,52 +7938,19 @@ public final class ConfigSearchResultsHook implements IStartup
 
     private static long countMatchItemsRecursively(Object node)
     {
-        return countMatchItemsRecursively(node, new java.util.HashSet<>());
-    }
-
-    /**
-     * @param countedFiles файлы, чьи синтетические полнотекстовые вхождения уже учтены в текущем
-     *     обходе — чтобы один файл не сосчитался дважды в разных ветках
-     */
-    private static long countMatchItemsRecursively(Object node, java.util.Set<String> countedFiles)
-    {
         if (node == null)
             return 0;
         long count = 0;
         Object ownItems = Global.invoke(node, "getTableItems"); //$NON-NLS-1$
         if (ownItems instanceof List<?> list)
-        {
             count += list.size();
-            Map<String, Long> synthetic = syntheticCountByFilePath;
-            if (synthetic != null && !synthetic.isEmpty())
-            {
-                for (Object item : list)
-                {
-                    IFile file = matchItemFile(item);
-                    if (file == null)
-                        continue;
-                    String key = file.getFullPath().toString();
-                    if (countedFiles.add(key))
-                        count += synthetic.getOrDefault(key, 0L);
-                }
-            }
-        }
         Object children = Global.invoke(node, "getChildren"); //$NON-NLS-1$
         if (children instanceof List<?> childList)
         {
             for (Object child : childList)
-                count += countMatchItemsRecursively(child, countedFiles);
+                count += countMatchItemsRecursively(child);
         }
         return count;
-    }
-
-    /** Файл вхождения элемента таблицы дерева поиска (для учёта синтетических полнотекстовых строк). */
-    private static IFile matchItemFile(Object matchItem)
-    {
-        Object data = Global.invoke(matchItem, "getData"); //$NON-NLS-1$
-        if (data instanceof TextSearchFileMatch fm)
-            return fm.getFile();
-        return bslReferenceMatchFile(data);
     }
 
     private static long parseMatchCountFromLabel(String label)
