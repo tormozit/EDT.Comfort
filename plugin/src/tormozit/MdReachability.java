@@ -752,7 +752,8 @@ public final class MdReachability
                         GitChangedFileMenuHook.openInEditor(resolved, null, window != null ? window.getShell() : null);
                         NavigatorReveal.revealAndActivateIfHidden(resolved);
                         // Автопроверка достижимости сама не пересчитывается: объект не менялся.
-                        ComfortCheckRecompute.recomputeObjects(item.project(), List.of(resolved));
+                        // ЕДТ ещё перечитывает изменённый описатель родителя — ждём затишья.
+                        ComfortCheckRecompute.recomputeObjectsWhenIdle(item.project(), List.of(resolved));
                     });
                 return Status.OK_STATUS;
             }

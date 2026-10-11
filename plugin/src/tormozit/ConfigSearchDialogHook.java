@@ -25,6 +25,7 @@ import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.CTabFolder;
 import org.eclipse.swt.custom.CTabItem;
+import org.eclipse.swt.graphics.Font;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.layout.GridData;
@@ -35,6 +36,7 @@ import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Group;
 import org.eclipse.swt.widgets.Label;
+import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Table;
 import org.eclipse.swt.widgets.ToolBar;
@@ -80,6 +82,8 @@ public class ConfigSearchDialogHook implements IStartup
     private static final String SIZE_MEMORY_KEY = "tormozit.configSearchSizeMemory";
     private static final String OBJECT_TYPES_COUNT_KEY = "tormozit.configSearchObjectTypesCount";
     private static final String SEARCH_IN_COUNT_KEY = "tormozit.configSearchSearchInCount";
+    private static final String GROUP_NORMAL_FONT_KEY = "tormozit.configSearchGroupNormalFont";
+    private static final String GROUP_BOLD_FONT_KEY = "tormozit.configSearchGroupBoldFont";
     private static final String SEARCH_IN_TITLE_RU = "Искать в";
     private static final String SEARCH_IN_TITLE_EN = "Search In";
     private static final String OBJECT_TYPES_TITLE_RU ="среди типов объектов";
@@ -116,7 +120,9 @@ public class ConfigSearchDialogHook implements IStartup
                     addPageChangeListener(dialog, shell);
                 }
 
-                schedulePatch(shell, dialog, 0);
+                // синхронно, до показа окна: правки после первого кадра дают видимую перерисовку
+                if (!tryPatchNow(shell, dialog))
+                    schedulePatch(shell, dialog, 0);
             });
         });
     }
@@ -142,7 +148,11 @@ public class ConfigSearchDialogHook implements IStartup
                 ConfigSearchDialogHook.class.getClassLoader(),
                 new Class[] { listenerClass },
                 (proxy, method, args) -> {
-                    schedulePatch(shell, dialog, 0);
+                    // синхронно, пока кадр не нарисован: штатное окно успело расшириться под новую
+                    // страницу, и отложенный возврат размера виден как «расширение на несколько кадров»
+                    restoreShellSize(shell);
+                    if (!tryPatchNow(shell, dialog))
+                        schedulePatch(shell, dialog, 0);
                     scheduleRestoreShellSize(shell);
                     return null;
                 });
@@ -163,31 +173,25 @@ public class ConfigSearchDialogHook implements IStartup
         {
             if (shell.isDisposed())
                 return;
-
-            Object page = getSelectedPage(dialog);
-            if (page == null)
-            {
-                if (attempt < 100)
-                    schedulePatch(shell, dialog, attempt + 1);
-                return;
-            }
-
-            if (!PAGE_CLASS.equals(page.getClass().getName()))
-            {
-                if (attempt < 100)
-                    schedulePatch(shell, dialog, attempt + 1);
-                return;
-            }
-
-            if (Global.getField(page, "searchExecutorProvider") == null)
-            {
-                if (attempt < 100)
-                    schedulePatch(shell, dialog, attempt + 1);
-                return;
-            }
-
-            patchPage(shell, dialog, page);
+            if (!tryPatchNow(shell, dialog) && attempt < 100)
+                schedulePatch(shell, dialog, attempt + 1);
         });
+    }
+
+    /**
+     * Доработать страницу сразу, если она уже создана. Вызов из обработчика {@code SWT.Show} —
+     * до первого кадра, иначе перерисовка после правок видна пользователю.
+     *
+     * @return {@code false}, если страница ещё не готова (нужна повторная попытка)
+     */
+    private static boolean tryPatchNow(Shell shell, Object dialog)
+    {
+        Object page = getSelectedPage(dialog);
+        if (page == null || !PAGE_CLASS.equals(page.getClass().getName())
+            || Global.getField(page, "searchExecutorProvider") == null)
+            return false;
+        patchPage(shell, dialog, page);
+        return true;
     }
 
     private static Object getSelectedPage(Object dialog)
@@ -360,6 +364,40 @@ public class ConfigSearchDialogHook implements IStartup
         shell.setData(SIZE_MEMORY_KEY, Boolean.TRUE);
 
         Point[] lastSize = { null };
+        // Смена вкладки: штатный SearchDialog.turnToPage расширяет окно под страницу (resizeDialogIfNeeded),
+        // создаёт страницу (десятки мс) и лишь потом шлёт pageChanged — окно стояло расширенным несколько
+        // кадров. Возвращаем размер в самом событии Resize, перерисовку держим выключенной до конца обработки.
+        Display display = shell.getDisplay();
+        boolean[] tabSwitch = { false, false }; // [0] идёт смена вкладки, [1] возврат размера уже идёт
+        Listener tabSwitchFilter = e ->
+        {
+            if (!(e.widget instanceof CTabFolder folder) || folder.isDisposed() || shell.isDisposed()
+                || folder.getShell() != shell)
+                return;
+            tabSwitch[0] = true;
+            shell.setRedraw(false);
+            display.asyncExec(() -> {
+                tabSwitch[0] = false;
+                if (!shell.isDisposed())
+                    shell.setRedraw(true);
+            });
+        };
+        display.addFilter(SWT.Selection, tabSwitchFilter);
+        shell.addDisposeListener(e -> display.removeFilter(SWT.Selection, tabSwitchFilter));
+        shell.addListener(SWT.Resize, e ->
+        {
+            if (!tabSwitch[0] || tabSwitch[1])
+                return;
+            tabSwitch[1] = true;
+            try
+            {
+                restoreShellSize(shell);
+            }
+            finally
+            {
+                tabSwitch[1] = false;
+            }
+        });
         shell.addListener(SWT.Resize, e ->
         {
             if (shell.getMaximized() || shell.getMinimized())
@@ -644,26 +682,44 @@ public class ConfigSearchDialogHook implements IStartup
             return;
         group.setData(SEARCH_IN_COUNT_KEY, Boolean.TRUE);
 
+        // группа «Искать для» — родитель пометки категории «Языковые элементы»
+        Button languageButton = NStrCategory.findCategory(page, root, SearchFor.LANGUAGE_ELEMENTS);
+        final Group searchForGroup = languageButton != null && languageButton.getParent() instanceof Group g
+            ? g : null;
+
         final String baseTitle = stripCountSuffix(group.getText()).trim();
+        final String searchForBaseTitle =
+            searchForGroup != null ? stripCountSuffix(searchForGroup.getText()).trim() : ""; //$NON-NLS-1$
         Runnable refresh = () -> {
             if (group.isDisposed())
                 return;
-            int checked = 0;
-            for (Control child : group.getChildren())
-            {
-                if (child instanceof Button button && (button.getStyle() & SWT.CHECK) != 0
-                    && button.getSelection())
-                    checked++;
-            }
+            int checked = countCheckedButtons(group);
             String title = baseTitle + " (" + checked + ")";
             if (!title.equals(group.getText()))
                 group.setText(title);
+            setGroupTitleBold(group, checked > 0);
+            if (searchForGroup != null && !searchForGroup.isDisposed())
+            {
+                int checkedFor = countCheckedButtons(searchForGroup);
+                String titleFor = searchForBaseTitle + " (" + checkedFor + ")";
+                if (!titleFor.equals(searchForGroup.getText()))
+                    searchForGroup.setText(titleFor);
+                setGroupTitleBold(searchForGroup, checkedFor > 0);
+            }
         };
 
         for (Control child : group.getChildren())
         {
             if (child instanceof Button button && (button.getStyle() & SWT.CHECK) != 0)
                 button.addListener(SWT.Selection, e -> refresh.run());
+        }
+        if (searchForGroup != null)
+        {
+            for (Control child : searchForGroup.getChildren())
+            {
+                if (child instanceof Button button && (button.getStyle() & SWT.CHECK) != 0)
+                    button.addListener(SWT.Selection, e -> refresh.run());
+            }
         }
         // Пометки меняет и сама EDT (подстановка прошлого запроса из истории) — без события Selection.
         Object searchData = Global.getField(page, "searchData");
@@ -709,6 +765,43 @@ public class ConfigSearchDialogHook implements IStartup
         }
         refresh.run();
         root.getDisplay().timerExec(100, refresh);
+    }
+
+    private static int countCheckedButtons(Group group)
+    {
+        int checked = 0;
+        for (Control child : group.getChildren())
+        {
+            if (child instanceof Button button && (button.getStyle() & SWT.CHECK) != 0
+                && button.getSelection())
+                checked++;
+        }
+        return checked;
+    }
+
+    /** Заголовок группы жирным, пока в ней включена хотя бы одна пометка. Шрифт группы создаётся один раз. */
+    private static void setGroupTitleBold(Group group, boolean bold)
+    {
+        Font normal = (Font) group.getData(GROUP_NORMAL_FONT_KEY);
+        if (normal == null)
+        {
+            normal = group.getFont();
+            group.setData(GROUP_NORMAL_FONT_KEY, normal);
+            org.eclipse.jface.resource.FontDescriptor boldDescriptor =
+                org.eclipse.jface.resource.FontDescriptor.createFrom(normal).setStyle(SWT.BOLD);
+            Font boldFont = boldDescriptor.createFont(group.getDisplay());
+            group.setData(GROUP_BOLD_FONT_KEY, boldFont);
+            group.addListener(SWT.Dispose, e -> boldFont.dispose());
+        }
+        Font target = bold ? (Font) group.getData(GROUP_BOLD_FONT_KEY) : (Font) group.getData(GROUP_NORMAL_FONT_KEY);
+        if (target != group.getFont())
+        {
+            group.setFont(target);
+            // жирный шрифт группы наследуют её флажки — возвращаем им обычный
+            for (Control child : group.getChildren())
+                child.setFont(group.getData(GROUP_NORMAL_FONT_KEY) instanceof Font f ? f : child.getFont());
+            group.getParent().layout(true, true);
+        }
     }
 
     /**
@@ -1172,6 +1265,15 @@ public class ConfigSearchDialogHook implements IStartup
             });
     }
 
+    /**
+     * Лежит ли смещение текста модуля внутри литерала-аргумента {@code НСтр()} — то же правило,
+     * по которому поиск относит вхождение к «Строкам пользовательского интерфейса».
+     */
+    static boolean isInsideNStrLiteral(String content, int offset)
+    {
+        return NStrCategory.isNStrLiteral(content, offset);
+    }
+
     private static boolean accept(Object match, String searchString, boolean caseSensitive,
         SearchSetMembership membership, NStrCategory nstr) throws Exception
     {
@@ -1202,6 +1304,13 @@ public class ConfigSearchDialogHook implements IStartup
      * </ul>
      * Принадлежность литералу — лексически по тексту модуля (согласовано): Xtext-разбор каждого
      * модуля с вхождениями замедлил бы поиск в разы.
+     *
+     * <p>Так же между категориями перенесены служебные строки метаданных (issue #757): штатно к
+     * «Строкам пользовательского интерфейса» отнесены маски, имена и выражения внешних источников
+     * данных, имена предопределённых элементов — пользователь их не видит. Они ищутся по пометке
+     * «Языковые элементы»; в «Строках пользовательского интерфейса» остаются тексты из
+     * {@link UserTextSpellCheck#isUserText}. Для этого в запрос на время поиска добавляется вторая
+     * категория пары, а сборщик оставляет реквизиты своей.
      */
     private static final class NStrCategory
     {
@@ -1216,15 +1325,18 @@ public class ConfigSearchDialogHook implements IStartup
         private final boolean onlyNStr;
         /** Исходный набор категорий, подменённый на время поиска; {@code null} — не подменялся. */
         private final Object originalSearchFors;
-        /** Штатный предикат реквизитов исходного набора категорий (только при {@link #onlyNStr}). */
+        /** Штатный предикат реквизитов исходного набора категорий; {@code null} — набор не подменялся. */
         private final Predicate<EAttribute> originalAttributes;
+        /** Штатный предикат реквизитов одной категории «Строки пользовательского интерфейса». */
+        private final Predicate<EAttribute> uiStringsAttributes;
 
         private NStrCategory(boolean onlyNStr, Object originalSearchFors,
-            Predicate<EAttribute> originalAttributes)
+            Predicate<EAttribute> originalAttributes, Predicate<EAttribute> uiStringsAttributes)
         {
             this.onlyNStr = onlyNStr;
             this.originalSearchFors = originalSearchFors;
             this.originalAttributes = originalAttributes;
+            this.uiStringsAttributes = uiStringsAttributes;
         }
 
         /** @return {@code null}, если для этого поиска разделять литералы НСтр() не требуется */
@@ -1238,17 +1350,17 @@ public class ConfigSearchDialogHook implements IStartup
             boolean uiStrings = searchFors.contains(SearchFor.UI_STRINGS);
             if (language == uiStrings)
                 return null;
-            if (language)
-                return new NStrCategory(false, null, null);
-
+            // Без предикатов или подмены набора остаётся прежнее деление: только по литералам НСтр().
+            NStrCategory literalsOnly = language ? new NStrCategory(false, null, null, null) : null;
             Predicate<EAttribute> attributes = attributePredicate(searchFors);
-            if (attributes == null)
-                return null;
+            Predicate<EAttribute> uiStringsOnly = attributePredicate(Set.of(SearchFor.UI_STRINGS));
+            if (attributes == null || uiStringsOnly == null)
+                return literalsOnly;
             Set<Object> broadened = new HashSet<>(searchFors);
-            broadened.add(SearchFor.LANGUAGE_ELEMENTS);
+            broadened.add(language ? SearchFor.UI_STRINGS : SearchFor.LANGUAGE_ELEMENTS);
             if (!Global.setFieldForce(input, INPUT_FIELD, broadened))
-                return null;
-            return new NStrCategory(true, searchFors, attributes);
+                return literalsOnly;
+            return new NStrCategory(uiStrings, searchFors, attributes, uiStringsOnly);
         }
 
         /** Вернуть исходный набор категорий — запрос можно выполнить повторно («Искать снова»). */
@@ -1265,9 +1377,13 @@ public class ConfigSearchDialogHook implements IStartup
                 Boolean inside = insideNStr(fileMatch);
                 return inside == null ? !onlyNStr : inside.booleanValue() == onlyNStr;
             }
-            if (onlyNStr && match instanceof TextSearchModelMatch modelMatch)
-                return !(modelMatch.getFeature() instanceof EAttribute attribute)
-                    || originalAttributes.test(attribute);
+            if (originalAttributes != null && match instanceof TextSearchModelMatch modelMatch
+                && modelMatch.getFeature() instanceof EAttribute attribute)
+            {
+                boolean service = uiStringsAttributes.test(attribute) && !UserTextSpellCheck.isUserText(attribute);
+                return onlyNStr ? originalAttributes.test(attribute) && !service
+                    : originalAttributes.test(attribute) || service;
+            }
             return true;
         }
 
@@ -1483,17 +1599,20 @@ public class ConfigSearchDialogHook implements IStartup
                         + "форм" + Global.pluginSignForTooltip()));
             }
             language.setToolTipText(TooltipText.wrap(language,
-                "Имена и другие служебные строки объектов метаданных, тексты модулей и макетов. "
+                "Имена и другие служебные строки объектов метаданных (в том числе маски, имена и "
+                    + "выражения внешних источников данных, имена предопределённых элементов), "
+                    + "тексты модулей и макетов. "
                     + "Строковые литералы внутри НСтр() сюда не входят — они ищутся по пометке «"
                     + uiStringsLabel + "»" + Global.pluginSignForTooltip()));
             uiStrings.setToolTipText(TooltipText.wrap(uiStrings,
                 "Синонимы, заголовки, подсказки и другие тексты, которые видит пользователь, "
+                    + "наименования предопределённых элементов, "
                     + "а также строковые литералы внутри НСтр() в модулях"
                     + Global.pluginSignForTooltip()));
             pageControl.layout(true, true);
         }
 
-        private static Button findCategory(Object page, Composite pageControl, SearchFor category)
+        static Button findCategory(Object page, Composite pageControl, SearchFor category)
         {
             String label;
             try

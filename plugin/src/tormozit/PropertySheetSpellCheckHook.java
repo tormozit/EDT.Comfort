@@ -22,10 +22,11 @@ import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 
 /**
- * Орфография Hunspell в полях панели «Свойства»: Заголовок, Подсказка, Синоним, Пояснение.
+ * Орфография Hunspell в полях панели «Свойства» (Заголовок, Подсказка, Синоним, Пояснение)
+ * и в таких же полях AEF редакторов объектов.
  * <p>
- * Основной путь: FocusIn/Show оверлея с {@code lwtOverlay} → {@code LightText} при открытой
- * панели «Свойства» (карта {@code viewModelToView} для этих полей часто не даёт LightText —
+ * Основной путь: FocusIn/Show оверлея с {@code lwtOverlay} → {@code LightText}, где бы поле
+ * ни находилось (карта {@code viewModelToView} для этих полей часто не даёт LightText —
  * см. TypeComboOverlayHook). Работает только при
  * {@link SpellCheckHook#isComfortPlatformSpellingActive()} (орфография + наш ru_RU).
  * <p>
@@ -358,14 +359,13 @@ public final class PropertySheetSpellCheckHook implements IStartup
     }
 
     /**
-     * Любой редактируемый LightText в открытой панели «Свойства».
+     * Любой редактируемый LightText — в панели «Свойства» и в полях AEF редакторов объектов
+     * (от видимости панели «Свойства» не зависит).
      * Имя/Синоним — обычно SINGLE ({@code isMultiline=false}); карта подписей часто пуста.
      */
     private static boolean isSpellEligibleLightText(Object lightText)
     {
         if (lightText == null || !lightText.getClass().getName().contains("LightText")) //$NON-NLS-1$
-            return false;
-        if (!isAnyPropertySheetVisible())
             return false;
         Object editable = Global.invoke(lightText, "isEditable"); //$NON-NLS-1$
         if (Boolean.FALSE.equals(editable))
@@ -377,30 +377,6 @@ public final class PropertySheetSpellCheckHook implements IStartup
         if (Boolean.TRUE.equals(password))
             return false;
         return true;
-    }
-
-    private static boolean isAnyPropertySheetVisible()
-    {
-        IWorkbench wb = PlatformUI.getWorkbench();
-        if (wb == null)
-            return false;
-        for (IWorkbenchWindow window : wb.getWorkbenchWindows())
-        {
-            if (window == null)
-                continue;
-            for (IWorkbenchPage page : window.getPages())
-            {
-                if (page == null)
-                    continue;
-                for (IViewReference ref : page.getViewReferences())
-                {
-                    IViewPart view = ref.getView(false);
-                    if (PropertyNameIdentifierHook.isPropertySheetView(view) && page.isPartVisible(view))
-                        return true;
-                }
-            }
-        }
-        return false;
     }
 
     private static void wireOverlayForLightText(Object lightText)

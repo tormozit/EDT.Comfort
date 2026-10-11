@@ -59,7 +59,7 @@ import com.e1c.g5.v8.dt.check.settings.ICheckRepository;
  * <p>
  * Штатный {@code CheckContextCollectingSession#addFullCheck} этого недостаточно: он не снимает
  * флаг {@code inactive} у контекста, и помеченные проверки не запускаются. Эталон — путь
- * «Проверить» в меню навигатора.
+ * «Запустить автопроверки» в меню навигатора.
  * <p>
  * Для объекта МД дополнительно помечаются вложенные {@link BasicForm} (у форм свой BM).
  * {@code BasicForm.getForm()} вызывается только внутри {@code updateDerivedData}.
@@ -244,6 +244,52 @@ public final class ComfortCheckRecompute
             toast("Проверить", "Ошибка при запуске проверки: " + t.getClass().getSimpleName() //$NON-NLS-1$
                 + (t.getMessage() != null ? " — " + t.getMessage() : "")); //$NON-NLS-1$
         }
+    }
+
+    /**
+     * То же, что {@link #recomputeObjects}, но сначала в фоне дожидается затишья менеджера
+     * производных данных. Нужно там, где перепроверку запускает не пользователь, а сам плагин
+     * сразу после изменения файлов проекта: ЕДТ в этот момент ещё перечитывает изменённое, и
+     * немедленный запуск упирается в «Предыдущая перепроверка ещё выполняется». Расчёт производных
+     * данных идёт вне заданий Eclipse, поэтому в панели фоновых задач его не видно.
+     *
+     * @param project проект объектов; {@code null} — ничего не делать
+     * @param objects объекты для перепроверки
+     */
+    public static void recomputeObjectsWhenIdle(IProject project, Collection<? extends EObject> objects)
+    {
+        IDerivedDataManagerProvider provider = Global.getOsgiService(IDerivedDataManagerProvider.class);
+        IDerivedDataManager manager = provider != null && project != null ? provider.get(project) : null;
+        if (manager == null)
+        {
+            recomputeObjects(project, objects);
+            return;
+        }
+        Job job = Job.create("Комфорт: ожидание перед перепроверкой", monitor -> //$NON-NLS-1$
+        {
+            long deadline = System.currentTimeMillis() + WAIT_COMPLETION_TIMEOUT_MS;
+            try
+            {
+                // Расчёт идёт волнами: после затишья может прийти следующая пачка
+                while (!manager.isIdle())
+                {
+                    long left = deadline - System.currentTimeMillis();
+                    if (left <= 0 || monitor.isCanceled())
+                        break;
+                    manager.waitAllComputations(left);
+                }
+            }
+            catch (InterruptedException e)
+            {
+                Thread.currentThread().interrupt();
+                return org.eclipse.core.runtime.Status.CANCEL_STATUS;
+            }
+            if (!monitor.isCanceled())
+                recomputeObjects(project, objects);
+            return org.eclipse.core.runtime.Status.OK_STATUS;
+        });
+        job.setSystem(true);
+        job.schedule();
     }
 
     private static void recomputeObjectsBody(IProject project, Collection<? extends EObject> objects)

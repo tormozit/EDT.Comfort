@@ -2482,7 +2482,7 @@ public final class ValidationChecksFilterHook implements IStartup
             boolean hasSavedWidths = settings.get(KEY_COL_TITLE_WIDTH) != null
                 || settings.get(KEY_COL_CATEGORY_WIDTH) != null;
             interaction.install(hasSavedWidths);
-            interaction.enableHeaderSort();
+            interaction.enableHeaderSort(settings);
             installSeverityMenu();
             registerCheckReferencesMenu(control, table, () ->
                 viewer.getStructuredSelection().getFirstElement() instanceof CheckRow row ? row.node.getValue() : null);

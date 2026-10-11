@@ -26,8 +26,8 @@ public final class BrokenMdCompositionCheck extends BasicCheck<Void>
     protected void configureCheck(CheckConfigurer configurer)
     {
         configurer.title("Битые ссылки метаданных")
-            .description("Свойства объектов конфигурации содержат ссылки на несуществующие объекты метаданных,"
-                + " включая подчинённые объекты и типы значений.")
+            .description("Ищет ссылки на несуществующие объекты метаданных в сохранённых свойствах конфигурации:"
+                + " на подчинённые объекты, типы значений, роли, картинки и т. п.")
             .severity(IssueSeverity.MAJOR)
             .issueType(IssueType.ERROR)
             .complexity(CheckComplexity.NORMAL);
@@ -62,8 +62,7 @@ public final class BrokenMdCompositionCheck extends BasicCheck<Void>
                 end++;
             int count = end - first;
             String message = count == 1
-                ? "Битая ссылка метаданных: " + MdReferenceSupport.localized(
-                    org.eclipse.emf.ecore.util.EcoreUtil.getURI(broken.target()))
+                ? "Битая ссылка метаданных: " + MdReferenceSupport.targetLabel(broken)
                 : "Битые ссылки метаданных: " + count;
             resultAcceptor.addIssue(message, broken.owner(), broken.feature());
             first = end;

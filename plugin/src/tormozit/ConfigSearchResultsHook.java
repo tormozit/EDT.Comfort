@@ -105,6 +105,7 @@ import com._1c.g5.v8.dt.md.ui.editor.base.EditorPageDescriptor;
 import com._1c.g5.v8.dt.md.ui.editor.base.IEditorPagesRegistry;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicFeature;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicForm;
+import com._1c.g5.v8.dt.metadata.mdclass.BasicTemplate;
 import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
 import com._1c.g5.v8.dt.metadata.mdclass.ExchangePlan;
 import com._1c.g5.v8.dt.metadata.mdclass.ExchangePlanContentItem;
@@ -1031,7 +1032,7 @@ public final class ConfigSearchResultsHook implements IStartup
         // таблицы (в т.ч. при перетаскивании разделителя SashForm). Ручной ресайз колонки в сессии
         // при этом работает как обычно.
         interaction.install(false);
-        interaction.enableHeaderSort();
+        interaction.enableHeaderSort(matchSettings);
         // Подсказки заголовков — через FormTableInteraction: если заголовок обрезан, первой строкой
         // подсказки идёт полный текст заголовка, затем описание (setToolTipText напрямую это правило
         // нарушает).
@@ -2635,23 +2636,28 @@ public final class ConfigSearchResultsHook implements IStartup
      */
     private static void openSyntheticMatch(MatchRow row, IWorkbenchPage page)
     {
+        openFileMatch(row.file, row.directOffset, row.directLength, page);
+    }
+
+    /** Открывает файл и выделяет в нём диапазон текста; не {@code private} — и для ошибок орфографии (#757). */
+    static void openFileMatch(IFile file, int offset, int length, IWorkbenchPage page)
+    {
         if (page == null)
             return;
         try
         {
-            if (BslModuleMethodResolver.isBslModule(row.file))
+            if (BslModuleMethodResolver.isBslModule(file))
             {
                 Shell shell = page.getWorkbenchWindow() != null ? page.getWorkbenchWindow().getShell() : null;
-                if (GoToDefinition.openBslModuleAtOffset(row.file, row.directOffset, row.directLength, page,
-                    shell))
+                if (GoToDefinition.openBslModuleAtOffset(file, offset, length, page, shell))
                     return;
                 log("openSyntheticMatch: openBslModuleAtOffset не удалось, откат к IDE.openEditor"); //$NON-NLS-1$
             }
-            IEditorPart editor = org.eclipse.ui.ide.IDE.openEditor(page, row.file, true);
+            IEditorPart editor = org.eclipse.ui.ide.IDE.openEditor(page, file, true);
             if (editor == null)
                 return;
             Global.markNavigationLocation(editor);
-            revealSyntheticMatch(editor, row.directOffset, row.directLength, 0);
+            revealSyntheticMatch(editor, offset, length, 0);
         }
         catch (Exception e)
         {
@@ -2756,7 +2762,52 @@ public final class ConfigSearchResultsHook implements IStartup
                 }
                 return false;
             }
+            return openTextModelMatch(match, workbenchPage);
+        }
+        catch (Throwable t)
+        {
+            return false;
+        }
+        finally
+        {
+            PropertyFieldFocus.clearPendingMatchRange();
+        }
+    }
 
+    /**
+     * Открывает вхождение в свойстве модели так же, как строку результатов поиска по конфигурации:
+     * сначала свои переходы ({@link #openTextModelMatch}), затем штатное открытие EDT. Для списков
+     * вне панели поиска по конфигурации (ошибки орфографии, issue #757), где штатной страницы с
+     * её {@code handleOpen} нет.
+     */
+    static void openModelMatch(TextSearchModelMatch match, IWorkbenchPage workbenchPage)
+    {
+        if (match == null || workbenchPage == null || openTextModelMatch(match, workbenchPage))
+            return;
+        try
+        {
+            // Ветка TextSearchModelMatch штатного ConfigurationSearchViewPage.handleOpen(IMatchItem);
+            // табличный документ до неё не доходит — его открывает openTextModelMatch.
+            Optional<?> matched = match.resolveMatchObject();
+            if (matched.isPresent() && matched.get() instanceof EObject object)
+                new OpenHelper(workbenchPage).openEditor(object, match.getFeature());
+        }
+        catch (Exception e)
+        {
+            log("openModelMatch: " + e); //$NON-NLS-1$
+        }
+    }
+
+    /**
+     * Свои переходы к вхождению в свойстве модели.
+     *
+     * @return {@code true}, если открытие обработано здесь; {@code false} — нужно штатное открытие
+     *         EDT (фокус поля панели «Свойства» или выделение в поле редактора уже запланированы)
+     */
+    private static boolean openTextModelMatch(TextSearchModelMatch match, IWorkbenchPage workbenchPage)
+    {
+        try
+        {
             Optional<?> matchedOpt = match.resolveMatchObject();
             if (matchedOpt.isEmpty() || !(matchedOpt.get() instanceof EObject matchedObject))
             {
@@ -2887,19 +2938,53 @@ public final class ConfigSearchResultsHook implements IStartup
                 mdObject = freshMd;
             }
 
+            if (insideSpreadsheet)
+            {
+                // Свойства ячейки правятся в панели «Свойства». Скрытая панель выделение редактора
+                // не обрабатывает и при показе остаётся пустой, поэтому она поднимается заранее —
+                // без активации: фокус остаётся в табличном документе. Не VIEW_VISIBLE: в одной
+                // стопке с активной частью (панелью «Поиск») он панель наверх не выводит.
+                try
+                {
+                    workbenchPage.bringToTop(
+                        workbenchPage.showView(IPageLayout.ID_PROP_SHEET, null, IWorkbenchPage.VIEW_CREATE));
+                }
+                catch (Exception e)
+                {
+                    log("openTextModelMatch: showView failed: " + e); //$NON-NLS-1$
+                }
+            }
             boolean opened = GoToDefinition.openMdObjectViaOpenHelper(mdObject,
                 fullName, workbenchPage, new StructuredSelection(matchedObject));
+            Global.tempLog("dcs-cell-dialog", "open fullName=" + fullName + " opened=" + opened //$NON-NLS-1$ //$NON-NLS-2$
+                + " spreadsheet=" + insideSpreadsheet + " activePart=" //$NON-NLS-1$
+                + (workbenchPage.getActivePart() != null ? workbenchPage.getActivePart().getClass().getSimpleName() : null)
+                + " activeEditor=" + (workbenchPage.getActiveEditor() != null //$NON-NLS-1$
+                    ? workbenchPage.getActiveEditor().getTitle() : null));
             if (!opened)
                 return false;
 
             if (insideSpreadsheet)
-                scheduleMoxelCellReveal(workbenchPage, matchedObject, 0);
+            {
+                // Макет уже открыт в текущем редакторе: OpenHelper.activateEditor часть не активирует,
+                // активной остаётся панель с результатами — и «Свойства» показывают её, а не ячейку.
+                IEditorPart target = workbenchPage.getActiveEditor();
+                if (target != null && workbenchPage.getActivePart() != target)
+                    workbenchPage.activate(target);
+                // Новый переход отменяет ожидание прежнего: иначе повторный двойной клик давал два
+                // независимых выделения ячейки и две активации поля.
+                moxelRevealToken = new Object();
+                PropertyFieldFocus.cancel();
+                scheduleMoxelCellReveal(workbenchPage, matchedObject,
+                    new int[] { match.getTextOffset(), match.getTextLength() }, 0, moxelRevealToken);
+            }
             else
                 scheduleDcsSettingsReveal(workbenchPage, matchedObject, match, 0);
             return true;
         }
         catch (Throwable t)
         {
+            Global.tempLog("dcs-cell-dialog", "openTextModelMatch failed " + t); //$NON-NLS-1$ //$NON-NLS-2$
             return false;
         }
         finally
@@ -2985,12 +3070,21 @@ public final class ConfigSearchResultsHook implements IStartup
                 {
                     if (attempt < 10)
                         scheduleDcsSettingsReveal(workbenchPage, matchedObject, match, attempt + 1);
+                    else
+                        Global.tempLog("dcs-cell-dialog", "dcs editor not found activeEditor=" //$NON-NLS-1$ //$NON-NLS-2$
+                            + (workbenchPage.getActiveEditor() != null
+                                ? workbenchPage.getActiveEditor().getClass().getName() : null));
                     return;
                 }
+                Global.tempLog("dcs-cell-dialog", "reveal attempt=" + attempt + " leaf=" //$NON-NLS-1$ //$NON-NLS-2$
+                    + matchedObject.eClass().getName() + " proxy=" + matchedObject.eIsProxy() //$NON-NLS-1$
+                    + " container=" + (matchedObject.eContainer() != null //$NON-NLS-1$
+                        ? matchedObject.eContainer().eClass().getName() : null));
                 revealInDcsSettings(dcsEditor, matchedObject, match);
             }
             catch (Throwable t)
             {
+                Global.tempLog("dcs-cell-dialog", "reveal failed " + t); //$NON-NLS-1$ //$NON-NLS-2$
             }
         });
     }
@@ -3062,20 +3156,76 @@ public final class ConfigSearchResultsHook implements IStartup
         return null;
     }
 
+    /**
+     * Временная диагностика (issue #757): после перехода к ячейке макета панель «Свойства» пуста.
+     * Пишет, какая часть активна, где фокус и что отдаёт как выделение сама часть и табличный документ.
+     */
+    private static void logMoxelSelection(String stage, IWorkbenchPage workbenchPage, Object moxelControl,
+        int[] rowCol)
+    {
+        try
+        {
+            org.eclipse.ui.IWorkbenchPart part = workbenchPage.getActivePart();
+            org.eclipse.jface.viewers.ISelectionProvider provider = part != null && part.getSite() != null
+                ? part.getSite().getSelectionProvider() : null;
+            Control focus = Display.getDefault().getFocusControl();
+            Global.tempLog("moxel-cell-reveal", stage + " cell=" + rowCol[0] + "," + rowCol[1] //$NON-NLS-1$ //$NON-NLS-2$
+                + " activePart=" + (part != null ? part.getClass().getName() : null) //$NON-NLS-1$
+                + " focus=" + (focus != null ? focus.getClass().getName() : null) //$NON-NLS-1$
+                + " focusIsMoxel=" + (focus == moxelControl) //$NON-NLS-1$
+                + " siteProvider=" + (provider != null ? provider.getClass().getName() : null) //$NON-NLS-1$
+                + " siteSelection=" + describeSelection(provider != null ? provider.getSelection() : null) //$NON-NLS-1$
+                + " moxelSelection=" + describeSelection(Global.invoke(moxelControl, "getSelection"))); //$NON-NLS-1$ //$NON-NLS-2$
+            // Что показывает сама панель «Свойства»: страница какой части и пустая ли она.
+            org.eclipse.ui.IViewPart sheet = workbenchPage.findView(IPageLayout.ID_PROP_SHEET);
+            Object sheetPage = sheet != null ? Global.invoke(sheet, "getCurrentPage") : null; //$NON-NLS-1$
+            Object contributor = sheet != null ? Global.invoke(sheet, "getCurrentContributingPart") : null; //$NON-NLS-1$
+            Object sheetControl = sheetPage != null ? Global.invoke(sheetPage, "getControl") : null; //$NON-NLS-1$
+            Global.tempLog("moxel-cell-reveal", stage + " sheet=" + (sheet != null ? sheet.getClass().getName() : null) //$NON-NLS-1$ //$NON-NLS-2$
+                + " visible=" + (sheet != null && workbenchPage.isPartVisible(sheet)) //$NON-NLS-1$
+                + " pinned=" + (sheet != null ? Global.invoke(sheet, "isPinned") : null) //$NON-NLS-1$ //$NON-NLS-2$
+                + " page=" + (sheetPage != null ? sheetPage.getClass().getName() : null) //$NON-NLS-1$
+                + " contributor=" + (contributor != null ? contributor.getClass().getName() : null) //$NON-NLS-1$
+                + " control=" + (sheetControl != null ? sheetControl.getClass().getName() : null) //$NON-NLS-1$
+                + " children=" + (sheetControl instanceof Composite composite //$NON-NLS-1$
+                    ? composite.getChildren().length : -1)
+                + " pageSelection=" + describeSelection(sheetPage != null //$NON-NLS-1$
+                    ? Global.getField(sheetPage, "selection") : null)); //$NON-NLS-1$
+        }
+        catch (Throwable t)
+        {
+            Global.tempLog("moxel-cell-reveal", stage + " failed " + t); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    private static String describeSelection(Object selection)
+    {
+        if (!(selection instanceof IStructuredSelection structured))
+            return String.valueOf(selection);
+        Object first = structured.getFirstElement();
+        return structured.size() + ":" + (first != null ? first.getClass().getName() : null); //$NON-NLS-1$
+    }
+
     /** См. {@link #scheduleDcsSettingsReveal} — тот же retry-паттерн, редактор активируется асинхронно. */
-    private static void scheduleMoxelCellReveal(IWorkbenchPage workbenchPage, EObject matchedObject, int attempt)
+    /** Метка текущего ожидания {@link #scheduleMoxelCellReveal}. */
+    private static volatile Object moxelRevealToken;
+
+    private static void scheduleMoxelCellReveal(IWorkbenchPage workbenchPage, EObject matchedObject,
+        int[] matchRange, int attempt, Object token)
     {
         Display display = Display.getDefault();
         if (display == null || display.isDisposed())
             return;
         display.timerExec(100, () -> {
+            if (token != moxelRevealToken)
+                return;
             try
             {
                 Object moxelEditor = findMoxelEditor(workbenchPage.getActiveEditor());
                 if (moxelEditor == null)
                 {
                     if (attempt < 10)
-                        scheduleMoxelCellReveal(workbenchPage, matchedObject, attempt + 1);
+                        scheduleMoxelCellReveal(workbenchPage, matchedObject, matchRange, attempt + 1, token);
                     else
                         {
                         }
@@ -3091,8 +3241,22 @@ public final class ConfigSearchResultsHook implements IStartup
                 {
                     return;
                 }
+                logMoxelSelection("before", workbenchPage, moxelControl, rowCol); //$NON-NLS-1$
                 Global.invoke(moxelControl, "setSelectionToCellSelection", rowCol[0], rowCol[1]); //$NON-NLS-1$
                 Global.invoke(moxelControl, "ensureCellVisible", rowCol[0], rowCol[1]); //$NON-NLS-1$
+                logMoxelSelection("after", workbenchPage, moxelControl, rowCol); //$NON-NLS-1$
+                // Вхождение в тексте самой ячейки (не рисунка в ней): поле «Текст» панели «Свойства».
+                // Только после выделения ячейки — до него панель показывает свойства прежней.
+                EObject textHolder = matchedObject.eContainer();
+                Global.tempLog("moxel-cell-reveal", "leaf=" + matchedObject.eClass().getName() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " holder=" + (textHolder != null ? textHolder.eClass().getName() : null) //$NON-NLS-1$
+                    + " holderFeature=" + (textHolder != null ? featureName(textHolder.eContainingFeature()) : null) //$NON-NLS-1$
+                    + " owner=" + (textHolder != null && textHolder.eContainer() != null //$NON-NLS-1$
+                        ? textHolder.eContainer().eClass().getName() : null));
+                if (matchedObject.eContainer() != null && matchedObject.eContainer().eContainer() instanceof Cell
+                    && "text".equals(featureName(matchedObject.eContainer().eContainingFeature()))) //$NON-NLS-1$
+                    PropertyFieldFocus.scheduleShown(workbenchPage, "CellsProperties", "text", matchRange); //$NON-NLS-1$ //$NON-NLS-2$
+                display.timerExec(500, () -> logMoxelSelection("after+500", workbenchPage, moxelControl, rowCol)); //$NON-NLS-1$
             }
             catch (Throwable t)
             {
@@ -3226,7 +3390,7 @@ public final class ConfigSearchResultsHook implements IStartup
         if (calcField != null)
         {
             revealSimpleTableExPage(dcsEditor, "com._1c.g5.v8.dt.dcs.ui.calculated.CalculatedFields", //$NON-NLS-1$
-                matchedObject, calcField, DataCompositionSchemaCalculatedField.class, match.getFeature());
+                matchedObject, calcField, DataCompositionSchemaCalculatedField.class, match);
             return;
         }
 
@@ -3234,7 +3398,7 @@ public final class ConfigSearchResultsHook implements IStartup
         if (totalField != null)
         {
             revealSimpleTableExPage(dcsEditor, "com._1c.g5.v8.dt.dcs.ui.resources.Resources", //$NON-NLS-1$
-                matchedObject, totalField, DataCompositionSchemaTotalField.class, match.getFeature());
+                matchedObject, totalField, DataCompositionSchemaTotalField.class, match);
             return;
         }
 
@@ -3242,7 +3406,7 @@ public final class ConfigSearchResultsHook implements IStartup
         if (link != null)
         {
             revealSimpleTableExPage(dcsEditor, "com._1c.g5.v8.dt.dcs.ui.links.Links", //$NON-NLS-1$
-                matchedObject, link, DataCompositionSchemaDataSetLink.class, match.getFeature());
+                matchedObject, link, DataCompositionSchemaDataSetLink.class, match);
             return;
         }
 
@@ -3250,7 +3414,7 @@ public final class ConfigSearchResultsHook implements IStartup
         if (parameter != null)
         {
             revealSimpleTableExPage(dcsEditor, "com._1c.g5.v8.dt.dcs.ui.parameters.Parameters", //$NON-NLS-1$
-                matchedObject, parameter, DataCompositionSchemaParameter.class, match.getFeature());
+                matchedObject, parameter, DataCompositionSchemaParameter.class, match);
             return;
         }
 
@@ -3258,7 +3422,7 @@ public final class ConfigSearchResultsHook implements IStartup
         if (nested != null)
         {
             revealSimpleTableExPage(dcsEditor, "com._1c.g5.v8.dt.dcs.ui.nested.NestedSchemas", //$NON-NLS-1$
-                matchedObject, nested, NestedDataCompositionSchema.class, match.getFeature());
+                matchedObject, nested, NestedDataCompositionSchema.class, match);
             return;
         }
 
@@ -3269,7 +3433,7 @@ public final class ConfigSearchResultsHook implements IStartup
             // Содержимое самого макета (Moxel/табличный документ) — отдельная, ещё не решённая
             // задача (см. согласование по табличным документам); здесь только строка списка макетов.
             revealSimpleTableExPage(dcsEditor, "com._1c.g5.v8.dt.dcs.ui.templates.Templates", //$NON-NLS-1$
-                matchedObject, template, DataCompositionSchemaTemplateDescription.class, match.getFeature());
+                matchedObject, template, DataCompositionSchemaTemplateDescription.class, match);
             return;
         }
 
@@ -3333,8 +3497,12 @@ public final class ConfigSearchResultsHook implements IStartup
      * только строка).
      */
     private static void revealSimpleTableExPage(DataCompositionSchemaEditor dcsEditor, String pageClassName,
-            EObject matchedObject, EObject rowObject, Class<? extends EObject> rowType, EStructuralFeature matchFeature)
+            EObject matchedObject, EObject rowObject, Class<? extends EObject> rowType, TextSearchModelMatch match)
     {
+        EStructuralFeature matchFeature = match.getFeature();
+        // Вхождение в многоязычной строке: её текст в ячейке не редактируется, только в окне по «лупе».
+        DcsCellText cellText = matchedObject instanceof Map.Entry<?, ?>
+            ? new DcsCellText(match.getText(), match.getTextOffset(), match.getTextLength()) : null;
         for (EditorPage page : dcsEditor.getPages())
         {
             if (!page.getClass().getName().equals(pageClassName))
@@ -3350,10 +3518,16 @@ public final class ConfigSearchResultsHook implements IStartup
             String featureName = findRowFeatureName(matchedObject, rowType, matchFeature);
 
             Integer column = resolveDcsColumnIndex(page, pageClassName, featureName);
-            scheduleSelectRowAndCell(viewerObj, rowObject, column, 0);
+            Global.tempLog("dcs-cell-dialog", "page=" + page.getClass().getSimpleName() + " feature=" + featureName //$NON-NLS-1$ //$NON-NLS-2$
+                + " column=" + column + " cellText=" + (cellText != null)); //$NON-NLS-1$ //$NON-NLS-2$
+            scheduleSelectRowAndCell(viewerObj, rowObject, column, cellText, 0);
             return;
         }
+        Global.tempLog("dcs-cell-dialog", "page not found " + pageClassName); //$NON-NLS-1$ //$NON-NLS-2$
     }
+
+    /** Текст многоязычной строки ячейки и диапазон вхождения в нём. */
+    private record DcsCellText(String text, int offset, int length) {}
 
     /** См. {@link #DCS_PAGE_COLUMN_BY_FEATURE}/{@link #DCS_PAGE_COLUMN_LITERAL_BY_FEATURE}. */
     private static Integer resolveDcsColumnIndex(EditorPage page, String pageClassName, String featureName)
@@ -3380,7 +3554,8 @@ public final class ConfigSearchResultsHook implements IStartup
      * вкладки не содержат ни одной строки, однократный {@code setSelection} впустую пропадает,
      * а повторный (на уже заполненной таблице) — срабатывает).
      */
-    private static void scheduleSelectRowAndCell(Object viewerObj, EObject rowObject, Integer column, int attempt)
+    private static void scheduleSelectRowAndCell(Object viewerObj, EObject rowObject, Integer column,
+        DcsCellText cellText, int attempt)
     {
         Object tableExObj = Global.invoke(viewerObj, "getTable"); //$NON-NLS-1$
         // Resources.getViewer() отдаёт не сам DataCompositionSchemaTotalField, а обёртку
@@ -3403,19 +3578,128 @@ public final class ConfigSearchResultsHook implements IStartup
             {
                 Display display = Display.getDefault();
                 if (display != null && !display.isDisposed())
-                    display.timerExec(50, () -> scheduleSelectRowAndCell(viewerObj, rowObject, column, attempt + 1));
+                    display.timerExec(50,
+                        () -> scheduleSelectRowAndCell(viewerObj, rowObject, column, cellText, attempt + 1));
                 return;
             }
             Object itemCount = tableExObj != null ? Global.invoke(tableExObj, "getItemCount") : null; //$NON-NLS-1$
             Object isDisposed = tableExObj != null ? Global.invoke(tableExObj, "isDisposed") : null; //$NON-NLS-1$
             Object inputObj = Global.invoke(viewerObj, "getInput"); //$NON-NLS-1$
+            Global.tempLog("dcs-cell-dialog", "row not selected items=" + itemCount + " disposed=" + isDisposed //$NON-NLS-1$ //$NON-NLS-2$
+                + " input=" + (inputObj != null ? inputObj.getClass().getSimpleName() : null) //$NON-NLS-1$
+                + " element=" + selectionElement.getClass().getSimpleName()); //$NON-NLS-1$
             return;
         }
+        Global.tempLog("dcs-cell-dialog", "row selected index=" + selectionIndices[0] + " attempt=" + attempt //$NON-NLS-1$ //$NON-NLS-2$
+            + " column=" + column); //$NON-NLS-1$
         if (column != null)
         {
             Point cell = new Point(column.intValue(), selectionIndices[0]);
             Global.invoke(tableExObj, "setCellSelection", cell); //$NON-NLS-1$
+            if (cellText != null)
+                openDcsCellTextDialog(viewerObj, selectionElement, column.intValue(), cellText);
         }
+    }
+
+    /**
+     * Вхождение в многоязычной строке ячейки таблицы СКД: ячейка переводится в режим
+     * редактирования, и если у её редактора есть кнопка открытия («лупа»), ею открывается окно
+     * «Строки на разных языках», а в нём выделяется найденный фрагмент. Сам текст в ячейке не
+     * редактируется и показан только на текущем языке.
+     *
+     * <p>Редактор ячейки — {@code ValueCellEditor}, его контрол {@code ValueEditControl} отдаёт
+     * кнопку через {@code getOpenButton()} ({@code LocalStringEditor.doActivateControls} включает
+     * именно её). Оба класса из неэкспортированных пакетов — доступ рефлексией. Окно модальное,
+     * поэтому нажатие отложено в {@code asyncExec}, а выделение запланировано до нажатия и
+     * выполняется уже в цикле событий окна.
+     */
+    private static void openDcsCellTextDialog(Object viewerObj, Object element, int column, DcsCellText cellText)
+    {
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed()
+            || !(viewerObj instanceof org.eclipse.jface.viewers.ColumnViewer viewer))
+            return;
+        Object token = dcsCellDialogToken = new Object();
+        display.asyncExec(() -> {
+            if (token != dcsCellDialogToken)
+                return;
+            try
+            {
+                viewer.editElement(element, column);
+                Object cellEditor = Global.getField(viewer.getColumnViewerEditor(), "cellEditor"); //$NON-NLS-1$
+                Object editControl = cellEditor != null ? Global.getField(cellEditor, "editControl") : null; //$NON-NLS-1$
+                Object openButton = editControl != null ? Global.invoke(editControl, "getOpenButton") : null; //$NON-NLS-1$
+                Global.tempLog("dcs-cell-dialog", "cellEditor=" //$NON-NLS-1$ //$NON-NLS-2$
+                    + (cellEditor != null ? cellEditor.getClass().getName() : null)
+                    + " openButton=" + (openButton != null ? openButton.getClass().getName() : null) //$NON-NLS-1$
+                    + (openButton instanceof org.eclipse.swt.widgets.Button b && !b.isDisposed()
+                        ? " visible=" + b.isVisible() + " enabled=" + b.isEnabled() : "") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + " editorActive=" + viewer.isCellEditorActive()); //$NON-NLS-1$
+                if (!(openButton instanceof org.eclipse.swt.widgets.Button button) || button.isDisposed()
+                    || !button.isVisible() || !button.isEnabled())
+                    return;
+                Shell owner = display.getActiveShell();
+                display.timerExec(200, () -> selectInOpenedTextDialog(owner, cellText, token, 0));
+                button.notifyListeners(SWT.Selection, new Event());
+            }
+            catch (Throwable t)
+            {
+                Global.tempLog("dcs-cell-dialog", "failed " + t); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        });
+    }
+
+    /** Метка текущего открытия окна по «лупе»: новый переход отменяет прежний. */
+    private static volatile Object dcsCellDialogToken;
+
+    /** Выделяет фрагмент в поле открывшегося окна, текст которого равен тексту вхождения. */
+    private static void selectInOpenedTextDialog(Shell owner, DcsCellText cellText, Object token, int attempt)
+    {
+        Display display = Display.getDefault();
+        if (token != dcsCellDialogToken || display == null || display.isDisposed())
+            return;
+        Shell dialog = display.getActiveShell();
+        Control field = dialog != null && dialog != owner ? findTextField(dialog, cellText.text()) : null;
+        if (field == null)
+        {
+            if (attempt < 15)
+                display.timerExec(150, () -> selectInOpenedTextDialog(owner, cellText, token, attempt + 1));
+            return;
+        }
+        field.setFocus();
+        int end = cellText.offset() + cellText.length();
+        if (field instanceof StyledText styled)
+        {
+            styled.setSelection(cellText.offset(), end);
+            styled.showSelection();
+        }
+        else if (field instanceof org.eclipse.swt.widgets.Text text)
+        {
+            text.setSelection(cellText.offset(), end);
+            text.showSelection();
+        }
+        Global.tempLog("dcs-cell-dialog", "selected in " + field.getClass().getSimpleName() //$NON-NLS-1$ //$NON-NLS-2$
+            + " attempt=" + attempt); //$NON-NLS-1$
+    }
+
+    /** Видимое поле ввода ({@code Text} / {@code StyledText}) с точно таким текстом. */
+    private static Control findTextField(Composite parent, String text)
+    {
+        for (Control child : parent.getChildren())
+        {
+            if (child.isDisposed() || !child.isVisible())
+                continue;
+            if (child instanceof StyledText styled && text.equals(styled.getText())
+                || child instanceof org.eclipse.swt.widgets.Text plain && text.equals(plain.getText()))
+                return child;
+            if (child instanceof Composite composite)
+            {
+                Control found = findTextField(composite, text);
+                if (found != null)
+                    return found;
+            }
+        }
+        return null;
     }
 
     /**
@@ -3711,9 +3995,21 @@ public final class ConfigSearchResultsHook implements IStartup
     private static EObject findNearestMdObjectMember(EObject leaf)
     {
         for (EObject cur = leaf; cur != null; cur = cur.eContainer())
-            if (cur instanceof BasicFeature)
+            if (cur instanceof BasicFeature || isNestedMdObject(cur))
                 return cur;
         return null;
+    }
+
+    /**
+     * Вложенный объект метаданных без своего редактора — табличная часть, команда объекта,
+     * значение перечисления и т.п. Как и реквизит, он выделяется в редакторе владельца, а его
+     * свойства правятся только в панели «Свойства». Форма и макет объекта сюда не входят: у них
+     * свои редакторы и свои переходы ({@link #openChildFormPropertyMatch}).
+     */
+    private static boolean isNestedMdObject(EObject object)
+    {
+        return object instanceof MdObject && object.eContainer() != null
+            && !(object instanceof BasicForm) && !(object instanceof BasicTemplate);
     }
 
     /**
@@ -4958,9 +5254,22 @@ public final class ConfigSearchResultsHook implements IStartup
     /**
      * Только что открытый редактор показывает страницу загрузки и добавляет свои страницы позже —
      * до этого {@code setActivePage} возвращает {@code null}. Повтор до ~4 с.
+     *
+     * <p>Ожидание относится только к появлению страницы. Когда страница уже выбрана, а поля свойства
+     * на ней нет (свойство вложенного объекта правится в панели «Свойства»), повторять нечего:
+     * каждая попытка заново активирует страницу и обходит её сцену в потоке интерфейса. На
+     * достройку сцены свежей страницы даётся {@link #PAGE_FIELD_ATTEMPTS} попытки.
      */
     private static void activateEditorPage(DtGranularEditor<?> editor, String pageId,
         EStructuralFeature feature, int attempt)
+    {
+        activateEditorPage(editor, pageId, feature, attempt, 0);
+    }
+
+    private static final int PAGE_FIELD_ATTEMPTS = 3;
+
+    private static void activateEditorPage(DtGranularEditor<?> editor, String pageId,
+        EStructuralFeature feature, int attempt, int fieldAttempt)
     {
         boolean selected = editor.setActivePage(pageId) != null;
         boolean focused = false;
@@ -4973,10 +5282,11 @@ public final class ConfigSearchResultsHook implements IStartup
         }
         Global.tempLog("broken-links-project", "focus editor page=" + pageId + " feature=" + feature.getName()
             + " selected=" + selected + " focused=" + focused + " attempt=" + attempt);
-        if (focused || attempt >= 40)
+        int fieldAttempts = selected ? fieldAttempt + 1 : 0;
+        if (focused || attempt >= 40 || fieldAttempts >= PAGE_FIELD_ATTEMPTS)
         {
             Global.tempLog("broken-links-project", "activate page=" + pageId + " selected=" + selected
-                + " attempt=" + attempt);
+                + " attempt=" + attempt + " fieldAttempts=" + fieldAttempts);
             return;
         }
         Display display = Display.getDefault();
@@ -4985,7 +5295,7 @@ public final class ConfigSearchResultsHook implements IStartup
         display.timerExec(100, () -> {
             if (editor.getSite() != null && editor.getSite().getPage() != null
                 && editor.getSite().getPage().findEditor(editor.getEditorInput()) == editor)
-                activateEditorPage(editor, pageId, feature, attempt + 1);
+                activateEditorPage(editor, pageId, feature, attempt + 1, fieldAttempts);
         });
     }
 
@@ -8177,6 +8487,18 @@ public final class ConfigSearchResultsHook implements IStartup
         static void cancel()
         {
             activeToken = new Object();
+            PropertySheetActivePropertyHook.Activation.cancel();
+        }
+
+        /**
+         * Свойство, которое активируется не обычным полем панели: диалог «Редактирование типа
+         * данных» либо наш оверлей поля «Тип». Для них остаётся прежний цикл {@link #retry};
+         * обычные поля активирует единая точка — {@link PropertySheetActivePropertyHook.Activation}.
+         */
+        private static boolean needsOwnActivation(List<EStructuralFeature> chain, List<String> typeDialogTargets)
+        {
+            return typeDialogTargets != null
+                || TypeComboOverlayHook.coversProperty(featureLabelForFocus(chain.get(0)));
         }
 
         /**
@@ -8212,7 +8534,15 @@ public final class ConfigSearchResultsHook implements IStartup
             Object token = new Object();
             activeToken = token;
             matchRange = pendingMatchRange;
-            retry(workbenchPage, member, chain, typeDialogTargets, 0, token);
+            if (needsOwnActivation(chain, typeDialogTargets))
+            {
+                PropertySheetActivePropertyHook.Activation.cancel();
+                retry(workbenchPage, member, chain, typeDialogTargets, 0, token);
+                return;
+            }
+            PropertySheetActivePropertyHook.Activation.request(workbenchPage,
+                (page, scene) -> paletteShowsObject(page, member) ? findFieldComponent(scene, chain) : null,
+                pendingMatchRange);
         }
 
         /**
@@ -8244,7 +8574,87 @@ public final class ConfigSearchResultsHook implements IStartup
             Object token = new Object();
             activeToken = token;
             matchRange = null;
-            retry(workbenchPage, member, List.of(feature), null, 0, token);
+            List<EStructuralFeature> chain = List.of(feature);
+            if (needsOwnActivation(chain, null))
+            {
+                PropertySheetActivePropertyHook.Activation.cancel();
+                retry(workbenchPage, member, chain, null, 0, token);
+                return;
+            }
+            PropertySheetActivePropertyHook.Activation.request(workbenchPage,
+                (page, scene) -> paletteShowsObject(page, member) ? findFieldComponent(scene, chain) : null, null);
+        }
+
+        /**
+         * Фокус в поле объекта, экземпляр которого заранее неизвестен: панель показывает не объект
+         * модели, а собственный объект свойств редактора (у табличного документа —
+         * {@code CellsProperties} выделенных ячеек). Объект панели узнаётся по имени класса модели.
+         *
+         * @param shownClassName имя {@code EClass} объекта, который должна показать панель
+         * @param featureName имя его свойства, поле которого нужно активировать
+         * @param range диапазон {offset, length} для выделения в поле; {@code null} — не выделять
+         */
+        static void scheduleShown(IWorkbenchPage workbenchPage, String shownClassName, String featureName,
+            int[] range)
+        {
+            if (workbenchPage == null)
+                return;
+            // Прежний цикл ожидания (диалог типа, оверлей) обесценивается: поле активирует единая точка.
+            activeToken = new Object();
+            PropertySheetActivePropertyHook.Activation.request(workbenchPage,
+                (page, scene) -> locateShown(page, scene, shownClassName, featureName), range);
+        }
+
+        /** Поле свойства объекта панели, найденного по имени класса модели; {@code null} — ещё не показан. */
+        private static Object locateShown(Object page, Object scene, String shownClassName, String featureName)
+        {
+            Object paletteModel = Global.invoke(page, "getPaletteModel"); //$NON-NLS-1$
+            Object objects = paletteModel != null ? Global.invoke(paletteModel, "getObjects") : null; //$NON-NLS-1$
+            EStructuralFeature feature = null;
+            if (objects instanceof Iterable)
+                for (Object shown : (Iterable<?>)objects)
+                    if (shown instanceof EObject object && shownClassName.equals(object.eClass().getName()))
+                        feature = object.eClass().getEStructuralFeature(featureName);
+            if (feature == null)
+                return null;
+            Object byFeature = findFieldComponent(scene, List.of(feature));
+            if (byFeature != null)
+                return byFeature;
+            // Поле без пути свойства: описатель задаёт его элементом с подписью свойства
+            // (CellsPropertiesDescriptor: element(featureToLabel(text), MultilanguageComponent)).
+            // Таких элементов два — простой и форматированный текст; показан один из них.
+            List<Object> candidates = new ArrayList<>();
+            findLabeledComponents(Global.invoke(scene, "getComponent"), //$NON-NLS-1$
+                Functions.featureToLabel().apply(feature), 0, candidates);
+            for (Object candidate : candidates)
+                if (!AefFieldFocus.editorNativeControls(scene, candidate).isEmpty())
+                    return candidate;
+            return null;
+        }
+
+        /**
+         * Компоненты-редакторы, определение которых — элемент со строковым идентификатором или
+         * подписью {@code label} ({@code IStringIdFieldDefinition} / {@code ILabeledDefinition}).
+         */
+        private static void findLabeledComponents(Object component, String label, int depth, List<Object> out)
+        {
+            if (component == null || label == null || depth > 32)
+                return;
+            Object map = Global.getField(component, "componentToDefinitionMap"); //$NON-NLS-1$
+            if (map instanceof Map)
+                for (Map.Entry<?, ?> entry : ((Map<?, ?>)map).entrySet())
+                {
+                    Object candidate = entry.getKey();
+                    Object definition = entry.getValue();
+                    if (candidate == null || definition == null
+                        || candidate.getClass().getName().contains("LabelComponent")) //$NON-NLS-1$
+                        continue;
+                    if (label.equals(Global.invoke(definition, "getStringId")) //$NON-NLS-1$
+                        || label.equals(Global.invoke(definition, "getLabel"))) //$NON-NLS-1$
+                        out.add(candidate);
+                }
+            for (Object child : childComponents(component))
+                findLabeledComponents(child, label, depth + 1, out);
         }
 
         /**
@@ -8256,7 +8666,7 @@ public final class ConfigSearchResultsHook implements IStartup
         private static boolean isPanelMember(EObject obj)
         {
             return obj instanceof BasicFeature || obj instanceof FormItem || obj instanceof FormAttribute
-                || obj instanceof FormCommand || obj instanceof FormParameter;
+                || obj instanceof FormCommand || obj instanceof FormParameter || isNestedMdObject(obj);
         }
 
         private static EObject nearestMember(EObject leaf)

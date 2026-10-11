@@ -45,6 +45,14 @@ public final class ErrorDialogLinksHook implements IStartup
     private static final String LINKS_BUTTON_LABEL = "Ссылки"; //$NON-NLS-1$
     private static final String LINKS_BUTTON_TOOLTIP =
         "Показать ссылки на объекты метаданных из текста ошибки"; //$NON-NLS-1$
+    private static final String BROKEN_LINKS_BUTTON_LABEL = "Битые ссылки"; //$NON-NLS-1$
+    private static final String BROKEN_LINKS_BUTTON_TOOLTIP =
+        "Найти битые ссылки метаданных в текущем проекте и показать в панели Поиск"; //$NON-NLS-1$
+    /** Сообщения платформы при обновлении базы, когда объект ссылается на отсутствующий объект метаданных. */
+    private static final String[] BROKEN_LINKS_SNIPPETS = {
+        "Неизвестный объект метаданных", //$NON-NLS-1$
+        "Файл объекта не существует", //$NON-NLS-1$
+    };
     private static final String DIALOG_TITLE = "Ошибка"; //$NON-NLS-1$
     private static final String DETAILS_SNIPPET = "Сведения"; //$NON-NLS-1$
     private static final String INTERNAL_DIALOG =
@@ -215,6 +223,18 @@ public final class ErrorDialogLinksHook implements IStartup
 
         Object dialog = shell.getData();
         links.addListener(SWT.Selection, e -> openLinks(shell, dialog));
+        String errorText = collectErrorText(shell, dialog);
+        if (java.util.Arrays.stream(BROKEN_LINKS_SNIPPETS).anyMatch(errorText::contains))
+        {
+            Button broken = new Button(buttonBar, SWT.PUSH);
+            broken.setText(BROKEN_LINKS_BUTTON_LABEL);
+            broken.setToolTipText(TooltipText.wrap(broken,
+                BROKEN_LINKS_BUTTON_TOOLTIP + Global.pluginSignForTooltip()));
+            applyButtonLayoutData(broken, barButton);
+            broken.moveAbove(barButton);
+            layout.numColumns++;
+            broken.addListener(SWT.Selection, e -> findBrokenLinks());
+        }
         relayoutButtonBar(shell, buttonBar, links);
         shell.setData(PATCHED_KEY, Boolean.TRUE);
         return true;
@@ -264,6 +284,14 @@ public final class ErrorDialogLinksHook implements IStartup
             }
         }
         return null;
+    }
+
+    /** Запускает «Найти битые ссылки метаданных» по всему текущему проекту; результат — в панели Поиск. */
+    private static void findBrokenLinks()
+    {
+        IProject project = Global.getActiveProject(Global.getActivePage(), true);
+        if (project != null)
+            MdReferenceSupport.findInProject(project);
     }
 
     private static void openLinks(Shell shell, Object dialog)
@@ -319,6 +347,19 @@ public final class ErrorDialogLinksHook implements IStartup
             Object statusObj = Global.getField(dialog, "status"); //$NON-NLS-1$
             if (statusObj instanceof IStatus status)
                 appendStatus(status, sb);
+        }
+
+        // RuntimeExecutionErrorDialog: область «Сведения» создаётся только при раскрытии,
+        // до этого текст вложенных причин есть лишь в самом исключении.
+        if (dialog != null && RUNTIME_EXECUTION_ERROR_DIALOG.equals(dialog.getClass().getName()))
+        {
+            Object exception = Global.getField(dialog, "exception"); //$NON-NLS-1$
+            for (Throwable t = exception instanceof Throwable e ? e : null; t != null; t = t.getCause())
+            {
+                String em = t.getMessage();
+                if (em != null && !em.isBlank())
+                    sb.append(em).append('\n');
+            }
         }
 
         appendStatusAdapter(dialog, sb);

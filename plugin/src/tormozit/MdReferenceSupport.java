@@ -199,7 +199,15 @@ public final class MdReferenceSupport
                 continue;
             if (owner instanceof com._1c.g5.v8.dt.metadata.mdclass.ExchangePlanContentItem && "mdObject".equals(feature.getName())
                 || owner instanceof com._1c.g5.v8.dt.metadata.mdclass.CommonAttributeContentItem && "metadata".equals(feature.getName())
-                || owner instanceof com._1c.g5.v8.dt.rights.model.ObjectRights && "object".equals(feature.getName()))
+                || owner instanceof com._1c.g5.v8.dt.rights.model.ObjectRights && "object".equals(feature.getName())
+                // Запись доступности по ролям без роли ломает экспорт формы в XML (NPE).
+                || owner instanceof com._1c.g5.v8.dt.metadata.mdclass.ForRoleType && "role".equals(feature.getName())
+                // Обёртка-ссылка без цели (PictureRef и др.) бессмысленна: удаляется целиком.
+                || owner instanceof com._1c.g5.v8.dt.mcore.PictureRef && "picture".equals(feature.getName())
+                || owner instanceof com._1c.g5.v8.dt.mcore.ColorRef && "color".equals(feature.getName())
+                || owner instanceof com._1c.g5.v8.dt.mcore.BorderRef && "border".equals(feature.getName())
+                || owner instanceof com._1c.g5.v8.dt.mcore.FontRef && "font".equals(feature.getName())
+                || owner instanceof com._1c.g5.v8.dt.mcore.CommandRef && "command".equals(feature.getName()))
             {
                 EcoreUtil.remove(owner);
                 return;
@@ -245,6 +253,36 @@ public final class MdReferenceSupport
     public static List<BrokenReference> findBrokenReferences(EObject owner, IProgressMonitor monitor)
     {
         return findBrokenReferences(owner, monitor, null);
+    }
+
+    /**
+     * Есть ли битые ссылки в свойстве объекта. Читает объект в транзакции модели: вне её
+     * (применимость быстрого исправления считается в UI-потоке) состав конфигурации недоступен.
+     */
+    public static boolean hasBrokenReferences(IProject project, long objectId, int featureId)
+    {
+        IBmModelManager manager = Global.getOsgiService(IBmModelManager.class);
+        IBmModel model = manager != null && project != null ? manager.getModel(project) : null;
+        if (model == null)
+            return false;
+        IBmTransaction current = model.getEngine().getCurrentTransaction();
+        if (current != null)
+            return hasBrokenReferences(current, objectId, featureId);
+        return model.executeReadonlyTask(new AbstractBmTask<Boolean>("Поиск битых ссылок свойства")
+        {
+            @Override
+            public Boolean execute(IBmTransaction transaction, IProgressMonitor taskMonitor)
+            {
+                return hasBrokenReferences(transaction, objectId, featureId);
+            }
+        });
+    }
+
+    private static boolean hasBrokenReferences(IBmTransaction transaction, long objectId, int featureId)
+    {
+        EObject owner = transaction.getObjectById(objectId);
+        return owner != null && owner.eClass().getEStructuralFeature(featureId) instanceof EReference reference
+            && !findBrokenReferences(owner, reference, new NullProgressMonitor()).isEmpty();
     }
 
     public static List<BrokenReference> findBrokenReferences(EObject owner, EReference feature,
@@ -304,8 +342,23 @@ public final class MdReferenceSupport
             }
             else if (value instanceof EObject target && broken(owner, target, unresolved))
                 found.accept(new BrokenReference(owner, feature, -1, target));
+            // Запись доступности по ролям без роли: экспорт формы в XML падает с NPE.
+            else if (value == null && owner instanceof com._1c.g5.v8.dt.metadata.mdclass.ForRoleType
+                && feature == MdClassPackage.Literals.FOR_ROLE_TYPE__ROLE)
+                found.accept(new BrokenReference(owner, feature, -1, null));
         }
         return result;
+    }
+
+    /** Пустая цель — запись доступности по ролям, у которой роль не задана. */
+    public static String targetLabel(BrokenReference reference)
+    {
+        return reference.target() == null ? "Роль не задана" : localized(EcoreUtil.getURI(reference.target()));
+    }
+
+    private static String targetFullName(BrokenReference reference)
+    {
+        return reference.target() == null ? "Роль не задана" : fullName(EcoreUtil.getURI(reference.target()));
     }
 
     /** null — свойство не относится к исходной проверке состава. Пустой список — проверено, ошибок нет. */
@@ -350,9 +403,59 @@ public final class MdReferenceSupport
         return metadata;
     }
 
+    /**
+     * Объект верхнего уровня есть в модели (его файл лежит в проекте), но исключён из состава
+     * конфигурации: в навигаторе его нет, а экспорт ссылки на него падает с NPE.
+     */
+    private static boolean detachedFromConfiguration(EObject target)
+    {
+        if (!(target instanceof com._1c.g5.v8.bm.core.IBmObject object) || !object.bmIsTop()
+            || !MdClassPackage.Literals.MD_OBJECT.isSuperTypeOf(target.eClass()))
+            return false;
+        // Вне транзакции объект BM не присоединён: bmGetFqn бросает исключение.
+        var transaction = object.bmGetTransaction();
+        if (transaction == null)
+            return false;
+        String fqn = object.bmGetFqn();
+        if (fqn == null)
+            return false;
+        // Вложенный объект верхнего уровня (подчинённая подсистема) входит в состав
+        // родителя, а не конфигурации: «Subsystem.А.Subsystem.Б» → «Subsystem.А».
+        int nameDot = fqn.lastIndexOf('.');
+        int parentEnd = nameDot > 0 ? fqn.lastIndexOf('.', nameDot - 1) : -1;
+        var holder = transaction.getTopObjectByFqn(parentEnd > 0 ? fqn.substring(0, parentEnd) : "Configuration"); //$NON-NLS-1$
+        if (holder == null || holder.bmGetNamespace() != object.bmGetNamespace())
+            return false;
+        List<EReference> lists = compositionLists(holder.eClass(), target.eClass());
+        if (lists.isEmpty())
+            return false;
+        for (EReference reference : lists)
+            // Список BM сравнивает сохранённые идентификаторы, объекты состава не загружает.
+            if (((List<?>) holder.eGet(reference)).contains(target))
+                return false;
+        return true;
+    }
+
+    private static final String MD_CLASS_ANNOTATION = "http://www.1c.ru/v8/dt/metadata/MdClass"; //$NON-NLS-1$
+    private static final Map<List<EClass>, List<EReference>> COMPOSITION_LISTS = new ConcurrentHashMap<>();
+
+    /**
+     * Списки состава владельца (конфигурации или родительской подсистемы) для вида объекта.
+     * Они помечены @MdClass; прочие ссылки на объекты (например, «Основные роли») к составу
+     * не относятся.
+     */
+    private static List<EReference> compositionLists(EClass holder, EClass type)
+    {
+        return COMPOSITION_LISTS.computeIfAbsent(List.of(holder, type), key -> holder.getEAllReferences().stream()
+            .filter(reference -> reference.isMany() && reference.getEAnnotation(MD_CLASS_ANNOTATION) != null
+                && reference.getEReferenceType().isSuperTypeOf(type)).toList());
+    }
+
     private static boolean broken(EObject owner, EObject target, Map<URI, Boolean> cache)
     {
-        if (!target.eIsProxy() || !isMetadataReferenceTarget(target))
+        if (!target.eIsProxy())
+            return detachedFromConfiguration(target);
+        if (!isMetadataReferenceTarget(target))
             return false;
         URI uri = EcoreUtil.getURI(target);
         if (cache != null && cache.containsKey(uri))
@@ -618,8 +721,7 @@ public final class MdReferenceSupport
                                         + " class=" + owner.eClass().getName() + " feature=" + reference.feature().getName()
                                         + " property=" + property);
                                     rows.add(new CompareSearchMatch(locationOf(owner, reference.feature()), localized(EcoreUtil.getURI(owner)),
-                                        property, localized(EcoreUtil.getURI(reference.target())),
-                                        fullName(EcoreUtil.getURI(reference.target()))));
+                                        property, targetLabel(reference), targetFullName(reference)));
                                 }
                                 checking.worked(1);
                             }
@@ -633,8 +735,7 @@ public final class MdReferenceSupport
                         String.CASE_INSENSITIVE_ORDER).thenComparing(CompareSearchMatch::getPropertyName,
                             String.CASE_INSENSITIVE_ORDER).thenComparing(CompareSearchMatch::getMatchText,
                                 String.CASE_INSENSITIVE_ORDER));
-                    Global.tempLog("broken-links-project", "finished project=" + project.getName() + " matches=" + matches.size());
-                    Display.getDefault().asyncExec(() ->
+                    Global.tempLog("broken-links-project", "finished project=" + project.getName() + " matches=" + matches.size());                    Display.getDefault().asyncExec(() ->
                     {
                         CompareSearchResult result = new CompareSearchResult(matches, null, project);
                         result.setQueryText("битые ссылки метаданных");
@@ -710,8 +811,7 @@ public final class MdReferenceSupport
                         if (property == null || property.isBlank())
                             property = propertyName(reference.feature());
                         CompareSearchMatch row = new CompareSearchMatch(navigation, localized(EcoreUtil.getURI(owner)),
-                            property, localized(EcoreUtil.getURI(reference.target())),
-                            fullName(EcoreUtil.getURI(reference.target())));
+                            property, targetLabel(reference), targetFullName(reference));
                         rows.add(row);
                         onMatch.accept(row);
                     });
@@ -759,7 +859,7 @@ public final class MdReferenceSupport
                             && localized(EcoreUtil.getURI(owner)).equals(match.getObjectPath())
                             && owner.eClass().getEStructuralFeature(location.feature()) instanceof EReference feature)
                             for (BrokenReference reference : findBrokenReferences(owner, feature, monitor))
-                                existing.add(fullName(EcoreUtil.getURI(reference.target())));
+                                existing.add(targetFullName(reference));
                         known.put(location, existing);
                     }
                     boolean old = existing.contains(match.getReferenceFqn());

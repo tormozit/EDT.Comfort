@@ -536,7 +536,7 @@ public final class BslReferenceSearchTableHook implements IStartup
             FormTableColumnState.loadOrder(settings, KEY_COL_ORDER, table);
             interaction.install(
                 FormTableColumnState.hasSavedColumnWidths(settings, KEY_COLUMNS_FILL, WIDTH_KEYS));
-            interaction.enableHeaderSort();
+            interaction.enableHeaderSort(settings);
             BslOccurrenceContextResolver.applyColumnHeaderTooltips(interaction, parentColumn,
                 parentTypeColumn, syntaxColumn);
 

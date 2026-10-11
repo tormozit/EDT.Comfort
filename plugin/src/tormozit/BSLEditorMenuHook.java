@@ -71,7 +71,8 @@ public class BSLEditorMenuHook implements IStartup
     private static final String ITEM_TEXT_QueryConstructor = IrQueryConstructorHandler.MENU_LABEL;
     private static final String ITEM_TEXT_FormatText = IrFormatTextHandler.MENU_LABEL;
     private static final String ITEM_TEXT_FindReferences = IrFindReferencesHandler.MENU_LABEL;
-    private static final String ITEM_TEXT_ModuleCheck = IrModuleCheckHandler.MENU_LABEL;
+    private static final String ITEM_TEXT_GitFragmentSearch = IrGitFragmentSearchHandler.MENU_LABEL;
+    private static final String ITEM_TEXT_ModuleCheck =IrModuleCheckHandler.MENU_LABEL;
     private static final String ITEM_TEXT_ModuleCheckClear = IrModuleCheckClearHandler.MENU_LABEL;
     private static final String ITEM_TEXT_DeclareExpressionType = IrDeclareExpressionTypeHandler.MENU_LABEL;
     private static final String ITEM_TEXT_ResetFolding = ResetFoldingHandler.MENU_LABEL;
@@ -453,6 +454,27 @@ public class BSLEditorMenuHook implements IStartup
                     });
                     addedItems.add(findRefsItem);
 
+                    if (IrGitFragmentSearchHandler.isGitProject(editor))
+                    {
+                        MenuItem gitFragmentItem = ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.PUSH,
+                            ComfortSubmenuHelper.menuItemTextWithKeyBinding(
+                                ITEM_TEXT_GitFragmentSearch,
+                                IrGitFragmentSearchHandler.COMMAND_ID,
+                                IrGitFragmentSearchHandler.BINDING_CONTEXT_ID));
+                        ComfortSubmenuHelper.setMenuItemTooltip(gitFragmentItem,
+                            "Найти выделенный фрагмент в истории Git модуля через приложение ИР."
+                                + " Без выделения открывается история Git модуля на текущей строке");
+                        gitFragmentItem.addSelectionListener(new SelectionAdapter()
+                        {
+                            @Override
+                            public void widgetSelected(SelectionEvent ev)
+                            {
+                                runGitFragmentSearchCommand(editor);
+                            }
+                        });
+                        addedItems.add(gitFragmentItem);
+                    }
+
                     MenuItem moduleCheckItem = ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.PUSH,
                         ComfortSubmenuHelper.menuItemTextWithKeyBinding(
                             ITEM_TEXT_ModuleCheck,
@@ -723,6 +745,24 @@ public class BSLEditorMenuHook implements IStartup
             // fallback ниже
         }
         IrFindReferencesHandler.findInModules(editor);
+    }
+
+    private static void runGitFragmentSearchCommand(BslXtextEditor editor)
+    {
+        try
+        {
+            IHandlerService handlerService = editor.getSite().getService(IHandlerService.class);
+            if (handlerService != null)
+            {
+                handlerService.executeCommand(IrGitFragmentSearchHandler.COMMAND_ID, null);
+                return;
+            }
+        }
+        catch (Exception ignored)
+        {
+            // fallback ниже
+        }
+        IrGitFragmentSearchHandler.findFragment(editor);
     }
 
     private static void runModuleCheckCommand(BslXtextEditor editor)

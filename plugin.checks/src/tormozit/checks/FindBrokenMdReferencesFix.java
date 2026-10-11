@@ -4,7 +4,6 @@ import java.util.Collection;
 import java.util.List;
 
 import org.eclipse.core.resources.IProject;
-import org.eclipse.core.runtime.NullProgressMonitor;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.EReference;
 import org.eclipse.emf.ecore.util.EcoreUtil;
@@ -46,10 +45,8 @@ public final class FindBrokenMdReferencesFix extends SingleVariantBasicFix<Basic
     @Override
     protected boolean isFixApplicable(BasicModelFixContext context, IFixSession session)
     {
-        EObject owner = session.getModelObject(context.getTargetObjectId());
-        return owner != null
-            && owner.eClass().getEStructuralFeature(context.getTargetFeatureId()) instanceof EReference reference
-            && !MdReferenceSupport.findBrokenReferences(owner, reference, new NullProgressMonitor()).isEmpty();
+        return session.getDtProject() != null && MdReferenceSupport.hasBrokenReferences(
+            session.getDtProject().getWorkspaceProject(), context.getTargetObjectId(), context.getTargetFeatureId());
     }
 
     @Override

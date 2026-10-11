@@ -2816,7 +2816,10 @@ public final class BslModuleSpellCheckHook implements IStartup
             {
                 if (params.isEmpty())
                     return ""; //$NON-NLS-1$
-                StringBuilder text = new StringBuilder("// Параметры:").append(delimiter); //$NON-NLS-1$
+                // Строка «//.» обязательна: без текста перед «Параметры:» конфигуратор не распознаёт
+                // описание параметров.
+                StringBuilder text = new StringBuilder("//.").append(delimiter) //$NON-NLS-1$
+                    .append("// Параметры:").append(delimiter); //$NON-NLS-1$
                 for (int i = 0; i < params.size(); i++)
                     text.append("//  ").append(params.get(i)).append(" - ").append(paramTypes.get(i)) //$NON-NLS-1$ //$NON-NLS-2$
                         .append(delimiter);

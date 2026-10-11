@@ -17,6 +17,12 @@ public class CompareSearchResult implements ISearchResult
     private final IProject project;
     private String queryText;
     private String scopeLabel;
+    private boolean spelling;
+
+    /** Режим «Ошибки орфографии»: дерево слева — объекты с ошибками, строки ведут в свойство или модуль. */
+    public void setSpelling(boolean spelling) { this.spelling = spelling; }
+
+    public boolean isSpelling() { return spelling; }
 
     public CompareSearchResult(List<CompareSearchMatch> matches, IEditorPart editorPart)
     {
@@ -66,6 +72,9 @@ public class CompareSearchResult implements ISearchResult
     {
         int count = matches != null ? matches.size() : 0;
         String q = queryText != null ? queryText.trim() : "";
+        if (spelling)
+            return "Ошибки орфографии в " + (scopeLabel != null ? scopeLabel + " проекта " : "проекте ")
+                + project.getName() + " - " + count;
         if (project != null)
             return "'" + q + "' в " + (scopeLabel != null ? scopeLabel + " проекта " : "проекте ")
                 + project.getName() + " - " + count + " совпадений";

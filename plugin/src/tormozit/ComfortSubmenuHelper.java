@@ -482,6 +482,8 @@ final class ComfortSubmenuHelper
         Menu comfortSub = new Menu(shell != null && !shell.isDisposed() ? shell : parentMenu.getShell(), SWT.DROP_DOWN);
         comfortRoot.setMenu(comfortSub);
         TreeCollapseOthers.ensureComfortMenuItem(comfortSub);
+        // «Вывести список» мог лечь в корень, пока подменю ещё не было.
+        OutputListCommand.moveRootItemToComfortSubmenu(parentMenu, comfortSub);
         return comfortSub;
     }
 

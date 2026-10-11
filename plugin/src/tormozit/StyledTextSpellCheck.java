@@ -5,6 +5,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Set;
 import java.util.WeakHashMap;
+import java.util.function.Consumer;
 import java.util.function.Function;
 
 import org.eclipse.core.runtime.IProgressMonitor;
@@ -454,32 +455,46 @@ final class StyledTextSpellCheck
      */
     private static void fillSuggestionsAsync(Menu menu, StyledText styled, WordSpan span)
     {
-        List<String> cached = ComfortSpellingEngine.peekSuggestCache(span.word, SUGGEST_MAX);
+        // Сразу после «Добавить в словарь» (индекс 0).
+        fillSuggestionsAsync(menu, span.word, 1,
+            replacement -> styled.getDisplay().asyncExec(() -> applySuggestion(styled, span, replacement)));
+    }
+
+    /**
+     * То же наполнение для любого меню со словом с ошибкой (панель результатов проверки орфографии):
+     * варианты вставляются подряд начиная с {@code firstIndex}.
+     *
+     * @param apply действие по выбору варианта; вызывается в потоке интерфейса
+     */
+    static void fillSuggestionsAsync(Menu menu, String word, int firstIndex, Consumer<String> apply)
+    {
+        Display menuDisplay = menu.getDisplay();
+        boolean[] anySuggestion = { false };
+        List<String> cached = ComfortSpellingEngine.peekSuggestCache(word, SUGGEST_MAX);
         if (cached != null)
         {
             if (cached.isEmpty())
             {
-                MenuItem empty = new MenuItem(menu, SWT.PUSH);
+                MenuItem empty = new MenuItem(menu, SWT.PUSH, Math.min(firstIndex, menu.getItemCount()));
                 empty.setText("Нет вариантов исправления"); //$NON-NLS-1$
                 empty.setEnabled(false);
             }
             else
             {
-                int at = 1; // сразу после «Добавить в словарь»
+                int at = firstIndex;
                 for (String suggestion : cached)
                 {
-                    addSuggestionMenuItem(menu, styled, span, suggestion, at);
+                    addSuggestionMenuItem(menu, apply, suggestion, at, firstIndex);
                     at++;
                 }
             }
             return;
         }
 
-        MenuItem loading = new MenuItem(menu, SWT.PUSH);
+        MenuItem loading = new MenuItem(menu, SWT.PUSH, Math.min(firstIndex, menu.getItemCount()));
         loading.setText("..."); //$NON-NLS-1$
         loading.setEnabled(false);
 
-        final String word = span.word;
         final java.util.ArrayList<String> pending = new java.util.ArrayList<>();
         final Object pendingLock = new Object();
         final boolean[] flushScheduled = { false };
@@ -505,7 +520,8 @@ final class StyledTextSpellCheck
                 if (menu.isDisposed() || loading.isDisposed())
                     return;
                 idx = menu.indexOf(loading);
-                addSuggestionMenuItem(menu, styled, span, suggestion, idx >= 0 ? idx : 1);
+                addSuggestionMenuItem(menu, apply, suggestion, idx >= 0 ? idx : firstIndex, firstIndex);
+                anySuggestion[0] = true;
             }
         };
 
@@ -518,7 +534,7 @@ final class StyledTextSpellCheck
                 {
                     if (monitor.isCanceled())
                         return;
-                    Display display = styled.getDisplay();
+                    Display display = menuDisplay;
                     if (display == null || display.isDisposed())
                         return;
                     synchronized (pendingLock)
@@ -544,7 +560,7 @@ final class StyledTextSpellCheck
                         }
                     }
                 }, monitor);
-                Display display = styled.getDisplay();
+                Display display = menuDisplay;
                 if (display == null || display.isDisposed())
                     return Status.OK_STATUS;
                 display.asyncExec(() ->
@@ -554,10 +570,9 @@ final class StyledTextSpellCheck
                         return;
                     if (!loading.isDisposed())
                         loading.dispose();
-                    if (!menuHasSpellSuggestion(menu))
+                    if (!anySuggestion[0])
                     {
-                        // сразу после «Добавить в словарь» (индекс 1)
-                        MenuItem empty = new MenuItem(menu, SWT.PUSH, Math.min(1, menu.getItemCount()));
+                        MenuItem empty = new MenuItem(menu, SWT.PUSH, Math.min(firstIndex, menu.getItemCount()));
                         empty.setText("Нет вариантов исправления"); //$NON-NLS-1$
                         empty.setEnabled(false);
                     }
@@ -571,38 +586,15 @@ final class StyledTextSpellCheck
         menu.addListener(SWT.Dispose, e -> job.cancel());
     }
 
-    private static boolean menuHasSpellSuggestion(Menu menu)
+    private static void addSuggestionMenuItem(Menu menu, Consumer<String> apply, String suggestion, int index,
+        int firstIndex)
     {
-        for (MenuItem item : menu.getItems())
-        {
-            if (item.isDisposed())
-                continue;
-            String t = item.getText();
-            if (t == null || t.isEmpty())
-                continue;
-            if (t.startsWith("Добавить в словарь") //$NON-NLS-1$
-                || t.startsWith("Копировать") || t.startsWith("Вырезать") //$NON-NLS-1$ //$NON-NLS-2$
-                || "...".equals(t) //$NON-NLS-1$
-                || "Нет вариантов исправления".equals(t)) //$NON-NLS-1$
-                continue;
-            return true;
-        }
-        return false;
-    }
-
-    private static void addSuggestionMenuItem(Menu menu, StyledText styled, WordSpan span,
-        String suggestion, int index)
-    {
-        // Не вставлять перед «Добавить в словарь» (индекс 0).
-        int safeIndex = index <= 0 ? 1 : index;
+        // Не вставлять перед пунктами, стоящими до вариантов («Добавить в словарь»).
+        int safeIndex = index < firstIndex ? firstIndex : index;
         safeIndex = Math.min(safeIndex, menu.getItemCount());
         MenuItem item = new MenuItem(menu, SWT.PUSH, safeIndex);
         item.setText(suggestion);
-        item.addListener(SWT.Selection, e ->
-        {
-            String replacement = suggestion;
-            styled.getDisplay().asyncExec(() -> applySuggestion(styled, span, replacement));
-        });
+        item.addListener(SWT.Selection, e -> apply.accept(suggestion));
     }
 
     private static void applySuggestion(StyledText styled, WordSpan span, String replacement)

@@ -50,7 +50,8 @@ import org.osgi.framework.Bundle;
  * либо регистрируется через {@link CopyCommandSupport#wireCopyOverride(Control)} (оттуда
  * вызывается {@link #attach(Control)}), либо подключается напрямую — {@link #attach(Control)} /
  * {@link #attachDescendants(Composite)}. В контекстном меню <b>штатного</b> списка EDT пункт идёт в подменю
- * «Комфорт», в меню <b>собственного окна плагина</b> — в корень (см. {@link #attach(Control)}).
+ * «Комфорт», если оно там есть (ради одного этого пункта подменю не создаётся — тогда в корень),
+ * в меню <b>собственного окна плагина</b> — в корень (см. {@link #attach(Control)}).
  * Окна, которые сами пересобирают меню при каждом показе ({@code FormTableInteraction} внешнего
  * режима, {@code DebugCollectionWindow}), зовут {@link #appendMenuItem(Menu, Control)}.
  *
@@ -63,6 +64,9 @@ public final class OutputListCommand
     private static final String ITEM_KEY = "tormozit.outputListItem"; //$NON-NLS-1$
 
     private static final String ATTACHED_KEY = "tormozit.outputListAttached"; //$NON-NLS-1$
+
+    /** Контрол штатного списка на пункте, лежащем в корне меню (подменю «Комфорт» в меню не было). */
+    private static final String NATIVE_CONTROL_KEY = "tormozit.outputListNativeControl"; //$NON-NLS-1$
 
     private static final String LABEL = "Вывести список"; //$NON-NLS-1$
 
@@ -156,8 +160,10 @@ public final class OutputListCommand
 
     /**
      * Кладёт пункт «Вывести список» в меню списка: для штатного списка EDT — в подменю
-     * «Комфорт» (find-or-create), с сохранением алфавитного порядка; для собственного окна
-     * плагина — в корень меню, отдельной группой (как команды отбора по значению ячейки).
+     * «Комфорт», если оно в меню уже есть (с сохранением алфавитного порядка); иначе, как и для
+     * собственного окна плагина, — в корень меню, отдельной группой (как команды отбора по
+     * значению ячейки). Ради одного этого пункта подменю «Комфорт» не создаётся; если его позже
+     * создаст другой наполнитель, пункт переедет туда — см. {@link #moveRootItemToComfortSubmenu}.
      * Прежний экземпляр пункта и его ведущий разделитель удаляются.
      */
     private static void placeItem(Menu rootMenu, Control control, boolean nativeList)
@@ -166,13 +172,38 @@ public final class OutputListCommand
             return;
         disposeExistingItem(rootMenu);
 
-        MenuItem item;
-        if (nativeList)
-        {
-            Menu comfortSub = ComfortSubmenuHelper.findOrCreateComfortSubmenu(rootMenu, rootMenu.getShell());
-            if (comfortSub == null || comfortSub.isDisposed())
-                return;
+        Menu comfortSub = nativeList ? ComfortSubmenuHelper.findExistingComfortSubmenu(rootMenu) : null;
+        if (comfortSub != null && comfortSub != rootMenu)
             disposeExistingItem(comfortSub);
+        else
+            comfortSub = null;
+        createItem(rootMenu, comfortSub, control, nativeList);
+    }
+
+    /**
+     * Подменю «Комфорт» только что создано в {@code rootMenu} другим наполнителем: пункт
+     * «Вывести список», уже положенный в корень меню штатного списка, переносится в подменю.
+     */
+    static void moveRootItemToComfortSubmenu(Menu rootMenu, Menu comfortSub)
+    {
+        if (rootMenu == null || rootMenu.isDisposed() || comfortSub == null || comfortSub.isDisposed())
+            return;
+        for (MenuItem mi : rootMenu.getItems())
+        {
+            if (mi.isDisposed() || !(mi.getData(NATIVE_CONTROL_KEY) instanceof Control control))
+                continue;
+            disposeExistingItem(rootMenu);
+            if (!control.isDisposed())
+                createItem(rootMenu, comfortSub, control, true);
+            return;
+        }
+    }
+
+    private static void createItem(Menu rootMenu, Menu comfortSub, Control control, boolean nativeList)
+    {
+        MenuItem item;
+        if (comfortSub != null)
+        {
             item = ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.PUSH, LABEL);
         }
         else
@@ -184,6 +215,8 @@ public final class OutputListCommand
             }
             item = new MenuItem(rootMenu, SWT.PUSH);
             item.setText(LABEL);
+            if (nativeList)
+                item.setData(NATIVE_CONTROL_KEY, control);
         }
         item.setData(ITEM_KEY, Boolean.TRUE);
         ComfortSubmenuHelper.setMenuItemTooltip(item, LABEL + " в табличный документ ODS."); //$NON-NLS-1$

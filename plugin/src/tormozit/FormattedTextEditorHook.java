@@ -740,7 +740,7 @@ public final class FormattedTextEditorHook implements IStartup
                 boolean cached = text.equals(lastText) && revision == lastRevision;
                 if (!cached)
                 {
-                    errors = ComfortSpellingEngine.findMisspelledRanges(maskMarkup(text));
+                    errors = ComfortSpellingEngine.findMisspelledRanges(ComfortSpellingEngine.maskMarkup(text));
                     lastText = text;
                     lastRevision = revision;
                 }
@@ -764,58 +764,6 @@ public final class FormattedTextEditorHook implements IStartup
                 return result;
             }
 
-            /** Маска сохраняет длину и модельные смещения, включая CRLF и сущности HTML. */
-            static String maskMarkup(String text)
-            {
-                char[] masked = text.toCharArray();
-                for (int i = 0; i < text.length();)
-                {
-                    int end = i;
-                    if (text.startsWith("<!--", i)) //$NON-NLS-1$
-                    {
-                        int close = text.indexOf("-->", i + 4); //$NON-NLS-1$
-                        end = close < 0 ? text.length() : close + 3;
-                    }
-                    else if (text.charAt(i) == '<' && i + 1 < text.length()
-                        && (Character.isLetter(text.charAt(i + 1)) || "/!?".indexOf(text.charAt(i + 1)) >= 0)) //$NON-NLS-1$
-                    {
-                        char quote = 0;
-                        end = i + 1;
-                        while (end < text.length())
-                        {
-                            char c = text.charAt(end++);
-                            if (quote != 0)
-                            {
-                                if (c == quote) quote = 0;
-                            }
-                            else if (c == '\'' || c == '"') quote = c;
-                            else if (c == '>') break;
-                        }
-                        for (String raw : List.of("script", "style")) //$NON-NLS-1$ //$NON-NLS-2$
-                            if (text.regionMatches(true, i, "<" + raw, 0, raw.length() + 1) //$NON-NLS-1$
-                                && i + raw.length() + 1 < text.length()
-                                && !Character.isLetterOrDigit(text.charAt(i + raw.length() + 1)))
-                            {
-                                int close = end;
-                                while (close < text.length()
-                                    && !text.regionMatches(true, close, "</" + raw, 0, raw.length() + 2)) close++; //$NON-NLS-1$
-                                end = close;
-                            }
-                    }
-                    else if (text.charAt(i) == '&')
-                    {
-                        int cursor = i + 1;
-                        while (cursor < text.length() && (Character.isLetterOrDigit(text.charAt(cursor))
-                            || text.charAt(cursor) == '#')) cursor++;
-                        if (cursor > i + 1 && cursor < text.length() && text.charAt(cursor) == ';')
-                            end = cursor + 1;
-                    }
-                    if (end == i) { i++; continue; }
-                    for (; i < end; i++)
-                        if (masked[i] != '\r' && masked[i] != '\n') masked[i] = ' ';
-                }
-                return new String(masked);
-            }
         }
     }
 }

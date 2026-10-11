@@ -11,7 +11,6 @@ import com.e1c.g5.v8.dt.check.settings.CheckUid;
 import tormozit.ComfortCheckIds;
 import tormozit.MdReferenceSupport;
 import org.eclipse.emf.ecore.EReference;
-import org.eclipse.core.runtime.NullProgressMonitor;
 
 /** Очищает битые ссылки свойства средствами штатного исправления модели EDT. */
 public final class BrokenMdCompositionFix extends SingleVariantModelBasicFix<EObject>
@@ -31,11 +30,8 @@ public final class BrokenMdCompositionFix extends SingleVariantModelBasicFix<EOb
     @Override
     protected boolean isFixApplicable(BasicModelFixContext context, IFixSession session)
     {
-        EObject owner = session.getModelObject(context.getTargetObjectId());
-        EStructuralFeature feature = owner != null
-            ? owner.eClass().getEStructuralFeature(context.getTargetFeatureId()) : null;
-        boolean applicable = feature instanceof EReference reference
-            && !MdReferenceSupport.findBrokenReferences(owner, reference, new NullProgressMonitor()).isEmpty();
+        boolean applicable = session.getDtProject() != null && MdReferenceSupport.hasBrokenReferences(
+            session.getDtProject().getWorkspaceProject(), context.getTargetObjectId(), context.getTargetFeatureId());
         tormozit.Global.tempLog("broken-links-fix", "applicable owner=" + context.getTargetObjectId()
             + " feature=" + context.getTargetFeatureId() + " result=" + applicable);
         return applicable;

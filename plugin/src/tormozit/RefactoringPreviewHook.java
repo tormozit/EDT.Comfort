@@ -565,7 +565,7 @@ public final class RefactoringPreviewHook
             // Ширины, оставшиеся от авто-заполнения, за «подстроенные» не считаются (KEY_COLUMNS_FILL).
             interaction.install(
                 FormTableColumnState.hasSavedColumnWidths(settings, KEY_COLUMNS_FILL, WIDTH_KEYS));
-            interaction.enableHeaderSort();
+            interaction.enableHeaderSort(settings);
             BslOccurrenceContextResolver.applyColumnHeaderTooltips(interaction, parentColumn,
                 parentTypeColumn, syntaxColumn);
             interaction.setHeaderTooltipExtra(suitableColumn,

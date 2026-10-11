@@ -216,6 +216,8 @@ public final class InfobasesViewHook implements IStartup
         ILabelProvider filterLabels = buildFilterLabelProvider(rawLp, searchCache);
 
         SmartOutlineFilter smartFilter = new SmartOutlineFilter(filterLabels, true, false);
+        // Имена баз произвольные («Тест 8.3 файловая») — точка в них не граница уровня.
+        smartFilter.setPlainNodeText(true);
         String initialPattern = searchInput.readPattern();
         smartFilter.setPattern(initialPattern);
         InfobasesViewDebug.log("tryPatch #" + attempt + " initialPattern=\"" + initialPattern + "\""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$

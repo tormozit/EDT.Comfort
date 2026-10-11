@@ -183,6 +183,44 @@ final class FormTableColumnState
             memento.putString(orderKey, formatOrder(table));
     }
 
+    // ---- сортировка по заголовку ----
+
+    /** Ключ сортировки в разделе настроек таблицы — см. {@link FormTableInteraction#enableHeaderSort(IDialogSettings)}. */
+    static final String KEY_HEADER_SORT = "headerSort"; //$NON-NLS-1$
+
+    /**
+     * Сохранить сортировку по заголовку ({@link FormTableInteraction#enableHeaderSort()}): индекс колонки
+     * и направление, например {@code "1,desc"}; без сортировки — пустая строка.
+     */
+    static void saveSort(IDialogSettings settings, String key, FormTableInteraction interaction)
+    {
+        if (settings == null || key == null || interaction == null)
+            return;
+        int column = interaction.headerSortColumnIndex();
+        settings.put(key, column < 0 ? "" //$NON-NLS-1$
+            : column + (interaction.isHeaderSortAscending() ? ",asc" : ",desc")); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /** Применить сортировку, сохранённую {@link #saveSort}; вызывать после {@code enableHeaderSort()}. */
+    static void loadSort(IDialogSettings settings, String key, FormTableInteraction interaction)
+    {
+        if (settings == null || key == null || interaction == null)
+            return;
+        String raw = settings.get(key);
+        if (raw == null || raw.isBlank())
+            return;
+        String[] parts = raw.split(","); //$NON-NLS-1$
+        try
+        {
+            interaction.restoreHeaderSort(Integer.parseInt(parts[0].trim()),
+                parts.length < 2 || !"desc".equals(parts[1].trim())); //$NON-NLS-1$
+        }
+        catch (NumberFormatException ex)
+        {
+            // Испорченная запись — остаётся порядок по умолчанию.
+        }
+    }
+
     private static int[] parseOrder(String raw, int columnCount)
     {
         if (raw == null || raw.isBlank() || columnCount <= 0)

@@ -28,6 +28,10 @@ public class SmartOutlineFilter extends ViewerFilter {
      * фильтре и {@code !expandTopLevelByDefault} возвращаемся именно к этому состоянию, а не
      * схлопываем всё подряд — иначе мы бы сами стирали то, что нативно раскрыл не наш код. */
     private Set<Object> initialExpandedElements;
+    /** {@code true} — точка в тексте узла — обычный символ, а не граница уровня: узел сопоставляется
+     * своим текстом целиком ({@link SmartMatcher#matches}). Для деревьев с произвольными именами
+     * («Тест 8.3 файловая»), где {@link SmartMatcher#matchesTree} сравнил бы только «3 файловая». */
+    private boolean plainNodeText;
 
     private final Map<Object, Integer> namePremiumCache = new HashMap<>();
     private final Map<Object, Integer> paramPremiumCache = new HashMap<>();
@@ -128,6 +132,11 @@ public class SmartOutlineFilter extends ViewerFilter {
 
     public boolean isExpandTopLevelByDefault() {
         return expandTopLevelByDefault;
+    }
+
+    public void setPlainNodeText(boolean plainNodeText) {
+        this.plainNodeText = plainNodeText;
+        subtreeMatchMemo.clear();
     }
 
     /**
@@ -355,7 +364,7 @@ public class SmartOutlineFilter extends ViewerFilter {
         String text = resolveFilterText(element);
 
         if (!hasChildren) {
-            if (pruneEmptyBranches && !matcher.isEmpty) {
+            if (pruneEmptyBranches && !matcher.isEmpty && !plainNodeText) {
                 String parentText = (parentElement != null && parentElement != treeInput)
                         ? resolveFilterText(parentElement) : "";
                 String elemText = resolveFilterText(element);
@@ -391,7 +400,7 @@ public class SmartOutlineFilter extends ViewerFilter {
             return memo.booleanValue();
 
         boolean self;
-        if (pruneEmptyBranches && !matcher.isEmpty) {
+        if (pruneEmptyBranches && !matcher.isEmpty && !plainNodeText) {
             Object parent = cp.getParent(element);
             String parentText = (parent != null && parent != treeInput)
                     ? resolveFilterText(parent) : "";

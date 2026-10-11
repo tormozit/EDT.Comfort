@@ -562,6 +562,11 @@
         categoryId="tormozit.commands.global"
         description="Найти ссылки на слово или объект метаданных через приложение ИР. Активно только при подключённом ИР. Настраивайте только «Редактирование источника Xtext». Остальные контексты не редактируйте. (Комфорт)"/>
     <command
+        id="tormozit.IrGitFragmentSearch"
+        name="Найти фрагмент в Гите ИР"
+        categoryId="tormozit.commands.global"
+        description="Найти выделенный фрагмент текста модуля в истории Git через приложение ИР. Активно только при подключённом ИР. Настраивайте только «Редактирование источника Xtext». Остальные контексты не редактируйте. (Комфорт)"/>
+    <command
         id="tormozit.MoveMethodToModule"
         name="Переместить метод в модуль"
         categoryId="tormozit.commands.global"
@@ -1021,6 +1026,17 @@
     <handler
         class="tormozit.ExecutableExtensionFactory:tormozit.IrFindReferencesCommandHandler"
         commandId="tormozit.IrFindReferences">
+      <activeWhen>
+        <with variable="activeContexts">
+          <iterate operator="or">
+            <equals value="org.eclipse.xtext.ui.XtextEditorScope"/>
+          </iterate>
+        </with>
+      </activeWhen>
+    </handler>
+    <handler
+        class="tormozit.ExecutableExtensionFactory:tormozit.IrGitFragmentSearchHandler"
+        commandId="tormozit.IrGitFragmentSearch">
       <activeWhen>
         <with variable="activeContexts">
           <iterate operator="or">
@@ -1946,5 +1962,14 @@
   <!-- Исправление проблемы EDT 2026; в EDT 2025 её идентификатор не возникает. -->
   <extension point="com.e1c.g5.v8.dt.check.fixes">
     <fix class="tormozit.ModuleAccessibilityAtClientFix"/>
+  </extension>
+
+  <!--
+  Панель «Поиск» не источник панели «Свойства» (issue #757). «Свойства» показывают выделение
+  активной части; страницы результатов объектов модели не отдают, и первый же клик по строке
+  результата очищал панель. Теперь она сохраняет содержимое до перехода к объекту.
+  -->
+  <extension point="org.eclipse.ui.propertiesView">
+    <excludeSources id="org.eclipse.search.ui.views.SearchView"/>
   </extension>
 </plugin>

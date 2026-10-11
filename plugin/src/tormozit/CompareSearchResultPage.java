@@ -70,6 +70,7 @@ import org.eclipse.swt.widgets.TreeItem;
 import org.eclipse.swt.widgets.Widget;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IActionBars;
+import org.eclipse.ui.actions.ActionFactory;
 import org.eclipse.ui.IMemento;
 import org.eclipse.ui.part.IPageSite;
 import org.eclipse.ui.model.IWorkbenchAdapter;
@@ -112,6 +113,18 @@ public class CompareSearchResultPage implements ISearchResultPage
     private MissingObjectNode missingObjectsRoot;
     private LocalResourceManager missingObjectsResources;
     private Action missingObjectGoAction;
+    /** Режим «Ошибки орфографии»: вместо дерева объектов слева — таблица слов с числом вхождений. */
+    private Composite treeHost;
+    private Composite wordsStack;
+    private Table wordsTable;
+    private TableViewer wordsViewer;
+    private FormTableInteraction wordsInteraction;
+    private List<WordRow> allWords = List.of();
+    /** Слова и текст фильтра, по которым отобраны строки, показанные сейчас в таблице результатов. */
+    private Object shownWordsFilter;
+    /** Ширины колонок таблицы слов, под которые подгоняется левая часть панели. */
+    private int[] wordsWidths = new int[0];
+    private boolean wordsMode;
     private Table table;
     private TableViewer tableViewer;
     private FormTableInteraction tableInteraction;
@@ -120,7 +133,7 @@ public class CompareSearchResultPage implements ISearchResultPage
     private CompareSearchResult searchResult;
     private String queryText;
 
-    private final Map<Boolean, FormTableInteraction.ColumnState> columnStates = new java.util.HashMap<>();
+    private final Map<String, FormTableInteraction.ColumnState> columnStates = new java.util.HashMap<>();
     private final Map<CompareSearchResult, ResultState> resultStates = new java.util.WeakHashMap<>();
 
     private static final class ResultState
@@ -166,6 +179,56 @@ public class CompareSearchResultPage implements ISearchResultPage
     private static final String KEY_COL_TEXT_WIDTH = "colTextWidth"; //$NON-NLS-1$
     private static final String KEY_COL_STATUS_WIDTH = "colStatusWidth"; //$NON-NLS-1$
     private static final String KEY_COL_SIDE_WIDTH = "colSideWidth"; //$NON-NLS-1$
+    private static final String KEY_COL_WORD_WIDTH = "colWordWidth"; //$NON-NLS-1$
+    /** Колонки до этого индекса есть в любом режиме; дальше — «хвост» своего режима (см. {@link #applyTailColumns}). */
+    private static final int BASE_COLUMNS = 4;
+    /** Ключ настроек ширины колонки — в данных самой колонки. */
+    private static final String COLUMN_WIDTH_KEY = "tormozit.compareSearchColumnWidthKey"; //$NON-NLS-1$
+    /** Режим, для которого сейчас создан «хвост» колонок. */
+    private String tailMode;
+    /** Открытые страницы результатов — им приходит оповещение об изменении набора строк. */
+    private static final Set<CompareSearchResultPage> LIVE_PAGES =
+        java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>());
+
+    /**
+     * Строки результата изменились извне (слово добавлено в словарь — его ошибки убраны):
+     * страницы, показывающие этот результат, перечитывают его, сохраняя текущий узел дерева и строку.
+     */
+    static void refreshResult(CompareSearchResult result)
+    {
+        for (CompareSearchResultPage page : new ArrayList<>(LIVE_PAGES))
+        {
+            if (page.searchResult != result || page.tableViewer == null || page.table == null
+                || page.table.isDisposed())
+                continue;
+            ResultState state = page.captureResultState();
+            // Строки убраны (слово ушло в словарь, заменено): текущей становится строка на месте
+            // исчезнувшей — и в таблице слов, и в таблице результатов.
+            FormTableInteraction.SelectionSnapshot rows = page.tableInteraction != null
+                ? page.tableInteraction.captureSelection() : null;
+            FormTableInteraction.SelectionSnapshot words = page.wordsMode && page.wordsInteraction != null
+                ? page.wordsInteraction.captureSelection() : null;
+            page.tableViewer.setInput(result.getMatches());
+            page.updateMissingObjectsTree(result);
+            page.restoreResultState(state);
+            // Слово нашлось по имени — restoreResultState его уже выбрал; иначе — по номеру строки.
+            if (words != null && page.wordsViewer.getStructuredSelection().isEmpty())
+                page.wordsInteraction.restoreSelection(words);
+            if (page.tableInteraction != null)
+            {
+                page.tableInteraction.restoreSelection(rows);
+                page.tableInteraction.resyncSelectionTheme();
+            }
+            if (page.viewPart != null)
+                page.viewPart.updateLabel();
+        }
+    }
+
+    /** Режим результата: у каждого свой набор видимых колонок и свои сохранённые ширины. */
+    private static String modeOf(CompareSearchResult result)
+    {
+        return result.isSpelling() ? "spelling" : result.getProject() != null ? "project" : "compare"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+    }
     private static final int CHECK_COLUMN_WIDTH = 22;
     @Override
     public void init(IPageSite site)
@@ -183,7 +246,7 @@ public class CompareSearchResultPage implements ISearchResultPage
     public void createControl(Composite parent)
     {
         resultSplit = new SashForm(parent, SWT.HORIZONTAL);
-        Composite treeHost = new Composite(resultSplit, SWT.NONE);
+        treeHost = new Composite(resultSplit, SWT.NONE);
         GridLayout treeLayout = new GridLayout(1, false);
         treeLayout.marginWidth = 0;
         treeLayout.marginHeight = 0;
@@ -231,7 +294,7 @@ public class CompareSearchResultPage implements ISearchResultPage
             @Override
             public void run()
             {
-                if (searchResult == null || searchResult.getProject() != null || missingObjectsTree.isDisposed())
+                if (searchResult == null || missingObjectsTree.isDisposed() || searchResult.getProject() != null)
                     return;
                 TreeItem[] selection = missingObjectsTree.getSelection();
                 if (selection.length == 1 && selection[0].getData() instanceof MissingObjectNode node
@@ -253,7 +316,7 @@ public class CompareSearchResultPage implements ISearchResultPage
         {
             TreeItem[] selection = missingObjectsTree.getSelection();
             missingObjectGoAction.setEnabled(selection.length == 1
-                && searchResult != null && searchResult.getProject() == null
+                && searchResult != null && (searchResult.getProject() == null || searchResult.isSpelling())
                 && selection[0].getData() instanceof MissingObjectNode node && node.referenceFqn != null);
         });
         missingObjectsTree.setMenu(treeMenu.createContextMenu(missingObjectsTree));
@@ -264,13 +327,14 @@ public class CompareSearchResultPage implements ISearchResultPage
             if (event.item instanceof TreeItem item && item.getData() instanceof MissingObjectNode node)
             {
                 missingObjectGoAction.setEnabled(node.referenceFqn != null && searchResult != null
-                    && searchResult.getProject() == null);
+                    && (searchResult.getProject() == null || searchResult.isSpelling()));
                 tableViewer.setInput(node.matches);
                 syncChecksFromTree();
                 if (tableInteraction != null)
                     tableInteraction.resyncSelectionTheme();
             }
         });
+        createWordsTable();
         // FormTableInteraction (accent заголовка) требует родителя Table без layout
         // либо TableColumnLayout — эталон tableStack в ConfigSearchResultsHook / RecentPlacesView.
         tableStack = new Composite(resultSplit, SWT.NONE);
@@ -303,9 +367,7 @@ public class CompareSearchResultPage implements ISearchResultPage
         addPathColumn(columnSettings);
         addPropertyColumn(columnSettings);
         addTextColumn(columnSettings);
-        addStatusColumn(columnSettings);
-        addColumnSideColumn(columnSettings);
-        FormTableColumnState.loadOrder(columnSettings, KEY_COL_ORDER, table);
+        LIVE_PAGES.add(this);
         applyRestoredState();
 
         table.addListener(SWT.MouseDown, event ->
@@ -379,13 +441,28 @@ public class CompareSearchResultPage implements ISearchResultPage
         for (int i = 1; i < table.getColumnCount(); i++)
             ownerDraw[i - 1] = table.getColumn(i);
         tableInteraction.setOwnerDrawColumns(ownerDraw);
+        tableInteraction.setExternalFilterState(this::rowsFilterState);
         boolean hasSavedColumnWidths = FormTableColumnState.hasSavedColumnWidths(columnSettings, KEY_COL_FILL_MODE,
-            KEY_COL_PATH_WIDTH, KEY_COL_PROPERTY_WIDTH, KEY_COL_TEXT_WIDTH, KEY_COL_STATUS_WIDTH, KEY_COL_SIDE_WIDTH);
+            KEY_COL_PATH_WIDTH, KEY_COL_PROPERTY_WIDTH, KEY_COL_TEXT_WIDTH);
         tableInteraction.install(hasSavedColumnWidths);
+        tableInteraction.enableHeaderSort();
         if (checkColumn != null && !checkColumn.isDisposed())
             checkColumn.setMoveable(false);
         // Второстепенные данные — при закрытии; при повторном поиске — явно в {@link #setInput}.
         table.addDisposeListener(e -> saveColumnLayout());
+    }
+
+    /**
+     * Чем отобраны строки таблицы результатов: выбранные слова либо узел дерева (как в
+     * {@link #captureResultState()}) и текст поля фильтра слева.
+     */
+    private Object rowsFilterState()
+    {
+        // Не живой выбор слов: он меняется раньше, чем таблица результатов получает новые строки.
+        if (wordsMode)
+            return shownWordsFilter;
+        ResultState state = captureResultState();
+        return state == null ? null : List.of(state.treePath, state.treeFilter.strip());
     }
 
     private static boolean isTableItemSelected(TableItem item)
@@ -410,8 +487,10 @@ public class CompareSearchResultPage implements ISearchResultPage
         menuManager.addMenuListener(manager ->
         {
             TableItem[] selection = table.getSelection();
-            if (selection.length == 1 && selection[0].getData() instanceof CompareSearchMatch projectMatch
-                && projectMatch.getProjectLocation() != null)
+            boolean spelling = searchResult != null && searchResult.isSpelling();
+            if (!spelling && selection.length == 1 && selection[0].getData() instanceof CompareSearchMatch projectMatch
+                && (projectMatch.getProjectLocation() != null || projectMatch.getModelMatch() != null
+                    || projectMatch.getModuleFile() != null))
             {
                 Action openProperty = new Action("Перейти")
                 {
@@ -422,11 +501,23 @@ public class CompareSearchResultPage implements ISearchResultPage
                     "Открыть свойство проекта с битой ссылкой" + Global.pluginSignForTooltip()));
                 manager.add(openProperty);
             }
+            if (spelling && selection.length > 0 && selection[0].getData() instanceof CompareSearchMatch wordMatch
+                && wordMatch.getMisspelledWord() != null)
+            {
+                String word = wordMatch.getMisspelledWord();
+                // Варианты исправления — только когда слово у всех выделенных строк одно:
+                // замена применяется ко всем им сразу.
+                List<CompareSearchMatch> sameWord = new ArrayList<>();
+                for (TableItem item : selection)
+                    if (item.getData() instanceof CompareSearchMatch row && word.equals(row.getMisspelledWord()))
+                        sameWord.add(row);
+                addSpellingWordActions(manager, table, word, sameWord.size() == selection.length ? sameWord : null);
+            }
             List<MdReferenceSupport.Location> brokenLocations = new ArrayList<>();
             for (TableItem item : selection)
                 if (item.getData() instanceof CompareSearchMatch row && row.getProjectLocation() != null)
                     brokenLocations.add(row.getProjectLocation());
-            if (!brokenLocations.isEmpty() && searchResult != null && searchResult.getProject() != null)
+            if (!brokenLocations.isEmpty() && searchResult != null && searchResult.getProject() != null && !spelling)
             {
                 CompareSearchResult result = searchResult;
                 Action removeBroken = new Action("Удалить битые ссылки")
@@ -494,6 +585,334 @@ public class CompareSearchResultPage implements ISearchResultPage
         });
         Menu menu = menuManager.createContextMenu(table);
         table.setMenu(menu);
+    }
+
+    /**
+     * «Добавить в словарь» и «Заменить на» для слова с ошибкой — общие для таблицы результатов и таблицы слов.
+     *
+     * @param rows строки, в которых слово заменяется; {@code null} — подменю замены не показывать
+     */
+    private void addSpellingWordActions(org.eclipse.jface.action.IMenuManager manager, Control host, String word, List<CompareSearchMatch> rows)
+    {
+        IProject project = searchResult.getProject();
+        Action addWord = new Action("Добавить в словарь")
+        {
+            @Override
+            public void run() { UserTextSpellCheck.addToDictionary(project, word); }
+        };
+        addWord.setToolTipText(TooltipText.wrap(host, "Добавить слово «" + word + "» в словарь орфографии."
+            + " Строки с этим словом и его формами будут убраны из результатов"
+            + Global.pluginSignForTooltip()));
+        manager.add(addWord);
+        if (rows == null)
+            return;
+        // Варианты подбираются в фоне и дописываются по мере готовности, поэтому они в
+        // своём подменю: основное меню при этом не меняется и пункты под курсором не
+        // сдвигаются. Подбор — общий с полями проверки орфографии (кэш, «…», фон).
+        CompareSearchResult result = searchResult;
+        manager.add(new org.eclipse.jface.action.ContributionItem()
+        {
+            @Override
+            public void fill(Menu menu, int index)
+            {
+                org.eclipse.swt.widgets.MenuItem cascade = index >= 0
+                    ? new org.eclipse.swt.widgets.MenuItem(menu, SWT.CASCADE, index)
+                    : new org.eclipse.swt.widgets.MenuItem(menu, SWT.CASCADE);
+                cascade.setText("Заменить на");
+                Menu variants = new Menu(menu);
+                cascade.setMenu(variants);
+                StyledTextSpellCheck.fillSuggestionsAsync(variants, word, 0,
+                    suggestion -> UserTextSpellCheck.replaceWord(result, rows, suggestion));
+            }
+        });
+    }
+
+    /** Строка таблицы слов: слово с ошибкой и все его вхождения в результате. */
+    private static final class WordRow
+    {
+        final String word;
+        /** Служебная строка «&lt;Все&gt;»: вхождения всех показанных слов, отбор справа отключён. */
+        final boolean all;
+        final List<CompareSearchMatch> matches = new ArrayList<>();
+
+        WordRow(String word)
+        {
+            this(word, false);
+        }
+
+        WordRow(String word, boolean all)
+        {
+            this.word = word;
+            this.all = all;
+        }
+    }
+
+    /** Одна на страницу: выбор этой строки переживает обновление списка слов. */
+    private final WordRow allWordsRow = new WordRow("<Все>", true);
+
+    /** Левая таблица режима «Ошибки орфографии»: слово и число вхождений; создаётся скрытой. */
+    private void createWordsTable()
+    {
+        wordsStack = new Composite(treeHost, SWT.NONE);
+        wordsStack.setLayout(null);
+        GridData stackData = new GridData(SWT.FILL, SWT.FILL, true, true);
+        stackData.exclude = true;
+        wordsStack.setLayoutData(stackData);
+        wordsStack.setVisible(false);
+        wordsTable = new Table(wordsStack,
+            SWT.MULTI | SWT.FULL_SELECTION | SWT.H_SCROLL | SWT.V_SCROLL | SWT.BORDER);
+        wordsTable.setHeaderVisible(true);
+        ThemeAwareColors.applyGridLines(wordsTable);
+        wordsStack.addControlListener(new ControlAdapter()
+        {
+            @Override
+            public void controlResized(ControlEvent e)
+            {
+                if (!wordsTable.isDisposed())
+                    wordsTable.setBounds(wordsStack.getClientArea());
+            }
+        });
+        wordsViewer = new TableViewer(wordsTable);
+        wordsViewer.setContentProvider(ArrayContentProvider.getInstance());
+        TableViewerColumn wordColumn = new TableViewerColumn(wordsViewer, SWT.LEFT);
+        wordColumn.getColumn().setText("Слово");
+        IDialogSettings wordsSettings = wordsSettings();
+        wordColumn.getColumn().setWidth(FormTableColumnState.readWidth(wordsSettings, KEY_WORDS_COL_WORD_WIDTH,
+            defaultWordsColumnWidth(30), 1));
+        wordColumn.getColumn().setResizable(true);
+        wordColumn.setLabelProvider(new SelectionAwareStyledCellLabelProvider(new IStyledLabelProvider()
+        {
+            @Override
+            public StyledString getStyledText(Object element)
+            {
+                if (!(element instanceof WordRow row))
+                    return new StyledString("");
+                return row.all ? new StyledString(row.word)
+                    : highlight(row.word, missingObjectsSearch.getText().strip());
+            }
+
+            @Override
+            public Image getImage(Object element) { return null; }
+            @Override
+            public void addListener(ILabelProviderListener listener) {}
+            @Override
+            public void removeListener(ILabelProviderListener listener) {}
+            @Override
+            public void dispose() {}
+            @Override
+            public boolean isLabelProperty(Object element, String property) { return false; }
+        }));
+        TableViewerColumn countColumn = new TableViewerColumn(wordsViewer, SWT.RIGHT);
+        countColumn.getColumn().setText("Вхождений");
+        countColumn.getColumn().setWidth(FormTableColumnState.readWidth(wordsSettings, KEY_WORDS_COL_COUNT_WIDTH,
+            defaultWordsColumnWidth(5), 1));
+        countColumn.getColumn().setResizable(true);
+        countColumn.setLabelProvider(new ColumnLabelProvider()
+        {
+            @Override
+            public String getText(Object element)
+            {
+                return element instanceof WordRow row ? Integer.toString(row.matches.size()) : "";
+            }
+        });
+        wordsInteraction = new FormTableInteraction(wordsTable, wordsViewer);
+        wordsInteraction.setOwnerDrawColumns(wordColumn.getColumn());
+        wordsInteraction.setExternalFilterState(() -> missingObjectsSearch.getText().strip());
+        wordsInteraction.setPinnedTop(element -> element == allWordsRow);
+        FormTableColumnState.loadOrder(wordsSettings, KEY_WORDS_COL_ORDER, wordsTable);
+        wordsInteraction.install(FormTableColumnState.hasSavedColumnWidths(wordsSettings, KEY_WORDS_FILL_MODE,
+            WORDS_WIDTH_KEYS));
+        wordsInteraction.enableHeaderSort(wordsSettings);
+        // Как у таблицы результатов: порядок, ширины и сортировка — в настройках, отборы — ColumnState.
+        if (wordsColumnState != null)
+            wordsInteraction.restoreColumnState(wordsColumnState);
+        wordsWidths = new int[] { wordsTable.getColumn(0).getWidth(), wordsTable.getColumn(1).getWidth() };
+        wordsTable.addDisposeListener(event -> saveWordsLayout());
+        wordsViewer.addSelectionChangedListener(event -> showWordsMatches());
+
+        MenuManager wordsMenu = new MenuManager();
+        wordsMenu.setRemoveAllWhenShown(true);
+        wordsMenu.addMenuListener(manager ->
+        {
+            if (searchResult == null || !searchResult.isSpelling())
+                return;
+            List<?> selected = wordsViewer.getStructuredSelection().toList();
+            if (selected.size() == 1 && selected.get(0) instanceof WordRow row && !row.all)
+                addSpellingWordActions(manager, wordsTable, row.word, row.matches);
+        });
+        wordsTable.setMenu(wordsMenu.createContextMenu(wordsTable));
+        wordsTable.addDisposeListener(event -> wordsMenu.dispose());
+    }
+
+    private static final String KEY_WORDS_COL_WORD_WIDTH = "wordsColWordWidth"; //$NON-NLS-1$
+    private static final String KEY_WORDS_COL_COUNT_WIDTH = "wordsColCountWidth"; //$NON-NLS-1$
+    private static final String KEY_WORDS_FILL_MODE = "wordsFillMode"; //$NON-NLS-1$
+    private static final String KEY_WORDS_COL_ORDER = "wordsColumnOrder"; //$NON-NLS-1$
+    private static final String[] WORDS_WIDTH_KEYS = { KEY_WORDS_COL_WORD_WIDTH, KEY_WORDS_COL_COUNT_WIDTH };
+    /** Состояние таблицы слов (сортировка, отборы) — переживает закрытие панели, как {@link #columnStates}. */
+    private static FormTableInteraction.ColumnState wordsColumnState;
+
+    /** Настройки левой таблицы слов — общие для всех результатов проверки орфографии. */
+    private static IDialogSettings wordsSettings()
+    {
+        IDialogSettings top = Activator.getDefault().getDialogSettings();
+        IDialogSettings section = top.getSection(SETTINGS_SECTION);
+        if (section == null)
+            section = top.addNewSection(SETTINGS_SECTION);
+        IDialogSettings words = section.getSection("spellingWords"); //$NON-NLS-1$
+        return words != null ? words : section.addNewSection("spellingWords"); //$NON-NLS-1$
+    }
+
+    /** Ширины и сортировка левой таблицы — при закрытии панели и повторном поиске. */
+    private void saveWordsLayout()
+    {
+        if (wordsTable == null || wordsTable.isDisposed() || wordsTable.getColumnCount() < 2
+            || wordsInteraction == null)
+            return;
+        // Скрытая таблица (другой режим поиска) своих ширин не имеет — сохранять нечего.
+        if (!wordsMode)
+            return;
+        wordsWidths = new int[] { wordsTable.getColumn(0).getWidth(), wordsTable.getColumn(1).getWidth() };
+        wordsColumnState = wordsInteraction.captureColumnState();
+        FormTableColumnState.saveOrderAndWidths(wordsSettings(), KEY_WORDS_COL_ORDER, KEY_WORDS_FILL_MODE,
+            wordsInteraction.isColumnsExactFill(), WORDS_WIDTH_KEYS, wordsTable.getColumns(), wordsTable);
+    }
+
+    /** Выбор слов слева задаёт строки справа; «&lt;Все&gt;» или пустой выбор — строки всех показанных слов. */
+    private void showWordsMatches()
+    {
+        if (!wordsMode || table == null || table.isDisposed() || searchResult == null)
+            return;
+        List<?> selected = wordsViewer.getStructuredSelection().toList();
+        List<CompareSearchMatch> rows;
+        if (selected.isEmpty() || selected.contains(allWordsRow))
+            rows = new ArrayList<>(allWordsRow.matches);
+        else
+        {
+            rows = new ArrayList<>();
+            for (Object row : selected)
+                rows.addAll(((WordRow) row).matches);
+        }
+        // Снимок — с прежним отбором (shownWordsFilter ещё старый): сменилось слово — текущая строка
+        // по номеру не подбирается, те же слова (обновление результата) — подбирается.
+        FormTableInteraction.SelectionSnapshot snapshot = tableInteraction != null
+            ? tableInteraction.captureSelection() : null;
+        tableViewer.setInput(rows);
+        List<String> words = new ArrayList<>();
+        for (Object row : wordsViewer.getStructuredSelection().toList())
+            words.add(((WordRow) row).word);
+        shownWordsFilter = List.of(words, missingObjectsSearch.getText().strip());
+        syncChecksFromTree();
+        if (tableInteraction != null)
+        {
+            tableInteraction.restoreSelection(snapshot);
+            tableInteraction.resyncSelectionTheme();
+        }
+    }
+
+    private void applyWordsFilter()
+    {
+        if (wordsTable == null || wordsTable.isDisposed())
+            return;
+        String text = missingObjectsSearch.getText().strip().toLowerCase(Locale.ROOT);
+        List<WordRow> visible = new ArrayList<>();
+        visible.add(allWordsRow);
+        allWordsRow.matches.clear();
+        for (WordRow row : allWords)
+            if (text.isEmpty() || row.word.toLowerCase(Locale.ROOT).contains(text))
+            {
+                visible.add(row);
+                allWordsRow.matches.addAll(row.matches);
+            }
+        // Без фильтра — исходный порядок строк результата, а не сгруппированный по словам.
+        if (text.isEmpty() && searchResult != null)
+        {
+            allWordsRow.matches.clear();
+            allWordsRow.matches.addAll(searchResult.getMatches());
+        }
+        List<?> kept = wordsViewer.getStructuredSelection().toList();
+        wordsViewer.setInput(visible);
+        wordsViewer.setSelection(new StructuredSelection(kept.stream().filter(visible::contains).toList()), true);
+        // Смена набора слов не всегда меняет выбор — строки справа обновляем в любом случае.
+        showWordsMatches();
+    }
+
+    /** Слова результата: по числу вхождений, затем по алфавиту. */
+    private void updateWordsTable(CompareSearchResult result)
+    {
+        Map<String, WordRow> byWord = new java.util.HashMap<>();
+        for (CompareSearchMatch match : result.getMatches())
+            if (match.getMisspelledWord() != null)
+                byWord.computeIfAbsent(match.getMisspelledWord(), WordRow::new).matches.add(match);
+        allWords = new ArrayList<>(byWord.values());
+        allWords.sort(Comparator.<WordRow>comparingInt(row -> -row.matches.size())
+            .thenComparing(row -> row.word, String.CASE_INSENSITIVE_ORDER));
+        boolean entering = !wordsMode;
+        wordsMode = true;
+        showWordsPane(true);
+        missingObjectsSearch.setText("");
+        wordsViewer.setInput(null);
+        applyWordsFilter();
+        if (wordsViewer.getStructuredSelection().isEmpty())
+            wordsViewer.setSelection(new StructuredSelection(allWordsRow), true);
+        resultSplit.setMaximizedControl(null);
+        if (entering)
+            fitWordsPaneWidth(true);
+    }
+
+    /**
+     * Ширина левой части — по колонкам таблицы слов (их ширины по умолчанию или сохранённые), а не доля
+     * панели: иначе заполнение по ширине растянуло бы колонки под случайную ширину.
+     *
+     * @param retry панель ещё не разложена — повторить после раскладки
+     */
+    private void fitWordsPaneWidth(boolean retry)
+    {
+        if (resultSplit == null || resultSplit.isDisposed() || wordsTable.isDisposed() || !wordsMode)
+            return;
+        int total = resultSplit.getClientArea().width;
+        if (total <= 0)
+        {
+            if (retry)
+                resultSplit.getDisplay().asyncExec(() -> fitWordsPaneWidth(false));
+            return;
+        }
+        // Не текущие ширины колонок: к этому моменту заполнение по ширине уже могло растянуть их под
+        // прежнюю ширину левой части.
+        int left = wordsTable.getBorderWidth() * 2 + wordsTable.getVerticalBar().getSize().x;
+        for (int width : wordsWidths)
+            left += width;
+        if (left >= total)
+            return;
+        resultSplit.setWeights(left, total - left);
+        resultSplit.layout(true, true);
+        wordsInteraction.restoreColumnWidths(wordsWidths.clone(), true);
+    }
+
+    /** Ширины колонок таблицы слов по умолчанию: слово — 30 символов, число вхождений — 5 цифр. */
+    private int defaultWordsColumnWidth(int chars)
+    {
+        GC gc = new GC(wordsTable);
+        try
+        {
+            return Math.max(ColumnWidthFit.minColumnWidth(wordsTable),
+                gc.textExtent("0".repeat(chars)).x + 12); //$NON-NLS-1$
+        }
+        finally
+        {
+            gc.dispose();
+        }
+    }
+
+    private void showWordsPane(boolean words)
+    {
+        for (Control control : new Control[] { wordsStack, missingObjectsTree })
+        {
+            boolean show = control == wordsStack ? words : !words;
+            ((GridData) control.getLayoutData()).exclude = !show;
+            control.setVisible(show);
+        }
+        treeHost.layout(true);
     }
 
     private boolean selectionHasCheckable()
@@ -659,8 +1078,9 @@ public class CompareSearchResultPage implements ISearchResultPage
         TableViewerColumn col = new TableViewerColumn(tableViewer, SWT.LEFT);
         col.getColumn().setText("Свойство");
         col.getColumn().setResizable(true);
+        col.getColumn().setData(COLUMN_WIDTH_KEY, KEY_COL_PROPERTY_WIDTH);
         col.getColumn().setWidth(FormTableColumnState.readWidth(settings, KEY_COL_PROPERTY_WIDTH, 200, 1));
-        col.setLabelProvider(new DelegatingStyledCellLabelProvider(new IStyledLabelProvider()
+        col.setLabelProvider(new SelectionAwareStyledCellLabelProvider(new IStyledLabelProvider()
         {
             @Override
             public StyledString getStyledText(Object element)
@@ -693,8 +1113,9 @@ public class CompareSearchResultPage implements ISearchResultPage
         TableViewerColumn col = new TableViewerColumn(tableViewer, SWT.LEFT);
         col.getColumn().setText("Путь");
         col.getColumn().setResizable(true);
+        col.getColumn().setData(COLUMN_WIDTH_KEY, KEY_COL_PATH_WIDTH);
         col.getColumn().setWidth(FormTableColumnState.readWidth(settings, KEY_COL_PATH_WIDTH, 360, 1));
-        col.setLabelProvider(new DelegatingStyledCellLabelProvider(new IStyledLabelProvider()
+        col.setLabelProvider(new SelectionAwareStyledCellLabelProvider(new IStyledLabelProvider()
         {
             @Override
             public StyledString getStyledText(Object element)
@@ -722,14 +1143,16 @@ public class CompareSearchResultPage implements ISearchResultPage
         TableViewerColumn col = new TableViewerColumn(tableViewer, SWT.LEFT);
         col.getColumn().setText("Текст");
         col.getColumn().setResizable(true);
+        col.getColumn().setData(COLUMN_WIDTH_KEY, KEY_COL_TEXT_WIDTH);
         col.getColumn().setWidth(FormTableColumnState.readWidth(settings, KEY_COL_TEXT_WIDTH, 250, 1));
-        col.setLabelProvider(new DelegatingStyledCellLabelProvider(new IStyledLabelProvider()
+        col.setLabelProvider(new SelectionAwareStyledCellLabelProvider(new IStyledLabelProvider()
         {
             @Override
             public StyledString getStyledText(Object element)
             {
                 if (element instanceof CompareSearchMatch m)
-                    return highlight(m.getMatchText());
+                    return highlight(m.getMatchText(),
+                        m.getMisspelledWord() != null ? m.getMisspelledWord() : queryText);
                 return new StyledString("");
             }
 
@@ -751,8 +1174,9 @@ public class CompareSearchResultPage implements ISearchResultPage
         TableViewerColumn col = new TableViewerColumn(tableViewer, SWT.LEFT);
         col.getColumn().setText("Статус");
         col.getColumn().setResizable(true);
+        col.getColumn().setData(COLUMN_WIDTH_KEY, KEY_COL_STATUS_WIDTH);
         col.getColumn().setWidth(FormTableColumnState.readWidth(settings, KEY_COL_STATUS_WIDTH, 100, 1));
-        col.setLabelProvider(new DelegatingStyledCellLabelProvider(new IStyledLabelProvider()
+        col.setLabelProvider(new SelectionAwareStyledCellLabelProvider(new IStyledLabelProvider()
         {
             @Override
             public StyledString getStyledText(Object element)
@@ -783,13 +1207,44 @@ public class CompareSearchResultPage implements ISearchResultPage
         }));
     }
 
+    /** Слово с ошибкой — колонка только режима «Ошибки орфографии»; по ней строки сортируются по словам. */
+    private void addWordColumn(IDialogSettings settings)
+    {
+        TableViewerColumn col = new TableViewerColumn(tableViewer, SWT.LEFT);
+        col.getColumn().setText("Слово");
+        col.getColumn().setResizable(true);
+        col.getColumn().setData(COLUMN_WIDTH_KEY, KEY_COL_WORD_WIDTH);
+        col.getColumn().setWidth(FormTableColumnState.readWidth(settings, KEY_COL_WORD_WIDTH, 140, 1));
+        col.setLabelProvider(new SelectionAwareStyledCellLabelProvider(new IStyledLabelProvider()
+        {
+            @Override
+            public StyledString getStyledText(Object element)
+            {
+                String word = element instanceof CompareSearchMatch m ? m.getMisspelledWord() : null;
+                return new StyledString(word != null ? word : "");
+            }
+
+            @Override
+            public Image getImage(Object element) { return null; }
+            @Override
+            public void addListener(ILabelProviderListener listener) {}
+            @Override
+            public void removeListener(ILabelProviderListener listener) {}
+            @Override
+            public void dispose() {}
+            @Override
+            public boolean isLabelProperty(Object element, String property) { return false; }
+        }));
+    }
+
     private void addColumnSideColumn(IDialogSettings settings)
     {
         TableViewerColumn col = new TableViewerColumn(tableViewer, SWT.LEFT);
         col.getColumn().setText("Колонка");
         col.getColumn().setResizable(true);
+        col.getColumn().setData(COLUMN_WIDTH_KEY, KEY_COL_SIDE_WIDTH);
         col.getColumn().setWidth(FormTableColumnState.readWidth(settings, KEY_COL_SIDE_WIDTH, 100, 1));
-        col.setLabelProvider(new DelegatingStyledCellLabelProvider(new IStyledLabelProvider()
+        col.setLabelProvider(new SelectionAwareStyledCellLabelProvider(new IStyledLabelProvider()
         {
             @Override
             public StyledString getStyledText(Object element)
@@ -823,6 +1278,12 @@ public class CompareSearchResultPage implements ISearchResultPage
     };
 
     private StyledString highlight(String text)
+    {
+        return highlight(text, queryText);
+    }
+
+    /** @param queryText подстрока для подсветки: строка поиска либо слово с ошибкой орфографии */
+    private StyledString highlight(String text, String queryText)
     {
         if (text == null)
             return new StyledString("");
@@ -1213,6 +1674,11 @@ public class CompareSearchResultPage implements ISearchResultPage
     {
         if (match == null || searchResult == null)
             return;
+        if (searchResult.isSpelling())
+        {
+            UserTextSpellCheck.open(match);
+            return;
+        }
         if (searchResult.getProject() != null)
         {
             MdReferenceSupport.open(searchResult.getProject(), match.getProjectLocation(), match.getReferenceFqn());
@@ -1269,6 +1735,11 @@ public class CompareSearchResultPage implements ISearchResultPage
 
     private void applyMissingObjectsFilter()
     {
+        if (wordsMode)
+        {
+            applyWordsFilter();
+            return;
+        }
         if (missingObjectsRoot == null || missingObjectsTree.isDisposed())
             return;
         String text = missingObjectsSearch.getText().strip().toLowerCase(Locale.ROOT);
@@ -1327,6 +1798,17 @@ public class CompareSearchResultPage implements ISearchResultPage
     {
         if (missingObjectsTree == null || missingObjectsTree.isDisposed())
             return;
+        if (result.isSpelling())
+        {
+            updateWordsTable(result);
+            return;
+        }
+        if (wordsMode)
+        {
+            wordsMode = false;
+            showWordsPane(false);
+            resultSplit.setWeights(25, 75);
+        }
         boolean brokenLinks = result.getProject() != null || "битые ссылки".equals(result.getQueryText())
             || result.getMatches().stream().anyMatch(match -> match.getReferenceFqn() != null);
         missingObjectsTree.setRedraw(false);
@@ -1353,7 +1835,8 @@ public class CompareSearchResultPage implements ISearchResultPage
             for (CompareSearchMatch match : result.getMatches())
             {
                 root.matches.add(match);
-                String name = match.getMatchText();
+                // Орфография: дерево — объекты с ошибками, а не цели ссылок.
+                String name = result.isSpelling() ? match.getObjectPath() : match.getMatchText();
                 if (name == null || name.isBlank())
                     name = match.getReferenceFqn();
                 if (name == null || name.isBlank())
@@ -1433,6 +1916,9 @@ public class CompareSearchResultPage implements ISearchResultPage
                 }
             }
             missingObjectsRoot = root;
+            missingObjectGoAction.setToolTipText(TooltipText.wrap(missingObjectsTree, (result.isSpelling()
+                ? "Открыть объект в редакторе" : "Активировать объект в дереве сравнения")
+                + Global.pluginSignForTooltip()));
             // Input — контейнер корней. Сам корень не должен совпадать с input:
             // AbstractTreeViewer иначе снова запрашивает getElements вместо getChildren.
             missingObjectsViewer.setInput(List.of(root));
@@ -1454,7 +1940,7 @@ public class CompareSearchResultPage implements ISearchResultPage
         saveColumnLayout();
         if (searchResult != null && tableInteraction != null && table != null && !table.isDisposed())
         {
-            columnStates.put(searchResult.getProject() != null, tableInteraction.captureColumnState());
+            columnStates.put(modeOf(searchResult), tableInteraction.captureColumnState());
             resultStates.put(searchResult, captureResultState());
         }
         if (search instanceof CompareSearchResult csr)
@@ -1467,12 +1953,11 @@ public class CompareSearchResultPage implements ISearchResultPage
                 boolean projectMode = csr.getProject() != null;
                 IDialogSettings settings = dialogSettings();
                 tableInteraction.setColumnHidden(checkColumn, projectMode, CHECK_COLUMN_WIDTH);
-                tableInteraction.setColumnHidden(table.getColumn(4), projectMode,
-                    FormTableColumnState.readWidth(settings, KEY_COL_STATUS_WIDTH, 100, 1));
-                tableInteraction.setColumnHidden(table.getColumn(5), projectMode,
-                    FormTableColumnState.readWidth(settings, KEY_COL_SIDE_WIDTH, 100, 1));
+                applyTailColumns(csr);
+                // У каждого режима свой набор колонок — и своя запомненная сортировка.
+                tableInteraction.setHeaderSortSettings(settings);
                 updateMissingObjectsTree(csr);
-                FormTableInteraction.ColumnState columns = columnStates.get(projectMode);
+                FormTableInteraction.ColumnState columns = columnStates.get(modeOf(csr));
                 if (columns != null)
                     tableInteraction.restoreColumnState(columns);
                 else
@@ -1531,7 +2016,13 @@ public class CompareSearchResultPage implements ISearchResultPage
         if (tableViewer == null || table == null || table.isDisposed() || tableInteraction == null)
             return null;
         List<String> path = new ArrayList<>();
-        if (missingObjectsViewer != null && !missingObjectsTree.isDisposed()
+        if (wordsMode && wordsViewer != null)
+        {
+            // В режиме орфографии «путь» — выбранные слова.
+            for (Object row : wordsViewer.getStructuredSelection().toList())
+                path.add(((WordRow) row).word);
+        }
+        else if (missingObjectsViewer != null && !missingObjectsTree.isDisposed()
             && missingObjectsViewer.getStructuredSelection().getFirstElement() instanceof MissingObjectNode node)
         {
             while (node.parent != null)
@@ -1550,7 +2041,20 @@ public class CompareSearchResultPage implements ISearchResultPage
     {
         if (state == null)
             return;
-        if (missingObjectsRoot != null)
+        if (wordsMode)
+        {
+            missingObjectsSearch.setText(state.treeFilter);
+            applyWordsFilter();
+            List<WordRow> chosen = new ArrayList<>();
+            if (state.treePath.contains(allWordsRow.word))
+                chosen.add(allWordsRow);
+            for (WordRow row : allWords)
+                if (state.treePath.contains(row.word))
+                    chosen.add(row);
+            wordsViewer.setSelection(new StructuredSelection(chosen), true);
+            showWordsMatches();
+        }
+        else if (missingObjectsRoot != null)
         {
             missingObjectsSearch.setText(state.treeFilter);
             applyMissingObjectsFilter();
@@ -1569,28 +2073,90 @@ public class CompareSearchResultPage implements ISearchResultPage
         tableInteraction.restoreActiveColumn(state.activeColumn);
     }
 
+    /**
+     * Колонки результата: общие (путь, свойство, текст) и «хвост» своего режима — у сравнения «Статус» и
+     * «Колонка», у орфографии «Слово». Лишних колонок в таблице нет, а не скрыты нулевой шириной:
+     * скрытая колонка посреди шапки на Win32 «вылезает» при перетаскивании соседней границы.
+     */
+    private void applyTailColumns(CompareSearchResult csr)
+    {
+        String mode = modeOf(csr);
+        if (mode.equals(tailMode))
+            return;
+        tailMode = mode;
+        for (int i = table.getColumnCount() - 1; i >= BASE_COLUMNS; i--)
+            table.getColumn(i).dispose();
+        IDialogSettings settings = dialogSettings();
+        if (csr.isSpelling())
+            addWordColumn(settings);
+        else if (csr.getProject() == null)
+        {
+            addStatusColumn(settings);
+            addColumnSideColumn(settings);
+        }
+        TableColumn[] ownerDraw = new TableColumn[table.getColumnCount() - 1];
+        for (int i = 1; i < table.getColumnCount(); i++)
+            ownerDraw[i - 1] = table.getColumn(i);
+        tableInteraction.setOwnerDrawColumns(ownerDraw);
+        tableViewer.refresh();
+    }
+
+    /** Ключи настроек ширины колонок (без колонки пометки) в порядке создания. */
+    private String[] columnWidthKeys()
+    {
+        String[] keys = new String[Math.max(0, table.getColumnCount() - 1)];
+        for (int i = 0; i < keys.length; i++)
+            keys[i] = (String) table.getColumn(i + 1).getData(COLUMN_WIDTH_KEY);
+        return keys;
+    }
+
+    private static int defaultColumnWidth(String key)
+    {
+        return switch (key)
+        {
+            case KEY_COL_PATH_WIDTH -> 360;
+            case KEY_COL_PROPERTY_WIDTH -> 200;
+            case KEY_COL_TEXT_WIDTH -> 250;
+            case KEY_COL_WORD_WIDTH -> 140;
+            default -> 100;
+        };
+    }
+
     private void restoreColumnLayout(IDialogSettings settings)
     {
         FormTableColumnState.loadOrder(settings, KEY_COL_ORDER, table);
-        tableInteraction.restoreColumnWidths(new int[] { CHECK_COLUMN_WIDTH,
-            FormTableColumnState.readWidth(settings, KEY_COL_PATH_WIDTH, 360, 1),
-            FormTableColumnState.readWidth(settings, KEY_COL_PROPERTY_WIDTH, 200, 1),
-            FormTableColumnState.readWidth(settings, KEY_COL_TEXT_WIDTH, 250, 1),
-            FormTableColumnState.readWidth(settings, KEY_COL_STATUS_WIDTH, 100, 1),
-            FormTableColumnState.readWidth(settings, KEY_COL_SIDE_WIDTH, 100, 1) },
-            !FormTableColumnState.hasSavedColumnWidths(settings, KEY_COL_FILL_MODE,
-                KEY_COL_PATH_WIDTH, KEY_COL_PROPERTY_WIDTH, KEY_COL_TEXT_WIDTH,
-                KEY_COL_STATUS_WIDTH, KEY_COL_SIDE_WIDTH));
+        String[] keys = columnWidthKeys();
+        int[] widths = new int[keys.length + 1];
+        widths[0] = CHECK_COLUMN_WIDTH;
+        for (int i = 0; i < keys.length; i++)
+            widths[i + 1] = FormTableColumnState.readWidth(settings, keys[i], defaultColumnWidth(keys[i]), 1);
+        tableInteraction.restoreColumnWidths(widths,
+            !FormTableColumnState.hasSavedColumnWidths(settings, KEY_COL_FILL_MODE, keys));
     }
 
     @Override
     public void setActionBars(IActionBars actionBars)
     {
+        // Ctrl+A в панели «Поиск» идёт командой «Выделить всё»; без обработчика страницы она недоступна.
+        actionBars.setGlobalActionHandler(ActionFactory.SELECT_ALL.getId(), new Action()
+        {
+            @Override
+            public void run()
+            {
+                if (table != null && !table.isDisposed() && table.isFocusControl())
+                {
+                    table.selectAll();
+                    table.notifyListeners(SWT.Selection, new org.eclipse.swt.widgets.Event());
+                }
+            }
+        });
+        actionBars.updateActionBars();
     }
 
     @Override
     public void dispose()
     {
+        LIVE_PAGES.remove(this);
         saveColumnLayout();
         uninstallTreeCheckListener();
         disposeCheckImages();
@@ -1603,6 +2169,13 @@ public class CompareSearchResultPage implements ISearchResultPage
         missingObjectsRoot = null;
         missingObjectsResources = null;
         missingObjectGoAction = null;
+        treeHost = null;
+        wordsStack = null;
+        wordsTable = null;
+        wordsViewer = null;
+        wordsInteraction = null;
+        allWords = List.of();
+        wordsMode = false;
         table = null;
         tableViewer = null;
         searchResult = null;
@@ -1710,15 +2283,17 @@ public class CompareSearchResultPage implements ISearchResultPage
      */
     private void saveColumnLayout()
     {
-        if (table == null || table.isDisposed() || table.getColumnCount() < 6 || searchResult == null)
+        saveWordsLayout();
+        if (table == null || table.isDisposed() || table.getColumnCount() < BASE_COLUMNS || searchResult == null
+            || tailMode == null)
             return;
         boolean fillMode = tableInteraction != null && tableInteraction.isColumnsExactFill();
+        String[] keys = columnWidthKeys();
+        int[] widths = new int[keys.length];
+        for (int i = 0; i < widths.length; i++)
+            widths[i] = table.getColumn(i + 1).getWidth();
         FormTableColumnState.saveOrderAndWidths(dialogSettings(), KEY_COL_ORDER, KEY_COL_FILL_MODE, fillMode,
-            new String[] { KEY_COL_PATH_WIDTH, KEY_COL_PROPERTY_WIDTH, KEY_COL_TEXT_WIDTH,
-                KEY_COL_STATUS_WIDTH, KEY_COL_SIDE_WIDTH },
-            new int[] { table.getColumn(1).getWidth(), table.getColumn(2).getWidth(),
-                table.getColumn(3).getWidth(), table.getColumn(4).getWidth(), table.getColumn(5).getWidth() },
-            table);
+            keys, widths, table);
     }
 
     private IDialogSettings dialogSettings()
@@ -1729,9 +2304,11 @@ public class CompareSearchResultPage implements ISearchResultPage
             section = top.addNewSection(SETTINGS_SECTION);
         if (searchResult != null && searchResult.getProject() != null)
         {
-            IDialogSettings project = section.getSection("project"); //$NON-NLS-1$
+            // У режима «Ошибки орфографии» свой набор колонок — и свои порядок и ширины.
+            String name = searchResult.isSpelling() ? "spelling" : "project"; //$NON-NLS-1$ //$NON-NLS-2$
+            IDialogSettings project = section.getSection(name);
             if (project == null)
-                project = section.addNewSection("project"); //$NON-NLS-1$
+                project = section.addNewSection(name);
             return project;
         }
         return section;

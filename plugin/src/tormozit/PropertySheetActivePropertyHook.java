@@ -1158,6 +1158,10 @@ public class PropertySheetActivePropertyHook implements IStartup
     {
         if (page == null || activePropertyName == null || attempt >= REVEAL_RETRIES)
             return;
+        // Идёт переход к свойству: ввод ставит только Activation, иначе два возврата ввода
+        // (к прежнему текущему свойству и к целевому) перебивают друг друга.
+        if (Activation.isActive())
+            return;
         // Палитра перезаполняется на КАЖДУЮ букву фильтра, и ввод в это время принадлежит полю
         // фильтра — отбирать его нельзя. Доводка нужна, когда фильтр снят и список вернулся
         // к полному виду.
@@ -1195,6 +1199,199 @@ public class PropertySheetActivePropertyHook implements IStartup
         Display display = Display.getDefault();
         if (display != null && !display.isDisposed())
             display.timerExec(REVEAL_RETRY_MS, () -> revealLabel(page, attempt + 1));
+    }
+
+    // =========================================================================
+    // Единая точка программной активации свойства
+    // =========================================================================
+
+    /**
+     * Единственное место, которое при переходе к свойству ставит ввод в его поле панели
+     * «Свойства» и выделяет в поле фрагмент (issue #757). Раньше этим одновременно занимались
+     * несколько независимых циклов — ожидание поля, удержание фокуса, повторное выделение,
+     * возврат ввода после перезаполнения панели: каждый действовал по своему таймеру, и поле
+     * мигало, а итог зависел от того, кто сработал последним.
+     *
+     * <p>Запрос один: новый переход отменяет прежний. Всё делает {@link #pump} по одному таймеру,
+     * и он идемпотентен: пока ввод в поле цели, а фрагмент выделен, он ничего не трогает. Действие
+     * выполняется, только когда состояние реально разошлось с целью — панель показала нужный
+     * объект, EDT при дозаполнении увела ввод в первое поле либо пересоздала поле.
+     *
+     * <p>Переход завершается, когда ввод продержался в поле {@link #SETTLE_MS}, пользователь
+     * что-то нажал, сменилось активное окно или истёк {@link #TIMEOUT_MS}.
+     */
+    static final class Activation
+    {
+        /** Находит поле свойства в актуальной сцене панели; сам ничего не активирует. */
+        interface Target
+        {
+            /**
+             * @param page страница панели «Свойства»
+             * @param scene её сцена AEF
+             * @return компонент поля; {@code null} — панель ещё не показывает нужный объект или
+             *         поле не построено (ждать дальше)
+             */
+            Object locate(Object page, Object scene);
+        }
+
+        private static final int TICK_MS = 150;
+        /** Панель наполняется асинхронно ({@code MdPropertySheetPage} ведёт свой прогресс). */
+        private static final int TIMEOUT_MS = 6000;
+        /** Сколько ввод должен продержаться в поле, чтобы переход считался состоявшимся. */
+        private static final int SETTLE_MS = 1200;
+        private static final String LOG_TOPIC = "property-activation"; //$NON-NLS-1$
+
+        private static Target target;
+        private static IWorkbenchPage workbenchPage;
+        private static int[] range;
+        private static Object token;
+        private static org.eclipse.swt.widgets.Shell shell;
+        private static long startedAt;
+        /** С какого момента ввод непрерывно в поле цели; 0 — сейчас он не там. */
+        private static long stableSince;
+        /** Поле, в котором фрагмент уже выделен: пересозданное поле — другой объект. */
+        private static Object selectedField;
+        /** Панель после получения ввода сама дообновляет поле и сбрасывает выделение — один повтор. */
+        private static boolean selectionRepeated;
+        private static long lastUserInput;
+        private static boolean inputListenerInstalled;
+
+        private Activation() {}
+
+        /**
+         * @param newRange диапазон {offset, length} для выделения в поле; {@code null} — поле
+         *        активируется без выделения фрагмента
+         */
+        static void request(IWorkbenchPage page, Target newTarget, int[] newRange)
+        {
+            Display display = Display.getDefault();
+            if (page == null || newTarget == null || display == null || display.isDisposed())
+                return;
+            if (!inputListenerInstalled)
+            {
+                inputListenerInstalled = true;
+                Listener listener = event -> lastUserInput = System.currentTimeMillis();
+                display.addFilter(SWT.MouseDown, listener);
+                display.addFilter(SWT.KeyDown, listener);
+            }
+            target = newTarget;
+            workbenchPage = page;
+            range = newRange != null && newRange.length == 2 && newRange[0] >= 0 && newRange[1] > 0
+                ? newRange : null;
+            startedAt = System.currentTimeMillis();
+            stableSince = 0;
+            selectedField = null;
+            selectionRepeated = false;
+            shell = display.getActiveShell();
+            Object mine = new Object();
+            token = mine;
+            Global.tempLog(LOG_TOPIC, "request range=" + (range != null ? range[0] + "+" + range[1] : null)); //$NON-NLS-1$ //$NON-NLS-2$
+            schedule(display, mine);
+        }
+
+        /** Идёт переход: другим механизмам ввод в панели сейчас трогать нельзя. */
+        static boolean isActive()
+        {
+            return target != null;
+        }
+
+        /** Отменить переход (открытие сорвалось либо активацию взял на себя другой сценарий). */
+        static void cancel()
+        {
+            if (target != null)
+                finish("cancelled"); //$NON-NLS-1$
+        }
+
+        private static void schedule(Display display, Object mine)
+        {
+            display.timerExec(TICK_MS, () -> {
+                if (mine != token || target == null || display.isDisposed())
+                    return;
+                try
+                {
+                    pump(display);
+                }
+                catch (Throwable t)
+                {
+                    Global.logError("PropertySheetActiveProperty", "Activation.pump", t); //$NON-NLS-1$ //$NON-NLS-2$
+                    finish("failed " + t); //$NON-NLS-1$
+                }
+                if (mine == token && target != null)
+                    schedule(display, mine);
+            });
+        }
+
+        private static void pump(Display display)
+        {
+            long now = System.currentTimeMillis();
+            if (lastUserInput > startedAt)
+            {
+                finish("user input"); //$NON-NLS-1$
+                return;
+            }
+            if (display.getActiveShell() != shell)
+            {
+                finish("shell changed"); //$NON-NLS-1$
+                return;
+            }
+            if (now - startedAt > TIMEOUT_MS)
+            {
+                finish("timeout"); //$NON-NLS-1$
+                return;
+            }
+            IViewPart view = ConfigSearchResultsHook.PropertyFieldFocus.findPropertySheetView(workbenchPage);
+            Object page = view != null ? PropertyNameIdentifierHook.resolvePropertySheetPage(view) : null;
+            Object scene = page != null ? Global.invoke(page, "getScene") : null; //$NON-NLS-1$
+            Object field = scene != null ? target.locate(page, scene) : null;
+            if (field == null)
+            {
+                stableSince = 0;
+                return;
+            }
+            if (AefFieldFocus.isComponentFocused(scene, field))
+            {
+                if (range != null && (selectedField != field || !selectionRepeated))
+                {
+                    selectionRepeated = selectedField == field;
+                    select(scene, field);
+                }
+                if (stableSince == 0)
+                    stableSince = now;
+                else if (now - stableSince >= SETTLE_MS)
+                    finish("settled"); //$NON-NLS-1$
+                return;
+            }
+            // Ввода в поле нет: первая активация либо EDT увела его при дозаполнении панели.
+            stableSince = 0;
+            boolean focused = AefFieldFocus.focusComponent(scene, field);
+            Global.tempLog(LOG_TOPIC, "focus field=" + field.getClass().getSimpleName() + " focused=" + focused //$NON-NLS-1$ //$NON-NLS-2$
+                + " ms=" + (now - startedAt)); //$NON-NLS-1$
+            if (focused)
+            {
+                stableSince = now;
+                selectionRepeated = false;
+                if (range != null)
+                    select(scene, field);
+            }
+        }
+
+        private static void select(Object scene, Object field)
+        {
+            boolean selected = AefFieldFocus.selectRangeInFocusedField(scene, field, range[0], range[1]);
+            selectedField = field;
+            Global.tempLog(LOG_TOPIC, "select field=" + field.getClass().getSimpleName() + " selected=" + selected //$NON-NLS-1$ //$NON-NLS-2$
+                + " ms=" + (System.currentTimeMillis() - startedAt)); //$NON-NLS-1$
+        }
+
+        private static void finish(String reason)
+        {
+            Global.tempLog(LOG_TOPIC, "finish " + reason + " ms=" + (System.currentTimeMillis() - startedAt)); //$NON-NLS-1$ //$NON-NLS-2$
+            target = null;
+            token = null;
+            workbenchPage = null;
+            selectedField = null;
+            onActivationSettled();
+        }
     }
 
     /**

@@ -179,6 +179,11 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
     private boolean headerSortEnabled;
     private TableColumn headerSortColumn;
     private boolean headerSortAscending = true;
+    /** Куда записывается сортировка по заголовку; {@code null} — не запоминается. */
+    private IDialogSettings headerSortSettings;
+    /** Сохранённая сортировка по колонке, которой в таблице пока нет; -1 — нет отложенной. */
+    private int pendingSortColumn = -1;
+    private boolean pendingSortAscending;
     /** Оттенки подсветки — общие для всех списков плагина. */
     private static final ListSelectionPalette.Mode PALETTE =
         ListSelectionPalette.Mode.NATIVE_SELECTION;
@@ -198,6 +203,8 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
     private boolean externalMenuPopulation;
     private ViewerFilter columnValueViewerFilter;
     private Runnable substringFilterClearer;
+    private java.util.function.Supplier<Object> externalFilterState;
+    private java.util.function.Predicate<Object> pinnedTop;
     private Runnable columnFilterChangeListener;
     private Image filterGlyph;
 
@@ -568,6 +575,62 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
             installHeaderSortListener(column);
     }
 
+    /** Индекс колонки текущей сортировки по заголовку; -1 — сортировки нет. */
+    int headerSortColumnIndex()
+    {
+        return headerSortColumn == null || headerSortColumn.isDisposed() || table.isDisposed()
+            ? -1 : table.indexOf(headerSortColumn);
+    }
+
+    boolean isHeaderSortAscending()
+    {
+        return headerSortAscending;
+    }
+
+    /**
+     * То же, что {@link #enableHeaderSort()}, с запоминанием сортировки в настройках: сохранённая
+     * применяется сразу, каждая смена пользователем записывается. Раздел настроек — свой у таблицы
+     * (тот же, где её порядок и ширины колонок).
+     */
+    void enableHeaderSort(IDialogSettings settings)
+    {
+        enableHeaderSort();
+        setHeaderSortSettings(settings);
+    }
+
+    /**
+     * Сменить раздел настроек сортировки (у таблицы несколько режимов со своими колонками) и применить
+     * сохранённую в нём. Без сохранённой — текущая сортировка остаётся.
+     */
+    void setHeaderSortSettings(IDialogSettings settings)
+    {
+        headerSortSettings = settings;
+        pendingSortColumn = -1;
+        FormTableColumnState.loadSort(settings, FormTableColumnState.KEY_HEADER_SORT, this);
+    }
+
+    /**
+     * Применить сохранённую сортировку по заголовку (после {@link #enableHeaderSort()}); хранение —
+     * {@link FormTableColumnState#saveSort} / {@link FormTableColumnState#loadSort}. Колонки ещё нет
+     * (добавляется позже) — сортировка применится в {@link #notifyColumnsChanged()}.
+     */
+    void restoreHeaderSort(int column, boolean ascending)
+    {
+        if (!headerSortEnabled || table == null || table.isDisposed() || column < 0)
+            return;
+        if (column >= table.getColumnCount())
+        {
+            pendingSortColumn = column;
+            pendingSortAscending = ascending;
+            return;
+        }
+        pendingSortColumn = -1;
+        headerSortColumn = table.getColumn(column);
+        // sortByHeader переключает направление у уже отсортированной колонки.
+        headerSortAscending = !ascending;
+        sortByHeader(headerSortColumn);
+    }
+
     /**
      * Дополнительный текст подсказки заголовка колонки (описание параметра и т.п.).
      * Если заголовок обрезан, имя колонки показывается сверху, затем этот текст.
@@ -595,6 +658,8 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
         {
             for (TableColumn column : table.getColumns())
                 installHeaderSortListener(column);
+            if (pendingSortColumn >= 0)
+                restoreHeaderSort(pendingSortColumn, pendingSortAscending);
         }
         scheduleHeaderOverlayUpdate();
         lastAutoFillClientWidth = -1;
@@ -623,12 +688,17 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
             @Override
             public int compare(Viewer viewer, Object e1, Object e2)
             {
+                boolean pinned1 = pinnedTop != null && pinnedTop.test(e1);
+                boolean pinned2 = pinnedTop != null && pinnedTop.test(e2);
+                if (pinned1 != pinned2)
+                    return pinned1 ? -1 : 1;
                 int cmp = compareHeaderSortKeys(headerSortKey(e1, sortColumn), headerSortKey(e2, sortColumn));
                 return ascending ? cmp : -cmp;
             }
         });
         table.setSortColumn(column);
         table.setSortDirection(ascending ? SWT.UP : SWT.DOWN);
+        FormTableColumnState.saveSort(headerSortSettings, FormTableColumnState.KEY_HEADER_SORT, this);
         if (selected.length > 0)
             multiSelectViewer.setSelection(new StructuredSelection(selected), true);
         resyncSelectionTheme();
@@ -851,6 +921,27 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
     void setSubstringFilterClearer(Runnable substringFilterClearer)
     {
         this.substringFilterClearer = substringFilterClearer;
+    }
+
+    /**
+     * Служебные строки (например «&lt;Все&gt;»), которые сортировка по заголовку оставляет наверху при
+     * любом направлении.
+     */
+    void setPinnedTop(java.util.function.Predicate<Object> pinnedTop)
+    {
+        this.pinnedTop = pinnedTop;
+    }
+
+    /**
+     * Состояние отбора, которым управляет потребитель (текст поля поиска, выбранный узел или строка
+     * соседнего списка) — значение со своим {@code equals}. Сама таблица такого отбора не видит, а
+     * знать о его смене обязана: {@link #restoreSelection} берёт строку по номеру только при прежнем
+     * отборе. Потребитель с отбором по подстроке, вызывающий {@link #captureSelection()}, обязан
+     * задать этот источник.
+     */
+    void setExternalFilterState(java.util.function.Supplier<Object> externalFilterState)
+    {
+        this.externalFilterState = externalFilterState;
     }
 
     /**
@@ -1881,26 +1972,42 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
      * находят). Тот же класс проблемы описан в javadoc {@link #isRowSelected}
      * ({@code MatchRow}/{@code FileSearchRow} без {@code equals()}).
      */
-    private static final class SelectionSnapshot
+    static final class SelectionSnapshot
     {
         final Object activeElement;
         final String activeKey;
+        /**
+         * Номер активной строки. Запасной ориентир: строки нет ни по элементу, ни по ключу (её
+         * удалили) — активной становится строка на том же месте, а не первая и не «никакая».
+         */
+        final int activeIndex;
+        /**
+         * Отбор и сортировка на момент снимка. Номер строки что-то значит только при тех же отборе
+         * и сортировке: иначе на этом месте стоит посторонняя строка.
+         */
+        final Object[] viewState;
         final int activeColumn;
         final List<Object> selectedElements;
         final List<String> selectedKeys;
 
-        SelectionSnapshot(Object activeElement, String activeKey, int activeColumn,
-            List<Object> selectedElements, List<String> selectedKeys)
+        SelectionSnapshot(Object activeElement, String activeKey, int activeIndex, Object[] viewState,
+            int activeColumn, List<Object> selectedElements, List<String> selectedKeys)
         {
+            this.viewState = viewState;
             this.activeElement = activeElement;
             this.activeKey = activeKey;
+            this.activeIndex = activeIndex;
             this.activeColumn = activeColumn;
             this.selectedElements = selectedElements;
             this.selectedKeys = selectedKeys;
         }
     }
 
-    private SelectionSnapshot captureSelection()
+    /**
+     * Снимок активной строки и выделения — до обновления строк таблицы самим потребителем
+     * ({@code setInput}, пересборка списка); после обновления — {@link #restoreSelection}.
+     */
+    SelectionSnapshot captureSelection()
     {
         TableItem active = activeRow();
         boolean activeAlive = active != null && !active.isDisposed();
@@ -1920,8 +2027,23 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
                     selectedKeys.add(key);
             }
         }
-        return new SelectionSnapshot(activeElement, activeKey, activeColumnIndex(),
+        return new SelectionSnapshot(activeElement, activeKey,
+            activeAlive && !table.isDisposed() ? table.indexOf(active) : -1, viewState(), activeColumnIndex(),
             selectedElements, selectedKeys);
+    }
+
+    /**
+     * Отбор и сортировка таблицы для сравнения «до» и «после»: отборы по колонкам, фильтры viewer и
+     * его компаратор (при каждой смене сортировки по заголовку он создаётся заново), отбор потребителя
+     * ({@link #setExternalFilterState}).
+     */
+    private Object[] viewState()
+    {
+        return new Object[] { externalFilterState != null ? externalFilterState.get() : null,
+            new LinkedHashMap<>(columnValueFilters),
+            multiSelectViewer != null ? Arrays.asList(multiSelectViewer.getFilters()) : List.of(),
+            multiSelectViewer != null ? multiSelectViewer.getComparator() : null,
+            headerSortColumn, Boolean.valueOf(headerSortAscending) };
     }
 
     /**
@@ -2175,11 +2297,30 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
     {
         if (multiSelectViewer == null || table.isDisposed())
             return;
+        multiSelectViewer.refresh();
+        // Сюда приходят только после смены отбора по колонкам — номер строки уже ничего не значит.
+        // Снимок при этом бывает снят уже после изменения набора отборов, так что сравнение
+        // состояний этого не покажет.
+        restoreSelection(snapshot, false);
+    }
+
+    /**
+     * Вернуть активную строку и выделение из {@link #captureSelection()} после того, как строки
+     * таблицы обновлены. Строка ищется по элементу модели, затем по текстовому ключу; не нашлась
+     * (удалена) — берётся строка с тем же номером, для последней — новая последняя.
+     */
+    void restoreSelection(SelectionSnapshot snapshot)
+    {
+        restoreSelection(snapshot, true);
+    }
+
+    private void restoreSelection(SelectionSnapshot snapshot, boolean allowIndex)
+    {
+        if (snapshot == null || multiSelectViewer == null || table.isDisposed())
+            return;
         Object activeElement = snapshot.activeElement;
         int column = snapshot.activeColumn;
         List<Object> selectedElements = snapshot.selectedElements;
-
-        multiSelectViewer.refresh();
 
         selectedItem = null;
         selectionAnchor = null;
@@ -2223,6 +2364,20 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
                     if (activeKey.equals(key))
                         activeRowAfter = row;
                 }
+            }
+        }
+        // Активной строки больше нет (удалена) и из выделения ничего не уцелело — строка на её месте.
+        // Ключ, найденный среди ещё не материализованных строк виртуальной таблицы, — не удаление.
+        // Только при прежних отборе и сортировке: иначе на этом номере стоит посторонняя строка.
+        if (allowIndex && activeRowAfter == null && elementsToSelect.isEmpty() && snapshot.activeIndex >= 0
+            && Arrays.equals(snapshot.viewState, viewState()) && table.getItemCount() > 0 && (activeKey == null || findDisplayedIndexByKey(activeKey) < 0))
+        {
+            TableItem fallback = table.getItem(Math.min(snapshot.activeIndex, table.getItemCount() - 1));
+            Object data = fallback.getData();
+            if (data != null)
+            {
+                activeRowAfter = fallback;
+                elementsToSelect.add(data);
             }
         }
         suppressTableToViewerSync++;

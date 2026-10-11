@@ -480,7 +480,7 @@ public final class CallHierarchyViewHook implements IStartup
         boolean hasSaved = settings.get(KEY_COL_LINE_WIDTH) != null
             || settings.get(KEY_COL_INFO_WIDTH) != null;
         interaction.install(hasSaved);
-        interaction.enableHeaderSort();
+        interaction.enableHeaderSort(settings);
         enhanceSplitter(sash, tableStack);
 
         Menu menu = table.getMenu();
