@@ -12,6 +12,7 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
@@ -53,6 +54,8 @@ import com._1c.g5.v8.bm.integration.AbstractBmTask;
 import com._1c.g5.v8.bm.integration.IBmModel;
 import com._1c.g5.v8.dt.core.platform.IBmModelManager;
 import com._1c.g5.v8.dt.core.platform.IResourceLookup;
+import com._1c.g5.v8.dt.form.model.FormPackage;
+import com._1c.g5.v8.dt.mcore.ContextDef;
 import com._1c.g5.v8.dt.mcore.McorePackage;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicCommand;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicForm;
@@ -69,12 +72,41 @@ import com._1c.g5.v8.dt.ui.util.OpenHelper;
  * конфигурации ({@link #isUserText}, {@link ConfigSearchDialogHook#isInsideNStrLiteral}).
  * Ошибки ищет {@link ComfortSpellingEngine#findMisspelledRanges}; результат — в панели «Поиск»
  * в режиме «Ошибки орфографии» ({@link CompareSearchResult#isSpelling}).
+ *
+ * <p>Команда {@link #TITLE_ALL} проверяет ещё и программные тексты: имена и комментарии объектов
+ * модели ({@link #isProgramText}), комментарии, строки и имена модулей ({@link #scanModule}). Строки
+ * результата различает {@link CompareSearchMatch#isUserText}.
  */
 final class UserTextSpellCheck
 {
     static final String TITLE = "Проверить орфографию в текстах пользователя";
+    /** Та же проверка, дополненная программными текстами: {@link #isProgramText} и весь текст модулей. */
+    static final String TITLE_ALL = "Проверить орфографию во всех текстах";
 
     private static final String JOB_NAME = "Проверка орфографии в текстах пользователя";
+    private static final String JOB_NAME_ALL = "Проверка орфографии во всех текстах";
+    /** Вид текста с ошибкой в модуле: третий элемент описания ошибки. */
+    private static final int KIND_USER = 0;
+    private static final int KIND_PROGRAM = 1;
+    private static final int KIND_IDENTIFIER = 2;
+    /** Программные тексты модели: имена и комментарии разработчика. */
+    private static final Set<EAttribute> PROGRAM_NAMES = Set.of(McorePackage.Literals.NAMED_ELEMENT__NAME,
+        MdClassPackage.Literals.MD_OBJECT__NAME, MdClassPackage.Literals.PREDEFINED_ITEM__NAME);
+    private static final Set<EAttribute> PROGRAM_COMMENTS = Set.of(MdClassPackage.Literals.MD_OBJECT__COMMENT,
+        FormPackage.Literals.FORM_ATTRIBUTE__COMMENT, FormPackage.Literals.FORM_COMMAND__COMMENT,
+        FormPackage.Literals.FORM_PARAMETER__COMMENT);
+    private static final Map<EClass, List<EAttribute>> ALL_TEXT_ATTRIBUTES = new ConcurrentHashMap<>();
+    /** Ключевые слова языка (в нижнем регистре): как имена на орфографию не проверяются. */
+    private static final Set<String> KEYWORDS = Set.of(
+        "если", "тогда", "иначеесли", "иначе", "конецесли", "для", "каждого", "из", "по", "пока", "цикл", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$ //$NON-NLS-7$ //$NON-NLS-8$ //$NON-NLS-9$ //$NON-NLS-10$ //$NON-NLS-11$
+        "конеццикла", "процедура", "конецпроцедуры", "функция", "конецфункции", "перем", "знач", "экспорт", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$ //$NON-NLS-7$ //$NON-NLS-8$
+        "возврат", "продолжить", "прервать", "перейти", "попытка", "исключение", "конецпопытки", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$ //$NON-NLS-7$
+        "вызватьисключение", "новый", "выполнить", "и", "или", "не", "истина", "ложь", "неопределено", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$ //$NON-NLS-7$ //$NON-NLS-8$ //$NON-NLS-9$
+        "добавитьобработчик", "удалитьобработчик", "асинх", "ждать", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+        "if", "then", "elsif", "else", "endif", "for", "each", "in", "to", "while", "do", "enddo", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$ //$NON-NLS-7$ //$NON-NLS-8$ //$NON-NLS-9$ //$NON-NLS-10$ //$NON-NLS-11$ //$NON-NLS-12$
+        "procedure", "endprocedure", "function", "endfunction", "var", "val", "export", "return", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$ //$NON-NLS-7$ //$NON-NLS-8$
+        "continue", "break", "goto", "try", "except", "endtry", "raise", "new", "execute", "and", "or", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$ //$NON-NLS-7$ //$NON-NLS-8$ //$NON-NLS-9$ //$NON-NLS-10$ //$NON-NLS-11$
+        "not", "true", "false", "undefined", "null", "addhandler", "removehandler", "async", "await"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$ //$NON-NLS-7$ //$NON-NLS-8$ //$NON-NLS-9$
     private static final String LOG_TOPIC = "spell-user-texts";
     private static final String BSL_EXTENSION = "bsl";
     /** Текст длиннее показывается фрагментом вокруг слова с ошибкой. */
@@ -95,19 +127,30 @@ final class UserTextSpellCheck
             || attribute == MdClassPackage.Literals.PREDEFINED_ITEM__DESCRIPTION;
     }
 
-    static void findInProject(IProject project)
+    /**
+     * Программный текст модели — имя или комментарий разработчика; проверяется только командой
+     * {@link #TITLE_ALL}.
+     */
+    static boolean isProgramText(EAttribute attribute)
     {
-        schedule(project, null, null);
+        return PROGRAM_NAMES.contains(attribute) || PROGRAM_COMMENTS.contains(attribute);
+    }
+
+    /** @param allTexts проверять и программные тексты ({@link #TITLE_ALL}) */
+    static void findInProject(IProject project, boolean allTexts)
+    {
+        schedule(project, null, null, allTexts);
     }
 
     /**
      * Проверка только выбранных объектов с вложенными; пустой набор не расширяется до проекта.
      *
      * @param scope подписи выбранных узлов для заголовка результата
+     * @param allTexts проверять и программные тексты ({@link #TITLE_ALL})
      */
-    static void findInObjects(IProject project, List<URI> roots, String scope)
+    static void findInObjects(IProject project, List<URI> roots, String scope, boolean allTexts)
     {
-        schedule(project, List.copyOf(roots), scope);
+        schedule(project, List.copyOf(roots), scope, allTexts);
     }
 
     /** Открывает строку результата тем же путём, что и результаты поиска по конфигурации. */
@@ -212,7 +255,7 @@ final class UserTextSpellCheck
                     // Свойства модели: правка текста владельца целиком, вхождения — с конца к началу.
                     Map<Long, List<CompareSearchMatch>> byObject = new HashMap<>();
                     for (CompareSearchMatch row : rows)
-                        if (row.getModelMatch() != null)
+                        if (row.getModelMatch() != null && !row.isIdentifier())
                             byObject.computeIfAbsent(row.getModelMatch().getObjectId(), id -> new ArrayList<>()).add(row);
                     Set<String> topNames = new LinkedHashSet<>();
                     Set<Long> topIds = new HashSet<>();
@@ -286,7 +329,8 @@ final class UserTextSpellCheck
                                             if (top != null && !top.eIsProxy())
                                                 pending.add(top);
                                         }
-                                        traverse(model, pending, fresh, SubMonitor.convert(monitor));
+                                        traverse(model, pending, fresh, SubMonitor.convert(monitor),
+                                            result.isAllTexts());
                                     }
                                     finally
                                     {
@@ -305,7 +349,7 @@ final class UserTextSpellCheck
                     // Модули: одна правка на файл; смещения остальных строк файла сдвигаются.
                     Map<IFile, List<CompareSearchMatch>> byFile = new LinkedHashMap<>();
                     for (CompareSearchMatch row : rows)
-                        if (row.getModuleFile() != null)
+                        if (row.getModuleFile() != null && !row.isIdentifier())
                             byFile.computeIfAbsent(row.getModuleFile(), file -> new ArrayList<>()).add(row);
                     Map<IFile, List<int[]>> applied = new HashMap<>();
                     for (Map.Entry<IFile, List<CompareSearchMatch>> entry : byFile.entrySet())
@@ -353,7 +397,7 @@ final class UserTextSpellCheck
                             .thenComparing(CompareSearchMatch::getMatchText, String.CASE_INSENSITIVE_ORDER));
                         CompareSearchResultPage.refreshResult(result);
                         if (replaced[0] < rows.size())
-                            ToastNotification.show(TITLE, "Исправлено " + replaced[0] + " из " + rows.size()
+                            ToastNotification.show(result.isAllTexts() ? TITLE_ALL : TITLE, "Исправлено " + replaced[0] + " из " + rows.size()
                                 + ": в остальных строках текст изменился после проверки.", 10_000);
                     });
                     Global.tempLog(LOG_TOPIC, "replace finished replaced=" + replaced[0] + " tops=" + topNames
@@ -425,24 +469,27 @@ final class UserTextSpellCheck
         }
     }
 
-    private static void schedule(IProject project, List<URI> roots, String scope)
+    private static void schedule(IProject project, List<URI> roots, String scope, boolean allTexts)
     {
         if (project == null)
             return;
-        new Job(JOB_NAME)
+        String title = allTexts ? TITLE_ALL : TITLE;
+        String jobName = allTexts ? JOB_NAME_ALL : JOB_NAME;
+        new Job(jobName)
         {
             @Override
             protected IStatus run(IProgressMonitor monitor)
             {
                 long started = System.currentTimeMillis();
-                Global.tempLog(LOG_TOPIC, "start project=" + project.getName() + " roots=" + roots);
+                Global.tempLog(LOG_TOPIC, "start project=" + project.getName() + " allTexts=" + allTexts
+                    + " roots=" + roots);
                 // Проектный словарь: активный проект из фонового потока не определяется.
                 ComfortSpellingEngine.setCheckProjectOverride(project);
                 try
                 {
                     if (ComfortSpellingEngine.sharedDictionaries().isEmpty())
                     {
-                        toast("Словари орфографии не загружены — см. Параметры → Общие → Орфография.");
+                        toast(title, "Словари орфографии не загружены — см. Параметры → Общие → Орфография.");
                         return Status.OK_STATUS;
                     }
                     IBmModelManager manager = Global.getOsgiService(IBmModelManager.class);
@@ -453,7 +500,7 @@ final class UserTextSpellCheck
                     List<CompareSearchMatch> matches = new ArrayList<>();
                     Set<IContainer> moduleFolders = new LinkedHashSet<>();
                     Thread caller = Thread.currentThread();
-                    model.executeReadonlyTask(new AbstractBmTask<Void>(JOB_NAME)
+                    model.executeReadonlyTask(new AbstractBmTask<Void>(jobName)
                     {
                         @Override
                         public Void execute(IBmTransaction transaction, IProgressMonitor taskMonitor)
@@ -461,7 +508,8 @@ final class UserTextSpellCheck
                             ComfortSpellingEngine.setCheckProjectOverride(project);
                             try
                             {
-                                checkModel(model, transaction, roots, matches, moduleFolders, progress.split(70));
+                                checkModel(model, transaction, roots, matches, moduleFolders, progress.split(70),
+                                    allTexts);
                             }
                             finally
                             {
@@ -476,7 +524,7 @@ final class UserTextSpellCheck
                     if (roots == null)
                         moduleFolders.add(project);
                     List<IFile> modules = moduleFiles(moduleFolders);
-                    checkModules(modules, matches, progress.split(30));
+                    checkModules(modules, matches, progress.split(30), allTexts);
                     if (monitor.isCanceled())
                         return Status.CANCEL_STATUS;
                     matches.sort(Comparator.comparing(CompareSearchMatch::getObjectPath, String.CASE_INSENSITIVE_ORDER)
@@ -487,7 +535,7 @@ final class UserTextSpellCheck
                         + " ms=" + (System.currentTimeMillis() - started));
                     if (matches.isEmpty())
                     {
-                        toast("Ошибок орфографии не найдено.");
+                        toast(title, "Ошибок орфографии не найдено.");
                         return Status.OK_STATUS;
                     }
                     Display.getDefault().asyncExec(() ->
@@ -495,6 +543,7 @@ final class UserTextSpellCheck
                         CompareSearchResult result = new CompareSearchResult(matches, null, project);
                         RESULTS.add(result);
                         result.setSpelling(true);
+                        result.setAllTexts(allTexts);
                         result.setScopeLabel(scope);
                         CompareSearchQuery query = new CompareSearchQuery();
                         result.setQuery(query);
@@ -520,13 +569,13 @@ final class UserTextSpellCheck
         }.schedule();
     }
 
-    private static void toast(String message)
+    private static void toast(String title, String message)
     {
-        Display.getDefault().asyncExec(() -> ToastNotification.show(TITLE, message, 10_000));
+        Display.getDefault().asyncExec(() -> ToastNotification.show(title, message, 10_000));
     }
 
     private static void checkModel(IBmModel model, IBmTransaction transaction, List<URI> roots,
-        List<CompareSearchMatch> matches, Set<IContainer> moduleFolders, SubMonitor monitor)
+        List<CompareSearchMatch> matches, Set<IContainer> moduleFolders, SubMonitor monitor, boolean allTexts)
     {
         ArrayDeque<EObject> pending = new ArrayDeque<>();
         if (roots == null)
@@ -553,12 +602,12 @@ final class UserTextSpellCheck
                     moduleFolders.add(folder);
             }
         }
-        traverse(model, pending, matches, monitor);
+        traverse(model, pending, matches, monitor, allTexts);
     }
 
     /** Обходит объекты очереди с вложенными и собирает ошибки их текстов. */
     private static void traverse(IBmModel model, ArrayDeque<EObject> pending, List<CompareSearchMatch> matches,
-        SubMonitor monitor)
+        SubMonitor monitor, boolean allTexts)
     {
         Set<EObject> visited = Collections.newSetFromMap(new IdentityHashMap<>());
         Set<Long> ids = new HashSet<>();
@@ -570,9 +619,13 @@ final class UserTextSpellCheck
             monitor.worked(1);
             if (!visited.add(object) || object instanceof IBmObject bm && !ids.add(bm.bmGetId()))
                 continue;
+            // Производное описание модуля (экспортные методы и их параметры): это не объект
+            // конфигурации, открыть его нельзя; сами имена проверяются в тексте модуля.
+            if (object instanceof ContextDef)
+                continue;
             try
             {
-                checkTexts(model, object, matches);
+                checkTexts(model, object, matches, allTexts);
             }
             catch (RuntimeException error)
             {
@@ -613,23 +666,8 @@ final class UserTextSpellCheck
     private static List<int[]> misspelledRanges(String text)
     {
         List<int[]> ranges = new ArrayList<>(ComfortSpellingEngine.findMisspelledRanges(text));
-        ranges.removeIf(range -> isCamelCase(text, range[0], range[1]));
+        ranges.removeIf(range -> ComfortSpellingEngine.isInsideCamelCaseWord(text, range[0], range[1]));
         return ranges;
-    }
-
-    /**
-     * Проверка орфографии режет слитное имя на части («ДатаЗаема» → «Заема»), поэтому смотрим не на
-     * саму часть, а на всё слитное слово вокруг неё.
-     */
-    private static boolean isCamelCase(String text, int offset, int length)
-    {
-        int start = Math.max(0, Math.min(offset, text.length()));
-        int end = Math.max(start, Math.min(offset + length, text.length()));
-        while (start > 0 && isNameChar(text.charAt(start - 1)))
-            start--;
-        while (end < text.length() && isNameChar(text.charAt(end)))
-            end++;
-        return hasInnerCapital(text, start, end - start);
     }
 
     private static boolean isNameChar(char c)
@@ -637,26 +675,60 @@ final class UserTextSpellCheck
         return Character.isLetterOrDigit(c) || c == '_';
     }
 
-    private static boolean hasInnerCapital(String text, int offset, int length)
+    /**
+     * Ошибки орфографии программного текста (комментарий, строка модуля). Разбор слов рассчитан на
+     * Javadoc и склеивает {@code <} и {@code >} с соседним словом («&lt;/head&gt;», «&lt;Имя»), поэтому
+     * угловые скобки заменяются пробелами; знаки, оставшиеся по краям слова, отрезаются.
+     */
+    private static List<int[]> programRanges(String text)
     {
-        for (int i = offset + 1; i < offset + length && i < text.length(); i++)
-            if (Character.isUpperCase(text.charAt(i)) && Character.isLowerCase(text.charAt(i - 1)))
-                return true;
-        return false;
+        List<int[]> ranges = new ArrayList<>();
+        for (int[] range : ComfortSpellingEngine.findMisspelledRanges(text.replace('<', ' ').replace('>', ' ')))
+        {
+            int start = range[0];
+            int end = Math.min(text.length(), range[0] + range[1]);
+            while (start < end && !Character.isLetterOrDigit(text.charAt(start)))
+                start++;
+            while (end > start && !Character.isLetterOrDigit(text.charAt(end - 1)))
+                end--;
+            if (end <= start)
+                continue;
+            // Имя платформы в закомментированном коде или в тексте запроса — не опечатка.
+            int nameStart = start;
+            int nameEnd = end;
+            while (nameStart > 0 && isNameChar(text.charAt(nameStart - 1)))
+                nameStart--;
+            while (nameEnd < text.length() && isNameChar(text.charAt(nameEnd)))
+                nameEnd++;
+            if ((nameStart < start || nameEnd > end)
+                && BslModuleSpellCheckHook.isPlatformApiName(text.substring(nameStart, nameEnd)))
+                continue;
+            // Часть имени вплотную к цифре в комментарии или строке — обозначение, а не текст.
+            if (!ComfortSpellingEngine.isSubwordNextToDigit(text, start, end - start))
+                ranges.add(new int[] { start, end - start });
+        }
+        return ranges;
     }
 
-    private static void checkTexts(IBmModel model, EObject object, List<CompareSearchMatch> matches)
+    private static void checkTexts(IBmModel model, EObject object, List<CompareSearchMatch> matches,
+        boolean allTexts)
     {
-        List<EAttribute> attributes = TEXT_ATTRIBUTES.computeIfAbsent(object.eClass(),
+        List<EAttribute> attributes = (allTexts ? ALL_TEXT_ATTRIBUTES : TEXT_ATTRIBUTES).computeIfAbsent(
+            object.eClass(),
             // Ключ записи многоязычной строки — код языка, а не текст.
             type -> type.getEAllAttributes().stream().filter(attribute -> !attribute.isMany()
-                && !attribute.isDerived() && isUserText(attribute) && !"key".equals(attribute.getName())).toList());
+                && !attribute.isDerived() && (isUserText(attribute) || allTexts && isProgramText(attribute))
+                && !"key".equals(attribute.getName())).toList());
         for (EAttribute attribute : attributes)
         {
             if (!(object.eGet(attribute) instanceof String text) || text.isBlank())
                 continue;
+            boolean user = isUserText(attribute);
             // Форматированные строки хранят разметку (<b>, <a href=…>) прямо в значении свойства.
-            List<int[]> ranges = misspelledRanges(ComfortSpellingEngine.maskMarkup(text));
+            // Имена и комментарии проверяются как в редакторе: слитные имена — по частям.
+            List<int[]> ranges = user ? misspelledRanges(ComfortSpellingEngine.maskMarkup(text))
+                : PROGRAM_NAMES.contains(attribute) ? ComfortSpellingEngine.findMisspelledRanges(text)
+                    : programRanges(text);
             if (ranges.isEmpty())
                 continue;
             // Свойство объекта — многоязычная строка целиком; сама запись языка своего поля не имеет.
@@ -679,8 +751,9 @@ final class UserTextSpellCheck
                 // объект — владелец реквизита, по нему строка открывается теми же переходами.
                 TextSearchModelMatch found = object instanceof IBmObject bm ? new TextSearchModelMatch(model, text,
                     bm.bmGetTopObject().bmGetId(), bm.bmGetId(), attribute, range[0], range[1]) : null;
-                matches.add(CompareSearchMatch.misspelledProperty(found, path, property,
-                    fragment(text, range[0], range[1]), text.substring(range[0], range[0] + range[1])));
+                CompareSearchMatch match = CompareSearchMatch.misspelledProperty(found, path, property,
+                    fragment(text, range[0], range[1]), text.substring(range[0], range[0] + range[1]));
+                matches.add(user ? match : match.programText(PROGRAM_NAMES.contains(attribute)));
             }
         }
     }
@@ -739,9 +812,12 @@ final class UserTextSpellCheck
         return files;
     }
 
-    private static void checkModules(List<IFile> files, List<CompareSearchMatch> matches, SubMonitor monitor)
+    private static void checkModules(List<IFile> files, List<CompareSearchMatch> matches, SubMonitor monitor,
+        boolean allTexts)
     {
         monitor.setWorkRemaining(Math.max(1, files.size()));
+        // Одно и то же имя встречается в модулях многократно — проверяется один раз.
+        Map<String, List<int[]>> identifiers = new HashMap<>();
         for (IFile file : files)
         {
             monitor.checkCanceled();
@@ -749,16 +825,22 @@ final class UserTextSpellCheck
             String content = BslModuleMethodResolver.moduleText(file);
             if (content == null)
                 continue;
+            // Ошибка: {смещение, длина, вид текста}.
             List<int[]> errors = new ArrayList<>();
-            Matcher call = NSTR_CALL.matcher(content);
-            while (call.find())
+            if (allTexts)
+                scanModule(content, errors, identifiers);
+            else
             {
-                int openQuote = call.end() - 1;
-                if (!ConfigSearchDialogHook.isInsideNStrLiteral(content, openQuote + 1))
-                    continue;
-                for (int[] range : misspelledRanges(
-                    ComfortSpellingEngine.maskMarkup(literalText(content, openQuote))))
-                    errors.add(new int[] { openQuote + 1 + range[0], range[1] });
+                Matcher call = NSTR_CALL.matcher(content);
+                while (call.find())
+                {
+                    int openQuote = call.end() - 1;
+                    if (!ConfigSearchDialogHook.isInsideNStrLiteral(content, openQuote + 1))
+                        continue;
+                    for (int[] range : misspelledRanges(
+                        ComfortSpellingEngine.maskMarkup(literalText(content, openQuote))))
+                        errors.add(new int[] { openQuote + 1 + range[0], range[1], KIND_USER });
+                }
             }
             if (errors.isEmpty())
                 continue;
@@ -779,11 +861,83 @@ final class UserTextSpellCheck
                 int lineStart = lineStarts[line - 1];
                 int lineEnd = line < lineStarts.length ? lineStarts[line] : content.length();
                 String method = methods != null ? methods.get(line) : null;
-                matches.add(CompareSearchMatch.misspelledInModule(file, error[0] - shift, path,
+                CompareSearchMatch match = CompareSearchMatch.misspelledInModule(file, error[0] - shift, path,
                     method != null ? method : "", //$NON-NLS-1$
                     fragment(content.substring(lineStart, lineEnd), error[0] - lineStart, error[1]),
-                    content.substring(error[0], error[0] + error[1])));
+                    content.substring(error[0], error[0] + error[1]));
+                matches.add(error[2] == KIND_USER ? match : match.programText(error[2] == KIND_IDENTIFIER));
             }
+        }
+    }
+
+    /**
+     * Ошибки орфографии всего текста модуля: комментарии, строковые литералы и имена. Разбор —
+     * лексический, как у литералов {@code НСтр()}: литерал внутри {@code НСтр()} — текст для
+     * пользователя, остальное — программный текст. Ключевые слова, директивы и аннотации, имена
+     * платформы не проверяются. Имя с ошибкой показывается один раз на модуль — в первом месте, где
+     * встретилось: иначе на каждое обращение к нему была бы своя строка результата.
+     */
+    private static void scanModule(String content, List<int[]> errors, Map<String, List<int[]>> identifiers)
+    {
+        int length = content.length();
+        Set<String> reported = new HashSet<>();
+        int pos = 0;
+        while (pos < length)
+        {
+            char c = content.charAt(pos);
+            if (c == '/' && pos + 1 < length && content.charAt(pos + 1) == '/')
+            {
+                int end = content.indexOf('\n', pos);
+                if (end < 0)
+                    end = length;
+                for (int[] range : programRanges(content.substring(pos, end)))
+                    errors.add(new int[] { pos + range[0], range[1], KIND_PROGRAM });
+                pos = end;
+            }
+            else if (c == '"')
+            {
+                String literal = literalText(content, pos);
+                boolean user = ConfigSearchDialogHook.isInsideNStrLiteral(content, pos + 1);
+                List<int[]> ranges = user ? misspelledRanges(ComfortSpellingEngine.maskMarkup(literal))
+                    : programRanges(literal);
+                for (int[] range : ranges)
+                    errors.add(new int[] { pos + 1 + range[0], range[1], user ? KIND_USER : KIND_PROGRAM });
+                // Литерал той же длины, что и в модуле; за ним — закрывающая кавычка, если она есть.
+                pos += literal.length() + 1;
+                if (pos < length && content.charAt(pos) == '"')
+                    pos++;
+            }
+            else if (c == '\'')
+            {
+                // Литерал даты.
+                int end = content.indexOf('\'', pos + 1);
+                pos = end < 0 ? length : end + 1;
+            }
+            else if (c == '#' || c == '&')
+            {
+                // Директива препроцессора или аннотация: само слово — не имя разработчика.
+                pos++;
+                while (pos < length && isNameChar(content.charAt(pos)))
+                    pos++;
+            }
+            else if (isNameChar(c))
+            {
+                int start = pos;
+                while (pos < length && isNameChar(content.charAt(pos)))
+                    pos++;
+                if (Character.isDigit(c))
+                    continue;
+                String name = content.substring(start, pos);
+                List<int[]> ranges = identifiers.computeIfAbsent(name,
+                    key -> KEYWORDS.contains(key.toLowerCase(Locale.ROOT))
+                        || BslModuleSpellCheckHook.isPlatformApiName(key)
+                            ? List.of() : ComfortSpellingEngine.findMisspelledRanges(key));
+                if (!ranges.isEmpty() && reported.add(name))
+                    for (int[] range : ranges)
+                        errors.add(new int[] { start + range[0], range[1], KIND_IDENTIFIER });
+            }
+            else
+                pos++;
         }
     }
 

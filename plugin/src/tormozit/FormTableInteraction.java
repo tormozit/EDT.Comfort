@@ -2405,6 +2405,10 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
         {
             updateActiveCell(activeRowAfter, column);
             ensureNativeSelection(activeRowAfter);
+            // Перезаполнение таблицы сбрасывает прокрутку в начало: текущая строка должна остаться
+            // на экране. Уже видимую строку showItem не двигает.
+            if (!activeRowAfter.isDisposed())
+                table.showItem(activeRowAfter);
         }
         else if (activeKey != null && !table.isDisposed())
         {

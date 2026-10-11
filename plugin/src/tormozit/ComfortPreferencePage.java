@@ -1193,6 +1193,15 @@ public class ComfortPreferencePage
     {
         if (field == null || tooltip == null)
             return;
+        if (field instanceof BooleanFieldEditor)
+        {
+            IPreferenceStore store = getPreferenceStore();
+            if (store != null)
+            {
+                boolean byDefault = store.getDefaultBoolean(field.getPreferenceName());
+                tooltip = tooltip + "\nПо умолчанию — " + (byDefault ? "включено" : "отключено"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            }
+        }
         Control change = existingChangeControl(field);
         if (change != null && !change.isDisposed())
             change.setToolTipText(TooltipText.wrap(change, tooltip));

@@ -234,7 +234,7 @@ public final class BslModuleSpellCheckHook implements IStartup
         McorePackage.Literals.PROPERTY,
         McorePackage.Literals.TYPE_ITEM
     };
-    /** Кэш имён платформенного API (en+ru) из IEObjectProvider. */
+    /** Кэш имён платформенного API (en+ru) из IEObjectProvider, в нижнем регистре. */
     private static volatile Set<String> PLATFORM_API_NAMES;
 
     @Override
@@ -1056,6 +1056,10 @@ public final class BslModuleSpellCheckHook implements IStartup
                     String word = text.substring(r[0], r[0] + r[1]);
                     if (!checkIdentifiers && kind == LeafKind.COMMENT && looksLikeIdentifier(word))
                         continue;
+                    // Часть имени вплотную к цифре в комментарии или строке — обозначение, а не текст.
+                    if ((kind == LeafKind.COMMENT || kind == LeafKind.STRING)
+                        && ComfortSpellingEngine.isSubwordNextToDigit(text, r[0], r[1]))
+                        continue;
                     int leafLen = leafEnd - leafStart;
                     result.add(new ModuleProblem(abs, len, word, kind, leafStart, leafLen, text));
                 }
@@ -1199,11 +1203,13 @@ public final class BslModuleSpellCheckHook implements IStartup
     }
 
     /** Имя есть в индексе платформенного API (Method/Property/TypeItem, en+ru). */
-    private static boolean isPlatformApiName(String name)
+    /** Имя есть в каталоге платформенного API (метод, свойство, тип) — на орфографию не проверяется. */
+    static boolean isPlatformApiName(String name)
     {
         if (name == null || name.isEmpty())
             return false;
-        if (platformApiNames().contains(name))
+        // Язык не различает регистр: «нрег» и «НРег» — одна и та же функция.
+        if (platformApiNames().contains(name.toLowerCase(java.util.Locale.ROOT)))
             return true;
         // прямой lookup в descrByName (на случай расхождения с descrList)
         return platformProviderHasName(name);
@@ -1309,7 +1315,7 @@ public final class BslModuleSpellCheckHook implements IStartup
                             {
                                 String seg = qn.getSegment(s);
                                 if (seg != null && !seg.isEmpty())
-                                    names.add(seg);
+                                    names.add(seg.toLowerCase(java.util.Locale.ROOT));
                             }
                         }
                     }

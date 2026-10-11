@@ -242,39 +242,8 @@ public final class NavigatorRecomputeChecksMenuHook implements IStartup
                     });
                     added.add(unreachable);
 
-                    MenuItem spelling = ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.PUSH,
-                        UserTextSpellCheck.TITLE);
-                    ComfortSubmenuHelper.setMenuItemTooltip(spelling,
-                        "Найти ошибки орфографии в синонимах, заголовках, подсказках и других текстах для"
-                            + " пользователя, а также в строках НСтр() модулей выбранных объектов с вложенными"
-                            + " и показать в панели Поиск");
-                    spelling.addSelectionListener(new SelectionAdapter()
-                    {
-                        @Override
-                        public void widgetSelected(SelectionEvent event)
-                        {
-                            ISelection selected = ComfortSubmenuHelper.menuSelection(comfortSub, viewer);
-                            if (!(selected instanceof IStructuredSelection objects))
-                                return;
-                            IResource resource = NavigatorResourceResolver.resolveFirst(objects);
-                            IProject project = resource != null ? resource.getProject()
-                                : objects.getFirstElement() instanceof IProject root ? root : null;
-                            if (project == null)
-                                project = Global.getActiveProject(Global.getActivePage(), true);
-                            List<URI> roots = new ArrayList<>();
-                            java.util.Set<Object> visited = java.util.Collections.newSetFromMap(
-                                new java.util.IdentityHashMap<>());
-                            boolean wholeProject = false;
-                            for (Object node : objects.toList())
-                                wholeProject |= collectSearchRoots(viewer, node, roots, visited);
-                            if (wholeProject)
-                                UserTextSpellCheck.findInProject(project);
-                            else
-                                UserTextSpellCheck.findInObjects(project, roots,
-                                    searchScopeLabel(viewer, objects.toList()));
-                        }
-                    });
-                    added.add(spelling);
+                    added.add(createSpellingItem(comfortSub, viewer, false));
+                    added.add(createSpellingItem(comfortSub, viewer, true));
                 }
             }
 
@@ -299,6 +268,52 @@ public final class NavigatorRecomputeChecksMenuHook implements IStartup
             if (!comfortSub.isDisposed())
                 comfortSub.removeMenuListener(subListener);
         });
+    }
+
+    /**
+     * Пункт проверки орфографии выбранных объектов с вложенными.
+     *
+     * @param allTexts {@code false} — только тексты для пользователя; {@code true} — ещё и программные
+     */
+    private static MenuItem createSpellingItem(Menu comfortSub, CommonViewer viewer, boolean allTexts)
+    {
+        MenuItem spelling = ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.PUSH,
+            allTexts ? UserTextSpellCheck.TITLE_ALL : UserTextSpellCheck.TITLE);
+        ComfortSubmenuHelper.setMenuItemTooltip(spelling, allTexts
+            ? "Найти ошибки орфографии во всех текстах выбранных объектов с вложенными: в текстах для"
+                + " пользователя, в именах и комментариях объектов, в комментариях, строках и именах"
+                + " модулей — и показать в панели Поиск. Тексты для пользователя отмечены в колонке"
+                + " «Пользовательский»"
+            : "Найти ошибки орфографии в синонимах, заголовках, подсказках и других текстах для"
+                + " пользователя, а также в строках НСтр() модулей выбранных объектов с вложенными"
+                + " и показать в панели Поиск");
+        spelling.addSelectionListener(new SelectionAdapter()
+        {
+            @Override
+            public void widgetSelected(SelectionEvent event)
+            {
+                ISelection selected = ComfortSubmenuHelper.menuSelection(comfortSub, viewer);
+                if (!(selected instanceof IStructuredSelection objects))
+                    return;
+                IResource resource = NavigatorResourceResolver.resolveFirst(objects);
+                IProject project = resource != null ? resource.getProject()
+                    : objects.getFirstElement() instanceof IProject root ? root : null;
+                if (project == null)
+                    project = Global.getActiveProject(Global.getActivePage(), true);
+                List<URI> roots = new ArrayList<>();
+                java.util.Set<Object> visited = java.util.Collections.newSetFromMap(
+                    new java.util.IdentityHashMap<>());
+                boolean wholeProject = false;
+                for (Object node : objects.toList())
+                    wholeProject |= collectSearchRoots(viewer, node, roots, visited);
+                if (wholeProject)
+                    UserTextSpellCheck.findInProject(project, allTexts);
+                else
+                    UserTextSpellCheck.findInObjects(project, roots,
+                        searchScopeLabel(viewer, objects.toList()), allTexts);
+            }
+        });
+        return spelling;
     }
 
     /** Подписи выбранных узлов для заголовка результата: «Справочники», «Справочник.Товары». */

@@ -24,6 +24,16 @@ public class CompareSearchResult implements ISearchResult
 
     public boolean isSpelling() { return spelling; }
 
+    private boolean allTexts;
+
+    /**
+     * Режим «Ошибки орфографии» по всем текстам: кроме текстов для пользователя проверены программные
+     * (имена, комментарии, строки модулей) — в таблице есть колонка «Пользовательский».
+     */
+    public void setAllTexts(boolean allTexts) { this.allTexts = allTexts; }
+
+    public boolean isAllTexts() { return allTexts; }
+
     public CompareSearchResult(List<CompareSearchMatch> matches, IEditorPart editorPart)
     {
         this(matches, editorPart, null);
@@ -73,7 +83,7 @@ public class CompareSearchResult implements ISearchResult
         int count = matches != null ? matches.size() : 0;
         String q = queryText != null ? queryText.trim() : "";
         if (spelling)
-            return "Ошибки орфографии в " + (scopeLabel != null ? scopeLabel + " проекта " : "проекте ")
+            return "Ошибки орфографии " + (allTexts ? "во всех текстах " : "") + "в " + (scopeLabel != null ? scopeLabel + " проекта " : "проекте ")
                 + project.getName() + " - " + count;
         if (project != null)
             return "'" + q + "' в " + (scopeLabel != null ? scopeLabel + " проекта " : "проекте ")

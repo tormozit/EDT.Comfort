@@ -122,6 +122,11 @@ public class CompareSearchResultPage implements ISearchResultPage
     private List<WordRow> allWords = List.of();
     /** Слова и текст фильтра, по которым отобраны строки, показанные сейчас в таблице результатов. */
     private Object shownWordsFilter;
+    /** Строки режима слов, показанные сейчас в таблице результатов, — её input. */
+    private List<CompareSearchMatch> shownRows;
+    /** Счётчик {@link #holdRows}: пока больше нуля, таблица результатов не перезаполняется. */
+    private int rowsHold;
+    private boolean rowsPending;
     /** Ширины колонок таблицы слов, под которые подгоняется левая часть панели. */
     private int[] wordsWidths = new int[0];
     private boolean wordsMode;
@@ -180,6 +185,14 @@ public class CompareSearchResultPage implements ISearchResultPage
     private static final String KEY_COL_STATUS_WIDTH = "colStatusWidth"; //$NON-NLS-1$
     private static final String KEY_COL_SIDE_WIDTH = "colSideWidth"; //$NON-NLS-1$
     private static final String KEY_COL_WORD_WIDTH = "colWordWidth"; //$NON-NLS-1$
+    private static final String KEY_COL_USER_WIDTH = "colUserWidth"; //$NON-NLS-1$
+    private static final int USER_COLUMN_WIDTH = 130;
+    /** Пометка колонки «Пользовательский» — как у флагов в дереве элементов формы. */
+    private static final String USER_TEXT_MARK = "✓"; //$NON-NLS-1$
+    /** Штатный значок EDT «пользователь» — шапка колонки «Пользовательский». */
+    private static final String USER_ICON_BUNDLE = "com._1c.g5.v8.dt.platform.services.ui"; //$NON-NLS-1$
+    private static final String USER_ICON_PATH = "icons/etool16/active_users.png"; //$NON-NLS-1$
+    private static final String USER_ICON_KEY = "tormozit.compareSearch.userTextIcon"; //$NON-NLS-1$
     /** Колонки до этого индекса есть в любом режиме; дальше — «хвост» своего режима (см. {@link #applyTailColumns}). */
     private static final int BASE_COLUMNS = 4;
     /** Ключ настроек ширины колонки — в данных самой колонки. */
@@ -208,12 +221,18 @@ public class CompareSearchResultPage implements ISearchResultPage
                 ? page.tableInteraction.captureSelection() : null;
             FormTableInteraction.SelectionSnapshot words = page.wordsMode && page.wordsInteraction != null
                 ? page.wordsInteraction.captureSelection() : null;
-            page.tableViewer.setInput(result.getMatches());
-            page.updateMissingObjectsTree(result);
-            page.restoreResultState(state);
-            // Слово нашлось по имени — restoreResultState его уже выбрал; иначе — по номеру строки.
-            if (words != null && page.wordsViewer.getStructuredSelection().isEmpty())
-                page.wordsInteraction.restoreSelection(words);
+            // Режим слов заполняет таблицу сам (showWordsMatches) — один раз, после всех шагов.
+            if (!result.isSpelling())
+                page.tableViewer.setInput(result.getMatches());
+            page.holdRows(() ->
+            {
+                page.updateMissingObjectsTree(result);
+                page.restoreResultState(state);
+                // Слово нашлось по имени — restoreResultState его уже выбрал; иначе — по номеру строки.
+                if (words != null && page.wordsViewer.getStructuredSelection().isEmpty())
+                    page.wordsInteraction.restoreSelection(words);
+            });
+            page.reselectRows(state);
             if (page.tableInteraction != null)
             {
                 page.tableInteraction.restoreSelection(rows);
@@ -227,7 +246,8 @@ public class CompareSearchResultPage implements ISearchResultPage
     /** Режим результата: у каждого свой набор видимых колонок и свои сохранённые ширины. */
     private static String modeOf(CompareSearchResult result)
     {
-        return result.isSpelling() ? "spelling" : result.getProject() != null ? "project" : "compare"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        return result.isSpelling() ? result.isAllTexts() ? "spellingAll" : "spelling" //$NON-NLS-1$ //$NON-NLS-2$
+            : result.getProject() != null ? "project" : "compare"; //$NON-NLS-1$ //$NON-NLS-2$
     }
     private static final int CHECK_COLUMN_WIDTH = 22;
     @Override
@@ -507,9 +527,11 @@ public class CompareSearchResultPage implements ISearchResultPage
                 String word = wordMatch.getMisspelledWord();
                 // Варианты исправления — только когда слово у всех выделенных строк одно:
                 // замена применяется ко всем им сразу.
+                // Слово в имени заменой текста не исправляется: имя переименовывают вместе со ссылками.
                 List<CompareSearchMatch> sameWord = new ArrayList<>();
                 for (TableItem item : selection)
-                    if (item.getData() instanceof CompareSearchMatch row && word.equals(row.getMisspelledWord()))
+                    if (item.getData() instanceof CompareSearchMatch row && word.equals(row.getMisspelledWord())
+                        && !row.isIdentifier())
                         sameWord.add(row);
                 addSpellingWordActions(manager, table, word, sameWord.size() == selection.length ? sameWord : null);
             }
@@ -738,7 +760,8 @@ public class CompareSearchResultPage implements ISearchResultPage
                 return;
             List<?> selected = wordsViewer.getStructuredSelection().toList();
             if (selected.size() == 1 && selected.get(0) instanceof WordRow row && !row.all)
-                addSpellingWordActions(manager, wordsTable, row.word, row.matches);
+                addSpellingWordActions(manager, wordsTable, row.word,
+                    row.matches.stream().anyMatch(CompareSearchMatch::isIdentifier) ? null : row.matches);
         });
         wordsTable.setMenu(wordsMenu.createContextMenu(wordsTable));
         wordsTable.addDisposeListener(event -> wordsMenu.dispose());
@@ -783,6 +806,11 @@ public class CompareSearchResultPage implements ISearchResultPage
     {
         if (!wordsMode || table == null || table.isDisposed() || searchResult == null)
             return;
+        if (rowsHold > 0)
+        {
+            rowsPending = true;
+            return;
+        }
         List<?> selected = wordsViewer.getStructuredSelection().toList();
         List<CompareSearchMatch> rows;
         if (selected.isEmpty() || selected.contains(allWordsRow))
@@ -797,7 +825,19 @@ public class CompareSearchResultPage implements ISearchResultPage
         // по номеру не подбирается, те же слова (обновление результата) — подбирается.
         FormTableInteraction.SelectionSnapshot snapshot = tableInteraction != null
             ? tableInteraction.captureSelection() : null;
-        tableViewer.setInput(rows);
+        if (!removeGoneRows(rows))
+        {
+            shownRows = rows;
+            table.setRedraw(false);
+            try
+            {
+                tableViewer.setInput(rows);
+            }
+            finally
+            {
+                table.setRedraw(true);
+            }
+        }
         List<String> words = new ArrayList<>();
         for (Object row : wordsViewer.getStructuredSelection().toList())
             words.add(((WordRow) row).word);
@@ -808,6 +848,80 @@ public class CompareSearchResultPage implements ISearchResultPage
             tableInteraction.restoreSelection(snapshot);
             tableInteraction.resyncSelectionTheme();
         }
+    }
+
+    /**
+     * Обновление результата меняет фильтр и выбор слов в несколько шагов, и каждый шаг перезаполнял бы
+     * таблицу результатов целиком (тысячи строк, секунды блокировки окна). На время {@code body}
+     * строки не трогаются; после него таблица обновляется один раз.
+     */
+    private void holdRows(Runnable body)
+    {
+        rowsHold++;
+        try
+        {
+            body.run();
+        }
+        finally
+        {
+            if (--rowsHold == 0 && rowsPending)
+            {
+                rowsPending = false;
+                showWordsMatches();
+            }
+        }
+    }
+
+    /**
+     * Выбор строк из сохранённого состояния — повторно после {@link #holdRows}: внутри него
+     * {@link #restoreResultState} выбирал строки в ещё не заполненной таблице.
+     */
+    private void reselectRows(ResultState state)
+    {
+        if (state == null || !wordsMode || tableInteraction == null)
+            return;
+        tableViewer.setSelection(new StructuredSelection(state.selection), true);
+        tableInteraction.restoreActiveColumn(state.activeColumn);
+    }
+
+    /**
+     * Новый набор строк — прежний без части строк (слово ушло в словарь, заменено): убираются только
+     * исчезнувшие строки, остальные не перерисовываются.
+     *
+     * @return {@code false} — набор изменился иначе, таблицу нужно заполнить заново
+     */
+    private boolean removeGoneRows(List<CompareSearchMatch> rows)
+    {
+        if (shownRows == null || tableViewer.getInput() != shownRows || rows.size() > shownRows.size())
+            return false;
+        Set<CompareSearchMatch> kept = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        kept.addAll(rows);
+        List<CompareSearchMatch> gone = new ArrayList<>();
+        int next = 0;
+        for (CompareSearchMatch row : shownRows)
+        {
+            if (!kept.contains(row))
+                gone.add(row);
+            else if (next >= rows.size() || rows.get(next++) != row)
+                return false;
+        }
+        // Появились новые строки либо убирается большая часть — заполнить заново дешевле.
+        if (next != rows.size() || gone.size() > shownRows.size() / 2)
+            return false;
+        if (gone.isEmpty())
+            return true;
+        shownRows.clear();
+        shownRows.addAll(rows);
+        table.setRedraw(false);
+        try
+        {
+            tableViewer.remove(gone.toArray());
+        }
+        finally
+        {
+            table.setRedraw(true);
+        }
+        return true;
     }
 
     private void applyWordsFilter()
@@ -1235,6 +1349,71 @@ public class CompareSearchResultPage implements ISearchResultPage
             @Override
             public boolean isLabelProperty(Object element, String property) { return false; }
         }));
+    }
+
+    /**
+     * Признак «текст для пользователя» — колонка только проверки орфографии во всех текстах; пометка
+     * та же, что у флагов в дереве элементов формы.
+     */
+    private void addUserTextColumn(IDialogSettings settings)
+    {
+        // В шапке только значок (как у колонки «Сервер» иерархии вызовов); без значка — текст.
+        Image icon = userTextIcon(table.getDisplay());
+        TableViewerColumn col = new TableViewerColumn(tableViewer, SWT.CENTER);
+        col.getColumn().setText(icon != null ? "" : "Пользовательский"); //$NON-NLS-1$
+        col.getColumn().setImage(icon);
+        col.getColumn().setResizable(icon == null);
+        col.getColumn().setData(COLUMN_WIDTH_KEY, KEY_COL_USER_WIDTH);
+        col.getColumn().setWidth(icon != null ? ColumnWidthFit.headerIconColumnWidth(icon)
+            : FormTableColumnState.readWidth(settings, KEY_COL_USER_WIDTH, USER_COLUMN_WIDTH, 1));
+        tableInteraction.setHeaderTooltipExtra(col.getColumn(),
+            "Пользовательский. Текст видит пользователь программы: синоним, заголовок, подсказка, строка"
+                + " НСтр() модуля. Без пометки — программный текст: имя, комментарий, прочие строки модуля");
+        // Со значком в шапке одной колонки Windows рисует значок и в шапке первой колонки;
+        // повторная установка пустой картинки снимает у остальных признак значка.
+        if (icon != null)
+            for (TableColumn column : table.getColumns())
+                if (column != col.getColumn() && column.getImage() == null)
+                    column.setImage(null);
+        col.setLabelProvider(new SelectionAwareStyledCellLabelProvider(new IStyledLabelProvider()
+        {
+            @Override
+            public StyledString getStyledText(Object element)
+            {
+                return new StyledString(element instanceof CompareSearchMatch m && m.isUserText()
+                    ? USER_TEXT_MARK : ""); //$NON-NLS-1$
+            }
+
+            @Override
+            public Image getImage(Object element) { return null; }
+            @Override
+            public void addListener(ILabelProviderListener listener) {}
+            @Override
+            public void removeListener(ILabelProviderListener listener) {}
+            @Override
+            public void dispose() {}
+            @Override
+            public boolean isLabelProperty(Object element, String property) { return false; }
+        }));
+    }
+
+    /** Штатный значок EDT «пользователь» для шапки; один на дисплей, либо {@code null}. */
+    private static Image userTextIcon(Display display)
+    {
+        if (display.getData(USER_ICON_KEY) instanceof Image cached && !cached.isDisposed())
+            return cached;
+        org.osgi.framework.Bundle bundle = org.eclipse.core.runtime.Platform.getBundle(USER_ICON_BUNDLE);
+        java.net.URL url = bundle != null ? bundle.getEntry(USER_ICON_PATH) : null;
+        Image image = url != null ? ImageDescriptor.createFromURL(url).createImage(false, display) : null;
+        if (image == null)
+            return null;
+        display.setData(USER_ICON_KEY, image);
+        display.disposeExec(() ->
+        {
+            if (!image.isDisposed())
+                image.dispose();
+        });
+        return image;
     }
 
     private void addColumnSideColumn(IDialogSettings settings)
@@ -1949,21 +2128,26 @@ public class CompareSearchResultPage implements ISearchResultPage
             this.queryText = csr.getQueryText();
             if (tableViewer != null && !table.isDisposed())
             {
-                tableViewer.setInput(csr.getMatches());
+                // Режим слов заполняет таблицу сам (showWordsMatches) — один раз, после всех шагов.
+                tableViewer.setInput(csr.isSpelling() ? List.of() : csr.getMatches());
                 boolean projectMode = csr.getProject() != null;
                 IDialogSettings settings = dialogSettings();
                 tableInteraction.setColumnHidden(checkColumn, projectMode, CHECK_COLUMN_WIDTH);
                 applyTailColumns(csr);
                 // У каждого режима свой набор колонок — и своя запомненная сортировка.
                 tableInteraction.setHeaderSortSettings(settings);
-                updateMissingObjectsTree(csr);
-                FormTableInteraction.ColumnState columns = columnStates.get(modeOf(csr));
-                if (columns != null)
-                    tableInteraction.restoreColumnState(columns);
-                else
-                    restoreColumnLayout(settings);
                 ResultState state = uiState instanceof ResultState saved ? saved : resultStates.get(csr);
-                restoreResultState(state);
+                holdRows(() ->
+                {
+                    updateMissingObjectsTree(csr);
+                    FormTableInteraction.ColumnState columns = columnStates.get(modeOf(csr));
+                    if (columns != null)
+                        tableInteraction.restoreColumnState(columns);
+                    else
+                        restoreColumnLayout(settings);
+                    restoreResultState(state);
+                });
+                reselectRows(state);
                 syncChecksFromTree();
                 if (tableInteraction != null)
                     tableInteraction.resyncSelectionTheme();
@@ -2088,7 +2272,11 @@ public class CompareSearchResultPage implements ISearchResultPage
             table.getColumn(i).dispose();
         IDialogSettings settings = dialogSettings();
         if (csr.isSpelling())
+        {
             addWordColumn(settings);
+            if (csr.isAllTexts())
+                addUserTextColumn(settings);
+        }
         else if (csr.getProject() == null)
         {
             addStatusColumn(settings);
@@ -2098,6 +2286,8 @@ public class CompareSearchResultPage implements ISearchResultPage
         for (int i = 1; i < table.getColumnCount(); i++)
             ownerDraw[i - 1] = table.getColumn(i);
         tableInteraction.setOwnerDrawColumns(ownerDraw);
+        // Колонки «хвоста» созданы после install(): им нужны слушатели шапки (сортировка по заголовку).
+        tableInteraction.notifyColumnsChanged();
         tableViewer.refresh();
     }
 
@@ -2118,6 +2308,7 @@ public class CompareSearchResultPage implements ISearchResultPage
             case KEY_COL_PROPERTY_WIDTH -> 200;
             case KEY_COL_TEXT_WIDTH -> 250;
             case KEY_COL_WORD_WIDTH -> 140;
+            case KEY_COL_USER_WIDTH -> ColumnWidthFit.headerIconColumnWidth();
             default -> 100;
         };
     }
@@ -2305,7 +2496,8 @@ public class CompareSearchResultPage implements ISearchResultPage
         if (searchResult != null && searchResult.getProject() != null)
         {
             // У режима «Ошибки орфографии» свой набор колонок — и свои порядок и ширины.
-            String name = searchResult.isSpelling() ? "spelling" : "project"; //$NON-NLS-1$ //$NON-NLS-2$
+            // У проверки всех текстов есть ещё колонка «Пользовательский» — раздел тоже свой.
+            String name = modeOf(searchResult);
             IDialogSettings project = section.getSection(name);
             if (project == null)
                 project = section.addNewSection(name);

@@ -232,6 +232,8 @@ public final class IndentGuidePreferencePage extends PreferencePage implements I
         btn.setText(label);
         btn.setData(key);
         btn.setSelection(getPreferenceStore().getBoolean(key));
+        btn.setToolTipText(TooltipText.wrap(btn,
+            "По умолчанию — " + (getPreferenceStore().getDefaultBoolean(key) ? "включено" : "отключено"))); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         GridDataFactory.fillDefaults().align(SWT.FILL, SWT.CENTER).applyTo(btn);
         parts.add(btn);
         return btn;

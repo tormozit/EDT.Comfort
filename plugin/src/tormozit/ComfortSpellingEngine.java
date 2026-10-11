@@ -652,7 +652,9 @@ public final class ComfortSpellingEngine
             refreshSpellingAfterUserWordChange(toastLemma, true);
             ToastNotification.show(
                 "Орфография", //$NON-NLS-1$
-                "Слово «" + toastLemma + "» добавлено в словарь. Всего слов: " //$NON-NLS-1$ //$NON-NLS-2$
+                "Слово «" + toastLemma + "» добавлено в " //$NON-NLS-1$ //$NON-NLS-2$
+                    + (toastProject ? "проектный" : "пользовательский") //$NON-NLS-1$ //$NON-NLS-2$
+                    + " словарь. Всего слов: " //$NON-NLS-1$
                     + dictSize + ".", //$NON-NLS-1$
                 10_000,
                 () -> undoUserMorphAdd(toastLemma, toastFlag, toastProject),
@@ -1010,6 +1012,42 @@ public final class ComfortSpellingEngine
         {
             return null;
         }
+    }
+
+    /**
+     * Слово с ошибкой — часть слитного имени вида CamelCase (заглавная буква после строчной). В
+     * естественном языке таких слов нет: в тексте для чтения (комментарий, строка, синоним) это
+     * упоминание имени, а не опечатка. Проверка орфографии режет слитное имя на части («ДатаЗаема» →
+     * «Заема»), поэтому смотрим не на саму часть, а на всё слитное слово вокруг неё.
+     */
+    static boolean isInsideCamelCaseWord(String text, int offset, int length)
+    {
+        int start = Math.max(0, Math.min(offset, text.length()));
+        int end = Math.max(start, Math.min(offset + length, text.length()));
+        while (start > 0 && isNamePart(text.charAt(start - 1)))
+            start--;
+        while (end < text.length() && isNamePart(text.charAt(end)))
+            end++;
+        for (int i = start + 1; i < end; i++)
+            if (Character.isUpperCase(text.charAt(i)) && Character.isLowerCase(text.charAt(i - 1)))
+                return true;
+        return false;
+    }
+
+    private static boolean isNamePart(char c)
+    {
+        return Character.isLetterOrDigit(c) || c == '_';
+    }
+
+    /**
+     * Слово с ошибкой — часть имени, стоящая вплотную к цифре («Сзд2», «Т1Док»). В комментарии и
+     * строковом литерале это обозначение, а не слово текста.
+     */
+    static boolean isSubwordNextToDigit(String text, int offset, int length)
+    {
+        int end = offset + length;
+        return offset > 0 && offset <= text.length() && Character.isDigit(text.charAt(offset - 1))
+            || end >= 0 && end < text.length() && Character.isDigit(text.charAt(end));
     }
 
     /**

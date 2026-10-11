@@ -32,6 +32,8 @@ public class CompareSearchMatch
     private IFile moduleFile;
     private int moduleOffset;
     private String misspelledWord;
+    private boolean userText = true;
+    private boolean identifier;
 
     public CompareSearchMatch(MdReferenceSupport.Location location, String path, String property, String text,
         String referenceFqn)
@@ -83,6 +85,26 @@ public class CompareSearchMatch
 
     /** Слово с ошибкой орфографии; {@code null} — строка не из режима «Ошибки орфографии». */
     public String getMisspelledWord() { return misspelledWord; }
+
+    /**
+     * Ошибка орфографии найдена в программном тексте (имя, комментарий, строка вне {@code НСтр()}),
+     * а не в тексте для пользователя.
+     *
+     * @param identifier слово — часть имени: заменой текста его исправлять нельзя, имя нужно
+     *     переименовывать вместе со ссылками на него
+     */
+    CompareSearchMatch programText(boolean identifier)
+    {
+        this.userText = false;
+        this.identifier = identifier;
+        return this;
+    }
+
+    /** Текст с ошибкой орфографии видит пользователь программы; {@code false} — программный текст. */
+    public boolean isUserText() { return userText; }
+
+    /** Слово с ошибкой орфографии — часть имени (объекта, реквизита, метода, переменной). */
+    public boolean isIdentifier() { return identifier; }
 
     public CompareSearchMatch(Object comparisonNode, String objectPath, String propertyName,
             String columnSide, String matchText, String comparisonStatus, RowColorKind rowColorKind,
