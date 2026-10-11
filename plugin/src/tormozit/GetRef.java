@@ -78,12 +78,12 @@ public class GetRef extends AbstractHandler implements IElementUpdater
         "CommonModules", "CommonForms", "CommonTemplates", "CommonPictures", "CommonCommands"
     ));
 
-    private static final Pattern METHOD_START = Pattern.compile(
+    static final Pattern METHOD_START = Pattern.compile(
         "^\\s*(?:Асинх\\s+)?(?:Процедура|Функция|Procedure|Function)\\s+" +
         "([А-ЯЁа-яёA-Za-z_][А-ЯЁа-яёA-Za-z0-9_]*)",
         Pattern.UNICODE_CASE);
 
-    private static final Pattern METHOD_END = Pattern.compile(
+    static final Pattern METHOD_END = Pattern.compile(
         "^\\s*(?:КонецПроцедуры|КонецФункции|EndProcedure|EndFunction)\\b",
         Pattern.UNICODE_CASE);
 

@@ -53,6 +53,7 @@ import org.eclipse.jgit.revwalk.RevCommit;
 import org.eclipse.jgit.revwalk.RevWalk;
 import org.eclipse.jgit.treewalk.TreeWalk;
 import org.eclipse.swt.SWT;
+import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.events.MenuAdapter;
 import org.eclipse.swt.events.MenuEvent;
 import org.eclipse.swt.events.SelectionAdapter;
@@ -367,6 +368,11 @@ public final class GitChangedFileMenuHook implements IStartup
                 + (event.widget != null ? event.widget.getClass().getName() : "null")); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
+
+        // Текстовые поля панелей (текст изменений, сообщение коммита): команды над файлами,
+        // выбранными в списке, в меню текста неуместны — подменю «Комфорт» туда не добавляется.
+        if (target instanceof StyledText)
+            return;
 
         menuDetectRowElement = rowElementAt(event);
 
@@ -1282,6 +1288,25 @@ public final class GitChangedFileMenuHook implements IStartup
                         }
                     });
                     addedItems.add(brokenItem);
+                }
+
+                String viewId = view.getSite().getId();
+                if (DT_STAGING_VIEW_ID.equals(viewId) || EGIT_STAGING_VIEW_ID.equals(viewId))
+                {
+                    MenuItem diffItem = ComfortSubmenuHelper.createSortedMenuItem(submenu, SWT.PUSH,
+                        "Показать изменения файла");
+                    diffItem.setImage(GitFileDiffView.icon());
+                    ComfortSubmenuHelper.setMenuItemTooltip(diffItem,
+                        "Показать панель «Изменения файла Git» связанную с текущим файлом");
+                    diffItem.addSelectionListener(new SelectionAdapter()
+                    {
+                        @Override
+                        public void widgetSelected(SelectionEvent ev)
+                        {
+                            GitFileDiffView.open(view.getSite().getPage());
+                        }
+                    });
+                    addedItems.add(diffItem);
                 }
             }
 

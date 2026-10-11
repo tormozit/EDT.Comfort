@@ -16,6 +16,7 @@ final class CompareMethodHeader
     private static final String LAST_METHOD_KEY = "tormozit.compareMethodHeader.lastMethod"; //$NON-NLS-1$
     private static final String INSTALLED_KEY = "tormozit.compareMethodHeader.installed"; //$NON-NLS-1$
     private static final String PENDING_KEY = "tormozit.compareMethodHeader.pending"; //$NON-NLS-1$
+    private static final String DOCUMENT_KEY = "tormozit.compareMethodHeader.document"; //$NON-NLS-1$
     private static final String METHOD_SEPARATOR = " — "; //$NON-NLS-1$
 
     private CompareMethodHeader()
@@ -30,13 +31,28 @@ final class CompareMethodHeader
         try
         {
             int line1 = CompareLineRangeMatcher.lineAtCaret(text) + 1;
-            String name = GetRef.findEnclosingMethodName(new Document(text.getText()), line1);
+            String name = GetRef.findEnclosingMethodName(documentOf(text), line1);
             return name != null && !name.isBlank() ? name : null;
         }
         catch (Exception e)
         {
             return null;
         }
+    }
+
+    private record CachedDocument(long stamp, Document document)
+    {
+    }
+
+    /** Документ по тексту виджета; пересоздаётся только после изменения текста, не на каждое движение каретки. */
+    private static Document documentOf(StyledText text)
+    {
+        long stamp = CompareLineRangeMatcher.contentStamp(text);
+        if (text.getData(DOCUMENT_KEY) instanceof CachedDocument cached && cached.stamp() == stamp)
+            return cached.document();
+        Document document = new Document(text.getText());
+        text.setData(DOCUMENT_KEY, new CachedDocument(stamp, document));
+        return document;
     }
 
     /**

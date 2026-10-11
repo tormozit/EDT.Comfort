@@ -18,14 +18,19 @@ import org.eclipse.jface.action.IContributionItem;
 import org.eclipse.jface.action.IToolBarManager;
 import org.eclipse.jface.action.Separator;
 import org.eclipse.jface.resource.ImageDescriptor;
+import org.eclipse.jface.text.IDocument;
+import org.eclipse.jface.text.ITextInputListener;
+import org.eclipse.jface.text.source.SourceViewer;
 import org.eclipse.jface.viewers.Viewer;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.StyledText;
+import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.layout.GridLayout;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
+import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IEditorReference;
@@ -445,7 +450,7 @@ public final class CompareEditorCurrentLinesHook
      * {@code BlameHyperlinkOpenFixHook.resolvePendingReveal}) — вторая сторона находится через
      * {@link CompareLineRangeMatcher#findMatchedLine}.
      */
-    record PendingLineReveal(int lineNo, boolean oldSide, long createdAtMs)
+    record PendingLineReveal(int lineNo, boolean oldSide, long createdAtMs, String lineText, int column, int length)
     {
     }
 
@@ -454,7 +459,35 @@ public final class CompareEditorCurrentLinesHook
 
     static void setPendingLineReveal(int lineNo, boolean oldSide)
     {
-        pendingLineReveal = new PendingLineReveal(lineNo, oldSide, System.currentTimeMillis());
+        pendingLineReveal = new PendingLineReveal(lineNo, oldSide, System.currentTimeMillis(), null, 0, 0);
+    }
+
+    /**
+     * Переход к фрагменту строки в следующем открытом сравнении, когда неизвестно, слева или
+     * справа окажется нужная версия файла: сторона определяется по тексту строки
+     * {@code lineNo} (с нуля). Фрагмент {@code column}/{@code length} в ней выделяется.
+     */
+    static void setPendingTextReveal(int lineNo, String lineText, int column, int length)
+    {
+        pendingLineReveal = new PendingLineReveal(lineNo, true, System.currentTimeMillis(),
+            stripLineEnd(lineText), column, length);
+    }
+
+    private static String stripLineEnd(String line)
+    {
+        return line != null && line.endsWith("\r") ? line.substring(0, line.length() - 1) : line; //$NON-NLS-1$
+    }
+
+    /** Сторона, в которой строка {@code lineNo} совпадает с ожидаемым текстом; {@code null} — пока ни одна. */
+    private static StyledText sideWithLine(PendingLineReveal reveal, StyledText first, StyledText second)
+    {
+        for (StyledText side : new StyledText[] { first, second })
+        {
+            if (side.getLineCount() > reveal.lineNo()
+                && reveal.lineText().equals(stripLineEnd(side.getLine(reveal.lineNo()))))
+                return side;
+        }
+        return null;
     }
 
     /** Разовое потребление — следующий {@code attach()}, что бы он ни открыл, и не позже. */
@@ -501,7 +534,11 @@ public final class CompareEditorCurrentLinesHook
         StyledText modelLeftText = mirrored ? rightText : leftText;
         StyledText modelRightText = mirrored ? leftText : rightText;
         StyledText knownText = reveal.oldSide() ? modelLeftText : modelRightText;
-        if (knownText.getLineCount() <= reveal.lineNo() && attempt < PENDING_LINE_REVEAL_MAX_ATTEMPTS)
+        StyledText byText = reveal.lineText() != null ? sideWithLine(reveal, modelLeftText, modelRightText) : null;
+        if (byText != null)
+            knownText = byText;
+        if ((reveal.lineText() != null ? byText == null : knownText.getLineCount() <= reveal.lineNo())
+            && attempt < PENDING_LINE_REVEAL_MAX_ATTEMPTS)
         {
             Display display = knownText.getDisplay();
             if (display == null || display.isDisposed())
@@ -511,12 +548,56 @@ public final class CompareEditorCurrentLinesHook
             return;
         }
         takePendingLineReveal();
-        StyledText otherText = reveal.oldSide() ? modelRightText : modelLeftText;
+        StyledText otherText = knownText == modelLeftText ? modelRightText : modelLeftText;
         int knownLine = Math.max(0, Math.min(reveal.lineNo(), Math.max(0, knownText.getLineCount() - 1)));
         activateLine(knownText, knownLine);
+        if (byText != null && reveal.length() > 0
+            && reveal.column() + reveal.length() <= knownText.getLine(knownLine).length())
+        {
+            knownText.setSelectionRange(knownText.getOffsetAtLine(knownLine) + reveal.column(), reveal.length());
+            keepSelectionThroughFocus(knownText, knownText.getOffsetAtLine(knownLine) + reveal.column(), reveal.length());
+        }
         int matchedLine = CompareLineRangeMatcher.findMatchedLine(knownText, knownLine, otherText);
         if (matchedLine >= 0)
             activateLine(otherText, matchedLine);
+    }
+
+    /**
+     * Выделение фрагмента ставится, пока сторона сравнения ещё без фокуса; при получении фокуса
+     * редактор сравнения сворачивает его до каретки, не двигая её (подтверждено логом: до фокуса
+     * {@code {start, length}}, после — {@code {start + length, 0}}, событий каретки нет).
+     * Возвращаем выделение один раз — после обработчиков получения фокуса и только если каретка
+     * осталась в конце фрагмента, то есть пользователь её не трогал.
+     */
+    private static void keepSelectionThroughFocus(StyledText text, int start, int length)
+    {
+        Listener[] holder = new Listener[1];
+        Runnable restore = () ->
+        {
+            if (text.isDisposed())
+                return;
+            Point selection = text.getSelectionRange();
+            if (selection.y == 0 && text.getCaretOffset() == start + length && start + length <= text.getCharCount())
+                text.setSelectionRange(start, length);
+        };
+        holder[0] = event ->
+        {
+            text.removeListener(SWT.FocusIn, holder[0]);
+            text.getDisplay().asyncExec(restore);
+            // сворачивание может прийти и позже первого прохода очереди событий
+            text.getDisplay().timerExec(300, restore);
+        };
+        if (text.isFocusControl())
+            holder[0].handleEvent(null);
+        else
+        {
+            text.addListener(SWT.FocusIn, holder[0]);
+            text.getDisplay().timerExec(10_000, () ->
+            {
+                if (!text.isDisposed())
+                    text.removeListener(SWT.FocusIn, holder[0]);
+            });
+        }
     }
 
     private static void activateLine(StyledText text, int line)
@@ -591,7 +672,9 @@ public final class CompareEditorCurrentLinesHook
 
         StyledText leftText = MergeViewerReflection.extractStyledText(viewer, "fLeft"); //$NON-NLS-1$
         StyledText rightText = MergeViewerReflection.extractStyledText(viewer, "fRight"); //$NON-NLS-1$
-        applyPendingLineRevealIfAny(leftText, rightText, config != null && config.isMirrored());
+        if (!restoreSavedPosition(pane, viewer))
+            applyPendingLineRevealIfAny(leftText, rightText, config != null && config.isMirrored());
+        trackPosition(pane, MergeViewerReflection.extractSourceViewer(viewer, "fLeft"), leftText, rightText); //$NON-NLS-1$
         registerModuleLineRefSides(editorInput, leftText, rightText);
 
         String irSyntaxVariant = IrCompareValuesHandler.syntaxVariantFor(resolveCompareType(editorInput));
@@ -647,6 +730,195 @@ public final class CompareEditorCurrentLinesHook
             scheduleAttach(editorInput, editor, 0, false);
         });
     }
+
+    private static final String SAVED_POSITION_KEY = "tormozit.compareEditorSavedPosition"; //$NON-NLS-1$
+
+    /** Позиция в поле текста одной стороны на момент смены варианта сравнения. */
+    private record SidePosition(int line, int column, int topIndex, boolean focused)
+    {
+        static SidePosition capture(StyledText text)
+        {
+            if (text == null || text.isDisposed() || text.getCharCount() == 0)
+                return null;
+            try
+            {
+                int caret = text.getCaretOffset();
+                int line = text.getLineAtOffset(caret);
+                return new SidePosition(line, caret - text.getOffsetAtLine(line), text.getTopIndex(),
+                    text.isFocusControl());
+            }
+            catch (Exception e)
+            {
+                return null;
+            }
+        }
+    }
+
+    private record SavedPosition(SidePosition left, SidePosition right)
+    {
+    }
+
+    /**
+     * Запоминает позицию обеих сторон перед тем, как вьюер лишится текста. При смене варианта
+     * сравнения {@code CompareViewerSwitchingPane.setViewer} сначала зовёт
+     * {@code fViewer.setInput(null)} и только потом уничтожает содержимое панели — к Dispose
+     * поля текста уже пусты, поэтому позиция снимается в уведомлении о предстоящей смене
+     * документа. Слушатель только на левой стороне: её документ меняется первым
+     * ({@code TextMergeViewer.updateContent}), а к смене документа правой та уже
+     * сброшена в начало — снимать её позже нельзя.
+     */
+    private static void trackPosition(CompareViewerSwitchingPane pane, SourceViewer leftViewer,
+        StyledText leftText, StyledText rightText)
+    {
+        if (leftViewer == null)
+            return;
+        leftViewer.addTextInputListener(new ITextInputListener()
+        {
+            @Override
+            public void inputDocumentAboutToBeChanged(IDocument oldInput, IDocument newInput)
+            {
+                SidePosition left = SidePosition.capture(leftText);
+                SidePosition right = SidePosition.capture(rightText);
+                // #region agent log — позиция сторон перед сменой документа вьюера
+                Global.tempLog("compare-position", "capture left=" + left + " right=" + right //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + " newInput=" + (newInput != null)); //$NON-NLS-1$
+                // #endregion
+                if ((left != null || right != null) && !pane.isDisposed())
+                    pane.setData(SAVED_POSITION_KEY, new SavedPosition(left, right));
+            }
+
+            @Override
+            public void inputDocumentChanged(IDocument oldInput, IDocument newInput)
+            {
+            }
+        });
+    }
+
+    /**
+     * Возвращает позицию, запомненную перед сменой варианта сравнения: текст сторон тот же,
+     * но вьюер пересоздан и каретка в его полях стоит в начале.
+     *
+     * @return {@code true}, если позиция была запомнена
+     */
+    private static boolean restoreSavedPosition(CompareViewerSwitchingPane pane, TextMergeViewer viewer)
+    {
+        if (!(pane.getData(SAVED_POSITION_KEY) instanceof SavedPosition saved))
+            return false;
+        pane.setData(SAVED_POSITION_KEY, null);
+        // #region agent log
+        Global.tempLog("compare-position", "restore " + saved); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
+        applySavedPosition(saved, MergeViewerReflection.extractSourceViewer(viewer, "fLeft"), //$NON-NLS-1$
+            MergeViewerReflection.extractSourceViewer(viewer, "fRight"), 0); //$NON-NLS-1$
+        return true;
+    }
+
+    /**
+     * Переприсоединение идёт по таймеру, а он срабатывает и внутри ещё не завершённого
+     * {@code CompareViewerSwitchingPane.setInput}: расчёт различий большого модуля крутит
+     * вложенный цикл событий, и после него {@code TextMergeViewer.updateContent} ставит каретку
+     * на первое различие ({@code selectFirstDiff}) — поверх уже восстановленной позиции.
+     * Поэтому ждём, пока {@code setInput} уйдёт из стека UI-потока.
+     */
+    private static void applySavedPosition(SavedPosition saved, SourceViewer leftViewer, SourceViewer rightViewer,
+        int attempt)
+    {
+        StyledText leftText = leftViewer != null ? leftViewer.getTextWidget() : null;
+        StyledText rightText = rightViewer != null ? rightViewer.getTextWidget() : null;
+        if (leftText == null || leftText.isDisposed() || rightText == null || rightText.isDisposed())
+            return;
+        boolean inputBeingSet = isPaneInputBeingSet();
+        boolean textMissing = !hasLine(leftText, saved.left()) || !hasLine(rightText, saved.right());
+        if (inputBeingSet || (textMissing && attempt < PENDING_LINE_REVEAL_MAX_ATTEMPTS))
+        {
+            int nextAttempt = inputBeingSet ? attempt : attempt + 1;
+            leftText.getDisplay().timerExec(PENDING_LINE_REVEAL_RETRY_DELAY_MS,
+                () -> applySavedPosition(saved, leftViewer, rightViewer, nextAttempt));
+            return;
+        }
+        boolean rightIsPrimary = saved.left() == null || (saved.right() != null && saved.right().focused());
+        SourceViewer primary = rightIsPrimary ? rightViewer : leftViewer;
+        SourceViewer secondary = rightIsPrimary ? leftViewer : rightViewer;
+        SidePosition primaryPosition = rightIsPrimary ? saved.right() : saved.left();
+        SidePosition secondaryPosition = rightIsPrimary ? saved.left() : saved.right();
+        if (secondaryPosition != null)
+        {
+            setCaret(secondary.getTextWidget(), secondaryPosition);
+            secondary.getTextWidget().setTopIndex(secondaryPosition.topIndex());
+        }
+        setCaret(primary.getTextWidget(), primaryPosition);
+        // Через вьюер: он уведомляет слушателей прокрутки, и TextMergeViewer подтягивает
+        // общую полосу прокрутки и соседнюю сторону.
+        primary.setTopIndex(primaryPosition.topIndex());
+        if (primaryPosition.focused())
+            primary.getTextWidget().setFocus();
+        // #region agent log
+        Global.tempLog("compare-position", "applied attempt=" + attempt //$NON-NLS-1$ //$NON-NLS-2$
+            + " left caret=" + leftText.getCaretOffset() + " top=" + leftText.getTopIndex() //$NON-NLS-1$ //$NON-NLS-2$
+            + " right caret=" + rightText.getCaretOffset() + " top=" + rightText.getTopIndex()); //$NON-NLS-1$ //$NON-NLS-2$
+        logPositionAfterRestore(leftText, "left"); //$NON-NLS-1$
+        logPositionAfterRestore(rightText, "right"); //$NON-NLS-1$
+        // #endregion
+    }
+
+    private static boolean hasLine(StyledText text, SidePosition position)
+    {
+        return position == null || text.getLineCount() > position.line();
+    }
+
+    private static void setCaret(StyledText text, SidePosition position)
+    {
+        int line = Math.min(position.line(), text.getLineCount() - 1);
+        int column = Math.min(position.column(), text.getLine(line).length());
+        text.setSelectionRange(text.getOffsetAtLine(line) + column, 0);
+    }
+
+    /** Выполняется ли сейчас (ниже по стеку UI-потока) {@code CompareViewerSwitchingPane.setInput}. */
+    private static boolean isPaneInputBeingSet()
+    {
+        for (StackTraceElement frame : Thread.currentThread().getStackTrace())
+        {
+            if ("setInput".equals(frame.getMethodName()) //$NON-NLS-1$
+                && CompareViewerSwitchingPane.class.getName().equals(frame.getClassName()))
+                return true;
+        }
+        return false;
+    }
+
+    // #region agent log
+    /** Временная диагностика: кто и когда сбивает каретку/прокрутку стороны после восстановления позиции. */
+    private static void logPositionAfterRestore(StyledText text, String side)
+    {
+        String topic = "compare-position"; //$NON-NLS-1$
+        org.eclipse.swt.custom.CaretListener caretListener = event ->
+        {
+            StringBuilder stack = new StringBuilder();
+            StackTraceElement[] frames = Thread.currentThread().getStackTrace();
+            for (int i = 2; i < Math.min(frames.length, 26); i++)
+                stack.append(" <- ").append(frames[i].getClassName()).append('.') //$NON-NLS-1$
+                    .append(frames[i].getMethodName()).append(':').append(frames[i].getLineNumber());
+            Global.tempLog(topic, side + " caretMoved=" + event.caretOffset + " top=" + text.getTopIndex() + stack); //$NON-NLS-1$ //$NON-NLS-2$
+        };
+        text.addCaretListener(caretListener);
+        for (int delayMs : new int[] { 0, 50, 150, 400, 1000, 2000, 3000 })
+        {
+            text.getDisplay().timerExec(delayMs, () ->
+            {
+                if (text.isDisposed())
+                {
+                    Global.tempLog(topic, side + " +" + delayMs + "ms disposed"); //$NON-NLS-1$ //$NON-NLS-2$
+                    return;
+                }
+                Global.tempLog(topic, side + " +" + delayMs + "ms caret=" + text.getCaretOffset() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " line=" + text.getLineAtOffset(text.getCaretOffset()) + " top=" + text.getTopIndex() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " lines=" + text.getLineCount() + " focus=" + text.isFocusControl() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " visible=" + text.isVisible() + " size=" + text.getSize()); //$NON-NLS-1$ //$NON-NLS-2$
+                if (delayMs == 3000)
+                    text.removeCaretListener(caretListener);
+            });
+        }
+    }
+    // #endregion
 
     /**
      * Семантическая подпись стороны (левый/правый input), без учёта визуального

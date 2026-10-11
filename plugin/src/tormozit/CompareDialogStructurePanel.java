@@ -19,6 +19,7 @@ import org.eclipse.swt.dnd.Clipboard;
 import org.eclipse.swt.dnd.TextTransfer;
 import org.eclipse.swt.dnd.Transfer;
 import org.eclipse.swt.graphics.Color;
+import org.eclipse.swt.graphics.RGB;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.layout.GridLayout;
 import org.eclipse.swt.widgets.Combo;
@@ -565,21 +566,21 @@ final class CompareDialogStructurePanel
         private Color lightGreen(Display display)
         {
             if (addedBackground == null || addedBackground.isDisposed())
-                addedBackground = new Color(display, 226, 245, 226);
+                addedBackground = new Color(display, ThemeAwareColors.toEffectiveBackgroundRgb(new RGB(226, 245, 226)));
             return addedBackground;
         }
 
         private Color lightOrange(Display display)
         {
             if (removedBackground == null || removedBackground.isDisposed())
-                removedBackground = new Color(display, 250, 235, 215);
+                removedBackground = new Color(display, ThemeAwareColors.toEffectiveBackgroundRgb(new RGB(250, 235, 215)));
             return removedBackground;
         }
 
         private Color lightRed(Display display)
         {
             if (errorBackground == null || errorBackground.isDisposed())
-                errorBackground = new Color(display, 250, 220, 220);
+                errorBackground = new Color(display, ThemeAwareColors.toEffectiveBackgroundRgb(new RGB(250, 220, 220)));
             return errorBackground;
         }
 

@@ -440,11 +440,11 @@ public final class CompareCurrentLinesPanel
     private void createDiffColors(Display display)
     {
         // Слева — зелёное (как ADDITION в TextMergeViewer), справа — красное (DELETION).
-        leftDiffBackground = new Color(display, 216, 255, 216);
+        leftDiffBackground = new Color(display, ThemeAwareColors.toEffectiveBackgroundRgb(new RGB(216, 255, 216)));
         leftDiffForeground = new Color(display, ThemeAwareColors.toEffectiveRgb(new RGB(46, 125, 50)));
-        rightDiffBackground = new Color(display, 255, 224, 224);
+        rightDiffBackground = new Color(display, ThemeAwareColors.toEffectiveBackgroundRgb(new RGB(255, 224, 224)));
         rightDiffForeground = new Color(display, ThemeAwareColors.toEffectiveRgb(new RGB(198, 40, 40)));
-        spaceBackground = new Color(display, 224, 224, 255);
+        spaceBackground = new Color(display, ThemeAwareColors.toEffectiveBackgroundRgb(new RGB(224, 224, 255)));
         spaceForeground = new Color(display, ThemeAwareColors.toEffectiveRgb(new RGB(21, 101, 192)));
     }
 

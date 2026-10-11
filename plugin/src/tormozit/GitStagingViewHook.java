@@ -194,6 +194,7 @@ public final class GitStagingViewHook implements IStartup
                 return;
             RepositorySelection.install(view, commit);
             DeleteCheckAction.install(view);
+            installFileDiffAction(view);
             CommitButtons session = new CommitButtons(new StagingSource(view), commit, push);
             session.install(commit);
             session.install(push);
@@ -206,6 +207,27 @@ public final class GitStagingViewHook implements IStartup
             return;
         }
         Display.getDefault().timerExec(attempt < 30 ? 100 : 500, () -> patch(view, attempt + 1));
+    }
+
+    /**
+     * Кнопка панели инструментов, открывающая {@link GitFileDiffView}. Штатный
+     * {@code StagingView.updateToolbar} заполняет панель один раз при создании, поэтому кнопка остаётся.
+     */
+    private static void installFileDiffAction(IViewPart view)
+    {
+        var toolbar = view.getViewSite().getActionBars().getToolBarManager();
+        if (toolbar.find(GitFileDiffView.ID) != null)
+            return;
+        Action action = new Action("Изменения файла")
+        {
+            @Override public void run() { GitFileDiffView.open(view.getSite().getPage()); }
+        };
+        action.setId(GitFileDiffView.ID);
+        action.setImageDescriptor(GitFileDiffView.iconDescriptor());
+        action.setToolTipText("Показать панель «Изменения файла Git» связанную с текущим файлом"
+            + Global.pluginSignForTooltip());
+        toolbar.add(action);
+        toolbar.update(true);
     }
 
     /** Поля commitButton, commitAndPushButton, filesViewer, repository подтверждены в CommitDialog EGit 6.8. */

@@ -373,7 +373,7 @@ public final class TextEditorFastSearchHandler extends AbstractHandler
      * «Найти/Заменить» (оттуда её берут {@code FindNextAction} — F3/Shift+F3 — и сам диалог
      * при открытии) и, если диалог уже открыт, подставляет в его поле «Найти».
      */
-    private static void publishSearchTarget(String searchString)
+    static void publishSearchTarget(String searchString)
     {
         if (searchString == null || searchString.isEmpty())
             return;

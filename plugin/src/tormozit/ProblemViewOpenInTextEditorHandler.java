@@ -266,7 +266,8 @@ public class ProblemViewOpenInTextEditorHandler extends AbstractHandler
     }
 
     /** Текстовая страница внутри многостраничного редактора XML. */
-    private static ITextEditor findTextEditor(IEditorPart editor)
+    /** Не {@code private} — переиспользуется {@link GitFileDiffView}. */
+    static ITextEditor findTextEditor(IEditorPart editor)
     {
         if (editor instanceof ITextEditor textEditor)
             return textEditor;

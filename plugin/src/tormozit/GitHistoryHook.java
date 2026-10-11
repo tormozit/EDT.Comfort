@@ -2,22 +2,60 @@ package tormozit;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.WeakHashMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import org.eclipse.core.resources.IProject;
+import org.eclipse.core.runtime.IProgressMonitor;
+import org.eclipse.core.runtime.IStatus;
+import org.eclipse.core.runtime.Status;
+import org.eclipse.core.runtime.jobs.IJobChangeEvent;
+import org.eclipse.core.runtime.jobs.Job;
+import org.eclipse.core.runtime.jobs.JobChangeAdapter;
 import org.eclipse.core.runtime.preferences.InstanceScope;
 import org.eclipse.egit.core.RepositoryCache;
 import org.eclipse.egit.core.RepositoryUtil;
 import org.eclipse.egit.core.project.RepositoryMapping;
+import org.eclipse.jgit.diff.DiffAlgorithm;
+import org.eclipse.jgit.diff.DiffEntry;
+import org.eclipse.jgit.diff.Edit;
+import org.eclipse.jgit.diff.RawText;
+import org.eclipse.jgit.diff.RawTextComparator;
+import org.eclipse.jgit.lib.AbbreviatedObjectId;
+import org.eclipse.jgit.lib.Constants;
+import org.eclipse.jgit.lib.ObjectId;
+import org.eclipse.jgit.lib.ObjectLoader;
 import org.eclipse.jgit.lib.Repository;
+import org.eclipse.jgit.revwalk.RevCommit;
+import org.eclipse.jgit.revwalk.RevWalk;
+import org.eclipse.jgit.revwalk.filter.AndRevFilter;
+import org.eclipse.jgit.revwalk.filter.RevFilter;
+import org.eclipse.jface.action.Action;
+import org.eclipse.jface.action.IAction;
+import org.eclipse.jface.action.IMenuCreator;
+import org.eclipse.jface.action.IMenuManager;
+import org.eclipse.jface.action.IToolBarManager;
+import org.eclipse.jface.action.MenuManager;
+import org.eclipse.jface.action.Separator;
 import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.jface.layout.TableColumnLayout;
 import org.eclipse.jface.preference.IPreferenceStore;
+import org.eclipse.jface.resource.JFaceResources;
+import org.eclipse.jface.text.BadLocationException;
+import org.eclipse.jface.text.IDocument;
+import org.eclipse.jface.text.IRegion;
+import org.eclipse.jface.text.ITextInputListener;
+import org.eclipse.jface.text.TextPresentation;
+import org.eclipse.jface.text.source.SourceViewer;
 import org.eclipse.jface.util.IPropertyChangeListener;
 import org.eclipse.jface.viewers.CellLabelProvider;
 import org.eclipse.jface.viewers.ColumnLabelProvider;
@@ -36,8 +74,14 @@ import org.eclipse.jface.viewers.ViewerComparator;
 import org.eclipse.jface.viewers.ViewerFilter;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.SashForm;
+import org.eclipse.swt.custom.StyleRange;
+import org.eclipse.swt.custom.StyledText;
+import org.eclipse.swt.events.MenuAdapter;
+import org.eclipse.swt.events.MenuEvent;
 import org.eclipse.swt.graphics.Color;
 import org.eclipse.swt.graphics.Image;
+import org.eclipse.swt.graphics.Point;
+import org.eclipse.swt.graphics.RGB;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.layout.GridLayout;
 import org.eclipse.swt.widgets.Composite;
@@ -45,7 +89,10 @@ import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Label;
+import org.eclipse.swt.widgets.Link;
 import org.eclipse.swt.widgets.Listener;
+import org.eclipse.swt.widgets.Menu;
+import org.eclipse.swt.widgets.MenuItem;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Table;
 import org.eclipse.swt.widgets.TableColumn;
@@ -53,15 +100,20 @@ import org.eclipse.swt.widgets.TableItem;
 import org.eclipse.swt.widgets.Text;
 import org.eclipse.swt.widgets.ToolBar;
 import org.eclipse.ui.IPartListener2;
+import org.eclipse.ui.IActionBars;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.IViewPart;
 import org.eclipse.ui.IViewReference;
+import org.eclipse.ui.IWorkbenchCommandConstants;
 import org.eclipse.ui.IWorkbench;
 import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.IWorkbenchPart;
 import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
+import org.eclipse.ui.plugin.AbstractUIPlugin;
+import org.eclipse.ui.actions.ActionFactory;
+import org.eclipse.ui.part.IPageSite;
 import org.eclipse.ui.preferences.ScopedPreferenceStore;
 
 /**
@@ -259,7 +311,12 @@ public final class GitHistoryHook implements IStartup
         int delay = attempt == 0 ? 0 : 150;
         display.timerExec(delay, () ->
         {
+            if (isHistoryView(view))
+                ChangeSearchMode.installFoundMenu(view);
             boolean pageReady = ensureGitHistoryPage(view);
+            Object historyPage = Global.call(view, "getHistoryPage"); //$NON-NLS-1$
+            if (isGitHistoryPage(historyPage))
+                ChangeSearchMode.installDiffSupport(historyPage);
             boolean colsReady = !ComfortSettings.isReplaceListFiltersEnabled()
                 || tryPatch(view, attempt);
             if ((!pageReady || !colsReady) && attempt < 20)
@@ -660,6 +717,1166 @@ public final class GitHistoryHook implements IStartup
             Debug.log("repoFromGitDir: " + dir + " → " + e); //$NON-NLS-1$ //$NON-NLS-2$
         }
         return null;
+    }
+
+    // -----------------------------------------------------------------------
+    // Режим «Найдено в изменениях файлов»
+    // -----------------------------------------------------------------------
+
+    /** F3 / Shift+F3 в области отличий; {@code false} — {@code text} не область отличий панели. */
+    static boolean findNextInDiff(StyledText text, boolean forward)
+    {
+        return ChangeSearchMode.findNextInDiff(text, forward);
+    }
+
+    /**
+     * Ctrl+F3 / Ctrl+Shift+F3 в {@code text}; {@code true} — это область отличий в режиме
+     * результатов поиска с выделенным вхождением, переход выполнен, быстрый поиск не нужен.
+     */
+    static boolean fastSearchInDiff(StyledText text, boolean forward)
+    {
+        return ChangeSearchMode.fastSearch(text, forward);
+    }
+
+    /** Показать в панели «История Git» коммиты, найденные поиском по изменениям файлов. */
+    static void showChangeSearch(GitChangeSearch.Session session)
+    {
+        IWorkbenchPage workbenchPage = Global.getActivePage();
+        if (workbenchPage == null || session == null)
+            return;
+        try
+        {
+            IViewPart view = workbenchPage.showView(TEAM_HISTORY_VIEW_ID);
+            Object input = historyPageInput(session.repository());
+            Object pageSource = gitHistoryPageSource();
+            Object shown = null;
+            if (input != null && pageSource != null)
+            {
+                restoringGitHistoryPage = true;
+                try
+                {
+                    shown = Global.invoke(view, "showHistoryPageFor", //$NON-NLS-1$
+                        input, Boolean.TRUE, Boolean.TRUE, pageSource);
+                }
+                finally
+                {
+                    restoringGitHistoryPage = false;
+                }
+            }
+            if (!isGitHistoryPage(shown) || !ChangeSearchMode.enter(view, shown, session))
+                ToastNotification.show(ChangeSearchMode.TITLE,
+                    "Не удалось показать результаты в панели «История Git»", 5000);
+        }
+        catch (Exception e)
+        {
+            Debug.log("[!] change search: show failed " + Debug.shortStack(e)); //$NON-NLS-1$
+            ToastNotification.show(ChangeSearchMode.TITLE, "Ошибка показа результатов: " + e.getMessage(), 5000);
+        }
+    }
+
+    /**
+     * Режим страницы «История Git»: показаны только коммиты, найденные {@link GitChangeSearch},
+     * в списке файлов коммита — только файлы с совпадением, в области отличий окрашены вхождения.
+     *
+     * <p>Таблицу коммитов строит штатное задание {@code GenerateHistoryJob} своим обходом истории;
+     * перед его запуском ({@code aboutToRun}, нить задания, обход ещё не начат) в обход добавляется
+     * фильтр по найденным коммитам. Пока git ищет, страница раз в секунду перестраивается штатным
+     * {@code initAndStartRevWalk(true)}. Файлы с совпадением передаются штатному механизму «интересных путей»
+     * {@code CommitFileDiffViewer} — так же перед запуском его задания загрузки.
+     */
+    private static final class ChangeSearchMode
+    {
+        static final String TITLE = "Поиск в изменениях файлов";
+        private static final String GENERATE_JOB =
+            "org.eclipse.egit.ui.internal.history.GenerateHistoryJob"; //$NON-NLS-1$
+        private static final String FILE_LOADER_JOB =
+            "org.eclipse.egit.ui.internal.history.CommitFileDiffViewer$FileDiffLoader"; //$NON-NLS-1$
+        private static final String FILE_UPDATE_JOB =
+            "org.eclipse.egit.ui.internal.history.CommitFileDiffViewer$UpdateJob"; //$NON-NLS-1$
+        private static final String DIFF_SUPPORT_KEY = "tormozit.gitChangeSearchDiffSupport"; //$NON-NLS-1$
+        private static final String DIFF_PAGE_KEY = "tormozit.gitChangeSearchDiffPage"; //$NON-NLS-1$
+        private static final String FILE_CLICK_KEY = "tormozit.gitChangeSearchFileClick"; //$NON-NLS-1$
+        private static final String MENU_ITEM_KEY = "tormozit.gitChangeSearchMenuItem"; //$NON-NLS-1$
+        /** Меньше периода автоповтора клавиши, больше разрыва между двумя доставками одного нажатия. */
+        private static final int FIND_NEXT_REPEAT_MS = 25;
+        private static long lastFindNextMs;
+        /** После Ctrl+F3 в области отличий; сбрасывается сменой её документа. */
+        private static boolean bufferSearchInDiff;
+        private static final String FOUND_MENU_ID = "tormozit.gitChangeSearchFound"; //$NON-NLS-1$
+        /**
+         * Отказ от оформления темой Eclipse ({@code AbstractCSSSWTEngineImpl.isStylable}): иначе
+         * тёмная тема перекрашивает полосу в свой фон, и индикатор режима пропадает.
+         */
+        private static final String CSS_DISABLED_KEY = "org.eclipse.e4.ui.css.disabled"; //$NON-NLS-1$
+        private static final int REFRESH_MS = 1000;
+        /** Как у штатного автовыбора «интересных» файлов ({@code INTERESTING_AUTOSELECT_LIMIT}). */
+        private static final int AUTOSELECT_LIMIT = 100;
+
+        /** Страница {@code GitHistoryPage} → её режим; читается и из нитей заданий. */
+        private static final Map<Object, ChangeSearchMode> MODES =
+            Collections.synchronizedMap(new IdentityHashMap<>());
+        /** Обходы, в которые фильтр уже добавлен: задание перезапускается на каждую пачку строк. */
+        private static final Set<Object> filteredWalks =
+            Collections.synchronizedSet(Collections.newSetFromMap(new WeakHashMap<>()));
+        private static final JobChangeAdapter JOB_LISTENER = new JobChangeAdapter()
+        {
+            @Override
+            public void aboutToRun(IJobChangeEvent event)
+            {
+                try
+                {
+                    onAboutToRun(event.getJob());
+                }
+                catch (RuntimeException e)
+                {
+                    Debug.log("[!] change search: aboutToRun failed " + Debug.shortStack(e)); //$NON-NLS-1$
+                }
+            }
+
+            @Override
+            public void done(IJobChangeEvent event)
+            {
+                Job job = event.getJob();
+                if (!FILE_UPDATE_JOB.equals(job.getClass().getName()))
+                    return;
+                ChangeSearchMode mode = byFileViewer(Global.getField(job, "this$0")); //$NON-NLS-1$
+                Display display = Display.getDefault();
+                if (mode != null && !display.isDisposed())
+                    display.asyncExec(mode::selectFoundFiles);
+            }
+        };
+
+        private final Object page;
+        private final TableViewer fileViewer;
+        private final Composite historyControl;
+        private volatile GitChangeSearch.Session session;
+        private volatile boolean allFiles;
+        private Composite banner;
+        private Label bannerText;
+        private Link bannerLinks;
+        private Object stockInterestingOnly;
+        private int shownVersion = -1;
+        private boolean ticking;
+        private boolean failureShown;
+        private Pattern pattern;
+        private GitChangeSearch.Session patternSession;
+
+        private ChangeSearchMode(Object page, TableViewer fileViewer, Composite historyControl)
+        {
+            this.page = page;
+            this.fileViewer = fileViewer;
+            this.historyControl = historyControl;
+        }
+
+        /** @return {@code false}, если страница устроена не так, как ожидается */
+        static boolean enter(IViewPart view, Object page, GitChangeSearch.Session session)
+        {
+            ChangeSearchMode mode = MODES.get(page);
+            if (mode == null)
+            {
+                if (!(Global.getField(page, "fileViewer") instanceof TableViewer fileViewer) //$NON-NLS-1$
+                    || !(Global.getField(page, "historyControl") instanceof Composite historyControl) //$NON-NLS-1$
+                    || !(Global.getField(page, "graphDetailSplit") instanceof Control split) //$NON-NLS-1$
+                    || historyControl.isDisposed() || !(historyControl.getLayout() instanceof GridLayout))
+                {
+                    Debug.log("[!] change search: unexpected page structure page=" + describe(page)); //$NON-NLS-1$
+                    return false;
+                }
+                // с колонками списка файлов разделитель лежит не прямо в historyControl, а в нашем
+                // горизонтальном SashForm (installFilterComposite) — полоса встаёт над ним
+                Control anchor = split;
+                while (anchor != null && anchor.getParent() != historyControl)
+                    anchor = anchor.getParent();
+                if (anchor == null)
+                {
+                    Debug.log("[!] change search: split is outside historyControl children=" //$NON-NLS-1$
+                        + historyControl.getChildren().length);
+                    return false;
+                }
+                mode = new ChangeSearchMode(page, fileViewer, historyControl);
+                mode.createBanner(anchor);
+                mode.stockInterestingOnly = Global.getField(fileViewer, "showInterestingOnly"); //$NON-NLS-1$
+                if (MODES.isEmpty())
+                    Job.getJobManager().addJobChangeListener(JOB_LISTENER);
+                MODES.put(page, mode);
+                ChangeSearchMode created = mode;
+                historyControl.addDisposeListener(e -> created.forget());
+                if (!installDiffSupport(page))
+                    Debug.log("[!] change search: diff viewer not found"); //$NON-NLS-1$
+                installFileClickFocus(page, fileViewer.getTable());
+                Global.invokeVoid(fileViewer, "setShowInterestingOnly", Boolean.TRUE); //$NON-NLS-1$
+            }
+            installFoundMenu(view);
+            mode.show(session);
+            return true;
+        }
+
+        /**
+         * В режиме щелчок по файлу отдаёт фокус тексту изменений: дальше F3 идёт по вхождениям.
+         * Только простой щелчок — выбор стрелками и щелчки с Ctrl/Shift (несколько файлов)
+         * оставляют фокус в списке.
+         */
+        private static void installFileClickFocus(Object page, Table files)
+        {
+            if (files.getData(FILE_CLICK_KEY) != null)
+                return;
+            files.setData(FILE_CLICK_KEY, Boolean.TRUE);
+            files.addListener(SWT.MouseUp, event ->
+            {
+                if (event.button != 1 || (event.stateMask & (SWT.MOD1 | SWT.MOD2)) != 0
+                    || MODES.get(page) == null || files.getItem(new Point(event.x, event.y)) == null)
+                    return;
+                // после штатной обработки выбора строки
+                files.getDisplay().asyncExec(() ->
+                {
+                    SourceViewer viewer = diffViewer(page);
+                    if (viewer != null && MODES.get(page) != null && files.isFocusControl())
+                        viewer.getTextWidget().setFocus();
+                });
+            });
+        }
+
+        private void show(GitChangeSearch.Session shown)
+        {
+            session = shown;
+            shownVersion = -1;
+            failureShown = false;
+            if (allFiles)
+                setAllFiles(false);
+            invalidateDiff();
+            if (!ticking)
+                tick();
+        }
+
+        private boolean isActive()
+        {
+            return !historyControl.isDisposed() && MODES.get(page) == this;
+        }
+
+        /** Перестроить таблицу коммитов, если git нашёл новые; повторять, пока идёт поиск. */
+        private void tick()
+        {
+            ticking = false;
+            if (!isActive())
+                return;
+            GitChangeSearch.Session current = session;
+            // состояние читается раньше счётчика: после завершения счётчик уже окончательный
+            boolean running = current.isRunning();
+            int version = current.version();
+            if (version != shownVersion)
+            {
+                shownVersion = version;
+                if (!restartWalk())
+                    Debug.log("[!] change search: walk not restarted"); //$NON-NLS-1$
+            }
+            updateBanner();
+            if (running)
+            {
+                ticking = true;
+                historyControl.getDisplay().timerExec(REFRESH_MS, this::tick);
+            }
+            else if (current.state() == GitChangeSearch.State.FAILED && !failureShown)
+            {
+                failureShown = true;
+                ToastNotification.show(TITLE, current.error() == null || current.error().isBlank()
+                    ? "git завершился с ошибкой" : current.error(), 8000);
+            }
+        }
+
+        /**
+         * Построить таблицу коммитов заново. Штатный {@code refresh()} не годится: без смены ветви,
+         * путей или настроек он оставляет прежний обход ({@code initAndStartRevWalk(false, …)}).
+         * {@code initAndStartRevWalk(true)} — то же, чем сама страница отвечает на смену настроек.
+         */
+        private boolean restartWalk()
+        {
+            try
+            {
+                return Global.invokeVoid(page, "initAndStartRevWalk", Boolean.TRUE); //$NON-NLS-1$
+            }
+            catch (RuntimeException e)
+            {
+                Debug.log("[!] change search: restart failed " + Debug.shortStack(e)); //$NON-NLS-1$
+                return false;
+            }
+        }
+
+        // ---- полоса режима ----
+
+        private void createBanner(Control split)
+        {
+            Display display = historyControl.getDisplay();
+            boolean dark = ThemeAwareColors.isDarkTheme();
+            Color background = new Color(display, dark ? new RGB(232, 170, 0) : new RGB(255, 221, 87));
+            Color foreground = display.getSystemColor(SWT.COLOR_BLACK);
+
+            banner = new Composite(historyControl, SWT.NONE);
+            banner.setData(CSS_DISABLED_KEY, Boolean.TRUE);
+            banner.moveAbove(split);
+            banner.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
+            banner.setBackgroundMode(SWT.INHERIT_FORCE);
+            banner.setBackground(background);
+            banner.addDisposeListener(e -> background.dispose());
+            GridLayout layout = new GridLayout(2, false);
+            layout.marginHeight = 3;
+            layout.marginWidth = 6;
+            layout.horizontalSpacing = 12;
+            banner.setLayout(layout);
+
+            bannerText = new Label(banner, SWT.NONE);
+            bannerText.setData(CSS_DISABLED_KEY, Boolean.TRUE);
+            bannerText.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
+            bannerText.setForeground(foreground);
+            bannerText.setFont(JFaceResources.getFontRegistry().getBold(JFaceResources.DEFAULT_FONT));
+
+            bannerLinks = new Link(banner, SWT.NONE);
+            bannerLinks.setData(CSS_DISABLED_KEY, Boolean.TRUE);
+            bannerLinks.setLayoutData(new GridData(SWT.END, SWT.CENTER, false, false));
+            bannerLinks.setForeground(foreground);
+            bannerLinks.addListener(SWT.Selection, e ->
+            {
+                if ("stop".equals(e.text)) //$NON-NLS-1$
+                {
+                    session.stop();
+                    updateBanner();
+                }
+                else if ("files".equals(e.text)) //$NON-NLS-1$
+                    setAllFiles(!allFiles);
+                else if ("close".equals(e.text)) //$NON-NLS-1$
+                    exit();
+            });
+            historyControl.layout(true, true);
+        }
+
+        private void updateBanner()
+        {
+            if (banner == null || banner.isDisposed())
+                return;
+            GitChangeSearch.Session current = session;
+            String state = switch (current.state())
+            {
+                case RUNNING -> ", идёт поиск…";
+                case STOPPED -> ", поиск остановлен";
+                case FAILED -> ", поиск прерван ошибкой";
+                default -> ""; //$NON-NLS-1$
+            };
+            String text = "Найдено в изменениях файлов: " + current.label()
+                + " — коммитов: " + current.commitCount() + state;
+            String links = (current.isRunning() ? "<a href=\"stop\">Остановить</a>   " : "") //$NON-NLS-2$
+                + "<a href=\"files\">" + (allFiles ? "Только найденные файлы" : "Все файлы коммита") + "</a>   " //$NON-NLS-1$ //$NON-NLS-4$
+                + "<a href=\"close\">Закрыть</a>";
+            boolean relayout = !links.equals(bannerLinks.getText());
+            // «&» в надписи — признак клавиши доступа, табуляция рвёт строку
+            String label = text.replace("&", "&&").replace('\t', ' '); //$NON-NLS-1$ //$NON-NLS-2$
+            if (!label.equals(bannerText.getText()))
+            {
+                bannerText.setText(label);
+                GitChangeSearch.Query query = current.query();
+                bannerText.setToolTipText(TooltipText.wrap(bannerText,
+                    "Показаны только коммиты репозитория «" + current.repositoryName()
+                        + "», в изменениях файлов которых найден текст " + current.label()
+                        + (query.regex() ? ", регулярное выражение" : "") //$NON-NLS-2$
+                        + (query.caseSensitive() ? ", с учётом регистра" : "") //$NON-NLS-2$
+                        + (query.allBranches() ? ", все ветви" : ", текущая ветвь")
+                        + ". Обычная история — по ссылке «Закрыть»" + Global.pluginSignForTooltip()));
+            }
+            if (relayout)
+            {
+                bannerLinks.setText(links);
+                banner.layout(true, true);
+            }
+        }
+
+        private void setAllFiles(boolean all)
+        {
+            allFiles = all;
+            Global.invokeVoid(fileViewer, "setShowInterestingOnly", Boolean.valueOf(!all)); //$NON-NLS-1$
+            updateBanner();
+        }
+
+        private void exit()
+        {
+            forget();
+            if (historyControl.isDisposed())
+                return;
+            if (banner != null && !banner.isDisposed())
+                banner.dispose();
+            historyControl.layout(true, true);
+            if (stockInterestingOnly instanceof Boolean stock)
+                Global.invokeVoid(fileViewer, "setShowInterestingOnly", stock); //$NON-NLS-1$
+            invalidateDiff();
+            restartWalk();
+        }
+
+        private void forget()
+        {
+            if (MODES.remove(page) != null && MODES.isEmpty())
+                Job.getJobManager().removeJobChangeListener(JOB_LISTENER);
+        }
+
+        // ---- штатные задания страницы ----
+
+        private static void onAboutToRun(Job job)
+        {
+            String name = job.getClass().getName();
+            if (GENERATE_JOB.equals(name))
+            {
+                ChangeSearchMode mode = MODES.get(Global.getField(job, "page")); //$NON-NLS-1$
+                if (mode != null && Global.getField(job, "walk") instanceof RevWalk walk) //$NON-NLS-1$
+                    mode.filterWalk(walk);
+            }
+            else if (FILE_LOADER_JOB.equals(name))
+            {
+                Object input = Global.getField(job, "input"); //$NON-NLS-1$
+                ChangeSearchMode mode = input != null ? byFileInput(input) : null;
+                if (mode != null)
+                    mode.markFoundFiles(job, input);
+            }
+        }
+
+        private static List<ChangeSearchMode> modes()
+        {
+            synchronized (MODES)
+            {
+                return new ArrayList<>(MODES.values());
+            }
+        }
+
+        private static ChangeSearchMode byFileInput(Object input)
+        {
+            for (ChangeSearchMode mode : modes())
+            {
+                if (Global.getField(mode.fileViewer, "realInput") == input) //$NON-NLS-1$
+                    return mode;
+            }
+            return null;
+        }
+
+        private static ChangeSearchMode byFileViewer(Object viewer)
+        {
+            for (ChangeSearchMode mode : modes())
+            {
+                if (mode.fileViewer == viewer)
+                    return mode;
+            }
+            return null;
+        }
+
+        /** Оставить в обходе истории только найденные коммиты. */
+        private void filterWalk(RevWalk walk)
+        {
+            if (!filteredWalks.add(walk))
+                return;
+            RevFilter stock = walk.getRevFilter();
+            RevFilter own = new FoundCommitFilter(this);
+            try
+            {
+                walk.setRevFilter(stock == null || stock == RevFilter.ALL ? own : AndRevFilter.create(stock, own));
+            }
+            catch (IllegalStateException e)
+            {
+                Debug.log("[!] change search: walk already started " + Debug.shortStack(e)); //$NON-NLS-1$
+            }
+        }
+
+        /**
+         * Передать штатной загрузке списка файлов пути с совпадением: она пометит их, а таблица
+         * оставит только помеченные. Остальные файлы коммита (их могут быть тысячи) в список не
+         * попадают, отличия по ним не строятся.
+         */
+        private void markFoundFiles(Job loader, Object input)
+        {
+            if (!(Global.call(input, "getCommit") instanceof RevCommit commit)) //$NON-NLS-1$
+                return;
+            Set<String> found = session.paths(commit);
+            if (found.isEmpty())
+                return;
+            List<String> paths = new ArrayList<>(found);
+            Global.invokeVoid(input, "setInterestingPaths", paths); //$NON-NLS-1$
+            Object filter = Global.invoke(fileViewer, "toFilter", paths); //$NON-NLS-1$
+            if (filter == null || !Global.setFieldForce(loader, "filter", filter)) //$NON-NLS-1$
+                Debug.log("[!] change search: found files not marked commit=" + commit.name()); //$NON-NLS-1$
+        }
+
+        /** Выделить найденные файлы — штатная панель строит отличия только по выделенным. */
+        private void selectFoundFiles()
+        {
+            if (!isActive() || fileViewer.getControl().isDisposed() || !fileViewer.getSelection().isEmpty()
+                || !(fileViewer.getInput() instanceof Object[] diffs))
+                return;
+            Object commit = Global.call(Global.getField(fileViewer, "realInput"), "getCommit"); //$NON-NLS-1$ //$NON-NLS-2$
+            Set<String> found = commit instanceof RevCommit revCommit ? session.paths(revCommit) : Set.of();
+            List<Object> selection = new ArrayList<>();
+            for (Object diff : diffs)
+            {
+                if (selection.size() < AUTOSELECT_LIMIT && found.contains(Global.call(diff, "getPath"))) //$NON-NLS-1$
+                    selection.add(diff);
+            }
+            if (!selection.isEmpty())
+                fileViewer.setSelection(new StructuredSelection(selection), true);
+        }
+
+        private static final class FoundCommitFilter extends RevFilter
+        {
+            private final ChangeSearchMode mode;
+
+            FoundCommitFilter(ChangeSearchMode mode)
+            {
+                this.mode = mode;
+            }
+
+            @Override
+            public boolean include(RevWalk walker, RevCommit commit)
+            {
+                return mode.session.contains(commit);
+            }
+
+            @Override
+            public RevFilter clone()
+            {
+                return this;
+            }
+
+            @Override
+            public boolean requiresCommitBody()
+            {
+                return false;
+            }
+
+            @Override
+            public String toString()
+            {
+                return "COMFORT_CHANGE_SEARCH"; //$NON-NLS-1$
+            }
+        }
+
+        // ---- область отличий: подсветка вхождений и переходы ----
+
+        private static SourceViewer diffViewer(Object page)
+        {
+            Object viewer = Global.call(Global.getField(page, "commitAndDiff"), "getDiffViewer"); //$NON-NLS-1$ //$NON-NLS-2$
+            return viewer instanceof SourceViewer source && source.getTextWidget() != null
+                && !source.getTextWidget().isDisposed() ? source : null;
+        }
+
+        /**
+         * Слушатели ставятся один раз на страницу и сами смотрят, включён ли режим. Клавиши поиска
+         * (F3 / Shift+F3 / Ctrl+F3) работают и без режима.
+         *
+         * @return {@code false}, если области отличий у страницы ещё нет
+         */
+        static boolean installDiffSupport(Object page)
+        {
+            SourceViewer viewer = diffViewer(page);
+            if (viewer == null)
+                return false;
+            StyledText text = viewer.getTextWidget();
+            if (text.getData(DIFF_SUPPORT_KEY) != null)
+                return true;
+            text.setData(DIFF_SUPPORT_KEY, viewer);
+            text.setData(DIFF_PAGE_KEY, page);
+            GitDiffMethods.install(viewer, GitHistoryHook::diffSections,
+                () -> diffMethodsHost(page, text), "history", //$NON-NLS-1$
+                offset -> openFullCompare(page, viewer, offset));
+            // StyledText обрабатывает клавиши во внутреннем слушателе KeyDown — перехват до него
+            text.addVerifyKeyListener(event ->
+            {
+                if (event.keyCode != SWT.F3 || (event.stateMask & SWT.MOD1) != 0)
+                    return;
+                findNextInDiff(text, (event.stateMask & SWT.MOD2) == 0);
+                event.doit = false;
+            });
+            installFindReplace(page, viewer);
+            viewer.addTextPresentationListener(presentation ->
+            {
+                ChangeSearchMode mode = MODES.get(page);
+                if (mode != null)
+                    mode.highlight(viewer, presentation);
+            });
+            viewer.addTextInputListener(new ITextInputListener()
+            {
+                @Override
+                public void inputDocumentAboutToBeChanged(IDocument oldInput, IDocument newInput)
+                {
+                }
+
+                @Override
+                public void inputDocumentChanged(IDocument oldInput, IDocument newInput)
+                {
+                    bufferSearchInDiff = false;
+                    // после штатной установки документа: она сама ставит каретку в начало
+                    text.getDisplay().asyncExec(() ->
+                    {
+                        ChangeSearchMode mode = MODES.get(page);
+                        if (mode != null && !text.isDisposed())
+                            mode.goToOccurrence(viewer, 0);
+                    });
+                }
+            });
+            Menu menu = text.getMenu();
+            if (menu == null)
+            {
+                Debug.log("[!] change search: diff viewer has no context menu"); //$NON-NLS-1$
+                return true;
+            }
+            menu.addMenuListener(new MenuAdapter()
+            {
+                @Override
+                public void menuShown(MenuEvent event)
+                {
+                    for (MenuItem item : menu.getItems())
+                    {
+                        if (item.getData(MENU_ITEM_KEY) != null)
+                            item.dispose();
+                    }
+                    ChangeSearchMode mode = MODES.get(page);
+                    if (mode == null)
+                        return;
+                    new MenuItem(menu, SWT.SEPARATOR).setData(MENU_ITEM_KEY, Boolean.TRUE);
+                    addOccurrenceItem(menu, "Следующее вхождение",
+                        "Перейти к следующему вхождению искомого текста в изменениях", () -> mode.goToOccurrence(viewer, 1));
+                    addOccurrenceItem(menu, "Предыдущее вхождение",
+                        "Перейти к предыдущему вхождению искомого текста в изменениях", () -> mode.goToOccurrence(viewer, -1));
+                }
+            });
+            return true;
+        }
+
+        /**
+         * Ctrl+F в области отличий — штатный диалог «Найти/Заменить», как в редакторе. Команда
+         * {@code org.eclipse.ui.edit.findReplace} на странице занята штатной кнопкой панели поиска
+         * коммитов ({@code GitHistoryPageActions.findAction}, глобальный обработчик
+         * {@code ActionFactory.FIND} в {@code IPageSite.getActionBars()}), а до клавиши в самом
+         * тексте Ctrl+F не доходит — подменяем этот обработчик: при фокусе в области отличий
+         * открываем диалог, иначе выполняем штатное действие.
+         */
+        private static void installFindReplace(Object page, SourceViewer viewer)
+        {
+            if (!(Global.call(page, "getSite") instanceof IPageSite site)) //$NON-NLS-1$
+                return;
+            IActionBars bars = site.getActionBars();
+            StyledText text = viewer.getTextWidget();
+            IAction original = bars.getGlobalActionHandler(ActionFactory.FIND.getId());
+            IAction wrapper = new Action()
+            {
+                @Override
+                public void run()
+                {
+                    if (!text.isDisposed() && text.isFocusControl())
+                    {
+                        GitDiffMethods.openFindReplace(viewer);
+                        // дальше F3 ищет строку диалога, а не вхождения режима результатов поиска
+                        bufferSearchInDiff = true;
+                        return;
+                    }
+                    if (original == null || !original.isEnabled())
+                        return;
+                    // кнопка панели поиска коммитов — с пометкой; ActionHandler переключал её сам
+                    if (original.getStyle() == IAction.AS_CHECK_BOX || original.getStyle() == IAction.AS_RADIO_BUTTON)
+                        original.setChecked(!original.isChecked());
+                    original.run();
+                }
+            };
+            wrapper.setActionDefinitionId(IWorkbenchCommandConstants.EDIT_FIND_AND_REPLACE);
+            bars.setGlobalActionHandler(ActionFactory.FIND.getId(), wrapper);
+            bars.updateActionBars();
+        }
+
+        /**
+         * «Найти далее / ранее» (F3 / Shift+F3) в области отличий. В режиме результатов поиска —
+         * по вхождениям искомого текста; после Ctrl+F3 в этом же тексте и вне режима — по строке
+         * диалога «Найти/Заменить», как в редакторе.
+         *
+         * @return {@code false}, если {@code text} — не область отличий «Истории Git»
+         */
+        static boolean findNextInDiff(StyledText text, boolean forward)
+        {
+            if (text == null || text.isDisposed() || !(text.getData(DIFF_SUPPORT_KEY) instanceof SourceViewer viewer))
+                return false;
+            // одно нажатие F3 приходит дважды — командой «Найти далее» и клавишей в сам текст
+            // (лог: два вызова с разницей в 3 мс); на двух вхождениях двойной шаг возвращал на место
+            long now = System.currentTimeMillis();
+            if (now - lastFindNextMs < FIND_NEXT_REPEAT_MS)
+                return true;
+            lastFindNextMs = now;
+            ChangeSearchMode mode = MODES.get(text.getData(DIFF_PAGE_KEY));
+            boolean byFound = mode != null && !bufferSearchInDiff;
+            if (byFound)
+                mode.goToOccurrence(viewer, forward ? 1 : -1);
+            else
+                TextEditorFastSearchHandler.executeFindNextFromBuffer(text, forward);
+            return true;
+        }
+
+        /**
+         * Ctrl+F3 / Ctrl+Shift+F3 в области отличий. Если выделено вхождение, найденное режимом
+         * (на нём курсор стоит сразу после выбора файла), — переход к следующему или предыдущему
+         * вхождению режима: быстрый поиск искал бы выделенный текст по флажкам диалога
+         * «Найти/Заменить» (регистр, «Слово целиком») и на единственном таком написании стоял бы
+         * на месте. Иначе — обычный быстрый поиск, и дальше F3 ищет его слово, а не найденное режимом.
+         *
+         * @return {@code true}, если переход выполнен здесь
+         */
+        static boolean fastSearch(StyledText text, boolean forward)
+        {
+            if (text == null || text.isDisposed() || !(text.getData(DIFF_SUPPORT_KEY) instanceof SourceViewer viewer))
+                return false;
+            ChangeSearchMode mode = MODES.get(text.getData(DIFF_PAGE_KEY));
+            Pattern pattern = mode != null ? mode.pattern() : null;
+            String selected = text.getSelectionText();
+            boolean onFound = pattern != null && !selected.isEmpty() && pattern.matcher(selected).matches();
+            if (!onFound)
+            {
+                bufferSearchInDiff = true;
+                return false;
+            }
+            bufferSearchInDiff = false;
+            mode.goToOccurrence(viewer, forward ? 1 : -1);
+            return true;
+        }
+
+        private static void addOccurrenceItem(Menu menu, String text, String tooltip, Runnable action)
+        {
+            MenuItem item = new MenuItem(menu, SWT.PUSH);
+            item.setData(MENU_ITEM_KEY, Boolean.TRUE);
+            item.setText(text);
+            ComfortSubmenuHelper.setMenuItemTooltip(item, tooltip);
+            item.addListener(SWT.Selection, e -> action.run());
+        }
+
+        private void invalidateDiff()
+        {
+            SourceViewer viewer = diffViewer(page);
+            if (viewer != null)
+                viewer.invalidateTextPresentation();
+        }
+
+        private Pattern pattern()
+        {
+            GitChangeSearch.Session current = session;
+            if (patternSession != current)
+            {
+                patternSession = current;
+                pattern = current.query().highlightPattern();
+            }
+            return pattern;
+        }
+
+        /** Строка изменения: «+»/«-» в начале, кроме заголовков файлов «+++ »/«--- ». */
+        private static boolean isChangeLine(String line)
+        {
+            if (line.length() < 2)
+                return false;
+            char first = line.charAt(0);
+            return (first == '+' || first == '-') && !line.startsWith("+++ ") && !line.startsWith("--- "); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        /**
+         * Вхождения искомого в строках изменений со строки {@code fromLine} по {@code toLine};
+         * строка обрезки текста — тоже вхождение, целиком.
+         */
+        private List<int[]> occurrences(IDocument document, int fromLine, int toLine)
+        {
+            List<int[]> result = new ArrayList<>();
+            Pattern search = pattern();
+            if (search == null || document == null)
+                return result;
+            try
+            {
+                for (int lineIndex = fromLine; lineIndex <= toLine; lineIndex++)
+                {
+                    IRegion region = document.getLineInformation(lineIndex);
+                    String line = document.get(region.getOffset(), region.getLength());
+                    if (GitDiffMethods.isTruncationLine(line))
+                    {
+                        // искомое может стоять в отброшенном хвосте — строка обрезки заменяет его вхождения
+                        result.add(new int[] { region.getOffset(), region.getLength() });
+                        continue;
+                    }
+                    if (!isChangeLine(line))
+                        continue;
+                    Matcher matcher = search.matcher(line);
+                    matcher.region(1, line.length());
+                    while (matcher.find())
+                    {
+                        if (matcher.end() == matcher.start())
+                            break;
+                        result.add(new int[] { region.getOffset() + matcher.start(), matcher.end() - matcher.start() });
+                    }
+                }
+            }
+            catch (BadLocationException e)
+            {
+                // документ сменился во время обхода
+            }
+            return result;
+        }
+
+        private void highlight(SourceViewer viewer, TextPresentation presentation)
+        {
+            IDocument document = viewer.getDocument();
+            IRegion extent = presentation.getExtent();
+            if (document == null || extent == null || extent.getLength() == 0)
+                return;
+            try
+            {
+                int from = document.getLineOfOffset(extent.getOffset());
+                int to = document.getLineOfOffset(extent.getOffset() + extent.getLength() - 1);
+                Display display = viewer.getTextWidget().getDisplay();
+                // чёрное на жёлтом читается поверх зелёного и красного фона строк в обеих темах
+                Color background = new Color(display, ThemeAwareColors.isDarkTheme()
+                    ? new RGB(232, 170, 0) : new RGB(255, 222, 60));
+                Color foreground = display.getSystemColor(SWT.COLOR_BLACK);
+                int extentEnd = extent.getOffset() + extent.getLength();
+                for (int[] occurrence : occurrences(document, from, to))
+                {
+                    if (occurrence[0] >= extent.getOffset() && occurrence[0] + occurrence[1] <= extentEnd)
+                        presentation.mergeStyleRange(
+                            new StyleRange(occurrence[0], occurrence[1], foreground, background));
+                }
+            }
+            catch (BadLocationException e)
+            {
+                // документ сменился во время раскраски
+            }
+        }
+
+        /**
+         * @param direction {@code 0} — первое вхождение, {@code 1} — следующее за выделением,
+         *                  {@code -1} — предыдущее; за краем — по кругу
+         */
+        private void goToOccurrence(SourceViewer viewer, int direction)
+        {
+            IDocument document = viewer.getDocument();
+            if (document == null || document.getNumberOfLines() == 0)
+                return;
+            List<int[]> all = occurrences(document, 0, document.getNumberOfLines() - 1);
+            if (all.isEmpty())
+                return;
+            Point selected = viewer.getSelectedRange();
+            int[] target = null;
+            if (direction > 0)
+            {
+                for (int[] occurrence : all)
+                {
+                    if (occurrence[0] >= selected.x + Math.max(selected.y, 1))
+                    {
+                        target = occurrence;
+                        break;
+                    }
+                }
+            }
+            else if (direction < 0)
+            {
+                for (int[] occurrence : all)
+                {
+                    if (occurrence[0] < selected.x)
+                        target = occurrence;
+                }
+                if (target == null)
+                    target = all.get(all.size() - 1);
+            }
+            if (target == null)
+                target = all.get(0);
+            viewer.setSelectedRange(target[0], target[1]);
+            viewer.revealRange(target[0], target[1]);
+        }
+
+        // ---- «Найденное»: кнопка с выпадающим списком на панели инструментов, как в панели «Поиск» ----
+
+        static void installFoundMenu(IViewPart view)
+        {
+            IToolBarManager toolBar = view.getViewSite().getActionBars().getToolBarManager();
+            if (toolBar.find(FOUND_MENU_ID) != null)
+                return;
+            Action found = new Action("Найденное", IAction.AS_DROP_DOWN_MENU)
+            {
+                /** Щелчок по самой кнопке — последний поиск. */
+                @Override
+                public void run()
+                {
+                    List<GitChangeSearch.Session> sessions = GitChangeSearch.sessions();
+                    if (sessions.isEmpty())
+                        ToastNotification.show(TITLE, "Поисков ещё не было. Искать: окно «Поиск» → вкладка "
+                            + "«Поиск в Git» → область «Изменения файлов»", 6000);
+                    else
+                        showChangeSearch(sessions.get(0));
+                }
+            };
+            found.setId(FOUND_MENU_ID);
+            // тот же значок, что у списка прошлых поисков панели «Поиск»
+            found.setImageDescriptor(AbstractUIPlugin.imageDescriptorFromPlugin(
+                "org.eclipse.search", "icons/full/elcl16/search_history.png")); //$NON-NLS-1$ //$NON-NLS-2$
+            found.setToolTipText("Найденное в изменениях файлов: поиски этого сеанса" + Global.pluginSignForTooltip());
+            found.setMenuCreator(new IMenuCreator()
+            {
+                private MenuManager manager;
+
+                @Override
+                public Menu getMenu(Control parent)
+                {
+                    dispose();
+                    manager = new MenuManager();
+                    fillFoundMenu(manager, view);
+                    return manager.createContextMenu(parent);
+                }
+
+                @Override
+                public Menu getMenu(Menu parent)
+                {
+                    return null;
+                }
+
+                @Override
+                public void dispose()
+                {
+                    if (manager != null)
+                    {
+                        manager.dispose();
+                        manager = null;
+                    }
+                }
+            });
+            toolBar.add(found);
+            view.getViewSite().getActionBars().updateActionBars();
+        }
+
+        private static void fillFoundMenu(IMenuManager manager, IViewPart view)
+        {
+            ChangeSearchMode mode = MODES.get(Global.call(view, "getHistoryPage")); //$NON-NLS-1$
+            GitChangeSearch.Session shown = mode != null ? mode.session : null;
+            List<GitChangeSearch.Session> sessions = GitChangeSearch.sessions();
+            if (sessions.isEmpty())
+            {
+                Action none = new Action("Поисков в изменениях файлов ещё не было")
+                {
+                };
+                none.setEnabled(false);
+                manager.add(none);
+                return;
+            }
+            for (GitChangeSearch.Session session : sessions)
+            {
+                String text = session.label() + " — " + session.repositoryName()
+                    + " (" + session.commitCount() + (session.isRunning() ? ", идёт поиск" : "") + ")"; //$NON-NLS-1$ //$NON-NLS-3$ //$NON-NLS-4$
+                // «@» и табуляцию в тексте пункта JFace принимает за начало сочетания клавиш
+                Action open = new Action(text.replace("&", "&&").replace('\t', ' ') //$NON-NLS-1$ //$NON-NLS-2$
+                    + (text.indexOf('@') >= 0 ? "@" : ""), //$NON-NLS-1$ //$NON-NLS-2$
+                    IAction.AS_RADIO_BUTTON)
+                {
+                    @Override
+                    public void run()
+                    {
+                        if (isChecked())
+                            showChangeSearch(session);
+                    }
+                };
+                open.setChecked(session == shown);
+                manager.add(open);
+            }
+            manager.add(new Separator());
+            manager.add(new Action("Очистить")
+            {
+                @Override
+                public void run()
+                {
+                    GitChangeSearch.clearSessions(shown);
+                }
+            });
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Методы модулей в области отличий (GitDiffMethods)
+    // -----------------------------------------------------------------------
+
+    private static final int MAX_MODULE_BYTES = 20 * 1024 * 1024;
+
+    /** Тексты файлов в документе области отличий: области файлов штатного {@code DiffDocument}. */
+    private static List<GitDiffMethods.Section> diffSections(IDocument document)
+    {
+        List<GitDiffMethods.Section> sections = new ArrayList<>();
+        if (!(Global.invoke(document, "getFileRegions") instanceof Object[] fileRegions)) //$NON-NLS-1$
+            return sections;
+        for (Object fileRegion : fileRegions)
+        {
+            if (!(fileRegion instanceof IRegion region))
+                continue;
+            Object diff = Global.call(fileRegion, "getDiff"); //$NON-NLS-1$
+            if (!(Global.call(diff, "getPath") instanceof String path) //$NON-NLS-1$
+                || !(Global.getField(diff, "diffEntry") instanceof DiffEntry entry) //$NON-NLS-1$
+                || !(Global.call(diff, "getRepository") instanceof Repository repository) //$NON-NLS-1$
+                || entry.getNewId() == null)
+                continue;
+            ObjectId blob = entry.getNewId().toObjectId();
+            if (blob == null || ObjectId.zeroId().equals(blob))
+                continue; // файл удалён — версии в коммите нет
+            sections.add(new GitDiffMethods.Section(region.getOffset(), region.getLength(), path,
+                () -> blobText(repository, blob)));
+        }
+        return sections;
+    }
+
+    /**
+     * Полное сравнение файла коммита, на котором текст отличий обрезан, — тем же штатным
+     * {@code DiffViewer.showTwoWayFileDiff(FileDiff)}, что и команда сравнения из списка файлов.
+     * Текст обрезается на файле, который выводился последним.
+     */
+    private static void openFullCompare(Object page, SourceViewer viewer, int truncationOffset)
+    {
+        Object found = null;
+        if (Global.invoke(viewer.getDocument(), "getFileRegions") instanceof Object[] fileRegions) //$NON-NLS-1$
+        {
+            for (Object fileRegion : fileRegions)
+            {
+                if (fileRegion instanceof IRegion region && region.getOffset() <= truncationOffset)
+                    found = Global.call(fileRegion, "getDiff"); //$NON-NLS-1$
+            }
+        }
+        if (found == null)
+            return;
+        Object diff = found;
+        Runnable open = () ->
+        {
+            try
+            {
+                Global.invoke(viewer.getClass(), "showTwoWayFileDiff", diff); //$NON-NLS-1$
+            }
+            catch (RuntimeException e)
+            {
+                Debug.log("[!] change search: full compare failed " + Debug.shortStack(e)); //$NON-NLS-1$
+            }
+        };
+        // в режиме результатов поиска сравнение открывается на первом вхождении искомого
+        ChangeSearchMode mode = ChangeSearchMode.MODES.get(page);
+        Pattern pattern = mode != null ? mode.pattern() : null;
+        if (pattern == null || !(Global.getField(diff, "diffEntry") instanceof DiffEntry entry) //$NON-NLS-1$
+            || !(Global.call(diff, "getRepository") instanceof Repository repository)) //$NON-NLS-1$
+        {
+            open.run();
+            return;
+        }
+        GitChangeSearch.Query query = mode.session.query();
+        Display display = viewer.getTextWidget().getDisplay();
+        Job job = new Job("Поиск вхождения для сравнения")
+        {
+            @Override
+            protected IStatus run(IProgressMonitor monitor)
+            {
+                ChangedOccurrence occurrence = firstChangedOccurrence(repository, entry, pattern);
+                if (!display.isDisposed())
+                    display.asyncExec(() ->
+                    {
+                        if (occurrence != null)
+                        {
+                            CompareEditorCurrentLinesHook.setPendingTextReveal(occurrence.line(),
+                                occurrence.text(), occurrence.column(), occurrence.length());
+                            // F3 / Shift+F3 в сравнении продолжают поиск того же текста
+                            if (!query.regex())
+                                TextEditorFastSearchHandler.publishSearchTarget(query.text());
+                        }
+                        open.run();
+                    });
+                return Status.OK_STATUS;
+            }
+        };
+        job.setSystem(true);
+        job.schedule();
+    }
+
+    /** Вхождение искомого в изменённой строке: номер строки (с нуля) в своей версии файла и её текст. */
+    private record ChangedOccurrence(int line, String text, int column, int length)
+    {
+    }
+
+    /**
+     * Первое вхождение в добавленной или удалённой строке файла коммита. Версии сравниваются
+     * заново, целиком: в тексте области отличий этой строки нет, он обрезан.
+     */
+    private static ChangedOccurrence firstChangedOccurrence(Repository repository, DiffEntry entry, Pattern pattern)
+    {
+        try
+        {
+            RawText before = rawText(repository, entry.getOldId());
+            RawText after = rawText(repository, entry.getNewId());
+            if (before == null || after == null)
+                return null;
+            for (Edit edit : DiffAlgorithm.getAlgorithm(DiffAlgorithm.SupportedAlgorithm.HISTOGRAM)
+                .diff(RawTextComparator.DEFAULT, before, after))
+            {
+                for (int line = edit.getBeginB(); line < edit.getEndB(); line++)
+                {
+                    ChangedOccurrence occurrence = occurrenceIn(after.getString(line), line, pattern);
+                    if (occurrence != null)
+                        return occurrence;
+                }
+                for (int line = edit.getBeginA(); line < edit.getEndA(); line++)
+                {
+                    ChangedOccurrence occurrence = occurrenceIn(before.getString(line), line, pattern);
+                    if (occurrence != null)
+                        return occurrence;
+                }
+            }
+        }
+        catch (IOException | RuntimeException e)
+        {
+            Debug.log("[!] change search: occurrence search failed " + Debug.shortStack(e)); //$NON-NLS-1$
+        }
+        return null;
+    }
+
+    private static ChangedOccurrence occurrenceIn(String text, int line, Pattern pattern)
+    {
+        Matcher matcher = pattern.matcher(text);
+        return matcher.find() && matcher.end() > matcher.start()
+            ? new ChangedOccurrence(line, text, matcher.start(), matcher.end() - matcher.start()) : null;
+    }
+
+    /** Версия файла; пустой текст, если версии нет (файл добавлен или удалён); {@code null} — слишком велика. */
+    private static RawText rawText(Repository repository, AbbreviatedObjectId id) throws IOException
+    {
+        ObjectId blob = id != null ? id.toObjectId() : null;
+        if (blob == null || ObjectId.zeroId().equals(blob))
+            return RawText.EMPTY_TEXT;
+        ObjectLoader loader = repository.open(blob, Constants.OBJ_BLOB);
+        return loader.getSize() > MAX_MODULE_BYTES ? null : new RawText(loader.getCachedBytes(MAX_MODULE_BYTES));
+    }
+
+    /** Версия файла из коммита; {@code null}, если её не прочитать или она слишком велика. */
+    private static String blobText(Repository repository, ObjectId blob)
+    {
+        try
+        {
+            ObjectLoader loader = repository.open(blob, Constants.OBJ_BLOB);
+            return loader.getSize() > MAX_MODULE_BYTES ? null
+                : new String(loader.getCachedBytes(MAX_MODULE_BYTES), StandardCharsets.UTF_8);
+        }
+        catch (IOException e)
+        {
+            return null;
+        }
+    }
+
+    /**
+     * Место списка методов — справа от области отличий в штатном разделителе {@code revInfoSplit}.
+     * Только когда список файлов коммита из него уже вынесен ({@code installFilterComposite}):
+     * штатная страница при закрытии запоминает веса разделителя и ждёт ровно две части — с тремя
+     * положение её разделителя перестало бы запоминаться.
+     */
+    private static GitDiffMethods.Host diffMethodsHost(Object page, StyledText text)
+    {
+        Control area = text;
+        while (area != null && !(area instanceof org.eclipse.swt.custom.ScrolledComposite))
+            area = area.getParent();
+        if (area == null || !(area.getParent() instanceof SashForm sash))
+        {
+            Debug.log("[!] methods list: diff area is not in a sash"); //$NON-NLS-1$
+            return null;
+        }
+        if (Global.getField(page, "fileViewer") instanceof TableViewer files //$NON-NLS-1$
+            && files.getTable().getParent() == sash)
+            return null;
+        return new GitDiffMethods.Host(sash, area);
     }
 
     // -----------------------------------------------------------------------

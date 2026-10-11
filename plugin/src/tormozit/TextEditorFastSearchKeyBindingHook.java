@@ -210,6 +210,11 @@ public final class TextEditorFastSearchKeyBindingHook implements IStartup
         if (!(event.widget instanceof StyledText textWidget) || textWidget.isDisposed())
             return;
 
+        if (GitHistoryHook.fastSearchInDiff(textWidget, forward))
+        {
+            event.doit = false;
+            return;
+        }
         TextEditorFastSearchHandler.executeSearch(textWidget, forward);
         event.doit = false;
     }
@@ -273,6 +278,9 @@ public final class TextEditorFastSearchKeyBindingHook implements IStartup
         {
             Display display = Display.getCurrent();
             Control focus = display != null ? display.getFocusControl() : null;
+            // область отличий «Истории Git» — не редактор, штатной «Найти далее» у неё нет
+            if (focus instanceof StyledText diffText && GitHistoryHook.findNextInDiff(diffText, forward.booleanValue()))
+                return;
             if (focus instanceof StyledText st && !st.isDisposed() && isTextCompareWidget(st))
                 TextEditorFastSearchHandler.executeFindNextFromBuffer(st, forward.booleanValue());
             return;

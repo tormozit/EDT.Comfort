@@ -27,6 +27,14 @@ public final class ThemeAwareColors
      */
     private static final float SATURATION_K = 2f;
 
+    /**
+     * Фон в тёмной теме ({@link #toEffectiveBackgroundRgb(RGB)}): светлота белого, наклон отражения
+     * светлоты и потолок насыщенности. Пастельный RGB(226,245,226) → примерно RGB(26,77,26).
+     */
+    private static final float DARK_BACKGROUND_MIN_LIGHTNESS = 0.10f;
+    private static final float DARK_BACKGROUND_LIGHTNESS_SLOPE = 1.25f;
+    private static final float DARK_BACKGROUND_MAX_SATURATION = 0.5f;
+
     /** Кэш осветлённых системных FG для тёмной темы: SWT color id → owned Color. */
     private static final Map<Integer, Color> cachedEffectiveSystemColors = new HashMap<>();
     private static Boolean cachedEffectiveSystemDark;
@@ -45,6 +53,27 @@ public final class ThemeAwareColors
         if (!isDarkTheme())
             return light;
         return invertLightness(light);
+    }
+
+    /**
+     * Эффективный цвет ФОНА для текущей темы; на входе — цвет светлой темы. Не
+     * {@link #toEffectiveRgb(RGB)}: тот рассчитан на цвет шрифта и светлый фон принимает за ошибочно
+     * сохранённый тёмный вариант ({@link #sanitizeStoredLightRgb(RGB)}) — перевернул бы его и в
+     * светлой теме.
+     * <p>
+     * В тёмной теме и не {@link #invertLightness(RGB)}: его кривая светлоты уводит пастельный фон
+     * (L≈0.9) почти в чёрный (L≈0.01), оттенок пропадает. Здесь тон сохраняется, светлота
+     * отражается линейно в диапазон чуть светлее фона тёмной темы, насыщенность ограничена.
+     */
+    public static RGB toEffectiveBackgroundRgb(RGB lightBackground)
+    {
+        if (lightBackground == null)
+            return new RGB(255, 255, 255);
+        if (!isDarkTheme())
+            return lightBackground;
+        float[] hsl = rgbToHsl(lightBackground);
+        float l = DARK_BACKGROUND_MIN_LIGHTNESS + (1f - hsl[2]) * DARK_BACKGROUND_LIGHTNESS_SLOPE;
+        return hslToRgb(hsl[0], Math.min(hsl[1], DARK_BACKGROUND_MAX_SATURATION), Math.min(l, 0.5f));
     }
 
     /**

@@ -1465,6 +1465,14 @@
         id="tormozit.ObjectSetsView"
         name="Наборы объектов"
         restorable="true"/>
+    <view
+        allowMultiple="false"
+        category="tormozit.views"
+        class="tormozit.GitFileDiffView"
+        icon="icons/eview16/git_file_diff.png"
+        id="tormozit.GitFileDiffView"
+        name="Изменения файла Git"
+        restorable="true"/>
   </extension>
 
   <extension point="org.eclipse.ui.preferencePages">

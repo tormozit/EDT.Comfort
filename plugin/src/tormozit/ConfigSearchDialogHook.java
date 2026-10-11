@@ -20,6 +20,9 @@ import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.Status;
+import org.eclipse.egit.core.RepositoryUtil;
+import org.eclipse.egit.core.project.RepositoryMapping;
+import org.eclipse.jgit.lib.Repository;
 import org.eclipse.emf.ecore.EAttribute;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.dialogs.IDialogSettings;
@@ -79,7 +82,12 @@ public class ConfigSearchDialogHook implements IStartup
     private static final String KEY_PROJECTS_TABLE_HEIGHT = "projectsTable.height";
     private static final String KEY_OBJECT_TYPES_TABLE_WIDTH = "objectTypesTable.width";
     private static final String KEY_OBJECT_TYPES_TABLE_HEIGHT = "objectTypesTable.height";
-    private static final String SEARCH_DIALOG_CLASS = "org.eclipse.search.internal.ui.SearchDialog";
+    private static final String HELD_SIZE_KEY = "tormozit.configSearchHeldSize";
+    private static final String WIDTH_FITTED_KEY = "tormozit.configSearchWidthFitted";
+    /** Размер списка при расчёте необходимого размера окна — вместо запомненного фактического. */
+    private static final int MIN_TABLE_WIDTH = 100;
+    private static final int MIN_TABLE_HEIGHT = 100;
+    private static final String SEARCH_DIALOG_CLASS ="org.eclipse.search.internal.ui.SearchDialog";
     private static final String PAGE_CLASS = "com._1c.g5.v8.dt.internal.search.ui.dialog.ConfigurationSearchDialogPage";
     private static final String HOOKED_KEY = "tormozit.configSearchHooked";
     private static final String LISTENER_KEY = "tormozit.configSearchListener";
@@ -127,6 +135,7 @@ public class ConfigSearchDialogHook implements IStartup
                 // синхронно, до показа окна: правки после первого кадра дают видимую перерисовку
                 if (!tryPatchNow(shell, dialog))
                     schedulePatch(shell, dialog, 0);
+                fitHeldSize(shell, false);
             });
         });
     }
@@ -157,6 +166,7 @@ public class ConfigSearchDialogHook implements IStartup
                     restoreShellSize(shell);
                     if (!tryPatchNow(shell, dialog))
                         schedulePatch(shell, dialog, 0);
+                    fitHeldSize(shell, false);
                     scheduleRestoreShellSize(shell);
                     return null;
                 });
@@ -191,8 +201,8 @@ public class ConfigSearchDialogHook implements IStartup
     private static boolean tryPatchNow(Shell shell, Object dialog)
     {
         Object page = getSelectedPage(dialog);
-        if (page != null && GitSearchPageLink.PAGE_CLASS.equals(page.getClass().getName()))
-            return GitSearchPageLink.patch(shell, page);
+        if (page != null && GitSearchPagePatch.PAGE_CLASS.equals(page.getClass().getName()))
+            return GitSearchPagePatch.patch(shell, dialog, page);
         if (page == null || !PAGE_CLASS.equals(page.getClass().getName())
             || Global.getField(page, "searchExecutorProvider") == null)
             return false;
@@ -291,6 +301,7 @@ public class ConfigSearchDialogHook implements IStartup
         SearchScopeGroup.patch(shell, page);
         NStrCategory.patchLabels(page);
         hideForeignSearchTabs(shell, dialog);
+        fitHeldSize(shell, true);
         scheduleRestoreShellSize(shell);
 
         patchExecutor(page);
@@ -436,9 +447,30 @@ public class ConfigSearchDialogHook implements IStartup
     {
         if (shell == null || shell.isDisposed() || shell.getMaximized())
             return;
+        Point held = heldShellSize(shell);
+        if (held == null)
+            return;
+
+        Point current = shell.getSize();
+        if (current.x == held.x && current.y == held.y)
+            return;
+        // Только размер — x/y не трогаем. Пересчёт «центра» сдвигал окно при смене вкладки.
+        shell.setSize(held.x, held.y);
+    }
+
+    /**
+     * Размер, удерживаемый окном в этом его открытии: изначально запомненный с прошлого закрытия,
+     * затем поднимается до необходимого показанным вкладкам ({@link #fitHeldSize}).
+     *
+     * @return {@code null}, если запомненного размера нет
+     */
+    private static Point heldShellSize(Shell shell)
+    {
+        if (shell.getData(HELD_SIZE_KEY) instanceof Point held)
+            return held;
         IDialogSettings settings = getDialogSettings();
         if (settings.get(KEY_SHELL_WIDTH) == null || settings.get(KEY_SHELL_HEIGHT) == null)
-            return;
+            return null;
 
         int width;
         int height;
@@ -449,16 +481,88 @@ public class ConfigSearchDialogHook implements IStartup
         }
         catch (NumberFormatException e)
         {
-            return;
+            return null;
         }
         if (width <= 0 || height <= 0)
-            return;
+            return null;
+        Point held = new Point(width, height);
+        shell.setData(HELD_SIZE_KEY, held);
+        return held;
+    }
 
-        Point current = shell.getSize();
-        if (current.x == width && current.y == height)
+    /**
+     * Поднять удерживаемый размер окна до необходимого выбранной вкладке. Запомненный размер один
+     * на все вкладки: закрытое маленьким на «Поиске в Git» окно обрезало бы «Поиск в конфигурациях».
+     * Делается один раз на вкладку за открытие окна.
+     *
+     * @param force пересчитать и для уже учтённой вкладки (после нашей доработки страницы)
+     */
+    private static void fitHeldSize(Shell shell, boolean force)
+    {
+        if (shell == null || shell.isDisposed() || shell.getMaximized())
             return;
-        // Только размер — x/y не трогаем. Пересчёт «центра» сдвигал окно при смене вкладки.
-        shell.setSize(width, height);
+        CTabFolder folder = Global.findControl(shell, CTabFolder.class, f -> true);
+        CTabItem selected = folder != null && !folder.isDisposed() ? folder.getSelection() : null;
+        Control pageControl = selected != null ? selected.getControl() : null;
+        if (pageControl == null || pageControl.isDisposed()
+            || (!force && selected.getData(WIDTH_FITTED_KEY) != null))
+            return;
+        Point held = heldShellSize(shell);
+        org.eclipse.swt.graphics.Rectangle area = folder.getClientArea();
+        if (held == null || area.width <= 0 || area.height <= 0)
+            return;
+        selected.setData(WIDTH_FITTED_KEY, Boolean.TRUE);
+
+        // Запомненные размеры списков (applyStoredTableSize) — прошлый фактический размер, а не
+        // необходимый: с ними нужный размер равнялся бы прошлому размеру окна плюс обрамление списков.
+        Map<GridData, Point> tableHints = new HashMap<>();
+        if (pageControl instanceof Composite root)
+            collectTableSizeHints(root, tableHints);
+        Point preferred;
+        try
+        {
+            for (GridData data : tableHints.keySet())
+            {
+                data.widthHint = Math.min(data.widthHint, MIN_TABLE_WIDTH);
+                data.heightHint = Math.min(data.heightHint, MIN_TABLE_HEIGHT);
+            }
+            preferred = pageControl.computeSize(SWT.DEFAULT, SWT.DEFAULT, true);
+        }
+        finally
+        {
+            tableHints.forEach((data, hint) -> {
+                data.widthHint = hint.x;
+                data.heightHint = hint.y;
+            });
+        }
+        // кэш раскладки посчитан с временными размерами — пересчитать с настоящими
+        if (!tableHints.isEmpty())
+            pageControl.computeSize(SWT.DEFAULT, SWT.DEFAULT, true);
+
+        // обрамление — разница между окном и клиентской областью папки вкладок
+        Point shellSize = shell.getSize();
+        int requiredWidth = shellSize.x - area.width + preferred.x;
+        int requiredHeight = shellSize.y - area.height + preferred.y;
+        if (requiredWidth <= held.x && requiredHeight <= held.y)
+            return;
+        held.x = Math.max(held.x, requiredWidth);
+        held.y = Math.max(held.y, requiredHeight);
+        restoreShellSize(shell);
+    }
+
+    private static void collectTableSizeHints(Composite root, Map<GridData, Point> hints)
+    {
+        for (Control child : root.getChildren())
+        {
+            if (child instanceof Table)
+            {
+                if (child.getLayoutData() instanceof GridData data
+                    && (data.widthHint > MIN_TABLE_WIDTH || data.heightHint > MIN_TABLE_HEIGHT))
+                    hints.put(data, new Point(data.widthHint, data.heightHint));
+            }
+            else if (child instanceof Composite composite)
+                collectTableSizeHints(composite, hints);
+        }
     }
 
     private static void saveShellSize(Point size)
@@ -619,14 +723,61 @@ public class ConfigSearchDialogHook implements IStartup
 
         String strippedTitle = stripCountSuffix(titleLabel.getText()).trim();
         final String baseTitle = strippedTitle.isEmpty() ? OBJECT_TYPES_TITLE_RU : strippedTitle;
+        final Button customScopeRadio = SearchScopeGroup.findScopeRadio(root,
+            "Пользовательская область", "Custom scope", "По настроенному отбору");
+
+        // список «среди проектов»: счётчика в заголовке нет, только жирный шрифт
+        final Label projectsLabel = Global.findControl(root, Label.class,
+            lbl -> isScopeListTitle(lbl.getText(), PROJECTS_TITLE_RU, PROJECTS_TITLE_EN));
+        final Table projectsTable = findScopeTable(root, PROJECTS_TITLE_RU, PROJECTS_TITLE_EN);
 
         Runnable refresh = () -> {
             if (titleLabel.isDisposed() || typesTable.isDisposed())
                 return;
+            // списки действуют только при области «По настроенному отбору»
+            boolean customScope = customScopeRadio == null || customScopeRadio.isDisposed()
+                || customScopeRadio.getSelection();
             int checked = typesTable.getItemCount() > 0 ? countCheckedItems(typesTable) : 0;
             titleLabel.setText(baseTitle + " (" + checked + ")");
-            setGroupTitleBold(titleLabel, checked > 0);
+            setGroupTitleBold(titleLabel, checked > 0 && customScope);
+            if (projectsLabel != null && projectsTable != null && !projectsLabel.isDisposed()
+                && !projectsTable.isDisposed())
+                setGroupTitleBold(projectsLabel, customScope && countCheckedItems(projectsTable) > 0);
         };
+        if (projectsTable != null && projectsLabel != null)
+        {
+            projectsTable.addListener(SWT.Selection, e -> refresh.run());
+            Composite projectsSection = projectsLabel.getParent();
+            if (projectsSection != null && !projectsSection.isDisposed())
+            {
+                for (Control child : projectsSection.getChildren())
+                {
+                    if (child instanceof org.eclipse.swt.widgets.ToolBar toolbar)
+                    {
+                        for (org.eclipse.swt.widgets.ToolItem item : toolbar.getItems())
+                            item.addListener(SWT.Selection,
+                                e -> projectsSection.getDisplay().asyncExec(refresh));
+                    }
+                }
+            }
+        }
+        if (customScopeRadio != null)
+        {
+            // радио области (в т.ч. добавляемые позже нашими вариантами) меняют выбор после своего
+            // события — штатная привязка и наш fixVisual отрабатывают отложенно
+            Composite radioRow = customScopeRadio.getParent();
+            Display display = root.getDisplay();
+            Listener radioFilter = e -> {
+                if (e.widget instanceof Button b && b.getParent() == radioRow)
+                {
+                    display.asyncExec(refresh);
+                    display.timerExec(100, refresh);
+                }
+            };
+            display.addFilter(SWT.Selection, radioFilter);
+            root.addDisposeListener(e -> display.removeFilter(SWT.Selection, radioFilter));
+            display.timerExec(200, refresh);
+        }
 
         typesTable.addListener(SWT.Selection, e -> refresh.run());
         Composite section = titleLabel.getParent();
@@ -1146,21 +1297,35 @@ public class ConfigSearchDialogHook implements IStartup
     }
 
     /**
-     * Ссылка «Искать по текстам изменений через ИР» на вкладке «Поиск в Git»: штатный поиск EGit
-     * просматривает только реквизиты коммитов, тексты изменений — нет. Ссылка есть, только если
-     * активный проект подключён к Git.
+     * Доработки вкладки «Поиск в Git»: штатный поиск EGit просматривает только реквизиты
+     * коммитов, тексты изменений — нет.
+     * <ul>
+     *   <li>Область «Изменения файлов» с полем маски имени файла — поиск внешним git
+     *       ({@link GitChangeSearch}), результат показывает панель «История Git».</li>
+     *   <li>Ссылка «Поиск в текстах изменений ИР» — есть, только если активный проект подключён
+     *       к Git.</li>
+     * </ul>
      */
-    private static final class GitSearchPageLink
+    private static final class GitSearchPagePatch
     {
         static final String PAGE_CLASS = "org.eclipse.egit.ui.internal.search.CommitSearchPage"; //$NON-NLS-1$
         private static final String PATCHED_KEY = "tormozit.gitSearchIrLink"; //$NON-NLS-1$
+        private static final String AREA_KEY = "tormozit.gitChangeSearchArea"; //$NON-NLS-1$
+        private static final String BUTTON_KEY = "tormozit.gitChangeSearchButton"; //$NON-NLS-1$
+        private static final String KEY_ENABLED = "gitChangeSearch.enabled"; //$NON-NLS-1$
+        private static final String KEY_MASKS = "gitChangeSearch.masks"; //$NON-NLS-1$
+        private static final String KEY_MASK = "gitChangeSearch.mask"; //$NON-NLS-1$
+        private static final int MASK_HISTORY_SIZE = 10;
+        /** Штатные флажки группы «Область» — область «Изменения файлов» им альтернативна. */
+        private static final String[] SCOPE_FIELDS = { "searchMessageButton", "searchAuthorButton", //$NON-NLS-1$ //$NON-NLS-2$
+            "searchCommitterButton", "searchCommitButton", "searchTreeButton", "searchParentsButton" }; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
 
-        private GitSearchPageLink()
+        private GitSearchPagePatch()
         {
         }
 
         /** @return {@code false}, если страница ещё не создана (нужна повторная попытка) */
-        static boolean patch(Shell shell, Object page)
+        static boolean patch(Shell shell, Object dialog, Object page)
         {
             if (!(Global.getField(page, "patternCombo") instanceof Combo combo) || combo.isDisposed()) //$NON-NLS-1$
                 return false;
@@ -1170,21 +1335,325 @@ public class ConfigSearchDialogHook implements IStartup
                 return false;
             Composite group = anchor.getParent();
             if (group.getData(PATCHED_KEY) != null)
+            {
+                // повторный показ страницы: штатная проверка уже пересчитала доступность «Найти»
+                if (shell.getData(AREA_KEY) instanceof ChangesArea area)
+                    area.applyOkStatus();
                 return true;
+            }
             group.setData(PATCHED_KEY, Boolean.TRUE);
 
             IWorkbenchPage workbenchPage = Global.getActivePage();
             IProject project = Global.getActiveProject(
                 workbenchPage != null ? workbenchPage.getActivePart() : null, false);
-            if (!IrGitFragmentSearchHandler.isGitProject(project)
-                || !(group.getLayout() instanceof GridLayout grid))
+            if (!(group.getLayout() instanceof GridLayout grid))
                 return true;
+            if (IrGitFragmentSearchHandler.isGitProject(project))
+                addIrLink(group, grid, anchor, combo, project);
 
+            RepositoryMapping mapping = project != null ? RepositoryMapping.getMapping(project) : null;
+            ChangesArea area = new ChangesArea(shell, dialog, page, combo,
+                mapping != null ? mapping.getRepository() : null);
+            area.create(group, grid.numColumns);
+            shell.setData(AREA_KEY, area);
+            interceptSearchButton(shell, dialog);
+            group.getParent().layout(true, true);
+            return true;
+        }
+
+        /**
+         * Кнопка «Найти» общая для всех вкладок: её штатные слушатели снимаются и вызываются из
+         * нашего, если область «Изменения файлов» не включена или открыта другая вкладка.
+         */
+        private static void interceptSearchButton(Shell shell, Object dialog)
+        {
+            Object found = Global.invoke(dialog, "getButton", Integer.valueOf(0)); //$NON-NLS-1$
+            Button search = found instanceof Button button ? button : shell.getDefaultButton();
+            if (search == null || search.isDisposed() || search.getData(BUTTON_KEY) != null)
+            {
+                log("git search: search button not intercepted"); //$NON-NLS-1$
+                return;
+            }
+            search.setData(BUTTON_KEY, Boolean.TRUE);
+            Listener[] stock = search.getListeners(SWT.Selection);
+            for (Listener listener : stock)
+                search.removeListener(SWT.Selection, listener);
+            search.addListener(SWT.Selection, event ->
+            {
+                Object page = getSelectedPage(dialog);
+                if (shell.getData(AREA_KEY) instanceof ChangesArea area && area.page == page && area.isOn())
+                {
+                    area.launch();
+                    return;
+                }
+                for (Listener listener : stock)
+                    listener.handleEvent(event);
+            });
+        }
+
+        /** Область «Изменения файлов»: флажок, поле маски имени файла и запуск поиска. */
+        private static final class ChangesArea
+        {
+            private final Shell shell;
+            private final Object dialog;
+            final Object page;
+            private final Combo patternCombo;
+            /** Репозиторий активного проекта: режим работает с одним репозиторием. */
+            private final Repository repository;
+            private final List<Button> scopeButtons = new ArrayList<>();
+            private final List<Boolean> scopeSelection = new ArrayList<>();
+            private Button flag;
+            private Label maskLabel;
+            private Combo maskCombo;
+
+            ChangesArea(Shell shell, Object dialog, Object page, Combo patternCombo, Repository repository)
+            {
+                this.shell = shell;
+                this.dialog = dialog;
+                this.page = page;
+                this.patternCombo = patternCombo;
+                this.repository = repository;
+                for (String field : SCOPE_FIELDS)
+                {
+                    if (Global.getField(page, field) instanceof Button button && !button.isDisposed())
+                        scopeButtons.add(button);
+                }
+            }
+
+            boolean isOn()
+            {
+                return flag != null && !flag.isDisposed() && flag.getSelection();
+            }
+
+            void create(Composite group, int columns)
+            {
+                Composite row = new Composite(group, SWT.NONE);
+                row.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false, columns, 1));
+                GridLayout rowLayout = new GridLayout(2, false);
+                rowLayout.marginWidth = 0;
+                rowLayout.marginHeight = 0;
+                rowLayout.horizontalSpacing = 20;
+                row.setLayout(rowLayout);
+
+                flag = new Button(row, SWT.CHECK);
+                flag.setFont(group.getFont());
+                String repositoryName = repository != null
+                    ? RepositoryUtil.INSTANCE.getRepositoryName(repository) : null;
+                flag.setText(repositoryName != null
+                    ? "Изменения файлов (репозиторий «" + repositoryName + "»)"
+                    : "Изменения файлов");
+                String flagTip = repositoryName != null
+                    ? "Искать текст в изменениях файлов коммитов репозитория активного проекта. "
+                        + "Найденные коммиты показывает панель «История Git». Остальные области и "
+                        + "список репозиториев при этом не используются. Нужен установленный Git"
+                    : "Активный проект не подключён к Git — искать в изменениях файлов негде";
+                flag.setToolTipText(TooltipText.wrap(flag, flagTip + Global.pluginSignForTooltip()));
+                flag.setEnabled(repository != null);
+                if (repository == null) // недоступный флажок свою подсказку не показывает
+                    row.setToolTipText(flag.getToolTipText());
+
+                Composite maskHost = new Composite(row, SWT.NONE);
+                maskHost.setLayoutData(new GridData(SWT.BEGINNING, SWT.CENTER, false, false));
+                GridLayout maskLayout = new GridLayout(2, false);
+                maskLayout.marginWidth = 0;
+                maskLayout.marginHeight = 0;
+                maskHost.setLayout(maskLayout);
+                maskLabel = new Label(maskHost, SWT.NONE);
+                maskLabel.setFont(group.getFont());
+                maskLabel.setText("Маска имени файла:");
+                maskCombo = new Combo(maskHost, SWT.DROP_DOWN | SWT.BORDER);
+                maskCombo.setFont(group.getFont());
+                GridData maskData = new GridData(SWT.BEGINNING, SWT.CENTER, false, false);
+                maskData.widthHint = 220;
+                maskCombo.setLayoutData(maskData);
+                String[] masks = getDialogSettings().getArray(KEY_MASKS);
+                if (masks != null)
+                    maskCombo.setItems(masks);
+                // значение последнего поиска; пустое тоже запоминается — поиск был по всем файлам
+                String lastMask = getDialogSettings().get(KEY_MASK);
+                if (lastMask != null)
+                    maskCombo.setText(lastMask);
+                String maskTip = TooltipText.wrap(maskCombo,
+                    "Искать только в файлах, путь которых подходит под маску. Несколько масок — "
+                        + "через «|», например: *.bsl|Справочники. Маска без «*» ищется как часть пути. "
+                        + "Пусто — во всех файлах. Доступно для области «Изменения файлов»"
+                        + Global.pluginSignForTooltip());
+                maskLabel.setToolTipText(maskTip);
+                maskCombo.setToolTipText(maskTip);
+                maskHost.setToolTipText(maskTip); // для недоступного поля
+
+                flag.addListener(SWT.Selection, e -> applyMode(flag.getSelection()));
+                // штатные слушатели этих же полей срабатывают раньше и гасят «Найти» из-за пустой области
+                Listener recheck = e -> applyOkStatus();
+                patternCombo.addListener(SWT.Modify, recheck);
+                patternCombo.addListener(SWT.Selection, recheck);
+                for (String field : new String[] { "isRegExButton", "isCaseSensitiveButton" }) //$NON-NLS-1$ //$NON-NLS-2$
+                {
+                    if (Global.getField(page, field) instanceof Button button && !button.isDisposed())
+                        button.addListener(SWT.Selection, recheck);
+                }
+
+                if (Global.getField(page, "isRegExButton") instanceof Button regex && !regex.isDisposed()) //$NON-NLS-1$
+                {
+                    // состав проверен прогоном git log -G на Git для Windows
+                    String stock = regex.getToolTipText();
+                    regex.setToolTipText(TooltipText.wrap(regex,
+                        (stock == null || stock.isBlank() ? "" : stock + "\n\n") //$NON-NLS-1$ //$NON-NLS-2$
+                            + "Для области «Изменения файлов» выражение разбирает сам Git, а не Java — "
+                            + "расширенный синтаксис POSIX.\n"
+                            + "Работают: группы и варианты (а|б), повторы {1,2}, [0-9], \\w, \\s, \\b, ^ и $.\n"
+                            + "Не работают: \\d (пишите [0-9]) и (?i).\n"
+                            + "Русская буква для Git — два символа: точка «.» ей не соответствует, диапазоны "
+                            + "вида [а-я] ненадёжны, регистр русских букв учитывается всегда, даже без "
+                            + "пометки «С учётом регистра».\n"
+                            + "Подсветка найденного использует синтаксис Java и на таких выражениях может "
+                            + "расходиться с найденным" + Global.pluginSignForTooltip()));
+                }
+
+                maskLabel.setEnabled(false);
+                maskCombo.setEnabled(false);
+                if (repository != null && getDialogSettings().getBoolean(KEY_ENABLED))
+                {
+                    flag.setSelection(true);
+                    applyMode(true);
+                }
+            }
+
+            private void applyMode(boolean on)
+            {
+                for (int i = 0; i < scopeButtons.size(); i++)
+                {
+                    Button button = scopeButtons.get(i);
+                    if (button.isDisposed())
+                        continue;
+                    if (on)
+                    {
+                        while (scopeSelection.size() <= i)
+                            scopeSelection.add(Boolean.FALSE);
+                        scopeSelection.set(i, Boolean.valueOf(button.getSelection()));
+                        button.setSelection(false);
+                    }
+                    else if (i < scopeSelection.size())
+                        button.setSelection(scopeSelection.get(i).booleanValue());
+                    button.setEnabled(!on);
+                }
+                // режим работает с одним репозиторием — активного проекта
+                if (Global.getField(page, "repositoryGroup") instanceof Composite repositories //$NON-NLS-1$
+                    && !repositories.isDisposed())
+                {
+                    for (Control child : repositories.getChildren())
+                        child.setEnabled(!on);
+                }
+                maskLabel.setEnabled(on);
+                maskCombo.setEnabled(on);
+                getDialogSettings().put(KEY_ENABLED, on);
+                applyOkStatus();
+            }
+
+            /** Доступность «Найти»: штатная проверка требует штатную область и репозитории из списка. */
+            void applyOkStatus()
+            {
+                if (flag == null || flag.isDisposed())
+                    return;
+                if (!flag.getSelection())
+                {
+                    Global.invoke(page, "updateOKStatus"); //$NON-NLS-1$
+                    return;
+                }
+                String problem = ""; //$NON-NLS-1$
+                boolean ok = !patternCombo.getText().isEmpty();
+                if (ok && Global.getField(page, "isRegExButton") instanceof Button regex //$NON-NLS-1$
+                    && regex.getSelection())
+                {
+                    try
+                    {
+                        Pattern.compile(patternCombo.getText());
+                    }
+                    catch (java.util.regex.PatternSyntaxException e)
+                    {
+                        ok = false;
+                        problem = e.getDescription();
+                    }
+                }
+                Global.invoke(page, "statusMessage", Boolean.valueOf(!problem.isEmpty()), problem); //$NON-NLS-1$
+                Global.invoke(Global.invoke(page, "getContainer"), //$NON-NLS-1$
+                    "setPerformActionEnabled", Boolean.valueOf(ok)); //$NON-NLS-1$
+            }
+
+            void launch()
+            {
+                String mask = maskCombo.getText().trim();
+                getDialogSettings().put(KEY_MASK, mask);
+                rememberMask(mask);
+                GitChangeSearch.Query query = new GitChangeSearch.Query(patternCombo.getText(), mask,
+                    isChecked("isCaseSensitiveButton"), isChecked("isRegExButton"), //$NON-NLS-1$ //$NON-NLS-2$
+                    isChecked("searchAllBranchesButton")); //$NON-NLS-1$
+                Display display = shell.getDisplay();
+                rememberText(query.text());
+                Global.call(dialog, "close"); //$NON-NLS-1$
+                GitChangeSearch.Session session = GitChangeSearch.start(repository, query);
+                display.asyncExec(() -> GitHistoryHook.showChangeSearch(session));
+            }
+
+            /**
+             * Искомый текст — в историю штатного поля «Содержит текст». Её пополняет только штатный
+             * {@code newQuery()} (вызывается из {@code performAction}, который мы обходим), а на диск
+             * пишет {@code dispose()} страницы. Запись берёт состояние флажков — на время вызова
+             * возвращаем штатным областям их прежние пометки: выбор такой записи из истории вне
+             * нашего режима иначе снял бы все области.
+             */
+            private void rememberText(String text)
+            {
+                for (int i = 0; i < scopeButtons.size() && i < scopeSelection.size(); i++)
+                {
+                    if (!scopeButtons.get(i).isDisposed())
+                        scopeButtons.get(i).setSelection(scopeSelection.get(i).booleanValue());
+                }
+                try
+                {
+                    // без повторов: штатный код дописывает запись в начало, не убирая прежнюю с тем же текстом
+                    if (Global.getField(page, "fPreviousSearchPatterns") instanceof List<?> previous) //$NON-NLS-1$
+                        previous.removeIf(settings -> text.equals(Global.call(settings, "getTextPattern"))); //$NON-NLS-1$
+                    Global.invoke(page, "newQuery"); //$NON-NLS-1$
+                }
+                catch (RuntimeException e)
+                {
+                    log("git search: text history failed: " + e); //$NON-NLS-1$
+                }
+            }
+
+            private boolean isChecked(String field)
+            {
+                return Global.getField(page, field) instanceof Button button && !button.isDisposed()
+                    && button.getSelection();
+            }
+
+            private static void rememberMask(String mask)
+            {
+                if (mask.isEmpty())
+                    return;
+                List<String> masks = new ArrayList<>();
+                masks.add(mask);
+                String[] previous = getDialogSettings().getArray(KEY_MASKS);
+                if (previous != null)
+                {
+                    for (String item : previous)
+                    {
+                        if (!item.equals(mask) && masks.size() < MASK_HISTORY_SIZE)
+                            masks.add(item);
+                    }
+                }
+                getDialogSettings().put(KEY_MASKS, masks.toArray(new String[0]));
+            }
+        }
+
+        private static void addIrLink(Composite group, GridLayout grid, Button anchor, Combo combo, IProject project)
+        {
             // отдельная колонка справа от флажков, на высоту обеих их строк
             grid.numColumns++;
             Link link = new Link(group, SWT.NONE);
             link.setFont(group.getFont());
-            link.setText("<a>Искать по текстам изменений через ИР</a>");
+            link.setText("<a>Поиск в текстах изменений ИР</a>");
             link.setToolTipText(TooltipText.wrap(link,
                 "Искать текст из поля «Содержит текст» в текстах изменений истории Git проекта «"
                     + project.getName() + "» через приложение ИР. Штатный поиск просматривает только "
@@ -1195,8 +1664,6 @@ public class ConfigSearchDialogHook implements IStartup
             link.setLayoutData(data);
             link.addListener(SWT.Selection,
                 e -> IrGitFragmentSearchHandler.findText(project, combo.getText()));
-            group.getParent().layout(true, true);
-            return true;
         }
     }
 
