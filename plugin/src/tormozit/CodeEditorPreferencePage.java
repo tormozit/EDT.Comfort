@@ -42,6 +42,21 @@ public final class CodeEditorPreferencePage extends ComfortPreferencePage
         timeoutLabelData.horizontalIndent = 20;
         timeoutField.getLabelControl(parent).setLayoutData(timeoutLabelData);
 
+        BooleanFieldEditor naparnikRowField = new BooleanFieldEditor(
+            ComfortSettings.PREF_NAPARNIK_ASSIST_ROW_ENABLED,
+            "Предложение Напарника наверху списка автодополнения", //$NON-NLS-1$
+            parent);
+        addField(naparnikRowField);
+        setFieldTooltip(naparnikRowField,
+            "Первая строка списка автодополнения показывает предложение 1С:Напарника для текущего места модуля.\n" //$NON-NLS-1$
+            + "Enter в этой строке вставляет верхнюю строку предложения, Ctrl+Enter — всё предложение.\n" //$NON-NLS-1$
+            + "Tab вставляет очередное слово, а остаток показывает подсказкой Напарника прямо в тексте.\n" //$NON-NLS-1$
+            + "При каждом открытии списка выполняется запрос к серверу Напарника.\n" //$NON-NLS-1$
+            + "Работает при включённом флажке «Улучшать списки».\n" //$NON-NLS-1$
+            + "Не работает, если в «Параметры → 1С:Напарник» политика завершения кода — «Выключен»:\n" //$NON-NLS-1$
+            + "запросы не выполняются, строка показывается только с ошибкой последнего запроса.", //$NON-NLS-1$
+            parent);
+
         BooleanFieldEditor serverCallField = new BooleanFieldEditor(
             ComfortSettings.PREF_SERVER_CALL_HIGHLIGHTING_ENABLED,
             "Подсвечивать серверные вызовы", //$NON-NLS-1$

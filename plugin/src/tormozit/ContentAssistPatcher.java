@@ -88,6 +88,7 @@ public final class ContentAssistPatcher
 
         contentAssist.setSorter(new SmartCodeProposalSorter());
         ContentAssistSessionReloader.install(sourceViewer, contentAssist, wrapper, facade);
+        NaparnikAssistRow.install(sourceViewer, contentAssist);
 
         ContentAssistDebug.log("applyPatch OK delegate=" + xtext.getClass().getSimpleName()); //$NON-NLS-1$
 return true;
@@ -132,6 +133,7 @@ return true;
         }
         contentAssist.setSorter(null);
         ContentAssistSessionReloader.uninstall(sourceViewer, contentAssist);
+        NaparnikAssistRow.uninstall(sourceViewer);
     }
 
     public static ContentAssistant getContentAssistant(SourceViewer sourceViewer)

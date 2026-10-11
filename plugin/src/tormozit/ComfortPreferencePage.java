@@ -1739,6 +1739,8 @@ public class ComfortPreferencePage
             appendFlag(sb, "Группировать общие модули в навигаторе по имени", //$NON-NLS-1$
                 ComfortSettings.isGroupCommonModulesEnabled());
             appendFlag(sb, "Автооткрытие подсказок при вводе", isContentAssistAutoOpen()); //$NON-NLS-1$
+            appendFlag(sb, "Предложение Напарника наверху списка автодополнения", //$NON-NLS-1$
+                ComfortSettings.isNaparnikAssistRowEnabled());
             appendFlag(sb, "Подсвечивать серверные вызовы", //$NON-NLS-1$
                 ComfortSettings.isServerCallHighlightingEnabled());
             appendFlag(sb, "Подсвечивать создаваемые переменные", //$NON-NLS-1$

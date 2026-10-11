@@ -2574,6 +2574,7 @@ return;
             result = synthesizeBareConstructorProposals(result,
                 viewer != null ? viewer.getDocument() : null, offset);
             result = queryParametersOnly(viewer, offset, result);
+            result = NaparnikAssistRow.withRow(result);
             return result;
         }
         finally

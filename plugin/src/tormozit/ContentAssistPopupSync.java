@@ -864,6 +864,8 @@ if (viewer != null && isPopupVisible(assistant))
         if (processor != null && processor.isIrWordsResolvedForContext()
             && processor.resolvedIrProposalCount() > 0)
             listToApply = SmartContentAssistProcessor.stripEmptyPlaceholderList(displayList);
+        // Со строкой Напарника сразу: ниже число строк таблицы сверяется с этим списком.
+        listToApply = NaparnikAssistRow.withRow(listToApply);
         setProposalsAndRestoreSelection(popup, listToApply, false, saved, resetToFirst, restoreNow);
 
         List<ICompletionProposal> applied = (List<ICompletionProposal>)
@@ -1249,6 +1251,7 @@ if (processor != null && processor.isIrWordsResolvedForContext()
         Table table = (Table) fProposalTableField.get(popup);
         if (table == null || table.isDisposed())
             return;
+        list = NaparnikAssistRow.withRow(list);
         fFilteredProposalsField.set(popup, list);
         table.clearAll();
         table.setItemCount(list.size());
@@ -3087,7 +3090,9 @@ finishSyncCycleLight(popup);
                                                            SavedSelection saved)
             throws Exception
     {
-        List<ICompletionProposal> keepBase = base != null && !base.isEmpty() ? base : filtered;
+        boolean baseIsFiltered = base == null || base.isEmpty();
+        filtered = NaparnikAssistRow.withRow(filtered);
+        List<ICompletionProposal> keepBase = baseIsFiltered ? filtered : NaparnikAssistRow.withRow(base);
         if (fComputedProposalsField != null && keepBase != null)
             fComputedProposalsField.set(popup, keepBase);
         setProposalsMethod.invoke(popup, filtered, Boolean.TRUE);
@@ -3581,6 +3586,99 @@ ensureFilterPending(popup);
     {
         try { hideProposalPopup(getPopup(assistant)); }
         catch (Exception ignored) {}
+    }
+
+    // ---- строка Напарника (NaparnikAssistRow) ---------------------------------
+
+    /** Показанный список открытого окна; {@code null} — окна нет. */
+    static List<ICompletionProposal> visibleProposals(ContentAssistant assistant)
+    {
+        return readPopupList(assistant, false);
+    }
+
+    /** Полный (до отбора) список открытого окна; {@code null} — окна нет. */
+    static List<ICompletionProposal> computedProposals(ContentAssistant assistant)
+    {
+        List<ICompletionProposal> computed = readPopupList(assistant, true);
+        return computed != null && !computed.isEmpty() ? computed : readPopupList(assistant, false);
+    }
+
+    private static List<ICompletionProposal> readPopupList(ContentAssistant assistant, boolean computed)
+    {
+        try
+        {
+            Object popup = assistant != null ? getPopup(assistant) : null;
+            if (popup == null)
+                return null;
+            initPopupReflection(popup);
+            Field field = computed ? fComputedProposalsField : fFilteredProposalsField;
+            return field != null ? (List<ICompletionProposal>) field.get(popup) : null;
+        }
+        catch (Exception ignored)
+        {
+            return null;
+        }
+    }
+
+    static int selectedProposalIndex(ContentAssistant assistant)
+    {
+        try
+        {
+            Table table = getProposalTable(getPopup(assistant));
+            return table != null && !table.isDisposed() ? table.getSelectionIndex() : -1;
+        }
+        catch (Exception ignored)
+        {
+            return -1;
+        }
+    }
+
+    static void selectProposalIndex(ContentAssistant assistant, int index)
+    {
+        try
+        {
+            Object popup = getPopup(assistant);
+            if (popup == null)
+                return;
+            initPopupReflection(popup);
+            selectProposalAtIndex(popup, index);
+        }
+        catch (Exception ignored)
+        {
+        }
+    }
+
+    /**
+     * Перечитывает текст строки списка, а если она текущая — и боковую подсказку.
+     * Список при этом не пересобирается: выделение и прокрутка остаются на месте.
+     */
+    static void refreshProposalRow(ContentAssistant assistant, ICompletionProposal proposal)
+    {
+        try
+        {
+            Object popup = assistant != null ? getPopup(assistant) : null;
+            if (popup == null)
+                return;
+            initPopupReflection(popup);
+            Table table = getProposalTable(popup);
+            List<ICompletionProposal> list =
+                (List<ICompletionProposal>) fFilteredProposalsField.get(popup);
+            int index = list != null ? list.indexOf(proposal) : -1;
+            if (table == null || table.isDisposed() || index < 0 || index >= table.getItemCount())
+                return;
+            table.clear(index);
+            // Чтение текста заполняет очищенную строку заново (таблица виртуальная).
+            table.getItem(index).getText();
+            if (table.getSelectionIndex() != index)
+                return;
+            Object controller = fAdditionalInfoControllerField.get(popup);
+            if (controller != null && handleTableSelectionChangedMethod != null)
+                handleTableSelectionChangedMethod.invoke(controller);
+        }
+        catch (Exception e)
+        {
+            ContentAssistDebug.log("refreshProposalRow ERROR: " + e.getMessage()); //$NON-NLS-1$
+        }
     }
 
     public static Object resolveAdditionalInfoController(ContentAssistant assistant)
@@ -4389,6 +4487,7 @@ ensureFilterPending(popup);
                                                         boolean restoreAfterFilterToggle)
             throws Exception
     {
+        list = NaparnikAssistRow.withRow(list);
         if (fComputedProposalsField != null)
             fComputedProposalsField.set(popup, list);
         setProposalsMethod.invoke(popup, list, filteredSubset);
@@ -4413,7 +4512,7 @@ ensureFilterPending(popup);
         if (list == null || list.isEmpty() || selectProposalMethod == null)
             return;
         if (resetToFirst)
-            selectProposalAtIndex(popup, 0);
+            selectProposalAtIndex(popup, NaparnikAssistRow.defaultIndex(list));
         else if (restoreAfterFilterToggle)
             restoreSelection(popup, saved, list);
         else if (!SmartAssistFilterState.isSmartFilterEnabled())
@@ -4422,7 +4521,7 @@ ensureFilterPending(popup);
             if (prefix != null && !prefix.isEmpty())
             {
                 int idx = findFirstPrefixMatchIndex(list, prefix);
-                selectProposalAtIndex(popup, idx >= 0 ? idx : 0);
+                selectProposalAtIndex(popup, idx >= 0 ? idx : NaparnikAssistRow.defaultIndex(list));
             }
             else
                 restoreSelection(popup, saved, list);
@@ -4452,8 +4551,9 @@ ensureFilterPending(popup);
         }
         if (index < 0 && saved != null && saved.index >= 0 && saved.index < list.size())
             index = saved.index;
-        if (index < 0)
-            index = 0;
+        // Строка Напарника остаётся текущей, только если пользователь сам на неё перешёл.
+        if (index < 0 || (index == 0 && NaparnikAssistRow.isRow(list.get(0))))
+            index = NaparnikAssistRow.defaultIndex(list);
         selectProposalAtIndex(popup, index);
     }
 
@@ -4503,7 +4603,8 @@ ensureFilterPending(popup);
             return -1;
         for (int i = 0; i < list.size(); i++)
         {
-            if (proposalNameStartsWithPrefix(list.get(i), prefix))
+            if (!NaparnikAssistRow.isRow(list.get(i))
+                && proposalNameStartsWithPrefix(list.get(i), prefix))
                 return i;
         }
         return -1;

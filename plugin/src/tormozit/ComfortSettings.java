@@ -284,6 +284,14 @@ public final class ComfortSettings
     /** Минимальное число строк по умолчанию — 50. */
     public static final int DEFAULT_BRACKET_CONTENT_HINT_MIN_LINES = 50;
 
+    // ---- Naparnik row in content assist ----
+
+    /** Ключ: строка с предложением 1С:Напарника наверху списка автодополнения. */
+    public static final String PREF_NAPARNIK_ASSIST_ROW_ENABLED = "comfort.naparnikAssistRow.enabled"; //$NON-NLS-1$
+
+    /** По умолчанию выключено: каждое открытие списка — запрос к серверу Напарника. */
+    public static final boolean DEFAULT_NAPARNIK_ASSIST_ROW_ENABLED = false;
+
     // ---- Compile context status field ----
 
     /** Ключ: ширина индикатора условий компиляции в строке состояния, в символах; 0 — не показывать. */
@@ -1233,6 +1241,14 @@ public final class ComfortSettings
         if (settings == null)
             return DEFAULT_BRACKET_CONTENT_HINT_ENABLED;
         return settings.preferenceStore.getBoolean(PREF_BRACKET_CONTENT_HINT_ENABLED);
+    }
+
+    public static boolean isNaparnikAssistRowEnabled()
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return DEFAULT_NAPARNIK_ASSIST_ROW_ENABLED;
+        return settings.preferenceStore.getBoolean(PREF_NAPARNIK_ASSIST_ROW_ENABLED);
     }
 
     // ---- Auto-collapsed regions accessors ----

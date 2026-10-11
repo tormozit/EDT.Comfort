@@ -582,6 +582,33 @@ public final class NaparnikManualModeHook implements IStartup
         }
     }
 
+    /** Модель завершения кода Напарника, подключённая к виджету редактора; {@code null} — нет. */
+    static Object findViewModel(StyledText widget)
+    {
+        if (widget == null || widget.isDisposed())
+            return null;
+        List<Object> found = new ArrayList<>();
+        collectViewModels(widget.getListeners(ST.VerifyKey), found);
+        if (found.isEmpty())
+            collectViewModels(widget.getListeners(SWT.Modify), found);
+        return found.isEmpty() ? null : found.get(0);
+    }
+
+    /**
+     * Разрешает показ серой подсказки в режиме «Ручной» — так же, как команда «Предложи код».
+     * Для подсказки, которую показывают по явному действию пользователя, а не по вводу.
+     */
+    static void allowHintByUserAction()
+    {
+        allowSuggest.incrementAndGet();
+    }
+
+    /** Политика завершения кода Напарника ({@code off}, {@code manual}, …); {@code ?} — не прочитана. */
+    static String completionPolicy()
+    {
+        return readPolicy();
+    }
+
     private static void collectViewModels(Object[] listeners, List<Object> found)
     {
         if (listeners == null)

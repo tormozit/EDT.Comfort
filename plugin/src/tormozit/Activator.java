@@ -148,6 +148,9 @@ public class Activator extends AbstractUIPlugin
             ComfortSettings.PREF_BRACKET_CONTENT_HINT_MIN_LINES,
             ComfortSettings.DEFAULT_BRACKET_CONTENT_HINT_MIN_LINES);
         settings.getPreferenceStore().setDefault(
+            ComfortSettings.PREF_NAPARNIK_ASSIST_ROW_ENABLED,
+            ComfortSettings.DEFAULT_NAPARNIK_ASSIST_ROW_ENABLED);
+        settings.getPreferenceStore().setDefault(
             ComfortSettings.PREF_COMPILE_CONTEXT_STATUS_WIDTH,
             ComfortSettings.DEFAULT_COMPILE_CONTEXT_STATUS_WIDTH);
         settings.getPreferenceStore().setDefault(

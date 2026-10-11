@@ -16,6 +16,12 @@ public class SmartCodeProposalSorter implements ICompletionProposalSorter
     @Override
     public int compare(ICompletionProposal p1, ICompletionProposal p2)
     {
+        // Строка Напарника закреплена наверху при любом отборе и порядке.
+        boolean row1 = NaparnikAssistRow.isRow(p1);
+        boolean row2 = NaparnikAssistRow.isRow(p2);
+        if (row1 || row2)
+            return row1 == row2 ? 0 : row1 ? -1 : 1;
+
         if (!SmartAssistFilterState.isSmartFilterEnabled())
             return compareDisplay(p1, p2);
 
