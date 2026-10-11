@@ -17,6 +17,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import org.eclipse.core.resources.IFile;
+import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.Status;
 import org.eclipse.emf.ecore.EAttribute;
@@ -31,17 +32,20 @@ import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.layout.GridLayout;
 import org.eclipse.swt.widgets.Button;
+import org.eclipse.swt.widgets.Combo;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Group;
 import org.eclipse.swt.widgets.Label;
+import org.eclipse.swt.widgets.Link;
 import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Table;
 import org.eclipse.swt.widgets.ToolBar;
 import org.eclipse.swt.widgets.ToolItem;
 import org.eclipse.ui.IStartup;
+import org.eclipse.ui.IWorkbenchPage;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.ClassWriter;
@@ -187,6 +191,8 @@ public class ConfigSearchDialogHook implements IStartup
     private static boolean tryPatchNow(Shell shell, Object dialog)
     {
         Object page = getSelectedPage(dialog);
+        if (page != null && GitSearchPageLink.PAGE_CLASS.equals(page.getClass().getName()))
+            return GitSearchPageLink.patch(shell, page);
         if (page == null || !PAGE_CLASS.equals(page.getClass().getName())
             || Global.getField(page, "searchExecutorProvider") == null)
             return false;
@@ -619,6 +625,7 @@ public class ConfigSearchDialogHook implements IStartup
                 return;
             int checked = typesTable.getItemCount() > 0 ? countCheckedItems(typesTable) : 0;
             titleLabel.setText(baseTitle + " (" + checked + ")");
+            setGroupTitleBold(titleLabel, checked > 0);
         };
 
         typesTable.addListener(SWT.Selection, e -> refresh.run());
@@ -780,7 +787,7 @@ public class ConfigSearchDialogHook implements IStartup
     }
 
     /** Заголовок группы жирным, пока в ней включена хотя бы одна пометка. Шрифт группы создаётся один раз. */
-    private static void setGroupTitleBold(Group group, boolean bold)
+    private static void setGroupTitleBold(Control group, boolean bold)
     {
         Font normal = (Font) group.getData(GROUP_NORMAL_FONT_KEY);
         if (normal == null)
@@ -798,8 +805,11 @@ public class ConfigSearchDialogHook implements IStartup
         {
             group.setFont(target);
             // жирный шрифт группы наследуют её флажки — возвращаем им обычный
-            for (Control child : group.getChildren())
-                child.setFont(group.getData(GROUP_NORMAL_FONT_KEY) instanceof Font f ? f : child.getFont());
+            if (group instanceof Composite composite)
+            {
+                for (Control child : composite.getChildren())
+                    child.setFont(group.getData(GROUP_NORMAL_FONT_KEY) instanceof Font f ? f : child.getFont());
+            }
             group.getParent().layout(true, true);
         }
     }
@@ -1132,6 +1142,61 @@ public class ConfigSearchDialogHook implements IStartup
             }
             result.put("", new ArrayList<>(union)); //$NON-NLS-1$
             return result;
+        }
+    }
+
+    /**
+     * Ссылка «Искать по текстам изменений через ИР» на вкладке «Поиск в Git»: штатный поиск EGit
+     * просматривает только реквизиты коммитов, тексты изменений — нет. Ссылка есть, только если
+     * активный проект подключён к Git.
+     */
+    private static final class GitSearchPageLink
+    {
+        static final String PAGE_CLASS = "org.eclipse.egit.ui.internal.search.CommitSearchPage"; //$NON-NLS-1$
+        private static final String PATCHED_KEY = "tormozit.gitSearchIrLink"; //$NON-NLS-1$
+
+        private GitSearchPageLink()
+        {
+        }
+
+        /** @return {@code false}, если страница ещё не создана (нужна повторная попытка) */
+        static boolean patch(Shell shell, Object page)
+        {
+            if (!(Global.getField(page, "patternCombo") instanceof Combo combo) || combo.isDisposed()) //$NON-NLS-1$
+                return false;
+            // последний флажок первой строки группы «Область» — ссылка встаёт справа от него
+            if (!(Global.getField(page, "searchCommitterButton") instanceof Button anchor) //$NON-NLS-1$
+                || anchor.isDisposed())
+                return false;
+            Composite group = anchor.getParent();
+            if (group.getData(PATCHED_KEY) != null)
+                return true;
+            group.setData(PATCHED_KEY, Boolean.TRUE);
+
+            IWorkbenchPage workbenchPage = Global.getActivePage();
+            IProject project = Global.getActiveProject(
+                workbenchPage != null ? workbenchPage.getActivePart() : null, false);
+            if (!IrGitFragmentSearchHandler.isGitProject(project)
+                || !(group.getLayout() instanceof GridLayout grid))
+                return true;
+
+            // отдельная колонка справа от флажков, на высоту обеих их строк
+            grid.numColumns++;
+            Link link = new Link(group, SWT.NONE);
+            link.setFont(group.getFont());
+            link.setText("<a>Искать по текстам изменений через ИР</a>");
+            link.setToolTipText(TooltipText.wrap(link,
+                "Искать текст из поля «Содержит текст» в текстах изменений истории Git проекта «"
+                    + project.getName() + "» через приложение ИР. Штатный поиск просматривает только "
+                    + "реквизиты коммитов" + Global.pluginSignForTooltip()));
+            link.moveBelow(anchor);
+            GridData data = new GridData(SWT.BEGINNING, SWT.CENTER, false, false, 1, 2);
+            data.horizontalIndent = 20;
+            link.setLayoutData(data);
+            link.addListener(SWT.Selection,
+                e -> IrGitFragmentSearchHandler.findText(project, combo.getText()));
+            group.getParent().layout(true, true);
+            return true;
         }
     }
 

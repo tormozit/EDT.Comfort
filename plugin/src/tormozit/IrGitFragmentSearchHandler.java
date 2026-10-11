@@ -51,7 +51,11 @@ public final class IrGitFragmentSearchHandler extends AbstractHandler
     static boolean isGitProject(BslXtextEditor editor)
     {
         IDtProject dtProject = editor != null ? Global.getDtProjectFromBslEditor(editor) : null;
-        IProject project = dtProject != null ? dtProject.getWorkspaceProject() : null;
+        return isGitProject(dtProject != null ? dtProject.getWorkspaceProject() : null);
+    }
+
+    static boolean isGitProject(IProject project)
+    {
         if (project == null)
             return false;
         RepositoryMapping mapping = RepositoryMapping.getMapping(project);
@@ -76,7 +80,28 @@ public final class IrGitFragmentSearchHandler extends AbstractHandler
         ITextSelection selection = textSelection(editor);
         String text = selection != null && selection.getText() != null ? selection.getText() : ""; //$NON-NLS-1$
 
-        IDtProject dtProject = Global.getDtProjectFromBslEditor(editor);
+        String moduleName = GetRef.resolveSetTextModuleName(editor);
+        // ITextSelection редактора — координаты документа (не виджета), строка с нуля.
+        int lineNumber = selection != null ? selection.getStartLine() + 1 : 0;
+        openGitHistory(Global.getDtProjectFromBslEditor(editor), text, moduleName, lineNumber);
+    }
+
+    /**
+     * Поиск текста в истории Git проекта без привязки к модулю — по текстам изменений всех файлов
+     * (ссылка на вкладке «Поиск в Git» окна «Поиск»).
+     */
+    static void findText(IProject project, String text)
+    {
+        if (!isGitProject(project))
+        {
+            ToastNotification.show(MENU_LABEL, "Проект не подключён к Git", 3000); //$NON-NLS-1$
+            return;
+        }
+        openGitHistory(Global.getDtProjectFromWorkspaceProject(project), text, null, 0);
+    }
+
+    private static void openGitHistory(IDtProject dtProject, String text, String moduleName, int lineNumber)
+    {
         if (dtProject == null)
             return;
 
@@ -85,11 +110,8 @@ public final class IrGitFragmentSearchHandler extends AbstractHandler
             return;
 
         // Текст в ИР — с переводами строк LF, как и весь модуль после синхронизации.
-        String fragment = text.replace("\r\n", "\n").replace('\r', '\n'); //$NON-NLS-1$ //$NON-NLS-2$
-        String moduleName = GetRef.resolveSetTextModuleName(editor);
+        String fragment = (text != null ? text : "").replace("\r\n", "\n").replace('\r', '\n'); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         String finalModuleName = moduleName != null ? moduleName : ""; //$NON-NLS-1$
-        // ITextSelection редактора — координаты документа (не виджета), строка с нуля.
-        int lineNumber = selection != null ? selection.getStartLine() + 1 : 0;
 
         irSession.executor.submit(() ->
         {
