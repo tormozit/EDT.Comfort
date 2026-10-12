@@ -8,14 +8,26 @@ read_release() {
   grep 'comfort.release=' site/version.txt | head -1 | cut -d= -f2 | tr -d '[:space:]'
 }
 
+# Два формата полной версии:
+#   новый  1.0.2.202610120038     — три числа + метка сборки четвёртым сегментом;
+#   старый 1.0.1.9-202610062102   — четыре сегмента + метка после дефиса (архивные версии на gh-pages).
 base_version() {
-  echo "${1%%-*}"
+  local ver="$1"
+  if [[ "$ver" == *-* ]]; then
+    echo "${ver%%-*}"
+  elif [[ "$ver" =~ ^([0-9]+\.[0-9]+\.[0-9]+)\..+$ ]]; then
+    echo "${BASH_REMATCH[1]}"
+  else
+    echo "$ver"
+  fi
 }
 
 qualifier() {
   local ver="$1"
   if [[ "$ver" == *-* ]]; then
     echo "${ver#*-}"
+  elif [[ "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.(.+)$ ]]; then
+    echo "${BASH_REMATCH[1]}"
   else
     echo ""
   fi
@@ -80,7 +92,7 @@ else
 fi
 
 if [[ -z "$LOCAL_QUAL" ]]; then
-  echo "ERROR: cannot determine build qualifier (expected 1.0.0.N-yyyyMMddHHmm)"
+  echo "ERROR: cannot determine build qualifier (expected 1.0.N.yyyyMMddHHmm)"
   exit 1
 fi
 

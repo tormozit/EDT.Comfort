@@ -27,8 +27,12 @@ public final class ComfortVersionInfo
     private static final String BUNDLE_P2_ENGINE = "org.eclipse.equinox.p2.engine"; //$NON-NLS-1$
     private static final String RELEASES_BASE_URL =
             "https://github.com/tormozit/EDT.Comfort/releases/tag/"; //$NON-NLS-1$
+    /**
+     * Метка сборки в конце версии: {@code 1.0.2.202610120038} (три числа и метка четвёртым
+     * сегментом) либо прежний вид {@code 1.0.1.9-202610062102} (метка после дефиса).
+     */
     private static final Pattern QUALIFIER_TIMESTAMP =
-            Pattern.compile("-(\\d{12})$"); //$NON-NLS-1$
+            Pattern.compile("[-.](\\d{12})$"); //$NON-NLS-1$
     private static final DateTimeFormatter DISPLAY_DATE =
             DateTimeFormatter.ofPattern("dd.MM.yyyy"); //$NON-NLS-1$
 
@@ -174,7 +178,7 @@ public final class ComfortVersionInfo
         }
     }
 
-    /** Разбор полной p2/OSGi-версии вида {@code 1.0.0.11-202606090924}. */
+    /** Разбор полной p2/OSGi-версии вида {@code 1.0.2.202610120038} или {@code 1.0.0.11-202606090924}. */
     public static ComfortVersionInfo fromOsgiVersion(String osgiVersion)
     {
         if (osgiVersion == null || osgiVersion.isBlank())
@@ -213,7 +217,7 @@ public final class ComfortVersionInfo
 
     /**
      * Полное сравнение версий: сначала числовые сегменты базы, при равенстве —
-     * квалификатор сборки ({@code yyyyMMddHHmm} после {@code -}).
+     * квалификатор сборки ({@code yyyyMMddHHmm} после {@code .} или {@code -}).
      */
     public static int compare(ComfortVersionInfo left, ComfortVersionInfo right)
     {

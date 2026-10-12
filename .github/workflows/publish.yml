@@ -79,7 +79,7 @@ jobs:
               case "$name" in
                 p2.index|compositeContent.jar|compositeArtifacts.jar|index.html) continue ;;
               esac
-              if [[ "$name" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              if [[ "$name" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
                 echo "$name" >> /tmp/old-pages-versions.txt
               fi
               if [ ! -d "deploy/$name" ]; then
@@ -131,7 +131,7 @@ jobs:
           version_dirs=()
           for dir in deploy/*/; do
             name=$(basename "$dir")
-            [[ "$name" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
+            [[ "$name" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] || continue
             version_dirs+=("$name")
             VER_QUAL=$(grep -o "id='tormozit.comfort.feature.feature.group' version='[^']*'" "deploy/$name/content.xml" | head -1 | sed "s/.*version='//;s/'$//")
             if [[ -z "$VER_QUAL" ]]; then

@@ -9,7 +9,7 @@ REMOTE="${GH_PAGES_REMOTE:-origin/gh-pages}"
 
 version_dirs_from_tree() {
   git ls-tree --name-only "$1" 2>/dev/null \
-    | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' \
+    | grep -E '^[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?$' \
     | sort -V \
     || true
 }
@@ -40,7 +40,7 @@ ensure_not_stale() {
   mapfile -t remote_versions < <(version_dirs_from_tree "$REMOTE")
   mapfile -t deploy_versions < <(
     find "$DEPLOY_DIR" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null \
-      | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' \
+      | grep -E '^[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?$' \
       | sort -V \
       || true
   )

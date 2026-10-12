@@ -1,6 +1,10 @@
 # Фиксированная часть номера версии (единственное место для ручного изменения).
 # При сборке PDE headless / Tycho вместо "qualifier" подставляется метка времени автоматически.
-# Пример итоговой версии: 1.0.0.10-202606061430
+# Пример итоговой версии: 1.0.2.202610120038
+#
+# Номер релиза — РОВНО ТРИ ЧИСЛА (1.0.2, 1.0.3, … 1.0.10, 1.0.11): в OSGi/p2 числами сравниваются
+# только первые три сегмента, четвёртый — строка (посимвольно, "9…" > "10…"). Прежний формат
+# 1.0.1.N сломался на 1.0.1.9 → 1.0.1.10: установщик EDT считал 1.0.1.10 старше 1.0.1.9.
 #
 # Публикация на GitHub Pages:
 #   site\release.bat или site\republish.bat — sync, сборка site/, restore-main, проверка версии OSGi
@@ -18,7 +22,7 @@
 # не пропажа файла в JAR. См. launch\README.txt и site\scripts\assert-comfort-osgi.ps1.
 # URL в EDT «Установить новое ПО»:
 #   https://tormozit.github.io/EDT.Comfort/          — composite (все архивные линейки)
-#   https://tormozit.github.io/EDT.Comfort/1.0.0.10/ — фиксированная версия
+#   https://tormozit.github.io/EDT.Comfort/1.0.2/ — фиксированная версия
 #
 # Один раз: GitHub → Settings → Pages → Deploy from branch → gh-pages / (root)
-comfort.release=1.0.1.10
+comfort.release=1.0.2

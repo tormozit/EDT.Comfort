@@ -350,8 +350,13 @@ def list_version_children() -> list[str]:
         d for d in os.listdir(deploy_dir)
         if os.path.isdir(os.path.join(deploy_dir, d)) and d[0:1].isdigit()
     ]
-    children.sort(reverse=True)
+    # Числовой порядок сегментов: строковая сортировка ставит 1.0.9 выше 1.0.10.
+    children.sort(key=_version_sort_key, reverse=True)
     return children
+
+
+def _version_sort_key(name: str) -> tuple:
+    return tuple(int(part) if part.isdigit() else -1 for part in name.split("."))
 
 
 def order_version_children(children: list[str]) -> list[str]:
