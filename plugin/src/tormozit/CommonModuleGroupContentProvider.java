@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import org.eclipse.core.runtime.Platform;
 import org.eclipse.jface.viewers.Viewer;
@@ -12,14 +13,21 @@ import org.eclipse.swt.widgets.Tree;
 import org.eclipse.ui.IMemento;
 import org.eclipse.ui.model.IWorkbenchAdapter;
 import org.eclipse.ui.navigator.ICommonContentExtensionSite;
-import org.eclipse.ui.navigator.ICommonContentProvider;
+import org.eclipse.ui.navigator.INavigatorContentExtension;
+import org.eclipse.ui.navigator.INavigatorContentService;
+import org.eclipse.ui.navigator.IPipelinedTreeContentProvider2;
+import org.eclipse.ui.navigator.PipelinedShapeModification;
+import org.eclipse.ui.navigator.PipelinedViewerUpdate;
 
 import com._1c.g5.v8.dt.metadata.mdclass.CommonModule;
+import com._1c.g5.v8.dt.navigator.providers.INavigatorContentProviderStateAware;
+import com._1c.g5.v8.dt.navigator.providers.INavigatorContentProviderStateProvider;
 
 /**
  * Добавляет виртуальные узлы-группы общих модулей как ДОПОЛНИТЕЛЬНЫЕ дети папки
- * «Общие модули» — штатное содержимое EDT не подменяется, а дополняется (Common Navigator
- * Framework, additive content extension). Группировка считается из {@link CommonModuleGrouping}
+ * «Общие модули». Через pipeline CNF участники групп убираются из штатного списка детей:
+ * это работает и в диалоге «Выбор объектов», где commonFilter навигатора не вызывается.
+ * Группировка считается из {@link CommonModuleGrouping}
  * и кэшируется на время пересборки дерева (см. {@link GroupingSnapshot}) — на диске по-прежнему
  * ничего не хранится.
  *
@@ -28,15 +36,18 @@ import com._1c.g5.v8.dt.metadata.mdclass.CommonModule;
  * EDT не читает лейблы через глобальный {@code AdapterManager}, а идёт через контент-сервис
  * CNF (композиция зарегистрированных {@code navigatorContent} расширений).
  */
-public final class CommonModuleGroupContentProvider implements ICommonContentProvider
+public final class CommonModuleGroupContentProvider implements IPipelinedTreeContentProvider2
 {
     private static final Object[] NO_CHILDREN = new Object[0];
 
     private Viewer viewer;
+    private INavigatorContentService contentService;
+    private INavigatorContentProviderStateAware edtContentProvider;
 
     @Override
     public void init(ICommonContentExtensionSite aConfig)
     {
+        contentService = aConfig.getService();
     }
 
     @Override
@@ -52,7 +63,9 @@ public final class CommonModuleGroupContentProvider implements ICommonContentPro
             return NO_CHILDREN;
 
         if (parentElement instanceof CommonModuleGroupNode group)
+        {
             return group.getMembers().toArray();
+        }
 
         if (isCommonModulesFolder(parentElement))
         {
@@ -61,6 +74,75 @@ public final class CommonModuleGroupContentProvider implements ICommonContentPro
         }
 
         return NO_CHILDREN;
+    }
+
+    /** Меняет состав детей до преобразования объектов в строки дерева AEF (issue #766). */
+    @Override
+    @SuppressWarnings({ "rawtypes", "unchecked" })
+    public void getPipelinedChildren(Object parent, Set currentChildren)
+    {
+        if (!isGroupingActive() || !isCommonModulesFolder(parent))
+            return;
+
+        CommonModuleGroupSorter.installOn(viewer);
+        for (CommonModuleGroupNode group : snapshotFor(parent).nodes)
+        {
+            // Штатный провайдер диалога уже ограничил состав доступными объектами.
+            // Общий кэш мог прийти из навигатора: не возвращать отсечённые EDT модули.
+            List<CommonModule> members = new ArrayList<>();
+            for (CommonModule member : group.getMembers())
+                if (currentChildren.contains(member))
+                    members.add(member);
+            if (members.isEmpty())
+                continue;
+            currentChildren.removeAll(members);
+            currentChildren.add(members.size() == group.getMembers().size() ? group
+                    : new CommonModuleGroupNode(group.getBaseName(), members, parent, group.getSortIndex()));
+        }
+    }
+
+    @Override
+    @SuppressWarnings("rawtypes")
+    public void getPipelinedElements(Object input, Set currentElements)
+    {
+        getPipelinedChildren(input, currentElements);
+    }
+
+    @Override
+    public Object getPipelinedParent(Object element, Object suggestedParent)
+    {
+        Object parent = getParent(element);
+        return parent != null ? parent : suggestedParent;
+    }
+
+    @Override
+    public boolean hasPipelinedChildren(Object element, boolean currentHasChildren)
+    {
+        return element instanceof CommonModuleGroupNode ? hasChildren(element) : currentHasChildren;
+    }
+
+    @Override
+    public PipelinedShapeModification interceptAdd(PipelinedShapeModification modification)
+    {
+        return modification;
+    }
+
+    @Override
+    public PipelinedShapeModification interceptRemove(PipelinedShapeModification modification)
+    {
+        return modification;
+    }
+
+    @Override
+    public boolean interceptRefresh(PipelinedViewerUpdate update)
+    {
+        return false;
+    }
+
+    @Override
+    public boolean interceptUpdate(PipelinedViewerUpdate update)
+    {
+        return false;
     }
 
     /**
@@ -118,9 +200,30 @@ public final class CommonModuleGroupContentProvider implements ICommonContentPro
             return false;
         Control control = viewer != null ? viewer.getControl() : null;
         if (!(control instanceof Tree tree))
-            return true;
+            return isObjectPickerContentActive();
         return !NavigatorFilterHook.isSmartFilterPatternActive(tree)
                 && !NavigatorFilterHook.isSubsystemsRebindPending(tree);
+    }
+
+    /**
+     * UiLessTreeViewer используется и диалогом выбора, и деревьями редакторов AEF.
+     * NavigatorTreeDialogModel включает штатное состояние с trie допустимых объектов.
+     * Панель «Состав» вместо него использует ContainmentTreeContentProvider, чей
+     * фиксированный PARENT_TO_CHILDREN_CLASSES_MAP не поддерживает виртуальные группы.
+     * Там сохраняем штатные папки: иначе уже переданный по OK модуль не виден (issue #766).
+     */
+    private boolean isObjectPickerContentActive()
+    {
+        if (edtContentProvider == null && contentService != null)
+        {
+            INavigatorContentExtension extension = contentService.getContentExtensionById(
+                    "com._1c.g5.v8.dt.navigator.ui.v8model"); //$NON-NLS-1$
+            if (extension != null && extension.getContentProvider() instanceof INavigatorContentProviderStateAware stateAware)
+                edtContentProvider = stateAware;
+        }
+        INavigatorContentProviderStateProvider state = edtContentProvider != null
+                ? edtContentProvider.getNavigatorContentProviderState() : null;
+        return state != null && state.isActive();
     }
 
     @Override

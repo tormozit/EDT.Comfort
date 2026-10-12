@@ -1681,8 +1681,9 @@
   -->
 
   <!-- Динамическая группировка общих модулей в навигаторе по имени/суффиксу (issue #117).
-       Механизм подтверждён рабочим прецедентом (DitriXNew/EDT-MCP): additive navigatorContent
-       + commonFilter, не подмена штатного content provider'а EDT. Включается флажком
+       Pipeline CNF скрывает участников групп до преобразования в строки дерева, в том числе
+       в диалоге «Выбор объектов» (issue #766); commonFilter учитывает отбор по подсистемам.
+       Включается флажком
        ComfortSettings.PREF_GROUP_COMMON_MODULES_ENABLED (по умолчанию выключено). -->
   <extension point="org.eclipse.ui.navigator.navigatorContent">
     <navigatorContent
@@ -1692,7 +1693,6 @@
           labelProvider="tormozit.CommonModuleGroupLabelProvider"
           activeByDefault="true"
           priority="highest">
-      <commonSorter class="tormozit.CommonModuleGroupSorter"/>
       <triggerPoints>
         <or>
           <instanceof value="org.eclipse.ui.model.IWorkbenchAdapter"/>
@@ -1706,6 +1706,9 @@
           <instanceof value="com._1c.g5.v8.dt.metadata.mdclass.CommonModule"/>
         </or>
       </possibleChildren>
+      <commonSorter class="tormozit.CommonModuleGroupSorter"/>
+      <override suppressedExtensionId="com._1c.g5.v8.dt.navigator.ui.v8model"
+                policy="InvokeAlwaysRegardlessOfSuppressedExt"/>
     </navigatorContent>
     <commonFilter
           id="tormozit.groupCommonModules.filter"
