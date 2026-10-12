@@ -284,7 +284,14 @@ public final class IrKeyBindingHook implements org.eclipse.ui.IStartup
             IrBindingDescriptor descriptor = IrBindingDescriptor.from(binding);
             String sig = descriptor.signature();
             if (suppressedSigs.contains(sig))
+            {
+                // Снятая привязка может вернуться в модель E4: пользовательские привязки
+                // перечитываются из настроек после старта. Оставшись рядом со штатным
+                // «Формат», она даёт конфликт — окно выбора команды вместо выполнения.
+                if (RuntimeKeyBindingSupport.isLiveInModel(binding))
+                    bindingServiceInternal.removeBinding(binding);
                 continue;
+            }
 
             bindingServiceInternal.removeBinding(binding);
             suppressedDescriptors.add(descriptor);

@@ -184,7 +184,8 @@ public final class MdEditorMarkerMessageHook implements IStartup
      * Подменяем менеджер сообщений формы своим. Он копит цикл перестроения молча, а в конце
      * сравнивает получившийся набор сообщений с прежним: совпал — форму вообще не трогаем,
      * не совпал — отдаём штатное обновление. Отличие от исходного поведения ровно одно:
-     * повторная установка того же самого текста больше не доходит до формы.
+     * повторная установка того же самого текста больше не доходит до формы. Если надписи в шапке
+     * нет, хотя сообщения есть, обновление не глушим — см. {@code summaryMissing}.
      */
     private static void installIdleRebuildGuard(Form form)
     {
@@ -271,9 +272,22 @@ public final class MdEditorMarkerMessageHook implements IStartup
         private void finishRebuild()
         {
             rebuilding = false;
-            if (currentKeys().equals(before) && enableAutoUpdateSilently())
+            Set<String> after = currentKeys();
+            if (after.equals(before) && !summaryMissing(after) && enableAutoUpdateSilently())
                 return;
             super.setAutoUpdate(autoUpdateBeforeCycle);
+        }
+
+        /**
+         * Сообщения в менеджере есть, а шапка пустая. Так бывает, когда прошлое обновление пришлось
+         * на шапку нулевой высоты (страница ещё не разложена): штатный {@code MessageManager.update}
+         * в этом случае снимает сообщение формы, но свой список сохраняет. Набор при этом «не
+         * изменился», и без этой проверки надпись не появилась бы, пока не поменяется состав проблем
+         * объекта.
+         */
+        private boolean summaryMissing(Set<String> keys)
+        {
+            return !keys.isEmpty() && !form.isDisposed() && form.getMessage() == null;
         }
 
         /**

@@ -186,6 +186,7 @@ public class CompareSearchResultPage implements ISearchResultPage
     private static final String KEY_COL_SIDE_WIDTH = "colSideWidth"; //$NON-NLS-1$
     private static final String KEY_COL_WORD_WIDTH = "colWordWidth"; //$NON-NLS-1$
     private static final String KEY_COL_USER_WIDTH = "colUserWidth"; //$NON-NLS-1$
+    private static final String KEY_COL_LANG_WIDTH = "colLangWidth"; //$NON-NLS-1$
     private static final int USER_COLUMN_WIDTH = 130;
     /** Пометка колонки «Пользовательский» — как у флагов в дереве элементов формы. */
     private static final String USER_TEXT_MARK = "✓"; //$NON-NLS-1$
@@ -655,6 +656,8 @@ public class CompareSearchResultPage implements ISearchResultPage
         final String word;
         /** Служебная строка «&lt;Все&gt;»: вхождения всех показанных слов, отбор справа отключён. */
         final boolean all;
+        /** Язык слова по письменности: RU, EN; пусто — служебная строка или смешанное слово. */
+        final String lang;
         final List<CompareSearchMatch> matches = new ArrayList<>();
 
         WordRow(String word)
@@ -666,7 +669,54 @@ public class CompareSearchResultPage implements ISearchResultPage
         {
             this.word = word;
             this.all = all;
+            this.lang = all ? "" : wordLanguage(word); //$NON-NLS-1$
         }
+    }
+
+    /** Кириллица — RU, латиница — EN, иначе пусто. */
+    private static String wordLanguage(String word)
+    {
+        boolean cyr = false;
+        boolean lat = false;
+        for (int i = 0; i < word.length(); i++)
+        {
+            Character.UnicodeScript script = Character.UnicodeScript.of(word.charAt(i));
+            if (script == Character.UnicodeScript.CYRILLIC)
+                cyr = true;
+            else if (script == Character.UnicodeScript.LATIN)
+                lat = true;
+        }
+        return cyr == lat ? "" : cyr ? "RU" : "EN"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+    }
+
+    /** RU первым, EN вторым, остальные по алфавиту кода, пустой язык последним. */
+    private static int compareLang(Object a, Object b)
+    {
+        String la = langOf(a);
+        String lb = langOf(b);
+        int cmp = Integer.compare(langRank(la), langRank(lb));
+        return cmp != 0 ? cmp : la.compareTo(lb);
+    }
+
+    /** Язык строки таблицы слов или строки результата (по её слову с ошибкой). */
+    private static String langOf(Object element)
+    {
+        if (element instanceof WordRow row)
+            return row.lang;
+        if (element instanceof CompareSearchMatch match && match.getMisspelledWord() != null)
+            return wordLanguage(match.getMisspelledWord());
+        return ""; //$NON-NLS-1$
+    }
+
+    private static int langRank(String lang)
+    {
+        return switch (lang)
+        {
+            case "RU" -> 0; //$NON-NLS-1$
+            case "EN" -> 1; //$NON-NLS-1$
+            case "" -> 3; //$NON-NLS-1$
+            default -> 2;
+        };
     }
 
     /** Одна на страницу: выбор этой строки переживает обновление списка слов. */
@@ -737,7 +787,22 @@ public class CompareSearchResultPage implements ISearchResultPage
                 return element instanceof WordRow row ? Integer.toString(row.matches.size()) : "";
             }
         });
+        TableViewerColumn langColumn = new TableViewerColumn(wordsViewer, SWT.LEFT);
+        langColumn.getColumn().setText("Язык");
+        langColumn.getColumn().setWidth(FormTableColumnState.readWidth(wordsSettings, KEY_WORDS_COL_LANG_WIDTH,
+            defaultWordsColumnWidth(5), 1));
+        langColumn.getColumn().setResizable(true);
+        langColumn.setLabelProvider(new ColumnLabelProvider()
+        {
+            @Override
+            public String getText(Object element)
+            {
+                return element instanceof WordRow row ? row.lang : "";
+            }
+        });
         wordsInteraction = new FormTableInteraction(wordsTable, wordsViewer);
+        wordsInteraction.setColumnSortComparator(langColumn.getColumn(), CompareSearchResultPage::compareLang);
+        wordsInteraction.setSortTieBreaker(CompareSearchResultPage::compareLang);
         wordsInteraction.setOwnerDrawColumns(wordColumn.getColumn());
         wordsInteraction.setExternalFilterState(() -> missingObjectsSearch.getText().strip());
         wordsInteraction.setPinnedTop(element -> element == allWordsRow);
@@ -748,7 +813,7 @@ public class CompareSearchResultPage implements ISearchResultPage
         // Как у таблицы результатов: порядок, ширины и сортировка — в настройках, отборы — ColumnState.
         if (wordsColumnState != null)
             wordsInteraction.restoreColumnState(wordsColumnState);
-        wordsWidths = new int[] { wordsTable.getColumn(0).getWidth(), wordsTable.getColumn(1).getWidth() };
+        wordsWidths = wordsColumnWidths();
         wordsTable.addDisposeListener(event -> saveWordsLayout());
         wordsViewer.addSelectionChangedListener(event -> showWordsMatches());
 
@@ -771,7 +836,17 @@ public class CompareSearchResultPage implements ISearchResultPage
     private static final String KEY_WORDS_COL_COUNT_WIDTH = "wordsColCountWidth"; //$NON-NLS-1$
     private static final String KEY_WORDS_FILL_MODE = "wordsFillMode"; //$NON-NLS-1$
     private static final String KEY_WORDS_COL_ORDER = "wordsColumnOrder"; //$NON-NLS-1$
-    private static final String[] WORDS_WIDTH_KEYS = { KEY_WORDS_COL_WORD_WIDTH, KEY_WORDS_COL_COUNT_WIDTH };
+    private static final String KEY_WORDS_COL_LANG_WIDTH = "wordsColLangWidth"; //$NON-NLS-1$
+    private static final String[] WORDS_WIDTH_KEYS = { KEY_WORDS_COL_WORD_WIDTH, KEY_WORDS_COL_COUNT_WIDTH,
+        KEY_WORDS_COL_LANG_WIDTH };
+
+    private int[] wordsColumnWidths()
+    {
+        int[] widths = new int[wordsTable.getColumnCount()];
+        for (int i = 0; i < widths.length; i++)
+            widths[i] = wordsTable.getColumn(i).getWidth();
+        return widths;
+    }
     /** Состояние таблицы слов (сортировка, отборы) — переживает закрытие панели, как {@link #columnStates}. */
     private static FormTableInteraction.ColumnState wordsColumnState;
 
@@ -789,13 +864,13 @@ public class CompareSearchResultPage implements ISearchResultPage
     /** Ширины и сортировка левой таблицы — при закрытии панели и повторном поиске. */
     private void saveWordsLayout()
     {
-        if (wordsTable == null || wordsTable.isDisposed() || wordsTable.getColumnCount() < 2
+        if (wordsTable == null || wordsTable.isDisposed() || wordsTable.getColumnCount() < 3
             || wordsInteraction == null)
             return;
         // Скрытая таблица (другой режим поиска) своих ширин не имеет — сохранять нечего.
         if (!wordsMode)
             return;
-        wordsWidths = new int[] { wordsTable.getColumn(0).getWidth(), wordsTable.getColumn(1).getWidth() };
+        wordsWidths = wordsColumnWidths();
         wordsColumnState = wordsInteraction.captureColumnState();
         FormTableColumnState.saveOrderAndWidths(wordsSettings(), KEY_WORDS_COL_ORDER, KEY_WORDS_FILL_MODE,
             wordsInteraction.isColumnsExactFill(), WORDS_WIDTH_KEYS, wordsTable.getColumns(), wordsTable);
@@ -970,8 +1045,33 @@ public class CompareSearchResultPage implements ISearchResultPage
         if (wordsViewer.getStructuredSelection().isEmpty())
             wordsViewer.setSelection(new StructuredSelection(allWordsRow), true);
         resultSplit.setMaximizedControl(null);
+        updateLangColumns(result);
         if (entering)
             fitWordsPaneWidth(true);
+    }
+
+    /** Колонка «Язык» в обеих таблицах скрыта, пока у всех слов результата один язык. */
+    private void updateLangColumns(CompareSearchResult result)
+    {
+        if (!result.isSpelling())
+            return;
+        Set<String> languages = new java.util.HashSet<>();
+        for (CompareSearchMatch match : result.getMatches())
+            if (match.getMisspelledWord() != null)
+                languages.add(wordLanguage(match.getMisspelledWord()));
+        boolean hide = languages.size() <= 1;
+        if (wordsMode && wordsInteraction != null && wordsTable.getColumnCount() > 2)
+        {
+            wordsInteraction.setColumnHidden(wordsTable.getColumn(2), hide,
+                FormTableColumnState.readWidth(wordsSettings(), KEY_WORDS_COL_LANG_WIDTH,
+                    defaultWordsColumnWidth(5), 1));
+            wordsWidths = wordsColumnWidths();
+        }
+        if (tableInteraction != null && !table.isDisposed())
+            for (TableColumn column : table.getColumns())
+                if (KEY_COL_LANG_WIDTH.equals(column.getData(COLUMN_WIDTH_KEY)))
+                    tableInteraction.setColumnHidden(column, hide,
+                        FormTableColumnState.readWidth(dialogSettings(), KEY_COL_LANG_WIDTH, 60, 1));
     }
 
     /**
@@ -1349,6 +1449,25 @@ public class CompareSearchResultPage implements ISearchResultPage
             @Override
             public boolean isLabelProperty(Object element, String property) { return false; }
         }));
+    }
+
+    /** Язык слова с ошибкой (RU, EN) — как колонка «Язык» левой таблицы; RU раньше EN при сортировке. */
+    private void addLangColumn(IDialogSettings settings)
+    {
+        TableViewerColumn col = new TableViewerColumn(tableViewer, SWT.LEFT);
+        col.getColumn().setText("Язык");
+        col.getColumn().setResizable(true);
+        col.getColumn().setData(COLUMN_WIDTH_KEY, KEY_COL_LANG_WIDTH);
+        col.getColumn().setWidth(FormTableColumnState.readWidth(settings, KEY_COL_LANG_WIDTH, 60, 1));
+        col.setLabelProvider(new ColumnLabelProvider()
+        {
+            @Override
+            public String getText(Object element)
+            {
+                return langOf(element);
+            }
+        });
+        tableInteraction.setColumnSortComparator(col.getColumn(), CompareSearchResultPage::compareLang);
     }
 
     /**
@@ -2145,6 +2264,7 @@ public class CompareSearchResultPage implements ISearchResultPage
                         tableInteraction.restoreColumnState(columns);
                     else
                         restoreColumnLayout(settings);
+                    updateLangColumns(csr);
                     restoreResultState(state);
                 });
                 reselectRows(state);
@@ -2274,6 +2394,7 @@ public class CompareSearchResultPage implements ISearchResultPage
         if (csr.isSpelling())
         {
             addWordColumn(settings);
+            addLangColumn(settings);
             if (csr.isAllTexts())
                 addUserTextColumn(settings);
         }
@@ -2308,6 +2429,7 @@ public class CompareSearchResultPage implements ISearchResultPage
             case KEY_COL_PROPERTY_WIDTH -> 200;
             case KEY_COL_TEXT_WIDTH -> 250;
             case KEY_COL_WORD_WIDTH -> 140;
+            case KEY_COL_LANG_WIDTH -> 60;
             case KEY_COL_USER_WIDTH -> ColumnWidthFit.headerIconColumnWidth();
             default -> 100;
         };

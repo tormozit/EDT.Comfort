@@ -398,6 +398,7 @@ public final class GitFileDiffView extends ViewPart
             });
         installTextActions();
         setContentDescription(NO_FILE);
+        Global.hideEmptyViewToolbar(getSite(), sash);
 
         IWorkbenchPage page = getSite().getPage();
         page.addPartListener(partListener);

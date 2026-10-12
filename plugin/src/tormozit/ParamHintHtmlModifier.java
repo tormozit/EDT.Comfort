@@ -5592,11 +5592,11 @@ public final class ParamHintHtmlModifier
                     sb.append("<a href=\""); //$NON-NLS-1$
                     sb.append(escapeHtmlAttr(href));
                     sb.append("\">"); //$NON-NLS-1$
-                    sb.append(escapeHtml(name));
+                    sb.append(escapeHtmlNormalized(name));
                     sb.append("</a>"); //$NON-NLS-1$
                 }
                 else
-                    sb.append(escapeHtml(name));
+                    sb.append(escapeHtmlNormalized(name));
                 count++;
             }
         }
@@ -6950,6 +6950,23 @@ public final class ParamHintHtmlModifier
             .replace("▼", "") //$NON-NLS-1$ //$NON-NLS-2$
             .replace("►", ""); //$NON-NLS-1$ //$NON-NLS-2$
         return text.replaceAll("\\s+", " ").trim(); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /**
+     * Имя типа от EDT ({@code toShortString}) может уже содержать сущности ({@code &lt;Имя регистра&gt;}).
+     * Обычное экранирование превращает их в {@code &amp;lt;} и в подсказке видны литералы
+     * "&amp;lt;" — сначала декодируем, потом экранируем один раз.
+     */
+    private static String escapeHtmlNormalized(String text)
+    {
+        if (text == null || text.isEmpty())
+            return ""; //$NON-NLS-1$
+        String decoded = text
+            .replace("&lt;", "<") //$NON-NLS-1$ //$NON-NLS-2$
+            .replace("&gt;", ">") //$NON-NLS-1$ //$NON-NLS-2$
+            .replace("&quot;", "\"") //$NON-NLS-1$ //$NON-NLS-2$
+            .replace("&amp;", "&"); //$NON-NLS-1$ //$NON-NLS-2$
+        return escapeHtml(decoded);
     }
 
     private static String escapeHtml(String text)

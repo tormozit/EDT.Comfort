@@ -280,17 +280,46 @@ public final class ComfortKeysPreferences
 
     private static void applyEnhancements(IPreferencePage page, String filterText)
     {
-        removeMirrorBindingHint(page);
-        FilteredTree tree = resolveFilteredTree(page);
-        if (filterText != null && tree != null)
-            setFilterText(tree, filterText);
-        wireBindingsTreeCopy(page);
-        wireDescriptionTextCopy(page);
-        wireFilterHistory(tree);
-        LocalConflictUi.install(page);
-        installUserIndicatorCheckbox(page);
-        translateShowKeysControls(page);
-        KeysPageMinWidth.install(page);
+        runWithDeferredLayout(page, () -> {
+            removeMirrorBindingHint(page);
+            FilteredTree tree = resolveFilteredTree(page);
+            if (filterText != null && tree != null)
+                setFilterText(tree, filterText);
+            wireBindingsTreeCopy(page);
+            wireDescriptionTextCopy(page);
+            wireFilterHistory(tree);
+            LocalConflictUi.install(page);
+            installUserIndicatorCheckbox(page);
+            translateShowKeysControls(page);
+            KeysPageMinWidth.install(page);
+        });
+    }
+
+    /**
+     * Все раскладки внутри {@code body} выполняются одним проходом в конце. Иначе каждый
+     * {@code layout(true, true)} доработок заново измеряет дерево привязок, а
+     * {@code Tree.computeSize} обходит все его строки (до первой отрисовки ещё и запрашивает
+     * текст каждой): на первом открытии страницы набегало 13 секунд (#770).
+     */
+    private static void runWithDeferredLayout(IPreferencePage page, Runnable body)
+    {
+        Control root = page != null ? page.getControl() : null;
+        Shell shell = root != null && !root.isDisposed() ? root.getShell() : null;
+        if (shell == null || shell.isDisposed())
+        {
+            body.run();
+            return;
+        }
+        shell.setLayoutDeferred(true);
+        try
+        {
+            body.run();
+        }
+        finally
+        {
+            if (!shell.isDisposed())
+                shell.setLayoutDeferred(false);
+        }
     }
 
     // =========================================================================
@@ -1312,8 +1341,9 @@ public final class ComfortKeysPreferences
                     && !Boolean.TRUE.equals(root.getData(WIRED_KEY + ".timers"))) //$NON-NLS-1$
             {
                 root.setData(WIRED_KEY + ".timers", Boolean.TRUE); //$NON-NLS-1$
-                display.timerExec(0, () -> install(page));
-                display.timerExec(200, () -> install(page));
+                Runnable reinstall = () -> runWithDeferredLayout(page, () -> install(page));
+                display.timerExec(0, reinstall);
+                display.timerExec(200, reinstall);
             }
         }
 

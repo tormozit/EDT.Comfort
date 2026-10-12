@@ -2535,7 +2535,6 @@ public final class BslModuleSpellCheckHook implements IStartup
      */
     private static final class CreateMethodFix
     {
-        private static final String TOPIC = "709"; //$NON-NLS-1$
         /**
          * Проверки «Свойство (метод) объекта не обнаружено»: идентификатор — префикс
          * {@code bsl-legacy-} плюс имя метода {@code BslJavaValidator}. Короткий код SU… у каждого
@@ -2575,7 +2574,6 @@ public final class BslModuleSpellCheckHook implements IStartup
             }
             catch (RuntimeException e)
             {
-                Global.tempLog(TOPIC, "proposals failed: " + e); //$NON-NLS-1$
                 return List.of();
             }
         }
@@ -2586,7 +2584,6 @@ public final class BslModuleSpellCheckHook implements IStartup
                 return true;
             ICheckRepository repository = Global.getOsgiService(ICheckRepository.class);
             CheckUid uid = repository == null ? null : repository.getUidForShortUid(code, project);
-            Global.tempLog(TOPIC, "code=" + code + " uid=" + uid); //$NON-NLS-1$ //$NON-NLS-2$
             return uid != null && CHECK_IDS.contains(uid.getCheckId());
         }
 
@@ -2601,9 +2598,6 @@ public final class BslModuleSpellCheckHook implements IStartup
             if (!isUnknownMethodCheck(code, project))
                 return List.of();
             EObject semantic = NodeModelUtils.findActualSemanticObjectFor(leaf);
-            Global.tempLog(TOPIC, "leaf=" + leaf.getText() + " semantic=" //$NON-NLS-1$ //$NON-NLS-2$
-                + (semantic == null ? "null" : semantic.eClass().getName()) + " container=" //$NON-NLS-1$ //$NON-NLS-2$
-                + (semantic == null || semantic.eContainer() == null ? "null" : semantic.eContainer().eClass().getName())); //$NON-NLS-1$
             DynamicFeatureAccess access = semantic instanceof DynamicFeatureAccess dynamic ? dynamic
                 : EcoreUtil2.getContainerOfType(semantic, DynamicFeatureAccess.class);
             if (access == null || access.getName() == null || access.getSource() == null
@@ -2611,8 +2605,6 @@ public final class BslModuleSpellCheckHook implements IStartup
                 || invocation.getMethodAccess() != access || !access.getName().equals(leaf.getText()))
                 return List.of();
             Map<String, String> modules = targetModules(resource, project, access.getSource());
-            Global.tempLog(TOPIC, "name=" + access.getName() + " source=" //$NON-NLS-1$ //$NON-NLS-2$
-                + access.getSource().eClass().getName() + " modules=" + modules.keySet()); //$NON-NLS-1$
             boolean function = !(invocation.eContainer() instanceof SimpleStatement statement
                 && statement.getLeft() == invocation && statement.getRight() == null);
             List<String> params = parameterNames(invocation);
@@ -2624,8 +2616,6 @@ public final class BslModuleSpellCheckHook implements IStartup
                 // Файла модуля может ещё не быть — тогда он создаётся при применении; каталог объекта
                 // существует всегда, по нему отсекаются несуществующие объекты.
                 boolean available = file.exists() || file.getParent().exists();
-                Global.tempLog(TOPIC, "file=" + module.getKey() + " exists=" + file.exists() //$NON-NLS-1$ //$NON-NLS-2$
-                    + " available=" + available); //$NON-NLS-1$
                 if (available && result.size() < MAX_TARGETS)
                     result.add(new Target(file, module.getValue(), access.getName(), params, paramTypes, function));
             }
@@ -2661,8 +2651,6 @@ public final class BslModuleSpellCheckHook implements IStartup
             {
                 for (TypeItem type : types(resource, expression))
                 {
-                    Global.tempLog(TOPIC, "type=" + McoreUtil.getTypeName(type) + " class=" //$NON-NLS-1$ //$NON-NLS-2$
-                        + (type == null ? "null" : type.eClass().getName())); //$NON-NLS-1$
                     int before = result.size();
                     addOwnerModule(result, type, resource);
                     if (result.size() == before)
@@ -2810,7 +2798,6 @@ public final class BslModuleSpellCheckHook implements IStartup
                 }
                 result.add(names.isEmpty() ? "Произвольный" : String.join(", ", names)); //$NON-NLS-1$ //$NON-NLS-2$
             }
-            Global.tempLog(TOPIC, "paramTypes=" + result); //$NON-NLS-1$
             return result;
         }
 
@@ -2857,20 +2844,18 @@ public final class BslModuleSpellCheckHook implements IStartup
                     }
                     // Тот же путь, что у «Перейти к определению»: редактор объекта со страницей модуля.
                     XtextEditor editor = GoToDefinition.openBslModuleGranularEditor(file);
-                    Global.tempLog(TOPIC, "apply editor=" + (editor == null ? "null" : editor.getClass().getName())); //$NON-NLS-1$ //$NON-NLS-2$
                     if (editor != null)
                         insert(editor);
                 }
                 catch (Exception e)
                 {
-                    Global.tempLog(TOPIC, "apply failed: " + e); //$NON-NLS-1$
+                    // Правка не применена — метод не создан.
                 }
             }
 
             private void insert(XtextEditor editor)
             {
                 IDocument document = editor.getDocument();
-                Global.tempLog(TOPIC, "insert document=" + (document == null ? "null" : document.getClass().getName())); //$NON-NLS-1$ //$NON-NLS-2$
                 if (document == null)
                     return;
                 String delimiter = org.eclipse.jface.text.TextUtilities.getDefaultLineDelimiter(document);
@@ -2901,13 +2886,12 @@ public final class BslModuleSpellCheckHook implements IStartup
                         replaced = document.getLength() - offset;
                     }
                     document.replace(offset, replaced, insertion);
-                    Global.tempLog(TOPIC, "inserted place=" + place[0] + " offset=" + offset); //$NON-NLS-1$ //$NON-NLS-2$
                     // Каретка — в тело метода, сразу за отступом.
                     editor.selectAndReveal(offset + lead.length() + header.length() + 1, 0);
                 }
                 catch (org.eclipse.jface.text.BadLocationException e)
                 {
-                    Global.tempLog(TOPIC, "insert failed: " + e); //$NON-NLS-1$
+                    // Вставка не удалась — документ не изменён.
                 }
             }
 
@@ -3017,10 +3001,6 @@ public final class BslModuleSpellCheckHook implements IStartup
         }
         if (annotation instanceof XtextAnnotation liveAnnotation)
             base = ModuleAccessibilityAtClientFix.withLiveProposal(base, liveAnnotation, fallbackIcon);
-        Global.tempLog(CreateMethodFix.TOPIC, "annotation=" + (annotation == null ? "null" : annotation.getClass().getName()) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " text=" + (annotation == null ? "" : annotation.getText()) //$NON-NLS-1$ //$NON-NLS-2$
-            + " code=" + (annotation instanceof XtextAnnotation logged && logged.getIssue() != null //$NON-NLS-1$
-                ? logged.getIssue().getCode() : "-")); //$NON-NLS-1$
         if (annotation instanceof XtextAnnotation createAnnotation)
         {
             for (ICompletionProposal create : CreateMethodFix.proposals(createAnnotation, fallbackIcon))

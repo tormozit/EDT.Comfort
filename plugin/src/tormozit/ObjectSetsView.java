@@ -356,6 +356,7 @@ public final class ObjectSetsView extends ViewPart
         installContextProjectListener();
         refreshSetsTable();
         activateKeyContext();
+        Global.hideEmptyViewToolbar(getSite(), root);
     }
 
     private void createFilterRow(Composite parent)

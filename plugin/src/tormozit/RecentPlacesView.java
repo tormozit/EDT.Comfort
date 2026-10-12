@@ -354,6 +354,7 @@ public final class RecentPlacesView extends ViewPart
             listViewer.getControl().addDisposeListener(event -> markers.removeListener(listener));
         }
         refreshFromStore();
+        Global.hideEmptyViewToolbar(getSite(), root);
     }
 
     @Override

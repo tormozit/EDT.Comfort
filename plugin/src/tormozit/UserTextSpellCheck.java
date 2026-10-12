@@ -670,6 +670,46 @@ final class UserTextSpellCheck
         return ranges;
     }
 
+    /** Язык, тексты которого проверяются: ru и en (в том числе с регионом, {@code en_US}). */
+    private static boolean isCheckedLanguage(String code)
+    {
+        String lang = code.strip().toLowerCase(Locale.ROOT);
+        int sep = lang.indexOf('_');
+        if (sep >= 0)
+            lang = lang.substring(0, sep);
+        return lang.equals("ru") || lang.equals("en"); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /** Фрагмент {@code код = '…'} многоязычной строки НСтр. */
+    private static final Pattern NSTR_LANGUAGE_PART = Pattern.compile("([\\p{L}_]+)\\s*=\\s*'"); //$NON-NLS-1$
+
+    /**
+     * Литерал {@code НСтр()}: ошибки в фрагментах языков, кроме ru и en, отбрасываются. Литерал без
+     * фрагментов {@code код = '…'} не меняется.
+     */
+    private static List<int[]> keepCheckedLanguages(String literal, List<int[]> ranges)
+    {
+        if (ranges.isEmpty())
+            return ranges;
+        List<int[]> skipped = new ArrayList<>();
+        Matcher part = NSTR_LANGUAGE_PART.matcher(literal);
+        int from = 0;
+        while (part.find(from))
+        {
+            int end = part.end();
+            while (end < literal.length() && (literal.charAt(end) != '\'' || literal.charAt(end - 1) == '\\'))
+                end++;
+            if (!isCheckedLanguage(part.group(1)))
+                skipped.add(new int[] { part.start(), Math.min(end, literal.length()) });
+            from = Math.min(end + 1, literal.length());
+        }
+        if (skipped.isEmpty())
+            return ranges;
+        List<int[]> kept = new ArrayList<>(ranges);
+        kept.removeIf(range -> skipped.stream().anyMatch(s -> range[0] >= s[0] && range[0] < s[1]));
+        return kept;
+    }
+
     private static boolean isNameChar(char c)
     {
         return Character.isLetterOrDigit(c) || c == '_';
@@ -722,6 +762,11 @@ final class UserTextSpellCheck
         for (EAttribute attribute : attributes)
         {
             if (!(object.eGet(attribute) instanceof String text) || text.isBlank())
+                continue;
+            // Запись многоязычной строки: проверяются только русский и английский тексты.
+            if (object.eClass() == McorePackage.Literals.LOCAL_STRING_MAP_ENTRY
+                && object.eClass().getEStructuralFeature("key") instanceof EAttribute keyAttribute
+                && object.eGet(keyAttribute) instanceof String key && !isCheckedLanguage(key))
                 continue;
             boolean user = isUserText(attribute);
             // Форматированные строки хранят разметку (<b>, <a href=…>) прямо в значении свойства.
@@ -837,8 +882,9 @@ final class UserTextSpellCheck
                     int openQuote = call.end() - 1;
                     if (!ConfigSearchDialogHook.isInsideNStrLiteral(content, openQuote + 1))
                         continue;
-                    for (int[] range : misspelledRanges(
-                        ComfortSpellingEngine.maskMarkup(literalText(content, openQuote))))
+                    String literal = literalText(content, openQuote);
+                    for (int[] range : keepCheckedLanguages(literal,
+                        misspelledRanges(ComfortSpellingEngine.maskMarkup(literal))))
                         errors.add(new int[] { openQuote + 1 + range[0], range[1], KIND_USER });
                 }
             }
@@ -898,8 +944,8 @@ final class UserTextSpellCheck
             {
                 String literal = literalText(content, pos);
                 boolean user = ConfigSearchDialogHook.isInsideNStrLiteral(content, pos + 1);
-                List<int[]> ranges = user ? misspelledRanges(ComfortSpellingEngine.maskMarkup(literal))
-                    : programRanges(literal);
+                List<int[]> ranges = user ? keepCheckedLanguages(literal,
+                    misspelledRanges(ComfortSpellingEngine.maskMarkup(literal))) : programRanges(literal);
                 for (int[] range : ranges)
                     errors.add(new int[] { pos + 1 + range[0], range[1], user ? KIND_USER : KIND_PROGRAM });
                 // Литерал той же длины, что и в модуле; за ним — закрывающая кавычка, если она есть.

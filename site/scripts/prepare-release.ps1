@@ -21,7 +21,7 @@ function Set-Utf8NoBomContent {
 function Read-ComfortRelease {
     $release = $null
     Get-Content -LiteralPath $versionFile -Encoding UTF8 | ForEach-Object {
-        if ($_ -match '^\s*comfort\.release\s*=\s*(\d+\.\d+\.\d+\.\d+)\s*(?:#.*)?$') {
+        if ($_ -match '^\s*comfort\.release\s*=\s*(\d+\.\d+\.\d+)\s*(?:#.*)?$') {
             $release = $Matches[1]
         }
     }
@@ -36,16 +36,16 @@ function Invoke-BumpRelease {
     $newRelease = $null
     $lines = Get-Content -LiteralPath $versionFile -Encoding UTF8
     for ($i = 0; $i -lt $lines.Count; $i++) {
-        if ($lines[$i] -match '^\s*comfort\.release\s*=\s*(\d+\.\d+\.\d+\.\d+)\s*(#.*)?$') {
+        if ($lines[$i] -match '^\s*comfort\.release\s*=\s*(\d+\.\d+\.\d+)\s*(#.*)?$') {
             $release = $Matches[1]
             $suffix = ''
             if ($Matches[2]) { $suffix = " $($Matches[2].Trim())" }
             $parts = $release.Split('.')
-            if ($parts.Count -ne 4) {
-                Write-Error "comfort.release must have 4 segments (e.g. 1.0.0.13), got: $release"
+            if ($parts.Count -ne 3) {
+                Write-Error "comfort.release must have 3 segments (e.g. 1.0.2), got: $release"
             }
-            $last = [int]$parts[3]
-            $parts[3] = ($last + 1).ToString()
+            $last = [int]$parts[2]
+            $parts[2] = ($last + 1).ToString()
             $newRelease = $parts -join '.'
             $lines[$i] = "comfort.release=$newRelease$suffix"
             break
@@ -184,7 +184,7 @@ function Assert-PdeSiteArtifacts {
     if (-not $featureJar) {
         Write-Error "No feature jar in $featuresDir"
     }
-    if ($featureJar.Name -match '-qualifier\.jar$') {
+    if ($featureJar.Name -match '[.-]qualifier\.jar$') {
         Write-Error "Feature jar still has literal qualifier: $($featureJar.Name)"
     }
     if ($featureJar.LastWriteTime -lt $NotBefore) {

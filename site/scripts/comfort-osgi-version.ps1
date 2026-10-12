@@ -26,19 +26,19 @@ function Get-ComfortReleaseFromVersionFile {
     }
     $release = $null
     Get-Content -LiteralPath $VersionFile -Encoding UTF8 | ForEach-Object {
-        if ($_ -match '^\s*comfort\.release\s*=\s*(\d+\.\d+\.\d+\.\d+)\s*(?:#.*)?$') {
+        if ($_ -match '^\s*comfort\.release\s*=\s*(\d+\.\d+\.\d+)\s*(?:#.*)?$') {
             $release = $Matches[1]
         }
     }
     if (-not $release) {
-        throw "comfort.release not found in $VersionFile"
+        throw "comfort.release not found in $VersionFile (expected exactly three numbers, e.g. 1.0.2)"
     }
     return $release
 }
 
 function Get-ComfortExpectedQualifier {
     param([string]$VersionFile = $script:ComfortVersionFile)
-    return "$(Get-ComfortReleaseFromVersionFile -VersionFile $VersionFile)-qualifier"
+    return "$(Get-ComfortReleaseFromVersionFile -VersionFile $VersionFile).qualifier"
 }
 
 function Get-ComfortManifestVersion {

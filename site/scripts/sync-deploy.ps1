@@ -21,9 +21,9 @@ function Get-VersionDirs {
         return @()
     }
     Get-ChildItem -LiteralPath $Dir -Directory |
-        Where-Object { $_.Name -match '^\d+\.\d+\.\d+\.\d+$' } |
+        Where-Object { $_.Name -match '^\d+\.\d+\.\d+(\.\d+)?$' } |
         ForEach-Object { $_.Name } |
-        Sort-Object -Descending
+        Sort-Object -Descending { [version]$_ }
 }
 
 function Show-DeploySummary {

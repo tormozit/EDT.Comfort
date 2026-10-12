@@ -43,7 +43,8 @@ public final class UiStallSampler implements IStartup
     private static final long AUTO_OFF_MS = 60_000;
     private static final long TICK_MS = 300;
     private static final long STALL_MS = 1000;
-    private static final int STACK_DEPTH = 18;
+    /** Глубина с запасом: при 18 кадрах вложенные раскладки SWT съедали стек, инициатор не был виден. */
+    private static final int STACK_DEPTH = 60;
     private static final int TOP_STACKS = 4;
     /** Жёсткий предел размера файла: старые записи выбрасываются, новые дописываются. */
     private static final long MAX_FILE_BYTES = 1024 * 1024;
@@ -114,7 +115,8 @@ public final class UiStallSampler implements IStartup
         private long episodeGcStart;
         /** nanoTime, когда флажок замечен включённым; 0 — выключен. */
         private long enabledSinceNs;
-        private int episodesInRun;
+        /** Уведомление о зависании уже показано за это включение флажка. */
+        private boolean toastShownInRun;
 
         Sampler(Display display)
         {
@@ -131,7 +133,7 @@ public final class UiStallSampler implements IStartup
                     if (ComfortSettings.isRecordStallStacks())
                         tick();
                     else
-                        stop(false);
+                        stop();
                     Thread.sleep(TICK_MS);
                 }
                 catch (InterruptedException e)
@@ -151,13 +153,12 @@ public final class UiStallSampler implements IStartup
             if (enabledSinceNs == 0)
             {
                 enabledSinceNs = now;
-                episodesInRun = 0;
+                toastShownInRun = false;
             }
             else if ((now - enabledSinceNs) / 1_000_000 >= AUTO_OFF_MS)
             {
-                flushEpisode();
                 ComfortSettings.setRecordStallStacks(false);
-                stop(true);
+                stop();
                 return;
             }
             long since = pendingSince.get();
@@ -185,29 +186,39 @@ public final class UiStallSampler implements IStartup
             // Пишем сразу, а не по окончании: зависание может не закончиться (EDT убьют).
             // Подряд идущие одинаковые стеки не повторяем.
             if (samples == 1)
+            {
                 write(LocalDateTime.now() + " подвисание UI началось"); //$NON-NLS-1$
+                showToastOnce();
+            }
             if (!stack.equals(lastStack))
                 write("  +" + (now - episodeStartNs) / 1_000_000 + " мс" + stack); //$NON-NLS-1$ //$NON-NLS-2$
             lastStack = stack;
         }
 
-        /** Выключение (по таймеру или вручную): итог эпизода, тост при автоотключении. */
-        private void stop(boolean byTimer)
+        /**
+         * Уведомление при первом же зависании за включение флажка. Ставится в очередь UI-потока
+         * в момент обнаружения, поэтому появляется, как только окно EDT отвиснет.
+         */
+        private void showToastOnce()
+        {
+            if (toastShownInRun)
+                return;
+            toastShownInRun = true;
+            String message = "Стеки записываются в файл " + FILE_NAME //$NON-NLS-1$
+                + ", пока включён флажок «Записывать стеки при зависаниях»."; //$NON-NLS-1$
+            Runnable open = logFile() == null ? null : UiStallSampler::openLogFile;
+            display.asyncExec(() -> ToastNotification.showStickyUntilToastHover(
+                "Обнаружено зависание окна EDT", message, open, //$NON-NLS-1$
+                open == null ? null : "Открыть файл")); //$NON-NLS-1$
+        }
+
+        /** Выключение (по таймеру или вручную): итог эпизода. */
+        private void stop()
         {
             if (enabledSinceNs == 0)
                 return;
             enabledSinceNs = 0;
             flushEpisode();
-            if (byTimer && episodesInRun > 0)
-            {
-                File file = logFile();
-                String message = "Зависаний за минуту: " + episodesInRun //$NON-NLS-1$
-                    + ". Стеки записаны в файл " + FILE_NAME + "."; //$NON-NLS-1$ //$NON-NLS-2$
-                Runnable open = file == null ? null : UiStallSampler::openLogFile;
-                display.asyncExec(() -> ToastNotification.showStickyUntilToastHover(
-                    "Запись стеков при зависаниях отключена", message, open, //$NON-NLS-1$
-                    open == null ? null : "Открыть файл")); //$NON-NLS-1$
-            }
         }
 
         /** Выполняется в UI-потоке: только отметка. */
@@ -233,7 +244,6 @@ public final class UiStallSampler implements IStartup
                 .limit(TOP_STACKS)
                 .forEach(e -> sb.append("\n  hits=").append(e.getValue()).append(e.getKey())); //$NON-NLS-1$
             write(sb.toString());
-            episodesInRun++;
             stacks.clear();
             samples = 0;
             lastStack = null;

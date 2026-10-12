@@ -300,7 +300,6 @@ public final class ValidationChecksFilterHook implements IStartup
         }
         if (errorItem != null)
             errorItem.setText(OTHER_ERROR_TYPE_TITLE);
-        Debug.temp("patchTypeMenu: renamed"); //$NON-NLS-1$
     }
 
     private static PreferenceDialog findPreferenceDialog(Shell shell)
@@ -422,17 +421,11 @@ public final class ValidationChecksFilterHook implements IStartup
             openPages++;
             treeViewer.getControl().addDisposeListener(event -> openPages--);
             treeViewer.getControl().setData(PATCHED_KEY, Boolean.TRUE);
-            Debug.temp("tryPatch PATCH OK"); //$NON-NLS-1$
             return true;
         }
         catch (Exception e)
         {
-            // ВРЕМЕННО безусловно (issue 401): при исключении патч обрывается
-            // на середине, и это видно только по последствиям в интерфейсе.
-            StringBuilder sb = new StringBuilder("tryPatch EXCEPTION: ").append(e).append('\n'); //$NON-NLS-1$
-            for (StackTraceElement frame : e.getStackTrace())
-                sb.append("        at ").append(frame).append('\n'); //$NON-NLS-1$
-            Debug.temp(sb.toString());
+            Debug.log("tryPatch failed: " + e); //$NON-NLS-1$
             return false;
         }
     }
@@ -623,7 +616,6 @@ public final class ValidationChecksFilterHook implements IStartup
         Object idTxtObj = Global.getField(control, "idTxt"); //$NON-NLS-1$
         if (!(idTxtObj instanceof StyledText idTxt) || idTxt.isDisposed())
         {
-            Debug.temp("compactSettingsRow: idTxt not found"); //$NON-NLS-1$
             return;
         }
 
@@ -632,7 +624,6 @@ public final class ValidationChecksFilterHook implements IStartup
             return;
         if (!(row.getLayout() instanceof GridLayout layout) || layout.numColumns != 5)
         {
-            Debug.temp("compactSettingsRow: unexpected layout"); //$NON-NLS-1$
             return;
         }
 
@@ -666,7 +657,6 @@ public final class ValidationChecksFilterHook implements IStartup
         if (severityCombo == null || resetButton == null || severityLabel == null || comboCount != 1
             || buttonCount != 1)
         {
-            Debug.temp("compactSettingsRow: unexpected controls combo=" + comboCount + " button=" + buttonCount); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
 
@@ -702,7 +692,6 @@ public final class ValidationChecksFilterHook implements IStartup
         // размеры внешнего ScrolledForm после смены раскладки.
         Global.invoke(control, "reflowParent", idTxt); //$NON-NLS-1$
         installTypeLabelPatch(control, typeLabel, row.getParent());
-        Debug.temp("compactSettingsRow: applied"); //$NON-NLS-1$
     }
 
     /**
@@ -986,7 +975,6 @@ public final class ValidationChecksFilterHook implements IStartup
         Object selectedCheck = Global.invoke(control, "getSelectedCheckObjects"); //$NON-NLS-1$
         if (!(selectedCheck instanceof IObservableValue<?> observable))
         {
-            Debug.temp("installTypeLabelPatch: observable not found"); //$NON-NLS-1$
             return;
         }
         observable.addChangeListener(event ->
@@ -1046,7 +1034,6 @@ public final class ValidationChecksFilterHook implements IStartup
                 if (expanded != null && expanded.length > 0)
                     return;
                 TreeExpander.notifyContentLoaded(treeViewer);
-                Debug.temp("autoExpandOnReset: applied"); //$NON-NLS-1$
             });
         });
     }
@@ -1064,8 +1051,6 @@ public final class ValidationChecksFilterHook implements IStartup
         if (provider == null)
             return null;
         Object checkFilter = Global.invoke(provider, "getCheckFilter"); //$NON-NLS-1$
-        Debug.temp("resolveCheckFilter: " //$NON-NLS-1$
-            + (checkFilter == null ? "null" : checkFilter.getClass().getName())); //$NON-NLS-1$
         return checkFilter;
     }
 
@@ -1733,20 +1718,10 @@ public final class ValidationChecksFilterHook implements IStartup
         Composite body = tree != null && !tree.isDisposed() ? tree.getParent() : null;
         if (!(body instanceof SashForm) || !(body.getLayoutData() instanceof GridData data))
         {
-            Debug.temp("relaxBodyMinimumWidth: unexpected layout"); //$NON-NLS-1$
             return;
         }
         data.widthHint = BODY_WIDTH_HINT;
         data.minimumWidth = BODY_WIDTH_HINT;
-        Debug.temp("relaxBodyMinimumWidth: applied"); //$NON-NLS-1$
-    }
-
-    private static String describe(Control control)
-    {
-        if (control == null)
-            return "null"; //$NON-NLS-1$
-        return control.getClass().getSimpleName() + "@" //$NON-NLS-1$
-            + Integer.toHexString(System.identityHashCode(control)) + control.getBounds();
     }
 
     private static SearchBox findSearchBox(Control control)
@@ -1964,7 +1939,6 @@ public final class ValidationChecksFilterHook implements IStartup
             if (!fresh.equals(state))
             {
                 state = fresh;
-                Debug.temp("check filter state: " + fresh); //$NON-NLS-1$
             }
         }
 
@@ -2371,7 +2345,6 @@ public final class ValidationChecksFilterHook implements IStartup
             Tree tree = treeViewer.getTree();
             if (tree == null || tree.isDisposed() || !(tree.getParent() instanceof SashForm body))
             {
-                Debug.temp("ChecksTablePane: tree parent is not SashForm"); //$NON-NLS-1$
                 return null;
             }
 
@@ -2394,7 +2367,6 @@ public final class ValidationChecksFilterHook implements IStartup
             if (!tree.setParent(stack))
             {
                 stack.dispose();
-                Debug.temp("ChecksTablePane: setParent(tree) failed"); //$NON-NLS-1$
                 return null;
             }
             if (rightPane != null)
@@ -2432,7 +2404,6 @@ public final class ValidationChecksFilterHook implements IStartup
             pane.wireListeners();
             pane.installToggle(pageControl);
             pane.setTableMode(ComfortSettings.isValidationChecksTableMode());
-            Debug.temp("ChecksTablePane: installed"); //$NON-NLS-1$
             return pane;
         }
 
@@ -2535,7 +2506,6 @@ public final class ValidationChecksFilterHook implements IStartup
             // штатный код тоже его не выставляет при смене критичности.
             treeViewer.refresh();
             viewer.refresh();
-            Debug.temp("applySeverityToSelection: severity=" + severity + " rows=" + selection.size()); //$NON-NLS-1$ //$NON-NLS-2$
         }
 
         private TableColumn addTextColumn(TableColumnLayout columnLayout, IDialogSettings settings, String title,
@@ -2672,10 +2642,8 @@ public final class ValidationChecksFilterHook implements IStartup
             ToolBar toolBar = pageControl != null ? findToolBar(pageControl) : null;
             if (toolBar == null || toolBar.isDisposed())
             {
-                Debug.temp("ChecksTablePane: toolbar not found"); //$NON-NLS-1$
                 return;
             }
-            int itemsBefore = toolBar.getItemCount();
             ToolItem item = new ToolItem(toolBar, SWT.CHECK);
             item.setImage(tableModeIcon(toolBar.getDisplay()));
             item.setToolTipText(TooltipText.wrap(toolBar,
@@ -2688,11 +2656,6 @@ public final class ValidationChecksFilterHook implements IStartup
             });
             requestToolBarLayout(toolBar);
             toggleItem = item;
-            Debug.temp("installToggle: toolBar=" + describe(toolBar) //$NON-NLS-1$
-                + " parent=" + describe(toolBar.getParent()) //$NON-NLS-1$
-                + " items " + itemsBefore + "->" + toolBar.getItemCount() //$NON-NLS-1$ //$NON-NLS-2$
-                + " itemBounds=" + item.getBounds() //$NON-NLS-1$
-                + " image=" + (item.getImage() != null)); //$NON-NLS-1$
         }
 
         /**
@@ -2738,7 +2701,6 @@ public final class ValidationChecksFilterHook implements IStartup
         {
             if (stack.isDisposed())
                 return;
-            Debug.temp("ChecksTablePane.applyMode: table=" + value); //$NON-NLS-1$
             tableMode = value;
             if (value)
                 reload();
@@ -2799,7 +2761,6 @@ public final class ValidationChecksFilterHook implements IStartup
             viewer.refresh();
             if (!restoreSelection(selectedNodes))
                 syncSelectionFromTree();
-            Debug.temp("ChecksTablePane.reload: rows=" + rows.size()); //$NON-NLS-1$
         }
 
         /** @return {@code true}, если хотя бы одна из строк с этими узлами дерева нашлась среди новых {@link #rows}. */
@@ -3160,8 +3121,6 @@ public final class ValidationChecksFilterHook implements IStartup
     private static final class Debug
     {
         private static final String TAG = "ValidationChecksFilter"; //$NON-NLS-1$
-        /** Тема временного лога {@code .tmp/temp-logs/validation-checks.log} (см. {@link #temp}). */
-        private static final String TEMP_TOPIC = "validation-checks"; //$NON-NLS-1$
 
         private Debug() {}
 
@@ -3169,17 +3128,6 @@ public final class ValidationChecksFilterHook implements IStartup
         {
             if (Global.isLogEnabled())
                 Global.log(TAG, msg);
-        }
-
-        /**
-         * ВРЕМЕННАЯ диагностика переработки страницы «Проверки» (issue 401):
-         * безусловная запись в отдельный файл, независимо от флажка «Вести журнал»
-         * — иначе при первой же неудаче лог оказался бы пустым. Снять после
-         * подтверждения работоспособности пользователем.
-         */
-        static void temp(String msg)
-        {
-            Global.tempLog(TEMP_TOPIC, msg);
         }
     }
 }

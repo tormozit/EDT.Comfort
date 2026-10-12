@@ -128,9 +128,6 @@ public class EditorStatusFieldsFixHook implements IStartup
             return true;
 
         contributor.setActivePage(embedded);
-
-        Global.tempLog("status-line", "{\"event\":\"restoreStatusFields\",\"editor\":\"" //$NON-NLS-1$ //$NON-NLS-2$
-            + editor.getTitle() + "\",\"restored\":" + hasPositionField(embedded) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         return true;
     }
 

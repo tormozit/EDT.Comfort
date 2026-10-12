@@ -193,8 +193,6 @@ public final class IndentGuideHook implements IStartup
     private void installOnEditor(IWorkbenchPart part, AbstractTextEditor editor)
     {
         boolean enabled = store != null && store.getBoolean(ComfortSettings.PREF_INDENT_GUIDE_ENABLED);
-        Global.tempLog("indent-guide", "installOnEditor enabled=" + enabled //$NON-NLS-1$ //$NON-NLS-2$
-            + " part=" + part.getClass().getName() + " editor=" + editor.getClass().getName()); //$NON-NLS-1$ //$NON-NLS-2$
         // Смена страницы составного редактора вызывает этот метод напрямую.
         if (!enabled)
             return;
@@ -224,7 +222,6 @@ public final class IndentGuideHook implements IStartup
         }
         catch (Throwable e)
         {
-            Global.tempLogException("indent-guide", "install failed", e); //$NON-NLS-1$ //$NON-NLS-2$
             Global.log(TAG, "install failed: " + e.getMessage()); //$NON-NLS-1$
         }
     }
@@ -418,8 +415,6 @@ public final class IndentGuideHook implements IStartup
 
             if (!ComfortSettings.isIndentGuideProperty(prop))
                 return;
-
-            Global.tempLog("indent-guide", "property=" + prop + " value=" + now); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
 
             if (ComfortSettings.PREF_INDENT_GUIDE_ENABLED.equals(prop))
             {

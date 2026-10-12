@@ -114,6 +114,21 @@ final class HunspellDictionary
         return dict;
     }
 
+    /**
+     * Аффиксы из {@code affFile}, слова — из готового текста {@code .dic} (первая строка —
+     * счётчик). Нужен, чтобы один пользовательский {@code .dic} разложить на два словаря
+     * с разными {@code .aff} (русский AOT и английский en_US) без временных файлов.
+     */
+    static HunspellDictionary loadFromText(File affFile, String dicText, ScriptKind script)
+        throws IOException
+    {
+        HunspellDictionary dict = new HunspellDictionary(script);
+        byte[] affBytes = Files.readAllBytes(affFile.toPath());
+        dict.parseAff(new String(affBytes, detectCharset(affBytes)));
+        dict.parseDic(dicText);
+        return dict;
+    }
+
     boolean matchesScript(ScriptKind wordScript)
     {
         if (script == ScriptKind.ANY || wordScript == null || wordScript == ScriptKind.ANY)

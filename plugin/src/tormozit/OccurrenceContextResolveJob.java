@@ -203,7 +203,6 @@ final class OccurrenceContextResolveJob
     }
 
     /** Тема временного лога — снять после подтверждения производительности. */
-    private static final String LOG = "occ-context"; //$NON-NLS-1$
     private static final int FAST_BATCH = 150;
     /** Тяжёлый проход: строка = секунды, поэтому публикуем каждую (плавный % и подсветка ячейки). */
     private static final int TYPE_BATCH = 1;
@@ -353,7 +352,6 @@ final class OccurrenceContextResolveJob
         {
             updateProgress();
             fireTypePendingChanged();
-            Global.tempLog(LOG, "reschedule: нечего считать (" + targets.size() + " строк на входе)"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         long gen = ++generation;
@@ -362,7 +360,6 @@ final class OccurrenceContextResolveJob
         {
             fastQueue = new ArrayDeque<>(ordered);
         }
-        Global.tempLog(LOG, "reschedule: " + ordered.size() + " строк, быстрый проход (gen=" + gen + ")"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         Job created = Job.create("Комфорт: контекст вхождений BSL", //$NON-NLS-1$
             (IJobFunction)(monitor -> runFast(ordered.size(), gen, monitor)));
         created.setSystem(true);
@@ -502,19 +499,15 @@ final class OccurrenceContextResolveJob
 
     private IStatus runFast(int total, long gen, IProgressMonitor monitor)
     {
-        long startedAt = System.currentTimeMillis();
-        Global.tempLog(LOG, "fast start: total=" + total + " gen=" + gen); //$NON-NLS-1$ //$NON-NLS-2$
         Map<IFile, String> texts = new IdentityHashMap<>();
         List<Target> batch = new ArrayList<>();
         List<Target> forType = new ArrayList<>();
         List<Target> forIr = new ArrayList<>();
         IrParentTypeResolver ir = irResolver;
-        int done = 0;
         while (true)
         {
             if (monitor.isCanceled() || gen != generation)
             {
-                Global.tempLog(LOG, "fast cancelled at " + done + "/" + total); //$NON-NLS-1$ //$NON-NLS-2$
                 return Status.CANCEL_STATUS;
             }
             Target target;
@@ -527,12 +520,7 @@ final class OccurrenceContextResolveJob
             IFile file = target.file();
             if (!texts.containsKey(file))
                 texts.put(file, BslModuleMethodResolver.moduleText(file));
-            long t0 = System.currentTimeMillis();
             FastContext fc = resolveFast(target, texts.get(file));
-            long spent = System.currentTimeMillis() - t0;
-            if (spent > 150)
-                Global.tempLog(LOG, "slow fast row " + spent + " ms: " //$NON-NLS-1$ //$NON-NLS-2$
-                    + (file != null ? file.getName() : "?")); //$NON-NLS-1$
             if (fc.wantsParentType)
                 forType.add(target);
             else if (ir != null && BslOccurrenceContextResolver.KIND_LITERAL.equals(fc.syntaxKind)
@@ -542,15 +530,12 @@ final class OccurrenceContextResolveJob
             else
                 target.applyParentType(""); // комментарий/литерал без родителя/неразбор: типа нет //$NON-NLS-1$
             batch.add(target);
-            done++;
             if (batch.size() >= FAST_BATCH || fastQueueEmpty())
             {
                 publishFast(new ArrayList<>(batch), gen);
                 batch.clear();
             }
         }
-        Global.tempLog(LOG, "fast done: " + done + "/" + total + " за " //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + (System.currentTimeMillis() - startedAt) + " ms; тип нужен " + forType.size()); //$NON-NLS-1$
         if (gen == generation && !monitor.isCanceled())
         {
             startTypePass(forType, gen);
@@ -602,7 +587,6 @@ final class OccurrenceContextResolveJob
 
     private void startTypePass(List<Target> forType, long gen)
     {
-        Global.tempLog(LOG, "type pass: кандидатов " + forType.size() + ", порог " + typeAutoThreshold); //$NON-NLS-1$ //$NON-NLS-2$
         runOnUi(() ->
         {
             if (gen != generation || table.isDisposed())
@@ -687,7 +671,6 @@ final class OccurrenceContextResolveJob
 
     private IStatus runType(long gen, IProgressMonitor monitor)
     {
-        long startedAt = System.currentTimeMillis();
         int total;
         synchronized (queueLock)
         {
@@ -696,7 +679,6 @@ final class OccurrenceContextResolveJob
         Map<IFile, String> texts = new IdentityHashMap<>();
         List<Target> batch = new ArrayList<>();
         List<Target> irAfterType = new ArrayList<>();
-        int processed = 0;
         boolean userStopped = false;
         try
         {
@@ -706,7 +688,6 @@ final class OccurrenceContextResolveJob
                 if (monitor.isCanceled())
                 {
                     userStopped = true;
-                    Global.tempLog(LOG, "type STOPPED by user at " + typeDone.get() + "/" + total); //$NON-NLS-1$ //$NON-NLS-2$
                     return Status.CANCEL_STATUS;
                 }
                 if (gen != generation)
@@ -722,14 +703,9 @@ final class OccurrenceContextResolveJob
                 if (!texts.containsKey(file))
                     texts.put(file, BslModuleMethodResolver.moduleText(file));
                 int[] region = target.resolvedRegion();
-                long t0 = System.currentTimeMillis();
                 String type = region != null && texts.get(file) != null
                     ? BslOccurrenceContextResolver.parentType(file, texts.get(file), region[0])
                     : ""; //$NON-NLS-1$
-                long spent = System.currentTimeMillis() - t0;
-                if (spent > 400)
-                    Global.tempLog(LOG, "slow type " + spent + " ms: " //$NON-NLS-1$ //$NON-NLS-2$
-                        + (file != null ? file.getName() : "?")); //$NON-NLS-1$
                 target.applyParentType(type);
                 // Модель типа не дала — спрашиваем ИР (он знает типы из doc-комментариев и т.п.).
                 // Раньше к ИР уходили только литералы, и обращение по коду оставалось с «?».
@@ -738,16 +714,12 @@ final class OccurrenceContextResolveJob
                 batch.add(target);
                 typeDone.incrementAndGet();
                 monitor.worked(1);
-                processed++;
                 if (batch.size() >= TYPE_BATCH || typeQueueEmpty())
                 {
                     publishType(new ArrayList<>(batch), gen);
                     batch.clear();
                 }
             }
-            Global.tempLog(LOG, "type done: " + processed + "/" + total + " за " //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + (System.currentTimeMillis() - startedAt) + " ms; без типа → в ИР " //$NON-NLS-1$
-                + irAfterType.size());
             if (!irAfterType.isEmpty() && gen == generation)
                 startIrPass(irAfterType, gen);
             return Status.OK_STATUS;
@@ -804,7 +776,6 @@ final class OccurrenceContextResolveJob
     {
         if (forIr.isEmpty() || irResolver == null)
             return;
-        Global.tempLog(LOG, "ir pass: литеральных кандидатов " + forIr.size()); //$NON-NLS-1$
         runOnUi(() ->
         {
             if (gen != generation || table.isDisposed())
@@ -869,11 +840,9 @@ final class OccurrenceContextResolveJob
 
     private IStatus runIr(long gen, IProgressMonitor monitor)
     {
-        long startedAt = System.currentTimeMillis();
         IrParentTypeResolver ir = irResolver;
         Map<IFile, String> texts = new IdentityHashMap<>();
         List<Target> batch = new ArrayList<>();
-        int done = 0;
         try
         {
             while (ir != null)
@@ -900,12 +869,7 @@ final class OccurrenceContextResolveJob
                     if (parentEnd >= 0)
                     {
                         asked = true;
-                        long t0 = System.currentTimeMillis();
                         types = ir.resolve(file, content, parentEnd);
-                        long spent = System.currentTimeMillis() - t0;
-                        if (spent > 800)
-                            Global.tempLog(LOG, "slow ir type " + spent + " ms: " //$NON-NLS-1$ //$NON-NLS-2$
-                                + (file != null ? file.getName() : "?")); //$NON-NLS-1$
                     }
                 }
                 if (asked && types == null)
@@ -923,15 +887,12 @@ final class OccurrenceContextResolveJob
                 // «Подходит» по цепочке «Родитель» из applyFast не трогаем.
                 target.applyIrParentType(types != null ? types : ""); //$NON-NLS-1$
                 batch.add(target);
-                done++;
                 if (batch.size() >= TYPE_BATCH || irQueueEmpty())
                 {
                     publishType(new ArrayList<>(batch), gen);
                     batch.clear();
                 }
             }
-            Global.tempLog(LOG, "ir done: " + done + " за " //$NON-NLS-1$ //$NON-NLS-2$
-                + (System.currentTimeMillis() - startedAt) + " ms"); //$NON-NLS-1$
             return Status.OK_STATUS;
         }
         finally

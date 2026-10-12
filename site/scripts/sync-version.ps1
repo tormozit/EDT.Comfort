@@ -12,16 +12,18 @@ if (-not (Test-Path -LiteralPath $versionFile)) {
 
 $release = $null
 Get-Content -LiteralPath $versionFile -Encoding UTF8 | ForEach-Object {
-    if ($_ -match '^\s*comfort\.release\s*=\s*(\d+\.\d+\.\d+\.\d+)\s*(?:#.*)?$') {
+    if ($_ -match '^\s*comfort\.release\s*=\s*(\d+\.\d+\.\d+)\s*(?:#.*)?$') {
         $release = $Matches[1]
     }
 }
 
 if (-not $release) {
-    Write-Error "comfort.release not found in version.txt (expected format: 1.0.0.10)"
+    Write-Error "comfort.release not found in version.txt (expected exactly three numbers, e.g. 1.0.2)"
 }
 
-$qualifier = "$release-qualifier"
+# Три числа + точка + qualifier: в OSGi/p2 числовые только первые три сегмента, четвёртый —
+# строка, сравнивается посимвольно ("9..." > "10..."). Поэтому номер релиза — ровно три числа.
+$qualifier = "$release.qualifier"
 $releaseSnapshot = "$release-SNAPSHOT"
 Write-Host "Sync version: $qualifier (Maven: $releaseSnapshot)"
 

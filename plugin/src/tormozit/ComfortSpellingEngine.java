@@ -86,6 +86,8 @@ public final class ComfortSpellingEngine
     private static final String USER_MORPH_DICT_FILE_PROJECT = "spelling-comfort-project.dic"; //$NON-NLS-1$
     private static final String PROJECT_MORPH_DIR = ".comfort"; //$NON-NLS-1$
     private static final String AOT_RU_BASE = "dictionaries/hunspell/russian-aot-ieyo"; //$NON-NLS-1$
+    /** Аффиксы английской морфологии пользовательского словаря (латинские леммы). */
+    private static final String EN_US_BASE = "dictionaries/hunspell/en_US"; //$NON-NLS-1$
     /** Леммы IT/1С; .aff берём у AOT (не дублируем). */
     private static final String EXTRA_RU_DIC_BASE = "dictionaries/hunspell/comfort-extra-ru"; //$NON-NLS-1$
     /** ISO 639 languages + ISO 3166 countries (lowercase). */
@@ -100,9 +102,9 @@ public final class ComfortSpellingEngine
     private static final Object USER_MORPH_LOCK = new Object();
     private static volatile Set<String> userWords;
     /** Общий morph-dic (stateLocation). */
-    private static volatile HunspellDictionary userMorphDictionary;
+    private static volatile List<HunspellDictionary> userMorphDictionary;
     /** Проектный morph-dic активного проекта. */
-    private static volatile HunspellDictionary projectMorphDictionary;
+    private static volatile List<HunspellDictionary> projectMorphDictionary;
     private static volatile String projectMorphProjectName;
     private static final ConcurrentHashMap<String, List<String>> suggestCache =
         new ConcurrentHashMap<>();
@@ -277,22 +279,22 @@ public final class ComfortSpellingEngine
     {
         ensureProjectMorphListener();
         List<HunspellDictionary> base = sharedDictionaries();
-        HunspellDictionary common = sharedCommonUserMorphDictionary();
-        HunspellDictionary project = sharedProjectUserMorphDictionary();
+        List<HunspellDictionary> common = sharedCommonUserMorphDictionary();
+        List<HunspellDictionary> project = sharedProjectUserMorphDictionary();
         if (common == null && project == null)
             return base;
-        List<HunspellDictionary> all = new ArrayList<>(base.size() + 2);
+        List<HunspellDictionary> all = new ArrayList<>(base.size() + 4);
         all.addAll(base);
         if (common != null)
-            all.add(common);
+            all.addAll(common);
         if (project != null)
-            all.add(project);
+            all.addAll(project);
         return all;
     }
 
-    private static HunspellDictionary sharedCommonUserMorphDictionary()
+    private static List<HunspellDictionary> sharedCommonUserMorphDictionary()
     {
-        HunspellDictionary result = userMorphDictionary;
+        List<HunspellDictionary> result = userMorphDictionary;
         if (result != null)
             return result;
         synchronized (USER_MORPH_LOCK)
@@ -307,7 +309,7 @@ public final class ComfortSpellingEngine
         }
     }
 
-    private static HunspellDictionary sharedProjectUserMorphDictionary()
+    private static List<HunspellDictionary> sharedProjectUserMorphDictionary()
     {
         IProject project = resolveSpellingProject();
         String name = project != null ? project.getName() : null;
@@ -1523,24 +1525,66 @@ public final class ComfortSpellingEngine
             display.asyncExec(ui);
     }
 
-    private static HunspellDictionary loadUserMorphDictionary(File dic)
+    /**
+     * Пользовательский morph-dic раскладывается на два словаря по алфавиту леммы:
+     * кириллица и смешанные — с аффиксами AOT, латиница — с аффиксами en_US. Один
+     * {@code .aff} на смесь не годится: русские окончания к английскому слову дают мусор.
+     *
+     * @return {@code [русский, английский]}; {@code null} — файла нет или нет аффиксов
+     */
+    private static List<HunspellDictionary> loadUserMorphDictionary(File dic)
     {
         try
         {
-            File aff = resolveDictionaryFile(AOT_RU_BASE, ".aff"); //$NON-NLS-1$
-            if (aff == null || !aff.isFile())
+            File affRu = resolveDictionaryFile(AOT_RU_BASE, ".aff"); //$NON-NLS-1$
+            File affEn = resolveDictionaryFile(EN_US_BASE, ".aff"); //$NON-NLS-1$
+            if (affRu == null || !affRu.isFile())
                 return null;
             if (dic == null)
                 return null;
             if (!dic.isFile())
                 return null;
-            return HunspellDictionary.load(aff, dic, HunspellDictionary.ScriptKind.CYRILLIC,
-                StandardCharsets.UTF_8);
+            List<String> ru = new ArrayList<>();
+            List<String> en = new ArrayList<>();
+            for (String entry : readUserMorphEntries(dic))
+            {
+                MorphLineParsed parsed = parseMorphLine(entry);
+                if (parsed == null)
+                    continue;
+                if (detectWordScript(parsed.lemma) == HunspellDictionary.ScriptKind.LATIN)
+                    en.add(entry);
+                else
+                    ru.add(entry);
+            }
+            List<HunspellDictionary> result = new ArrayList<>(2);
+            result.add(HunspellDictionary.loadFromText(affRu, morphDicText(ru),
+                HunspellDictionary.ScriptKind.CYRILLIC));
+            if (affEn != null && affEn.isFile())
+                result.add(HunspellDictionary.loadFromText(affEn, morphDicText(en),
+                    HunspellDictionary.ScriptKind.LATIN));
+            return List.copyOf(result);
         }
         catch (Exception e)
         {
             return null;
         }
+    }
+
+    private static boolean anyCorrect(List<HunspellDictionary> dicts, String word)
+    {
+        if (dicts == null)
+            return false;
+        for (HunspellDictionary dict : dicts)
+        {
+            if (dict.isCorrect(word))
+                return true;
+        }
+        return false;
+    }
+
+    private static String morphDicText(List<String> entries)
+    {
+        return entries.size() + "\n" + String.join("\n", entries) + "\n"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
     }
 
     private static void ensureUserMorphFile(File dic) throws IOException
@@ -1848,26 +1892,39 @@ public final class ComfortSpellingEngine
     {
         if (lemma == null || lemma.isBlank())
             return List.of();
-        HunspellDictionary dict = sharedCommonUserMorphDictionary();
-        if (dict == null)
-            dict = sharedProjectUserMorphDictionary();
-        if (dict == null)
-        {
-            // Aff для превью — из бандла; dic может быть пустым
-            File common = getCommonUserMorphDictionaryFile();
-            try
-            {
-                if (common != null)
-                    ensureUserMorphFile(common);
-            }
-            catch (IOException e)
-            {
-            }
-            dict = loadUserMorphDictionary(common);
-        }
+        boolean latin = detectWordScript(lemma) == HunspellDictionary.ScriptKind.LATIN;
+        HunspellDictionary dict = previewAffixDictionary(latin);
         if (dict == null)
             return List.of(lemma.trim());
         return dict.expandForms(lemma.trim(), flagOrNull, max);
+    }
+
+    private static volatile HunspellDictionary previewDictionaryRu;
+    private static volatile HunspellDictionary previewDictionaryEn;
+
+    /** Словарь без слов — только аффиксы для превью форм (AOT или en_US по алфавиту леммы). */
+    private static HunspellDictionary previewAffixDictionary(boolean latin)
+    {
+        HunspellDictionary cached = latin ? previewDictionaryEn : previewDictionaryRu;
+        if (cached != null)
+            return cached;
+        try
+        {
+            File aff = resolveDictionaryFile(latin ? EN_US_BASE : AOT_RU_BASE, ".aff"); //$NON-NLS-1$
+            if (aff == null || !aff.isFile())
+                return null;
+            HunspellDictionary dict = HunspellDictionary.loadFromText(aff, morphDicText(List.of()),
+                latin ? HunspellDictionary.ScriptKind.LATIN : HunspellDictionary.ScriptKind.CYRILLIC);
+            if (latin)
+                previewDictionaryEn = dict;
+            else
+                previewDictionaryRu = dict;
+            return dict;
+        }
+        catch (Exception e)
+        {
+            return null;
+        }
     }
 
     private static final class MorphLineParsed
@@ -1949,13 +2006,22 @@ public final class ComfortSpellingEngine
         ADJ_II("на -ий"), //$NON-NLS-1$
         ADJ_OI("на -ой"), //$NON-NLS-1$
         VERB_T("на -ть"), //$NON-NLS-1$
-        VERB_TSYA("на -ться"); //$NON-NLS-1$
+        VERB_TSYA("на -ться"), //$NON-NLS-1$
+        // английские леммы (латиница): аффиксы en_US, род/число не различаются
+        EN_NOUN("регулярное: -s, -es, -'s"), //$NON-NLS-1$
+        EN_VERB("регулярный: -s, -ed, -ing"), //$NON-NLS-1$
+        EN_ADJ("регулярное: -er, -est, -ly"); //$NON-NLS-1$
 
         final String label;
 
         MorphDeclension(String label)
         {
             this.label = label;
+        }
+
+        boolean isEnglish()
+        {
+            return this == EN_NOUN || this == EN_VERB || this == EN_ADJ;
         }
     }
 
@@ -1985,7 +2051,7 @@ public final class ComfortSpellingEngine
 
         String describe()
         {
-            if (pos == MorphPos.NOUN)
+            if (pos == MorphPos.NOUN && gender != null)
                 return pos.label + ", " + gender.label + ", " + number.label + ", " //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                     + declension.label;
             return pos.label + ", " + declension.label; //$NON-NLS-1$
@@ -2017,7 +2083,37 @@ public final class ComfortSpellingEngine
         new MorphParadigm("adj_oi", MorphPos.ADJ, null, null, MorphDeclension.ADJ_OI, "5"), //$NON-NLS-1$ //$NON-NLS-2$
         new MorphParadigm("verb_t", MorphPos.VERB, null, null, MorphDeclension.VERB_T, "2433"), //$NON-NLS-1$ //$NON-NLS-2$
         new MorphParadigm("verb_tsya", MorphPos.VERB, null, null, MorphDeclension.VERB_TSYA,
-            "151")); //$NON-NLS-1$ //$NON-NLS-2$
+            "151"), //$NON-NLS-1$ //$NON-NLS-2$
+        // английские: флаги en_US.aff (M — 's, S — -s/-es/-ies, D — -ed, G — -ing, T/R/Y — -est/-er/-ly)
+        new MorphParadigm("en_noun", MorphPos.NOUN, null, null, MorphDeclension.EN_NOUN, "MS"), //$NON-NLS-1$ //$NON-NLS-2$
+        new MorphParadigm("en_verb", MorphPos.VERB, null, null, MorphDeclension.EN_VERB, "SDG"), //$NON-NLS-1$ //$NON-NLS-2$
+        new MorphParadigm("en_adj", MorphPos.ADJ, null, null, MorphDeclension.EN_ADJ, "TRY")); //$NON-NLS-1$ //$NON-NLS-2$
+
+    private static MorphDeclension englishDeclension(MorphPos pos)
+    {
+        if (pos == MorphPos.VERB)
+            return MorphDeclension.EN_VERB;
+        if (pos == MorphPos.ADJ)
+            return MorphDeclension.EN_ADJ;
+        return MorphDeclension.EN_NOUN;
+    }
+
+    private static MorphParadigm englishParadigm(MorphPos pos)
+    {
+        MorphDeclension decl = englishDeclension(pos);
+        for (MorphParadigm p : MORPH_PARADIGMS)
+        {
+            if (p.declension == decl)
+                return p;
+        }
+        return MORPH_PARADIGMS.get(2);
+    }
+
+    private static boolean isLatinLemma(String lemma)
+    {
+        return lemma != null
+            && detectWordScript(lemma) == HunspellDictionary.ScriptKind.LATIN;
+    }
 
     private static MorphParadigm paradigmById(String id)
     {
@@ -2053,7 +2149,7 @@ public final class ComfortSpellingEngine
         LinkedHashSet<MorphDeclension> set = new LinkedHashSet<>();
         for (MorphParadigm p : MORPH_PARADIGMS)
         {
-            if (p.pos != pos)
+            if (p.pos != pos || p.declension.isEnglish())
                 continue;
             if (pos == MorphPos.NOUN)
             {
@@ -2256,6 +2352,8 @@ public final class ComfortSpellingEngine
     {
         String raw = seed == null ? "" : seed.trim(); //$NON-NLS-1$
         String w = raw.toLowerCase(Locale.ROOT);
+        if (isLatinLemma(raw))
+            return guessEnglish(raw, MorphPos.NOUN);
         MorphGuess verb = guessVerb(raw, w);
         if (verb != null)
             return verb;
@@ -2272,6 +2370,8 @@ public final class ComfortSpellingEngine
     private static MorphGuess guessMorphologyForPos(String seed, MorphPos pos)
     {
         String raw = seed == null ? "" : seed.trim(); //$NON-NLS-1$
+        if (isLatinLemma(raw))
+            return guessEnglish(raw, pos);
         String w = raw.toLowerCase(Locale.ROOT);
         MorphGuess g = new MorphGuess();
         g.lemma = raw.isEmpty() ? w : raw;
@@ -2342,6 +2442,21 @@ public final class ComfortSpellingEngine
         return g;
     }
 
+    /** Латиница: лемма как есть, регулярная английская парадигма выбранной части речи. */
+    private static MorphGuess guessEnglish(String raw, MorphPos pos)
+    {
+        MorphGuess g = new MorphGuess();
+        g.lemma = raw;
+        g.morphology = true;
+        g.pos = pos != null ? pos : MorphPos.NOUN;
+        g.gender = MorphGender.MASC;
+        g.number = MorphNumber.SING;
+        MorphParadigm p = englishParadigm(g.pos);
+        g.declension = p.declension;
+        g.paradigmId = p.id;
+        return g;
+    }
+
     private static final class MorphGuess
     {
         String lemma;
@@ -2376,6 +2491,8 @@ public final class ComfortSpellingEngine
         private boolean updating;
         /** Ручная правка отключает автоподбор леммы до закрытия диалога. */
         private boolean lemmaManuallyEdited;
+        /** Лемма латиницей: английские парадигмы (en_US), род/число не нужны. */
+        private boolean latinMode;
         /** Высота по полной компоновке (существительное); не сжимаем при смене POS. */
         private int preferredShellHeight;
 
@@ -2630,18 +2747,21 @@ public final class ComfortSpellingEngine
             MorphGuess guess = guessMorphology(seedWord);
             updating = true;
             lemmaText.setText(guess.lemma != null ? guess.lemma : seedWord);
+            latinMode = isLatinLemma(lemmaText.getText());
             morphCheck.setSelection(guess.morphology);
             selectPos(guess.pos);
             selectNumber(guess.number);
             selectGender(guess.gender);
             refillDeclensions(guess.pos, guess.number, guess.gender, guess.declension);
             updating = false;
+            updateDeclensionLabel();
 
             ModifyListener refresh = e ->
             {
                 if (!updating)
                 {
                     lemmaManuallyEdited = true;
+                    syncLatinMode();
                     refreshPreviewAndWarning();
                 }
             };
@@ -2670,12 +2790,10 @@ public final class ComfortSpellingEngine
                         refillDeclensions(g.pos, g.number, g.gender, g.declension);
                     }
                     updating = false;
+                    syncLatinModeFields();
                     updateMorphEnabled();
                     updateNounControlsVisible();
-                    if (selectedPos() == MorphPos.NOUN)
-                        declensionLabel.setText("Склонение:"); //$NON-NLS-1$
-                    else
-                        declensionLabel.setText("Тип:"); //$NON-NLS-1$
+                    updateDeclensionLabel();
                     refreshPreviewAndWarning();
                 }
             };
@@ -2691,10 +2809,7 @@ public final class ComfortSpellingEngine
                         updateParadigmForCurrentLemma(selectedPos());
                     updateNounControlsVisible();
                     updateMorphEnabled();
-                    if (selectedPos() == MorphPos.NOUN)
-                        declensionLabel.setText("Склонение:"); //$NON-NLS-1$
-                    else
-                        declensionLabel.setText("Тип:"); //$NON-NLS-1$
+                    updateDeclensionLabel();
                     refreshPreviewAndWarning();
                 }
             });
@@ -2739,7 +2854,38 @@ public final class ComfortSpellingEngine
 
         private void updateNounControlsVisible()
         {
-            setNounFieldsVisible(selectedPos() == MorphPos.NOUN);
+            setNounFieldsVisible(selectedPos() == MorphPos.NOUN && !latinMode);
+        }
+
+        private void updateDeclensionLabel()
+        {
+            declensionLabel.setText(selectedPos() == MorphPos.NOUN && !latinMode
+                ? "Склонение:" : "Тип:"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        /**
+         * Правка леммы могла сменить алфавит (кириллица ↔ латиница): тогда набор типов
+         * меняется целиком — русские окончания или английские.
+         */
+        private void syncLatinMode()
+        {
+            if (isLatinLemma(lemmaText.getText()) == latinMode)
+                return;
+            syncLatinModeFields();
+            updateNounControlsVisible();
+            updateDeclensionLabel();
+        }
+
+        private void syncLatinModeFields()
+        {
+            boolean latin = isLatinLemma(lemmaText.getText());
+            if (latin == latinMode)
+                return;
+            latinMode = latin;
+            boolean wasUpdating = updating;
+            updating = true;
+            refillDeclensions(selectedPos(), selectedNumber(), selectedGender(), null);
+            updating = wasUpdating;
         }
 
         /** Автоподбор от исходного слова до ручной правки; после неё лемму сохраняем. */
@@ -2861,7 +3007,7 @@ public final class ComfortSpellingEngine
         private void refillDeclensions(MorphPos pos, MorphNumber number, MorphGender gender,
             MorphDeclension prefer)
         {
-            List<MorphDeclension> list = declensionsFor(pos, number, gender);
+            List<MorphDeclension> list = currentDeclensions(pos, number, gender);
             MorphDeclension wanted = prefer != null ? prefer : declensionForCurrentLemma(list);
             declensionCombo.removeAll();
             int select = 0;
@@ -2907,12 +3053,21 @@ public final class ComfortSpellingEngine
             return free;
         }
 
+        /** Типы для режима: английский — один регулярный на часть речи, иначе русские склонения. */
+        private List<MorphDeclension> currentDeclensions(MorphPos pos, MorphNumber number,
+            MorphGender gender)
+        {
+            if (latinMode)
+                return List.of(englishDeclension(pos));
+            return declensionsFor(pos, number, gender);
+        }
+
         private MorphDeclension selectedDeclension()
         {
             MorphPos pos = selectedPos();
             MorphNumber number = pos == MorphPos.NOUN ? selectedNumber() : null;
             MorphGender gender = pos == MorphPos.NOUN ? selectedGender() : null;
-            List<MorphDeclension> list = declensionsFor(pos, number, gender);
+            List<MorphDeclension> list = currentDeclensions(pos, number, gender);
             int idx = declensionCombo.getSelectionIndex();
             if (idx < 0 || idx >= list.size())
                 return list.isEmpty() ? MorphDeclension.ZERO : list.get(0);
@@ -2922,6 +3077,8 @@ public final class ComfortSpellingEngine
         private MorphParadigm selectedParadigm()
         {
             MorphPos pos = selectedPos();
+            if (latinMode)
+                return englishParadigm(pos);
             MorphDeclension decl = selectedDeclension();
             if (pos == MorphPos.NOUN)
             {
@@ -3095,11 +3252,9 @@ public final class ComfortSpellingEngine
             }
             if (isUserWord(word))
                 sources.add("пользовательский словарь"); //$NON-NLS-1$
-            HunspellDictionary common = sharedCommonUserMorphDictionary();
-            if (common != null && common.isCorrect(word))
+            if (anyCorrect(sharedCommonUserMorphDictionary(), word))
                 sources.add("пользовательский словарь"); //$NON-NLS-1$
-            HunspellDictionary project = sharedProjectUserMorphDictionary();
-            if (project != null && project.isCorrect(word))
+            if (anyCorrect(sharedProjectUserMorphDictionary(), word))
                 sources.add("словарь проекта"); //$NON-NLS-1$
             return List.copyOf(sources);
         }

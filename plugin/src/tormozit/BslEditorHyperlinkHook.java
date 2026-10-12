@@ -292,6 +292,12 @@ public final class BslEditorHyperlinkHook implements IStartup
 
     private static String dataPageId(EObject target, IWorkbenchPage page)
     {
+        EditorPageDescriptor descriptor = dataPageDescriptor(target, page);
+        return descriptor == null ? null : descriptor.getPageId();
+    }
+
+    private static EditorPageDescriptor dataPageDescriptor(EObject target, IWorkbenchPage page)
+    {
         OpenHelper helper = new OpenHelper(page);
         var input = helper.getEditorInput(target, null, null);
         if (input == null)
@@ -302,7 +308,7 @@ public final class BslEditorHyperlinkHook implements IStartup
         // Тот же реестр, которым DtGranularEditor.addPages наполняет редактор.
         for (EditorPageDescriptor descriptor : IEditorPagesRegistry.INSTANCE.getEditorPages(editorId, target))
             if (descriptor.getPageId().endsWith(".pages.data")) //$NON-NLS-1$
-                return descriptor.getPageId();
+                return descriptor;
         return null;
     }
 
@@ -332,11 +338,38 @@ public final class BslEditorHyperlinkHook implements IStartup
         {
             try (HistoryScope scope = new HistoryScope(page, source))
             {
-                IEditorPart editor = new OpenHelper(page).openEditor(target);
-                boolean selected = editor instanceof DtGranularEditor<?> granular
-                    && granular.setActivePage(pageId) != null;
-                scope.opened = selected;
+                // Редактор выбирает начальную страницу по свойству во входе
+                // (DtGranularEditor.getPageForFeatureOrDefault), поэтому передаём свойство
+                // страницы «Данные» — тогда первая страница не мелькает.
+                EditorPageDescriptor descriptor = dataPageDescriptor(target, page);
+                List<EStructuralFeature> features = descriptor == null ? null : descriptor.getFeatures();
+                EStructuralFeature feature = features == null || features.isEmpty() ? null : features.get(0);
+                IEditorPart editor = feature != null ? new OpenHelper(page).openEditor(target, feature)
+                    : new OpenHelper(page).openEditor(target);
+                if (editor instanceof DtGranularEditor<?> granular)
+                {
+                    scope.opened = true;
+                    // Только что открытый редактор сначала показывает страницу загрузки и
+                    // добавляет свои страницы позже — до этого setActivePage возвращает null.
+                    if (granular.setActivePage(pageId) == null)
+                        retryActivatePage(granular, pageId, 1);
+                }
             }
+        }
+
+        private static void retryActivatePage(DtGranularEditor<?> editor, String pageId, int attempt)
+        {
+            Display display = Display.getDefault();
+            if (display == null || display.isDisposed() || attempt > 40)
+                return;
+            display.timerExec(100, () ->
+            {
+                if (editor.getSite() == null || editor.getSite().getPage() == null
+                    || editor.getSite().getPage().findEditor(editor.getEditorInput()) != editor)
+                    return;
+                if (editor.setActivePage(pageId) == null)
+                    retryActivatePage(editor, pageId, attempt + 1);
+            });
         }
     }
 

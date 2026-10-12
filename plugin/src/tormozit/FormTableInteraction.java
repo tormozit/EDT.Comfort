@@ -205,6 +205,8 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
     private Runnable substringFilterClearer;
     private java.util.function.Supplier<Object> externalFilterState;
     private java.util.function.Predicate<Object> pinnedTop;
+    private final Map<TableColumn, Comparator<Object>> columnSortComparators = new java.util.HashMap<>();
+    private Comparator<Object> sortTieBreaker;
     private Runnable columnFilterChangeListener;
     private Image filterGlyph;
 
@@ -692,8 +694,13 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
                 boolean pinned2 = pinnedTop != null && pinnedTop.test(e2);
                 if (pinned1 != pinned2)
                     return pinned1 ? -1 : 1;
-                int cmp = compareHeaderSortKeys(headerSortKey(e1, sortColumn), headerSortKey(e2, sortColumn));
-                return ascending ? cmp : -cmp;
+                Comparator<Object> own = columnSortComparators.get(sortColumn);
+                int cmp = own != null ? own.compare(e1, e2)
+                    : compareHeaderSortKeys(headerSortKey(e1, sortColumn), headerSortKey(e2, sortColumn));
+                if (cmp != 0)
+                    return ascending ? cmp : -cmp;
+                // Тай-брейк не зависит от направления: порядок «RU, затем EN» не должен переворачиваться.
+                return sortTieBreaker != null ? sortTieBreaker.compare(e1, e2) : 0;
             }
         });
         table.setSortColumn(column);
@@ -930,6 +937,18 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
     void setPinnedTop(java.util.function.Predicate<Object> pinnedTop)
     {
         this.pinnedTop = pinnedTop;
+    }
+
+    /** Свой порядок для сортировки по заголовку колонки вместо сравнения текста ячеек. */
+    void setColumnSortComparator(TableColumn column, Comparator<Object> comparator)
+    {
+        columnSortComparators.put(column, comparator);
+    }
+
+    /** Вторичный порядок при равенстве по выбранной колонке; направление сортировки на него не влияет. */
+    void setSortTieBreaker(Comparator<Object> sortTieBreaker)
+    {
+        this.sortTieBreaker = sortTieBreaker;
     }
 
     /**

@@ -1014,6 +1014,49 @@ public final class Global
     // Временное логирование (отдельные файлы на отладочном РМ, см. .cursor/rules/comfort-logging.mdc)
     // =========================================================================
 
+    /**
+     * Скрывает пустой тулбар панели без собственных кнопок. Звать из {@code createPartControl}.
+     *
+     * <p>Eclipse при каждом показе вкладки включает тулбару панели видимость в модели
+     * ({@code LazyStackRenderer.showElementRecursive}), а {@code StackRenderer.adjustTopRight}
+     * показывает правый верхний блок папки вкладок по одной лишь «отрисовываемости» тулбара,
+     * даже пустого. Блок появляется вторым кадром и сдвигает содержимое панели. Штатный тег
+     * {@code HIDDEN_EXPLICITLY} снимает «отрисовываемость» ({@code ToolBarManagerRenderer}).
+     *
+     * @param control любой контрол панели — для отложенного повтора, если тулбара в модели ещё нет
+     *                (при первом открытии панели он создаётся после {@code createPartControl})
+     */
+    public static void hideEmptyViewToolbar(org.eclipse.ui.IWorkbenchPartSite site,
+        org.eclipse.swt.widgets.Control control)
+    {
+        if (hideEmptyViewToolbar(site) || control == null || control.isDisposed())
+            return;
+        control.getDisplay().asyncExec(() ->
+        {
+            if (!control.isDisposed())
+                hideEmptyViewToolbar(site);
+        });
+    }
+
+    private static boolean hideEmptyViewToolbar(org.eclipse.ui.IWorkbenchPartSite site)
+    {
+        org.eclipse.e4.ui.model.application.ui.basic.MPart part =
+            site.getService(org.eclipse.e4.ui.model.application.ui.basic.MPart.class);
+        org.eclipse.e4.ui.model.application.ui.menu.MToolBar toolbar = part != null ? part.getToolbar() : null;
+        if (toolbar == null)
+            return false;
+        String tag = org.eclipse.e4.ui.workbench.IPresentationEngine.HIDDEN_EXPLICITLY;
+        if (!toolbar.getTags().contains(tag))
+            toolbar.getTags().add(tag);
+        // Тег мог сохраниться в модели с прошлого сеанса, а обработчик срабатывает только на его добавление.
+        if (toolbar.isToBeRendered())
+        {
+            toolbar.setVisible(false);
+            toolbar.setToBeRendered(false);
+        }
+        return true;
+    }
+
     /** Корень репозитория с исходниками плагина (личное РМ автора, не для дистрибуции). */
     private static final String SOURCE_ROOT = "C:\\VC\\EDT.Comfort"; //$NON-NLS-1$
 

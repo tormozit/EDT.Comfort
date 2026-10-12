@@ -9,6 +9,7 @@ import java.util.IdentityHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.regex.Matcher;
@@ -17,6 +18,7 @@ import java.util.regex.Pattern;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.IStatus;
+import org.eclipse.core.runtime.ListenerList;
 import org.eclipse.core.runtime.Status;
 import org.eclipse.core.runtime.jobs.IJobChangeEvent;
 import org.eclipse.core.runtime.jobs.Job;
@@ -64,6 +66,9 @@ import org.eclipse.jface.viewers.ColumnViewer;
 import org.eclipse.jface.viewers.IBaseLabelProvider;
 import org.eclipse.jface.viewers.ILabelProvider;
 import org.eclipse.jface.viewers.ILabelProviderListener;
+import org.eclipse.jface.viewers.ISelectionChangedListener;
+import org.eclipse.jface.viewers.IStructuredSelection;
+import org.eclipse.jface.viewers.SelectionChangedEvent;
 import org.eclipse.jface.viewers.StructuredSelection;
 import org.eclipse.jface.viewers.StyledCellLabelProvider;
 import org.eclipse.jface.viewers.TableViewer;
@@ -809,6 +814,8 @@ public final class GitHistoryHook implements IStartup
          */
         private static final String CSS_DISABLED_KEY = "org.eclipse.e4.ui.css.disabled"; //$NON-NLS-1$
         private static final int REFRESH_MS = 1000;
+        private static final String STOCK_COMMIT_LISTENER =
+            "org.eclipse.egit.ui.internal.history.GitHistoryPage$5"; //$NON-NLS-1$
         /** Как у штатного автовыбора «интересных» файлов ({@code INTERESTING_AUTOSELECT_LIMIT}). */
         private static final int AUTOSELECT_LIMIT = 100;
 
@@ -841,6 +848,11 @@ public final class GitHistoryHook implements IStartup
                     return;
                 ChangeSearchMode mode = byFileViewer(Global.getField(job, "this$0")); //$NON-NLS-1$
                 Display display = Display.getDefault();
+                if (mode != null && event.getResult() != null && event.getResult().isOK())
+                {
+                    mode.loadedInterestingOnly = Global.getField(mode.fileViewer, "showInterestingOnly"); //$NON-NLS-1$
+                    mode.loadedInput = Global.getField(mode.fileViewer, "realInput"); //$NON-NLS-1$
+                }
                 if (mode != null && !display.isDisposed())
                     display.asyncExec(mode::selectFoundFiles);
             }
@@ -857,6 +869,9 @@ public final class GitHistoryHook implements IStartup
         private Object stockInterestingOnly;
         private int shownVersion = -1;
         private boolean ticking;
+        /** Ввод списка файлов, по которому список уже загружен, и режим «только найденные» той загрузки. */
+        private volatile Object loadedInput;
+        private volatile Object loadedInterestingOnly;
         private boolean failureShown;
         private Pattern pattern;
         private GitChangeSearch.Session patternSession;
@@ -904,6 +919,7 @@ public final class GitHistoryHook implements IStartup
                 if (!installDiffSupport(page))
                     Debug.log("[!] change search: diff viewer not found"); //$NON-NLS-1$
                 installFileClickFocus(page, fileViewer.getTable());
+                installSameCommitGuard(page);
                 Global.invokeVoid(fileViewer, "setShowInterestingOnly", Boolean.TRUE); //$NON-NLS-1$
             }
             installFoundMenu(view);
@@ -1129,8 +1145,21 @@ public final class GitHistoryHook implements IStartup
             {
                 Object input = Global.getField(job, "input"); //$NON-NLS-1$
                 ChangeSearchMode mode = input != null ? byFileInput(input) : null;
-                if (mode != null)
-                    mode.markFoundFiles(job, input);
+                if (mode == null)
+                    return;
+                // После каждого перестроения обхода страница при включённом «Следовать за
+                // переименованиями» зовёт fileViewer.setInterestingPaths (GitHistoryPage$8 →
+                // updateInterestingPathsOfFileViewer), а тот безусловно загружает список файлов
+                // заново: выбор файлов сбрасывается, текст отличий строится снова. Список по этому
+                // же вводу в том же режиме уже загружен — повторную загрузку отменяем.
+                boolean repeated = input == mode.loadedInput
+                    && Objects.equals(mode.loadedInterestingOnly, Global.getField(mode.fileViewer, "showInterestingOnly")); //$NON-NLS-1$
+                if (repeated)
+                {
+                    job.cancel();
+                    return;
+                }
+                mode.markFoundFiles(job, input);
             }
         }
 
@@ -1216,6 +1245,70 @@ public final class GitHistoryHook implements IStartup
                 fileViewer.setSelection(new StructuredSelection(selection), true);
         }
 
+        /**
+         * Не перезагружать показанный коммит при перестроении обхода. Штатный слушатель выделения
+         * таблицы коммитов ({@code GitHistoryPage$5}) пропускает повторную загрузку, только если
+         * выделен тот же объект, что уже показан ({@code first == commentViewer.getInput()}).
+         * Новый обход создаёт для того же коммита новый объект — и слушатель заново ставит
+         * сообщение коммита, список файлов и отличия: текст мигает, позиция в нём сбрасывается.
+         * Обёртка сравнивает коммиты по идентификатору и в режиме такой вызов не пропускает дальше.
+         */
+        private static void installSameCommitGuard(Object page)
+        {
+            Object table = Global.getField(Global.getField(page, "graph"), "table"); //$NON-NLS-1$ //$NON-NLS-2$
+            Object comment = Global.call(Global.getField(page, "commitAndDiff"), "getCommitViewer"); //$NON-NLS-1$ //$NON-NLS-2$
+            if (!(table instanceof TableViewer commits) || !(comment instanceof Viewer commentViewer)
+                || !(Global.getField(commits, "postSelectionChangedListeners") instanceof ListenerList<?> listeners)) //$NON-NLS-1$
+            {
+                Debug.log("[!] change search: commit table or its listeners not found"); //$NON-NLS-1$
+                return;
+            }
+            ISelectionChangedListener stock = null;
+            for (Object listener : listeners.getListeners())
+            {
+                if (listener instanceof SameCommitGuard)
+                    return;
+                if (STOCK_COMMIT_LISTENER.equals(listener.getClass().getName()))
+                    stock = (ISelectionChangedListener)listener;
+            }
+            if (stock == null)
+            {
+                Debug.log("[!] change search: stock commit selection listener not found"); //$NON-NLS-1$
+                return;
+            }
+            commits.removePostSelectionChangedListener(stock);
+            commits.addPostSelectionChangedListener(new SameCommitGuard(page, stock, commentViewer));
+        }
+
+        private static final class SameCommitGuard implements ISelectionChangedListener
+        {
+            private final Object page;
+            private final ISelectionChangedListener stock;
+            private final Viewer commentViewer;
+
+            SameCommitGuard(Object page, ISelectionChangedListener stock, Viewer commentViewer)
+            {
+                this.page = page;
+                this.stock = stock;
+                this.commentViewer = commentViewer;
+            }
+
+            @Override
+            public void selectionChanged(SelectionChangedEvent event)
+            {
+                if (MODES.get(page) != null && event.getSelection() instanceof IStructuredSelection selection
+                    && selection.size() == 1)
+                {
+                    Object first = selection.getFirstElement();
+                    Object shown = commentViewer.getInput();
+                    // RevCommit.equals сравнивает идентификаторы коммитов
+                    if (first != shown && first instanceof RevCommit && first.equals(shown))
+                        return;
+                }
+                stock.selectionChanged(event);
+            }
+        }
+
         private static final class FoundCommitFilter extends RevFilter
         {
             private final ChangeSearchMode mode;
@@ -1272,7 +1365,12 @@ public final class GitHistoryHook implements IStartup
                 return false;
             StyledText text = viewer.getTextWidget();
             if (text.getData(DIFF_SUPPORT_KEY) != null)
+            {
+                // сайт страницы мог быть не готов при первой установке, а штатный обработчик —
+                // подставлен заново: повторные вызовы (смена страницы/активация) донастраивают Ctrl+F
+                installFindReplace(page, viewer);
                 return true;
+            }
             text.setData(DIFF_SUPPORT_KEY, viewer);
             text.setData(DIFF_PAGE_KEY, page);
             GitDiffMethods.install(viewer, GitHistoryHook::diffSections,
@@ -1342,13 +1440,19 @@ public final class GitHistoryHook implements IStartup
             return true;
         }
 
+        /** Метка нашего обработчика Find: по ней повторная установка видит, что уже стоит. */
+        private abstract static class FindWrapper extends Action
+        {
+        }
+
         /**
          * Ctrl+F в области отличий — штатный диалог «Найти/Заменить», как в редакторе. Команда
          * {@code org.eclipse.ui.edit.findReplace} на странице занята штатной кнопкой панели поиска
          * коммитов ({@code GitHistoryPageActions.findAction}, глобальный обработчик
          * {@code ActionFactory.FIND} в {@code IPageSite.getActionBars()}), а до клавиши в самом
          * тексте Ctrl+F не доходит — подменяем этот обработчик: при фокусе в области отличий
-         * открываем диалог, иначе выполняем штатное действие.
+         * открываем диалог, иначе выполняем штатное действие. Вызывается повторно: если сайт
+         * страницы был не готов или штатный обработчик подставлен заново, ставим свой снова.
          */
         private static void installFindReplace(Object page, SourceViewer viewer)
         {
@@ -1357,7 +1461,9 @@ public final class GitHistoryHook implements IStartup
             IActionBars bars = site.getActionBars();
             StyledText text = viewer.getTextWidget();
             IAction original = bars.getGlobalActionHandler(ActionFactory.FIND.getId());
-            IAction wrapper = new Action()
+            if (original instanceof FindWrapper)
+                return;
+            IAction wrapper = new FindWrapper()
             {
                 @Override
                 public void run()

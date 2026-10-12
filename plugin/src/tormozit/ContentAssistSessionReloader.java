@@ -949,6 +949,7 @@ boolean inLiteral = endCaret >= 0
         };
         doc.addDocumentListener(completionAutoOpenDocumentListener);
         installAssistSyncValidationRestart();
+        OrphanUnderlineRepair.install(viewer);
         // #region agent log
         if (STALE_MARKERS_LOG)
             Global.tempLog("stale-markers", "слушатель правок подключён: документ " //$NON-NLS-1$ //$NON-NLS-2$
@@ -2624,6 +2625,241 @@ boolean inLiteral = endCaret >= 0
             new java.util.concurrent.atomic.AtomicInteger();
     }
 
+    /**
+     * Обход дефекта EDT: подчёркивание снятой ошибки остаётся в тексте.
+     *
+     * <p>Ошибки проверки рисуются стилем текста. Когда ошибку снимают, отрисовщик
+     * аннотаций шлёт запрос на переоформление участка, но штатный расчёт участка молча
+     * ничего не делает, если запрошенный участок упирается в конец видимого текста — так
+     * бывает, когда ниже есть свёрнутый метод (минимальный тест и лог 12.10.2026;
+     * воспроизводится без плагина). Стиль подчёркивания остаётся в тексте без аннотации,
+     * пока участок не переоформят по другому поводу.
+     *
+     * <p>Переоформляем только при установленном остатке: после снятия маркера проверки
+     * смотрим реальный стиль текста на его месте, и если там подчёркивание, которого нет
+     * у отрисовщика, строим оформление этих строк заново. Повторный запрос слать
+     * бессмысленно — он теряется там же.
+     */
+    private static final class OrphanUnderlineRepair
+        implements org.eclipse.jface.text.source.IAnnotationModelListener,
+        org.eclipse.jface.text.source.IAnnotationModelListenerExtension
+    {
+        /** Позиции снятых маркеров живут в документе под этой категорией и едут с правками. */
+        private static final String CATEGORY = "tormozit.orphanUnderline"; //$NON-NLS-1$
+        /** Пауза, чтобы отрисовщик успел снять маркер у себя и отправить свой запрос. */
+        private static final int DELAY_MS = 150;
+
+        private static final java.util.Set<Object> WATCHED_MODELS =
+            java.util.Collections.synchronizedSet(
+                java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>()));
+
+        private final java.lang.ref.WeakReference<org.eclipse.jface.text.ITextViewer> viewer;
+        private final java.util.List<org.eclipse.jface.text.Position> removed = new java.util.ArrayList<>();
+        private boolean scheduled;
+
+        private OrphanUnderlineRepair(org.eclipse.jface.text.ITextViewer viewer)
+        {
+            this.viewer = new java.lang.ref.WeakReference<>(viewer);
+        }
+
+        static void install(org.eclipse.jface.text.ITextViewer viewer)
+        {
+            org.eclipse.jface.text.source.IAnnotationModel model =
+                viewer instanceof org.eclipse.jface.text.source.ISourceViewer source
+                    ? source.getAnnotationModel() : null;
+            IDocument doc = viewer == null ? null : viewer.getDocument();
+            if (model == null || doc == null || !WATCHED_MODELS.add(model))
+                return;
+            // Категорию заводим здесь, в UI-потоке: события модели приходят из фоновых
+            if (!doc.containsPositionCategory(CATEGORY))
+            {
+                doc.addPositionCategory(CATEGORY);
+                doc.addPositionUpdater(new org.eclipse.jface.text.DefaultPositionUpdater(CATEGORY));
+            }
+            model.addAnnotationModelListener(new OrphanUnderlineRepair(viewer));
+        }
+
+        private static boolean isValidationMarker(org.eclipse.jface.text.source.Annotation annotation)
+        {
+            String kind = annotation.getClass().getSimpleName();
+            return kind.equals("XtextAnnotation") || kind.endsWith("MarkerAnnotation"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        @Override
+        public void modelChanged(org.eclipse.jface.text.source.AnnotationModelEvent event)
+        {
+            org.eclipse.jface.text.source.Annotation[] gone = event.getRemovedAnnotations();
+            if (gone.length == 0)
+                return;
+            org.eclipse.jface.text.ITextViewer target = viewer.get();
+            IDocument doc = target == null ? null : target.getDocument();
+            if (doc == null)
+                return;
+            // Проверка заменяет все свои маркеры разом; маркер, поставленный заново на то же
+            // место, снятым не считаем
+            java.util.Set<Long> kept = new java.util.HashSet<>();
+            for (org.eclipse.jface.text.source.Annotation annotation : event.getAddedAnnotations())
+            {
+                org.eclipse.jface.text.Position position = isValidationMarker(annotation)
+                    ? event.getAnnotationModel().getPosition(annotation) : null;
+                if (position != null)
+                    kept.add(Long.valueOf(((long)position.getOffset() << 32) | position.getLength()));
+            }
+            boolean arm = false;
+            synchronized (removed)
+            {
+                for (org.eclipse.jface.text.source.Annotation annotation : gone)
+                {
+                    org.eclipse.jface.text.Position position = isValidationMarker(annotation)
+                        ? event.getPositionOfRemovedAnnotation(annotation) : null;
+                    if (position == null || position.getLength() <= 0
+                        || kept.contains(Long.valueOf(((long)position.getOffset() << 32) | position.getLength())))
+                        continue;
+                    org.eclipse.jface.text.Position tracked =
+                        new org.eclipse.jface.text.Position(position.getOffset(), position.getLength());
+                    try
+                    {
+                        doc.addPosition(CATEGORY, tracked);
+                        removed.add(tracked);
+                    }
+                    catch (org.eclipse.jface.text.BadLocationException
+                        | org.eclipse.jface.text.BadPositionCategoryException ignored)
+                    {
+                        // Текст успели изменить или документ сменили — место уже не то,
+                        // проверять нечего
+                    }
+                }
+                if (!removed.isEmpty() && !scheduled)
+                {
+                    scheduled = true;
+                    arm = true;
+                }
+            }
+            if (!arm)
+                return;
+            Display display = Display.getDefault();
+            display.asyncExec(() -> display.timerExec(DELAY_MS, this::repair));
+        }
+
+        @Override
+        public void modelChanged(org.eclipse.jface.text.source.IAnnotationModel model)
+        {
+            // Событие без состава приходит парой с развёрнутым
+        }
+
+        /** UI-поток: проверить места снятых маркеров и переоформить строки с остатком. */
+        private void repair()
+        {
+            java.util.List<org.eclipse.jface.text.Position> check;
+            synchronized (removed)
+            {
+                check = new java.util.ArrayList<>(removed);
+                removed.clear();
+                scheduled = false;
+            }
+            org.eclipse.jface.text.ITextViewer target = viewer.get();
+            StyledText widget = target == null ? null : target.getTextWidget();
+            IDocument doc = target == null ? null : target.getDocument();
+            try
+            {
+                if (widget == null || widget.isDisposed() || doc == null)
+                    return;
+                int from = Integer.MAX_VALUE;
+                int to = -1;
+                for (org.eclipse.jface.text.Position position : check)
+                {
+                    if (position.isDeleted() || position.getLength() <= 0
+                        || !hasOrphanUnderline(target, widget, position))
+                        continue;
+                    from = Math.min(from, position.getOffset());
+                    to = Math.max(to, position.getOffset() + position.getLength());
+                }
+                if (to < 0)
+                    return;
+                // Целыми строками: оформление строится по лексемам
+                int start = doc.getLineInformationOfOffset(from).getOffset();
+                org.eclipse.jface.text.IRegion lastLine = doc.getLineInformationOfOffset(Math.min(to, doc.getLength()));
+                int end = lastLine.getOffset() + lastLine.getLength();
+                if (!(Global.getField(target, "fPresentationReconciler") //$NON-NLS-1$
+                    instanceof org.eclipse.xtext.ui.editor.XtextPresentationReconciler reconciler))
+                    return;
+                // createRepairDescription игнорирует переданный участок и строит оформление
+                // всего документа — так же, как сама подсветка Xtext после каждой правки.
+                // Строить только участок (PresentationReconciler.createPresentation) пробовали
+                // 12.10.2026: оформление «охват 127+39» применялось, а остаток не убирался.
+                // Не менять на частичное без прогона минимального теста.
+                org.eclipse.jface.text.TextPresentation presentation =
+                    reconciler.createRepairDescription(new org.eclipse.jface.text.Region(start, end - start), doc);
+                if (presentation != null)
+                    target.changeTextPresentation(presentation, false);
+            }
+            catch (org.eclipse.jface.text.BadLocationException | RuntimeException ignored)
+            {
+                // Редактор закрыли или текст изменили во время проверки — остаток,
+                // если он есть, снимет следующее срабатывание
+            }
+            finally
+            {
+                if (doc != null)
+                    for (org.eclipse.jface.text.Position position : check)
+                        try
+                        {
+                            doc.removePosition(CATEGORY, position);
+                        }
+                        catch (org.eclipse.jface.text.BadPositionCategoryException ignored)
+                        {
+                            // Категорию убрали вместе с документом
+                        }
+            }
+        }
+
+        /**
+         * Есть ли на месте снятого маркера подчёркивание, которого отрисовщик не знает.
+         * Свои подчёркивания (стиль текста) он держит в {@code fHighlightedDecorationsMap}.
+         */
+        private static boolean hasOrphanUnderline(org.eclipse.jface.text.ITextViewer target,
+            StyledText widget, org.eclipse.jface.text.Position position)
+        {
+            int widgetStart = position.getOffset();
+            int widgetEnd = position.getOffset() + position.getLength();
+            if (target instanceof org.eclipse.jface.text.ITextViewerExtension5 mapping)
+            {
+                widgetStart = mapping.modelOffset2WidgetOffset(position.getOffset());
+                widgetEnd = mapping.modelOffset2WidgetOffset(position.getOffset() + position.getLength());
+            }
+            // Место свёрнуто — остатка не видно, трогать нечего
+            if (widgetStart < 0 || widgetEnd <= widgetStart || widgetEnd > widget.getCharCount())
+                return false;
+            boolean underlined = false;
+            for (org.eclipse.swt.custom.StyleRange style : widget.getStyleRanges(widgetStart, widgetEnd - widgetStart))
+                underlined |= style.underline;
+            if (!underlined)
+                return false;
+            Object painter = null;
+            Object painters = Global.getField(Global.getField(target, "fPaintManager"), "fPainters"); //$NON-NLS-1$ //$NON-NLS-2$
+            if (painters instanceof java.util.Collection<?> list)
+                for (Object candidate : new java.util.ArrayList<>(list))
+                    if (candidate instanceof org.eclipse.jface.text.source.AnnotationPainter)
+                        painter = candidate;
+            Object lock = Global.getField(painter, "fHighlightedDecorationsMapLock"); //$NON-NLS-1$
+            // Не знаем, что рисует отрисовщик, — остаток не установлен, не трогаем
+            if (!(Global.getField(painter, "fHighlightedDecorationsMap") //$NON-NLS-1$
+                instanceof java.util.Map<?, ?> styled) || lock == null)
+                return false;
+            synchronized (lock)
+            {
+                for (Object decoration : styled.values())
+                    if (Global.getField(decoration, "fPosition") //$NON-NLS-1$
+                        instanceof org.eclipse.jface.text.Position drawn
+                        && !drawn.isDeleted()
+                        && drawn.getOffset() < position.getOffset() + position.getLength()
+                        && drawn.getOffset() + drawn.getLength() > position.getOffset())
+                        return false;
+            }
+            return true;
+        }
+    }
+
     /** Через сколько после отмены проверки сторож смотрит, чем кончилось. */
     private static final int VALIDATION_GUARD_DELAY_MS = 500;
     /** Предел перезапусков и предел отложенных проверок сторожа на одну правку текста. */
@@ -2792,7 +3028,7 @@ boolean inLiteral = endCaret >= 0
      * Выключена 06.10.2026 по просьбе автора; сама диагностика не снята — второй сценарий
      * (проверка не планируется после блочной замены) не разобран. Включить: {@code true}.
      */
-    static final boolean STALE_MARKERS_LOG = false;
+    static final boolean STALE_MARKERS_LOG = true;
 
     private static final java.util.Set<org.eclipse.core.runtime.jobs.Job> VALIDATION_JOBS_WATCHED =
         java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>());
