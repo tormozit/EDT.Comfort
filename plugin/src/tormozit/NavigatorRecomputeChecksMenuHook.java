@@ -136,6 +136,7 @@ public final class NavigatorRecomputeChecksMenuHook implements IStartup
             public void menuShown(MenuEvent e)
             {
                 hookComfortSubmenu(menu, viewer);
+                hookReferencesSubmenu(menu, viewer);
             }
         };
         menu.addMenuListener(listener);
@@ -186,40 +187,7 @@ public final class NavigatorRecomputeChecksMenuHook implements IStartup
                 added.add(item);
                 if (viewer != null)
                 {
-                    MenuItem find = ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.PUSH,
-                        "Найти битые ссылки метаданных");
-                    ComfortSubmenuHelper.setMenuItemTooltip(find,
-                        "Найти битые ссылки в выбранных объектах с вложенными и показать в панели Поиск");
-                    find.addSelectionListener(new SelectionAdapter()
-                    {
-                        @Override
-                        public void widgetSelected(SelectionEvent event)
-                        {
-                            ISelection selected = ComfortSubmenuHelper.menuSelection(comfortSub, viewer);
-                            if (selected instanceof IStructuredSelection objects)
-                            {
-                                IResource resource = NavigatorResourceResolver.resolveFirst(objects);
-                                IProject project = resource != null ? resource.getProject()
-                                    : objects.getFirstElement() instanceof IProject root ? root : null;
-                                if (project == null)
-                                    project = Global.getActiveProject(Global.getActivePage(), true);
-                                List<URI> roots = new ArrayList<>();
-                                java.util.Set<Object> visited = java.util.Collections.newSetFromMap(
-                                    new java.util.IdentityHashMap<>());
-                                boolean wholeProject = false;
-                                for (Object node : objects.toList())
-                                    wholeProject |= collectSearchRoots(viewer, node, roots, visited);
-                                Global.tempLog("broken-links-project", "navigator selection=" + objects.toList()
-                                    + " wholeProject=" + wholeProject + " roots=" + roots);
-                                if (wholeProject)
-                                    MdReferenceSupport.findInProject(project);
-                                else
-                                    MdReferenceSupport.findInObjects(project, roots,
-                                        searchScopeLabel(viewer, objects.toList()));
-                            }
-                        }
-                    });
-                    added.add(find);
+                    added.add(createReferencesItem(comfortSub, viewer, true));
 
                     MenuItem unreachable = ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.PUSH,
                         MdReachability.TITLE);
@@ -268,6 +236,89 @@ public final class NavigatorRecomputeChecksMenuHook implements IStartup
             if (!comfortSub.isDisposed())
                 comfortSub.removeMenuListener(subListener);
         });
+    }
+
+    /** Дополняет штатное подменю «Ссылки» навигатора. */
+    private static void hookReferencesSubmenu(Menu contextMenu, CommonViewer viewer)
+    {
+        for (MenuItem item : contextMenu.getItems())
+        {
+            if (!(item.getData() instanceof org.eclipse.jface.action.IContributionItem contribution)
+                || !"referencesSubMenu".equals(contribution.getId()))
+                continue;
+            Menu references = item.getMenu();
+            if (references == null || references.isDisposed()
+                || Boolean.TRUE.equals(references.getData(HOOK_MARKER)))
+                return;
+            references.setData(HOOK_MARKER, Boolean.TRUE);
+            references.addMenuListener(new MenuAdapter()
+            {
+                private MenuItem added;
+
+                @Override
+                public void menuShown(MenuEvent event)
+                {
+                    if (added != null && !added.isDisposed())
+                        added.dispose();
+                    added = createReferencesItem(references, viewer, false);
+                }
+
+                @Override
+                public void menuHidden(MenuEvent event)
+                {
+                    MenuItem previous = added;
+                    added = null;
+                    references.getDisplay().asyncExec(() -> {
+                        if (previous != null && !previous.isDisposed())
+                            previous.dispose();
+                    });
+                }
+            });
+            return;
+        }
+    }
+
+    /** Поиск ссылок выбранных узлов через общий механизм обхода метаданных. */
+    private static MenuItem createReferencesItem(Menu comfortSub, CommonViewer viewer, boolean brokenOnly)
+    {
+        MenuItem find = ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.PUSH,
+            brokenOnly ? "Найти битые ссылки метаданных" : "Найти ссылки в объекте");
+        ComfortSubmenuHelper.setMenuItemTooltip(find,
+            brokenOnly ? "Найти битые ссылки в выбранных объектах с вложенными и показать в панели Поиск"
+                : "Найти все ссылки на метаданные в свойствах выбранных объектов с вложенными и показать в панели Поиск");
+        find.addSelectionListener(new SelectionAdapter()
+        {
+            @Override
+            public void widgetSelected(SelectionEvent event)
+            {
+                ISelection selected = ComfortSubmenuHelper.menuSelection(comfortSub, viewer);
+                if (selected instanceof IStructuredSelection objects)
+                {
+                    IResource resource = NavigatorResourceResolver.resolveFirst(objects);
+                    IProject project = resource != null ? resource.getProject()
+                        : objects.getFirstElement() instanceof IProject root ? root : null;
+                    if (project == null)
+                        project = Global.getActiveProject(Global.getActivePage(), true);
+                    List<URI> roots = new ArrayList<>();
+                    java.util.Set<Object> visited = java.util.Collections.newSetFromMap(
+                        new java.util.IdentityHashMap<>());
+                    boolean wholeProject = false;
+                    for (Object node : objects.toList())
+                        wholeProject |= collectSearchRoots(viewer, node, roots, visited);
+                    Global.tempLog("broken-links-project", "navigator selection=" + objects.toList()
+                        + " wholeProject=" + wholeProject + " roots=" + roots);
+                    if (!brokenOnly)
+                        MdReferenceSupport.findReferencesInObjects(project, wholeProject ? null : roots,
+                            searchScopeLabel(viewer, objects.toList()));
+                    else if (wholeProject)
+                        MdReferenceSupport.findInProject(project);
+                    else
+                        MdReferenceSupport.findInObjects(project, roots,
+                            searchScopeLabel(viewer, objects.toList()));
+                }
+            }
+        });
+        return find;
     }
 
     /**

@@ -126,7 +126,11 @@ public final class GitFileDiffView extends ViewPart
         private final Repository repository;
         /** Новая сторона — индекс («Индексированные изменения»), иначе рабочий каталог. */
         private final boolean staged;
-        private final List<Integer> offsets = new ArrayList<>();
+        /**
+         * Первая строка текста каждого файла. Строка, а не смещение: в заголовки блоков дописываются
+         * имена методов ({@link GitDiffMethods}), и смещения сдвигаются.
+         */
+        private final List<Integer> firstLines = new ArrayList<>();
         /** {@code null} — файла в новой стороне нет (удалён). */
         private final List<String> paths = new ArrayList<>();
 
@@ -140,16 +144,29 @@ public final class GitFileDiffView extends ViewPart
         List<GitDiffMethods.Section> sections()
         {
             List<GitDiffMethods.Section> sections = new ArrayList<>();
-            for (int i = 0; i < offsets.size(); i++)
+            for (int i = 0; i < firstLines.size(); i++)
             {
                 String path = paths.get(i);
                 if (path == null)
                     continue;
-                int start = offsets.get(i).intValue();
-                int end = i + 1 < offsets.size() ? offsets.get(i + 1).intValue() : getLength();
+                int start = offset(i);
+                int end = i + 1 < firstLines.size() ? offset(i + 1) : getLength();
                 sections.add(new GitDiffMethods.Section(start, end - start, path, () -> newText(path)));
             }
             return sections;
+        }
+
+        /** Смещение начала текста файла {@code index}. */
+        private int offset(int index)
+        {
+            try
+            {
+                return getLineOffset(firstLines.get(index).intValue());
+            }
+            catch (BadLocationException e)
+            {
+                return getLength();
+            }
         }
 
         /**
@@ -160,7 +177,7 @@ public final class GitFileDiffView extends ViewPart
         void openFullCompare(int truncationOffset, IWorkbenchPage page)
         {
             String path = null;
-            for (int i = 0; i < offsets.size() && offsets.get(i).intValue() <= truncationOffset; i++)
+            for (int i = 0; i < firstLines.size() && offset(i) <= truncationOffset; i++)
                 path = paths.get(i) != null ? paths.get(i) : path;
             if (path == null)
                 return;
@@ -197,7 +214,8 @@ public final class GitFileDiffView extends ViewPart
 
         void startFile(String path)
         {
-            offsets.add(Integer.valueOf(getLength()));
+            // текст предыдущего файла кончается переводом строки: конец документа — начало новой строки
+            firstLines.add(Integer.valueOf(getNumberOfLines() - 1));
             paths.add(path);
         }
 
@@ -208,16 +226,15 @@ public final class GitFileDiffView extends ViewPart
          */
         Target target(int line) throws BadLocationException
         {
-            int offset = getLineOffset(line);
             int index = -1;
-            for (int i = 0; i < offsets.size() && offsets.get(i).intValue() <= offset; i++)
+            for (int i = 0; i < firstLines.size() && firstLines.get(i).intValue() <= line; i++)
                 index = i;
             if (index < 0 || paths.get(index) == null)
                 return null;
             File file = new File(repository.getWorkTree(), paths.get(index));
             if (!file.isFile())
                 return null;
-            int first = getLineOfOffset(offsets.get(index).intValue());
+            int first = firstLines.get(index).intValue();
             int passed = 0;
             for (int i = line; i >= first; i--)
             {

@@ -7,6 +7,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
+import java.util.function.BiFunction;
 
 import org.eclipse.core.databinding.Binding;
 import org.eclipse.core.databinding.DataBindingContext;
@@ -17,7 +18,12 @@ import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.ScrolledComposite;
 import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.graphics.Point;
+import org.eclipse.emf.ecore.EObject;
+import org.eclipse.emf.ecore.EStructuralFeature;
+import org.eclipse.jface.dialogs.IDialogConstants;
 import org.eclipse.swt.layout.GridData;
+import org.eclipse.swt.layout.GridLayout;
+import org.eclipse.swt.widgets.Button;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
@@ -27,8 +33,10 @@ import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Text;
 import org.eclipse.ui.IStartup;
 
+import com._1c.g5.v8.dt.common.StringUtils;
+
 /**
- * Орфография Hunspell в окне «Строки на разных языках»
+ * Кнопка «Из имени» и орфография Hunspell в окне «Строки на разных языках»
  * ({@code com._1c.g5.v8.dt.ui.dialog.LocalStringDialog} и наследник {@code LocalStringFormatDialog}).
  *
  * <p>Поля этого окна — нативные {@link Text}, а нативное поле не умеет ни рисовать волну, ни
@@ -50,7 +58,7 @@ import org.eclipse.ui.IStartup;
  * здесь: Ctrl+Enter (ОК), разворот свёрнутого многострочного поля при получении фокуса и высота
  * поля при переключении «(раскрыть)/(свернуть)».
  */
-public final class LocalStringDialogSpellCheckHook implements IStartup
+public final class LocalStringDialogHook implements IStartup
 {
     private static final String DIALOG_CLASS =
         "com._1c.g5.v8.dt.ui.dialog.LocalStringDialog"; //$NON-NLS-1$
@@ -60,17 +68,55 @@ public final class LocalStringDialogSpellCheckHook implements IStartup
 
     private static final Set<Shell> ATTACHED = Collections.newSetFromMap(new WeakHashMap<>());
 
+    /** Имя передаётся из создавшего диалог компонента, а не из активного редактора. */
+    private static final Map<Object, String> SOURCE_NAMES = new WeakHashMap<>();
+
     private static boolean filterInstalled;
 
     @Override
     public void earlyStartup()
     {
-        if (!ComfortJdtAvailability.isJdtUiAvailable())
-            return;
+        System.getProperties().put("tormozit.localStringDialog.source", //$NON-NLS-1$
+            (BiFunction<Object, Object, Object>) (dialog, component) ->
+            {
+                String name;
+                if (component instanceof EObject object)
+                    name = sourceName(object);
+                else
+                {
+                    Object model = Global.invoke(component, "getModel"); //$NON-NLS-1$
+                    Object source = Global.invoke(model, "getObject"); //$NON-NLS-1$
+                    name = source instanceof EObject object ? sourceName(object)
+                        : SOURCE_NAMES.get(Global.getField(component, "cellEditor")); //$NON-NLS-1$
+                }
+                if (dialog != null)
+                {
+                    SOURCE_NAMES.remove(dialog);
+                    if (name != null)
+                        SOURCE_NAMES.put(dialog, name);
+                }
+                return dialog;
+            });
         Display display = Display.getDefault();
         if (display == null || display.isDisposed())
             return;
         display.asyncExec(() -> installShellFilter(display));
+    }
+
+    /** Штатное преобразование имени для диалога и контекстного меню поля свойства. */
+    static String textFromName(EObject object)
+    {
+        String name = object == null ? null : sourceName(object);
+        return name == null ? null : StringUtils.nameToText(name);
+    }
+    private static String sourceName(EObject object)
+    {
+        EStructuralFeature feature = object.eClass().getEStructuralFeature("name"); //$NON-NLS-1$
+        // В модели поля набора СКД имя представлено свойством «Путь к данным».
+        if (feature == null && object instanceof com._1c.g5.v8.dt.dcs.model.schema.DataSetField)
+            feature = object.eClass().getEStructuralFeature("dataPath"); //$NON-NLS-1$
+        Object value = feature == null ? null : object.eGet(feature);
+        return value instanceof String name && !name.isBlank() ? name : null;
     }
 
     private static void installShellFilter(Display display)
@@ -82,15 +128,17 @@ public final class LocalStringDialogSpellCheckHook implements IStartup
         {
             if (!(event.widget instanceof Shell shell) || shell.isDisposed())
                 return;
-            if (!SpellCheckHook.isComfortPlatformSpellingActive())
-                return;
             Object dialog = resolveLocalStringDialog(shell);
             if (dialog == null)
                 return;
             if (!ATTACHED.add(shell))
                 return;
             // Подменять на самом Show нельзя: разметка ещё не устоялась, pack даст не ту высоту.
-            shell.getDisplay().asyncExec(() -> attach(shell, dialog));
+            shell.getDisplay().asyncExec(() ->
+            {
+                attach(shell, dialog);
+                NameButton.install(shell, dialog);
+            });
         };
         display.addFilter(SWT.Show, listener);
         display.addFilter(SWT.Activate, listener);
@@ -112,7 +160,8 @@ public final class LocalStringDialogSpellCheckHook implements IStartup
 
     private static void attach(Shell shell, Object dialog)
     {
-        if (shell.isDisposed() || !SpellCheckHook.isComfortPlatformSpellingActive())
+        if (shell.isDisposed() || !ComfortJdtAvailability.isJdtUiAvailable()
+            || !SpellCheckHook.isComfortPlatformSpellingActive())
             return;
         DataBindingContext context = resolveContext(dialog);
         Object localStringsObject = Global.invoke(dialog, "getLocalStrings"); //$NON-NLS-1$
@@ -148,6 +197,92 @@ public final class LocalStringDialogSpellCheckHook implements IStartup
         {
             content.layout(true, true);
             content.pack();
+        }
+    }
+
+    /** Работа с привязками сохраняет штатные modified/валидацию/результат при ОК. */
+    private static final class NameButton
+    {
+        private Control activeField;
+        private IObservableValue<?> activeValue;
+        private Button button;
+
+        static void install(Shell shell, Object dialog)
+        {
+            if (shell.isDisposed())
+                return;
+            String name = SOURCE_NAMES.remove(dialog);
+            DataBindingContext context = resolveContext(dialog);
+            Object strings = Global.invoke(dialog, "getLocalStrings"); //$NON-NLS-1$
+            Object okObject = Global.invoke(dialog, "getButton", IDialogConstants.OK_ID); //$NON-NLS-1$
+            if (name == null || context == null || !(strings instanceof List<?> localStrings)
+                || !(okObject instanceof Button ok) || ok.isDisposed()
+                || Boolean.TRUE.equals(Global.getField(dialog, "isReadOnly"))) //$NON-NLS-1$
+                return;
+            Composite bar = ok.getParent();
+            if (!(bar.getLayout() instanceof GridLayout layout))
+                return;
+            NameButton session = new NameButton();
+            Object language = Global.invoke(dialog, "getLanguageCode"); //$NON-NLS-1$
+            for (Object candidate : context.getBindings())
+            {
+                if (!(candidate instanceof Binding binding)
+                    || !(binding.getTarget() instanceof ISWTObservableValue<?> target)
+                    || !(target.getWidget() instanceof Control field) || field.isDisposed()
+                    || !field.isVisible() || !editable(field))
+                    continue;
+                Object localString = localStringFor(localStrings, binding.getModel());
+                if (localString == null || !(binding.getModel() instanceof IObservableValue<?> value))
+                    continue;
+                field.addListener(SWT.FocusIn, event -> session.activate(field, value));
+                if (field.isFocusControl()
+                    || session.activeField == null && language != null
+                        && language.equals(Global.invoke(localString, "getLanguageCode"))) //$NON-NLS-1$
+                    session.activate(field, value);
+            }
+            Button button = new Button(bar, SWT.PUSH);
+            session.button = button;
+            button.setText("Из имени");
+            button.setFont(ok.getFont());
+            button.setToolTipText(TooltipText.wrap(button,
+                "Полностью заменить текст активного языкового поля текстом из имени объекта"
+                    + Global.pluginSignForTooltip()));
+            button.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, false, false));
+            button.moveAbove(ok);
+            layout.numColumns++;
+            button.setEnabled(session.activeValue != null);
+            // FocusOut не сбрасывает активное поле: к моменту Selection фокус уже у кнопки.
+            button.addListener(SWT.Selection, event -> session.replace(StringUtils.nameToText(name)));
+            bar.layout(true, true);
+            shell.layout(true, true);
+        }
+
+        private static boolean editable(Control field)
+        {
+            return field.isEnabled() && (field instanceof Text text && text.getEditable()
+                || field instanceof StyledText styled && styled.getEditable());
+        }
+
+        private void activate(Control field, IObservableValue<?> value)
+        {
+            activeField = field;
+            activeValue = value;
+            if (button != null && !button.isDisposed())
+                button.setEnabled(true);
+        }
+
+        @SuppressWarnings("unchecked")
+        private void replace(String text)
+        {
+            if (activeField == null || activeField.isDisposed() || !editable(activeField)
+                || activeValue == null || activeValue.isDisposed())
+                return;
+            ((IObservableValue<String>) activeValue).setValue(text);
+            activeField.setFocus();
+            if (activeField instanceof Text field)
+                field.setSelection(field.getCharCount());
+            else if (activeField instanceof StyledText field)
+                field.setCaretOffset(field.getCharCount());
         }
     }
 

@@ -465,6 +465,7 @@ public class FormEditorHook implements IStartup
         display.addFilter(SWT.MouseDoubleClick, FormEditorHook::handleMouseDoubleClick);
         display.addFilter(SWT.MenuDetect, FormEditorHook::handleMenuDetect);
         WysiwygHeaderClick.install(display);
+        Preview.install();
         TabCounts.install();
         AttributesDrop.install();
         AttributesTypePresentation.install();
@@ -479,6 +480,276 @@ public class FormEditorHook implements IStartup
         FormPaste.install();
         AppearancePage.install();
         ConditionalAppearanceCellStyle.install(display);
+    }
+
+    /** Регистрируется из Activator до создания редакторов; здесь нет обращений к UI. */
+    static void installPreviewCallbacks()
+    {
+        Preview.installCallbacks();
+    }
+
+    /** Переключатель макета и замеры: API и поля проверены в form-ui/form-presentation. */
+    private static final class Preview
+    {
+        private static final String LOG = "form-preview"; //$NON-NLS-1$
+        private static final String REPRESENTATION =
+            "com._1c.g5.v8.dt.form.internal.presentation.wysiwyg.FormWysiwygRepresentation"; //$NON-NLS-1$
+        private static final long SLOW_MS = 2000;
+        private static final EditorMemoryStore STORE =
+            new EditorMemoryStore("formPreview.entries", 2000); //$NON-NLS-1$
+        private static final Map<Object, PreviewState> STATES = new WeakHashMap<>();
+        private static final Map<Object, Long> OPEN_STARTS = new WeakHashMap<>();
+
+        static void installCallbacks()
+        {
+            System.getProperties().put("tormozit.formPreview.allowed", //$NON-NLS-1$
+                (java.util.function.BiFunction<Object, Boolean, Boolean>) (representation, original) -> {
+                    try
+                    {
+                        PreviewState state = state(representation);
+                        boolean allowed = original && (state == null || state.visible);
+                        Global.tempLog(LOG, "gate key=" + (state == null ? "<no-form>" : state.key) //$NON-NLS-1$ //$NON-NLS-2$
+                            + " original=" + original + " allowed=" + allowed); //$NON-NLS-1$ //$NON-NLS-2$
+                        return allowed;
+                    }
+                    catch (RuntimeException e)
+                    {
+                        Global.tempLogException(LOG, "gate", e); //$NON-NLS-1$
+                        return original;
+                    }
+                });
+            System.getProperties().put("tormozit.formPreview.event", //$NON-NLS-1$
+                (java.util.function.BiFunction<Object, String, Object>) (source, phase) -> {
+                    try
+                    {
+                        event(source, phase);
+                    }
+                    catch (RuntimeException e)
+                    {
+                        Global.tempLogException(LOG, phase, e);
+                    }
+                    return null;
+                });
+            Global.tempLog(LOG, "callbacks installed"); //$NON-NLS-1$
+        }
+
+        static void install()
+        {
+            trackFormEditors(editor -> attach(findFormPage(editor)));
+        }
+
+        private static String key(Form form)
+        {
+            IResourceLookup lookup = Global.getOsgiService(IResourceLookup.class);
+            IFile file = lookup != null ? lookup.getPlatformResource(form) : null;
+            return file != null ? file.getFullPath().toString() : EcoreUtil.getURI(form).toString();
+        }
+
+        private static synchronized PreviewState state(Object representation)
+        {
+            if (representation == null)
+                return null;
+            PreviewState state = STATES.get(representation);
+            if (state == null && Global.getField(representation, "form") instanceof Form form) //$NON-NLS-1$
+            {
+                String key = key(form);
+                state = new PreviewState(key, !"false".equals(STORE.load(key))); //$NON-NLS-1$
+                STATES.put(representation, state);
+            }
+            return state;
+        }
+
+        private static void event(Object source, String phase)
+        {
+            long now = System.nanoTime();
+            Global.tempLog(LOG, phase);
+            if (phase.startsWith("open.")) //$NON-NLS-1$
+            {
+                if ("open.begin".equals(phase)) //$NON-NLS-1$
+                {
+                    synchronized (OPEN_STARTS)
+                    {
+                        OPEN_STARTS.put(source, now);
+                    }
+                }
+                else if (source instanceof FormEditorPage page)
+                {
+                    Long start;
+                    synchronized (OPEN_STARTS)
+                    {
+                        start = OPEN_STARTS.remove(source);
+                    }
+                    String key = page.getModel() != null ? key(page.getModel()) : "<no-form>"; //$NON-NLS-1$
+                    Global.tempLog(LOG, phase + " key=" + key + " visible=" + !"false".equals(STORE.load(key)) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        + " controlsMs=" + (start == null ? -1 : (now - start) / 1_000_000)); //$NON-NLS-1$
+                    if ("open.end".equals(phase)) //$NON-NLS-1$
+                    {
+                        attach(page);
+                        PreviewState state = state(wysiwygRepresentation(page));
+                        if (state != null && start != null)
+                        {
+                            state.openingStartedNanos = start;
+                            state.logOpening();
+                        }
+                    }
+                }
+                return;
+            }
+            PreviewState state = state(source);
+            if (state == null)
+                return;
+            if ("render.begin".equals(phase)) //$NON-NLS-1$
+            {
+                state.starts.push(now);
+                return;
+            }
+            long ms = state.starts.isEmpty() ? -1 : (now - state.starts.pop()) / 1_000_000;
+            Global.tempLog(LOG, phase + " key=" + state.key + " ms=" + ms //$NON-NLS-1$ //$NON-NLS-2$
+                + " first=" + !state.rendered + " visible=" + state.visible + " slow=" + (ms > SLOW_MS)); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            if (!state.rendered && "render.end".equals(phase)) //$NON-NLS-1$
+            {
+                state.rendered = true;
+                state.firstRenderMs = ms;
+                state.firstRenderFinishedNanos = now;
+                state.logOpening();
+                // Макет построен до подключения тулбара — уведомление покажет attach().
+                FormEditorPage page = state.page.get();
+                if (page != null)
+                    page.getPartControl().getDisplay().asyncExec(state::notifySlow);
+            }
+        }
+
+        private static void attach(FormEditorPage page)
+        {
+            if (page == null || !(Global.getField(page, "itemsActionGroupManager") instanceof ToolBarManager manager)) //$NON-NLS-1$
+                return;
+            ToolBar bar = manager.getControl();
+            if (bar == null || bar.isDisposed() || bar.getData(LOG) != null)
+                return;
+            Object representation = wysiwygRepresentation(page);
+            PreviewState state = state(representation);
+            if (state == null)
+                return;
+            state.page = new java.lang.ref.WeakReference<>(page);
+            Action action = new Action("Скрыть макет формы", IAction.AS_CHECK_BOX) //$NON-NLS-1$
+            {
+                @Override
+                public void run()
+                {
+                    state.setVisible(!isChecked());
+                }
+            };
+            action.setId("tormozit.formPreview"); //$NON-NLS-1$
+            Image icon = ItemsTree.headerIcon(bar.getDisplay(), ItemsTree.ICON_INVISIBLE);
+            if (icon != null)
+            {
+                action.setImageDescriptor(ImageDescriptor.createFromImage(icon));
+                action.setText(""); //$NON-NLS-1$
+            }
+            action.setChecked(!state.visible);
+            action.setToolTipText(TooltipText.wrap(bar,
+                "Скрыть макет формы и отключить его обновление. Нажатая кнопка означает," //$NON-NLS-1$
+                    + " что макет скрыт. Выбор сохраняется отдельно для каждой формы." //$NON-NLS-1$
+                    + Global.pluginSignForTooltip()));
+            String patch = System.getProperty("tormozit.formPreview.patch." + REPRESENTATION); //$NON-NLS-1$
+            action.setEnabled("ok".equals(patch)); //$NON-NLS-1$
+            state.action = action;
+            bar.setData(LOG, state);
+            manager.add(new Separator());
+            manager.add(action);
+            manager.update(true);
+            bar.getParent().layout(true, true);
+            Global.tempLog(LOG, "attach key=" + state.key + " visible=" + state.visible + " patch=" + patch); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            if (action.isEnabled())
+                state.applyVisibility();
+            bar.getDisplay().asyncExec(state::notifySlow);
+        }
+
+        private static final class PreviewState
+        {
+            final String key;
+            final java.util.Deque<Long> starts = new java.util.ArrayDeque<>();
+            volatile boolean visible;
+            boolean warnOnOpening;
+            boolean rendered;
+            boolean notified;
+            boolean openingLogged;
+            long firstRenderMs;
+            long openingStartedNanos;
+            long firstRenderFinishedNanos;
+            java.lang.ref.WeakReference<FormEditorPage> page = new java.lang.ref.WeakReference<>(null);
+            Action action;
+
+            PreviewState(String key, boolean visible)
+            {
+                this.key = key;
+                this.visible = visible;
+                warnOnOpening = visible;
+            }
+
+            void logOpening()
+            {
+                if (openingLogged || openingStartedNanos == 0 || visible && !rendered)
+                    return;
+                openingLogged = true;
+                Global.tempLog(LOG, "opening key=" + key + " visible=" + visible //$NON-NLS-1$ //$NON-NLS-2$
+                    + " openToFirstRenderMs=" + (rendered //$NON-NLS-1$
+                        ? (firstRenderFinishedNanos - openingStartedNanos) / 1_000_000 : -1)
+                    + " renderMs=" + (rendered ? firstRenderMs : -1)); //$NON-NLS-1$
+            }
+
+            void setVisible(boolean value)
+            {
+                FormEditorPage current = page.get();
+                if (current == null || current.getPartControl() == null || current.getPartControl().isDisposed())
+                    return;
+                // Пользователь выбрал режим сам: отменяем и ожидающее уведомление об открытии.
+                warnOnOpening = false;
+                visible = value;
+                STORE.updateMemory(key, Boolean.toString(value));
+                STORE.flush();
+                action.setChecked(!value);
+                applyVisibility();
+                Global.tempLog(LOG, "toggle key=" + key + " visible=" + value); //$NON-NLS-1$ //$NON-NLS-2$
+                if (value)
+                {
+                    Object viewer = Global.getField(current, "wysiwygViewer"); //$NON-NLS-1$
+                    Global.invokeVoid(viewer, "refresh"); //$NON-NLS-1$
+                }
+            }
+
+            void applyVisibility()
+            {
+                FormEditorPage current = page.get();
+                Object representation = wysiwygRepresentation(current);
+                Object scrolled = representation == null ? null : Global.getField(representation, "scrolledComposite"); //$NON-NLS-1$
+                if (!(scrolled instanceof Control preview) || preview.isDisposed()
+                    || !(preview.getParent() instanceof org.eclipse.swt.custom.SashForm sash))
+                    return;
+                Control other = Arrays.stream(sash.getChildren()).filter(child -> child != preview
+                    && !(child instanceof org.eclipse.swt.widgets.Sash)).findFirst().orElse(null);
+                if (visible)
+                    sash.setMaximizedControl(null);
+                else if (other != null)
+                    sash.setMaximizedControl(other);
+            }
+
+            void notifySlow()
+            {
+                FormEditorPage current = page.get();
+                if (!warnOnOpening || notified || !rendered || !visible || firstRenderMs <= SLOW_MS || action == null
+                    || !action.isEnabled() || current == null || current.getPartControl() == null
+                    || current.getPartControl().isDisposed())
+                    return;
+                notified = true;
+                ToastNotification.show("Макет формы", //$NON-NLS-1$
+                    "Отрисовка макета при открытии заняла " //$NON-NLS-1$
+                        + String.format(Locale.ROOT, "%.1f", firstRenderMs / 1000.0) //$NON-NLS-1$
+                        + " с. Отключите его, чтобы ускорить работу с этой формой. " //$NON-NLS-1$
+                        + "Включить макет снова можно кнопкой с перечёркнутым глазом над деревом элементов.", //$NON-NLS-1$
+                    15_000, () -> setVisible(false), "Отключить макет"); //$NON-NLS-1$
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -2747,6 +3018,19 @@ public class FormEditorHook implements IStartup
     // Язык и вариант встроенного языка редактируемой формы
     // -----------------------------------------------------------------------
 
+    private static Form safeModel(FormEditorPage page)
+    {
+        try
+        {
+            Form form = page.getModel();
+            return form == null || form.eIsProxy() ? null : form;
+        }
+        catch (RuntimeException e)
+        {
+            return null;
+        }
+    }
+
     private static IV8Project formV8Project(FormEditorPage page)
     {
         Object manager = page != null ? Global.getField(page, "v8projectManager") : null; //$NON-NLS-1$
@@ -2957,6 +3241,25 @@ public class FormEditorHook implements IStartup
         }
     }
 
+    /** Hide приходит от скрываемого предка; сам дочерний Tree отдельного Hide не получает. */
+    private static void watchHiddenAncestors(Control control, Runnable hidden)
+    {
+        List<Control> ancestors = new ArrayList<>();
+        Listener listener = event -> hidden.run();
+        for (Control current = control; current != null; current = current.getParent())
+        {
+            current.addListener(SWT.Hide, listener);
+            ancestors.add(current);
+        }
+        control.addDisposeListener(event ->
+        {
+            hidden.run();
+            for (Control ancestor : ancestors)
+                if (!ancestor.isDisposed())
+                    ancestor.removeListener(SWT.Hide, listener);
+        });
+    }
+
     // -----------------------------------------------------------------------
     // Наследуемые заголовки: фоновое разрешение ссылок (InheritedTitles)
     // -----------------------------------------------------------------------
@@ -2978,9 +3281,9 @@ public class FormEditorHook implements IStartup
      * читается из него на каждой отрисовке обычным чтением многоязычной строки — это дёшево и
      * не требует инвалидации кеша, когда пользователь правит заголовок.
      *
-     * <p>Первый проход идёт по всей модели формы сразу при подключении к дереву: так колонка
-     * заполняется целиком, и отбор по заголовкам ищет по всем строкам, а не только по видимым.
-     * Элементы, добавленные позже, встают в очередь при первой же отрисовке.
+     * <p>Пока дерево показано, в фоне загружаются заголовки всех элементов формы, включая
+     * строки вне экрана. Отбор сначала показывает результат по готовым данным, после первого
+     * кадра возобновляет загрузку и дополняет совпадения. Скрытие дерева приостанавливает очередь.
      */
     private static final class InheritedTitles
     {
@@ -3063,11 +3366,19 @@ public class FormEditorHook implements IStartup
             Job job;
 
             boolean scheduled;
+
+            boolean filterAwaitingPaint = true;
+
+            boolean filterRefreshNeeded;
+
+            volatile int filterGeneration;
+
+            volatile boolean shown;
         }
 
         /**
          * Подключение к дереву элементов: запоминаем просмотрщик (его строки потом обновляем)
-         * и ставим в очередь всю модель формы.
+         * и возобновляем очередь только при отрисовке показанного дерева.
          */
         static void install(FormEditorPage page, TreeViewer viewer, Tree tree)
         {
@@ -3076,11 +3387,15 @@ public class FormEditorHook implements IStartup
             PageState state = state(page);
             state.viewer = viewer;
             state.tree = tree;
+            state.shown = tree.isVisible();
+            watchHiddenAncestors(tree, () ->
+            {
+                state.shown = false;
+                state.filterAwaitingPaint = true;
+                tree.setData(ItemsTree.KEY_REFRESH_STAMP, null);
+            });
             tree.addListener(SWT.Dispose, event -> dispose(page));
-            Form form = safeModel(page);
-            if (form != null)
-                enqueueAll(state, form);
-            schedule(page, state);
+            tree.addListener(SWT.Paint, event -> onPaint(page, state));
         }
 
         /** Источник из кеша; при промахе элемент встаёт в очередь и вернётся пустой заголовок. */
@@ -3162,8 +3477,6 @@ public class FormEditorHook implements IStartup
                 return null;
             // Команда не из формы: её имя составное («Объект.Команда») — точка в имени и есть признак.
             String name = commandFullName(command);
-            Global.tempLog("formButtonCommandKind", item.getName() + " -> " + name //$NON-NLS-1$ //$NON-NLS-2$
-                + " class=" + command.getClass().getName() + " object=" + source.object); //$NON-NLS-1$ //$NON-NLS-2$
             return name != null && name.indexOf('.') >= 0 ? "Г" : null; //$NON-NLS-1$
         }
 
@@ -3214,6 +3527,66 @@ public class FormEditorHook implements IStartup
                 state.job.cancel();
         }
 
+        /** Смена отбора: ни один фоновый запуск не опережает первый кадр результата. */
+        static void filterChanged(FormEditorPage page)
+        {
+            PageState state = STATES.get(page);
+            if (state == null)
+                return;
+            state.filterGeneration++;
+            state.filterAwaitingPaint = true;
+            state.filterRefreshNeeded = false;
+            state.pending.clear();
+        }
+
+        private static void onPaint(FormEditorPage page, PageState state)
+        {
+            if (!isVisible(state) || STATES.get(page) != state)
+                return;
+            state.shown = true;
+            if (!state.filterAwaitingPaint)
+            {
+                schedule(page, state);
+                return;
+            }
+            int generation = state.filterGeneration;
+            state.tree.getDisplay().timerExec(0, () ->
+            {
+                if (STATES.get(page) != state || !isVisible(state)
+                    || generation != state.filterGeneration || !state.filterAwaitingPaint)
+                    return;
+                state.filterAwaitingPaint = false;
+                Form form = safeModel(page);
+                if (form != null)
+                    enqueueAll(state, form);
+                SmartMatcher matcher = ItemsTree.matcherOf(state.tree);
+                if (matcher != null && !matcher.isEmpty && state.filterRefreshNeeded)
+                    ItemsTree.refreshFilterResults(state.viewer, state.tree);
+                state.filterRefreshNeeded = false;
+                schedule(page, state);
+            });
+        }
+
+        private static boolean isVisible(PageState state)
+        {
+            return state.tree != null && !state.tree.isDisposed() && state.tree.isVisible();
+        }
+
+        /** UI: показанное дерево обслуживает всю очередь, независимо от прокрутки. */
+        private static List<FormItem> requested(PageState state)
+        {
+            List<FormItem> result = new ArrayList<>(BATCH);
+            if (!state.shown || !isVisible(state) || state.filterAwaitingPaint)
+                return result;
+            for (FormItem item : state.pending)
+            {
+                result.add(item);
+                if (result.size() >= BATCH)
+                    break;
+            }
+            return result;
+        }
+
         private static void enqueueAll(PageState state, Form form)
         {
             for (FormItem item : form.getItems())
@@ -3241,8 +3614,7 @@ public class FormEditorHook implements IStartup
          */
         private static void schedule(FormEditorPage page, PageState state)
         {
-            if (state.scheduled || state.pending.isEmpty() || state.tree == null
-                || state.tree.isDisposed())
+            if (state.scheduled || state.pending.isEmpty() || requested(state).isEmpty())
                 return;
             state.scheduled = true;
             if (state.job == null)
@@ -3269,6 +3641,7 @@ public class FormEditorHook implements IStartup
         private static void runBatch(FormEditorPage page, PageState state, IProgressMonitor monitor)
         {
             List<FormItem> batch = new ArrayList<>(BATCH);
+            int[] generation = new int[1];
             Display display = Display.getDefault();
             if (display == null || display.isDisposed())
                 return;
@@ -3276,11 +3649,10 @@ public class FormEditorHook implements IStartup
             {
                 // Очередь живёт в UI-потоке — снимок берём оттуда же, а не читаем её из джоба.
                 display.syncExec(() -> {
-                    for (FormItem item : state.pending)
+                    if (STATES.get(page) == state)
                     {
-                        batch.add(item);
-                        if (batch.size() >= BATCH)
-                            break;
+                        batch.addAll(requested(state));
+                        generation[0] = state.filterGeneration;
                     }
                 });
             }
@@ -3290,30 +3662,38 @@ public class FormEditorHook implements IStartup
             }
             if (batch.isEmpty())
             {
-                display.asyncExec(() -> state.scheduled = false);
+                display.asyncExec(() ->
+                {
+                    state.scheduled = false;
+                    if (STATES.get(page) == state)
+                        schedule(page, state);
+                });
                 return;
             }
             Map<FormItem, Source> computed = new HashMap<>();
             for (FormItem item : batch)
             {
-                if (monitor != null && monitor.isCanceled())
+                if (!state.shown || generation[0] != state.filterGeneration
+                    || (monitor != null && monitor.isCanceled()))
                     break;
                 computed.put(item, resolve(item));
             }
-            display.asyncExec(() -> apply(page, state, batch, computed));
+            display.asyncExec(() -> apply(page, state, computed));
         }
 
-        private static void apply(FormEditorPage page, PageState state, List<FormItem> batch,
-            Map<FormItem, Source> computed)
+        private static void apply(FormEditorPage page, PageState state, Map<FormItem, Source> computed)
         {
             state.scheduled = false;
-            for (FormItem item : batch)
+            if (STATES.get(page) != state)
+                return;
+            for (FormItem item : computed.keySet())
             {
-                // Из очереди уходит КАЖДЫЙ взятый элемент — иначе джоб зациклится на неудачном.
+                // Отменённая часть пачки остаётся в очереди до следующего показа.
                 state.pending.remove(item);
                 state.resolved.put(item, computed.getOrDefault(item, NONE));
             }
-            refresh(state, batch);
+            if (!computed.isEmpty())
+                refresh(state, new ArrayList<>(computed.keySet()));
             schedule(page, state);
         }
 
@@ -3333,15 +3713,21 @@ public class FormEditorHook implements IStartup
             SmartMatcher matcher = ItemsTree.matcherOf(tree);
             if (matcher != null && !matcher.isEmpty)
             {
-                viewer.refresh();
-                viewer.expandAll();
+                // Последняя начатая операция могла закончиться уже после скрытия дерева.
+                // Не теряем её новые совпадения даже при полностью опустевшей очереди.
+                if (!tree.isVisible() || state.filterAwaitingPaint)
+                    state.filterRefreshNeeded = true;
+                else
+                    ItemsTree.refreshFilterResults(viewer, tree);
                 return;
             }
+            if (!tree.isVisible())
+                return;
             Set<FormItem> updated = new HashSet<>(batch);
-            for (TreeItem row : ItemsTree.visibleRows(tree))
+            for (TreeItem row : ItemsTree.updateRows(tree))
             {
                 if (row.getData() != null && updated.contains(ItemsTree.domainItem(row.getData())))
-                    viewer.update(row.getData(), null);
+                    DecorationRelay.updateItem(viewer, row);
             }
         }
 
@@ -3417,19 +3803,6 @@ public class FormEditorHook implements IStartup
             return best;
         }
 
-        private static Form safeModel(FormEditorPage page)
-        {
-            try
-            {
-                Form form = page.getModel();
-                return form == null || form.eIsProxy() ? null : form;
-            }
-            catch (RuntimeException e)
-            {
-                return null;
-            }
-        }
-
         private InheritedTitles()
         {
         }
@@ -3447,8 +3820,8 @@ public class FormEditorHook implements IStartup
      * <ul>
      *   <li>в ячейку ставится уже готовый {@link Image} из кеша;</li>
      *   <li>промах кеша ставит картинку в очередь фонового джоба и возвращает {@code null};</li>
-     *   <li>очередь наполняется только из провайдеров подписи видимых строк — невидимые
-     *       элементы и команды не грузятся, пока до них не дойдёт прокрутка или раскрытие.</li>
+     *   <li>показанное дерево загружает картинки всех элементов в фоне; скрытие приостанавливает
+     *       очередь. Обновление строк — экран плюс один экран сверху и снизу; при прокрутке берётся кеш.</li>
      * </ul>
      *
      * <p>Кеш общий на страницу редактора: одна и та же {@link Picture} (кнопка и её команда,
@@ -3485,6 +3858,16 @@ public class FormEditorHook implements IStartup
             Job job;
 
             boolean scheduled;
+
+            boolean itemsShown;
+
+            boolean allItemsQueued;
+
+            boolean enqueueScheduled;
+
+            boolean commandsShown;
+
+            volatile Set<Picture> activePictures = Set.of();
         }
 
         /**
@@ -3540,6 +3923,24 @@ public class FormEditorHook implements IStartup
             PageState state = state(page);
             state.itemsViewer = viewer;
             state.itemsTree = tree;
+            state.itemsShown = tree.isVisible();
+            watchHiddenAncestors(tree, () ->
+            {
+                state.itemsShown = false;
+                state.allItemsQueued = false;
+                requested(state);
+            });
+            tree.addListener(SWT.Paint, event ->
+            {
+                state.itemsShown = tree.isVisible();
+                if (!state.allItemsQueued)
+                    enqueueAfterPaint(page, state);
+                else
+                {
+                    requested(state);
+                    schedule(page, state);
+                }
+            });
             tree.addListener(SWT.Dispose, event -> {
                 PageState current = STATES.get(page);
                 if (current == null)
@@ -3560,6 +3961,18 @@ public class FormEditorHook implements IStartup
                 return;
             PageState state = state(page);
             state.commandsViewer = viewer;
+            state.commandsShown = table.isVisible();
+            watchHiddenAncestors(table, () ->
+            {
+                state.commandsShown = false;
+                requested(state);
+            });
+            table.addListener(SWT.Paint, event ->
+            {
+                state.commandsShown = table.isVisible();
+                requested(state);
+                schedule(page, state);
+            });
             table.addListener(SWT.Dispose, event -> {
                 PageState current = STATES.get(page);
                 if (current == null)
@@ -3604,9 +4017,78 @@ public class FormEditorHook implements IStartup
             state.pending.clear();
         }
 
+        /** Заполнить очередь всех элементов только после завершения первого кадра дерева. */
+        private static void enqueueAfterPaint(FormEditorPage page, PageState state)
+        {
+            if (state.enqueueScheduled)
+                return;
+            state.enqueueScheduled = true;
+            state.itemsTree.getDisplay().timerExec(0, () ->
+            {
+                state.enqueueScheduled = false;
+                if (STATES.get(page) != state || state.itemsTree == null
+                    || state.itemsTree.isDisposed() || !state.itemsTree.isVisible() || !state.itemsShown)
+                    return;
+                Form form = safeModel(page);
+                if (form != null)
+                    for (FormItem item : form.getItems())
+                        enqueueItem(state, item, 0);
+                state.allItemsQueued = true;
+                requested(state);
+                schedule(page, state);
+            });
+        }
+
+        private static void enqueueItem(PageState state, FormItem item, int depth)
+        {
+            if (item == null || depth > 32)
+                return;
+            Picture picture = pictureOf(item);
+            if (picture != null && !state.images.containsKey(picture) && !state.empty.contains(picture))
+                state.pending.add(picture);
+            if (item instanceof FormItemContainer container)
+                for (FormItem child : container.getItems())
+                    enqueueItem(state, child, depth + 1);
+        }
+
+        /** UI: показанное дерево обслуживает всю очередь; отдельно видимый список команд — свои строки. */
+        private static List<Picture> requested(PageState state)
+        {
+            Set<Picture> needed = new LinkedHashSet<>();
+            Tree tree = state.itemsTree;
+            if (state.itemsShown && state.allItemsQueued && tree != null
+                && !tree.isDisposed() && tree.isVisible())
+            {
+                for (Picture picture : state.pending)
+                {
+                    needed.add(picture);
+                    if (needed.size() >= BATCH)
+                        break;
+                }
+            }
+            TableViewer viewer = state.commandsViewer;
+            if (state.commandsShown && viewer != null && !viewer.getTable().isDisposed()
+                && viewer.getTable().isVisible())
+            {
+                org.eclipse.swt.widgets.Table table = viewer.getTable();
+                int top = table.getTopIndex();
+                int bottom = Math.min(table.getItemCount(), top + visibleCommandLimit(table));
+                for (int i = top; i < bottom; i++)
+                    if (table.getItem(i).getData() instanceof FormCommand command)
+                    {
+                        Picture picture = pictureOf(command);
+                        if (picture != null && state.pending.contains(picture))
+                            needed.add(picture);
+                    }
+            }
+            state.activePictures = Set.copyOf(needed);
+            List<Picture> result = new ArrayList<>(needed);
+            return result.size() > BATCH ? new ArrayList<>(result.subList(0, BATCH)) : result;
+        }
+
         private static void schedule(FormEditorPage page, PageState state)
         {
-            if (state.scheduled || state.pending.isEmpty())
+            if (state.scheduled || state.pending.isEmpty() || requested(state).isEmpty())
                 return;
             state.scheduled = true;
             if (state.job == null)
@@ -3639,12 +4121,8 @@ public class FormEditorHook implements IStartup
             try
             {
                 display.syncExec(() -> {
-                    for (Picture picture : state.pending)
-                    {
-                        batch.add(picture);
-                        if (batch.size() >= BATCH)
-                            break;
-                    }
+                    if (STATES.get(page) == state)
+                        batch.addAll(requested(state));
                 });
             }
             catch (SWTException e)
@@ -3653,7 +4131,12 @@ public class FormEditorHook implements IStartup
             }
             if (batch.isEmpty())
             {
-                display.asyncExec(() -> state.scheduled = false);
+                display.asyncExec(() ->
+                {
+                    state.scheduled = false;
+                    if (STATES.get(page) == state)
+                        schedule(page, state);
+                });
                 return;
             }
             IPictureManager manager = pictureManager();
@@ -3662,9 +4145,11 @@ public class FormEditorHook implements IStartup
             {
                 if (monitor != null && monitor.isCanceled())
                     break;
+                if (!state.activePictures.contains(picture))
+                    continue;
                 loaded.put(picture, loadImageData(picture, manager));
             }
-            display.asyncExec(() -> apply(page, state, batch, loaded));
+            display.asyncExec(() -> apply(page, state, loaded));
         }
 
         private static IPictureManager pictureManager()
@@ -3707,12 +4192,13 @@ public class FormEditorHook implements IStartup
             }
         }
 
-        private static void apply(FormEditorPage page, PageState state, List<Picture> batch,
-            Map<Picture, ImageData> loaded)
+        private static void apply(FormEditorPage page, PageState state, Map<Picture, ImageData> loaded)
         {
             state.scheduled = false;
+            if (STATES.get(page) != state)
+                return;
             Display display = Display.getCurrent();
-            for (Picture picture : batch)
+            for (Picture picture : loaded.keySet())
             {
                 state.pending.remove(picture);
                 ImageData data = loaded.get(picture);
@@ -3726,7 +4212,9 @@ public class FormEditorHook implements IStartup
                 if (previous != null && previous != image && !previous.isDisposed())
                     previous.dispose();
             }
-            refresh(state, batch);
+            if (!loaded.isEmpty())
+                refresh(state, new ArrayList<>(loaded.keySet()));
+            requested(state);
             schedule(page, state);
         }
 
@@ -3742,16 +4230,16 @@ public class FormEditorHook implements IStartup
             TreeViewer viewer = state.itemsViewer;
             Tree tree = state.itemsTree;
             if (viewer == null || tree == null || tree.isDisposed()
-                || viewer.getControl().isDisposed())
+                || viewer.getControl().isDisposed() || !tree.isVisible())
                 return;
-            for (TreeItem row : ItemsTree.visibleRows(tree))
+            for (TreeItem row : ItemsTree.updateRows(tree))
             {
                 if (row.isDisposed() || row.getData() == null)
                     continue;
                 FormItem item = ItemsTree.domainItem(row.getData());
                 Picture picture = pictureOf(item);
                 if (picture != null && updated.contains(picture))
-                    viewer.update(row.getData(), null);
+                    DecorationRelay.updateItem(viewer, row);
             }
         }
 
@@ -3761,7 +4249,7 @@ public class FormEditorHook implements IStartup
             if (viewer == null || viewer.getControl() == null || viewer.getControl().isDisposed())
                 return;
             org.eclipse.swt.widgets.Table table = viewer.getTable();
-            if (table.isDisposed())
+            if (table.isDisposed() || !table.isVisible())
                 return;
             int top = table.getTopIndex();
             int bottom = Math.min(table.getItemCount(), top + visibleCommandLimit(table));
@@ -5898,62 +6386,183 @@ public class FormEditorHook implements IStartup
 
         private static final int DELAY_MS = 100;
 
+        /** Штатное обновление известной строки, без StructuredViewer.findItems. */
+        private static Method itemUpdater()
+        {
+            try
+            {
+                Method method = AbstractTreeViewer.class.getDeclaredMethod("doUpdateItem", //$NON-NLS-1$
+                    Widget.class, Object.class, boolean.class);
+                method.setAccessible(true);
+                return method;
+            }
+            catch (ReflectiveOperationException | RuntimeException e)
+            {
+                Global.logError("FormEditorHook.DecorationRelay", "itemUpdater", e); //$NON-NLS-1$
+                return null;
+            }
+        }
+
+        private static final Method UPDATER = itemUpdater();
+
+        static void updateItem(TreeViewer viewer, TreeItem item)
+        {
+            if (UPDATER == null || item.isDisposed() || !viewer.getTree().isVisible()
+                || item.getData() == null)
+                return;
+            try
+            {
+                UPDATER.invoke(viewer, item, item.getData(), true);
+            }
+            catch (ReflectiveOperationException | RuntimeException e)
+            {
+                Global.logError("FormEditorHook.DecorationRelay", "updateItem", e); //$NON-NLS-1$
+            }
+        }
+
         static void install(TreeViewer viewer)
+        {
+            install(viewer, false);
+        }
+
+        static void install(TreeViewer viewer, boolean viewport)
         {
             Tree tree = viewer.getTree();
             if (tree == null || tree.isDisposed() || tree.getData(KEY_INSTALLED) != null)
+                return;
+            Method updater = UPDATER;
+            if (updater == null)
                 return;
             tree.setData(KEY_INSTALLED, Boolean.TRUE);
             IDecoratorManager decorators = PlatformUI.getWorkbench().getDecoratorManager();
             Set<Object> pending = new LinkedHashSet<>();
             boolean[] pendingAll = new boolean[1];
+            boolean[] scheduled = new boolean[1];
+            Map<TreeItem, Object[]> refreshed = new WeakHashMap<>();
+            if (viewport)
+                watchHiddenAncestors(tree, refreshed::clear);
+            Object[] revision = { new Object() };
+            Display display = tree.getDisplay();
+            Runnable flushTask = () ->
+            {
+                scheduled[0] = false;
+                flush(viewer, tree, pending, pendingAll, updater, viewport, refreshed, revision[0]);
+            };
+            Runnable schedule = () ->
+            {
+                if (!tree.isDisposed() && tree.isVisible() && !scheduled[0]
+                    && (pendingAll[0] || !pending.isEmpty()))
+                {
+                    scheduled[0] = true;
+                    display.timerExec(DELAY_MS, flushTask);
+                }
+            };
+            // Показ вкладки/страницы приводит к Paint. Здесь только планируем обновление:
+            // скрытое дерево хранит один флаг, без обходов и периодических таймеров.
+            tree.addListener(SWT.Paint, event ->
+            {
+                if (viewport && tree.isVisible())
+                    for (TreeItem row : ItemsTree.updateRows(tree))
+                        if (!isCurrent(refreshed.get(row), revision[0], row.getData()))
+                        {
+                            pendingAll[0] = true;
+                            break;
+                        }
+                schedule.run();
+            });
             ILabelProviderListener listener = event ->
             {
                 if (tree.isDisposed())
                     return;
                 Object[] changed = event.getElements();
-                Display display = tree.getDisplay();
                 display.asyncExec(() ->
                 {
                     if (tree.isDisposed())
                         return;
-                    boolean idle = !pendingAll[0] && pending.isEmpty();
-                    if (changed == null)
+                    boolean visible = tree.isVisible();
+                    if (viewport)
+                        revision[0] = new Object();
+                    if (viewport || !visible || changed == null)
+                    {
                         pendingAll[0] = true;
-                    else
+                        pending.clear();
+                    }
+                    else if (!pendingAll[0])
                         pending.addAll(Arrays.asList(changed));
-                    if (idle)
-                        display.timerExec(DELAY_MS, () -> flush(viewer, tree, pending, pendingAll));
+                    schedule.run();
                 });
             };
             decorators.addListener(listener);
             tree.addDisposeListener(e -> decorators.removeListener(listener));
         }
 
-        private static void flush(TreeViewer viewer, Tree tree, Set<Object> pending, boolean[] pendingAll)
+        private static boolean isCurrent(Object[] stamp, Object revision, Object element)
         {
-            boolean all = pendingAll[0];
-            List<Object> elements = new ArrayList<>();
-            if (all)
-                collectExpandedElements(tree.isDisposed() ? new TreeItem[0] : tree.getItems(), elements);
-            else
-                elements.addAll(pending);
-            pendingAll[0] = false;
-            pending.clear();
-            if (tree.isDisposed() || elements.isEmpty())
-                return;
-            viewer.update(elements.toArray(), null);
+            return stamp != null && stamp[0] == revision && stamp[1] == element;
         }
 
-        private static void collectExpandedElements(TreeItem[] items, List<Object> into)
+        private static void flush(TreeViewer viewer, Tree tree, Set<Object> pending, boolean[] pendingAll,
+            Method updater, boolean viewport, Map<TreeItem, Object[]> refreshed, Object revision)
+        {
+            if (tree.isDisposed())
+                return;
+            // Вкладку могли скрыть между постановкой таймера и его срабатыванием.
+            if (!tree.isVisible())
+            {
+                pendingAll[0] = true;
+                pending.clear();
+                return;
+            }
+            boolean all = pendingAll[0];
+            Set<Object> changed = new LinkedHashSet<>(pending);
+            pendingAll[0] = false;
+            pending.clear();
+            if (tree.isDisposed() || (!all && changed.isEmpty()))
+                return;
+            try
+            {
+                if (viewport)
+                {
+                    for (TreeItem row : ItemsTree.updateRows(tree))
+                    {
+                        if (row.isDisposed() || row.getData() == null)
+                            continue;
+                        if (!isCurrent(refreshed.get(row), revision, row.getData()))
+                        {
+                            updater.invoke(viewer, row, row.getData(), true);
+                            refreshed.put(row, new Object[] { revision, row.getData() });
+                        }
+                    }
+                }
+                else
+                    updateExpandedItems(viewer, tree.getItems(), changed, all, updater);
+            }
+            catch (ReflectiveOperationException | RuntimeException e)
+            {
+                Global.logError("FormEditorHook.DecorationRelay", "flush", e); //$NON-NLS-1$
+            }
+        }
+
+        /**
+         * Один проход по раскрытым веткам. viewer.update(elements, null) ищет каждую строку
+         * заново во всём дереве, включая сохранённые потомки свёрнутых веток; глобальное
+         * событие декораторов может содержать тысячи элементов других редакторов.
+         * doUpdateItem — тот же штатный путь обновления подписи и значка, но строка уже известна.
+         */
+        private static void updateExpandedItems(TreeViewer viewer, TreeItem[] items, Set<Object> changed,
+            boolean all, Method updater) throws ReflectiveOperationException
         {
             for (TreeItem item : items)
             {
+                if (item.isDisposed())
+                    continue;
                 Object data = item.getData();
-                if (data != null)
-                    into.add(data);
-                if (item.getExpanded())
-                    collectExpandedElements(item.getItems(), into);
+                if (data != null && (all || changed.contains(data)))
+                {
+                    updater.invoke(viewer, item, data, true);
+                }
+                if (!item.isDisposed() && item.getExpanded())
+                    updateExpandedItems(viewer, item.getItems(), changed, all, updater);
             }
         }
     }
@@ -8544,6 +9153,7 @@ public class FormEditorHook implements IStartup
             if (tree.isDisposed() || viewer.getControl().isDisposed())
                 return;
             SmartMatcher matcher = new SmartMatcher(pattern != null ? pattern : ""); //$NON-NLS-1$
+            InheritedTitles.filterChanged(page);
             tree.setData(KEY_MATCHER, matcher);
             for (ViewerFilter existing : viewer.getFilters())
             {
@@ -8567,6 +9177,26 @@ public class FormEditorHook implements IStartup
                 // После сброса отбора выделенная строка может оказаться вне видимой области.
                 tree.showSelection();
             }
+        }
+
+        /** Дополнение уже показанного результата после фоновой загрузки заголовков. */
+        private static void refreshFilterResults(TreeViewer viewer, Tree tree)
+        {
+            if (tree.isDisposed() || !tree.isVisible())
+                return;
+            ISelection selection = viewer.getSelection();
+            Object top = tree.getTopItem() != null ? tree.getTopItem().getData() : null;
+            viewer.refresh();
+            viewer.expandAll();
+            if (!selection.isEmpty())
+                viewer.setSelection(selection, true);
+            FilterInputBoxListNavigation.selectFirstRowIfSelectionLost(tree);
+            for (TreeItem row : updateRows(tree))
+                if (Objects.equals(top, row.getData()))
+                {
+                    tree.setTopItem(row);
+                    break;
+                }
         }
 
         /**
@@ -8743,7 +9373,7 @@ public class FormEditorHook implements IStartup
 
         private static void refreshVisibleRows(TreeViewer viewer, Tree tree)
         {
-            if (tree.isDisposed() || tree.getColumnCount() <= COLUMN_LAST)
+            if (tree.isDisposed() || !tree.isVisible() || tree.getColumnCount() <= COLUMN_LAST)
                 return;
             long now = System.currentTimeMillis();
             if (tree.getData(KEY_REFRESH_STAMP) instanceof Long last
@@ -8751,41 +9381,88 @@ public class FormEditorHook implements IStartup
                 return;
             tree.setData(KEY_REFRESH_STAMP, Long.valueOf(now));
 
-            List<Object> stale = new ArrayList<>();
-            for (TreeItem row : visibleRows(tree))
+            List<TreeItem> stale = new ArrayList<>();
+            for (TreeItem row : updateRows(tree))
             {
                 if (row.getData() != null && isStale(viewer, row))
-                    stale.add(row.getData());
+                    stale.add(row);
             }
             if (stale.isEmpty())
                 return;
             tree.getDisplay().asyncExec(() -> {
-                if (tree.isDisposed())
+                if (tree.isDisposed() || !tree.isVisible())
                     return;
-                for (Object element : stale)
-                    viewer.update(element, null);
+                Set<TreeItem> visible = new HashSet<>(updateRows(tree));
+                for (TreeItem row : stale)
+                    if (visible.contains(row))
+                        DecorationRelay.updateItem(viewer, row);
             });
         }
 
         /**
-         * Видимые строки — обходом вниз от верхней строки ({@link Tree#getTopItem}).
+         * Строки области обновления: экран плюс по одному экрану сверху и снизу.
+         * Обход идёт по уже раскрытым строкам, без поиска элементов по всему дереву.
          *
          * <p>Раньше строки искались хиттестом по каждой координате Y, а он при промахе (клик по
          * отступу первой колонки) обходит ВСЁ дерево. На прокрутке это давало полный обход дерева
          * на каждую видимую строку — отрисовка заметно проседала.
          */
-        private static List<TreeItem> visibleRows(Tree tree)
+        private static List<TreeItem> updateRows(Tree tree)
         {
             List<TreeItem> rows = new ArrayList<>();
+            if (tree.isDisposed() || !tree.isVisible())
+                return rows;
             int height = Math.max(tree.getItemHeight(), 1);
-            int limit = tree.getClientArea().height / height + 2;
-            for (TreeItem row = tree.getTopItem(); row != null && rows.size() < limit;
+            int screenRows = (tree.getClientArea().height + height - 1) / height + 1;
+            Rectangle area = updateArea(tree);
+            TreeItem first = tree.getTopItem();
+            if (first == null)
+                return rows;
+            for (int i = 0; i < screenRows; i++)
+            {
+                TreeItem previous = previousVisibleRow(first);
+                if (previous == null)
+                    break;
+                first = previous;
+            }
+            int scanned = 0;
+            int limit = screenRows * 3 + 2;
+            for (TreeItem row = first; row != null && scanned++ < limit;
                 row = nextVisibleRow(row))
             {
-                if (!row.isDisposed())
+                if (row.isDisposed())
+                    continue;
+                Rectangle bounds = row.getBounds(0);
+                if (bounds.y >= area.y + area.height)
+                    break;
+                if (bounds.height > 0 && bounds.y + bounds.height > area.y)
                     rows.add(row);
             }
             return rows;
+        }
+
+        private static Rectangle updateArea(Tree tree)
+        {
+            Rectangle area = tree.getClientArea();
+            return new Rectangle(area.x, area.y - area.height, area.width, area.height * 3);
+        }
+
+        /** Предыдущая раскрытая строка: последний раскрытый потомок соседа либо родитель. */
+        private static TreeItem previousVisibleRow(TreeItem row)
+        {
+            TreeItem parent = row.getParentItem();
+            TreeItem[] siblings = parent != null ? parent.getItems() : row.getParent().getItems();
+            for (int i = 0; i < siblings.length; i++)
+                if (siblings[i] == row)
+                {
+                    if (i == 0)
+                        return parent;
+                    TreeItem previous = siblings[i - 1];
+                    while (previous.getExpanded() && previous.getItemCount() > 0)
+                        previous = previous.getItem(previous.getItemCount() - 1);
+                    return previous;
+                }
+            return null;
         }
 
         /** Следующая строка в порядке показа: первый развёрнутый потомок, иначе следующий сосед. */
@@ -10227,6 +10904,19 @@ public class FormEditorHook implements IStartup
         // Провайдеры колонок
         // -------------------------------------------------------------------
 
+        /** Вычислять колонки в экранной области и на один экран выше/ниже неё. */
+        private static boolean isInUpdateArea(ViewerCell cell)
+        {
+            if (!(cell.getItem() instanceof TreeItem item) || item.isDisposed())
+                return false;
+            Tree tree = item.getParent();
+            if (!tree.isVisible())
+                return false;
+            Rectangle row = item.getBounds(0);
+            Rectangle area = updateArea(tree);
+            return row.height > 0 && row.y + row.height > area.y && row.y < area.y + area.height;
+        }
+
         /**
          * Штатная подпись элемента плюс вид группы в скобках — приглушённым цветом
          * ({@link StyledString#DECORATIONS_STYLER}), чтобы он не сливался с именем.
@@ -10251,12 +10941,14 @@ public class FormEditorHook implements IStartup
                 this.base = base;
                 this.page = page;
                 this.tree = tree;
-                DecorationRelay.install(viewer);
+                DecorationRelay.install(viewer, true);
             }
 
             @Override
             public void update(ViewerCell cell)
             {
+                if (!isInUpdateArea(cell))
+                    return;
                 Object element = cell.getElement();
                 String text = base.getText(element);
                 StyledString styled = new StyledString(text == null ? "" : text); //$NON-NLS-1$
@@ -10343,7 +11035,7 @@ public class FormEditorHook implements IStartup
             @Override
             public void update(ViewerCell cell)
             {
-                if (ColumnVisibilityMenu.isHidden(cell))
+                if (!isInUpdateArea(cell) || ColumnVisibilityMenu.isHidden(cell))
                     return;
                 Object element = cell.getElement();
                 EffectiveTitle.Info info = EffectiveTitle.of(page, domainItem(element));
@@ -10367,7 +11059,7 @@ public class FormEditorHook implements IStartup
             @Override
             public void update(ViewerCell cell)
             {
-                if (!ColumnVisibilityMenu.isHidden(cell))
+                if (isInUpdateArea(cell) && !ColumnVisibilityMenu.isHidden(cell))
                     super.update(cell);
             }
         }

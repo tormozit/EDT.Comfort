@@ -63,6 +63,7 @@ import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.common.ui.controls.search.SearchBox;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
 import com._1c.g5.v8.dt.mcore.TypeItem;
+import com._1c.g5.v8.dt.mcore.TypeSet;
 import com._1c.g5.v8.dt.md.resource.MdTypeUtil;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com._1c.g5.v8.dt.ui.util.OpenHelper;
@@ -2369,7 +2370,8 @@ public class SmartOutlineHook implements IStartup {
     /**
      * «Открыть объект» и «Показать в навигаторе» в контекстном меню дерева типов окна
      * «Редактирование типа данных» (issue #624). Объект — производитель типа выбранной строки
-     * ({@code MdTypeUtil.getTypeProducer}); у строк-групп и типов платформы его нет — пункты
+     * (для одиночного типа — {@code MdTypeUtil.getTypeProducer}, для набора — объект-владелец);
+     * у строк-групп и типов платформы его нет — пункты
      * недоступны. Строка дерева ({@code TreeItemViewModel}) переводится в {@code TypeItem}
      * штатным маппером компонента дерева, как в {@link #revealBestType}.
      */
@@ -2426,7 +2428,16 @@ public class SmartOutlineHook implements IStartup {
             Object treeComponent = component != null ? Global.getField(component, "treeComponent") : null; //$NON-NLS-1$
             Object mapper = treeComponent != null ? Global.invoke(treeComponent, "getMapper") : null; //$NON-NLS-1$
             Object model = row != null && mapper != null ? Global.invoke(mapper, "mapViewToModel", row) : null; //$NON-NLS-1$
-            return model instanceof TypeItem typeItem ? MdTypeUtil.getTypeProducer(typeItem) : null;
+            MdObject producer = null;
+            if (model instanceof TypeItem typeItem)
+            {
+                producer = MdTypeUtil.getTypeProducer(typeItem);
+                // MdTypeUtil.getTypeProducer принимает только обёртку MdType; у TypeSet
+                // обёртка MdTypeSet. EDT ищет владельца такого набора через EcoreUtil2.
+                if (producer == null && typeItem instanceof TypeSet)
+                    producer = org.eclipse.xtext.EcoreUtil2.getContainerOfType(typeItem, MdObject.class);
+            }
+            return producer;
         }
         catch (Exception | LinkageError e)
         {

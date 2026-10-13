@@ -272,11 +272,11 @@ public final class GitStagingViewHook implements IStartup
         String canceled, String changed)
     {
         static final Wording COMMIT = new Wording(TITLE, "составе коммита",
-            "Коммит содержит битые ссылки на метаданные (показаны в панели Поиск). Продолжить?",
+            "Коммит образует битые ссылки на метаданные (показаны в панели Поиск). Продолжить?",
             "Отменить фиксацию", "Продолжается штатная фиксация.", "Фиксация отменена.",
             "Состав коммита изменился во время проверки");
         private static final String OPERATION_QUESTION =
-            "Операция приведет к появлению битых ссылок на метаданные (показаны в панели Поиск). Продолжить?";
+            "Операция образует битые ссылки на метаданные (показаны в панели Поиск). Продолжить?";
         static final Wording REPLACE = new Wording("Проверка ссылок замены на HEAD-ревизию",
             "результате замены на HEAD-ревизию", OPERATION_QUESTION, "Отменить замену",
             "Продолжается замена на HEAD-ревизию.", "Замена отменена.",
@@ -1404,20 +1404,22 @@ public final class GitStagingViewHook implements IStartup
                 IBmModel original = manager.getModel(project.project());
                 if (original == null)
                     throw new IllegalStateException("Недоступна модель проекта " + project.project().getName());
+                String configuration = prefix + "src/Configuration/Configuration.mdo";
+                boolean hadPrevious = before != null ? before.getEntry(configuration) != null
+                    : head != null && existed(repository, head, configuration);
                 if (deleted)
                 {
                     Global.tempLog(LOG, "full search started project=" + project.project().getName());
                     staged.selectAll();
                 }
                 else
-                    staged.selectTargets(projectFiles, converter, names, original, checking.split(10));
+                    staged.selectTargets(projectFiles, converter, names, original,
+                        hadPrevious ? previousFiles : null, checking.split(10));
                 IComparisonDataSource source = createSource(factory, staged);
                 try
                 {
                     start(source, checking.split(30));
-                    String configuration = prefix + "src/Configuration/Configuration.mdo";
-                    if (!deleted && (before != null ? before.getEntry(configuration) != null
-                        : head != null && existed(repository, head, configuration)))
+                    if (!deleted && hadPrevious)
                     {
                         previousFiles.select(projectFiles, converter);
                         IComparisonDataSource previous = createSource(factory, previousFiles);
@@ -1441,18 +1443,20 @@ public final class GitStagingViewHook implements IStartup
                         + " changed=" + projectFiles.size() + " imported=" + staged.files.size()
                         + " previous=" + previousFiles.files.size());
                     List<CompareSearchMatch> rows = Collections.synchronizedList(new ArrayList<>());
+                    // При полном поиске импортировано всё: пропускать в Configuration.mdo нечего.
+                    Set<String> unchanged = deleted ? Set.of() : staged.unchangedTargets;
                     if (before == null)
                     {
                         findings.add(new Findings(project.project(), rows));
                         MdReferenceSupport.findInModel(source, project.navigationBase(),
-                            deleted ? null : projectFiles, checking.split(20), rows::add);
+                            deleted ? null : projectFiles, unchanged, checking.split(20), rows::add);
                     }
                     else
                     {
                         // Операция отвечает только за ссылки, которые ломает она сама: битые и без неё
                         // отсеиваются по рабочей модели проекта, поэтому результат показывается целиком в конце.
                         List<CompareSearchMatch> found = MdReferenceSupport.findInModel(source,
-                            project.navigationBase(), deleted ? null : projectFiles, checking.split(15));
+                            project.navigationBase(), deleted ? null : projectFiles, unchanged, checking.split(15));
                         rows.addAll(MdReferenceSupport.newInProject(project.project(), found, checking.split(5)));
                         Global.tempLog(LOG, "new links project=" + project.project().getName()
                             + " found=" + found.size() + " new=" + rows.size());
@@ -1620,6 +1624,12 @@ public final class GitStagingViewHook implements IStartup
         private final Map<ObjectId, byte[]> workTree;
         private final Set<String> files = new HashSet<>();
         private final Map<String, ObjectId> oldIds = new HashMap<>();
+        private static final String CONFIGURATION = "src/Configuration/Configuration.mdo";
+        /**
+         * Ссылки Configuration.mdo, которые были и в исходном состоянии
+         * ({@link MdReferenceSupport#unchangedTargetKey}). Их цели не импортируются и не проверяются.
+         */
+        private final Set<String> unchangedTargets = new HashSet<>();
         private boolean full;
 
         IndexSource(Repository repository, DirCache index, String prefix, ObjectId head,
@@ -1687,8 +1697,12 @@ public final class GitStagingViewHook implements IStartup
             }
         }
 
+        /**
+         * @param previous исходное состояние; {@code null} — его нет, и все ссылки считаются изменёнными
+         */
         void selectTargets(Set<String> changed, IQualifiedNameFilePathConverter converter,
-            ISymbolicNameService names, IBmModel original, IProgressMonitor monitor) throws IOException
+            ISymbolicNameService names, IBmModel original, IndexSource previous, IProgressMonitor monitor)
+            throws IOException
         {
             for (String file : changed)
             {
@@ -1696,70 +1710,101 @@ public final class GitStagingViewHook implements IStartup
                     throw new OperationCanceledException();
                 if (!fileExists(Path.of(file)))
                     continue;
-                URI uri = URI.createPlatformResourceURI("/" + getProjectName() + "/" + file, true);
-                IResourceServiceProvider provider = IResourceServiceProvider.Registry.INSTANCE.getResourceServiceProvider(uri);
-                if (provider == null)
-                    throw new IllegalStateException("Недоступен анализатор EDT для " + file);
-                Resource.Factory factory = provider.get(Resource.Factory.class);
-                XmlParserAdapter parser = provider.get(XmlParserAdapter.class);
-                if (factory == null || parser == null || !(factory.createResource(uri) instanceof XMLResource nativeResource))
-                    throw new IllegalStateException("Недоступен XML-анализатор EDT для " + file);
-                // Только разбор XML. Ни связывания с рабочей моделью, ни разрешения ссылок её геттерами.
-                XmlResource resource = new XmlResource(uri);
-                Map<Object, Object> options = new HashMap<>(nativeResource.getDefaultLoadOptions());
-                options.put(IXmlParser.OPTION_USE_SYMLINK, true);
-                options.put("PLATFORM_VERSION", getTargetRuntimeVersion());
-                parser.init(resource.createXMLHelper(), options);
-                try (InputStream input = getFileStream(Path.of(file)))
-                {
-                    if (input == null)
-                        throw new IOException("Файл исчез из индекса: " + file);
-                    parser.parse(input);
-                }
-                if (!resource.getErrors().isEmpty() || resource.getContents().isEmpty())
-                    throw new IOException("Не удалось прочитать " + file + ": " + resource.getErrors());
+                List<SavedReference> references = savedReferences(file, monitor);
                 QualifiedName ownerName = converter.getFqn(file);
                 if (ownerName == null)
                     throw new IOException("Не удалось определить объект файла " + file);
-                var objects = EcoreUtil.<EObject>getAllContents(resource.getContents(), false);
-                while (objects.hasNext())
-                {
-                    if (monitor.isCanceled())
-                        throw new OperationCanceledException();
-                    EObject owner = objects.next();
-                    for (EReference feature : MdReferenceSupport.features(owner.eClass()))
-                    {
-                        Object value = owner.eGet(feature, false);
-                        if (value instanceof InternalEList<?> list)
-                        {
-                            var values = list.basicIterator();
-                            while (values.hasNext())
-                                selectTarget(values.next(), owner, feature, ownerName, converter, names, original);
-                        }
-                        else if (value instanceof EObject)
-                            selectTarget(value, owner, feature, ownerName, converter, names, original);
-                        else if (value instanceof List<?>)
-                            throw new IOException("Недоступно чтение сохранённых ссылок " + file);
-                    }
-                }
-                Global.tempLog(LOG, "parsed index file=" + prefix + file + " selected=" + files.size());
+                // Configuration.mdo ссылается на все объекты верхнего уровня. Проверяются только ссылки,
+                // которых не было в исходном состоянии: иначе во временную модель уходит вся конфигурация.
+                Set<String> known = new HashSet<>();
+                if (previous != null && CONFIGURATION.equals(file) && previous.fileExists(Path.of(file)))
+                    for (SavedReference reference : previous.savedReferences(file, monitor))
+                        known.add(reference.key());
+                int before = unchangedTargets.size();
+                for (SavedReference reference : references)
+                    selectTarget(reference, known.contains(reference.key()), ownerName, converter, names, original);
+                Global.tempLog(LOG, "parsed index file=" + prefix + file + " selected=" + files.size()
+                    + " references=" + references.size() + " previous=" + known.size()
+                    + " unchanged=" + (unchangedTargets.size() - before));
             }
         }
 
-        private void selectTarget(Object value, EObject owner, EReference feature, QualifiedName ownerName,
+        private record SavedReference(EObject owner, EReference feature, EObject target)
+        {
+            String key()
+            {
+                return owner.eClass().getName() + "|" + feature.getName() + "|" + EcoreUtil.getURI(target);
+            }
+        }
+
+        /** Только разбор XML. Ни связывания с рабочей моделью, ни разрешения ссылок её геттерами. */
+        private List<SavedReference> savedReferences(String file, IProgressMonitor monitor) throws IOException
+        {
+            URI uri = URI.createPlatformResourceURI("/" + getProjectName() + "/" + file, true);
+            IResourceServiceProvider provider = IResourceServiceProvider.Registry.INSTANCE.getResourceServiceProvider(uri);
+            if (provider == null)
+                throw new IllegalStateException("Недоступен анализатор EDT для " + file);
+            Resource.Factory factory = provider.get(Resource.Factory.class);
+            XmlParserAdapter parser = provider.get(XmlParserAdapter.class);
+            if (factory == null || parser == null || !(factory.createResource(uri) instanceof XMLResource nativeResource))
+                throw new IllegalStateException("Недоступен XML-анализатор EDT для " + file);
+            XmlResource resource = new XmlResource(uri);
+            Map<Object, Object> options = new HashMap<>(nativeResource.getDefaultLoadOptions());
+            options.put(IXmlParser.OPTION_USE_SYMLINK, true);
+            options.put("PLATFORM_VERSION", getTargetRuntimeVersion());
+            parser.init(resource.createXMLHelper(), options);
+            try (InputStream input = getFileStream(Path.of(file)))
+            {
+                if (input == null)
+                    throw new IOException("Файл исчез из индекса: " + file);
+                parser.parse(input);
+            }
+            if (!resource.getErrors().isEmpty() || resource.getContents().isEmpty())
+                throw new IOException("Не удалось прочитать " + file + ": " + resource.getErrors());
+            List<SavedReference> result = new ArrayList<>();
+            var objects = EcoreUtil.<EObject>getAllContents(resource.getContents(), false);
+            while (objects.hasNext())
+            {
+                if (monitor.isCanceled())
+                    throw new OperationCanceledException();
+                EObject owner = objects.next();
+                for (EReference feature : MdReferenceSupport.features(owner.eClass()))
+                {
+                    Object value = owner.eGet(feature, false);
+                    if (value instanceof InternalEList<?> list)
+                    {
+                        var values = list.basicIterator();
+                        while (values.hasNext())
+                            if (values.next() instanceof EObject target)
+                                result.add(new SavedReference(owner, feature, target));
+                    }
+                    else if (value instanceof EObject target)
+                        result.add(new SavedReference(owner, feature, target));
+                    else if (value instanceof List<?>)
+                        throw new IOException("Недоступно чтение сохранённых ссылок " + file);
+                }
+            }
+            return result;
+        }
+
+        private void selectTarget(SavedReference reference, boolean unchanged, QualifiedName ownerName,
             IQualifiedNameFilePathConverter converter, ISymbolicNameService names, IBmModel original)
         {
-            if (!(value instanceof EObject target) || !target.eIsProxy()
-                || !MdReferenceSupport.isMetadataReferenceTarget(target))
+            EObject target = reference.target();
+            if (!target.eIsProxy() || !MdReferenceSupport.isMetadataReferenceTarget(target))
                 return;
             URI saved = EcoreUtil.getURI(target);
             // OPTION_USE_SYMLINK штатного StaxXmlParser сохраняет имя в unresolved:/<имя>.
             if (!"unresolved".equals(saved.scheme()) || saved.path() == null || !saved.path().startsWith("/"))
                 throw new IllegalStateException("Неизвестный формат сохранённой ссылки: " + saved);
             String name = URI.decode(saved.path().substring(1));
-            URI address = names.convertSymbolicNameToUri(name, owner, feature, ownerName.toString(),
-                original.getEngine(), getTargetRuntimeVersion());
-            if (address != null && BmUriUtil.isBmUri(address))
+            URI address = names.convertSymbolicNameToUri(name, reference.owner(), reference.feature(),
+                ownerName.toString(), original.getEngine(), getTargetRuntimeVersion());
+            if (address == null || !BmUriUtil.isBmUri(address))
+                return;
+            if (unchanged)
+                unchangedTargets.add(MdReferenceSupport.unchangedTargetKey(reference.feature(), address));
+            else
                 addObject(QualifiedName.create(BmUriUtil.extractTopObjectFqn(address).split("\\.")), converter);
         }
 

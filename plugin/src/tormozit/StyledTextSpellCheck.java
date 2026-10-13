@@ -34,7 +34,7 @@ import org.eclipse.swt.widgets.MenuItem;
  *
  * <p>Общая часть двух мест, где проверка идёт по StyledText, а не по документу редактора:
  * панель «Свойства» ({@link PropertySheetSpellCheckHook} — StyledText там оверлей LWT) и окно
- * «Строки на разных языках» ({@link LocalStringDialogSpellCheckHook} — StyledText создаёт сам
+ * «Строки на разных языках» ({@link LocalStringDialogHook} — StyledText создаёт сам
  * плагин вместо штатного поля). Здесь только работа с виджетом; поиск нужного StyledText и его
  * жизненный цикл — на стороне потребителя.
  *

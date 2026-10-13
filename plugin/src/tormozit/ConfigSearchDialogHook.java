@@ -730,6 +730,19 @@ public class ConfigSearchDialogHook implements IStartup
         final Label projectsLabel = Global.findControl(root, Label.class,
             lbl -> isScopeListTitle(lbl.getText(), PROJECTS_TITLE_RU, PROJECTS_TITLE_EN));
         final Table projectsTable = findScopeTable(root, PROJECTS_TITLE_RU, PROJECTS_TITLE_EN);
+        final Button workspaceRadio = SearchScopeGroup.findScopeRadio(root,
+            "Рабочая область", "Workspace", "Вся рабочая область");
+        Group scopeGroupFound = null;
+        for (Composite c = workspaceRadio != null ? workspaceRadio.getParent() : null;
+            c != null && c != root; c = c.getParent())
+        {
+            if (c instanceof Group g)
+            {
+                scopeGroupFound = g;
+                break;
+            }
+        }
+        final Group scopeGroup = scopeGroupFound;
 
         Runnable refresh = () -> {
             if (titleLabel.isDisposed() || typesTable.isDisposed())
@@ -743,6 +756,10 @@ public class ConfigSearchDialogHook implements IStartup
             if (projectsLabel != null && projectsTable != null && !projectsLabel.isDisposed()
                 && !projectsTable.isDisposed())
                 setGroupTitleBold(projectsLabel, customScope && countCheckedItems(projectsTable) > 0);
+            // «Область поиска» выделена, если выбран не первый вариант («Вся рабочая область»)
+            if (scopeGroup != null && !scopeGroup.isDisposed() && workspaceRadio != null
+                && !workspaceRadio.isDisposed())
+                setGroupTitleBold(scopeGroup, !workspaceRadio.getSelection());
         };
         if (projectsTable != null && projectsLabel != null)
         {

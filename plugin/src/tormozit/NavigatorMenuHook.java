@@ -33,6 +33,8 @@ import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Menu;
 import org.eclipse.swt.widgets.MenuItem;
 import org.eclipse.ui.IPartListener2;
+import org.eclipse.ui.IEditorPart;
+import org.eclipse.ui.IEditorReference;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.ISources;
 import org.eclipse.ui.commands.ICommandService;
@@ -47,7 +49,7 @@ import org.eclipse.ui.IWindowListener;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.navigator.CommonNavigator;
 
-/** Упрощает контекстное меню навигатора: единственная команда «Создать» без подменю. */
+/** Дополняет контекстное меню навигатора и упрощает единственную команду «Создать». */
 public final class NavigatorMenuHook implements IStartup
 {
     private static final String HOOK_MARKER = "tormozit.navigatorMenuHook"; //$NON-NLS-1$
@@ -55,6 +57,8 @@ public final class NavigatorMenuHook implements IStartup
     private static final String COMPARE_COMMAND_ID =
         "com._1c.g5.v8.dt.compare.ui.openCompareWizard"; //$NON-NLS-1$
     private static final String SELECTION_ORDER = "tormozit.navigatorProjectSelectionOrder"; //$NON-NLS-1$
+    private static final String SHOW_IN_COMPARISONS_ITEM = "tormozit.showInComparisonsItem"; //$NON-NLS-1$
+    private static final String COMPARE_EDITOR_ID = "com._1c.g5.v8.dt.compare.ui.editor"; //$NON-NLS-1$
     private static boolean compareListenerInstalled;
     private static IHandler nativeCompareHandler;
 
@@ -117,8 +121,75 @@ public final class NavigatorMenuHook implements IStartup
             return;
         // Слушатель JFace уже зарегистрирован: к этому моменту EDT наполнила меню
         // для текущего выделения, включая доступность действий создания.
-        menu.addListener(SWT.Show, event -> flattenSingleCreate(menu));
+        menu.addListener(SWT.Show, event ->
+        {
+            flattenSingleCreate(menu);
+            fillShowInComparisons(menu, viewer.getStructuredSelection());
+        });
         menu.setData(HOOK_MARKER, Boolean.TRUE);
+    }
+
+    private static void fillShowInComparisons(Menu menu, IStructuredSelection selection)
+    {
+        if (menu.getData(SHOW_IN_COMPARISONS_ITEM) instanceof MenuItem previous && !previous.isDisposed())
+            previous.dispose();
+        menu.setData(SHOW_IN_COMPARISONS_ITEM, null);
+        if (selection.size() != 1)
+            return;
+        String fullName = GetRef.fullNameFromNavigatorElement(selection.getFirstElement());
+        if (fullName == null || fullName.isBlank())
+            return;
+        String fqn = MdTypeMapping.anyFullNameToBmFqn(fullName);
+        if (fqn == null || fqn.isBlank())
+            return;
+
+        Menu comfortSub = ComfortSubmenuHelper.findOrCreateNavigatorComfortSubmenu(menu, menu.getShell());
+        if (comfortSub == null || comfortSub.isDisposed())
+            return;
+        MenuItem item = ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.PUSH,
+            "Показать в сравнениях"); //$NON-NLS-1$
+        ComfortSubmenuHelper.setMenuItemTooltip(item,
+            "Выделить объект во всех открытых редакторах сравнения конфигураций"); //$NON-NLS-1$
+        item.setEnabled(!openComparisons().isEmpty());
+        item.addListener(SWT.Selection, event -> showInComparisons(fqn));
+        menu.setData(SHOW_IN_COMPARISONS_ITEM, item);
+    }
+
+    private static List<IEditorReference> openComparisons()
+    {
+        List<IEditorReference> editors = new ArrayList<>();
+        for (IWorkbenchWindow window : PlatformUI.getWorkbench().getWorkbenchWindows())
+            for (IWorkbenchPage page : window.getPages())
+                for (IEditorReference reference : page.getEditorReferences())
+                    if (COMPARE_EDITOR_ID.equals(reference.getId()))
+                        editors.add(reference);
+        return editors;
+    }
+
+    private static void showInComparisons(String fqn)
+    {
+        List<IEditorReference> editors = openComparisons();
+        int[] revealed = { 0 };
+        CompareConfigSelectionListener.withoutNavigatorReveal(() ->
+        {
+            for (IEditorReference reference : editors)
+            {
+                try
+                {
+                    IEditorPart editor = reference.getEditor(true);
+                    boolean found = CompareConfigMenuHook.revealObjectInTree(editor, fqn, revealed[0] == 0);
+                    if (found)
+                        revealed[0]++;
+                }
+                catch (RuntimeException e)
+                {
+                    // Недоступный редактор не мешает показу объекта в остальных сравнениях.
+                }
+            }
+        });
+        if (revealed[0] == 0)
+            ToastNotification.show("Показать в сравнениях", //$NON-NLS-1$
+                "Объект не найден в открытых сравнениях или его строка недоступна", 4000); //$NON-NLS-1$
     }
 
     /** Порядок добавления проектов в выделение, независимо от сортировки дерева SWT. */

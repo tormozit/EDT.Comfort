@@ -2076,6 +2076,7 @@ public final class ProblemViewHook implements IStartup
         IOpenListener stock = findStockOpenListener(viewer);
         if (stock == null)
         {
+            Global.tempLog("broken-links-open", "install: stock open listener not found");
             Debug.log("installOpenOverride: stock open listener not found"); //$NON-NLS-1$
             return;
         }
@@ -2091,15 +2092,29 @@ public final class ProblemViewHook implements IStartup
         viewer.addOpenListener(event ->
         {
             int index = lastColumn[0];
+            Global.tempLog("broken-links-open", "open: column=" + index
+                + " improveLists=" + ComfortSettings.isReplaceListFiltersEnabled());
             Marker marker = ComfortSettings.isReplaceListFiltersEnabled()
                 ? firstMarker(event.getSelection()) : null;
             if (marker != null && index >= 0 && index < tree.getColumnCount()
                 && CODE_COLUMN_TITLE.equals(columnTitle(tree, index)))
             {
+                Global.tempLog("broken-links-open", "route=check-settings");
                 openCheckSettings(tree.getShell(), marker);
                 return;
             }
-            stock.open(event);
+            if (marker != null && ProblemViewOpenTargetHook.openConfigurationMarker(marker))
+                return;
+            Global.tempLog("broken-links-open", "route=stock");
+            try
+            {
+                stock.open(event);
+            }
+            catch (RuntimeException e)
+            {
+                Global.tempLogException("broken-links-open", "stock open failed", e);
+                throw e;
+            }
         });
         tree.addDisposeListener(e -> tree.setData(OPEN_OVERRIDE_KEY, null));
         Debug.log("installOpenOverride: installed"); //$NON-NLS-1$

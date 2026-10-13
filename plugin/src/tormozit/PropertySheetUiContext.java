@@ -1,5 +1,11 @@
 package tormozit;
 
+import java.util.Map;
+import java.util.WeakHashMap;
+import java.util.function.BiFunction;
+import java.util.function.Consumer;
+
+import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.swt.custom.ScrolledComposite;
 import org.eclipse.swt.dnd.Clipboard;
 import org.eclipse.swt.dnd.TextTransfer;
@@ -11,6 +17,128 @@ import org.eclipse.swt.widgets.Control;
 final class PropertySheetUiContext
 {
     private PropertySheetUiContext() {}
+
+    /** Колбэки раннего вплетения в MdPropertySheetPage (issue #783). */
+    static void installSelectionCallbacks()
+    {
+        System.getProperties().put("tormozit.propertySheet.invalidate", //$NON-NLS-1$
+            (Consumer<Object>) SelectionUpdates::invalidate);
+        System.getProperties().put("tormozit.propertySheet.operation", //$NON-NLS-1$
+            (BiFunction<Object, Runnable, Runnable>) SelectionUpdates::operation);
+        System.getProperties().put("tormozit.propertySheet.result", //$NON-NLS-1$
+            (BiFunction<Object, Runnable, Runnable>) SelectionUpdates::result);
+        System.getProperties().put("tormozit.propertySheet.progress", //$NON-NLS-1$
+            (BiFunction<Object, Runnable, Runnable>) (monitor, runnable) -> SelectionUpdates.progress(monitor, runnable, false));
+        System.getProperties().put("tormozit.propertySheet.progressDone", //$NON-NLS-1$
+            (BiFunction<Object, Runnable, Runnable>) (monitor, runnable) -> SelectionUpdates.progress(monitor, runnable, true));
+    }
+
+    /**
+     * Каждая отмена штатного монитора инвалидирует и уже поставленные asyncExec.
+     * Очередь ProjectOperationApi остаётся штатной: устаревший Runnable завершается
+     * до получения контекста и загрузки свойств. Токен переносится из операции в UI,
+     * поскольку EDT создаёт новое ISelection при адаптации к контексту модели.
+     */
+    private static final class SelectionUpdates
+    {
+        private static final Map<Object, State> STATES = new WeakHashMap<>();
+        private static final ThreadLocal<Ticket> RUNNING = new ThreadLocal<>();
+
+        private static synchronized State state(Object page)
+        {
+            return STATES.computeIfAbsent(page, key -> new State());
+        }
+
+        static void invalidate(Object page)
+        {
+            State state = state(page);
+            synchronized (state)
+            {
+                ++state.revision;
+            }
+        }
+
+        static Runnable operation(Object page, Runnable original)
+        {
+            State state = state(page);
+            Ticket ticket;
+            synchronized (state)
+            {
+                ticket = new Ticket(state, state.revision);
+            }
+            return () ->
+            {
+                if (!ticket.isCurrent())
+                    return;
+                Ticket previous = RUNNING.get();
+                RUNNING.set(ticket);
+                try
+                {
+                    original.run();
+                }
+                finally
+                {
+                    if (previous == null)
+                        RUNNING.remove();
+                    else
+                        RUNNING.set(previous);
+                }
+            };
+        }
+
+        static Runnable result(Object page, Runnable original)
+        {
+            Ticket ticket = RUNNING.get();
+            if (ticket == null || ticket.state != state(page))
+                return original;
+            return () ->
+            {
+                if (ticket.isCurrent())
+                    original.run();
+            };
+        }
+
+        /** Monitor.beginTask/done ставят layout панели отдельно от результата операции. */
+        static Runnable progress(Object monitor, Runnable original, boolean finish)
+        {
+            return () ->
+            {
+                boolean canceled = monitor instanceof IProgressMonitor progress && progress.isCanceled();
+                Object page = Global.getField(monitor, "this$0"); //$NON-NLS-1$
+                Object currentMonitor = Global.getField(page, "progressMonitor"); //$NON-NLS-1$
+                // После перехода к пустому/неподдерживаемому выделению новый Monitor
+                // не создаётся: старый done всё ещё должен убрать начатый индикатор.
+                boolean skip = canceled && (!finish || currentMonitor != null && currentMonitor != monitor);
+                if (!skip)
+                    original.run();
+            };
+        }
+
+        private static final class State
+        {
+            private long revision;
+        }
+
+        private static final class Ticket
+        {
+            private final State state;
+            private final long revision;
+
+            private Ticket(State state, long revision)
+            {
+                this.state = state;
+                this.revision = revision;
+            }
+
+            private boolean isCurrent()
+            {
+                synchronized (state)
+                {
+                    return revision == state.revision;
+                }
+            }
+        }
+    }
 
     static void copyToClipboard(Control control, String text)
     {

@@ -6,6 +6,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.ResourceBundle;
+import java.util.TreeMap;
 import java.util.function.Function;
 import java.util.function.IntConsumer;
 import java.util.function.Supplier;
@@ -17,14 +18,20 @@ import org.eclipse.core.runtime.IStatus;
 import org.eclipse.core.runtime.Status;
 import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.egit.ui.internal.UIText;
+import org.eclipse.egit.ui.internal.commit.DiffDocument;
+import org.eclipse.egit.ui.internal.commit.DiffRegionFormatter;
+import org.eclipse.egit.ui.internal.commit.DiffRegionFormatter.DiffRegion;
+import org.eclipse.egit.ui.internal.commit.DiffRegionFormatter.FileDiffRegion;
 import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.jface.resource.JFaceColors;
-import org.eclipse.jface.resource.JFaceResources;
 import org.eclipse.jface.text.BadLocationException;
+import org.eclipse.jface.text.Document;
 import org.eclipse.jface.text.IDocument;
+import org.eclipse.jface.text.IDocumentPartitioner;
 import org.eclipse.jface.text.IRegion;
 import org.eclipse.jface.text.ITextInputListener;
 import org.eclipse.jface.text.source.SourceViewer;
+import org.eclipse.jgit.diff.DiffEntry;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.SashForm;
 import org.eclipse.swt.custom.ScrolledComposite;
@@ -32,7 +39,9 @@ import org.eclipse.swt.custom.StyleRange;
 import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.events.MenuAdapter;
 import org.eclipse.swt.events.MenuEvent;
+import org.eclipse.swt.graphics.Color;
 import org.eclipse.swt.graphics.Point;
+import org.eclipse.swt.graphics.RGB;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
@@ -49,9 +58,9 @@ import org.eclipse.ui.texteditor.FindReplaceAction;
  * области отличий панели «История Git» и панели «Изменения файла Git», по образцу обработки
  * «История Git» ИР:
  * <ul>
- *   <li>после заголовка каждого блока «@@ … @@» дорисовывается имя метода, в котором лежит
- *       изменение. Текст документа не меняется — иначе разошлись бы области раскраски и переходы
- *       штатного {@code DiffDocument};</li>
+ *   <li>в заголовок каждого блока «@@ … @@» дописывается имя метода, в котором лежит изменение, —
+ *       текстом документа, как у самого Git; области раскраски и переходов штатного
+ *       {@code DiffDocument} сдвигаются следом ({@link #insertNames});</li>
  *   <li>справа от текста — узкий список методов с изменениями по алфавиту; выбор строки
  *       прокручивает текст к первому изменению метода;</li>
  *   <li>строка, которой EGit заканчивает обрезанный текст, — ссылка на полное сравнение файла.</li>
@@ -68,6 +77,8 @@ final class GitDiffMethods
     private static final String OUTSIDE = "<вне методов>";
     private static final String TRUNCATED = "<текст обрезан>";
     private static final int DEFAULT_WIDTH_PERMILLE = 180;
+    /** Отступ имени метода от заголовка блока. */
+    private static final String NAME_GAP = "  "; //$NON-NLS-1$
 
     /**
      * Текст изменений одного файла в документе.
@@ -185,8 +196,7 @@ final class GitDiffMethods
         Supplier<Host> host, String settingsKey, IntConsumer openFullCompare)
     {
         GitDiffMethods methods = new GitDiffMethods(viewer, sections, host, settingsKey, openFullCompare);
-        // обычный слушатель Paint выполняется после собственной отрисовки StyledText
-        methods.text.addListener(SWT.Paint, methods::paint);
+        methods.installNameStyle();
         methods.installTruncationLink();
         methods.installListToggle();
         viewer.addTextInputListener(new ITextInputListener()
@@ -263,7 +273,9 @@ final class GitDiffMethods
                             return;
                         namesDocument = document;
                         namesByLine = names;
-                        text.redraw();
+                        // вставка сама перекрашивает весь текст; без неё имена красятся отдельно
+                        if (!insertNames(document, names))
+                            viewer.invalidateTextPresentation();
                         showEntries(sorted);
                     });
                 return Status.OK_STATUS;
@@ -376,23 +388,200 @@ final class GitDiffMethods
         return fullName != null && !fullName.isBlank() ? fullName : path;
     }
 
-    private void paint(Event event)
+    // ---- имена методов в заголовках блоков ----
+
+    /**
+     * Дописывает имена методов в строки заголовков блоков — текстом документа, чтобы имя можно было
+     * выделить и скопировать. Области штатного {@code DiffDocument} (раскраска, номера строк,
+     * ссылки) заданы смещениями и за текстом сами не сдвигаются: документу отдаются их сдвинутые
+     * копии тем же {@code connect}, которым области ставит EGit. Число строк не меняется.
+     *
+     * @return {@code false} — текст не менялся
+     */
+    private boolean insertNames(IDocument document, Map<Integer, String> names)
     {
-        if (namesByLine.isEmpty() || namesDocument != viewer.getDocument())
-            return;
-        int lineCount = text.getLineCount();
-        int first = text.getLineIndex(event.y);
-        int last = text.getLineIndex(event.y + event.height);
-        for (Map.Entry<Integer, String> name : namesByLine.entrySet())
+        if (!(document instanceof DiffDocument diff))
+            return false;
+        // место вставки (конец строки заголовка) → вставляемый текст, по возрастанию
+        TreeMap<Integer, String> inserts = new TreeMap<>();
+        try
         {
-            int line = viewer.modelLine2WidgetLine(name.getKey().intValue());
-            if (line < first || line > last || line >= lineCount)
-                continue;
-            Point end = text.getLocationAtOffset(text.getOffsetAtLine(line) + text.getLine(line).length());
-            event.gc.setFont(JFaceResources.getFontRegistry().getBold(JFaceResources.TEXT_FONT));
-            event.gc.setForeground(text.getForeground());
-            event.gc.drawText("  " + name.getValue(), end.x, end.y, true); //$NON-NLS-1$
+            for (Map.Entry<Integer, String> name : names.entrySet())
+            {
+                IRegion line = document.getLineInformation(name.getKey().intValue());
+                // тот же документ мог быть установлен повторно — имя в заголовке уже стоит
+                if (document.get(line.getOffset(), line.getLength()).endsWith("@@")) //$NON-NLS-1$
+                    inserts.put(Integer.valueOf(line.getOffset() + line.getLength()), NAME_GAP + name.getValue());
+            }
         }
+        catch (BadLocationException e)
+        {
+            return false;
+        }
+        if (inserts.isEmpty())
+            return false;
+        if (!(Global.invoke(diff, "getRegions") instanceof DiffRegion[] regions)) //$NON-NLS-1$
+        {
+            Global.logError("GitDiffMethods", "no diff regions, names not inserted", null); //$NON-NLS-1$ //$NON-NLS-2$
+            return false;
+        }
+        int[] points = new int[inserts.size()];
+        // grown[i] — сколько текста добавят первые i вставок
+        int[] grown = new int[inserts.size() + 1];
+        int index = 0;
+        for (Map.Entry<Integer, String> insert : inserts.entrySet())
+        {
+            points[index] = insert.getKey().intValue();
+            grown[index + 1] = grown[index] + insert.getValue().length();
+            index++;
+        }
+        DiffRegion[] movedRegions = new DiffRegion[regions.length];
+        for (int i = 0; i < regions.length; i++)
+        {
+            int[] moved = moved(regions[i], points, grown);
+            movedRegions[i] = new DiffRegion(moved[0], moved[1], regions[i].getLine(DiffEntry.Side.OLD),
+                regions[i].getLine(DiffEntry.Side.NEW), regions[i].getType());
+        }
+        FileDiffRegion[] movedFiles = null;
+        if (Global.invoke(diff, "getFileRegions") instanceof FileDiffRegion[] files) //$NON-NLS-1$
+        {
+            movedFiles = new FileDiffRegion[files.length];
+            try
+            {
+                for (int i = 0; i < files.length; i++)
+                {
+                    int[] moved = moved(files[i], points, grown);
+                    // единственный открытый конструктор: (FileDiff, смещение, длина)
+                    movedFiles[i] = (FileDiffRegion) FileDiffRegion.class.getConstructors()[0].newInstance(
+                        Global.call(files[i], "getDiff"), Integer.valueOf(moved[0]), Integer.valueOf(moved[1])); //$NON-NLS-1$
+                }
+            }
+            catch (ReflectiveOperationException | RuntimeException e)
+            {
+                Global.logError("GitDiffMethods", "file regions not moved, names not inserted", e); //$NON-NLS-1$ //$NON-NLS-2$
+                return false;
+            }
+        }
+        int[] maximumLines = Global.getField(diff, "maximumLineNumbers") instanceof int[] lines ? lines : null; //$NON-NLS-1$
+        FileDiffRegion[] fileRegions = movedFiles;
+        // перерисовка выключена: виджет получает весь новый текст разом, выделение и прокрутка возвращаются
+        viewer.setRedraw(false);
+        try
+        {
+            // прежний разборщик областей читает старые смещения — на время правки текста он снят
+            IDocumentPartitioner partitioner = diff.getDocumentPartitioner();
+            if (partitioner != null)
+            {
+                partitioner.disconnect();
+                diff.setDocumentPartitioner(null);
+            }
+            for (Map.Entry<Integer, String> insert : inserts.descendingMap().entrySet())
+                diff.replace(insert.getKey().intValue(), 0, insert.getValue());
+            try (DiffRegionFormatter moved = new DiffRegionFormatter(new Document())
+            {
+                @Override
+                public DiffRegion[] getRegions()
+                {
+                    return movedRegions;
+                }
+
+                @Override
+                public FileDiffRegion[] getFileRegions()
+                {
+                    return fileRegions;
+                }
+
+                @Override
+                public int[] getMaximumLineNumbers()
+                {
+                    return maximumLines;
+                }
+            })
+            {
+                diff.connect(moved);
+            }
+        }
+        catch (BadLocationException | RuntimeException e)
+        {
+            Global.logError("GitDiffMethods", "names insert failed", e); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        finally
+        {
+            viewer.setRedraw(true);
+        }
+        // «История Git»: область текста растянута по его размеру — штатный пересчёт идёт по изменению
+        // размера внешней области прокрутки
+        ScrolledComposite outer = outerScroll();
+        if (outer != null)
+            outer.notifyListeners(SWT.Resize, new Event());
+        return true;
+    }
+
+    /**
+     * Область после вставок: {@code [смещение, длина]}. Вставка до начала области сдвигает её,
+     * вставка внутри или вплотную к концу (заголовок блока кончается местом вставки) — удлиняет.
+     */
+    private static int[] moved(IRegion region, int[] points, int[] grown)
+    {
+        int before = countUpTo(points, region.getOffset());
+        int through = countUpTo(points, region.getOffset() + region.getLength());
+        return new int[] { region.getOffset() + grown[before],
+            region.getLength() + grown[Math.max(before, through)] - grown[before] };
+    }
+
+    /** Сколько мест вставки не дальше {@code offset}; {@code points} по возрастанию. */
+    private static int countUpTo(int[] points, int offset)
+    {
+        int low = 0;
+        int high = points.length;
+        while (low < high)
+        {
+            int middle = (low + high) >>> 1;
+            if (points[middle] <= offset)
+                low = middle + 1;
+            else
+                high = middle;
+        }
+        return low;
+    }
+
+    /** Имя метода в заголовке блока — цветом имени метода обработки «История Git» ИР. */
+    private void installNameStyle()
+    {
+        viewer.addTextPresentationListener(presentation ->
+        {
+            IDocument document = viewer.getDocument();
+            IRegion extent = presentation.getExtent();
+            if (document == null || extent == null || namesByLine.isEmpty() || namesDocument != document)
+                return;
+            try
+            {
+                int extentEnd = extent.getOffset() + extent.getLength();
+                int from = document.getLineOfOffset(extent.getOffset());
+                int to = document.getLineOfOffset(extentEnd);
+                for (Map.Entry<Integer, String> name : namesByLine.entrySet())
+                {
+                    int line = name.getKey().intValue();
+                    if (line < from || line > to)
+                        continue;
+                    IRegion region = document.getLineInformation(line);
+                    int length = name.getValue().length();
+                    int start = region.getOffset() + region.getLength() - length;
+                    if (start < region.getOffset() || start < extent.getOffset() || start + length > extentEnd
+                        || !name.getValue().equals(document.get(start, length)))
+                        continue;
+                    // как класс «method» в ИР: тёмно-синий #000080, обычное начертание; в тёмной теме —
+                    // светлая пара того же тона
+                    presentation.mergeStyleRange(new StyleRange(start, length,
+                        new Color(text.getDisplay(), ThemeAwareColors.isDarkTheme()
+                            ? new RGB(130, 170, 255) : new RGB(0, 0, 128)), null));
+                }
+            }
+            catch (BadLocationException e)
+            {
+                // документ сменился во время раскраски
+            }
+        });
     }
 
     // ---- строка обрезки текста — ссылка на полное сравнение ----

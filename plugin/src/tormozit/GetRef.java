@@ -914,6 +914,19 @@ public class GetRef extends AbstractHandler implements IElementUpdater
         if (p.length < 2 || p[1].isEmpty()) return withExt(extensionName, typeRu);
         String objectName = stripFileExt(p[1]);
         String base = withExt(extensionName, typeRu + "." + objectName); //$NON-NLS-1$
+        // Вложенные подсистемы повторяют пару Subsystems/Имя на каждом уровне.
+        if ("Subsystems".equals(p[0])) //$NON-NLS-1$
+        {
+            StringBuilder fullName = new StringBuilder(base);
+            for (int i = 2; i < p.length && "Subsystems".equals(p[i]); i += 2) //$NON-NLS-1$
+            {
+                fullName.append('.').append(typeRu);
+                if (i + 1 >= p.length || p[i + 1].isEmpty())
+                    break;
+                fullName.append('.').append(stripFileExt(p[i + 1]));
+            }
+            return fullName.toString();
+        }
         if (p.length == 2) return base;
         String seg2 = p[2];
         if (seg2.endsWith(".mdo") && stripFileExt(seg2).equals(objectName)) return base; //$NON-NLS-1$

@@ -18,6 +18,12 @@ public class CompareSearchResult implements ISearchResult
     private String queryText;
     private String scopeLabel;
     private boolean spelling;
+    private boolean allReferences;
+
+    /** Поиск всех ссылок: результаты не предлагают удаление битых ссылок. */
+    public void setAllReferences(boolean allReferences) { this.allReferences = allReferences; }
+
+    public boolean isAllReferences() { return allReferences; }
 
     /** Режим «Ошибки орфографии»: дерево слева — объекты с ошибками, строки ведут в свойство или модуль. */
     public void setSpelling(boolean spelling) { this.spelling = spelling; }

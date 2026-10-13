@@ -306,6 +306,14 @@ public final class MdReferenceSupport
     private static List<BrokenReference> findBrokenReferences(EObject owner, IProgressMonitor monitor,
         Map<URI, Boolean> unresolved, String property, java.util.function.Consumer<BrokenReference> onReference)
     {
+        return findReferences(owner, monitor, unresolved, property, onReference, true);
+    }
+
+    /** Общий обход сохранённых ссылок; проверка ошибок сохраняет прежние критерии. */
+    private static List<BrokenReference> findReferences(EObject owner, IProgressMonitor monitor,
+        Map<URI, Boolean> unresolved, String property, java.util.function.Consumer<BrokenReference> onReference,
+        boolean brokenOnly)
+    {
         List<BrokenReference> result = new ArrayList<>();
         java.util.function.Consumer<BrokenReference> found = reference ->
         {
@@ -320,7 +328,8 @@ public final class MdReferenceSupport
                 throw new OperationCanceledException();
             // Составы проверяет исходный анализатор: расширение на остальные свойства
             // не должно менять его геттеры, обработку записей и критерий eIsProxy().
-            List<MdCompositionSupport.BrokenReference> compositionReferences = compositionReferences(owner, feature);
+            List<MdCompositionSupport.BrokenReference> compositionReferences = brokenOnly
+                ? compositionReferences(owner, feature) : null;
             if (compositionReferences != null)
             {
                 for (MdCompositionSupport.BrokenReference reference : compositionReferences)
@@ -336,18 +345,31 @@ public final class MdReferenceSupport
                     if (monitor.isCanceled())
                         throw new OperationCanceledException();
                     Object element = list.get(i);
-                    if (element instanceof EObject target && broken(owner, target, unresolved))
+                    if (element instanceof EObject target && (brokenOnly ? broken(owner, target, unresolved)
+                        : isMetadataSearchTarget(target)))
                         found.accept(new BrokenReference(owner, feature, i, target));
                 }
             }
-            else if (value instanceof EObject target && broken(owner, target, unresolved))
+            else if (value instanceof EObject target && (brokenOnly ? broken(owner, target, unresolved)
+                : isMetadataSearchTarget(target)))
                 found.accept(new BrokenReference(owner, feature, -1, target));
             // Запись доступности по ролям без роли: экспорт формы в XML падает с NPE.
-            else if (value == null && owner instanceof com._1c.g5.v8.dt.metadata.mdclass.ForRoleType
+            else if (brokenOnly && value == null && owner instanceof com._1c.g5.v8.dt.metadata.mdclass.ForRoleType
                 && feature == MdClassPackage.Literals.FOR_ROLE_TYPE__ROLE)
                 found.accept(new BrokenReference(owner, feature, -1, null));
         }
         return result;
+    }
+
+    /** Встроенные типы и значения платформы не являются ссылками на метаданные. */
+    private static boolean isMetadataSearchTarget(EObject target)
+    {
+        URI uri = EcoreUtil.getURI(target);
+        boolean metadata = MdClassPackage.Literals.MD_OBJECT.isSuperTypeOf(target.eClass())
+            || MdTypeMapping.bmFqnToRuFullName(fullName(uri)) != null;
+        Global.tempLog("metadata-links-search", "target=" + uri + " class=" + target.eClass().getName()
+            + " metadata=" + metadata);
+        return metadata;
     }
 
     /** Пустая цель — запись доступности по ролям, у которой роль не задана. */
@@ -387,15 +409,16 @@ public final class MdReferenceSupport
         // Ссылки BM могут быть EObject-оболочками без Java-интерфейсов модели.
         // Тип цели определяем по EClass, который оболочка делегирует объекту.
         EClass type = target.eClass();
-        boolean metadata = MdClassPackage.Literals.MD_OBJECT.isSuperTypeOf(type)
-            || McorePackage.Literals.TYPE_ITEM.isSuperTypeOf(type)
-            || McorePackage.Literals.PICTURE.isSuperTypeOf(type)
-            || McorePackage.Literals.COLOR.isSuperTypeOf(type)
-            || McorePackage.Literals.FONT.isSuperTypeOf(type)
-            || McorePackage.Literals.BORDER.isSuperTypeOf(type)
-            || McorePackage.Literals.COMMAND.isSuperTypeOf(type)
-                && !McorePackage.Literals.COMMAND_REF.isSuperTypeOf(type)
-            || McorePackage.Literals.COMMAND_GROUP.isSuperTypeOf(type);
+        // Внутренние объекты формы (в том числе FormCommand) не являются метаданными.
+        // Команды и группы метаданных проходят через MdObject, а не через Mcore.Command.
+        boolean metadata = type.getEPackage() != FormPackage.eINSTANCE
+            && (MdClassPackage.Literals.MD_OBJECT.isSuperTypeOf(type)
+                || (McorePackage.Literals.TYPE_ITEM.isSuperTypeOf(type)
+                    || McorePackage.Literals.PICTURE.isSuperTypeOf(type)
+                    || McorePackage.Literals.COLOR.isSuperTypeOf(type)
+                    || McorePackage.Literals.FONT.isSuperTypeOf(type)
+                    || McorePackage.Literals.BORDER.isSuperTypeOf(type))
+                    && MdTypeMapping.bmFqnToRuFullName(fullName(EcoreUtil.getURI(target))) != null);
         if (target.eIsProxy())
             Global.tempLog("broken-links-reference", "target=" + EcoreUtil.getURI(target)
                 + " javaClass=" + target.getClass().getName() + " modelClass=" + type.getName()
@@ -651,16 +674,28 @@ public final class MdReferenceSupport
         return labels.size() > shown ? text + " и ещё " + (labels.size() - shown) : text;
     }
 
+    /** Все сохранённые ссылки выбранных объектов с вложенными; null — весь проект. */
+    public static void findReferencesInObjects(IProject project, List<URI> roots, String scope)
+    {
+        findInProject(project, null, roots != null ? List.copyOf(roots) : null, scope, false);
+    }
+
     private static void findInProject(IProject project, Location location, List<URI> roots, String scope)
+    {
+        findInProject(project, location, roots, scope, true);
+    }
+
+    private static void findInProject(IProject project, Location location, List<URI> roots, String scope,
+        boolean brokenOnly)
     {
         if (project == null)
             return;
-        new Job("Поиск битых ссылок метаданных")
+        new Job(brokenOnly ? "Поиск битых ссылок метаданных" : "Найти ссылки в объекте")
         {
             @Override
             protected IStatus run(IProgressMonitor monitor)
             {
-                Global.tempLog("broken-links-project", "start project=" + project.getName() + " location=" + location
+                Global.tempLog("broken-links-project", "start brokenOnly=" + brokenOnly + " project=" + project.getName() + " location=" + location
                     + " roots=" + roots);
                 try
                 {
@@ -710,8 +745,8 @@ public final class MdReferenceSupport
                             for (EObject owner : owners)
                             {
                                 checking.checkCanceled();
-                                for (BrokenReference reference : findBrokenReferences(owner, checking, unresolved,
-                                    location != null ? location.feature() : null))
+                                for (BrokenReference reference : findReferences(owner, checking, unresolved,
+                                    location != null ? location.feature() : null, found -> {}, brokenOnly))
                                 {
                                     String property = ConfigSearchResultsHook.metadataPropertyPath(owner,
                                         reference.feature(), EcoreUtil.getRootContainer(owner));
@@ -738,14 +773,15 @@ public final class MdReferenceSupport
                     Global.tempLog("broken-links-project", "finished project=" + project.getName() + " matches=" + matches.size());                    Display.getDefault().asyncExec(() ->
                     {
                         CompareSearchResult result = new CompareSearchResult(matches, null, project);
-                        result.setQueryText("битые ссылки метаданных");
+                        result.setAllReferences(!brokenOnly);
+                        result.setQueryText(brokenOnly ? "битые ссылки метаданных" : "ссылки метаданных");
                         result.setScopeLabel(scope);
                         CompareSearchQuery query = new CompareSearchQuery();
                         result.setQuery(query);
                         query.setSearchResult(result);
                         NewSearchUI.runQueryInBackground(query);
                         if (!unreadable.isEmpty())
-                            ToastNotification.show("Поиск битых ссылок метаданных", "Пропущено вложенных объектов без"
+                            ToastNotification.show(brokenOnly ? "Поиск битых ссылок метаданных" : "Найти ссылки в объекте", "Пропущено вложенных объектов без"
                                 + " данных в модели: " + unreadable.size() + ". Первый: " + localized(unreadable.get(0)),
                                 10_000);
                     });
@@ -763,14 +799,26 @@ public final class MdReferenceSupport
 
     /** Проверка изолированной модели Git; адреса результата относятся к исходному проекту. */
     public static List<CompareSearchMatch> findInModel(IComparisonDataSource source, URI navigationBase,
-        Set<String> changedFiles, IProgressMonitor monitor)
+        Set<String> changedFiles, Set<String> unchangedConfigurationTargets, IProgressMonitor monitor)
     {
-        return findInModel(source, navigationBase, changedFiles, monitor, match -> {});
+        return findInModel(source, navigationBase, changedFiles, unchangedConfigurationTargets, monitor, match -> {});
     }
 
-    /** Передаёт каждую найденную ссылку сразу, сохраняя частичные результаты при отмене. */
+    /** Ключ ссылки Configuration.mdo, цель которой не импортирована во временную модель: «свойство|полное имя». */
+    public static String unchangedTargetKey(EReference feature, URI target)
+    {
+        return feature.getName() + "|" + fullName(target);
+    }
+
+    /**
+     * Передаёт каждую найденную ссылку сразу, сохраняя частичные результаты при отмене.
+     *
+     * @param unchangedConfigurationTargets ссылки Configuration.mdo, которые не менялись ({@link #unchangedTargetKey}):
+     *     их цели в модель не импортированы, поэтому неразрешённая ссылка здесь ещё не битая
+     */
     public static List<CompareSearchMatch> findInModel(IComparisonDataSource source, URI navigationBase,
-        Set<String> changedFiles, IProgressMonitor monitor, java.util.function.Consumer<CompareSearchMatch> onMatch)
+        Set<String> changedFiles, Set<String> unchangedConfigurationTargets, IProgressMonitor monitor,
+        java.util.function.Consumer<CompareSearchMatch> onMatch)
     {
         return source.getBmModel().executeReadonlyTask(new AbstractBmTask<List<CompareSearchMatch>>(
             "Проверка ссылок коммита")
@@ -789,6 +837,7 @@ public final class MdReferenceSupport
                 List<CompareSearchMatch> rows = new ArrayList<>();
                 Map<URI, Boolean> unresolved = new HashMap<>();
                 SubMonitor checking = progress.split(70).setWorkRemaining(Math.max(1, owners.size()));
+                int[] skipped = { 0 };
                 for (EObject owner : owners)
                 {
                     checking.checkCanceled();
@@ -797,8 +846,21 @@ public final class MdReferenceSupport
                         checking.worked(1);
                         continue;
                     }
+                    boolean configuration = !unchangedConfigurationTargets.isEmpty()
+                        && EcoreUtil.getRootContainer(owner) instanceof com._1c.g5.v8.dt.metadata.mdclass.Configuration;
                     findBrokenReferences(owner, checking, unresolved, null, reference ->
                     {
+                        if (configuration && reference.target() != null)
+                        {
+                            if (unchangedConfigurationTargets.contains(
+                                unchangedTargetKey(reference.feature(), EcoreUtil.getURI(reference.target()))))
+                            {
+                                skipped[0]++;
+                                return;
+                            }
+                            Global.tempLog("broken-links-commit", "configuration broken feature="
+                                + reference.feature().getName() + " target=" + EcoreUtil.getURI(reference.target()));
+                        }
                         Location location = locationOf(owner, reference.feature());
                         URI root = navigationBase.appendSegment(location.root().lastSegment())
                             .appendFragment(location.root().fragment());
@@ -817,6 +879,8 @@ public final class MdReferenceSupport
                     });
                     checking.worked(1);
                 }
+                Global.tempLog("broken-links-commit", "configuration unchanged=" + unchangedConfigurationTargets.size()
+                    + " skipped=" + skipped[0] + " rows=" + rows.size());
                 return rows;
             }
         });
@@ -922,7 +986,22 @@ public final class MdReferenceSupport
                         }
                     }
                     if (object instanceof com._1c.g5.v8.dt.metadata.mdclass.BasicForm form && form.getForm() != null)
-                        pending.add(form.getForm());
+                    {
+                        EObject content = form.getForm();
+                        // Содержимое формы лежит в своём файле. В модель исходного состояния загружены только
+                        // изменённые файлы: у неизменённой формы оно заглушка, и удалений в нём быть не может.
+                        boolean skip = false;
+                        if (content.eIsProxy())
+                        {
+                            URI address = EcoreUtil.getURI(content);
+                            String path = previous.getPath(address.lastSegment(), content.eClass());
+                            skip = path != null && !changedFiles.contains(path.replace('\\', '/'));
+                            Global.tempLog("broken-links-commit", "form content proxy=" + address + " path=" + path
+                                + " skip=" + skip);
+                        }
+                        if (!skip)
+                            pending.add(content);
+                    }
                     for (EReference containment : object.eClass().getEAllContainments())
                     {
                         if (containment.isDerived() || containment.isTransient() || containment.isVolatile())

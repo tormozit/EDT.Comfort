@@ -49,7 +49,8 @@ import com._1c.g5.v8.dt.validation.marker.StandardExtraInfo;
  * {@code com._1c.g5.v8.dt.rights.model}) — открывает редактор роли на странице «Права», выделяет
  * строку объекта и прокручивает колонку права в видимую область
  * ({@link ConfigSearchResultsHook#revealRoleRightsRow}, issue #463);</li>
- * <li><b>корневая конфигурация</b> — открывает Configuration.mdo в текстовом редакторе;</li>
+ * <li><b>корневая конфигурация</b> — открывает Configuration.mdo в текстовом редакторе
+ * вместо штатного открытия (маршрут выбирает {@link ProblemViewHook});</li>
  * <li><b>любая другая проблема на свойстве объекта панели «Свойства»</b> (элемент/реквизит/команда
  * формы, реквизит МД; объект проблемы может быть вложен в него — путь к данным, {@code ExtInfo}
  * картинки подменю) — показывает панель и активирует поле свойства
@@ -265,15 +266,45 @@ public final class ProblemViewOpenTargetHook implements IStartup
             return;
         if (MdClassPackage.Literals.CONFIGURATION.isSuperTypeOf(markerObject.eClass()))
         {
-            Global.tempLog("broken-links-problem", "open configuration marker=" + marker.getClass().getName()
-                + " check=" + marker.getCheckId() + " feature=" + marker.getFeatureId());
-            Display.getDefault().asyncExec(() -> ProblemViewOpenInTextEditorHandler.openMarker(marker));
+            // Открытие выполняет только подмена IOpenListener в ProblemViewHook:
+            // остальные события одного двойного клика не должны открывать файл повторно.
             return;
         }
         String rightName = roleRightName(markerObject, marker);
         if (ConfigSearchResultsHook.revealRoleRightsRow(page, markerObject, rightName, marker.getMessage()))
             return;
         focusPropertyField(marker, markerObject, page);
+    }
+
+    /** Выбирает текстовый маршрут до вызова штатного открытия редактора EDT. */
+    static boolean openConfigurationMarker(Marker marker)
+    {
+        Function<EObject, Boolean> configuration = object -> object != null
+            && MdClassPackage.Literals.CONFIGURATION.isSuperTypeOf(object.eClass());
+        boolean isConfiguration = Boolean.TRUE.equals(marker.provideObject(configuration));
+        Global.tempLog("broken-links-open", "resolve marker=" + marker.getClass().getName()
+            + " check=" + marker.getCheckId() + " feature=" + marker.getFeatureId()
+            + " configuration=" + isConfiguration);
+        if (!isConfiguration)
+            return false;
+        Global.tempLog("broken-links-problem", "open configuration marker=" + marker.getClass().getName()
+            + " check=" + marker.getCheckId() + " feature=" + marker.getFeatureId());
+        Global.tempLog("broken-links-open", "route=configuration-text");
+        Display.getDefault().asyncExec(() ->
+        {
+            Global.tempLog("broken-links-open", "configuration-text begin");
+            try
+            {
+                ProblemViewOpenInTextEditorHandler.openMarker(marker);
+                Global.tempLog("broken-links-open", "configuration-text end");
+            }
+            catch (RuntimeException e)
+            {
+                Global.tempLogException("broken-links-open", "configuration-text failed", e);
+                throw e;
+            }
+        });
+        return true;
     }
 
     /**

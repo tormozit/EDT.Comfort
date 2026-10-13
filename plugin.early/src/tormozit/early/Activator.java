@@ -8,6 +8,7 @@ import java.util.function.Function;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.Handle;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
 import org.osgi.framework.BundleActivator;
@@ -119,18 +120,47 @@ public final class Activator
         private static final String PROP_BEFORE_MERGE_COMMIT = "tormozit.compare.beforeMergeCommit"; //$NON-NLS-1$
         private static final String EDITOR_MATCHING = "com._1c.g5.v8.dt.ui.editor.DtEditorMatchingStrategy"; //$NON-NLS-1$
         private static final String GRANULAR_EDITOR = "com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor"; //$NON-NLS-1$
+        private static final String PROPERTY_SHEET = "com._1c.g5.v8.dt.md.ui.properties.MdPropertySheetPage"; //$NON-NLS-1$
+        private static final String PROPERTY_SHEET_MONITOR = PROPERTY_SHEET + "$Monitor"; //$NON-NLS-1$
+        private static final String PROP_SELECTION_INVALIDATE = "tormozit.propertySheet.invalidate"; //$NON-NLS-1$
+        private static final String PROP_SELECTION_OPERATION = "tormozit.propertySheet.operation"; //$NON-NLS-1$
+        private static final String PROP_SELECTION_RESULT = "tormozit.propertySheet.result"; //$NON-NLS-1$
+        private static final String PROP_SELECTION_PATCH = "tormozit.propertySheet.patch"; //$NON-NLS-1$
+        private static final String PROP_SELECTION_PROGRESS = "tormozit.propertySheet.progress"; //$NON-NLS-1$
+        private static final String PROP_SELECTION_PROGRESS_DONE = "tormozit.propertySheet.progressDone"; //$NON-NLS-1$
+        private static final String PROP_SELECTION_MONITOR_PATCH = "tormozit.propertySheet.monitorPatch"; //$NON-NLS-1$
         /** Совпадает с MdEditorTabsHook.PROP_PAGES_CREATED. */
         private static final String PROP_PAGES_CREATED = "tormozit.mdEditor.pagesCreated"; //$NON-NLS-1$
         private static final String TREE_VIEWER = "org.eclipse.jface.viewers.AbstractTreeViewer"; //$NON-NLS-1$
+        private static final String FORM_PRESENTATION =
+            "com._1c.g5.v8.dt.form.internal.presentation.wysiwyg.FormWysiwygRepresentation"; //$NON-NLS-1$
+        private static final String FORM_PAGE = "com._1c.g5.v8.dt.form.ui.editor.FormEditorPage"; //$NON-NLS-1$
+        private static final String PROP_FORM_ALLOWED = "tormozit.formPreview.allowed"; //$NON-NLS-1$
+        private static final String PROP_FORM_EVENT = "tormozit.formPreview.event"; //$NON-NLS-1$
+        private static final String PROP_FORM_PATCH = "tormozit.formPreview.patch."; //$NON-NLS-1$
         private static final String SEARCH_TREE_LAYOUT =
             "com._1c.g5.v8.dt.internal.search.ui.provider.SearchResultTreeLayoutManager"; //$NON-NLS-1$
         private static final String PROP_COMMON_CHILDREN = "tormozit.commonNode.children"; //$NON-NLS-1$
         private static final String PROP_COMMON_SEARCH_NODE = "tormozit.commonNode.searchNode"; //$NON-NLS-1$
         /** Совпадает с WorkbenchTabsHook.EditorModelMatching.PROPERTY. */
         static final String PROP_EDITOR_MODEL_EQUALS = "tormozit.editor.modelEquals"; //$NON-NLS-1$
+        private static final String MULTILANGUAGE_COMPONENT =
+            "com._1c.g5.v8.dt.md.ui.aef.components.AbstractMultilanguageComponent"; //$NON-NLS-1$
+        private static final String SINGLE_LANGUAGE_COMPONENT =
+            "com._1c.g5.v8.dt.md.ui.aef.components.AbstractSingleLanguageComponent"; //$NON-NLS-1$
+        private static final String PROP_LOCAL_STRING_SOURCE = "tormozit.localStringDialog.source"; //$NON-NLS-1$
+        private static final String DCS_LOCAL_STRING_EDITOR =
+            "com._1c.g5.v8.dt.dcs.ui.valueeditors.LocalStringEditor"; //$NON-NLS-1$
+        private static final String DCS_FIELD_EDITING =
+            "com._1c.g5.v8.dt.dcs.ui.datasets.fields.DataSetsFieldsEditingSupport"; //$NON-NLS-1$
+        private static final String DCS_PARAMETER_EDITING =
+            "com._1c.g5.v8.dt.dcs.ui.parameters.ParametersEditingSupport"; //$NON-NLS-1$
         private static final List<String> TARGETS = List.of(BSL_PARSER, CUSTOM_BSL_PARSER, HELPER,
             SUPPRESSION_PROVIDER, FOLDING_PROVIDER, TAB_FOLDER, PART_LIST_CONTROL, COMPARISON_EDITOR,
-            MERGE_COMMIT_CALLBACK, EDITOR_MATCHING, GRANULAR_EDITOR, TREE_VIEWER, SEARCH_TREE_LAYOUT);
+            MERGE_COMMIT_CALLBACK, EDITOR_MATCHING, GRANULAR_EDITOR, TREE_VIEWER, SEARCH_TREE_LAYOUT,
+            FORM_PRESENTATION, FORM_PAGE, PROPERTY_SHEET, PROPERTY_SHEET_MONITOR,
+            MULTILANGUAGE_COMPONENT, SINGLE_LANGUAGE_COMPONENT,
+            DCS_LOCAL_STRING_EDITOR, DCS_FIELD_EDITING, DCS_PARAMETER_EDITING);
 
         private static final String EXTRACT_SUPPRESSIONS_DESC = "(Lorg/eclipse/xtext/nodemodel/ILeafNode;)Ljava/util/Set;"; //$NON-NLS-1$
         private static final String ILEAF_NODE = "org/eclipse/xtext/nodemodel/ILeafNode"; //$NON-NLS-1$
@@ -145,6 +175,19 @@ public final class Activator
         /** Свойства ставятся до хука: вплетённый код вызывает их без проверки на {@code null}. */
         static void install(BundleContext context)
         {
+            System.getProperties().putIfAbsent(PROP_SELECTION_INVALIDATE, (Consumer<Object>) page -> {});
+            System.getProperties().putIfAbsent(PROP_SELECTION_OPERATION,
+                (BiFunction<Object, Runnable, Runnable>) (page, runnable) -> runnable);
+            System.getProperties().putIfAbsent(PROP_SELECTION_RESULT,
+                (BiFunction<Object, Runnable, Runnable>) (page, runnable) -> runnable);
+            System.getProperties().putIfAbsent(PROP_SELECTION_PROGRESS,
+                (BiFunction<Object, Runnable, Runnable>) (monitor, runnable) -> runnable);
+            System.getProperties().putIfAbsent(PROP_SELECTION_PROGRESS_DONE,
+                (BiFunction<Object, Runnable, Runnable>) (monitor, runnable) -> runnable);
+            System.getProperties().putIfAbsent(PROP_FORM_ALLOWED,
+                (BiFunction<Object, Boolean, Boolean>) (representation, allowed) -> allowed);
+            System.getProperties().putIfAbsent(PROP_FORM_EVENT,
+                (BiFunction<Object, String, Object>) (source, phase) -> null);
             System.getProperties().putIfAbsent(PROP_PAGES_CREATED, (Consumer<Object>) editor -> {});
             System.getProperties().putIfAbsent(PROP_COMMON_CHILDREN,
                 (BiFunction<Object, Object, Object>) (parent, children) -> children);
@@ -176,6 +219,8 @@ public final class Activator
             });
             System.getProperties().putIfAbsent(PROP_AFTER_MERGE, (Function<Object, Object>) editor -> null);
             System.getProperties().putIfAbsent(PROP_BEFORE_MERGE_COMMIT, (Function<Object, Object>) callback -> null);
+            System.getProperties().putIfAbsent(PROP_LOCAL_STRING_SOURCE,
+                (BiFunction<Object, Object, Object>) (dialog, component) -> dialog);
             context.registerService(WeavingHook.class, new EarlyWeaving(), null);
         }
 
@@ -195,11 +240,17 @@ public final class Activator
             }
             catch (Throwable t)
             {
+                if (PROPERTY_SHEET.equals(name))
+                    System.setProperty(PROP_SELECTION_PATCH, "error " + t); //$NON-NLS-1$
+                if (PROPERTY_SHEET_MONITOR.equals(name))
+                    System.setProperty(PROP_SELECTION_MONITOR_PATCH, "error " + t); //$NON-NLS-1$
                 // Класс остаётся штатным: лучше без исправления, чем без парсера.
                 if (TAB_FOLDER.equals(name))
                     System.setProperty(PROP_TAB_FOLDER_CHEVRON, "error " + t); //$NON-NLS-1$
                 if (PART_LIST_CONTROL.equals(name))
                     System.setProperty(PROP_PART_LIST_CONTROL, "error " + t); //$NON-NLS-1$
+                if (FORM_PRESENTATION.equals(name) || FORM_PAGE.equals(name))
+                    System.setProperty(PROP_FORM_PATCH + name, "error " + t); //$NON-NLS-1$
             }
         }
 
@@ -433,9 +484,377 @@ public final class Activator
             return touched[0] == 1 && touched[1] == 1 ? writer.toByteArray() : null;
         }
 
+        /** Ворота пересчёта и замеры реальной работы, без новых ветвлений и кадров стека. */
+        private static byte[] transformFormPreview(String className, byte[] bytes)
+        {
+            boolean representation = FORM_PRESENTATION.equals(className);
+            ClassReader reader = new ClassReader(bytes);
+            ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+            int[] touched = new int[3];
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor, String signature,
+                    String[] exceptions)
+                {
+                    MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    boolean gate = representation && "isRebuildAllowed".equals(name) //$NON-NLS-1$
+                        && "()Z".equals(descriptor); //$NON-NLS-1$
+                    boolean timed = representation
+                        ? "rebuildInternal".equals(name) && descriptor.equals( //$NON-NLS-1$
+                            "(Lcom/_1c/g5/v8/dt/form/model/Form;Lcom/_1c/g5/v8/dt/form/mapping/model/CommandInterfaceMapping;Lcom/_1c/g5/v8/dt/form/model/NativeRenderEvent;Z)V") //$NON-NLS-1$
+                        : "createPageControlsInternal".equals(name) //$NON-NLS-1$
+                            && "(Lorg/eclipse/ui/forms/IManagedForm;)V".equals(descriptor); //$NON-NLS-1$
+                    if (!gate && !timed)
+                        return mv;
+                    touched[gate ? 0 : 1]++;
+                    return new MethodVisitor(Opcodes.ASM9, mv)
+                    {
+                        private void callback(String phase)
+                        {
+                            super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", //$NON-NLS-1$ //$NON-NLS-2$
+                                "()Ljava/util/Properties;", false); //$NON-NLS-1$
+                            super.visitLdcInsn(PROP_FORM_EVENT);
+                            super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", //$NON-NLS-1$ //$NON-NLS-2$
+                                "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$
+                            super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/BiFunction"); //$NON-NLS-1$
+                            super.visitVarInsn(Opcodes.ALOAD, 0);
+                            super.visitLdcInsn(phase);
+                            super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BiFunction", "apply", //$NON-NLS-1$ //$NON-NLS-2$
+                                "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$
+                            super.visitInsn(Opcodes.POP);
+                        }
+
+                        @Override
+                        public void visitCode()
+                        {
+                            super.visitCode();
+                            if (timed)
+                                callback(representation ? "render.begin" : "open.begin"); //$NON-NLS-1$ //$NON-NLS-2$
+                        }
+
+                        @Override
+                        public void visitInsn(int opcode)
+                        {
+                            if (gate && opcode == Opcodes.IRETURN)
+                            {
+                                // Исходный boolean остаётся аргументом: штатное false не превращаем в true.
+                                super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Boolean", "valueOf", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "(Z)Ljava/lang/Boolean;", false); //$NON-NLS-1$
+                                super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "()Ljava/util/Properties;", false); //$NON-NLS-1$
+                                super.visitLdcInsn(PROP_FORM_ALLOWED);
+                                super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$
+                                super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/BiFunction"); //$NON-NLS-1$
+                                super.visitInsn(Opcodes.SWAP);
+                                super.visitVarInsn(Opcodes.ALOAD, 0);
+                                super.visitInsn(Opcodes.SWAP);
+                                super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BiFunction", "apply", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$
+                                super.visitTypeInsn(Opcodes.CHECKCAST, "java/lang/Boolean"); //$NON-NLS-1$
+                                super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/Boolean", "booleanValue", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "()Z", false); //$NON-NLS-1$
+                            }
+                            if (timed && (opcode == Opcodes.RETURN || opcode == Opcodes.ATHROW))
+                            {
+                                callback(representation
+                                    ? (opcode == Opcodes.RETURN ? "render.end" : "render.error") //$NON-NLS-1$ //$NON-NLS-2$
+                                    : (opcode == Opcodes.RETURN ? "open.end" : "open.error")); //$NON-NLS-1$ //$NON-NLS-2$
+                                touched[2]++;
+                            }
+                            super.visitInsn(opcode);
+                        }
+                    };
+                }
+            }, 0);
+            boolean complete = touched[0] == (representation ? 1 : 0)
+                && touched[1] == 1 && touched[2] > 0;
+            System.setProperty(PROP_FORM_PATCH + className, complete ? "ok" : "unsupported"); //$NON-NLS-1$ //$NON-NLS-2$
+            return complete ? writer.toByteArray() : null;
+        }
+
+        /**
+         * MdPropertySheetPage: отмена монитора инвалидирует токен, Runnable операции
+         * захватывает его, все пять путей передачи результата в UI сохраняют тот же токен.
+         * Имя синтетической lambda берётся из bootstrap, а не из её порядкового номера.
+         * Все точки подтверждены javap целевого бандла; неполный патч не применяется.
+         */
+        private static byte[] transformPropertySheet(byte[] bytes)
+        {
+            String submitDesc = "(Lorg/eclipse/core/resources/IProject;Lorg/eclipse/jface/viewers/ISelection;Ljava/util/List;)V"; //$NON-NLS-1$
+            String operationDesc = "(Lorg/eclipse/jface/viewers/ISelection;Ljava/util/List;)V"; //$NON-NLS-1$
+            String[] operationName = { null };
+            ClassReader reader = new ClassReader(bytes);
+            reader.accept(new ClassVisitor(Opcodes.ASM9)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor,
+                    String signature, String[] exceptions)
+                {
+                    if (!"submitSelectionOperation".equals(name) || !submitDesc.equals(descriptor)) //$NON-NLS-1$
+                        return null;
+                    return new MethodVisitor(Opcodes.ASM9)
+                    {
+                        @Override
+                        public void visitInvokeDynamicInsn(String name, String descriptor,
+                            Handle bootstrap, Object... arguments)
+                        {
+                            for (Object argument : arguments)
+                                if (argument instanceof Handle handle
+                                    && handle.getOwner().equals(PROPERTY_SHEET.replace('.', '/'))
+                                    && operationDesc.equals(handle.getDesc()))
+                                    operationName[0] = handle.getName();
+                        }
+                    };
+                }
+            }, ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+            ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+            int[] touched = new int[3];
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor,
+                    String signature, String[] exceptions)
+                {
+                    MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    boolean invalidate = "()V".equals(descriptor) //$NON-NLS-1$
+                        && ("cancelPreviousSelectionProcess".equals(name) || "dispose".equals(name)); //$NON-NLS-1$ //$NON-NLS-2$
+                    boolean submit = "submitSelectionOperation".equals(name) && submitDesc.equals(descriptor); //$NON-NLS-1$
+                    boolean operation = name.equals(operationName[0]) && operationDesc.equals(descriptor);
+                    if (!invalidate && !submit && !operation)
+                        return mv;
+                    return new MethodVisitor(Opcodes.ASM9, mv)
+                    {
+                        private void callback(String key, boolean wrap)
+                        {
+                            super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", //$NON-NLS-1$ //$NON-NLS-2$
+                                "()Ljava/util/Properties;", false); //$NON-NLS-1$
+                            super.visitLdcInsn(key);
+                            super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", //$NON-NLS-1$ //$NON-NLS-2$
+                                "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$
+                            super.visitTypeInsn(Opcodes.CHECKCAST,
+                                wrap ? "java/util/function/BiFunction" : "java/util/function/Consumer"); //$NON-NLS-1$ //$NON-NLS-2$
+                            if (wrap)
+                                super.visitInsn(Opcodes.SWAP);
+                            super.visitVarInsn(Opcodes.ALOAD, 0);
+                            if (wrap)
+                            {
+                                super.visitInsn(Opcodes.SWAP);
+                                super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BiFunction", "apply", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$
+                                super.visitTypeInsn(Opcodes.CHECKCAST, "java/lang/Runnable"); //$NON-NLS-1$
+                            }
+                            else
+                                super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Consumer", "accept", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "(Ljava/lang/Object;)V", true); //$NON-NLS-1$
+                        }
+
+                        @Override
+                        public void visitCode()
+                        {
+                            super.visitCode();
+                            if (invalidate)
+                            {
+                                callback(PROP_SELECTION_INVALIDATE, false);
+                                touched[0]++;
+                            }
+                        }
+
+                        @Override
+                        public void visitInvokeDynamicInsn(String name, String descriptor,
+                            Handle bootstrap, Object... arguments)
+                        {
+                            super.visitInvokeDynamicInsn(name, descriptor, bootstrap, arguments);
+                            if (submit && descriptor.endsWith(")Ljava/lang/Runnable;")) //$NON-NLS-1$
+                            {
+                                callback(PROP_SELECTION_OPERATION, true);
+                                touched[1]++;
+                            }
+                        }
+
+                        @Override
+                        public void visitMethodInsn(int opcode, String owner, String name,
+                            String descriptor, boolean isInterface)
+                        {
+                            if (operation && opcode == Opcodes.INVOKEVIRTUAL
+                                && "org/eclipse/swt/widgets/Display".equals(owner) //$NON-NLS-1$
+                                && "asyncExec".equals(name) && "(Ljava/lang/Runnable;)V".equals(descriptor)) //$NON-NLS-1$ //$NON-NLS-2$
+                            {
+                                callback(PROP_SELECTION_RESULT, true);
+                                touched[2]++;
+                            }
+                            super.visitMethodInsn(opcode, owner, name, descriptor, isInterface);
+                        }
+                    };
+                }
+            }, 0);
+            boolean complete = touched[0] == 2 && touched[1] == 1 && touched[2] == 5;
+            System.setProperty(PROP_SELECTION_PATCH, (complete ? "ok " : "unsupported ") //$NON-NLS-1$ //$NON-NLS-2$
+                + java.util.Arrays.toString(touched));
+            return complete ? writer.toByteArray() : null;
+        }
+
+        /** У отменённого Monitor не выполняются отложенные startProgress/stopProgress с layout. */
+        private static byte[] transformPropertySheetMonitor(byte[] bytes)
+        {
+            ClassReader reader = new ClassReader(bytes);
+            ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+            int[] touched = new int[2];
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor,
+                    String signature, String[] exceptions)
+                {
+                    MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    int index = "beginTask".equals(name) && "(Ljava/lang/String;I)V".equals(descriptor) ? 0 //$NON-NLS-1$ //$NON-NLS-2$
+                        : "done".equals(name) && "()V".equals(descriptor) ? 1 : -1; //$NON-NLS-1$ //$NON-NLS-2$
+                    if (index < 0)
+                        return mv;
+                    return new MethodVisitor(Opcodes.ASM9, mv)
+                    {
+                        @Override
+                        public void visitMethodInsn(int opcode, String owner, String name,
+                            String descriptor, boolean isInterface)
+                        {
+                            if (opcode == Opcodes.INVOKEVIRTUAL && "org/eclipse/swt/widgets/Display".equals(owner) //$NON-NLS-1$
+                                && "asyncExec".equals(name) && "(Ljava/lang/Runnable;)V".equals(descriptor)) //$NON-NLS-1$ //$NON-NLS-2$
+                            {
+                                super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "()Ljava/util/Properties;", false); //$NON-NLS-1$
+                                super.visitLdcInsn(index == 0 ? PROP_SELECTION_PROGRESS : PROP_SELECTION_PROGRESS_DONE);
+                                super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$
+                                super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/BiFunction"); //$NON-NLS-1$
+                                super.visitInsn(Opcodes.SWAP);
+                                super.visitVarInsn(Opcodes.ALOAD, 0);
+                                super.visitInsn(Opcodes.SWAP);
+                                super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BiFunction", "apply", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$
+                                super.visitTypeInsn(Opcodes.CHECKCAST, "java/lang/Runnable"); //$NON-NLS-1$
+                                touched[index]++;
+                            }
+                            super.visitMethodInsn(opcode, owner, name, descriptor, isInterface);
+                        }
+                    };
+                }
+            }, 0);
+            boolean complete = touched[0] == 1 && touched[1] == 1;
+            System.setProperty(PROP_SELECTION_MONITOR_PATCH, (complete ? "ok " : "unsupported ") //$NON-NLS-1$ //$NON-NLS-2$
+                + java.util.Arrays.toString(touched));
+            return complete ? writer.toByteArray() : null;
+        }
+
+        /** Связывает диалог с открывшим его компонентом до open(), включая наследников. */
+        private static byte[] transformLocalStringSource(byte[] bytes)
+        {
+            ClassReader reader = new ClassReader(bytes);
+            ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+            int[] touched = { 0 };
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor,
+                    String signature, String[] exceptions)
+                {
+                    MethodVisitor original = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    if ((access & Opcodes.ACC_STATIC) != 0)
+                        return original;
+                    return new MethodVisitor(Opcodes.ASM9, original)
+                    {
+                        @Override
+                        public void visitMethodInsn(int opcode, String owner, String method, String desc,
+                            boolean isInterface)
+                        {
+                            super.visitMethodInsn(opcode, owner, method, desc, isInterface);
+                            if (opcode != Opcodes.INVOKEVIRTUAL || !"createMultiLanguageDialog".equals(method) //$NON-NLS-1$
+                                || !owner.equals(reader.getClassName())
+                                || !desc.endsWith(")Lcom/_1c/g5/v8/dt/ui/dialog/LocalStringDialog;")) //$NON-NLS-1$
+                                return;
+                            // Стек: dialog -> function, dialog, component -> dialog.
+                            super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", //$NON-NLS-1$ //$NON-NLS-2$
+                                "()Ljava/util/Properties;", false); //$NON-NLS-1$
+                            super.visitLdcInsn(PROP_LOCAL_STRING_SOURCE);
+                            super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", //$NON-NLS-1$ //$NON-NLS-2$
+                                "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$
+                            super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/BiFunction"); //$NON-NLS-1$
+                            super.visitInsn(Opcodes.SWAP);
+                            super.visitVarInsn(Opcodes.ALOAD, 0);
+                            super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BiFunction", "apply", //$NON-NLS-1$ //$NON-NLS-2$
+                                "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$
+                            super.visitTypeInsn(Opcodes.CHECKCAST, "com/_1c/g5/v8/dt/ui/dialog/LocalStringDialog"); //$NON-NLS-1$
+                            touched[0]++;
+                        }
+                    };
+                }
+            }, 0);
+            return touched[0] == 1 ? writer.toByteArray() : null;
+        }
+
+        /** СКД: редактор ячейки запоминает владельца, диалог получает его через cellEditor. */
+        private static byte[] transformDcsLocalStringSource(String className, byte[] bytes)
+        {
+            boolean dialog = DCS_LOCAL_STRING_EDITOR.equals(className);
+            String method = dialog ? "createDialog" : "getCellEditor"; //$NON-NLS-1$ //$NON-NLS-2$
+            String desc = dialog
+                ? "(Lorg/eclipse/swt/widgets/Shell;Lcom/_1c/g5/v8/dt/core/platform/IV8Project;Lorg/eclipse/emf/ecore/EObject;Ljava/lang/String;ZLjava/util/Map;)Lcom/_1c/g5/v8/dt/ui/dialog/LocalStringDialog;" //$NON-NLS-1$
+                : "(Ljava/lang/Object;)Lorg/eclipse/jface/viewers/CellEditor;"; //$NON-NLS-1$
+            String result = dialog ? "com/_1c/g5/v8/dt/ui/dialog/LocalStringDialog" //$NON-NLS-1$
+                : "org/eclipse/jface/viewers/CellEditor"; //$NON-NLS-1$
+            ClassReader reader = new ClassReader(bytes);
+            ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+            int[] touched = { 0 };
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor,
+                    String signature, String[] exceptions)
+                {
+                    MethodVisitor original = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    if (!method.equals(name) || !desc.equals(descriptor))
+                        return original;
+                    return new MethodVisitor(Opcodes.ASM9, original)
+                    {
+                        @Override
+                        public void visitInsn(int opcode)
+                        {
+                            if (opcode == Opcodes.ARETURN)
+                            {
+                                super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "()Ljava/util/Properties;", false); //$NON-NLS-1$
+                                super.visitLdcInsn(PROP_LOCAL_STRING_SOURCE);
+                                super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$
+                                super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/BiFunction"); //$NON-NLS-1$
+                                super.visitInsn(Opcodes.SWAP);
+                                super.visitVarInsn(Opcodes.ALOAD, dialog ? 0 : 1);
+                                super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BiFunction", "apply", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$
+                                super.visitTypeInsn(Opcodes.CHECKCAST, result);
+                                touched[0]++;
+                            }
+                            super.visitInsn(opcode);
+                        }
+                    };
+                }
+            }, 0);
+            return touched[0] == 2 ? writer.toByteArray() : null;
+        }
         /** Кадры стека остаются исходными: вставки без ветвлений и не меняют высоту стека в точках кадров. */
         static byte[] transform(String className, byte[] bytes)
         {
+            if (DCS_LOCAL_STRING_EDITOR.equals(className) || DCS_FIELD_EDITING.equals(className)
+                || DCS_PARAMETER_EDITING.equals(className))
+                return transformDcsLocalStringSource(className, bytes);
+            if (MULTILANGUAGE_COMPONENT.equals(className) || SINGLE_LANGUAGE_COMPONENT.equals(className))
+                return transformLocalStringSource(bytes);
+            if (PROPERTY_SHEET.equals(className))
+                return transformPropertySheet(bytes);
+            if (PROPERTY_SHEET_MONITOR.equals(className))
+                return transformPropertySheetMonitor(bytes);
+            if (FORM_PRESENTATION.equals(className) || FORM_PAGE.equals(className))
+                return transformFormPreview(className, bytes);
             if (TREE_VIEWER.equals(className) || SEARCH_TREE_LAYOUT.equals(className))
                 return transformCommonTree(className, bytes);
             if (GRANULAR_EDITOR.equals(className))

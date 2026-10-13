@@ -519,7 +519,7 @@ public class CompareSearchResultPage implements ISearchResultPage
                     public void run() { navigateToNode(projectMatch); }
                 };
                 openProperty.setToolTipText(TooltipText.wrap(table,
-                    "Открыть свойство проекта с битой ссылкой" + Global.pluginSignForTooltip()));
+                    "Открыть свойство проекта, содержащее ссылку" + Global.pluginSignForTooltip()));
                 manager.add(openProperty);
             }
             if (spelling && selection.length > 0 && selection[0].getData() instanceof CompareSearchMatch wordMatch
@@ -540,7 +540,8 @@ public class CompareSearchResultPage implements ISearchResultPage
             for (TableItem item : selection)
                 if (item.getData() instanceof CompareSearchMatch row && row.getProjectLocation() != null)
                     brokenLocations.add(row.getProjectLocation());
-            if (!brokenLocations.isEmpty() && searchResult != null && searchResult.getProject() != null && !spelling)
+            if (!brokenLocations.isEmpty() && searchResult != null && searchResult.getProject() != null
+                && !spelling && !searchResult.isAllReferences())
             {
                 CompareSearchResult result = searchResult;
                 Action removeBroken = new Action("Удалить битые ссылки")

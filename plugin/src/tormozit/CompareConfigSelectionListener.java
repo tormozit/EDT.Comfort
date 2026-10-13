@@ -24,6 +24,8 @@ import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
  */
 public class CompareConfigSelectionListener implements ISelectionChangedListener
 {
+    private static boolean navigatorRevealSuppressed;
+
     private final IEditorPart editor;
 
     public CompareConfigSelectionListener(IEditorPart editor)
@@ -40,7 +42,24 @@ public class CompareConfigSelectionListener implements ISelectionChangedListener
     @Override
     public void selectionChanged(SelectionChangedEvent event)
     {
+       if (navigatorRevealSuppressed)
+           return;
        showObjectInNavigator(event.getSelection(), false);
+    }
+
+    /** Выделение из навигатора не должно запускать обратный переход. Только UI-поток. */
+    static void withoutNavigatorReveal(Runnable action)
+    {
+        boolean previous = navigatorRevealSuppressed;
+        navigatorRevealSuppressed = true;
+        try
+        {
+            action.run();
+        }
+        finally
+        {
+            navigatorRevealSuppressed = previous;
+        }
     }
 
     /**

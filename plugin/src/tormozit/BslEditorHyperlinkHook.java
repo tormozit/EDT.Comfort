@@ -44,6 +44,7 @@ import org.eclipse.xtext.util.concurrent.IUnitOfWork;
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.mcore.McorePackage;
 import com._1c.g5.v8.dt.mcore.TypeItem;
+import com._1c.g5.v8.dt.mcore.TypeSet;
 import com._1c.g5.v8.dt.md.resource.MdTypeUtil;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
 import com._1c.g5.v8.dt.md.ui.editor.base.EditorPageDescriptor;
@@ -201,7 +202,7 @@ public final class BslEditorHyperlinkHook implements IStartup
                     EObject object = description == null ? null : description.getEObjectOrProxy();
                     if (object != null && object.eIsProxy())
                         object = EcoreUtil.resolve(object, resource);
-                    MdObject producer = object instanceof TypeItem type ? MdTypeUtil.getTypeProducer(type) : null;
+                    MdObject producer = object instanceof TypeItem type ? typeProducer(type) : null;
                     return producer == null ? null
                         : new TypeHyperlink(new Region(leaf.getOffset() + start, end - start), name, producer,
                             editor, page);
@@ -212,6 +213,15 @@ public final class BslEditorHyperlinkHook implements IStartup
         {
             return null;
         }
+    }
+
+    /** Для TypeSet (в том числе определяемого типа) EDT хранит владельца через MdTypeSet. */
+    static MdObject typeProducer(TypeItem type)
+    {
+        MdObject producer = MdTypeUtil.getTypeProducer(type);
+        if (producer == null && type instanceof TypeSet)
+            producer = org.eclipse.xtext.EcoreUtil2.getContainerOfType(type, MdObject.class);
+        return producer;
     }
 
     private static ILeafNode commentLeaf(XtextResource resource, int offset)
@@ -254,7 +264,7 @@ public final class BslEditorHyperlinkHook implements IStartup
                     // Как для имени типа в комментарии, берём объект — производитель типа.
                     boolean typeTarget = target instanceof TypeItem;
                     if (target instanceof TypeItem type)
-                        target = MdTypeUtil.getTypeProducer(type);
+                        target = typeProducer(type);
                     EStructuralFeature objectModule = target instanceof MdObject
                         ? target.eClass().getEStructuralFeature("objectModule") : null; //$NON-NLS-1$
                     EStructuralFeature managerModule = target instanceof MdObject

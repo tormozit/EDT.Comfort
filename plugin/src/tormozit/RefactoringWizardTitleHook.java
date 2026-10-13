@@ -119,6 +119,14 @@ public final class RefactoringWizardTitleHook
     {
         if (!(event.widget instanceof Shell shell) || shell.isDisposed())
             return;
+        prepareRenameContext(shell);
+        if (shell.getData(SHELL_RENAME_FULL_NAME_KEY) instanceof String fullName)
+            scheduleApplyTitle(shell, fullName, 0);
+    }
+
+    /** Имя нужно таблице уже при показе страницы, ещё до SWT.Show самого окна. */
+    static void prepareRenameContext(Shell shell)
+    {
         if (shell.getData(SHELL_HANDLED_KEY) != null || !isRefactoringWizardDialog(shell))
             return;
         shell.setData(SHELL_HANDLED_KEY, Boolean.TRUE);
@@ -130,10 +138,6 @@ public final class RefactoringWizardTitleHook
         if (fullName == null || fullName.isBlank())
             return;
         shell.setData(SHELL_RENAME_FULL_NAME_KEY, fullName);
-
-        String target = fullName;
-        Display display = shell.getDisplay();
-        display.asyncExec(() -> scheduleApplyTitle(shell, target, 0));
     }
 
     private static String freshPendingFullName()

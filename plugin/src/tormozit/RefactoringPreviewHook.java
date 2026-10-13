@@ -125,7 +125,6 @@ public final class RefactoringPreviewHook
         if (display == null || display.isDisposed())
             return;
         display.addFilter(SWT.Show, RefactoringPreviewHook::handleShow);
-        Marks.install(display);
         CurrentLines.install(display);
     }
 
@@ -139,8 +138,8 @@ public final class RefactoringPreviewHook
     }
 
     /**
-     * Показ любого контрола внутри окна мастера: страница предпросмотра становится видимой именно
-     * так ({@code WizardDialog.showPage} → {@code setVisible(true)}), отдельного события у неё нет.
+     * SWT.Show приходит до нативного показа. Берём только окно и корень текущей страницы:
+     * показ внутренних контролов во время createControl ещё не означает готовность страницы.
      */
     private static void handleShow(Event event)
     {
@@ -149,10 +148,21 @@ public final class RefactoringPreviewHook
         Shell shell = control.getShell();
         if (shell == null || shell.isDisposed() || !isRefactoringWizardDialog(shell))
             return;
-        Display display = shell.getDisplay();
-        if (display == null || display.isDisposed())
+        if (!isPageOrShellShow(control, shell))
             return;
-        display.asyncExec(() -> scheduleAttach(shell, 0));
+        RefactoringWizardTitleHook.prepareRenameContext(shell);
+        Marks.scheduleApply(shell, 0);
+        scheduleAttach(shell, 0);
+    }
+
+    private static boolean isPageOrShellShow(Control control, Shell shell)
+    {
+        if (control == shell)
+            return true;
+        if (!(shell.getData() instanceof IWizardContainer container))
+            return false;
+        IWizardPage page = container.getCurrentPage();
+        return page != null && page.getControl() == control;
     }
 
     private static void scheduleAttach(Shell shell, int attempt)
@@ -1557,24 +1567,6 @@ public final class RefactoringPreviewHook
         {
         }
 
-        static void install(Display display)
-        {
-            display.addFilter(SWT.Show, Marks::handleShow);
-        }
-
-        private static void handleShow(Event event)
-        {
-            if (!(event.widget instanceof Control control) || control.isDisposed())
-                return;
-            Shell shell = control.getShell();
-            if (shell == null || shell.isDisposed() || !isRefactoringWizardDialog(shell))
-                return;
-            Display display = shell.getDisplay();
-            if (display == null || display.isDisposed())
-                return;
-            display.asyncExec(() -> scheduleApply(shell, 0));
-        }
-
         private static void scheduleApply(Shell shell, int attempt)
         {
             if (shell.isDisposed() || attempt >= MARKS_MAX_ATTEMPTS)
@@ -1813,14 +1805,18 @@ public final class RefactoringPreviewHook
 
         private static void handleShow(Event event)
         {
-            if (!(event.widget instanceof Shell shell) || shell.isDisposed())
+            if (!(event.widget instanceof Control control) || control.isDisposed())
                 return;
-            if (Boolean.TRUE.equals(shell.getData(SHELL_HANDLED_KEY)))
+            Shell shell = control.getShell();
+            if (!isRefactoringWizardDialog(shell) || !isPageOrShellShow(control, shell))
                 return;
-            if (!isRefactoringWizardDialog(shell))
-                return;
-            shell.setData(SHELL_HANDLED_KEY, Boolean.TRUE);
-            installShellSizeMemory(shell);
+            if (control == shell)
+            {
+                if (Boolean.TRUE.equals(shell.getData(SHELL_HANDLED_KEY)))
+                    return;
+                shell.setData(SHELL_HANDLED_KEY, Boolean.TRUE);
+                installShellSizeMemory(shell);
+            }
             // Если предпросмотр уже создан, вставляем панели до показа мастера.
             if (tryAttach(shell) == ATTACH_WAIT)
                 scheduleAttach(shell, 0, false);
@@ -1849,12 +1845,6 @@ public final class RefactoringPreviewHook
             shell.addDisposeListener(e -> saveShellSize(lastSize[0]));
 
             restoreShellSize(shell);
-            Display display = shell.getDisplay();
-            if (display != null && !display.isDisposed())
-            {
-                display.asyncExec(() -> restoreShellSize(shell));
-                display.timerExec(100, () -> restoreShellSize(shell));
-            }
         }
 
         private static void restoreShellSize(Shell shell)
@@ -1972,9 +1962,6 @@ public final class RefactoringPreviewHook
             {
                 shell.setData(SIZE_RESTORED_ON_PREVIEW_KEY, Boolean.TRUE);
                 restoreShellSize(shell);
-                Display display = shell.getDisplay();
-                if (display != null && !display.isDisposed())
-                    display.asyncExec(() -> restoreShellSize(shell));
             }
             return ATTACH_DONE;
         }

@@ -707,6 +707,7 @@ public final class BslEditorHoverHook implements IStartup
         private volatile String lastDirective;
         private volatile String lastMethodLink;
         private volatile String lastMethodName;
+        private volatile Map<String, String> lastDefinedTypeLinks = Map.of();
         private volatile String lastFormHandlersHtml;
         private volatile String lastPlatformAvailabilityHtml;
         private volatile Object lastDocumentationDescriptor;
@@ -802,6 +803,7 @@ public final class BslEditorHoverHook implements IStartup
             lastDirective = (directive != null && !directive.isBlank()) ? directive : null;
             lastCreationSite = isImplicitVariableCreationAt(region);
             lastMethodLink = resolveMethodLink(region, info);
+            lastDefinedTypeLinks = resolveDefinedTypeLinks(IrBslHoverHtml.readHtml(info));
             lastFormHandlersHtml = resolveFormHandlersHtml(region);
             lastPlatformAvailabilityHtml = PlatformWordAvailability.hoverBlock(info, platformAvailabilityColor);
         }
@@ -968,7 +970,7 @@ public final class BslEditorHoverHook implements IStartup
         {
             if (html == null)
                 return html;
-            String result = html;
+            String result = injectDefinedTypeLinks(html);
             if (lastDirective != null && !lastDirective.isBlank())
                 result = IrBslHoverHtml.injectDirectiveIntoHtml(result, lastDirective);
             if (lastCreationSite)
@@ -1014,6 +1016,73 @@ public final class BslEditorHoverHook implements IStartup
                     : result + handlersHtml;
             }
             return PlatformWordAvailability.injectHoverBlock(result, lastPlatformAvailabilityHtml);
+        }
+
+        /** Ищем имена только в тексте HTML, пропуская существующие ссылки, теги и скрипты. */
+        private static final java.util.regex.Pattern DEFINED_TYPE_TEXT = java.util.regex.Pattern.compile(
+            "(<a\\b[^>]*>[\\s\\S]*?</a\\s*>|<script\\b[^>]*>[\\s\\S]*?</script\\s*>"
+                + "|<style\\b[^>]*>[\\s\\S]*?</style\\s*>|<[^>]*>)"
+                + "|((?<![\\p{L}\\p{N}_])(?:ОпределяемыйТип|DefinedType)\\.[\\p{L}_][\\p{L}\\p{N}_]*)",
+            java.util.regex.Pattern.CASE_INSENSITIVE | java.util.regex.Pattern.UNICODE_CASE);
+
+        private Map<String, String> resolveDefinedTypeLinks(String html)
+        {
+            Set<String> names = new java.util.LinkedHashSet<>();
+            java.util.regex.Matcher text = DEFINED_TYPE_TEXT.matcher(html);
+            while (text.find())
+                if (text.group(2) != null)
+                    names.add(text.group(2));
+            if (names.isEmpty() || !(editor.getDocument() instanceof IXtextDocument document))
+                return Map.of();
+            return document.readOnly((IUnitOfWork<Map<String, String>, XtextResource>) resource -> {
+                if (resource == null || resource.getContents().isEmpty())
+                    return Map.of();
+                var provider = resource.getResourceServiceProvider();
+                var scopes = provider.get(org.eclipse.xtext.scoping.IScopeProvider.class);
+                var converter = provider.get(org.eclipse.xtext.naming.IQualifiedNameConverter.class);
+                if (scopes == null || converter == null)
+                    return Map.of();
+                var scope = scopes.getScope(resource.getContents().get(0),
+                    com._1c.g5.v8.dt.mcore.McorePackage.Literals.TYPE_DESCRIPTION__TYPES);
+                Map<String, String> links = new java.util.LinkedHashMap<>();
+                for (String name : names)
+                {
+                    var description = scope.getSingleElement(converter.toQualifiedName(name));
+                    EObject object = description == null ? null : description.getEObjectOrProxy();
+                    if (object != null && object.eIsProxy())
+                        object = org.eclipse.emf.ecore.util.EcoreUtil.resolve(object, resource);
+                    if (!(object instanceof com._1c.g5.v8.dt.mcore.TypeSet type))
+                        continue;
+                    var producer = BslEditorHyperlinkHook.typeProducer(type);
+                    if (!(producer instanceof com._1c.g5.v8.dt.metadata.mdclass.DefinedType))
+                        continue;
+                    var uri = resource.getResourceSet().getURIConverter().normalize(
+                        org.eclipse.emf.ecore.util.EcoreUtil.getURI(producer));
+                    links.put(name, java.net.URLEncoder.encode(uri.toString(),
+                        java.nio.charset.StandardCharsets.UTF_8));
+                }
+                return Map.copyOf(links);
+            });
+        }
+
+        private String injectDefinedTypeLinks(String html)
+        {
+            Map<String, String> links = lastDefinedTypeLinks;
+            if (links.isEmpty())
+                return html;
+            java.util.regex.Matcher text = DEFINED_TYPE_TEXT.matcher(html);
+            StringBuilder result = new StringBuilder();
+            while (text.find())
+            {
+                String name = text.group(2);
+                String uri = name == null ? null : links.get(name);
+                String replacement = uri == null ? text.group()
+                    : "<a class=\"comfort-defined-type\" href=\"#\" onclick=\""
+                        + "comfortOpenMethodDefinition('" + uri + "');return false;\">" + name + "</a>";
+                text.appendReplacement(result, java.util.regex.Matcher.quoteReplacement(replacement));
+            }
+            text.appendTail(result);
+            return result.toString();
         }
 
         /** Сбрасывает delayed input на штатный base, чтобы родный HTML обновлялся при смене слова. */

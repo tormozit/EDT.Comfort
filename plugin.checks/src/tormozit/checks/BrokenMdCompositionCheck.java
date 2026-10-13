@@ -63,7 +63,7 @@ public final class BrokenMdCompositionCheck extends BasicCheck<Void>
             int count = end - first;
             String message = count == 1
                 ? "Битая ссылка метаданных: " + MdReferenceSupport.targetLabel(broken)
-                : "Битые ссылки метаданных: " + count;
+                : "Битые ссылки метаданных: " + count + " шт (в меню исправлений доступен их список)";
             resultAcceptor.addIssue(message, broken.owner(), broken.feature());
             first = end;
         }

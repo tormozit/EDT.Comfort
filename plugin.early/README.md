@@ -39,6 +39,14 @@
 
 В `DtGranularEditor.init(IEditorSite, IDtEditorInput)` сразу после `FormEditor.init` редактору передаётся название из `IWorkbenchPartReference.getTitle()`. При восстановлении сеанса ссылка Eclipse ещё хранит сохранённое название вкладки. Оно остаётся на вкладке во время асинхронной загрузки; штатный `makeInitialized` затем задаёт окончательное название. Вставка не добавляет ветвлений и применяется только при одном ожидаемом вызове `FormEditor.init`.
 
+### Очередь обновления панели «Свойства» (issue #783)
+
+В `MdPropertySheetPage` начало `cancelPreviousSelectionProcess` и `dispose` инвалидирует токен обновления через `tormozit.propertySheet.invalidate`. Созданный в `submitSelectionOperation` Runnable проходит через `tormozit.propertySheet.operation`; все пять вызовов `Display.asyncExec` в его лямбде — через `tormozit.propertySheet.result`. Имя лямбды определяется по bootstrap-ссылке. При несовпадении полного набора точек байткод остаётся штатным; статус — `tormozit.propertySheet.patch` (`ok [2, 1, 5]`).
+
+Колбэки устанавливает `PropertySheetUiContext` при старте основного бандла. Устаревшие операции не получают контекст модели, а устаревшие результаты не заполняют палитру. Токен переносится через `ThreadLocal` из фоновой операции в отложенный UI-вызов; смена выделения и закрытие страницы делают его неактуальным. До старта основного бандла колбэки тождественные.
+
+Отдельно вплетён `MdPropertySheetPage$Monitor`: `asyncExec` в `beginTask` и `done` проходят через `tormozit.propertySheet.progress` / `progressDone`. Перед выполнением проверяется штатный `IProgressMonitor.isCanceled()`, чтобы отменённые задания не показывали и не скрывали индикатор с повторным `layout()` панели. Если нового монитора нет (например, переход к пустому выделению), прежний `done` всё ещё убирает начатый индикатор. Поля `Monitor.this$0` и `MdPropertySheetPage.progressMonitor` подтверждены javap. Статус — `tormozit.propertySheet.monitorPatch` (`ok [1, 1]`).
+
 ## Правила
 
 - **Не зависеть от основного бандла.** Обращение к его классам активировало бы весь Комфорт на старте фреймворка, до Workbench. Связь с основным бандлом — только через `System.getProperties()`.
@@ -46,3 +54,8 @@
 - Нет `Bundle-ActivationPolicy: lazy`: ленивый бандл даже с флагом «запущен» активируется только при первой загрузке класса.
 - Версия — с `.qualifier`: проверок EDT здесь нет, поэтому квалификатор сборки перепроверку проекта не вызывает (в отличие от `plugin.checks`).
 - **Имя бандла и пакета не менять без нужды.** Бандл проверок требует его по имени (`Require-Bundle`), а версия проверок фиксированная: переименование требует поднять `Bundle-Version` в `plugin.checks`, то есть полной перепроверки проектов у пользователей.
+
+## Источник окна «Строки на разных языках» (#788)
+Вызов createMultiLanguageDialog в AbstractMultilanguageComponent и AbstractSingleLanguageComponent передаёт созданный диалог и исходный компонент через tormozit.localStringDialog.source. LocalStringDialogHook получает имя из getModel().getObject() и добавляет кнопку «Из имени». Вставка применяется только при единственном подтверждённом вызове; до старта основного бандла колбэк возвращает диалог без изменений.
+
+Для СКД getCellEditor(Object) в DataSetsFieldsEditingSupport и ParametersEditingSupport связывает возвращаемый редактор с исходным полем/параметром. LocalStringEditor.createDialog передаёт диалог и редактор строки; имя извлекается по его cellEditor. Точки и число возвратов (по два в каждом методе) подтверждены javap; общий контекст схемы и копия LocalString для имени не используются.

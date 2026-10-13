@@ -193,6 +193,7 @@ public class PropertySheetActivePropertyHook implements IStartup
         display.addFilter(SWT.FocusIn, focusListener);
         display.addFilter(SWT.FocusOut, focusListener);
         display.addFilter(SWT.MenuDetect, PropertySheetActivePropertyHook::onMenuDetect);
+        display.addFilter(SWT.Show, NameFieldMenu::onShow);
         display.addFilter(SWT.MouseHover, PropertySheetActivePropertyHook::onMouseHover);
         display.addFilter(SWT.MouseMove, PropertySheetActivePropertyHook::onMouseMove);
 
@@ -1881,6 +1882,7 @@ public class PropertySheetActivePropertyHook implements IStartup
      */
     private static void onMenuDetect(Event event)
     {
+        NameFieldMenu.capture(event);
         if (!(event.widget instanceof Control control) || control.isDisposed())
             return;
         Object page = resolvePageFromControl(control);
@@ -1893,6 +1895,118 @@ public class PropertySheetActivePropertyHook implements IStartup
             return;
         event.doit = false;
         showPropertyMenu(control, display, hit);
+    }
+
+    /** Дополняет штатное меню ввода, включая меню орфографии и помощника EDT. */
+    private static final class NameFieldMenu
+    {
+        private static final String ITEM_KEY = "tormozit.property.fromName"; //$NON-NLS-1$
+        private static final String HOOK_KEY = "tormozit.property.fromNameMenu"; //$NON-NLS-1$
+        private static final String FIELD_KEY = "tormozit.property.fromNameField"; //$NON-NLS-1$
+        private static Control requestedField;
+
+        private static void capture(Event event)
+        {
+            requestedField = event.widget instanceof Control field && !field.isDisposed() && editable(field)
+                ? field : null;
+            Control captured = requestedField;
+            if (captured != null)
+            {
+                // Если штатное меню не открылось, запрос не должен попасть в следующее меню.
+                captured.getDisplay().asyncExec(() ->
+                {
+                    if (requestedField == captured)
+                        requestedField = null;
+                });
+            }
+        }
+
+        private static void onShow(Event event)
+        {
+            if (!(event.widget instanceof Menu menu) || menu.isDisposed()
+                || (menu.getStyle() & SWT.POP_UP) == 0)
+                return;
+            Control field = requestedField;
+            requestedField = null;
+            menu.setData(FIELD_KEY, field);
+            if (field == null && !Boolean.TRUE.equals(menu.getData(HOOK_KEY)))
+                return;
+            if (!Boolean.TRUE.equals(menu.getData(HOOK_KEY)))
+            {
+                menu.setData(HOOK_KEY, Boolean.TRUE);
+                // После штатного MenuManager: он может пересоздать пункты на SWT.Show.
+                menu.addListener(SWT.Show, shown -> fill(menu));
+            }
+            fill(menu);
+        }
+
+        private static void fill(Menu menu)
+        {
+            if (menu.isDisposed())
+                return;
+            for (MenuItem item : menu.getItems())
+            {
+                if (Boolean.TRUE.equals(item.getData(ITEM_KEY)))
+                    item.dispose();
+            }
+            Object target = menu.getData(FIELD_KEY);
+            if (!(target instanceof Control field) || field.isDisposed() || !editable(field))
+                return;
+            Object page = resolvePageFromControl(field);
+            if (page == null)
+                return;
+            String property = focusedPropertyName(page);
+            if (!propertyNamesMatch("Синоним", property) && !propertyNamesMatch("Заголовок", property))
+                return;
+            Object scene = Global.invoke(page, "getScene"); //$NON-NLS-1$
+            PropertySheetControlInterop.CopyNameContext context =
+                PropertySheetControlInterop.resolveCopyNameContext(page, scene, null, property);
+            EObject owner = context.owner();
+            String text = LocalStringDialogHook.textFromName(owner);
+            if (text == null)
+                return;
+            if (menu.getItemCount() > 0)
+            {
+                MenuItem separator = new MenuItem(menu, SWT.SEPARATOR);
+                separator.setData(ITEM_KEY, Boolean.TRUE);
+            }
+            MenuItem item = new MenuItem(menu, SWT.PUSH);
+            item.setData(ITEM_KEY, Boolean.TRUE);
+            item.setText("Из имени");
+            ComfortSubmenuHelper.setMenuItemTooltip(item,
+                "Полностью заменить значение свойства текстом из имени объекта");
+            item.addListener(SWT.Selection, selected ->
+            {
+                if (field.isDisposed() || !editable(field) || resolvePageFromControl(field) != page)
+                    return;
+                // Палитра могла сменить объект, пока меню было открыто.
+                PropertySheetControlInterop.CopyNameContext current =
+                    PropertySheetControlInterop.resolveCopyNameContext(page, scene, null, property);
+                if (current.owner() != owner)
+                    return;
+                String replacement = LocalStringDialogHook.textFromName(owner);
+                if (replacement == null)
+                    return;
+                // Modify штатного ввода обновляет модель AEF, как при ручном вводе.
+                if (field instanceof StyledText styled)
+                {
+                    styled.setText(replacement);
+                    styled.setSelection(styled.getCharCount());
+                }
+                else if (field instanceof Text nativeText)
+                {
+                    nativeText.setText(replacement);
+                    nativeText.setSelection(nativeText.getCharCount());
+                }
+                field.setFocus();
+            });
+        }
+
+        private static boolean editable(Control field)
+        {
+            return field.isEnabled() && (field instanceof StyledText styled && styled.getEditable()
+                || field instanceof Text text && text.getEditable());
+        }
     }
 
     private static void showPropertyMenu(Control control, Point display, HitProperty hit)

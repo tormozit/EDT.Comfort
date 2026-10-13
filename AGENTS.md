@@ -205,6 +205,10 @@ powershell -NoProfile -File "C:\VC\EDT.Comfort\.cursor\scripts\repair-double-eol
 
 Запрещено: менять основной `Eclipse Application.launch` без просьбы; второй launch с тем же `configLocation`; `clearConfig`/`generateProfile` для экспериментов; активные `.launch` в репо; `+R` на `.metadata` (только эталон в `launch/backup/`); restore только `bundles.info`.
 
+**Версии OSGi:** после изменения `Bundle-Version` агент сам, без согласования, синхронизирует `bundles.info` и `dev.properties` рабочего профиля и `launch/backup/osgi` через `site/scripts/comfort-osgi-version.ps1`; рабочий профиль — `assert-comfort-osgi.ps1 -Repair`, затем проверка без `-Repair`. Снимки обязательны и для внешних файлов. Штатное управление ReadOnly этим скриптом — исключение из запрета выше. Убедиться, что runtime EDT остановлена; иначе попросить только закрыть её и продолжить самому. Посторонние записи и `.launch` не менять. Без успешной проверки синхронизации задача не завершена.
+
+**Правила писать кратко:** только обязательное действие, ограничения и необходимые ссылки; без пересказа механизма и повторения общих правил.
+
 ## EDT workspace
 
 ### Бандлы EDT

@@ -558,6 +558,7 @@ public class CompareConfigMenuHook implements IStartup
         private static final class CleanupPlan
         {
             private final Map<com._1c.g5.v8.bm.integration.IBmModel, Map<String, Set<String>>> owners = new IdentityHashMap<>();
+            private final Map<com._1c.g5.v8.bm.integration.IBmModel, IDtProject> modelProjects = new IdentityHashMap<>();
             final Set<String> projects = new HashSet<>();
             /** Читается без блокировки плана: поток интерфейса не должен ждать очистку. */
             private volatile boolean started;
@@ -568,6 +569,7 @@ public class CompareConfigMenuHook implements IStartup
                 {
                     var source = finding.session.getDataSource(ComparisonSide.MAIN);
                     projects.add(source.getProjectName());
+                    modelProjects.put(source.getBmModel(), source.getDtProject());
                     if (!owners.containsKey(source.getBmModel()))
                         Global.tempLog("broken-links-merge", "cleanup plan project=" + source.getProjectName()
                             + " source=" + source.getType() + " model=" + source.getBmModel().getId());
@@ -603,12 +605,17 @@ public class CompareConfigMenuHook implements IStartup
                 {
                     for (var model : owners.entrySet())
                     {
-                        // IBmModel.execute только фиксирует транзакцию: файл на диске остаётся прежним
-                        // (тест 09.10.2026). На диск пишут контексты редактирования; save(true) —
-                        // синхронно, до возврата. Пакетная сессия здесь запрещена: endBatchSession
-                        // ждёт окончания фоновых расчётов, удерживая блокировку модели, а штатная
-                        // «Сортировка объектов метаданных» после объединения ждёт ту же блокировку —
-                        // взаимная блокировка (дамп потоков 09.10.2026).
+                        // IBmModel.execute только фиксирует транзакцию, без записи файла.
+                        // save(true), как и endBatchSession, ждёт экспорт под блокировкой Reactor:
+                        // штатная сортировка после объединения не может выполнить свою задачу.
+                        // save(false) ставит экспорт в очередь; ждём EXP_O/EXP_B отдельно, вне
+                        // блокировки Reactor, как SynchronizationManager.saveNow (dt-core-26).
+                        var provider = Global.getOsgiService(
+                            com._1c.g5.v8.dt.core.platform.IDerivedDataManagerProvider.class);
+                        IDtProject project = modelProjects.get(model.getKey());
+                        var derived = provider != null && project != null ? provider.get(project) : null;
+                        if (derived == null)
+                            throw new IllegalStateException("Недоступен менеджер экспорта проекта: " + model.getKey().getId());
                         var editing = model.getKey().createLocalContext("Очистка битых ссылок");
                         try
                         {
@@ -646,7 +653,18 @@ public class CompareConfigMenuHook implements IStartup
                             });
                             Global.tempLog("broken-links-merge", "cleanup save start model=" + model.getKey().getId()
                                 + " dirty=" + editing.isDirty());
-                            editing.save(true);
+                            editing.save(false);
+                            progress.subTask("Сохранение очищенных объектов: " + project.getName());
+                            try
+                            {
+                                if (!derived.waitComputation(-1, true, "EXP_O", "EXP_B"))
+                                    throw new IllegalStateException("Не завершён экспорт проекта: " + project.getName());
+                            }
+                            catch (InterruptedException e)
+                            {
+                                Thread.currentThread().interrupt();
+                                throw new IllegalStateException("Прервано сохранение очищенных объектов: " + project.getName(), e);
+                            }
                         }
                         finally
                         {
@@ -8166,7 +8184,10 @@ public class CompareConfigMenuHook implements IStartup
             {
                 TreeItem[] selected = tree.getSelection();
                 if (selected.length > 0)
+                {
                     tree.showItem(selected[0]);
+                    activateObjectCell(editor, selected[0]);
+                }
             }
             if (activateAndFocus)
             {
@@ -8175,7 +8196,55 @@ public class CompareConfigMenuHook implements IStartup
                 if (control != null && !control.isDisposed())
                     control.setFocus();
             }
+            if (control instanceof Tree tree && !tree.isDisposed())
+            {
+                centerCurrentRow(tree);
+                tree.redraw();
+            }
             return RevealResult.OK;
+        }
+
+        /** То же состояние текущей ячейки, что устанавливает штатный MouseDown EDT. */
+        private static void activateObjectCell(IEditorPart editor, TreeItem item)
+        {
+            Object view = Global.getField(editor, "comparisonView"); //$NON-NLS-1$
+            if (!(view instanceof DtComparisonView comparisonView))
+                return;
+            ComparisonTreeControl treeControl = comparisonView.getTreeControl();
+            if (treeControl == null)
+                return;
+            boolean activated = Global.setFieldForce(treeControl, "selectedColumn", 0); //$NON-NLS-1$
+            if (activated)
+                treeControl.setSelection(new StructuredSelection(item.getText(0)));
+        }
+
+        /** Прокрутка по вертикали: найденная строка в середине доступной области. */
+        private static void centerCurrentRow(Tree tree)
+        {
+            TreeItem[] selected = tree.getSelection();
+            if (selected.length == 0 || selected[0].isDisposed())
+                return;
+            int height = tree.getClientArea().height - (tree.getHeaderVisible() ? tree.getHeaderHeight() : 0);
+            int visibleRows = Math.max(1, height / Math.max(1, tree.getItemHeight()));
+            TreeItem top = selected[0];
+            for (int i = 0; i < (visibleRows - 1) / 2; i++)
+            {
+                TreeItem parent = top.getParentItem();
+                int index = parent == null ? tree.indexOf(top) : parent.indexOf(top);
+                if (index <= 0)
+                {
+                    if (parent == null)
+                        break;
+                    top = parent;
+                }
+                else
+                {
+                    top = parent == null ? tree.getItem(index - 1) : parent.getItem(index - 1);
+                    while (top.getExpanded() && top.getItemCount() > 0)
+                        top = top.getItem(top.getItemCount() - 1);
+                }
+            }
+            tree.setTopItem(top);
         }
 
         /** Итог {@link #revealFqn}: строка активирована / объекта нет / строка или сравнение недоступны. */
@@ -8212,7 +8281,8 @@ public class CompareConfigMenuHook implements IStartup
             top = session.getTopNode(fqn, ComparisonSide.OTHER);
             if (top != null)
                 return top;
-            return session.getTopNode(fqn, ComparisonSide.COMMON_ANCESTOR);
+            top = session.getTopNode(fqn, ComparisonSide.COMMON_ANCESTOR);
+            return top;
         }
 
         private static void ensurePartialModel(IEditorPart editor)
