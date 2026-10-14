@@ -208,6 +208,7 @@
     <startup class="tormozit.BslModuleSpellCheckStartup"/>
     <startup class="tormozit.CommitMessageSpellCheckHook"/>
     <startup class="tormozit.LocalStringDialogHook"/>
+    <startup class="tormozit.FormatStringDialogHook"/>
     <startup class="tormozit.FormattedTextEditorHook"/>
     <startup class="tormozit.FindReplaceDialogHook"/>
     <startup class="tormozit.AnnotationsPreferenceHook"/>
