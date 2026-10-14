@@ -46,7 +46,9 @@ import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
  * видимых на экране в этот момент. Коллекции верхнего уровня («Справочники», «Документы») так
  * не считаются — см. там же.
  *
- * <p>После первого раскрытия число уже не пропадает: раз посчитанное значение запоминается
+ * <p>У раскрытой ветки с менее чем пятью элементами число скрыто, если все дочерние строки
+ * целиком видны по высоте дерева. При прокрутке, изменении размера и сворачивании оно обновляется.
+ * Раз посчитанное значение запоминается
  * в {@link #LAST_KNOWN_COUNTS} и показывается даже после того, как JFace выбросил созданные
  * строки (сворачивание Ctrl+кликом, обновление свёрнутого узла). При каждом раскрытии оно
  * перезаписывается фактическим, так что устареть может только пока узел свёрнут.
@@ -81,8 +83,11 @@ final class FolderItemCountDecoration
     /** Слушатель раскрытия уже поставлен на это дерево. */
     private static final String EXPAND_HOOK_KEY = "tormozit.navigatorFolderItemCount.expandHook"; //$NON-NLS-1$
 
-    /** Предел обхода item'ов в {@link #refreshAfterProgrammaticExpand}. */
+    /** Предел обхода item'ов в {@link #refreshAfterProgrammaticToggle}. */
     private static final int REFRESH_BUDGET = 20000;
+
+    /** Начиная с этого числа элементов счётчик показывается даже у полностью видимой ветки. */
+    private static final int SMALL_BRANCH_LIMIT = 5;
 
     /** Отложенный досчёт видимых строк — см. {@link #scheduleVisibleScan}. */
     private static final String VISIBLE_SCAN_KEY = "tormozit.folderItemCount.visibleScan"; //$NON-NLS-1$
@@ -208,22 +213,22 @@ final class FolderItemCountDecoration
             if (tree.isDisposed())
                 return;
             tree.setData(VISIBLE_SCAN_KEY, null);
-            updateVisibleUncounted(viewer, tree);
+            updateVisibleCounts(viewer, tree);
         };
         tree.setData(VISIBLE_SCAN_KEY, scan);
         display.timerExec(VISIBLE_SCAN_DELAY_MS, scan);
     }
 
     /**
-     * Обновляет надписи видимых строк, у которых числа ещё нет: при обновлении ячейки сработает
-     * досрочный подсчёт ({@link #eagerCount}) — он разрешён только для видимых строк.
+     * Обновляет надписи видимых папок без числа и небольших веток: при обновлении ячейки
+     * сработает досрочный подсчёт ({@link #eagerCount}) и проверка видимости дочерних строк.
      *
      * <p>Строки берутся обходом «следующая видимая» от {@code tree.getTopItem()} вниз, пока не
      * кончится клиентская область. По координатам ({@code tree.getItem(Point)}) не выйдет: на
      * Win32 попадание считается по самой строке, а не по её отступу, поэтому фиксированный x
      * не находит вложенные строки — именно из-за этого досчёт папок внутри объекта не срабатывал.
      */
-    private static void updateVisibleUncounted(ColumnViewer viewer, Tree tree)
+    private static void updateVisibleCounts(ColumnViewer viewer, Tree tree)
     {
         Control control = viewer.getControl();
         if (control == null || control.isDisposed())
@@ -240,7 +245,12 @@ final class FolderItemCountDecoration
             if (bounds.y >= client.y + client.height)
                 break;
             Object data = item.getData();
-            if (data == null || LAST_KNOWN_COUNTS.containsKey(data) || liveCount(item) != null)
+            if (data == null || !isCountableNode(data))
+                continue;
+            Integer count = LAST_KNOWN_COUNTS.get(data);
+            if (count == null)
+                count = liveCount(item);
+            if (count != null && count >= SMALL_BRANCH_LIMIT)
                 continue;
             targets.add(data);
         }
@@ -272,10 +282,11 @@ final class FolderItemCountDecoration
     }
 
     /**
-     * Пересчёт надписей после <b>программного</b> разворота поддерева (Ctrl+клик по плюсику,
+     * Пересчёт надписей после <b>программного</b> разворота или сворачивания поддерева (Ctrl+клик по плюсику,
      * {@link TreeExpander}): {@code AbstractTreeViewer.expandToLevel} создаёт детей и ставит
      * {@code TreeItem.setExpanded} напрямую, события {@link SWT#Expand} при этом не бывает —
-     * слушатель {@link #installExpandRefresh} его не видит, и папки остались бы без числа.
+     * слушатель {@link #installExpandRefresh} его не видит. При сворачивании число возвращается,
+     * а видимые небольшие ветки пересчитываются после изменения состава строк на экране.
      *
      * <p>Обновляются только узлы с уже созданными дочерними item'ами — то есть ровно те, у которых
      * число может появиться; листья (их подавляющее большинство) не трогаются. Обход ограничен
@@ -285,13 +296,14 @@ final class FolderItemCountDecoration
      * <p>Деревья, не пропатченные {@link #installExpandRefresh} (все прочие деревья EDT, куда
      * {@link TreeExpander} тоже подключён), пропускаются — чисел там нет и обновлять нечего.
      */
-    static void refreshAfterProgrammaticExpand(ColumnViewer viewer, Tree tree, TreeItem root)
+    static void refreshAfterProgrammaticToggle(ColumnViewer viewer, Tree tree, TreeItem root)
     {
         if (viewer == null || tree == null || tree.isDisposed() || root == null || root.isDisposed())
             return;
         if (tree.getData(EXPAND_HOOK_KEY) == null)
             return;
 
+        scheduleVisibleScan(viewer, tree);
         List<Object> targets = new ArrayList<>();
         collectNodesWithChildren(root, targets, new int[] { REFRESH_BUDGET });
         if (targets.isEmpty())
@@ -372,7 +384,7 @@ final class FolderItemCountDecoration
             if (!isCountableNode(element))
                 return null;
             LAST_KNOWN_COUNTS.put(element, live);
-            return live.toString();
+            return live < SMALL_BRANCH_LIMIT && allChildrenFullyVisible(item) ? null : live.toString();
         }
         if (element == null)
             return null;
@@ -389,6 +401,31 @@ final class FolderItemCountDecoration
         if (!isOnScreen(item))
             return null;
         return toText(eagerCount(element));
+    }
+
+    /** Все непосредственные дочерние строки раскрытой ветки целиком помещаются по высоте. */
+    private static boolean allChildrenFullyVisible(TreeItem item)
+    {
+        if (!item.getExpanded() || item.getItemCount() == 0)
+            return false;
+        for (TreeItem parent = item.getParentItem(); parent != null; parent = parent.getParentItem())
+        {
+            if (!parent.getExpanded())
+                return false;
+        }
+        Rectangle client = item.getParent().getClientArea();
+        for (TreeItem child : item.getItems())
+        {
+            if (child.isDisposed() || child.getData() == null)
+                return false;
+            Rectangle bounds = child.getBounds();
+            if (bounds.height <= 0 || bounds.y < client.y
+                || bounds.y + bounds.height > client.y + client.height)
+            {
+                return false;
+            }
+        }
+        return true;
     }
 
     /** Строка сейчас в видимой части дерева (не за полосой прокрутки и не в свёрнутой ветке). */

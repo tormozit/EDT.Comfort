@@ -595,7 +595,7 @@ public final class TreeExpander implements IStartup
                 }
             });
             // Программный разворот не шлёт SWT.Expand — надписи с числом элементов обновляем сами.
-            FolderItemCountDecoration.refreshAfterProgrammaticExpand(viewer, tree, item);
+            FolderItemCountDecoration.refreshAfterProgrammaticToggle(viewer, tree, item);
             return;
         }
         runSuppressed(() -> expandAllDescendantsSwt(item, 0,
@@ -620,6 +620,7 @@ public final class TreeExpander implements IStartup
                         tree.setRedraw(true);
                 }
             });
+            FolderItemCountDecoration.refreshAfterProgrammaticToggle(viewer, tree, item);
             return;
         }
         collapseAllDescendantsSwt(item);
