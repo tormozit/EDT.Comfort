@@ -783,6 +783,7 @@ public class ConfigSearchDialogHook implements IStartup
             // радио области (в т.ч. добавляемые позже нашими вариантами) меняют выбор после своего
             // события — штатная привязка и наш fixVisual отрабатывают отложенно
             Composite radioRow = customScopeRadio.getParent();
+            radioRow.setData(SearchScopeGroup.REFRESH_KEY, refresh);
             Display display = root.getDisplay();
             Listener radioFilter = e -> {
                 if (e.widget instanceof Button b && b.getParent() == radioRow)
@@ -1052,6 +1053,7 @@ public class ConfigSearchDialogHook implements IStartup
     {
         private static final String PATCHED_KEY = "tormozit.searchScopeGroupPatched"; //$NON-NLS-1$
         private static final String SCOPE_MODE_KEY = "comfortScopeMode"; //$NON-NLS-1$
+        private static final String REFRESH_KEY = "tormozit.searchScopeGroupRefresh"; //$NON-NLS-1$
 
         enum ScopeMode
         {
@@ -1199,6 +1201,10 @@ public class ConfigSearchDialogHook implements IStartup
                 if (!otherComfort.isDisposed())
                     otherComfort.setSelection(false);
                 self.setSelection(true);
+                // Программное восстановление отметок не посылает SWT.Selection.
+                // Обновляем оформление после окончательного выбора нашего варианта.
+                if (self.getParent().getData(REFRESH_KEY) instanceof Runnable refresh)
+                    refresh.run();
             };
             self.getDisplay().asyncExec(fixVisual);
             self.getDisplay().timerExec(60, fixVisual);

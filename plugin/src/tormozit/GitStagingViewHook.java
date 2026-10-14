@@ -334,6 +334,7 @@ public final class GitStagingViewHook implements IStartup
     private static final class StagingSource implements CheckSource
     {
         private final IViewPart view;
+        private final List<IProject> workingModelProjects = new java.util.concurrent.CopyOnWriteArrayList<>();
 
         StagingSource(IViewPart view) { this.view = view; }
 
@@ -376,6 +377,9 @@ public final class GitStagingViewHook implements IStartup
         @Override
         public boolean unchanged(Repository repository, Snapshot snapshot) throws IOException
         {
+            for (IProject project : workingModelProjects)
+                if (!CommitButtons.workingFilesMatchIndex(repository, snapshot.index(), project, new NullProgressMonitor()))
+                    return false;
             if (Global.getField(view, "currentRepository") != repository
                 || !java.util.Objects.equals(snapshot.head(), repository.resolve("HEAD")))
                 return false;
@@ -939,6 +943,18 @@ public final class GitStagingViewHook implements IStartup
 
         private static void reportSkipped(String title, String message, Throwable error)
         {
+            String notification = message;
+            if (error != null)
+            {
+                Throwable cause = error;
+                while (cause.getCause() != null && cause.getCause() != cause)
+                    cause = cause.getCause();
+                String reason = cause.getMessage();
+                notification = "Проверка битых ссылок не выполнена из-за ошибки.\n"
+                    + message + "\nПричина: " + (reason == null || reason.isBlank()
+                        ? cause.getClass().getSimpleName() : reason);
+            }
+            final String notificationText = notification;
             try
             {
                 if (error == null)
@@ -951,7 +967,13 @@ public final class GitStagingViewHook implements IStartup
             {
                 Display.getDefault().asyncExec(() ->
                 {
-                    try { ToastNotification.show(title, message); }
+                    try
+                    {
+                        if (error != null)
+                            ToastNotification.showStickyUntilToastHover(title, notificationText, null, null);
+                        else
+                            ToastNotification.show(title, notificationText);
+                    }
                     catch (Throwable notificationError) { /* Уведомление не влияет на фиксацию. */ }
                 });
             }
@@ -1034,7 +1056,7 @@ public final class GitStagingViewHook implements IStartup
                             {
                                 check(repository, content, selectedProjects, findings,
                                     content.changed() != null ? content.changed() : changedFiles(repository, index, head),
-                                    cancellation);
+                                    cancellation, source instanceof StagingSource staging ? staging : null);
                             }
                             finally
                             {
@@ -1113,7 +1135,10 @@ public final class GitStagingViewHook implements IStartup
                     if (requester.gone())
                         return;
                     if (repository != null && snapshot != null && !source.unchanged(repository, snapshot))
+                    {
+                        proceed = false;
                         throw new IllegalStateException(words.changed());
+                    }
                     int count = showFindings();
                     if (error instanceof OperationCanceledException)
                     {
@@ -1132,13 +1157,32 @@ public final class GitStagingViewHook implements IStartup
                 }
                 catch (Throwable failure)
                 {
-                    skipped(commitCanceled ? words.canceled() + " Не удалось завершить проверку ссылок."
+                    if (source instanceof StagingSource staging && !staging.workingModelProjects.isEmpty())
+                        proceed = false;
+                    skipped(!proceed ? words.canceled() + " Не удалось завершить проверку ссылок."
                         : "Проверка ссылок недоступна. " + words.proceeds(), failure);
                 }
                 finally { requester.unlock(); }
                 // Исключения штатных обработчиков не перехватываются как ошибки нашей проверки.
                 if (proceed && !commitCanceled && !requester.gone())
+                {
+                    // Пользователь мог изменить файлы, пока отвечал на вопрос о найденных ссылках.
+                    if (source instanceof StagingSource staging && !staging.workingModelProjects.isEmpty())
+                        try
+                        {
+                            if (!source.unchanged(repository, snapshot))
+                            {
+                                skipped(words.canceled() + " " + words.changed(), null);
+                                return;
+                            }
+                        }
+                        catch (IOException failure)
+                        {
+                            skipped(words.canceled() + " Не удалось проверить состояние файлов.", failure);
+                            return;
+                        }
                     requester.proceed();
+                }
             }
 
             /** Окно фиксации может быть уже закрыто — тогда родителем служит окно приложения. */
@@ -1352,9 +1396,87 @@ public final class GitStagingViewHook implements IStartup
             }
         }
 
+        /** Проверяет содержимое, а не кэш панели Git и не даты файлов. Новые файлы тоже учитываются. */
+        private static boolean workingFilesMatchIndex(Repository repository, DirCache index, IProject project,
+            IProgressMonitor monitor) throws IOException
+        {
+            if (monitor.isCanceled())
+                throw new OperationCanceledException();
+            long started = System.nanoTime();
+            String prefix = repository.getWorkTree().toPath().relativize(project.getLocation().toFile().toPath())
+                .toString().replace('\\', '/');
+            if (!prefix.isEmpty())
+                prefix += "/";
+            Map<String, ObjectId> expected = new HashMap<>();
+            for (int i = 0; i < index.getEntryCount(); i++)
+            {
+                var entry = index.getEntry(i);
+                String path = entry.getPathString();
+                if (path.startsWith(prefix) && (IndexSource.metadataSource(path.substring(prefix.length()))
+                    || path.equals(prefix + "DT-INF/PROJECT.PMF")))
+                    expected.put(path, entry.getObjectId());
+            }
+            int checked = 0;
+            // Без итератора индекса даты файлов не заменяют чтение содержимого.
+            try (TreeWalk tree = new TreeWalk(repository))
+            {
+                var files = new org.eclipse.jgit.treewalk.FileTreeIterator(repository);
+                tree.addTree(new EmptyTreeIterator());
+                files.setDirCacheIterator(tree, 0);
+                files.setWalkIgnoredDirectories(true);
+                tree.addTree(files);
+                tree.setRecursive(true);
+                tree.setFilter(org.eclipse.jgit.treewalk.filter.PathFilterGroup.createFromStrings(
+                    prefix + "src", prefix + "DT-INF/PROJECT.PMF"));
+                while (tree.next())
+                {
+                    if (monitor.isCanceled())
+                        throw new OperationCanceledException();
+                    String path = tree.getPathString();
+                    if (!path.startsWith(prefix) || !(IndexSource.metadataSource(path.substring(prefix.length()))
+                        || path.equals(prefix + "DT-INF/PROJECT.PMF")))
+                        continue;
+                    ObjectId id = expected.remove(path);
+                    if (id == null || !id.equals(tree.getObjectId(1)))
+                    {
+                        Global.tempLog(LOG, "working files differ project=" + project.getName() + " path=" + path);
+                        return false;
+                    }
+                    checked++;
+                }
+            }
+            Global.tempLog(LOG, "working files compared project=" + project.getName() + " checked=" + checked
+                + " missing=" + expected.size() + " ms=" + (System.nanoTime() - started) / 1_000_000);
+            return expected.isEmpty();
+        }
+
+        /** Публичный API службы: её runtime-объект не обязан быть самим BmModelManager. */
+        private static void waitWorkingModel(IBmModelManager manager, IProject project,
+            IProgressMonitor monitor) throws IOException
+        {
+            if (monitor.isCanceled())
+                throw new OperationCanceledException();
+            long started = System.nanoTime();
+            Global.tempLog(LOG, "working model wait start project=" + project.getName()
+                + " manager=" + manager.getClass().getName());
+            try
+            {
+                if (manager.getDtProject(manager.getModel(project)) == null)
+                    throw new IOException("Не найден проект модели " + project.getName());
+                manager.waitModelSynchronization(project);
+                if (monitor.isCanceled())
+                    throw new OperationCanceledException();
+            }
+            finally
+            {
+                Global.tempLog(LOG, "working model wait end project=" + project.getName()
+                    + " canceled=" + monitor.isCanceled() + " ms=" + (System.nanoTime() - started) / 1_000_000);
+            }
+        }
+
         private static void check(Repository repository, Snapshot content, List<ProjectCheck> projects,
-            List<Findings> findings, Set<String> changedFiles, IProgressMonitor monitor)
-            throws IOException
+            List<Findings> findings, Set<String> changedFiles, IProgressMonitor monitor, StagingSource stagingSource)
+            throws IOException, org.eclipse.core.runtime.CoreException
         {
             DirCache index = content.index();
             ObjectId head = content.head();
@@ -1407,6 +1529,45 @@ public final class GitStagingViewHook implements IStartup
                 String configuration = prefix + "src/Configuration/Configuration.mdo";
                 boolean hadPrevious = before != null ? before.getEntry(configuration) != null
                     : head != null && existed(repository, head, configuration);
+                if (stagingSource != null
+                    && workingFilesMatchIndex(repository, index, project.project(), checking))
+                {
+                    long workingStarted = System.nanoTime();
+                    Global.tempLog(LOG, "working model synchronization start project=" + project.project().getName());
+                    project.project().refreshLocal(org.eclipse.core.resources.IResource.DEPTH_INFINITE, checking);
+                    waitWorkingModel(manager, project.project(), checking);
+                    checking.checkCanceled();
+                    // Для удаления вложенного объекта нужны только изменённые файлы HEAD.
+                    // Текущее состояние берём из рабочей модели: индекс не импортируется.
+                    if (!deleted && hadPrevious)
+                    {
+                        previousFiles.select(projectFiles, converter);
+                        IComparisonDataSource previous = createSource(factory, previousFiles);
+                        try
+                        {
+                            start(previous, checking.split(25));
+                            deleted = MdReferenceSupport.hasDeletedObjects(previous, original, projectFiles,
+                                checking.split(5));
+                        }
+                        finally { stopDeferred(previous); }
+                    }
+                    // Импорт HEAD и ожидание могли дать время на изменение файлов.
+                    if (workingFilesMatchIndex(repository, index, project.project(), checking))
+                    {
+                        List<CompareSearchMatch> rows = Collections.synchronizedList(new ArrayList<>());
+                        findings.add(new Findings(project.project(), rows));
+                        stagingSource.workingModelProjects.add(project.project());
+                        Global.tempLog(LOG, "working model scope project=" + project.project().getName()
+                            + " all=" + deleted + " changed=" + projectFiles.size()
+                            + " previous=" + previousFiles.files.size());
+                        MdReferenceSupport.findInModel(original, project.navigationBase(),
+                            deleted ? null : projectFiles, converter, checking.split(60), rows::add);
+                        Global.tempLog(LOG, "working model finished project=" + project.project().getName()
+                            + " rows=" + rows.size() + " ms=" + (System.nanoTime() - workingStarted) / 1_000_000);
+                        checking.done();
+                        continue;
+                    }
+                }
                 if (deleted)
                 {
                     Global.tempLog(LOG, "full search started project=" + project.project().getName());

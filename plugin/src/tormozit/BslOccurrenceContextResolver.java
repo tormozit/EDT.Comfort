@@ -1,9 +1,17 @@
 package tormozit;
 
 import java.util.List;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.awt.BasicStroke;
+import java.awt.Graphics2D;
+import java.awt.RenderingHints;
+import java.awt.geom.Line2D;
+import java.awt.geom.Path2D;
+import java.awt.geom.Rectangle2D;
+import java.awt.image.BufferedImage;
 
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IProject;
@@ -14,6 +22,21 @@ import org.eclipse.emf.ecore.EStructuralFeature;
 import org.eclipse.emf.ecore.resource.Resource;
 import org.eclipse.emf.ecore.resource.ResourceSet;
 import org.eclipse.swt.graphics.Color;
+import org.eclipse.swt.SWT;
+import org.eclipse.swt.graphics.Image;
+import org.eclipse.swt.graphics.ImageData;
+import org.eclipse.swt.graphics.ImageDataProvider;
+import org.eclipse.swt.graphics.PaletteData;
+import org.eclipse.swt.graphics.Rectangle;
+import org.eclipse.swt.widgets.Listener;
+import org.eclipse.swt.widgets.Table;
+import org.eclipse.swt.widgets.TableItem;
+import org.eclipse.jface.layout.TableColumnLayout;
+import org.eclipse.jface.viewers.ColumnLabelProvider;
+import org.eclipse.jface.viewers.ColumnViewerToolTipSupport;
+import org.eclipse.jface.viewers.TableViewer;
+import org.eclipse.jface.viewers.TableViewerColumn;
+import org.eclipse.jface.viewers.ViewerCell;
 import org.eclipse.swt.graphics.RGB;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.TableColumn;
@@ -83,6 +106,7 @@ public final class BslOccurrenceContextResolver
     static final String KIND_LITERAL = "Литерал"; //$NON-NLS-1$
     static final String KIND_METHOD = "Метод"; //$NON-NLS-1$
     static final String KIND_PROPERTY = "Свойство"; //$NON-NLS-1$
+    static final String KIND_HANDLER = "Обработчик"; //$NON-NLS-1$
 
     /** Единые заголовки колонок контекста вхождения для обоих потребителей. */
     static final String COL_PARENT = "Родитель"; //$NON-NLS-1$
@@ -92,7 +116,211 @@ public final class BslOccurrenceContextResolver
 
     private static final String TIP_PARENT = "Выражение слева от точки перед вхождением"; //$NON-NLS-1$
     private static final String TIP_PARENT_TYPE = "Тип выражения-родителя. При подключенном ИР заполняется лучше."; //$NON-NLS-1$
-    private static final String TIP_SYNTAX_KIND = "Свойство, метод, литерал или комментарий"; //$NON-NLS-1$
+    private static final String TIP_SYNTAX_KIND = "Категория: свойство, метод, литерал, комментарий или обработчик"; //$NON-NLS-1$
+
+    /** Компактная колонка категории; текст остаётся в подсказке и модели для копирования/отбора. */
+    static TableViewerColumn addCategoryColumn(TableViewer viewer, TableColumnLayout layout,
+        java.util.function.Function<Object, String> category)
+    {
+        TableViewerColumn column = new TableViewerColumn(viewer, SWT.NONE);
+        CategoryLabelProvider labels = new CategoryLabelProvider(viewer, category);
+        column.setLabelProvider(labels);
+        FormTableInteraction.applyIconColumn(column.getColumn(), layout, 0);
+        column.getColumn().setText("К"); //$NON-NLS-1$
+        Table table = viewer.getTable();
+        Listener erase = event ->
+        {
+            if (!column.getColumn().isDisposed() && event.index == table.indexOf(column.getColumn()))
+            {
+                event.detail &= ~SWT.FOREGROUND;
+                event.detail &= ~(SWT.SELECTED | SWT.HOT);
+            }
+        };
+        Listener paint = event ->
+        {
+            if (column.getColumn().isDisposed() || event.index != table.indexOf(column.getColumn())
+                || !(event.item instanceof TableItem item))
+                return;
+            Image icon = labels.getImage(item.getData());
+            if (icon == null)
+                return;
+            Rectangle cell = item.getBounds(event.index);
+            Rectangle image = icon.getBounds();
+            Rectangle previousClip = event.gc.getClipping();
+            try
+            {
+                event.gc.setClipping(cell.intersection(table.getClientArea()));
+                event.gc.drawImage(icon, cell.x + (cell.width - image.width) / 2,
+                    cell.y + (cell.height - image.height) / 2);
+            }
+            finally
+            {
+                event.gc.setClipping(previousClip);
+            }
+        };
+        table.addListener(SWT.EraseItem, erase);
+        table.addListener(SWT.PaintItem, paint);
+        column.getColumn().addDisposeListener(event ->
+        {
+            if (!table.isDisposed())
+            {
+                table.removeListener(SWT.EraseItem, erase);
+                table.removeListener(SWT.PaintItem, paint);
+            }
+        });
+        ColumnViewerToolTipSupport.enableFor(viewer);
+        return column;
+    }
+
+    private static final class CategoryLabelProvider extends ColumnLabelProvider
+    {
+        private final TableViewer viewer;
+        private final java.util.function.Function<Object, String> category;
+        private final Map<String, Image> images = new HashMap<>();
+
+        CategoryLabelProvider(TableViewer viewer, java.util.function.Function<Object, String> category)
+        {
+            this.viewer = viewer;
+            this.category = category;
+        }
+
+        @Override
+        public String getText(Object element)
+        {
+            String value = category.apply(element);
+            return value != null ? value : ""; //$NON-NLS-1$
+        }
+
+        @Override
+        public void update(ViewerCell cell)
+        {
+            // Провайдер отдаёт название для Copy, сортировки и отбора; ячейка рисует только значок.
+            cell.setText(""); //$NON-NLS-1$
+            cell.setImage(null);
+            cell.setBackground(getBackground(cell.getElement()));
+            cell.setForeground(getForeground(cell.getElement()));
+            cell.setFont(getFont(cell.getElement()));
+        }
+
+        @Override
+        public String getToolTipText(Object element)
+        {
+            String value = category.apply(element);
+            return value == null || value.isBlank() ? null : TooltipText.wrap(viewer.getTable(), value);
+        }
+
+        @Override
+        public Image getImage(Object element)
+        {
+            String value = category.apply(element);
+            if (value == null || value.isBlank())
+                return null;
+            boolean dark = ThemeAwareColors.isDarkTheme();
+            return images.computeIfAbsent(value + ":" + dark, key -> createImage(value, dark)); //$NON-NLS-1$
+        }
+
+        private Image createImage(String value, boolean dark)
+        {
+            RGB rgb = switch (value)
+            {
+                case KIND_COMMENT -> new RGB(64, 133, 85);
+                case KIND_LITERAL, KIND_HANDLER -> new RGB(182, 121, 32);
+                case KIND_METHOD -> new RGB(118, 84, 174);
+                case KIND_PROPERTY -> dark ? new RGB(115, 115, 115) : new RGB(175, 175, 175);
+                default -> null;
+            };
+            if (rgb == null)
+                return null;
+            if (dark && !KIND_PROPERTY.equals(value))
+                rgb = new RGB(Math.min(255, rgb.red + 55), Math.min(255, rgb.green + 55),
+                    Math.min(255, rgb.blue + 55));
+            RGB iconColor = rgb;
+            // SWT запрашивает исходное изображение под реальный DPI: готовые 16 px не растягиваются.
+            return new Image(viewer.getTable().getDisplay(),
+                (ImageDataProvider)zoom -> renderIconData(value, iconColor, zoom));
+        }
+
+        private static ImageData renderIconData(String value, RGB rgb, int zoom)
+        {
+            int size = Math.max(1, Math.round(16 * zoom / 100f));
+            int samples = 4;
+            BufferedImage mask = new BufferedImage(size * samples, size * samples, BufferedImage.TYPE_INT_ARGB);
+            Graphics2D graphics = mask.createGraphics();
+            try
+            {
+                graphics.scale(size * samples / 16.0, size * samples / 16.0);
+                graphics.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+                graphics.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING,
+                    RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+                graphics.setColor(java.awt.Color.BLACK);
+                graphics.setStroke(new BasicStroke(1.6f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+                switch (value)
+                {
+                    case KIND_COMMENT ->
+                    {
+                        graphics.draw(new Line2D.Double(6, 3, 2, 13));
+                        graphics.draw(new Line2D.Double(13, 3, 9, 13));
+                    }
+                    case KIND_LITERAL ->
+                    {
+                        graphics.fill(new Rectangle2D.Double(3, 3, 3, 4));
+                        graphics.fill(new Rectangle2D.Double(10, 3, 3, 4));
+                        graphics.draw(new Line2D.Double(5, 7, 3, 10));
+                        graphics.draw(new Line2D.Double(12, 7, 10, 10));
+                    }
+                    case KIND_METHOD ->
+                    {
+                        java.awt.Font font = new java.awt.Font("Consolas", java.awt.Font.BOLD, 9); //$NON-NLS-1$
+                        graphics.fill(font.createGlyphVector(graphics.getFontRenderContext(), "f()") //$NON-NLS-1$
+                            .getOutline(-0.5f, 10f));
+                    }
+                    case KIND_PROPERTY -> graphics.draw(polygon(8, 2, 14, 8, 8, 14, 2, 8));
+                    case KIND_HANDLER -> graphics.fill(polygon(9, 1, 3, 9, 7, 9, 5, 15, 13, 6, 9, 6));
+                    default -> { }
+                }
+            }
+            finally
+            {
+                graphics.dispose();
+            }
+            // Цвет контура постоянный, сглаживание хранится только в alphaData: белого фона/ореола нет.
+            ImageData data = new ImageData(size, size, 32, new PaletteData(0xFF0000, 0xFF00, 0xFF));
+            data.alphaData = new byte[size * size];
+            int pixel = data.palette.getPixel(rgb);
+            for (int y = 0; y < size; y++)
+                for (int x = 0; x < size; x++)
+                {
+                    int sum = 0;
+                    for (int sy = 0; sy < samples; sy++)
+                        for (int sx = 0; sx < samples; sx++)
+                            sum += mask.getRGB(x * samples + sx, y * samples + sy) >>> 24;
+                    int alpha = (sum + samples * samples / 2) / (samples * samples);
+                    data.setPixel(x, y, pixel);
+                    data.alphaData[y * size + x] = (byte)alpha;
+                }
+            return data;
+        }
+
+        private static Path2D polygon(double... points)
+        {
+            Path2D path = new Path2D.Double();
+            path.moveTo(points[0], points[1]);
+            for (int i = 2; i < points.length; i += 2)
+                path.lineTo(points[i], points[i + 1]);
+            path.closePath();
+            return path;
+        }
+
+        @Override
+        public void dispose()
+        {
+            for (Image image : images.values())
+                if (image != null && !image.isDisposed())
+                    image.dispose();
+            images.clear();
+            super.dispose();
+        }
+    }
     static final String TIP_SUITABLE = "Тип родителя совместим с искомым"; //$NON-NLS-1$
 
     /** Значения ячейки колонки «Подходит». */
@@ -280,10 +508,13 @@ public final class BslOccurrenceContextResolver
     {
         if (content == null || offset < 0 || length <= 0 || offset + length > content.length())
             return ""; //$NON-NLS-1$
-        String prefix = linePrefix(content, offset);
+        int start = lineStart(content, offset);
+        if (startsWithPipe(content, start))
+            return KIND_LITERAL;
+        String prefix = content.substring(start, offset);
         if (BslAssistSourceHeuristics.isInsideLineComment(prefix))
             return KIND_COMMENT;
-        if (isInsideLiteral(content, offset))
+        if (BslAssistSourceHeuristics.isInsideStringLiteral(prefix))
             return KIND_LITERAL;
         int after = offset + length;
         while (after < content.length() && isInlineSpace(content.charAt(after)))
@@ -916,21 +1147,7 @@ public final class BslOccurrenceContextResolver
         return pos > 0 && content.charAt(pos - 1) == '.' ? pos - 1 : -1;
     }
 
-    /**
-     * Вхождение внутри строкового литерала. Учитывает многострочные литералы 1С: строки
-     * продолжения начинаются с {@code |}, и нечётная кавычка открывающей строки действует до конца
-     * блока — та же логика, что у {@link BslAssistSourceHeuristics#isInsideStringLiteral}, но
-     * с подъёмом к началу блока продолжений.
-     */
-    private static boolean isInsideLiteral(String content, int offset)
-    {
-        int blockStart = lineStart(content, offset);
-        while (blockStart > 0 && startsWithPipe(content, blockStart))
-            blockStart = lineStart(content, blockStart - 1);
-        String prefix = content.substring(blockStart, offset);
-        return BslAssistSourceHeuristics.isInsideStringLiteral(prefix);
-    }
-
+    /** Первый символ строки после пробелов — {@code |}: строка относится к литералу. */
     private static boolean startsWithPipe(String content, int lineStart)
     {
         for (int i = lineStart; i < content.length(); i++)

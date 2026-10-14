@@ -820,7 +820,24 @@ public final class MdReferenceSupport
         Set<String> changedFiles, Set<String> unchangedConfigurationTargets, IProgressMonitor monitor,
         java.util.function.Consumer<CompareSearchMatch> onMatch)
     {
-        return source.getBmModel().executeReadonlyTask(new AbstractBmTask<List<CompareSearchMatch>>(
+        return findInModel(source.getBmModel(), source, navigationBase, changedFiles,
+            unchangedConfigurationTargets, null, monitor, onMatch);
+    }
+
+    /** Поиск в синхронизированной рабочей модели; null в changedFiles означает весь проект. */
+    public static List<CompareSearchMatch> findInModel(IBmModel model, URI navigationBase,
+        Set<String> changedFiles, com._1c.g5.v8.dt.core.filesystem.IQualifiedNameFilePathConverter converter,
+        IProgressMonitor monitor, java.util.function.Consumer<CompareSearchMatch> onMatch)
+    {
+        return findInModel(model, null, navigationBase, changedFiles, Set.of(), converter, monitor, onMatch);
+    }
+
+    private static List<CompareSearchMatch> findInModel(IBmModel model, IComparisonDataSource source,
+        URI navigationBase, Set<String> changedFiles, Set<String> unchangedConfigurationTargets,
+        com._1c.g5.v8.dt.core.filesystem.IQualifiedNameFilePathConverter converter,
+        IProgressMonitor monitor, java.util.function.Consumer<CompareSearchMatch> onMatch)
+    {
+        return model.executeReadonlyTask(new AbstractBmTask<List<CompareSearchMatch>>(
             "Проверка ссылок коммита")
         {
             @Override
@@ -830,7 +847,8 @@ public final class MdReferenceSupport
                 List<EObject> owners = new ArrayList<>();
                 List<URI> unreadable = new ArrayList<>();
                 collect(transaction.getTopObjectIterator(), new HashSet<>(), owners, unreadable,
-                    progress.split(30), object -> changedFiles == null || inChangedFile(source, object, changedFiles));
+                    progress.split(30), object -> changedFiles == null
+                        || inChangedFile(source, converter, object, changedFiles));
                 if (!unreadable.isEmpty())
                     throw new IllegalStateException("Не удалось прочитать вложенный объект из индекса Git: "
                         + localized(unreadable.get(0)));
@@ -841,7 +859,7 @@ public final class MdReferenceSupport
                 for (EObject owner : owners)
                 {
                     checking.checkCanceled();
-                    if (changedFiles != null && !inChangedFile(source, owner, changedFiles))
+                    if (changedFiles != null && !inChangedFile(source, converter, owner, changedFiles))
                     {
                         checking.worked(1);
                         continue;
@@ -942,7 +960,14 @@ public final class MdReferenceSupport
     public static boolean hasDeletedObjects(IComparisonDataSource previous, IComparisonDataSource current,
         Set<String> changedFiles, IProgressMonitor monitor)
     {
-        var configuration = current.getBmModel().getEngine().getTopObjectByFqn("Configuration");
+        return hasDeletedObjects(previous, current.getBmModel(), changedFiles, monitor);
+    }
+
+    /** Исходные объекты из HEAD сопоставляются с загруженной рабочей моделью без импорта индекса. */
+    public static boolean hasDeletedObjects(IComparisonDataSource previous, IBmModel current,
+        Set<String> changedFiles, IProgressMonitor monitor)
+    {
+        var configuration = current.getEngine().getTopObjectByFqn("Configuration");
         if (configuration == null)
             throw new IllegalStateException("Не найдена конфигурация в модели индекса Git");
         URI currentBase = EcoreUtil.getURI(configuration).trimFragment().trimSegments(1);
@@ -978,7 +1003,7 @@ public final class MdReferenceSupport
                     {
                         URI old = EcoreUtil.getURI(object);
                         URI address = currentBase.appendSegment(old.lastSegment()).appendFragment(old.fragment());
-                        EObject after = current.getBmModel().getEngine().resolve(address, object.eClass());
+                        EObject after = current.getEngine().resolve(address, object.eClass());
                         if (after == null || after.eIsProxy())
                         {
                             Global.tempLog("broken-links-commit", "deleted object=" + old);
@@ -1022,12 +1047,23 @@ public final class MdReferenceSupport
 
     private static boolean inChangedFile(IComparisonDataSource source, EObject object, Set<String> changedFiles)
     {
+        return inChangedFile(source, null, object, changedFiles);
+    }
+
+    private static boolean inChangedFile(IComparisonDataSource source,
+        com._1c.g5.v8.dt.core.filesystem.IQualifiedNameFilePathConverter converter,
+        EObject object, Set<String> changedFiles)
+    {
         EObject root = EcoreUtil.getRootContainer(object);
         if (root instanceof IBmObject bm && "command_interface_root".equals(bm.bmGetTopObject().bmGetFqn())
             || !scopes().containsKey(root.eClass()) && !isMetadataReferenceTarget(root))
             return false;
         String fqn = EcoreUtil.getURI(root).lastSegment();
-        String path = source.getPath(fqn, root.eClass());
+        // Повторяет DtProjectDataSource.getPath: учитывает класс корня (описание и тело формы различаются).
+        org.eclipse.core.runtime.IPath converted = source == null
+            ? converter.getFilePath(org.eclipse.xtext.naming.QualifiedName.create(fqn), root.eClass()) : null;
+        String path = source != null ? source.getPath(fqn, root.eClass())
+            : converted != null ? converted.toPortableString() : null;
         return path != null && changedFiles.contains(path.replace('\\', '/'));
     }
 

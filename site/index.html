@@ -12,15 +12,37 @@
 </head>
 <body>
   <h1>EDT Comfort (Комфорт)</h1>
-  <p>Плагин для 1C:Enterprise Development Tools (EDT). Навигация, наборы объектов, редактор BSL, отладка, сравнение конфигураций и интеграция с <a href="https://devtool1c.ucoz.ru/">Инструментами разработчика Tormozit (ИР)</a>.</p>
+  <p>Плагин широкого назначения для <strong>1C EDT 2025-2026</strong> с поддержкой <a href="https://devtool1c.ucoz.ru/">Инструментами разработчика Tormozit (ИР)</a>. Telegram <a href="https://t.me/EdtComfort">https://t.me/EdtComfort</a></p>
 
   <h2>Справка</h2>
   <p><a href="help/">Описание возможностей плагина</a></p>
 
-  <h2>Установка в EDT</h2>
-  <p>Главное меню → <strong>Справка</strong> → <strong>Установить новое ПО…</strong> → <strong>Добавить</strong> → указать URL:</p>
-  <p><code>{{SITE_BASE_URL}}</code></p>
-  <p>Подробнее: <a href="help/#/ustanovka-i-obnovlenie">установка и обновление</a>.</p>
+  <h2>Установка</h2>
+  <h3>Через интернет (рекомендуется)</h3>
+  <ol>
+    <li>Главное меню → <strong>Справка</strong> → <strong>Установить новое ПО…</strong> → <strong>Добавить</strong>.</li>
+    <li>Указать URL сайта обновления (последняя версия, composite): <code>{{SITE_BASE_URL}}</code></li>
+    <li>Отметить <strong>EDT Comfort</strong> → <strong>Далее</strong> → <strong>Готово</strong>.</li>
+    <li>Если всё сделано правильно, EDT предложит <strong>перезапуск</strong> — согласитесь.</li>
+  </ol>
+
+  <h3>Без интернета (архив)</h3>
+  <ol>
+    <li>Скачать ZIP с <a href="https://github.com/tormozit/EDT.Comfort/releases">релизов GitHub</a> или с URL фиксированной версии, например <code>https://tormozit.github.io/EDT.Comfort/1.0.0.13/</code></li>
+    <li>Главное меню → <strong>Справка</strong> → <strong>Установить новое ПО…</strong> → <strong>Добавить</strong> → <strong>Архив…</strong> → выбрать ZIP → <strong>Добавить</strong>.</li>
+    <li>Отметить <strong>EDT Comfort</strong> → <strong>Далее</strong> → <strong>Готово</strong>.</li>
+    <li>Если всё сделано правильно, EDT предложит <strong>перезапуск</strong> — согласитесь.</li>
+  </ol>
+
+  <h3>Обновление</h3>
+  <p>Тот же URL или архив новой версии. Если установщик <strong>не видит новую версию</strong>:</p>
+  <ol>
+    <li>В диалоге установки — <strong>Управление…</strong></li>
+    <li>В списке сайтов — <strong>Обновить</strong> у <code>{{SITE_BASE_URL}}</code></li>
+    <li>Либо удалить сайт и <strong>добавить заново</strong> (из архива — с именем установочного файла)</li>
+  </ol>
+  <p>Полный текст: <a href="help/#/ustanovka-i-obnovlenie">установка и обновление</a>. Уведомление о версии — <a href="help/#/nastroyki">настройки</a>.</p>
+  <p><strong>Параметры → Комфорт</strong> — настройки на верхнем уровне.</p>
 
   <h2>Архивные версии (фиксированный URL)</h2>
   <ul>

@@ -150,6 +150,14 @@ public final class BslModuleMethodResolver
     {
         if (!isBslModule(file))
             return null;
+        return resourceText(file);
+    }
+
+    /** Текст любого файла с его кодировкой; общий кэш чтения с BSL-контекстом. */
+    static String resourceText(IFile file)
+    {
+        if (file == null || !file.exists())
+            return null;
         return fileText(file, file.getModificationStamp());
     }
 

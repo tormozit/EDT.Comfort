@@ -647,14 +647,13 @@ public class FormEditorHook implements IStartup
     /** Переключатель макета и замеры: API и поля проверены в form-ui/form-presentation. */
     private static final class Preview
     {
-        private static final String LOG = "form-preview"; //$NON-NLS-1$
+        private static final String TOOLBAR_STATE = "tormozit.formPreview.state"; //$NON-NLS-1$
         private static final String REPRESENTATION =
             "com._1c.g5.v8.dt.form.internal.presentation.wysiwyg.FormWysiwygRepresentation"; //$NON-NLS-1$
         private static final long SLOW_MS = 2000;
         private static final EditorMemoryStore STORE =
             new EditorMemoryStore("formPreview.entries", 2000); //$NON-NLS-1$
         private static final Map<Object, PreviewState> STATES = new WeakHashMap<>();
-        private static final Map<Object, Long> OPEN_STARTS = new WeakHashMap<>();
 
         static void installCallbacks()
         {
@@ -664,13 +663,10 @@ public class FormEditorHook implements IStartup
                     {
                         PreviewState state = state(representation);
                         boolean allowed = original && (state == null || state.visible);
-                        Global.tempLog(LOG, "gate key=" + (state == null ? "<no-form>" : state.key) //$NON-NLS-1$ //$NON-NLS-2$
-                            + " original=" + original + " allowed=" + allowed); //$NON-NLS-1$ //$NON-NLS-2$
                         return allowed;
                     }
                     catch (RuntimeException e)
                     {
-                        Global.tempLogException(LOG, "gate", e); //$NON-NLS-1$
                         return original;
                     }
                 });
@@ -682,11 +678,9 @@ public class FormEditorHook implements IStartup
                     }
                     catch (RuntimeException e)
                     {
-                        Global.tempLogException(LOG, phase, e);
                     }
                     return null;
                 });
-            Global.tempLog(LOG, "callbacks installed"); //$NON-NLS-1$
         }
 
         static void install()
@@ -718,37 +712,10 @@ public class FormEditorHook implements IStartup
         private static void event(Object source, String phase)
         {
             long now = System.nanoTime();
-            Global.tempLog(LOG, phase);
             if (phase.startsWith("open.")) //$NON-NLS-1$
             {
-                if ("open.begin".equals(phase)) //$NON-NLS-1$
-                {
-                    synchronized (OPEN_STARTS)
-                    {
-                        OPEN_STARTS.put(source, now);
-                    }
-                }
-                else if (source instanceof FormEditorPage page)
-                {
-                    Long start;
-                    synchronized (OPEN_STARTS)
-                    {
-                        start = OPEN_STARTS.remove(source);
-                    }
-                    String key = page.getModel() != null ? key(page.getModel()) : "<no-form>"; //$NON-NLS-1$
-                    Global.tempLog(LOG, phase + " key=" + key + " visible=" + !"false".equals(STORE.load(key)) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        + " controlsMs=" + (start == null ? -1 : (now - start) / 1_000_000)); //$NON-NLS-1$
-                    if ("open.end".equals(phase)) //$NON-NLS-1$
-                    {
-                        attach(page);
-                        PreviewState state = state(wysiwygRepresentation(page));
-                        if (state != null && start != null)
-                        {
-                            state.openingStartedNanos = start;
-                            state.logOpening();
-                        }
-                    }
-                }
+                if ("open.end".equals(phase) && source instanceof FormEditorPage page) //$NON-NLS-1$
+                    attach(page);
                 return;
             }
             PreviewState state = state(source);
@@ -760,14 +727,10 @@ public class FormEditorHook implements IStartup
                 return;
             }
             long ms = state.starts.isEmpty() ? -1 : (now - state.starts.pop()) / 1_000_000;
-            Global.tempLog(LOG, phase + " key=" + state.key + " ms=" + ms //$NON-NLS-1$ //$NON-NLS-2$
-                + " first=" + !state.rendered + " visible=" + state.visible + " slow=" + (ms > SLOW_MS)); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             if (!state.rendered && "render.end".equals(phase)) //$NON-NLS-1$
             {
                 state.rendered = true;
                 state.firstRenderMs = ms;
-                state.firstRenderFinishedNanos = now;
-                state.logOpening();
                 // Макет построен до подключения тулбара — уведомление покажет attach().
                 FormEditorPage page = state.page.get();
                 if (page != null)
@@ -780,7 +743,7 @@ public class FormEditorHook implements IStartup
             if (page == null || !(Global.getField(page, "itemsActionGroupManager") instanceof ToolBarManager manager)) //$NON-NLS-1$
                 return;
             ToolBar bar = manager.getControl();
-            if (bar == null || bar.isDisposed() || bar.getData(LOG) != null)
+            if (bar == null || bar.isDisposed() || bar.getData(TOOLBAR_STATE) != null)
                 return;
             Object representation = wysiwygRepresentation(page);
             PreviewState state = state(representation);
@@ -810,12 +773,11 @@ public class FormEditorHook implements IStartup
             String patch = System.getProperty("tormozit.formPreview.patch." + REPRESENTATION); //$NON-NLS-1$
             action.setEnabled("ok".equals(patch)); //$NON-NLS-1$
             state.action = action;
-            bar.setData(LOG, state);
+            bar.setData(TOOLBAR_STATE, state);
             manager.add(new Separator());
             manager.add(action);
             manager.update(true);
             bar.getParent().layout(true, true);
-            Global.tempLog(LOG, "attach key=" + state.key + " visible=" + state.visible + " patch=" + patch); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             if (action.isEnabled())
                 state.applyVisibility();
             bar.getDisplay().asyncExec(state::notifySlow);
@@ -829,10 +791,7 @@ public class FormEditorHook implements IStartup
             boolean warnOnOpening;
             boolean rendered;
             boolean notified;
-            boolean openingLogged;
             long firstRenderMs;
-            long openingStartedNanos;
-            long firstRenderFinishedNanos;
             java.lang.ref.WeakReference<FormEditorPage> page = new java.lang.ref.WeakReference<>(null);
             Action action;
 
@@ -841,17 +800,6 @@ public class FormEditorHook implements IStartup
                 this.key = key;
                 this.visible = visible;
                 warnOnOpening = visible;
-            }
-
-            void logOpening()
-            {
-                if (openingLogged || openingStartedNanos == 0 || visible && !rendered)
-                    return;
-                openingLogged = true;
-                Global.tempLog(LOG, "opening key=" + key + " visible=" + visible //$NON-NLS-1$ //$NON-NLS-2$
-                    + " openToFirstRenderMs=" + (rendered //$NON-NLS-1$
-                        ? (firstRenderFinishedNanos - openingStartedNanos) / 1_000_000 : -1)
-                    + " renderMs=" + (rendered ? firstRenderMs : -1)); //$NON-NLS-1$
             }
 
             void setVisible(boolean value)
@@ -866,7 +814,6 @@ public class FormEditorHook implements IStartup
                 STORE.flush();
                 action.setChecked(!value);
                 applyVisibility();
-                Global.tempLog(LOG, "toggle key=" + key + " visible=" + value); //$NON-NLS-1$ //$NON-NLS-2$
                 if (value)
                 {
                     Object viewer = Global.getField(current, "wysiwygViewer"); //$NON-NLS-1$
@@ -7729,8 +7676,6 @@ public class FormEditorHook implements IStartup
 
         private static final int REVEAL_DELAY_MS = 100;
 
-        /** ВРЕМЕННОЕ: тема временного лога (.tmp/temp-logs/сгруппировать.log). */
-        private static final String LOG = "сгруппировать"; //$NON-NLS-1$
 
         /** Виды элементов дерева, которые можно разгруппировать. */
         private static final Set<ItemType> GROUP_TYPES = Set.of(ItemType.GROUP_USUAL,
@@ -7844,7 +7789,6 @@ public class FormEditorHook implements IStartup
             }
             catch (RuntimeException e)
             {
-                Global.tempLogException(LOG, "resolveTarget: исключение", e); //$NON-NLS-1$
                 Global.logError("FormEditorHook.GroupItemsCommand", "resolveTarget", e); //$NON-NLS-1$ //$NON-NLS-2$
                 return null;
             }
@@ -7915,7 +7859,6 @@ public class FormEditorHook implements IStartup
             }
             catch (RuntimeException e)
             {
-                Global.tempLogException(LOG, "resolveUngroup: исключение", e); //$NON-NLS-1$
                 Global.logError("FormEditorHook.GroupItemsCommand", "resolveUngroup", e); //$NON-NLS-1$ //$NON-NLS-2$
                 return null;
             }
@@ -7968,26 +7911,19 @@ public class FormEditorHook implements IStartup
 
         private static void run(Tree tree)
         {
-            // ВРЕМЕННОЕ: пошаговый разбор — команда молча ничего не делала.
-            Global.tempLog(LOG, "run: начало"); //$NON-NLS-1$
             try
             {
                 runUnsafe(tree);
             }
             catch (RuntimeException | LinkageError | AssertionError e)
             {
-                Global.tempLogException(LOG, "run: исключение", e); //$NON-NLS-1$
                 Global.logError("FormEditorHook.GroupItemsCommand", "run", e); //$NON-NLS-1$ //$NON-NLS-2$
             }
         }
 
         private static void runUnsafe(Tree tree)
         {
-            long started = System.currentTimeMillis();
             Target target = resolveTarget(tree);
-            Global.tempLog(LOG, "цель: " + (target == null ? "нет" //$NON-NLS-1$ //$NON-NLS-2$
-                : "контейнер=" + target.container().getClass().getSimpleName() //$NON-NLS-1$
-                    + ", индекс=" + target.index() + ", элементов=" + target.items().size())); //$NON-NLS-1$ //$NON-NLS-2$
             if (target == null)
                 return;
             IFormItemManagementService management =
@@ -7997,28 +7933,22 @@ public class FormEditorHook implements IStartup
             IFormItemNamingService naming =
                 formService(IFormItemNamingService.class, target.page(), "namingService"); //$NON-NLS-1$
             Object contextObj = Global.invoke(target.page(), "getEditingContext"); //$NON-NLS-1$
-            Global.tempLog(LOG, "сервисы: управление=" + (management != null) //$NON-NLS-1$
-                + ", перенос=" + (movement != null) + ", имена=" + (naming != null) //$NON-NLS-1$ //$NON-NLS-2$
-                + ", контекст=" + (contextObj == null ? "null" : contextObj.getClass().getName())); //$NON-NLS-1$ //$NON-NLS-2$
             if (management == null || movement == null || naming == null
                 || !(contextObj instanceof IBmEditingContext context))
                 return;
 
             ManagedFormGroupType type = groupType(target.container());
             String base = naming.getDefaultName(namingType(type), scriptVariant(target.page()));
-            Global.tempLog(LOG, "вид=" + type + ", основа имени=" + base); //$NON-NLS-1$ //$NON-NLS-2$
             if (base == null || base.isEmpty())
                 return;
             // Штатный счётчик имён внутри транзакции не видит существующие элементы:
             // глобальная форма и её транзакционная копия — разные экземпляры, поэтому
             // уникальное имя считаем заранее по глобальной форме («Группа», «Группа1», …).
             String name = uniqueItemName(target.form(), base);
-            Global.tempLog(LOG, "имя новой группы=" + name); //$NON-NLS-1$
             FormNewItemDescriptor descriptor =
                 new FormNewItemDescriptor(name, Collections.emptyMap(), false);
             String language = editingLanguage(target.page());
             String[] created = new String[1];
-            logNullSlots(target.form(), "до"); //$NON-NLS-1$
 
             try
             {
@@ -8030,14 +7960,9 @@ public class FormEditorHook implements IStartup
                         Form form = (Form)transaction.toTransactionObject(target.form());
                         FormItemContainer container =
                             (FormItemContainer)transaction.toTransactionObject(target.container());
-                        Global.tempLog(LOG, "транзакция: форма: " + bmState(transaction, target.form(), form)); //$NON-NLS-1$
-                        Global.tempLog(LOG, "транзакция: контейнер: " + bmState(transaction, target.container(), container)); //$NON-NLS-1$
                         FormGroup group = target.index() < 0
                             ? management.addGroup(container, type, form, descriptor)
                             : management.addGroup(container, target.index(), type, form, descriptor);
-                        Global.tempLog(LOG, "группа создана: " + (group == null ? "null" //$NON-NLS-1$ //$NON-NLS-2$
-                            : group.getName() + ", вид=" + group.getType() //$NON-NLS-1$
-                                + ": " + bmState(transaction, group, null))); //$NON-NLS-1$
                         if (group == null)
                             return null;
                         created[0] = group.getName();
@@ -8048,15 +7973,11 @@ public class FormEditorHook implements IStartup
                         return null;
                     }
                 });
-                Global.tempLog(LOG, "транзакция создания группы выполнена, " //$NON-NLS-1$
-                    + (System.currentTimeMillis() - started) + " мс от начала"); //$NON-NLS-1$
                 // Перенос выбранных элементов — штатным сервисом, как при перетаскивании:
                 // он сам исполняет задачу переноса в BM, и дерево редактора получает ровно
                 // те же события, что и от штатных операций. Любые свои правки списков
                 // внутри чужой транзакции дерево не подхватывает до переоткрытия.
                 FormGroup createdGroup = findGroupByName(target.form(), created[0]);
-                Global.tempLog(LOG, "группа после коммита: " //$NON-NLS-1$
-                    + (createdGroup == null ? "не найдена" : createdGroup.getName())); //$NON-NLS-1$
                 if (createdGroup != null)
                 {
                     // Перенос — тем же классом задачи, что и штатное перетаскивание
@@ -8068,103 +7989,17 @@ public class FormEditorHook implements IStartup
                     for (FormItem item : target.items())
                     {
                         tasks.add(new MoveFormItemTask(movement, item, createdGroup, position++));
-                        Global.tempLog(LOG, "перенос в задачу: " + item.getName()); //$NON-NLS-1$
                     }
                     context.execute(new BmCompoundTask(tasks));
-                    Global.tempLog(LOG, "перенос выполнен, " //$NON-NLS-1$
-                        + (System.currentTimeMillis() - started) + " мс от начала"); //$NON-NLS-1$
                 }
-                logNullSlots(target.form(), "после"); //$NON-NLS-1$
             }
             catch (RuntimeException e)
             {
-                Global.tempLogException(LOG, "транзакция: исключение", e); //$NON-NLS-1$
                 Global.logError("FormEditorHook.GroupItemsCommand", "run", e); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
             }
             if (created[0] != null)
                 revealItem(tree, created[0], 0);
-            measureUiRelease(tree, started, "сгруппировать"); //$NON-NLS-1$
-        }
-
-        /**
-         * ВРЕМЕННОЕ: состояние объекта в BM для разбора потери группы при коммите.
-         * {@code attached} — есть ли движок BM ({@code bmGetEngine()}); {@code tx} — тот же это
-         * экземпляр, что и глобальный, или отдельный транзакционный; для элемента формы — родитель.
-         */
-        private static String bmState(IBmTransaction transaction, EObject global, EObject txArg)
-        {
-            if (global == null && txArg == null)
-                return "null"; //$NON-NLS-1$
-            Object view = global != null ? global : txArg;
-            StringBuilder state = new StringBuilder(view.getClass().getSimpleName());
-            Object tx = txArg;
-            if (tx == null)
-            {
-                try
-                {
-                    tx = transaction.toTransactionObject(global);
-                }
-                catch (RuntimeException e)
-                {
-                    state.append(", toTransactionObject: ").append(e.getClass().getSimpleName()); //$NON-NLS-1$
-                }
-            }
-            if (view instanceof IBmObject o)
-            {
-                state.append(", attached=").append(o.bmGetEngine() != null); //$NON-NLS-1$
-                try
-                {
-                    state.append(", id=").append(o.bmGetId()); //$NON-NLS-1$
-                    if (!o.bmIsTop() && o.bmGetTopObject() != null)
-                        state.append(", top=").append(o.bmGetTopObject().bmGetId()); //$NON-NLS-1$
-                }
-                catch (RuntimeException e)
-                {
-                    state.append(", bm: ").append(e.getClass().getSimpleName()); //$NON-NLS-1$
-                }
-            }
-            if (tx != null)
-                state.append(view == tx ? ", tx=тот же" : ", tx=другой"); //$NON-NLS-1$ //$NON-NLS-2$
-            if (tx != null && tx != view && tx instanceof IBmObject t)
-                state.append(" (txAttached=").append(t.bmGetEngine() != null) //$NON-NLS-1$
-                    .append(", txId=").append(t.bmGetId()).append(')'); //$NON-NLS-1$
-            if (view instanceof FormItem item && item.eContainer() != null)
-                state.append(", родитель=").append(item.eContainer().getClass().getSimpleName()); //$NON-NLS-1$
-            return state.toString();
-        }
-
-        /**
-         * ВРЕМЕННОЕ: обход всех коллекций items формы (как FormItemIterator) с печатью размера
-         * каждой и поиском null-элементов — безусловный канал для разбора порчи модели.
-         */
-        private static void logNullSlots(Form form, String when)
-        {
-            List<FormItemContainer> queue = new ArrayList<>();
-            queue.add(form);
-            for (int head = 0; head < queue.size(); head++)
-            {
-                FormItemContainer container = queue.get(head);
-                String where = container instanceof FormItem item
-                    ? item.getName() : "Form"; //$NON-NLS-1$
-                List<FormItem> items = container.getItems();
-                for (int i = 0; i < items.size(); i++)
-                {
-                    FormItem item = items.get(i);
-                    if (item == null)
-                        Global.tempLog(LOG, when + ": NULL в items \"" + where + "\", индекс " + i); //$NON-NLS-1$ //$NON-NLS-2$
-                    else
-                    {
-                        if (item instanceof FormItemContainer nested)
-                            queue.add(nested);
-                        if (item instanceof FormField field
-                            && field.getExtInfo() instanceof TableHolder holder
-                            && holder.getAutoTable() != null)
-                            queue.add(holder.getAutoTable());
-                    }
-                }
-                Global.tempLog(LOG, when + ": items(" + items.size() + ") у \"" + where + "\""); //$NON-NLS-1$ //$NON-NLS-2$
-            }
         }
 
         /**
@@ -8231,26 +8066,19 @@ public class FormEditorHook implements IStartup
 
         private static void runUngroup(Tree tree)
         {
-            // ВРЕМЕННОЕ: пошаговый разбор — как и у «Сгруппировать».
-            Global.tempLog(LOG, "разгруппировать: начало"); //$NON-NLS-1$
             try
             {
                 runUngroupUnsafe(tree);
             }
             catch (RuntimeException | LinkageError | AssertionError e)
             {
-                Global.tempLogException(LOG, "разгруппировать: исключение", e); //$NON-NLS-1$
                 Global.logError("FormEditorHook.GroupItemsCommand", "runUngroup", e); //$NON-NLS-1$ //$NON-NLS-2$
             }
         }
 
         private static void runUngroupUnsafe(Tree tree)
         {
-            long started = System.currentTimeMillis();
             Ungroup target = resolveUngroup(tree);
-            Global.tempLog(LOG, "разгруппировать: групп=" //$NON-NLS-1$
-                + (target == null ? "нет цели" : target.groups().size()) //$NON-NLS-1$
-                + ", разбор " + (System.currentTimeMillis() - started) + " мс"); //$NON-NLS-1$ //$NON-NLS-2$
             if (target == null)
                 return;
             IFormItemMovementService movement =
@@ -8258,7 +8086,6 @@ public class FormEditorHook implements IStartup
             Object contextObj = Global.invoke(target.page(), "getEditingContext"); //$NON-NLS-1$
             if (movement == null || !(contextObj instanceof IBmEditingContext context))
             {
-                Global.tempLog(LOG, "разгруппировать: нет сервиса переноса или контекста"); //$NON-NLS-1$
                 return;
             }
             // Выделение после команды: прежнее снимается целиком, выделяются только
@@ -8280,25 +8107,8 @@ public class FormEditorHook implements IStartup
                     return null;
                 }
             });
-            Global.tempLog(LOG, "разгруппировать: транзакция выполнена, " //$NON-NLS-1$
-                + (System.currentTimeMillis() - started) + " мс от начала"); //$NON-NLS-1$
             if (!ungrouped.isEmpty())
                 revealItems(tree, ungrouped, removedGroups, 0);
-            measureUiRelease(tree, started, "разгруппировать"); //$NON-NLS-1$
-        }
-
-        /**
-         * ВРЕМЕННОЕ: сколько всего держится поток UI. Обработчик команды возвращает управление
-         * быстро, а видимая задержка — это работа EDT на перестроении модели соответствия,
-         * эскиза и панели «Свойства»; она идёт в том же потоке и в те же события. Замер через
-         * {@code asyncExec} показывает, когда поток освободился.
-         */
-        private static void measureUiRelease(Tree tree, long started, String what)
-        {
-            if (tree.isDisposed())
-                return;
-            tree.getDisplay().asyncExec(() -> Global.tempLog(LOG,
-                what + ": UI освободился через " + (System.currentTimeMillis() - started) + " мс")); //$NON-NLS-1$ //$NON-NLS-2$
         }
 
         /**
@@ -8323,8 +8133,6 @@ public class FormEditorHook implements IStartup
             for (FormItem child : new ArrayList<>(group.getItems()))
             {
                 boolean done = movement.move(child, parent, position);
-                Global.tempLog(LOG, "перенос из группы " + group.getName() //$NON-NLS-1$
-                    + ": " + child.getName() + " -> " + done); //$NON-NLS-1$ //$NON-NLS-2$
                 allMoved &= done;
                 if (done)
                 {
@@ -8334,12 +8142,9 @@ public class FormEditorHook implements IStartup
             }
             if (!allMoved)
             {
-                Global.tempLog(LOG, "группа " + group.getName() //$NON-NLS-1$
-                    + " не удалена: перенеслось не всё содержимое"); //$NON-NLS-1$
                 return;
             }
             new DeleteFormItemTask(modelForm, modelGroup).execute(form, group, monitor);
-            Global.tempLog(LOG, "группа удалена"); //$NON-NLS-1$
             removedGroups.add(group.getName());
             for (String name : movedNames)
             {
@@ -8376,7 +8181,6 @@ public class FormEditorHook implements IStartup
             }
             catch (RuntimeException e)
             {
-                Global.tempLogException(LOG, "сервис " + type.getSimpleName() + ": реестр отказал", e); //$NON-NLS-1$ //$NON-NLS-2$
                 return null;
             }
         }
@@ -8460,12 +8264,9 @@ public class FormEditorHook implements IStartup
             TreeItem found = findItemRow(tree.getItems(), name);
             if (found == null)
             {
-                if (attempt == REVEAL_ATTEMPTS)
-                    Global.tempLog(LOG, "строка " + name + " в дереве не найдена"); //$NON-NLS-1$ //$NON-NLS-2$
                 tree.getDisplay().timerExec(REVEAL_DELAY_MS, () -> revealItem(tree, name, attempt + 1));
                 return;
             }
-            Global.tempLog(LOG, "строка " + name + " найдена, попытка " + attempt); //$NON-NLS-1$ //$NON-NLS-2$
             Object element = found.getData();
             if (element == null)
                 return;
@@ -8492,14 +8293,10 @@ public class FormEditorHook implements IStartup
             collectItemRows(tree.getItems(), missing, elements, vanished, stale);
             if (!missing.isEmpty() || !stale.isEmpty())
             {
-                if (attempt == REVEAL_ATTEMPTS)
-                    Global.tempLog(LOG, "выделение не готово: не найдены " + missing //$NON-NLS-1$
-                        + ", старые строки ещё видны " + stale); //$NON-NLS-1$
                 tree.getDisplay().timerExec(REVEAL_DELAY_MS,
                     () -> revealItems(tree, select, vanished, attempt + 1));
                 return;
             }
-            Global.tempLog(LOG, "разгруппировано строк к выделению: " + elements.size()); //$NON-NLS-1$
             viewer.setSelection(new StructuredSelection(elements), true);
         }
 

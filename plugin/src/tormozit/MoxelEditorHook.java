@@ -99,10 +99,11 @@ import com._1c.g5.v8.dt.ui.MultiSelection;
  */
 public class MoxelEditorHook implements IStartup
 {
-    /** До первой загрузки ColorComponent, как остальные хуки из Activator.start. */
-    public static void installColorResetHook()
+    /** До первой загрузки классов EDT, как остальные хуки из Activator.start. */
+    public static void installWeavingHooks()
     {
         ColorResetSupport.install();
+        FixedTableScrollSupport.install();
     }
 
     private static final String SPREADSHEET_PAGE_ID = "editors.commontemplate.pages.spreadsheet"; //$NON-NLS-1$
@@ -118,7 +119,7 @@ public class MoxelEditorHook implements IStartup
     @Override
     public void earlyStartup()
     {
-        installColorResetHook();
+        installWeavingHooks();
         Display.getDefault().asyncExec(() ->
         {
             PasteCacheRepair.install();
@@ -827,6 +828,114 @@ public class MoxelEditorHook implements IStartup
             {
                 org.eclipse.swt.internal.win32.OS.ValidateRect(control.handle, null);
             }
+        }
+    }
+
+    /** Сохранение прокрутки при изменении ячеек с фиксацией таблицы (issue 796). */
+    private static final class FixedTableScrollSupport implements WeavingHook
+    {
+        private static final String TARGET = "com._1c.g5.v8.dt.moxel.ui.editor.MoxelControl"; //$NON-NLS-1$
+        private static final String OWNER = TARGET.replace('.', '/');
+        private static final String KEEP_SCROLL = "comfort$positionViewPortsAfterChange"; //$NON-NLS-1$
+        private static final AtomicBoolean installed = new AtomicBoolean();
+
+        static void install()
+        {
+            if (!installed.compareAndSet(false, true))
+                return;
+            Bundle bundle = FrameworkUtil.getBundle(MoxelEditorHook.class);
+            BundleContext context = bundle != null ? bundle.getBundleContext() : null;
+            if (context != null)
+                context.registerService(WeavingHook.class, new FixedTableScrollSupport(), null);
+        }
+
+        @Override
+        public void weave(WovenClass wovenClass)
+        {
+            if (!TARGET.equals(wovenClass.getClassName()))
+                return;
+            try
+            {
+                byte[] patched = transform(wovenClass.getBytes());
+                if (patched != null)
+                    wovenClass.setBytes(patched);
+                Global.tempLog("moxel-fixed-scroll", "weave bundle=" + wovenClass.getBundleWiring().getBundle().getVersion()
+                    + " patched=" + (patched != null)); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            }
+            catch (RuntimeException | LinkageError e)
+            {
+                Global.tempLog("moxel-fixed-scroll", "weave failed: " + e); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+
+        /**
+         * EDT 2025/2026: SheetAccessor.onChange ставит needUpdatePositions. В doPaint штатный
+         * positionViewPorts сбрасывает четыре области на точку фиксации. Для этого вызова
+         * копируем метод без setViewPortsSheetPositions: correctViewPortsSheetPositions
+         * пересчитывает размеры от текущего begin каждой области. Первичная раскладка,
+         * изменение фиксации, масштаба и размера окна используют исходный метод.
+         */
+        private static byte[] transform(byte[] bytes)
+        {
+            ClassReader reader = new ClassReader(bytes);
+            ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+            int[] patched = { 0, 0 };
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor,
+                    String signature, String[] exceptions)
+                {
+                    MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    if (!"doPaint".equals(name) //$NON-NLS-1$
+                        || !"(Lorg/eclipse/swt/events/PaintEvent;)V".equals(descriptor)) //$NON-NLS-1$
+                        return mv;
+                    return new MethodVisitor(Opcodes.ASM9, mv)
+                    {
+                        @Override
+                        public void visitMethodInsn(int opcode, String owner, String method,
+                            String desc, boolean isInterface)
+                        {
+                            if (opcode == Opcodes.INVOKEVIRTUAL && OWNER.equals(owner)
+                                && "positionViewPorts".equals(method) && "()V".equals(desc)) //$NON-NLS-1$ //$NON-NLS-2$
+                            {
+                                method = KEEP_SCROLL;
+                                patched[0]++;
+                            }
+                            super.visitMethodInsn(opcode, owner, method, desc, isInterface);
+                        }
+                    };
+                }
+            }, 0);
+            reader.accept(new ClassVisitor(Opcodes.ASM9)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor,
+                    String signature, String[] exceptions)
+                {
+                    if (!"positionViewPorts".equals(name) || !"()V".equals(descriptor)) //$NON-NLS-1$ //$NON-NLS-2$
+                        return null;
+                    MethodVisitor mv = writer.visitMethod(Opcodes.ACC_PRIVATE, KEEP_SCROLL,
+                        descriptor, signature, exceptions);
+                    return new MethodVisitor(Opcodes.ASM9, mv)
+                    {
+                        @Override
+                        public void visitMethodInsn(int opcode, String owner, String method,
+                            String desc, boolean isInterface)
+                        {
+                            if (opcode == Opcodes.INVOKEVIRTUAL && OWNER.equals(owner)
+                                && "setViewPortsSheetPositions".equals(method) && "()V".equals(desc)) //$NON-NLS-1$ //$NON-NLS-2$
+                            {
+                                super.visitInsn(Opcodes.POP);
+                                patched[1]++;
+                                return;
+                            }
+                            super.visitMethodInsn(opcode, owner, method, desc, isInterface);
+                        }
+                    };
+                }
+            }, 0);
+            return patched[0] == 1 && patched[1] == 1 ? writer.toByteArray() : null;
         }
     }
 

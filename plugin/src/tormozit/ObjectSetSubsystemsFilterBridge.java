@@ -1425,7 +1425,8 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
                 }
             }
 
-            return applySubsystemBlacklist(viewer, effective, element, nativeVisible);
+            boolean visible = applySubsystemBlacklist(viewer, effective, element, nativeVisible);
+            return visible;
         }
 
         /**

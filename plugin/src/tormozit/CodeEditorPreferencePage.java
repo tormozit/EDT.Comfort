@@ -189,7 +189,5 @@ public final class CodeEditorPreferencePage extends ComfortPreferencePage
                 + "слова с заглавной буквой не на первой позиции (как в CamelCase) пропускаются.", //$NON-NLS-1$
                 spellingIdentsHost);
         }
-        else
-            createInstallJdtSpellingLink(parent);
     }
 }

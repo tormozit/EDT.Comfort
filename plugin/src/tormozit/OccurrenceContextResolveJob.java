@@ -519,7 +519,7 @@ final class OccurrenceContextResolveJob
                 break;
             IFile file = target.file();
             if (!texts.containsKey(file))
-                texts.put(file, BslModuleMethodResolver.moduleText(file));
+                texts.put(file, BslModuleMethodResolver.resourceText(file));
             FastContext fc = resolveFast(target, texts.get(file));
             if (fc.wantsParentType)
                 forType.add(target);
@@ -554,6 +554,11 @@ final class OccurrenceContextResolveJob
         }
         int offset = region[0];
         int length = region[1];
+        if (offset < 0 || offset > content.length() || length < 0 || length > content.length() - offset)
+        {
+            target.applyFast(FastContext.empty());
+            return FastContext.empty();
+        }
         int lineStart = lineStart(content, offset);
         int lineEnd = lineEnd(content, offset);
         String raw = content.substring(lineStart, lineEnd);
@@ -562,10 +567,11 @@ final class OccurrenceContextResolveJob
         int hlStart = Math.max(0, offset - lineStart - lead);
         int hlLen = Math.max(0, Math.min(length, lineText.length() - hlStart));
         int line = lineNumber(content, offset);
-        String parent = BslOccurrenceContextResolver.parentText(content, offset);
-        String syntaxKind = BslOccurrenceContextResolver.syntaxKind(content, offset, length);
-        String method = BslModuleMethodResolver.methodAtLine(target.file(), line);
-        boolean wantsType = !BslOccurrenceContextResolver.KIND_COMMENT.equals(syntaxKind)
+        boolean bsl = BslModuleMethodResolver.isBslModule(target.file());
+        String parent = bsl ? BslOccurrenceContextResolver.parentText(content, offset) : ""; //$NON-NLS-1$
+        String syntaxKind = bsl ? BslOccurrenceContextResolver.syntaxKind(content, offset, length) : ""; //$NON-NLS-1$
+        String method = bsl ? BslModuleMethodResolver.methodAtLine(target.file(), line) : ""; //$NON-NLS-1$
+        boolean wantsType = bsl && !BslOccurrenceContextResolver.KIND_COMMENT.equals(syntaxKind)
             && !BslOccurrenceContextResolver.KIND_LITERAL.equals(syntaxKind);
         FastContext fc = new FastContext(offset, length, line, lineText, hlStart, hlLen, parent,
             syntaxKind, method != null ? method : "", wantsType); //$NON-NLS-1$

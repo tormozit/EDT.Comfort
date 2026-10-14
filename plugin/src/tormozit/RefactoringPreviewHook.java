@@ -56,6 +56,7 @@ import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.graphics.Rectangle;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.layout.GridLayout;
+import org.eclipse.swt.widgets.Button;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
@@ -81,7 +82,8 @@ import com._1c.g5.v8.dt.metadata.mdclass.ScheduledJob;
 
 /**
  * Все доработки окна мастера рефакторинга LTK — «Рефакторинг», «Переименовать элемент», «Мастер
- * переименования». Три независимые части, у каждой своя привязка и жизненный цикл, общее — только
+ * переименования», «Заменить совпадения текста». Три независимые части, у каждой своя привязка
+ * и жизненный цикл, общее — только
  * распознавание окна ({@link #isRefactoringWizardDialog}):
  *
  * <ul>
@@ -111,6 +113,7 @@ public final class RefactoringPreviewHook
     private static final String PREVIEW_PAGE_NAME_PART = "PreviewWizardPage"; //$NON-NLS-1$
 
     private static final String PAGE_HANDLED_KEY = "tormozit.refactoringPreviewTablePage"; //$NON-NLS-1$
+    private static final String ATTACH_PENDING_KEY = "tormozit.refactoringPreviewTablePending"; //$NON-NLS-1$
 
     /** Страница предпросмотра может быть не первой страницей мастера — ждём её с повторами. */
     private static final int RETRY_DELAY_MS = 300;
@@ -125,7 +128,58 @@ public final class RefactoringPreviewHook
         if (display == null || display.isDisposed())
             return;
         display.addFilter(SWT.Show, RefactoringPreviewHook::handleShow);
+        display.addFilter(SWT.Selection, RefactoringPreviewHook::handleWizardButtonSelection);
+        display.addFilter(SWT.Hide, RefactoringPreviewHook::handleWizardControlHide);
         CurrentLines.install(display);
+    }
+
+    /**
+     * RefactoringWizardDialog2 создаёт предпросмотр в обработчике кнопки перехода, после
+     * фильтра Selection. Отложенный вызов может попасть во вложенный цикл расчёта изменений,
+     * пока текущая страница ещё прежняя; окончание перехода отслеживает handleWizardControlHide.
+     */
+    private static void handleWizardButtonSelection(Event event)
+    {
+        if (!(event.widget instanceof Button button) || button.isDisposed())
+            return;
+        Shell shell = button.getShell();
+        if (!isRefactoringWizardDialog(shell)
+            || !PreviewTablePane.isTextReplacementWizard(shell)
+            || Boolean.TRUE.equals(shell.getData(ATTACH_PENDING_KEY)))
+            return;
+        shell.setData(ATTACH_PENDING_KEY, Boolean.TRUE);
+        shell.getDisplay().asyncExec(() ->
+        {
+            if (shell.isDisposed())
+                return;
+            shell.setData(ATTACH_PENDING_KEY, null);
+            scheduleAttach(shell, 0);
+        });
+    }
+
+    /**
+     * В makeVisible мастер скрывает прежнюю страницу уже после присвоения fCurrentPage и
+     * createControl новой страницы. Её первый Show может предшествовать setControl, поэтому
+     * проверка после Hide прежней страницы закрывает этот промежуток жизненного цикла LTK.
+     */
+    private static void handleWizardControlHide(Event event)
+    {
+        if (!(event.widget instanceof Control control) || control.isDisposed())
+            return;
+        Shell shell = control.getShell();
+        if (!isRefactoringWizardDialog(shell)
+            || !PreviewTablePane.isTextReplacementWizard(shell)
+            || !(shell.getData() instanceof IWizardContainer container))
+            return;
+        IWizardPage page = container.getCurrentPage();
+        if (page == null || !page.getClass().getName().contains(PREVIEW_PAGE_NAME_PART)
+            || Boolean.TRUE.equals(pageFlag(page)))
+            return;
+        shell.getDisplay().asyncExec(() ->
+        {
+            if (!shell.isDisposed())
+                scheduleAttach(shell, 0);
+        });
     }
 
     static boolean isRefactoringWizardDialog(Shell shell)
@@ -269,11 +323,11 @@ public final class RefactoringPreviewHook
             return file;
         }
 
-        /** Колонки «Метод», «Родитель», «Тип родителя», «Категория» есть только у модулей. */
+        /** Строка текста нужна для любого файла с известной позицией вхождения. */
         @Override
         public boolean needsContext()
         {
-            return offset >= 0 && length > 0 && BslModuleMethodResolver.isBslModule(file);
+            return offset >= 0 && length > 0 && file != null;
         }
 
         /** Позиция вхождения известна заранее — из группы правок LTK. */
@@ -363,8 +417,7 @@ public final class RefactoringPreviewHook
         private static final String[] WIDTH_KEYS = {"markWidth", "changeWidth", "fileWidth", "fileTypeWidth", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
             "moduleWidth", "methodWidth", "parentWidth", "parentTypeWidth", "suitableWidth", "syntaxWidth", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
             "textWidth"}; //$NON-NLS-1$
-        private static final int[] DEFAULT_WIDTHS = {74, 320, 200, 90, 260, 180, 180, 220, 80, 90, 320};
-        private static final int MIN_COLUMN_WIDTH = 40;
+        private static final int[] DEFAULT_WIDTHS = {74, 100, 90, 45, 260, 180, 180, 220, 80, 90, 320};
 
         /**
          * Индекс колонки «Пометка» — первая: именно в ней стиль {@code SWT.CHECK} рисует нативный
@@ -393,6 +446,7 @@ public final class RefactoringPreviewHook
         private final Composite tableHost;
         private final Table table;
         private final CheckboxTableViewer viewer;
+        private final boolean textReplacement;
         private final List<PreviewRow> rows = new ArrayList<>();
         /** Свои пункты контекстного меню — их доступность зависит от выделения (см. prepareMarkMenu). */
         private final List<MenuItem> markMenuItems = new ArrayList<>();
@@ -423,6 +477,7 @@ public final class RefactoringPreviewHook
             this.tableHost = tableHost;
             this.table = table;
             this.viewer = viewer;
+            this.textReplacement = isTextReplacementWizard(treeViewer.getTree().getShell());
         }
 
         /**
@@ -451,7 +506,6 @@ public final class RefactoringPreviewHook
             Composite columnHost = new Composite(tableHost, SWT.NONE);
             TableColumnLayout columnLayout = new TableColumnLayout();
             columnHost.setLayout(columnLayout);
-
             // CheckboxTableViewer, а не TableViewer: пометки строк восстанавливает сам JFace по
             // ICheckStateProvider, иначе сортировка и отбор их теряют.
             CheckboxTableViewer viewer = new CheckboxTableViewer(
@@ -481,8 +535,25 @@ public final class RefactoringPreviewHook
         {
             if (shell == null || shell.isDisposed())
                 return null;
+            if (isTextReplacementWizard(shell))
+                return null;
             return shell.getData(RefactoringWizardTitleHook.SHELL_RENAME_FULL_NAME_KEY) instanceof String fqn
                 ? BslOccurrenceContextResolver.parseSought(fqn) : null;
+        }
+
+        private static boolean isTextReplacementWizard(Shell shell)
+        {
+            if (shell.getData() instanceof IWizardContainer container)
+            {
+                IWizardPage page = container.getCurrentPage();
+                // Замена произвольного текста: имя активного модуля в заголовке не является
+                // искомым объектом. Без него скрыты «Подходит» и отбор «Только подходящие».
+                if (page != null && page.getWizard() != null
+                    && "org.eclipse.search.internal.ui.text.ReplaceAction$ReplaceWizard" //$NON-NLS-1$
+                        .equals(page.getWizard().getClass().getName()))
+                    return true;
+            }
+            return false;
         }
 
         private void createColumns(TableColumnLayout columnLayout)
@@ -541,10 +612,11 @@ public final class RefactoringPreviewHook
                 BslOccurrenceContextResolver.COL_PARENT, row -> row.parent);
             parentTypeColumn = addColoredTextColumn(columnLayout, settings, 7, PARENT_TYPE_TITLE,
                 row -> row.parentType != null ? row.parentType : UNKNOWN_TYPE);
-            suitableColumn = addColoredTextColumn(columnLayout, settings, 8,
-                BslOccurrenceContextResolver.COL_SUITABLE, PreviewTablePane::suitableCell);
-            TableColumn syntaxColumn = addTextColumn(columnLayout, settings, 9,
-                BslOccurrenceContextResolver.COL_SYNTAX_KIND, row -> row.syntaxKind);
+            if (!textReplacement)
+                suitableColumn = addColoredTextColumn(columnLayout, settings, 8,
+                    BslOccurrenceContextResolver.COL_SUITABLE, PreviewTablePane::suitableCell);
+            TableColumn syntaxColumn = BslOccurrenceContextResolver.addCategoryColumn(viewer, columnLayout,
+                element -> element instanceof PreviewRow row ? row.syntaxKind : "").getColumn(); //$NON-NLS-1$
             TableColumn occurrenceTextColumn = OccurrenceContextResolveJob.addTextColumn(viewer).getColumn();
             applyWidth(columnLayout, occurrenceTextColumn, settings, 10);
 
@@ -567,22 +639,19 @@ public final class RefactoringPreviewHook
 
             interaction = new FormTableInteraction(table, viewer,
                 (item, col) -> cellText(item != null ? item.getData() : null, col));
-            interaction.setFilterTextResolver(PreviewTablePane::cellText);
+            interaction.setFilterTextResolver(this::cellText);
             interaction.setColumnReorderEnabled(true);
             interaction.setOwnerDrawColumns(occurrenceTextColumn);
             FormTableColumnState.loadOrder(settings, KEY_COL_ORDER, table);
             // true — пользователь уже подстраивал ширины сам, режим заполнения по ширине не навязываем.
             // Ширины, оставшиеся от авто-заполнения, за «подстроенные» не считаются (KEY_COLUMNS_FILL).
             interaction.install(
-                FormTableColumnState.hasSavedColumnWidths(settings, KEY_COLUMNS_FILL, WIDTH_KEYS));
+                FormTableColumnState.hasSavedColumnWidths(settings, KEY_COLUMNS_FILL, widthKeys()));
             interaction.enableHeaderSort(settings);
             BslOccurrenceContextResolver.applyColumnHeaderTooltips(interaction, parentColumn,
                 parentTypeColumn, syntaxColumn);
             interaction.setHeaderTooltipExtra(suitableColumn,
                 BslOccurrenceContextResolver.TIP_SUITABLE + Global.pluginSignForTooltip());
-            // «Подходит» имеет смысл только при известном искомом объекте (заголовок мастера).
-            if (sought == null)
-                interaction.setColumnHidden(suitableColumn, true, DEFAULT_WIDTHS[8]);
             // Порог MAX_VALUE — окно рефакторинга модальное, кнопки «Рассчитать типы» тут нет:
             // «Тип родителя» всегда считается автоматически системным проходом, как и раньше.
             contextResolver = new OccurrenceContextResolveJob(table, viewer, parentTypeColumn,
@@ -662,7 +731,7 @@ public final class RefactoringPreviewHook
             IDialogSettings settings, int index)
         {
             int width = FormTableColumnState.readWidth(settings, WIDTH_KEYS[index], DEFAULT_WIDTHS[index],
-                MIN_COLUMN_WIDTH);
+                ColumnWidthFit.minColumnWidth(column.getParent()));
             // addTrim=false — ширина сохранённая (уже фактическая), иначе раскладка прибавляла бы к ней
             // COLUMN_TRIM, и колонки росли бы от открытия к открытию.
             columnLayout.setColumnData(column, new ColumnPixelData(width, true, false));
@@ -679,9 +748,10 @@ public final class RefactoringPreviewHook
             {
                 if (event.detail == SWT.CHECK)
                     toggleCheck(event.item);
-                else
-                    syncSelectionToTree();
             });
+            // FormTableInteraction выбирает строку через viewer.setSelection без SWT.Selection.
+            // Событие JFace приходит и при таком клике, и при клавиатурном/программном выборе.
+            viewer.addSelectionChangedListener(event -> syncSelectionToTree());
             // Пробел переключает пометку у всех выделенных строк. Штатную обработку гасим:
             // иначе система переключит ещё и флажок строки с фокусом, отменив нашу.
             table.addListener(SWT.KeyDown, event ->
@@ -1135,7 +1205,7 @@ public final class RefactoringPreviewHook
                 row.fileType = fileExtension(file);
                 row.module = moduleLabel(file);
             }
-            if (!row.needsContext())
+            if (!BslModuleMethodResolver.isBslModule(file))
                 row.parentType = ""; //$NON-NLS-1$
             applyMdPropertyContext(row, node);
             row.sought = sought;
@@ -1163,14 +1233,14 @@ public final class RefactoringPreviewHook
             {
                 row.parent = job.getName() != null ? job.getName() : ""; //$NON-NLS-1$
                 row.parentType = "РегламентноеЗадание"; //$NON-NLS-1$
-                row.syntaxKind = "Свойство «Метод обработчик»"; //$NON-NLS-1$
+                row.syntaxKind = BslOccurrenceContextResolver.KIND_HANDLER;
                 value = job.getMethodName();
             }
             else if (modified instanceof EventSubscription subscription)
             {
                 row.parent = subscription.getName() != null ? subscription.getName() : ""; //$NON-NLS-1$
                 row.parentType = "ПодпискаНаСобытие"; //$NON-NLS-1$
-                row.syntaxKind = "Свойство «Обработчик»"; //$NON-NLS-1$
+                row.syntaxKind = BslOccurrenceContextResolver.KIND_HANDLER;
                 value = subscription.getHandler();
             }
             else
@@ -1446,11 +1516,24 @@ public final class RefactoringPreviewHook
 
         // ---- Прочее ----
 
-        private static String cellText(Object element, int column)
+        private int logicalColumnIndex(int column)
+        {
+            return textReplacement && column >= 8 ? column + 1 : column;
+        }
+
+        private String[] widthKeys()
+        {
+            String[] keys = new String[table.getColumnCount()];
+            for (int i = 0; i < keys.length; i++)
+                keys[i] = WIDTH_KEYS[logicalColumnIndex(i)];
+            return keys;
+        }
+
+        private String cellText(Object element, int column)
         {
             if (!(element instanceof PreviewRow row))
                 return ""; //$NON-NLS-1$
-            return switch (column)
+            return switch (logicalColumnIndex(column))
             {
                 case 0 -> markText(row);
                 case 1 -> row.text;
@@ -1470,7 +1553,7 @@ public final class RefactoringPreviewHook
         /** Значение колонки «Подходит»: «?» до расчёта; пусто — если искомое неизвестно / не BSL-модуль. */
         private static String suitableCell(PreviewRow row)
         {
-            if (row == null || row.sought == null || !row.needsContext())
+            if (row == null || row.sought == null || !BslModuleMethodResolver.isBslModule(row.file))
                 return ""; //$NON-NLS-1$
             return row.suitable != null ? row.suitable : BslOccurrenceContextResolver.SUITABLE_UNKNOWN;
         }
@@ -1480,17 +1563,18 @@ public final class RefactoringPreviewHook
             if (table == null || table.isDisposed())
                 return;
             TableColumn[] columns = table.getColumns();
-            if (columns.length != WIDTH_KEYS.length)
-                return;
+            String[] keys = widthKeys();
             FormTableColumnState.saveOrderAndWidths(dialogSettings(), KEY_COL_ORDER, KEY_COLUMNS_FILL,
-                interaction != null && interaction.isColumnsExactFill(), WIDTH_KEYS, columns, table);
+                interaction != null && interaction.isColumnsExactFill(), keys, columns, table);
         }
 
-        private static IDialogSettings dialogSettings()
+        private IDialogSettings dialogSettings()
         {
             IDialogSettings root = Activator.getDefault().getDialogSettings();
-            IDialogSettings section = root.getSection(SETTINGS_SECTION);
-            return section != null ? section : root.addNewSection(SETTINGS_SECTION);
+            // Разный состав колонок — отдельные настройки порядка, сортировки и ширин.
+            String sectionName = textReplacement ? SETTINGS_SECTION + ".replace" : SETTINGS_SECTION; //$NON-NLS-1$
+            IDialogSettings section = root.getSection(sectionName);
+            return section != null ? section : root.addNewSection(sectionName);
         }
 
         /**

@@ -266,6 +266,8 @@ public class ComfortPreferencePage
 
         if (ComfortJdtAvailability.isJdtUiAvailable())
             createCommonDictionaryLink();
+        else
+            createInstallJdtSpellingLink(getFieldEditorParent());
 
         createTextEditorsGroup();
 
@@ -305,7 +307,7 @@ public class ComfortPreferencePage
     }
 
     /** Ссылка установки Eclipse JDT — без него орфография Comfort недоступна. */
-    protected void createInstallJdtSpellingLink(Composite parent)
+    private void createInstallJdtSpellingLink(Composite parent)
     {
         Link link = new Link(parent, SWT.NONE);
         link.setText("<a>Установить модуль орфографии (JDT)</a>"); //$NON-NLS-1$
@@ -313,10 +315,10 @@ public class ComfortPreferencePage
         gd.horizontalSpan = 2;
         gd.verticalIndent = 8;
         link.setLayoutData(gd);
-        link.setToolTipText(
+        link.setToolTipText(TooltipText.wrap(link,
             "Орфография Comfort использует Eclipse JDT UI (org.eclipse.jdt.ui).\n"
             + "В этой EDT модуль не установлен — откроется мастер с предвыбором минимума.\n"
-            + "После установки перезапустите EDT."); //$NON-NLS-1$
+            + "После установки перезапустите EDT.")); //$NON-NLS-1$
         link.addListener(SWT.Selection, e ->
         {
             if (!"Установить модуль орфографии (JDT)".equals(e.text)) //$NON-NLS-1$

@@ -461,7 +461,7 @@ def publish_help_site(repo_root: str) -> None:
 
 def write_root_index_html(children: list[str]) -> None:
     version_links = "\n".join(
-        f'    <li><a href="{c}/">{c}</a> — фиксированная версия</li>' for c in children
+        f'    <li><a href="{c}/">{c}</a></li>' for c in children
     )
     template_path = os.path.join(
         os.environ.get("REPO_ROOT", "."), "site", "index.html")

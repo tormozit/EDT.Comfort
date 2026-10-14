@@ -319,6 +319,343 @@ public final class ConfigSearchResultsHook implements IStartup
     private static final Map<String, FormTableInteraction.ColumnState> RESULT_COLUMN_STATES = new LinkedHashMap<>();
     private static String activeResultColumnType;
     private static boolean resultColumnsPending;
+    private static int matchColumnMask = 255;
+    private static boolean changingMatchColumns;
+
+    private static String matchOrderKey()
+    {
+        return KEY_COL_ORDER + "." + matchColumnMask; //$NON-NLS-1$
+    }
+
+    private static IDialogSettings matchSortSettings()
+    {
+        IDialogSettings root = dialogSettings();
+        String key = "columns." + matchColumnMask; //$NON-NLS-1$
+        IDialogSettings settings = root.getSection(key);
+        return settings != null ? settings : root.addNewSection(key);
+    }
+
+    private static String[] allMatchWidthKeys()
+    {
+        return new String[] {KEY_COL_PATH_WIDTH, KEY_COL_PROPERTY_WIDTH, KEY_COL_LINE_WIDTH,
+            KEY_COL_PARENT_WIDTH, KEY_COL_PARENT_TYPE_WIDTH, KEY_COL_SYNTAX_WIDTH,
+            KEY_COL_SUITABLE_WIDTH, KEY_COL_TEXT_WIDTH};
+    }
+
+    private static TableColumn[] allMatchColumns()
+    {
+        return new TableColumn[] {cachedMatchPathColumn, cachedMatchPropertyColumn, cachedMatchLineColumn,
+            cachedMatchParentColumn, cachedMatchParentTypeColumn, cachedMatchSyntaxColumn,
+            cachedMatchSuitableColumn, cachedMatchTextColumn};
+    }
+
+    private static String matchColumnKey(TableColumn column)
+    {
+        if (column == null)
+            return null;
+        TableColumn[] columns = allMatchColumns();
+        String[] keys = allMatchWidthKeys();
+        for (int i = 0; i < columns.length; i++)
+            if (columns[i] == column)
+                return keys[i];
+        return null;
+    }
+
+    private static int matchColumnIndex(String key)
+    {
+        if (key == null || cachedMatchTableViewer == null)
+            return -1;
+        Table table = cachedMatchTableViewer.getTable();
+        for (int i = 0; i < table.getColumnCount(); i++)
+            if (key.equals(matchColumnKey(table.getColumn(i))))
+                return i;
+        return -1;
+    }
+
+    private static String[] matchWidthKeys()
+    {
+        List<String> visible = new ArrayList<>();
+        String[] keys = allMatchWidthKeys();
+        for (int i = 0; i < keys.length; i++)
+            if ((matchColumnMask & (1 << i)) != 0)
+                visible.add(keys[i]);
+        return visible.toArray(String[]::new);
+    }
+
+    private static int defaultMatchWidth(String key)
+    {
+        return switch (key)
+        {
+            case KEY_COL_PATH_WIDTH -> MATCH_PATH_COLUMN_WIDTH;
+            case KEY_COL_PROPERTY_WIDTH -> 140;
+            case KEY_COL_LINE_WIDTH -> 60;
+            case KEY_COL_PARENT_WIDTH -> MATCH_PARENT_COLUMN_WIDTH;
+            case KEY_COL_PARENT_TYPE_WIDTH -> MATCH_PARENT_TYPE_COLUMN_WIDTH;
+            case KEY_COL_SYNTAX_WIDTH -> MATCH_SYNTAX_COLUMN_WIDTH;
+            case KEY_COL_SUITABLE_WIDTH -> MATCH_SUITABLE_COLUMN_WIDTH;
+            default -> MATCH_TEXT_COLUMN_WIDTH;
+        };
+    }
+
+    private static void configureMatchColumnInteraction(FormTableInteraction interaction)
+    {
+        interaction.setOwnerDrawColumns(cachedMatchTextColumn, cachedMatchSyntaxColumn);
+        String sign = Global.pluginSignForTooltip();
+        interaction.setHeaderTooltipExtra(cachedMatchPathColumn, "Полное имя объекта метаданных" + sign); //$NON-NLS-1$
+        interaction.setHeaderTooltipExtra(cachedMatchPropertyColumn,
+            "Для вхождений в BSL-модуле — модуль и метод" + sign); //$NON-NLS-1$
+        interaction.setHeaderTooltipExtra(cachedMatchLineColumn, "Номер строки вхождения" + sign); //$NON-NLS-1$
+        interaction.setHeaderTooltipExtra(cachedMatchTextColumn, "Строка исходного текста с вхождением" + sign); //$NON-NLS-1$
+        BslOccurrenceContextResolver.applyColumnHeaderTooltips(interaction, cachedMatchParentColumn,
+            cachedMatchParentTypeColumn, cachedMatchSyntaxColumn);
+        interaction.setHeaderTooltipExtra(cachedMatchSuitableColumn,
+            BslOccurrenceContextResolver.TIP_SUITABLE + sign);
+    }
+
+    private static void ensureMatchColumns(TableViewer viewer, boolean references, boolean suitable,
+        boolean path, List<MatchRow> rows)
+    {
+        boolean text = rows.isEmpty() || rows.stream().anyMatch(row -> row.text != null && !row.text.isBlank()
+            || row.tableItem != null && isDeferredCalculationItem(row.tableItem));
+        int mask = 2 | 4 | 32 | (path ? 1 : 0) | (references ? 8 | 16 : 0)
+            | (references && suitable ? 64 : 0) | (text ? 128 : 0);
+        if (mask == matchColumnMask || changingMatchColumns || cachedMatchTableInteraction == null)
+            return;
+        FormTableInteraction interaction = cachedMatchTableInteraction;
+        Table table = viewer.getTable();
+        IStructuredSelection selection = viewer.getStructuredSelection();
+        int active = interaction.activeColumn();
+        String activeKey = active >= 0 && active < table.getColumnCount()
+            ? matchColumnKey(table.getColumn(active)) : null;
+        int sort = interaction.headerSortColumnIndex();
+        String sortKey = sort >= 0 ? matchColumnKey(table.getColumn(sort)) : null;
+        boolean ascending = interaction.isHeaderSortAscending();
+        Map<String, String> filters = new LinkedHashMap<>();
+        for (int i = 0; i < table.getColumnCount(); i++)
+            if (interaction.isColumnFiltered(i))
+                filters.put(matchColumnKey(table.getColumn(i)), interaction.columnFilterValue(i));
+        saveMatchColumnState();
+        changingMatchColumns = true;
+        table.setRedraw(false);
+        try
+        {
+            interaction.clearAllFilters();
+            for (TableColumn column : table.getColumns())
+                column.dispose();
+            createMatchColumns(viewer, mask);
+            configureMatchColumnInteraction(interaction);
+            interaction.notifyColumnsChanged();
+            FormTableColumnState.loadOrder(dialogSettings(), matchOrderKey(), table);
+            interaction.setHeaderSortSettings(matchSortSettings());
+            int newSort = matchColumnIndex(sortKey);
+            if (newSort >= 0)
+                interaction.restoreHeaderSort(newSort, ascending);
+            for (Map.Entry<String, String> filter : filters.entrySet())
+            {
+                int column = matchColumnIndex(filter.getKey());
+                if (column >= 0)
+                    interaction.applyColumnFilterValue(column, filter.getValue());
+            }
+            viewer.refresh();
+            viewer.setSelection(selection, true);
+            interaction.restoreActiveColumn(matchColumnIndex(activeKey));
+        }
+        finally
+        {
+            table.setRedraw(true);
+            changingMatchColumns = false;
+        }
+    }
+
+    private static void createMatchColumns(TableViewer matchViewer, int mask)
+    {
+        matchColumnMask = mask;
+        IDialogSettings matchSettings = dialogSettings();
+        TableViewerColumn pathCol = null;
+        if ((mask & 1) != 0)
+        {
+            pathCol = new TableViewerColumn(matchViewer, SWT.LEFT);
+            pathCol.getColumn().setText("Путь"); //$NON-NLS-1$
+            pathCol.getColumn().setWidth(
+                FormTableColumnState.readWidth(matchSettings, KEY_COL_PATH_WIDTH, MATCH_PATH_COLUMN_WIDTH, 1));
+            cachedMatchPathColumn = pathCol.getColumn();
+            pathCol.setLabelProvider(new ColumnLabelProvider()
+            {
+                @Override
+                public String getText(Object element)
+                {
+                    if (element instanceof MatchRow row)
+                        return row.path != null ? row.path : ""; //$NON-NLS-1$
+                    return ""; //$NON-NLS-1$
+                }
+            });
+        }
+        TableViewerColumn propertyCol = null;
+        if ((mask & 2) != 0)
+        {
+            propertyCol = new TableViewerColumn(matchViewer, SWT.LEFT);
+            propertyCol.getColumn().setText("Свойство"); //$NON-NLS-1$
+            propertyCol.getColumn().setWidth(
+                FormTableColumnState.readWidth(matchSettings, KEY_COL_PROPERTY_WIDTH, 140, 1));
+            propertyCol.setLabelProvider(new ColumnLabelProvider()
+            {
+                @Override
+                public String getText(Object element)
+                {
+                    return element instanceof MatchRow row ? matchPropertyDisplayText(row) : ""; //$NON-NLS-1$
+                }
+            });
+        }
+        TableViewerColumn lineCol = null;
+        if ((mask & 4) != 0)
+        {
+            lineCol = new TableViewerColumn(matchViewer, SWT.RIGHT);
+            lineCol.getColumn().setText("Строка"); //$NON-NLS-1$
+            lineCol.getColumn().setWidth(
+                FormTableColumnState.readWidth(matchSettings, KEY_COL_LINE_WIDTH, 60, 1));
+            lineCol.setLabelProvider(new ColumnLabelProvider()
+            {
+                @Override
+                public String getText(Object element)
+                {
+                    if (element instanceof MatchRow row)
+                        return row.lineNumber > 0 ? String.valueOf(row.lineNumber) : ""; //$NON-NLS-1$
+                    return ""; //$NON-NLS-1$
+                }
+            });
+        }
+        TableViewerColumn parentCol = null;
+        if ((mask & 8) != 0)
+        {
+            parentCol = new TableViewerColumn(matchViewer, SWT.LEFT);
+            parentCol.getColumn().setText(BslOccurrenceContextResolver.COL_PARENT);
+            parentCol.getColumn().setWidth(
+                FormTableColumnState.readWidth(matchSettings, KEY_COL_PARENT_WIDTH, MATCH_PARENT_COLUMN_WIDTH, 1));
+            parentCol.setLabelProvider(new ColumnLabelProvider()
+            {
+                @Override
+                public String getText(Object element)
+                {
+                    return element instanceof MatchRow row && row.parent != null ? row.parent : ""; //$NON-NLS-1$
+                }
+            });
+        }
+        TableViewerColumn parentTypeCol = null;
+        if ((mask & 16) != 0)
+        {
+            parentTypeCol = new TableViewerColumn(matchViewer, SWT.LEFT);
+            parentTypeCol.getColumn().setText(MATCH_PARENT_TYPE_TITLE);
+            parentTypeCol.getColumn().setWidth(
+                FormTableColumnState.readWidth(matchSettings, KEY_COL_PARENT_TYPE_WIDTH,
+                    MATCH_PARENT_TYPE_COLUMN_WIDTH, 1));
+            parentTypeCol.setLabelProvider(new ColumnLabelProvider()
+            {
+                @Override
+                public String getText(Object element)
+                {
+                    if (!(element instanceof MatchRow row) || !row.needsContext())
+                        return ""; //$NON-NLS-1$
+                    return row.parentType != null ? row.parentType : MATCH_UNKNOWN_TYPE;
+                }
+
+                @Override
+                public Color getForeground(Object element)
+                {
+                    return matchSuitableForeground(element, matchViewer);
+                }
+            });
+        }
+        TableViewerColumn syntaxCol = null;
+        if ((mask & 32) != 0)
+        {
+            syntaxCol = BslOccurrenceContextResolver.addCategoryColumn(matchViewer, null,
+                element -> element instanceof MatchRow row ? row.syntaxKind : ""); //$NON-NLS-1$
+        }
+        TableViewerColumn suitableCol = null;
+        if ((mask & 64) != 0)
+        {
+            suitableCol = new TableViewerColumn(matchViewer, SWT.LEFT);
+            suitableCol.getColumn().setText(BslOccurrenceContextResolver.COL_SUITABLE);
+            suitableCol.getColumn().setWidth(
+                FormTableColumnState.readWidth(matchSettings, KEY_COL_SUITABLE_WIDTH, MATCH_SUITABLE_COLUMN_WIDTH, 1));
+            suitableCol.setLabelProvider(new ColumnLabelProvider()
+            {
+                @Override
+                public String getText(Object element)
+                {
+                    // «Тип родителя» ещё не вычислен — как и он сам, показываем «?» (кроме литералов/
+                    // комментариев, где suitable уже проставлен быстрым проходом).
+                    return element instanceof MatchRow row ? matchSuitableCellValue(row) : ""; //$NON-NLS-1$
+                }
+
+                @Override
+                public Color getForeground(Object element)
+                {
+                    return matchSuitableForeground(element, matchViewer);
+                }
+            });
+        }
+        TableViewerColumn textCol = null;
+        if ((mask & 128) != 0)
+        {
+            textCol = new TableViewerColumn(matchViewer, SWT.LEFT);
+            textCol.getColumn().setText("Текст"); //$NON-NLS-1$
+            textCol.getColumn().setWidth(
+                FormTableColumnState.readWidth(matchSettings, KEY_COL_TEXT_WIDTH, MATCH_TEXT_COLUMN_WIDTH, 1));
+            textCol.setLabelProvider(new SelectionAwareStyledCellLabelProvider(new IStyledLabelProvider()
+            {
+                @Override
+                public StyledString getStyledText(Object element)
+                {
+                    if (!(element instanceof MatchRow row) || row.styledText == null)
+                        return new StyledString(""); //$NON-NLS-1$
+                    // Синтетические полнотекстовые строки: подсветку кладём здесь, в UI-потоке, ТЕМИ ЖЕ
+                    // стилями, что и родные строки (extractMatchStyledText) — иначе цвет вхождения разный.
+                    if (row.tableItem == null && row.directHlStart >= 0 && row.directHlLen > 0)
+                    {
+                        String text = row.styledText.getString();
+                        int relOff = row.directHlStart;
+                        int relEnd = relOff + row.directHlLen;
+                        if (relEnd <= text.length())
+                        {
+                            Control ctx = cachedMatchTableViewer != null ? cachedMatchTableViewer.getTable() : null;
+                            StyledString s = new StyledString();
+                            if (relOff > 0)
+                                s.append(text.substring(0, relOff), SmartMatchHighlight.plainStyler());
+                            s.append(text.substring(relOff, relEnd), SmartMatchHighlight.textOnlyStyler(ctx));
+                            if (relEnd < text.length())
+                                s.append(text.substring(relEnd), SmartMatchHighlight.plainStyler());
+                            return s;
+                        }
+                    }
+                    return row.styledText;
+                }
+
+                @Override
+                public Image getImage(Object element) { return null; }
+
+                @Override
+                public void addListener(ILabelProviderListener listener) {}
+
+                @Override
+                public void dispose() {}
+
+                @Override
+                public boolean isLabelProperty(Object element, String property) { return false; }
+
+                @Override
+                public void removeListener(ILabelProviderListener listener) {}
+            }));
+        }
+        cachedMatchPathColumn = pathCol != null ? pathCol.getColumn() : null;
+        cachedMatchPropertyColumn = propertyCol != null ? propertyCol.getColumn() : null;
+        cachedMatchLineColumn = lineCol != null ? lineCol.getColumn() : null;
+        cachedMatchParentColumn = parentCol != null ? parentCol.getColumn() : null;
+        cachedMatchParentTypeColumn = parentTypeCol != null ? parentTypeCol.getColumn() : null;
+        cachedMatchSyntaxColumn = syntaxCol != null ? syntaxCol.getColumn() : null;
+        cachedMatchSuitableColumn = suitableCol != null ? suitableCol.getColumn() : null;
+        cachedMatchTextColumn = textCol != null ? textCol.getColumn() : null;
+    }
 
     private static void restoreResultColumns(Object input)
     {
@@ -326,26 +663,23 @@ public final class ConfigSearchResultsHook implements IStartup
         TableViewer viewer = cachedMatchTableViewer;
         if (input == null || interaction == null || viewer == null || viewer.getTable().isDisposed())
             return;
-        FormTableInteraction.ColumnState state = RESULT_COLUMN_STATES.get(resultColumnType(input));
+        FormTableInteraction.ColumnState state = RESULT_COLUMN_STATES.get(resultColumnType(input) + ":" + matchColumnMask); //$NON-NLS-1$
         if (state != null)
             interaction.restoreColumnState(state, false);
         else
         {
             IDialogSettings settings = dialogSettings();
             Table table = viewer.getTable();
-            FormTableColumnState.loadOrder(settings, KEY_COL_ORDER, table);
-            String[] keys = { KEY_COL_PATH_WIDTH, KEY_COL_PROPERTY_WIDTH, KEY_COL_LINE_WIDTH,
-                KEY_COL_PARENT_WIDTH, KEY_COL_PARENT_TYPE_WIDTH, KEY_COL_SYNTAX_WIDTH,
-                KEY_COL_SUITABLE_WIDTH, KEY_COL_TEXT_WIDTH };
-            int[] defaults = { MATCH_PATH_COLUMN_WIDTH, 140, 60, MATCH_PARENT_COLUMN_WIDTH,
-                MATCH_PARENT_TYPE_COLUMN_WIDTH, MATCH_SYNTAX_COLUMN_WIDTH,
-                MATCH_SUITABLE_COLUMN_WIDTH, MATCH_TEXT_COLUMN_WIDTH };
+            FormTableColumnState.loadOrder(settings, matchOrderKey(), table);
+            String[] keys = matchWidthKeys();
             int[] widths = new int[keys.length];
             for (int i = 0; i < keys.length; i++)
-                widths[i] = FormTableColumnState.readWidth(settings, keys[i], defaults[i], 1);
+                widths[i] = keys[i].equals(KEY_COL_SYNTAX_WIDTH) ? MATCH_SYNTAX_COLUMN_WIDTH
+                    : FormTableColumnState.readWidth(settings, keys[i], defaultMatchWidth(keys[i]), 1);
             interaction.restoreColumnWidths(widths,
                 !FormTableColumnState.hasSavedColumnWidths(settings, KEY_COL_FILL_MODE, keys));
         }
+        interaction.setHeaderSortSettings(matchSortSettings());
         resultColumnsPending = false;
     }
 
@@ -353,7 +687,7 @@ public final class ConfigSearchResultsHook implements IStartup
     {
         final List<List<String>> treePaths;
         final List<MatchRow> rows;
-        final int activeColumn;
+        final String activeColumnKey;
 
         SearchResultState(TreeViewer tree, TableViewer table, FormTableInteraction interaction)
         {
@@ -369,7 +703,9 @@ public final class ConfigSearchResultsHook implements IStartup
             for (Object row : table.getStructuredSelection().toList())
                 if (row instanceof MatchRow match)
                     rows.add(match);
-            activeColumn = interaction.activeColumn();
+            int active = interaction.activeColumn();
+            activeColumnKey = active >= 0 && active < table.getTable().getColumnCount()
+                ? matchColumnKey(table.getTable().getColumn(active)) : null;
         }
     }
 
@@ -387,7 +723,7 @@ public final class ConfigSearchResultsHook implements IStartup
         if (input == null || table == null || table.getTable().isDisposed() || interaction == null)
             return;
         RESULT_STATES.put(input, new SearchResultState(tree, table, interaction));
-        RESULT_COLUMN_STATES.put(resultColumnType(input), interaction.captureColumnState());
+        RESULT_COLUMN_STATES.put(resultColumnType(input) + ":" + matchColumnMask, interaction.captureColumnState());
         saveMatchColumnState();
     }
 
@@ -457,7 +793,7 @@ public final class ConfigSearchResultsHook implements IStartup
                     }
                 }
         viewer.setSelection(new StructuredSelection(selected), true);
-        cachedMatchTableInteraction.restoreActiveColumn(state.activeColumn);
+        cachedMatchTableInteraction.restoreActiveColumn(matchColumnIndex(state.activeColumnKey));
         if (selected.size() < state.rows.size() && attempt < 60)
         {
             List<Object> context = new ArrayList<>(tree.getStructuredSelection().toList());
@@ -534,7 +870,7 @@ public final class ConfigSearchResultsHook implements IStartup
     private static final int MATCH_TEXT_COLUMN_WIDTH = 280;
     private static final int MATCH_PARENT_COLUMN_WIDTH = 160;
     private static final int MATCH_PARENT_TYPE_COLUMN_WIDTH = 200;
-    private static final int MATCH_SYNTAX_COLUMN_WIDTH = 150;
+    private static final int MATCH_SYNTAX_COLUMN_WIDTH = ColumnWidthFit.iconColumnWidth();
     private static final int MATCH_SUITABLE_COLUMN_WIDTH = 80;
 
     // Отложенное довычисление «Текст» для BslResourceMatchTreeTableItem (IMatchItemDeferredCalculation) —
@@ -631,6 +967,8 @@ public final class ConfigSearchResultsHook implements IStartup
          */
         volatile int directOffset = -1;
         volatile int directLength;
+        /** Поиск по конфигурации: нужна категория, без дорогого вычисления типа родителя. */
+        boolean categoryOnly;
         /** Диапазон подсветки полнотекстового вхождения внутри {@code styledText}. */
         volatile int directHlStart = -1;
         volatile int directHlLen;
@@ -830,167 +1168,7 @@ public final class ConfigSearchResultsHook implements IStartup
         matchViewer.setContentProvider(org.eclipse.jface.viewers.ArrayContentProvider.getInstance());
 
         IDialogSettings matchSettings = dialogSettings();
-        TableViewerColumn pathCol = new TableViewerColumn(matchViewer, SWT.LEFT);
-        pathCol.getColumn().setText("Путь"); //$NON-NLS-1$
-        pathCol.getColumn().setWidth(
-            FormTableColumnState.readWidth(matchSettings, KEY_COL_PATH_WIDTH, MATCH_PATH_COLUMN_WIDTH, 1));
-        cachedMatchPathColumn = pathCol.getColumn();
-        pathCol.setLabelProvider(new ColumnLabelProvider()
-        {
-            @Override
-            public String getText(Object element)
-            {
-                if (element instanceof MatchRow row)
-                    return row.path != null ? row.path : ""; //$NON-NLS-1$
-                return ""; //$NON-NLS-1$
-            }
-        });
-
-        TableViewerColumn propertyCol = new TableViewerColumn(matchViewer, SWT.LEFT);
-        propertyCol.getColumn().setText("Свойство"); //$NON-NLS-1$
-        propertyCol.getColumn().setWidth(
-            FormTableColumnState.readWidth(matchSettings, KEY_COL_PROPERTY_WIDTH, 140, 1));
-        propertyCol.setLabelProvider(new ColumnLabelProvider()
-        {
-            @Override
-            public String getText(Object element)
-            {
-                return element instanceof MatchRow row ? matchPropertyDisplayText(row) : ""; //$NON-NLS-1$
-            }
-        });
-
-        TableViewerColumn lineCol = new TableViewerColumn(matchViewer, SWT.RIGHT);
-        lineCol.getColumn().setText("Строка"); //$NON-NLS-1$
-        lineCol.getColumn().setWidth(
-            FormTableColumnState.readWidth(matchSettings, KEY_COL_LINE_WIDTH, 60, 1));
-        lineCol.setLabelProvider(new ColumnLabelProvider()
-        {
-            @Override
-            public String getText(Object element)
-            {
-                if (element instanceof MatchRow row)
-                    return row.lineNumber > 0 ? String.valueOf(row.lineNumber) : ""; //$NON-NLS-1$
-                return ""; //$NON-NLS-1$
-            }
-        });
-
-        TableViewerColumn parentCol = new TableViewerColumn(matchViewer, SWT.LEFT);
-        parentCol.getColumn().setText(BslOccurrenceContextResolver.COL_PARENT);
-        parentCol.getColumn().setWidth(
-            FormTableColumnState.readWidth(matchSettings, KEY_COL_PARENT_WIDTH, MATCH_PARENT_COLUMN_WIDTH, 1));
-        parentCol.setLabelProvider(new ColumnLabelProvider()
-        {
-            @Override
-            public String getText(Object element)
-            {
-                return element instanceof MatchRow row && row.parent != null ? row.parent : ""; //$NON-NLS-1$
-            }
-        });
-
-        TableViewerColumn parentTypeCol = new TableViewerColumn(matchViewer, SWT.LEFT);
-        parentTypeCol.getColumn().setText(MATCH_PARENT_TYPE_TITLE);
-        parentTypeCol.getColumn().setWidth(
-            FormTableColumnState.readWidth(matchSettings, KEY_COL_PARENT_TYPE_WIDTH,
-                MATCH_PARENT_TYPE_COLUMN_WIDTH, 1));
-        parentTypeCol.setLabelProvider(new ColumnLabelProvider()
-        {
-            @Override
-            public String getText(Object element)
-            {
-                if (!(element instanceof MatchRow row) || !row.needsContext())
-                    return ""; //$NON-NLS-1$
-                return row.parentType != null ? row.parentType : MATCH_UNKNOWN_TYPE;
-            }
-
-            @Override
-            public Color getForeground(Object element)
-            {
-                return matchSuitableForeground(element, matchViewer);
-            }
-        });
-
-        TableViewerColumn syntaxCol = new TableViewerColumn(matchViewer, SWT.LEFT);
-        syntaxCol.getColumn().setText(BslOccurrenceContextResolver.COL_SYNTAX_KIND);
-        syntaxCol.getColumn().setWidth(
-            FormTableColumnState.readWidth(matchSettings, KEY_COL_SYNTAX_WIDTH, MATCH_SYNTAX_COLUMN_WIDTH, 1));
-        syntaxCol.setLabelProvider(new ColumnLabelProvider()
-        {
-            @Override
-            public String getText(Object element)
-            {
-                return element instanceof MatchRow row && row.syntaxKind != null ? row.syntaxKind : ""; //$NON-NLS-1$
-            }
-        });
-
-        TableViewerColumn suitableCol = new TableViewerColumn(matchViewer, SWT.LEFT);
-        suitableCol.getColumn().setText(BslOccurrenceContextResolver.COL_SUITABLE);
-        suitableCol.getColumn().setWidth(
-            FormTableColumnState.readWidth(matchSettings, KEY_COL_SUITABLE_WIDTH, MATCH_SUITABLE_COLUMN_WIDTH, 1));
-        suitableCol.setLabelProvider(new ColumnLabelProvider()
-        {
-            @Override
-            public String getText(Object element)
-            {
-                // «Тип родителя» ещё не вычислен — как и он сам, показываем «?» (кроме литералов/
-                // комментариев, где suitable уже проставлен быстрым проходом).
-                return element instanceof MatchRow row ? matchSuitableCellValue(row) : ""; //$NON-NLS-1$
-            }
-
-            @Override
-            public Color getForeground(Object element)
-            {
-                return matchSuitableForeground(element, matchViewer);
-            }
-        });
-
-        TableViewerColumn textCol = new TableViewerColumn(matchViewer, SWT.LEFT);
-        textCol.getColumn().setText("Текст"); //$NON-NLS-1$
-        textCol.getColumn().setWidth(
-            FormTableColumnState.readWidth(matchSettings, KEY_COL_TEXT_WIDTH, MATCH_TEXT_COLUMN_WIDTH, 1));
-        textCol.setLabelProvider(new SelectionAwareStyledCellLabelProvider(new IStyledLabelProvider()
-        {
-            @Override
-            public StyledString getStyledText(Object element)
-            {
-                if (!(element instanceof MatchRow row) || row.styledText == null)
-                    return new StyledString(""); //$NON-NLS-1$
-                // Синтетические полнотекстовые строки: подсветку кладём здесь, в UI-потоке, ТЕМИ ЖЕ
-                // стилями, что и родные строки (extractMatchStyledText) — иначе цвет вхождения разный.
-                if (row.directHlStart >= 0 && row.directHlLen > 0)
-                {
-                    String text = row.styledText.getString();
-                    int relOff = row.directHlStart;
-                    int relEnd = relOff + row.directHlLen;
-                    if (relEnd <= text.length())
-                    {
-                        Control ctx = cachedMatchTableViewer != null ? cachedMatchTableViewer.getTable() : null;
-                        StyledString s = new StyledString();
-                        if (relOff > 0)
-                            s.append(text.substring(0, relOff), SmartMatchHighlight.plainStyler());
-                        s.append(text.substring(relOff, relEnd), SmartMatchHighlight.textOnlyStyler(ctx));
-                        if (relEnd < text.length())
-                            s.append(text.substring(relEnd), SmartMatchHighlight.plainStyler());
-                        return s;
-                    }
-                }
-                return row.styledText;
-            }
-
-            @Override
-            public Image getImage(Object element) { return null; }
-
-            @Override
-            public void addListener(ILabelProviderListener listener) {}
-
-            @Override
-            public void dispose() {}
-
-            @Override
-            public boolean isLabelProperty(Object element, String property) { return false; }
-
-            @Override
-            public void removeListener(ILabelProviderListener listener) {}
-        }));
+        createMatchColumns(matchViewer, 255);
 
         matchViewer.setComparator(new org.eclipse.jface.viewers.ViewerComparator()
         {
@@ -1022,31 +1200,29 @@ public final class ConfigSearchResultsHook implements IStartup
             else
                 log("installMatchTableSplitPane: treePart недоступен, штатная таблица не скрыта"); //$NON-NLS-1$
         }
-        FormTableColumnState.loadOrder(matchSettings, KEY_COL_ORDER, matchTable);
+        FormTableColumnState.loadOrder(matchSettings, matchOrderKey(), matchTable);
         FormTableInteraction interaction = new FormTableInteraction(matchTable, matchViewer);
-        interaction.setOwnerDrawColumns(textCol.getColumn());
-        // Колонки «Путь»/«Текст» динамически прячутся (см. ниже, applyResults) — прячем их через
-        // FormTableInteraction.setColumnHidden, тогда авто-заполнение их не растягивает обратно.
+        configureMatchColumnInteraction(interaction);
         // false — таблица всегда открывается в режиме заполнения по ширине: сохранённые ширины
         // применены выше как стартовые пропорции, дальше колонки авто-пересчитываются под ширину
         // таблицы (в т.ч. при перетаскивании разделителя SashForm). Ручной ресайз колонки в сессии
         // при этом работает как обычно.
         interaction.install(false);
-        interaction.enableHeaderSort(matchSettings);
+        interaction.enableHeaderSort(matchSortSettings());
         // Подсказки заголовков — через FormTableInteraction: если заголовок обрезан, первой строкой
         // подсказки идёт полный текст заголовка, затем описание (setToolTipText напрямую это правило
         // нарушает).
         String sign = Global.pluginSignForTooltip();
-        interaction.setHeaderTooltipExtra(pathCol.getColumn(), "Полное имя объекта метаданных" + sign); //$NON-NLS-1$
-        interaction.setHeaderTooltipExtra(propertyCol.getColumn(),
+        interaction.setHeaderTooltipExtra(cachedMatchPathColumn, "Полное имя объекта метаданных" + sign); //$NON-NLS-1$
+        interaction.setHeaderTooltipExtra(cachedMatchPropertyColumn,
             "Для вхождений в BSL-модуле — модуль и метод" + sign); //$NON-NLS-1$
-        interaction.setHeaderTooltipExtra(lineCol.getColumn(), "Номер строки вхождения" + sign); //$NON-NLS-1$
-        interaction.setHeaderTooltipExtra(textCol.getColumn(), "Строка исходного текста с вхождением" + sign); //$NON-NLS-1$
+        interaction.setHeaderTooltipExtra(cachedMatchLineColumn, "Номер строки вхождения" + sign); //$NON-NLS-1$
+        interaction.setHeaderTooltipExtra(cachedMatchTextColumn, "Строка исходного текста с вхождением" + sign); //$NON-NLS-1$
         // Колонки «Родитель»/«Тип родителя»/«Категория» — общие с табличным режимом
         // рефакторинга, заголовки и подсказки в едином источнике.
-        BslOccurrenceContextResolver.applyColumnHeaderTooltips(interaction, parentCol.getColumn(),
-            parentTypeCol.getColumn(), syntaxCol.getColumn());
-        interaction.setHeaderTooltipExtra(suitableCol.getColumn(),
+        BslOccurrenceContextResolver.applyColumnHeaderTooltips(interaction, cachedMatchParentColumn,
+            cachedMatchParentTypeColumn, cachedMatchSyntaxColumn);
+        interaction.setHeaderTooltipExtra(cachedMatchSuitableColumn,
             BslOccurrenceContextResolver.TIP_SUITABLE + sign);
         // Второстепенные данные — при закрытии панели; при повторном поиске — явно в
         // {@link #saveMatchColumnStateOnUiThread} (Dispose не срабатывает, панель остаётся открытой).
@@ -1066,13 +1242,6 @@ public final class ConfigSearchResultsHook implements IStartup
             });
 
         cachedMatchTableViewer = matchViewer;
-        cachedMatchTextColumn = textCol.getColumn();
-        cachedMatchPropertyColumn = propertyCol.getColumn();
-        cachedMatchLineColumn = lineCol.getColumn();
-        cachedMatchParentColumn = parentCol.getColumn();
-        cachedMatchParentTypeColumn = parentTypeCol.getColumn();
-        cachedMatchSyntaxColumn = syntaxCol.getColumn();
-        cachedMatchSuitableColumn = suitableCol.getColumn();
         cachedMatchTableInteraction = interaction;
         pageContainer.setData(MATCH_PANE_HOOKED_KEY, Boolean.TRUE);
         matchTable.addDisposeListener(e -> {
@@ -1137,6 +1306,7 @@ public final class ConfigSearchResultsHook implements IStartup
             collectTableItemsRecursively(node, tableItems);
         lastSyncedTableItems = tableItems;
 
+        boolean referenceSearch = isReferenceSearchResult(treeViewer);
         List<MatchRow> rows = new ArrayList<>();
         for (Object tableItem : tableItems)
         {
@@ -1183,12 +1353,11 @@ public final class ConfigSearchResultsHook implements IStartup
             MatchRow row = new MatchRow(path, extractPropertyText(tableItem), lineNumber,
                 extractMatchStyledText(tableItem), file, tableItem, segment, sourceUri, sourceReference,
                 sourceIndexInList);
-            if (match instanceof TextSearchFileMatch fm && isReferenceSearchResult(treeViewer))
+            if (match instanceof TextSearchFileMatch fm)
             {
                 row.directOffset = fm.getFileOffset();
                 row.directLength = fm.getTextLength();
-                row.directHlStart = fm.getTextOffset();
-                row.directHlLen = fm.getTextLength();
+                row.categoryOnly = !referenceSearch;
             }
             // Значение из кэша резолвера — сразу, без чтения файла: при потоковом обновлении списка
             // во время поиска строки пересоздаются постоянно, без этого ячейка мигала бы «пусто → имя».
@@ -1200,6 +1369,8 @@ public final class ConfigSearchResultsHook implements IStartup
             }
             rows.add(row);
         }
+        ensureMatchColumns(matchViewer, referenceSearch, cachedSought != null,
+            !isTerminalTreeSelection(selectedNodes), rows);
         matchViewer.setInput(rows);
         scheduleMatchMethodResolution(matchViewer, rows);
         scheduleMatchContextResolution(matchViewer, rows);
@@ -1207,48 +1378,6 @@ public final class ConfigSearchResultsHook implements IStartup
         // их полнотекстовым проходом самого рефакторинга (мастер переименования делает так же).
         applyFullTextAugmentation(treeViewer, matchViewer, rows);
 
-        // При терминальном узле путь у всех строк одинаковый (сам узел и есть этот путь) — как и
-        // у штатной таблицы (см. hidePathColumn/showPathColumn), колонку тогда прячем.
-        if (cachedMatchPathColumn != null && !cachedMatchPathColumn.isDisposed()
-            && cachedMatchTableInteraction != null)
-        {
-            // Живая ширина важнее settings: иначе каждый refresh сбрасывал бы ручную подгонку.
-            int pathWhenVisible = cachedMatchPathColumn.getWidth();
-            if (pathWhenVisible <= 0)
-                pathWhenVisible = FormTableColumnState.readWidth(dialogSettings(), KEY_COL_PATH_WIDTH,
-                    MATCH_PATH_COLUMN_WIDTH, 1);
-            cachedMatchTableInteraction.setColumnHidden(cachedMatchPathColumn,
-                isTerminalTreeSelection(selectedNodes), pathWhenVisible);
-        }
-
-        // «Найти ссылки на объект» (BmReferenceMatch) — структурные вхождения без текста/смещения,
-        // колонка «Текст» у них всегда пустая (в отличие от текстового поиска, TextSearchModelMatch/
-        // TextSearchFileMatch) — прячем её для ТАКОГО набора результатов, тем же приёмом, что и «Путь».
-        if (cachedMatchTextColumn != null && !cachedMatchTextColumn.isDisposed()
-            && cachedMatchTableInteraction != null)
-        {
-            boolean anyText = rows.stream().anyMatch(row -> row.text != null && !row.text.isBlank());
-            int textWhenVisible = cachedMatchTextColumn.getWidth();
-            if (textWhenVisible <= 0)
-                textWhenVisible = FormTableColumnState.readWidth(dialogSettings(), KEY_COL_TEXT_WIDTH,
-                    MATCH_TEXT_COLUMN_WIDTH, 1);
-            cachedMatchTableInteraction.setColumnHidden(cachedMatchTextColumn, !rows.isEmpty() && !anyText,
-                textWhenVisible);
-        }
-
-        // Колонки «Родитель»/«Тип родителя»/«Категория» описывают контекст вхождения-ССЫЛКИ и
-        // наполняются только для BslReferenceMatch. В текстовом поиске по конфигурации они всегда
-        // пусты — показываем их только в режиме поиска ссылок, тем же приёмом, что «Путь»/«Текст».
-        boolean referenceSearch = isReferenceSearchResult(treeViewer);
-        setMatchColumnVisible(cachedMatchParentColumn, referenceSearch, KEY_COL_PARENT_WIDTH,
-            MATCH_PARENT_COLUMN_WIDTH);
-        setMatchColumnVisible(cachedMatchParentTypeColumn, referenceSearch, KEY_COL_PARENT_TYPE_WIDTH,
-            MATCH_PARENT_TYPE_COLUMN_WIDTH);
-        setMatchColumnVisible(cachedMatchSyntaxColumn, referenceSearch, KEY_COL_SYNTAX_WIDTH,
-            MATCH_SYNTAX_COLUMN_WIDTH);
-        // «Подходит» — только когда искомое разобрано в полное имя объекта метаданных.
-        setMatchColumnVisible(cachedMatchSuitableColumn, referenceSearch && cachedSought != null,
-            KEY_COL_SUITABLE_WIDTH, MATCH_SUITABLE_COLUMN_WIDTH);
         updateMatchSuitableOnly();
 
         scheduleVisibleDeferredCalculations(matchViewer);
@@ -1275,25 +1404,8 @@ public final class ConfigSearchResultsHook implements IStartup
     }
 
     /**
-     * Показать/скрыть колонку таблицы вхождений через {@link FormTableInteraction#setColumnHidden}
-     * (ширина 0, авто-заполнение её не растягивает). Живая ширина важнее сохранённой — иначе каждый
-     * refresh сбрасывал бы ручную подгонку пользователя.
-     */
-    private static void setMatchColumnVisible(TableColumn column, boolean visible, String widthKey,
-        int defaultWidth)
-    {
-        if (column == null || column.isDisposed() || cachedMatchTableInteraction == null)
-            return;
-        int widthWhenVisible = column.getWidth();
-        if (widthWhenVisible <= 0)
-            widthWhenVisible = FormTableColumnState.readWidth(dialogSettings(), widthKey, defaultWidth, 1);
-        cachedMatchTableInteraction.setColumnHidden(column, !visible, widthWhenVisible);
-    }
-
-    /**
      * Сохранить порядок/ширины колонок таблицы вхождений и флаг fill-mode.
-     * Вызывать с UI-потока. Путь/Текст могут быть временно скрыты (ширина 0) — 0 не пишем,
-     * чтобы не затереть последнюю видимую ширину пользователя.
+     * Вызывать с UI-потока. Отсутствующие колонки не перезаписывают сохранённые ширины.
      */
     private static void saveMatchColumnState()
     {
@@ -1313,7 +1425,7 @@ public final class ConfigSearchResultsHook implements IStartup
         int syntaxWidth = columnWidthOrZero(cachedMatchSyntaxColumn);
         int suitableWidth = columnWidthOrZero(cachedMatchSuitableColumn);
         int textWidth = columnWidthOrZero(cachedMatchTextColumn);
-        FormTableColumnState.saveOrderAndWidths(dialogSettings(), KEY_COL_ORDER,
+        FormTableColumnState.saveOrderAndWidths(dialogSettings(), matchOrderKey(),
             KEY_COL_FILL_MODE, fillMode,
             new String[] { KEY_COL_PATH_WIDTH, KEY_COL_PROPERTY_WIDTH, KEY_COL_LINE_WIDTH,
                 KEY_COL_PARENT_WIDTH, KEY_COL_PARENT_TYPE_WIDTH, KEY_COL_SYNTAX_WIDTH, KEY_COL_SUITABLE_WIDTH,
@@ -2494,8 +2606,15 @@ public final class ConfigSearchResultsHook implements IStartup
         int length = region[1];
         row.contextOffset = offset;
         row.contextLength = length;
-        row.parent = BslOccurrenceContextResolver.parentText(content, offset);
         row.syntaxKind = BslOccurrenceContextResolver.syntaxKind(content, offset, length);
+        if (row.categoryOnly)
+        {
+            row.parent = ""; //$NON-NLS-1$
+            row.parentType = ""; //$NON-NLS-1$
+            row.suitable = ""; //$NON-NLS-1$
+            return;
+        }
+        row.parent = BslOccurrenceContextResolver.parentText(content, offset);
         // Комментарии и строковые литералы модели не принадлежат — типа родителя у них нет.
         if (BslOccurrenceContextResolver.KIND_COMMENT.equals(row.syntaxKind)
             || BslOccurrenceContextResolver.KIND_LITERAL.equals(row.syntaxKind))
@@ -5785,7 +5904,7 @@ public final class ConfigSearchResultsHook implements IStartup
         SAVED_TABLE_SELECTION_BY_VIEWER.clear();
         log("onSearchStarting: watch first root, gen=" + searchGeneration); //$NON-NLS-1$
         // Панель не закрывается — Dispose не вызовется; сохранить ширины до прихода новых результатов
-        // (иначе refreshMatchTable/setColumnHidden подтянет устаревшие значения из settings).
+        // (иначе refreshMatchTable/ensureMatchColumns подтянет устаревшие значения из settings).
         saveMatchColumnStateOnUiThread();
         Display display = Display.getDefault();
         if (display == null || display.isDisposed())
@@ -7756,10 +7875,10 @@ public final class ConfigSearchResultsHook implements IStartup
         TableViewerColumn column = new TableViewerColumn(tableViewer, SWT.LEFT);
         TableColumn swtColumn = column.getColumn();
         swtColumn.setText("Путь"); //$NON-NLS-1$
-        swtColumn.setToolTipText("Путь" + Global.pluginSignForTooltip());
+        swtColumn.setToolTipText(TooltipText.wrap(table, "Путь" + Global.pluginSignForTooltip())); //$NON-NLS-1$
         swtColumn.setResizable(true);
         swtColumn.setMoveable(false);
-        swtColumn.setWidth(0); // по умолчанию скрыта — показывается только при агрегации
+        swtColumn.setWidth(PATH_COLUMN_WIDTH);
 
         // ВАЖНО: обычный CellLabelProvider рисуется нативной отрисовкой Table (Windows custom draw);
         // в тёмной теме для строки под курсором (выделенной) это иногда даёт невидимый текст
@@ -7793,12 +7912,17 @@ public final class ConfigSearchResultsHook implements IStartup
             public void removeListener(ILabelProviderListener listener) {}
         }));
 
-        table.addDisposeListener(e -> {
-            PATH_MAPS_BY_TABLE_VIEWER.remove(tableViewer);
-            PATH_COLUMN_BY_TABLE_VIEWER.remove(tableViewer);
-            DEFERRED_PROVIDER_BY_TABLE_VIEWER.remove(tableViewer);
-            SAVED_TABLE_SELECTION_BY_VIEWER.remove(tableViewer);
-        });
+        String cleanupKey = "tormozit.configSearchPathColumnCleanup"; //$NON-NLS-1$
+        if (!Boolean.TRUE.equals(table.getData(cleanupKey)))
+        {
+            table.setData(cleanupKey, Boolean.TRUE);
+            table.addDisposeListener(e -> {
+                PATH_MAPS_BY_TABLE_VIEWER.remove(tableViewer);
+                PATH_COLUMN_BY_TABLE_VIEWER.remove(tableViewer);
+                DEFERRED_PROVIDER_BY_TABLE_VIEWER.remove(tableViewer);
+                SAVED_TABLE_SELECTION_BY_VIEWER.remove(tableViewer);
+            });
+        }
 
         PATH_COLUMN_BY_TABLE_VIEWER.put(tableViewer, swtColumn);
 
@@ -8036,15 +8160,16 @@ public final class ConfigSearchResultsHook implements IStartup
     private static void showPathColumn(TableViewer tableViewer)
     {
         TableColumn column = PATH_COLUMN_BY_TABLE_VIEWER.get(tableViewer);
-        if (column != null && !column.isDisposed() && column.getWidth() == 0)
-            column.setWidth(PATH_COLUMN_WIDTH);
+        if (column == null || column.isDisposed())
+            installPathColumn(tableViewer);
     }
 
     private static void hidePathColumn(TableViewer tableViewer)
     {
         TableColumn column = PATH_COLUMN_BY_TABLE_VIEWER.get(tableViewer);
-        if (column != null && !column.isDisposed() && column.getWidth() != 0)
-            column.setWidth(0);
+        if (column != null && !column.isDisposed())
+            column.dispose();
+        PATH_COLUMN_BY_TABLE_VIEWER.remove(tableViewer);
     }
 
     /**

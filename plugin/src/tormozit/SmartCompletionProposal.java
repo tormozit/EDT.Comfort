@@ -85,6 +85,9 @@ public class SmartCompletionProposal implements
     /** Каретка внутри сохранённых скобок после вставки только имени метода. */
     private int wordOnlyCaret = -1;
 
+    /** Каретка внутри встроенного шаблона вставки. */
+    private Point templateSelection;
+
     public SmartCompletionProposal(ICompletionProposal delegate)
     {
         this(delegate, -1);
@@ -209,7 +212,12 @@ public class SmartCompletionProposal implements
     public Point getSelection(IDocument document)
     {
         Point selection;
-        if (wordOnlyCaret >= 0)
+        if (templateSelection != null)
+        {
+            selection = templateSelection;
+            templateSelection = null;
+        }
+        else if (wordOnlyCaret >= 0)
         {
             int caret = wordOnlyCaret;
             wordOnlyCaret = -1;
@@ -244,6 +252,7 @@ public class SmartCompletionProposal implements
         {
             logApplyStart("doc"); //$NON-NLS-1$
             rebaseInspectExpressionReplacement(document, null, caret);
+            rebaseEdtTemplateReplacement(document, null, caret);
             if (replaceParentOverlap && tryApplyEdtOverlapReplaceParent(document, null, -1))
                 return;
             if (tryApplyWordOnly(document, null, -1, null))
@@ -251,6 +260,8 @@ public class SmartCompletionProposal implements
                 logApplyWordOnly("doc"); //$NON-NLS-1$
                 return;
             }
+            if (tryApplyTemplate(document, null, caret, null))
+                return;
             if (irApply)
             {
                 applyIrBareCtorOrDelegate(document, null, (char) 0, 0, caret);
@@ -279,6 +290,7 @@ public class SmartCompletionProposal implements
         {
             logApplyStart("docTrigger"); //$NON-NLS-1$
             rebaseInspectExpressionReplacement(document, null, caret);
+            rebaseEdtTemplateReplacement(document, null, caret);
             if (replaceParentOverlap && tryApplyEdtOverlapReplaceParent(document, null, offset))
                 return;
             if (tryApplyWordOnly(document, null, offset, null))
@@ -286,6 +298,8 @@ public class SmartCompletionProposal implements
                 logApplyWordOnly("docTrigger"); //$NON-NLS-1$
                 return;
             }
+            if (tryApplyTemplate(document, null, caret, null))
+                return;
             if (irApply)
             {
                 applyIrBareCtorOrDelegate(document, null, trigger, 0, caret);
@@ -347,6 +361,7 @@ public class SmartCompletionProposal implements
         {
             logApplyStart("viewer"); //$NON-NLS-1$
             rebaseInspectExpressionReplacement(document, viewer, caret);
+            rebaseEdtTemplateReplacement(document, viewer, caret);
             if (replaceParentOverlap && tryApplyEdtOverlapReplaceParent(document, viewer, offset))
                 return;
             if (viewer != null && tryApplyWordOnly(document, viewer, offset, stateMask))
@@ -360,13 +375,15 @@ public class SmartCompletionProposal implements
             if (irApply
                 && tryApplyWithIrAdapter((IrCompletionProposal) delegate, viewer, offset))
                 return;
+            if (!irApply && viewer != null && tryApplyGeneralIrOverlapAdapter(viewer, offset))
+                return;
+            if (tryApplyTemplate(document, viewer, caret, stateMask))
+                return;
             if (irApply)
             {
                 applyIrBareCtorOrDelegate(document, viewer, trigger, stateMask, caret);
                 return;
             }
-            if (viewer != null && tryApplyGeneralIrOverlapAdapter(viewer, offset))
-                return;
             if (delegate instanceof ICompletionProposalExtension2)
                 ((ICompletionProposalExtension2) delegate).apply(viewer, trigger, stateMask, offset);
             else if (document != null)
@@ -1165,6 +1182,47 @@ public class SmartCompletionProposal implements
             : ContentAssistSessionReloader.getActiveReloader();
         if (reloader != null)
             reloader.scheduleParamHintForExistingCall(desiredCaret);
+        return true;
+    }
+
+    /**
+     * Штатный шаблон EDT обновляет replaceLength только в validate(DocumentEvent).
+     * Умный фильтр обходит этот вызов, а кэш может перенести предложение на другое слово.
+     * Перед штатной вставкой пересчитываем диапазон, как для кэшированных предложений Xtext.
+     * Поля подтверждены в .tmp/bundles/lcore-ui-templates/TemplateProposal.javap.txt.
+     */
+    private void rebaseEdtTemplateReplacement(IDocument document, ITextViewer viewer, int caret)
+    {
+        ICompletionProposal raw = SmartContentAssistProcessor.unwrapProposal(delegate);
+        if (raw == null || !raw.getClass().getName().equals(
+            "com.e1c.g5.v8.dt.lcore.ui.templates.contentassist.TemplateProposal")) //$NON-NLS-1$
+            return;
+        Object oldOffset = Global.getField(raw, "replaceOffset"); //$NON-NLS-1$
+        Object oldLength = Global.getField(raw, "replaceLength"); //$NON-NLS-1$
+        if (document == null || caret < 0 || caret > document.getLength()
+            || !(oldOffset instanceof Integer) || !(oldLength instanceof Integer))
+            return;
+        String prefix = SmartContentAssistProcessor.computeIdentifierFilter(document, caret);
+        int start = caret - prefix.length();
+        Point selection = viewer != null ? viewer.getSelectedRange() : null;
+        int selectedLength = selection != null && selection.x == caret ? selection.y : 0;
+        int length = prefix.length() + selectedLength;
+        // setFieldForce проверяет результат через ==: для упакованного int вне кэша
+        // Integer возвращает false даже после успешной записи. Не связываем записи через &&.
+        Global.setField(raw, "replaceOffset", start); //$NON-NLS-1$
+        Global.setField(raw, "replaceLength", length); //$NON-NLS-1$
+    }
+
+    private boolean tryApplyTemplate(IDocument document, ITextViewer viewer, int caret, Integer stateMask)
+    {
+        templateSelection = BslCompletionTemplates.apply(delegate, document, viewer, caret, stateMask);
+        if (templateSelection == null)
+            return false;
+        ContentAssistSessionReloader reloader = viewer instanceof SourceViewer sourceViewer
+            ? ContentAssistSessionReloader.forViewer(sourceViewer)
+            : ContentAssistSessionReloader.getActiveReloader();
+        if (reloader != null)
+            reloader.scheduleParamHintForExistingCall(templateSelection.x);
         return true;
     }
 

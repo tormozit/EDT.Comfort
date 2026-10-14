@@ -501,8 +501,8 @@ public final class BslReferenceSearchTableHook implements IStartup
                 addColumn(columnLayout, settings, 5, BslOccurrenceContextResolver.COL_PARENT, r -> r.parent);
             TableColumn parentTypeColumn = addColumn(columnLayout, settings, 6, PARENT_TYPE_TITLE,
                 r -> r.parentType != null ? r.parentType : UNKNOWN_TYPE);
-            TableColumn syntaxColumn = addColumn(columnLayout, settings, 7,
-                BslOccurrenceContextResolver.COL_SYNTAX_KIND, r -> r.syntaxKind);
+            TableColumn syntaxColumn = BslOccurrenceContextResolver.addCategoryColumn(viewer, columnLayout,
+                element -> element instanceof ReferenceRow row ? row.syntaxKind : "").getColumn(); //$NON-NLS-1$
             addColumn(columnLayout, settings, 8, "Строка", r -> r.line > 0 ? String.valueOf(r.line) : ""); //$NON-NLS-1$ //$NON-NLS-2$
             TableColumn textColumn = addTextColumn(columnLayout, settings, 9);
 
@@ -828,7 +828,7 @@ public final class BslReferenceSearchTableHook implements IStartup
 
             if (mdObject instanceof ScheduledJob job)
             {
-                category = "Свойство «Метод обработчик»"; //$NON-NLS-1$
+                category = BslOccurrenceContextResolver.KIND_HANDLER;
                 parentType = "РегламентноеЗадание"; //$NON-NLS-1$
                 name = job.getName() != null ? job.getName() : fqn; //$NON-NLS-1$
                 feature = MdClassPackage.Literals.SCHEDULED_JOB__METHOD_NAME;
@@ -837,7 +837,7 @@ public final class BslReferenceSearchTableHook implements IStartup
             }
             else if (mdObject instanceof EventSubscription subscription)
             {
-                category = "Свойство «Обработчик»"; //$NON-NLS-1$
+                category = BslOccurrenceContextResolver.KIND_HANDLER;
                 parentType = "ПодпискаНаСобытие"; //$NON-NLS-1$
                 name = subscription.getName() != null ? subscription.getName() : fqn; //$NON-NLS-1$
                 feature = MdClassPackage.Literals.EVENT_SUBSCRIPTION__HANDLER;

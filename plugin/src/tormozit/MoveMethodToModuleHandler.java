@@ -149,6 +149,8 @@ import com._1c.g5.v8.dt.metadata.mdclass.CommonModule;
 public class MoveMethodToModuleHandler extends AbstractHandler
 {
     private static final String TITLE = "Переместить в модуль";
+    /** Последние приёмники по исходным модулям, только на время работы плагина (UI-поток). */
+    private static final Map<String, String> LAST_TARGETS = new HashMap<>();
     /** Штатная команда редактора модуля «Иерархия вызовов» (com._1c.g5.v8.dt.bsl.ui/plugin.xml). */
     private static final String CALL_HIERARCHY_COMMAND_ID =
         "com._1c.g5.v8.dt.bsl.ui.editor.callhierarchy.CallHierarchy";
@@ -825,25 +827,31 @@ public class MoveMethodToModuleHandler extends AbstractHandler
             return null;
         }
         targets.sort((a, b) -> a.prefix.compareToIgnoreCase(b.prefix));
-        // Последний выбранный модуль для этого набора контекстов компиляции — если он есть в списке.
-        IDialogSettings settings = lastTargetSettings();
-        String settingsKey = lastTargetKey(source);
-        String lastPrefix = settings.get(settingsKey);
+        // Последний выбранный приёмник для исходного модуля — если он есть в списке.
+        String sourceKey = lastTargetKey(source);
+        String lastPrefix = LAST_TARGETS.get(sourceKey);
         TargetModule last = null;
         for (TargetModule module : targets)
         {
             if (module.prefix.equalsIgnoreCase(lastPrefix))
                 last = module;
         }
+        // Исходный модуль временно участвует в сортировке и начальном выборе строки.
+        TargetModule sourceModule = describeModule(source.file, source.header.russian, commonModules);
+        if (sourceModule != null)
+        {
+            targets.add(sourceModule);
+            targets.sort((a, b) -> a.prefix.compareToIgnoreCase(b.prefix));
+        }
         Environments environments = source.environments;
         boolean[] columnFilters = new boolean[TargetDialog.COLUMN_COUNT];
         columnFilters[TargetDialog.CLIENT_COLUMN] =
             environments != null && environments.containsAny(Environments.MNG_CLIENTS);
         columnFilters[TargetDialog.SERVER_CALL_COLUMN] = source.needsServerCall;
-        TargetDialog dialog = new TargetDialog(shell, targets, last, columnFilters, source.calledFromClient);
+        TargetDialog dialog = new TargetDialog(shell, targets, last, sourceModule, columnFilters, source.calledFromClient);
         if (dialog.open() != Window.OK || dialog.chosen == null)
             return null;
-        settings.put(settingsKey, dialog.chosen.prefix);
+        LAST_TARGETS.put(sourceKey, dialog.chosen.prefix);
         return dialog.chosen;
     }
 
@@ -872,6 +880,7 @@ public class MoveMethodToModuleHandler extends AbstractHandler
 
         private final List<TargetModule> targets;
         private final TargetModule initial;
+        private final TargetModule sourceModule;
         /** Колонки-галочки, по которым список открывается с отбором (пользователь может его снять). */
         private final boolean[] columnFilters;
         /** Были ли отборы по галочке в «Клиент» и «Вызов сервера» при прошлом оповещении — чтобы поймать снятие. */
@@ -891,13 +900,14 @@ public class MoveMethodToModuleHandler extends AbstractHandler
         /** Выделение меняет сам диалог (после фильтра) — {@link #current} не трогать. */
         private boolean selecting;
 
-        TargetDialog(Shell parentShell, List<TargetModule> targets, TargetModule initial, boolean[] columnFilters,
+        TargetDialog(Shell parentShell, List<TargetModule> targets, TargetModule initial, TargetModule sourceModule, boolean[] columnFilters,
             boolean serverCallLocked)
         {
             super(parentShell);
             this.serverCallLocked = serverCallLocked;
             this.targets = targets;
             this.initial = initial;
+            this.sourceModule = sourceModule;
             this.columnFilters = columnFilters;
             setShellStyle(SWT.DIALOG_TRIM | SWT.RESIZE | SWT.APPLICATION_MODAL);
         }
@@ -1039,7 +1049,36 @@ public class MoveMethodToModuleHandler extends AbstractHandler
                 });
             });
 
-            current = initial;
+            current = null;
+            for (TableItem item : table.getItems())
+            {
+                if (item.getData() == initial)
+                {
+                    current = initial;
+                    break;
+                }
+            }
+            if (sourceModule != null && current == null)
+            {
+                TableItem[] items = table.getItems();
+                for (int index = 0; index < items.length; index++)
+                {
+                    if (items[index].getData() == sourceModule)
+                    {
+                        if (index > 0)
+                        {
+                            current = (TargetModule) items[index - 1].getData();
+                            viewer.setSelection(new StructuredSelection(current), true);
+                        }
+                        break;
+                    }
+                }
+            }
+            if (sourceModule != null)
+            {
+                targets.remove(sourceModule);
+                viewer.refresh();
+            }
             selectCurrentOrFirst();
 
             table.addListener(SWT.MouseDoubleClick, event -> okPressed());
@@ -1192,24 +1231,10 @@ public class MoveMethodToModuleHandler extends AbstractHandler
         }
     }
 
-    private static IDialogSettings lastTargetSettings()
-    {
-        return DialogSettings.getOrCreateSection(Activator.getDefault().getDialogSettings(),
-            "MoveMethodToModule.lastTarget");
-    }
-
-    /** Ключ запоминания: проект и набор контекстов компиляции метода (имена по алфавиту). */
+    /** Ключ запоминания: полный путь исходного модуля в рабочем пространстве. */
     private static String lastTargetKey(Source source)
     {
-        List<String> names = new ArrayList<>();
-        if (source.environments != null)
-        {
-            for (Environment environment : source.environments.toArray())
-                names.add(environment.name());
-        }
-        names.sort(null);
-        return source.file.getProject().getName() + "|" + String.join(",", names)
-            + (source.needsServerCall ? "|serverCall" : "");
+        return source.file.getFullPath().toPortableString();
     }
 
     /**
@@ -1378,7 +1403,7 @@ public class MoveMethodToModuleHandler extends AbstractHandler
             Map<URI, TreeMap<Integer, Integer>> occurrences = new LinkedHashMap<>();
             collectOccurrences(processor.createChange(monitor.split(20)), occurrences);
 
-            int rewritten = 0;
+            int foundCalls = 0;
             for (Map.Entry<URI, TreeMap<Integer, Integer>> entry : occurrences.entrySet())
             {
                 URI uri = entry.getKey();
@@ -1393,6 +1418,7 @@ public class MoveMethodToModuleHandler extends AbstractHandler
                     // сам перемещаемый метод: объявление и рекурсивные вызовы уезжают как есть
                     if (inSource && occurrence.getKey() >= source.deleteStart && occurrence.getKey() < source.deleteEnd)
                         continue;
+                    foundCalls++;
                     int offset = nameOffset(text, source.name, occurrence.getKey(), occurrence.getValue());
                     String place = uri.lastSegment() + ", строка " + lineNumber(text, occurrence.getKey());
                     if (offset < 0 || insideStringLiteral(text, offset))
@@ -1432,7 +1458,6 @@ public class MoveMethodToModuleHandler extends AbstractHandler
                     }
                     if (!replacement.equals(text.substring(qualifierStart, end)))
                         updates.accept(uri, new ReplaceEdit(qualifierStart, end - qualifierStart, replacement));
-                    rewritten++;
                 }
             }
 
@@ -1460,7 +1485,7 @@ public class MoveMethodToModuleHandler extends AbstractHandler
             updates.accept(targetUri, insertion(targetText));
             propertyChanges.clear();
             collectPropertyReferences(monitor.split(10), status);
-            if (rewritten == 0 && propertyChanges.isEmpty())
+            if (foundCalls == 0 && propertyChanges.isEmpty())
                 status.addInfo("Вызовы метода «" + source.name + "» не найдены.");
             acceptor = updates;
         }
@@ -1791,8 +1816,29 @@ public class MoveMethodToModuleHandler extends AbstractHandler
     private static int skipWhitespaceBack(String text, int offset)
     {
         int pos = offset;
-        while (pos > 0 && Character.isWhitespace(text.charAt(pos - 1)))
-            pos--;
+        while (pos > 0)
+        {
+            while (pos > 0 && Character.isWhitespace(text.charAt(pos - 1)))
+                pos--;
+            // Комментарий предыдущей строки не является частью выражения перед вызовом.
+            // Кавычки учитываются, чтобы не принять "//" внутри строки за комментарий.
+            boolean inString = false;
+            int comment = -1;
+            for (int i = lineStart(text, pos); i + 1 < pos; i++)
+            {
+                char c = text.charAt(i);
+                if (c == '"')
+                    inString = !inString;
+                else if (!inString && c == '/' && text.charAt(i + 1) == '/')
+                {
+                    comment = i;
+                    break;
+                }
+            }
+            if (comment < 0)
+                break;
+            pos = comment;
+        }
         return pos;
     }
 

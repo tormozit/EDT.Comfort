@@ -59,7 +59,8 @@ public final class CommonModuleGroupContentProvider implements IPipelinedTreeCon
     @Override
     public Object[] getChildren(Object parentElement)
     {
-        if (!isGroupingActive())
+        boolean groupingActive = isGroupingActive();
+        if (!groupingActive)
             return NO_CHILDREN;
 
         if (parentElement instanceof CommonModuleGroupNode group)
@@ -112,7 +113,13 @@ public final class CommonModuleGroupContentProvider implements IPipelinedTreeCon
     public Object getPipelinedParent(Object element, Object suggestedParent)
     {
         Object parent = getParent(element);
-        return parent != null ? parent : suggestedParent;
+        // CNF передаёт сюда null даже при найденном штатном родителе. Возврат null
+        // в Eclipse 3.12.200 оставляет вместо родителя Object[]: фильтр подсистем
+        // не находит проект и пропускает модуль без проверки. Для модуля без группы
+        // (и при выключенной группировке) возвращаем его штатную папку явно.
+        if (parent == null)
+            parent = suggestedParent != null ? suggestedParent : realParent(element);
+        return parent;
     }
 
     @Override
@@ -150,17 +157,24 @@ public final class CommonModuleGroupContentProvider implements IPipelinedTreeCon
      * при восстановлении выделения/раскрытия после перестроения дерева строит путь «Папка→Модуль»,
      * который не совпадает с реальным «Папка→Группа→Модуль», и выделение/раскрытие теряется
      * (issue #117: пропадает активная строка модуля после снятия текстового фильтра).
+     * Для остальных общих модулей возвращает штатную папку: после объявления override
+     * CNF выбирает этот провайдер вместо EDT и напрямую вызывает getParent(), без pipeline.
+     * Возврат null обрывает поиск проекта в NavigatorSubsystemsFilter и отключает отбор модуля.
      */
     @Override
     public Object getParent(Object element)
     {
+        Object parent = null;
         if (element instanceof CommonModuleGroupNode group)
-            return group.getParent();
-
-        if (element instanceof CommonModule module && isGroupingActive())
-            return groupNodeFor(module);
-
-        return null;
+            parent = group.getParent();
+        else if (element instanceof CommonModule module)
+        {
+            if (isGroupingActive())
+                parent = groupNodeFor(module);
+            if (parent == null)
+                parent = realParent(module);
+        }
+        return parent;
     }
 
     /** Реальный (штатный EDT) родитель элемента — через его собственный {@link IWorkbenchAdapter}. */

@@ -473,6 +473,16 @@ final class UserTextSpellCheck
     {
         if (project == null)
             return;
+        boolean jdtAvailable = ComfortJdtAvailability.isJdtUiAvailable();
+        Global.tempLog(LOG_TOPIC, "request allTexts=" + allTexts + " jdtAvailable=" + jdtAvailable);
+        if (!jdtAvailable)
+        {
+            ToastNotification.show("Орфография",
+                "Для проверки орфографии нужен модуль Eclipse JDT UI. Сейчас откроется мастер его установки.\n"
+                + "После установки перезапустите EDT и повторите команду проверки орфографии.", 15_000);
+            ComfortPreferences.openInstallJdtForSpelling();
+            return;
+        }
         String title = allTexts ? TITLE_ALL : TITLE;
         String jobName = allTexts ? JOB_NAME_ALL : JOB_NAME;
         new Job(jobName)
