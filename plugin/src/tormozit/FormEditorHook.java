@@ -127,6 +127,7 @@ import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IEditorReference;
 import org.eclipse.ui.IPartListener2;
 import org.eclipse.ui.IStartup;
+import org.eclipse.ui.dialogs.FilteredList;
 import org.eclipse.ui.IViewPart;
 import org.eclipse.ui.IViewReference;
 import org.eclipse.ui.IWorkbenchPartSite;
@@ -194,6 +195,7 @@ import com._1c.g5.v8.dt.form.mapping.model.ParameterizedCommandPath;
 import com._1c.g5.v8.dt.form.mapping.model.ParameterizedTableItem;
 import com._1c.g5.v8.dt.form.mapping.model.ItemType;
 import com._1c.g5.v8.dt.form.mapping.model.ItemsHolder;
+import com._1c.g5.v8.dt.common.Pair;
 import com._1c.g5.v8.dt.form.model.AbstractDataPath;
 import com._1c.g5.v8.dt.form.model.Addition;
 import com._1c.g5.v8.dt.form.model.AutoCommandBar;
@@ -473,6 +475,7 @@ public class FormEditorHook implements IStartup
         AttributeHeaderTooltips.install();
         AttributesExtraColumns.install();
         ItemsTree.install();
+        CreationItemDialogHook.install(display);
         GlobalCommandsProperties.install();
         GlobalCommandsFilter.install();
         GlobalCommandsExpansion.install();
@@ -486,6 +489,159 @@ public class FormEditorHook implements IStartup
     static void installPreviewCallbacks()
     {
         Preview.installCallbacks();
+    }
+
+    /** Окно «Добавить»: пометка дочерних вариантов и текущая строка подходящего вида группы. */
+    private static final class CreationItemDialogHook
+    {
+        private static final String DIALOG_CLASS =
+            "com._1c.g5.v8.dt.form.internal.ui.editor.item.CreationItemDialog"; //$NON-NLS-1$
+        private static final String HANDLED_KEY = "tormozit.creationItemDialogHandled"; //$NON-NLS-1$
+
+        static void install(Display display)
+        {
+            display.addFilter(SWT.Show, event -> {
+                if (!(event.widget instanceof Shell shell) || shell.isDisposed())
+                    return;
+                Object dialog = shell.getData();
+                if (Boolean.TRUE.equals(shell.getData(HANDLED_KEY)))
+                    return;
+                if (dialog == null || !DIALOG_CLASS.equals(dialog.getClass().getName()))
+                    return;
+                shell.setData(HANDLED_KEY, Boolean.TRUE);
+                FormEditorPage page = FormEditor.getActiveFormEditorPage();
+                FormItem selected = selectedFormItem(page);
+                ItemType childType = childGroupType(selected);
+                if (selected == null)
+                    return;
+
+                // Поля подтверждены в ElementListSelectionDialog/AbstractElementListSelectionDialog;
+                // CreationItemDialog хранит пары (родитель, вид), включая варианты предков.
+                Object rawElements = Global.getField(dialog, "fElements"); //$NON-NLS-1$
+                Object rawList = Global.getField(dialog, "fFilteredList"); //$NON-NLS-1$
+                if (!(rawElements instanceof Object[] elements)
+                    || !(rawList instanceof FilteredList list)
+                    || list.isDisposed())
+                    return;
+                markChildVariants(dialog, list, elements, selected);
+                if (childType == null)
+                    return;
+                for (Object element : elements)
+                {
+                    if (element instanceof Pair<?, ?> pair && pair.second == childType
+                        && pair.first instanceof ItemsHolder<?> holder && holder.getDomain() == selected)
+                    {
+                        // Обновление фильтра может заменить задачу и потерять её indicesToSelect.
+                        // Закрепляем начальную строку после завершения актуальной задачи.
+                        selectAfterPopulation(list, element);
+                        list.setSelection(new Object[] { element });
+                        return;
+                    }
+                }
+            });
+        }
+
+        private static void markChildVariants(Object dialog, FilteredList list, Object[] elements,
+            FormItem selected)
+        {
+            org.eclipse.jface.viewers.ILabelProvider base = list.getLabelProvider();
+            Map<Object, String> texts = new java.util.IdentityHashMap<>();
+            String[] labels = new String[elements.length];
+            boolean hasChildren = false;
+            for (int i = 0; i < elements.length; i++)
+            {
+                Object element = elements[i];
+                boolean child = element instanceof Pair<?, ?> pair
+                    && pair.first instanceof ItemsHolder<?> holder && holder.getDomain() == selected;
+                String text = base.getText(element);
+                labels[i] = child ? text + " (дочерний)" : text; //$NON-NLS-1$
+                texts.put(element, labels[i]);
+                hasChildren |= child;
+            }
+            if (!hasChildren)
+                return;
+
+            // ElementsComparator сравнивает подписи по идентичности. Тот же объект String
+            // должен попасть и в labels диалога, и в fLabels списка (байткод md-ui/platform-ui).
+            ChildLabelProvider decorated = new ChildLabelProvider(base, texts);
+            Global.setField(dialog, "labels", labels); //$NON-NLS-1$
+            Global.setField(list, "fLabelProvider", decorated); //$NON-NLS-1$
+            list.setElements(elements);
+        }
+
+        private static final class ChildLabelProvider implements org.eclipse.jface.viewers.ILabelProvider
+        {
+            private final org.eclipse.jface.viewers.ILabelProvider base;
+            private final Map<Object, String> texts;
+
+            ChildLabelProvider(org.eclipse.jface.viewers.ILabelProvider base, Map<Object, String> texts)
+            {
+                this.base = base;
+                this.texts = texts;
+            }
+
+            @Override public String getText(Object element)
+            {
+                return texts.containsKey(element) ? texts.get(element) : base.getText(element);
+            }
+
+            @Override public Image getImage(Object element) { return base.getImage(element); }
+            @Override public void dispose() { base.dispose(); }
+            @Override public boolean isLabelProperty(Object element, String property)
+            {
+                return base.isLabelProperty(element, property);
+            }
+            @Override public void addListener(ILabelProviderListener listener) { base.addListener(listener); }
+            @Override public void removeListener(ILabelProviderListener listener) { base.removeListener(listener); }
+        }
+
+        private static void selectAfterPopulation(FilteredList list, Object element)
+        {
+            list.addSelectionListener(new org.eclipse.swt.events.SelectionAdapter()
+            {
+                private boolean scheduled;
+
+                @Override
+                public void widgetSelected(org.eclipse.swt.events.SelectionEvent event)
+                {
+                    if (scheduled)
+                        return;
+                    scheduled = true;
+                    // TableUpdateJob выставляет readyForSelection после SWT.Selection.
+                    // Поле и порядок подтверждены в байткоде org.eclipse.ui.workbench.
+                    list.getDisplay().asyncExec(() -> {
+                        scheduled = false;
+                        if (list.isDisposed())
+                            return;
+                        Object job = Global.getField(list, "fUpdateJob"); //$NON-NLS-1$
+                        boolean ready = job == null
+                            || Boolean.TRUE.equals(Global.getField(job, "readyForSelection")); //$NON-NLS-1$
+                        if (!ready)
+                            return;
+                        list.removeSelectionListener(this);
+                        if (list.getFilter() != null && !list.getFilter().isEmpty())
+                            return;
+                        list.setSelection(new Object[] { element });
+                    });
+                }
+            });
+        }
+
+        private static ItemType childGroupType(FormItem selected)
+        {
+            if (selected instanceof com._1c.g5.v8.dt.form.model.Table)
+                return ItemType.GROUP_COLUMN;
+            ManagedFormGroupType parentType = selected instanceof FormGroup group ? group.getType() : null;
+            if (parentType == null)
+                return null;
+            return switch (parentType)
+            {
+                case PAGES -> ItemType.GROUP_PAGE;
+                case COMMAND_BAR, AUTO_COMMAND_BAR, BUTTON_GROUP, POPUP -> ItemType.GROUP_POPUP;
+                case COLUMN_GROUP -> ItemType.GROUP_COLUMN;
+                default -> null;
+            };
+        }
     }
 
     /** Переключатель макета и замеры: API и поля проверены в form-ui/form-presentation. */
