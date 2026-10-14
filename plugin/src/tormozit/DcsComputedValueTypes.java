@@ -593,6 +593,8 @@ final class DcsComputedValueTypes
                     if (shortName != null)
                         cell.setText(shortName);
                 }
+                else if (type != null && type.getTypes().size() > 1 && element instanceof EObject object)
+                    cell.setText(TypeDescriptionPresentationHook.sortText(type, object, text));
                 return;
             }
             // Путь поля объекта может совпасть с путём поля другого набора — подсказку не даём.
@@ -621,7 +623,9 @@ final class DcsComputedValueTypes
         @Override
         public String getToolTipText(Object element)
         {
-            return delegate.getToolTipText(element);
+            String text = delegate.getToolTipText(element);
+            return TypeDescriptionPresentationHook.sortText(valueType(element),
+                element instanceof EObject object ? object : null, text);
         }
 
         @Override

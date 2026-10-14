@@ -69,7 +69,8 @@ class ValueTypeColumnLabelProvider extends ColumnLabelProvider
         {
             String baseToolTip = base.getToolTipText(element);
             if (baseToolTip != null && !baseToolTip.isEmpty())
-                return TooltipText.wrap(control, baseToolTip);
+                return TooltipText.wrap(control, TypeDescriptionPresentationHook.sortText(
+                    typeOf.apply(element), contextOf.apply(element), baseToolTip));
         }
         TypeDescription type = typeOf.apply(element);
         String text = fullText(element, type);
@@ -99,7 +100,8 @@ class ValueTypeColumnLabelProvider extends ColumnLabelProvider
         if (base != null)
         {
             String text = base.getText(element);
-            return text != null ? text : ""; //$NON-NLS-1$
+            return text != null ? TypeDescriptionPresentationHook.sortText(type, contextOf.apply(element), text)
+                : ""; //$NON-NLS-1$
         }
         if (type == null)
             return ""; //$NON-NLS-1$
@@ -110,7 +112,8 @@ class ValueTypeColumnLabelProvider extends ColumnLabelProvider
             if (name != null && !name.isBlank())
                 names.add(name);
         }
-        return String.join(", ", names); //$NON-NLS-1$
+        return TypeDescriptionPresentationHook.sortText(type, contextOf.apply(element),
+            String.join(", ", names)); //$NON-NLS-1$
     }
 
     private TypeItem resolve(TypeItem item, Object element)

@@ -6705,7 +6705,8 @@ public class FormEditorHook implements IStartup
                     new TreeViewerColumn(viewer, tree.getColumn(i))
                         .setLabelProvider(new ValueTypeColumnLabelProvider(tree,
                             element -> element instanceof PropertyInfo info ? info.getValueType() : null,
-                            element -> element instanceof PropertyInfo info ? info.getForm() : null,
+                            element -> element instanceof PropertyInfo info
+                                ? info.getSource() instanceof EObject source ? source : info.getForm() : null,
                             base));
                     tree.setData(KEY_HOOKED, Boolean.TRUE);
                     viewer.refresh();

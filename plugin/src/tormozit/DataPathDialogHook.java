@@ -12,6 +12,7 @@ import org.eclipse.core.runtime.IStatus;
 import org.eclipse.core.runtime.OperationCanceledException;
 import org.eclipse.core.runtime.Status;
 import org.eclipse.core.runtime.jobs.Job;
+import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.jface.viewers.ColumnLabelProvider;
 import org.eclipse.jface.viewers.ColumnViewerToolTipSupport;
@@ -204,7 +205,7 @@ public final class DataPathDialogHook implements IStartup
             },
             element -> {
                 PropertyInfo info = session.content.propertyInfo(element);
-                return info != null ? info.getForm() : null;
+                return info != null ? info.getSource() instanceof EObject source ? source : info.getForm() : null;
             },
             typeTextProvider(session.content)));
 

@@ -72,6 +72,7 @@ public class Activator extends AbstractUIPlugin
 
         super.start(context);
         instance = this;
+        TypeDescriptionPresentationHook.install(context);
         PropertySheetUiContext.installSelectionCallbacks();
         FormEditorHook.installPreviewCallbacks();
         CommonNodeAlphabeticSorter.installGlobally();
