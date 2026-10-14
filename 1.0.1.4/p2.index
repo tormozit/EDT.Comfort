@@ -1,0 +1,3 @@
+version=1
+metadata.repository.factory.order=content.xml,content.jar,!
+artifact.repository.factory.order=artifacts.xml,artifacts.jar,!
