@@ -80,6 +80,14 @@ public final class BslParserHook
         if (!state.cut)
             return result;
         state.cut = false;
+        // #region agent log
+        // Временная диагностика: сколько раз частичный разбор отдан на полный из-за огрызка
+        // директивы. Только счётчик — основной бандл читает его в reparse-kind.log.
+        Object counter = System.getProperties().computeIfAbsent("tormozit.bslParser.cutCount", //$NON-NLS-1$
+            key -> new java.util.concurrent.atomic.AtomicInteger());
+        if (counter instanceof java.util.concurrent.atomic.AtomicInteger count)
+            count.incrementAndGet();
+        // #endregion
         return null;
     }
 

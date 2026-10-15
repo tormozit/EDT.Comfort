@@ -23,6 +23,8 @@ import org.eclipse.core.runtime.SubMonitor;
 import org.eclipse.egit.core.project.RepositoryMapping;
 import org.eclipse.egit.core.RepositoryCache;
 import org.eclipse.egit.core.RepositoryUtil;
+import org.eclipse.egit.core.IteratorService;
+import org.eclipse.egit.core.EclipseGitProgressTransformer;
 import org.eclipse.egit.core.internal.indexdiff.IndexDiffCache;
 import org.eclipse.egit.core.internal.indexdiff.IndexDiffCacheEntry;
 import org.eclipse.egit.core.internal.indexdiff.IndexDiffData;
@@ -59,6 +61,7 @@ import org.eclipse.jgit.dircache.DirCacheIterator;
 import org.eclipse.jgit.lib.FileMode;
 import org.eclipse.jgit.lib.ObjectId;
 import org.eclipse.jgit.lib.ObjectInserter;
+import org.eclipse.jgit.lib.IndexDiff;
 import org.eclipse.jgit.lib.Constants;
 import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.revwalk.RevWalk;
@@ -76,6 +79,7 @@ import org.eclipse.ui.IPartListener2;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.IViewPart;
 import org.eclipse.ui.IViewReference;
+import org.eclipse.ui.navigator.CommonNavigator;
 import org.eclipse.ui.IWindowListener;
 import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
@@ -374,12 +378,19 @@ public final class GitStagingViewHook implements IStartup
                 null, Set.of());
         }
 
+        /** Готовые данные панели EGit; при отсутствии результата штатный расчёт идёт в фоне. */
+        boolean filesUnchanged(Repository repository) throws IOException
+        {
+            for (IProject project : workingModelProjects)
+                if (!CommitButtons.workingFilesMatchIndex(repository, project, new NullProgressMonitor()))
+                    return false;
+            return true;
+        }
+
+        /** Без содержимого рабочих файлов: его сверяет {@link #filesUnchanged} перед фиксацией. */
         @Override
         public boolean unchanged(Repository repository, Snapshot snapshot) throws IOException
         {
-            for (IProject project : workingModelProjects)
-                if (!CommitButtons.workingFilesMatchIndex(repository, snapshot.index(), project, new NullProgressMonitor()))
-                    return false;
             if (Global.getField(view, "currentRepository") != repository
                 || !java.util.Objects.equals(snapshot.head(), repository.resolve("HEAD")))
                 return false;
@@ -1128,6 +1139,7 @@ public final class GitStagingViewHook implements IStartup
                     + " error=" + error);
                 cancellation.setCanceled(true);
                 boolean proceed = !commitCanceled;
+                boolean verifyFiles = false;
                 try
                 {
                     Display.getDefault().timerExec(-1, askCancellation);
@@ -1162,27 +1174,68 @@ public final class GitStagingViewHook implements IStartup
                     skipped(!proceed ? words.canceled() + " Не удалось завершить проверку ссылок."
                         : "Проверка ссылок недоступна. " + words.proceeds(), failure);
                 }
-                finally { requester.unlock(); }
-                // Исключения штатных обработчиков не перехватываются как ошибки нашей проверки.
-                if (proceed && !commitCanceled && !requester.gone())
+                finally
                 {
-                    // Пользователь мог изменить файлы, пока отвечал на вопрос о найденных ссылках.
-                    if (source instanceof StagingSource staging && !staging.workingModelProjects.isEmpty())
-                        try
-                        {
-                            if (!source.unchanged(repository, snapshot))
-                            {
-                                skipped(words.canceled() + " " + words.changed(), null);
-                                return;
-                            }
-                        }
-                        catch (IOException failure)
-                        {
-                            skipped(words.canceled() + " Не удалось проверить состояние файлов.", failure);
-                            return;
-                        }
-                    requester.proceed();
+                    // Сверка файлов перед фиксацией идёт в фоне: кнопки разблокирует она.
+                    verifyFiles = proceed && !commitCanceled && !requester.gone()
+                        && source instanceof StagingSource staging && !staging.workingModelProjects.isEmpty();
+                    if (!verifyFiles)
+                        requester.unlock();
                 }
+                // Исключения штатных обработчиков не перехватываются как ошибки нашей проверки.
+                if (verifyFiles)
+                    proceedAfterFileCheck((StagingSource) source);
+                else if (proceed && !commitCanceled && !requester.gone())
+                    requester.proceed();
+            }
+
+            /**
+             * Рабочие файлы могли измениться за время проверки и ответов на вопросы:
+             * перед фиксацией повторно читаем готовые данные EGit в фоне.
+             */
+            private void proceedAfterFileCheck(StagingSource staging)
+            {
+                Repository checkedRepository = repository;
+                new Job(words.title())
+                {
+                    @Override protected IStatus run(IProgressMonitor monitor)
+                    {
+                        boolean unchanged = false;
+                        Throwable failure = null;
+                        try { unchanged = staging.filesUnchanged(checkedRepository); }
+                        catch (Throwable error) { failure = error; }
+                        final boolean filesUnchanged = unchanged;
+                        final Throwable result = failure;
+                        Display.getDefault().asyncExec(() -> proceedChecked(filesUnchanged, result));
+                        return Status.OK_STATUS;
+                    }
+                }.schedule();
+            }
+
+            private void proceedChecked(boolean filesUnchanged, Throwable failure)
+            {
+                try
+                {
+                    if (requester.gone())
+                        return;
+                    if (failure != null)
+                    {
+                        skipped(words.canceled() + " Не удалось проверить состояние файлов.", failure);
+                        return;
+                    }
+                    if (!filesUnchanged || !source.unchanged(repository, snapshot))
+                    {
+                        skipped(words.canceled() + " " + words.changed(), null);
+                        return;
+                    }
+                }
+                catch (IOException error)
+                {
+                    skipped(words.canceled() + " Не удалось проверить состояние файлов.", error);
+                    return;
+                }
+                finally { requester.unlock(); }
+                requester.proceed();
             }
 
             /** Окно фиксации может быть уже закрыто — тогда родителем служит окно приложения. */
@@ -1396,8 +1449,8 @@ public final class GitStagingViewHook implements IStartup
             }
         }
 
-        /** Проверяет содержимое, а не кэш панели Git и не даты файлов. Новые файлы тоже учитываются. */
-        private static boolean workingFilesMatchIndex(Repository repository, DirCache index, IProject project,
+        /** Готовый список неиндексированных изменений EGit; возраст результата не ограничивается. */
+        private static boolean workingFilesMatchIndex(Repository repository, IProject project,
             IProgressMonitor monitor) throws IOException
         {
             if (monitor.isCanceled())
@@ -1407,47 +1460,46 @@ public final class GitStagingViewHook implements IStartup
                 .toString().replace('\\', '/');
             if (!prefix.isEmpty())
                 prefix += "/";
-            Map<String, ObjectId> expected = new HashMap<>();
-            for (int i = 0; i < index.getEntryCount(); i++)
+            IndexDiffCacheEntry cache = IndexDiffCache.INSTANCE.getIndexDiffCacheEntry(repository);
+            IndexDiffData diff = cache != null ? cache.getIndexDiff() : null;
+            String algorithm = diff != null ? "EGit.cache" : "EGit.IndexDiff";
+            Global.tempLog("broken-links-working-copy", "begin algorithm=" + algorithm + " project=" + project.getName());
+            if (diff == null)
             {
-                var entry = index.getEntry(i);
-                String path = entry.getPathString();
-                if (path.startsWith(prefix) && (IndexSource.metadataSource(path.substring(prefix.length()))
-                    || path.equals(prefix + "DT-INF/PROJECT.PMF")))
-                    expected.put(path, entry.getObjectId());
+                // Готового результата ещё нет: штатный полный расчёт IndexDiffCacheEntry.
+                var iterator = IteratorService.createInitialIterator(repository);
+                if (iterator == null)
+                    throw new IOException("Недоступен итератор рабочего каталога EGit");
+                IndexDiff computed = new IndexDiff(repository, Constants.HEAD, iterator);
+                computed.diff(new EclipseGitProgressTransformer(monitor), 0, 0, "Проверка рабочего каталога Git",
+                    () -> RepositoryCache.INSTANCE.getBuilder(true, true));
+                diff = new IndexDiffData(computed);
             }
-            int checked = 0;
-            // Без итератора индекса даты файлов не заменяют чтение содержимого.
-            try (TreeWalk tree = new TreeWalk(repository))
-            {
-                var files = new org.eclipse.jgit.treewalk.FileTreeIterator(repository);
-                tree.addTree(new EmptyTreeIterator());
-                files.setDirCacheIterator(tree, 0);
-                files.setWalkIgnoredDirectories(true);
-                tree.addTree(files);
-                tree.setRecursive(true);
-                tree.setFilter(org.eclipse.jgit.treewalk.filter.PathFilterGroup.createFromStrings(
-                    prefix + "src", prefix + "DT-INF/PROJECT.PMF"));
-                while (tree.next())
-                {
-                    if (monitor.isCanceled())
-                        throw new OperationCanceledException();
-                    String path = tree.getPathString();
-                    if (!path.startsWith(prefix) || !(IndexSource.metadataSource(path.substring(prefix.length()))
+            if (monitor.isCanceled())
+                throw new OperationCanceledException();
+            List<Set<String>> groups = List.of(diff.getModified(), diff.getMissing(),
+                diff.getUntracked(), diff.getConflicting());
+            List<String> kinds = List.of("modified", "missing", "untracked", "conflicting");
+            boolean matches = true;
+            changes:
+            for (int i = 0; i < groups.size(); i++)
+                for (String path : groups.get(i))
+                    if (path.startsWith(prefix) && (IndexSource.metadataSource(path.substring(prefix.length()))
                         || path.equals(prefix + "DT-INF/PROJECT.PMF")))
-                        continue;
-                    ObjectId id = expected.remove(path);
-                    if (id == null || !id.equals(tree.getObjectId(1)))
                     {
-                        Global.tempLog(LOG, "working files differ project=" + project.getName() + " path=" + path);
-                        return false;
+                        matches = false;
+                        Global.tempLog("broken-links-working-copy", "different project=" + project.getName()
+                            + " kind=" + kinds.get(i) + " path=" + path);
+                        Global.tempLog(LOG, "working files differ project=" + project.getName()
+                            + " kind=" + kinds.get(i) + " path=" + path);
+                        break changes;
                     }
-                    checked++;
-                }
-            }
-            Global.tempLog(LOG, "working files compared project=" + project.getName() + " checked=" + checked
-                + " missing=" + expected.size() + " ms=" + (System.nanoTime() - started) / 1_000_000);
-            return expected.isEmpty();
+            Global.tempLog("broken-links-working-copy", "finish algorithm=" + algorithm + " project=" + project.getName()
+                + " matches=" + matches + " modified=" + diff.getModified().size()
+                + " missing=" + diff.getMissing().size() + " untracked=" + diff.getUntracked().size()
+                + " conflicting=" + diff.getConflicting().size()
+                + " ms=" + (System.nanoTime() - started) / 1_000_000);
+            return matches;
         }
 
         /** Публичный API службы: её runtime-объект не обязан быть самим BmModelManager. */
@@ -1513,13 +1565,22 @@ public final class GitStagingViewHook implements IStartup
                     ? new IndexSource(repository, before, prefix, null, content.workTree())
                     : new IndexSource(repository, index, prefix, head, Map.of());
                 boolean deleted = false;
+                Set<String> deletedTargets = new HashSet<>();
+                Set<String> nestedFiles = new HashSet<>(projectFiles);
                 for (String file : projectFiles)
                 {
                     checking.checkCanceled();
                     if (file.endsWith(".mdo") && !staged.fileExists(Path.of(file)))
                     {
                         deleted = true;
-                        break;
+                        if (before != null)
+                            break;
+                        QualifiedName name = converter.getFqn(file);
+                        if (name == null)
+                            throw new IllegalStateException("Не удалось определить удалённый объект файла " + file);
+                        deletedTargets.add(name.toString());
+                        String directory = file.substring(0, file.lastIndexOf('/') + 1);
+                        nestedFiles.removeIf(path -> path.startsWith(directory));
                     }
                 }
                 staged.select(projectFiles, converter);
@@ -1530,7 +1591,7 @@ public final class GitStagingViewHook implements IStartup
                 boolean hadPrevious = before != null ? before.getEntry(configuration) != null
                     : head != null && existed(repository, head, configuration);
                 if (stagingSource != null
-                    && workingFilesMatchIndex(repository, index, project.project(), checking))
+                    && workingFilesMatchIndex(repository, project.project(), checking))
                 {
                     long workingStarted = System.nanoTime();
                     Global.tempLog(LOG, "working model synchronization start project=" + project.project().getName());
@@ -1539,34 +1600,32 @@ public final class GitStagingViewHook implements IStartup
                     checking.checkCanceled();
                     // Для удаления вложенного объекта нужны только изменённые файлы HEAD.
                     // Текущее состояние берём из рабочей модели: индекс не импортируется.
-                    if (!deleted && hadPrevious)
+                    if (hadPrevious && !nestedFiles.isEmpty() && (before == null || !deleted))
                     {
-                        previousFiles.select(projectFiles, converter);
+                        previousFiles.select(nestedFiles, converter);
                         IComparisonDataSource previous = createSource(factory, previousFiles);
                         try
                         {
                             start(previous, checking.split(25));
-                            deleted = MdReferenceSupport.hasDeletedObjects(previous, original, projectFiles,
-                                checking.split(5));
+                            deletedTargets.addAll(MdReferenceSupport.deletedObjects(previous, original, nestedFiles,
+                                checking.split(5)));
+                            deleted = !deletedTargets.isEmpty();
                         }
                         finally { stopDeferred(previous); }
                     }
-                    // Импорт HEAD и ожидание могли дать время на изменение файлов.
-                    if (workingFilesMatchIndex(repository, index, project.project(), checking))
-                    {
-                        List<CompareSearchMatch> rows = Collections.synchronizedList(new ArrayList<>());
-                        findings.add(new Findings(project.project(), rows));
-                        stagingSource.workingModelProjects.add(project.project());
-                        Global.tempLog(LOG, "working model scope project=" + project.project().getName()
-                            + " all=" + deleted + " changed=" + projectFiles.size()
-                            + " previous=" + previousFiles.files.size());
-                        MdReferenceSupport.findInModel(original, project.navigationBase(),
-                            deleted ? null : projectFiles, converter, checking.split(60), rows::add);
-                        Global.tempLog(LOG, "working model finished project=" + project.project().getName()
-                            + " rows=" + rows.size() + " ms=" + (System.nanoTime() - workingStarted) / 1_000_000);
-                        checking.done();
-                        continue;
-                    }
+                    // Изменение файлов за время проверки ловит сверка перед фиксацией (finish).
+                    List<CompareSearchMatch> rows = Collections.synchronizedList(new ArrayList<>());
+                    stagingSource.workingModelProjects.add(project.project());
+                    Global.tempLog(LOG, "working model scope project=" + project.project().getName()
+                        + " all=" + deleted + " changed=" + projectFiles.size()
+                        + " previous=" + previousFiles.files.size() + " deletedTargets=" + deletedTargets.size());
+                    findings.add(new Findings(project.project(), rows));
+                    MdReferenceSupport.findForCommit(original, null, project.navigationBase(),
+                        projectFiles, deletedTargets, Set.of(), converter, checking.split(60), rows::add);
+                    Global.tempLog(LOG, "working model finished project=" + project.project().getName()
+                        + " rows=" + rows.size() + " ms=" + (System.nanoTime() - workingStarted) / 1_000_000);
+                    checking.done();
+                    continue;
                 }
                 if (deleted)
                 {
@@ -1580,15 +1639,22 @@ public final class GitStagingViewHook implements IStartup
                 try
                 {
                     start(source, checking.split(30));
-                    if (!deleted && hadPrevious)
+                    if (hadPrevious && !nestedFiles.isEmpty() && (before == null || !deleted))
                     {
-                        previousFiles.select(projectFiles, converter);
+                        previousFiles.select(nestedFiles, converter);
                         IComparisonDataSource previous = createSource(factory, previousFiles);
                         try
                         {
                             start(previous, checking.split(25));
-                            deleted = MdReferenceSupport.hasDeletedObjects(previous, source, projectFiles,
-                                checking.split(5));
+                            if (before != null)
+                                deleted = MdReferenceSupport.hasDeletedObjects(previous, source, nestedFiles,
+                                    checking.split(5));
+                            else
+                            {
+                                deletedTargets.addAll(MdReferenceSupport.deletedObjects(previous, source.getBmModel(),
+                                    nestedFiles, checking.split(5)));
+                                deleted = !deletedTargets.isEmpty();
+                            }
                         }
                         finally { stopDeferred(previous); }
                     }
@@ -1602,15 +1668,16 @@ public final class GitStagingViewHook implements IStartup
                     }
                     Global.tempLog(LOG, "scope project=" + project.project().getName() + " all=" + deleted
                         + " changed=" + projectFiles.size() + " imported=" + staged.files.size()
-                        + " previous=" + previousFiles.files.size());
+                        + " previous=" + previousFiles.files.size() + " deletedTargets=" + deletedTargets.size());
                     List<CompareSearchMatch> rows = Collections.synchronizedList(new ArrayList<>());
                     // При полном поиске импортировано всё: пропускать в Configuration.mdo нечего.
                     Set<String> unchanged = deleted ? Set.of() : staged.unchangedTargets;
                     if (before == null)
                     {
                         findings.add(new Findings(project.project(), rows));
-                        MdReferenceSupport.findInModel(source, project.navigationBase(),
-                            deleted ? null : projectFiles, unchanged, checking.split(20), rows::add);
+                        MdReferenceSupport.findForCommit(source.getBmModel(), source,
+                            project.navigationBase(), projectFiles, deletedTargets, unchanged, converter,
+                            checking.split(20), rows::add);
                     }
                     else
                     {
@@ -1643,12 +1710,16 @@ public final class GitStagingViewHook implements IStartup
          * {@code MdEObjectEmfIndexBuilder}, без отбора по модели), а редактор запрашивает адреса
          * объектов из этих событий отложенно. Остановка раньше даёт «The namespace '.virtual.N' is
          * inactive», и события остаются в очереди редактора — он падает на каждом следующем.
-         * Поэтому сначала ждём конец производных расчётов модели и задания редакторов.
+         * Поэтому ждём расчёты, доставку BM-событий, задания редакторов и очередь навигатора.
          */
         private static void stopDeferred(IComparisonDataSource source)
         {
+            int sourceId = System.identityHashCode(source);
+            Global.tempLog("broken-links-model-lifetime", "stop scheduled source=" + sourceId);
             Job job = new Job("Остановка временной модели проверки коммита")
             {
+                private final Set<Job> editorJobs = Collections.newSetFromMap(new IdentityHashMap<>());
+
                 @Override
                 protected IStatus run(IProgressMonitor monitor)
                 {
@@ -1656,20 +1727,60 @@ public final class GitStagingViewHook implements IStartup
                     boolean computed = true;
                     int joined = 0;
                     int unfinished = 0;
+                    boolean safeToStop = false;
                     try
                     {
                         IDerivedDataManagerProvider provider = Global.getOsgiService(IDerivedDataManagerProvider.class);
                         IBmModel model = source.getBmModel();
+                        Global.tempLog("broken-links-model-lifetime", "wait start source=" + sourceId
+                            + " model=" + model);
                         var derived = provider != null && model != null ? provider.get(model) : null;
                         if (derived != null)
                             computed = derived.waitAllComputations(STOP_WAIT_MS);
-                        for (Job pending : Job.getJobManager().find(null))
+                        if (computed && model != null)
                         {
-                            if (pending.getState() == Job.NONE || !isEditorStateJob(pending))
-                                continue;
-                            joined++;
-                            if (!pending.join(STOP_WAIT_MS, monitor))
-                                unfinished++;
+                            Global.tempLog("broken-links-model-lifetime", "BM events wait begin source=" + sourceId);
+                            model.waitAllEnqueuedEventsSent();
+                            Global.tempLog("broken-links-model-lifetime", "BM events delivered source=" + sourceId);
+                        }
+                        long deadline = System.nanoTime() + STOP_WAIT_MS * 1_000_000L;
+                        while (computed && !monitor.isCanceled())
+                        {
+                            for (Job pending : Job.getJobManager().find(null))
+                                if (isEditorStateJob(pending))
+                                    editorJobs.add(pending);
+                            joined = editorJobs.size();
+                            unfinished = 0;
+                            for (Job pending : editorJobs)
+                            {
+                                int before = pending.getState();
+                                long remaining = (deadline - System.nanoTime()) / 1_000_000L;
+                                boolean completed = before == Job.NONE
+                                    || remaining > 0 && pending.join(remaining, monitor);
+                                // Очередь и клиент подтверждены в DirtyStateEditorSupport целевого Xtext.
+                                Object queue = Global.getField(pending, "pendingChanges");
+                                Object support = Global.getField(pending, "this$0");
+                                boolean clientGone = support != null && Global.getField(support, "currentClient") == null;
+                                int after = pending.getState();
+                                boolean drained = editorStateDrained(after, queue, clientGone);
+                                Global.tempLog("broken-links-model-lifetime", "editor job source=" + sourceId
+                                    + " job=" + System.identityHashCode(pending) + " before=" + before
+                                    + " after=" + after + " joined=" + completed
+                                    + " pending=" + (queue instanceof java.util.Queue<?> changes ? changes.size() : "unknown")
+                                    + " clientGone=" + clientGone + " drained=" + drained
+                                    + " result=" + pending.getResult());
+                                if (!completed || !drained)
+                                    unfinished++;
+                            }
+                            if (unfinished == 0)
+                            {
+                                safeToStop = waitNavigatorUpdates(sourceId, monitor);
+                                break;
+                            }
+                            if (System.nanoTime() >= deadline)
+                                break;
+                            // join() может вернуться при отмене/перепланировании, пока очередь ещё не обработана.
+                            Thread.sleep(10);
                         }
                     }
                     catch (InterruptedException interrupted)
@@ -1684,13 +1795,81 @@ public final class GitStagingViewHook implements IStartup
                     {
                         Global.tempLog(LOG, "deferred stop computed=" + computed + " editorJobs=" + joined
                             + " unfinished=" + unfinished + " ms=" + (System.nanoTime() - started) / 1_000_000);
-                        source.stop();
+                        Global.tempLog("broken-links-model-lifetime", "stop begin source=" + sourceId
+                            + " computed=" + computed + " joined=" + joined + " unfinished=" + unfinished
+                            + " safe=" + safeToStop);
+                        if (safeToStop)
+                        {
+                            source.stop();
+                            Global.tempLog("broken-links-model-lifetime", "stop complete source=" + sourceId);
+                        }
+                        else
+                        {
+                            Global.tempLog("broken-links-model-lifetime", "stop postponed source=" + sourceId);
+                            if (!monitor.isCanceled() && !Thread.currentThread().isInterrupted())
+                                schedule(1000);
+                        }
                     }
                     return Status.OK_STATUS;
                 }
             };
             job.setSystem(true);
             job.schedule();
+        }
+
+        private static boolean editorStateDrained(int state, Object queue, boolean clientGone)
+        {
+            return state == Job.NONE && queue instanceof java.util.Queue<?> changes
+                && (changes.isEmpty() || clientGone);
+        }
+
+        /** BM-слушатель ставит адаптеры в updateList; UI читает их порциями по 100, пока needRefresh не станет 0. */
+        private static boolean waitNavigatorUpdates(int sourceId, IProgressMonitor monitor) throws InterruptedException
+        {
+            long deadline = System.nanoTime() + STOP_WAIT_MS * 1_000_000L;
+            Display display = Display.getDefault();
+            while (!monitor.isCanceled() && !display.isDisposed())
+            {
+                boolean[] drained = { true };
+                display.syncExec(() ->
+                {
+                    for (IWorkbenchWindow window : PlatformUI.getWorkbench().getWorkbenchWindows())
+                        for (var page : window.getPages())
+                            for (IViewReference ref : page.getViewReferences())
+                            {
+                                if (!(ref.getView(false) instanceof CommonNavigator navigator))
+                                    continue;
+                                var extension = navigator.getNavigatorContentService().getContentExtensionById(
+                                    "com._1c.g5.v8.dt.navigator.ui.v8model");
+                                if (extension == null)
+                                    continue;
+                                Object provider = extension.getContentProvider();
+                                // Оба поля и их значения подтверждены в NavigatorContentProvider и его Runnable $1.
+                                Object updates = Global.getField(provider, "updateList");
+                                Object refresh = Global.getField(provider, "needRefresh");
+                                if (!(updates instanceof Collection<?> queue) || !(refresh instanceof Integer state))
+                                    throw new IllegalStateException("Недоступна очередь обновлений навигатора EDT");
+                                int size;
+                                synchronized (queue)
+                                {
+                                    size = queue.size();
+                                    if (size != 0 || state != 0)
+                                        drained[0] = false;
+                                }
+                                Global.tempLog("broken-links-model-lifetime", "navigator source=" + sourceId
+                                    + " provider=" + System.identityHashCode(provider) + " pending=" + size
+                                    + " refresh=" + state);
+                            }
+                });
+                Global.tempLog("broken-links-model-lifetime", "navigator wait source=" + sourceId
+                    + " drained=" + drained[0]);
+                if (drained[0])
+                    return true;
+                if (System.nanoTime() >= deadline)
+                    return false;
+                Thread.sleep(10);
+            }
+            return false;
         }
 
         private static boolean isEditorStateJob(Job job)
@@ -1710,6 +1889,8 @@ public final class GitStagingViewHook implements IStartup
             if (source.getBmModel() == null
                 || source.getBmModel().getEngine().getTopObjectByFqn("Configuration") == null)
                 throw new IllegalStateException("Не удалось прочитать объекты коммита");
+            Global.tempLog("broken-links-model-lifetime", "source active source=" + System.identityHashCode(source)
+                + " uri=" + EcoreUtil.getURI(source.getBmModel().getEngine().getTopObjectByFqn("Configuration")));
         }
 
         /** Конструктор и поля фабрики подтверждены в ComparisonDataSourceFactory целевой EDT. */

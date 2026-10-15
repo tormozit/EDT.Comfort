@@ -314,6 +314,13 @@ public final class MdReferenceSupport
         Map<URI, Boolean> unresolved, String property, java.util.function.Consumer<BrokenReference> onReference,
         boolean brokenOnly)
     {
+        return findReferences(owner, monitor, unresolved, property, onReference, brokenOnly, target -> true);
+    }
+
+    private static List<BrokenReference> findReferences(EObject owner, IProgressMonitor monitor,
+        Map<URI, Boolean> unresolved, String property, java.util.function.Consumer<BrokenReference> onReference,
+        boolean brokenOnly, java.util.function.Predicate<EObject> includeTarget)
+    {
         List<BrokenReference> result = new ArrayList<>();
         java.util.function.Consumer<BrokenReference> found = reference ->
         {
@@ -333,7 +340,8 @@ public final class MdReferenceSupport
             if (compositionReferences != null)
             {
                 for (MdCompositionSupport.BrokenReference reference : compositionReferences)
-                    found.accept(new BrokenReference(owner, feature, reference.index(), reference.reference()));
+                    if (includeTarget.test(reference.reference()))
+                        found.accept(new BrokenReference(owner, feature, reference.index(), reference.reference()));
                 continue;
             }
             // Штатные геттеры BM разрешают значения ссылок перед проверкой eIsProxy.
@@ -345,17 +353,19 @@ public final class MdReferenceSupport
                     if (monitor.isCanceled())
                         throw new OperationCanceledException();
                     Object element = list.get(i);
-                    if (element instanceof EObject target && (brokenOnly ? broken(owner, target, unresolved)
+                    if (element instanceof EObject target && includeTarget.test(target)
+                        && (brokenOnly ? broken(owner, target, unresolved)
                         : isMetadataSearchTarget(target)))
                         found.accept(new BrokenReference(owner, feature, i, target));
                 }
             }
-            else if (value instanceof EObject target && (brokenOnly ? broken(owner, target, unresolved)
+            else if (value instanceof EObject target && includeTarget.test(target)
+                && (brokenOnly ? broken(owner, target, unresolved)
                 : isMetadataSearchTarget(target)))
                 found.accept(new BrokenReference(owner, feature, -1, target));
             // Запись доступности по ролям без роли: экспорт формы в XML падает с NPE.
             else if (brokenOnly && value == null && owner instanceof com._1c.g5.v8.dt.metadata.mdclass.ForRoleType
-                && feature == MdClassPackage.Literals.FOR_ROLE_TYPE__ROLE)
+                && feature == MdClassPackage.Literals.FOR_ROLE_TYPE__ROLE && includeTarget.test(null))
                 found.accept(new BrokenReference(owner, feature, -1, null));
         }
         return result;
@@ -837,6 +847,30 @@ public final class MdReferenceSupport
         com._1c.g5.v8.dt.core.filesystem.IQualifiedNameFilePathConverter converter,
         IProgressMonitor monitor, java.util.function.Consumer<CompareSearchMatch> onMatch)
     {
+        return findInModel(model, source, navigationBase, changedFiles, unchangedConfigurationTargets,
+            converter, null, monitor, onMatch);
+    }
+
+    /** В изменённых файлах — все битые ссылки; в неизменённых — только ссылки на удалённые цели. */
+    public static List<CompareSearchMatch> findForCommit(IBmModel model, IComparisonDataSource source,
+        URI navigationBase, Set<String> changedFiles, Set<String> deletedTargets,
+        Set<String> unchangedConfigurationTargets,
+        com._1c.g5.v8.dt.core.filesystem.IQualifiedNameFilePathConverter converter,
+        IProgressMonitor monitor, java.util.function.Consumer<CompareSearchMatch> onMatch)
+    {
+        List<CompareSearchMatch> result = findInModel(model, source, navigationBase, changedFiles, unchangedConfigurationTargets,
+            converter, deletedTargets, monitor, onMatch);
+        Global.tempLog("broken-links-commit-filter", "changedFiles=" + changedFiles.size()
+            + " deletedTargets=" + deletedTargets + " rows=" + result.size());
+        return result;
+    }
+
+    private static List<CompareSearchMatch> findInModel(IBmModel model, IComparisonDataSource source,
+        URI navigationBase, Set<String> changedFiles, Set<String> unchangedConfigurationTargets,
+        com._1c.g5.v8.dt.core.filesystem.IQualifiedNameFilePathConverter converter,
+        Set<String> deletedTargets, IProgressMonitor monitor,
+        java.util.function.Consumer<CompareSearchMatch> onMatch)
+    {
         return model.executeReadonlyTask(new AbstractBmTask<List<CompareSearchMatch>>(
             "Проверка ссылок коммита")
         {
@@ -847,7 +881,7 @@ public final class MdReferenceSupport
                 List<EObject> owners = new ArrayList<>();
                 List<URI> unreadable = new ArrayList<>();
                 collect(transaction.getTopObjectIterator(), new HashSet<>(), owners, unreadable,
-                    progress.split(30), object -> changedFiles == null
+                    progress.split(30), object -> changedFiles == null || deletedTargets != null && !deletedTargets.isEmpty()
                         || inChangedFile(source, converter, object, changedFiles));
                 if (!unreadable.isEmpty())
                     throw new IllegalStateException("Не удалось прочитать вложенный объект из индекса Git: "
@@ -856,17 +890,19 @@ public final class MdReferenceSupport
                 Map<URI, Boolean> unresolved = new HashMap<>();
                 SubMonitor checking = progress.split(70).setWorkRemaining(Math.max(1, owners.size()));
                 int[] skipped = { 0 };
+                int[] unrelated = { 0 };
                 for (EObject owner : owners)
                 {
                     checking.checkCanceled();
-                    if (changedFiles != null && !inChangedFile(source, converter, owner, changedFiles))
+                    boolean changed = changedFiles == null || inChangedFile(source, converter, owner, changedFiles);
+                    if (!changed && (deletedTargets == null || deletedTargets.isEmpty()))
                     {
                         checking.worked(1);
                         continue;
                     }
                     boolean configuration = !unchangedConfigurationTargets.isEmpty()
                         && EcoreUtil.getRootContainer(owner) instanceof com._1c.g5.v8.dt.metadata.mdclass.Configuration;
-                    findBrokenReferences(owner, checking, unresolved, null, reference ->
+                    findReferences(owner, checking, unresolved, null, reference ->
                     {
                         if (configuration && reference.target() != null)
                         {
@@ -894,14 +930,32 @@ public final class MdReferenceSupport
                             property, targetLabel(reference), targetFullName(reference));
                         rows.add(row);
                         onMatch.accept(row);
+                    }, true, target ->
+                    {
+                        boolean include = changed || target != null
+                            && isDeletedTarget(fullName(EcoreUtil.getURI(target)), deletedTargets);
+                        if (!include)
+                            unrelated[0]++;
+                        return include;
                     });
                     checking.worked(1);
                 }
                 Global.tempLog("broken-links-commit", "configuration unchanged=" + unchangedConfigurationTargets.size()
-                    + " skipped=" + skipped[0] + " rows=" + rows.size());
+                    + " skipped=" + skipped[0] + " unrelated=" + unrelated[0] + " rows=" + rows.size());
                 return rows;
             }
         });
+    }
+
+    /** Удаление объекта также удаляет его именованные дочерние объекты и производные типы. */
+    private static boolean isDeletedTarget(String target, Set<String> deletedTargets)
+    {
+        if (deletedTargets.contains(target))
+            return true;
+        for (int dot = target.lastIndexOf('.'); dot > 0; dot = target.lastIndexOf('.', dot - 1))
+            if (deletedTargets.contains(target.substring(0, dot)))
+                return true;
+        return false;
     }
 
     /**
@@ -960,23 +1014,30 @@ public final class MdReferenceSupport
     public static boolean hasDeletedObjects(IComparisonDataSource previous, IComparisonDataSource current,
         Set<String> changedFiles, IProgressMonitor monitor)
     {
-        return hasDeletedObjects(previous, current.getBmModel(), changedFiles, monitor);
+        return !deletedObjects(previous, current.getBmModel(), changedFiles, monitor, true).isEmpty();
     }
 
     /** Исходные объекты из HEAD сопоставляются с загруженной рабочей моделью без импорта индекса. */
-    public static boolean hasDeletedObjects(IComparisonDataSource previous, IBmModel current,
+    public static Set<String> deletedObjects(IComparisonDataSource previous, IBmModel current,
         Set<String> changedFiles, IProgressMonitor monitor)
+    {
+        return deletedObjects(previous, current, changedFiles, monitor, false);
+    }
+
+    private static Set<String> deletedObjects(IComparisonDataSource previous, IBmModel current,
+        Set<String> changedFiles, IProgressMonitor monitor, boolean firstOnly)
     {
         var configuration = current.getEngine().getTopObjectByFqn("Configuration");
         if (configuration == null)
             throw new IllegalStateException("Не найдена конфигурация в модели индекса Git");
         URI currentBase = EcoreUtil.getURI(configuration).trimFragment().trimSegments(1);
-        return previous.getBmModel().executeReadonlyTask(new AbstractBmTask<Boolean>(
+        return previous.getBmModel().executeReadonlyTask(new AbstractBmTask<Set<String>>(
             "Поиск удалённых объектов коммита")
         {
             @Override
-            public Boolean execute(IBmTransaction transaction, IProgressMonitor taskMonitor)
+            public Set<String> execute(IBmTransaction transaction, IProgressMonitor taskMonitor)
             {
+                Set<String> deleted = new HashSet<>();
                 ArrayDeque<EObject> pending = new ArrayDeque<>();
                 var roots = transaction.getTopObjectIterator();
                 while (roots.hasNext())
@@ -1007,7 +1068,11 @@ public final class MdReferenceSupport
                         if (after == null || after.eIsProxy())
                         {
                             Global.tempLog("broken-links-commit", "deleted object=" + old);
-                            return true;
+                            deleted.add(fullName(old));
+                            if (firstOnly)
+                                return deleted;
+                            // Именованные потомки покрываются префиксом удалённой цели.
+                            continue;
                         }
                     }
                     if (object instanceof com._1c.g5.v8.dt.metadata.mdclass.BasicForm form && form.getForm() != null)
@@ -1040,7 +1105,7 @@ public final class MdReferenceSupport
                                     pending.add(nested);
                     }
                 }
-                return false;
+                return deleted;
             }
         });
     }

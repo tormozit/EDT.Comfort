@@ -331,6 +331,11 @@ this.completionListener = new CompletionListenerAdapter() {
             @Override
             public void assistSessionStarted(ContentAssistEvent event)
             {
+                BslEditorHighlightingHook.logAssistPaintState(viewer, "sessionStarted auto=" + event.isAutoActivated); //$NON-NLS-1$
+                if (Global.isLogEnabled() && viewer != null && viewer.getTextWidget() != null)
+                    viewer.getTextWidget().getDisplay().asyncExec(() ->
+                        BslEditorHighlightingHook.logAssistPaintState(viewer,
+                            "sessionStarted.afterDispatch popup=" + ContentAssistPopupSync.isPopupVisible(assistant))); //$NON-NLS-1$
                 // #region agent log
                 if (STALE_MARKERS_LOG)
                     Global.tempLog("stale-markers", "assist.sessionStarted " + describeReconciler(viewer)); //$NON-NLS-1$ //$NON-NLS-2$
@@ -473,6 +478,7 @@ if (Boolean.TRUE.equals(LITERAL_REPEAT_FROM_COMMAND.get()))
             @Override
             public void assistSessionEnded(ContentAssistEvent event)
             {
+                BslEditorHighlightingHook.logAssistPaintState(viewer, "sessionEnded"); //$NON-NLS-1$
                 // #region agent log
                 if (STALE_MARKERS_LOG)
                     Global.tempLog("stale-markers", "assist.sessionEnded " + describeReconciler(viewer)); //$NON-NLS-1$ //$NON-NLS-2$
@@ -884,6 +890,8 @@ boolean inLiteral = endCaret >= 0
             @Override
             public void documentChanged(DocumentEvent event)
             {
+                if (processor != null)
+                    processor.traceAssistInput(viewer, event);
                 long t0 = System.nanoTime();
                 noteDocumentChangedForValidation(event);
                 // #region agent log
@@ -1404,6 +1412,18 @@ boolean inLiteral = endCaret >= 0
                         lastExecMs, hintKind));
                 return;
             }
+        }
+        // Идёт разбор EDT: чтение ниже ждало бы его в beginRule (withModelSyncHeld) на UI.
+        // Опрашиваем дальше, UI не ждёт.
+        IDocument pollDoc = viewer != null ? viewer.getDocument() : null;
+        if (isModelSyncBusy(pollDoc) && waitMs < PARAM_HINT_AST_TIMEOUT_MS)
+        {
+            if (attempt == 0)
+                logLinkedMode("poll.waitModelSync", "{\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            display.timerExec(PARAM_HINT_AST_POLL_MS,
+                () -> pollAstReadyThenShowParamHint(desiredCaret, gen, attempt + 1, startedMs,
+                    lastExecMs, hintKind));
+            return;
         }
         String astAt = describeInvocationAt(desiredCaret);
         boolean ownOpen = isOwnCallOpenParen(astAt, desiredCaret);
@@ -1969,127 +1989,131 @@ boolean inLiteral = endCaret >= 0
 
     private void runInvocationParametersHoverCommand(int desiredCaret, int gen, int attempt)
     {
-        if (gen != paramHintPostGen.get())
-            return;
-        StyledText st = viewer != null ? viewer.getTextWidget() : null;
-        if (st == null || st.isDisposed())
-            return;
-        int caret = modelCaretOffset();
-        if (caret != desiredCaret)
+        try (ContentAssistDebug.FillSpan phase = ContentAssistDebug.fillStart("paramHint.show", null))
         {
-            logLinkedMode("hover.skip", "{\"reason\":\"caretMismatch\",\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"desired\":" + desiredCaret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            return;
-        }
-        if (isAnyParamHintShellVisible() || isParamHoverInfoControlVisible())
-        {
-            // Рядом с кареткой уже наша/нормальная — не дублируем.
-            // Далеко (навигатор) или поле выражения — сносим и открываем заново.
-            if (!isExpressionFieldViewer() && isParamHoverShellVisible())
+            if (gen != paramHintPostGen.get())
+                return;
+            StyledText st = viewer != null ? viewer.getTextWidget() : null;
+            if (st == null || st.isDisposed())
+                return;
+            int caret = modelCaretOffset();
+            if (caret != desiredCaret)
             {
-                paramHintPostGen.incrementAndGet();
-                logLinkedMode("hover.skip", "{\"reason\":\"alreadyVisible\",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                logLinkedMode("hover.skip", "{\"reason\":\"caretMismatch\",\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"desired\":" + desiredCaret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
             }
-            removeLinkedModeParamHintListeners("hover"); //$NON-NLS-1$
-            ParamHintHtmlModifier.dismissAllVisible();
-        }
-        ParamHoverProbe probe = new ParamHoverProbe();
-        long tOpen = ContentAssistDebug.perfStart("paramHint.open"); //$NON-NLS-1$
-        try
-        {
-            boolean inspect = isExpressionFieldViewer();
-            boolean assistOpen = ContentAssistPopupSync.isPopupVisible(assistant);
-            if (!inspect)
+            if (isAnyParamHintShellVisible() || isParamHoverInfoControlVisible())
             {
-                IWorkbenchPartSite site = facade != null ? facade.getSite() : null;
-                if (site != null && site.getPage() != null)
+                // Рядом с кареткой уже наша/нормальная — не дублируем.
+                // Далеко (навигатор) или поле выражения — сносим и открываем заново.
+                if (!isExpressionFieldViewer() && isParamHoverShellVisible())
                 {
-                    if (bslEditor != null)
-                        site.getPage().activate(bslEditor);
-                    else
-                        site.getPage().activate(site.getPart());
+                    paramHintPostGen.incrementAndGet();
+                    logLinkedMode("hover.skip", "{\"reason\":\"alreadyVisible\",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    return;
                 }
+                removeLinkedModeParamHintListeners("hover"); //$NON-NLS-1$
+                ParamHintHtmlModifier.dismissAllVisible();
             }
-            if (!st.isFocusControl())
-                st.setFocus();
-            // Любые чужие окна (LinkedMode / промах с координатами в навигаторе) —
-            // до нашей команды, иначе получим два shell.
-            // Слушателя LinkedMode-подсказки снимаем здесь же и безусловно: показ уже
-            // решён, а если снимать после показа, пользователь видит мигание — сначала
-            // чужое окно, потом наше (жалоба 13.09.2026 про «каждое второе открытие»).
-            forceRemoveLinkedModeParamHintListeners("beforeShow"); //$NON-NLS-1$
-            ParamHintHtmlModifier.dismissAllVisible();
-            boolean focused = st.isFocusControl();
-            Point caretDisp = null;
+            ParamHoverProbe probe = new ParamHoverProbe();
+            long tOpen = ContentAssistDebug.perfStart("paramHint.open"); //$NON-NLS-1$
             try
             {
-                caretDisp = st.toDisplay(st.getLocationAtOffset(st.getCaretOffset()));
-            }
-            catch (Exception ignored)
-            {
-            }
-            logLinkedMode("hover.pre", "{\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"inspect\":" + inspect //$NON-NLS-1$
-                + ",\"focused\":" + focused //$NON-NLS-1$
-                + ",\"assistOpen\":" + assistOpen //$NON-NLS-1$
-                + ",\"caretReady\":" + ParamHintHtmlModifier.isCaretDisplayReady(st) //$NON-NLS-1$
-                + ",\"caretDisp\":\"" + (caretDisp == null ? "null" : caretDisp.x + "," + caretDisp.y) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + "\",\"activeShell\":\"" + ContentAssistDebug.jsonEscapeForLog(
-                    describeActiveShell()) + "\"}"); //$NON-NLS-1$
-            if (inspect)
-            {
-                boolean opened = ParamHintHtmlModifier.tryOpenParamHintForViewer(viewer);
-                probe.execOk = opened;
-                probe.popupShown = opened || isParamHoverShellVisible();
-            }
-            else
-                probe = executeInvocationParametersHoverCommand();
-            if (!probe.popupShown && isParamHoverShellVisible())
-                probe.popupShown = true;
-            // Пересчёт положения после загрузки содержимого — для любого пути показа,
-            // включая штатную команду: иначе окно остаётся снизу от каретки, потому что
-            // в момент расчёта Browser пуст и высота почти нулевая.
-            if (probe.popupShown)
-                ParamHintHtmlModifier.repositionShownParamHint();
-            Shell shown = findParamHintShell(false);
-            // Границы только что показанной подсказки считает EDT, и правую она ставит
-            // НА закрывающую скобку — каретка перед «)» уже вне [first, last).
-            if (shown != null && viewer != null)
-                ParamHintHtmlModifier.includeClosingParen(viewer.getTextWidget(),
-                    viewer.getDocument());
-            if (shown != null && !shown.isDisposed())
-            {
-                boolean moved = ParamHintHtmlModifier.ensureParamHintShellGeometry(shown, st);
-                Point loc = shown.getLocation();
-                logLinkedMode("hover.shell", "{\"near\":" + (findParamHintShell(true) != null) //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"moved\":" + moved //$NON-NLS-1$
-                    + ",\"loc\":\"" + loc.x + "," + loc.y + "\"" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + ",\"size\":\"" + shown.getSize().x + "x" + shown.getSize().y + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                if (findParamHintShell(true) != null)
+                boolean inspect = isExpressionFieldViewer();
+                boolean assistOpen = ContentAssistPopupSync.isPopupVisible(assistant);
+                if (!inspect)
+                {
+                    IWorkbenchPartSite site = facade != null ? facade.getSite() : null;
+                    if (site != null && site.getPage() != null)
+                    {
+                        if (bslEditor != null)
+                            site.getPage().activate(bslEditor);
+                        else
+                            site.getPage().activate(site.getPart());
+                    }
+                }
+                if (!st.isFocusControl())
+                    st.setFocus();
+                // Любые чужие окна (LinkedMode / промах с координатами в навигаторе) —
+                // до нашей команды, иначе получим два shell.
+                // Слушателя LinkedMode-подсказки снимаем здесь же и безусловно: показ уже
+                // решён, а если снимать после показа, пользователь видит мигание — сначала
+                // чужое окно, потом наше (жалоба 13.09.2026 про «каждое второе открытие»).
+                forceRemoveLinkedModeParamHintListeners("beforeShow"); //$NON-NLS-1$
+                ParamHintHtmlModifier.dismissAllVisible();
+                boolean focused = st.isFocusControl();
+                Point caretDisp = null;
+                try
+                {
+                    caretDisp = st.toDisplay(st.getLocationAtOffset(st.getCaretOffset()));
+                }
+                catch (Exception ignored)
+                {
+                }
+                logLinkedMode("hover.pre", "{\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"inspect\":" + inspect //$NON-NLS-1$
+                    + ",\"focused\":" + focused //$NON-NLS-1$
+                    + ",\"assistOpen\":" + assistOpen //$NON-NLS-1$
+                    + ",\"caretReady\":" + ParamHintHtmlModifier.isCaretDisplayReady(st) //$NON-NLS-1$
+                    + ",\"caretDisp\":\"" + (caretDisp == null ? "null" : caretDisp.x + "," + caretDisp.y) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + "\",\"activeShell\":\"" + ContentAssistDebug.jsonEscapeForLog(
+                        describeActiveShell()) + "\"}"); //$NON-NLS-1$
+                if (inspect)
+                {
+                    boolean opened = ParamHintHtmlModifier.tryOpenParamHintForViewer(viewer);
+                    probe.execOk = opened;
+                    probe.popupShown = opened || isParamHoverShellVisible();
+                }
+                else
+                    probe = executeInvocationParametersHoverCommand();
+                if (!probe.popupShown && isParamHoverShellVisible())
                     probe.popupShown = true;
+                // Пересчёт положения после загрузки содержимого — для любого пути показа,
+                // включая штатную команду: иначе окно остаётся снизу от каретки, потому что
+                // в момент расчёта Browser пуст и высота почти нулевая.
+                if (probe.popupShown)
+                    ParamHintHtmlModifier.repositionShownParamHint();
+                Shell shown = findParamHintShell(false);
+                // Границы только что показанной подсказки считает EDT, и правую она ставит
+                // НА закрывающую скобку — каретка перед «)» уже вне [first, last).
+                if (shown != null && viewer != null)
+                    ParamHintHtmlModifier.includeClosingParen(viewer.getTextWidget(),
+                        viewer.getDocument());
+                if (shown != null && !shown.isDisposed())
+                {
+                    boolean moved = ParamHintHtmlModifier.ensureParamHintShellGeometry(shown, st);
+                    Point loc = shown.getLocation();
+                    logLinkedMode("hover.shell", "{\"near\":" + (findParamHintShell(true) != null) //$NON-NLS-1$ //$NON-NLS-2$
+                        + ",\"moved\":" + moved //$NON-NLS-1$
+                        + ",\"loc\":\"" + loc.x + "," + loc.y + "\"" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        + ",\"size\":\"" + shown.getSize().x + "x" + shown.getSize().y + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    if (findParamHintShell(true) != null)
+                        probe.popupShown = true;
+                }
+                if (probe.popupShown)
+                    paramHintPostGen.incrementAndGet();
             }
-            if (probe.popupShown)
-                paramHintPostGen.incrementAndGet();
+            catch (Exception ex)
+            {
+                probe.execOk = false;
+                probe.err = String.valueOf(ex);
+            }
+            finally
+            {
+                ContentAssistDebug.perfEnd("paramHint.open", tOpen, //$NON-NLS-1$
+                    "{\"popupShown\":" + probe.popupShown //$NON-NLS-1$
+                        + ",\"execOk\":" + probe.execOk + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            logLinkedMode("hover.exec", "{\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"caret\":" + caret //$NON-NLS-1$
+                + ",\"execOk\":" + probe.execOk //$NON-NLS-1$
+                + ",\"popupShown\":" + probe.popupShown //$NON-NLS-1$
+                + ",\"infoControl\":\"" + ContentAssistDebug.jsonEscapeForLog(probe.infoControlState) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"handler\":\"" + ContentAssistDebug.jsonEscapeForLog(probe.handlerClass) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"err\":\"" + ContentAssistDebug.jsonEscapeForLog(probe.err) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+
         }
-        catch (Exception ex)
-        {
-            probe.execOk = false;
-            probe.err = String.valueOf(ex);
-        }
-        finally
-        {
-            ContentAssistDebug.perfEnd("paramHint.open", tOpen, //$NON-NLS-1$
-                "{\"popupShown\":" + probe.popupShown //$NON-NLS-1$
-                    + ",\"execOk\":" + probe.execOk + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-        }
-        logLinkedMode("hover.exec", "{\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
-            + ",\"caret\":" + caret //$NON-NLS-1$
-            + ",\"execOk\":" + probe.execOk //$NON-NLS-1$
-            + ",\"popupShown\":" + probe.popupShown //$NON-NLS-1$
-            + ",\"infoControl\":\"" + ContentAssistDebug.jsonEscapeForLog(probe.infoControlState) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-            + ",\"handler\":\"" + ContentAssistDebug.jsonEscapeForLog(probe.handlerClass) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-            + ",\"err\":\"" + ContentAssistDebug.jsonEscapeForLog(probe.err) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     /** Штатная команда BSL: Ctrl+Shift+Space — подсказка параметров вызова. */
@@ -2107,37 +2131,45 @@ boolean inLiteral = endCaret >= 0
 
     private ParamHoverProbe executeInvocationParametersHoverCommand()
     {
-        ParamHoverProbe probe = new ParamHoverProbe();
-        try
+        try (ContentAssistDebug.FillSpan phase = ContentAssistDebug.fillStart("paramHint.command", null))
         {
-            org.eclipse.ui.IWorkbenchWindow window =
-                PlatformUI.getWorkbench().getActiveWorkbenchWindow();
-            if (window == null)
+            ParamHoverProbe probe = new ParamHoverProbe();
+            try
             {
-                probe.err = "windowNull"; //$NON-NLS-1$
+                org.eclipse.ui.IWorkbenchWindow window =
+                    PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+                if (window == null)
+                {
+                    probe.err = "windowNull"; //$NON-NLS-1$
+                    return probe;
+                }
+                org.eclipse.ui.IWorkbenchPartSite site = facade != null ? facade.getSite() : null;
+                org.eclipse.ui.handlers.IHandlerService handlers = null;
+                if (site != null)
+                    handlers = site.getService(org.eclipse.ui.handlers.IHandlerService.class);
+                if (handlers == null)
+                    handlers = window.getService(org.eclipse.ui.handlers.IHandlerService.class);
+                if (handlers == null)
+                {
+                    probe.err = "handlersNull"; //$NON-NLS-1$
+                    return probe;
+                }
+                try (ContentAssistDebug.FillSpan nativePhase =
+                    ContentAssistDebug.fillStart("paramHint.nativeExecute", handlers))
+            {
+                handlers.executeCommand(INVOCATION_PARAMETERS_HOVER_COMMAND, null);
+            }
+                probe.execOk = true;
+                fillParamHoverInfoControlProbe(probe);
                 return probe;
             }
-            org.eclipse.ui.IWorkbenchPartSite site = facade != null ? facade.getSite() : null;
-            org.eclipse.ui.handlers.IHandlerService handlers = null;
-            if (site != null)
-                handlers = site.getService(org.eclipse.ui.handlers.IHandlerService.class);
-            if (handlers == null)
-                handlers = window.getService(org.eclipse.ui.handlers.IHandlerService.class);
-            if (handlers == null)
+            catch (Exception ex)
             {
-                probe.err = "handlersNull"; //$NON-NLS-1$
+                probe.execOk = false;
+                probe.err = String.valueOf(ex);
                 return probe;
             }
-            handlers.executeCommand(INVOCATION_PARAMETERS_HOVER_COMMAND, null);
-            probe.execOk = true;
-            fillParamHoverInfoControlProbe(probe);
-            return probe;
-        }
-        catch (Exception ex)
-        {
-            probe.execOk = false;
-            probe.err = String.valueOf(ex);
-            return probe;
+
         }
     }
 
@@ -2579,7 +2611,28 @@ boolean inLiteral = endCaret >= 0
      */
     static <T> T readOnlyForContentAssist(IXtextDocument doc, IUnitOfWork<T, XtextResource> work)
     {
-        Object result = invokeBslRead(doc, "readOnlyForContentAssist", work); //$NON-NLS-1$
+        // Без удержания перепарсинга штатное чтение идёт одновременно с ним
+        // (withModelSyncHeld): так упало «Unhandled event loop exception: StackOverflowError»
+        // из подсказки параметров сразу после вставки УстановитьТекстЗапроса(Текст)
+        // (лог 15.10.2026 09:25:38).
+        // На UI идущий или поставленный разбор не ждём (замер 15.10.2026 09:41: опрос
+        // подсказки параметров стоял в beginRule 4,3 с) — попытку пропускаем, вызывающий
+        // повторит или обойдётся без ответа.
+        if (Display.getCurrent() != null && isModelSyncBusy(doc))
+        {
+            SmartContentAssistProcessor.uiBlockLog("modelSync.uiSkip", "read"); //$NON-NLS-1$ //$NON-NLS-2$
+            return null;
+        }
+        Object result = withModelSyncHeld(doc, null,
+            () -> invokeBslRead(doc, "readOnlyForContentAssist", work)); //$NON-NLS-1$
+        // #region agent log
+        // Однократно: прошёл ли этот вызов через вплетённый вход (wovenBeginCalled).
+        BslXtextDocumentHook.logWeaveDiagOnce("firstAssistRead docClass=" //$NON-NLS-1$
+            + (doc == null ? "null" : doc.getClass().getName()) //$NON-NLS-1$
+            + " lockerClass=" + (doc == null ? "null" //$NON-NLS-1$ //$NON-NLS-2$
+                : String.valueOf(Global.getField(doc, "stateAccess") == null ? null //$NON-NLS-1$
+                    : Global.getField(doc, "stateAccess").getClass().getName()))); //$NON-NLS-1$
+        // #endregion
         if (result != BSL_READ_MISSING)
         {
             // Прямой тип BslXtextDocument тянет отсутствующий в build path
@@ -2601,6 +2654,410 @@ boolean inLiteral = endCaret >= 0
     /** Семейство штатного задания, догоняющего модель до текста для автодополнения. */
     private static final String ASSIST_SYNC_JOB_FAMILY =
         "com._1c.g5.v8.dt.bsl.ui.editor.BslXtextDocument$ContentAssistResourceSync"; //$NON-NLS-1$
+
+    /**
+     * Штатное задание документа, догоняющее модель до текста
+     * ({@code BslXtextDocument.stateAccess.contentAssistSyncJob}); {@code null} — не BSL-документ.
+     */
+    private static org.eclipse.core.runtime.jobs.Job assistSyncJob(IDocument doc)
+    {
+        Object locker = Global.getField(doc, "stateAccess"); //$NON-NLS-1$
+        return Global.getField(locker, "contentAssistSyncJob") //$NON-NLS-1$
+            instanceof org.eclipse.core.runtime.jobs.Job job ? job : null;
+    }
+
+    /**
+     * Удержание догоняющего разбора EDT на время штатного расчёта.
+     *
+     * <p>{@code readOnlyForContentAssist}, увидев, что модель отстала от текста, ставит
+     * задание {@code ContentAssistResourceSync} и тут же, без замка, считает по той же
+     * модели: перепарсинг и расчёт идут одновременно — {@code ConcurrentModificationException}
+     * в {@code TypesComputer}/{@code CreatorTreeState}, потом испорченные прокси и бесконечная
+     * рекурсия {@code BslLazyUriEncoder} → «Переполнение стека» (лог 15.10.2026 08:59).
+     * Ждать разбор перед расчётом нельзя: на большом модуле он идёт ~4 с (лог 09:30).
+     * Поэтому расчёт идёт по текущей модели, как у самой EDT, а заданию разбора дано это
+     * правило: поставленное во время расчёта, оно стартует только после него.
+     */
+    private static final org.eclipse.core.runtime.jobs.ISchedulingRule ASSIST_SYNC_HOLD =
+        new org.eclipse.core.runtime.jobs.ISchedulingRule()
+        {
+            @Override
+            public boolean contains(org.eclipse.core.runtime.jobs.ISchedulingRule rule)
+            {
+                return rule == this;
+            }
+
+            @Override
+            public boolean isConflicting(org.eclipse.core.runtime.jobs.ISchedulingRule rule)
+            {
+                return rule == this;
+            }
+
+            @Override
+            public String toString()
+            {
+                return "ComfortAssistSyncHold"; //$NON-NLS-1$
+            }
+        };
+
+    /** Шаг ожидания идущего разбора: между шагами спрашиваем {@code abort}. */
+    private static final long MODEL_SYNC_JOIN_STEP_MS = 100;
+
+    /** Разбор EDT сейчас идёт: прервать его нельзя, только дождаться. */
+    static boolean isModelSyncRunning(IDocument doc)
+    {
+        org.eclipse.core.runtime.jobs.Job job = assistSyncJob(doc);
+        return job != null && job.getState() == org.eclipse.core.runtime.jobs.Job.RUNNING;
+    }
+
+    // #region agent log
+    /**
+     * Временная диагностика: состояние модели в момент штатного расчёта — совпадает ли разбор
+     * с текстом, разобран ли только метод и готово ли локальное разрешение ссылок, в каком
+     * состоянии задание разбора. Ровно то, чего ждёт штатный readOnlyForContentAssist.
+     */
+    static String describeModelState(IDocument doc)
+    {
+        try
+        {
+            org.eclipse.core.runtime.jobs.Job job = assistSyncJob(doc);
+            Object resource = Global.getField(doc, "resource"); //$NON-NLS-1$
+            String textMatch = "?"; //$NON-NLS-1$
+            if (resource instanceof XtextResource xtext)
+            {
+                org.eclipse.xtext.parser.IParseResult parse = xtext.getParseResult();
+                ICompositeNode root = parse != null ? parse.getRootNode() : null;
+                textMatch = root == null ? "noRoot" //$NON-NLS-1$
+                    : String.valueOf(root.getText().equals(doc.get()));
+            }
+            return "textMatch=" + textMatch //$NON-NLS-1$
+                + " onlyMethodReparse=" + Global.invoke(resource, "isOnlyMethodReparse") //$NON-NLS-1$ //$NON-NLS-2$
+                + " localResolved=" + Global.invoke(resource, "isLocalResolveCrossReference") //$NON-NLS-1$ //$NON-NLS-2$
+                + " syncJob=" + (job == null ? "null" : String.valueOf(job.getState())); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        catch (Throwable t)
+        {
+            return "err=" + t; //$NON-NLS-1$
+        }
+    }
+    // #endregion
+
+    /** Сколько ждать разрешения ссылок после совпавшего разбора, прежде чем считать без него. */
+    private static final long LOCAL_RESOLVE_GRACE_MS = 1500;
+    /** Потолок ожидания готовности модели: выход раньше — по устареванию запроса. */
+    private static final long MODEL_READY_CAP_MS = 15_000;
+
+    /**
+     * Дождаться модели, по которой штатный расчёт даст члены после точки. Замер 15.10.2026
+     * 09:59: по модели без точки — только шаблон (1,2 с впустую, да ещё под удержанием,
+     * которое не пускало разбор); по модели с точкой, но без разрешённых ссылок —
+     * тоже только шаблон. Поэтому ждём, пока разбор не идёт, текст модели до {@code end}
+     * совпадает с документом (набор после точки не мешает) и ссылки разрешены. Отставшую
+     * модель догоняем штатным заданием сами; удержание при этом не берём.
+     *
+     * @return {@code false} — запрос устарел ({@code abort}) или вышел потолок
+     */
+    static boolean waitModelReadyUpTo(IDocument doc, int end, java.util.function.BooleanSupplier abort)
+    {
+        org.eclipse.core.runtime.jobs.Job job = assistSyncJob(doc);
+        if (job == null || doc == null)
+            return true;
+        long t0 = System.nanoTime();
+        long matchedAtNs = 0L;
+        int steps = 0;
+        String why = "ready"; //$NON-NLS-1$
+        boolean ok = true;
+        while (true)
+        {
+            if (abort != null && abort.getAsBoolean())
+            {
+                why = "aborted"; //$NON-NLS-1$
+                ok = false;
+                break;
+            }
+            long waitedMs = (System.nanoTime() - t0) / 1_000_000L;
+            if (waitedMs >= MODEL_READY_CAP_MS)
+            {
+                why = "cap"; //$NON-NLS-1$
+                ok = false;
+                break;
+            }
+            if (job.getState() == org.eclipse.core.runtime.jobs.Job.NONE)
+            {
+                if (!modelTextMatchesUpTo(doc, end))
+                {
+                    matchedAtNs = 0L;
+                    job.schedule();
+                }
+                else
+                {
+                    if (matchedAtNs == 0L)
+                        matchedAtNs = System.nanoTime();
+                    Object resource = Global.getField(doc, "resource"); //$NON-NLS-1$
+                    boolean resolved = !Boolean.FALSE.equals(
+                        Global.invoke(resource, "isLocalResolveCrossReference")); //$NON-NLS-1$
+                    if (resolved)
+                        break;
+                    if ((System.nanoTime() - matchedAtNs) / 1_000_000L >= LOCAL_RESOLVE_GRACE_MS)
+                    {
+                        why = "resolveGrace"; //$NON-NLS-1$
+                        break;
+                    }
+                }
+            }
+            steps++;
+            boolean idle = job.getState() == org.eclipse.core.runtime.jobs.Job.NONE;
+            if (idle)
+            {
+                // join у незапланированного задания возвращается сразу — ждём шагом сами.
+                try
+                {
+                    Thread.sleep(MODEL_SYNC_JOIN_STEP_MS);
+                }
+                catch (InterruptedException e)
+                {
+                    Thread.currentThread().interrupt();
+                    why = "interrupted"; //$NON-NLS-1$
+                    ok = false;
+                    break;
+                }
+            }
+            else if (!joinStep(job, abort))
+            {
+                why = "aborted"; //$NON-NLS-1$
+                ok = false;
+                break;
+            }
+        }
+        long ms = (System.nanoTime() - t0) / 1_000_000L;
+        if (steps > 0 || !ok)
+            SmartContentAssistProcessor.uiBlockLog("modelReady.wait", //$NON-NLS-1$
+                "why=" + why + " ms=" + ms + " steps=" + steps + " end=" + end); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+        return ok;
+    }
+
+    /** Текст модели до {@code end} совпадает с текстом документа. */
+    private static boolean modelTextMatchesUpTo(IDocument doc, int end)
+    {
+        if (!(Global.getField(doc, "resource") instanceof XtextResource resource)) //$NON-NLS-1$
+            return true;
+        org.eclipse.xtext.parser.IParseResult parse = resource.getParseResult();
+        ICompositeNode root = parse != null ? parse.getRootNode() : null;
+        if (root == null)
+            return false;
+        String model = root.getText();
+        try
+        {
+            // Литералу нужен весь текущий разбор, включая удаление хвоста документа.
+            if (end == Integer.MAX_VALUE)
+                return model.equals(doc.get());
+            int len = Math.min(end, doc.getLength());
+            return model.length() >= len && model.regionMatches(0, doc.get(0, len), 0, len);
+        }
+        catch (org.eclipse.jface.text.BadLocationException e)
+        {
+            return false;
+        }
+    }
+
+    /** Разбор EDT идёт или поставлен. */
+    static boolean isModelSyncBusy(IDocument doc)
+    {
+        org.eclipse.core.runtime.jobs.Job job = assistSyncJob(doc);
+        return job != null && job.getState() != org.eclipse.core.runtime.jobs.Job.NONE;
+    }
+
+    /**
+     * Модель совпадает с текстом и разбор не стоит: чтение без синхронизации увидит то же,
+     * что на экране, и ничего не запустит. Та же проверка текста, что в
+     * {@code readOnlyForContentAssist}. Только для BSL-документа, иначе {@code false}.
+     */
+    static boolean isModelCurrent(IDocument doc)
+    {
+        if (assistSyncJob(doc) == null || isModelSyncBusy(doc))
+            return false;
+        if (!(Global.getField(doc, "resource") instanceof XtextResource resource)) //$NON-NLS-1$
+            return false;
+        org.eclipse.xtext.parser.IParseResult parse = resource.getParseResult();
+        ICompositeNode root = parse != null ? parse.getRootNode() : null;
+        return root != null && root.getText().equals(doc.get());
+    }
+
+    /**
+     * Мониторы второстепенных читателей модели (проверка орфографии), держащих удержание.
+     * Расчёт подсказок, начиная своё удержание, отменяет их — они выходят на следующем шаге
+     * и отпускают правило: второстепенная работа не задерживает подсказки.
+     */
+    private static final java.util.Set<org.eclipse.core.runtime.IProgressMonitor> LOW_PRIORITY_HOLDERS =
+        java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    /**
+     * Удержание для второстепенного читателя: как {@link #beginModelSyncHold}, но его
+     * отменяет любой расчёт подсказок ({@link #LOW_PRIORITY_HOLDERS}). Парный вызов —
+     * {@link #endLowPriorityHold}, только если вернулось {@code TRUE}.
+     */
+    static Boolean beginLowPriorityHold(IDocument doc, org.eclipse.core.runtime.IProgressMonitor monitor,
+                                        java.util.function.BooleanSupplier abort)
+    {
+        Boolean held = beginModelSyncHoldInternal(assistSyncJob(doc), abort, false);
+        if (Boolean.TRUE.equals(held))
+            LOW_PRIORITY_HOLDERS.add(monitor);
+        return held;
+    }
+
+    static void endLowPriorityHold(org.eclipse.core.runtime.IProgressMonitor monitor)
+    {
+        LOW_PRIORITY_HOLDERS.remove(monitor);
+        endModelSyncHold();
+    }
+
+    /**
+     * Дать заданию разбора {@link #ASSIST_SYNC_HOLD}. {@code Job.setRule} допустим только
+     * у незапланированного задания ({@code JobManager.setRule}: {@code state == NONE}),
+     * поэтому при первом обращении ждём, пока оно освободится.
+     */
+    private static boolean attachHoldRule(org.eclipse.core.runtime.jobs.Job job,
+                                          java.util.function.BooleanSupplier abort)
+    {
+        while (job.getRule() != ASSIST_SYNC_HOLD)
+        {
+            synchronized (ASSIST_SYNC_HOLD)
+            {
+                if (job.getRule() == ASSIST_SYNC_HOLD)
+                    return true;
+                if (job.getState() == org.eclipse.core.runtime.jobs.Job.NONE)
+                {
+                    try
+                    {
+                        job.setRule(ASSIST_SYNC_HOLD);
+                        SmartContentAssistProcessor.uiBlockLog("modelSync.ruleAttached", //$NON-NLS-1$
+                            "job=" + System.identityHashCode(job)); //$NON-NLS-1$
+                        return true;
+                    }
+                    catch (RuntimeException e)
+                    {
+                        // Задание успели поставить между проверкой и setRule — ждём ещё.
+                    }
+                }
+            }
+            if (!joinStep(job, abort))
+                return false;
+        }
+        return true;
+    }
+
+    /** Шаг ожидания задания. {@code false} — запрос устарел или поток прерван. */
+    private static boolean joinStep(org.eclipse.core.runtime.jobs.Job job,
+                                    java.util.function.BooleanSupplier abort)
+    {
+        if (abort != null && abort.getAsBoolean())
+            return false;
+        try
+        {
+            job.join(MODEL_SYNC_JOIN_STEP_MS, null);
+        }
+        catch (InterruptedException e)
+        {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+        catch (org.eclipse.core.runtime.OperationCanceledException e)
+        {
+            // join прерван — решит следующая проверка
+        }
+        return true;
+    }
+
+    /**
+     * Выполнить штатный расчёт по текущей модели, удерживая догоняющий разбор EDT
+     * ({@link #ASSIST_SYNC_HOLD}). Идущий разбор прервать нельзя — его ждём: шагами, пока
+     * {@code abort} (может быть {@code null}) не скажет, что запрос устарел, иначе внутри
+     * {@code beginRule}.
+     *
+     * @return результат {@code body} или {@code null}, если запрос устарел во время ожидания
+     */
+    static <T> T withModelSyncHeld(IDocument doc, java.util.function.BooleanSupplier abort,
+                                   java.util.function.Supplier<T> body)
+    {
+        Boolean held = beginModelSyncHold(assistSyncJob(doc), abort);
+        if (held == null)
+            return null;
+        try
+        {
+            return body.get();
+        }
+        finally
+        {
+            if (held.booleanValue())
+                endModelSyncHold();
+        }
+    }
+
+    /** С какого ожидания удержания пишем строку в лог: это порог наблюдения, не задержка. */
+    private static final long MODEL_SYNC_HOLD_REPORT_MS = 5;
+
+    /**
+     * Начать удержание разбора {@code job} ({@link #ASSIST_SYNC_HOLD}); парный вызов —
+     * {@link #endModelSyncHold()}, только если вернулось {@code TRUE}. Зовётся и из
+     * вплетённого в EDT {@code readOnlyForContentAssist} ({@code BslXtextDocumentHook}).
+     *
+     * @return {@code TRUE} — правило взято; {@code FALSE} — удерживать нечего или нельзя
+     *     (считаем как раньше); {@code null} — запрос устарел во время ожидания
+     */
+    static Boolean beginModelSyncHold(org.eclipse.core.runtime.jobs.Job job,
+                                      java.util.function.BooleanSupplier abort)
+    {
+        return beginModelSyncHoldInternal(job, abort, true);
+    }
+
+    private static Boolean beginModelSyncHoldInternal(org.eclipse.core.runtime.jobs.Job job,
+                                                      java.util.function.BooleanSupplier abort,
+                                                      boolean preemptLowPriority)
+    {
+        if (job == null)
+            return Boolean.FALSE;
+        if (preemptLowPriority)
+            for (org.eclipse.core.runtime.IProgressMonitor holder : LOW_PRIORITY_HOLDERS)
+                holder.setCanceled(true);
+        long t0 = System.nanoTime();
+        if (!attachHoldRule(job, abort))
+            return abort != null ? null : Boolean.FALSE;
+        if (abort != null)
+        {
+            while (job.getState() == org.eclipse.core.runtime.jobs.Job.RUNNING)
+            {
+                if (!joinStep(job, abort))
+                {
+                    SmartContentAssistProcessor.uiBlockLog("modelSync.hold", //$NON-NLS-1$
+                        "aborted=true waitMs=" + ((System.nanoTime() - t0) / 1_000_000L)); //$NON-NLS-1$
+                    return null;
+                }
+            }
+        }
+        boolean held = false;
+        try
+        {
+            org.eclipse.core.runtime.jobs.Job.getJobManager().beginRule(ASSIST_SYNC_HOLD, null);
+            held = true;
+        }
+        catch (RuntimeException e)
+        {
+            // Поток уже держит чужое правило (beginRule не вкладывается в несовместимое).
+            SmartContentAssistProcessor.uiBlockLogThrowable("modelSync.hold.err", e); //$NON-NLS-1$
+        }
+        long waitMs = (System.nanoTime() - t0) / 1_000_000L;
+        if (waitMs >= MODEL_SYNC_HOLD_REPORT_MS || !held)
+            SmartContentAssistProcessor.uiBlockLog("modelSync.hold", //$NON-NLS-1$
+                "held=" + held + " waitMs=" + waitMs //$NON-NLS-1$ //$NON-NLS-2$
+                    + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
+        return Boolean.valueOf(held);
+    }
+
+    /** Конец удержания, начатого {@link #beginModelSyncHold} с результатом {@code TRUE}. */
+    static void endModelSyncHold()
+    {
+        org.eclipse.core.runtime.jobs.Job.getJobManager().endRule(ASSIST_SYNC_HOLD);
+    }
 
     private static final java.util.Map<IDocument, ValidationWatch> VALIDATION_WATCHES =
         java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
@@ -4893,11 +5350,27 @@ boolean inLiteral = endCaret >= 0
         int live = modelCaretOffset();
         if (live < 0)
             live = caret;
+        boolean cachedOnly = processor.hasReadyLiteralArgListForCaret(viewer, live);
         long tOpen = System.nanoTime();
         warmupAssistBrowserCreator(live);
-        openCompletionAutoEdtPopup(live, autoOpenSeq, false);
+        final int readyCaret = live;
+        // __string остаётся штатной вне этого показа. Здесь список уже посчитан:
+        // штатный processor не знает о нашем кэше и повторно блокировал UI на 0,4–2,8 с.
+        boolean supplied = false;
+        if (cachedOnly)
+            supplied = ContentAssistPatcher.runWithProcessorForCaret(assistant, viewer,
+                readyCaret, processor, () -> openCompletionAutoEdtPopup(readyCaret, autoOpenSeq, true));
+        if (!supplied)
+        {
+            ContentAssistDebug.pipeline("literalArg.open.deferred", "caret=" + live
+                + " reason=" + (cachedOnly ? "processorUnavailable" : "cacheMiss"));
+            if (!cachedOnly)
+                processor.scheduleLiteralArgListInBackground(viewer, readyCaret, "openCacheMiss",
+                    () -> openLiteralArgPopup(readyCaret, autoOpenSeq));
+        }
         Global.tempLog("literal-arg", "open uiMs=" + ((System.nanoTime() - tOpen) / 1_000_000L) //$NON-NLS-1$ //$NON-NLS-2$
             + " caret=" + caret + " live=" + live //$NON-NLS-1$ //$NON-NLS-2$
+            + " cachedProcessor=" + supplied
             + " visible=" + ContentAssistPopupSync.isPopupVisible(assistant)); //$NON-NLS-1$
     }
 
@@ -4912,9 +5385,60 @@ boolean inLiteral = endCaret >= 0
             && processor.hasReadyFullListCacheForCaret(viewer, caret);
     }
 
+    /** Потолок ожидания идущего разбора EDT перед штатным расчётом из ворот показа. */
+    private static final long MODEL_SYNC_WAIT_CAP_MS = 8000;
+
+    /** Когда отложенный показ начал ждать идущий разбор; 0 — не ждёт. Только UI. */
+    private long modelSyncWaitSinceNs;
+
+    /**
+     * Штатный расчёт удерживает разбор EDT ({@link #withModelSyncHeld}), но идущий разбор
+     * прервать нельзя, а ждать его в {@code beginRule} на UI — заморозка на секунды. Пока
+     * он идёт, показ повторяем через ворота; UI при этом не ждёт.
+     *
+     * @return {@code true} — показ отложен (или снят по потолку ожидания)
+     */
+    private boolean deferUntilModelSynced(int expectedCaret, int autoOpenSeq)
+    {
+        IDocument doc = viewer != null ? viewer.getDocument() : null;
+        long now = System.nanoTime();
+        long waitMs = modelSyncWaitSinceNs == 0L ? 0L : (now - modelSyncWaitSinceNs) / 1_000_000L;
+        if (!isModelSyncRunning(doc))
+        {
+            if (modelSyncWaitSinceNs != 0L)
+                SmartContentAssistProcessor.uiBlockLog("show.modelSync.done", //$NON-NLS-1$
+                    "caret=" + expectedCaret + " waitMs=" + waitMs); //$NON-NLS-1$ //$NON-NLS-2$
+            modelSyncWaitSinceNs = 0L;
+            return false;
+        }
+        if (modelSyncWaitSinceNs == 0L)
+        {
+            modelSyncWaitSinceNs = now;
+            SmartContentAssistProcessor.uiBlockLog("show.modelSync.wait", "caret=" + expectedCaret); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        else if (waitMs >= MODEL_SYNC_WAIT_CAP_MS)
+        {
+            SmartContentAssistProcessor.uiBlockLog("show.modelSync.drop", //$NON-NLS-1$
+                "caret=" + expectedCaret + " waitMs=" + waitMs); //$NON-NLS-1$ //$NON-NLS-2$
+            modelSyncWaitSinceNs = 0L;
+            return true;
+        }
+        showGate.request("modelSync", () -> { //$NON-NLS-1$
+            if (ContentAssistPopupSync.isPopupVisible(assistant))
+            {
+                modelSyncWaitSinceNs = 0L;
+                return;
+            }
+            openCompletionAutoEdtPopup(expectedCaret, autoOpenSeq, false);
+        });
+        return true;
+    }
+
     private void openCompletionAutoEdtPopup(int expectedCaret, int autoOpenSeq,
                                             boolean cachedListOnly)
     {
+        if (!cachedListOnly && deferUntilModelSynced(expectedCaret, autoOpenSeq))
+            return;
         // Ветки «пробел / = / буква» открываются с пустым словом, а «&~#» — со уже набранным
         // символом. Обнулять фильтр там нельзя: попап собирался по кэшированному полному
         // списку, и после амперсанда в него доливался весь список EDT для этого места модуля.
@@ -4933,7 +5457,11 @@ boolean inLiteral = endCaret >= 0
                 + " cachedListOnly=" + cachedListOnly //$NON-NLS-1$
                 + " filter=" + currentDocumentFilter(expectedCaret)); //$NON-NLS-1$
         // #endregion
-        boolean shown = ContentAssistPopupSync.showPossibleCompletions(assistant, cachedListOnly);
+        // Штатный расчёт (не из кэша) — с удержанием разбора EDT, см. withModelSyncHeld.
+        boolean shown = cachedListOnly
+            ? ContentAssistPopupSync.showPossibleCompletions(assistant, true)
+            : Boolean.TRUE.equals(withModelSyncHeld(viewer != null ? viewer.getDocument() : null, null,
+                () -> Boolean.valueOf(ContentAssistPopupSync.showPossibleCompletions(assistant, false))));
         // #region agent log
         SmartContentAssistProcessor.uiBlockLog("openCompletionAutoEdtPopup.afterShow", //$NON-NLS-1$
             "ms=" + ((System.nanoTime() - tShow) / 1_000_000L) //$NON-NLS-1$
@@ -5469,9 +5997,15 @@ if (!inLiteral)
     /** Один COM {@code ОписаниеТекущегоСловаАвтодополнения} на ключ за одну активацию строки. */
     public boolean tryBeginIrActivation(String stableCacheKey)
     {
+        return tryBeginIrActivation(stableCacheKey, false);
+    }
+
+    /** Фоновая подготовка EDT-описания нужна и при готовом ответе ИР; не дублируем её. */
+    boolean tryBeginIrActivation(String stableCacheKey, boolean allowCached)
+    {
         if (stableCacheKey == null || stableCacheKey.isEmpty())
             return false;
-        if (irActivationByKey.containsKey(stableCacheKey))
+        if (!allowCached && irActivationByKey.containsKey(stableCacheKey))
             return false;
         return pendingIrActivationKeys.add(stableCacheKey);
     }
@@ -5972,9 +6506,10 @@ if (!inLiteral)
     {
         if (!ComfortSettings.isReplaceListFiltersEnabled())
             return false;
-        if (!irConnectedForAssist())
+        // Отсутствие выделения исключает режим без дорогого поиска подключения ИР.
+        if (widgetSelectionLength() <= 0)
             return false;
-        return widgetSelectionLength() > 0;
+        return irConnectedForAssist();
     }
 
     private IrBslCompletionSupport.Snapshot buildSnapshotFromRaw(
@@ -6423,7 +6958,17 @@ processor.applyIrCompletion(snapshot);
     /** Повторная загрузка списка после reconcile (member-access после точки). */
     public static void refreshPopupIfOpen()
     {
-        requestPopupRefresh(false);
+        requestPopupRefresh(false, -1);
+    }
+
+    /**
+     * То же с явной кареткой — для вызова из события документа: каретка виджета там ещё
+     * стоит до вставленного текста (лог 15.10.2026 09:49:45 — после повторной «.» список
+     * членов пересобран по каретке перед точкой с фильтром «схемаМоя»: «нет вариантов»).
+     */
+    public static void refreshPopupIfOpen(int caret)
+    {
+        requestPopupRefresh(false, caret);
     }
 
     /**
@@ -6511,7 +7056,7 @@ processor.applyIrCompletion(snapshot);
     /** Обновление popup после прихода слов ИР (сразу или в очередь при recompute). */
     public static void requestIrPopupRefresh()
     {
-        requestPopupRefresh(true);
+        requestPopupRefresh(true, -1);
     }
 
     private static boolean shouldDeferLiteralMergeUntilBrowser(ContentAssistant ca,
@@ -6568,7 +7113,8 @@ processor.applyIrCompletion(snapshot);
         ContentAssistPopupSync.recomputePopupList(ca, viewer, processor);
     }
 
-    private static void requestPopupRefresh(boolean irOnly)
+    /** @param caretOverride {@code >= 0} — явная каретка, иначе каретка виджета */
+    private static void requestPopupRefresh(boolean irOnly, int caretOverride)
     {
         if (!ComfortSettings.isReplaceListFiltersEnabled())
             return;
@@ -6616,7 +7162,7 @@ return;
             ContentAssistPopupSync.invalidateSyncSnapshot();
             reloader.rememberPreIrMergeSelectionState(ca);
         }
-        ContentAssistPopupSync.recomputePopupList(ca, viewer, processor);
+        ContentAssistPopupSync.recomputePopupList(ca, viewer, processor, caretOverride);
     }
 
     public static void scheduleFilterToggleUiSync()
@@ -6771,7 +7317,7 @@ if (!popupVisible)
         int tableRowsBefore = ContentAssistPopupSync.tableItemCountForAssistant(assistant);
 LITERAL_REPEAT_FROM_COMMAND.set(Boolean.TRUE);
         lastLiteralToggleMs = System.currentTimeMillis();
-        ContentAssistPopupSync.seedStableDelegateFromVisiblePopup(assistant, processor);
+        ContentAssistPopupSync.seedStableDelegateFromVisiblePopup(assistant, processor, viewer, caret);
         ContentAssistPopupSync.captureSelectionBeforeFilterToggle(assistant);
         SmartAssistFilterState.toggle();
 scheduleFilterToggleUiSync();
@@ -6960,6 +7506,9 @@ return;
         /** С любого потока. Таймер уже тикает с такта нажатия ({@link #arm()}). */
         void request(String kind, Runnable action)
         {
+            ContentAssistDebug.pipeline("gate.request", "kind=" + kind
+                + " viewer=" + ContentAssistDebug.pipelineIdentity(host.viewer)
+                + " " + (host.processor == null ? "" : host.processor.pipelineState()));
             synchronized (actions)
             {
                 actions.remove(kind);
@@ -7053,6 +7602,7 @@ return;
                 return;
             }
             lastGateWhy = ""; //$NON-NLS-1$
+            BslEditorHighlightingHook.logAssistPaintState(host.viewer, "gate.beforeUpdate"); //$NON-NLS-1$
             // Таймер Windows приходит после WM_PAINT, но на GTK порядок другой: добираем
             // недорисованное синхронно, чтобы показ не замер на неполном кадре.
             text.update();
@@ -7072,7 +7622,20 @@ return;
                 kinds.append(entry.getKey());
                 try
                 {
-                    entry.getValue().run();
+                    try (ContentAssistDebug.PipelineSpan showing = ContentAssistDebug.pipelineStart("gate.action",
+                        "kind=" + entry.getKey() + " waitMs=" + waitMs
+                            + " " + (host.processor == null ? "" : host.processor.pipelineState())))
+                    {
+                        BslEditorHighlightingHook.logAssistPaintState(host.viewer, "gate.beforeAction " + entry.getKey()); //$NON-NLS-1$
+                        try
+                        {
+                            entry.getValue().run();
+                        }
+                        finally
+                        {
+                            BslEditorHighlightingHook.logAssistPaintState(host.viewer, "gate.afterAction " + entry.getKey()); //$NON-NLS-1$
+                        }
+                    }
                 }
                 catch (Exception | LinkageError e)
                 {

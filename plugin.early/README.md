@@ -47,6 +47,15 @@
 
 Отдельно вплетён `MdPropertySheetPage$Monitor`: `asyncExec` в `beginTask` и `done` проходят через `tormozit.propertySheet.progress` / `progressDone`. Перед выполнением проверяется штатный `IProgressMonitor.isCanceled()`, чтобы отменённые задания не показывали и не скрывали индикатор с повторным `layout()` панели. Если нового монитора нет (например, переход к пустому выделению), прежний `done` всё ещё убирает начатый индикатор. Поля `Monitor.this$0` и `MdPropertySheetPage.progressMonitor` подтверждены javap. Статус — `tormozit.propertySheet.monitorPatch` (`ok [1, 1]`).
 
+### Блокировщик документа BSL
+
+`BslXtextDocument$CustomXtextDocumentLocker` грузится раньше активации основного бандла, а агента перезагрузки классов в EDT нет — вплетение из основного бандла не срабатывало ни разу (временный лог 15.10.2026 10:33: `weaveCalls=0`, `instrumentation=false`).
+
+- `waitUpdatingDataModel` — ранний выход по функции `tormozit.bslXtextDoc.skipWaitUpdatingDataModel` (ставит `tormozit.BslXtextDocumentHook`: UI-поток, фоновый расчёт автодополнения, вложенный вызов внутри вплетённого чтения). Штатно метод спит до 5 с, пока не сменится результат разбора.
+- `readOnlyForContentAssist` — на время метода монитор ресурса (`XtextDocument.getResourceLock()`), затем блокировка чтения документа: тот же порядок, что у штатного `internalReadOnly`, но без запуска разбора. Все, кто меняет модель, идут через `modify` и ждут; без этого расчёт шёл по модели, которую в это время перестраивали («Переполнение стека»). Вход и выход (`MONITORENTER`/`MONITOREXIT` в обработчике любого исключения) и объект монитора — только в этом бандле (`EarlyWeaving.AssistReadLock`), чтобы вход и выход не разошлись при старте основного бандла посреди вызова.
+
+Итог — в системном свойстве `tormozit.bslXtextDoc.lockerPatch` (`woven wait=1 read=1`).
+
 ## Правила
 
 - **Не зависеть от основного бандла.** Обращение к его классам активировало бы весь Комфорт на старте фреймворка, до Workbench. Связь с основным бандлом — только через `System.getProperties()`.

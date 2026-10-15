@@ -140,6 +140,7 @@ import org.eclipse.xtext.ui.editor.XtextEditor;
 import org.eclipse.xtext.ui.editor.contentassist.ConfigurableCompletionProposal;
 import org.eclipse.xtext.ui.editor.hover.IEObjectHover;
 import org.eclipse.xtext.ui.editor.model.IXtextDocument;
+import org.eclipse.xtext.ui.editor.model.IXtextModelListener;
 import org.eclipse.xtext.ui.editor.validation.XtextAnnotation;
 import org.eclipse.xtext.ui.refactoring.ui.IRenameContextFactory;
 import org.eclipse.xtext.ui.refactoring.ui.IRenameElementContext;
@@ -650,6 +651,11 @@ public final class BslModuleSpellCheckHook implements IStartup
         final ISourceViewer viewer;
         final IDocumentListener documentListener;
         final org.eclipse.jface.text.IViewportListener viewportListener;
+        /**
+         * Проверка запускается, когда EDT сама пересобрала модель: раньше её результат
+         * недостоверен, а запуск по таймеру либо ждал разбора, либо сам его вызывал.
+         */
+        final IXtextModelListener modelListener;
         Job job;
         volatile int scheduleGeneration;
 
@@ -660,9 +666,10 @@ public final class BslModuleSpellCheckHook implements IStartup
             this.documentListener = new IDocumentListener()
             {
                 @Override public void documentAboutToBeChanged(DocumentEvent event) {}
-                @Override public void documentChanged(DocumentEvent event) { schedule(DEBOUNCE_MS); }
+                @Override public void documentChanged(DocumentEvent event) { hideUntilModelReconciled(); }
             };
             this.viewportListener = verticalOffset -> schedule(DEBOUNCE_MS);
+            this.modelListener = resource -> onModelReconciled();
         }
 
         void install()
@@ -670,7 +677,28 @@ public final class BslModuleSpellCheckHook implements IStartup
             IDocument doc = viewer.getDocument();
             if (doc != null)
                 doc.addDocumentListener(documentListener);
+            if (doc instanceof IXtextDocument xdoc)
+                xdoc.addModelListener(modelListener);
             viewer.addViewportListener(viewportListener);
+        }
+
+        /**
+         * Правка текста: подчёркивания устарели — снимаем сразу, а заново проверяем только
+         * по пересборке модели ({@link #onModelReconciled}). Только UI.
+         */
+        private void hideUntilModelReconciled()
+        {
+            ++scheduleGeneration;
+            cancelJob();
+            removeComfortAnnotations();
+        }
+
+        /** Из потока разбора EDT: модель пересобрана — проверить заново (с UI, без ожидания). */
+        private void onModelReconciled()
+        {
+            Display display = Display.getDefault();
+            if (display != null && !display.isDisposed())
+                display.asyncExec(() -> schedule(0));
         }
 
         void dispose()
@@ -681,6 +709,8 @@ public final class BslModuleSpellCheckHook implements IStartup
                 IDocument doc = viewer.getDocument();
                 if (doc != null)
                     doc.removeDocumentListener(documentListener);
+                if (doc instanceof IXtextDocument xdoc)
+                    xdoc.removeModelListener(modelListener);
             }
             catch (Exception ignored)
             {
@@ -768,12 +798,24 @@ public final class BslModuleSpellCheckHook implements IStartup
                 {
                     if (monitor.isCanceled() || gen != scheduleGeneration)
                         return Status.CANCEL_STATUS;
+                    // Второстепенная работа: разбор модуля не запускает (xdoc.readOnly вызывал
+                    // полный разбор с разрешением всех ссылок, и подсказки ждали его — замер
+                    // 15.10.2026 09:41) и уступает расчёту подсказок. Модель отстала — ждём
+                    // штатного разбора EDT и пробуем позже.
+                    if (!ContentAssistSessionReloader.isModelCurrent(xdoc))
+                        return rescheduleLater();
                     List<ModuleProblem> problems;
+                    Boolean held = ContentAssistSessionReloader.beginLowPriorityHold(xdoc, monitor,
+                        () -> monitor.isCanceled() || gen != scheduleGeneration);
+                    if (held == null)
+                        return Status.CANCEL_STATUS;
                     ComfortSpellingEngine.setCheckProjectOverride(checkProject);
                     try
                     {
+                        if (!ContentAssistSessionReloader.isModelCurrent(xdoc))
+                            return rescheduleLater();
                         boolean checkIdents = ComfortSettings.isSpellingCheckIdentifiersVisible();
-                        problems = xdoc.readOnly(
+                        problems = ContentAssistSessionReloader.readOnlyPeekAst(xdoc,
                             new CollectProblems(visOffset, visEnd, checkIdents, monitor));
                     }
                     catch (Exception e)
@@ -783,7 +825,12 @@ public final class BslModuleSpellCheckHook implements IStartup
                     finally
                     {
                         ComfortSpellingEngine.setCheckProjectOverride(null);
+                        if (held.booleanValue())
+                            ContentAssistSessionReloader.endLowPriorityHold(monitor);
                     }
+                    // Прервана расчётом подсказок — не публикуем неполный список, повторим.
+                    if (monitor.isCanceled() && gen == scheduleGeneration)
+                        return rescheduleLater();
                     if (monitor.isCanceled() || gen != scheduleGeneration)
                         return Status.CANCEL_STATUS;
                     final List<ModuleProblem> toApply = problems != null ? problems : List.of();
@@ -800,6 +847,18 @@ public final class BslModuleSpellCheckHook implements IStartup
                         applyAnnotations(toApply);
                     });
                     return Status.OK_STATUS;
+                }
+
+                private IStatus rescheduleLater()
+                {
+                    Display display = Display.getDefault();
+                    if (display != null && !display.isDisposed())
+                        display.asyncExec(() ->
+                        {
+                            if (gen == scheduleGeneration)
+                                schedule(DEBOUNCE_MS);
+                        });
+                    return Status.CANCEL_STATUS;
                 }
             };
             checkJob.setSystem(true);

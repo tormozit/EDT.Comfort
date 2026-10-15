@@ -103,6 +103,7 @@ public class SmartCompletionProposal implements
 
     private static ICompletionProposal unwrapRaw(ICompletionProposal proposal)
     {
+        
         ICompletionProposal start = proposal;
         int depth = 0;
         while (proposal instanceof SmartCompletionProposal)
@@ -130,31 +131,42 @@ public class SmartCompletionProposal implements
     @Override
     public StyledString getStyledDisplayString()
     {
-        String overlapDisplay = resolveIrOverlapDisplayOverride();
-        ICompletionProposal raw = delegate instanceof SmartCompletionProposal
-            ? null : delegate;
-        String sourceDisplay = overlapDisplay != null
-            ? overlapDisplay
-            : (raw == null ? "" : raw.getDisplayString()); //$NON-NLS-1$
-        String localized = SmartContentAssistProcessor.localizeAssistTypeNames(sourceDisplay);
-        StyledString result;
-        if (overlapDisplay != null || delegate instanceof IrCompletionProposal)
-            result = buildIrStyledDisplayString(localized);
-        else if (localized != null && localized.equals(sourceDisplay)
-            && !(delegate instanceof SmartCompletionProposal)
-            && delegate instanceof ICompletionProposalExtension6 ext6)
-            result = ext6.getStyledDisplayString();
-        else
-            result = buildIrStyledDisplayString(localized != null ? localized : ""); //$NON-NLS-1$
-        SmartCodeMatcher matcher = resolveHighlightMatcher();
-        if (!matcher.isEmpty)
+        try (ContentAssistDebug.FillSpan fill = ContentAssistDebug.fillStart("proposal.style", delegate))
         {
-            String display = localized != null ? localized : ""; //$NON-NLS-1$
-            String nameOnly = SmartContentAssistProcessor.parseProposalListName(display);
-            if (!nameOnly.isEmpty())
-                SmartMatchHighlight.applyRanges(result, matcher.getHighlightRanges(nameOnly));
+            long pipelineStyleStart = System.nanoTime();
+            try
+            {
+                String overlapDisplay = resolveIrOverlapDisplayOverride();
+                ICompletionProposal raw = delegate instanceof SmartCompletionProposal
+                    ? null : delegate;
+                String sourceDisplay = overlapDisplay != null
+                    ? overlapDisplay
+                    : (raw == null ? "" : raw.getDisplayString()); //$NON-NLS-1$
+                String localized = SmartContentAssistProcessor.localizeAssistTypeNames(sourceDisplay);
+                StyledString result;
+                if (overlapDisplay != null || delegate instanceof IrCompletionProposal)
+                    result = buildIrStyledDisplayString(localized);
+                else if (localized != null && localized.equals(sourceDisplay)
+                    && !(delegate instanceof SmartCompletionProposal)
+                    && delegate instanceof ICompletionProposalExtension6 ext6)
+                    result = ext6.getStyledDisplayString();
+                else
+                    result = buildIrStyledDisplayString(localized != null ? localized : ""); //$NON-NLS-1$
+                SmartCodeMatcher matcher = resolveHighlightMatcher();
+                if (!matcher.isEmpty)
+                {
+                    String display = localized != null ? localized : ""; //$NON-NLS-1$
+                    String nameOnly = SmartContentAssistProcessor.parseProposalListName(display);
+                    if (!nameOnly.isEmpty())
+                        SmartMatchHighlight.applyRanges(result, matcher.getHighlightRanges(nameOnly));
+                }
+                return result;
+            }
+            finally
+            {
+                ContentAssistDebug.pipelineStyled(pipelineStyleStart, delegate);
+            }
         }
-        return result;
     }
 
     /** Владелец после {@code ~} — как у штатного assist EDT ({@link StyledString#QUALIFIER_STYLER}). */
@@ -173,13 +185,16 @@ public class SmartCompletionProposal implements
     @Override
     public String getDisplayString()
     {
-        String overlapDisplay = resolveIrOverlapDisplayOverride();
-        if (overlapDisplay != null)
-            return SmartContentAssistProcessor.localizeAssistTypeNames(overlapDisplay);
-        if (delegate instanceof SmartCompletionProposal)
-            return ""; //$NON-NLS-1$
-        String raw = delegate.getDisplayString();
-        return SmartContentAssistProcessor.localizeAssistTypeNames(raw);
+        try (ContentAssistDebug.FillSpan fill = ContentAssistDebug.fillStart("proposal.text", delegate))
+        {
+            String overlapDisplay = resolveIrOverlapDisplayOverride();
+            if (overlapDisplay != null)
+                return SmartContentAssistProcessor.localizeAssistTypeNames(overlapDisplay);
+            if (delegate instanceof SmartCompletionProposal)
+                return ""; //$NON-NLS-1$
+            String raw = delegate.getDisplayString();
+            return SmartContentAssistProcessor.localizeAssistTypeNames(raw);
+        }
     }
 
     /**
@@ -187,25 +202,31 @@ public class SmartCompletionProposal implements
      */
     private String resolveIrOverlapDisplayOverride()
     {
-        if (delegate instanceof IrCompletionProposal)
-            return null;
-        if (delegate instanceof SmartCompletionProposal)
-            return null;
-        if (!ComfortSettings.isReplaceListFiltersEnabled())
-            return null;
-        SmartContentAssistProcessor processor = ContentAssistSessionReloader.getActiveProcessor();
-        if (processor == null)
-            return null;
-        String key = SmartContentAssistProcessor.dedupKeyForMerge(delegate);
-        if (key.isEmpty())
-            return null;
-        return processor.resolveIrOverlapDisplay(delegate.getDisplayString(), key);
+        try (ContentAssistDebug.FillSpan fill = ContentAssistDebug.fillStart("proposal.overlapText", delegate))
+        {
+            if (delegate instanceof IrCompletionProposal)
+                return null;
+            if (delegate instanceof SmartCompletionProposal)
+                return null;
+            if (!ComfortSettings.isReplaceListFiltersEnabled())
+                return null;
+            SmartContentAssistProcessor processor = ContentAssistSessionReloader.getActiveProcessor();
+            if (processor == null)
+                return null;
+            String key = SmartContentAssistProcessor.dedupKeyForMerge(delegate);
+            if (key.isEmpty())
+                return null;
+            return processor.resolveIrOverlapDisplay(delegate.getDisplayString(), key);
+        }
     }
 
     @Override
     public Image getImage()
     {
-        return delegate.getImage();
+        try (ContentAssistDebug.FillSpan fill = ContentAssistDebug.fillStart("proposal.image", delegate))
+        {
+            return delegate.getImage();
+        }
     }
 
     @Override
@@ -460,26 +481,38 @@ public class SmartCompletionProposal implements
     @Override
     public void selected(ITextViewer viewer, boolean smartToggle)
     {
-        logProposalAtSelection(viewer);
-        stashOverlapReplaceParentIr();
-        if (delegate instanceof IrCompletionProposal ir)
-            scheduleIrWordActivation(ir);
-        else
+        try (ContentAssistDebug.FillSpan fill = ContentAssistDebug.fillStart("proposal.selected", delegate))
         {
-            ensureLiteralOverlapBrowserIfNeeded(viewer);
-            scheduleEdtRowActivation(null);
+            logProposalAtSelection(viewer);
+            stashOverlapReplaceParentIr();
+            if (delegate instanceof IrCompletionProposal ir)
+                scheduleIrWordActivation(ir);
+            else
+            {
+                ensureLiteralOverlapBrowserIfNeeded(viewer);
+                scheduleEdtRowActivation(null);
+            }
+            if (!(delegate instanceof SmartCompletionProposal)
+                && delegate instanceof ICompletionProposalExtension2 ext2)
+            {
+                try (ContentAssistDebug.FillSpan selected =
+                    ContentAssistDebug.fillStart("selected.delegate", delegate))
+                {
+                    ext2.selected(viewer, smartToggle);
+                }
+            }
         }
-        if (!(delegate instanceof SmartCompletionProposal)
-            && delegate instanceof ICompletionProposalExtension2 ext2)
-            ext2.selected(viewer, smartToggle);
     }
 
     @Override
     public void unselected(ITextViewer viewer)
     {
-        if (delegate instanceof ICompletionProposalExtension2
-            && !(delegate instanceof SmartCompletionProposal))
-            ((ICompletionProposalExtension2) delegate).unselected(viewer);
+        try (ContentAssistDebug.FillSpan fill = ContentAssistDebug.fillStart("proposal.unselected", delegate))
+        {
+            if (delegate instanceof ICompletionProposalExtension2
+                && !(delegate instanceof SmartCompletionProposal))
+                ((ICompletionProposalExtension2) delegate).unselected(viewer);
+        }
     }
 
     @Override
@@ -543,9 +576,12 @@ public class SmartCompletionProposal implements
 
     private void stashOverlapReplaceParentIr()
     {
-        if (delegate instanceof IrCompletionProposal)
-            return;
-        overlapIr = findIrOverlapForEdt(delegate);
+        try (ContentAssistDebug.FillSpan fill = ContentAssistDebug.fillStart("selected.overlap", delegate))
+        {
+            if (delegate instanceof IrCompletionProposal)
+                return;
+            overlapIr = findIrOverlapForEdt(delegate);
+        }
     }
 
     private boolean tryApplyEdtOverlapReplaceParent(IDocument document, ITextViewer viewer,
@@ -955,10 +991,13 @@ public class SmartCompletionProposal implements
     @Override
     public String getAdditionalProposalInfo()
     {
-        if (delegate instanceof IrCompletionProposal ir)
-            return resolveIrAdditionalProposalInfo(ir);
-        Object baseInfo = readDelegateEdtAdditionalInfo(new NullProgressMonitor());
-        return objectToSideHintString(resolveEdtAssistSideHint(baseInfo));
+        try (ContentAssistDebug.FillSpan fill = ContentAssistDebug.fillStart("proposal.info", delegate))
+        {
+            if (delegate instanceof IrCompletionProposal ir)
+                return resolveIrAdditionalProposalInfo(ir);
+            Object baseInfo = readDelegateEdtAdditionalInfo(new NullProgressMonitor());
+            return objectToSideHintString(resolveEdtAssistSideHint(baseInfo));
+        }
     }
 
     private static String objectToSideHintString(Object info)
@@ -1021,25 +1060,28 @@ public class SmartCompletionProposal implements
     /** H41: идентичность proposal при {@code selected()} в literal assist. */
     private void logProposalAtSelection(ITextViewer viewer)
     {
-        if (!(viewer instanceof SourceViewer sourceViewer))
-            return;
-        int caret = SmartContentAssistProcessor.resolveWidgetCaret(sourceViewer);
-        if (caret < 0 || !SmartContentAssistProcessor.isStringLiteralAssistContext(
-            sourceViewer, caret))
-            return;
-        ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
-        if (reloader == null)
-            return;
-        ICompletionProposal raw = SmartContentAssistProcessor.unwrapProposal(this);
-        String displayKey = delegate.getDisplayString() != null ? delegate.getDisplayString() : ""; //$NON-NLS-1$
-        String delegateClass = raw != null ? raw.getClass().getSimpleName()
-            : delegate.getClass().getSimpleName();
-        boolean hasIrMergedHtml = hasIrMergedHtmlForSelection(reloader, raw);
-        boolean setupPhase = reloader.isLiteralOpenSetupPhase();
-        boolean literalFinishPinPending = reloader.isLiteralFinishPinPending();
-        int gen = reloader.getLiteralOpenGen();
-        long ms = reloader.msSinceLiteralOpen();
-}
+        try (ContentAssistDebug.FillSpan fill = ContentAssistDebug.fillStart("selected.audit", delegate))
+        {
+            if (!(viewer instanceof SourceViewer sourceViewer))
+                return;
+            int caret = SmartContentAssistProcessor.resolveWidgetCaret(sourceViewer);
+            if (caret < 0 || !SmartContentAssistProcessor.isStringLiteralAssistContext(
+                sourceViewer, caret))
+                return;
+            ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
+            if (reloader == null)
+                return;
+            ICompletionProposal raw = SmartContentAssistProcessor.unwrapProposal(this);
+            String displayKey = delegate.getDisplayString() != null ? delegate.getDisplayString() : ""; //$NON-NLS-1$
+            String delegateClass = raw != null ? raw.getClass().getSimpleName()
+                : delegate.getClass().getSimpleName();
+            boolean hasIrMergedHtml = hasIrMergedHtmlForSelection(reloader, raw);
+            boolean setupPhase = reloader.isLiteralOpenSetupPhase();
+            boolean literalFinishPinPending = reloader.isLiteralFinishPinPending();
+            int gen = reloader.getLiteralOpenGen();
+            long ms = reloader.msSinceLiteralOpen();
+        }
+    }
 
     private static boolean hasIrMergedHtmlForSelection(ContentAssistSessionReloader reloader,
         ICompletionProposal raw)
@@ -1064,49 +1106,61 @@ public class SmartCompletionProposal implements
 
     private void ensureLiteralOverlapBrowserIfNeeded(ITextViewer viewer)
     {
-        if (!isEdtIrOverlapRow())
-            return;
-        if (!(viewer instanceof SourceViewer sourceViewer))
-            return;
-        ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
-        if (assistant == null)
-            return;
-        int caret = SmartContentAssistProcessor.resolveWidgetCaret(sourceViewer);
-        if (caret < 0 || !SmartContentAssistProcessor.isStringLiteralAssistContext(
-            sourceViewer, caret))
-            return;
-        ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
-        if (reloader != null && reloader.isLiteralOpenSetupPhase())
-            return;
-        if (!ContentAssistPopupSync.hasAssistBrowserSidePanel(assistant))
-            ContentAssistPopupSync.ensureAssistBrowserCreatorOnController(assistant, sourceViewer);
+        try (ContentAssistDebug.FillSpan fill = ContentAssistDebug.fillStart("selected.browser", delegate))
+        {
+            if (!isEdtIrOverlapRow())
+                return;
+            if (!(viewer instanceof SourceViewer sourceViewer))
+                return;
+            ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
+            if (assistant == null)
+                return;
+            int caret = SmartContentAssistProcessor.resolveWidgetCaret(sourceViewer);
+            if (caret < 0 || !SmartContentAssistProcessor.isStringLiteralAssistContext(
+                sourceViewer, caret))
+                return;
+            ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
+            if (reloader != null && reloader.isLiteralOpenSetupPhase())
+                return;
+            if (!ContentAssistPopupSync.hasAssistBrowserSidePanel(assistant))
+                ContentAssistPopupSync.ensureAssistBrowserCreatorOnController(assistant, sourceViewer);
+        }
     }
 
     @Override
     public Object getAdditionalProposalInfo(IProgressMonitor monitor)
     {
-        if (delegate instanceof IrCompletionProposal ir)
-            return resolveIrAdditionalProposalInfo(ir);
-        Object baseInfo = readDelegateEdtAdditionalInfo(monitor);
-        return resolveEdtAssistSideHint(baseInfo);
+        try (ContentAssistDebug.FillSpan fill = ContentAssistDebug.fillStart("proposal.infoMonitor", delegate))
+        {
+            if (delegate instanceof IrCompletionProposal ir)
+                return resolveIrAdditionalProposalInfo(ir);
+            Object baseInfo = readDelegateEdtAdditionalInfo(monitor);
+            return resolveEdtAssistSideHint(baseInfo);
+        }
     }
 
     @Override
     public CharSequence getPrefixCompletionText(IDocument document, int completionOffset)
     {
-        if (delegate instanceof ICompletionProposalExtension3)
-            return ((ICompletionProposalExtension3) delegate)
-                .getPrefixCompletionText(document, completionOffset);
-        return null;
+        try (ContentAssistDebug.FillSpan fill = ContentAssistDebug.fillStart("proposal.prefixText", delegate))
+        {
+            if (delegate instanceof ICompletionProposalExtension3)
+                return ((ICompletionProposalExtension3) delegate)
+                    .getPrefixCompletionText(document, completionOffset);
+            return null;
+        }
     }
 
     @Override
     public int getPrefixCompletionStart(IDocument document, int completionOffset)
     {
-        if (delegate instanceof ICompletionProposalExtension3)
-            return ((ICompletionProposalExtension3) delegate)
-                .getPrefixCompletionStart(document, completionOffset);
-        return completionOffset;
+        try (ContentAssistDebug.FillSpan fill = ContentAssistDebug.fillStart("proposal.prefixStart", delegate))
+        {
+            if (delegate instanceof ICompletionProposalExtension3)
+                return ((ICompletionProposalExtension3) delegate)
+                    .getPrefixCompletionStart(document, completionOffset);
+            return completionOffset;
+        }
     }
 
     private void logApplyStart(String overload)
@@ -1540,19 +1594,28 @@ public class SmartCompletionProposal implements
      */
     private Object readDelegateEdtAdditionalInfo(IProgressMonitor monitor)
     {
-        if (delegate instanceof ICompletionProposalExtension5 ext5)
+        return readDelegateEdtAdditionalInfo(delegate, monitor);
+    }
+
+    private static Object readDelegateEdtAdditionalInfo(ICompletionProposal delegate,
+        IProgressMonitor monitor)
+    {
+        try (ContentAssistDebug.FillSpan fill = ContentAssistDebug.fillStart("proposal.infoDelegate", delegate))
         {
-            try
+            if (delegate instanceof ICompletionProposalExtension5 ext5)
             {
-                return ext5.getAdditionalProposalInfo(
-                    monitor != null ? monitor : new NullProgressMonitor());
+                try
+                {
+                    return ext5.getAdditionalProposalInfo(
+                        monitor != null ? monitor : new NullProgressMonitor());
+                }
+                catch (RuntimeException e)
+                {
+                    return null;
+                }
             }
-            catch (RuntimeException e)
-            {
-                return null;
-            }
+            return delegate.getAdditionalProposalInfo();
         }
-        return delegate.getAdditionalProposalInfo();
     }
 
     /**
@@ -1615,59 +1678,45 @@ public class SmartCompletionProposal implements
 
     private void scheduleEdtRowActivation(Object baseInfo)
     {
-        if (!ComfortSettings.isReplaceListFiltersEnabled())
-            return;
-        ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
-        if (reloader == null)
-            return;
-        String cacheKey = BslCompletionSideHintResolver.resolveIrCacheKey(delegate);
-        String name = BslCompletionSideHintResolver.resolveElementName(delegate);
-        String kind = BslCompletionSideHintResolver.resolveElementKind(delegate);
-        if (cacheKey == null || cacheKey.isEmpty() || name == null || name.isEmpty()
-            || kind == null)
-            return;
-        final Object baseInput = baseInfo != null
-            ? baseInfo
-            : readDelegateEdtAdditionalInfo(new NullProgressMonitor());
-        IrBslCompletionSupport.ActivationDescription cachedRaw = reloader.getIrActivation(cacheKey);
-        // Пустой тип при overlap — обычно fetch без КлючНабораСлов до прихода ИР; не держим кэш.
-        if (cachedRaw != null && (cachedRaw.type == null || cachedRaw.type.isEmpty())
-            && resolveEdtOverlapDictionaryKey(delegate) != null)
+        try (ContentAssistDebug.FillSpan fill = ContentAssistDebug.fillStart("selected.activation", delegate))
         {
-            reloader.removeIrActivation(cacheKey);
-            cachedRaw = null;
-        }
-        final IrBslCompletionSupport.ActivationDescription cached = cachedRaw;
-        if (cached != null)
-        {
+            if (!ComfortSettings.isReplaceListFiltersEnabled())
+                return;
+            ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
+            if (reloader == null)
+                return;
+            String cacheKey = BslCompletionSideHintResolver.resolveIrCacheKey(delegate);
+            String name = BslCompletionSideHintResolver.resolveElementName(delegate);
+            String kind = BslCompletionSideHintResolver.resolveElementKind(delegate);
+            if (cacheKey == null || cacheKey.isEmpty() || name == null || name.isEmpty()
+                || kind == null)
+                return;
+            IrBslCompletionSupport.ActivationDescription cachedRaw = reloader.getIrActivation(cacheKey);
+            // Пустой тип при overlap — обычно fetch без КлючНабораСлов до прихода ИР; не держим кэш.
+            if (cachedRaw != null && (cachedRaw.type == null || cachedRaw.type.isEmpty())
+                && resolveEdtOverlapDictionaryKey(delegate) != null)
+            {
+                reloader.removeIrActivation(cacheKey);
+                cachedRaw = null;
+            }
+            IRSession session = IrBslExpressionHtmlSupport.resolveConnectedSession(reloader.getBslEditor());
+            if (session == null)
+                return;
             Display display = Display.getDefault();
             if (display == null || display.isDisposed())
                 return;
-            display.asyncExec(() -> applyCachedEdtActivation(
-                reloader, cacheKey, delegate.getDisplayString(), cached, baseInput, delegate));
-            return;
+            // И кэш, и подключение проверены до запроса штатного описания. Чтение
+            // описания выполняется в существующем фоновом задании активации.
+            if (!reloader.tryBeginIrActivation(cacheKey, true))
+                return;
+            final boolean isMethod =
+                IrBslExpressionHtmlSupport.KIND_METHOD.equals(kind);
+            final int gen = reloader.beginIrFetchForDisplay(cacheKey);
+            final String displayKey = delegate.getDisplayString();
+            final BslXtextEditor editor = reloader.getBslEditor();
+            display.asyncExec(() -> submitEdtActivationOnUi(
+                reloader, session, editor, gen, cacheKey, displayKey, name, isMethod, baseInfo, delegate));
         }
-        if (!reloader.tryBeginIrActivation(cacheKey))
-            return;
-        IRSession session = IrBslExpressionHtmlSupport.resolveConnectedSession(reloader.getBslEditor());
-        if (session == null)
-        {
-            reloader.endIrActivation(cacheKey);
-            return;
-        }
-        final boolean isMethod =
-            IrBslExpressionHtmlSupport.KIND_METHOD.equals(kind);
-        final int gen = reloader.beginIrFetchForDisplay(cacheKey);
-        final String displayKey = delegate.getDisplayString();
-        final BslXtextEditor editor = reloader.getBslEditor();
-        Display display = Display.getDefault();
-        if (display == null || display.isDisposed())
-        {
-            reloader.endIrActivation(cacheKey);
-            return;
-        }
-        display.asyncExec(() -> submitEdtActivationOnUi(
-            reloader, session, editor, gen, cacheKey, displayKey, name, isMethod, baseInput, delegate));
     }
 
     /** RDT {@code ПриАктивизацииСтрокиТ9}: динамический тип и описание ИР-слова. */
@@ -1854,20 +1903,6 @@ public class SmartCompletionProposal implements
 return pinned;
     }
 
-    private static void applyCachedEdtActivation(
-        ContentAssistSessionReloader reloader, String cacheKey, String displayKey,
-        IrBslCompletionSupport.ActivationDescription desc, Object baseInput,
-        ICompletionProposal edtDelegate)
-    {
-        org.eclipse.jface.text.contentassist.ContentAssistant assistant =
-            ContentAssistSessionReloader.getActiveAssistant();
-        if (assistant == null || !ContentAssistPopupSync.isPopupVisible(assistant))
-            return;
-        applyEdtListTypeFromIrActivation(assistant, edtDelegate, desc);
-        applyEdtActivationToSidePanel(
-            reloader, assistant, cacheKey, displayKey, desc, baseInput);
-    }
-
     private static void submitEdtActivationOnUi(
         ContentAssistSessionReloader reloader, IRSession session, BslXtextEditor editor,
         int gen, String cacheKey, String displayKey, String wordValue, boolean isMethod,
@@ -1882,7 +1917,8 @@ return pinned;
         Runnable fetch = () -> runEdtActivationFetch(
             reloader, session, gen, cacheKey, displayKey, wordValue, isMethod, baseInput,
             edtDelegate);
-        if (!reloader.isWordsTableReady())
+        // Для готового ответа ИР таблица слов уже не нужна.
+        if (!reloader.isWordsTableReady() && reloader.getIrActivation(cacheKey) == null)
         {
             reloader.runWhenWordsTableReady(() -> session.executor.submit(fetch));
             return;
@@ -1897,15 +1933,14 @@ return pinned;
     {
         try
         {
+            if (gen != reloader.getIrFetchGeneration())
+                return;
             IrBslCompletionSupport.ActivationDescription cached =
                 reloader.getIrActivation(cacheKey);
             if (cached != null)
             {
-                Display display = Display.getDefault();
-                if (display == null || display.isDisposed())
-                    return;
-                display.asyncExec(() -> applyEdtActivationResult(
-                    reloader, session, gen, cacheKey, displayKey, cached, baseInput, edtDelegate));
+                publishEdtActivationFromBackground(reloader, session, gen, cacheKey,
+                    displayKey, cached, baseInput, edtDelegate);
                 return;
             }
             IrOverlapActivationTarget target = resolveEdtOverlapActivationTarget(
@@ -1921,16 +1956,32 @@ return pinned;
             if (hasType || hasDict)
                 reloader.putIrActivation(cacheKey, desc);
             session.pumpUserMessagesToUi();
-            Display display = Display.getDefault();
-            if (display == null || display.isDisposed())
-                return;
-            display.asyncExec(() -> applyEdtActivationResult(
-                reloader, session, gen, cacheKey, displayKey, desc, baseInput, edtDelegate));
+            publishEdtActivationFromBackground(reloader, session, gen, cacheKey,
+                displayKey, desc, baseInput, edtDelegate);
         }
         finally
         {
             reloader.endIrActivation(cacheKey);
         }
+    }
+
+    /** Тяжёлое штатное описание — в том же фоне, что и активация ИР, до публикации на UI. */
+    private static void publishEdtActivationFromBackground(
+        ContentAssistSessionReloader reloader, IRSession session, int gen,
+        String cacheKey, String displayKey, IrBslCompletionSupport.ActivationDescription desc,
+        Object baseInput, ICompletionProposal edtDelegate)
+    {
+        if (gen != reloader.getIrFetchGeneration())
+            return;
+        Object readyBaseInput = baseInput != null ? baseInput
+            : readDelegateEdtAdditionalInfo(edtDelegate, new NullProgressMonitor());
+        if (gen != reloader.getIrFetchGeneration())
+            return;
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        display.asyncExec(() -> applyEdtActivationResult(
+            reloader, session, gen, cacheKey, displayKey, desc, readyBaseInput, edtDelegate));
     }
 
     private static void applyEdtActivationResult(

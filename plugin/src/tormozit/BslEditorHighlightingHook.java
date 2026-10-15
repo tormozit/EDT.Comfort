@@ -9,6 +9,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.IStatus;
@@ -19,9 +20,18 @@ import org.eclipse.core.runtime.preferences.InstanceScope;
 import org.eclipse.jface.dialogs.IPageChangedListener;
 import org.eclipse.jface.text.TextAttribute;
 import org.eclipse.jface.text.TextPresentation;
+import org.eclipse.jface.text.DocumentEvent;
+import org.eclipse.jface.text.IDocument;
+import org.eclipse.jface.text.IDocumentListener;
+import org.eclipse.jface.text.ITextPresentationListener;
+import org.eclipse.jface.text.source.SourceViewer;
+import org.eclipse.swt.SWT;
+import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.graphics.Color;
 import org.eclipse.swt.graphics.RGB;
 import org.eclipse.swt.widgets.Display;
+import org.eclipse.swt.widgets.Control;
+import org.eclipse.swt.widgets.Listener;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IEditorReference;
 import org.eclipse.ui.IPartListener2;
@@ -68,6 +78,11 @@ public final class BslEditorHighlightingHook implements IStartup
             return;
 
         PlatformUI.getWorkbench().getDisplay().asyncExec(() -> {
+            Display.getCurrent().addFilter(SWT.Paint, event -> {
+                if (Global.isLogEnabled() && event.widget instanceof StyledText text
+                    && text.getData(EditorPaintDebug.KEY) instanceof EditorPaintDebug debug)
+                    debug.paintRequests++;
+            });
             for (IWorkbenchWindow window : PlatformUI.getWorkbench().getWorkbenchWindows())
                 registerWindow(window);
             PlatformUI.getWorkbench().addWindowListener(new WindowAdapter());
@@ -447,6 +462,9 @@ public final class BslEditorHighlightingHook implements IStartup
             if (viewer == null)
                 return;
 
+            if (viewer instanceof SourceViewer sourceViewer)
+                EditorPaintDebug.install(sourceViewer, editor);
+
             Object reconciler = findHighlightingReconciler(viewer);
             if (reconciler == null)
                 return;
@@ -660,6 +678,275 @@ public final class BslEditorHighlightingHook implements IStartup
         }
     }
 
+    /** Снимок непосредственно на границе показа списка: таймер может пропустить переход. */
+    static void logAssistPaintState(org.eclipse.jface.text.ITextViewer viewer, String phase)
+    {
+        if (!Global.isLogEnabled() || viewer == null)
+            return;
+        StyledText text = viewer.getTextWidget();
+        if (text == null || text.isDisposed()
+            || !(text.getData(EditorPaintDebug.KEY) instanceof EditorPaintDebug debug))
+            return;
+        try
+        {
+            Global.log(EditorPaintDebug.TAG, debug.id() + " assist=" + phase); //$NON-NLS-1$
+            debug.bindDocument();
+            debug.previousCounters = null;
+            debug.snapshot();
+        }
+        catch (RuntimeException e)
+        {
+            Global.logError(EditorPaintDebug.TAG, debug.id() + " assist snapshot failed", e); //$NON-NLS-1$
+        }
+    }
+
+    /** Наблюдение за issue #812. Не записывает текст модуля и не инициирует перерисовку. */
+    private static final class EditorPaintDebug
+    {
+        private static final String KEY = "tormozit.editorPaintDebug"; //$NON-NLS-1$
+        private static final String TAG = "BslEditorPaint"; //$NON-NLS-1$
+        private final SourceViewer viewer;
+        private final StyledText text;
+        private final BslXtextEditor editor;
+        private final AtomicLong documentChanges = new AtomicLong();
+        private final AtomicLong presentations = new AtomicLong();
+        private final ITextPresentationListener presentationListener = presentation -> {
+            if (Global.isLogEnabled())
+                presentations.incrementAndGet();
+        };
+        private final IDocumentListener documentListener = new IDocumentListener()
+        {
+            @Override public void documentAboutToBeChanged(DocumentEvent event) {}
+
+            @Override public void documentChanged(DocumentEvent event)
+            {
+                if (Global.isLogEnabled())
+                {
+                    documentChanges.incrementAndGet();
+                    lastDocumentChange = System.nanoTime();
+                }
+            }
+        };
+        private IDocument document;
+        private long paintRequests;
+        private long paints;
+        private long keys;
+        private long verifies;
+        private long modifies;
+        private long selections;
+        private long lastPaint;
+        private volatile long lastDocumentChange;
+        private long lastOutput;
+        private String previousCounters;
+        private boolean announced;
+        private boolean previouslyNoPaint;
+
+        private EditorPaintDebug(SourceViewer viewer, BslXtextEditor editor)
+        {
+            this.viewer = viewer;
+            this.text = viewer.getTextWidget();
+            this.editor = editor;
+        }
+
+        static void install(SourceViewer viewer, BslXtextEditor editor)
+        {
+            StyledText text = viewer.getTextWidget();
+            if (text == null || text.isDisposed() || text.getData(KEY) != null)
+                return;
+            EditorPaintDebug debug = new EditorPaintDebug(viewer, editor);
+            text.setData(KEY, debug);
+            Listener activity = event -> {
+                if (!Global.isLogEnabled())
+                    return;
+                switch (event.type)
+                {
+                    case SWT.Paint -> { debug.paints++; debug.lastPaint = System.nanoTime(); }
+                    case SWT.KeyDown -> debug.keys++;
+                    case SWT.Verify -> debug.verifies++;
+                    case SWT.Modify -> debug.modifies++;
+                    case SWT.Selection -> debug.selections++;
+                    default -> { }
+                }
+            };
+            for (int type : new int[] { SWT.Paint, SWT.KeyDown, SWT.Verify, SWT.Modify, SWT.Selection })
+                text.addListener(type, activity);
+            viewer.addTextPresentationListener(debug.presentationListener);
+            debug.bindDocument();
+            text.addDisposeListener(event -> {
+                if (debug.document != null)
+                    debug.document.removeDocumentListener(debug.documentListener);
+                viewer.removeTextPresentationListener(debug.presentationListener);
+                if (Global.isLogEnabled())
+                    Global.log(TAG, debug.id() + " dispose " + debug.counters()); //$NON-NLS-1$
+            });
+            debug.tick();
+        }
+
+        private void bindDocument()
+        {
+            IDocument current = viewer.getDocument();
+            if (document == current)
+                return;
+            if (document != null)
+                document.removeDocumentListener(documentListener);
+            document = current;
+            if (document != null)
+                document.addDocumentListener(documentListener);
+            if (Global.isLogEnabled())
+                Global.log(TAG, id() + " document=" + identity(document)); //$NON-NLS-1$
+        }
+
+        private void tick()
+        {
+            if (text.isDisposed())
+                return;
+            try
+            {
+                bindDocument();
+                if (Global.isLogEnabled())
+                    snapshot();
+                else
+                {
+                    announced = false;
+                    lastDocumentChange = 0;
+                }
+            }
+            catch (RuntimeException e)
+            {
+                Global.logError(TAG, id() + " snapshot failed", e); //$NON-NLS-1$
+            }
+            finally
+            {
+                if (!text.isDisposed())
+                    text.getDisplay().timerExec(2000, this::tick);
+            }
+        }
+
+        private void snapshot()
+        {
+            long now = System.nanoTime();
+            if (!announced)
+            {
+                announced = true;
+                Global.log(TAG, id() + " start editor=" + editor.getTitle() //$NON-NLS-1$
+                    + " viewer=" + identity(viewer) + " widget=" + identity(text) //$NON-NLS-1$ //$NON-NLS-2$
+                    + " bslBundle=" + org.osgi.framework.FrameworkUtil.getBundle(BslXtextEditor.class) //$NON-NLS-1$
+                    + " swt=" + SWT.getVersion() + " os=" + System.getProperty("os.version") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + " serverCalls=" + ComfortSettings.isServerCallHighlightingEnabled() //$NON-NLS-1$
+                    + " implicitVariables=" + ComfortSettings.isImplicitVariableHighlightingEnabled()); //$NON-NLS-1$
+                for (int type : new int[] { SWT.Paint, SWT.Verify, SWT.Modify })
+                {
+                    StringBuilder listeners = new StringBuilder();
+                    for (Listener listener : text.getListeners(type))
+                        listeners.append(' ').append(listener.getClass().getName());
+                    Global.log(TAG, id() + " listeners type=" + type + listeners); //$NON-NLS-1$
+                }
+            }
+            String counters = counters();
+            boolean changed = !counters.equals(previousCounters);
+            boolean noPaintAfterChange = text.isVisible() && lastDocumentChange > lastPaint
+                && now - lastDocumentChange >= 2_000_000_000L;
+            if (!changed && noPaintAfterChange == previouslyNoPaint
+                && (!text.isFocusControl() || now - lastOutput < 10_000_000_000L))
+                return;
+            previousCounters = counters;
+            previouslyNoPaint = noPaintAfterChange;
+            lastOutput = now;
+            StringBuilder redraw = new StringBuilder();
+            for (Control control = text; control != null; control = control.getParent())
+                redraw.append(' ').append(identity(control)).append(':').append(readField(control, "drawCount")); //$NON-NLS-1$
+            Object reconciler = findHighlightingReconciler(viewer);
+            Global.log(TAG, (noPaintAfterChange ? "[!] " : "") + id() + " " + counters //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " visible=" + text.isVisible() + " focus=" + text.isFocusControl() //$NON-NLS-1$ //$NON-NLS-2$
+                + " docLength=" + (document == null ? -1 : document.getLength()) //$NON-NLS-1$
+                + " widgetLength=" + text.getCharCount() + " lines=" + text.getLineCount() //$NON-NLS-1$ //$NON-NLS-2$
+                + " caret=" + text.getCaretOffset() + " selection=" + text.getSelection() //$NON-NLS-1$ //$NON-NLS-2$
+                + " top=" + text.getTopIndex() + " horizontal=" + text.getHorizontalPixel() //$NON-NLS-1$ //$NON-NLS-2$
+                + " client=" + text.getClientArea() + " paintAgeMs=" + ageMs(now, lastPaint) //$NON-NLS-1$ //$NON-NLS-2$
+                + " changeAgeMs=" + ageMs(now, lastDocumentChange) //$NON-NLS-1$
+                + " noPaintAfterChange=" + noPaintAfterChange //$NON-NLS-1$
+                + " viewerRedraw=" + readField(viewer, "fRedrawCounter") //$NON-NLS-1$ //$NON-NLS-2$
+                + " calculator=" + readField(reconciler, "newCalculator") //$NON-NLS-1$ //$NON-NLS-2$
+                + " reconciling=" + readField(reconciler, "reconciling") + " drawCounts=" + redraw); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            Object renderer = Global.getField(text, "renderer"); //$NON-NLS-1$
+            Object pending = Global.getField(viewer, "fPendingRequests"); //$NON-NLS-1$
+            Global.log(TAG, id() + " geometry content=" + identity(text.getContent()) //$NON-NLS-1$
+                + " docLines=" + (document == null ? -1 : document.getNumberOfLines()) //$NON-NLS-1$
+                + " lineSpacing=" + readField(text, "lineSpacing") //$NON-NLS-1$ //$NON-NLS-2$
+                + " variableHeight=" + readField(text, "hasStyleWithVariableHeight") //$NON-NLS-1$ //$NON-NLS-2$
+                + " topIndexY=" + readField(text, "topIndexY") //$NON-NLS-1$ //$NON-NLS-2$
+                + " ignoreResize=" + readField(text, "ignoreResize") //$NON-NLS-1$ //$NON-NLS-2$
+                + " rendererLines=" + readField(renderer, "lineCount") //$NON-NLS-1$ //$NON-NLS-2$
+                + " ascent=" + readField(renderer, "ascent") + " descent=" + readField(renderer, "descent") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+                + " averageHeight=" + readField(renderer, "averageLineHeight") //$NON-NLS-1$ //$NON-NLS-2$
+                + " pendingProjection=" + (pending instanceof List<?> list ? list.size() : "unavailable") //$NON-NLS-1$ //$NON-NLS-2$
+                + " lineSpans=" + lineSpans(renderer)); //$NON-NLS-1$
+        }
+
+        /** Только длины и уже рассчитанные высоты; getLinePixel/getTextLayout меняют кэш. */
+        private String lineSpans(Object renderer)
+        {
+            StringBuilder result = new StringBuilder();
+            Object sizes = Global.getField(renderer, "lineSizes"); //$NON-NLS-1$
+            int count = text.getLineCount();
+            int first = Math.max(0, Math.min(text.getTopIndex(), count - 1));
+            for (int line = first; line < Math.min(count, first + 16); line++)
+            {
+                int start = text.getContent().getOffsetAtLine(line);
+                int end = line + 1 < count ? text.getContent().getOffsetAtLine(line + 1) : text.getCharCount();
+                int modelLine = viewer instanceof org.eclipse.jface.text.ITextViewerExtension5 projection
+                    ? projection.widgetLine2ModelLine(line) : line;
+                result.append(' ').append(line).append(':').append(end - start)
+                    .append("->").append(modelLine).append(':'); //$NON-NLS-1$
+                try
+                {
+                    result.append(document != null && modelLine >= 0 ? document.getLineLength(modelLine) : -1);
+                }
+                catch (org.eclipse.jface.text.BadLocationException e)
+                {
+                    result.append("unavailable"); //$NON-NLS-1$
+                }
+                if (sizes instanceof Object[] array && line < array.length && array[line] != null)
+                    result.append("/h=").append(readField(array[line], "height")); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            return result.toString();
+        }
+
+        private String counters()
+        {
+            return "keys=" + keys + " verify=" + verifies + " modify=" + modifies //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " selection=" + selections + " docChanges=" + documentChanges.get() //$NON-NLS-1$ //$NON-NLS-2$
+                + " presentations=" + presentations.get() + " paintRequests=" + paintRequests + " paints=" + paints; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        }
+
+        private String id() { return "editor@" + Integer.toHexString(System.identityHashCode(text)); } //$NON-NLS-1$
+        private static String identity(Object value)
+        {
+            return value == null ? "null" : value.getClass().getName() + '@' //$NON-NLS-1$
+                + Integer.toHexString(System.identityHashCode(value));
+        }
+        private static long ageMs(long now, long then) { return then == 0 ? -1 : (now - then) / 1_000_000; }
+
+        /** Имена подтверждены исходниками SWT/TextViewer и существующим хуком реконсилера. */
+        private static String readField(Object object, String name)
+        {
+            if (object == null)
+                return "unavailable"; //$NON-NLS-1$
+            try
+            {
+                Field field = findField(object.getClass(), name);
+                if (field == null)
+                    return "missing"; //$NON-NLS-1$
+                field.setAccessible(true);
+                return String.valueOf(field.get(object));
+            }
+            catch (ReflectiveOperationException | RuntimeException e)
+            {
+                return "unavailable:" + e.getClass().getSimpleName(); //$NON-NLS-1$
+            }
+        }
+    }
+
     static final class DelegatingCalculator implements ISemanticHighlightingCalculator
     {
         private final Object delegate;
@@ -675,12 +962,40 @@ public final class BslEditorHighlightingHook implements IStartup
         {
             if (delegate instanceof ISemanticHighlightingCalculator)
             {
-                ((ISemanticHighlightingCalculator)delegate)
-                    .provideHighlightingFor(resource, acceptor, cancelIndicator);
+                calculate("native", (ISemanticHighlightingCalculator)delegate, //$NON-NLS-1$
+                    resource, acceptor, cancelIndicator);
             }
 
-            new BslEditorHighlighting()
-                .provideHighlightingFor(resource, acceptor, cancelIndicator);
+            calculate("comfort", new BslEditorHighlighting(), resource, acceptor, cancelIndicator); //$NON-NLS-1$
+        }
+
+        private void calculate(String phase, ISemanticHighlightingCalculator calculator,
+            XtextResource resource, IHighlightedPositionAcceptor acceptor, CancelIndicator cancelIndicator)
+        {
+            if (!Global.isLogEnabled())
+            {
+                calculator.provideHighlightingFor(resource, acceptor, cancelIndicator);
+                return;
+            }
+            long start = System.nanoTime();
+            String context = "calculator@" + Integer.toHexString(System.identityHashCode(this)) //$NON-NLS-1$
+                + " resource=" + EditorPaintDebug.identity(resource) + " phase=" + phase //$NON-NLS-1$ //$NON-NLS-2$
+                + " thread=" + Thread.currentThread().getName(); //$NON-NLS-1$
+            Global.log(EditorPaintDebug.TAG, context + " begin"); //$NON-NLS-1$
+            try
+            {
+                calculator.provideHighlightingFor(resource, acceptor, cancelIndicator);
+            }
+            catch (RuntimeException | Error e)
+            {
+                Global.logError(EditorPaintDebug.TAG, context + " failed", e); //$NON-NLS-1$
+                throw e;
+            }
+            finally
+            {
+                Global.log(EditorPaintDebug.TAG, context + " end ms=" //$NON-NLS-1$
+                    + (System.nanoTime() - start) / 1_000_000);
+            }
         }
     }
 

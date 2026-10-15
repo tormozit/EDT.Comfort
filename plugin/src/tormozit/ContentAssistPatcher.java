@@ -152,6 +152,53 @@ return true;
         return p;
     }
 
+    /** На один показ подключает к текущей партиции процессор готового кэша. */
+    @SuppressWarnings("unchecked")
+    static boolean runWithProcessorForCaret(ContentAssistant assistant, SourceViewer viewer,
+        int caret, IContentAssistProcessor processor, Runnable action)
+    {
+        try
+        {
+            String type = org.eclipse.jface.text.TextUtilities.getContentType(
+                viewer.getDocument(), assistant.getDocumentPartitioning(), caret, true);
+            if (fProcessorsField == null)
+            {
+                fProcessorsField = ContentAssistant.class.getDeclaredField("fProcessors");
+                fProcessorsField.setAccessible(true);
+            }
+            Object value = fProcessorsField.get(assistant);
+            if (!(value instanceof java.util.Map<?, ?>))
+            {
+                ContentAssistDebug.pipeline("popup.cachedProcessor.skip", "reason=noProcessorMap");
+                return false;
+            }
+            java.util.Map<String, Object> processors = (java.util.Map<String, Object>) value;
+            Object previous = processors.get(type);
+            java.util.Set<IContentAssistProcessor> replacement = new java.util.LinkedHashSet<>();
+            replacement.add(processor);
+            processors.put(type, replacement);
+            try
+            {
+                ContentAssistDebug.pipeline("popup.cachedProcessor.begin", "type=" + type);
+                action.run();
+            }
+            finally
+            {
+                if (previous == null)
+                    processors.remove(type);
+                else
+                    processors.put(type, previous);
+                ContentAssistDebug.pipeline("popup.cachedProcessor.end", "type=" + type);
+            }
+            return true;
+        }
+        catch (Exception error)
+        {
+            Global.tempLogException("assist-pipeline", "popup.cachedProcessor.failed", error);
+            return false;
+        }
+    }
+
     /**
      * Типы содержимого комментария, зарегистрированные у ассистента ({@code __sl_comment}).
      * Читаем реальную карту процессоров, а не константу бандла EDT: карта — то, по чему

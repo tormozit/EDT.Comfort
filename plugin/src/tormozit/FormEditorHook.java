@@ -650,7 +650,7 @@ public class FormEditorHook implements IStartup
         private static final String TOOLBAR_STATE = "tormozit.formPreview.state"; //$NON-NLS-1$
         private static final String REPRESENTATION =
             "com._1c.g5.v8.dt.form.internal.presentation.wysiwyg.FormWysiwygRepresentation"; //$NON-NLS-1$
-        private static final long SLOW_MS = 2000;
+        private static final long SLOW_MS = 3000;
         private static final EditorMemoryStore STORE =
             new EditorMemoryStore("formPreview.entries", 2000); //$NON-NLS-1$
         private static final Map<Object, PreviewState> STATES = new WeakHashMap<>();
@@ -850,7 +850,7 @@ public class FormEditorHook implements IStartup
                         + String.format(Locale.ROOT, "%.1f", firstRenderMs / 1000.0) //$NON-NLS-1$
                         + " с. Отключите его, чтобы ускорить работу с этой формой. " //$NON-NLS-1$
                         + "Включить макет снова можно кнопкой с глазом над деревом элементов.", //$NON-NLS-1$
-                    15_000, () -> setVisible(false), "Отключить макет"); //$NON-NLS-1$
+                    5_000, () -> setVisible(false), "Отключить макет"); //$NON-NLS-1$
             }
         }
     }

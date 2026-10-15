@@ -973,6 +973,20 @@ public class GetRef extends AbstractHandler implements IElementUpdater
         return null;
     }
 
+    /** Колонка «Путь» в панелях Git: имя объекта МД или путь файла в репозитории без расширения. */
+    static String gitPathColumnText(String path)
+    {
+        if (path == null || path.isEmpty())
+            return ""; //$NON-NLS-1$
+        String fullName = resolveFullNameOrNull(path);
+        if (fullName != null && !fullName.isEmpty())
+            return fullName;
+        int dot = path.lastIndexOf('.');
+        if (dot > path.lastIndexOf('/') + 1)
+            path = path.substring(0, dot);
+        return path;
+    }
+
     /** Подпись колонки «Путь» для {@code src/Configuration/*} (и Configuration в расширении). */
     private static String configurationRootDisplayName(String projectRelativePath)
     {

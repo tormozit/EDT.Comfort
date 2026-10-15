@@ -9,6 +9,7 @@ import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.Handle;
+import org.objectweb.asm.Label;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
 import org.osgi.framework.BundleActivator;
@@ -155,12 +156,45 @@ public final class Activator
             "com._1c.g5.v8.dt.dcs.ui.datasets.fields.DataSetsFieldsEditingSupport"; //$NON-NLS-1$
         private static final String DCS_PARAMETER_EDITING =
             "com._1c.g5.v8.dt.dcs.ui.parameters.ParametersEditingSupport"; //$NON-NLS-1$
+        /**
+         * Блокировщик документа BSL. Грузится раньше активации основного бандла, а агента
+         * перезагрузки классов в EDT нет — вплетение из основного бандла не срабатывало ни разу
+         * (временный лог 15.10.2026 10:33: {@code weaveCalls=0}, {@code instrumentation=false}).
+         *
+         * <p>{@code waitUpdatingDataModel}: ранний выход по {@link #PROP_SKIP_WAIT} — функцию ставит
+         * основной бандл ({@code BslXtextDocumentHook}), до него — «внутри расчёта автодополнения».
+         *
+         * <p>{@code readOnlyForContentAssist}: штатный метод не берёт ни монитора, ни блокировки и
+         * считает по модели, которую в это время перестраивают, — гонка, «Переполнение стека».
+         * Вплетены монитор ресурса и блокировка чтения ({@link AssistReadLock}) — порядок как у
+         * {@code internalReadOnly}, без запуска разбора.
+         */
+        private static final String DOC_LOCKER =
+            "com._1c.g5.v8.dt.bsl.ui.editor.BslXtextDocument$CustomXtextDocumentLocker"; //$NON-NLS-1$
+        /** Совпадает с {@code BslXtextDocumentHook.PROP_SKIP_WAIT}. */
+        static final String PROP_SKIP_WAIT = "tormozit.bslXtextDoc.skipWaitUpdatingDataModel"; //$NON-NLS-1$
+        static final String PROP_ASSIST_READ_BEGIN = "tormozit.bslXtextDoc.assistReadLockBegin"; //$NON-NLS-1$
+        static final String PROP_ASSIST_READ_LOCKED = "tormozit.bslXtextDoc.assistReadLocked"; //$NON-NLS-1$
+        static final String PROP_ASSIST_READ_END = "tormozit.bslXtextDoc.assistReadLockEnd"; //$NON-NLS-1$
+        /** {@code IntSupplier}: глубина вплетённых {@code readOnlyForContentAssist} на текущем потоке. */
+        static final String PROP_ASSIST_READ_DEPTH = "tormozit.bslXtextDoc.assistReadDepth"; //$NON-NLS-1$
+        /**
+         * Необязательный наблюдатель основного бандла {@code BiConsumer<String, Long>} (событие,
+         * миллисекунды): ожидание монитора и блокировки, ошибки рефлексии.
+         */
+        static final String PROP_ASSIST_READ_OBSERVER = "tormozit.bslXtextDoc.assistReadObserver"; //$NON-NLS-1$
+        /** Итог вплетения в {@link #DOC_LOCKER}: {@code woven wait=1 read=1} или {@code error …}. */
+        static final String PROP_DOC_LOCKER_PATCH = "tormozit.bslXtextDoc.lockerPatch"; //$NON-NLS-1$
+        private static final String WAIT_UPDATING_DESC =
+            "(Lcom/_1c/g5/v8/dt/bsl/resource/BslResource;I)V"; //$NON-NLS-1$
+        private static final String READ_FOR_ASSIST_DESC =
+            "(Lorg/eclipse/xtext/util/concurrent/IUnitOfWork;)Ljava/lang/Object;"; //$NON-NLS-1$
         private static final List<String> TARGETS = List.of(BSL_PARSER, CUSTOM_BSL_PARSER, HELPER,
             SUPPRESSION_PROVIDER, FOLDING_PROVIDER, TAB_FOLDER, PART_LIST_CONTROL, COMPARISON_EDITOR,
             MERGE_COMMIT_CALLBACK, EDITOR_MATCHING, GRANULAR_EDITOR, TREE_VIEWER, SEARCH_TREE_LAYOUT,
             FORM_PRESENTATION, FORM_PAGE, PROPERTY_SHEET, PROPERTY_SHEET_MONITOR,
             MULTILANGUAGE_COMPONENT, SINGLE_LANGUAGE_COMPONENT,
-            DCS_LOCAL_STRING_EDITOR, DCS_FIELD_EDITING, DCS_PARAMETER_EDITING);
+            DCS_LOCAL_STRING_EDITOR, DCS_FIELD_EDITING, DCS_PARAMETER_EDITING, DOC_LOCKER);
 
         private static final String EXTRACT_SUPPRESSIONS_DESC = "(Lorg/eclipse/xtext/nodemodel/ILeafNode;)Ljava/util/Set;"; //$NON-NLS-1$
         private static final String ILEAF_NODE = "org/eclipse/xtext/nodemodel/ILeafNode"; //$NON-NLS-1$
@@ -221,6 +255,14 @@ public final class Activator
             System.getProperties().putIfAbsent(PROP_BEFORE_MERGE_COMMIT, (Function<Object, Object>) callback -> null);
             System.getProperties().putIfAbsent(PROP_LOCAL_STRING_SOURCE,
                 (BiFunction<Object, Object, Object>) (dialog, component) -> dialog);
+            // До основного бандла: ожидание бессмысленно только внутри расчёта — разбор ждёт наш монитор.
+            System.getProperties().putIfAbsent(PROP_SKIP_WAIT,
+                (java.util.function.BooleanSupplier) () -> AssistReadLock.depth() > 0);
+            // Вход и выход — только здесь: подмена посреди вызова дала бы выход не из того монитора.
+            System.getProperties().put(PROP_ASSIST_READ_BEGIN, (Function<Object, Object>) AssistReadLock::begin);
+            System.getProperties().put(PROP_ASSIST_READ_LOCKED, (Runnable) AssistReadLock::locked);
+            System.getProperties().put(PROP_ASSIST_READ_END, (java.util.function.Supplier<Object>) AssistReadLock::end);
+            System.getProperties().put(PROP_ASSIST_READ_DEPTH, (java.util.function.IntSupplier) AssistReadLock::depth);
             context.registerService(WeavingHook.class, new EarlyWeaving(), null);
         }
 
@@ -251,6 +293,8 @@ public final class Activator
                     System.setProperty(PROP_PART_LIST_CONTROL, "error " + t); //$NON-NLS-1$
                 if (FORM_PRESENTATION.equals(name) || FORM_PAGE.equals(name))
                     System.setProperty(PROP_FORM_PATCH + name, "error " + t); //$NON-NLS-1$
+                if (DOC_LOCKER.equals(name))
+                    System.setProperty(PROP_DOC_LOCKER_PATCH, "error " + t); //$NON-NLS-1$
             }
         }
 
@@ -844,6 +888,8 @@ public final class Activator
         /** Кадры стека остаются исходными: вставки без ветвлений и не меняют высоту стека в точках кадров. */
         static byte[] transform(String className, byte[] bytes)
         {
+            if (DOC_LOCKER.equals(className))
+                return transformDocLocker(bytes);
             if (DCS_LOCAL_STRING_EDITOR.equals(className) || DCS_FIELD_EDITING.equals(className)
                 || DCS_PARAMETER_EDITING.equals(className))
                 return transformDcsLocalStringSource(className, bytes);
@@ -1214,6 +1260,308 @@ public final class Activator
         private static void emitResultFilter(MethodVisitor mv, String prop)
         {
             emitFilter(mv, prop, IPARSE_RESULT);
+        }
+
+        /**
+         * {@link #DOC_LOCKER}: ветвление и обработчик исключений — кадры пересчитываются
+         * ({@code COMPUTE_FRAMES}, общий предок — {@code Object}, классы EDT не загружаются), как в
+         * {@link #transformFoldingProvider}. Функции ставит {@link #install} до хука, поэтому
+         * вплетённый код зовёт их без проверок.
+         */
+        private static byte[] transformDocLocker(byte[] bytes)
+        {
+            ClassReader reader = new ClassReader(bytes);
+            ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_FRAMES)
+            {
+                @Override
+                protected String getCommonSuperClass(String type1, String type2)
+                {
+                    return "java/lang/Object"; //$NON-NLS-1$
+                }
+            };
+            int[] touched = new int[2];
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor, String signature,
+                    String[] exceptions)
+                {
+                    MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    if (mv == null)
+                        return null;
+                    if ("waitUpdatingDataModel".equals(name) && WAIT_UPDATING_DESC.equals(descriptor)) //$NON-NLS-1$
+                    {
+                        touched[0]++;
+                        return new MethodVisitor(Opcodes.ASM9, mv)
+                        {
+                            @Override
+                            public void visitCode()
+                            {
+                                super.visitCode();
+                                // if (skip.getAsBoolean()) return;
+                                emitGetProperty(this, PROP_SKIP_WAIT, "java/util/function/BooleanSupplier"); //$NON-NLS-1$
+                                super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BooleanSupplier", //$NON-NLS-1$
+                                    "getAsBoolean", "()Z", true); //$NON-NLS-1$ //$NON-NLS-2$
+                                Label original = new Label();
+                                super.visitJumpInsn(Opcodes.IFEQ, original);
+                                super.visitInsn(Opcodes.RETURN);
+                                super.visitLabel(original);
+                            }
+                        };
+                    }
+                    if ("readOnlyForContentAssist".equals(name) && READ_FOR_ASSIST_DESC.equals(descriptor)) //$NON-NLS-1$
+                    {
+                        touched[1]++;
+                        return new AssistReadVisitor(mv);
+                    }
+                    return mv;
+                }
+            }, ClassReader.EXPAND_FRAMES);
+            boolean woven = touched[0] == 1 && touched[1] == 1;
+            System.setProperty(PROP_DOC_LOCKER_PATCH, (woven ? "woven" : "skipped") //$NON-NLS-1$ //$NON-NLS-2$
+                + " wait=" + touched[0] + " read=" + touched[1]); //$NON-NLS-1$ //$NON-NLS-2$
+            return woven ? writer.toByteArray() : null;
+        }
+
+        /**
+         * Тело {@code readOnlyForContentAssist}:
+         * <pre>
+         * MONITORENTER begin(this); locked();
+         * try { тело } — перед каждым ARETURN и в обработчике любого исключения: MONITOREXIT end();
+         * </pre>
+         * Обработчик — последняя запись таблицы исключений, внутренние обработчики он не заслоняет.
+         * Новых методов и локальных переменных нет; объект монитора хранит {@link AssistReadLock}.
+         */
+        private static final class AssistReadVisitor extends MethodVisitor
+        {
+            private final Label start = new Label();
+            private final Label end = new Label();
+            private final Label handler = new Label();
+
+            AssistReadVisitor(MethodVisitor mv)
+            {
+                super(Opcodes.ASM9, mv);
+            }
+
+            @Override
+            public void visitCode()
+            {
+                super.visitCode();
+                emitGetProperty(mv, PROP_ASSIST_READ_BEGIN, "java/util/function/Function"); //$NON-NLS-1$
+                mv.visitVarInsn(Opcodes.ALOAD, 0);
+                mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Function", "apply", //$NON-NLS-1$ //$NON-NLS-2$
+                    "(Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$
+                mv.visitInsn(Opcodes.MONITORENTER);
+                // Защищённый участок — сразу за входом в монитор: выход парный при любом исключении.
+                mv.visitLabel(start);
+                emitGetProperty(mv, PROP_ASSIST_READ_LOCKED, "java/lang/Runnable"); //$NON-NLS-1$
+                mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/lang/Runnable", "run", "()V", true); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            }
+
+            @Override
+            public void visitInsn(int opcode)
+            {
+                if (opcode == Opcodes.ARETURN)
+                    emitExit();
+                super.visitInsn(opcode);
+            }
+
+            @Override
+            public void visitMaxs(int maxStack, int maxLocals)
+            {
+                mv.visitLabel(end);
+                mv.visitTryCatchBlock(start, end, handler, null);
+                mv.visitLabel(handler);
+                emitExit();
+                mv.visitInsn(Opcodes.ATHROW);
+                super.visitMaxs(maxStack, maxLocals);
+            }
+
+            /** {@code MONITOREXIT end()}; стек не меняет. */
+            private void emitExit()
+            {
+                emitGetProperty(mv, PROP_ASSIST_READ_END, "java/util/function/Supplier"); //$NON-NLS-1$
+                mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Supplier", "get", //$NON-NLS-1$ //$NON-NLS-2$
+                    "()Ljava/lang/Object;", true); //$NON-NLS-1$
+                mv.visitInsn(Opcodes.MONITOREXIT);
+            }
+        }
+
+        /**
+         * Монитор ресурса и блокировка чтения документа на время вплетённого
+         * {@code readOnlyForContentAssist}: тот же порядок, что у штатного {@code internalReadOnly}
+         * ({@code XtextDocument.getResourceLock()}, затем {@code acquireReadLock}), но без
+         * {@code updateContentBeforeRead}, то есть без запуска разбора. Все, кто меняет модель, идут
+         * через {@code modify} (монитор, затем запись) и ждут; вложенные {@code readOnly} внутри
+         * расчёта входят повторно и разбор не запускают ({@code getReadHoldCount() > 1}).
+         *
+         * <p>Только рефлексия по именам: типы Xtext не загружаются. Методы не бросают и не возвращают
+         * {@code null} — иначе упадёт метод EDT; без нужного метода монитор — сам блокировщик.
+         */
+        private static final class AssistReadLock
+        {
+            private static final class Entry
+            {
+                final Object locker;
+                final Object monitor;
+                final long startNs = System.nanoTime();
+                boolean readLocked;
+
+                Entry(Object locker, Object monitor)
+                {
+                    this.locker = locker;
+                    this.monitor = monitor;
+                }
+            }
+
+            private static final ThreadLocal<java.util.ArrayDeque<Entry>> STACK =
+                ThreadLocal.withInitial(java.util.ArrayDeque::new);
+            private static final java.util.Map<Class<?>,
+                java.util.Map<String, java.util.Optional<java.lang.reflect.Method>>> METHODS =
+                    new java.util.concurrent.ConcurrentHashMap<>();
+            /** С какого ожидания сообщать наблюдателю: порог наблюдения, не задержка. */
+            private static final long REPORT_MS = 5;
+
+            private AssistReadLock()
+            {
+            }
+
+            static Object begin(Object locker)
+            {
+                Object monitor = locker;
+                try
+                {
+                    java.lang.reflect.Field outer = findField(locker.getClass(), "this$0"); //$NON-NLS-1$
+                    Object document = outer != null ? outer.get(locker) : null;
+                    Object lock = invoke(document, "getResourceLock"); //$NON-NLS-1$
+                    if (lock != null)
+                        monitor = lock;
+                }
+                catch (Throwable t)
+                {
+                    observe("beginError " + t, 0); //$NON-NLS-1$
+                }
+                STACK.get().push(new Entry(locker, monitor));
+                return monitor;
+            }
+
+            static void locked()
+            {
+                Entry entry = STACK.get().peek();
+                if (entry == null)
+                    return;
+                try
+                {
+                    invoke(entry.locker, "acquireReadLock"); //$NON-NLS-1$
+                    entry.readLocked = true;
+                }
+                catch (Throwable t)
+                {
+                    observe("readLockError " + t, 0); //$NON-NLS-1$
+                }
+                long waitMs = (System.nanoTime() - entry.startNs) / 1_000_000L;
+                if (waitMs >= REPORT_MS || !entry.readLocked)
+                    observe("readLock readLocked=" + entry.readLocked + " depth=" + STACK.get().size(), waitMs); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+
+            static Object end()
+            {
+                java.util.ArrayDeque<Entry> stack = STACK.get();
+                Entry entry = stack.poll();
+                if (stack.isEmpty())
+                    STACK.remove();
+                if (entry == null)
+                    return new Object(); // не бывает: вход и выход парные; MONITOREXIT бросит IllegalMonitorState
+                if (entry.readLocked)
+                {
+                    try
+                    {
+                        invoke(entry.locker, "releaseReadLock"); //$NON-NLS-1$
+                    }
+                    catch (Throwable t)
+                    {
+                        observe("releaseError " + t, 0); //$NON-NLS-1$
+                    }
+                }
+                return entry.monitor;
+            }
+
+            static int depth()
+            {
+                java.util.ArrayDeque<Entry> stack = STACK.get();
+                int depth = stack.size();
+                if (depth == 0)
+                    STACK.remove();
+                return depth;
+            }
+
+            @SuppressWarnings("unchecked")
+            private static void observe(String event, long ms)
+            {
+                try
+                {
+                    Object observer = System.getProperties().get(PROP_ASSIST_READ_OBSERVER);
+                    if (observer instanceof java.util.function.BiConsumer<?, ?> consumer)
+                        ((java.util.function.BiConsumer<String, Long>) consumer).accept(event, Long.valueOf(ms));
+                }
+                catch (Throwable ignored)
+                {
+                }
+            }
+
+            /** Метод без параметров в классе объекта или его предке, в том числе закрытый. */
+            private static Object invoke(Object target, String name) throws Exception
+            {
+                if (target == null)
+                    return null;
+                Class<?> type = target.getClass();
+                java.util.Optional<java.lang.reflect.Method> method = METHODS
+                    .computeIfAbsent(type, key -> new java.util.concurrent.ConcurrentHashMap<>())
+                    .computeIfAbsent(name, key -> java.util.Optional.ofNullable(findMethod(type, key)));
+                return method.isPresent() ? method.get().invoke(target) : null;
+            }
+
+            private static java.lang.reflect.Method findMethod(Class<?> type, String name)
+            {
+                for (Class<?> c = type; c != null; c = c.getSuperclass())
+                {
+                    try
+                    {
+                        java.lang.reflect.Method m = c.getDeclaredMethod(name);
+                        m.setAccessible(true);
+                        return m;
+                    }
+                    catch (NoSuchMethodException ignored)
+                    {
+                    }
+                    catch (Throwable t)
+                    {
+                        return null;
+                    }
+                }
+                return null;
+            }
+
+            private static java.lang.reflect.Field findField(Class<?> type, String name)
+            {
+                for (Class<?> c = type; c != null; c = c.getSuperclass())
+                {
+                    try
+                    {
+                        java.lang.reflect.Field f = c.getDeclaredField(name);
+                        f.setAccessible(true);
+                        return f;
+                    }
+                    catch (NoSuchFieldException ignored)
+                    {
+                    }
+                    catch (Throwable t)
+                    {
+                        return null;
+                    }
+                }
+                return null;
+            }
         }
 
         /** Стек {@code [value]} → {@code [(castTo) ((Function) prop).apply(value)]}. */

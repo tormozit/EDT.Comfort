@@ -2134,11 +2134,7 @@ public final class GitHistoryHook implements IStartup
         return switch (logical)
         {
             case COL_TYPE -> extensionOf(path);
-            case COL_PATH ->
-            {
-                String fullName = GetRef.resolveFullNameOrNull(path);
-                yield fullName != null ? fullName : ""; //$NON-NLS-1$
-            }
+            case COL_PATH -> GetRef.gitPathColumnText(path);
             case COL_STATUS -> statusText(element);
             default -> path;
         };
@@ -2454,10 +2450,7 @@ public final class GitHistoryHook implements IStartup
             if (col == 1)
                 return extensionOf(path);
             if (col == 2)
-            {
-                String fullName = GetRef.resolveFullNameOrNull(path);
-                return fullName != null ? fullName : ""; //$NON-NLS-1$
-            }
+                return GetRef.gitPathColumnText(path);
             if (col == 3)
                 return statusText(element);
             return ""; //$NON-NLS-1$
@@ -2708,7 +2701,7 @@ public final class GitHistoryHook implements IStartup
     /**
      * Multi-column label provider: column 0 — оригинальный
      * {@code FileDiffLabelProvider} (иконки, dimmed foreground, tooltip rename),
-     * column 1 — расширение, column 2 — {@code resolveFullNameOrNull(path)},
+     * column 1 — расширение, column 2 — {@link GetRef#gitPathColumnText},
      * column 3 — статус. Подсветка совпадений {@link SmartMatchHighlight}
      * только в колонках «Файл»/«Тип»/«Путь» (не в «Статус»).
      */
@@ -2762,8 +2755,7 @@ public final class GitHistoryHook implements IStartup
                 Object element = cell.getElement();
                 Object pathObj = Global.call(element, "getPath"); //$NON-NLS-1$
                 String path = pathObj instanceof String s ? s : ""; //$NON-NLS-1$
-                String fullName = GetRef.resolveFullNameOrNull(path);
-                cell.setText(fullName != null ? fullName : ""); //$NON-NLS-1$
+                cell.setText(GetRef.gitPathColumnText(path));
                 // Как у штатной колонки «Файл»: dimmed foreground для unmarked FileDiff.
                 copyFileColumnStyle(cell, element);
             }

@@ -357,7 +357,7 @@ public final class ContentAssistPopupSync
                         int stableNAfterSeed = -1;
                         if (inLiteral)
                         {
-                            seedStableDelegateFromVisiblePopup(assistant, processor);
+                            seedStableDelegateFromVisiblePopup(assistant, processor, viewer, caret);
                             stableNAfterSeed = processor.literalStableDelegateCount();
                         }
                         String previousFilter = SmartFilterTracker.getCurrentFilter();
@@ -581,6 +581,12 @@ public final class ContentAssistPopupSync
                                              SmartContentAssistProcessor processor,
                                              int caretOverride)
     {
+        try (ContentAssistDebug.PipelineSpan pipeline =
+            ContentAssistDebug.pipelineStart("popup.recompute",
+                (processor == null ? "processor=null" : processor.pipelineState())
+                    + " viewer=" + ContentAssistDebug.pipelineIdentity(viewer)
+                    + " caretOverride=" + caretOverride + " trigger=" + RECOMPUTE_TRIGGER.get()))
+        {
         if (!ComfortSettings.isReplaceListFiltersEnabled())
             return false;
         if (Boolean.TRUE.equals(RECOMPUTE_GUARD.get()))
@@ -613,6 +619,9 @@ public final class ContentAssistPopupSync
                 : SmartContentAssistProcessor.resolveWidgetCaret(viewer);
             if (caret >= 0)
                 SmartContentAssistProcessor.primeFilterTrackerOnly(viewer, caret);
+
+            if (syncLiteralArgPopupInPlace(assistant, viewer, processor, caret))
+                return true;
 
             boolean inLiteralRecompute = SmartContentAssistProcessor.isStringLiteralAssistContext(
                 viewer, caret);
@@ -721,6 +730,9 @@ if (fastIrMergeReset)
                             + e.getMessage());
                     }
                 }
+                ContentAssistDebug.pipeline("popup.recompute.skip", "reason=sameSnapshot"
+                    + " filter=" + ContentAssistDebug.pipelineText(filter)
+                    + " " + ContentAssistDebug.pipelineList(proposals));
                 finishSyncCycle(popup);
                 return true;
             }
@@ -843,6 +855,7 @@ if (viewer != null && isPopupVisible(assistant))
                     FLUSH_RECOMPUTE_GUARD.remove();
                 }
             }
+        }
         }
     }
 
@@ -991,10 +1004,21 @@ if (processor != null && processor.isIrWordsResolvedForContext()
 
         PendingDebouncedFilter prev = PENDING_CARET_TASKS.remove(viewer);
         if (prev != null)
+        {
+            ContentAssistDebug.pipeline("caret.timer.cancel", "task="
+                + ContentAssistDebug.pipelineIdentity(prev.task) + " reason=replaced");
             prev.display.timerExec(-1, prev.task);
+        }
 
         final int taskGen = CARET_TASK_GEN.incrementAndGet();
+        final long pipelineQueuedNs = System.nanoTime();
+        ContentAssistDebug.pipeline("caret.timer.schedule", processor.pipelineState()
+            + " generation=" + taskGen + " replaced=" + (prev != null));
         Runnable task = () -> {
+            ContentAssistDebug.pipeline("caret.timer.run", processor.pipelineState()
+                + " viewer=" + ContentAssistDebug.pipelineIdentity(viewer)
+                + " generation=" + taskGen + "/" + CARET_TASK_GEN.get()
+                + " queuedNs=" + (System.nanoTime() - pipelineQueuedNs));
             PENDING_CARET_TASKS.remove(viewer);
             if (widget.isDisposed() || taskGen != CARET_TASK_GEN.get()
                 || isRecomputeInProgress())
@@ -1054,6 +1078,8 @@ if (processor != null && processor.isIrWordsResolvedForContext()
             }
         };
         PENDING_CARET_TASKS.put(viewer, new PendingDebouncedFilter(task, display));
+        ContentAssistDebug.pipeline("caret.timer.queued", "task=" + ContentAssistDebug.pipelineIdentity(task)
+            + " generation=" + taskGen + " delayMs=" + FILTER_DEBOUNCE_MS);
         display.timerExec(FILTER_DEBOUNCE_MS, task);
     }
 
@@ -1064,7 +1090,11 @@ if (processor != null && processor.isIrWordsResolvedForContext()
         CARET_TASK_GEN.incrementAndGet();
         PendingDebouncedFilter pending = PENDING_CARET_TASKS.remove(viewer);
         if (pending != null && pending.display != null && !pending.display.isDisposed())
+        {
+            ContentAssistDebug.pipeline("timer.cancel", "task="
+                + ContentAssistDebug.pipelineIdentity(pending.task) + " reason=explicit");
             pending.display.timerExec(-1, pending.task);
+        }
     }
 
     /** Сбрасывает pending filter/document и отменяет отложенный debounce (разрыв цикла). */
@@ -1192,7 +1222,9 @@ if (processor != null && processor.isIrWordsResolvedForContext()
                 + " total=" + lastFullFilteredCount); //$NON-NLS-1$
         }
         else if (!processor.isFullListComplete()
-            && SmartFilterTracker.getCurrentFilter().isEmpty())
+            && SmartFilterTracker.getCurrentFilter().isEmpty()
+            && !SmartContentAssistProcessor.isStringLiteralAssistContext(viewer,
+                SmartContentAssistProcessor.resolveWidgetCaret(viewer)))
         {
             processor.scheduleLoadFullListCache(viewer);
         }
@@ -1246,16 +1278,21 @@ if (processor != null && processor.isIrWordsResolvedForContext()
                                           boolean restoreAfterFilterToggle)
             throws Exception
     {
-        if (fProposalTableField == null || selectProposalMethod == null || list == null)
-            return;
-        Table table = (Table) fProposalTableField.get(popup);
-        if (table == null || table.isDisposed())
-            return;
-        list = NaparnikAssistRow.withRow(list);
-        fFilteredProposalsField.set(popup, list);
-        table.clearAll();
-        table.setItemCount(list.size());
-        applySelection(popup, list, saved, resetToFirst, restoreAfterFilterToggle);
+        try (ContentAssistDebug.FillSpan fill = ContentAssistDebug.fillStart("table.forceFill", popup))
+        {
+            if (fProposalTableField == null || selectProposalMethod == null || list == null)
+                return;
+            Table table = (Table) fProposalTableField.get(popup);
+            if (table == null || table.isDisposed())
+                return;
+            list = NaparnikAssistRow.withRow(list);
+            fFilteredProposalsField.set(popup, list);
+            ContentAssistDebug.pipeline("popup.forceFill", "popup=" + ContentAssistDebug.pipelineIdentity(popup)
+                + " rowsBefore=" + table.getItemCount() + " " + ContentAssistDebug.pipelineList(list));
+            table.clearAll();
+            table.setItemCount(list.size());
+            applySelection(popup, list, saved, resetToFirst, restoreAfterFilterToggle);
+        }
     }
 
     private static boolean shouldResetSelectionToFirst()
@@ -1331,7 +1368,7 @@ if (processor != null && processor.isIrWordsResolvedForContext()
 
     /** Заполнить stable/delegate cache из текущего popup (literal без ИР, fix11). */
     static void seedStableDelegateFromVisiblePopup(ContentAssistant assistant,
-                                                   SmartContentAssistProcessor processor)
+        SmartContentAssistProcessor processor, SourceViewer viewer, int caret)
     {
         if (assistant == null || processor == null || !isPopupVisible(assistant))
             return;
@@ -1348,7 +1385,7 @@ if (processor != null && processor.isIrWordsResolvedForContext()
             if (list == null || list.isEmpty())
                 return;
             processor.absorbStableFromPopupProposals(
-                list.toArray(new ICompletionProposal[list.size()]));
+                list.toArray(new ICompletionProposal[list.size()]), viewer, caret);
         }
         catch (Exception ignored) {}
     }
@@ -2311,7 +2348,10 @@ IInformationControlCreator creator = trace.creator;
                             && !s.isDisposed() && s.isVisible())
                         {
                             logSidePanelRefresh("configureAndMakeVisible"); //$NON-NLS-1$
-                            configureAndMakeVisibleMethod.invoke(popup);
+                            try (ContentAssistDebug.FillSpan nativeCall = ContentAssistDebug.fillStart("popup.configure", popup))
+                            {
+                                configureAndMakeVisibleMethod.invoke(popup);
+                            }
                             logSidePanelGeometry("configureAndMakeVisible"); //$NON-NLS-1$
                         }
                         else
@@ -2423,7 +2463,10 @@ IInformationControlCreator creator = trace.creator;
                 if (configureAndMakeVisibleMethod != null)
                 {
                     logSidePanelRefresh("configureAndMakeVisible"); //$NON-NLS-1$
-                    configureAndMakeVisibleMethod.invoke(popup);
+                    try (ContentAssistDebug.FillSpan nativeCall = ContentAssistDebug.fillStart("popup.configure", popup))
+                    {
+                        configureAndMakeVisibleMethod.invoke(popup);
+                    }
                     logSidePanelGeometry("recreateBrowser"); //$NON-NLS-1$
                 }
                 else
@@ -2722,7 +2765,10 @@ IInformationControlCreator creator = trace.creator;
         }
 
         if (selectProposalMethod != null)
-            selectProposalMethod.invoke(popup, selectionIndex, Boolean.FALSE);
+            try (ContentAssistDebug.FillSpan nativeCall = ContentAssistDebug.fillStart("popup.select", popup))
+            {
+                selectProposalMethod.invoke(popup, selectionIndex, Boolean.FALSE);
+            }
 
         if (fAdditionalInfoControllerField != null && handleTableSelectionChangedMethod != null)
         {
@@ -2744,7 +2790,10 @@ IInformationControlCreator creator = trace.creator;
                 && !((org.eclipse.swt.widgets.Shell) shell).isDisposed()
                 && ((org.eclipse.swt.widgets.Shell) shell).isVisible())
             {
-                configureAndMakeVisibleMethod.invoke(popup);
+                try (ContentAssistDebug.FillSpan nativeCall = ContentAssistDebug.fillStart("popup.configure", popup))
+                {
+                    configureAndMakeVisibleMethod.invoke(popup);
+                }
             }
         }
     }
@@ -2761,10 +2810,21 @@ IInformationControlCreator creator = trace.creator;
 
         PendingDebouncedFilter prev = PENDING_FILTER_TASKS.remove(popup);
         if (prev != null)
+        {
+            ContentAssistDebug.pipeline("filter.timer.cancel", "task="
+                + ContentAssistDebug.pipelineIdentity(prev.task) + " reason=replaced");
             prev.display.timerExec(-1, prev.task);
+        }
 
         final int taskGen = FILTER_TASK_GEN.incrementAndGet();
+        final long pipelineQueuedNs = System.nanoTime();
+        ContentAssistDebug.pipeline("filter.timer.schedule", "popup=" + ContentAssistDebug.pipelineIdentity(popup)
+            + " generation=" + taskGen + " replaced=" + (prev != null)
+            + " filter=" + ContentAssistDebug.pipelineText(SmartFilterTracker.getCurrentFilter()));
         Runnable task = () -> {
+            ContentAssistDebug.pipeline("filter.timer.run", "popup=" + ContentAssistDebug.pipelineIdentity(popup)
+                + " generation=" + taskGen + "/" + FILTER_TASK_GEN.get()
+                + " queuedNs=" + (System.nanoTime() - pipelineQueuedNs));
             PENDING_FILTER_TASKS.remove(popup);
             if (widget.isDisposed() || taskGen != FILTER_TASK_GEN.get()
                 || isRecomputeInProgress())
@@ -2830,6 +2890,8 @@ IInformationControlCreator creator = trace.creator;
             }
         };
         PENDING_FILTER_TASKS.put(popup, new PendingDebouncedFilter(task, display));
+        ContentAssistDebug.pipeline("filter.timer.queued", "task=" + ContentAssistDebug.pipelineIdentity(task)
+            + " generation=" + taskGen + " delayMs=" + FILTER_DEBOUNCE_MS);
         display.timerExec(FILTER_DEBOUNCE_MS, task);
     }
 
@@ -2875,7 +2937,11 @@ IInformationControlCreator creator = trace.creator;
             return;
         PendingDebouncedFilter pending = PENDING_FILTER_TASKS.remove(popup);
         if (pending != null && pending.display != null && !pending.display.isDisposed())
+        {
+            ContentAssistDebug.pipeline("timer.cancel", "task="
+                + ContentAssistDebug.pipelineIdentity(pending.task) + " reason=explicit");
             pending.display.timerExec(-1, pending.task);
+        }
     }
 
     private static void ensureFilterPending(Object popup) throws Exception
@@ -3095,7 +3161,15 @@ finishSyncCycleLight(popup);
         List<ICompletionProposal> keepBase = baseIsFiltered ? filtered : NaparnikAssistRow.withRow(base);
         if (fComputedProposalsField != null && keepBase != null)
             fComputedProposalsField.set(popup, keepBase);
-        setProposalsMethod.invoke(popup, filtered, Boolean.TRUE);
+        try (ContentAssistDebug.PipelineSpan fill = ContentAssistDebug.pipelineStart("popup.setProposals.member",
+            "popup=" + ContentAssistDebug.pipelineIdentity(popup)
+                + " filter=" + ContentAssistDebug.pipelineText(SmartFilterTracker.getCurrentFilter())
+                + " rowsBefore=" + tableItemCount(popup)
+                + " " + ContentAssistDebug.pipelineList(filtered)))
+        {
+            invokeSetProposals(popup, filtered, true);
+            ContentAssistDebug.pipeline("popup.setProposals.result", "rowsAfter=" + tableItemCount(popup));
+        }
         List<ICompletionProposal> applied =
             (List<ICompletionProposal>) fFilteredProposalsField.get(popup);
         // Не перезаписываем computed отфильтрованным результатом setProposals.
@@ -3157,11 +3231,96 @@ finishSyncCycle(popup);
     }
 
     /**
+     * Литерал-аргумент без ИР: фильтруем сохранённую базу, не запускаем JFace restart
+     * при Backspace. До готовности базы оставляем видимые строки.
+     */
+    private static boolean syncLiteralArgPopupInPlace(ContentAssistant assistant,
+        SourceViewer viewer, SmartContentAssistProcessor processor, int caret) throws Exception
+    {
+        if (viewer == null || processor == null || caret < 0
+            || !SmartContentAssistProcessor.isStringLiteralAssistContext(viewer, caret)
+            || BslAssistSourceHeuristics.literalCallMethodName(viewer.getDocument(), caret) == null
+            || isLiteralIrExpected(viewer, processor, caret))
+            return false;
+        Object popup = getPopup(assistant);
+        if (popup == null)
+            return false;
+        initPopupReflection(popup);
+        ICompletionProposal[] base = processor.literalArgPopupBaseForCaret(viewer, caret);
+        if (base == null)
+        {
+            processor.scheduleLiteralArgListInBackground(viewer, caret, "popupCacheMiss",
+                () -> ContentAssistSessionReloader.openLiteralArgPopupFor(viewer));
+            ContentAssistDebug.pipeline("literalArg.popup.wait", "caret=" + caret
+                + " rows=" + tableItemCount(popup));
+            finishSyncCycleLight(popup);
+            return true;
+        }
+        if (fFilteredProposalsField == null || setProposalsMethod == null)
+            return false;
+        String filter = processor.literalArgPopupFilterForCaret(viewer, caret);
+        SmartFilterTracker.setCurrentFilter(filter);
+        boolean smart = SmartAssistFilterState.isSmartFilterEnabled();
+        String snapshot = smart + ":" + filter;
+        Table table = fProposalTableField != null ? (Table) fProposalTableField.get(popup) : null;
+        String previous = table != null && !table.isDisposed()
+            ? (String) table.getData("comfort.literal.filter") : null;
+        if (!snapshot.equals(previous))
+            popupDisplayLimit = INITIAL_POPUP_DISPLAY_LIMIT;
+        ICompletionProposal[] filtered = smart
+            ? processor.filterProposalsInPlace(base, filter)
+            : SmartContentAssistProcessor.filterStockDelegateProposals(viewer, caret, base);
+        List<ICompletionProposal> full = new ArrayList<>(Arrays.asList(base));
+        lastFullFilteredCount = filtered.length;
+        int displayCount = Math.min(filtered.length, popupDisplayLimit);
+        List<ICompletionProposal> ready = NaparnikAssistRow.withRow(
+            new ArrayList<>(Arrays.asList(Arrays.copyOf(filtered, displayCount))));
+        @SuppressWarnings("unchecked")
+        List<ICompletionProposal> current =
+            (List<ICompletionProposal>) fFilteredProposalsField.get(popup);
+        boolean same = snapshot.equals(previous) && sameProposalOrder(current, ready);
+        if (!same)
+            applyMemberAccessFilteredProposals(popup, full, ready, saveSelection(popup));
+        else if (fComputedProposalsField != null)
+            fComputedProposalsField.set(popup, NaparnikAssistRow.withRow(full));
+        table = fProposalTableField != null ? (Table) fProposalTableField.get(popup) : null;
+        if (table != null && !table.isDisposed())
+            table.setData("comfort.literal.filter", snapshot);
+        installPopupScrollWatcher(popup, assistant, viewer, processor);
+        ContentAssistDebug.pipeline("literalArg.popup.fill", "skipped=" + same
+            + " displayN=" + displayCount + " fullN=" + filtered.length);
+        resetFilterPrefixToCaret(assistant, caret);
+        finishSyncCycleLight(popup);
+        ContentAssistDebug.pipeline("literalArg.popup.cache", "caret=" + caret
+            + " baseN=" + base.length + " n=" + filtered.length
+            + " filter=" + ContentAssistDebug.pipelineText(filter));
+        return true;
+    }
+
+    /** Совпадают именно предложения и порядок, а не только число строк. */
+    private static boolean sameProposalOrder(List<ICompletionProposal> left,
+        List<ICompletionProposal> right)
+    {
+        if (left == null || right == null || left.size() != right.size())
+            return false;
+        for (int i = 0; i < left.size(); i++)
+            if (SmartContentAssistProcessor.unwrapProposal(left.get(i))
+                != SmartContentAssistProcessor.unwrapProposal(right.get(i)))
+                return false;
+        return true;
+    }
+
+    /**
      * Штатный {@code fFilterRunnable}: offset'ы popup, {@code completeCommonPrefix}, validate.
      * Вызывать до нашего {@link #recomputePopupList}, если тот нужен.
      */
     static void runStockFilterRunnable(ContentAssistant assistant)
     {
+        try (ContentAssistDebug.PipelineSpan pipeline =
+            ContentAssistDebug.pipelineStart("popup.stockFilter",
+                "assistant=" + ContentAssistDebug.pipelineIdentity(assistant)
+                    + " filter=" + ContentAssistDebug.pipelineText(SmartFilterTracker.getCurrentFilter())))
+        {
         if (assistant == null)
             return;
         try
@@ -3173,18 +3332,56 @@ finishSyncCycle(popup);
             if (original == null)
                 return;
             initPopupReflection(popup);
+            SourceViewer literalViewer = ContentAssistSessionReloader.getActiveAssistant() == assistant
+                ? ContentAssistSessionReloader.getActiveViewer() : null;
+            SmartContentAssistProcessor literalProcessor =
+                ContentAssistSessionReloader.getActiveProcessor();
+            if (syncLiteralArgPopupInPlace(assistant, literalViewer, literalProcessor,
+                SmartContentAssistProcessor.resolveWidgetCaret(literalViewer)))
+                return;
             String filterPrefix = SmartFilterTracker.getCurrentFilter();
             int tableBefore = tableItemCount(popup);
             int filteredBefore = filteredProposalCount(popup);
             boolean popupVisibleBefore = isPopupVisible(assistant);
 ensureFilterPending(popup);
-            original.run();
+            ContentAssistDebug.pipeline("popup.stockFilter.before", "popup=" + ContentAssistDebug.pipelineIdentity(popup)
+                + " rows=" + tableBefore + " filtered=" + filteredBefore);
+            // Временный замер: разделить вычисления, блокировки и ожидание внутри JFace.
+            java.lang.management.ThreadMXBean mx =
+                java.lang.management.ManagementFactory.getThreadMXBean();
+            long threadId = Thread.currentThread().getId();
+            long cpuBefore = mx.isCurrentThreadCpuTimeSupported()
+                ? mx.getCurrentThreadCpuTime() : -1L;
+            java.lang.management.ThreadInfo infoBefore = mx.getThreadInfo(threadId);
+            long stockStart = System.nanoTime();
+            try
+            {
+                original.run();
+            }
+            finally
+            {
+                long elapsedNs = System.nanoTime() - stockStart;
+                long cpuAfter = mx.isCurrentThreadCpuTimeSupported()
+                    ? mx.getCurrentThreadCpuTime() : -1L;
+                java.lang.management.ThreadInfo infoAfter = mx.getThreadInfo(threadId);
+                boolean contention = mx.isThreadContentionMonitoringEnabled()
+                    && infoBefore != null && infoAfter != null;
+                ContentAssistDebug.pipeline("popup.stockFilter.work", "elapsedNs=" + elapsedNs
+                    + " cpuNs=" + (cpuBefore >= 0 && cpuAfter >= 0 ? cpuAfter - cpuBefore : -1L)
+                    + " blockedMs=" + (contention
+                        ? infoAfter.getBlockedTime() - infoBefore.getBlockedTime() : -1L)
+                    + " waitedMs=" + (contention
+                        ? infoAfter.getWaitedTime() - infoBefore.getWaitedTime() : -1L));
+            }
+            ContentAssistDebug.pipeline("popup.stockFilter.after", "rows=" + tableItemCount(popup)
+                + " filtered=" + filteredProposalCount(popup));
             if (!SmartAssistFilterState.isSmartFilterEnabled())
                 applyPrefixSelectionIfNeeded(assistant);
 }
         catch (Exception e)
         {
             ContentAssistDebug.log("stockFilter ERROR: " + e.getMessage()); //$NON-NLS-1$
+        }
         }
     }
 
@@ -3434,10 +3631,15 @@ ensureFilterPending(popup);
             int idx = table.getSelectionIndex();
             if (list != null && !list.isEmpty())
             {
+                ContentAssistDebug.pipeline("popup.refreshFill", "popup=" + ContentAssistDebug.pipelineIdentity(popup)
+                    + " rowsBefore=" + table.getItemCount() + " " + ContentAssistDebug.pipelineList(list));
                 table.clearAll();
                 table.setItemCount(list.size());
                 if (idx >= 0 && idx < list.size() && selectProposalMethod != null)
-                    selectProposalMethod.invoke(popup, idx, Boolean.FALSE);
+                    try (ContentAssistDebug.FillSpan nativeCall = ContentAssistDebug.fillStart("popup.select", popup))
+                    {
+                        selectProposalMethod.invoke(popup, idx, Boolean.FALSE);
+                    }
             }
             table.redraw();
             table.update();
@@ -4479,6 +4681,19 @@ ensureFilterPending(popup);
         }
     }
 
+    /** Единственная граница вызова JFace setProposals для детализации его callbacks. */
+    private static void invokeSetProposals(Object popup, List<ICompletionProposal> list,
+        boolean filteredSubset) throws Exception
+    {
+        try (ContentAssistDebug.FillSpan fill = ContentAssistDebug.fillStart("setProposals", popup,
+            "n=" + (list == null ? -1 : list.size()) + " rowsBefore=" + tableItemCount(popup)
+                + " subset=" + filteredSubset
+                + " filter=" + ContentAssistDebug.pipelineText(SmartFilterTracker.getCurrentFilter())))
+        {
+            setProposalsMethod.invoke(popup, list, filteredSubset);
+        }
+    }
+
     private static void setProposalsAndRestoreSelection(Object popup,
                                                         List<ICompletionProposal> list,
                                                         boolean filteredSubset,
@@ -4490,7 +4705,15 @@ ensureFilterPending(popup);
         list = NaparnikAssistRow.withRow(list);
         if (fComputedProposalsField != null)
             fComputedProposalsField.set(popup, list);
-        setProposalsMethod.invoke(popup, list, filteredSubset);
+        try (ContentAssistDebug.PipelineSpan fill = ContentAssistDebug.pipelineStart("popup.setProposals",
+            "popup=" + ContentAssistDebug.pipelineIdentity(popup)
+                + " filter=" + ContentAssistDebug.pipelineText(SmartFilterTracker.getCurrentFilter())
+                + " filteredSubset=" + filteredSubset + " rowsBefore=" + tableItemCount(popup)
+                + " " + ContentAssistDebug.pipelineList(list)))
+        {
+            invokeSetProposals(popup, list, filteredSubset);
+            ContentAssistDebug.pipeline("popup.setProposals.result", "rowsAfter=" + tableItemCount(popup));
+        }
         List<ICompletionProposal> applied =
             (List<ICompletionProposal>) fFilteredProposalsField.get(popup);
         if (fComputedProposalsField != null && applied != null)
@@ -4509,25 +4732,28 @@ ensureFilterPending(popup);
                                        SavedSelection saved, boolean resetToFirst,
                                        boolean restoreAfterFilterToggle) throws Exception
     {
-        if (list == null || list.isEmpty() || selectProposalMethod == null)
-            return;
-        if (resetToFirst)
-            selectProposalAtIndex(popup, NaparnikAssistRow.defaultIndex(list));
-        else if (restoreAfterFilterToggle)
-            restoreSelection(popup, saved, list);
-        else if (!SmartAssistFilterState.isSmartFilterEnabled())
+        try (ContentAssistDebug.FillSpan fill = ContentAssistDebug.fillStart("popup.applySelection", popup))
         {
-            String prefix = SmartFilterTracker.getCurrentFilter();
-            if (prefix != null && !prefix.isEmpty())
+            if (list == null || list.isEmpty() || selectProposalMethod == null)
+                return;
+            if (resetToFirst)
+                selectProposalAtIndex(popup, NaparnikAssistRow.defaultIndex(list));
+            else if (restoreAfterFilterToggle)
+                restoreSelection(popup, saved, list);
+            else if (!SmartAssistFilterState.isSmartFilterEnabled())
             {
-                int idx = findFirstPrefixMatchIndex(list, prefix);
-                selectProposalAtIndex(popup, idx >= 0 ? idx : NaparnikAssistRow.defaultIndex(list));
+                String prefix = SmartFilterTracker.getCurrentFilter();
+                if (prefix != null && !prefix.isEmpty())
+                {
+                    int idx = findFirstPrefixMatchIndex(list, prefix);
+                    selectProposalAtIndex(popup, idx >= 0 ? idx : NaparnikAssistRow.defaultIndex(list));
+                }
+                else
+                    restoreSelection(popup, saved, list);
             }
             else
                 restoreSelection(popup, saved, list);
         }
-        else
-            restoreSelection(popup, saved, list);
     }
 
     private static void restoreSelection(Object popup, SavedSelection saved,
@@ -4579,21 +4805,27 @@ ensureFilterPending(popup);
 
     private static void selectProposalAtIndex(Object popup, int index) throws Exception
     {
-        if (selectProposalMethod == null)
-            return;
-        Table table = getProposalTable(popup);
-        if (table != null && !table.isDisposed() && table.getItemCount() > 0)
+        try (ContentAssistDebug.FillSpan fill = ContentAssistDebug.fillStart("popup.select", popup))
         {
-            if (index < 0)
+            if (selectProposalMethod == null)
+                return;
+            Table table = getProposalTable(popup);
+            if (table != null && !table.isDisposed() && table.getItemCount() > 0)
+            {
+                if (index < 0)
+                    index = 0;
+                if (index >= table.getItemCount())
+                    index = table.getItemCount() - 1;
+                table.setSelection(index);
+                table.showSelection();
+            }
+            else if (index < 0)
                 index = 0;
-            if (index >= table.getItemCount())
-                index = table.getItemCount() - 1;
-            table.setSelection(index);
-            table.showSelection();
+            try (ContentAssistDebug.FillSpan nativeCall = ContentAssistDebug.fillStart("popup.select", popup))
+            {
+                selectProposalMethod.invoke(popup, index, Boolean.FALSE);
+            }
         }
-        else if (index < 0)
-            index = 0;
-        selectProposalMethod.invoke(popup, index, Boolean.FALSE);
     }
 
     /** Первый элемент, чьё имя (до «(» / «:») начинается с префикса; список алфавитный. */

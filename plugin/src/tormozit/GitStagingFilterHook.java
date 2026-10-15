@@ -1616,14 +1616,7 @@ public final class GitStagingFilterHook implements IStartup
     /** Колонка «Путь»: полное имя объекта МД, а для неизвестных объектов — относительный путь файла без расширения. */
     private static String pathColumnText(Object element)
     {
-        String fullName = fullNameOf(element);
-        if (!fullName.isEmpty())
-            return fullName;
-        String path = pathOf(element);
-        int dot = path.lastIndexOf('.');
-        if (dot > path.lastIndexOf('/') + 1)
-            path = path.substring(0, dot);
-        return path;
+        return GetRef.gitPathColumnText(pathOf(element));
     }
 
     /** Текст колонки «Имя» для сортировки: {@code StagingFolderEntry.getLabel()} / {@code StagingEntry.getName()}. */

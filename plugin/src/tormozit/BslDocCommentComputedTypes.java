@@ -360,6 +360,7 @@ public final class BslDocCommentComputedTypes
         {
             if (comment == null || !(method instanceof EObject methodObject))
                 return comment;
+            ParamHintHtmlModifier.rememberNativeDocumentationComment(comment, methodObject);
             // Порядок проверок — от дешёвых к дорогим: разбор комментария идёт для каждого
             // метода каждого модуля, и всё, что здесь делается, множится на их число.
             if (!isFunction(methodObject))

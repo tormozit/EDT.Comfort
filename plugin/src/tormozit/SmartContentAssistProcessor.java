@@ -40,6 +40,8 @@ import org.eclipse.jface.text.source.SourceViewer;
 import org.eclipse.jface.text.contentassist.ICompletionProposal;
 import org.eclipse.jface.text.contentassist.ICompletionProposalExtension;
 import org.eclipse.jface.text.contentassist.ICompletionProposalExtension2;
+import org.eclipse.jface.text.contentassist.ICompletionProposalExtension6;
+import org.eclipse.jface.viewers.StyledString;
 import org.eclipse.jface.text.contentassist.ContentAssistant;
 import org.eclipse.jface.text.contentassist.IContentAssistProcessor;
 import org.eclipse.jface.text.contentassist.IContextInformation;
@@ -97,6 +99,31 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
 
     private final IContentAssistProcessor delegate;
     private final String activationChars;
+
+    /** Только диагностика: последняя правка документа, без влияния на отмену/кэш. */
+    private volatile long pipelineInputId;
+
+    void traceAssistInput(ITextViewer viewer, DocumentEvent event)
+    {
+        pipelineInputId = ContentAssistDebug.pipelineNextId();
+        ContentAssistDebug.pipeline("input", pipelineState()
+            + " viewer=" + ContentAssistDebug.pipelineIdentity(viewer)
+            + " doc=" + ContentAssistDebug.pipelineIdentity(event == null ? null : event.getDocument())
+            + " offset=" + (event == null ? -1 : event.getOffset())
+            + " removed=" + (event == null ? -1 : event.getLength())
+            + " inserted=" + (event == null || event.getText() == null ? 0 : event.getText().length())
+            + " text=" + ContentAssistDebug.pipelineText(event == null ? null : event.getText()));
+    }
+
+    String pipelineState()
+    {
+        return "processor=" + ContentAssistDebug.pipelineIdentity(this)
+            + " input=" + pipelineInputId + " context=" + fullListContextKey
+            + " cache=" + ContentAssistDebug.pipelineIdentity(fullListCache)
+            + " cacheN=" + fullListCache.length + " ready=" + fullListReady
+            + " complete=" + fullListComplete
+            + " seed=" + ContentAssistDebug.pipelineText(fullListCachePrefix);
+    }
 
     private ICompletionProposal[] fullListCache = EMPTY;
     /** Порядок элементов в {@link #fullListCache} для tie-break при равном рейтинге. */
@@ -337,6 +364,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
 
     static void uiBlockLog(String where, String data)
     {
+        ContentAssistDebug.pipeline(where, data);
         if (uiBlockLogQuiet(where))
             return;
         boolean onUi = org.eclipse.swt.widgets.Display.getCurrent() != null;
@@ -559,6 +587,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     {
         this.delegate = delegate;
         this.activationChars = activationChars;
+        ContentAssistDebug.installModelResolutionTrace();
     }
 
     public IContentAssistProcessor getDelegate()
@@ -1197,6 +1226,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
 
     public void invalidateCache()
     {
+        ContentAssistDebug.pipeline("cache.invalidate", pipelineState());
         fullListReady = false;
         fullListComplete = false;
         assignFullListCache(EMPTY);
@@ -1578,6 +1608,7 @@ return;
         }
         adoptIrTypeForEdtOverlaps(merged, irProposals);
         fullListCache = merged;
+        ContentAssistDebug.pipeline("cache.merged", pipelineState());
         rebuildDelegateOrderMap();
         fullListReady = true;
         if (clearProbeOnEmptyBase)
@@ -1627,7 +1658,7 @@ return;
     }
 
     /** Заполнить stable/delegate cache из видимого popup (literal без ИР). */
-    void absorbStableFromPopupProposals(ICompletionProposal[] raw)
+    void absorbStableFromPopupProposals(ICompletionProposal[] raw, ITextViewer viewer, int caret)
     {
         if (raw == null || raw.length == 0)
             return;
@@ -1640,6 +1671,19 @@ return;
             assignFullListCache(stock);
             fullListReady = true;
             markDelegateSyncProbed();
+            IDocument doc = viewer != null ? viewer.getDocument() : null;
+            if (doc != null && literalArgKeyAt(doc, caret) >= 0
+                && !containsOnlyTemplateProposals(stock))
+            {
+                ICompletionProposal[] existing = literalArgListForCaret(doc, caret);
+                if (existing == null || !hasReadyLiteralArgListForCaret(viewer, caret)
+                    || stock.length > existing.length)
+                {
+                    storeLiteralArgList(doc, caret, stock);
+                    Global.tempLog("literal-arg", "cache capture native caret=" + caret
+                        + " n=" + stock.length + " previousN=" + (existing == null ? 0 : existing.length));
+                }
+            }
         }
 }
 
@@ -1757,7 +1801,7 @@ return;
         if (memberDot >= 0)
         {
             abortWordListBackground("memberDot"); //$NON-NLS-1$
-            showMemberListAfterDot(viewer, memberDot);
+            showMemberListAfterDot(viewer, memberDot, caret);
             uiBlockLog("wordList.kickDoc.skip", "why=memberDot caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
                 + " dot=" + memberDot + " stock=" + memberStockFullList.length); //$NON-NLS-1$ //$NON-NLS-2$
             return;
@@ -1785,13 +1829,15 @@ return;
      * После «.»: подменить уже открытый словарь списком членов. Если попап слов
      * уже виден, {@code beginCompletionAutoOpen} выходит по {@code popupVisible}
      * и без этого кэш слов так и остаётся на экране.
+     *
+     * @param caret каретка после правки из события документа: каретка виджета в этот
+     *     момент ещё стоит до вставленного текста
      */
-    private void showMemberListAfterDot(ITextViewer viewer, int dot)
+    private void showMemberListAfterDot(ITextViewer viewer, int dot, int caret)
     {
         if (hasMemberListForDot(dot))
         {
             IDocument doc = viewer != null ? viewer.getDocument() : null;
-            int caret = resolveWidgetCaret(viewer);
             if (doc != null && caret >= 0)
                 repairPopupListFromMemberStock(doc, caret);
             if (fullListCache.length == 0)
@@ -1803,7 +1849,7 @@ return;
             if (ContentAssistSessionReloader.suppressMemberPopupForDotBeforeListedWord(viewer))
                 return;
             if (isPopupVisible())
-                ContentAssistSessionReloader.refreshPopupIfOpen();
+                ContentAssistSessionReloader.refreshPopupIfOpen(caret);
             else
                 runWordListOnUi(viewer, null, "member", //$NON-NLS-1$
                     () -> ContentAssistSessionReloader.openPopupForBackgroundMemberList(viewer));
@@ -2235,11 +2281,17 @@ return result;
      */
     ICompletionProposal[] filterCachedProposalsForPopup(ITextViewer viewer, int caret, String filter)
     {
+        try (ContentAssistDebug.PipelineSpan pipeline =
+            ContentAssistDebug.pipelineStart("cache.filter", pipelineState()
+                + " caret=" + caret + " filter=" + ContentAssistDebug.pipelineText(filter)))
+        {
         ICompletionProposal[] result = filterCachedProposalsForPopupImpl(viewer, caret, filter);
+        ContentAssistDebug.pipeline("cache.filter.result", ContentAssistDebug.pipelineList(result));
         if (result == null || result.length == 0)
             return result;
         return synthesizeBareConstructorProposals(result,
             viewer != null ? viewer.getDocument() : null, caret);
+        }
     }
 
     private ICompletionProposal[] filterCachedProposalsForPopupImpl(ITextViewer viewer, int caret, String filter)
@@ -2369,13 +2421,25 @@ return result;
 
     private ICompletionProposal[] resolveStockLiteralProposalSource(ITextViewer viewer, int caret)
     {
-        ICompletionProposal[] literalArg = literalArgListForCaret(
-            viewer != null ? viewer.getDocument() : null, caret);
+        IDocument doc = viewer != null ? viewer.getDocument() : null;
+        ICompletionProposal[] literalArg = literalArgListForCaret(doc, caret);
+        // Ctrl+Space уже мог получить полноценный список EDT. Нельзя затем стирать
+        // его старым фоновым ответом, в котором был только шаблон (488 -> «кстр» -> 0).
+        if (literalArg != null && isCacheValidForCaret(doc, caret) && isDelegateSyncProbedForContext()
+            && lastStableDelegateList.length > 0
+            && !containsOnlyTemplateProposals(lastStableDelegateList)
+            && (containsOnlyTemplateProposals(literalArg)
+                || lastStableDelegateList.length > literalArg.length))
+        {
+            Global.tempLog("literal-arg", "cache upgrade native caret=" + caret
+                + " previousN=" + literalArg.length + " nativeN=" + lastStableDelegateList.length);
+            storeLiteralArgList(doc, caret, stripIrProposals(unwrapProposals(lastStableDelegateList)));
+            literalArg = literalArgListForCaret(doc, caret);
+        }
         if (literalArg != null)
             return literalArg;
         if (lastStableDelegateList.length > 0)
             return stripIrProposals(unwrapProposals(lastStableDelegateList));
-        IDocument doc = viewer != null ? viewer.getDocument() : null;
         ICompletionProposal[] interim = interimSourceForCaret(doc, caret);
         if (interim != null && interim.length > 0)
             return stripIrProposals(unwrapProposals(interim));
@@ -2553,6 +2617,10 @@ return;
     @Override
     public ICompletionProposal[] computeCompletionProposals(ITextViewer viewer, int offset)
     {
+        try (ContentAssistDebug.PipelineSpan pipeline =
+            ContentAssistDebug.pipelineStart("compute", pipelineState()
+                + " viewer=" + ContentAssistDebug.pipelineIdentity(viewer) + " offset=" + offset))
+        {
         long t0 = ContentAssistDebug.perfStart("computeCompletionProposals"); //$NON-NLS-1$
         long tUi = System.nanoTime();
         boolean firstPopup = !wordListSeededOnUi;
@@ -2648,6 +2716,7 @@ return;
                 int rememberCaret = resolveInvocationCaret(viewer, offset);
                 rememberCtorTypeCatalog(rememberDoc, rememberCaret, fullListCache);
             }
+        }
         }
     }
 
@@ -2876,6 +2945,9 @@ return;
         }
         if (wordListBackgroundJob != null)
         {
+            ContentAssistDebug.pipeline("word.cancel.request", pipelineState()
+                + " jobObject=" + ContentAssistDebug.pipelineIdentity(wordListBackgroundJob)
+                + " state=" + wordListBackgroundJob.getState());
             wordListBackgroundJob.cancel();
             wordListBackgroundJob = null;
             wordListEpoch++;
@@ -2892,11 +2964,20 @@ return;
         // Слово набирают вплотную перед уже стоящей «.» — это не точка, набранная вдогонку.
         final boolean dotAhead = isDotAt(doc, caret);
         final boolean inspectJob = DebugInspectorHook.isInspectExpressionViewer(viewer);
+        final long pipelineJobId = ContentAssistDebug.pipelineNextId();
+        final long pipelineScheduledNs = System.nanoTime();
+        final long pipelineScheduledInput = pipelineInputId;
+        ContentAssistDebug.pipeline("word.schedule", pipelineState()
+            + " job=" + pipelineJobId + " viewer=" + ContentAssistDebug.pipelineIdentity(viewer)
+            + " caret=" + caret + " delayMs=" + delayMs + " epoch=" + epoch);
         Job job = new Job("SCAP word list") //$NON-NLS-1$
         {
             @Override
             protected IStatus run(IProgressMonitor monitor)
             {
+                ContentAssistDebug.PipelineSpan pipeline = ContentAssistDebug.pipelineStart("word.run",
+                    pipelineState() + " job=" + pipelineJobId + " scheduledInput=" + pipelineScheduledInput
+                        + " queuedNs=" + (System.nanoTime() - pipelineScheduledNs));
                 uiBlockLog("wordListBackground.run", "key=" + key //$NON-NLS-1$ //$NON-NLS-2$
                     + " canceled=" + monitor.isCanceled() //$NON-NLS-1$
                     + " seeded=" + wordListSeededOnUi); //$NON-NLS-1$
@@ -3089,13 +3170,28 @@ return;
                 // Пустой префикс + известный набор контекстов = список годен любому слову
                 // в этом наборе, а не только набранному.
                 final String ctorEnvKey = ctorKey;
+                final long pipelineReadyNs = System.nanoTime();
+                ContentAssistDebug.pipeline("word.publish.queued", pipelineState()
+                    + " job=" + pipelineJobId + " filter=" + ContentAssistDebug.pipelineText(popupFilterFinal)
+                    + " " + ContentAssistDebug.pipelineList(popupList));
                 runWordListOnUi(viewer, display, "word", //$NON-NLS-1$
-                    () -> publishWordList(viewer, key, gen, epoch, result,
-                    dataEvents, popupList, popupFilterFinal, probeOffset, ctorEnvKey));
+                    () -> {
+                        try (ContentAssistDebug.PipelineSpan publication = ContentAssistDebug.pipelineStart(
+                            "word.publish", pipelineState() + " job=" + pipelineJobId
+                                + " scheduledInput=" + pipelineScheduledInput
+                                + " uiWaitNs=" + (System.nanoTime() - pipelineReadyNs)))
+                        {
+                            publishWordList(viewer, key, gen, epoch, result,
+                                dataEvents, popupList, popupFilterFinal, probeOffset, ctorEnvKey);
+                        }
+                    });
                 return Status.OK_STATUS;
                 }
                 catch (StackOverflowError e)
                 {
+                    Global.tempLogException("assist-filter", "word.stackOverflow " + pipelineState()
+                        + " job=" + pipelineJobId + " scheduledInput=" + pipelineScheduledInput
+                        + " key=" + key + " offset=" + offset + " epoch=" + epoch + "/" + wordListEpoch, e);
                     uiBlockLog("wordListBackground.soe", "key=" + key); //$NON-NLS-1$ //$NON-NLS-2$
                     return Status.CANCEL_STATUS;
                 }
@@ -3104,12 +3200,18 @@ return;
                     DELEGATE_STALE_CHECK.remove();
                     BslXtextDocumentHook.markAssistBackground(false);
                     restoreAssistWorkerPriority(worker, workerPriority);
+                    ContentAssistDebug.pipeline("word.exit", pipelineState()
+                        + " job=" + pipelineJobId + " canceled=" + monitor.isCanceled()
+                        + " epoch=" + epoch + "/" + wordListEpoch);
+                    pipeline.close();
                 }
             }
         };
         job.setSystem(true);
         job.setPriority(Job.INTERACTIVE);
         wordListBackgroundJob = job;
+        ContentAssistDebug.pipeline("word.scheduled", pipelineState()
+            + " job=" + pipelineJobId + " jobObject=" + ContentAssistDebug.pipelineIdentity(job));
         job.schedule(Math.max(0L, delayMs));
         // #region agent log
         uiBlockLog("scheduleWordListInBackground", "key=" + key + " caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
@@ -3152,6 +3254,11 @@ return;
         if (pendingPublishKey != Integer.MIN_VALUE)
             return true;
         if (wordListBackgroundJob != null && wordListBackgroundJob.getState() != Job.NONE)
+            return true;
+        // Список литерала тоже: пока он ждёт догоняющий разбор, таймер иначе встаёт, а
+        // будить его из фона — asyncExec, который стоит за перерисовкой тысяч аннотаций
+        // после того же разбора (лог 15.10.2026 09:17: список готов, показан через 14 с).
+        if (literalArgBusy)
             return true;
         return memberStockBackgroundJob != null
             && memberStockBackgroundJob.getState() != Job.NONE;
@@ -3269,6 +3376,9 @@ return;
         wordListBackgroundKey = Integer.MIN_VALUE;
         if (wordListBackgroundJob != null)
         {
+            ContentAssistDebug.pipeline("word.cancel.request", pipelineState()
+                + " jobObject=" + ContentAssistDebug.pipelineIdentity(wordListBackgroundJob)
+                + " state=" + wordListBackgroundJob.getState());
             wordListBackgroundJob.cancel();
             wordListBackgroundJob = null;
         }
@@ -3290,6 +3400,9 @@ return;
         pendingPublishKey = Integer.MIN_VALUE;
         if (wordListBackgroundJob != null)
         {
+            ContentAssistDebug.pipeline("word.cancel.request", pipelineState()
+                + " jobObject=" + ContentAssistDebug.pipelineIdentity(wordListBackgroundJob)
+                + " state=" + wordListBackgroundJob.getState());
             wordListBackgroundJob.cancel();
             wordListBackgroundJob = null;
         }
@@ -3612,6 +3725,10 @@ return;
         if (!thisPopup)
         {
             String liveFilter = computeIdentifierFilter(liveDoc, liveCaret);
+            ContentAssistDebug.pipeline("word.publish.filter", pipelineState()
+                + " liveFilter=" + ContentAssistDebug.pipelineText(liveFilter)
+                + " preparedFilter=" + ContentAssistDebug.pipelineText(popupFilter)
+                + " preparedN=" + (popupList == null ? -1 : popupList.length));
             if (popupList != null && popupList.length > 0 && liveFilter.equals(popupFilter))
             {
                 backgroundPopupList = popupList;
@@ -3726,6 +3843,16 @@ return probeDelegateOnce(viewer, offset);
         {
             int caret = resolveInvocationCaret(viewer, offset);
             IDocument doc = viewer != null ? viewer.getDocument() : null;
+            ICompletionProposal[] literalArg = literalArgListForCaret(doc, caret);
+            if (literalArgPopupBaseForCaret(viewer, caret) != null
+                && isStringLiteralAssistContext(doc, caret))
+            {
+                String literalFilter = literalArgFilter(doc, caret, SmartFilterTracker.getCurrentFilter());
+                ContentAssistDebug.pipeline("cacheOnly.literalArg", "caret=" + caret
+                    + " filter=" + ContentAssistDebug.pipelineText(literalFilter)
+                    + " " + ContentAssistDebug.pipelineList(java.util.Arrays.asList(literalArg)));
+                return applyLiteralSmartFilter(literalArg, literalFilter);
+            }
             restoreCtorTypeCatalog(doc, caret);
             String filter = computeIdentifierFilter(doc, caret);
             if (backgroundPopupList.length > 0 && backgroundPopupFilter.equals(filter))
@@ -3780,8 +3907,9 @@ return probeDelegateOnce(viewer, offset);
             {
                 ICompletionProposal[] raw =
                     unwrapProposals(fetchDelegateList(viewer, offset, caret));
-                absorbInterimIntoCache(viewer, caret, raw);
                 cached = filterAndSort(mergeIrForDisplay(raw), filter);
+                if (cached.length > 0)
+                    rememberRecoveredDelegateList(viewer, caret, filter, raw);
                 // #region agent log
                 uiBlockLog("cacheOnly.uiRefetch", "filter=" + filter //$NON-NLS-1$ //$NON-NLS-2$
                     + " raw=" + raw.length + " n=" + cached.length); //$NON-NLS-1$ //$NON-NLS-2$
@@ -4104,11 +4232,13 @@ return EMPTY;
     }
 
     private ICompletionProposal[] literalArgList = EMPTY;
+    private boolean literalArgListConfirmed;
     private IDocument literalArgDoc;
     private int literalArgQuote = -1;
     private String literalArgTyped = ""; //$NON-NLS-1$
     private Job literalArgJob;
     private int literalArgJobQuote = -1;
+    private IDocument literalArgJobDoc;
     private String literalArgJobTyped;
     /** Последний {@code onReady}, пришедший, пока расчёт литерала в полёте (только UI). */
     private Runnable literalArgJobOnReady;
@@ -4208,10 +4338,35 @@ return EMPTY;
             resolveEditorForLiteralAudit(viewer), sourceViewer) != null;
     }
 
-    /** Готовый список этого литерала для каретки или {@code null}. */
+    /** Готовая база текущего сегмента, в том числе подтверждённая пустая. */
+    ICompletionProposal[] literalArgPopupBaseForCaret(ITextViewer viewer, int caret)
+    {
+        IDocument doc = viewer != null ? viewer.getDocument() : null;
+        ICompletionProposal[] list = literalArgListForCaret(doc, caret);
+        return list != null && (literalArgListConfirmed || !containsOnlyTemplateProposals(list))
+            ? list : null;
+    }
+
+    String literalArgPopupFilterForCaret(ITextViewer viewer, int caret)
+    {
+        return literalArgFilter(viewer != null ? viewer.getDocument() : null, caret,
+            SmartFilterTracker.getCurrentFilter());
+    }
+
+    boolean hasReadyLiteralArgListForCaret(ITextViewer viewer, int caret)
+    {
+        ICompletionProposal[] list = literalArgPopupBaseForCaret(viewer, caret);
+        ContentAssistDebug.pipeline("literalArg.cacheReadiness", "caret=" + caret
+            + " sourceN=" + (list == null ? -1 : list.length)
+            + " confirmed=" + literalArgListConfirmed);
+        // Ноль совпадений с введённым префиксом не делает готовую базу неполной.
+        return list != null;
+    }
+
     private ICompletionProposal[] literalArgListForCaret(IDocument doc, int caret)
     {
-        if (doc == null || doc != literalArgDoc || literalArgList.length == 0)
+        if (doc == null || doc != literalArgDoc
+            || literalArgList.length == 0 && !literalArgListConfirmed)
             return null;
         int quote = literalArgKeyAt(doc, caret);
         if (quote < 0 || quote != literalArgQuote)
@@ -4235,6 +4390,7 @@ return EMPTY;
         // В обёртках, как список слов: иначе при пустом фильтре окно получает сырые
         // предложения EDT и рисует штатную, а не нашу подсветку вхождений фильтра.
         literalArgList = buildDelegateOrderedList(list);
+        literalArgListConfirmed = false;
     }
 
     /**
@@ -4254,7 +4410,7 @@ return EMPTY;
         String typed = quote >= 0 ? literalTyped(doc, quote, caret) : null;
         if (quote < 0 || typed == null)
             return false;
-        if (literalArgListForCaret(doc, caret) != null)
+        if (literalArgPopupBaseForCaret(viewer, caret) != null)
         {
             Global.tempLog("literal-arg", "schedule cacheHit why=" + why + " caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 + " method=" + method + " n=" + literalArgList.length); //$NON-NLS-1$ //$NON-NLS-2$
@@ -4268,7 +4424,8 @@ return EMPTY;
         // фильтрацией. Новый расчёт на каждую букву только множил параллельные вызовы EDT
         // (замер 29.09.2026: три расчёта на «в/ва/вап»).
         // «В полёте» — до публикации на UI, а не до конца Job: публикация ждёт ворот показа.
-        if (literalArgBusy && literalArgJobQuote == quote && literalArgJobTyped != null
+        if (literalArgBusy && literalArgJobDoc == doc
+            && literalArgJobQuote == quote && literalArgJobTyped != null
             && typed.length() >= literalArgJobTyped.length()
             && typed.regionMatches(true, 0, literalArgJobTyped, 0, literalArgJobTyped.length()))
         {
@@ -4296,6 +4453,7 @@ return EMPTY;
             literalArgJob.cancel();
         final int epoch = ++literalArgEpoch;
         literalArgJobQuote = quote;
+        literalArgJobDoc = doc;
         // Зонд на начале сегмента — как у списка слов (зонд на начале слова): у EDT пустой
         // префикс, список полный и годен всему сегменту, включая Backspace. Ключ набранного
         // поэтому пустой: кэш, «в полёте» и «заведомо пусто» относятся ко всему сегменту.
@@ -4322,10 +4480,8 @@ return EMPTY;
                     ICompletionProposal[] raw = EMPTY;
                     java.util.Map<Object, Object> events = java.util.Collections.emptyMap();
                     String error = null;
-                    // Один заход, без повтора на пустом ответе: замеры 29.09.2026 — все
-                    // непустые списки приходили с первого захода, а повтор только удваивал
-                    // цену заведомо пустых литералов (Сообщить(""), РольДоступна("")).
-                    int attempts = 1;
+                    // Пустой ответ текущей модели окончателен. Повтор нужен только
+                    // если модель/документ изменились во время самого расчёта.
                     if (monitor.isCanceled() || epoch != literalArgEpoch)
                         return Status.CANCEL_STATUS;
                     try
@@ -4335,8 +4491,12 @@ return EMPTY;
                         // сам берёт длину замены как offset − replacementOffset, а validate
                         // сверяет набранное от replacementOffset до каретки.
                         raw = BslDataEventGuard.runIsolated(
-                            () -> computeMemberStockViaSelectionProxy(viewer, quote + 1));
+                            () -> computeLiteralArgListOnReadyModel(viewer, quote + 1,
+                                () -> monitor.isCanceled() || epoch != literalArgEpoch
+                                    || System.nanoTime() - tStart >= 15_000_000_000L));
                         events = BslDataEventGuard.drainIsolated(doc);
+                        if (raw == null)
+                            return Status.CANCEL_STATUS;
                     }
                     catch (Exception | LinkageError e)
                     {
@@ -4348,6 +4508,11 @@ return EMPTY;
                         error = e.getClass().getSimpleName() + ": " + e.getMessage(); //$NON-NLS-1$
                         raw = EMPTY;
                     }
+                    if (error != null)
+                    {
+                        Global.tempLog("literal-arg", "bg failed caret=" + caret + " err=" + error);
+                        return Status.CANCEL_STATUS;
+                    }
                     long computeMs = (System.nanoTime() - tStart) / 1_000_000L;
                     final ICompletionProposal[] list = stripIrProposals(
                         unwrapProposals(raw == null ? EMPTY : raw));
@@ -4355,7 +4520,7 @@ return EMPTY;
                     Global.tempLog("literal-arg", "bg done why=" + why + " caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                         + " method=" + method + " typed=" + typed //$NON-NLS-1$ //$NON-NLS-2$
                         + " queueMs=" + ((tStart - tSchedule) / 1_000_000L) //$NON-NLS-1$
-                        + " computeMs=" + computeMs + " attempts=" + attempts //$NON-NLS-1$ //$NON-NLS-2$
+                        + " computeMs=" + computeMs //$NON-NLS-1$
                         + " n=" + list.length //$NON-NLS-1$
                         + " quote=" + quote //$NON-NLS-1$
                         + " repl0=" + (list.length > 0 //$NON-NLS-1$
@@ -4403,6 +4568,37 @@ return EMPTY;
     }
 
     /**
+     * Штатный расчёт только в фоне, после готовности текущей модели. Если документ
+     * изменился во время чтения, ответ не подтверждён: ждём новый разбор в том же задании.
+     */
+    private ICompletionProposal[] computeLiteralArgListOnReadyModel(ITextViewer viewer,
+        int probeOffset, java.util.function.BooleanSupplier abort)
+    {
+        IDocument doc = viewer.getDocument();
+        while (!abort.getAsBoolean())
+        {
+            if (!ContentAssistSessionReloader.waitModelReadyUpTo(doc, Integer.MAX_VALUE, abort))
+            {
+                Global.tempLog("literal-arg", "bg modelReady canceled probe=" + probeOffset);
+                return null;
+            }
+            String text = doc.get();
+            ICompletionProposal[] result = computeMemberStockViaSelectionProxy(viewer, probeOffset);
+            boolean sameText = text.equals(doc.get());
+            boolean currentModel = ContentAssistSessionReloader.isModelCurrent(doc);
+            Global.tempLog("literal-arg", "bg modelCheck probe=" + probeOffset
+                + " sameText=" + sameText + " currentModel=" + currentModel
+                + " n=" + (result == null ? -1 : result.length));
+            if (sameText && currentModel)
+                return result;
+            // Эти записи относятся к отброшенному ответу, в UI их переносить нельзя.
+            BslDataEventGuard.drainIsolated(doc);
+        }
+        Global.tempLog("literal-arg", "bg modelReady aborted probe=" + probeOffset);
+        return null;
+    }
+
+    /**
      * UI (ворота показа): кэш литерала и последний {@code onReady} (пришедший в том числе
      * от букв, набранных, пока расчёт был в полёте), если каретка в том же литерале.
      */
@@ -4428,7 +4624,6 @@ return EMPTY;
             drop = "leftLiteral"; //$NON-NLS-1$
         else if (list.length == 0)
         {
-            drop = "empty"; //$NON-NLS-1$
             literalArgEmptyDoc = doc;
             literalArgEmptyQuote = quote;
             literalArgEmptyTyped = literalArgJobTyped;
@@ -4439,12 +4634,21 @@ return EMPTY;
                 + " n=" + list.length + " liveCaret=" + liveCaret); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
+        ICompletionProposal[] existing = literalArgListForCaret(liveDoc, liveCaret);
+        if (existing != null && !containsOnlyTemplateProposals(existing)
+            && containsOnlyTemplateProposals(list))
+        {
+            Global.tempLog("literal-arg", "publish drop=weakerTemplateAnswer n=" + list.length
+                + " existingN=" + existing.length + " liveCaret=" + liveCaret);
+            return;
+        }
         BslDataEventGuard.mergeIntoReal(liveDoc, dataEvents);
         literalArgDoc = doc;
         literalArgQuote = quote;
         literalArgTyped = literalArgJobTyped != null ? literalArgJobTyped : ""; //$NON-NLS-1$
         // В обёртках, как список слов (см. storeLiteralArgList).
         literalArgList = buildDelegateOrderedList(list);
+        literalArgListConfirmed = true;
         long tReady = System.nanoTime();
         if (onReady != null)
             onReady.run();
@@ -4936,6 +5140,30 @@ return EMPTY;
     }
 
     /**
+     * UI-допрос нашёл совпадения, которых нет в фоновой базе. Сохраняем именно его
+     * результат для текущего префикса: число элементов не определяет полноту базы.
+     * При удалении префикса обычная проверка fullListCachePrefix запросит широкую базу.
+     */
+    private void rememberRecoveredDelegateList(ITextViewer viewer, int caret, String filter,
+        ICompletionProposal[] raw)
+    {
+        IDocument doc = viewer != null ? viewer.getDocument() : null;
+        if (doc == null || raw == null || raw.length == 0
+            || computeFullListContextKey(doc, caret) != fullListContextKey)
+            return;
+        String before = pipelineState();
+        assignFullListCache(unwrapProposals(raw));
+        fullListReady = true;
+        fullListComplete = false;
+        fullListCachePrefix = filter;
+        lastStableDelegateList = buildDelegateOrderedList(unwrapProposals(raw));
+        lastStableEmptyList = EMPTY;
+        ContentAssistPopupSync.invalidateSyncSnapshot();
+        Global.tempLog("assist-filter", "recoveredBase before={" + before + "} after={"
+            + pipelineState() + "} " + ContentAssistDebug.pipelineList(raw));
+    }
+
+    /**
      * База popup посчитана под более длинным префиксом, чем текущий: показывать её дальше
      * нельзя — корректный список был бы её надмножеством. Вызывающий сначала пробует
      * {@link #repairPopupListFromMemberStock}, и только затем закрывает окно.
@@ -4993,6 +5221,7 @@ return EMPTY;
     private void rebuildMergedFullListCache()
     {
         fullListCache = mergeIrProposals(delegateListCache);
+        ContentAssistDebug.pipeline("cache.rebuilt", pipelineState());
         rebuildDelegateOrderMap();
     }
 
@@ -5797,7 +6026,7 @@ return stripEmptyPlaceholderProposals(result);
      */
     private static final class BareConstructorProposal implements ICompletionProposal,
         ICompletionProposalExtension2, org.eclipse.jface.text.contentassist.ICompletionProposalExtension3,
-        org.eclipse.jface.text.contentassist.ICompletionProposalExtension5
+        org.eclipse.jface.text.contentassist.ICompletionProposalExtension5, ICompletionProposalExtension6
     {
         private final String typeName;
         private final org.eclipse.swt.graphics.Image image;
@@ -5929,7 +6158,13 @@ return stripEmptyPlaceholderProposals(result);
             int caret = resolveFilterCaret(document, offset, event);
             String prefix = document != null && caret >= 0
                 ? computeIdentifierFilter(document, caret) : ""; //$NON-NLS-1$
-            return prefix.isEmpty() || typeName.regionMatches(true, 0, prefix, 0, prefix.length());
+            boolean accepted = prefix.isEmpty() || (SmartAssistFilterState.isSmartFilterEnabled()
+                ? new SmartCodeMatcher(prefix).computeNamePremium(typeName) > 0
+                : typeName.regionMatches(true, 0, prefix, 0, prefix.length()));
+            Global.tempLog("assist-filter", "bare.validate type=" + ContentAssistDebug.pipelineText(typeName)
+                + " filter=" + ContentAssistDebug.pipelineText(prefix)
+                + " smart=" + SmartAssistFilterState.isSmartFilterEnabled() + " accepted=" + accepted);
+            return accepted;
         }
 
         @Override
@@ -5948,6 +6183,23 @@ return stripEmptyPlaceholderProposals(result);
         public String getDisplayString()
         {
             return typeName;
+        }
+
+        @Override
+        public StyledString getStyledDisplayString()
+        {
+            long started = System.nanoTime();
+            try
+            {
+                StyledString styled = new StyledString(typeName);
+                SmartCodeMatcher matcher = new SmartCodeMatcher(SmartFilterTracker.getCurrentFilter());
+                SmartMatchHighlight.applyRanges(styled, matcher.getHighlightRanges(typeName));
+                return styled;
+            }
+            finally
+            {
+                ContentAssistDebug.pipelineStyled(started, this);
+            }
         }
 
         @Override
@@ -5985,12 +6237,17 @@ return stripEmptyPlaceholderProposals(result);
     private void debugFilterCachedExit(ITextViewer viewer, int caret, String filter, IDocument doc,
         int interimN, String path, ICompletionProposal[] result)
     {
+        ContentAssistDebug.pipeline("cache.path", pipelineState()
+            + " caret=" + caret + " filter=" + ContentAssistDebug.pipelineText(filter)
+            + " path=" + path + " interimN=" + interimN
+            + " " + ContentAssistDebug.pipelineList(result));
     }
 
     @SuppressWarnings("unused")
     private void debugResolveExit(IDocument doc, int caret, String filter, int interimN,
         boolean cacheValid, String exit, ICompletionProposal[] result)
     {
+        ContentAssistDebug.pipeline("resolve.state", pipelineState());
         // #region agent log
         uiBlockLog("resolveExit", "exit=" + exit //$NON-NLS-1$ //$NON-NLS-2$
             + " caret=" + caret //$NON-NLS-1$
@@ -6113,6 +6370,14 @@ return stripEmptyPlaceholderProposals(result);
         IDocument doc = viewer.getDocument();
         if (!(doc instanceof IXtextDocument) || probeOffset < 0 || probeOffset > doc.getLength())
             return null;
+        // Конец слова здесь намеренно: probeOffset обычно стоит в начале идентификатора,
+        // а ключевым словам нужен набранный текст целиком. В фоне позиция виджета недоступна,
+        // сохранённая каретка запроса может отставать от уже изменившегося документа.
+        // Проверено 15.10.2026: замена конца слова кареткой UI/фонового запроса при правке
+        // issue #813 убрала «КонецФункции» для отдельной строки «конец» внутри функции;
+        // после отката пункт вернулся. EDT проверяет совпадение строки с префиксом
+        // (lineContentIsEmpty), поэтому эту позицию нельзя механически заменять кареткой.
+        // Учёт букв справа от каретки (#813) требует сохранения этого сценария.
         int caret = computeIdentifierWordEnd(doc, probeOffset);
         if (caret < 0 || ReceiverTypeLabel.findMemberAccessDot(doc, caret) >= 0
             || isAfterNewKeyword(doc, caret)
@@ -6160,8 +6425,12 @@ return stripEmptyPlaceholderProposals(result);
     }
 
     /**
-     * Заменяет ключевые слова в ответе EDT на посчитанные в каретке ({@link #beginKeywordProbe}).
-     * Не посчитали — остаётся ответ EDT как есть.
+     * Добавляет к ответу EDT ключевые слова, посчитанные в каретке ({@link #beginKeywordProbe});
+     * одноимённые слова EDT заменяются посчитанными. Не посчитали — остаётся ответ EDT как есть.
+     *
+     * <p>Ключевые слова EDT из ответа не выбрасываются: они верны для этого места, а расчёт в
+     * каретке берёт слово целиком, вместе с буквами справа от каретки. Внутри слова
+     * ({@code ист|ро}) он ничего не находит, и замена набора теряла «Истина»/«Ложь» (#813).
      */
     private ICompletionProposal[] mergeLiveKeywords(ICompletionProposal[] raw, KeywordProbe probe)
     {
@@ -6170,10 +6439,18 @@ return stripEmptyPlaceholderProposals(result);
         ICompletionProposal[] live = probe.live;
         if (grammarKeywords == null || live == null)
             return raw;
+        Set<String> liveNames = new HashSet<>();
+        for (ICompletionProposal p : live)
+        {
+            String name = displayString(p);
+            if (name != null)
+                liveNames.add(name.toLowerCase(java.util.Locale.ROOT));
+        }
         List<ICompletionProposal> out = new ArrayList<>(raw.length + live.length);
         for (ICompletionProposal p : raw)
         {
-            if (!isKeywordProposal(p))
+            String name = isKeywordProposal(p) ? displayString(unwrapProposal(p)) : null;
+            if (name == null || !liveNames.contains(name.toLowerCase(java.util.Locale.ROOT)))
                 out.add(p);
         }
         // Список EDT упорядочен по приоритету, от него плагин берёт порядок пунктов. Ставим
@@ -7052,6 +7329,9 @@ return result;
      */
     private void rebuildEnvRanges(org.eclipse.xtext.resource.XtextResource resource)
     {
+        // #region agent log
+        logReparseKind(resource);
+        // #endregion
         try
         {
             if (resource == null || resource.getContents().isEmpty())
@@ -7086,6 +7366,53 @@ return result;
             uiBlockLogThrowable("envRanges.build.err", e); //$NON-NLS-1$
         }
     }
+
+    // #region agent log
+    /**
+     * Временная диагностика: вид пересборки модели. EDT умеет переразбирать один метод
+     * ({@code PartialParseResult.isOnlyMethodReparse}), но в логе 15.10.2026 09:59 всегда шёл
+     * полный разбор (2–4,6 с на каждую правку). Здесь — что вышло и почему: класс результата,
+     * переразобранный метод, синтаксические ошибки (их непокрытость ведёт EDT в fullyReparse) и
+     * счётчик нашего отказа от частичного разбора при огрызке директивы (#561).
+     */
+    private static void logReparseKind(org.eclipse.xtext.resource.XtextResource resource)
+    {
+        try
+        {
+            org.eclipse.xtext.parser.IParseResult parse = resource != null ? resource.getParseResult() : null;
+            if (parse == null)
+            {
+                Global.tempLog("reparse-kind", "parse=null"); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            }
+            Object method = Global.invoke(parse, "getReparseMethod"); //$NON-NLS-1$
+            String methodName = method instanceof com._1c.g5.v8.dt.bsl.model.Method m ? m.getName() : String.valueOf(method);
+            int errors = 0;
+            String first = "-"; //$NON-NLS-1$
+            for (org.eclipse.xtext.nodemodel.INode node : parse.getSyntaxErrors())
+            {
+                if (errors++ == 0)
+                {
+                    String text = node.getText();
+                    first = "off=" + node.getOffset() //$NON-NLS-1$
+                        + " text=\"" + (text == null ? "" : text.replace("\r", "").replace("\n", "\\n")) + "\"" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$ //$NON-NLS-7$
+                        + " msg=" + (node.getSyntaxErrorMessage() == null ? "?" //$NON-NLS-1$ //$NON-NLS-2$
+                            : node.getSyntaxErrorMessage().getMessage());
+                }
+            }
+            Global.tempLog("reparse-kind", "result=" + parse.getClass().getSimpleName() //$NON-NLS-1$ //$NON-NLS-2$
+                + " onlyMethod=" + Global.invoke(parse, "isOnlyMethodReparse") //$NON-NLS-1$ //$NON-NLS-2$
+                + " method=" + methodName //$NON-NLS-1$
+                + " syntaxErrors=" + errors + " first{" + first + "}" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " directiveCut=" + System.getProperties().get("tormozit.bslParser.cutCount") //$NON-NLS-1$ //$NON-NLS-2$
+                + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
+        }
+        catch (Throwable t)
+        {
+            Global.tempLog("reparse-kind", "err " + t); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+    // #endregion
 
     private static void addEnvRange(java.util.List<int[]> bounds, java.util.List<String> keys,
                                     String project, EObject element)
@@ -7410,18 +7737,16 @@ return result;
 
     private static boolean selectionForcesIrOnlyFullList()
     {
-        SmartContentAssistProcessor proc = ContentAssistSessionReloader.getActiveProcessor();
-        boolean irOnly = proc != null && proc.isIrOnlyManualMode();
-        if (!irOnly && !selectionIrOnlyActive())
-            return false;
+        // Без выделения этот режим невозможен. Проверяем до поиска проекта/сессии ИР:
+        // JFace вызывает validate для каждого предложения одного и того же списка.
         SourceViewer sv = ContentAssistSessionReloader.getActiveViewer();
         if (sv == null)
             return false;
         org.eclipse.swt.graphics.Point sel = sv.getSelectedRange();
-        int len = sel != null ? sel.y : -1;
-        if (len <= 0)
+        if (sel == null || sel.y <= 0)
             return false;
-        return true;
+        SmartContentAssistProcessor proc = ContentAssistSessionReloader.getActiveProcessor();
+        return (proc != null && proc.isIrOnlyManualMode()) || selectionIrOnlyActive();
     }
 
     static boolean proposalMatchesFilter(ICompletionProposal proposal, IDocument document,
@@ -7429,8 +7754,6 @@ return result;
     {
         if (selectionForcesIrOnlyFullList())
             return true;
-        int caret = resolveFilterCaret(document, offset, event);
-        boolean inLiteralValidate = isStringLiteralAssistContext(document, caret);
 if (!SmartAssistFilterState.isSmartFilterEnabled())
         {
             ICompletionProposal raw = unwrapProposal(proposal);
@@ -7440,7 +7763,8 @@ if (!SmartAssistFilterState.isSmartFilterEnabled())
         }
         if (isMemberAccessContextChange(document, event))
             return true;
-        String filter = computeActiveFilter(document, offset, event);
+        int caret = resolveFilterCaret(document, offset, event);
+        String filter = computeIdentifierFilter(document, caret);
         if (filter.isEmpty())
         {
             if (ReceiverTypeLabel.findMemberAccessDot(document, caret) >= 0
@@ -7578,6 +7902,9 @@ if (!SmartAssistFilterState.isSmartFilterEnabled())
             // фон → publish, с писком на каждом витке (замер 05.09.2026).
             if (wordListBackgroundJob != null)
             {
+                ContentAssistDebug.pipeline("word.cancel.request", pipelineState()
+                    + " jobObject=" + ContentAssistDebug.pipelineIdentity(wordListBackgroundJob)
+                    + " state=" + wordListBackgroundJob.getState() + " reason=contextChanged");
                 wordListBackgroundJob.cancel();
                 wordListBackgroundKey = Integer.MIN_VALUE;
             }
@@ -7877,6 +8204,20 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
     private static final long DELEGATE_LOCK_UI_REPORT_MS = 5;
 
     /**
+     * Штатный расчёт по текущей модели с удержанием догоняющего разбора EDT
+     * ({@link ContentAssistSessionReloader#withModelSyncHeld}). Правило берётся раньше
+     * {@link #DELEGATE_LOCK} и всегда в этом порядке: штатный показ из ворот берёт его
+     * и уже под ним доходит до этого замка — обратный порядок дал бы взаимную блокировку.
+     * Фон бросает ожидание идущего разбора, когда запрос устарел.
+     */
+    private ICompletionProposal[] probeDelegateOnce(ITextViewer viewer, int off)
+    {
+        boolean onUi = org.eclipse.swt.widgets.Display.getCurrent() != null;
+        return ContentAssistSessionReloader.withModelSyncHeld(viewer != null ? viewer.getDocument() : null,
+            onUi ? null : DELEGATE_STALE_CHECK.get(), () -> probeDelegateOnceHeld(viewer, off));
+    }
+
+    /**
      * Один вызов штатного процессора с замером: главный источник блокировки UI.
      *
      * <p>Расчёты сериализованы {@link #DELEGATE_LOCK}. UI-поток ждёт замок сколько нужно —
@@ -7884,8 +8225,12 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
      * ждёт ограниченно и при занятости возвращает {@code null}. Расчёт членов
      * ({@link #DELEGATE_LOCK_WAIT_BG}) ждёт замок без лимита.
      */
-    private ICompletionProposal[] probeDelegateOnce(ITextViewer viewer, int off)
+    private ICompletionProposal[] probeDelegateOnceHeld(ITextViewer viewer, int off)
     {
+        try (ContentAssistDebug.PipelineSpan pipeline = ContentAssistDebug.pipelineStart(
+            "delegate.probe", pipelineState() + " viewer=" + ContentAssistDebug.pipelineIdentity(viewer)
+                + " offset=" + off))
+        {
         boolean onUi = org.eclipse.swt.widgets.Display.getCurrent() != null;
         long tLock = System.nanoTime();
         boolean locked;
@@ -7945,6 +8290,8 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
             return null;
         }
         long waitMs = (System.nanoTime() - tLock) / 1_000_000L;
+        ContentAssistDebug.pipeline("delegate.lock.acquired", "waitNs=" + (System.nanoTime() - tLock)
+            + " offset=" + off);
         java.util.function.BooleanSupplier staleCheck = DELEGATE_STALE_CHECK.get();
         if (staleCheck != null && staleCheck.getAsBoolean())
         {
@@ -7970,6 +8317,10 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
             if (!onUi)
                 resetDelegateAssistMode();
             KeywordProbe keywordProbe = beginKeywordProbe(viewer, off);
+            // #region agent log
+            uiBlockLog("model.stateAtCompute", "off=" + off + " " //$NON-NLS-1$ //$NON-NLS-2$
+                + ContentAssistSessionReloader.describeModelState(viewer != null ? viewer.getDocument() : null));
+            // #endregion
             try
             {
                 raw = delegate.computeCompletionProposals(viewer, off);
@@ -8003,6 +8354,24 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
             DELEGATE_LOCK.unlock();
             IDocument d = viewer != null ? viewer.getDocument() : null;
             long computeMs = (System.nanoTime() - tCompute) / 1_000_000L;
+            int modelProposals = 0;
+            int templateProposals = 0;
+            Map<String, Integer> proposalClasses = new LinkedHashMap<>();
+            if (raw != null)
+                for (ICompletionProposal proposal : raw)
+                {
+                    ICompletionProposal unwrapped = unwrapProposal(proposal);
+                    if (unwrapped instanceof ConfigurableCompletionProposal)
+                        modelProposals++;
+                    if (isTemplateProposal(unwrapped))
+                        templateProposals++;
+                    proposalClasses.merge(unwrapped == null ? "null" : unwrapped.getClass().getName(),
+                        1, Integer::sum);
+                }
+            Global.tempLog("assist-filter", "delegate.result " + pipelineState()
+                + " offset=" + off + " ui=" + onUi + " mode=" + modeBefore + "/" + delegateAssistMode()
+                + " modelProposals=" + modelProposals + " templateProposals=" + templateProposals
+                + " classes=" + proposalClasses + " " + ContentAssistDebug.pipelineList(raw));
             ContentAssistDebug.perfEnd("delegate.compute", t0, //$NON-NLS-1$
                 "{\"off\":" + off + ",\"n\":" + (raw == null ? -1 : raw.length) //$NON-NLS-1$ //$NON-NLS-2$
                     + ",\"docLen\":" + (d == null ? -1 : d.getLength()) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
@@ -8019,6 +8388,7 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                 + " popup=" + isPopupVisible() //$NON-NLS-1$
                 + " caller=" + uiBlockCaller()); //$NON-NLS-1$
             // #endregion
+        }
         }
     }
 
@@ -8333,6 +8703,33 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
     }
 
     /**
+     * Шаблон EDT не наследует JFace TemplateProposal. Иерархия подтверждена в
+     * .tmp/bundles/lcore-ui-templates/TemplateProposal.javap.txt; имя проверяется точно,
+     * без дополнительной зависимости основного бандла от lcore.ui.templates.
+     */
+    private static boolean isTemplateProposal(ICompletionProposal proposal)
+    {
+        ICompletionProposal raw = unwrapProposal(proposal);
+        if (raw instanceof org.eclipse.jface.text.templates.TemplateProposal)
+            return true;
+        for (Class<?> type = raw == null ? null : raw.getClass(); type != null; type = type.getSuperclass())
+            if ("com.e1c.g5.v8.dt.lcore.ui.templates.contentassist.TemplateProposal".equals(type.getName()))
+                return true;
+        return false;
+    }
+
+    /** Шаблоны сохраняются в смешанном ответе, но сами по себе не составляют список членов. */
+    private static boolean containsOnlyTemplateProposals(ICompletionProposal[] proposals)
+    {
+        if (proposals == null || proposals.length == 0)
+            return false;
+        for (ICompletionProposal proposal : proposals)
+            if (!isTemplateProposal(proposal))
+                return false;
+        return true;
+    }
+
+    /**
      * Расчёт списка членов в фоновом потоке. Такт нажатия клавиши не занимается ничем:
      * буква печатается сразу, список приходит, когда посчитается.
      *
@@ -8408,6 +8805,18 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                         // (новое задание на другую точку), а не по смене поколения.
                         if (monitor.isCanceled() || memberStockBackgroundDot != dotContextKey)
                             return Status.CANCEL_STATUS;
+                        // Считать только по готовой модели: точка в ней есть, ссылки разрешены.
+                        // Иначе штатный расчёт отдаёт один шаблон, а держит удержание и не
+                        // пускает разбор (замер 15.10.2026 09:59: три попытки, 6 с).
+                        if (!ContentAssistSessionReloader.waitModelReadyUpTo(doc, probeOffset,
+                            () -> monitor.isCanceled() || memberStockBackgroundDot != dotContextKey
+                                || contextGen != memberStockContextGen))
+                        {
+                            // Как отказ по устареванию в probeDelegateOnce: метку точки снимет
+                            // общий выход ниже.
+                            raw = null;
+                            break;
+                        }
                         attempts++;
                         try
                         {
@@ -8432,6 +8841,17 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                                     + " attempt=" + attempts); //$NON-NLS-1$
                                 return Status.CANCEL_STATUS;
                             }
+                            raw = EMPTY;
+                        }
+                        // Шаблон (например «кстр») не является членом получателя.
+                        // Такой ответ не подтверждает готовность базы: используем те же
+                        // ограниченные повторы, что и для пустого ответа EDT.
+                        if (containsOnlyTemplateProposals(raw))
+                        {
+                            Global.tempLog("assist-filter", "member.templatesOnly " + pipelineState()
+                                + " dot=" + dotContextKey + " attempt=" + attempts
+                                + " mode=" + delegateAssistMode()
+                                + " " + ContentAssistDebug.pipelineList(raw));
                             raw = EMPTY;
                         }
                         if (raw != null && raw.length > 0)
@@ -9718,6 +10138,11 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
     /** Только для {@link #computeForPopupRefresh} — не для штатного keystroke path. */
     private ICompletionProposal[] filterAndSort(ICompletionProposal[] raw, String filter)
     {
+        try (ContentAssistDebug.PipelineSpan pipeline =
+            ContentAssistDebug.pipelineStart("filter", pipelineState()
+                + " raw=" + ContentAssistDebug.pipelineIdentity(raw)
+                + " filter=" + ContentAssistDebug.pipelineText(filter)))
+        {
         if (raw == null || raw.length == 0)
             return EMPTY;
 
@@ -9856,8 +10281,12 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
             for (int i = 0; i < idx.length; i++)
                 idx[i] = i;
             long tSort = System.nanoTime();
-            Arrays.sort(idx, (a, b) -> compareProposals(matcher,
-                filtered.get(a), filtered.get(b)));
+            try (ContentAssistDebug.PipelineSpan sorting = ContentAssistDebug.pipelineStart(
+                "filter.sort", "n=" + filtered.size()))
+            {
+                Arrays.sort(idx, (a, b) -> compareProposals(matcher,
+                    filtered.get(a), filtered.get(b)));
+            }
             sortMs = (System.nanoTime() - tSort) / 1_000_000L;
 
             result = new ICompletionProposal[idx.length];
@@ -9908,6 +10337,7 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                 + " classes=" + classes //$NON-NLS-1$
                 + " caller=" + uiBlockCaller()); //$NON-NLS-1$
             // #endregion
+        }
         }
     }
 
@@ -10197,6 +10627,7 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                                        ICompletionProposal p1,
                                        ICompletionProposal p2)
     {
+        ContentAssistDebug.pipelineCompare();
         int n1 = computeNameScore(matcher, p1);
         int n2 = computeNameScore(matcher, p2);
         if (n1 != n2)
@@ -10645,11 +11076,6 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
             {
                 return -1;
             }
-            boolean inLiteral = isStringLiteralAssistContext(doc, caret);
-            if (inLiteral)
-            {
-                return -1;
-            }
             try
             {
                 // Только имя члена: obj.| / obj.префикс|. Скобки не перескакивать —
@@ -10662,6 +11088,10 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
                 {
                     return -1;
                 }
+                // До проверки литерала дошли только при реальной точке слева от слова.
+                // Для обычного идентификатора извлекать содержимое литерала не нужно.
+                if (isStringLiteralAssistContext(doc, caret))
+                    return -1;
                 return pos - 1;
             }
             catch (Exception e)
@@ -11041,6 +11471,7 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
             if (Boolean.TRUE.equals(SmartCompletionProposal.IR_PROPOSAL_APPLY_IN_PROGRESS.get()))
                 return;
             rekeyDataEventForLeadingSpace(event);
+            rebaseEmptyCallDataEventForInsert(event);
             EObject pending = PENDING_SIGNATURE.get();
             String text = event.getText();
             if (pending == null)
@@ -11154,6 +11585,75 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
             }
             catch (Exception ignored)
             {
+            }
+        }
+
+        /**
+         * Карта EDT индексируется текстом вставки, а координаты в DataEvent абсолютные.
+         * До завершения нового расчёта в ней может оставаться Метод() с другой строки.
+         * Для единственного пустого поля его точная позиция известна из самой вставки.
+         * Создаём новую модель, не меняя позиции в записи, общей с кэшем предложений.
+         */
+        private static void rebaseEmptyCallDataEventForInsert(DocumentEvent event)
+        {
+            String text = event.getText();
+            String outcome = null;
+            int oldStart = -1;
+            int desired = -1;
+            try
+            {
+                if (!text.matches(" ?[\\p{L}_][\\p{L}\\p{N}_]*\\(\\);?")) //$NON-NLS-1$
+                    return;
+                desired = event.getOffset() + text.indexOf('(') + 1;
+                IDocumentListener listener = findBslDocumentListener(event.getDocument());
+                if (listener == null)
+                    return;
+                Field mapField = listener.getClass().getDeclaredField("map"); //$NON-NLS-1$
+                mapField.setAccessible(true);
+                if (!(mapField.get(listener) instanceof Map<?, ?> rawMap))
+                    return;
+                @SuppressWarnings("unchecked")
+                Map<Object, Object> map = (Map<Object, Object>) rawMap;
+                Object previous = map.get(text);
+                if (previous == null)
+                    return;
+                oldStart = readEventInt(previous, "posStart"); //$NON-NLS-1$
+                if (oldStart == desired)
+                    return;
+                Object info = Global.getField(previous, "allInfo"); //$NON-NLS-1$
+                outcome = "unsupportedPositions"; //$NON-NLS-1$
+                if (!(info instanceof List<?> positions) || positions.size() != 1
+                    || !(positions.get(0) instanceof LinkedPosition position)
+                    || position.getOffset() != oldStart || position.getLength() != 0
+                    || readEventInt(previous, "length") != 0) //$NON-NLS-1$
+                    return;
+                LinkedPosition rebased = new LinkedPosition(event.getDocument(), desired, 0);
+                LinkedPositionGroup group = new LinkedPositionGroup();
+                group.addPosition(rebased);
+                LinkedModeModel model = new LinkedModeModel();
+                model.addGroup(group);
+                int stop = readEventInt(previous, "stopPos"); //$NON-NLS-1$
+                Object replacement = newDataEvent(listener, previous.getClass(), desired, 0,
+                    stop < 0 ? stop : stop + desired - oldStart, model, List.of(rebased),
+                    Global.getField(previous, "objects")); //$NON-NLS-1$
+                outcome = "noConstructor"; //$NON-NLS-1$
+                if (replacement == null)
+                    return;
+                map.put(text, replacement);
+                outcome = "rebased"; //$NON-NLS-1$
+            }
+            catch (Exception ex)
+            {
+                outcome = "error:" + ex.getClass().getSimpleName(); //$NON-NLS-1$
+            }
+            finally
+            {
+                // Длительная диагностика: только устаревшие координаты и ошибки,
+                // без текста модуля, штатных пропусков и зависимости от флажка журнала.
+                if (outcome != null)
+                    Global.tempLog("assist-caret-rebase", "emptyCall outcome=" + outcome //$NON-NLS-1$ //$NON-NLS-2$
+                        + " offset=" + event.getOffset() + " oldStart=" + oldStart //$NON-NLS-1$ //$NON-NLS-2$
+                        + " desired=" + desired); //$NON-NLS-1$
             }
         }
 

@@ -108,6 +108,7 @@ public final class GcPressureToastHook implements IStartup
             }
             catch (RuntimeException e)
             {
+                Global.tempLogException("assist-memory", "poll failed", e);
                 // пропускаем отсчёт — следующий через POLL_MS
             }
         }
@@ -116,15 +117,18 @@ public final class GcPressureToastHook implements IStartup
         {
             long now = System.nanoTime();
             long gcMillis = 0;
+            long gcCount = 0;
             for (GarbageCollectorMXBean collector : collectors)
+            {
                 gcMillis += Math.max(0, collector.getCollectionTime());
+                gcCount += Math.max(0, collector.getCollectionCount());
+            }
             MemoryUsage heap = memory.getHeapMemoryUsage();
             long max = heap.getMax() > 0 ? heap.getMax() : Runtime.getRuntime().maxMemory();
 
             samples.addLast(new long[] {now, gcMillis, heap.getUsed()});
             while (samples.size() > 2 && ageMs(now, samples.getFirst()) > EXIT_WINDOW_MS + 5 * POLL_MS)
                 samples.removeFirst();
-
             if (inEpisode)
             {
                 if (gcShare(now, gcMillis, EXIT_WINDOW_MS) < EXIT_GC_SHARE)
