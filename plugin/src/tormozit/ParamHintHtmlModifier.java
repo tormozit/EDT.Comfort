@@ -333,6 +333,17 @@ public final class ParamHintHtmlModifier
             tryModifyBrowserHtml(browser);
         });
 
+        // Автооткрытие подсказки после вставки предложения (BslSelectionChangedListener)
+        // создаёт своё окно и при промахе EDT (Найти()) уничтожает его, так и не показав.
+        // Штатный слушатель закрытия при этом сохраняет размер непоказанного окна —
+        // размер окна Windows по умолчанию, почти весь экран. Возвращаем размер
+        // пользователя сразу, до следующего показа: иначе окно открывается гигантом.
+        display.addFilter(SWT.Dispose, event ->
+        {
+            if (event.widget instanceof Shell && SavedBounds.isSectionKnown())
+                display.asyncExec(() -> SavedBounds.repair(null));
+        });
+
         installParamHoverCommandProbe(display);
 
         ContentAssistDebug.log("ParamHintHtmlModifier: SWT.Show filter installed"); //$NON-NLS-1$
@@ -8394,6 +8405,11 @@ public final class ParamHintHtmlModifier
             return preferences;
         }
 
+        static boolean isSectionKnown()
+        {
+            return cachedSection != null;
+        }
+
         static boolean isRemembered(Point size)
         {
             return rememberedSize != null && rememberedSize.equals(size);
@@ -8479,7 +8495,10 @@ public final class ParamHintHtmlModifier
                 Rectangle monitor = primaryMonitorClient();
                 if (!isGiantParamHintSize(stored, sane, monitor))
                     return;
-                Point fixed = clampParamHintToMonitor(sane, monitor);
+                // Размер пользователя важнее расчётного: гигант сюда пишет штатный
+                // saveBounds непоказанного окна, а не пользователь.
+                Point fixed = clampParamHintToMonitor(
+                    rememberedSize != null ? rememberedSize : sane, monitor);
                 if (fixed == null || fixed.x <= 0 || fixed.y <= 0)
                     fixed = sane;
                 Global.invoke(section, "put", HOVER_BOUNDS_WIDTH, String.valueOf(fixed.x)); //$NON-NLS-1$

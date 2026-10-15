@@ -2961,8 +2961,14 @@ public final class ProblemViewHook implements IStartup
             PreferencesUtil.createPropertyDialogOn(target, project, CHECKS_PAGE_ID, null, data);
         if (dialog == null)
             return;
-        CheckDescriptionRefresh.install(dialog);
+        installCheckDescriptionRefresh(dialog);
         dialog.open();
+    }
+
+    /** Общий путь обновления описания при программном открытии страницы проверок. */
+    static void installCheckDescriptionRefresh(PreferenceDialog dialog)
+    {
+        CheckDescriptionRefresh.install(dialog);
     }
 
     /** Открывает страницу параметров проекта с идентификатором {@code pageId}. */

@@ -17,6 +17,7 @@ import java.util.function.Predicate;
 
 import org.eclipse.core.databinding.observable.IObservable;
 import org.eclipse.core.databinding.observable.value.IObservableValue;
+import org.eclipse.core.resources.IProject;
 import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.jface.dialogs.IPageChangedListener;
 import org.eclipse.jface.layout.TableColumnLayout;
@@ -162,6 +163,9 @@ public final class ValidationChecksFilterHook implements IStartup
     static final String PAGE_TITLE = "Проверки"; //$NON-NLS-1$
     /** Цель открытия для нашего хука; штатный applyData EDT этот ключ не обрабатывает. */
     static final String OPEN_CHECK_DATA_KEY = "tormozit.validationCheckToOpen"; //$NON-NLS-1$
+    private static final String OPEN_COLUMN_FILTER_DATA_KEY = "tormozit.validationColumnFilterToOpen"; //$NON-NLS-1$
+
+    private record CheckColumnFilter(int column, String value) {}
     private static final String PATCHED_KEY = "tormozit.validationChecksFilterPatched"; //$NON-NLS-1$
     private static final String PAGE_COPY_ROOT_KEY = "tormozit.validationPageCopyRoot"; //$NON-NLS-1$
     private static final String COPY_WIRED_KEY = "tormozit.validationCopyWired"; //$NON-NLS-1$
@@ -302,6 +306,38 @@ public final class ValidationChecksFilterHook implements IStartup
             errorItem.setText(OTHER_ERROR_TYPE_TITLE);
     }
 
+    /** Переход из окна отбора проблем к проверкам выбранного типа (issue 811). */
+    static void openForType(Shell shell, IProject project, IssueType type)
+    {
+        if (type != null)
+            openForColumn(shell, project, new CheckColumnFilter(0, localizedType(type)));
+    }
+
+    /** null означает пустую критичность, как в информационных строках BSL. */
+    static void openForSeverity(Shell shell, IProject project, IssueSeverity severity)
+    {
+        openForColumn(shell, project, new CheckColumnFilter(1, localizedSeverity(severity)));
+    }
+
+    private static void openForColumn(Shell shell, IProject project, CheckColumnFilter filter)
+    {
+        if (project == null)
+            return;
+        PreferenceDialog dialog = PreferencesUtil.createPropertyDialogOn(shell, project,
+            "com.e1c.g5.v8.dt.checks.properties", null, Map.of(OPEN_COLUMN_FILTER_DATA_KEY, filter)); //$NON-NLS-1$
+        if (dialog != null)
+        {
+            ProblemViewHook.installCheckDescriptionRefresh(dialog);
+            dialog.open();
+        }
+    }
+
+    /** Часть флажка «Показывать ошибки конфигурации», соответствующая MarkerSeverity.ERRORS. */
+    static int internalBslErrorCheckCount()
+    {
+        return (int)InternalBslChecks.ENTRIES.values().stream().filter(InternalBslChecks.Entry::canReportError).count();
+    }
+
     private static PreferenceDialog findPreferenceDialog(Shell shell)
     {
         Shell current = shell;
@@ -394,7 +430,7 @@ public final class ValidationChecksFilterHook implements IStartup
             // Compact 300 px здесь слишком узкий: штатно SearchBox тянется
             // в строке с тулбаром (fillDefaults + minSize 100 + grab).
             relaxBodyMinimumWidth(treeViewer);
-            ChecksTablePane.install(control, treeViewer, filter, pageControl);
+            ChecksTablePane tablePane = ChecksTablePane.install(control, treeViewer, filter, pageControl);
             registerCheckReferencesMenu(control, treeViewer.getTree(), () ->
                 treeViewer.getStructuredSelection().getFirstElement() instanceof IChecksTreeNode node
                     ? node.getValue() : null);
@@ -417,6 +453,14 @@ public final class ValidationChecksFilterHook implements IStartup
             compactSettingsRow(control);
             InternalBslChecks.installDetails(control);
             ChecksSelectionMemory.install(control, treeViewer, dialog);
+
+            Object pageData = Global.getField(dialog, "pageData"); //$NON-NLS-1$
+            if (pageData instanceof Map<?, ?> data
+                && data.get(OPEN_COLUMN_FILTER_DATA_KEY) instanceof CheckColumnFilter requested)
+            {
+                if (tablePane != null)
+                    tablePane.openColumn(requested);
+            }
 
             openPages++;
             treeViewer.getControl().addDisposeListener(event -> openPages--);
@@ -1546,6 +1590,11 @@ public final class ValidationChecksFilterHook implements IStartup
 
         private record Entry(String code, String text, String kinds) implements INamedElement
         {
+            boolean canReportError()
+            {
+                return Arrays.asList(kinds.split(",")).contains("ERROR"); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+
             @Override public CheckUid getId() { return code != null ? new CheckUid(code, CONTRIBUTOR) : ROOT; }
             @Override public CheckUid getParentId() { return code != null ? ROOT : INamedElement.ROOT_ID; }
             @Override public String getTitle() { return text; }
@@ -2447,7 +2496,7 @@ public final class ValidationChecksFilterHook implements IStartup
 
             interaction = new FormTableInteraction(table, viewer,
                 (item, col) -> cellText(item != null ? item.getData() : null, col));
-            interaction.setFilterTextResolver(ChecksTablePane::cellText);
+            interaction.setFilterTextResolver(ChecksTablePane::cellFilterText);
             interaction.setOwnerDrawColumns(titleColumn, categoryColumn);
             FormTableColumnState.loadOrder(settings, KEY_COL_ORDER, table);
             boolean hasSavedWidths = settings.get(KEY_COL_TITLE_WIDTH) != null
@@ -2690,6 +2739,18 @@ public final class ValidationChecksFilterHook implements IStartup
             return null;
         }
 
+        void openColumn(CheckColumnFilter requested)
+        {
+            setTableMode(true);
+            ComfortSettings.setValidationChecksTableMode(true);
+            interaction.applyColumnFilterValue(requested.column(), requested.value());
+            if (viewer.getStructuredSelection().isEmpty() && viewer.getElementAt(0) != null)
+                viewer.setSelection(new StructuredSelection(viewer.getElementAt(0)), true);
+            // Программный выбор не посылает SWT.Selection, который обычно
+            // переносит текущую строку в дерево EDT и обновляет правую панель.
+            syncSelectionToTree();
+        }
+
         void setTableMode(boolean value)
         {
             applyMode(value);
@@ -2826,6 +2887,19 @@ public final class ValidationChecksFilterHook implements IStartup
                 if (index < columns.length)
                     settings.put(widthKeys[i], columns[index].getWidth());
             }
+        }
+
+        /**
+         * Штатный флажок включает и IssueType.ERROR, и MarkerSeverity.ERRORS.
+         * BmAwareResourceValidatorListener преобразует BSL Severity.ERROR в ERRORS;
+         * WARNING/INFO сюда не относятся. Коды с ERROR,WARNING могут выдавать оба вида.
+         */
+        private static String cellFilterText(Object element, int column)
+        {
+            if (column == 0 && element instanceof CheckRow row
+                && row.node.getValue() instanceof InternalBslChecks.Entry entry && entry.canReportError())
+                return localizedType(IssueType.ERROR);
+            return cellText(element, column);
         }
 
         static String cellText(Object element, int column)

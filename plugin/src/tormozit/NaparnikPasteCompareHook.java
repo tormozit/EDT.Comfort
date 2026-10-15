@@ -88,6 +88,13 @@ public final class NaparnikPasteCompareHook implements IStartup
         + "getter.__comfort=true;" //$NON-NLS-1$
         + "function install(){" //$NON-NLS-1$
         + "try{" //$NON-NLS-1$
+        // Клиент хранит ideApi в IdeAutomation. Подмена window.ideApi не меняет эту ссылку.
+        // Сам IdeAutomation — JS-объект: сохраняем его штатный метод и все возможности API.
+        + "var automation=window.chatApi&&window.chatApi.ideAutomation;" //$NON-NLS-1$
+        + "if(automation&&typeof automation.paste_code==='function'&&!automation.paste_code.__comfortPaste){" //$NON-NLS-1$
+        + "var originalPaste=automation.paste_code;" //$NON-NLS-1$
+        + "var capturePaste=function(code){window.__comfortLastPaste=code==null?'':String(code);return originalPaste.call(this,code);};" //$NON-NLS-1$
+        + "capturePaste.__comfortPaste=true;automation.paste_code=capturePaste;}" //$NON-NLS-1$
         + "var d=Object.getOwnPropertyDescriptor(window,'ideApi');" //$NON-NLS-1$
         + "if(d&&d.get&&d.get.__comfort)return;" //$NON-NLS-1$
         + "if(d&&'value' in d)raw=d.value;" //$NON-NLS-1$
@@ -117,10 +124,12 @@ public final class NaparnikPasteCompareHook implements IStartup
 
     private static void registerAsm()
     {
+        Global.tempLog(TAG, "registerAsm registered=" + asmRegistered); //$NON-NLS-1$
         if (asmRegistered)
             return;
         boolean ok = BslDocCommentDescriptionFix.registerExtraTransformer(
             new PasteCodeTransformer(), TARGET);
+        Global.tempLog(TAG, "registerAsm result=" + ok); //$NON-NLS-1$
         if (ok)
             asmRegistered = true;
         else
@@ -135,6 +144,7 @@ public final class NaparnikPasteCompareHook implements IStartup
         {
             if (!(event.widget instanceof Shell shell) || shell.isDisposed())
                 return;
+            Global.tempLog(TAG, "shell event=" + event.type + " title=" + shell.getText()); //$NON-NLS-1$ //$NON-NLS-2$
             display.asyncExec(() -> interceptNativeReplaceQuestion(display, shell));
         };
         display.addFilter(SWT.Show, nativeQuestion);
@@ -200,6 +210,7 @@ public final class NaparnikPasteCompareHook implements IStartup
 
     private static void wrapAllChatViews()
     {
+        Global.tempLog(TAG, "wrapAllChatViews"); //$NON-NLS-1$
         IWorkbench workbench = PlatformUI.getWorkbench();
         if (workbench == null)
             return;
@@ -211,6 +222,8 @@ public final class NaparnikPasteCompareHook implements IStartup
             {
                 for (IViewReference ref : page.getViewReferences())
                 {
+                    Global.tempLog(TAG, "view id=" + ref.getId() + " class=" //$NON-NLS-1$ //$NON-NLS-2$
+                        + (ref.getPart(false) == null ? "null" : ref.getPart(false).getClass().getName())); //$NON-NLS-1$
                     if (!isChatView(ref))
                         continue;
                     wrapChatView(ref.getView(false));
@@ -233,15 +246,18 @@ public final class NaparnikPasteCompareHook implements IStartup
 
     private static void wrapChatView(IViewPart view)
     {
+        Global.tempLog(TAG, "wrapChatView view=" + (view == null ? "null" : view.getClass().getName())); //$NON-NLS-1$ //$NON-NLS-2$
         if (view == null)
             return;
         try
         {
             Object chat = Global.getField(view, "chatDialog"); //$NON-NLS-1$
+            Global.tempLog(TAG, "wrapChatView chat=" + (chat == null ? "null" : chat.getClass().getName())); //$NON-NLS-1$ //$NON-NLS-2$
             if (chat == null)
                 return;
             Object handler = Global.getField(chat, "handler"); //$NON-NLS-1$
             Object webView = Global.getField(chat, "webView"); //$NON-NLS-1$
+            Global.tempLog(TAG, "wrapChatView handler=" + (handler != null) + " webView=" + (webView != null)); //$NON-NLS-1$ //$NON-NLS-2$
             if (handler != null)
                 lastHandler = handler;
             if (webView != null)
@@ -250,18 +266,20 @@ public final class NaparnikPasteCompareHook implements IStartup
                 return;
             runOnFx(() -> injectJsWrap(webView));
         }
-        catch (Throwable ignored)
+        catch (Throwable failure)
         {
-            // чат ещё не готов
+            Global.tempLogException(TAG, "wrapChatView", failure); //$NON-NLS-1$
         }
     }
 
     private static void runOnFx(Runnable action)
     {
+        Global.tempLog(TAG, "runOnFx thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
         try
         {
             Class<?> platform = Class.forName("javafx.application.Platform"); //$NON-NLS-1$
             Boolean fxThread = (Boolean) platform.getMethod("isFxApplicationThread").invoke(null); //$NON-NLS-1$
+            Global.tempLog(TAG, "runOnFx fxThread=" + fxThread); //$NON-NLS-1$
             if (Boolean.TRUE.equals(fxThread))
             {
                 action.run();
@@ -269,24 +287,36 @@ public final class NaparnikPasteCompareHook implements IStartup
             }
             platform.getMethod("runLater", Runnable.class).invoke(null, action); //$NON-NLS-1$
         }
-        catch (Throwable ignored)
+        catch (Throwable failure)
         {
-            // JavaFX ещё не поднят
+            Global.tempLogException(TAG, "runOnFx", failure); //$NON-NLS-1$
         }
     }
 
     private static void injectJsWrap(Object webView)
     {
+        Global.tempLog(TAG, "injectJsWrap"); //$NON-NLS-1$
         try
         {
             Object engine = Global.invoke(webView, "getEngine"); //$NON-NLS-1$
+            Global.tempLog(TAG, "injectJsWrap engine=" + (engine != null)); //$NON-NLS-1$
             if (engine == null)
                 return;
-            Global.invoke(engine, "executeScript", WRAP_JS); //$NON-NLS-1$
+            Object result = Global.invoke(engine, "executeScript", WRAP_JS); //$NON-NLS-1$
+            Global.tempLog(TAG, "injectJsWrap result=" + result); //$NON-NLS-1$
+            Object state = Global.invoke(engine, "executeScript", //$NON-NLS-1$
+                "JSON.stringify({url:location.href,guard:window.__comfortPasteGuard," //$NON-NLS-1$
+                + "count:window.__comfortWrapCount,error:window.__comfortWrapErr," //$NON-NLS-1$
+                + "api:typeof window.ideApi,paste:window.ideApi&&typeof window.ideApi.paste_code," //$NON-NLS-1$
+                + "wrapped:window.ideApi&&window.ideApi.__comfortPaste," //$NON-NLS-1$
+                + "automation:!!(window.chatApi&&window.chatApi.ideAutomation)," //$NON-NLS-1$
+                + "automationWrapped:!!(window.chatApi&&window.chatApi.ideAutomation&&window.chatApi.ideAutomation.paste_code&&window.chatApi.ideAutomation.paste_code.__comfortPaste)," //$NON-NLS-1$
+                + "lastLength:window.__comfortLastPaste==null?-1:String(window.__comfortLastPaste).length})"); //$NON-NLS-1$
+            Global.tempLog(TAG, "injectJsWrap state=" + state); //$NON-NLS-1$
         }
-        catch (Throwable ignored)
+        catch (Throwable failure)
         {
-            // страница чата ещё не загружена
+            Global.tempLogException(TAG, "injectJsWrap", failure); //$NON-NLS-1$
         }
     }
 
@@ -296,6 +326,8 @@ public final class NaparnikPasteCompareHook implements IStartup
      */
     public static Object handlePasteCode(Object handler, Object textObj)
     {
+        Global.tempLog(TAG, "handlePasteCode handler=" + (handler != null) //$NON-NLS-1$
+            + " textLength=" + (textObj instanceof String s ? s.length() : -1)); //$NON-NLS-1$
         try
         {
             String text = textObj instanceof String s ? s : null;
@@ -310,8 +342,9 @@ public final class NaparnikPasteCompareHook implements IStartup
             display.syncExec(() -> handled[0] = handleOnUi(handler, text));
             return Boolean.valueOf(handled[0]);
         }
-        catch (Throwable ignored)
+        catch (Throwable failure)
         {
+            Global.tempLogException(TAG, "handlePasteCode", failure); //$NON-NLS-1$
             return Boolean.FALSE;
         }
     }
@@ -322,14 +355,17 @@ public final class NaparnikPasteCompareHook implements IStartup
         {
             Object ui = Global.getField(handler, "ui"); //$NON-NLS-1$
             ISourceViewer viewer = lastSourceViewer(ui);
+            Global.tempLog(TAG, "handleOnUi viewer=" + (viewer != null)); //$NON-NLS-1$
             if (viewer == null)
                 return false;
             Point range = viewer.getSelectedRange();
             int selLen = range == null ? -1 : range.y;
+            Global.tempLog(TAG, "handleOnUi selectionLength=" + selLen); //$NON-NLS-1$
             if (selLen <= 0)
                 return false;
 
             TextEditor.Context ctx = contextFromViewer(ui, viewer);
+            Global.tempLog(TAG, "handleOnUi context=" + (ctx != null)); //$NON-NLS-1$
             if (ctx == null)
                 return false;
             if (!ctx.editable)
@@ -346,8 +382,9 @@ public final class NaparnikPasteCompareHook implements IStartup
             TextEditor.replaceSelectionAndSelect(ctx, processed);
             return true;
         }
-        catch (Throwable ignored)
+        catch (Throwable failure)
         {
+            Global.tempLogException(TAG, "handleOnUi", failure); //$NON-NLS-1$
             return false;
         }
     }
@@ -359,6 +396,7 @@ public final class NaparnikPasteCompareHook implements IStartup
         if (Boolean.TRUE.equals(shell.getData(WRAPPED_KEY)))
             return;
         String message = findLabelText(shell);
+        Global.tempLog(TAG, "interceptNativeReplaceQuestion title=" + shell.getText() + " message=" + message); //$NON-NLS-1$ //$NON-NLS-2$
         if (!NATIVE_QUESTION_RU.equals(message) && !NATIVE_QUESTION_EN.equals(message))
             return;
         shell.setData(WRAPPED_KEY, Boolean.TRUE);
@@ -376,6 +414,8 @@ public final class NaparnikPasteCompareHook implements IStartup
 
     private static void finishNativeQuestion(Shell shell, Object handler, String pasted)
     {
+        Global.tempLog(TAG, "finishNativeQuestion handler=" + (handler != null) //$NON-NLS-1$
+            + " pastedLength=" + (pasted == null ? -1 : pasted.length())); //$NON-NLS-1$
         try
         {
             if (pasted == null || pasted.isEmpty() || handler == null)
@@ -387,8 +427,9 @@ public final class NaparnikPasteCompareHook implements IStartup
             cancelQuestionDialog(shell);
             handleOnUi(handler, pasted);
         }
-        catch (Throwable ignored)
+        catch (Throwable failure)
         {
+            Global.tempLogException(TAG, "finishNativeQuestion", failure); //$NON-NLS-1$
             if (shell != null && !shell.isDisposed())
                 shell.setVisible(true);
         }
@@ -396,16 +437,19 @@ public final class NaparnikPasteCompareHook implements IStartup
 
     private static String readLastPaste(Object webView)
     {
+        Global.tempLog(TAG, "readLastPaste webView=" + (webView != null)); //$NON-NLS-1$
         if (webView == null)
             return ""; //$NON-NLS-1$
         try
         {
             Object engine = Global.invoke(webView, "getEngine"); //$NON-NLS-1$
             Object result = Global.invoke(engine, "executeScript", READ_PASTE_JS); //$NON-NLS-1$
+            Global.tempLog(TAG, "readLastPaste length=" + (result instanceof String s ? s.length() : -1)); //$NON-NLS-1$
             return result instanceof String s ? s : (result == null ? "" : String.valueOf(result)); //$NON-NLS-1$
         }
-        catch (Throwable ignored)
+        catch (Throwable failure)
         {
+            Global.tempLogException(TAG, "readLastPaste", failure); //$NON-NLS-1$
             return ""; //$NON-NLS-1$
         }
     }
@@ -568,12 +612,14 @@ public final class NaparnikPasteCompareHook implements IStartup
         {
             if (!TARGET_INTERNAL.equals(className))
                 return null;
+            Global.tempLog(TAG, "transform " + className); //$NON-NLS-1$
             try
             {
                 return transformPasteCode(classfileBuffer);
             }
-            catch (Throwable ignored)
+            catch (Throwable failure)
             {
+                Global.tempLogException(TAG, "transform", failure); //$NON-NLS-1$
                 return null;
             }
         }

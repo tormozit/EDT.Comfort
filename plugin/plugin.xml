@@ -192,6 +192,7 @@
     <startup class="tormozit.SyntaxAssistHook"/>
     <startup class="tormozit.NewAttributeNameIdentifierHook"/>
     <startup class="tormozit.NewCommandWizardHook"/>
+    <startup class="tormozit.BslLocalVariableExtractorWizardHook"/>
     <startup class="tormozit.PropertyNameIdentifierHook"/>
     <startup class="tormozit.PropertySheetActivePropertyHook"/>
     <startup class="tormozit.LwtTextSaveHook"/>

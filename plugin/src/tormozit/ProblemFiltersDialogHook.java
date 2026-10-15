@@ -2,8 +2,11 @@ package tormozit;
 
 import java.lang.reflect.Field;
 import java.util.ArrayList;
+import java.util.EnumMap;
 import java.util.List;
+import java.util.Map;
 
+import org.eclipse.core.resources.IProject;
 import org.eclipse.jface.window.Window;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.CLabel;
@@ -20,10 +23,14 @@ import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Label;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.ui.IStartup;
+import org.eclipse.ui.IWorkbenchPage;
 
 import com._1c.g5.v8.dt.common.localization.LocalizedEnumProvider;
 import com._1c.g5.v8.dt.ui.V8UiSharedImages;
 import com._1c.g5.v8.dt.validation.marker.MarkerSeverity;
+import com.e1c.g5.v8.dt.check.settings.ICheckRepository;
+import com.e1c.g5.v8.dt.check.settings.ICheckSettings;
+import com.e1c.g5.v8.dt.check.settings.INamedElement;
 import com.e1c.g5.v8.dt.check.settings.IssueSeverity;
 import com.e1c.g5.v8.dt.check.settings.IssueType;
 
@@ -54,6 +61,7 @@ public final class ProblemFiltersDialogHook implements IStartup
     private static final String DIALOG_CLASS_NAME =
         "com._1c.g5.v8.dt.internal.ui.validation.ProblemViewFiltersDialog"; //$NON-NLS-1$
     private static final String PATCHED_KEY = "tormozit.problemFiltersDialogPatched"; //$NON-NLS-1$
+    private static final String CHECK_FILTER_ICON_KEY = "tormozit.problemFilterIcon"; //$NON-NLS-1$
 
     /** Штатные тексты EDT ({@code internal/ui/validation/messages.properties}). */
     private static final String SHOW_PROBLEMS_LABEL = "Показывать проблемы:"; //$NON-NLS-1$
@@ -144,6 +152,7 @@ public final class ProblemFiltersDialogHook implements IStartup
 
         renameWarningType(shell);
         Composite severityHost = applyModuleSeverityIcons(shell);
+        installCheckLinks(shell);
         Object dialog = shell.getData();
         installComfortScopeRadios(shell, dialog,
             dialog != null ? dialog.getClass().getClassLoader() : null);
@@ -538,7 +547,7 @@ public final class ProblemFiltersDialogHook implements IStartup
         cellLayout.horizontalSpacing = ICON_SPACING;
         cell.setLayout(cellLayout);
 
-        iconLabel(cell, own, "Критичность: " + button.getText()); //$NON-NLS-1$
+        Label severityIcon = iconLabel(cell, own, "Критичность: " + button.getText()); //$NON-NLS-1$
         Label moduleIcon = iconLabel(cell, module, ValidationChecksFilterHook.moduleSeverityTooltip(severity));
         ValidationChecksFilterHook.setModuleSeverityIcon(moduleIcon, severity);
         ValidationChecksFilterHook.wireModuleAnnotationSettings(moduleIcon);
@@ -549,6 +558,7 @@ public final class ProblemFiltersDialogHook implements IStartup
             return;
         }
         button.setImage(null);
+        button.setData(CHECK_FILTER_ICON_KEY, severityIcon);
         GridData buttonData = new GridData(SWT.BEGINNING, SWT.CENTER, false, false);
         buttonData.widthHint = width;
         button.setLayoutData(buttonData);
@@ -674,6 +684,144 @@ public final class ProblemFiltersDialogHook implements IStartup
             return;
         warningType.setText(ValidationChecksFilterHook.OTHER_WARNING_TYPE_TITLE);
         warningType.setImage(ValidationChecksFilterHook.typeImage(shell.getDisplay(), IssueType.WARNING));
+    }
+
+    /** Значки типов и критичности открывают соответствующий отбор колонки таблицы. */
+    private static void installCheckLinks(Shell shell)
+    {
+        IWorkbenchPage page = Global.getActivePage();
+        IProject project = Global.getActiveProject(page != null ? page.getActivePart() : null, false);
+        CheckCounts counts = countChecks(project);
+        java.util.function.Supplier<IProject> target = () -> project != null ? project
+            : Global.getActiveProject(page != null ? page.getActivePart() : null, true);
+        for (IssueType type : IssueType.values())
+        {
+            if (type == IssueType.ERROR)
+                continue;
+            Button button = findCheckbox(shell, ValidationChecksFilterHook.localizedType(type));
+            installCheckLink(button, countText(counts, counts != null ? counts.types.getOrDefault(type, 0) : 0),
+                "Открыть проверки активного проекта с отбором по типу «" //$NON-NLS-1$
+                    + ValidationChecksFilterHook.localizedType(type) + "»", //$NON-NLS-1$
+                () -> ValidationChecksFilterHook.openForType(shell, target.get(), type));
+        }
+        for (IssueSeverity severity : IssueSeverity.values())
+        {
+            String title = ValidationChecksFilterHook.localizedSeverity(severity);
+            if (title.isEmpty())
+                continue;
+            Button button = findCheckbox(shell, title);
+            installCheckLink(button, countText(counts, counts != null ? counts.severities.getOrDefault(severity, 0) : 0),
+                "Открыть проверки активного проекта с отбором по критичности «" + title + "»", //$NON-NLS-1$ //$NON-NLS-2$
+                () -> ValidationChecksFilterHook.openForSeverity(shell, target.get(), severity));
+        }
+        installCheckLink(findCheckbox(shell, SHOW_BUILD_ERRORS_LABEL),
+            countText(counts, counts != null ? counts.types.getOrDefault(IssueType.ERROR, 0)
+                + ValidationChecksFilterHook.internalBslErrorCheckCount() : 0),
+            "Открыть проверки типа «Прочая ошибка» и внутренние проверки BSL, которые могут выдавать ошибки. " //$NON-NLS-1$
+                + "Число в скобках учитывает обе группы", //$NON-NLS-1$
+            () -> ValidationChecksFilterHook.openForType(shell, target.get(), IssueType.ERROR));
+    }
+
+    private static String countText(CheckCounts counts, int count)
+    {
+        return counts != null ? Integer.toString(count) : "—"; //$NON-NLS-1$
+    }
+
+    /** Переход только по значку; штатная надпись с числом переключает флажок EDT. */
+    private static void installCheckLink(Button button, String count, String tooltip, Runnable open)
+    {
+        if (button == null)
+            return;
+        String title = button.getText();
+        Image image = button.getImage();
+        Label icon = button.getData(CHECK_FILTER_ICON_KEY) instanceof Label existing ? existing : null;
+        Composite captionHost = button.getParent();
+        if (icon == null && image != null)
+        {
+            Composite cell = new Composite(button.getParent(), SWT.NONE);
+            cell.setLayoutData(copyLayoutData(button.getLayoutData()));
+            cell.moveAbove(button);
+            GridLayout layout = new GridLayout(3, false);
+            layout.marginWidth = 0;
+            layout.marginHeight = 0;
+            layout.horizontalSpacing = ICON_SPACING;
+            cell.setLayout(layout);
+            if (!button.setParent(cell))
+            {
+                cell.dispose();
+                return;
+            }
+            icon = iconLabel(cell, image, title);
+            button.setImage(null);
+            captionHost = cell;
+        }
+        else if (icon != null && captionHost.getLayout() instanceof GridLayout layout)
+            layout.numColumns++;
+        button.setText(""); //$NON-NLS-1$
+        // У splitIcons была фиксированная ширина подписи без счётчика.
+        button.setLayoutData(new GridData(SWT.BEGINNING, SWT.CENTER, false, false));
+        button.setToolTipText(TooltipText.wrap(button,
+            (SHOW_BUILD_ERRORS_LABEL.equals(title) ? SHOW_BUILD_ERRORS_TOOLTIP : title)
+                + "\nПосмотреть проверки можно кликом по иконке" + Global.pluginSignForTooltip())); //$NON-NLS-1$
+        Label caption = new Label(captionHost, SWT.NONE);
+        caption.setText(title + " (" + count + ")"); //$NON-NLS-1$ //$NON-NLS-2$
+        caption.setLayoutData(new GridData(SWT.BEGINNING, SWT.CENTER, false, false));
+        caption.setToolTipText(TooltipText.wrap(caption, button.getToolTipText()));
+        caption.addListener(SWT.MouseUp, event ->
+        {
+            if (event.button == 1 && button.isEnabled())
+            {
+                button.setSelection(!button.getSelection());
+                button.notifyListeners(SWT.Selection, null);
+            }
+        });
+        if (icon == null)
+            return;
+        icon.setCursor(icon.getDisplay().getSystemCursor(SWT.CURSOR_HAND));
+        icon.setToolTipText(TooltipText.wrap(icon,
+            tooltip + Global.pluginSignForTooltip())); //$NON-NLS-1$
+        icon.addListener(SWT.MouseUp, event ->
+        {
+            if (event.button == 1)
+                open.run();
+        });
+    }
+
+    private static final class CheckCounts
+    {
+        final Map<IssueType, Integer> types = new EnumMap<>(IssueType.class);
+        final Map<IssueSeverity, Integer> severities = new EnumMap<>(IssueSeverity.class);
+    }
+
+    /** Количество строк по значениям колонок таблицы, включая отключённые проверки. */
+    private static CheckCounts countChecks(IProject project)
+    {
+        ICheckRepository repository = Global.getOsgiService(ICheckRepository.class);
+        if (project == null || repository == null)
+            return null;
+        try
+        {
+            CheckCounts counts = new CheckCounts();
+            List<INamedElement> elements = new ArrayList<>(repository.getRootElements(project));
+            for (int i = 0; i < elements.size(); i++)
+            {
+                INamedElement element = elements.get(i);
+                if (element instanceof ICheckSettings settings)
+                {
+                    if (settings.getType() != null)
+                        counts.types.merge(settings.getType(), 1, Integer::sum);
+                    if (!ValidationChecksFilterHook.localizedSeverity(settings.getSeverity()).isEmpty())
+                        counts.severities.merge(settings.getSeverity(), 1, Integer::sum);
+                }
+                else
+                    elements.addAll(repository.getChildren(element, project));
+            }
+            return counts;
+        }
+        catch (RuntimeException e)
+        {
+            return null;
+        }
     }
 
     private static Label findLabel(Control control, String text)

@@ -180,6 +180,7 @@ public final class BslEditorHoverHook implements IStartup
         // Глобальный тумблер «Подсказки при наведении» применяется и к новым,
         // и к уже обёрнутым редакторам (повторные вызовы при активации/смене страницы).
         BslHoverHintState.applyToViewer(sourceViewer);
+        BslEditorFoldingHook.installCommentHover(sourceViewer);
         // Презентер создаётся позже обёртки hover-ов, поэтому прокси ставим при каждом
         // проходе (сам по себе повторно не навешивается).
         installAnnotationAwareInformationProvider(sourceViewer);
