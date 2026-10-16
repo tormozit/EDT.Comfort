@@ -1355,6 +1355,23 @@ boolean inLiteral = endCaret >= 0
             paramHintPollActive = false;
             return;
         }
+        // Приоритет непрерывен от чтения AST до возврата команды показа. Вложенное
+        // readOnlyForContentAssist восстанавливает проверку аннотаций, но пока этот
+        // scope открыт, её запуск откладывается: она не захватит монитор перед командой.
+        try (AssistPriority priority = AssistPriority.begin(viewer != null ? viewer.getDocument() : null))
+        {
+            pollAstReadyThenShowParamHintInternal(desiredCaretStart, gen, attempt, startedMs, lastExecMs, hintKind);
+        }
+    }
+
+    private void pollAstReadyThenShowParamHintInternal(int desiredCaretStart, int gen, int attempt,
+        long startedMs, long lastExecMs, char hintKind)
+    {
+        if (gen != paramHintPostGen.get())
+        {
+            paramHintPollActive = false;
+            return;
+        }
         // Позиция могла уехать, пока ждали AST (пользователь набрал запятую): берём
         // актуальную, а не ту, с которой опрос начинался.
         int desiredResolved = paramHintPollDesired >= 0 ? paramHintPollDesired : desiredCaretStart;
@@ -2150,6 +2167,76 @@ boolean inLiteral = endCaret >= 0
         String err;
     }
 
+    // #region agent log
+    /** Стеки UI и владельцев его блокировок во время штатной команды, без чтения SWT из фона. */
+    private static final class ParamHintCommandTrace implements AutoCloseable
+    {
+        private final long threadId = Thread.currentThread().getId();
+        private final long startedNs = System.nanoTime();
+        private final java.util.Timer timer = new java.util.Timer("Comfort: parameter hint diagnostics", true); //$NON-NLS-1$
+        private volatile boolean finished;
+
+        ParamHintCommandTrace()
+        {
+            Global.tempLog("param-hint-ui", "begin request=" + startedNs + " thread=" + threadId); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            timer.schedule(new java.util.TimerTask()
+            {
+                @Override
+                public void run()
+                {
+                    sample();
+                }
+            }, 150, 150);
+        }
+
+        private void sample()
+        {
+            if (finished)
+                return;
+            try
+            {
+                java.lang.management.ThreadMXBean bean = java.lang.management.ManagementFactory.getThreadMXBean();
+                StringBuilder text = new StringBuilder("sample request=").append(startedNs) //$NON-NLS-1$
+                    .append(" elapsedNs=").append(System.nanoTime() - startedNs); //$NON-NLS-1$
+                java.util.Set<Long> visited = new java.util.HashSet<>();
+                long next = threadId;
+                while (next >= 0 && visited.add(next))
+                {
+                    java.lang.management.ThreadInfo info = bean.getThreadInfo(new long[] {next},
+                        bean.isObjectMonitorUsageSupported(), bean.isSynchronizerUsageSupported())[0];
+                    if (info == null)
+                        break;
+                    text.append("\nthread=").append(next).append(' ').append(info.getThreadName()) //$NON-NLS-1$
+                        .append(" state=").append(info.getThreadState()).append(" waitsFor=").append(info.getLockInfo()) //$NON-NLS-1$ //$NON-NLS-2$
+                        .append(" ownerId=").append(info.getLockOwnerId()); //$NON-NLS-1$
+                    for (StackTraceElement frame : info.getStackTrace())
+                        text.append("\n  at ").append(frame); //$NON-NLS-1$
+                    for (java.lang.management.MonitorInfo monitor : info.getLockedMonitors())
+                        text.append("\n  holdsMonitor ").append(monitor).append(" at ").append(monitor.getLockedStackFrame()); //$NON-NLS-1$ //$NON-NLS-2$
+                    for (java.lang.management.LockInfo lock : info.getLockedSynchronizers())
+                        text.append("\n  holdsSynchronizer ").append(lock); //$NON-NLS-1$
+                    next = info.getLockOwnerId();
+                }
+                text.append("\nfinished=").append(finished); //$NON-NLS-1$
+                Global.tempLog("param-hint-ui", text.toString()); //$NON-NLS-1$
+            }
+            catch (Throwable t)
+            {
+                Global.tempLogException("param-hint-ui", "sample failed", t); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+
+        @Override
+        public void close()
+        {
+            finished = true;
+            timer.cancel();
+            Global.tempLog("param-hint-ui", "end request=" + startedNs //$NON-NLS-1$ //$NON-NLS-2$
+                + " elapsedNs=" + (System.nanoTime() - startedNs)); //$NON-NLS-1$
+        }
+    }
+    // #endregion
+
     private ParamHoverProbe executeInvocationParametersHoverCommand()
     {
         try (ContentAssistDebug.FillSpan phase = ContentAssistDebug.fillStart("paramHint.command", null))
@@ -2176,7 +2263,8 @@ boolean inLiteral = endCaret >= 0
                     return probe;
                 }
                 try (ContentAssistDebug.FillSpan nativePhase =
-                    ContentAssistDebug.fillStart("paramHint.nativeExecute", handlers))
+                    ContentAssistDebug.fillStart("paramHint.nativeExecute", handlers);
+                    ParamHintCommandTrace trace = new ParamHintCommandTrace())
             {
                 handlers.executeCommand(INVOCATION_PARAMETERS_HOVER_COMMAND, null);
             }
@@ -2780,6 +2868,15 @@ boolean inLiteral = endCaret >= 0
      */
     static boolean waitModelReadyUpTo(IDocument doc, int end, java.util.function.BooleanSupplier abort)
     {
+        try (AssistPriority priority = AssistPriority.begin(doc))
+        {
+            return waitModelReadyUpToInternal(doc, end, abort);
+        }
+    }
+
+    private static boolean waitModelReadyUpToInternal(IDocument doc, int end,
+                                                      java.util.function.BooleanSupplier abort)
+    {
         org.eclipse.core.runtime.jobs.Job job = assistSyncJob(doc);
         if (job == null || doc == null)
             return true;
@@ -2905,12 +3002,141 @@ boolean inLiteral = endCaret >= 0
     }
 
     /**
-     * Мониторы второстепенных читателей модели (проверка орфографии), держащих удержание.
+     * Мониторы второстепенных читателей модели (орфография, индекс конструкций), держащих удержание.
      * Расчёт подсказок, начиная своё удержание, отменяет их — они выходят на следующем шаге
      * и отпускают правило: второстепенная работа не задерживает подсказки.
      */
     private static final java.util.Set<org.eclipse.core.runtime.IProgressMonitor> LOW_PRIORITY_HOLDERS =
         java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    /**
+     * Проверка уступает ещё ДО входа в монитор документа. Штатное чтение отменяет её
+     * уже внутри монитора — слишком поздно, если проверка удерживает его сама.
+     * Отмена кооперативная: BslValidationJob передаёт свой монитор в CancelIndicator.
+     * Признак skip не меняем: им управляют EDT и ContentAssistResourceSync.
+     */
+    private static final class AssistPriority extends org.eclipse.core.runtime.jobs.JobChangeAdapter
+        implements AutoCloseable
+    {
+        private static final Map<IDocument, AssistPriority> STATES = new java.util.WeakHashMap<>();
+        private final java.lang.ref.WeakReference<IDocument> document;
+        private final java.lang.ref.WeakReference<org.eclipse.core.runtime.jobs.Job> validation;
+        private final AtomicInteger users = new AtomicInteger();
+        private final java.util.concurrent.atomic.AtomicBoolean interrupted =
+            new java.util.concurrent.atomic.AtomicBoolean();
+        private final org.eclipse.core.runtime.jobs.Job resume;
+
+        private AssistPriority(IDocument doc, org.eclipse.core.runtime.jobs.Job job)
+        {
+            document = new java.lang.ref.WeakReference<>(doc);
+            validation = new java.lang.ref.WeakReference<>(job);
+            resume = org.eclipse.core.runtime.jobs.Job.create("Комфорт: возобновление проверки после подсказок", //$NON-NLS-1$
+                (org.eclipse.core.runtime.ICoreRunnable)monitor -> resumeValidation());
+            resume.setSystem(true);
+            resume.setPriority(org.eclipse.core.runtime.jobs.Job.DECORATE);
+            job.addJobChangeListener(this);
+        }
+
+        static AssistPriority begin(IDocument doc)
+        {
+            Object candidate = Global.invoke(doc, "getValidationJob"); //$NON-NLS-1$
+            if (!(candidate instanceof org.eclipse.core.runtime.jobs.Job job))
+                return null;
+            AssistPriority state;
+            synchronized (STATES)
+            {
+                state = STATES.get(doc);
+                if (state == null || state.validation.get() != job)
+                {
+                    state = new AssistPriority(doc, job);
+                    STATES.put(doc, state);
+                }
+                state.users.incrementAndGet();
+            }
+            state.deferValidation(job, "begin"); //$NON-NLS-1$
+            for (org.eclipse.core.runtime.IProgressMonitor holder : LOW_PRIORITY_HOLDERS)
+                holder.setCanceled(true);
+            return state;
+        }
+
+        static boolean isPending(IDocument doc)
+        {
+            synchronized (STATES)
+            {
+                AssistPriority state = STATES.get(doc);
+                return state != null && state.users.get() > 0;
+            }
+        }
+
+        private void deferValidation(org.eclipse.core.runtime.jobs.Job job, String phase)
+        {
+            if (job.getState() != org.eclipse.core.runtime.jobs.Job.NONE)
+                interrupted.set(true);
+            // #region agent log
+            Global.tempLog("assist-priority", phase + " cancelValidation job=" //$NON-NLS-1$ //$NON-NLS-2$
+                + System.identityHashCode(job) + " state=" + job.getState() + " users=" + users.get()); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+            job.cancel();
+        }
+
+        @Override
+        public void scheduled(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
+        {
+            if (users.get() > 0)
+                deferValidation(event.getJob(), "scheduled"); //$NON-NLS-1$
+        }
+
+        @Override
+        public void aboutToRun(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
+        {
+            if (users.get() > 0)
+                deferValidation(event.getJob(), "aboutToRun"); //$NON-NLS-1$
+        }
+
+        @Override
+        public void done(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
+        {
+            // Отмена может завершиться уже ПОСЛЕ close() и первого resumeValidation().
+            // В этом случае ждём фактического выхода проверки и восстанавливаем её.
+            if (users.get() == 0 && interrupted.getAndSet(false)
+                && (event.getResult() == null || !event.getResult().isOK()))
+                resume.schedule(VALIDATION_GUARD_DELAY_MS);
+        }
+
+        @Override
+        public void close()
+        {
+            int remaining = users.decrementAndGet();
+            // #region agent log
+            Global.tempLog("assist-priority", "end users=" + remaining); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+            if (remaining == 0)
+                resume.schedule(VALIDATION_GUARD_DELAY_MS);
+        }
+
+        private void resumeValidation()
+        {
+            IDocument doc = document.get();
+            org.eclipse.core.runtime.jobs.Job job = validation.get();
+            if (doc == null || job == null || Global.getField(doc, "resource") == null) //$NON-NLS-1$
+                return;
+            boolean pending = isPending(doc);
+            boolean skip = Boolean.TRUE.equals(Global.invoke(job, "isSkip")); //$NON-NLS-1$
+            // #region agent log
+            Global.tempLog("assist-priority", "resume job=" + System.identityHashCode(job) //$NON-NLS-1$ //$NON-NLS-2$
+                + " state=" + job.getState() + " pending=" + pending + " skip=" + skip); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            // #endregion
+            if (pending)
+                return; // последний close() снова запланирует возобновление
+            if (skip || isModelSyncBusy(doc))
+            {
+                resume.schedule(VALIDATION_GUARD_DELAY_MS);
+                return;
+            }
+            if (job.getState() == org.eclipse.core.runtime.jobs.Job.NONE)
+                Global.invokeVoid(doc, "checkAndUpdateAnnotations"); //$NON-NLS-1$
+        }
+    }
 
     /**
      * Удержание для второстепенного читателя: как {@link #beginModelSyncHold}, но его
@@ -2920,9 +3146,19 @@ boolean inLiteral = endCaret >= 0
     static Boolean beginLowPriorityHold(IDocument doc, org.eclipse.core.runtime.IProgressMonitor monitor,
                                         java.util.function.BooleanSupplier abort)
     {
+        if (AssistPriority.isPending(doc))
+        {
+            monitor.setCanceled(true);
+            return null;
+        }
         Boolean held = beginModelSyncHoldInternal(assistSyncJob(doc), abort, false);
         if (Boolean.TRUE.equals(held))
+        {
             LOW_PRIORITY_HOLDERS.add(monitor);
+            // Подсказка могла прийти между первым isPending и регистрацией читателя.
+            if (AssistPriority.isPending(doc))
+                monitor.setCanceled(true);
+        }
         return held;
     }
 
@@ -3000,17 +3236,20 @@ boolean inLiteral = endCaret >= 0
     static <T> T withModelSyncHeld(IDocument doc, java.util.function.BooleanSupplier abort,
                                    java.util.function.Supplier<T> body)
     {
-        Boolean held = beginModelSyncHold(assistSyncJob(doc), abort);
-        if (held == null)
-            return null;
-        try
+        try (AssistPriority priority = AssistPriority.begin(doc))
         {
-            return body.get();
-        }
-        finally
-        {
-            if (held.booleanValue())
-                endModelSyncHold();
+            Boolean held = beginModelSyncHold(assistSyncJob(doc), abort);
+            if (held == null)
+                return null;
+            try
+            {
+                return body.get();
+            }
+            finally
+            {
+                if (held.booleanValue())
+                    endModelSyncHold();
+            }
         }
     }
 

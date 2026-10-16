@@ -2186,11 +2186,17 @@ return result;
             return EMPTY;
         if (dot == nonObjectCheckedDot)
             return lastNonObjectResult ? EMPTY : null;
-        // На UI после точки это ~100 мс readOnly в большом модуле (лог 15:53).
-        // Фон проверит в SCAP member stock; Ctrl+Space — как раньше, на месте.
-        if (org.eclipse.swt.widgets.Display.getCurrent() != null
-            && !ManualInvocationDetect.isActive())
+        // Вспомогательная проверка не должна ждать монитор на UI, в том числе при
+        // Ctrl+Space: лог 16.10 23:35 — ожидание Bsl resolve cross references >82 с.
+        // После пропуска обычный путь получает список членов из фонового расчёта.
+        if (org.eclipse.swt.widgets.Display.getCurrent() != null)
+        {
+            // #region agent log
+            Global.tempLog("assist-receiver-probe", "skipUi dot=" + dot //$NON-NLS-1$ //$NON-NLS-2$
+                + " manual=" + ManualInvocationDetect.isActive()); //$NON-NLS-1$
+            // #endregion
             return null;
+        }
         boolean nonObject = ReceiverTypeLabel.isNonObjectReceiver(doc, dot, caret);
         nonObjectCheckedDot = dot;
         lastNonObjectResult = nonObject;
@@ -7174,8 +7180,7 @@ return result;
                 // Пустой member + фон уже считает: не падать в fetchFullDelegateListAtAnchor.
                 // Тот probeDelegateOnce на UI ждал lock фона (лог 15:53: 199+171 мс).
                 // Без Job (первый раз в редакторе, noGuard) — как раньше, через fetch.
-                if (isMemberStockBackgroundInFlight(dot)
-                    && !ManualInvocationDetect.isActive())
+                if (isMemberStockBackgroundInFlight(dot))
                 {
                     ContentAssistDebug.perfMark("resolve.memberDeferNoFetch", //$NON-NLS-1$
                         "{\"dot\":" + dot + ",\"inFlight\":true}"); //$NON-NLS-1$ //$NON-NLS-2$
@@ -7250,8 +7255,7 @@ return result;
                     fullListComplete = true;
                 return member;
             }
-            if (!ManualInvocationDetect.isActive()
-                && isMemberStockBackgroundInFlight(dot))
+            if (isMemberStockBackgroundInFlight(dot))
                 return EMPTY;
         }
         ICompletionProposal[] nativeList =
@@ -8848,6 +8852,17 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         if (hasMemberListForDot(dot) && containsProposalName(memberStockFullList, name))
             return true;
         return fullListContextKey == dot && containsProposalName(fullListCache, name);
+    }
+
+    /** Исходный запас членов, до фильтрации и схлопывания отображаемого списка. Без чтения модели. */
+    ICompletionProposal[] memberAccessBaseForPopup(IDocument doc, int caret)
+    {
+        int dot = doc != null ? ReceiverTypeLabel.findMemberAccessDot(doc, caret) : -1;
+        ICompletionProposal[] base = hasMemberListForDot(dot) ? memberStockFullList : EMPTY;
+        // #region agent log
+        Global.tempLog("assist-overload-filter", "stockBase dot=" + dot + " n=" + base.length); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        // #endregion
+        return base;
     }
 
     private ICompletionProposal[] preferMemberFullList(ITextViewer viewer, int dot,
@@ -11707,8 +11722,9 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
     }
 
     /**
-     * Конструкторы/методы EDT часто вставляют max-слоты. Обрезаем replacement до
-     * {@code getMinParams()}; перед apply кладём выбранный {@link FakeCtor}/{@link ParamSet}
+     * Конструкторы EDT часто вставляют max-слоты. Обрезаем их replacement до
+     * {@code getMinParams()}; методы вставляем по выбранной видимой сигнатуре.
+     * Перед apply кладём выбранный {@link FakeCtor}/{@link ParamSet}
      * в {@code DataEvent.objects} (иначе при общем ключе вставки побеждает чужая перегрузка).
      */
     private static final class CtorMinParamsInsert
@@ -11991,13 +12007,32 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
                 return;
             String inside = oldRepl.substring(open + 1, close);
             int currentSlots = countEmptySlots(inside);
-            if (currentSlots <= 0)
+            boolean method = signature instanceof ParamSet;
+            if (!method && currentSlots <= 0)
                 return;
-            int minParams = resolveMinParams(signature, currentSlots);
-            if (minParams < 0 || minParams >= currentSlots)
+            // ParamSet описывает диапазон min/max. Две строки «Свойство(Ключ)» и
+            // «Свойство(Ключ, НайденноеЗначение)» должны вставлять разное число слотов,
+            // даже когда их additionalProposalInfo ссылается на один ParamSet.
+            String display = displayString(cp);
+            if (method && (display == null || display.indexOf('(') < 0 || display.lastIndexOf(')') < 0
+                || !inside.chars().allMatch(c -> c == ',' || Character.isWhitespace(c))))
+                return;
+            // Прежняя обрезка методов до минимума сохранена для возможного возврата:
+            // раскомментировать ветку ParamSet в resolveMinParams и заменить расчёт ниже на:
+            // int targetSlots = resolveMinParams(signature, currentSlots);
+            // if (targetSlots < 0 || targetSlots >= currentSlots)
+            //     return;
+            int targetSlots = method ? parseProposalParamNames(display).size()
+                : resolveMinParams(signature, currentSlots);
+            // #region agent log
+            Global.tempLog("assist-insert-slots", "prepare proposal=" + System.identityHashCode(cp) //$NON-NLS-1$ //$NON-NLS-2$
+                + " display=" + display + " method=" + method + " current=" + currentSlots //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " target=" + targetSlots + " replacement=" + clipCtorText(oldRepl)); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+            if (targetSlots < 0 || (!method && targetSlots >= currentSlots))
                 return;
             String commaStr = detectCommaStr(inside);
-            String newInside = buildEmptyInside(minParams, commaStr);
+            String newInside = buildEmptyInside(targetSlots, commaStr);
             String newRepl = oldRepl.substring(0, open + 1) + newInside + oldRepl.substring(close);
             if (newRepl.equals(oldRepl))
                 return;
@@ -12011,7 +12046,11 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
             cp.setReplacementString(newRepl);
             cp.setCursorPosition(open + 1);
             syncInitialReplacementContent(cp, newRepl);
-            ContentAssistSessionReloader.logLinkedMode("ctor.trim", "{\"minParams\":" + minParams //$NON-NLS-1$ //$NON-NLS-2$
+            // #region agent log
+            Global.tempLog("assist-insert-slots", "changed proposal=" + System.identityHashCode(cp) //$NON-NLS-1$ //$NON-NLS-2$
+                + " replacement=" + clipCtorText(newRepl)); //$NON-NLS-1$
+            // #endregion
+            ContentAssistSessionReloader.logLinkedMode("ctor.trim", "{\"targetSlots\":" + targetSlots //$NON-NLS-1$ //$NON-NLS-2$
                 + ",\"old\":\"" + ContentAssistDebug.jsonEscapeForLog(clipCtorText(oldRepl)) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
                 + ",\"new\":\"" + ContentAssistDebug.jsonEscapeForLog(clipCtorText(newRepl)) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
         }
@@ -12455,11 +12494,12 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
 
         private static int resolveMinParams(EObject signature, int currentSlots)
         {
-            if (signature instanceof ParamSet set)
-            {
-                int min = set.getMinParams();
-                return Math.max(0, Math.min(min, currentSlots));
-            }
+            // Отключено по просьбе пользователя; оставить для возможного возврата.
+            // if (signature instanceof ParamSet set)
+            // {
+            //     int min = set.getMinParams();
+            //     return Math.max(0, Math.min(min, currentSlots));
+            // }
             if (!(signature instanceof FakeCtor fakeCtor))
                 return -1;
             try

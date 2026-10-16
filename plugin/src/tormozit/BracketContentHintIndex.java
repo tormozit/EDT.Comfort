@@ -5,6 +5,8 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 
+import org.eclipse.core.runtime.IProgressMonitor;
+import org.eclipse.core.runtime.OperationCanceledException;
 import org.eclipse.emf.common.util.TreeIterator;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.text.BadLocationException;
@@ -57,7 +59,7 @@ final class BracketContentHintIndex
         }
     }
 
-    static List<Entry> build(XtextResource resource, IDocument document)
+    static List<Entry> build(XtextResource resource, IDocument document, IProgressMonitor monitor)
     {
         if (resource == null || resource.getParseResult() == null || document == null)
             return Collections.emptyList();
@@ -70,10 +72,11 @@ final class BracketContentHintIndex
         TreeIterator<EObject> iterator = root.eAllContents();
         while (iterator.hasNext())
         {
+            checkCanceled(monitor);
             EObject element = iterator.next();
             if (isTracked(element))
             {
-                Entry entry = toEntry(element, document);
+                Entry entry = toEntry(element, document, monitor);
                 if (entry != null)
                     entries.add(entry);
             }
@@ -91,14 +94,14 @@ final class BracketContentHintIndex
             || element instanceof IfPreprocessor;
     }
 
-    private static Entry toEntry(EObject element, IDocument document)
+    private static Entry toEntry(EObject element, IDocument document, IProgressMonitor monitor)
     {
         ICompositeNode node = NodeModelUtils.getNode(element);
         if (node == null)
             return null;
 
         int startOffset = node.getOffset();
-        int endOffset = resolveEndOffset(element, node);
+        int endOffset = resolveEndOffset(element, node, monitor);
         if (endOffset < 0 || endOffset <= startOffset)
             return null;
 
@@ -114,7 +117,7 @@ final class BracketContentHintIndex
 
             String hintText = element instanceof Method method
                 ? buildMethodHint(method)
-                : extractConstructHintText(document, node, element, leadingKeywordCount(element));
+                : extractConstructHintText(document, node, element, leadingKeywordCount(element), monitor);
             if (hintText == null || hintText.isEmpty())
                 return null;
             if (hintText.length() > MAX_HINT_LENGTH)
@@ -142,8 +145,17 @@ final class BracketContentHintIndex
      */
     static int resolveEndOffset(EObject element, ICompositeNode node)
     {
+        int endOffset = resolveEndOffset(element, node, new org.eclipse.core.runtime.NullProgressMonitor());
+        // #region agent log
+        Global.tempLog("folding-end-offset", "start=" + node.getOffset() + " end=" + endOffset); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        // #endregion
+        return endOffset;
+    }
+
+    private static int resolveEndOffset(EObject element, ICompositeNode node, IProgressMonitor monitor)
+    {
         if (element instanceof RegionPreprocessor || element instanceof IfPreprocessor)
-            return findOwnClosingTerminalEndOffset(node);
+            return findOwnClosingTerminalEndOffset(node, monitor);
         return node.getEndOffset();
     }
 
@@ -171,11 +183,12 @@ final class BracketContentHintIndex
      * возвращает {@link RuleCall} (ссылку на правило), а не сам {@code AbstractRule} —
      * имя нужно брать через {@code ruleCall.getRule().getName()}.
      */
-    private static int findOwnClosingTerminalEndOffset(ICompositeNode node)
+    private static int findOwnClosingTerminalEndOffset(ICompositeNode node, IProgressMonitor monitor)
     {
         int depth = 0;
         for (ILeafNode leaf : node.getLeafNodes())
         {
+            checkCanceled(monitor);
             if (leaf.isHidden())
                 continue;
             if (!(leaf.getGrammarElement() instanceof RuleCall ruleCall))
@@ -291,13 +304,13 @@ final class BracketContentHintIndex
      * {@link Method} (Процедура/Функция) используется отдельный {@link #buildMethodHint}.
      */
     private static String extractConstructHintText(IDocument document, ICompositeNode node, EObject element,
-        int skipKeywords) throws BadLocationException
+        int skipKeywords, IProgressMonitor monitor) throws BadLocationException
     {
-        int contentStart = skipKeywords > 0 ? skipLeadingKeywords(node, skipKeywords) : node.getOffset();
+        int contentStart = skipKeywords > 0 ? skipLeadingKeywords(node, skipKeywords, monitor) : node.getOffset();
 
         if (hasBooleanHeader(element))
         {
-            int headerEnd = findHeaderEndOffset(node, contentStart);
+            int headerEnd = findHeaderEndOffset(node, contentStart, monitor);
             if (headerEnd > contentStart)
                 return joinLines(document, contentStart, headerEnd);
         }
@@ -306,10 +319,11 @@ final class BracketContentHintIndex
     }
 
     /** Офсет конца ближайшего (после {@code fromOffset}) листа-ключевого слова {@link #isHeaderEndKeyword}. */
-    private static int findHeaderEndOffset(ICompositeNode node, int fromOffset)
+    private static int findHeaderEndOffset(ICompositeNode node, int fromOffset, IProgressMonitor monitor)
     {
         for (ILeafNode leaf : node.getLeafNodes())
         {
+            checkCanceled(monitor);
             if (leaf.isHidden() || leaf.getOffset() < fromOffset)
                 continue;
             if (isHeaderEndKeyword(leaf.getText().strip()))
@@ -350,12 +364,13 @@ final class BracketContentHintIndex
     }
 
     /** Офсет конца {@code count}-го непустого (не скрытого пробела/комментария) листа узла. */
-    private static int skipLeadingKeywords(ICompositeNode node, int count)
+    private static int skipLeadingKeywords(ICompositeNode node, int count, IProgressMonitor monitor)
     {
         int offset = node.getOffset();
         int skipped = 0;
         for (ILeafNode leaf : node.getLeafNodes())
         {
+            checkCanceled(monitor);
             if (leaf.isHidden())
                 continue;
             offset = leaf.getEndOffset();
@@ -364,6 +379,12 @@ final class BracketContentHintIndex
                 break;
         }
         return offset;
+    }
+
+    private static void checkCanceled(IProgressMonitor monitor)
+    {
+        if (monitor.isCanceled())
+            throw new OperationCanceledException();
     }
 
     /** «&Директива1 &Директива2 ИмяМетода» — без ключевого слова Процедура/Функция, без параметров. */

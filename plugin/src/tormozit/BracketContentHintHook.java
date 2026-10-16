@@ -228,7 +228,7 @@ public final class BracketContentHintHook implements IStartup
             // первичного парсинга/связывания (та сама ждёт UI-поток). Здесь мы
             // регистрируем слушатели и планируем первый пересчёт в фоновом Job.
             // Документ уже мог быть разобран до подключения modelListener, поэтому
-            // ждать только следующего modelChanged нельзя. document.readOnly()
+            // ждать только следующего modelChanged нельзя. Чтение модели
             // остаётся в PatchState.rebuildJob, вне UI-потока.
             if (ComfortSettings.isBracketContentHintEnabled())
                 scheduleRebuild(state);
@@ -245,6 +245,7 @@ public final class BracketContentHintHook implements IStartup
         PatchState state = patched.remove(widget);
         if (state == null)
             return;
+        state.disposed = true;
         try
         {
             if (!widget.isDisposed())
@@ -303,6 +304,7 @@ public final class BracketContentHintHook implements IStartup
         final Job rebuildJob;
         volatile List<BracketContentHintIndex.Entry> index = Collections.emptyList();
         volatile int pendingOldDelims;
+        volatile boolean disposed;
         /** Последнее множество подсказок, отражённое на экране (обновляется в onPaint). Только UI-поток. */
         private List<BracketContentHintPresenter.VisibleHint> lastPainted = Collections.emptyList();
 
@@ -364,24 +366,56 @@ public final class BracketContentHintHook implements IStartup
                 @Override
                 protected IStatus run(IProgressMonitor monitor)
                 {
+                    // #region agent log
+                    Global.tempLog("assist-priority-index", "begin canceled=" + monitor.isCanceled() //$NON-NLS-1$ //$NON-NLS-2$
+                        + " disposed=" + disposed); //$NON-NLS-1$
+                    // #endregion
+                    if (disposed || monitor.isCanceled())
+                        return Status.CANCEL_STATUS;
+                    if (!ContentAssistSessionReloader.isModelCurrent(document))
+                        return retryRebuild();
+                    Boolean held = ContentAssistSessionReloader.beginLowPriorityHold(document, monitor,
+                        monitor::isCanceled);
+                    if (held == null)
+                        return retryRebuild();
                     List<BracketContentHintIndex.Entry> result;
                     try
                     {
-                        // document.readOnly(...) — штатный безопасный доступ к
-                        // XtextResource из ФОНОВОГО потока (в отличие от вызова
-                        // из patchEditor/partOpened на UI-потоке, см. комментарий
-                        // там — здесь это не приводит к deadlock'у).
-                        result = document.readOnly(res -> BracketContentHintIndex.build(res, document));
+                        if (monitor.isCanceled() || !ContentAssistSessionReloader.isModelCurrent(document))
+                            return retryRebuild();
+                        // Индекс не запускает разбор и не оповещает слушателей модели.
+                        // Удержание общее с подсказками; обход проверяет отмену.
+                        result = ContentAssistSessionReloader.readOnlyPeekAst(document,
+                            res -> BracketContentHintIndex.build(res, document, monitor));
+                    }
+                    catch (org.eclipse.core.runtime.OperationCanceledException e)
+                    {
+                        return retryRebuild();
                     }
                     catch (Exception e)
                     {
+                        // #region agent log
+                        Global.tempLogException("assist-priority-index", "failed", e); //$NON-NLS-1$ //$NON-NLS-2$
+                        // #endregion
                         Global.log(TAG, "rebuildJob failed: " + e.getMessage()); //$NON-NLS-1$
                         return Status.CANCEL_STATUS;
                     }
+                    finally
+                    {
+                        if (held.booleanValue())
+                            ContentAssistSessionReloader.endLowPriorityHold(monitor);
+                    }
+                    if (disposed)
+                        return Status.CANCEL_STATUS;
                     if (monitor.isCanceled())
+                        return retryRebuild();
+                    if (result == null)
                         return Status.CANCEL_STATUS;
 
                     index = result;
+                    // #region agent log
+                    Global.tempLog("assist-priority-index", "published entries=" + result.size()); //$NON-NLS-1$ //$NON-NLS-2$
+                    // #endregion
                     Display display = PlatformUI.getWorkbench().getDisplay();
                     if (display != null && !display.isDisposed())
                     {
@@ -391,6 +425,18 @@ public final class BracketContentHintHook implements IStartup
                         });
                     }
                     return Status.OK_STATUS;
+                }
+
+                private IStatus retryRebuild()
+                {
+                    // #region agent log
+                    Global.tempLog("assist-priority-index", "retry disposed=" + disposed); //$NON-NLS-1$ //$NON-NLS-2$
+                    // #endregion
+                    // Повторяем после уступки подсказкам; закрытый редактор и выключенная
+                    // возможность не должны оставлять задание в цикле ожидания.
+                    if (!disposed && !widget.isDisposed() && ComfortSettings.isBracketContentHintEnabled())
+                        schedule(REBUILD_DEBOUNCE_MS);
+                    return Status.CANCEL_STATUS;
                 }
             };
             this.rebuildJob.setSystem(true); // не показывать в Progress View — внутренняя декоративная фича

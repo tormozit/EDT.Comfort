@@ -273,6 +273,9 @@ public final class ContentAssistPopupUi
 
     private static String resolveContextTypeLabel(SourceViewer viewer)
     {
+        // #region agent log
+        Global.tempLog("assist-context-label", "resolve viewer=" + System.identityHashCode(viewer)); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
         if (viewer == null || viewer.getDocument() == null)
         {
             return ""; //$NON-NLS-1$
@@ -333,19 +336,20 @@ public final class ContentAssistPopupUi
         String fromList = parentFromCurrentProposals();
         if (!fromList.isEmpty())
         {
+            // #region agent log
+            Global.tempLog("assist-context-label", "fromList dot=" + dot + " text=" + fromList); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            // #endregion
             cachedContextLabelDot = dot;
             cachedContextLabelReceiver = receiver;
             cachedContextLabelText = fromList;
             return cachedContextLabelText;
         }
-        String ast = SmartContentAssistProcessor.ReceiverTypeLabel.resolve(viewer);
-        if (ast != null && !ast.isEmpty())
-        {
-            cachedContextLabelDot = dot;
-            cachedContextLabelReceiver = receiver;
-            cachedContextLabelText = "Родитель: " + ast;
-            return cachedContextLabelText;
-        }
+        // Подпись второстепенна: readOnly модели на UI ждёт разрешение всех ссылок
+        // (лог 16.10 23:39: ReceiverTypeLabel.resolve → waitAllBslResolveCrossReferencesJob).
+        // publishMemberStock обновит подпись по готовому списку через updateContextTypeLabel.
+        // #region agent log
+        Global.tempLog("assist-context-label", "pendingList dot=" + dot + " receiver=" + receiver); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        // #endregion
         cachedContextLabelDot = dot;
         cachedContextLabelReceiver = receiver;
         cachedContextLabelText = PARENT_PLACEHOLDER;

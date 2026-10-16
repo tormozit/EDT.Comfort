@@ -3064,7 +3064,7 @@ IInformationControlCreator creator = trace.creator;
 
                 SavedSelection saved = saveSelection(popup);
                 List<ICompletionProposal> list = new ArrayList<>(Arrays.asList(filtered));
-                list = SmartContentAssistProcessor.collapseOptionalEdtOverlapsInMergedList(list);
+                list = collapseOptionalOverlapsUsingBase(list, baseList);
                 // Базу (полный список) не затираем отфильтрованным — иначе Backspace
                 // не сможет вернуть отброшенные строки без stock recompute.
                 applyMemberAccessFilteredProposals(popup, baseList, list, saved);
@@ -3125,10 +3125,19 @@ finishSyncCycleLight(popup);
         }
     }
 
-    /** Полный список member-access: предпочитаем {@code fComputedProposals}, иначе filtered. */
+    /** Исходный запас процессора; поля JFace могут уже содержать срез по введённому имени. */
     private static List<ICompletionProposal> readMemberAccessBaseProposals(Object popup)
         throws Exception
     {
+        SourceViewer viewer = ContentAssistSessionReloader.getActiveViewer();
+        SmartContentAssistProcessor processor = ContentAssistSessionReloader.getActiveProcessor();
+        if (viewer != null && processor != null)
+        {
+            ICompletionProposal[] stock = processor.memberAccessBaseForPopup(viewer.getDocument(),
+                SmartContentAssistProcessor.resolveWidgetCaret(viewer));
+            if (stock.length > 0)
+                return new ArrayList<>(Arrays.asList(stock));
+        }
         List<ICompletionProposal> computed = null;
         if (fComputedProposalsField != null)
             computed = (List<ICompletionProposal>) fComputedProposalsField.get(popup);
@@ -3145,6 +3154,55 @@ finishSyncCycleLight(popup);
         if (computed != null)
             return new ArrayList<>(computed);
         return new ArrayList<>();
+    }
+
+    /** Решение о перегрузках принимаем по полной базе, независимо от набранного фильтра. */
+    private static List<ICompletionProposal> collapseOptionalOverlapsUsingBase(
+        List<ICompletionProposal> current, List<ICompletionProposal> base)
+    {
+        List<ICompletionProposal> source = new ArrayList<>(base != null && !base.isEmpty() ? base : current);
+        // Исходный запас EDT не содержит добавленные позднее слова ИР.
+        for (ICompletionProposal proposal : current)
+        {
+            ICompletionProposal raw = SmartContentAssistProcessor.unwrapProposal(proposal);
+            if (raw instanceof IrCompletionProposal && source.stream().noneMatch(
+                entry -> SmartContentAssistProcessor.unwrapProposal(entry) == raw))
+                source.add(proposal);
+        }
+        List<ICompletionProposal> canonical =
+            SmartContentAssistProcessor.collapseOptionalEdtOverlapsInMergedList(new ArrayList<>(source));
+        SourceViewer viewer = ContentAssistSessionReloader.getActiveViewer();
+        SmartContentAssistProcessor processor = ContentAssistSessionReloader.getActiveProcessor();
+        if (viewer != null && processor != null && processor.memberAccessBaseForPopup(
+            viewer.getDocument(), SmartContentAssistProcessor.resolveWidgetCaret(viewer)).length > 0)
+        {
+            // JFace или предыдущее схлопывание могли уже удалить строку из current.
+            // Восстанавливаем срез из исходной базы, а не только вычитаем из current.
+            ICompletionProposal[] rebuilt = processor.filterProposalsInPlace(
+                canonical.toArray(new ICompletionProposal[0]), SmartFilterTracker.getCurrentFilter());
+            // #region agent log
+            Global.tempLog("assist-overload-filter", "rebuild filter=" + SmartFilterTracker.getCurrentFilter() //$NON-NLS-1$ //$NON-NLS-2$
+                + " base=" + source.size() + " canonical=" + canonical.size() //$NON-NLS-1$ //$NON-NLS-2$
+                + " current=" + current.size() + " kept=" + rebuilt.length); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+            return new ArrayList<>(Arrays.asList(rebuilt));
+        }
+        java.util.Set<ICompletionProposal> removed =
+            java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        for (ICompletionProposal proposal : source)
+            removed.add(SmartContentAssistProcessor.unwrapProposal(proposal));
+        for (ICompletionProposal proposal : canonical)
+            removed.remove(SmartContentAssistProcessor.unwrapProposal(proposal));
+        List<ICompletionProposal> result = new ArrayList<>(current.size());
+        for (ICompletionProposal proposal : current)
+            if (!removed.contains(SmartContentAssistProcessor.unwrapProposal(proposal)))
+                result.add(proposal);
+        // #region agent log
+        Global.tempLog("assist-overload-filter", "filter=" + SmartFilterTracker.getCurrentFilter() //$NON-NLS-1$ //$NON-NLS-2$
+            + " base=" + source.size() + " canonical=" + canonical.size() //$NON-NLS-1$ //$NON-NLS-2$
+            + " current=" + current.size() + " kept=" + result.size()); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
+        return result;
     }
 
     /**
@@ -3205,9 +3263,8 @@ finishSyncCycleLight(popup);
             if (current == null || current.isEmpty())
                 return false;
             SavedSelection saved = saveSelection(popup);
-            List<ICompletionProposal> collapsed =
-                SmartContentAssistProcessor.collapseOptionalEdtOverlapsInMergedList(
-                    new ArrayList<>(current));
+            List<ICompletionProposal> collapsed = collapseOptionalOverlapsUsingBase(
+                current, readMemberAccessBaseProposals(popup));
             if (collapsed.size() == current.size())
             {
 // Не cancelDebouncedNativeFilter: иначе набор префикса после «.» теряет

@@ -274,6 +274,12 @@ public final class ParamHintHtmlModifier
             Point showSize = shell.getSize();
             Rectangle mon = paramHintMonitorClient(shell);
             boolean giant = isGiantParamHintSize(showSize, HOVER_FALLBACK_SIZE, mon);
+            // #region agent log
+            StyledText showAnchor = paramHintAnchorWidget(hoverForBounds);
+            Global.tempLog("param-hint-geometry", "show shell=" + System.identityHashCode(shell) //$NON-NLS-1$ //$NON-NLS-2$
+                + " bounds=" + shell.getBounds() + " monitor=" + mon + " giant=" + giant //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " caret=" + caretDisplayLocation(showAnchor)); //$NON-NLS-1$
+            // #endregion
             if (showLoc.x <= 8 || giant)
             {
                 int prevAlpha = 255;
@@ -2041,6 +2047,10 @@ public final class ParamHintHtmlModifier
             // положение посчитано по другому размеру. Иначе — по обычным правилам, иначе
             // окно ездило бы за кареткой при каждой смене параметра (вспышки в модуле).
             relocateNearParamHintAnchor(shell, paramHintAnchorWidget(control), resized);
+            // #region agent log
+            Global.tempLog("param-hint-geometry", "updateSize shell=" + System.identityHashCode(shell) //$NON-NLS-1$ //$NON-NLS-2$
+                + " intended=" + intended + " resized=" + resized + " bounds=" + shell.getBounds()); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            // #endregion
         }
         catch (Exception | LinkageError ignored)
         {
@@ -3021,6 +3031,10 @@ public final class ParamHintHtmlModifier
                 changed |= relocateParamHintShellNearCaret(shell, st, shrunk);
             else
                 changed |= relocateParamHintShellNearCaret(shell, shrunk);
+            // #region agent log
+            Global.tempLog("param-hint-geometry", "ensure shell=" + System.identityHashCode(shell) //$NON-NLS-1$ //$NON-NLS-2$
+                + " shrunk=" + shrunk + " changed=" + changed + " bounds=" + shell.getBounds()); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            // #endregion
             return changed;
 
         }
@@ -3090,7 +3104,12 @@ public final class ParamHintHtmlModifier
             return false;
         Point caret = caretDisplayLocation(st);
         if (caret == null)
+        {
+            // #region agent log
+            Global.tempLog("param-hint-geometry", "relocate noCaret shell=" + System.identityHashCode(shell)); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
             return false;
+        }
         Point size = shell.getSize();
         if (size.x < 50 || size.y < 20)
             size = new Point(360, 105);
@@ -3108,6 +3127,14 @@ public final class ParamHintHtmlModifier
         if (target == null)
             return false;
         Point now = shell.getLocation();
+        // #region agent log
+        Global.tempLog("param-hint-geometry", "relocate shell=" + System.identityHashCode(shell) //$NON-NLS-1$ //$NON-NLS-2$
+            + " caret=" + caret + " widgetCaret=" + st.getCaretOffset() + " top=" + st.getTopIndex() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " now=" + now + " size=" + size + " actualSize=" + shell.getSize() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " target=" + target + " force=" + force //$NON-NLS-1$ //$NON-NLS-2$
+            + " far=" + (Math.abs(now.x - caret.x) > 200 || Math.abs(now.y - caret.y) > 200 || now.x <= 8) //$NON-NLS-1$
+            + " wrongSide=" + (now.y > caret.y && target.y + size.y <= caret.y)); //$NON-NLS-1$
+        // #endregion
         if (Math.abs(now.x - target.x) <= 8 && Math.abs(now.y - target.y) <= 8)
         {
             return false;

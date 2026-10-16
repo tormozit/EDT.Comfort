@@ -1414,6 +1414,10 @@ public final class Activator
                 final Object locker;
                 final Object monitor;
                 final long startNs = System.nanoTime();
+                final Thread thread = Thread.currentThread();
+                volatile String phase = "monitor"; //$NON-NLS-1$
+                volatile long phaseNs = startNs;
+                java.util.concurrent.ScheduledFuture<?> probe;
                 boolean readLocked;
 
                 Entry(Object locker, Object monitor)
@@ -1430,6 +1434,99 @@ public final class Activator
                     new java.util.concurrent.ConcurrentHashMap<>();
             /** С какого ожидания сообщать наблюдателю: порог наблюдения, не задержка. */
             private static final long REPORT_MS = 5;
+
+            // #region agent log
+            private static final java.util.concurrent.ScheduledThreadPoolExecutor LOCK_PROBES = createLockProbes();
+
+            private static java.util.concurrent.ScheduledThreadPoolExecutor createLockProbes()
+            {
+                java.util.concurrent.ScheduledThreadPoolExecutor executor =
+                    new java.util.concurrent.ScheduledThreadPoolExecutor(1, action -> {
+                        Thread thread = new Thread(action, "Comfort: assist lock diagnostics"); //$NON-NLS-1$
+                        thread.setDaemon(true);
+                        return thread;
+                    });
+                executor.setRemoveOnCancelPolicy(true);
+                return executor;
+            }
+
+            private static void logLockStage(Entry entry, String event, long elapsedNs)
+            {
+                observe("lockDiag." + event + " request=" + entry.thread.getId() + ":" + entry.startNs //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + " requester=" + entry.thread.getName() + " phase=" + entry.phase //$NON-NLS-1$ //$NON-NLS-2$
+                    + " monitor=" + entry.monitor.getClass().getName() + "@" //$NON-NLS-1$ //$NON-NLS-2$
+                    + Integer.toHexString(System.identityHashCode(entry.monitor))
+                    + " elapsedNs=" + elapsedNs, elapsedNs / 1_000_000L); //$NON-NLS-1$
+            }
+
+            /** Снимок во время ожидания: ожидающий поток, владельцы и работающие с моделью потоки. */
+            private static void probeLock(Entry entry)
+            {
+                String phase = entry.phase;
+                if ("acquired".equals(phase) || "done".equals(phase)) //$NON-NLS-1$ //$NON-NLS-2$
+                    return;
+                long phaseNs = entry.phaseNs;
+                try
+                {
+                    java.lang.management.ThreadMXBean bean = java.lang.management.ManagementFactory.getThreadMXBean();
+                    java.lang.management.ThreadInfo[] threads = bean.dumpAllThreads(
+                        bean.isObjectMonitorUsageSupported(), bean.isSynchronizerUsageSupported());
+                    java.util.Map<Long, java.lang.management.ThreadInfo> byId = new java.util.HashMap<>();
+                    for (java.lang.management.ThreadInfo thread : threads)
+                        byId.put(thread.getThreadId(), thread);
+                    java.util.Set<Long> selected = new java.util.LinkedHashSet<>();
+                    long owner = entry.thread.getId();
+                    while (owner >= 0 && selected.add(owner))
+                    {
+                        java.lang.management.ThreadInfo thread = byId.get(owner);
+                        owner = thread != null ? thread.getLockOwnerId() : -1;
+                    }
+                    for (java.lang.management.ThreadInfo thread : threads)
+                    {
+                        for (java.lang.management.MonitorInfo monitor : thread.getLockedMonitors())
+                            if (monitor.getIdentityHashCode() == System.identityHashCode(entry.monitor)
+                                && monitor.getClassName().equals(entry.monitor.getClass().getName()))
+                                selected.add(thread.getThreadId());
+                        for (StackTraceElement frame : thread.getStackTrace())
+                        {
+                            String name = frame.getClassName();
+                            if (name.contains("Validation") || name.contains("Reconciler") //$NON-NLS-1$ //$NON-NLS-2$
+                                || name.contains("XtextDocument") || name.contains("DocumentLocker")) //$NON-NLS-1$ //$NON-NLS-2$
+                            {
+                                selected.add(thread.getThreadId());
+                                break;
+                            }
+                        }
+                    }
+                    StringBuilder text = new StringBuilder("lockDiag.sample request=") //$NON-NLS-1$
+                        .append(entry.thread.getId()).append(':').append(entry.startNs)
+                        .append(" sampledPhase=").append(phase).append(" currentPhase=").append(entry.phase) //$NON-NLS-1$ //$NON-NLS-2$
+                        .append(" phaseWaitNs=").append(System.nanoTime() - phaseNs); //$NON-NLS-1$
+                    for (Long id : selected)
+                    {
+                        java.lang.management.ThreadInfo thread = byId.get(id);
+                        if (thread == null)
+                            continue;
+                        text.append("\nthread=").append(id).append(' ').append(thread.getThreadName()) //$NON-NLS-1$
+                            .append(" state=").append(thread.getThreadState()).append(" waitsFor=") //$NON-NLS-1$ //$NON-NLS-2$
+                            .append(thread.getLockInfo()).append(" ownerId=").append(thread.getLockOwnerId()) //$NON-NLS-1$
+                            .append(" ownerName=").append(thread.getLockOwnerName()); //$NON-NLS-1$
+                        for (StackTraceElement frame : thread.getStackTrace())
+                            text.append("\n  at ").append(frame); //$NON-NLS-1$
+                        for (java.lang.management.MonitorInfo monitor : thread.getLockedMonitors())
+                            text.append("\n  holdsMonitor ").append(monitor).append(" at ") //$NON-NLS-1$ //$NON-NLS-2$
+                                .append(monitor.getLockedStackFrame());
+                        for (java.lang.management.LockInfo lock : thread.getLockedSynchronizers())
+                            text.append("\n  holdsSynchronizer ").append(lock); //$NON-NLS-1$
+                    }
+                    observe(text.toString(), (System.nanoTime() - entry.startNs) / 1_000_000L);
+                }
+                catch (Throwable t)
+                {
+                    observe("lockDiag.sampleError " + t, 0); //$NON-NLS-1$
+                }
+            }
+            // #endregion
 
             private AssistReadLock()
             {
@@ -1450,7 +1547,20 @@ public final class Activator
                 {
                     observe("beginError " + t, 0); //$NON-NLS-1$
                 }
-                STACK.get().push(new Entry(locker, monitor));
+                Entry entry = new Entry(locker, monitor);
+                STACK.get().push(entry);
+                // #region agent log
+                logLockStage(entry, "begin", 0); //$NON-NLS-1$
+                try
+                {
+                    entry.probe = LOCK_PROBES.scheduleWithFixedDelay(() -> probeLock(entry),
+                        150, 150, java.util.concurrent.TimeUnit.MILLISECONDS);
+                }
+                catch (RuntimeException e)
+                {
+                    observe("lockDiag.scheduleError " + e, 0); //$NON-NLS-1$
+                }
+                // #endregion
                 return monitor;
             }
 
@@ -1459,6 +1569,13 @@ public final class Activator
                 Entry entry = STACK.get().peek();
                 if (entry == null)
                     return;
+                // #region agent log
+                long monitorAcquiredNs = System.nanoTime();
+                entry.phaseNs = monitorAcquiredNs;
+                entry.phase = "readLock"; //$NON-NLS-1$
+                logLockStage(entry, "monitorAcquired", monitorAcquiredNs - entry.startNs); //$NON-NLS-1$
+                long readStartedNs = System.nanoTime();
+                // #endregion
                 try
                 {
                     invoke(entry.locker, "acquireReadLock"); //$NON-NLS-1$
@@ -1468,6 +1585,13 @@ public final class Activator
                 {
                     observe("readLockError " + t, 0); //$NON-NLS-1$
                 }
+                // #region agent log
+                long readAcquiredNs = System.nanoTime();
+                entry.phase = "acquired"; //$NON-NLS-1$
+                if (entry.probe != null)
+                    entry.probe.cancel(false);
+                logLockStage(entry, "readAcquired readLocked=" + entry.readLocked, readAcquiredNs - readStartedNs); //$NON-NLS-1$
+                // #endregion
                 long waitMs = (System.nanoTime() - entry.startNs) / 1_000_000L;
                 if (waitMs >= REPORT_MS || !entry.readLocked)
                     observe("readLock readLocked=" + entry.readLocked + " depth=" + STACK.get().size(), waitMs); //$NON-NLS-1$ //$NON-NLS-2$
@@ -1481,6 +1605,12 @@ public final class Activator
                     STACK.remove();
                 if (entry == null)
                     return new Object(); // не бывает: вход и выход парные; MONITOREXIT бросит IllegalMonitorState
+                // #region agent log
+                entry.phase = "done"; //$NON-NLS-1$
+                if (entry.probe != null)
+                    entry.probe.cancel(false);
+                logLockStage(entry, "end", System.nanoTime() - entry.startNs); //$NON-NLS-1$
+                // #endregion
                 if (entry.readLocked)
                 {
                     try

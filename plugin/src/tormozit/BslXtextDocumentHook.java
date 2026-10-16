@@ -80,6 +80,11 @@ public final class BslXtextDocumentHook implements IStartup
      */
     private static void observeAssistRead(String event, Long ms)
     {
+        if (event.startsWith("lockDiag.")) //$NON-NLS-1$
+        {
+            Global.tempLog("assist-lock-wait", event + " waitMs=" + ms); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        }
         SmartContentAssistProcessor.uiBlockLog("modelSync.readLock", //$NON-NLS-1$
             event + " waitMs=" + ms + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$ //$NON-NLS-2$
     }
