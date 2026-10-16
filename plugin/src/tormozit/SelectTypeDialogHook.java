@@ -146,7 +146,6 @@ public class SelectTypeDialogHook implements IStartup
     /** Штатный редактор описания типов в режиме просмотра, поверх отдельной копии значения. */
     static void openReadOnly(Shell parent, TypeDescription type, EObject context)
     {
-        Global.tempLog("type-description-view", "openReadOnly type=" + type + " context=" + context); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         if (parent == null || parent.isDisposed() || type == null)
             return;
         Object engine = null;
@@ -201,7 +200,6 @@ public class SelectTypeDialogHook implements IStartup
                 || !Boolean.FALSE.equals(Global.invoke(dialogModel, "isEditable")) //$NON-NLS-1$
                 || !Boolean.FALSE.equals(Global.invoke(parameters, "isEditable"))) //$NON-NLS-1$
                 throw new IllegalStateException("Не удалось включить режим просмотра типов"); //$NON-NLS-1$
-            Global.tempLog("type-description-view", "readOnly model=true parameters=true"); //$NON-NLS-1$ //$NON-NLS-2$
             Global.invokeVoid(parameters, "setTitle", Global.withPluginWindowTitle("Просмотр описания типов")); //$NON-NLS-1$ //$NON-NLS-2$
             engine = createEngine(bundle);
             if (engine == null)
@@ -227,7 +225,6 @@ public class SelectTypeDialogHook implements IStartup
         {
             if (engine != null)
                 Global.invoke(engine, "dispose"); //$NON-NLS-1$
-            Global.tempLogException("type-description-view", "openReadOnly", e); //$NON-NLS-1$ //$NON-NLS-2$
             ToastNotification.show("Открыть типы", "Не удалось открыть описание типов: " + e.getMessage(), 5000); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }

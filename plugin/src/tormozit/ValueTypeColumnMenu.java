@@ -107,19 +107,12 @@ final class ValueTypeColumnMenu
             : host instanceof Table table ? table.getColumn(columnIndex)
                 : ((TableEx)host).getColumn(columnIndex);
         support.columns.put(column, new TypeColumn(typeOf, contextOf));
-        Global.tempLog("value-type-menu", "install host=" + host + " column=" + column); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        if (host instanceof TableEx)
-            Global.tempLog("dcs-type-menu", "install control=" + host + " column=" + columnIndex); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
     }
 
     private void menuDetected(Event event)
     {
-        Global.tempLog("value-type-menu", "detect host=" + host + " detail=" + event.detail //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " screen=" + event.x + "," + event.y + " local=" + control.toControl(event.x, event.y)); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         detectedCell = event.detail == SWT.MENU_KEYBOARD ? selectedCell()
             : cellAt(control.toControl(event.x, event.y));
-        Global.tempLog("value-type-menu", "detected=" + describeCell(detectedCell) //$NON-NLS-1$ //$NON-NLS-2$
-            + " selected=" + describeCell(selectedCell())); //$NON-NLS-1$
         Menu menu = control.getMenu();
         if (menu == null || menu.isDisposed())
         {
@@ -134,29 +127,14 @@ final class ValueTypeColumnMenu
         {
             Cell cell = host instanceof TableEx ? selectedCell() : detectedCell;
             TypeColumn column = cell != null ? columns.get(cell.column()) : null;
-            Global.tempLog("value-type-menu", "show cell=" + describeCell(cell) //$NON-NLS-1$ //$NON-NLS-2$
-                + " registered=" + (column != null) + " columns=" + columns.keySet()); //$NON-NLS-1$ //$NON-NLS-2$
             TypeDescription type = column != null ? column.typeOf().apply(cell.element()) : null;
             EObject context = column != null ? column.contextOf().apply(cell.element()) : null;
             String text = referenceText(type, context);
-            if (host instanceof TableEx)
-                Global.tempLog("dcs-type-menu", "show cell=" + cell + " references=" + text); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             Runnable openTypes = type != null && !type.getTypes().isEmpty()
                 ? () -> SelectTypeDialogHook.openReadOnly(control.getShell(), type, context) : null;
-            Global.tempLog("value-type-menu", "resolved count=" + (type != null ? type.getTypes().size() : -1) //$NON-NLS-1$ //$NON-NLS-2$
-                + " references=" + text + " openTypes=" + (openTypes != null) //$NON-NLS-1$ //$NON-NLS-2$
-                + " root=" + host.getData(ROOT_MENU_KEY) + " index=" + rootInsertIndex((Menu)eventShown.widget)); //$NON-NLS-1$ //$NON-NLS-2$
             GotoDefinitionFieldMenuHook.updateTypeReferenceMenu((Menu)eventShown.widget, control, text,
                 Boolean.TRUE.equals(host.getData(ROOT_MENU_KEY)), openTypes);
-            Global.tempLog("value-type-menu", "show result=" + java.util.Arrays.stream( //$NON-NLS-1$ //$NON-NLS-2$
-                ((Menu)eventShown.widget).getItems()).map(MenuItem::getText).toList());
         });
-    }
-
-    private static String describeCell(Cell cell)
-    {
-        return cell == null ? null : cell.column() + " elementClass=" //$NON-NLS-1$
-            + (cell.element() != null ? cell.element().getClass().getName() : null);
     }
 
     private Cell selectedCell()

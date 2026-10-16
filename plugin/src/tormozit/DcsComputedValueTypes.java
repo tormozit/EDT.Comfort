@@ -261,9 +261,6 @@ final class DcsComputedValueTypes
     private TypeDescription cellTypeDescription(Object element)
     {
         TypeDescription type = HintLabelProvider.valueType(element);
-        Global.tempLog("dcs-type-menu", "cell element=" //$NON-NLS-1$ //$NON-NLS-2$
-            + (element != null ? element.getClass().getName() : null)
-            + " explicitTypes=" + (type != null ? type.getTypes().size() : 0)); //$NON-NLS-1$
         if (type != null && !type.getTypes().isEmpty())
             return type;
         // У полей набора «Объект» вычисленный тип не показывается.
@@ -402,8 +399,6 @@ final class DcsComputedValueTypes
                         result.put(pathKey(path), new TypePresentation(text, references,
                             org.eclipse.emf.ecore.util.EcoreUtil.copy(info.valueType.toTypeDescription()),
                             category, composite));
-                        Global.tempLog("dcs-type-menu", "computed path=" + path //$NON-NLS-1$ //$NON-NLS-2$
-                            + " text=" + text + " references=" + references); //$NON-NLS-1$ //$NON-NLS-2$
                     }
                 }
             }
