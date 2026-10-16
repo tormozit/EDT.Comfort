@@ -783,6 +783,7 @@ public final class MdEditorTreeHook
         column.setMoveable(true);
         setFixedColumnWidth(tree, column, AttributesColumnWidthStore.loadType());
         installTypeColumnWidthPersistence(column);
+        ValueTypeColumnMenu.useRootMenu(tree);
         typeColumn.setLabelProvider(new ValueTypeColumnLabelProvider(tree,
             element -> {
                 EObject object = elementObject(tree, element);
@@ -1155,7 +1156,7 @@ public final class MdEditorTreeHook
     }
 
     /** Отдельное дерево стандартных реквизитов на вкладке «Данные». */
-    private static boolean isStandardAttributesTree(Tree tree)
+    static boolean isStandardAttributesTree(Tree tree)
     {
         DtGranularEditor<?> editor = MdEditorAttributeMenuHook.editorOf(tree);
         IFormPage page = editor != null ? editor.getActivePageInstance() : null;

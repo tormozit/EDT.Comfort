@@ -149,6 +149,7 @@ public final class NaparnikManualModeHook implements IStartup
         System.getProperties().put(PROP_REPLACE,
             (Predicate<Object>) NaparnikManualModeHook::allowReplace);
         System.getProperties().put(PROP_HINT, (Predicate<Object>) NaparnikManualModeHook::allowHint);
+        Global.tempLog(LOG, "bootFromActivator patch=" + PATCH_ENABLED); //$NON-NLS-1$
         registerWeavingHook();
         registerTransformer();
     }
@@ -374,6 +375,7 @@ public final class NaparnikManualModeHook implements IStartup
 
     private static void attachDocument(IDocument document)
     {
+        Global.tempLog(LOG, "attachDocument document=" + System.identityHashCode(document)); //$NON-NLS-1$
         if (document == null)
             return;
         synchronized (guards)
@@ -394,6 +396,8 @@ public final class NaparnikManualModeHook implements IStartup
     static boolean allowReplace(Object text)
     {
         boolean allow = !isRestrictedPolicy() || allowApply.get() > 0;
+        Global.tempLog(LOG, "allowReplace allow=" + (!PATCH_ENABLED || allow) + " policy=" + readPolicy() //$NON-NLS-1$ //$NON-NLS-2$
+            + " allowApply=" + allowApply.get() + " послеВставки=" + sinceLastPaste()); //$NON-NLS-1$ //$NON-NLS-2$
         return !PATCH_ENABLED || allow;
     }
 
@@ -401,10 +405,9 @@ public final class NaparnikManualModeHook implements IStartup
     {
         boolean allow = !isRestrictedPolicy() || allowSuggest.get() > 0 || allowApply.get() > 0;
         boolean result = !PATCH_ENABLED || allow;
-        if (text instanceof String hintText && !hintText.isEmpty() && isRestrictedPolicy())
-            Global.tempLog(LOG, "ПОКАЗ ПОДСКАЗКИ: пропущен=" + result + " политика=" + readPolicy() //$NON-NLS-1$ //$NON-NLS-2$
-                + " послеВставки=" + sinceLastPaste() + " allowSuggest=" + allowSuggest.get() //$NON-NLS-1$ //$NON-NLS-2$
-                + " allowApply=" + allowApply.get() + " длина=" + hintText.length()); //$NON-NLS-1$ //$NON-NLS-2$
+        Global.tempLog(LOG, "ПОКАЗ ПОДСКАЗКИ: пропущен=" + result + " политика=" + readPolicy() //$NON-NLS-1$ //$NON-NLS-2$
+            + " послеВставки=" + sinceLastPaste() + " allowSuggest=" + allowSuggest.get() //$NON-NLS-1$ //$NON-NLS-2$
+            + " allowApply=" + allowApply.get() + " длина=" + (text instanceof String s ? s.length() : -1)); //$NON-NLS-1$ //$NON-NLS-2$
         return result;
     }
 
@@ -455,6 +458,8 @@ public final class NaparnikManualModeHook implements IStartup
                 Display display = Display.getCurrent();
                 Control focus = display != null ? display.getFocusControl() : null;
                 boolean ours = isHookedEditorStyledText(focus);
+                Global.tempLog(LOG, "paste ours=" + ours + " policy=" + readPolicy() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " allowApply=" + allowApply.get() + " allowSuggest=" + allowSuggest.get()); //$NON-NLS-1$ //$NON-NLS-2$
                 if (ours)
                 {
                     lastPasteNanos = System.nanoTime();
@@ -511,6 +516,8 @@ public final class NaparnikManualModeHook implements IStartup
 
     private static void scheduleSuppress(IDocument document)
     {
+        Global.tempLog(LOG, "scheduleSuppress document=" + System.identityHashCode(document) //$NON-NLS-1$
+            + " policy=" + readPolicy() + " armed=" + suppressSeriesArmed); //$NON-NLS-1$ //$NON-NLS-2$
         if (!isRestrictedPolicy())
             return;
         Display display = Display.getDefault();
@@ -528,6 +535,8 @@ public final class NaparnikManualModeHook implements IStartup
             {
                 try
                 {
+                    Global.tempLog(LOG, "suppress timer delay=" + delay + " allowApply=" + allowApply.get() //$NON-NLS-1$ //$NON-NLS-2$
+                        + " allowSuggest=" + allowSuggest.get()); //$NON-NLS-1$
                     if (allowApply.get() > 0 || allowSuggest.get() > 0)
                         return;
                     suppressViewModel(pendingSuppressDoc);
@@ -544,6 +553,8 @@ public final class NaparnikManualModeHook implements IStartup
 
     private static void suppressViewModel(IDocument document)
     {
+        Global.tempLog(LOG, "suppressViewModel document=" + System.identityHashCode(document) //$NON-NLS-1$
+            + " policy=" + readPolicy()); //$NON-NLS-1$
         if (!isRestrictedPolicy())
             return;
         List<Object> found = new ArrayList<>();
@@ -565,11 +576,13 @@ public final class NaparnikManualModeHook implements IStartup
             collectViewModels(widget.getListeners(ST.VerifyKey), found);
             collectViewModels(widget.getListeners(SWT.Modify), found);
         }
+        Global.tempLog(LOG, "suppressViewModel found=" + found.size() + " widget=" + (widget != null)); //$NON-NLS-1$ //$NON-NLS-2$
         for (Object vm : found)
         {
             if (!PATCH_ENABLED)
                 continue;
             Object balanced = Global.invoke(vm, "isBalanced"); //$NON-NLS-1$
+            Global.tempLog(LOG, "suppressViewModel balanced=" + balanced); //$NON-NLS-1$
             String lastJob = cancelJob(vm, "lastJob"); //$NON-NLS-1$
             String commitJob = cancelJob(vm, "commitJob"); //$NON-NLS-1$
             cancelJob(vm, "lastUpdateMethodJob"); //$NON-NLS-1$
@@ -633,6 +646,8 @@ public final class NaparnikManualModeHook implements IStartup
         Object inner = Global.invoke(listener, "getEventListener"); //$NON-NLS-1$
         if (inner != null)
             actual = inner;
+        Global.tempLog(LOG, "collectViewModels listener=" + listener.getClass().getName() //$NON-NLS-1$
+            + " actual=" + actual.getClass().getName()); //$NON-NLS-1$
         if (VM.equals(actual.getClass().getName()) && !found.contains(actual))
             found.add(actual);
     }
@@ -776,6 +791,10 @@ public final class NaparnikManualModeHook implements IStartup
                 return;
             String inserted = event.getText() != null ? event.getText() : ""; //$NON-NLS-1$
             boolean naparnik = stackHasNaparnik();
+            Global.tempLog(LOG, "documentChanged document=" + System.identityHashCode(event.getDocument()) //$NON-NLS-1$
+                + " offset=" + event.getOffset() + " removed=" + event.getLength() + " inserted=" + inserted.length() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " naparnik=" + naparnik + " pasteActive=" + pasteActive.get() //$NON-NLS-1$ //$NON-NLS-2$
+                + " allowApply=" + allowApply.get() + " policy=" + readPolicy()); //$NON-NLS-1$ //$NON-NLS-2$
             if (pasteActive.get() > 0 || (naparnik && inserted.length() > 1))
                 scheduleSuppress(event.getDocument());
             boolean revert = PATCH_ENABLED
@@ -940,6 +959,7 @@ public final class NaparnikManualModeHook implements IStartup
                 return;
             }
             context.registerService(WeavingHook.class, new ManualWeavingHook(), null);
+            Global.tempLog(LOG, "registerWeavingHook registered"); //$NON-NLS-1$
         }
         catch (Throwable t)
         {
@@ -949,7 +969,8 @@ public final class NaparnikManualModeHook implements IStartup
 
     private static void registerTransformer()
     {
-        BslDocCommentDescriptionFix.registerExtraTransformer(new ManualModeTransformer(), VM, CTX, PAINTER);
+        boolean registered = BslDocCommentDescriptionFix.registerExtraTransformer(new ManualModeTransformer(), VM, CTX, PAINTER);
+        Global.tempLog(LOG, "registerTransformer registered=" + registered); //$NON-NLS-1$
         retransformLoaded();
     }
 
@@ -960,6 +981,7 @@ public final class NaparnikManualModeHook implements IStartup
             Field field = BslDocCommentDescriptionFix.class.getDeclaredField("instrumentation"); //$NON-NLS-1$
             field.setAccessible(true);
             Object value = field.get(null);
+            Global.tempLog(LOG, "retransformLoaded instrumentation=" + (value instanceof Instrumentation)); //$NON-NLS-1$
             if (!(value instanceof Instrumentation inst))
                 return;
             for (Class<?> c : inst.getAllLoadedClasses())
@@ -994,8 +1016,7 @@ public final class NaparnikManualModeHook implements IStartup
             result = transformHint(classfileBuffer);
         else
             return null;
-        if (result == null)
-            Global.tempLog(LOG, "[!] класс не пропатчен: " + internal); //$NON-NLS-1$
+        Global.tempLog(LOG, "transformClass class=" + internal + " transformed=" + (result != null)); //$NON-NLS-1$ //$NON-NLS-2$
         return result;
     }
 
@@ -1221,6 +1242,7 @@ public final class NaparnikManualModeHook implements IStartup
             }
             catch (Throwable t)
             {
+                Global.tempLogException(LOG, "transform " + className, t); //$NON-NLS-1$
                 return null;
             }
         }
@@ -1234,6 +1256,7 @@ public final class NaparnikManualModeHook implements IStartup
             String name = wovenClass.getClassName();
             if (!VM.equals(name) && !CTX.equals(name) && !PAINTER.equals(name))
                 return;
+            Global.tempLog(LOG, "weave class=" + name + " state=" + wovenClass.getState()); //$NON-NLS-1$ //$NON-NLS-2$
             if (wovenClass.getState() != WovenClass.TRANSFORMING)
             {
                 return;

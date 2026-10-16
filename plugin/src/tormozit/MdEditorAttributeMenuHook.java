@@ -10,6 +10,8 @@ import java.util.function.Predicate;
 
 import org.eclipse.core.commands.AbstractHandler;
 import org.eclipse.core.commands.ExecutionEvent;
+import org.eclipse.e4.ui.model.application.ui.menu.MHandledItem;
+import org.eclipse.e4.ui.workbench.renderers.swt.HandledContributionItem;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.EReference;
 import org.eclipse.emf.ecore.util.EcoreUtil;
@@ -46,6 +48,7 @@ import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.IViewPart;
 import org.eclipse.ui.IWorkbenchPage;
+import org.eclipse.ui.menus.CommandContributionItem;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PartInitException;
 import org.eclipse.ui.PlatformUI;
@@ -68,6 +71,7 @@ import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
 import com._1c.g5.v8.dt.md.ui.shared.MdUiSharedImages;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicCommand;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicFeature;
+import com._1c.g5.v8.dt.metadata.mdclass.BasicTabularSection;
 import com._1c.g5.v8.dt.metadata.mdclass.CharacteristicsDescription;
 import com._1c.g5.v8.dt.metadata.mdclass.CommonCommand;
 import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
@@ -109,6 +113,8 @@ public final class MdEditorAttributeMenuHook implements IStartup
         "com._1c.g5.v8.dt.internal.md.ui.editors.pages.functionaloptions.DtGranularEditorFunctionalOptionsMdObjectContentComponent"; //$NON-NLS-1$
 
     private static final String PROPERTIES_MENU_TEXT = "Свойства"; //$NON-NLS-1$
+    private static final String OPEN_EDITOR_COMMAND_ID = "com._1c.g5.v8.dt.ui.commands.openEditor"; //$NON-NLS-1$
+    private static final String OPEN_EDITOR_DIAG = "md-attribute-menu-819"; //$NON-NLS-1$
 
     private static final String ITEM_FO = "Функциональные опции"; //$NON-NLS-1$
 
@@ -139,6 +145,7 @@ public final class MdEditorAttributeMenuHook implements IStartup
             if (display == null || display.isDisposed())
                 return;
             display.addFilter(SWT.MenuDetect, MdEditorAttributeMenuHook::handleMenuDetect);
+            Global.tempLog(OPEN_EDITOR_DIAG, "install filters"); //$NON-NLS-1$
             display.addFilter(SWT.Show, MdEditorAttributeMenuHook::handleMenuShow);
             display.addFilter(SWT.MouseDown, MdEditorAttributeMenuHook::handleMouseDown);
             display.addFilter(SWT.MouseDoubleClick, MdEditorAttributeMenuHook::handleMouseDoubleClick);
@@ -621,6 +628,10 @@ public final class MdEditorAttributeMenuHook implements IStartup
         if (!(event.widget instanceof Control control) || control.isDisposed())
             return;
         Control target = menuTargetOf(control);
+        DtGranularEditor<?> editor = editorOf(control);
+        IFormPage page = editor != null ? editor.getActivePageInstance() : null;
+        Global.tempLog(OPEN_EDITOR_DIAG, "MenuDetect control=" + control.getClass().getName() //$NON-NLS-1$
+            + " target=" + target + " page=" + (page != null ? page.getId() : null)); //$NON-NLS-1$ //$NON-NLS-2$
         if (target == null)
             return;
         Menu menu = menuOf(target);
@@ -733,6 +744,7 @@ public final class MdEditorAttributeMenuHook implements IStartup
                 return;
             if (current != menu)
                 hookMenu(tree, current);
+            hideRedundantOpenEditorItem(current, tree);
             if (!hasOurItems(current))
                 fillMenuItems(current, tree);
         });
@@ -742,6 +754,7 @@ public final class MdEditorAttributeMenuHook implements IStartup
     {
         if (swtMenu == null || swtMenu.isDisposed() || control == null || control.isDisposed())
             return;
+        hideRedundantOpenEditorItem(swtMenu, control);
         if (hasOurItems(swtMenu))
             return;
         EObject member = control instanceof Tree tree ? selectedDataMember(tree)
@@ -793,6 +806,111 @@ public final class MdEditorAttributeMenuHook implements IStartup
             "Открыть редактор «Все роли» и отфильтровать по относительному имени"); //$NON-NLS-1$
         allRolesItem.setEnabled(configuration != null);
         allRolesItem.addListener(SWT.Selection, ev -> revealOnAllRoles(editor, member, filterText));
+    }
+
+    /**
+     * OpenEditorHandler без параметров открывает выбранный EObject через OpenHelper.
+     * У собственного реквизита/табличной части редактора нет: OpenHelper возвращается к
+     * уже открытому владельцу с тем же выделением. «Свойства» остаются отдельной командой.
+     * Общие и стандартные реквизиты, другие вкладки и переходы через параметры не трогаем.
+     */
+    private static void hideRedundantOpenEditorItem(Menu menu, Control control)
+    {
+        Global.tempLog(OPEN_EDITOR_DIAG, "hide begin control=" + control //$NON-NLS-1$
+            + " items=" + menu.getItemCount()); //$NON-NLS-1$
+        for (MenuItem item : menu.getItems())
+        {
+            Object data = item.getData();
+            String command = data instanceof CommandContributionItem contribution && contribution.getCommand() != null
+                ? contribution.getCommand().getId() + " params=" + contribution.getCommand().getParameterMap() : null; //$NON-NLS-1$
+            if (data instanceof HandledContributionItem contribution && contribution.getModel() != null)
+            {
+                MHandledItem model = contribution.getModel();
+                command = (model.getCommand() != null ? model.getCommand().getElementId() : null)
+                    + " params=" + model.getParameters() + " wbCommand=" + model.getWbCommand(); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            Global.tempLog(OPEN_EDITOR_DIAG, "item text=" + plainMenuText(item) //$NON-NLS-1$
+                + " dataClass=" + (data != null ? data.getClass().getName() : null) + " command=" + command); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        if (!(control instanceof Tree tree) || tree.isDisposed())
+        {
+            Global.tempLog(OPEN_EDITOR_DIAG, "skip:not-live-tree"); //$NON-NLS-1$
+            return;
+        }
+        boolean dataPage = isDataPageAttributesTree(tree);
+        boolean standard = MdEditorTreeHook.isStandardAttributesTree(tree);
+        Global.tempLog(OPEN_EDITOR_DIAG, "scope selection=" + tree.getSelectionCount() //$NON-NLS-1$
+            + " dataPage=" + dataPage + " standard=" + standard); //$NON-NLS-1$ //$NON-NLS-2$
+        if (tree.getSelectionCount() != 1 || !dataPage || standard)
+        {
+            Global.tempLog(OPEN_EDITOR_DIAG, "skip:scope"); //$NON-NLS-1$
+            return;
+        }
+        EObject member = selectedDataMember(tree);
+        Global.tempLog(OPEN_EDITOR_DIAG, "member=" + describeOpenEditorObject(member) //$NON-NLS-1$
+            + " rowClass=" + (tree.getSelection()[0].getData() != null //$NON-NLS-1$
+                ? tree.getSelection()[0].getData().getClass().getName() : null));
+        if (!(member instanceof BasicFeature || member instanceof BasicTabularSection))
+        {
+            Global.tempLog(OPEN_EDITOR_DIAG, "skip:member-type"); //$NON-NLS-1$
+            return;
+        }
+        DtGranularEditor<?> editor = editorOf(tree);
+        EObject owner = editor != null ? editor.getModel() : null;
+        Global.tempLog(OPEN_EDITOR_DIAG, "editorOwner=" + describeOpenEditorObject(owner)); //$NON-NLS-1$
+        boolean belongsToEditor = false;
+        for (EObject parent = member.eContainer(); parent != null; parent = parent.eContainer())
+        {
+            Global.tempLog(OPEN_EDITOR_DIAG, "ancestor=" + describeOpenEditorObject(parent)); //$NON-NLS-1$
+            if (sameObject(parent, owner))
+            {
+                belongsToEditor = true;
+                break;
+            }
+        }
+        if (!belongsToEditor)
+        {
+            Global.tempLog(OPEN_EDITOR_DIAG, "skip:not-owned"); //$NON-NLS-1$
+            return;
+        }
+        int removed = 0;
+        for (MenuItem item : menu.getItems())
+        {
+            if (isPlainOpenEditorCommand(item.getData()))
+            {
+                Global.tempLog(OPEN_EDITOR_DIAG, "remove text=" + plainMenuText(item)); //$NON-NLS-1$
+                ValueTypeColumnMenu.rememberRootPosition(menu, item);
+                item.dispose();
+                removed++;
+            }
+        }
+        Global.tempLog(OPEN_EDITOR_DIAG, "hide end removed=" + removed); //$NON-NLS-1$
+    }
+
+    /** Оба штатных представления команды: JFace и E4; переходы через параметры сохраняем. */
+    private static boolean isPlainOpenEditorCommand(Object data)
+    {
+        if (data instanceof CommandContributionItem contribution)
+            return contribution.getCommand() != null
+                && OPEN_EDITOR_COMMAND_ID.equals(contribution.getCommand().getId())
+                && contribution.getCommand().getParameterMap().isEmpty();
+        if (data instanceof HandledContributionItem contribution)
+        {
+            MHandledItem model = contribution.getModel();
+            if (model == null || !model.getParameters().isEmpty())
+                return false;
+            if (model.getWbCommand() != null)
+                return OPEN_EDITOR_COMMAND_ID.equals(model.getWbCommand().getId())
+                    && model.getWbCommand().getParameterMap().isEmpty();
+            return model.getCommand() != null
+                && OPEN_EDITOR_COMMAND_ID.equals(model.getCommand().getElementId());
+        }
+        return false;
+    }
+
+    private static String describeOpenEditorObject(EObject object)
+    {
+        return object != null ? object.eClass().getName() + " uri=" + EcoreUtil.getURI(object) : null; //$NON-NLS-1$
     }
 
     private static boolean hasOurItems(Menu menu)

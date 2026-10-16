@@ -8324,6 +8324,7 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
             try
             {
                 raw = delegate.computeCompletionProposals(viewer, off);
+                BslStructureInsertCommentTypes.installPropertyProposalDescriptions(raw, viewer);
             }
             catch (NullPointerException npe)
             {

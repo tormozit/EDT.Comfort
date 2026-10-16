@@ -775,6 +775,7 @@ public final class BslEditorHoverHook implements IStartup
             if (!IrBslHoverHtml.isBslBrowserInput(info))
                 return info;
             final int offset = hoverRegion.getOffset();
+            BslStructureInsertCommentTypes.completePropertyHover(info, textViewer, offset);
             prepareHoverDecorations(hoverRegion, info);
             IRSession session = IrBslExpressionHtmlSupport.resolveConnectedSession(editor);
             if (session == null)

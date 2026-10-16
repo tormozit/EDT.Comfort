@@ -21,6 +21,7 @@ import org.eclipse.ui.IStartup;
 import org.osgi.framework.Bundle;
 
 import com._1c.g5.v8.dt.core.platform.IV8Project;
+import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
 import com._1c.g5.v8.dt.mcore.McorePackage;
 import com._1c.g5.v8.dt.mcore.TypeItem;
 import com._1c.g5.v8.dt.mcore.util.McoreUtil;
@@ -140,6 +141,95 @@ public class SelectTypeDialogHook implements IStartup
     static EObject holderOwner(Object holder)
     {
         return holder instanceof EObject key ? HOLDER_OWNERS.get(key) : null;
+    }
+
+    /** Штатный редактор описания типов в режиме просмотра, поверх отдельной копии значения. */
+    static void openReadOnly(Shell parent, TypeDescription type, EObject context)
+    {
+        Global.tempLog("type-description-view", "openReadOnly type=" + type + " context=" + context); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        if (parent == null || parent.isDisposed() || type == null)
+            return;
+        Object engine = null;
+        try
+        {
+            EObject owner = type.eContainer() != null ? type.eContainer() : context;
+            EReference feature = type.eContainingFeature() instanceof EReference reference ? reference : null;
+            if (feature == null && owner != null)
+            {
+                for (EReference reference : owner.eClass().getEAllReferences())
+                {
+                    if (reference.getEReferenceType() != McorePackage.Literals.TYPE_DESCRIPTION)
+                        continue;
+                    if (feature != null)
+                        throw new IllegalStateException("У владельца несколько описаний типов"); //$NON-NLS-1$
+                    feature = reference;
+                }
+            }
+            if (owner == null || feature == null)
+                throw new IllegalStateException("Не найден владелец описания типов"); //$NON-NLS-1$
+            IV8ProjectManager manager = (IV8ProjectManager)Global.getServiceByClass(IV8ProjectManager.class);
+            IV8Project project = manager.getProject(owner);
+            if (project == null)
+            {
+                org.eclipse.core.resources.IProject active = Global.getActiveProject(
+                    (org.eclipse.ui.IWorkbenchPage)null, true);
+                if (active == null)
+                    return;
+                project = manager.getProject(active);
+            }
+            if (project == null)
+                throw new IllegalStateException("Не найден проект описания типов"); //$NON-NLS-1$
+            Bundle bundle = Platform.getBundle(MD_UI_BUNDLE);
+            Bundle core = Platform.getBundle(TYPE_PROVIDER_BUNDLE);
+            Object service = core.loadClass(TYPE_PROVIDER_SERVICE).getField("INSTANCE").get(null); //$NON-NLS-1$
+            Object info = Global.invoke(service, "getTypeDescriptionInfoWithTypeInfo", //$NON-NLS-1$
+                owner, owner.eContainer(), feature, null);
+            if (info == null)
+                throw new IllegalStateException("Не получено описание доступных типов"); //$NON-NLS-1$
+            registerTypeProvider(bundle);
+            EObject holder = EcoreUtil.create(holderClass());
+            holder.eSet(holderClass().getEStructuralFeature(HOLDER_FEATURE), EcoreUtil.copy(type));
+            HOLDERS.put(holder, info);
+            HOLDER_OWNERS.put(holder, owner);
+            Object model = Global.newInstance(bundle.loadClass(MODEL_CLASS), holder, null,
+                holderClass().getEStructuralFeature(HOLDER_FEATURE), project);
+            Object dialogModel = Global.invoke(model, "createDialogModel"); //$NON-NLS-1$
+            Object component = Global.newInstance(bundle.loadClass(COMPONENT_CLASS));
+            Object parameters = Global.invoke(component, "getParameterization"); //$NON-NLS-1$
+            if (!Global.invokeVoid(dialogModel, "setEditable", Boolean.FALSE) //$NON-NLS-1$
+                || !Global.invokeVoid(parameters, "setEditable", Boolean.FALSE) //$NON-NLS-1$
+                || !Boolean.FALSE.equals(Global.invoke(dialogModel, "isEditable")) //$NON-NLS-1$
+                || !Boolean.FALSE.equals(Global.invoke(parameters, "isEditable"))) //$NON-NLS-1$
+                throw new IllegalStateException("Не удалось включить режим просмотра типов"); //$NON-NLS-1$
+            Global.tempLog("type-description-view", "readOnly model=true parameters=true"); //$NON-NLS-1$ //$NON-NLS-2$
+            Global.invokeVoid(parameters, "setTitle", Global.withPluginWindowTitle("Просмотр описания типов")); //$NON-NLS-1$ //$NON-NLS-2$
+            engine = createEngine(bundle);
+            if (engine == null)
+                throw new IllegalStateException("Не удалось создать редактор описания типов"); //$NON-NLS-1$
+            final Object engineRef = engine;
+            Class<?> listenerClass = bundle.loadClass(LISTENER_CLASS);
+            Object listener = Proxy.newProxyInstance(listenerClass.getClassLoader(),
+                new Class<?>[] { listenerClass }, (proxy, method, args) ->
+                {
+                    if ("eventReceived".equals(method.getName()) && args != null && args.length == 1) //$NON-NLS-1$
+                    {
+                        String event = args[0].getClass().getSimpleName();
+                        if ("CommitEvent".equals(event) || "DiscardEvent".equals(event)) //$NON-NLS-1$ //$NON-NLS-2$
+                            Global.invoke(engineRef, "dispose"); //$NON-NLS-1$
+                    }
+                    return null;
+                });
+            Global.invokeVoid(component, "addListener", listener); //$NON-NLS-1$
+            if (!showWithParent(bundle, engine, component, dialogModel, parent))
+                Global.invoke(engine, "showDialog", component, dialogModel); //$NON-NLS-1$
+        }
+        catch (ReflectiveOperationException | RuntimeException | LinkageError e)
+        {
+            if (engine != null)
+                Global.invoke(engine, "dispose"); //$NON-NLS-1$
+            Global.tempLogException("type-description-view", "openReadOnly", e); //$NON-NLS-1$ //$NON-NLS-2$
+            ToastNotification.show("Открыть типы", "Не удалось открыть описание типов: " + e.getMessage(), 5000); //$NON-NLS-1$ //$NON-NLS-2$
+        }
     }
 
     /**

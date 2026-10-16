@@ -2332,7 +2332,8 @@ public class SmartOutlineHook implements IStartup {
     /**
      * «Редактирование типа данных» при выключенном флажке «Составной тип»: двойной клик по строке
      * ставит на ней пометку (заменяя прежнюю) и закрывает окно по OK. Флажок читается в момент
-     * клика — пользователь может переключать его при открытом окне.
+     * клика — пользователь может переключать его при открытом окне. В режиме просмотра
+     * двойной клик открывает объект метаданных выбранного типа, оставляя окно открытым.
      */
     private static void installSingleTypeDoubleClick(Shell shell, TreeViewer viewer)
     {
@@ -2351,6 +2352,13 @@ public class SmartOutlineHook implements IStartup {
         tree.addListener(SWT.MouseDoubleClick, event ->
         {
             Object model = resolveTypeDescriptionModel(shell);
+            if (model != null && Boolean.FALSE.equals(Global.invoke(model, "isEditable"))) //$NON-NLS-1$
+            {
+                MdObject producer = selectedTypeProducer(shell, tree);
+                if (producer != null)
+                    new OpenHelper().openEditor(producer);
+                return;
+            }
             Object composite = model != null ? Global.invoke(model, "getCompositeType") : null; //$NON-NLS-1$
             Object value = composite != null ? Global.invoke(composite, "get") : null; //$NON-NLS-1$
             if (!Boolean.FALSE.equals(value) || tree.getSelectionCount() == 0)

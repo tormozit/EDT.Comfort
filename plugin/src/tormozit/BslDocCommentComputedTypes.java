@@ -373,7 +373,7 @@ public final class BslDocCommentComputedTypes
             List<?> computed = typeCacheByKey.get(cacheKey);
             if (computed != null && !computed.isEmpty())
             {
-                fillReturnSection(comment, computed);
+                fillReturnSection(comment, computed, methodObject);
                 return comment;
             }
             java.util.Set<Object> guard = computing.get();
@@ -388,7 +388,7 @@ public final class BslDocCommentComputedTypes
                     computed = typeCacheByKey.get(cacheKey);
                     if (computed != null && !computed.isEmpty())
                     {
-                        fillReturnSection(comment, computed);
+                        fillReturnSection(comment, computed, methodObject);
                         return comment;
                     }
                     return comment;
@@ -402,7 +402,7 @@ public final class BslDocCommentComputedTypes
             }
             if (computed == null || computed.isEmpty())
                 return comment;
-            fillReturnSection(comment, computed);
+            fillReturnSection(comment, computed, methodObject);
         }
         catch (Throwable ignored)
         {
@@ -569,7 +569,7 @@ public final class BslDocCommentComputedTypes
      * Признак русских имён подбирается попыткой: при неверном значении {@code fill} молча
      * выбрасывает типы, у которых нет имени на нужном языке, и секция остаётся пустой.
      */
-    private static void fillReturnSection(Object comment, List<?> computed) throws Exception
+    private static void fillReturnSection(Object comment, List<?> computed, EObject context) throws Exception
     {
         ClassLoader cl = comment.getClass().getClassLoader();
         Class<?> partClass = Class.forName(
@@ -600,9 +600,6 @@ public final class BslDocCommentComputedTypes
 
         java.lang.reflect.Method fill = typeSectionClass.getMethod("fill", //$NON-NLS-1$
             List.class, String.class, boolean.class, EObject.class);
-        Object owner = Global.invoke(comment, "getMethod"); //$NON-NLS-1$
-        EObject context = owner instanceof EObject eObject ? eObject : null;
-
         fill.invoke(typeSection, items, "", Boolean.TRUE, context); //$NON-NLS-1$
         int count = definitionCount(typeSection);
         if (count == 0)
@@ -612,6 +609,13 @@ public final class BslDocCommentComputedTypes
         }
         if (count == 0)
             return;
+        try
+        {
+            BslStructureInsertCommentTypes.fillPropertyDescriptions(typeSection, items, context);
+        }
+        catch (Throwable ignored)
+        {
+        }
         Global.invoke(returnSection, "addTypeSection", typeSection); //$NON-NLS-1$
         if (existing == null)
             Global.invoke(comment, "setReturnSection", returnSection); //$NON-NLS-1$

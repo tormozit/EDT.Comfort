@@ -7,6 +7,7 @@ import java.util.function.Function;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.util.EcoreUtil;
 import org.eclipse.jface.viewers.ColumnLabelProvider;
+import org.eclipse.jface.viewers.ViewerCell;
 import org.eclipse.swt.graphics.Color;
 import org.eclipse.swt.graphics.Font;
 import org.eclipse.swt.graphics.Image;
@@ -24,6 +25,7 @@ class ValueTypeColumnLabelProvider extends ColumnLabelProvider
     private final Function<Object, TypeDescription> typeOf;
     private final Function<Object, EObject> contextOf;
     private final ColumnLabelProvider base;
+    private boolean navigationInstalled;
 
     ValueTypeColumnLabelProvider(Control control, Function<Object, TypeDescription> typeOf,
         Function<Object, EObject> contextOf, ColumnLabelProvider base)
@@ -32,6 +34,17 @@ class ValueTypeColumnLabelProvider extends ColumnLabelProvider
         this.typeOf = typeOf;
         this.contextOf = contextOf;
         this.base = base;
+    }
+
+    @Override
+    public void update(ViewerCell cell)
+    {
+        if (!navigationInstalled)
+        {
+            ValueTypeColumnMenu.install(control, cell.getColumnIndex(), typeOf, contextOf);
+            navigationInstalled = true;
+        }
+        super.update(cell);
     }
 
     @Override

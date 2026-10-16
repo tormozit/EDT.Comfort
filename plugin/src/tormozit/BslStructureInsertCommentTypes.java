@@ -21,6 +21,11 @@ import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.resource.Resource;
 import org.eclipse.emf.ecore.resource.ResourceSet;
 import org.eclipse.emf.ecore.util.EcoreUtil;
+import org.eclipse.jface.text.IInformationControlCreator;
+import org.eclipse.jface.text.IRegion;
+import org.eclipse.jface.text.ITextHoverExtension;
+import org.eclipse.jface.text.ITextViewer;
+import org.eclipse.jface.text.contentassist.ICompletionProposal;
 import org.eclipse.ui.IStartup;
 import org.eclipse.xtext.EcoreUtil2;
 import org.eclipse.xtext.naming.IQualifiedNameConverter;
@@ -29,6 +34,9 @@ import org.eclipse.xtext.nodemodel.util.NodeModelUtils;
 import org.eclipse.xtext.resource.IResourceServiceProvider;
 import org.eclipse.xtext.scoping.IScope;
 import org.eclipse.xtext.scoping.IScopeProvider;
+import org.eclipse.xtext.ui.editor.contentassist.ConfigurableCompletionProposal;
+import org.eclipse.xtext.ui.editor.hover.IEObjectHover;
+import org.eclipse.xtext.ui.editor.model.IXtextDocument;
 import org.eclipse.xtext.util.CancelIndicator;
 import org.eclipse.xtext.util.Triple;
 
@@ -38,8 +46,11 @@ import com._1c.g5.v8.bm.integration.AbstractBmTask;
 import com._1c.g5.v8.bm.integration.IBmModel;
 import com._1c.g5.v8.dt.bsl.documentation.comment.BslCommentUtils;
 import com._1c.g5.v8.dt.bsl.documentation.comment.BslMultiLineCommentDocumentationProvider;
+import com._1c.g5.v8.dt.bsl.documentation.comment.TextPart;
+import com._1c.g5.v8.dt.bsl.documentation.comment.TypeSection;
 import com._1c.g5.v8.dt.bsl.model.Block;
 import com._1c.g5.v8.dt.bsl.model.BslContextDefMockProperty;
+import com._1c.g5.v8.dt.bsl.model.BslDerivedPropertySource;
 import com._1c.g5.v8.dt.bsl.model.DeclareStatement;
 import com._1c.g5.v8.dt.bsl.model.DynamicFeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.ExplicitVariable;
@@ -575,6 +586,7 @@ public final class BslStructureInsertCommentTypes
                 return;
 
             EObject root = scope != null ? scope : module;
+            PropertyDescriptions.of(module).clear(scope);
             List<Invocation> candidates = new ArrayList<>();
             for (Invocation invocation : EcoreUtil2.getAllContentsOfType(root, Invocation.class))
                 if (insertedKey(invocation) != null)
@@ -620,13 +632,325 @@ public final class BslStructureInsertCommentTypes
         return key == null || key.isEmpty() ? null : key;
     }
 
+    /** Описания из Pass; после перезапуска тип может быть восстановлен EDT раньше нашего прохода. */
+    private static String propertyDescription(Property property, EObject context)
+    {
+        if (!(property instanceof DerivedProperty derived)
+            || !(derived.getSource() instanceof BslDerivedPropertySource source)
+            || source.getModuleUri() == null
+            || !BslDocCommentComputedTypes.isExtendedTypesEnabled(context))
+            return null;
+        PropertyDescriptions descriptions = PropertyDescriptions.forModuleUri(URI.createURI(source.getModuleUri()));
+        if (!descriptions.contains(property))
+        {
+            readPropertySourceDescription(property, source, context);
+        }
+        return descriptions.get(property);
+    }
+
+    /** Холодный индекс: строго по сохранённому месту создания, тем же чтением строки, что в Pass. */
+    private static String readPropertySourceDescription(Property property, BslDerivedPropertySource source,
+        EObject context)
+    {
+        Module module = moduleFromSourceUri(URI.createURI(source.getModuleUri()), context);
+        if (module == null || !BslDocCommentComputedTypes.isExtendedTypesEnabled(module))
+            return null;
+        Block block = module;
+        if (source.getMethodName() != null && !source.getMethodName().isEmpty())
+        {
+            block = null;
+            for (Method method : module.allMethods())
+                if (source.getMethodName().equalsIgnoreCase(method.getName()))
+                {
+                    block = method;
+                    break;
+                }
+        }
+        ICompositeNode node = block == null ? null : NodeModelUtils.findActualNodeFor(block);
+        if (node == null)
+            return null;
+        int offset = node.getTotalOffset() + source.getLocalOffset();
+        if (offset < node.getTotalOffset() || offset >= node.getTotalEndOffset())
+            return null;
+        var leaf = NodeModelUtils.findLeafNodeAtOffset(node, offset);
+        EObject semantic = leaf == null ? null : NodeModelUtils.findActualSemanticObjectFor(leaf);
+        Invocation invocation = EcoreUtil2.getContainerOfType(semantic, Invocation.class);
+        if (invocation == null || !property.getName().equalsIgnoreCase(insertedKey(invocation)))
+            return null;
+        Statement statement = EcoreUtil2.getContainerOfType(invocation, Statement.class);
+        List<String> lines = sideCommentLines(statement);
+        String description = sideCommentDescription(lines);
+        PropertyDescriptions.forModuleUri(URI.createURI(source.getModuleUri())).put(property, description);
+        return description;
+    }
+
+    private static List<String> sideCommentLines(Statement statement)
+    {
+        Block block = statement == null ? null : EcoreUtil2.getContainerOfType(statement, Block.class);
+        ICompositeNode node = block == null ? null : NodeModelUtils.findActualNodeFor(block);
+        return node == null ? null : TypeSystemUtil.getCommentAfterObject(statement, node, false);
+    }
+
+    /** Штатные предложения Xtext, включая режим без «Улучшать списки». */
+    static void installPropertyProposalDescriptions(ICompletionProposal[] proposals, ITextViewer viewer)
+    {
+        if (proposals == null)
+            return;
+        java.util.Map<IEObjectHover, PropertyDescriptionHover> wrappers = new java.util.IdentityHashMap<>();
+        for (ICompletionProposal proposal : proposals)
+        {
+            ICompletionProposal raw = SmartContentAssistProcessor.unwrapProposal(proposal);
+            if (!(raw instanceof ConfigurableCompletionProposal configurable))
+                continue;
+            Object hover = Global.getField(configurable, "hover"); //$NON-NLS-1$
+            if (!(hover instanceof IEObjectHover original) || hover instanceof PropertyDescriptionHover)
+                continue;
+            configurable.setHover(wrappers.computeIfAbsent(original,
+                hoverProvider -> new PropertyDescriptionHover(hoverProvider, viewer)));
+        }
+    }
+
+    private static final class PropertyDescriptionHover implements IEObjectHover, ITextHoverExtension
+    {
+        private final IEObjectHover delegate;
+        private final ITextViewer proposalViewer;
+
+        PropertyDescriptionHover(IEObjectHover delegate, ITextViewer proposalViewer)
+        {
+            this.delegate = delegate;
+            this.proposalViewer = proposalViewer;
+        }
+
+        @Override
+        public Object getHoverInfo(EObject object, ITextViewer viewer, IRegion region)
+        {
+            Object info = delegate.getHoverInfo(object, viewer, region);
+            // У свойства ConfigurableCompletionProposal.viewer == null: EDT задаёт его
+            // только в setSimpleLinkedMode. Контекст берём из расчёта списка.
+            completePropertyHover(info, object, viewer != null ? viewer : proposalViewer);
+            return info;
+        }
+
+        @Override
+        public IInformationControlCreator getHoverControlCreator()
+        {
+            return delegate instanceof ITextHoverExtension extension ? extension.getHoverControlCreator() : null;
+        }
+    }
+
+    /** Дополняет именно страницу штатной подсказки; описание уже прочитано в Pass. */
+    private static void completePropertyHover(Object info, EObject object, ITextViewer viewer)
+    {
+        if (!(object instanceof Property property) || viewer == null
+            || !(viewer.getDocument() instanceof IXtextDocument document))
+            return;
+        try
+        {
+            String description = ContentAssistSessionReloader.readOnlyPeekAst(document, resource ->
+                resource == null || resource.getContents().isEmpty()
+                    ? null : propertyDescription(property, resource.getContents().get(0)));
+            Object page = Global.invoke(info, "getViewPage"); //$NON-NLS-1$
+            Object value = Global.getField(page, "value"); //$NON-NLS-1$
+            Object current = Global.invoke(value, "getDescription"); //$NON-NLS-1$
+            if (value == null)
+                return;
+            String html = current instanceof String text ? text : null;
+            if ((html == null || html.isBlank()) && description != null)
+                html = description.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
+            Object groups = ContentAssistSessionReloader.readOnlyPeekAst(document, resource ->
+                propertyTypeGroups(property, page, value, resource));
+            Object replacement = value.getClass().getConstructor(String.class, List.class).newInstance(html, groups);
+            Global.invokeVoid(page, "setValue", replacement); //$NON-NLS-1$
+        }
+        catch (Throwable ignored)
+        {
+        }
+    }
+
+    /** Как EDT getDocByDerivedProperty, но прокси типов разрешаются в ресурсе редактора. */
+    private static Object propertyTypeGroups(Property property, Object page, Object value, Resource resource)
+        throws Exception
+    {
+        Object original = Global.invoke(value, "getGroups"); //$NON-NLS-1$
+        if (resource == null || resource.getContents().isEmpty()
+            || !BslDocCommentComputedTypes.isExtendedTypesEnabled(resource.getContents().get(0)))
+            return original;
+        // У штатного DerivedProperty одна группа. Сохраняем её описание и сноску:
+        // это отдельные данные от ValueContent.description.
+        if (original instanceof List<?> groups && groups.size() > 1)
+            return original;
+        Object originalGroup = original instanceof List<?> groups && !groups.isEmpty() ? groups.get(0) : null;
+        Object groupDescription = Global.invoke(originalGroup, "getDescription"); //$NON-NLS-1$
+        Object groupFootnote = Global.invoke(originalGroup, "getFootnote"); //$NON-NLS-1$
+        Object provider = BslSyntaxAssist.documentationProvider();
+        Object locale = Global.invoke(page, "getLocale"); //$NON-NLS-1$
+        boolean russian = Boolean.TRUE.equals(Global.invoke(locale, "getElementsLanguage")); //$NON-NLS-1$
+        Object version = Global.invoke(page, "getVersion"); //$NON-NLS-1$
+        List<Object> references = new ArrayList<>();
+        for (TypeItem item : property.getTypes())
+        {
+            TypeItem resolved = (TypeItem)EcoreUtil.resolve(item, resource);
+            Object reference = Global.invoke(provider, "convertTypeItemToReference", //$NON-NLS-1$
+                resolved, resource, Boolean.valueOf(russian), version, Boolean.FALSE);
+            if (reference != null)
+                references.add(reference);
+        }
+        if (references.isEmpty())
+            return original;
+        ClassLoader loader = value.getClass().getClassLoader();
+        Class<?> groupClass = Class.forName(
+            "com._1c.g5.v8.dt.internal.bsl.ui.documentation.page.TypeGroupContent", true, loader); //$NON-NLS-1$
+        Class<?> footnoteClass = Class.forName(
+            "com._1c.g5.v8.dt.internal.bsl.ui.documentation.page.Footnote", true, loader); //$NON-NLS-1$
+        Object group = groupClass.getConstructor(String.class, List.class, footnoteClass)
+            .newInstance(groupDescription, references, groupFootnote);
+        return List.of(group);
+    }
+
+    /** Слово под указателем разрешается тем же API, что в штатном BslDispatchingEObjectTextHover. */
+    static void completePropertyHover(Object info, ITextViewer viewer, int offset)
+    {
+        if (viewer == null || !(viewer.getDocument() instanceof IXtextDocument document))
+            return;
+        try
+        {
+            EObject object = ContentAssistSessionReloader.readOnlyPeekAst(document, resource ->
+                resource == null ? null : new org.eclipse.xtext.resource.EObjectAtOffsetHelper()
+                    .resolveCrossReferencedElementAt(resource, offset));
+            completePropertyHover(info, object, viewer);
+        }
+        catch (Throwable ignored)
+        {
+        }
+    }
+
+    /**
+     * Ключ — URI модуля и место создания свойства, сохранённое EDT в копиях типов.
+     * Расчёт и подсказка читают разные экземпляры Module из разных ResourceSet:
+     * адаптер объекта модели между ними не переносится. При новом расчёте область
+     * метода/модуля очищается, включая удалённые комментарии.
+     */
+    private static final class PropertyDescriptions
+    {
+        private static final java.util.Map<String, PropertyDescriptions> byModuleUri =
+            new java.util.concurrent.ConcurrentHashMap<>();
+        private final java.util.Map<String, String> values = new java.util.concurrent.ConcurrentHashMap<>();
+
+        static PropertyDescriptions of(Module module)
+        {
+            return forModuleUri(EcoreUtil.getURI(module));
+        }
+
+        static PropertyDescriptions forModuleUri(URI uri)
+        {
+            return byModuleUri.computeIfAbsent(uri.trimFragment().toString(),
+                ignored -> new PropertyDescriptions());
+        }
+
+        void clear(Method scope)
+        {
+            if (scope == null)
+                values.clear();
+            else
+                values.keySet().removeIf(key -> key.startsWith(scope.getName() + "\n")); //$NON-NLS-1$
+        }
+
+        private static String key(Property property)
+        {
+            if (!(property instanceof DerivedProperty derived)
+                || !(derived.getSource() instanceof BslDerivedPropertySource source))
+                return null;
+            return source.getMethodName() + "\n" + source.getLocalOffset() + "\n" //$NON-NLS-1$ //$NON-NLS-2$
+                + property.getName().toLowerCase(Locale.ROOT);
+        }
+
+        void put(Property property, String description)
+        {
+            String key = key(property);
+            if (key == null)
+                return;
+            values.put(key, description == null ? "" : description); //$NON-NLS-1$
+        }
+
+        String get(Property property)
+        {
+            String key = key(property);
+            String result = key == null ? null : values.get(key);
+            if (result != null && result.isEmpty())
+                result = null;
+            return result;
+        }
+
+        boolean contains(Property property)
+        {
+            String key = key(property);
+            return key != null && values.containsKey(key);
+        }
+    }
+
+    /** getCommentAfterObject возвращает ["//Returns:", "// …"], а не только текст строки. */
+    private static String sideCommentDescription(List<String> lines)
+    {
+        if (lines == null)
+            return null;
+        for (String line : lines)
+        {
+            String description = sideCommentDescription(line);
+            if (description != null)
+                return description;
+        }
+        return null;
+    }
+
+    /** Явный разделитель «типы - описание», в том числе «// - описание» без типов. */
+    private static String sideCommentDescription(String line)
+    {
+        String text = line.startsWith("//") ? line.substring(2).trim() : line.trim(); //$NON-NLS-1$
+        var delimiter = java.util.regex.Pattern.compile("(?:^|\\s)-(?=\\s|$)").matcher(text); //$NON-NLS-1$
+        if (!delimiter.find())
+            return null;
+        String result = text.substring(delimiter.end()).trim();
+        return result.isEmpty() ? null : result;
+    }
+
+    /** Переносит описания в поля секции результата, которую собрал штатный TypeSection.fill. */
+    static void fillPropertyDescriptions(Object section, List<?> types, EObject context)
+    {
+        if (!(section instanceof TypeSection typeSection))
+            return;
+        for (var definition : typeSection.getTypeDefinitions())
+        {
+            if (definition.getTypeName() == null)
+                continue;
+            List<Property> properties = new ArrayList<>();
+            for (Object item : types)
+                if (item instanceof Type type && type.getContextDef() != null
+                    && (definition.getTypeName().equals(McoreUtil.getTypeName(type))
+                        || definition.getTypeName().equals(McoreUtil.getTypeNameRu(type))))
+                    properties.addAll(type.getContextDef().allProperties());
+            for (var field : definition.getFieldDefinitionExtension())
+                for (Property property : properties)
+                    if (field.getName().equalsIgnoreCase(property.getName()))
+                    {
+                        String description = propertyDescription(property, context);
+                        if (description != null && field.getDescription().getParts().isEmpty())
+                            field.getDescription().addPart(new TextPart(field.getDescription(),
+                                field.getLineNumber(), description));
+                        List<TypeItem> nestedTypes = property.getTypeContainer() instanceof TypeContainerRef ref
+                            ? ref.getTypes() : property.getTypes();
+                        for (TypeSection nested : field.getTypeSections())
+                            fillPropertyDescriptions(nested, nestedTypes, context);
+                    }
+        }
+    }
+
     /**
      * Дописывает типы комментария в свойство, созданное EDT для этого ключа. Ищем среди типов
      * переменной-источника сразу после вызова: именно там лежит структура (или таблица
      * значений) с новым свойством.
      */
     private static void fillProperty(Invocation invocation, String key,
-        Collection<TypeItem> commentTypes)
+        Collection<TypeItem> commentTypes, String description)
     {
         Variable variable = sourceVariable(
             ((DynamicFeatureAccess)invocation.getMethodAccess()).getSource());
@@ -667,6 +991,9 @@ public final class BslStructureInsertCommentTypes
                     continue;
                 if (property.getTypeContainer() instanceof TypeContainerRef ref)
                     addMissing(ref.getTypes(), commentTypes);
+                Module module = EcoreUtil2.getContainerOfType(invocation, Module.class);
+                if (module != null)
+                    PropertyDescriptions.of(module).put(property, description);
             }
         }
     }
@@ -1015,8 +1342,10 @@ public final class BslStructureInsertCommentTypes
                         ? null
                         : TypeSystemUtil.computeCommentTypes(statement, typeScope, scopeProvider,
                             nameConverter, commentProvider, v8ProjectManager, oldFormat, context);
-                    if (commentTypes != null && !commentTypes.isEmpty())
-                        fillProperty(invocation, key, commentTypes);
+                    List<String> lines = sideCommentLines(statement);
+                    String description = sideCommentDescription(lines);
+                    // Описание без типа (// - …) тоже должно дойти до свойства.
+                    fillProperty(invocation, key, commentTypes == null ? List.of() : commentTypes, description);
                 }
                 catch (Throwable ignored)
                 {

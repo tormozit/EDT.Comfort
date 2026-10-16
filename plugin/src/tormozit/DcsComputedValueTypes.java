@@ -32,6 +32,7 @@ import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 
+
 import com._1c.g5.v8.bm.core.event.BmChangeEvent;
 import com._1c.g5.v8.bm.core.event.BmEvent;
 import com._1c.g5.v8.bm.integration.IBmModel;
@@ -125,7 +126,8 @@ final class DcsComputedValueTypes
     /** Ключ — {@link #pathKey} пути данных поля, значение — представление типа. */
     private volatile Map<String, TypePresentation> types = Map.of();
 
-    private record TypePresentation(String text, String category, boolean composite)
+    private record TypePresentation(String text, String referenceText, TypeDescription description,
+        String category, boolean composite)
     {
         Image image()
         {
@@ -250,7 +252,28 @@ final class DcsComputedValueTypes
         if (!(current instanceof CellLabelProvider delegate) || current instanceof HintLabelProvider)
             return;
         viewerColumn.setLabelProvider(new HintLabelProvider(delegate, this, viewer.getControl()));
+        ValueTypeColumnMenu.install(viewer.getControl(), columnIndex, this::cellTypeDescription,
+            element -> element instanceof EObject object ? object : null);
         viewers.add(viewer);
+    }
+
+    /** Описание типа для общего меню; вычисленный тип берётся из кэша этой схемы. */
+    private TypeDescription cellTypeDescription(Object element)
+    {
+        TypeDescription type = HintLabelProvider.valueType(element);
+        Global.tempLog("dcs-type-menu", "cell element=" //$NON-NLS-1$ //$NON-NLS-2$
+            + (element != null ? element.getClass().getName() : null)
+            + " explicitTypes=" + (type != null ? type.getTypes().size() : 0)); //$NON-NLS-1$
+        if (type != null && !type.getTypes().isEmpty())
+            return type;
+        // У полей набора «Объект» вычисленный тип не показывается.
+        if (element instanceof DataCompositionSchemaDataSetField field
+            && field.eContainer() instanceof DataCompositionSchemaDataSetObject)
+            return null;
+        String dataPath = element instanceof DataCompositionSchemaDataSetField field ? field.getDataPath()
+            : element instanceof DataCompositionSchemaCalculatedField field ? field.getDataPath() : null;
+        TypePresentation hint = dataPath != null ? types.get(pathKey(dataPath)) : null;
+        return hint != null ? hint.description() : null;
     }
 
     private void hookBmChanges()
@@ -368,14 +391,19 @@ final class DcsComputedValueTypes
                 for (String path : paths)
                 {
                     DcsAvailableFieldInfo info = infos.get(pathKey(path));
-                    String text = typeText(info, alias);
+                    String text = typeText(info, alias, true);
                     if (text != null)
                     {
                         List<TypeItem> items = info.valueType.getTypes();
                         boolean composite = items.size() > 1;
                         String category = !composite && !items.isEmpty()
                             ? McoreUtil.getTypeCategory(items.get(0)) : null;
-                        result.put(pathKey(path), new TypePresentation(text, category, composite));
+                        String references = typeText(info, alias, false);
+                        result.put(pathKey(path), new TypePresentation(text, references,
+                            org.eclipse.emf.ecore.util.EcoreUtil.copy(info.valueType.toTypeDescription()),
+                            category, composite));
+                        Global.tempLog("dcs-type-menu", "computed path=" + path //$NON-NLS-1$ //$NON-NLS-2$
+                            + " text=" + text + " references=" + references); //$NON-NLS-1$ //$NON-NLS-2$
                     }
                 }
             }
@@ -480,8 +508,8 @@ final class DcsComputedValueTypes
         return infos;
     }
 
-    /** Представление как у штатной колонки: имена типов через запятую, без квалификаторов. */
-    private static String typeText(DcsAvailableFieldInfo info, int alias)
+    /** Короткие имена для колонки либо полные имена типов для навигации. */
+    private static String typeText(DcsAvailableFieldInfo info, int alias, boolean shortNames)
     {
         if (info == null || info.isFolder)
             return null;
@@ -494,7 +522,7 @@ final class DcsComputedValueTypes
             String name = alias == 0 ? McoreUtil.getTypeName(type) : McoreUtil.getTypeNameRu(type);
             if (name == null || name.isEmpty())
                 continue;
-            if (valueType.getTypes().size() == 1)
+            if (shortNames && valueType.getTypes().size() == 1)
             {
                 String shortName = ValueTypeColumnLabelProvider.singleReferenceName(name);
                 if (shortName != null)
