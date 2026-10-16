@@ -724,6 +724,10 @@ public final class BslStructureInsertCommentTypes
         @Override
         public Object getHoverInfo(EObject object, ITextViewer viewer, IRegion region)
         {
+            // Provider в ConfigurableCompletionProposal может вернуть EObject только
+            // здесь; проверка нужна и после него, до фонового построителя EDT.
+            if (!SmartCompletionProposal.isEdtDocumentationObjectReady(object))
+                return null;
             Object info = delegate.getHoverInfo(object, viewer, region);
             // У свойства ConfigurableCompletionProposal.viewer == null: EDT задаёт его
             // только в setSimpleLinkedMode. Контекст берём из расчёта списка.

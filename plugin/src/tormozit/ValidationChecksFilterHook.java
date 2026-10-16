@@ -1601,7 +1601,7 @@ public final class ValidationChecksFilterHook implements IStartup
             @Override public String getDescription()
             {
                 return "<h3>" + escape(text) + "</h3>" //$NON-NLS-1$ //$NON-NLS-2$
-                    + "<p>Внутренняя диагностика анализатора BSL в EDT.</p>"; //$NON-NLS-1$
+                    + "<p>Внутренние неотключаемые проверки анализатора встроенного языка (BSL) в EDT.</p>"; //$NON-NLS-1$
             }
             private static String escape(String text)
             {

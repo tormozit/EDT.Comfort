@@ -22,6 +22,7 @@ import org.eclipse.core.runtime.Status;
 import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.emf.common.util.EList;
 import org.eclipse.emf.ecore.EObject;
+import org.eclipse.emf.ecore.InternalEObject;
 import org.eclipse.emf.ecore.util.EcoreUtil;
 import org.eclipse.jface.text.AbstractDocument;
 import org.eclipse.jface.text.DocumentEvent;
@@ -2627,7 +2628,11 @@ return;
         ICompletionProposal[] result = EMPTY;
         try
         {
+            long stageStarted = System.nanoTime();
+            Global.tempLog("assist-compute-stages", "impl.begin");
             result = computeCompletionProposalsImpl(viewer, offset);
+            Global.tempLog("assist-compute-stages", "impl.end ms="
+                + ((System.nanoTime() - stageStarted) / 1_000_000L));
             // В комментарии пустой список — это просто «нет подходящих типов»: ни ИР,
             // ни ожидания фонового списка членов (точка в тексте комментария — не
             // member-access, ждать там нечего, а ожидание держит UI до 1,5 с).
@@ -2641,8 +2646,14 @@ return;
             }
             result = synthesizeBareConstructorProposals(result,
                 viewer != null ? viewer.getDocument() : null, offset);
+            stageStarted = System.nanoTime();
             result = queryParametersOnly(viewer, offset, result);
+            Global.tempLog("assist-compute-stages", "query.end ms="
+                + ((System.nanoTime() - stageStarted) / 1_000_000L));
+            stageStarted = System.nanoTime();
             result = NaparnikAssistRow.withRow(result);
+            Global.tempLog("assist-compute-stages", "naparnik.end ms="
+                + ((System.nanoTime() - stageStarted) / 1_000_000L));
             return result;
         }
         finally
@@ -3251,6 +3262,10 @@ return;
     /** Идёт ли фоновый расчёт списка: ворота показа держат таймер, пока он не кончился. */
     boolean isAssistBackgroundInFlight()
     {
+        if (BareConstructorWarmup.inFlight())
+            return true;
+        if (cacheOnlyRefetchJob != null && cacheOnlyRefetchJob.getState() != Job.NONE)
+            return true;
         if (pendingPublishKey != Integer.MIN_VALUE)
             return true;
         if (wordListBackgroundJob != null && wordListBackgroundJob.getState() != Job.NONE)
@@ -3370,6 +3385,8 @@ return;
 
     void abortWordListBackground(String why)
     {
+        if (cacheOnlyRefetchJob != null)
+            cacheOnlyRefetchJob.cancel();
         boolean hadJob = wordListBackgroundJob != null;
         boolean hadPending = pendingPublishKey != Integer.MIN_VALUE;
         pendingPublishKey = Integer.MIN_VALUE;
@@ -3393,6 +3410,8 @@ return;
      */
     void releaseWordListOpenGuard(String why)
     {
+        if (cacheOnlyRefetchJob != null)
+            cacheOnlyRefetchJob.cancel();
         wordListEpoch++;
         wordListOpenedKey = Integer.MIN_VALUE;
         wordListFailedKey = Integer.MIN_VALUE;
@@ -3805,30 +3824,142 @@ return;
     }
 
     private int cacheOnlyRefetchCaret = -1;
-    private String cacheOnlyRefetchFilter = ""; //$NON-NLS-1$
+    private IDocument cacheOnlyRefetchDoc;
+    private long cacheOnlyRefetchStamp;
+    private int cacheOnlyRefetchGen = -1;
+    private int cacheOnlyRefetchEpoch = -1;
+    private Job cacheOnlyRefetchJob;
 
     /**
-     * Разрешает разовый доспрос EDT с UI, когда фоновый список под набранный префикс не
-     * дал ничего.
-     *
-     * <p>Фоновый расчёт иногда возвращает урезанный список: замер 12.09.2026 15:12 — на
-     * одном и том же тексте и смещении шесть фоновых расчётов подряд дали 34 пункта (без
-     * {@code Сообщить}), а расчёт с UI в той же точке — 1783. Урезанный список под «сооб»
-     * не дал ни одного совпадения, и окно не открывалось вовсе. Спросить EDT так, как это
-     * делает CTRL+Space, дешевле (замер: 54 мс), чем показать пользователю пустоту.
-     *
-     * <p>Ровно один доспрос на пару «каретка + префикс»: JFace дёргает расчёт дважды на
-     * один символ (открытие и фильтрация), а каждая новая буква — уже другой префикс.
+     * Пустой результат фильтрации не означает, что в EDT нет предложений: фоновая
+     * база бывает неполной. Досчитываем у текущей каретки в изоляции DataEvent.
+     * Даже при опечатке UI только ставит задание, а не ждёт блокировок модели.
      */
-    private boolean beginCacheOnlyUiRefetch(int caret, String filter)
+    private void scheduleCacheOnlyRefetch(ITextViewer viewer, IDocument doc, int caret,
+        String filter)
     {
-        if (org.eclipse.swt.widgets.Display.getCurrent() == null)
-            return false;
-        if (cacheOnlyRefetchCaret == caret && cacheOnlyRefetchFilter.equals(filter))
-            return false;
+        if (viewer == null || !(doc instanceof IDocumentExtension4 ext4)
+            || viewer.getTextWidget() == null || viewer.getTextWidget().isDisposed())
+            return;
+        long stamp = ext4.getModificationStamp();
+        if (cacheOnlyRefetchDoc == doc && cacheOnlyRefetchStamp == stamp
+            && cacheOnlyRefetchCaret == caret && cacheOnlyRefetchGen == memberStockContextGen
+            && cacheOnlyRefetchEpoch == wordListEpoch)
+            return;
+        warmBslDocumentListener(viewer);
+        if (!BslDataEventGuard.install(doc))
+        {
+            Global.tempLog("assist-cache-refetch", "skip noGuard caret=" + caret);
+            return;
+        }
+        if (cacheOnlyRefetchJob != null)
+            cacheOnlyRefetchJob.cancel();
+        cacheOnlyRefetchDoc = doc;
+        cacheOnlyRefetchStamp = stamp;
         cacheOnlyRefetchCaret = caret;
-        cacheOnlyRefetchFilter = filter;
-        return true;
+        cacheOnlyRefetchGen = memberStockContextGen;
+        cacheOnlyRefetchEpoch = wordListEpoch;
+        final int gen = memberStockContextGen;
+        final int epoch = wordListEpoch;
+        final int key = fullListContextKey;
+        ContentAssistSessionReloader.armShowGate(viewer);
+        Job job = new Job("SCAP cache refetch") //$NON-NLS-1$
+        {
+            private boolean stale(IProgressMonitor monitor)
+            {
+                return monitor.isCanceled() || gen != memberStockContextGen
+                    || epoch != wordListEpoch || viewer.getDocument() != doc
+                    || ext4.getModificationStamp() != stamp;
+            }
+
+            @Override
+            protected IStatus run(IProgressMonitor monitor)
+            {
+                long started = System.nanoTime();
+                Global.tempLog("assist-cache-refetch", "begin caret=" + caret
+                    + " filter=" + filter + " stamp=" + stamp);
+                BslXtextDocumentHook.markAssistBackground(true);
+                DELEGATE_STALE_CHECK.set(() -> stale(monitor));
+                try
+                {
+                    if (stale(monitor))
+                        return Status.CANCEL_STATUS;
+                    ICompletionProposal[] raw = BslDataEventGuard.runIsolated(
+                        () -> computeMemberStockViaSelectionProxy(viewer, caret));
+                    java.util.Map<Object, Object> events = BslDataEventGuard.drainIsolated(doc);
+                    if (stale(monitor))
+                        return Status.CANCEL_STATUS;
+                    Global.tempLog("assist-cache-refetch", "ready caret=" + caret
+                        + " filter=" + filter + " raw=" + raw.length);
+                    boolean queued = ContentAssistSessionReloader.requestGatedShow(viewer,
+                        "cacheRefetch", () -> {
+                            if (stale(monitor) || cacheOnlyRefetchJob != this
+                                || viewer.getTextWidget() == null || viewer.getTextWidget().isDisposed()
+                                || resolveWidgetCaret(viewer) != caret
+                                || computeFullListContextKey(doc, caret) != key
+                                || (fullListContextKey != Integer.MIN_VALUE && fullListContextKey != key)
+                                || !filter.equals(computeIdentifierFilter(doc, caret)))
+                            {
+                                Global.tempLog("assist-cache-refetch", "drop stale caret=" + caret);
+                                return;
+                            }
+                            ICompletionProposal[] cached = filterAndSort(mergeIrForDisplay(raw), filter);
+                            Global.tempLog("assist-cache-refetch", "publish caret=" + caret
+                                + " filter=" + filter + " raw=" + raw.length + " n=" + cached.length);
+                            if (cached.length == 0)
+                                return;
+                            BslDataEventGuard.mergeIntoReal(doc, events);
+                            // Пустое открытие сбрасывает ключ кэша; живой документ уже проверен.
+                            fullListContextKey = key;
+                            rememberRecoveredDelegateList(viewer, caret, filter, raw);
+                            ContentAssistant ca = viewer instanceof SourceViewer sv
+                                ? ContentAssistPatcher.getContentAssistant(sv) : null;
+                            if (ca != null && ContentAssistPopupSync.isPopupVisible(ca)
+                                && viewer instanceof SourceViewer sv)
+                            {
+                                ContentAssistPopupSync.recomputePopupList(ca, sv,
+                                    SmartContentAssistProcessor.this);
+                                return;
+                            }
+                            backgroundPopupList = cached;
+                            backgroundPopupFilter = filter;
+                            try
+                            {
+                                if (ReceiverTypeLabel.findMemberAccessDot(doc, caret) >= 0)
+                                    ContentAssistSessionReloader.openPopupForBackgroundMemberList(viewer);
+                                else
+                                    ContentAssistSessionReloader.openPopupForBackgroundList(viewer);
+                            }
+                            finally
+                            {
+                                backgroundPopupList = EMPTY;
+                                backgroundPopupFilter = ""; //$NON-NLS-1$
+                            }
+                        });
+                    Global.tempLog("assist-cache-refetch", "queued=" + queued + " caret=" + caret);
+                    return Status.OK_STATUS;
+                }
+                catch (Exception | LinkageError | StackOverflowError e)
+                {
+                    Global.tempLogException("assist-cache-refetch", "failed caret=" + caret, e);
+                    return Status.CANCEL_STATUS;
+                }
+                finally
+                {
+                    DELEGATE_STALE_CHECK.remove();
+                    BslXtextDocumentHook.markAssistBackground(false);
+                    Global.tempLog("assist-cache-refetch", "end caret=" + caret
+                        + " stale=" + stale(monitor)
+                        + " ms=" + ((System.nanoTime() - started) / 1_000_000L));
+                }
+            }
+        };
+        job.setSystem(true);
+        job.setPriority(Job.INTERACTIVE);
+        cacheOnlyRefetchJob = job;
+        Global.tempLog("assist-cache-refetch", "schedule caret=" + caret
+            + " filter=" + filter + " stamp=" + stamp);
+        job.schedule();
     }
 
     private ICompletionProposal[] computeCompletionProposalsImpl(ITextViewer viewer, int offset)
@@ -3902,19 +4033,8 @@ return probeDelegateOnce(viewer, offset);
                 uiBlockLog("cacheOnly.prefixFallback", "filter=" + filter //$NON-NLS-1$ //$NON-NLS-2$
                     + " n=" + cached.length); //$NON-NLS-1$
             }
-            if (cached.length == 0 && !filter.isEmpty()
-                && beginCacheOnlyUiRefetch(caret, filter))
-            {
-                ICompletionProposal[] raw =
-                    unwrapProposals(fetchDelegateList(viewer, offset, caret));
-                cached = filterAndSort(mergeIrForDisplay(raw), filter);
-                if (cached.length > 0)
-                    rememberRecoveredDelegateList(viewer, caret, filter, raw);
-                // #region agent log
-                uiBlockLog("cacheOnly.uiRefetch", "filter=" + filter //$NON-NLS-1$ //$NON-NLS-2$
-                    + " raw=" + raw.length + " n=" + cached.length); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
-            }
+            if (cached.length == 0 && !filter.isEmpty())
+                scheduleCacheOnlyRefetch(viewer, doc, caret, filter);
             return dropTypedEcho(cached, filter);
         }
         int literalCaret = resolveInvocationCaret(viewer, offset);
@@ -5140,7 +5260,7 @@ return EMPTY;
     }
 
     /**
-     * UI-допрос нашёл совпадения, которых нет в фоновой базе. Сохраняем именно его
+     * Досчёт у текущей каретки нашёл совпадения, которых нет в базе. Сохраняем его
      * результат для текущего префикса: число элементов не определяет полноту базы.
      * При удалении префикса обычная проверка fullListCachePrefix запросит широкую базу.
      */
@@ -5815,7 +5935,7 @@ return stripEmptyPlaceholderProposals(result);
      * {@code Новый Тип} без скобок валиден, если хотя бы у одного конструктора типа
      * {@code getMinParams()==0} — источник модель типов EDT, не хардкод-список (issue 558).
      * Результат кэшируется по имени типа на весь сеанс EDT: первый запрос под конкретное имя
-     * резолвит {@link Type} через scope Xtext-ресурса (read-lock), дальше — из кэша.
+     * на UI ставит фоновую проверку, дальше — из кэша. Модель на UI не читаем.
      */
     static boolean isBareConstructorTypeName(String name)
     {
@@ -5825,6 +5945,11 @@ return stripEmptyPlaceholderProposals(result);
         Boolean cached = BARE_CTOR_TYPE_CACHE.get(key);
         if (cached != null)
             return cached.booleanValue();
+        if (org.eclipse.swt.widgets.Display.getCurrent() != null)
+        {
+            BareConstructorWarmup.request(name);
+            return false;
+        }
         boolean result = computeHasZeroMinParamsConstructor(name);
         BARE_CTOR_TYPE_CACHE.put(key, Boolean.valueOf(result));
         return result;
@@ -5832,7 +5957,11 @@ return stripEmptyPlaceholderProposals(result);
 
     private static boolean computeHasZeroMinParamsConstructor(String typeName)
     {
-        Type type = CtorMinParamsInsert.resolveType(typeName);
+        return hasZeroMinParamsConstructor(CtorMinParamsInsert.resolveType(typeName));
+    }
+
+    private static boolean hasZeroMinParamsConstructor(Type type)
+    {
         if (type == null)
             return false;
         EList<Ctor> ctors = type.getCtors();
@@ -5844,6 +5973,126 @@ return stripEmptyPlaceholderProposals(result);
                 return true;
         }
         return false;
+    }
+
+    /** Одна очередь на документ: модель типов читается в фоне, UI берёт только кэш. */
+    private static final class BareConstructorWarmup extends Job
+    {
+        private static final Map<IXtextDocument, BareConstructorWarmup> JOBS = new IdentityHashMap<>();
+        private final IXtextDocument document;
+        private final SourceViewer viewer;
+        private final Map<String, String> pending = new LinkedHashMap<>();
+
+        private BareConstructorWarmup(IXtextDocument document, SourceViewer viewer)
+        {
+            super("SCAP bare constructors"); //$NON-NLS-1$
+            this.document = document;
+            this.viewer = viewer;
+            setSystem(true);
+            setPriority(Job.INTERACTIVE);
+        }
+
+        static void request(String name)
+        {
+            SourceViewer viewer = ContentAssistSessionReloader.getActiveViewer();
+            if (viewer == null || !(viewer.getDocument() instanceof IXtextDocument document))
+                return;
+            String key = name.toLowerCase(java.util.Locale.ROOT);
+            synchronized (JOBS)
+            {
+                BareConstructorWarmup job = JOBS.get(document);
+                boolean fresh = job == null;
+                if (fresh)
+                {
+                    job = new BareConstructorWarmup(document, viewer);
+                    JOBS.put(document, job);
+                }
+                job.pending.putIfAbsent(key, name);
+                if (fresh)
+                {
+                    ContentAssistSessionReloader.armShowGate(viewer);
+                    job.schedule();
+                }
+            }
+            Global.tempLog("assist-bare-constructors", "request type=" + name);
+        }
+
+        static boolean inFlight()
+        {
+            synchronized (JOBS)
+            {
+                return !JOBS.isEmpty();
+            }
+        }
+
+        @Override
+        protected IStatus run(IProgressMonitor monitor)
+        {
+            long started = System.nanoTime();
+            Global.tempLog("assist-bare-constructors", "begin");
+            try
+            {
+                while (!monitor.isCanceled())
+                {
+                    Map<String, String> batch;
+                    synchronized (JOBS)
+                    {
+                        if (pending.isEmpty())
+                        {
+                            if (JOBS.get(document) == this)
+                                JOBS.remove(document);
+                            break;
+                        }
+                        batch = new LinkedHashMap<>(pending);
+                        pending.clear();
+                    }
+                    Map<String, Boolean> resolved = document.readOnly(resource -> {
+                        Map<String, Boolean> values = new HashMap<>();
+                        for (Map.Entry<String, String> entry : batch.entrySet())
+                        {
+                            if (monitor.isCanceled())
+                                break;
+                            Type type = CtorMinParamsInsert.resolveTypeInResource(resource, entry.getValue());
+                            values.put(entry.getKey(), Boolean.valueOf(hasZeroMinParamsConstructor(type)));
+                        }
+                        return values;
+                    });
+                    if (resolved != null)
+                        BARE_CTOR_TYPE_CACHE.putAll(resolved);
+                    Global.tempLog("assist-bare-constructors", "batch requested=" + batch.size()
+                        + " resolved=" + (resolved == null ? 0 : resolved.size()));
+                }
+                ContentAssistSessionReloader.requestGatedShow(viewer, "bareConstructors", () -> {
+                    if (viewer.getDocument() != document
+                        || ContentAssistSessionReloader.getActiveViewer() != viewer)
+                        return;
+                    ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
+                    SmartContentAssistProcessor processor = ContentAssistSessionReloader.getActiveProcessor();
+                    if (assistant != null && processor != null
+                        && ContentAssistPopupSync.isPopupVisible(assistant))
+                    {
+                        ContentAssistPopupSync.invalidateSyncSnapshot();
+                        ContentAssistPopupSync.recomputePopupList(assistant, viewer, processor);
+                    }
+                });
+                return Status.OK_STATUS;
+            }
+            catch (Exception | LinkageError | StackOverflowError e)
+            {
+                Global.tempLogException("assist-bare-constructors", "failed", e);
+                return Status.CANCEL_STATUS;
+            }
+            finally
+            {
+                synchronized (JOBS)
+                {
+                    if (JOBS.get(document) == this)
+                        JOBS.remove(document);
+                }
+                Global.tempLog("assist-bare-constructors", "end ms="
+                    + ((System.nanoTime() - started) / 1_000_000L));
+            }
+        }
     }
 
     /**
@@ -5948,75 +6197,87 @@ return stripEmptyPlaceholderProposals(result);
     private static ICompletionProposal[] synthesizeBareConstructorProposals(
         ICompletionProposal[] list, IDocument doc, int caret)
     {
-        if (list == null || list.length == 0 || doc == null || !isAfterNewKeyword(doc, caret))
-            return list;
-        Set<String> bareKeysPresent = new HashSet<>();
-        Map<String, ICompletionProposal> zeroArgByKey = new LinkedHashMap<>();
-        Map<String, ICompletionProposal> firstByKey = new LinkedHashMap<>();
-        for (ICompletionProposal p : list)
+        long started = System.nanoTime();
+        Global.tempLog("assist-bare-constructors", "synthesize.begin n="
+            + (list == null ? 0 : list.length) + " ui="
+            + (org.eclipse.swt.widgets.Display.getCurrent() != null));
+        try
         {
-            String key = dedupKey(p);
-            if (key.isEmpty())
-                continue;
-            String lower = key.toLowerCase(java.util.Locale.ROOT);
-            firstByKey.putIfAbsent(lower, p);
-            if (isEffectivelyBare(p))
-                bareKeysPresent.add(lower);
-            else if (isEffectivelyZeroArgWithParens(p) && !zeroArgByKey.containsKey(lower))
-                zeroArgByKey.put(lower, p);
+            if (list == null || list.length == 0 || doc == null || !isAfterNewKeyword(doc, caret))
+                return list;
+            Set<String> bareKeysPresent = new HashSet<>();
+            Map<String, ICompletionProposal> zeroArgByKey = new LinkedHashMap<>();
+            Map<String, ICompletionProposal> firstByKey = new LinkedHashMap<>();
+            for (ICompletionProposal p : list)
+            {
+                String key = dedupKey(p);
+                if (key.isEmpty())
+                    continue;
+                String lower = key.toLowerCase(java.util.Locale.ROOT);
+                firstByKey.putIfAbsent(lower, p);
+                if (isEffectivelyBare(p))
+                    bareKeysPresent.add(lower);
+                else if (isEffectivelyZeroArgWithParens(p) && !zeroArgByKey.containsKey(lower))
+                    zeroArgByKey.put(lower, p);
+            }
+            Map<String, ICompletionProposal> toInsert = new LinkedHashMap<>();
+            for (Map.Entry<String, ICompletionProposal> e : zeroArgByKey.entrySet())
+            {
+                if (bareKeysPresent.contains(e.getKey()))
+                    continue; // бесскобочный уже есть (обычно от ИР) — preferBareOverEmptyParens уберёт "()"
+                ICompletionProposal raw = unwrapProposal(e.getValue());
+                String typeName = parseProposalListName(displayString(raw));
+                if (typeName.isEmpty())
+                    continue;
+                // +1 — чтобы при равном имени сортировщик (SmartCodeProposalSorter →
+                // compareProposals → resolveNativePriority) ставил бесскобочный НАД перегрузками
+                // своей же группы, а не наравне/ниже (issue 558: без этого тонет в общем списке,
+                // т.к. у синтезированного predlozhenия нет "родного" приоритета EDT).
+                toInsert.put(e.getKey(),
+                    new BareConstructorProposal(typeName, raw.getImage(), resolveNativePriority(raw) + 1, raw));
+            }
+            // Структура/Массив/Запрос и подобные: EDT не выдаёт отдельную перегрузку "Тип()" — все
+            // параметры опциональные, EDT показывает одну перегрузку "Тип(Ключи, Значения)" без
+            // нулевой (issue 558: залогировано — "Структура()" не приходит никогда). Синтезировать
+            // не из чего напрямую — спрашиваем модель типов EDT (isBareConstructorTypeName).
+            for (Map.Entry<String, ICompletionProposal> e : firstByKey.entrySet())
+            {
+                String key = e.getKey();
+                if (toInsert.containsKey(key) || bareKeysPresent.contains(key))
+                    continue;
+                ICompletionProposal raw = unwrapProposal(e.getValue());
+                String typeName = parseProposalListName(displayString(raw));
+                // Оригинальный регистр — точнее для QualifiedName-поиска в isBareConstructorTypeName
+                // (кэш промахнётся один раз мимо, дальше по-любому из кэша).
+                if (typeName.isEmpty() || !isBareConstructorTypeName(typeName))
+                    continue;
+                toInsert.put(key,
+                    new BareConstructorProposal(typeName, raw.getImage(), resolveNativePriority(raw) + 1, raw));
+            }
+            if (toInsert.isEmpty())
+                return list;
+            // Бесскобочный вариант — самый частый выбор (issue 156), вставляем ПЕРЕД первым
+            // предложением своей группы, а не в конец всего списка (issue 558: иначе тонет внизу
+            // среди совсем других типов).
+            List<ICompletionProposal> merged = new ArrayList<>(list.length + toInsert.size());
+            Set<String> insertedKeys = new HashSet<>();
+            for (ICompletionProposal p : list)
+            {
+                String lower = dedupKey(p).toLowerCase(java.util.Locale.ROOT);
+                ICompletionProposal bare = !lower.isEmpty() && insertedKeys.add(lower)
+                    ? toInsert.get(lower) : null;
+                if (bare != null)
+                    merged.add(bare);
+                merged.add(p);
+            }
+            List<ICompletionProposal> deduped = preferBareOverEmptyParens(merged);
+            return deduped.toArray(new ICompletionProposal[deduped.size()]);
         }
-        Map<String, ICompletionProposal> toInsert = new LinkedHashMap<>();
-        for (Map.Entry<String, ICompletionProposal> e : zeroArgByKey.entrySet())
+        finally
         {
-            if (bareKeysPresent.contains(e.getKey()))
-                continue; // бесскобочный уже есть (обычно от ИР) — preferBareOverEmptyParens уберёт "()"
-            ICompletionProposal raw = unwrapProposal(e.getValue());
-            String typeName = parseProposalListName(displayString(raw));
-            if (typeName.isEmpty())
-                continue;
-            // +1 — чтобы при равном имени сортировщик (SmartCodeProposalSorter →
-            // compareProposals → resolveNativePriority) ставил бесскобочный НАД перегрузками
-            // своей же группы, а не наравне/ниже (issue 558: без этого тонет в общем списке,
-            // т.к. у синтезированного predlozhenия нет "родного" приоритета EDT).
-            toInsert.put(e.getKey(),
-                new BareConstructorProposal(typeName, raw.getImage(), resolveNativePriority(raw) + 1, raw));
+            Global.tempLog("assist-bare-constructors", "synthesize.end ms="
+                + ((System.nanoTime() - started) / 1_000_000L));
         }
-        // Структура/Массив/Запрос и подобные: EDT не выдаёт отдельную перегрузку "Тип()" — все
-        // параметры опциональные, EDT показывает одну перегрузку "Тип(Ключи, Значения)" без
-        // нулевой (issue 558: залогировано — "Структура()" не приходит никогда). Синтезировать
-        // не из чего напрямую — спрашиваем модель типов EDT (isBareConstructorTypeName).
-        for (Map.Entry<String, ICompletionProposal> e : firstByKey.entrySet())
-        {
-            String key = e.getKey();
-            if (toInsert.containsKey(key) || bareKeysPresent.contains(key))
-                continue;
-            ICompletionProposal raw = unwrapProposal(e.getValue());
-            String typeName = parseProposalListName(displayString(raw));
-            // Оригинальный регистр — точнее для QualifiedName-поиска в isBareConstructorTypeName
-            // (кэш промахнётся один раз мимо, дальше по-любому из кэша).
-            if (typeName.isEmpty() || !isBareConstructorTypeName(typeName))
-                continue;
-            toInsert.put(key,
-                new BareConstructorProposal(typeName, raw.getImage(), resolveNativePriority(raw) + 1, raw));
-        }
-        if (toInsert.isEmpty())
-            return list;
-        // Бесскобочный вариант — самый частый выбор (issue 156), вставляем ПЕРЕД первым
-        // предложением своей группы, а не в конец всего списка (issue 558: иначе тонет внизу
-        // среди совсем других типов).
-        List<ICompletionProposal> merged = new ArrayList<>(list.length + toInsert.size());
-        Set<String> insertedKeys = new HashSet<>();
-        for (ICompletionProposal p : list)
-        {
-            String lower = dedupKey(p).toLowerCase(java.util.Locale.ROOT);
-            ICompletionProposal bare = !lower.isEmpty() && insertedKeys.add(lower)
-                ? toInsert.get(lower) : null;
-            if (bare != null)
-                merged.add(bare);
-            merged.add(p);
-        }
-        List<ICompletionProposal> deduped = preferBareOverEmptyParens(merged);
-        return deduped.toArray(new ICompletionProposal[deduped.size()]);
     }
 
     /**
@@ -6053,23 +6314,8 @@ return stripEmptyPlaceholderProposals(result);
         @Override
         public Object getAdditionalProposalInfo(IProgressMonitor monitor)
         {
-            if (source == null)
-                return null;
-            // Как SmartCompletionProposal.readDelegateEdtAdditionalInfo: штатный hover EDT
-            // для EObject без ресурса иногда падает — не подавляем заранее, ловим локально.
-            if (source instanceof org.eclipse.jface.text.contentassist.ICompletionProposalExtension5 ext5)
-            {
-                try
-                {
-                    return ext5.getAdditionalProposalInfo(
-                        monitor != null ? monitor : new org.eclipse.core.runtime.NullProgressMonitor());
-                }
-                catch (RuntimeException e)
-                {
-                    return null;
-                }
-            }
-            return source.getAdditionalProposalInfo();
+            return source == null ? null
+                : SmartCompletionProposal.readDelegateEdtAdditionalInfo(source, monitor);
         }
 
         /**
@@ -10375,30 +10621,57 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
 
     private static void dropTypedIdentifierGhostInPlace(List<ICompletionProposal> list)
     {
-        if (list == null || list.isEmpty())
-            return;
-        IDocument doc = GHOST_DOC.get();
-        Integer ghostCaret = GHOST_CARET.get();
-        int caret;
-        if (doc != null && ghostCaret != null)
-            caret = ghostCaret.intValue();
-        else
-        {
-            ISourceViewer viewer = ContentAssistSessionReloader.getActiveViewer();
-            doc = viewer != null ? viewer.getDocument() : null;
-            caret = resolveWidgetCaret(viewer);
-        }
-        String typed = identifierAtCaret(doc, caret);
-        if (typed.isEmpty())
-            return;
+        long started = System.nanoTime();
+        int before = list == null ? 0 : list.size();
+        Global.tempLog("assist-ghost-filter", "begin n=" + before
+            + " ui=" + (org.eclipse.swt.widgets.Display.getCurrent() != null));
         try
         {
+            if (list == null || list.isEmpty())
+                return;
+            IDocument doc = GHOST_DOC.get();
+            Integer ghostCaret = GHOST_CARET.get();
+            int caret;
+            if (doc != null && ghostCaret != null)
+                caret = ghostCaret.intValue();
+            else
+            {
+                ISourceViewer viewer = ContentAssistSessionReloader.getActiveViewer();
+                doc = viewer != null ? viewer.getDocument() : null;
+                caret = resolveWidgetCaret(viewer);
+            }
+            String typed = identifierAtCaret(doc, caret);
+            if (typed.isEmpty())
+                return;
+            // Без точного совпадения удалять нечего: AST и ленивые ссылки не нужны.
+            boolean hasCandidate = false;
+            for (ICompletionProposal proposal : list)
+            {
+                ICompletionProposal raw = unwrapProposal(proposal);
+                if (raw != null && typed.equals(filterMatchName(raw))
+                    && isNoOpReplacement(raw, typed))
+                {
+                    hasCandidate = true;
+                    break;
+                }
+            }
+            Global.tempLog("assist-ghost-filter", "candidate=" + hasCandidate
+                + " caret=" + caret + " typed=" + typed);
+            if (!hasCandidate)
+                return;
             ImplicitVariable phantom = phantomImplicitAtCaret(list, doc, caret, typed);
             list.removeIf(p -> isTypedIdentifierGhost(p, typed, caret, phantom));
         }
         catch (StackOverflowError t)
         {
             uiBlockLogThrowable("ghost.drop.soe", t); //$NON-NLS-1$
+            Global.tempLogException("assist-ghost-filter", "drop failed n=" + before, t);
+        }
+        finally
+        {
+            Global.tempLog("assist-ghost-filter", "end before=" + before
+                + " after=" + (list == null ? 0 : list.size())
+                + " ms=" + ((System.nanoTime() - started) / 1_000_000L));
         }
     }
 
@@ -10438,6 +10711,8 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         if (!(raw instanceof ConfigurableCompletionProposal))
             return null;
         Object additional = Global.getField(raw, "additionalProposalInfo"); //$NON-NLS-1$
+        if (additional instanceof EObject object && object.eIsProxy())
+            return null;
         if (additional instanceof ImplicitVariable variable)
             return variable;
         if (additional instanceof StaticFeatureAccess access)
@@ -10483,9 +10758,12 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
             EObject obj = helper.resolveContainedElementAt(resource, caret);
             if (obj == null && caret > 0)
                 obj = helper.resolveContainedElementAt(resource, caret - 1);
-            StaticFeatureAccess access =
-                EcoreUtil2.getContainerOfType(obj, StaticFeatureAccess.class);
-            if (access == null)
+            Set<EObject> seen = Collections.newSetFromMap(new IdentityHashMap<>());
+            while (obj != null && !obj.eIsProxy() && !(obj instanceof StaticFeatureAccess)
+                && seen.add(obj))
+                obj = ghostBasicContainer(obj);
+            if (!(obj instanceof StaticFeatureAccess access) || access.eIsProxy()
+                || ghostBasicContainer(access) == null)
                 return null;
             ImplicitVariable variable = access.getImplicitVariable();
             if (variable == null || !typed.equals(variable.getName()))
@@ -10512,9 +10790,14 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
             if (!(raw instanceof ConfigurableCompletionProposal))
                 continue;
             Object additional = Global.getField(raw, "additionalProposalInfo"); //$NON-NLS-1$
-            if (additional instanceof EObject object
-                && object.eResource() instanceof XtextResource resource)
-                return resource;
+            InternalEObject object = additional instanceof InternalEObject e ? e : null;
+            Set<InternalEObject> seen = Collections.newSetFromMap(new IdentityHashMap<>());
+            while (object != null && !object.eIsProxy() && seen.add(object))
+            {
+                if (object.eDirectResource() instanceof XtextResource resource)
+                    return resource;
+                object = ghostBasicContainer(object);
+            }
         }
         return null;
     }
@@ -10526,14 +10809,27 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
      */
     private static StaticFeatureAccess uniqueAccessAtCaret(ImplicitVariable variable, int caret)
     {
-        if (variable == null)
+        if (variable == null || variable.eIsProxy())
             return null;
-        EObject container = variable.eContainer();
-        if (!(container instanceof StaticFeatureAccess access))
+        EObject container = ghostBasicContainer(variable);
+        if (!(container instanceof StaticFeatureAccess access)
+            || ghostBasicContainer(access) == null)
             return null;
         if (!nodeCoversCaret(access, caret))
             return null;
         return access;
+    }
+
+    /**
+     * Только уже загруженный родитель. eContainer() резолвит proxy родителя и может
+     * повторно войти в installProxiesForBlock (ghost.drop.soe на большом модуле).
+     */
+    private static InternalEObject ghostBasicContainer(EObject object)
+    {
+        if (!(object instanceof InternalEObject internal) || object.eIsProxy())
+            return null;
+        InternalEObject parent = internal.eInternalContainer();
+        return parent == null || parent.eIsProxy() ? null : parent;
     }
 
     private static boolean nodeCoversCaret(EObject object, int caret)
@@ -12259,38 +12555,7 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
                     @Override
                     public Type exec(XtextResource resource) throws Exception
                     {
-                        if (resource == null || resource.getContents().isEmpty())
-                            return null;
-                        IScopeProvider scopes = resource.getResourceServiceProvider()
-                            .get(IScopeProvider.class);
-                        if (scopes == null)
-                            return null;
-                        EObject model = resource.getContents().get(0);
-                        IScope scope = scopes.getScope(model,
-                            McorePackage.Literals.TYPE_DESCRIPTION__TYPES);
-                        if (scope == null)
-                            return null;
-                        IEObjectDescription desc = scope.getSingleElement(
-                            QualifiedName.create(typeName));
-                        if (desc == null)
-                        {
-                            for (IEObjectDescription d : scope.getAllElements())
-                            {
-                                if (d == null || d.getName() == null)
-                                    continue;
-                                if (typeName.equalsIgnoreCase(d.getName().toString()))
-                                {
-                                    desc = d;
-                                    break;
-                                }
-                            }
-                        }
-                        if (desc == null)
-                            return null;
-                        EObject obj = desc.getEObjectOrProxy();
-                        if (obj != null && obj.eIsProxy())
-                            obj = EcoreUtil.resolve(obj, resource);
-                        return obj instanceof Type t ? t : null;
+                        return resolveTypeInResource(resource, typeName);
                     }
                 });
             }
@@ -12298,6 +12563,42 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
             {
                 return null;
             }
+        }
+
+        private static Type resolveTypeInResource(XtextResource resource, String typeName)
+        {
+            if (resource == null || resource.getContents().isEmpty())
+                return null;
+            IScopeProvider scopes = resource.getResourceServiceProvider()
+                .get(IScopeProvider.class);
+            if (scopes == null)
+                return null;
+            EObject model = resource.getContents().get(0);
+            IScope scope = scopes.getScope(model,
+                McorePackage.Literals.TYPE_DESCRIPTION__TYPES);
+            if (scope == null)
+                return null;
+            IEObjectDescription desc = scope.getSingleElement(
+                QualifiedName.create(typeName));
+            if (desc == null)
+            {
+                for (IEObjectDescription d : scope.getAllElements())
+                {
+                    if (d == null || d.getName() == null)
+                        continue;
+                    if (typeName.equalsIgnoreCase(d.getName().toString()))
+                    {
+                        desc = d;
+                        break;
+                    }
+                }
+            }
+            if (desc == null)
+                return null;
+            EObject obj = desc.getEObjectOrProxy();
+            if (obj != null && obj.eIsProxy())
+                obj = EcoreUtil.resolve(obj, resource);
+            return obj instanceof Type t ? t : null;
         }
 
         private static Object newDataEvent(IDocumentListener listener, Class<?> eventClass,

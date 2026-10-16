@@ -17,7 +17,7 @@ public final class CodeEditorPreferencePage extends ComfortPreferencePage
         Composite parent = getFieldEditorParent();
         BooleanFieldEditor autoOpenField = new BooleanFieldEditor(
             ContentAssistSettings.PREF_ENABLED,
-            "Автооткрытие подсказок при вводе",
+            ComfortVisibleSettings.label(ContentAssistSettings.PREF_ENABLED),
             parent);
         addField(autoOpenField);
         setFieldTooltip(autoOpenField,
@@ -26,7 +26,7 @@ public final class CodeEditorPreferencePage extends ComfortPreferencePage
 
         IntegerFieldEditor timeoutField = new IntegerFieldEditor(
             ContentAssistSettings.PREF_TIMEOUT,
-            "Автооткрытие: Задержка (мс)",
+            ComfortVisibleSettings.label(ContentAssistSettings.PREF_TIMEOUT),
             parent,
             5);
         timeoutField.setValidRange(0, 10_000);
@@ -44,7 +44,7 @@ public final class CodeEditorPreferencePage extends ComfortPreferencePage
 
         BooleanFieldEditor naparnikRowField = new BooleanFieldEditor(
             ComfortSettings.PREF_NAPARNIK_ASSIST_ROW_ENABLED,
-            "Предложение Напарника наверху списка автодополнения", //$NON-NLS-1$
+            ComfortVisibleSettings.label(ComfortSettings.PREF_NAPARNIK_ASSIST_ROW_ENABLED),
             parent);
         addField(naparnikRowField);
         setFieldTooltip(naparnikRowField,
@@ -59,7 +59,7 @@ public final class CodeEditorPreferencePage extends ComfortPreferencePage
 
         BooleanFieldEditor serverCallField = new BooleanFieldEditor(
             ComfortSettings.PREF_SERVER_CALL_HIGHLIGHTING_ENABLED,
-            "Подсвечивать серверные вызовы", //$NON-NLS-1$
+            ComfortVisibleSettings.label(ComfortSettings.PREF_SERVER_CALL_HIGHLIGHTING_ENABLED),
             parent);
         addField(serverCallField);
         setFieldTooltip(serverCallField,
@@ -68,7 +68,7 @@ public final class CodeEditorPreferencePage extends ComfortPreferencePage
 
         ThemeAwareColorFieldEditor serverCallColorField = new ThemeAwareColorFieldEditor(
             ComfortSettings.PREF_SERVER_CALL_HIGHLIGHTING_COLOR,
-            "Цвет серверных вызовов:", //$NON-NLS-1$
+            ComfortVisibleSettings.label(ComfortSettings.PREF_SERVER_CALL_HIGHLIGHTING_COLOR),
             parent);
         addField(serverCallColorField);
         setFieldTooltip(serverCallColorField, SERVER_CALL_COLOR_TOOLTIP, parent);
@@ -76,7 +76,7 @@ public final class CodeEditorPreferencePage extends ComfortPreferencePage
 
         ThemeAwareColorFieldEditor serverCallContextColorField = new ThemeAwareColorFieldEditor(
             ComfortSettings.PREF_SERVER_CALL_CONTEXT_HIGHLIGHTING_COLOR,
-            "Цвет серверных вызовов с контекстом:", //$NON-NLS-1$
+            ComfortVisibleSettings.label(ComfortSettings.PREF_SERVER_CALL_CONTEXT_HIGHLIGHTING_COLOR),
             parent);
         addField(serverCallContextColorField);
         setFieldTooltip(serverCallContextColorField, SERVER_CALL_CONTEXT_COLOR_TOOLTIP, parent);
@@ -84,7 +84,7 @@ public final class CodeEditorPreferencePage extends ComfortPreferencePage
 
         BooleanFieldEditor implicitVariableField = new BooleanFieldEditor(
             ComfortSettings.PREF_IMPLICIT_VARIABLE_HIGHLIGHTING_ENABLED,
-            "Подсвечивать создаваемые переменные", //$NON-NLS-1$
+            ComfortVisibleSettings.label(ComfortSettings.PREF_IMPLICIT_VARIABLE_HIGHLIGHTING_ENABLED),
             parent);
         addField(implicitVariableField);
         setFieldTooltip(implicitVariableField,
@@ -93,7 +93,7 @@ public final class CodeEditorPreferencePage extends ComfortPreferencePage
 
         ThemeAwareColorFieldEditor implicitVariableColorField = new ThemeAwareColorFieldEditor(
             ComfortSettings.PREF_IMPLICIT_VARIABLE_HIGHLIGHTING_COLOR,
-            "Цвет создаваемых переменных:", //$NON-NLS-1$
+            ComfortVisibleSettings.label(ComfortSettings.PREF_IMPLICIT_VARIABLE_HIGHLIGHTING_COLOR),
             parent);
         addField(implicitVariableColorField);
         setFieldTooltip(implicitVariableColorField, IMPLICIT_VARIABLE_COLOR_TOOLTIP, parent);
@@ -101,7 +101,7 @@ public final class CodeEditorPreferencePage extends ComfortPreferencePage
 
         BooleanFieldEditor bracketHintField = new BooleanFieldEditor(
             ComfortSettings.PREF_BRACKET_CONTENT_HINT_ENABLED,
-            "Отображать начало конструкции в её конце", //$NON-NLS-1$
+            ComfortVisibleSettings.label(ComfortSettings.PREF_BRACKET_CONTENT_HINT_ENABLED),
             parent);
         addField(bracketHintField);
         setFieldTooltip(bracketHintField,
@@ -112,7 +112,7 @@ public final class CodeEditorPreferencePage extends ComfortPreferencePage
 
         IntegerFieldEditor bracketHintMinLinesField = new IntegerFieldEditor(
             ComfortSettings.PREF_BRACKET_CONTENT_HINT_MIN_LINES,
-            "Минимальное расстояние в строках", //$NON-NLS-1$
+            ComfortVisibleSettings.label(ComfortSettings.PREF_BRACKET_CONTENT_HINT_MIN_LINES),
             parent,
             5);
         bracketHintMinLinesField.setValidRange(0, 10_000);
@@ -136,7 +136,7 @@ public final class CodeEditorPreferencePage extends ComfortPreferencePage
 
         IntegerFieldEditor compileContextWidthField = new IntegerFieldEditor(
             ComfortSettings.PREF_COMPILE_CONTEXT_STATUS_WIDTH,
-            "Ширина индикатора условий компиляции", //$NON-NLS-1$
+            ComfortVisibleSettings.label(ComfortSettings.PREF_COMPILE_CONTEXT_STATUS_WIDTH),
             parent,
             3);
         compileContextWidthField.setValidRange(0, 200);
@@ -155,7 +155,7 @@ public final class CodeEditorPreferencePage extends ComfortPreferencePage
 
         StringFieldEditor autoCollapseRegionsField = new StringFieldEditor(
             ComfortSettings.PREF_AUTO_COLLAPSE_REGIONS,
-            "Автоматически сворачиваемые области", //$NON-NLS-1$
+            ComfortVisibleSettings.label(ComfortSettings.PREF_AUTO_COLLAPSE_REGIONS),
             parent);
         addField(autoCollapseRegionsField);
         String autoCollapseRegionsTooltip =
@@ -179,7 +179,7 @@ public final class CodeEditorPreferencePage extends ComfortPreferencePage
             spellingIdentsHost.setLayoutData(spellingIdentsHostData);
             BooleanFieldEditor spellingIdentsField = new BooleanFieldEditor(
                 ComfortSettings.PREF_SPELLING_CHECK_IDENTIFIERS_VISIBLE,
-                "Проверять орфографию в идентификаторах в видимой области", //$NON-NLS-1$
+                ComfortVisibleSettings.label(ComfortSettings.PREF_SPELLING_CHECK_IDENTIFIERS_VISIBLE),
                 spellingIdentsHost);
             addField(spellingIdentsField);
             setFieldTooltip(spellingIdentsField,

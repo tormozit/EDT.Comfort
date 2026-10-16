@@ -29,10 +29,15 @@ import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.emf.ecore.EObject;
+import org.eclipse.emf.ecore.InternalEObject;
+import org.eclipse.emf.ecore.util.InternalEList;
+import org.eclipse.xtext.resource.XtextResource;
 import org.eclipse.xtext.ui.editor.contentassist.ConfigurableCompletionProposal;
 import org.eclipse.xtext.ui.editor.model.IXtextDocument;
 import org.eclipse.jface.text.source.SourceViewer;
 
+import com._1c.g5.v8.dt.bsl.model.BslPackage;
+import com._1c.g5.v8.dt.bsl.model.ProposalElement;
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 
 /**
@@ -1586,36 +1591,128 @@ public class SmartCompletionProposal implements
     }
 
     /**
-     * Штатный hover EDT ({@code ConfigurableCompletionProposal.getAdditionalProposalInfo(monitor)})
-     * для {@code EObject} без ресурса иногда падает в
-     * {@code BslDocumentationProvider.getDocByNotFormalParamVariable}:
-     * {@code eResource().getURI()} без проверки. Не подавляем подсказку заранее:
-     * EDT успешно строит её для части таких объектов; исключение перехватываем локально.
+     * Кэш предложений переживает переразбор документа. В EDT описание BSL-метода
+     * вызывает installDerivedState у модуля без проверки его ресурса; eContainer()
+     * на старом AST также может рекурсивно запустить разрешение BSL-ссылок.
+     * Проверяем исходный EObject до штатного resolve и ещё раз на входе в hover.
      */
     private Object readDelegateEdtAdditionalInfo(IProgressMonitor monitor)
     {
         return readDelegateEdtAdditionalInfo(delegate, monitor);
     }
 
-    private static Object readDelegateEdtAdditionalInfo(ICompletionProposal delegate,
+    static Object readDelegateEdtAdditionalInfo(ICompletionProposal delegate,
         IProgressMonitor monitor)
     {
         try (ContentAssistDebug.FillSpan fill = ContentAssistDebug.fillStart("proposal.infoDelegate", delegate))
         {
-            if (delegate instanceof ICompletionProposalExtension5 ext5)
+            if (monitor != null && monitor.isCanceled())
+                return null;
+            if (delegate instanceof ConfigurableCompletionProposal configurable)
             {
-                try
-                {
+                Object additional = Global.getField(configurable, "additionalProposalInfo"); //$NON-NLS-1$
+                if (additional instanceof EObject object && !isEdtDocumentationObjectReady(object))
+                    return null;
+            }
+            try
+            {
+                if (delegate instanceof ICompletionProposalExtension5 ext5)
                     return ext5.getAdditionalProposalInfo(
                         monitor != null ? monitor : new NullProgressMonitor());
-                }
-                catch (RuntimeException e)
-                {
-                    return null;
-                }
+                return delegate.getAdditionalProposalInfo();
             }
-            return delegate.getAdditionalProposalInfo();
+            catch (RuntimeException | StackOverflowError e)
+            {
+                Global.tempLogException("assist-documentation", "delegate.failed class="
+                    + delegate.getClass().getName(), e);
+                return null;
+            }
         }
+    }
+
+    /** Проверка не резолвит proxy и не вызывает eContainer()/eResource(). */
+    static boolean isEdtDocumentationObjectReady(EObject object)
+    {
+        long started = System.nanoTime();
+        String problem = edtDocumentationObjectProblem(object);
+        Global.tempLog("assist-documentation", "check object="
+            + ContentAssistDebug.pipelineIdentity(object)
+            + " type=" + (object == null ? "null" : object.eClass().getName())
+            + " result=" + (problem == null ? "ready" : problem)
+            + " elapsedNs=" + (System.nanoTime() - started));
+        return problem == null;
+    }
+
+    private static String edtDocumentationObjectProblem(EObject object)
+    {
+        if (object == null)
+            return null;
+        java.util.Deque<EObject> pending = new java.util.ArrayDeque<>();
+        java.util.Set<EObject> checked = java.util.Collections.newSetFromMap(
+            new java.util.IdentityHashMap<>());
+        pending.add(object);
+        while (!pending.isEmpty())
+        {
+            EObject next = pending.removeFirst();
+            if (!checked.add(next))
+                continue;
+            String problem = edtDocumentationContainerProblem(next);
+            Global.tempLog("assist-documentation", "nested object="
+                + ContentAssistDebug.pipelineIdentity(next) + " type=" + next.eClass().getName()
+                + " result=" + (problem == null ? "ready" : problem));
+            if (problem != null)
+                return problem;
+            if (next instanceof ProposalElement && next instanceof InternalEObject proposal)
+            {
+                // getModel()/обычный итератор getList() разрешают ссылки. eGet(false)
+                // и basicIterator подтверждены ProposalElementImpl.eGet/getList.
+                Object model = proposal.eGet(BslPackage.PROPOSAL_ELEMENT__MODEL, false, false);
+                if (model instanceof EObject context)
+                    pending.addLast(context);
+                Object value = proposal.eGet(BslPackage.PROPOSAL_ELEMENT__LIST, false, false);
+                if (!(value instanceof InternalEList<?> list))
+                    return "proposalListNotBasic";
+                var entries = list.basicIterator();
+                while (entries.hasNext())
+                    if (entries.next() instanceof EObject entry)
+                        pending.addLast(entry);
+            }
+        }
+        return null;
+    }
+
+    private static String edtDocumentationContainerProblem(EObject object)
+    {
+        java.util.Set<EObject> path = java.util.Collections.newSetFromMap(
+            new java.util.IdentityHashMap<>());
+        boolean bsl = false;
+        boolean module = false;
+        InternalEObject current = object instanceof InternalEObject internal ? internal : null;
+        while (current != null)
+        {
+            if (!path.add(current))
+                return "containerCycle";
+            bsl |= BslPackage.eNS_URI.equals(current.eClass().getEPackage().getNsURI());
+            module |= current instanceof com._1c.g5.v8.dt.bsl.model.Module;
+            if (current.eIsProxy())
+                return bsl ? "bslProxy" : null;
+            org.eclipse.emf.ecore.resource.Resource direct = current.eDirectResource();
+            if (direct != null)
+            {
+                if (bsl && direct instanceof XtextResource resource)
+                {
+                    var parse = resource.getParseResult();
+                    if (parse == null || !path.contains(parse.getRootASTElement()))
+                        return "oldParseRoot";
+                }
+                return null;
+            }
+            current = current.eInternalContainer();
+        }
+        // Безресурсные объекты сами по себе допустимы. Ошибка EDT подтверждена
+        // для метода внутри отсоединённого Module: getEventsFromModelMethod
+        // вызывает module.eResource().installDerivedState без проверки на null.
+        return module ? "detachedBslModule" : null;
     }
 
     /**

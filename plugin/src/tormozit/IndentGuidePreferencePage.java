@@ -52,13 +52,7 @@ import org.eclipse.ui.IWorkbenchPreferencePage;
  */
 public final class IndentGuidePreferencePage extends PreferencePage implements IWorkbenchPreferencePage
 {
-    private static final String[] STYLES = {
-        "Сплошная", //$NON-NLS-1$
-        "Штрих", //$NON-NLS-1$
-        "Точки", //$NON-NLS-1$
-        "Штрих-точка", //$NON-NLS-1$
-        "Штрих-точка-точка" //$NON-NLS-1$
-    };
+    private static final String[] STYLES = ComfortVisibleSettings.indentGuideStyles();
 
     private static Set<IContentType> platformTextTypesCache;
 
@@ -114,7 +108,7 @@ public final class IndentGuidePreferencePage extends PreferencePage implements I
 
     private void createEnabledCheckBox(Composite comp)
     {
-        Button btn = createLabeledCheckbox(comp, "Включить направляющие отступов текстовых редакторов", //$NON-NLS-1$
+        Button btn = createLabeledCheckbox(comp, ComfortVisibleSettings.label(ComfortSettings.PREF_INDENT_GUIDE_ENABLED),
             ComfortSettings.PREF_INDENT_GUIDE_ENABLED);
         btn.addSelectionListener(new SelectionAdapter()
         {
@@ -140,14 +134,19 @@ public final class IndentGuidePreferencePage extends PreferencePage implements I
         Composite comp = createGroup(parent, "Атрибуты линии", false, 3); //$NON-NLS-1$
         blocks.add(comp);
 
-        createLabeledSpinner(comp, "Прозрачность", "(0 — прозрачная, 255 — непрозрачная)", //$NON-NLS-1$ //$NON-NLS-2$
+        createLabeledSpinner(comp, ComfortVisibleSettings.label(ComfortSettings.PREF_INDENT_GUIDE_LINE_ALPHA),
+            "(0 — прозрачная, 255 — непрозрачная)", //$NON-NLS-1$
             0, 255, ComfortSettings.PREF_INDENT_GUIDE_LINE_ALPHA);
-        createLabeledCombo(comp, "Стиль", "", STYLES, ComfortSettings.PREF_INDENT_GUIDE_LINE_STYLE); //$NON-NLS-1$ //$NON-NLS-2$
-        createLabeledSpinner(comp, "Толщина", "(1–8 пикселей)", //$NON-NLS-1$ //$NON-NLS-2$
+        createLabeledCombo(comp, ComfortVisibleSettings.label(ComfortSettings.PREF_INDENT_GUIDE_LINE_STYLE),
+            "", STYLES, ComfortSettings.PREF_INDENT_GUIDE_LINE_STYLE); //$NON-NLS-1$
+        createLabeledSpinner(comp, ComfortVisibleSettings.label(ComfortSettings.PREF_INDENT_GUIDE_LINE_WIDTH),
+            "(1–8 пикселей)", //$NON-NLS-1$
             1, 8, ComfortSettings.PREF_INDENT_GUIDE_LINE_WIDTH);
-        createLabeledSpinner(comp, "Сдвиг", "(0–8 пикселей)", //$NON-NLS-1$ //$NON-NLS-2$
+        createLabeledSpinner(comp, ComfortVisibleSettings.label(ComfortSettings.PREF_INDENT_GUIDE_LINE_SHIFT),
+            "(0–8 пикселей)", //$NON-NLS-1$
             0, 8, ComfortSettings.PREF_INDENT_GUIDE_LINE_SHIFT);
-        createLabeledColorEditor(comp, "Цвет", "", ComfortSettings.indentGuideLineColorKey()); //$NON-NLS-1$ //$NON-NLS-2$
+        createLabeledColorEditor(comp, ComfortVisibleSettings.label(ComfortSettings.indentGuideLineColorKey()),
+            "", ComfortSettings.indentGuideLineColorKey()); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private void createDrawingGroup(Composite parent)
@@ -155,17 +154,18 @@ public final class IndentGuidePreferencePage extends PreferencePage implements I
         Composite comp = createGroup(parent, "Параметры рисования", false, 1); //$NON-NLS-1$
         blocks.add(comp);
 
-        createLabeledCheckbox(comp, "Рисовать на первой колонке", //$NON-NLS-1$
+        createLabeledCheckbox(comp, ComfortVisibleSettings.label(ComfortSettings.PREF_INDENT_GUIDE_DRAW_LEAD_EDGE),
             ComfortSettings.PREF_INDENT_GUIDE_DRAW_LEAD_EDGE);
-        createLabeledCheckbox(comp, "Рисовать на пустых строках", //$NON-NLS-1$
+        createLabeledCheckbox(comp, ComfortVisibleSettings.label(ComfortSettings.PREF_INDENT_GUIDE_DRAW_BLANK_LINE),
             ComfortSettings.PREF_INDENT_GUIDE_DRAW_BLANK_LINE);
-        createLabeledCheckbox(comp, "Рисовать в блочных комментариях /* */", //$NON-NLS-1$
+        createLabeledCheckbox(comp, ComfortVisibleSettings.label(ComfortSettings.PREF_INDENT_GUIDE_DRAW_COMMENT_BLOCK),
             ComfortSettings.PREF_INDENT_GUIDE_DRAW_COMMENT_BLOCK);
     }
 
     private void createContentTypesGroup(Composite parent)
     {
-        Composite comp = createGroup(parent, "Типы файлов", true, 1); //$NON-NLS-1$
+        Composite comp = createGroup(parent,
+            ComfortVisibleSettings.label(ComfortSettings.PREF_INDENT_GUIDE_CONTENT_TYPES), true, 1);
         blocks.add(comp);
 
         CheckboxTreeViewer viewer = new CheckboxTreeViewer(comp,
@@ -422,6 +422,12 @@ public final class IndentGuidePreferencePage extends PreferencePage implements I
         }
     }
 
+    static String contentTypeLabel(IContentType type)
+    {
+        String ru = TypesLabelProvider.RU_NAMES.get(type.getId());
+        return ru != null ? ru : type.getName();
+    }
+
     private static final class TypesLabelProvider extends LabelProvider
     {
         /** Русские подписи для типов, у которых в платформе/EDT только английское name. */
@@ -438,8 +444,7 @@ public final class IndentGuidePreferencePage extends PreferencePage implements I
         public String getText(Object element)
         {
             IContentType type = (IContentType) element;
-            String ru = RU_NAMES.get(type.getId());
-            return ru != null ? ru : type.getName();
+            return contentTypeLabel(type);
         }
     }
 

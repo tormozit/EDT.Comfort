@@ -143,6 +143,9 @@ public final class Activator
             "com._1c.g5.v8.dt.internal.search.ui.provider.SearchResultTreeLayoutManager"; //$NON-NLS-1$
         private static final String PROP_COMMON_CHILDREN = "tormozit.commonNode.children"; //$NON-NLS-1$
         private static final String PROP_COMMON_SEARCH_NODE = "tormozit.commonNode.searchNode"; //$NON-NLS-1$
+        private static final String NAVIGATOR_MAPPER =
+            "com._1c.g5.v8.dt.ui.aef.component.NavigatorTreeComponent$NavigatorMapper"; //$NON-NLS-1$
+        private static final String PROP_COMMON_VIEW_NODE = "tormozit.commonNode.viewNode"; //$NON-NLS-1$
         /** Совпадает с WorkbenchTabsHook.EditorModelMatching.PROPERTY. */
         static final String PROP_EDITOR_MODEL_EQUALS = "tormozit.editor.modelEquals"; //$NON-NLS-1$
         private static final String MULTILANGUAGE_COMPONENT =
@@ -191,7 +194,7 @@ public final class Activator
             "(Lorg/eclipse/xtext/util/concurrent/IUnitOfWork;)Ljava/lang/Object;"; //$NON-NLS-1$
         private static final List<String> TARGETS = List.of(BSL_PARSER, CUSTOM_BSL_PARSER, HELPER,
             SUPPRESSION_PROVIDER, FOLDING_PROVIDER, TAB_FOLDER, PART_LIST_CONTROL, COMPARISON_EDITOR,
-            MERGE_COMMIT_CALLBACK, EDITOR_MATCHING, GRANULAR_EDITOR, TREE_VIEWER, SEARCH_TREE_LAYOUT,
+            MERGE_COMMIT_CALLBACK, EDITOR_MATCHING, GRANULAR_EDITOR, TREE_VIEWER, SEARCH_TREE_LAYOUT, NAVIGATOR_MAPPER,
             FORM_PRESENTATION, FORM_PAGE, PROPERTY_SHEET, PROPERTY_SHEET_MONITOR,
             MULTILANGUAGE_COMPONENT, SINGLE_LANGUAGE_COMPONENT,
             DCS_LOCAL_STRING_EDITOR, DCS_FIELD_EDITING, DCS_PARAMETER_EDITING, DOC_LOCKER);
@@ -227,6 +230,8 @@ public final class Activator
                 (BiFunction<Object, Object, Object>) (parent, children) -> children);
             System.getProperties().putIfAbsent(PROP_COMMON_SEARCH_NODE,
                 (BiFunction<Object, Object, Object>) (adapter, node) -> node);
+            System.getProperties().putIfAbsent(PROP_COMMON_VIEW_NODE,
+                (BiFunction<Object, Object, Object>) (model, node) -> node);
             System.getProperties().put(PROP_BEFORE_CREATE_PARSER,
                 (Consumer<Object>) stream -> BslParserHook.beforeCreateParser(stream));
             System.getProperties().put(PROP_AFTER_CHUNK_PARSE,
@@ -901,7 +906,8 @@ public final class Activator
                 return transformPropertySheetMonitor(bytes);
             if (FORM_PRESENTATION.equals(className) || FORM_PAGE.equals(className))
                 return transformFormPreview(className, bytes);
-            if (TREE_VIEWER.equals(className) || SEARCH_TREE_LAYOUT.equals(className))
+            if (TREE_VIEWER.equals(className) || SEARCH_TREE_LAYOUT.equals(className)
+                || NAVIGATOR_MAPPER.equals(className))
                 return transformCommonTree(className, bytes);
             if (GRANULAR_EDITOR.equals(className))
                 return transformGranularEditor(bytes);
@@ -990,10 +996,12 @@ public final class Activator
         private static byte[] transformCommonTree(String className, byte[] bytes)
         {
             boolean tree = TREE_VIEWER.equals(className);
-            String method = tree ? "getSortedChildren" : "insertWorkbenchAdapter"; //$NON-NLS-1$ //$NON-NLS-2$
+            boolean mapper = NAVIGATOR_MAPPER.equals(className);
+            String method = tree ? "getSortedChildren" : mapper ? "createModelToView" : "insertWorkbenchAdapter"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             String descriptor = tree ? "(Ljava/lang/Object;)[Ljava/lang/Object;" //$NON-NLS-1$
+                : mapper ? "(Ljava/lang/Object;)Lcom/_1c/g5/aef2/standard/viewModels/TreeItemViewModel;" //$NON-NLS-1$
                 : "(Lorg/eclipse/ui/model/IWorkbenchAdapter;Ljava/lang/Object;Lcom/_1c/g5/v8/bm/integration/IBmModel;)Lcom/_1c/g5/v8/dt/internal/search/ui/provider/MatchTreeItem;"; //$NON-NLS-1$
-            String property = tree ? PROP_COMMON_CHILDREN : PROP_COMMON_SEARCH_NODE;
+            String property = tree ? PROP_COMMON_CHILDREN : mapper ? PROP_COMMON_VIEW_NODE : PROP_COMMON_SEARCH_NODE;
             ClassReader reader = new ClassReader(bytes);
             ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
             int[] returns = { 0 };
@@ -1020,6 +1028,7 @@ public final class Activator
                                 super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BiFunction", //$NON-NLS-1$
                                     "apply", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$ //$NON-NLS-2$
                                 super.visitTypeInsn(Opcodes.CHECKCAST, tree ? "[Ljava/lang/Object;" //$NON-NLS-1$
+                                    : mapper ? "com/_1c/g5/aef2/standard/viewModels/TreeItemViewModel" //$NON-NLS-1$
                                     : "com/_1c/g5/v8/dt/internal/search/ui/provider/MatchTreeItem"); //$NON-NLS-1$
                                 returns[0]++;
                             }

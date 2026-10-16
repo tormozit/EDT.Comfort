@@ -236,28 +236,28 @@ public class ComfortPreferencePage
 
         BooleanFieldEditor improveDebuggerField = new BooleanFieldEditor(
             ComfortSettings.PREF_IMPROVE_DEBUGGER_WINDOWS,
-            "Улучшать окна отладчика", //$NON-NLS-1$
+            ComfortVisibleSettings.label(ComfortSettings.PREF_IMPROVE_DEBUGGER_WINDOWS),
             getFieldEditorParent());
         addField(improveDebuggerField);
         setFieldTooltip(improveDebuggerField, IMPROVE_DEBUGGER_WINDOWS_TOOLTIP);
 
         BooleanFieldEditor suppressMinBuildField = new BooleanFieldEditor(
             ComfortSettings.PREF_SUPPRESS_MIN_PLATFORM_BUILD,
-            "Подавлять требование минимальной сборки платформы", //$NON-NLS-1$
+            ComfortVisibleSettings.label(ComfortSettings.PREF_SUPPRESS_MIN_PLATFORM_BUILD),
             getFieldEditorParent());
         addField(suppressMinBuildField);
         setFieldTooltip(suppressMinBuildField, SUPPRESS_MIN_PLATFORM_BUILD_TOOLTIP);
 
         BooleanFieldEditor controlMdReferencesField = new BooleanFieldEditor(
             ComfortSettings.PREF_CONTROL_MD_REFERENCES,
-            "Контролировать ссылки метаданных в ключевых операциях", //$NON-NLS-1$
+            ComfortVisibleSettings.label(ComfortSettings.PREF_CONTROL_MD_REFERENCES),
             getFieldEditorParent());
         addField(controlMdReferencesField);
         setFieldTooltip(controlMdReferencesField, CONTROL_MD_REFERENCES_TOOLTIP);
 
         BooleanFieldEditor verticalTabsField = new BooleanFieldEditor(
             ComfortSettings.PREF_MD_EDITOR_VERTICAL_TABS,
-            "Вертикальные вкладки в редакторе объекта", //$NON-NLS-1$
+            ComfortVisibleSettings.label(ComfortSettings.PREF_MD_EDITOR_VERTICAL_TABS),
             getFieldEditorParent());
         addField(verticalTabsField);
         setFieldTooltip(verticalTabsField, MD_EDITOR_VERTICAL_TABS_TOOLTIP);
@@ -468,7 +468,7 @@ public class ComfortPreferencePage
         checkboxHost.setLayoutData(new GridData(SWT.LEFT, SWT.CENTER, false, false));
         BooleanFieldEditor replaceListFiltersField = new BooleanFieldEditor(
             ComfortSettings.PREF_REPLACE_LIST_FILTERS,
-            "Улучшать списки",
+            ComfortVisibleSettings.label(ComfortSettings.PREF_REPLACE_LIST_FILTERS),
             checkboxHost);
         addField(replaceListFiltersField);
         setFieldTooltip(replaceListFiltersField, REPLACE_LIST_FILTERS_TOOLTIP, checkboxHost);
@@ -506,7 +506,7 @@ public class ComfortPreferencePage
 
         BooleanFieldEditor groupCommonModulesField = new BooleanFieldEditor(
             ComfortSettings.PREF_GROUP_COMMON_MODULES_ENABLED,
-            "Группировать общие модули в навигаторе по имени", //$NON-NLS-1$
+            ComfortVisibleSettings.label(ComfortSettings.PREF_GROUP_COMMON_MODULES_ENABLED),
             navigatorGroup);
         addField(groupCommonModulesField);
         setFieldTooltip(groupCommonModulesField,
@@ -517,7 +517,7 @@ public class ComfortPreferencePage
 
         StringFieldEditor suffixes1Field = new StringFieldEditor(
             ComfortSettings.PREF_GROUP_COMMON_MODULES_SUFFIXES_1,
-            "Суффиксы набора 1 (через запятую):", //$NON-NLS-1$
+            ComfortVisibleSettings.label(ComfortSettings.PREF_GROUP_COMMON_MODULES_SUFFIXES_1),
             50,
             navigatorGroup);
         addField(suffixes1Field);
@@ -529,7 +529,7 @@ public class ComfortPreferencePage
 
         StringFieldEditor suffixes2Field = new StringFieldEditor(
             ComfortSettings.PREF_GROUP_COMMON_MODULES_SUFFIXES_2,
-            "Суффиксы набора 2 (через запятую):", //$NON-NLS-1$
+            ComfortVisibleSettings.label(ComfortSettings.PREF_GROUP_COMMON_MODULES_SUFFIXES_2),
             50,
             navigatorGroup);
         addField(suffixes2Field);
@@ -541,13 +541,14 @@ public class ComfortPreferencePage
 
         BooleanFieldEditor alphabeticCommonNodeField = new BooleanFieldEditor(
             ComfortSettings.PREF_ALPHABETIC_COMMON_NODE_ENABLED,
-            "Сортировать по алфавиту ветку «Общие» в деревьях конфигурации", //$NON-NLS-1$
+            ComfortVisibleSettings.label(ComfortSettings.PREF_ALPHABETIC_COMMON_NODE_ENABLED),
             navigatorGroup);
         addField(alphabeticCommonNodeField);
         setFieldTooltip(alphabeticCommonNodeField,
             "Общие модули, Общие реквизиты, Роли, Подсистемы и другие папки внутри верхнего узла\n"
             + "«Общие» показываются по алфавиту в деревьях конфигурации: навигаторе,\n"
-            + "сравнении конфигураций и итогах поиска по конфигурации\n"
+            + "сравнении конфигураций, итогах поиска по конфигурации,\n"
+            + "выборе объектов и составе подсистемы\n"
             + "вместо фиксированного порядка EDT.\n"
             + "Требует включённого флажка «Улучшать списки».", //$NON-NLS-1$
             navigatorGroup);
@@ -572,7 +573,7 @@ public class ComfortPreferencePage
     {
         ThemeAwareColorFieldEditor colorField = new ThemeAwareColorFieldEditor(
             ComfortSettings.PREF_FILTER_MATCH_COLOR,
-            "Цвет фильтра:", //$NON-NLS-1$
+            ComfortVisibleSettings.label(ComfortSettings.PREF_FILTER_MATCH_COLOR),
             getFieldEditorParent());
         addField(colorField);
         setFieldTooltip(colorField, FILTER_MATCH_COLOR_TOOLTIP);
@@ -729,7 +730,7 @@ public class ComfortPreferencePage
         ctrlClickHost.setLayoutData(ctrlClickHostData);
         BooleanFieldEditor ctrlClickSelectWordField = new BooleanFieldEditor(
             ComfortSettings.PREF_CTRL_CLICK_SELECT_WORD,
-            "Ctrl+клик выделяет слово", //$NON-NLS-1$
+            ComfortVisibleSettings.label(ComfortSettings.PREF_CTRL_CLICK_SELECT_WORD),
             ctrlClickHost);
         addField(ctrlClickSelectWordField);
         setFieldTooltip(ctrlClickSelectWordField,
@@ -751,7 +752,7 @@ public class ComfortPreferencePage
 
         BooleanFieldEditor moxelField = new BooleanFieldEditor(
             ComfortSettings.PREF_MOXEL_FAST_CELL_NAVIGATION,
-            "Ускорить перерисовку табличного документа", //$NON-NLS-1$
+            ComfortVisibleSettings.label(ComfortSettings.PREF_MOXEL_FAST_CELL_NAVIGATION),
             moxelHost);
         addField(moxelField);
         setFieldTooltip(moxelField,
@@ -774,7 +775,7 @@ public class ComfortPreferencePage
 
         BooleanFieldEditor debugLogField = new BooleanFieldEditor(
             ComfortSettings.PREF_DEBUG_LOG,
-            "Вести журнал",
+            ComfortVisibleSettings.label(ComfortSettings.PREF_DEBUG_LOG),
             checkboxHost);
         addField(debugLogField);
         setFieldTooltip(debugLogField,
@@ -794,7 +795,7 @@ public class ComfortPreferencePage
         stallHost.setLayoutData(new GridData(SWT.BEGINNING, SWT.CENTER, false, false));
         BooleanFieldEditor stallField = new BooleanFieldEditor(
             ComfortSettings.PREF_RECORD_STALL_STACKS,
-            "Записывать стеки при зависаниях",
+            ComfortVisibleSettings.label(ComfortSettings.PREF_RECORD_STALL_STACKS),
             stallHost);
         addField(stallField);
         setFieldTooltip(stallField,
@@ -1382,9 +1383,9 @@ public class ComfortPreferencePage
             Global.log(LOG_TAG, "установленные плагины: " + plugins.length() + " симв."); //$NON-NLS-1$ //$NON-NLS-2$
             appendCollapsed(body, "Установленные плагины", plugins); //$NON-NLS-1$
 
-            String flags = comfortFlagsText();
-            Global.log(LOG_TAG, "флажки Комфорт: " + flags.length() + " симв."); //$NON-NLS-1$ //$NON-NLS-2$
-            appendCollapsed(body, "Флажки Комфорт", flags); //$NON-NLS-1$
+            String settings = ComfortVisibleSettings.reportText();
+            Global.log(LOG_TAG, "настройки Комфорта: " + settings.length() + " симв."); //$NON-NLS-1$ //$NON-NLS-2$
+            appendCollapsed(body, "Настройки Комфорта общие", settings); //$NON-NLS-1$
 
             IProject project = activeProject();
             Global.log(LOG_TAG, "активный проект: " //$NON-NLS-1$
@@ -1393,8 +1394,8 @@ public class ComfortPreferencePage
             Global.log(LOG_TAG,
                 "настройки проекта: " + projectSettings.length() + " симв."); //$NON-NLS-1$ //$NON-NLS-2$
             appendCollapsed(body, project == null
-                ? "Настройки активного проекта" //$NON-NLS-1$
-                : "Настройки проекта «" + project.getName() + "»", //$NON-NLS-1$ //$NON-NLS-2$
+                ? "Настройки Комфорта проекта (проект не определён)" //$NON-NLS-1$
+                : "Настройки Комфорта проекта \"" + project.getName() + "\"", //$NON-NLS-1$ //$NON-NLS-2$
                 projectSettings);
 
             body.append("\n"); //$NON-NLS-1$
@@ -1736,42 +1737,6 @@ public class ComfortPreferencePage
             return id.startsWith("com._1c.") || id.startsWith("com.e1c."); //$NON-NLS-1$ //$NON-NLS-2$
         }
 
-        /** Флажки Комфорт: страница «Параметры → Комфорт» и соседние настройки-пометки. */
-        private static String comfortFlagsText()
-        {
-            StringBuilder sb = new StringBuilder();
-            appendFlag(sb, "Улучшать списки", ComfortSettings.isReplaceListFiltersEnabled()); //$NON-NLS-1$
-            appendFlag(sb, "Улучшать окна отладчика", //$NON-NLS-1$
-                ComfortSettings.isImproveDebuggerWindowsEnabled());
-            appendFlag(sb, "Вертикальные вкладки в редакторе объекта", //$NON-NLS-1$
-                ComfortSettings.isMdEditorVerticalTabsEnabled());
-            appendFlag(sb, "Контролировать ссылки метаданных в ключевых операциях", //$NON-NLS-1$
-                ComfortSettings.isControlMdReferencesEnabled());
-            appendFlag(sb, "Группировать общие модули в навигаторе по имени", //$NON-NLS-1$
-                ComfortSettings.isGroupCommonModulesEnabled());
-            appendFlag(sb, "Автооткрытие подсказок при вводе", isContentAssistAutoOpen()); //$NON-NLS-1$
-            appendFlag(sb, "Предложение Напарника наверху списка автодополнения", //$NON-NLS-1$
-                ComfortSettings.isNaparnikAssistRowEnabled());
-            appendFlag(sb, "Подсвечивать серверные вызовы", //$NON-NLS-1$
-                ComfortSettings.isServerCallHighlightingEnabled());
-            appendFlag(sb, "Подсвечивать создаваемые переменные", //$NON-NLS-1$
-                ComfortSettings.isImplicitVariableHighlightingEnabled());
-            appendFlag(sb, "Отображать начало конструкции в её конце", //$NON-NLS-1$
-                ComfortSettings.isBracketContentHintEnabled());
-            appendFlag(sb, "Проверять орфографию в идентификаторах в видимой области", //$NON-NLS-1$
-                ComfortSettings.isSpellingCheckIdentifiersVisible());
-            appendFlag(sb, "Ctrl+клик выделяет слово", //$NON-NLS-1$
-                ComfortSettings.isCtrlClickSelectWordEnabled());
-            appendFlag(sb, "Вести журнал", ComfortSettings.isDebugLogEnabled()); //$NON-NLS-1$
-            appendFlag(sb, "Включить направляющие отступов текстовых редакторов", //$NON-NLS-1$
-                ComfortSettings.isIndentGuideEnabled());
-            appendFlag(sb, "Подсказки при наведении без Ctrl", //$NON-NLS-1$
-                ComfortSettings.isHoverHintsEnabled());
-            appendFlag(sb, "Игнорировать сокращения в CamelCase", //$NON-NLS-1$
-                ComfortSettings.isSpellingIgnoreCamelCaseAbbreviations());
-            return sb.toString();
-        }
-
         /**
          * Проект, к которому относится заявка: контекстный проект страницы
          * ({@link ActiveProjectTracker}), а если трекер ничего не знает — активный проект
@@ -1831,14 +1796,6 @@ public class ComfortPreferencePage
             {
                 Global.logError(LOG_TAG, "чтение настроек проекта не удалось", e); //$NON-NLS-1$
             }
-        }
-
-        private static boolean isContentAssistAutoOpen()
-        {
-            ContentAssistSettings settings = ContentAssistSettings.getInstance();
-            if (settings == null)
-                return ContentAssistSettings.DEFAULT_ENABLED;
-            return settings.getPreferenceStore().getBoolean(ContentAssistSettings.PREF_ENABLED);
         }
 
         private static void appendFlag(StringBuilder sb, String label, boolean on)

@@ -228,6 +228,7 @@ public final class ContentAssistSessionReloader
     private final AtomicInteger completionAutoOpenScheduleGen = new AtomicInteger();
     private final AtomicInteger completionAutoOpenSeq = new AtomicInteger();
     private volatile int completionAutoOpenActiveSeq;
+    private final VerifyKeyListener emptyProposalKeyListener = this::onEmptyProposalKey;
     private VerifyKeyListener completionAutoOpenVerifyListener;
     private IDocumentListener completionAutoOpenDocumentListener;
     private volatile boolean completionAutoOpenAwaitingLogged;
@@ -488,6 +489,7 @@ if (Boolean.TRUE.equals(LITERAL_REPEAT_FROM_COMMAND.get()))
 
             private void assistSessionEndedImpl(ContentAssistEvent event)
             {
+                viewer.removeVerifyKeyListener(emptyProposalKeyListener);
                 boolean manualAwait = isManualIrAssistAwaitingWords();
                 boolean preserveOnEnd = manualAwait || isCompletionAutoOpenAwaitingIr();
                 boolean popupVisible = ContentAssistPopupSync.isPopupVisible(assistant);
@@ -597,6 +599,12 @@ boolean inLiteral = endCaret >= 0
                 boolean smartToggle)
             {
                 lastAssistSelection = proposal;
+                // JFace ставит свой слушатель при показе окна; уведомление о выборе
+                // позволяет поставить наш перед ним, как в NaparnikAssistRow.
+                if (SmartContentAssistProcessor.isEmptyPlaceholderProposal(proposal))
+                    viewer.prependVerifyKeyListener(emptyProposalKeyListener);
+                else
+                    viewer.removeVerifyKeyListener(emptyProposalKeyListener);
                 IDocument padDoc = viewer != null ? viewer.getDocument() : null;
                 ContentAssistPopupSync.syncEqualsSpacePad(assistant, padDoc, modelCaretOffset());
                 if (proposal == null)
@@ -626,6 +634,18 @@ boolean inLiteral = endCaret >= 0
         installContentAssistCommandListener();
     }
 
+    /** «Нет вариантов» закрывается по Enter без применения сохранённой каретки JFace. */
+    private void onEmptyProposalKey(VerifyEvent event)
+    {
+        if (!event.doit || (event.character != '\r' && event.character != '\n')
+            || !ContentAssistPopupSync.isPopupVisible(assistant)
+            || !SmartContentAssistProcessor.isEmptyPlaceholderProposal(lastAssistSelection))
+            return;
+        Global.tempLog("completion-empty-enter", "close caret=" + viewer.getSelectedRange()); //$NON-NLS-1$ //$NON-NLS-2$
+        event.doit = false;
+        ContentAssistPopupSync.hideProposalPopup(assistant);
+    }
+
     private void logInstallDiagnostics(SourceViewer sourceViewer)
     {
         Widget textWidget = viewer.getTextWidget();
@@ -648,6 +668,7 @@ boolean inLiteral = endCaret >= 0
         uninstallSessionCaretListener();
         uninstallContentAssistCommandListener();
         ContentAssistPopupSync.cancelCaretRecompute(viewer);
+        viewer.removeVerifyKeyListener(emptyProposalKeyListener);
         assistant.removeCompletionListener(completionListener);
     }
 

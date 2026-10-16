@@ -19,6 +19,7 @@ import org.eclipse.ui.model.IWorkbenchAdapter;
 
 import com._1c.g5.v8.dt.compare.ui.partialmodel.node.IPartialModelNode;
 import com._1c.g5.v8.dt.compare.ui.partialmodel.node.VirtualFolderPartialModelNode;
+import com._1c.g5.aef2.standard.viewModels.TreeItemViewModel;
 
 /**
  * Алфавитный порядок непосредственных детей верхнего узла «Общие» конфигурации
@@ -47,6 +48,19 @@ final class CommonNodeAlphabeticSorter extends TreePathViewerSorter
     /** Общая точка после штатной сортировки JFace; вплетение устанавливает ранний бандл. */
     static void installGlobally()
     {
+        // NavigatorMapper передаёт исходный узел и созданную строку AEF в обоих деревьях:
+        // «Выбор объектов» и «Состав» подсистемы. Проверено по байткоду EDT.
+        System.getProperties().put("tormozit.commonNode.viewNode", //$NON-NLS-1$
+            (BiFunction<Object, Object, Object>) (model, node) -> {
+                if (model != null && COMMON_NODE_CLASS_NAME.equals(model.getClass().getName()) && node != null)
+                {
+                    synchronized (COMMON_SEARCH_NODES)
+                    {
+                        COMMON_SEARCH_NODES.add(node);
+                    }
+                }
+                return node;
+            });
         System.getProperties().put("tormozit.commonNode.searchNode", //$NON-NLS-1$
             (BiFunction<Object, Object, Object>) (adapter, node) -> {
                 if (adapter != null && COMMON_NODE_CLASS_NAME.equals(adapter.getClass().getName()) && node != null)
@@ -61,8 +75,9 @@ final class CommonNodeAlphabeticSorter extends TreePathViewerSorter
         System.getProperties().put("tormozit.commonNode.children", //$NON-NLS-1$
             (BiFunction<Object, Object, Object>) (parent, children) -> {
                 Object element = parent instanceof TreePath path ? path.getLastSegment() : parent;
-                if (!(children instanceof Object[] elements) || !isEnabled()
-                        || !ComfortSettings.isReplaceListFiltersEnabled() || !isCommonNode(element))
+                if (!(children instanceof Object[] elements) || !isCommonNode(element))
+                    return children;
+                if (!isEnabled() || !ComfortSettings.isReplaceListFiltersEnabled())
                     return children;
                 Object[] sorted = elements.clone();
                 // Collator не потокобезопасен; провайдер дерева может вызываться в фоне.
@@ -167,6 +182,11 @@ final class CommonNodeAlphabeticSorter extends TreePathViewerSorter
 
     private static String labelOf(Object element)
     {
+        if (element instanceof TreeItemViewModel item)
+        {
+            String text = item.getText();
+            return text != null ? text : ""; //$NON-NLS-1$
+        }
         if (element != null && "com._1c.g5.v8.dt.internal.search.ui.provider.MatchTreeItem".equals( //$NON-NLS-1$
                 element.getClass().getName()))
         {
