@@ -21,6 +21,7 @@ import org.eclipse.emf.ecore.EReference;
 import org.eclipse.jface.action.Action;
 import org.eclipse.jface.action.MenuManager;
 import org.eclipse.jface.dialogs.IDialogSettings;
+import org.eclipse.jface.dialogs.InputDialog;
 import org.eclipse.jface.resource.ImageDescriptor;
 import org.eclipse.jface.resource.JFaceResources;
 import org.eclipse.jface.resource.LocalResourceManager;
@@ -62,6 +63,8 @@ import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Menu;
+import org.eclipse.swt.widgets.Link;
+import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Table;
 import org.eclipse.swt.widgets.TableColumn;
 import org.eclipse.swt.widgets.TableItem;
@@ -647,8 +650,81 @@ public class CompareSearchResultPage implements ISearchResultPage
                 cascade.setMenu(variants);
                 StyledTextSpellCheck.fillSuggestionsAsync(variants, word, 0,
                     suggestion -> UserTextSpellCheck.replaceWord(result, rows, suggestion));
+                new org.eclipse.swt.widgets.MenuItem(variants, SWT.SEPARATOR);
+                org.eclipse.swt.widgets.MenuItem arbitrary = new org.eclipse.swt.widgets.MenuItem(variants, SWT.PUSH);
+                arbitrary.setText("<произвольное>..."); //$NON-NLS-1$
+                ComfortSubmenuHelper.setMenuItemTooltip(arbitrary,
+                    "Ввести слово для замены");
+                arbitrary.addListener(SWT.Selection, e ->
+                {
+                    SpellingReplacementDialog dialog = new SpellingReplacementDialog(host.getShell(), project, word);
+                    if (dialog.open() == InputDialog.OK)
+                        UserTextSpellCheck.replaceWord(result, rows, dialog.getValue().trim());
+                });
             }
         });
+    }
+
+    /** Замена словом, прошедшим проверку орфографии, с возможностью добавить его в словарь. */
+    private static final class SpellingReplacementDialog extends InputDialog
+    {
+        private final IProject project;
+        private Link addReplacementToDictionary;
+
+        SpellingReplacementDialog(Shell parentShell, IProject project, String word)
+        {
+            super(parentShell, Global.withPluginWindowTitle("Заменить слово"), //$NON-NLS-1$
+                "Заменить «" + word + "» на:", word, //$NON-NLS-1$ //$NON-NLS-2$
+                value -> value.trim().isEmpty() ? "Введите слово для замены." : null); //$NON-NLS-1$
+            this.project = project;
+        }
+
+        @Override
+        protected Control createDialogArea(Composite parent)
+        {
+            Composite area = (Composite) super.createDialogArea(parent);
+            addReplacementToDictionary = new Link(area, SWT.WRAP);
+            addReplacementToDictionary.setText("<a>Добавить слово-замену в словарь</a>"); //$NON-NLS-1$
+            GridData data = new GridData(SWT.FILL, SWT.CENTER, true, false);
+            data.widthHint = convertHorizontalDLUsToPixels(org.eclipse.jface.dialogs.IDialogConstants.MINIMUM_MESSAGE_AREA_WIDTH);
+            addReplacementToDictionary.setLayoutData(data);
+            addReplacementToDictionary.setVisible(false);
+            addReplacementToDictionary.addListener(SWT.Selection, e ->
+            {
+                UserTextSpellCheck.addToDictionary(project, getText().getText().trim());
+                validateInput();
+            });
+            // Место под ссылку сохраняется, чтобы окно не меняло размер при вводе.
+            return area;
+        }
+
+        @Override
+        protected void createButtonsForButtonBar(Composite parent)
+        {
+            super.createButtonsForButtonBar(parent);
+            getOkButton().setText("Заменить"); //$NON-NLS-1$
+        }
+
+        @Override
+        protected void validateInput()
+        {
+            super.validateInput();
+            if (addReplacementToDictionary == null || addReplacementToDictionary.isDisposed())
+                return;
+            String replacement = getText().getText().trim();
+            ComfortSpellingEngine.setCheckProjectOverride(project);
+            try
+            {
+                boolean missing = !replacement.isEmpty() && !ComfortSpellingEngine.isCorrect(replacement);
+                addReplacementToDictionary.setVisible(missing);
+                if (missing)
+                    setErrorMessage("Слово не найдено в словарях."); //$NON-NLS-1$
+            }
+            finally
+            {
+                ComfortSpellingEngine.setCheckProjectOverride(null);
+            }
+        }
     }
 
     /** Строка таблицы слов: слово с ошибкой и все его вхождения в результате. */
