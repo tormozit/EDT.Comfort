@@ -41,7 +41,10 @@ import org.eclipse.xtext.ui.editor.hyperlinking.XtextHyperlink;
 import org.eclipse.xtext.ui.editor.model.IXtextDocument;
 import org.eclipse.xtext.util.concurrent.IUnitOfWork;
 
+import com._1c.g5.v8.dt.bsl.model.StringLiteral;
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
+import com._1c.g5.v8.dt.core.platform.IV8Project;
+import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
 import com._1c.g5.v8.dt.mcore.McorePackage;
 import com._1c.g5.v8.dt.mcore.TypeItem;
 import com._1c.g5.v8.dt.mcore.TypeSet;
@@ -58,6 +61,8 @@ import com._1c.g5.v8.dt.ui.util.OpenHelper;
  * Дополнительно: переход по имени типа объекта метаданных в комментарии
  * (Ctrl+клик и команда «Перейти к определению»).
  * По Ctrl+наведению на объект метаданных предлагает его модули, issue 708.
+ * Полное имя объекта метаданных в строковом литерале («РегистрСведений.КурсыВалют»
+ * в тексте запроса) — такая же ссылка, issue 825.
  */
 public final class BslEditorHyperlinkHook implements IStartup
 {
@@ -104,7 +109,7 @@ public final class BslEditorHyperlinkHook implements IStartup
                 int offset = viewer.getSelectedRange().x;
                 if (hasStockLinks(viewer, offset))
                     return;
-                pending = typeLink(editor, page, viewer, offset);
+                pending = textLink(editor, page, viewer, offset);
             }
             catch (RuntimeException | LinkageError e)
             {
@@ -148,6 +153,76 @@ public final class BslEditorHyperlinkHook implements IStartup
             }
             return false;
         }
+    }
+
+    private static IHyperlink textLink(BslXtextEditor editor, IWorkbenchPage page, ITextViewer viewer, int offset)
+    {
+        IHyperlink link = typeLink(editor, page, viewer, offset);
+        return link != null ? link : literalLink(editor, page, viewer, offset);
+    }
+
+    /**
+     * Ссылка на объект метаданных по полному имени «Тип.Имя» под {@code offset} в строковом
+     * литерале (текст запроса, аргумент НайтиПоПолномуИмени и т.п.). Дальние сегменты
+     * («…КурсыВалют.СрезПоследних») не мешают — ссылка ведёт на объект верхнего уровня.
+     */
+    private static IHyperlink literalLink(BslXtextEditor editor, IWorkbenchPage page, ITextViewer viewer, int offset)
+    {
+        if (!(viewer.getDocument() instanceof IXtextDocument document) || document.getResourceURI() == null)
+            return null;
+        try
+        {
+            Object[] found = document.readOnly(resource ->
+            {
+                if (resource == null || resource.getParseResult() == null)
+                    return null;
+                ILeafNode leaf = literalLeaf(resource, offset);
+                // Каретка сразу за именем перед закрывающей кавычкой или концом строки.
+                if (leaf == null && offset > 0)
+                    leaf = literalLeaf(resource, offset - 1);
+                if (leaf == null)
+                    return null;
+                String text = leaf.getText();
+                int position = Math.max(0, Math.min(text.length(), offset - leaf.getOffset()));
+                int start = position;
+                while (start > 0 && isTypeNameChar(text.charAt(start - 1)))
+                    start--;
+                while (start < position && text.charAt(start) == '.')
+                    start++;
+                int typeEnd = text.indexOf('.', start);
+                if (typeEnd < 0 || !MdTypeMapping.isKnownMdRootType(text.substring(start, typeEnd)))
+                    return null;
+                int end = typeEnd + 1;
+                while (end < text.length() && isTypeNameChar(text.charAt(end)) && text.charAt(end) != '.')
+                    end++;
+                // Под указателем — дальний сегмент, а не само «Тип.Имя».
+                if (end == typeEnd + 1 || position > end)
+                    return null;
+                return new Object[] { text.substring(start, end), new Region(leaf.getOffset() + start, end - start) };
+            });
+            if (found == null)
+                return null;
+            IV8ProjectManager manager = (IV8ProjectManager) Global.getServiceByClass(IV8ProjectManager.class);
+            IV8Project project = manager == null ? null : manager.getProject(document.getResourceURI());
+            if (project == null)
+                return null;
+            // Поиск в BM — вне блокировки документа.
+            String name = (String) found[0];
+            return GoToDefinition.resolveEObjectByQualifiedName(name, project) instanceof MdObject target
+                ? new TypeHyperlink((IRegion) found[1], name, target, editor, page)
+                : null;
+        }
+        catch (RuntimeException | LinkageError e)
+        {
+            return null;
+        }
+    }
+
+    private static ILeafNode literalLeaf(XtextResource resource, int offset)
+    {
+        ILeafNode leaf = NodeModelUtils.findLeafNodeAtOffset(resource.getParseResult().getRootNode(), offset);
+        return leaf != null && !leaf.isHidden()
+            && NodeModelUtils.findActualSemanticObjectFor(leaf) instanceof StringLiteral ? leaf : null;
     }
 
     /**
@@ -484,7 +559,7 @@ public final class BslEditorHyperlinkHook implements IStartup
             IHyperlink[] links = delegate.detectHyperlinks(viewer, region, multiple);
             if (links == null || links.length == 0)
             {
-                IHyperlink type = region == null ? null : typeLink(source, page, viewer, region.getOffset());
+                IHyperlink type = region == null ? null : textLink(source, page, viewer, region.getOffset());
                 if (type == null)
                     return links;
                 links = new IHyperlink[] { type };
