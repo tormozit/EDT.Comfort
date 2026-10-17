@@ -3,7 +3,11 @@ package tormozit;
 import java.io.File;
 import java.io.IOException;
 import java.lang.management.GarbageCollectorMXBean;
+import java.lang.management.LockInfo;
 import java.lang.management.ManagementFactory;
+import java.lang.management.MonitorInfo;
+import java.lang.management.ThreadInfo;
+import java.lang.management.ThreadMXBean;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.StandardOpenOption;
@@ -28,7 +32,8 @@ import org.eclipse.ui.IStartup;
  *
  * <p>Включённый сэмплер раз в {@link #TICK_MS} кладёт в очередь UI-потока «пульс»
  * ({@code asyncExec}). Пока пульс не выполнен дольше {@link #STALL_MS} — идёт эпизод: каждые
- * {@link #TICK_MS} снимается стек UI-потока. Когда пульс выполнен, в {@code ui-stalls.log}
+ * {@link #TICK_MS} снимается стек UI-потока с блокировками (а если он ждёт блокировку — и стек её
+ * владельца). Когда пульс выполнен, в {@code ui-stalls.log}
  * (рабочая папка плагина) пишется одна запись: длительность, прирост времени GC-пауз за эпизод и
  * топ стеков по числу попаданий.
  *
@@ -44,7 +49,7 @@ public final class UiStallSampler implements IStartup
     private static final long TICK_MS = 300;
     private static final long STALL_MS = 1000;
     /** Глубина с запасом: при 18 кадрах вложенные раскладки SWT съедали стек, инициатор не был виден. */
-    private static final int STACK_DEPTH = 60;
+    private static final int STACK_DEPTH = 100;
     private static final int TOP_STACKS = 4;
     /** Жёсткий предел размера файла: старые записи выбрасываются, новые дописываются. */
     private static final long MAX_FILE_BYTES = 1024 * 1024;
@@ -103,6 +108,7 @@ public final class UiStallSampler implements IStartup
         private final Display display;
         private final Thread uiThread;
         private final List<GarbageCollectorMXBean> collectors = ManagementFactory.getGarbageCollectorMXBeans();
+        private final ThreadMXBean threadMx = ManagementFactory.getThreadMXBean();
         /** nanoTime постановки невыполненного пульса, 0 — пульса в очереди нет. */
         private final AtomicLong pendingSince = new AtomicLong();
         private final AtomicLong lastPulseDoneNs = new AtomicLong(System.nanoTime());
@@ -176,11 +182,7 @@ public final class UiStallSampler implements IStartup
                 episodeStartNs = since;
                 episodeGcStart = gcMillis();
             }
-            StackTraceElement[] trace = uiThread.getStackTrace();
-            StringBuilder key = new StringBuilder();
-            for (int i = 0; i < Math.min(trace.length, STACK_DEPTH); i++)
-                key.append("\n    ").append(trace[i]); //$NON-NLS-1$
-            String stack = key.toString();
+            String stack = captureUiStack();
             stacks.merge(stack, 1, Integer::sum);
             samples++;
             // Пишем сразу, а не по окончании: зависание может не закончиться (EDT убьют).
@@ -283,6 +285,70 @@ public final class UiStallSampler implements IStartup
             while (from < all.length && !(from > 0 && all[from - 1] == '\n' && all[from] == '2'))
                 from++;
             Files.write(file.toPath(), java.util.Arrays.copyOfRange(all, from, all.length));
+        }
+
+        /**
+         * Стек UI-потока с блокировками, как в {@code jstack}: на каких кадрах захвачены мониторы,
+         * чего поток ждёт и кто владелец ожидаемой блокировки (с его стеком и его блокировками) —
+         * иначе при ожидании блокировки видно только «ждёт», а не того, кто держит.
+         */
+        private String captureUiStack()
+        {
+            ThreadInfo ui = threadInfo(uiThread.getId());
+            StringBuilder sb = new StringBuilder();
+            if (ui == null)
+            {
+                StackTraceElement[] trace = uiThread.getStackTrace();
+                for (int i = 0; i < Math.min(trace.length, STACK_DEPTH); i++)
+                    sb.append("\n    ").append(trace[i]); //$NON-NLS-1$
+                return sb.toString();
+            }
+            appendThread(sb, ui, "    "); //$NON-NLS-1$
+            long ownerId = ui.getLockOwnerId();
+            ThreadInfo owner = ownerId == -1 ? null : threadInfo(ownerId);
+            if (owner != null)
+            {
+                sb.append("\n    владелец блокировки: \"").append(owner.getThreadName()) //$NON-NLS-1$
+                    .append("\" id=").append(owner.getThreadId()) //$NON-NLS-1$
+                    .append(' ').append(owner.getThreadState());
+                appendThread(sb, owner, "      "); //$NON-NLS-1$
+            }
+            return sb.toString();
+        }
+
+        private ThreadInfo threadInfo(long id)
+        {
+            try
+            {
+                ThreadInfo[] infos = threadMx.getThreadInfo(new long[] { id },
+                    threadMx.isObjectMonitorUsageSupported(), threadMx.isSynchronizerUsageSupported());
+                return infos.length > 0 ? infos[0] : null;
+            }
+            catch (RuntimeException e)
+            {
+                return null;
+            }
+        }
+
+        /** Кадры (до {@link #STACK_DEPTH}) с пометками ожидания и захвата мониторов, затем захваченные синхронизаторы. */
+        private static void appendThread(StringBuilder sb, ThreadInfo info, String indent)
+        {
+            StackTraceElement[] trace = info.getStackTrace();
+            MonitorInfo[] monitors = info.getLockedMonitors();
+            LockInfo waitsFor = info.getLockInfo();
+            int depth = Math.min(trace.length, STACK_DEPTH);
+            for (int i = 0; i < depth; i++)
+            {
+                sb.append('\n').append(indent).append(trace[i]);
+                if (i == 0 && waitsFor != null)
+                    sb.append('\n').append(indent).append("- ждёт ").append(waitsFor) //$NON-NLS-1$
+                        .append(" (").append(info.getThreadState()).append(')'); //$NON-NLS-1$
+                for (MonitorInfo m : monitors)
+                    if (m.getLockedStackDepth() == i)
+                        sb.append('\n').append(indent).append("- захвачен ").append(m); //$NON-NLS-1$
+            }
+            for (LockInfo s : info.getLockedSynchronizers())
+                sb.append('\n').append(indent).append("- захвачен синхронизатор ").append(s); //$NON-NLS-1$
         }
 
         private long gcMillis()
