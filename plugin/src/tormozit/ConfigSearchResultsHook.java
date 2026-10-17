@@ -138,7 +138,10 @@ import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
+import org.eclipse.swt.widgets.Link;
 import org.eclipse.swt.widgets.Listener;
+import org.eclipse.swt.widgets.Menu;
+import org.eclipse.swt.widgets.MenuItem;
 import org.eclipse.swt.widgets.ScrollBar;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Table;
@@ -207,6 +210,12 @@ public final class ConfigSearchResultsHook implements IStartup
     private static final String KEY_COL_SYNTAX_WIDTH = "matchColSyntaxWidth"; //$NON-NLS-1$
     private static final String KEY_COL_SUITABLE_WIDTH = "matchColSuitableWidth"; //$NON-NLS-1$
     private static final String KEY_COL_TEXT_WIDTH = "matchColTextWidth"; //$NON-NLS-1$
+    private static final String KEY_COL_REPLACED_WIDTH = "matchColReplacedWidth"; //$NON-NLS-1$
+    /** Колонка «Заменено» (issue #800): значок в шапке, в ячейке — пометка. */
+    private static final String REPLACED_MARK = "✓"; //$NON-NLS-1$
+    private static final String REPLACED_ICON_BUNDLE = "org.eclipse.ltk.ui.refactoring"; //$NON-NLS-1$
+    private static final String REPLACED_ICON_PATH = "icons/full/obj16/change.png"; //$NON-NLS-1$
+    private static final String REPLACED_ICON_KEY = "tormozit.configSearch.replacedIcon"; //$NON-NLS-1$
     /** Был ли при закрытии активен режим заполнения по ширине (см. {@link FormTableColumnState}). */
     private static final String KEY_COL_FILL_MODE = "matchColFillMode"; //$NON-NLS-1$
 
@@ -335,18 +344,25 @@ public final class ConfigSearchResultsHook implements IStartup
         return settings != null ? settings : root.addNewSection(key);
     }
 
+    /**
+     * Колонки в порядке создания ({@link #createMatchColumns}) и их биты в {@link #matchColumnMask}.
+     * «Заменено» добавлена позже — бит 256 при месте перед «Текстом», чтобы маски прежних наборов
+     * колонок (ключи сохранённых порядка и ширин) не изменились.
+     */
+    private static final int[] MATCH_COLUMN_BITS = {1, 2, 4, 8, 16, 32, 64, 256, 128};
+
     private static String[] allMatchWidthKeys()
     {
         return new String[] {KEY_COL_PATH_WIDTH, KEY_COL_PROPERTY_WIDTH, KEY_COL_LINE_WIDTH,
             KEY_COL_PARENT_WIDTH, KEY_COL_PARENT_TYPE_WIDTH, KEY_COL_SYNTAX_WIDTH,
-            KEY_COL_SUITABLE_WIDTH, KEY_COL_TEXT_WIDTH};
+            KEY_COL_SUITABLE_WIDTH, KEY_COL_REPLACED_WIDTH, KEY_COL_TEXT_WIDTH};
     }
 
     private static TableColumn[] allMatchColumns()
     {
         return new TableColumn[] {cachedMatchPathColumn, cachedMatchPropertyColumn, cachedMatchLineColumn,
             cachedMatchParentColumn, cachedMatchParentTypeColumn, cachedMatchSyntaxColumn,
-            cachedMatchSuitableColumn, cachedMatchTextColumn};
+            cachedMatchSuitableColumn, cachedMatchReplacedColumn, cachedMatchTextColumn};
     }
 
     private static String matchColumnKey(TableColumn column)
@@ -377,7 +393,7 @@ public final class ConfigSearchResultsHook implements IStartup
         List<String> visible = new ArrayList<>();
         String[] keys = allMatchWidthKeys();
         for (int i = 0; i < keys.length; i++)
-            if ((matchColumnMask & (1 << i)) != 0)
+            if ((matchColumnMask & MATCH_COLUMN_BITS[i]) != 0)
                 visible.add(keys[i]);
         return visible.toArray(String[]::new);
     }
@@ -393,6 +409,7 @@ public final class ConfigSearchResultsHook implements IStartup
             case KEY_COL_PARENT_TYPE_WIDTH -> MATCH_PARENT_TYPE_COLUMN_WIDTH;
             case KEY_COL_SYNTAX_WIDTH -> MATCH_SYNTAX_COLUMN_WIDTH;
             case KEY_COL_SUITABLE_WIDTH -> MATCH_SUITABLE_COLUMN_WIDTH;
+            case KEY_COL_REPLACED_WIDTH -> ColumnWidthFit.headerIconColumnWidth();
             default -> MATCH_TEXT_COLUMN_WIDTH;
         };
     }
@@ -410,15 +427,17 @@ public final class ConfigSearchResultsHook implements IStartup
             cachedMatchParentTypeColumn, cachedMatchSyntaxColumn);
         interaction.setHeaderTooltipExtra(cachedMatchSuitableColumn,
             BslOccurrenceContextResolver.TIP_SUITABLE + sign);
+        interaction.setHeaderTooltipExtra(cachedMatchReplacedColumn,
+            "Заменено. Текст вхождения заменён, в колонке «Текст» — строка после замены" + sign); //$NON-NLS-1$
     }
 
     private static void ensureMatchColumns(TableViewer viewer, boolean references, boolean suitable,
-        boolean path, List<MatchRow> rows)
+        boolean path, boolean replaced, List<MatchRow> rows)
     {
         boolean text = rows.isEmpty() || rows.stream().anyMatch(row -> row.text != null && !row.text.isBlank()
             || row.tableItem != null && isDeferredCalculationItem(row.tableItem));
         int mask = 2 | 4 | 32 | (path ? 1 : 0) | (references ? 8 | 16 : 0)
-            | (references && suitable ? 64 : 0) | (text ? 128 : 0);
+            | (references && suitable ? 64 : 0) | (text ? 128 : 0) | (replaced ? 256 : 0);
         if (mask == matchColumnMask || changingMatchColumns || cachedMatchTableInteraction == null)
             return;
         FormTableInteraction interaction = cachedMatchTableInteraction;
@@ -595,6 +614,39 @@ public final class ConfigSearchResultsHook implements IStartup
                 }
             });
         }
+        TableViewerColumn replacedCol = null;
+        if ((mask & 256) != 0)
+        {
+            // В шапке только значок (как колонка «Пользовательский» проверки орфографии); без значка — текст.
+            Image icon = replacedIcon(matchViewer.getTable().getDisplay());
+            replacedCol = new TableViewerColumn(matchViewer, SWT.CENTER);
+            if (icon != null)
+            {
+                // Фиксированная ширина вне авто-пересчёта (как «К»); запас — чтобы значок шапки не обрезался.
+                FormTableInteraction.applyIconColumn(replacedCol.getColumn(), null,
+                    defaultMatchWidth(KEY_COL_REPLACED_WIDTH) - ColumnWidthFit.iconColumnWidth());
+                replacedCol.getColumn().setImage(icon);
+            }
+            else
+            {
+                replacedCol.getColumn().setText("Заменено"); //$NON-NLS-1$
+                replacedCol.getColumn().setWidth(MATCH_SUITABLE_COLUMN_WIDTH);
+            }
+            // Со значком в шапке одной колонки Windows рисует значок и в шапке первой колонки;
+            // повторная установка пустой картинки снимает у остальных признак значка.
+            if (icon != null)
+                for (TableColumn column : matchViewer.getTable().getColumns())
+                    if (column != replacedCol.getColumn() && column.getImage() == null)
+                        column.setImage(null);
+            replacedCol.setLabelProvider(new ColumnLabelProvider()
+            {
+                @Override
+                public String getText(Object element)
+                {
+                    return element instanceof MatchRow row && row.replaced ? REPLACED_MARK : ""; //$NON-NLS-1$
+                }
+            });
+        }
         TableViewerColumn textCol = null;
         if ((mask & 128) != 0)
         {
@@ -654,7 +706,31 @@ public final class ConfigSearchResultsHook implements IStartup
         cachedMatchParentTypeColumn = parentTypeCol != null ? parentTypeCol.getColumn() : null;
         cachedMatchSyntaxColumn = syntaxCol != null ? syntaxCol.getColumn() : null;
         cachedMatchSuitableColumn = suitableCol != null ? suitableCol.getColumn() : null;
+        cachedMatchReplacedColumn = replacedCol != null ? replacedCol.getColumn() : null;
         cachedMatchTextColumn = textCol != null ? textCol.getColumn() : null;
+    }
+
+    /**
+     * Штатный значок изменения LTK (как в предпросмотре рефакторинга) для шапки «Заменено»; один на
+     * дисплей. Общий с {@link FileSearchResultsHook}.
+     */
+    static Image replacedIcon(Display display)
+    {
+        if (display.getData(REPLACED_ICON_KEY) instanceof Image cached && !cached.isDisposed())
+            return cached;
+        org.osgi.framework.Bundle bundle = org.eclipse.core.runtime.Platform.getBundle(REPLACED_ICON_BUNDLE);
+        java.net.URL url = bundle != null ? bundle.getEntry(REPLACED_ICON_PATH) : null;
+        Image image = url != null
+            ? org.eclipse.jface.resource.ImageDescriptor.createFromURL(url).createImage(false, display) : null;
+        if (image == null)
+            return null;
+        display.setData(REPLACED_ICON_KEY, image);
+        display.disposeExec(() ->
+        {
+            if (!image.isDisposed())
+                image.dispose();
+        });
+        return image;
     }
 
     private static void restoreResultColumns(Object input)
@@ -675,6 +751,7 @@ public final class ConfigSearchResultsHook implements IStartup
             int[] widths = new int[keys.length];
             for (int i = 0; i < keys.length; i++)
                 widths[i] = keys[i].equals(KEY_COL_SYNTAX_WIDTH) ? MATCH_SYNTAX_COLUMN_WIDTH
+                    : keys[i].equals(KEY_COL_REPLACED_WIDTH) ? defaultMatchWidth(keys[i])
                     : FormTableColumnState.readWidth(settings, keys[i], defaultMatchWidth(keys[i]), 1);
             interaction.restoreColumnWidths(widths,
                 !FormTableColumnState.hasSavedColumnWidths(settings, KEY_COL_FILL_MODE, keys));
@@ -856,6 +933,7 @@ public final class ConfigSearchResultsHook implements IStartup
     private static TableColumn cachedMatchParentTypeColumn;
     private static TableColumn cachedMatchSyntaxColumn;
     private static TableColumn cachedMatchSuitableColumn;
+    private static TableColumn cachedMatchReplacedColumn;
     private static TableColumn cachedMatchTextColumn;
     private static FormTableInteraction cachedMatchTableInteraction;
     private static IToolBarManager cachedMatchToolBar;
@@ -972,6 +1050,8 @@ public final class ConfigSearchResultsHook implements IStartup
         /** Диапазон подсветки полнотекстового вхождения внутри {@code styledText}. */
         volatile int directHlStart = -1;
         volatile int directHlLen;
+        /** Текст вхождения заменён ({@link ConfigSearchReplace}): в «Тексте» — строка после замены. */
+        boolean replaced;
 
         MatchRow(String path, String property, long lineNumber, StyledString styledText, IFile file,
                 Object tableItem, String moduleKindSegment, URI sourceUri, EReference sourceReference,
@@ -1260,11 +1340,13 @@ public final class ConfigSearchResultsHook implements IStartup
                 cachedMatchParentTypeColumn = null;
                 cachedMatchSyntaxColumn = null;
                 cachedMatchSuitableColumn = null;
+                cachedMatchReplacedColumn = null;
                 cachedMatchTableInteraction = null;
             }
         });
 
         installMatchTableOpenSupport(matchViewer, activePage, view.getSite().getPage());
+        installReplaceMenus(matchViewer, treeViewer);
         NavigatorRevealDropHook.installViewerDrag(matchViewer, ConfigSearchResultsHook::resolveSearchDrag);
         NavigatorRevealDropHook.installViewerDrag(treeViewer, ConfigSearchResultsHook::resolveSearchDrag);
 
@@ -1277,6 +1359,153 @@ public final class ConfigSearchResultsHook implements IStartup
 
         pageContainer.layout(true, true);
         log("installMatchTableSplitPane: OK"); //$NON-NLS-1$
+    }
+
+    private static final String REPLACE_MENU_HOOKED_KEY = "tormozit.configSearchReplaceMenu"; //$NON-NLS-1$
+
+    /**
+     * Замена выполнена или отменена ({@link ConfigSearchReplace}): пересобрать таблицу вхождений,
+     * если она показывает этот результат, — колонка «Заменено» и текст после замены. UI-поток.
+     */
+    static void onMatchesReplaced(Object searchResult)
+    {
+        IViewPart view = findSearchViewPart();
+        SearchViewViewers viewers = view != null ? resolveViewers(view) : null;
+        if (viewers == null || viewers.tree.getInput() != searchResult)
+            return;
+        // Подписи узлов: счётчик вхождений без заменённых.
+        viewers.tree.refresh(true);
+        syncMatchTableToTree(viewers.tree);
+        // Штатный заголовок заново (после отмены число должно вернуться), затем без заменённых.
+        ((ISearchResultViewPart) view).updateLabel();
+        applyReplacedHeaderCount(view, searchResult);
+    }
+
+    /**
+     * Число в заголовке панели «Поиск» («Поиск "…" - N совпадений») без заменённых вхождений: они
+     * остаются в результате, штатный счётчик их учитывает. Меняется последнее число текста, если оно
+     * равно штатному счётчику (повторный вызов число уже не найдёт). Склонение не правится.
+     */
+    private static void applyReplacedHeaderCount(IViewPart view, Object searchResult)
+    {
+        int replaced = ConfigSearchReplace.replacedCount(searchResult);
+        if (replaced <= 0 || !(Global.getField(view, "fDescription") instanceof Link link) || link.isDisposed()) //$NON-NLS-1$
+            return;
+        String text = link.getText();
+        java.util.regex.Matcher number = java.util.regex.Pattern.compile("\\d+").matcher(text); //$NON-NLS-1$
+        int start = -1;
+        int end = -1;
+        while (number.find())
+        {
+            start = number.start();
+            end = number.end();
+        }
+        if (start < 0)
+            return;
+        long shown = Long.parseLong(text.substring(start, end));
+        boolean stock = Global.invoke(searchResult, "getMatchCount") instanceof Long total && total.longValue() == shown //$NON-NLS-1$
+            || Global.invoke(searchResult, "getDisplayedMatchCount") instanceof Long displayed && displayed.longValue() == shown; //$NON-NLS-1$
+        if (stock)
+            link.setText(text.substring(0, start) + Math.max(0, shown - replaced) + text.substring(end));
+    }
+
+    /**
+     * Команды замены (issue #800): своё контекстное меню таблицы вхождений и подменю «Комфорт»
+     * штатного меню дерева результатов. Только у текстового поиска — у «Найти ссылки» их нет.
+     */
+    private static void installReplaceMenus(TableViewer matchViewer, TreeViewer treeViewer)
+    {
+        Table table = matchViewer.getTable();
+        Menu tableMenu = new Menu(table);
+        table.setMenu(tableMenu);
+        tableMenu.addListener(SWT.Show, e ->
+        {
+            for (MenuItem item : tableMenu.getItems())
+                item.dispose();
+            Object result = treeViewer.getInput();
+            if (!ConfigSearchReplace.isTextSearchResult(result))
+                return;
+            List<Match> selected = new ArrayList<>();
+            for (TableItem item : table.getSelection())
+                if (item.getData() instanceof MatchRow row && row.tableItem != null
+                    && Global.invoke(row.tableItem, "getData") instanceof Match match //$NON-NLS-1$
+                    && ConfigSearchReplace.isReplaceable(match))
+                    selected.add(match);
+            addReplaceItems(tableMenu, false, table.getShell(), result, selected);
+        });
+
+        Menu treeMenu = treeViewer.getTree().getMenu();
+        if (treeMenu == null || treeMenu.getData(REPLACE_MENU_HOOKED_KEY) != null)
+            return;
+        treeMenu.setData(REPLACE_MENU_HOOKED_KEY, Boolean.TRUE);
+        treeMenu.addListener(SWT.Show, e -> hookReplaceComfortSubmenu(treeMenu, treeViewer));
+    }
+
+    private static void hookReplaceComfortSubmenu(Menu contextMenu, TreeViewer treeViewer)
+    {
+        MenuItem anchor = ComfortSubmenuHelper.findAnchorAfterEditGroup(contextMenu);
+        Menu comfortSub = ComfortSubmenuHelper.findOrCreateComfortSubmenu(contextMenu, contextMenu.getShell(), anchor);
+        if (comfortSub == null || comfortSub.isDisposed() || comfortSub.getData(REPLACE_MENU_HOOKED_KEY) != null)
+            return;
+        comfortSub.setData(REPLACE_MENU_HOOKED_KEY, Boolean.TRUE);
+        List<MenuItem> added = new ArrayList<>(2);
+        comfortSub.addListener(SWT.Show, e ->
+        {
+            Object result = treeViewer.getInput();
+            if (!ConfigSearchReplace.isTextSearchResult(result))
+                return;
+            Set<Object> seen = Collections.newSetFromMap(new IdentityHashMap<>());
+            List<Match> selected = new ArrayList<>();
+            List<Object> tableItems = new ArrayList<>();
+            for (Object node : treeViewer.getStructuredSelection().toList())
+                collectTableItemsRecursively(node, tableItems);
+            for (Object tableItem : tableItems)
+                if (Global.invoke(tableItem, "getData") instanceof Match match //$NON-NLS-1$
+                    && ConfigSearchReplace.isReplaceable(match) && seen.add(match))
+                    selected.add(match);
+            added.addAll(addReplaceItems(comfortSub, true, comfortSub.getShell(), result, selected));
+        });
+        comfortSub.addListener(SWT.Hide, e ->
+        {
+            List<MenuItem> snapshot = new ArrayList<>(added);
+            added.clear();
+            // после Selection: пункт, выбранный в меню, получает событие позже Hide
+            comfortSub.getDisplay().asyncExec(() ->
+            {
+                for (MenuItem item : snapshot)
+                    if (!item.isDisposed())
+                        item.dispose();
+            });
+        });
+    }
+
+    private static List<MenuItem> addReplaceItems(Menu menu, boolean comfortSubmenu, Shell shell, Object result,
+        List<Match> selected)
+    {
+        MenuItem selectedItem = addReplaceItem(menu, comfortSubmenu, "Заменить выделенные…", selected.isEmpty()
+            ? "Недоступно: не выделено ни одного вхождения." : "Заменить текст выделенных вхождений.",
+            () -> ConfigSearchReplace.open(shell, result, selected, false));
+        selectedItem.setEnabled(!selected.isEmpty());
+        MenuItem allItem = addReplaceItem(menu, comfortSubmenu, "Заменить все…",
+            "Заменить текст всех найденных вхождений.",
+            () -> ConfigSearchReplace.open(shell, result, ConfigSearchReplace.resultMatches(result), true));
+        return List.of(selectedItem, allItem);
+    }
+
+    private static MenuItem addReplaceItem(Menu menu, boolean comfortSubmenu, String text, String tooltip,
+        Runnable action)
+    {
+        MenuItem item;
+        if (comfortSubmenu)
+            item = ComfortSubmenuHelper.createSortedMenuItem(menu, SWT.PUSH, text);
+        else
+        {
+            item = new MenuItem(menu, SWT.PUSH);
+            item.setText(text);
+        }
+        ComfortSubmenuHelper.setMenuItemTooltip(item, tooltip);
+        item.addListener(SWT.Selection, e -> action.run());
+        return item;
     }
 
     private static int compareStrings(String a, String b)
@@ -1307,6 +1536,7 @@ public final class ConfigSearchResultsHook implements IStartup
         lastSyncedTableItems = tableItems;
 
         boolean referenceSearch = isReferenceSearchResult(treeViewer);
+        Object searchResult = treeViewer.getInput();
         List<MatchRow> rows = new ArrayList<>();
         for (Object tableItem : tableItems)
         {
@@ -1359,6 +1589,13 @@ public final class ConfigSearchResultsHook implements IStartup
                 row.directLength = fm.getTextLength();
                 row.categoryOnly = !referenceSearch;
             }
+            ConfigSearchReplace.ReplacedText replacedText = ConfigSearchReplace.replacedText(searchResult, match);
+            if (replacedText != null)
+            {
+                row.replaced = true;
+                row.styledText = matchStyledText(replacedText.text(), replacedText.offset(), replacedText.length());
+                row.text = row.styledText.getString();
+            }
             // Значение из кэша резолвера — сразу, без чтения файла: при потоковом обновлении списка
             // во время поиска строки пересоздаются постоянно, без этого ячейка мигала бы «пусто → имя».
             if (file != null && lineNumber > 0)
@@ -1370,7 +1607,7 @@ public final class ConfigSearchResultsHook implements IStartup
             rows.add(row);
         }
         ensureMatchColumns(matchViewer, referenceSearch, cachedSought != null,
-            !isTerminalTreeSelection(selectedNodes), rows);
+            !isTerminalTreeSelection(selectedNodes), ConfigSearchReplace.hasReplaced(searchResult), rows);
         matchViewer.setInput(rows);
         scheduleMatchMethodResolution(matchViewer, rows);
         scheduleMatchContextResolution(matchViewer, rows);
@@ -6376,6 +6613,7 @@ public final class ConfigSearchResultsHook implements IStartup
             TreeViewer treeViewer = (TreeViewer) viewerObj;
             if (treeViewer.getTree() == null || treeViewer.getTree().isDisposed())
                 return false;
+            applyReplacedHeaderCount(view, treeViewer.getInput());
 
             Object tableViewerObj = Global.getField(treeLayout, "tableViewer"); //$NON-NLS-1$
             if (!(tableViewerObj instanceof TableViewer))
@@ -7566,6 +7804,35 @@ public final class ConfigSearchResultsHook implements IStartup
         }
     }
 
+    /**
+     * Полный путь вхождения — колонки «Путь» и «Свойство» одной строкой (подпись правки в
+     * {@link ConfigSearchReplace}). Для модуля — путь модуля. {@code null} — путь определить не удалось.
+     */
+    static String matchDisplayPath(Object match)
+    {
+        try
+        {
+            if (match instanceof TextSearchFileMatch fileMatch)
+            {
+                String module = fileMatch.getFile() != null ? modulePathFromFile(fileMatch.getFile()) : null;
+                String path = module != null ? canonicalizeMdPath(module) : ""; //$NON-NLS-1$
+                return path.isEmpty() ? null : path;
+            }
+            EObject top = resolveMatchTopMdObject(match);
+            String path = top != null ? appendOwnedChildSegmentIfMissing(GetRef.eObjectToFullName(top), match) : null;
+            EObject leaf = resolveMatchLeaf(match);
+            String property = leaf != null ? metadataPropertyPath(leaf, resolveMatchFeature(match), top) : null;
+            if (path == null || path.isEmpty())
+                return property;
+            return property != null && !property.isEmpty() ? path + "." + property : path; //$NON-NLS-1$
+        }
+        catch (Exception e)
+        {
+            log("matchDisplayPath: " + e); //$NON-NLS-1$
+            return null;
+        }
+    }
+
     /** Общий путь свойства для штатного поиска и поиска битых ссылок. */
     static String metadataPropertyPath(EObject leaf, EStructuralFeature feature, EObject top)
     {
@@ -8072,7 +8339,17 @@ public final class ConfigSearchResultsHook implements IStartup
         if (!(offObj instanceof Integer off) || !(lenObj instanceof Integer len)
             || len <= 0 || off < 0 || off > text.length())
             return new StyledString(text);
-        int end = Math.min(off + len, text.length());
+        return matchStyledText(text, off.intValue(), len.intValue());
+    }
+
+    /**
+     * Строка текста с подсвеченным фрагментом {@code off..off+len} — для вхождения и для текста после
+     * замены ({@link ConfigSearchReplace.ReplacedText}; пустая замена — {@code len == 0}, без подсветки).
+     */
+    private static StyledString matchStyledText(String text, int off, int len)
+    {
+        off = Math.max(0, Math.min(off, text.length()));
+        int end = Math.min(off + Math.max(len, 0), text.length());
 
         // Многострочный текст (например запрос СКД/динамического списка) — match.getText() отдаёт
         // ВЕСЬ текст целиком, а не одну строку (как для БСЛ, где вхождение уже приходит построчно) —
@@ -8377,8 +8654,11 @@ public final class ConfigSearchResultsHook implements IStartup
             return 0;
         long count = 0;
         Object ownItems = Global.invoke(node, "getTableItems"); //$NON-NLS-1$
+        // Заменённые вхождения остаются в списке, но в счётчик не входят (issue #800).
         if (ownItems instanceof List<?> list)
-            count += list.size();
+            for (Object item : list)
+                if (!ConfigSearchReplace.isReplaced(Global.invoke(item, "getData"))) //$NON-NLS-1$
+                    count++;
         Object children = Global.invoke(node, "getChildren"); //$NON-NLS-1$
         if (children instanceof List<?> childList)
         {

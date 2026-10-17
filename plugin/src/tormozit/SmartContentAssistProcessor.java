@@ -509,6 +509,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
 
     /** Фоновый расчёт словарного списка: контекст в работе, неудачный и уже показанный. */
     private Job wordListBackgroundJob;
+    private volatile Job wordListModelRefreshJob;
     private volatile int wordListBackgroundKey = Integer.MIN_VALUE;
     /**
      * Ключ контекста, чей готовый список уже отдан воротам показа
@@ -3015,6 +3016,7 @@ return;
                 // «Новый <тип>»: список типов зависит только от контекстов компиляции,
                 // поэтому он считается один раз на набор и лежит в общем каталоге.
                 boolean ctorProbe = false;
+                boolean provisionalModel = false;
                 String ctorKey = null;
                 // Сначала compute без waitResource: readOnlyForContentAssist на воркере
                 // давал StackOverflow (лог 23:01 и раньше). Пустой ответ — короткий sleep.
@@ -3076,8 +3078,10 @@ return;
                     try
                     {
                         final int probeOffset = probe;
+                        provisionalModel |= !ContentAssistSessionReloader.isModelCurrent(doc);
                         raw = BslDataEventGuard.runIsolated(
                             () -> computeMemberStockViaSelectionProxy(viewer, probeOffset));
+                        provisionalModel |= !ContentAssistSessionReloader.isModelCurrent(doc);
                         events = BslDataEventGuard.drainIsolated(doc);
                         if (ctorKey != null && raw != null && countNoLinkModelProposals(raw) > 0)
                         {
@@ -3187,6 +3191,7 @@ return;
                 // Пустой префикс + известный набор контекстов = список годен любому слову
                 // в этом наборе, а не только набранному.
                 final String ctorEnvKey = ctorKey;
+                final boolean refreshOnCurrentModel = provisionalModel && !ctorProbe;
                 final long pipelineReadyNs = System.nanoTime();
                 ContentAssistDebug.pipeline("word.publish.queued", pipelineState()
                     + " job=" + pipelineJobId + " filter=" + ContentAssistDebug.pipelineText(popupFilterFinal)
@@ -3200,6 +3205,8 @@ return;
                         {
                             publishWordList(viewer, key, gen, epoch, result,
                                 dataEvents, popupList, popupFilterFinal, probeOffset, ctorEnvKey);
+                            if (refreshOnCurrentModel && epoch == wordListEpoch && gen == memberStockContextGen)
+                                scheduleWordListModelRefresh(viewer, key, gen, epoch);
                         }
                     });
                 return Status.OK_STATUS;
@@ -3269,6 +3276,8 @@ return;
     boolean isAssistBackgroundInFlight()
     {
         if (BareConstructorWarmup.inFlight())
+            return true;
+        if (wordListModelRefreshJob != null && wordListModelRefreshJob.getState() != Job.NONE)
             return true;
         if (cacheOnlyRefetchJob != null && cacheOnlyRefetchJob.getState() != Job.NONE)
             return true;
@@ -3391,6 +3400,8 @@ return;
 
     void abortWordListBackground(String why)
     {
+        if (wordListModelRefreshJob != null)
+            wordListModelRefreshJob.cancel();
         if (cacheOnlyRefetchJob != null)
             cacheOnlyRefetchJob.cancel();
         boolean hadJob = wordListBackgroundJob != null;
@@ -3416,6 +3427,8 @@ return;
      */
     void releaseWordListOpenGuard(String why)
     {
+        if (wordListModelRefreshJob != null)
+            wordListModelRefreshJob.cancel();
         if (cacheOnlyRefetchJob != null)
             cacheOnlyRefetchJob.cancel();
         wordListEpoch++;
@@ -3827,6 +3840,111 @@ return;
         publishMemberStock(viewer, stock.dot(), stock.gen(), stock.receiver(), stock.list(),
             stock.dataEvents());
         return hasMemberStock(dot);
+    }
+
+    /** Второй проход предварительного списка: ожидание и чтение модели — только на воркере. */
+    private void scheduleWordListModelRefresh(ITextViewer viewer, int key, int gen, int epoch)
+    {
+        if (!(viewer instanceof SourceViewer source) || key >= 0)
+            return;
+        ContentAssistant assistant = ContentAssistPatcher.getContentAssistant(source);
+        IDocument doc = viewer.getDocument();
+        if (assistant == null || !ContentAssistPopupSync.isPopupVisible(assistant)
+            || !(doc instanceof IDocumentExtension4 stamped)
+            || isAmpersandAnnotationFilter(doc, resolveWidgetCaret(viewer))
+            || isAfterNewKeyword(doc, resolveWidgetCaret(viewer)))
+            return;
+        org.eclipse.swt.widgets.Display display = source.getTextWidget().getDisplay();
+        if (wordListModelRefreshJob != null)
+            wordListModelRefreshJob.cancel();
+        Job refresh = new Job("Комфорт: обновление списка по актуальной модели") //$NON-NLS-1$
+        {
+            private boolean stale(IProgressMonitor monitor)
+            {
+                int caret = liveAssistCaret;
+                return monitor.isCanceled() || epoch != wordListEpoch || gen != memberStockContextGen
+                    || viewer.getDocument() != doc || caret < 0
+                    || computeFullListContextKey(doc, caret) != key;
+            }
+
+            @Override
+            protected IStatus run(IProgressMonitor monitor)
+            {
+                Global.tempLog("assist-model-refresh", "begin key=" + key + " epoch=" + epoch); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                BslXtextDocumentHook.markAssistBackground(true);
+                DELEGATE_STALE_CHECK.set(() -> stale(monitor));
+                try
+                {
+                    while (!stale(monitor))
+                    {
+                        long computedStamp = stamped.getModificationStamp();
+                        ICompletionProposal[] raw = BslDataEventGuard.runIsolated(
+                            () -> computeDelegateListOnReadyModel(viewer, -key - 1, () -> stale(monitor)));
+                        java.util.Map<Object, Object> events = BslDataEventGuard.drainIsolated(doc);
+                        if (stale(monitor))
+                            return Status.CANCEL_STATUS;
+                        // Потолок одного ожидания не означает, что модель не станет готова:
+                        // пока та же сессия открыта, продолжаем ждать в том же воркере.
+                        if (raw == null && ContentAssistSessionReloader.isModelCurrent(doc))
+                        {
+                            Global.tempLog("assist-model-refresh", "stop: no delegate result key=" + key); //$NON-NLS-1$ //$NON-NLS-2$
+                            return Status.CANCEL_STATUS;
+                        }
+                        if (raw == null || stamped.getModificationStamp() != computedStamp)
+                            continue;
+                        Global.tempLog("assist-model-refresh", "ready key=" + key + " n=" + raw.length //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                            + " stamp=" + computedStamp); //$NON-NLS-1$
+                        runWordListOnUi(viewer, display, "wordModelRefresh", () -> { //$NON-NLS-1$
+                            int caret = resolveWidgetCaret(viewer);
+                            if (stale(monitor) || wordListModelRefreshJob != this
+                                || !ContentAssistPopupSync.isPopupVisible(assistant)
+                                || caret < 0 || computeFullListContextKey(doc, caret) != key
+                                || fullListContextKey != key)
+                            {
+                                Global.tempLog("assist-model-refresh", "drop context key=" + key); //$NON-NLS-1$ //$NON-NLS-2$
+                                return;
+                            }
+                            if (stamped.getModificationStamp() != computedStamp)
+                            {
+                                scheduleWordListModelRefresh(viewer, key, gen, epoch);
+                                return;
+                            }
+                            if (raw.length == 0)
+                            {
+                                Global.tempLog("assist-model-refresh", "keep preliminary: empty key=" + key); //$NON-NLS-1$ //$NON-NLS-2$
+                                return;
+                            }
+                            BslDataEventGuard.mergeIntoReal(doc, events);
+                            // Зонд в начале слова дал широкую базу. Фильтр берётся заново
+                            // при обновлении popup, поэтому ввод во время ожидания сохраняется.
+                            rememberRecoveredDelegateList(viewer, caret, "", raw); //$NON-NLS-1$
+                            ContentAssistPopupSync.recomputePopupListPreservingSelection(assistant, source,
+                                SmartContentAssistProcessor.this);
+                            Global.tempLog("assist-model-refresh", "publish key=" + key + " n=" + raw.length //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                                + " filter=" + computeIdentifierFilter(doc, caret)); //$NON-NLS-1$
+                        });
+                        return Status.OK_STATUS;
+                    }
+                    return Status.CANCEL_STATUS;
+                }
+                catch (Exception | LinkageError | StackOverflowError e)
+                {
+                    Global.tempLogException("assist-model-refresh", "failed key=" + key, e); //$NON-NLS-1$ //$NON-NLS-2$
+                    return Status.CANCEL_STATUS;
+                }
+                finally
+                {
+                    DELEGATE_STALE_CHECK.remove();
+                    BslXtextDocumentHook.markAssistBackground(false);
+                    Global.tempLog("assist-model-refresh", "end key=" + key + " stale=" + stale(monitor)); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                }
+            }
+        };
+        refresh.setSystem(true);
+        refresh.setPriority(Job.INTERACTIVE);
+        wordListModelRefreshJob = refresh;
+        Global.tempLog("assist-model-refresh", "schedule key=" + key + " epoch=" + epoch); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        refresh.schedule();
     }
 
     private int cacheOnlyRefetchCaret = -1;
@@ -4617,7 +4735,7 @@ return EMPTY;
                         // сам берёт длину замены как offset − replacementOffset, а validate
                         // сверяет набранное от replacementOffset до каретки.
                         raw = BslDataEventGuard.runIsolated(
-                            () -> computeLiteralArgListOnReadyModel(viewer, quote + 1,
+                            () -> computeDelegateListOnReadyModel(viewer, quote + 1,
                                 () -> monitor.isCanceled() || epoch != literalArgEpoch
                                     || System.nanoTime() - tStart >= 15_000_000_000L));
                         events = BslDataEventGuard.drainIsolated(doc);
@@ -4697,7 +4815,7 @@ return EMPTY;
      * Штатный расчёт только в фоне, после готовности текущей модели. Если документ
      * изменился во время чтения, ответ не подтверждён: ждём новый разбор в том же задании.
      */
-    private ICompletionProposal[] computeLiteralArgListOnReadyModel(ITextViewer viewer,
+    private ICompletionProposal[] computeDelegateListOnReadyModel(ITextViewer viewer,
         int probeOffset, java.util.function.BooleanSupplier abort)
     {
         IDocument doc = viewer.getDocument();
@@ -8569,7 +8687,9 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
             KeywordProbe keywordProbe = beginKeywordProbe(viewer, off);
             // #region agent log
             uiBlockLog("model.stateAtCompute", "off=" + off + " " //$NON-NLS-1$ //$NON-NLS-2$
-                + ContentAssistSessionReloader.describeModelState(viewer != null ? viewer.getDocument() : null));
+                + ContentAssistSessionReloader.describeModelState(viewer != null ? viewer.getDocument() : null)
+                + " " + ContentAssistSessionReloader.describeReceiverBeforeDot( //$NON-NLS-1$
+                    viewer != null ? viewer.getDocument() : null, off));
             // #endregion
             try
             {
@@ -8812,6 +8932,35 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         }
         if (unwrapped.length > memberStockFullList.length)
             memberStockFullList = unwrapped;
+    }
+
+    /**
+     * Ctrl+Space: запас членов, посчитанный до последнего переразбора, держит ссылки в
+     * заменённую модель (боковая подсказка без типа) и без сброса живёт, пока точка на месте.
+     * Сбрасываем — список считается заново штатным путём. При наборе не трогаем: там это был
+     * бы пересчёт на каждую букву. Сброс полный: свежий список той же длины иначе отбросило бы
+     * правило «не короче имеющегося».
+     */
+    private void dropStaleMemberStockOnManual(int dot)
+    {
+        if (!ManualInvocationDetect.isActive() || !hasMemberStock(dot) || !isMemberStockStale())
+            return;
+        uiBlockLog("memberStock.staleOnManual", "dot=" + dot + " n=" + memberStockFullList.length); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        resetMemberStockFullList();
+    }
+
+    /** Контекст первых предложений запаса устарел: смотрим несколько, не весь список. */
+    private boolean isMemberStockStale()
+    {
+        int checked = 0;
+        for (ICompletionProposal proposal : memberStockFullList)
+        {
+            if (SmartCompletionProposal.isProposalContextStale(proposal))
+                return true;
+            if (++checked >= 3)
+                break;
+        }
+        return false;
     }
 
     /** Полный список членов для {@code dot} уже в кэше (полон или заведомо большой). */
@@ -9425,6 +9574,7 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
     {
         if (terminalEmptyMemberAccess && cachedNonObjectDot == dot)
             return EMPTY;
+        dropStaleMemberStockOnManual(dot);
         if (hasMemberStock(dot))
             return finalizeListForIrAssistDisplay(buildDelegateOrderedList(memberStockFullList));
         ICompletionProposal[] inFlight = memberAccessUiDeferredList(viewer, dot, ""); //$NON-NLS-1$
@@ -9488,6 +9638,7 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
     {
         if (viewer == null || dot < 0)
             return EMPTY;
+        dropStaleMemberStockOnManual(dot);
         if (hasMemberStock(dot))
             return memberStockFullList;
         // Набор символов: считать здесь нельзя — это блокировка ввода на время штатного

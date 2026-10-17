@@ -15,8 +15,9 @@ import org.eclipse.swt.widgets.Label;
  * Крутящийся индикатор слева от подписи статуса: {@code Canvas} в той же ячейке
  * раскладки, что и {@code Label}, чтобы не ломать соседние контролы.
  * <p>
- * Потребители: панель проблем ({@link ProblemViewHook}) и диалог поиска по дереву
- * сравнения ({@link CompareConfigSearchDialogHook}).
+ * Потребители: панель проблем ({@link ProblemViewHook}), диалог поиска по дереву
+ * сравнения ({@link CompareConfigSearchDialogHook}) и свежесть полнотекстового индекса в окне
+ * «Поиск» ({@link ConfigSearchDialogHook}).
  */
 final class WaitSpinner
 {

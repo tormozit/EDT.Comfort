@@ -11,6 +11,7 @@ import org.eclipse.core.commands.ExecutionException;
 import org.eclipse.core.commands.IExecutionListener;
 import org.eclipse.core.commands.NotHandledException;
 import org.eclipse.core.resources.IFile;
+import org.eclipse.core.resources.ResourcesPlugin;
 import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.widgets.Display;
@@ -23,6 +24,10 @@ import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.commands.ICommandService;
 import org.eclipse.ui.handlers.HandlerUtil;
+import org.eclipse.ui.texteditor.IDocumentProvider;
+import org.eclipse.ui.texteditor.IDocumentProviderExtension;
+import org.eclipse.ui.texteditor.IElementStateListener;
+import org.eclipse.ui.texteditor.IElementStateListenerExtension;
 
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 
@@ -247,10 +252,11 @@ public final class BslXtextDocumentHook implements IStartup
             saveActive = false;
             SAVE_SKIP.set(0);
             SAVE_WAIT.set(0);
-            if (!SaveDebug.isEnabled())
-                return;
             IEditorPart editor = resolveEditor(event);
             BslXtextEditor bsl = GetRef.getActiveBslEditor(editor);
+            StateValidationAfterSave.beforeSave(bsl);
+            if (!SaveDebug.isEnabled())
+                return;
             if (bsl == null)
                 return;
             String module = moduleLabel(bsl);
@@ -267,6 +273,8 @@ public final class BslXtextDocumentHook implements IStartup
         public void postExecuteSuccess(String commandId, Object returnValue)
         {
             endSave(commandId, "ok"); //$NON-NLS-1$
+            if (CMD_SAVE.equals(commandId))
+                StateValidationAfterSave.afterSave();
         }
 
         @Override
@@ -334,6 +342,117 @@ public final class BslXtextDocumentHook implements IStartup
                 return file.getFullPath().toString();
         }
         return input != null ? input.getName() : "?"; //$NON-NLS-1$
+    }
+
+    /**
+     * После сохранения поставщик документа сбрасывает у редактора признак «состояние
+     * проверено», и первая клавиша зовёт {@code validateEditorInputState}: проверке нужна
+     * блокировка файла, а её держит сборка, запущенная этим же сохранением. Ввод стоит всю
+     * сборку, поверх — окно «Операция пользователя находится в состоянии ожидания».
+     * Проверяем состояние сразу после сохранения, пока сборка блокировку ещё не взяла.
+     * Взяла — ничего не делаем: первая клавиша подождёт, как штатно.
+     * <p>
+     * Сброс признака может прийти и позже команды (и при автосохранении), поэтому на поставщик
+     * документа сохраняемого редактора вешается слушатель — один раз на поставщик.
+     */
+    private static final class StateValidationAfterSave
+        implements IElementStateListener, IElementStateListenerExtension
+    {
+        private static final String TOPIC = "save-state-validation"; //$NON-NLS-1$
+        private static final java.util.Map<IDocumentProvider, Boolean> LISTENED =
+            new java.util.WeakHashMap<>();
+        private static java.lang.ref.WeakReference<BslXtextEditor> saving =
+            new java.lang.ref.WeakReference<>(null);
+
+        private final java.lang.ref.WeakReference<BslXtextEditor> editor;
+
+        private StateValidationAfterSave(BslXtextEditor editor)
+        {
+            this.editor = new java.lang.ref.WeakReference<>(editor);
+        }
+
+        /** UI-поток, {@code preExecute} команды сохранения. */
+        static void beforeSave(BslXtextEditor bsl)
+        {
+            saving = new java.lang.ref.WeakReference<>(bsl);
+            IDocumentProvider provider = bsl == null ? null : bsl.getDocumentProvider();
+            if (provider == null || LISTENED.containsKey(provider))
+                return;
+            LISTENED.put(provider, Boolean.TRUE);
+            provider.addElementStateListener(new StateValidationAfterSave(bsl));
+        }
+
+        /** UI-поток, сразу после успешной команды сохранения. */
+        static void afterSave()
+        {
+            validateIfFree(saving.get(), "afterSave"); //$NON-NLS-1$
+        }
+
+        @Override
+        public void elementStateValidationChanged(Object element, boolean isStateValidated)
+        {
+            if (isStateValidated)
+                return;
+            BslXtextEditor bsl = editor.get();
+            if (bsl == null || element == null || !element.equals(bsl.getEditorInput()))
+                return;
+            // Сброс приходит изнутри операции сохранения или оповещения об изменении ресурсов:
+            // там дерево ресурсов занято, проверку — следующим шагом UI.
+            Display display = Display.getDefault();
+            if (display != null && !display.isDisposed())
+                display.asyncExec(() -> validateIfFree(bsl, "invalidated")); //$NON-NLS-1$
+        }
+
+        private static void validateIfFree(BslXtextEditor bsl, String why)
+        {
+            if (bsl == null || bsl.getSite() == null || bsl.getEditorInput() == null)
+                return;
+            IEditorInput input = bsl.getEditorInput();
+            if (!(bsl.getDocumentProvider() instanceof IDocumentProviderExtension extension)
+                || extension.isStateValidated(input))
+                return;
+            IFile file = input.getAdapter(IFile.class);
+            if (file == null)
+                return;
+            String busy = conflictingRunningJob(file);
+            if (busy != null)
+            {
+                // #region agent log
+                Global.tempLog(TOPIC, why + " skip busy=" + busy + " file=" + file.getName()); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                // #endregion
+                return;
+            }
+            long started = System.nanoTime();
+            boolean ok = bsl.validateEditorInputState();
+            // #region agent log
+            Global.tempLog(TOPIC, why + " validated ok=" + ok + " ms=" //$NON-NLS-1$ //$NON-NLS-2$
+                + (System.nanoTime() - started) / 1_000_000 + " file=" + file.getName()); //$NON-NLS-1$
+            // #endregion
+        }
+
+        /** Имя выполняющегося задания, чьё правило пересекается с файлом; {@code null} — свободно. */
+        private static String conflictingRunningJob(IFile file)
+        {
+            for (Job job : Job.getJobManager().find(null))
+            {
+                if (job.getState() != Job.RUNNING)
+                    continue;
+                org.eclipse.core.runtime.jobs.ISchedulingRule rule = job.getRule();
+                if (rule != null && rule.isConflicting(file)
+                    || job.belongsTo(ResourcesPlugin.FAMILY_AUTO_BUILD)
+                    || job.belongsTo(ResourcesPlugin.FAMILY_MANUAL_BUILD))
+                    return job.getName();
+            }
+            return null;
+        }
+
+        @Override public void elementDirtyStateChanged(Object element, boolean isDirty) {}
+        @Override public void elementContentAboutToBeReplaced(Object element) {}
+        @Override public void elementContentReplaced(Object element) {}
+        @Override public void elementDeleted(Object element) {}
+        @Override public void elementMoved(Object originalElement, Object movedElement) {}
+        @Override public void elementStateChanging(Object element) {}
+        @Override public void elementStateChangeFailed(Object element) {}
     }
 
     private static final class SaveDebug

@@ -1613,6 +1613,8 @@ public class SmartCompletionProposal implements
                 Object additional = Global.getField(configurable, "additionalProposalInfo"); //$NON-NLS-1$
                 if (additional instanceof EObject object && !isEdtDocumentationObjectReady(object))
                     return null;
+                if (additional instanceof ProposalElement proposal)
+                    replaceStaleModelContext(proposal);
             }
             try
             {
@@ -1666,9 +1668,11 @@ public class SmartCompletionProposal implements
             {
                 // getModel()/обычный итератор getList() разрешают ссылки. eGet(false)
                 // и basicIterator подтверждены ProposalElementImpl.eGet/getList.
-                Object model = proposal.eGet(BslPackage.PROPOSAL_ELEMENT__MODEL, false, false);
-                if (model instanceof EObject context)
-                    pending.addLast(context);
+                // model — лишь контекст для getViewDocBySemanticEObject, и EDT берёт его через
+                // getModel() с разрешением прокси. Устаревший контекст — норма для списка после
+                // «.»: каждая набранная буква переразбирает метод, и узел выражения сам или его
+                // метод становится прокси. Цепочку контейнеров model поэтому не проверяем —
+                // запрет гасил боковую подсказку автооткрытого списка (см. replaceStaleModelContext).
                 Object value = proposal.eGet(BslPackage.PROPOSAL_ELEMENT__LIST, false, false);
                 if (!(value instanceof InternalEList<?> list))
                     return "proposalListNotBasic";
@@ -1679,6 +1683,67 @@ public class SmartCompletionProposal implements
             }
         }
         return null;
+    }
+
+    /**
+     * Контекст {@code ProposalElement.model} устарел — узел выражения после частичного
+     * переразбора висит под методом-прокси с пустым адресом. EDT строит по контексту имя и
+     * ссылку типа ({@code getViewDocBySemanticEObject(…, model)}), без ресурса получается
+     * {@code <null>}. Подставляем корень модуля из текущего ресурса редактора: у него тот же
+     * ресурс, версия платформы и язык. Только для ссылки: подмена в поле-включении вынула бы
+     * модуль из ресурса.
+     */
+    private static void replaceStaleModelContext(ProposalElement proposal)
+    {
+        try
+        {
+            Object model = ((InternalEObject)proposal).eGet(BslPackage.PROPOSAL_ELEMENT__MODEL, false, false);
+            if (!(model instanceof InternalEObject context) || !isStaleContext(context))
+                return;
+            org.eclipse.emf.ecore.EStructuralFeature feature =
+                proposal.eClass().getEStructuralFeature(BslPackage.PROPOSAL_ELEMENT__MODEL);
+            if (!(feature instanceof org.eclipse.emf.ecore.EReference reference) || reference.isContainment())
+                return;
+            SourceViewer viewer = ContentAssistSessionReloader.getActiveViewer();
+            if (viewer == null || !(viewer.getDocument() instanceof IXtextDocument document))
+                return;
+            EObject root = ContentAssistSessionReloader.readOnlyPeekAst(document, resource ->
+                resource == null || resource.getContents().isEmpty() ? null : resource.getContents().get(0));
+            if (root instanceof com._1c.g5.v8.dt.bsl.model.Module)
+                proposal.eSet(reference, root);
+        }
+        catch (RuntimeException ignored)
+        {
+        }
+    }
+
+    /**
+     * Предложение EDT посчитано по модели, которую частичный переразбор уже заменил: контекст
+     * его {@code ProposalElement} устарел. Не {@link ConfigurableCompletionProposal} или без
+     * {@code ProposalElement} — {@code false}.
+     */
+    static boolean isProposalContextStale(ICompletionProposal proposal)
+    {
+        if (!(proposal instanceof ConfigurableCompletionProposal configurable)
+            || !(Global.getField(configurable, "additionalProposalInfo") instanceof ProposalElement element)) //$NON-NLS-1$
+            return false;
+        Object model = ((InternalEObject)element).eGet(BslPackage.PROPOSAL_ELEMENT__MODEL, false, false);
+        return model instanceof InternalEObject context && isStaleContext(context);
+    }
+
+    /** В цепочке контейнеров прокси, или до ресурса не дойти. Прокси не разрешаются. */
+    private static boolean isStaleContext(InternalEObject context)
+    {
+        java.util.Set<EObject> path = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        for (InternalEObject current = context; current != null && path.add(current);
+            current = current.eInternalContainer())
+        {
+            if (current.eIsProxy())
+                return true;
+            if (current.eDirectResource() != null)
+                return false;
+        }
+        return true;
     }
 
     private static String edtDocumentationContainerProblem(EObject object)

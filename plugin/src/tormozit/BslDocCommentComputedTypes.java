@@ -34,6 +34,9 @@ import org.osgi.framework.FrameworkUtil;
 import org.osgi.framework.hooks.weaving.WeavingHook;
 import org.osgi.framework.hooks.weaving.WovenClass;
 
+import com._1c.g5.v8.dt.bsl.documentation.comment.BslDocumentationComment;
+import com._1c.g5.v8.dt.bsl.documentation.comment.BslDocumentationComment.ReturnSection;
+import com._1c.g5.v8.dt.bsl.documentation.comment.TypeSection;
 import com._1c.g5.v8.dt.bsl.model.BslFactory;
 import com._1c.g5.v8.dt.bsl.model.Method;
 import com._1c.g5.v8.dt.bsl.model.Variable;
@@ -413,7 +416,7 @@ public final class BslDocCommentComputedTypes
     {
         try
         {
-            Object name = Global.invoke(method, "getName"); //$NON-NLS-1$
+            Object name = BslDocCommentDescriptionFix.invokeCommentGetter(method, "getName"); //$NON-NLS-1$
             Resource resource = method.eResource();
             return String.valueOf(name) + "@" //$NON-NLS-1$
                 + (resource != null ? resource.getURI() : method.eClass().getName());
@@ -452,7 +455,7 @@ public final class BslDocCommentComputedTypes
     {
         try
         {
-            Object uriObj = Global.invoke(contextDefMethod, "getSourceUri"); //$NON-NLS-1$
+            Object uriObj = BslDocCommentDescriptionFix.invokeCommentGetter(contextDefMethod, "getSourceUri"); //$NON-NLS-1$
             if (!(uriObj instanceof URI uri) || uri.toString().isEmpty())
                 return null;
             EObject proxy = org.eclipse.emf.ecore.EcoreFactory.eINSTANCE.createEObject();
@@ -533,20 +536,16 @@ public final class BslDocCommentComputedTypes
      */
     private static int returnMark(Object comment)
     {
-        Object section = Global.invoke(comment, "getReturnSection"); //$NON-NLS-1$
+        if (!(comment instanceof BslDocumentationComment documentation))
+            return MARK_NONE;
+        ReturnSection section = documentation.getReturnSection();
         if (section == null)
             return MARK_NONE;
-        Object types = Global.invoke(section, "getReturnTypes"); //$NON-NLS-1$
-        if (!(types instanceof List<?> sections))
-            return MARK_NONE;
-        for (Object typeSection : sections)
+        for (TypeSection typeSection : section.getReturnTypes())
         {
-            Object defs = Global.invoke(typeSection, "getTypeDefinitions"); //$NON-NLS-1$
-            if (!(defs instanceof List<?> definitions))
-                continue;
-            for (Object definition : definitions)
+            for (var definition : typeSection.getTypeDefinitions())
             {
-                Object name = Global.invoke(definition, "getTypeName"); //$NON-NLS-1$
+                String name = definition.getTypeName();
                 if (MARK_BAN_TEXT.equals(name))
                     return MARK_BAN;
                 if (MARK_FORCE_TEXT.equals(name))
@@ -570,48 +569,56 @@ public final class BslDocCommentComputedTypes
      */
     private static void fillReturnSection(Object comment, List<?> computed, EObject context) throws Exception
     {
-        ClassLoader cl = comment.getClass().getClassLoader();
-        Class<?> partClass = Class.forName(
-            "com._1c.g5.v8.dt.bsl.documentation.comment.IDescriptionPart", true, cl); //$NON-NLS-1$
-        Class<?> returnSectionClass = Class.forName(
-            COMMENT_CLASS + "$ReturnSection", true, cl); //$NON-NLS-1$
-        Class<?> typeSectionClass = Class.forName(
-            "com._1c.g5.v8.dt.bsl.documentation.comment.TypeSection", true, cl); //$NON-NLS-1$
-
-        List<Object> items = new ArrayList<>();
+        if (!(comment instanceof BslDocumentationComment documentation))
+            return;
+        long sectionStarted = System.nanoTime();
+        List<TypeItem> items = new ArrayList<>();
         for (Object raw : computed)
         {
-            if (raw instanceof TypeItem)
-                items.add(raw);
+            if (raw instanceof TypeItem item)
+                items.add(item);
         }
         if (items.isEmpty())
             return;
 
         // Объявленный возврат не замещаем, а дополняем: EDT объединяет все секции типов
         // возврата, поэтому своя секция просто встаёт рядом с написанной руками.
-        Object existing = Global.invoke(comment, "getReturnSection"); //$NON-NLS-1$
-        Object returnSection = existing != null ? existing
-            : returnSectionClass.getConstructor(partClass, int.class)
-                .newInstance(comment, Integer.valueOf(0));
-        Object typeSection = typeSectionClass
-            .getConstructor(partClass, int.class)
-            .newInstance(returnSection, Integer.valueOf(0));
+        ReturnSection existing = documentation.getReturnSection();
+        ReturnSection returnSection = existing != null ? existing : new ReturnSection(documentation, 0);
+        TypeSection typeSection = new TypeSection(returnSection, 0);
 
-        java.lang.reflect.Method fill = typeSectionClass.getMethod("fill", //$NON-NLS-1$
-            List.class, String.class, boolean.class, EObject.class);
-        fill.invoke(typeSection, items, "", Boolean.TRUE, context); //$NON-NLS-1$
-        int count = definitionCount(typeSection);
+        typeSection.fill(items, "", true, context); //$NON-NLS-1$
+        int count = typeSection.getTypeDefinitions().size();
         if (count == 0)
         {
-            fill.invoke(typeSection, items, "", Boolean.FALSE, context); //$NON-NLS-1$
-            count = definitionCount(typeSection);
+            typeSection.fill(items, "", false, context); //$NON-NLS-1$
+            count = typeSection.getTypeDefinitions().size();
         }
         if (count == 0)
             return;
-        long descriptionsStarted = System.nanoTime();
+        // Место создания полей — и в сборке: из поля его берёт свойство, которое EDT создаёт
+        // по секции, а без места вставки подсказка не найдёт описание свойства.
+        int sources = 0;
         try
         {
-            BslStructureInsertCommentTypes.fillPropertyDescriptions(typeSection, items, context);
+            sources = BslStructureInsertCommentTypes.alignFieldSources(typeSection, documentation, items,
+                computed, methodLabel(context));
+        }
+        catch (Throwable t)
+        {
+            Global.tempLogException("bsl-property-fill-cost", "sources target=" + methodLabel(context), t); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        long descriptionsStarted = System.nanoTime();
+        // Описания полей — только текст для подсказок. Комментарий, разобранный сборкой, в
+        // подсказки не попадает (EDT разбирает его заново на каждое обращение), а сборка
+        // держит блокировку проекта, и первое нажатие клавиши после сохранения ждёт её конца.
+        boolean inBuild = isBuildThread();
+        boolean cached = false;
+        try
+        {
+            if (!inBuild)
+                cached = BslStructureInsertCommentTypes.fillPropertyDescriptions(typeSection, items,
+                    computed, methodLabel(context), context);
         }
         catch (Throwable t)
         {
@@ -622,20 +629,26 @@ public final class BslDocCommentComputedTypes
             Global.tempLog("bsl-property-fill-cost", "fill target=" + methodLabel(context) //$NON-NLS-1$ //$NON-NLS-2$
                 + " commentId=" + Integer.toHexString(System.identityHashCode(comment)) //$NON-NLS-1$
                 + " computedId=" + Integer.toHexString(System.identityHashCode(computed)) //$NON-NLS-1$
-                + " types=" + items.size() + " definitions=" + count //$NON-NLS-1$ //$NON-NLS-2$
+                + " types=" + items.size() + " definitions=" + count + " sources=" + sources //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " inBuild=" + inBuild + " cached=" + cached //$NON-NLS-1$ //$NON-NLS-2$
+                + " sectionFillNs=" + (descriptionsStarted - sectionStarted) //$NON-NLS-1$
                 + " elapsedNs=" + (System.nanoTime() - descriptionsStarted) //$NON-NLS-1$
                 + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
         }
-        Global.invoke(returnSection, "addTypeSection", typeSection); //$NON-NLS-1$
+        returnSection.addTypeSection(typeSection);
         if (existing == null)
-            Global.invoke(comment, "setReturnSection", returnSection); //$NON-NLS-1$
+            documentation.setReturnSection(returnSection);
     }
 
-    /** Сколько определений типа собралось в секции. */
-    private static int definitionCount(Object typeSection)
+    /**
+     * Текущий поток выполняет сборку: задание сборки EDT ({@code Builds.BuildProjectJob})
+     * относится к семейству ручной сборки, автосборка Eclipse — к своему.
+     */
+    private static boolean isBuildThread()
     {
-        Object defs = Global.invoke(typeSection, "getTypeDefinitions"); //$NON-NLS-1$
-        return defs instanceof List<?> list ? list.size() : 0;
+        Job job = Job.getJobManager().currentJob();
+        return job != null && (job.belongsTo(ResourcesPlugin.FAMILY_MANUAL_BUILD)
+            || job.belongsTo(ResourcesPlugin.FAMILY_AUTO_BUILD));
     }
 
     /**
@@ -680,7 +693,7 @@ public final class BslDocCommentComputedTypes
                 Object computer = rsp.get(computerClass);
                 if (computer == null)
                     return null;
-                Object envs = Global.invoke(target, "environments"); //$NON-NLS-1$
+                Object envs = BslDocCommentDescriptionFix.invokeCommentGetter(target, "environments"); //$NON-NLS-1$
                 if (envs == null)
                     return null;
                 phase = "native"; //$NON-NLS-1$
@@ -767,7 +780,7 @@ public final class BslDocCommentComputedTypes
     {
         try
         {
-            Object collector = Global.invoke(target, "getFinalReturnState"); //$NON-NLS-1$
+            Object collector = BslDocCommentDescriptionFix.invokeCommentGetter(target, "getFinalReturnState"); //$NON-NLS-1$
             if (collector == null)
                 return null;
             List<?> normal = typesFromReturnProvider(collector, "NORMAL", envs); //$NON-NLS-1$
@@ -795,13 +808,13 @@ public final class BslDocCommentComputedTypes
         if (last == null)
         {
             // Перегрузка без Environments (как в syncExportPropertyTypes).
-            Object all = Global.invoke(provider, "getLastState"); //$NON-NLS-1$
+            Object all = BslDocCommentDescriptionFix.invokeCommentGetter(provider, "getLastState"); //$NON-NLS-1$
             if (all instanceof List<?> states && !states.isEmpty())
             {
                 List<Object> types = new ArrayList<>();
                 for (Object state : states)
                 {
-                    Object iterable = state == null ? null : Global.invoke(state, "getTypes"); //$NON-NLS-1$
+                    Object iterable = state == null ? null : BslDocCommentDescriptionFix.invokeCommentGetter(state, "getTypes"); //$NON-NLS-1$
                     if (iterable instanceof Iterable<?> it)
                     {
                         for (Object item : it)
@@ -829,7 +842,7 @@ public final class BslDocCommentComputedTypes
             List<Object> types = new ArrayList<>();
             for (Object state : list)
             {
-                Object iterable = state == null ? null : Global.invoke(state, "getTypes"); //$NON-NLS-1$
+                Object iterable = state == null ? null : BslDocCommentDescriptionFix.invokeCommentGetter(state, "getTypes"); //$NON-NLS-1$
                 if (iterable instanceof Iterable<?> it)
                 {
                     for (Object item : it)
@@ -842,7 +855,7 @@ public final class BslDocCommentComputedTypes
             if (!types.isEmpty())
                 return types;
         }
-        Object typesObj = Global.invoke(last, "getTypes"); //$NON-NLS-1$
+        Object typesObj = BslDocCommentDescriptionFix.invokeCommentGetter(last, "getTypes"); //$NON-NLS-1$
         if (typesObj instanceof Iterable<?> it)
         {
             List<Object> types = new ArrayList<>();

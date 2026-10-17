@@ -26,7 +26,11 @@ import org.eclipse.jface.text.IRegion;
 import org.eclipse.jface.text.ITextHoverExtension;
 import org.eclipse.jface.text.ITextViewer;
 import org.eclipse.jface.text.contentassist.ICompletionProposal;
+import org.eclipse.swt.SWT;
+import org.eclipse.swt.widgets.Display;
+import org.eclipse.swt.widgets.Shell;
 import org.eclipse.ui.IStartup;
+import org.eclipse.ui.PlatformUI;
 import org.eclipse.xtext.EcoreUtil2;
 import org.eclipse.xtext.naming.IQualifiedNameConverter;
 import org.eclipse.xtext.nodemodel.ICompositeNode;
@@ -46,7 +50,10 @@ import com._1c.g5.v8.bm.core.IBmTransaction;
 import com._1c.g5.v8.bm.integration.AbstractBmTask;
 import com._1c.g5.v8.bm.integration.IBmModel;
 import com._1c.g5.v8.dt.bsl.documentation.comment.BslCommentUtils;
+import com._1c.g5.v8.dt.bsl.documentation.comment.BslDocumentationComment;
 import com._1c.g5.v8.dt.bsl.documentation.comment.BslMultiLineCommentDocumentationProvider;
+import com._1c.g5.v8.dt.bsl.documentation.comment.LinkPart;
+import com._1c.g5.v8.dt.bsl.documentation.comment.TagPart;
 import com._1c.g5.v8.dt.bsl.documentation.comment.TextPart;
 import com._1c.g5.v8.dt.bsl.documentation.comment.TypeSection;
 import com._1c.g5.v8.dt.bsl.model.Block;
@@ -149,6 +156,128 @@ public final class BslStructureInsertCommentTypes
         };
         job.setSystem(true);
         job.schedule();
+        WaitWindowDiagnostics.install();
+    }
+
+    /** Временная диагностика окна ожидания Eclipse; поведение операций не меняет. */
+    private static final class WaitWindowDiagnostics
+    {
+        private static final String TOPIC = "workspace-wait"; //$NON-NLS-1$
+        private static final String SESSION_KEY = "tormozit.waitWindowDiagnostics"; //$NON-NLS-1$
+        private static final AtomicBoolean installed = new AtomicBoolean();
+
+        static void install()
+        {
+            if (!installed.compareAndSet(false, true))
+                return;
+            Global.tempLog(TOPIC, "install.request"); //$NON-NLS-1$
+            Display display = PlatformUI.getWorkbench().getDisplay();
+            display.asyncExec(() ->
+            {
+                if (display.isDisposed())
+                    return;
+                display.addFilter(SWT.Show, event ->
+                {
+                    if (event.widget instanceof Shell shell && !shell.isDisposed())
+                        observe(shell);
+                });
+                Global.tempLog(TOPIC, "install.done"); //$NON-NLS-1$
+                for (Shell shell : display.getShells())
+                    if (!shell.isDisposed() && shell.isVisible())
+                        observe(shell);
+            });
+        }
+
+        private static void observe(Shell shell)
+        {
+            Object owner = shell.getData();
+            String ownerClass = owner == null ? "null" : owner.getClass().getName(); //$NON-NLS-1$
+            Global.tempLog(TOPIC, "shell.show title=" + shell.getText() + " owner=" + ownerClass); //$NON-NLS-1$ //$NON-NLS-2$
+            // Window.createShell сохраняет диалог в Shell.data. При закрытии EDT
+            // также показывает ProgressMonitorJobsDialog и его подклассы.
+            boolean observed = "org.eclipse.ui.internal.progress.BlockedJobsDialog".equals(ownerClass) //$NON-NLS-1$
+                || owner instanceof org.eclipse.jface.dialogs.ProgressMonitorDialog;
+            if (!observed || shell.getData(SESSION_KEY) != null)
+                return;
+            Session session = new Session(shell.getText());
+            shell.setData(SESSION_KEY, session);
+            shell.addListener(SWT.Hide, event -> session.close());
+            shell.addListener(SWT.Dispose, event -> session.close());
+            session.start();
+        }
+
+        private static final class Session
+        {
+            private final long id = System.nanoTime();
+            private final String title;
+            private final AtomicBoolean closed = new AtomicBoolean();
+            private final java.util.Timer timer = new java.util.Timer("ComfortWaitWindowDiagnostics", true); //$NON-NLS-1$
+
+            Session(String title)
+            {
+                this.title = title;
+            }
+
+            void start()
+            {
+                Global.tempLog(TOPIC, "window.open id=" + id + " title=" + title); //$NON-NLS-1$ //$NON-NLS-2$
+                timer.scheduleAtFixedRate(new java.util.TimerTask()
+                {
+                    @Override
+                    public void run()
+                    {
+                        sample();
+                    }
+                }, 0, 1000);
+            }
+
+            void close()
+            {
+                if (!closed.compareAndSet(false, true))
+                    return;
+                timer.cancel();
+                Global.tempLog(TOPIC, "window.close id=" + id + " elapsedNs=" + (System.nanoTime() - id)); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+
+            private void sample()
+            {
+                try
+                {
+                    StringBuilder text = new StringBuilder("sample id=").append(id) //$NON-NLS-1$
+                        .append(" elapsedNs=").append(System.nanoTime() - id).append('\n'); //$NON-NLS-1$
+                    for (Job job : Job.getJobManager().find(null))
+                    {
+                        var rule = job.getRule();
+                        text.append("job state=").append(job.getState()).append(" name=") //$NON-NLS-1$ //$NON-NLS-2$
+                            .append(job.getName()).append(" rule=") //$NON-NLS-1$
+                            .append(rule == null ? "null" : rule.getClass().getName()) //$NON-NLS-1$
+                            .append('\n');
+                    }
+                    java.lang.management.ThreadInfo[] threads =
+                        java.lang.management.ManagementFactory.getThreadMXBean().dumpAllThreads(true, true);
+                    for (java.lang.management.ThreadInfo thread : threads)
+                    {
+                        text.append("thread=").append(thread.getThreadId()).append(' ') //$NON-NLS-1$
+                            .append(thread.getThreadName()).append(" state=").append(thread.getThreadState()) //$NON-NLS-1$
+                            .append(" waitsFor=").append(thread.getLockInfo()) //$NON-NLS-1$
+                            .append(" owner=").append(thread.getLockOwnerId()).append(' ') //$NON-NLS-1$
+                            .append(thread.getLockOwnerName()).append('\n');
+                        for (StackTraceElement frame : thread.getStackTrace())
+                            text.append("  at ").append(frame).append('\n'); //$NON-NLS-1$
+                        for (java.lang.management.MonitorInfo monitor : thread.getLockedMonitors())
+                            text.append("  locked ").append(monitor).append(" depth=") //$NON-NLS-1$ //$NON-NLS-2$
+                                .append(monitor.getLockedStackDepth()).append('\n');
+                        for (java.lang.management.LockInfo lock : thread.getLockedSynchronizers())
+                            text.append("  synchronizer ").append(lock).append('\n'); //$NON-NLS-1$
+                    }
+                    Global.tempLog(TOPIC, text.toString());
+                }
+                catch (Throwable t)
+                {
+                    Global.tempLogException(TOPIC, "sample failed id=" + id, t); //$NON-NLS-1$
+                }
+            }
+        }
     }
 
     /**
@@ -689,6 +818,10 @@ public final class BslStructureInsertCommentTypes
                 + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
             return null;
         }
+        // Внутри разбора комментария (commentFieldDescription) наш же хук возврата собирает
+        // секцию и спрашивает описания снова — не входим повторно и не кэшируем пустое.
+        if (COMMENT_FIELD_PARSE.get() != null)
+            return null;
         // Источник есть и у полей документирующего комментария: там смещение указывает
         // на комментарий, а не на Вставить/Добавить. Пустой результат тоже сохраняем.
         // Кэш привязан к исходному Resource и сбрасывается Xtext при его изменении.
@@ -735,6 +868,14 @@ public final class BslStructureInsertCommentTypes
             var leaf = NodeModelUtils.findLeafNodeAtOffset(node, offset);
             EObject semantic = leaf == null ? null : NodeModelUtils.findActualSemanticObjectFor(leaf);
             Invocation invocation = EcoreUtil2.getContainerOfType(semantic, Invocation.class);
+            if (invocation == null && block instanceof Method method)
+            {
+                // Свойство по полю документирующего комментария: «* Поле - Тип - описание».
+                String description = commentFieldDescription(property, source, method, module);
+                PropertyDescriptions.forModuleUri(URI.createURI(source.getModuleUri())).put(property, description);
+                outcome = description == null ? "noCommentField" : "foundCommentField"; //$NON-NLS-1$ //$NON-NLS-2$
+                return description;
+            }
             if (invocation == null || !property.getName().equalsIgnoreCase(insertedKey(invocation)))
             {
                 outcome = invocation == null ? "noInvocation" : "differentKey"; //$NON-NLS-1$ //$NON-NLS-2$
@@ -756,6 +897,190 @@ public final class BslStructureInsertCommentTypes
                 + " elapsedNs=" + (System.nanoTime() - started) //$NON-NLS-1$
                 + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
         }
+    }
+
+    /**
+     * Описание поля документирующего комментария метода, по которому EDT создал свойство.
+     * Комментарий разбирает сам EDT ({@code BslCommentUtils.parseTemplateComment}); поле
+     * узнаём по месту создания так же, как его считает
+     * {@code BslDocumentationComment.createDerivedPropertySource}: смещение имени поля +
+     * смещение его строки. Поля ищутся в параметрах и в возвращаемом значении, на всю глубину.
+     */
+    private static String commentFieldDescription(Property property, BslDerivedPropertySource source,
+        Method method, Module module)
+    {
+        COMMENT_FIELD_PARSE.set(Boolean.TRUE);
+        try
+        {
+            return commentFieldDescriptionImpl(property, source, method, module);
+        }
+        catch (Throwable t)
+        {
+            Global.tempLogException("bsl-property-description-cost", "commentField property=" //$NON-NLS-1$ //$NON-NLS-2$
+                + property.getName(), t);
+            return null;
+        }
+        finally
+        {
+            COMMENT_FIELD_PARSE.remove();
+        }
+    }
+
+    private static final ThreadLocal<Boolean> COMMENT_FIELD_PARSE = new ThreadLocal<>();
+
+    private static String commentFieldDescriptionImpl(Property property, BslDerivedPropertySource source,
+        Method method, Module module)
+    {
+        Resource resource = module.eResource();
+        IResourceServiceProvider rsp = resource == null || resource.getURI() == null ? null
+            : IResourceServiceProvider.Registry.INSTANCE.getResourceServiceProvider(resource.getURI());
+        if (rsp == null)
+            return null;
+        BslMultiLineCommentDocumentationProvider commentProvider =
+            rsp.get(BslMultiLineCommentDocumentationProvider.class);
+        if (commentProvider == null)
+            return null;
+        IProject project = projectOf(module);
+        BslTreeTypeSystem typeSystem = null;
+        try
+        {
+            typeSystem = rsp.get(BslTreeTypeSystem.class);
+        }
+        catch (RuntimeException ignored)
+        {
+            // Нет привязки — формат по умолчанию, как при ошибке чтения флажка.
+        }
+        boolean oldFormat = project != null && typeSystem != null && isOldCommentFormat(typeSystem, project);
+        BslDocumentationComment comment = BslCommentUtils.parseTemplateComment(method, oldFormat, commentProvider);
+        // #region agent log
+        Global.tempLog("bsl-comment-field", "parse property=" + property.getName() //$NON-NLS-1$ //$NON-NLS-2$
+            + " method=" + method.getName() + " sourceOffset=" + source.getLocalOffset() //$NON-NLS-1$ //$NON-NLS-2$
+            + " oldFormat=" + oldFormat + " comment=" + (comment == null ? "null" : comment.getClass().getSimpleName()) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " lineOffsets=" + (comment == null ? "-" : java.util.Arrays.toString(comment.getLineGlobalOffsets())) //$NON-NLS-1$ //$NON-NLS-2$
+            + " params=" + (comment == null || comment.getParametersSection() == null ? "null" //$NON-NLS-1$ //$NON-NLS-2$
+                : comment.getParametersSection().getParameterDefinitions().size())
+            + " returns=" + (comment == null || comment.getReturnSection() == null ? "null" //$NON-NLS-1$ //$NON-NLS-2$
+                : comment.getReturnSection().getReturnTypes().size())
+            + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
+        // #endregion
+        if (comment == null)
+            return null;
+        int[] lineOffsets = comment.getLineGlobalOffsets();
+        List<TypeSection.FieldDefinition> roots = new ArrayList<>();
+        if (comment.getParametersSection() != null)
+            roots.addAll(comment.getParametersSection().getParameterDefinitions());
+        List<TypeSection> sections = new ArrayList<>();
+        for (TypeSection.FieldDefinition parameter : roots)
+            sections.addAll(parameter.getTypeSections());
+        if (comment.getReturnSection() != null)
+            sections.addAll(comment.getReturnSection().getReturnTypes());
+        // #region agent log
+        for (TypeSection section : sections)
+            logCommentFields(section, lineOffsets, "  "); //$NON-NLS-1$
+        // #endregion
+        for (TypeSection section : sections)
+        {
+            TypeSection.FieldDefinition field = findCommentField(section, property.getName(),
+                source.getLocalOffset(), lineOffsets);
+            if (field != null)
+                return fieldDescriptionText(field);
+        }
+        return null;
+    }
+
+    // #region agent log
+    private static void logCommentFields(TypeSection section, int[] lineOffsets, String indent)
+    {
+        for (var definition : section.getTypeDefinitions())
+        {
+            Global.tempLog("bsl-comment-field", indent + "type=" + definition.getTypeName() //$NON-NLS-1$ //$NON-NLS-2$
+                + " fields=" + definition.getFieldDefinitionExtension().size()); //$NON-NLS-1$
+            for (TypeSection.FieldDefinition field : definition.getFieldDefinitionExtension())
+            {
+                int line = field.getLineNumber();
+                int lineOffset = lineOffsets != null && line >= 0 && line < lineOffsets.length
+                    ? lineOffsets[line] : 0;
+                StringBuilder parts = new StringBuilder();
+                if (field.getDescription() != null)
+                    for (Object part : field.getDescription().getParts())
+                        parts.append('[').append(part.getClass().getSimpleName()).append(':')
+                            .append(part instanceof TextPart text ? text.getText() : String.valueOf(part)).append(']');
+                Global.tempLog("bsl-comment-field", indent + "  field=" + field.getName() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " nameOffset=" + field.getNameOffset() + " offset=" + field.getOffset() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " line=" + line + " lineOffset=" + lineOffset //$NON-NLS-1$ //$NON-NLS-2$
+                    + " sum=" + (field.getNameOffset() + lineOffset) //$NON-NLS-1$
+                    + " sections=" + field.getTypeSections().size() + " parts=" + parts //$NON-NLS-1$ //$NON-NLS-2$
+                    + " text=" + fieldDescriptionText(field)); //$NON-NLS-1$
+                for (TypeSection nested : field.getTypeSections())
+                    logCommentFields(nested, lineOffsets, indent + "    "); //$NON-NLS-1$
+            }
+        }
+    }
+    // #endregion
+
+    private static TypeSection.FieldDefinition findCommentField(TypeSection section, String name, int localOffset,
+        int[] lineOffsets)
+    {
+        for (var definition : section.getTypeDefinitions())
+        {
+            for (TypeSection.FieldDefinition field : definition.getFieldDefinitionExtension())
+            {
+                int line = field.getLineNumber();
+                int lineOffset = lineOffsets != null && line >= 0 && line < lineOffsets.length
+                    ? lineOffsets[line] : 0;
+                if (name.equalsIgnoreCase(field.getName()) && field.getNameOffset() + lineOffset == localOffset)
+                    return field;
+                for (TypeSection nested : field.getTypeSections())
+                {
+                    TypeSection.FieldDefinition found = findCommentField(nested, name, localOffset, lineOffsets);
+                    if (found != null)
+                        return found;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * В «* Поле - Тип - описание» EDT кладёт описание не в поле, а в раздел его типов
+     * ({@code TypeSection.getCurrentDescription}); в поле — только у «* Поле - описание»
+     * без типа.
+     */
+    private static String fieldDescriptionText(TypeSection.FieldDefinition field)
+    {
+        String text = descriptionText(field.getDescription());
+        if (text != null)
+            return text;
+        for (TypeSection section : field.getTypeSections())
+        {
+            text = descriptionText(section.getCurrentDescription());
+            if (text == null)
+                text = descriptionText(section.getSourceDescription());
+            if (text != null)
+                return text;
+        }
+        return null;
+    }
+
+    /** Текст описания поля: текст, ссылки «см. …» и теги — как написаны в комментарии. */
+    private static String descriptionText(BslDocumentationComment.Description description)
+    {
+        if (description == null)
+            return null;
+        StringBuilder text = new StringBuilder();
+        for (Object part : description.getParts())
+        {
+            String piece = part instanceof TextPart textPart ? textPart.getText()
+                : part instanceof LinkPart link ? link.getInitialContent()
+                : part instanceof TagPart tag ? tag.getContent()
+                : null;
+            if (piece == null || piece.isBlank())
+                continue;
+            if (text.length() > 0)
+                text.append(' ');
+            text.append(piece.trim());
+        }
+        return text.length() == 0 ? null : text.toString();
     }
 
     private static List<String> sideCommentLines(Statement statement)
@@ -822,16 +1147,24 @@ public final class BslStructureInsertCommentTypes
         if (!(object instanceof Property property) || viewer == null
             || !(viewer.getDocument() instanceof IXtextDocument document))
             return;
+        // #region agent log
+        String step = "begin"; //$NON-NLS-1$
+        String description = null;
+        // #endregion
         try
         {
-            String description = ContentAssistSessionReloader.readOnlyPeekAst(document, resource ->
+            description = ContentAssistSessionReloader.readOnlyPeekAst(document, resource ->
                 resource == null || resource.getContents().isEmpty()
                     ? null : propertyDescription(property, resource.getContents().get(0)));
+            step = "described"; //$NON-NLS-1$
             Object page = Global.invoke(info, "getViewPage"); //$NON-NLS-1$
             Object value = Global.getField(page, "value"); //$NON-NLS-1$
             Object current = Global.invoke(value, "getDescription"); //$NON-NLS-1$
             if (value == null)
+            {
+                step = "noValue page=" + (page == null ? "null" : page.getClass().getSimpleName()); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
+            }
             String html = current instanceof String text ? text : null;
             if ((html == null || html.isBlank()) && description != null)
                 html = description.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
@@ -839,10 +1172,26 @@ public final class BslStructureInsertCommentTypes
                 propertyTypeGroups(property, page, value, resource));
             Object replacement = value.getClass().getConstructor(String.class, List.class).newInstance(html, groups);
             Global.invokeVoid(page, "setValue", replacement); //$NON-NLS-1$
+            step = "set current=" + (current == null ? "null" : "\"" + current + "\"") + " html=" + html; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
         }
-        catch (Throwable ignored)
+        catch (Throwable t)
         {
+            step = "error " + t; //$NON-NLS-1$
         }
+        // #region agent log
+        finally
+        {
+            Global.tempLog("property-hover", "complete property=" + property.getName() //$NON-NLS-1$ //$NON-NLS-2$
+                + " class=" + property.getClass().getSimpleName() //$NON-NLS-1$
+                + " source=" + (property instanceof DerivedProperty derived && derived.getSource() instanceof BslDerivedPropertySource source //$NON-NLS-1$
+                    ? source.getMethodName() + "@" + source.getLocalOffset() //$NON-NLS-1$
+                    : property instanceof DerivedProperty derived2 ? String.valueOf(derived2.getSource()) : "-") //$NON-NLS-1$
+                + " description=" + description //$NON-NLS-1$
+                + " info=" + (info == null ? "null" : info.getClass().getSimpleName()) //$NON-NLS-1$ //$NON-NLS-2$
+                + " step=" + step //$NON-NLS-1$
+                + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
+        }
+        // #endregion
     }
 
     /** Как EDT getDocByDerivedProperty, но прокси типов разрешаются в ресурсе редактора. */
@@ -885,7 +1234,111 @@ public final class BslStructureInsertCommentTypes
         return List.of(group);
     }
 
-    /** Слово под указателем разрешается тем же API, что в штатном BslDispatchingEObjectTextHover. */
+    /**
+     * Свойство под указателем. {@code Структура.Поле} — динамическое обращение: ссылки на
+     * свойство в нём нет, и {@code EObjectAtOffsetHelper.resolveCrossReferencedElementAt}
+     * даёт {@code null}. Обращение с именем под указателем разрешается, как
+     * в штатной подсказке: {@code DynamicFeatureAccessComputer.resolveDynamicFeatureAccess(…, true)}.
+     * Из нескольких одноимённых свойств (несколько типов) — первое, у которого есть описание.
+     */
+    private static Property propertyAt(Resource resource, int offset)
+    {
+        if (!(resource instanceof org.eclipse.xtext.resource.XtextResource xtext))
+            return null;
+        EObject object = new org.eclipse.xtext.resource.EObjectAtOffsetHelper().resolveContainedElementAt(xtext, offset);
+        FeatureAccess access = null;
+        for (EObject current = object; current != null && access == null; current = current.eContainer())
+        {
+            if (!(current instanceof FeatureAccess candidate))
+                continue;
+            for (org.eclipse.xtext.nodemodel.INode node : NodeModelUtils.findNodesForFeature(candidate,
+                com._1c.g5.v8.dt.bsl.model.BslPackage.Literals.FEATURE_ACCESS__NAME))
+                if (offset >= node.getOffset() && offset < node.getEndOffset())
+                {
+                    access = candidate;
+                    break;
+                }
+        }
+        if (access == null)
+        {
+            // #region agent log
+            Global.tempLog("property-hover", "propertyAt offset=" + offset + " noAccess contained=" //$NON-NLS-1$ //$NON-NLS-2$
+                + (object == null ? "null" : object.getClass().getSimpleName())); //$NON-NLS-1$
+            // #endregion
+            return null;
+        }
+        IResourceServiceProvider rsp = IResourceServiceProvider.Registry.INSTANCE
+            .getResourceServiceProvider(resource.getURI());
+        DynamicFeatureAccessComputer computer = rsp == null ? null : rsp.get(DynamicFeatureAccessComputer.class);
+        List<FeatureEntry> entries = access instanceof StaticFeatureAccess staticAccess
+            ? staticAccess.getFeatureEntries()
+            // Флажок — как в штатной подсказке (BslDocumentationProvider.getHoverPageGroupByExpression):
+            // без него у параметра с типом из «см. Функция» свойство не находится.
+            : computer == null ? List.of()
+                : DynamicFeatureAccessComputer.resolveDynamicFeatureAccess(access, computer, true);
+        EObject context = resource.getContents().isEmpty() ? null : resource.getContents().get(0);
+        // #region agent log
+        StringBuilder features = new StringBuilder();
+        for (FeatureEntry entry : entries)
+        {
+            EObject feature = entry.getFeature();
+            features.append('[').append(feature == null ? "null" : feature.getClass().getSimpleName()) //$NON-NLS-1$
+                .append(feature != null && feature.eIsProxy() ? " proxy" : "") //$NON-NLS-1$ //$NON-NLS-2$
+                .append(feature instanceof Property p ? " " + p.getName() : "").append(']'); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        String compare = ""; //$NON-NLS-1$
+        if (entries.isEmpty() && access instanceof DynamicFeatureAccess dynamic)
+        {
+            try
+            {
+                Object docProvider = rsp.get(org.eclipse.core.runtime.Platform.getBundle("com._1c.g5.v8.dt.bsl.ui") //$NON-NLS-1$
+                    .loadClass("com._1c.g5.v8.dt.internal.bsl.ui.documentation.BslDocumentationProvider")); //$NON-NLS-1$
+                Object docComputer = Global.getField(docProvider, "dynamicComputer"); //$NON-NLS-1$
+                int docEntries = docComputer instanceof DynamicFeatureAccessComputer other
+                    ? DynamicFeatureAccessComputer.resolveDynamicFeatureAccess(access, other, true).size() : -1;
+                Object onOurs = Global.getField(computer, "computerTypes"); //$NON-NLS-1$
+                Object onDoc = Global.getField(docComputer, "computerTypes"); //$NON-NLS-1$
+                StringBuilder sourceTypes = new StringBuilder();
+                com._1c.g5.v8.dt.mcore.Environmental environmental =
+                    EcoreUtil2.getContainerOfType(access, com._1c.g5.v8.dt.mcore.Environmental.class);
+                TypesComputer typesComputer = rsp.get(TypesComputer.class);
+                if (environmental != null && typesComputer != null)
+                    for (TypeItem item : typesComputer.computeTypes(dynamic.getSource(), environmental.environments()))
+                        sourceTypes.append('[').append(McoreUtil.getTypeName(item))
+                            .append(item instanceof Type type && type.getContextDef() != null
+                                ? " props=" + type.getContextDef().allProperties().size() : "") //$NON-NLS-1$ //$NON-NLS-2$
+                            .append(']');
+                compare = " sameDfa=" + (docComputer == computer) //$NON-NLS-1$
+                    + " docEntries=" + docEntries //$NON-NLS-1$
+                    + " oursTypes=" + (onOurs == null ? "null" : onOurs.getClass().getSimpleName()) //$NON-NLS-1$ //$NON-NLS-2$
+                    + " docTypes=" + (onDoc == null ? "null" : onDoc.getClass().getSimpleName()) //$NON-NLS-1$ //$NON-NLS-2$
+                    + " sourceTypes=" + sourceTypes; //$NON-NLS-1$
+            }
+            catch (Throwable t)
+            {
+                compare = " compareError=" + t; //$NON-NLS-1$
+            }
+        }
+        Global.tempLog("property-hover", "propertyAt offset=" + offset //$NON-NLS-1$ //$NON-NLS-2$
+            + " contained=" + (object == null ? "null" : object.getClass().getSimpleName()) //$NON-NLS-1$ //$NON-NLS-2$
+            + " access=" + access.getClass().getSimpleName() + " name=" + access.getName() //$NON-NLS-1$ //$NON-NLS-2$
+            + " computer=" + (computer != null) + " entries=" + entries.size() + " " + features //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + compare + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
+        // #endregion
+        Property first = null;
+        for (FeatureEntry entry : entries)
+        {
+            if (!(entry.getFeature() instanceof Property property))
+                continue;
+            if (first == null)
+                first = property;
+            if (context != null && propertyDescription(property, context) != null)
+                return property;
+        }
+        return first;
+    }
+
+    /** Слово под указателем: свойство обращения под указателем, см. {@link #propertyAt}. */
     static void completePropertyHover(Object info, ITextViewer viewer, int offset)
     {
         if (viewer == null || !(viewer.getDocument() instanceof IXtextDocument document))
@@ -893,12 +1346,28 @@ public final class BslStructureInsertCommentTypes
         try
         {
             EObject object = ContentAssistSessionReloader.readOnlyPeekAst(document, resource ->
-                resource == null ? null : new org.eclipse.xtext.resource.EObjectAtOffsetHelper()
-                    .resolveCrossReferencedElementAt(resource, offset));
+                resource == null ? null : propertyAt(resource, offset));
+            // #region agent log
+            if (object == null)
+            {
+                // Как BslEditorHoverHook: обычное чтение (без отмены reconciler, в отличие от
+                // readOnlyForContentAssist).
+                object = document.readOnly(resource -> resource == null ? null : propertyAt(resource, offset));
+                Global.tempLog("property-hover", "pointer readOnly offset=" + offset //$NON-NLS-1$ //$NON-NLS-2$
+                    + " object=" + (object == null ? "null" : object.getClass().getSimpleName())); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            // #endregion
+            // #region agent log
+            Global.tempLog("property-hover", "pointer offset=" + offset //$NON-NLS-1$ //$NON-NLS-2$
+                + " object=" + (object == null ? "null" : object.getClass().getSimpleName() //$NON-NLS-1$ //$NON-NLS-2$
+                    + (object instanceof Property p ? " " + p.getName() : "")) //$NON-NLS-1$ //$NON-NLS-2$
+                + " info=" + (info == null ? "null" : info.getClass().getSimpleName())); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
             completePropertyHover(info, object, viewer);
         }
-        catch (Throwable ignored)
+        catch (Throwable t)
         {
+            Global.tempLog("property-hover", "pointer error " + t); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 
@@ -925,12 +1394,27 @@ public final class BslStructureInsertCommentTypes
                 ignored -> new PropertyDescriptions());
         }
 
+        /** Растёт при каждом изменении любого описания: по нему устаревает {@code FILLED_DESCRIPTIONS}. */
+        private static final java.util.concurrent.atomic.AtomicLong version =
+            new java.util.concurrent.atomic.AtomicLong();
+
+        static long version()
+        {
+            return version.get();
+        }
+
         void clear(Method scope)
         {
+            boolean removed;
             if (scope == null)
+            {
+                removed = !values.isEmpty();
                 values.clear();
+            }
             else
-                values.keySet().removeIf(key -> key.startsWith(scope.getName() + "\n")); //$NON-NLS-1$
+                removed = values.keySet().removeIf(key -> key.startsWith(scope.getName() + "\n")); //$NON-NLS-1$
+            if (removed)
+                version.incrementAndGet();
         }
 
         private static String key(Property property)
@@ -947,7 +1431,9 @@ public final class BslStructureInsertCommentTypes
             String key = key(property);
             if (key == null)
                 return;
-            values.put(key, description == null ? "" : description); //$NON-NLS-1$
+            String value = description == null ? "" : description; //$NON-NLS-1$
+            if (!value.equals(values.put(key, value)))
+                version.incrementAndGet();
         }
 
         String get(Property property)
@@ -991,31 +1477,233 @@ public final class BslStructureInsertCommentTypes
         return result.isEmpty() ? null : result;
     }
 
-    /** Переносит описания в поля секции результата, которую собрал штатный TypeSection.fill. */
-    static void fillPropertyDescriptions(Object section, List<?> types, EObject context)
+    /**
+     * Разложенные описания по ключу функции ({@code BslDocCommentComputedTypes.methodLabel}).
+     * EDT разбирает комментарий функции заново для каждого места её вызова — в сборке тысячи
+     * раз подряд для одной функции (лог окна ожидания 17.10.2026: 9645 раз за 43 с), а
+     * описания для того же списка типов выходят одни и те же.
+     */
+    private static final java.util.Map<String, FilledDescriptions> FILLED_DESCRIPTIONS =
+        new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** {@code types} сравнивается по ссылке: это список из кэша типов возврата функции. */
+    private record FilledDescriptions(List<?> types, long version, List<FilledDescription> parts)
+    {
+    }
+
+    /**
+     * Путь от корневой секции: тройки «определение, поле, вложенная секция», последняя —
+     * без секции.
+     */
+    private record FilledDescription(int[] path, String text)
+    {
+    }
+
+    /**
+     * {@link #collectPropertyDescriptions(TypeSection, List, EObject, int[], List)} с повтором
+     * разложенного результата. Повтор годен, пока тот же список типов и не менялось ни одно
+     * описание ({@link PropertyDescriptions#version()}); структуру секции при тех же типах
+     * штатный {@code TypeSection.fill} строит ту же.
+     *
+     * @return {@code true}, если описания взяты из кэша
+     */
+    static boolean fillPropertyDescriptions(Object section, List<?> types, List<?> cacheTypes,
+        String cacheKey, EObject context)
     {
         if (!(section instanceof TypeSection typeSection))
-            return;
-        for (var definition : typeSection.getTypeDefinitions())
+            return false;
+        long version = PropertyDescriptions.version();
+        FilledDescriptions cached = cacheKey == null ? null : FILLED_DESCRIPTIONS.get(cacheKey);
+        if (cached != null && cached.types() == cacheTypes && cached.version() == version)
         {
+            for (FilledDescription part : cached.parts())
+                applyDescription(typeSection, part);
+            return true;
+        }
+        List<FilledDescription> parts = new ArrayList<>();
+        collectPropertyDescriptions(typeSection, types, context, new int[0], parts);
+        if (cacheKey != null)
+            FILLED_DESCRIPTIONS.put(cacheKey, new FilledDescriptions(cacheTypes, version, parts));
+        return false;
+    }
+
+    private static void applyDescription(TypeSection section, FilledDescription part)
+    {
+        TypeSection.FieldDefinition field = fieldAt(section, part.path());
+        if (field != null && field.getDescription().getParts().isEmpty())
+            field.getDescription().addPart(new TextPart(field.getDescription(),
+                field.getLineNumber(), part.text()));
+    }
+
+    /** Поле по пути из {@link #childPath}; {@code null}, если секция собрана иначе. */
+    private static TypeSection.FieldDefinition fieldAt(TypeSection section, int[] path)
+    {
+        TypeSection current = section;
+        for (int i = 0; i + 1 < path.length; i += 3)
+        {
+            var definitions = current.getTypeDefinitions();
+            if (path[i] >= definitions.size())
+                return null;
+            var fields = definitions.get(path[i]).getFieldDefinitionExtension();
+            if (path[i + 1] >= fields.size())
+                return null;
+            var field = fields.get(path[i + 1]);
+            if (i + 2 >= path.length)
+                return field;
+            var nested = field.getTypeSections();
+            if (path[i + 2] >= nested.size())
+                return null;
+            current = nested.get(path[i + 2]);
+        }
+        return null;
+    }
+
+    /**
+     * Место создания полей секции результата по ключу функции; повтор годен для того же
+     * списка типов, как у {@link #FILLED_DESCRIPTIONS}.
+     */
+    private static final java.util.Map<String, FilledSources> FILLED_SOURCES =
+        new java.util.concurrent.ConcurrentHashMap<>();
+
+    private record FilledSources(List<?> types, List<FilledSource> parts)
+    {
+    }
+
+    /** {@code localOffset} — смещение вызова {@code Вставить} от начала метода, как у EDT. */
+    private record FilledSource(int[] path, int localOffset)
+    {
+    }
+
+    /**
+     * Ставит полям секции результата, собранной штатным {@code TypeSection.fill}, место
+     * создания свойства — вызов {@code Вставить}/{@code Добавить}.
+     * <p>
+     * Свойство по полю комментария EDT создаёт в
+     * {@code BslDocumentationComment.createDerivedPropertySource}: смещение = смещение имени
+     * поля + смещение его строки комментария ({@code getLineGlobalOffsets}). У собранной
+     * секции строк в тексте нет, смещение выходит 0 — начало метода, и подсказка не находит
+     * описание из бокового комментария вставки. Ставится, только если вставка в том же
+     * методе и модуле, что и комментарий: иначе смещение относилось бы к чужому методу.
+     *
+     * @return число полей, получивших место вставки
+     */
+    static int alignFieldSources(Object section, Object comment, List<?> types, List<?> cacheTypes,
+        String cacheKey)
+    {
+        if (!(section instanceof TypeSection typeSection)
+            || !(comment instanceof BslDocumentationComment documentation))
+            return 0;
+        FilledSources cached = cacheKey == null ? null : FILLED_SOURCES.get(cacheKey);
+        List<FilledSource> parts;
+        if (cached != null && cached.types() == cacheTypes)
+            parts = cached.parts();
+        else
+        {
+            parts = new ArrayList<>();
+            // Своих геттеров у этих полей нет; это те же поля, что EDT кладёт в источник.
+            Object methodName = Global.getField(documentation, "methodName"); //$NON-NLS-1$
+            Object moduleUri = Global.getField(documentation, "moduleURI"); //$NON-NLS-1$
+            if (methodName instanceof String name && !name.isEmpty() && moduleUri instanceof URI uri)
+                collectFieldSources(typeSection, types, name, uri.trimFragment(), new int[0], parts);
+            if (cacheKey != null)
+                FILLED_SOURCES.put(cacheKey, new FilledSources(cacheTypes, parts));
+        }
+        int[] lineOffsets = documentation.getLineGlobalOffsets();
+        int aligned = 0;
+        for (FilledSource part : parts)
+        {
+            TypeSection.FieldDefinition field = fieldAt(typeSection, part.path());
+            if (field == null)
+                continue;
+            int line = field.getLineNumber();
+            int lineOffset = lineOffsets != null && line >= 0 && line < lineOffsets.length
+                ? lineOffsets[line] : 0;
+            field.setNameOffset(part.localOffset() - lineOffset);
+            aligned++;
+        }
+        return aligned;
+    }
+
+    private static void collectFieldSources(TypeSection typeSection, List<?> types, String methodName,
+        URI moduleUri, int[] path, List<FilledSource> filled)
+    {
+        var definitions = typeSection.getTypeDefinitions();
+        for (int definitionIndex = 0; definitionIndex < definitions.size(); definitionIndex++)
+        {
+            var definition = definitions.get(definitionIndex);
             if (definition.getTypeName() == null)
                 continue;
-            java.util.Map<String, List<Property>> properties =
-                new java.util.TreeMap<>(String.CASE_INSENSITIVE_ORDER);
-            for (Object item : types)
-                if (item instanceof Type type && type.getContextDef() != null
-                    && (definition.getTypeName().equals(McoreUtil.getTypeName(type))
-                        || definition.getTypeName().equals(McoreUtil.getTypeNameRu(type))))
-                {
-                    for (Property property : type.getContextDef().allProperties())
-                    {
-                        String name = property.getName();
-                        if (name != null)
-                            properties.computeIfAbsent(name, ignored -> new ArrayList<>()).add(property);
-                    }
-                }
-            for (var field : definition.getFieldDefinitionExtension())
+            java.util.Map<String, List<Property>> properties = propertiesByName(definition.getTypeName(), types);
+            var fields = definition.getFieldDefinitionExtension();
+            for (int fieldIndex = 0; fieldIndex < fields.size(); fieldIndex++)
             {
+                var field = fields.get(fieldIndex);
+                List<Property> matching = properties.get(field.getName());
+                if (matching == null)
+                    continue;
+                int[] fieldPath = childPath(path, definitionIndex, fieldIndex);
+                for (Property property : matching)
+                {
+                    if (property instanceof DerivedProperty derived
+                        && derived.getSource() instanceof BslDerivedPropertySource source
+                        && methodName.equalsIgnoreCase(source.getMethodName())
+                        && source.getModuleUri() != null
+                        && moduleUri.equals(URI.createURI(source.getModuleUri()).trimFragment())
+                        && filled.stream().noneMatch(part -> java.util.Arrays.equals(part.path(), fieldPath)))
+                        filled.add(new FilledSource(fieldPath, source.getLocalOffset()));
+                    List<TypeItem> nestedTypes = property.getTypeContainer() instanceof TypeContainerRef ref
+                        ? ref.getTypes() : property.getTypes();
+                    var nestedSections = field.getTypeSections();
+                    for (int sectionIndex = 0; sectionIndex < nestedSections.size(); sectionIndex++)
+                        collectFieldSources(nestedSections.get(sectionIndex), nestedTypes, methodName, moduleUri,
+                            childPath(path, definitionIndex, fieldIndex, sectionIndex), filled);
+                }
+            }
+        }
+    }
+
+    /** Свойства контекстных типов, чьё имя совпадает с именем определения типа секции. */
+    private static java.util.Map<String, List<Property>> propertiesByName(String typeName, List<?> types)
+    {
+        java.util.Map<String, List<Property>> properties =
+            new java.util.TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+        for (Object item : types)
+            if (item instanceof Type type && type.getContextDef() != null
+                && (typeName.equals(McoreUtil.getTypeName(type))
+                    || typeName.equals(McoreUtil.getTypeNameRu(type))))
+            {
+                for (Property property : type.getContextDef().allProperties())
+                {
+                    String name = property.getName();
+                    if (name != null)
+                        properties.computeIfAbsent(name, ignored -> new ArrayList<>()).add(property);
+                }
+            }
+        return properties;
+    }
+
+    private static int[] childPath(int[] path, int... tail)
+    {
+        int[] result = java.util.Arrays.copyOf(path, path.length + tail.length);
+        System.arraycopy(tail, 0, result, path.length, tail.length);
+        return result;
+    }
+
+    /** Переносит описания в поля секции результата, которую собрал штатный TypeSection.fill. */
+    private static void collectPropertyDescriptions(TypeSection typeSection, List<?> types, EObject context,
+        int[] path, List<FilledDescription> filled)
+    {
+        var definitions = typeSection.getTypeDefinitions();
+        for (int definitionIndex = 0; definitionIndex < definitions.size(); definitionIndex++)
+        {
+            var definition = definitions.get(definitionIndex);
+            if (definition.getTypeName() == null)
+                continue;
+            java.util.Map<String, List<Property>> properties = propertiesByName(definition.getTypeName(), types);
+            var fields = definition.getFieldDefinitionExtension();
+            for (int fieldIndex = 0; fieldIndex < fields.size(); fieldIndex++)
+            {
+                var field = fields.get(fieldIndex);
                 List<Property> matching = properties.get(field.getName());
                 if (matching == null)
                     continue;
@@ -1029,13 +1717,19 @@ public final class BslStructureInsertCommentTypes
                         // тот же проект заново для каждого поля и каждой вложенной секции.
                         String description = propertyDescription(property, context, true);
                         if (description != null)
+                        {
                             field.getDescription().addPart(new TextPart(field.getDescription(),
                                 field.getLineNumber(), description));
+                            filled.add(new FilledDescription(
+                                childPath(path, definitionIndex, fieldIndex), description));
+                        }
                     }
                     List<TypeItem> nestedTypes = property.getTypeContainer() instanceof TypeContainerRef ref
                         ? ref.getTypes() : property.getTypes();
-                    for (TypeSection nested : field.getTypeSections())
-                        fillPropertyDescriptions(nested, nestedTypes, context);
+                    var nestedSections = field.getTypeSections();
+                    for (int sectionIndex = 0; sectionIndex < nestedSections.size(); sectionIndex++)
+                        collectPropertyDescriptions(nestedSections.get(sectionIndex), nestedTypes, context,
+                            childPath(path, definitionIndex, fieldIndex, sectionIndex), filled);
                 }
             }
         }
@@ -1679,15 +2373,69 @@ public final class BslStructureInsertCommentTypes
         public void installTypeSystem(Module module, CancelIndicator cancelIndicator)
         {
             boolean scopeOwner = beginExportVarsScope();
+            // #region agent log — завершается ли полный расчёт типов модуля (пустые члены после «.»)
+            long started = System.nanoTime();
+            String outcome = "ok"; //$NON-NLS-1$
+            // #endregion
             try
             {
                 installTypeSystemInScope(module, cancelIndicator);
             }
+            catch (RuntimeException | Error t)
+            {
+                // #region agent log
+                outcome = "throw " + t.getClass().getSimpleName(); //$NON-NLS-1$
+                // #endregion
+                throw t;
+            }
             finally
             {
                 endExportVarsScope(scopeOwner);
+                // #region agent log
+                logInstallTypeSystem(module, cancelIndicator, started, outcome);
+                // #endregion
             }
         }
+
+        // #region agent log
+        private static void logInstallTypeSystem(Module module, CancelIndicator cancelIndicator,
+            long started, String outcome)
+        {
+            try
+            {
+                URI uri = module == null ? null : EcoreUtil.getURI(module);
+                Resource resource = module == null ? null : module.eResource();
+                String probe = ""; //$NON-NLS-1$
+                if (uri != null && uri.toString().contains("УправлениеДоступомСлужебный") //$NON-NLS-1$
+                    && !module.eIsProxy())
+                {
+                    probe = " ОписаниеУзла=none"; //$NON-NLS-1$
+                    for (Method method : module.allMethods())
+                        if ("ОписаниеУзла".equalsIgnoreCase(method.getName())) //$NON-NLS-1$
+                        {
+                            Object collector = BslDocCommentDescriptionFix
+                                .invokeCommentGetter(method, "getFinalReturnState"); //$NON-NLS-1$
+                            probe = " ОписаниеУзла{" + (collector == null ? "noCollector" //$NON-NLS-1$ //$NON-NLS-2$
+                                : ContentAssistSessionReloader.finalReturnSizes(collector)) + "}"; //$NON-NLS-1$
+                            break;
+                        }
+                }
+                Global.tempLog("install-type-system", "module=" //$NON-NLS-1$ //$NON-NLS-2$
+                    + (uri == null ? "null" : uri.trimFragment().lastSegment() + "@" //$NON-NLS-1$ //$NON-NLS-2$
+                        + (uri.segmentCount() > 3 ? uri.segment(uri.segmentCount() - 2) : "?")) //$NON-NLS-1$
+                    + " outcome=" + outcome //$NON-NLS-1$
+                    + " canceled=" + (cancelIndicator != null && cancelIndicator.isCanceled()) //$NON-NLS-1$
+                    + " resourceSet=" + (resource == null || resource.getResourceSet() == null ? "null" //$NON-NLS-1$ //$NON-NLS-2$
+                        : Integer.toHexString(System.identityHashCode(resource.getResourceSet())))
+                    + " elapsedMs=" + (System.nanoTime() - started) / 1_000_000 //$NON-NLS-1$
+                    + probe + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
+            }
+            catch (Throwable t)
+            {
+                Global.tempLogException("install-type-system", "log failed", t); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+        // #endregion
 
         private void installTypeSystemInScope(Module module, CancelIndicator cancelIndicator)
         {

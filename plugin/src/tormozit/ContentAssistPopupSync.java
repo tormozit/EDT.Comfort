@@ -92,6 +92,7 @@ public final class ContentAssistPopupSync
     private static final ThreadLocal<Boolean> SHOW_PROPOSALS_GUARD = new ThreadLocal<>();
     /** fix12: session open literal no-IR — full smart recompute вместо literalStockOnly. */
     private static final ThreadLocal<Boolean> FORCE_SMART_LITERAL_OPEN = new ThreadLocal<>();
+    private static final ThreadLocal<Boolean> PRESERVE_SELECTION_ON_REFRESH = new ThreadLocal<>();
     /** H74/H75: sessionOpen | toggle | debounce */
     private static final ThreadLocal<String> RECOMPUTE_TRIGGER = new ThreadLocal<>();
     private static final AtomicInteger literalAutoSmartRouteLogs = new AtomicInteger();
@@ -567,6 +568,24 @@ public final class ContentAssistPopupSync
         return Boolean.TRUE.equals(RECOMPUTE_GUARD.get());
     }
 
+    static boolean recomputePopupListPreservingSelection(ContentAssistant assistant, SourceViewer viewer,
+        SmartContentAssistProcessor processor)
+    {
+        Boolean previous = PRESERVE_SELECTION_ON_REFRESH.get();
+        PRESERVE_SELECTION_ON_REFRESH.set(Boolean.TRUE);
+        try
+        {
+            return recomputePopupList(assistant, viewer, processor);
+        }
+        finally
+        {
+            if (previous == null)
+                PRESERVE_SELECTION_ON_REFRESH.remove();
+            else
+                PRESERVE_SELECTION_ON_REFRESH.set(previous);
+        }
+    }
+
     public static boolean recomputePopupList(ContentAssistant assistant, SourceViewer viewer,
                                              SmartContentAssistProcessor processor)
     {
@@ -702,9 +721,9 @@ final int fullProposalCount = proposals.length;
                 ContentAssistSessionReloader.getActiveReloader();
             final boolean forceIrMergeReplace = mergeReloader != null
                 && mergeReloader.isIrMergeGenerationBumpPending();
-            final boolean resetToFirst = restoreAfterFilterToggle
+            final boolean resetToFirst = !Boolean.TRUE.equals(PRESERVE_SELECTION_ON_REFRESH.get()) && (restoreAfterFilterToggle
                 ? SmartAssistFilterState.isSmartFilterEnabled()
-                : (shouldResetSelectionToFirst() || fastIrMergeReset);
+                : (shouldResetSelectionToFirst() || fastIrMergeReset));
             filter = SmartFilterTracker.getCurrentFilter();
             boolean smartEnabled = SmartAssistFilterState.isSmartFilterEnabled();
             if (!filter.equals(lastSyncedFilter))

@@ -98,6 +98,17 @@ public final class FileSearchResultsHook implements IStartup
     private static final String KEY_COL_TYPE_WIDTH = "colTypeWidth"; //$NON-NLS-1$
     private static final String KEY_COL_LINE_WIDTH = "colLineWidth"; //$NON-NLS-1$
     private static final String KEY_COL_TEXT_WIDTH = "colTextWidth"; //$NON-NLS-1$
+    private static final String REPLACED_MARK = "✓"; //$NON-NLS-1$
+    private static final String REPLACE_REFACTORING_UPDATE_CHANGE =
+        "org.eclipse.search.internal.ui.text.ReplaceRefactoring$SearchResultUpdateChange"; //$NON-NLS-1$
+    /**
+     * Заменённые строки по результатам поиска (issue #800): штатная замена Eclipse убирает вхождения
+     * из результата, и строки пропали бы из таблицы. В результат их не возвращаем — повторная штатная
+     * замена взяла бы их со старой длиной; строка показывается из реестра с пометкой «Заменено».
+     */
+    private static final Map<Object, Map<LineElement, ReplacedLine>> REPLACED = new java.util.WeakHashMap<>();
+    private static final Set<Object> RESULT_LISTENED = java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>());
+    private static TreeViewer cachedTreeViewer;
 
     /** Как в {@code org.eclipse.ui.actions.OpenWithMenu}: не переиспользовать чужой редактор по тому же input. */
     private static final int OPEN_WITH_MATCH =
@@ -410,6 +421,7 @@ public final class FileSearchResultsHook implements IStartup
         // Create the table on the right side
         TableViewer tableViewer = createResultTable(sashForm);
         cachedResultTableViewer = tableViewer;
+        cachedTreeViewer = treeViewer;
         registerOpenHandler(tableViewer, treeViewer, page);
         registerContextMenu(tableViewer, treeViewer, page);
         registerTreeContextMenu(treeViewer, page);
@@ -566,6 +578,34 @@ public final class FileSearchResultsHook implements IStartup
             }
         });
 
+        // «Заменено» (issue #800): значок в шапке, фиксированная ширина, в ячейке — пометка.
+        Image replacedIcon = ConfigSearchResultsHook.replacedIcon(table.getDisplay());
+        TableViewerColumn replacedCol = new TableViewerColumn(tableViewer, SWT.CENTER);
+        if (replacedIcon != null)
+        {
+            FormTableInteraction.applyIconColumn(replacedCol.getColumn(), null,
+                ColumnWidthFit.headerIconColumnWidth(replacedIcon) - ColumnWidthFit.iconColumnWidth());
+            replacedCol.getColumn().setImage(replacedIcon);
+            // Со значком в шапке одной колонки Windows рисует значок и в шапке первой колонки;
+            // повторная установка пустой картинки снимает у остальных признак значка.
+            for (TableColumn column : table.getColumns())
+                if (column != replacedCol.getColumn() && column.getImage() == null)
+                    column.setImage(null);
+        }
+        else
+        {
+            replacedCol.getColumn().setText("Заменено");
+            replacedCol.getColumn().setWidth(80);
+        }
+        replacedCol.setLabelProvider(new ColumnLabelProvider()
+        {
+            @Override
+            public String getText(Object element)
+            {
+                return element instanceof FileSearchRow row && row.replaced ? REPLACED_MARK : ""; //$NON-NLS-1$
+            }
+        });
+
         TableViewerColumn textCol = new TableViewerColumn(tableViewer, SWT.LEFT);
         textCol.getColumn().setText("Текст");
         textCol.getColumn().setToolTipText("Текст" + Global.pluginSignForTooltip());
@@ -641,6 +681,8 @@ public final class FileSearchResultsHook implements IStartup
         interaction.setOwnerDrawColumns(textCol.getColumn());
         interaction.install(hasSavedColumnWidths);
         interaction.enableHeaderSort(columnSettings);
+        interaction.setHeaderTooltipExtra(replacedCol.getColumn(),
+            "Заменено. Текст вхождений заменён, в колонке «Текст» — строка после замены" + Global.pluginSignForTooltip());
         cachedTableInteraction = interaction;
         cachedPathColumn = pathCol.getColumn();
         cachedFileColumn = fileCol.getColumn();
@@ -728,6 +770,8 @@ public final class FileSearchResultsHook implements IStartup
         final LineElement lineElement;
         final int[] matchOffsets;
         final int[] matchLengths;
+        /** Текст строки заменён штатной заменой Eclipse: {@link #text} — строка после замены. */
+        boolean replaced;
 
         FileSearchRow(String path, String file, int lineNumber, String text,
                 IFile iFile, LineElement lineElement, int[] matchOffsets, int[] matchLengths)
@@ -766,18 +810,31 @@ public final class FileSearchResultsHook implements IStartup
         {
             IStructuredSelection sel = treeViewer.getStructuredSelection();
             List<Object> selectedNodes = sel.toList();
+            Object resultInput = treeViewer.getInput();
+            AbstractTextSearchResult searchResult = resultInput instanceof AbstractTextSearchResult r ? r : null;
             if (selectedNodes.isEmpty())
             {
-                tableViewer.setInput(List.of());
+                // Последнее вхождение заменено — дерево пустое, выделять нечего: показываем все
+                // заменённые строки результата, а не пустую таблицу (issue #800).
+                List<FileSearchRow> replacedRows = new ArrayList<>();
+                if (searchResult != null)
+                {
+                    listenReplacements(searchResult);
+                    addReplacedRows(null, searchResult, replacedRows);
+                }
+                tableViewer.setInput(replacedRows);
                 return;
             }
 
             ITreeContentProvider cp = (ITreeContentProvider) treeViewer.getContentProvider();
             List<FileSearchRow> rows = new ArrayList<>();
-            Object resultInput = treeViewer.getInput();
-            AbstractTextSearchResult searchResult = resultInput instanceof AbstractTextSearchResult r ? r : null;
             for (Object node : selectedNodes)
                 collectRows(node, cp, rows, searchResult);
+            if (searchResult != null)
+            {
+                listenReplacements(searchResult);
+                addReplacedRows(selectedNodes, searchResult, rows);
+            }
 
             rows.sort(Comparator
                 .<FileSearchRow, String>comparing(r -> r.path != null ? r.path : "", String.CASE_INSENSITIVE_ORDER)
@@ -830,6 +887,164 @@ public final class FileSearchResultsHook implements IStartup
             Object[] children = cp.getChildren(node);
             for (Object child : children)
                 collectRows(child, cp, out, searchResult);
+        }
+    }
+
+    /** Строка, заменённая штатной заменой Eclipse, и её текст после замены. */
+    private record ReplacedLine(IFile file, LineElement line, String text)
+    {
+    }
+
+    /**
+     * Следит за результатом: удаление вхождений штатной заменой ({@code ReplaceRefactoring}) —
+     * пометка «Заменено», их возврат отменой замены — снятие пометки, очистка результата — сброс.
+     */
+    private static void listenReplacements(AbstractTextSearchResult result)
+    {
+        synchronized (RESULT_LISTENED)
+        {
+            if (!RESULT_LISTENED.add(result))
+                return;
+        }
+        result.addListener(event ->
+        {
+            boolean changed = false;
+            if (event instanceof org.eclipse.search.ui.text.RemoveAllEvent)
+                synchronized (REPLACED)
+                {
+                    changed = REPLACED.remove(result) != null;
+                }
+            else if (event instanceof org.eclipse.search.ui.text.MatchEvent matchEvent)
+            {
+                if (matchEvent.getKind() == org.eclipse.search.ui.text.MatchEvent.REMOVED && calledFromReplace())
+                    changed = markReplaced(result, matchEvent.getMatches());
+                else if (matchEvent.getKind() == org.eclipse.search.ui.text.MatchEvent.ADDED)
+                    changed = unmarkReplaced(result, matchEvent.getMatches());
+            }
+            if (changed)
+                Display.getDefault().asyncExec(() ->
+                {
+                    TreeViewer tree = cachedTreeViewer;
+                    TableViewer table = cachedResultTableViewer;
+                    if (tree != null && table != null && !tree.getTree().isDisposed() && !table.getTable().isDisposed()
+                        && tree.getInput() == result)
+                        updateTableFromSelection(tree, table);
+                });
+        });
+    }
+
+    /** Вхождения удаляет именно штатная замена — у прочих удалений (правка текста, удаление файла) пометки нет. */
+    private static boolean calledFromReplace()
+    {
+        return StackWalker.getInstance().walk(frames -> frames.anyMatch(
+            frame -> REPLACE_REFACTORING_UPDATE_CHANGE.equals(frame.getClassName())));
+    }
+
+    /** Текст строк после замены — из буфера файла: открытый несохранённый редактор правку получил, диск — нет. */
+    private static boolean markReplaced(AbstractTextSearchResult result, Match[] matches)
+    {
+        Map<IFile, List<FileMatch>> byFile = new java.util.LinkedHashMap<>();
+        for (Match match : matches)
+            if (match instanceof FileMatch fileMatch && fileMatch.getFile() != null && fileMatch.getLineElement() != null)
+                byFile.computeIfAbsent(fileMatch.getFile(), file -> new ArrayList<>()).add(fileMatch);
+        Map<LineElement, ReplacedLine> lines = new IdentityHashMap<>();
+        org.eclipse.core.filebuffers.ITextFileBufferManager manager =
+            org.eclipse.core.filebuffers.FileBuffers.getTextFileBufferManager();
+        for (Map.Entry<IFile, List<FileMatch>> entry : byFile.entrySet())
+        {
+            org.eclipse.core.runtime.IPath path = entry.getKey().getFullPath();
+            try
+            {
+                manager.connect(path, org.eclipse.core.filebuffers.LocationKind.IFILE, null);
+                try
+                {
+                    org.eclipse.jface.text.IDocument document = manager
+                        .getTextFileBuffer(path, org.eclipse.core.filebuffers.LocationKind.IFILE).getDocument();
+                    for (FileMatch match : entry.getValue())
+                    {
+                        LineElement line = match.getLineElement();
+                        if (lines.containsKey(line) || line.getLine() < 1 || line.getLine() > document.getNumberOfLines())
+                            continue;
+                        org.eclipse.jface.text.IRegion region = document.getLineInformation(line.getLine() - 1);
+                        lines.put(line, new ReplacedLine(entry.getKey(), line,
+                            document.get(region.getOffset(), region.getLength())));
+                    }
+                }
+                finally
+                {
+                    manager.disconnect(path, org.eclipse.core.filebuffers.LocationKind.IFILE, null);
+                }
+            }
+            catch (Exception e)
+            {
+                log("markReplaced " + path + ": " + e); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+        if (lines.isEmpty())
+            return false;
+        synchronized (REPLACED)
+        {
+            REPLACED.computeIfAbsent(result, r -> new IdentityHashMap<>()).putAll(lines);
+        }
+        return true;
+    }
+
+    private static boolean unmarkReplaced(AbstractTextSearchResult result, Match[] matches)
+    {
+        synchronized (REPLACED)
+        {
+            Map<LineElement, ReplacedLine> lines = REPLACED.get(result);
+            if (lines == null || lines.isEmpty())
+                return false;
+            boolean changed = false;
+            for (Match match : matches)
+                if (match instanceof FileMatch fileMatch && lines.remove(fileMatch.getLineElement()) != null)
+                    changed = true;
+            return changed;
+        }
+    }
+
+    /**
+     * Заменённые строки под выделенными узлами дерева: узел — ресурс, строка входит, если её файл
+     * лежит под ним. Строка, у которой в результате ещё остались вхождения, заменяется своей версией.
+     * {@code selectedNodes == null} — все заменённые строки результата.
+     */
+    private static void addReplacedRows(List<Object> selectedNodes, AbstractTextSearchResult result,
+        List<FileSearchRow> rows)
+    {
+        List<ReplacedLine> replaced;
+        synchronized (REPLACED)
+        {
+            Map<LineElement, ReplacedLine> lines = REPLACED.get(result);
+            if (lines == null || lines.isEmpty())
+                return;
+            replaced = new ArrayList<>(lines.values());
+        }
+        Map<LineElement, Integer> rowByLine = new IdentityHashMap<>();
+        for (int i = 0; i < rows.size(); i++)
+            if (rows.get(i).lineElement != null)
+                rowByLine.put(rows.get(i).lineElement, Integer.valueOf(i));
+        for (ReplacedLine line : replaced)
+        {
+            boolean selected = selectedNodes == null;
+            for (Object node : selectedNodes != null ? selectedNodes : List.of())
+                if (node == line.line()
+                    || node instanceof IResource resource && resource.getFullPath().isPrefixOf(line.file().getFullPath()))
+                {
+                    selected = true;
+                    break;
+                }
+            if (!selected)
+                continue;
+            String filePath = line.file().getProjectRelativePath().toString();
+            FileSearchRow row = new FileSearchRow(resolveMdPath(filePath), filePath, line.line().getLine(),
+                line.text(), line.file(), line.line(), new int[0], new int[0]);
+            row.replaced = true;
+            Integer existing = rowByLine.get(line.line());
+            if (existing != null)
+                rows.set(existing.intValue(), row);
+            else
+                rows.add(row);
         }
     }
 
@@ -919,10 +1134,71 @@ public final class FileSearchResultsHook implements IStartup
                 openFileInEditor(tableViewer, treeViewer, page);
             }
         });
+        // Замена (issue #800) — штатная замена Eclipse, как одноимённые пункты меню дерева.
+        Action replaceSelected = new Action("Заменить выделенные…")
+        {
+            @Override
+            public void run()
+            {
+                runReplace(tableViewer, treeViewer, true);
+            }
+        };
+        Action replaceAll = new Action("Заменить все…")
+        {
+            @Override
+            public void run()
+            {
+                runReplace(tableViewer, treeViewer, false);
+            }
+        };
+        replaceAll.setToolTipText("Заменить текст всех найденных вхождений" + Global.pluginSignForTooltip());
+        menuManager.add(new org.eclipse.jface.action.Separator());
+        menuManager.add(replaceSelected);
+        menuManager.add(replaceAll);
+        menuManager.addMenuListener(manager ->
+        {
+            boolean canReplace = replaceableResult(treeViewer) != null;
+            boolean hasLines = !selectedReplaceableLines(tableViewer).isEmpty();
+            replaceAll.setEnabled(canReplace);
+            replaceSelected.setEnabled(canReplace && hasLines);
+            replaceSelected.setToolTipText((hasLines ? "Заменить текст вхождений выделенных строк"
+                : "Недоступно: не выделено ни одной незаменённой строки") + Global.pluginSignForTooltip());
+        });
         // "Копировать" не добавляем — FormTableInteraction.install() сама добавляет
         // "Копировать\tCtrl+C" в это же меню (активная ячейка, см. createResultTable).
         Menu menu = menuManager.createContextMenu(table);
         table.setMenu(menu);
+    }
+
+    /** Результат, в котором штатная замена доступна (как в {@code FileSearchPage.fillContextMenu}), либо {@code null}. */
+    private static org.eclipse.search.internal.ui.text.FileSearchResult replaceableResult(TreeViewer treeViewer)
+    {
+        return treeViewer.getInput() instanceof org.eclipse.search.internal.ui.text.FileSearchResult result
+            && result.getQuery() instanceof FileSearchQuery query && !query.getSearchString().isEmpty() ? result : null;
+    }
+
+    /** Строки выделенных (ещё не заменённых) строк таблицы — выделение для штатной замены. */
+    private static List<LineElement> selectedReplaceableLines(TableViewer tableViewer)
+    {
+        List<LineElement> lines = new ArrayList<>();
+        for (Object element : tableViewer.getStructuredSelection().toList())
+            if (element instanceof FileSearchRow row && !row.replaced && row.lineElement != null
+                && !lines.contains(row.lineElement))
+                lines.add(row.lineElement);
+        return lines;
+    }
+
+    private static void runReplace(TableViewer tableViewer, TreeViewer treeViewer, boolean selectedOnly)
+    {
+        org.eclipse.search.internal.ui.text.FileSearchResult result = replaceableResult(treeViewer);
+        if (result == null)
+            return;
+        Object[] selection = selectedOnly ? selectedReplaceableLines(tableViewer).toArray() : null;
+        if (selection != null && selection.length == 0)
+            return;
+        org.eclipse.search.internal.ui.text.ReplaceAction action = new org.eclipse.search.internal.ui.text.ReplaceAction(
+            tableViewer.getTable().getShell(), result, selection);
+        action.run();
     }
 
     /**

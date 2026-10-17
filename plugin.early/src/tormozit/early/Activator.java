@@ -74,6 +74,8 @@ public final class Activator
          */
         private static final String FOLDING_PROVIDER = "com._1c.g5.v8.dt.bsl.ui.folding.BslFoldingRegionProvider"; //$NON-NLS-1$
         static final String PROP_INITIALLY_COLLAPSED = "tormozit.bslFolding.initiallyCollapsed"; //$NON-NLS-1$
+        private static final String FOLDING_STRUCTURE = "org.eclipse.xtext.ui.editor.folding.DefaultFoldingStructureProvider"; //$NON-NLS-1$
+        static final String PROP_FOLDING_UPDATE = "tormozit.bslFolding.update"; //$NON-NLS-1$
         private static final String INITIALLY_COLLAPSED_DESC = "(Lorg/eclipse/emf/ecore/EObject;)Z"; //$NON-NLS-1$
         /**
          * Область вкладок воркбенча: штатная кнопка списка вкладок видна всегда, а не только при
@@ -193,7 +195,7 @@ public final class Activator
         private static final String READ_FOR_ASSIST_DESC =
             "(Lorg/eclipse/xtext/util/concurrent/IUnitOfWork;)Ljava/lang/Object;"; //$NON-NLS-1$
         private static final List<String> TARGETS = List.of(BSL_PARSER, CUSTOM_BSL_PARSER, HELPER,
-            SUPPRESSION_PROVIDER, FOLDING_PROVIDER, TAB_FOLDER, PART_LIST_CONTROL, COMPARISON_EDITOR,
+            SUPPRESSION_PROVIDER, FOLDING_PROVIDER, FOLDING_STRUCTURE, TAB_FOLDER, PART_LIST_CONTROL, COMPARISON_EDITOR,
             MERGE_COMMIT_CALLBACK, EDITOR_MATCHING, GRANULAR_EDITOR, TREE_VIEWER, SEARCH_TREE_LAYOUT, NAVIGATOR_MAPPER,
             FORM_PRESENTATION, FORM_PAGE, PROPERTY_SHEET, PROPERTY_SHEET_MONITOR,
             MULTILANGUAGE_COMPONENT, SINGLE_LANGUAGE_COMPONENT,
@@ -212,6 +214,8 @@ public final class Activator
         /** Свойства ставятся до хука: вплетённый код вызывает их без проверки на {@code null}. */
         static void install(BundleContext context)
         {
+            System.getProperties().putIfAbsent(PROP_FOLDING_UPDATE,
+                (BiFunction<Object, Boolean, Boolean>) (provider, initialize) -> Boolean.FALSE);
             System.getProperties().putIfAbsent(PROP_SELECTION_INVALIDATE, (Consumer<Object>) page -> {});
             System.getProperties().putIfAbsent(PROP_SELECTION_OPERATION,
                 (BiFunction<Object, Runnable, Runnable>) (page, runnable) -> runnable);
@@ -919,6 +923,8 @@ public final class Activator
                 return transformMergeCommitCallback(bytes);
             if (FOLDING_PROVIDER.equals(className))
                 return transformFoldingProvider(bytes);
+            if (FOLDING_STRUCTURE.equals(className))
+                return transformFoldingStructure(bytes);
             if (TAB_FOLDER.equals(className))
                 return transformTabFolder(bytes);
             if (PART_LIST_CONTROL.equals(className))
@@ -1041,10 +1047,52 @@ public final class Activator
             return returns[0] > 0 ? writer.toByteArray() : null;
         }
 
-        /**
-         * В отличие от остальных вставок здесь есть ветвления, поэтому кадры стека пересчитываются
-         * ({@code COMPUTE_FRAMES}); общий предок типов — {@code Object}, классы EDT не загружаются.
-         */
+        /** Проверенный пролог без новых локальных переменных; исходные кадры стека сохраняются. */
+        private static byte[] transformFoldingStructure(byte[] bytes)
+        {
+            ClassReader reader = new ClassReader(bytes);
+            ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+            int[] touched = { 0 };
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor,
+                    String signature, String[] exceptions)
+                {
+                    MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    if (!"calculateProjectionAnnotationModel".equals(name) || !"(Z)V".equals(descriptor)) //$NON-NLS-1$ //$NON-NLS-2$
+                        return mv;
+                    return new MethodVisitor(Opcodes.ASM9, mv)
+                    {
+                        @Override
+                        public void visitCode()
+                        {
+                            super.visitCode();
+                            emitGetProperty(this, PROP_FOLDING_UPDATE, "java/util/function/BiFunction"); //$NON-NLS-1$
+                            super.visitVarInsn(Opcodes.ALOAD, 0);
+                            super.visitVarInsn(Opcodes.ILOAD, 1);
+                            super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Boolean", "valueOf", //$NON-NLS-1$ //$NON-NLS-2$
+                                "(Z)Ljava/lang/Boolean;", false); //$NON-NLS-1$
+                            super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BiFunction", //$NON-NLS-1$
+                                "apply", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$ //$NON-NLS-2$
+                            super.visitFieldInsn(Opcodes.GETSTATIC, "java/lang/Boolean", "TRUE", "Ljava/lang/Boolean;"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                            super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/Object", "equals", //$NON-NLS-1$ //$NON-NLS-2$
+                                "(Ljava/lang/Object;)Z", false); //$NON-NLS-1$
+                            Label original = new Label();
+                            super.visitJumpInsn(Opcodes.IFEQ, original);
+                            super.visitInsn(Opcodes.RETURN);
+                            super.visitLabel(original);
+                            super.visitFrame(Opcodes.F_SAME, 0, null, 0, null);
+                            touched[0]++;
+                        }
+                    };
+                }
+            }, 0);
+            System.setProperty(PROP_FOLDING_UPDATE + ".patch", "methods=" + touched[0]); //$NON-NLS-1$ //$NON-NLS-2$
+            return touched[0] == 1 ? writer.toByteArray() : null;
+        }
+
+        /** Кадры стека для условия начального сворачивания пересчитываются без загрузки EDT-классов. */
         private static byte[] transformFoldingProvider(byte[] bytes)
         {
             ClassReader reader = new ClassReader(bytes);

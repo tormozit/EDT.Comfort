@@ -4236,6 +4236,11 @@ public final class ParamHintHtmlModifier
 
     private static void refreshVirtualParamHtml(Browser browser, HoverContext ctx)
     {
+        // Перерисовка уже применяет номер из ctx. Не оставлять от предыдущего showPage
+        // отложенную пометку: следующий Progress иначе вернёт старый формальный параметр.
+        browser.setData(CURRENT_PARAM_INDEX_MARK, null);
+        Global.tempLog("param-hint-current", "render current=" + ctx.currentArgIndex //$NON-NLS-1$ //$NON-NLS-2$
+            + " stockPageParam=" + ctx.paramIndex); //$NON-NLS-1$
         String html = browser.getText();
         String heading = rewriteHeadingOptionalParams(html, ctx);
         if (heading == null)
@@ -6324,6 +6329,16 @@ public final class ParamHintHtmlModifier
 
         fillInvocationContext(ctx);
         keepStructureKeys(browser, ctx);
+        // AST может отставать и для обычного метода, где кэша ключей структуры нет.
+        // Номер берём из живых запятых открытой подсказки, в том числе за последним
+        // формальным параметром: такой слот рисуется как жирный «?».
+        int snapshotArg = ctx.currentArgIndex;
+        int liveArg = stockArgIndexAtCaret();
+        if (liveArg >= 0)
+            ctx.currentArgIndex = liveArg;
+        Global.tempLog("param-hint-current", "snapshot=" + snapshotArg + " live=" + liveArg //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " current=" + ctx.currentArgIndex + " stockPageParam=" + ctx.paramIndex //$NON-NLS-1$ //$NON-NLS-2$
+            + " invocationFound=" + ctx.invocationFound + " commas=" + stockCommas()); //$NON-NLS-1$ //$NON-NLS-2$
         return ctx;
     }
 

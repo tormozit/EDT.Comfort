@@ -25,6 +25,7 @@ import org.eclipse.egit.core.project.RepositoryMapping;
 import org.eclipse.jgit.lib.Repository;
 import org.eclipse.emf.ecore.EAttribute;
 import org.eclipse.emf.ecore.EObject;
+import org.eclipse.jface.dialogs.IDialogConstants;
 import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.CTabFolder;
@@ -64,6 +65,11 @@ import com._1c.g5.v8.bm.core.IBmObject;
 import com._1c.g5.v8.bm.core.IBmTransaction;
 import com._1c.g5.v8.bm.integration.AbstractBmTask;
 import com._1c.g5.v8.bm.integration.IBmModel;
+import com._1c.g5.v8.derived.DerivedDataStatus;
+import com._1c.g5.v8.derived.IDerivedDataManager;
+import com._1c.g5.v8.derived.IDerivedDataStatusListener;
+import com._1c.g5.v8.derived.pipeline.PipelineSegmentStatus;
+import com._1c.g5.v8.dt.core.platform.IDerivedDataManagerProvider;
 import com._1c.g5.v8.dt.core.platform.IV8Project;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
 import com._1c.g5.v8.dt.search.core.Match;
@@ -201,6 +207,7 @@ public class ConfigSearchDialogHook implements IStartup
     private static boolean tryPatchNow(Shell shell, Object dialog)
     {
         Object page = getSelectedPage(dialog);
+        ReplaceButtonPatch.sync(dialog, page);
         if (page != null && GitSearchPagePatch.PAGE_CLASS.equals(page.getClass().getName()))
             return GitSearchPagePatch.patch(shell, dialog, page);
         if (page == null || !PAGE_CLASS.equals(page.getClass().getName())
@@ -301,6 +308,7 @@ public class ConfigSearchDialogHook implements IStartup
         SearchScopeGroup.patch(shell, page);
         NStrCategory.patchLabels(page);
         hideForeignSearchTabs(shell, dialog);
+        IndexFreshness.install(page);
         fitHeldSize(shell, true);
         scheduleRestoreShellSize(shell);
 
@@ -1329,6 +1337,321 @@ public class ConfigSearchDialogHook implements IStartup
      *       к Git.</li>
      * </ul>
      */
+    /**
+     * Свежесть полнотекстового индекса EDT ({@code TextSearchIndex}) на вкладке «Поиск в
+     * конфигурациях» — других вкладок окна «Поиск», которые им пользуются, нет. Индекс считается
+     * производными данными проекта: сегменты {@code FTS_INDEXING_SEGMENT}/{@code FTS_CLEANER_SEGMENT};
+     * их остаток работы — из {@code IDerivedDataManager} (статус и слушатель статуса). Пока индекс
+     * обновляется — крутилка как в панели «Проблемы конфигурации».
+     */
+    private static final class IndexFreshness
+    {
+        private static final Set<String> SEGMENTS = Set.of("FTS_INDEXING_SEGMENT", "FTS_CLEANER_SEGMENT"); //$NON-NLS-1$ //$NON-NLS-2$
+        private static final int POLL_MS = 300;
+        private static final String TOOLTIP = "Поиск в конфигурации ищет не в самих модулях и свойствах, а в полнотекстовом"
+            + " индексе EDT. Индекс обновляется в фоне после каждого изменения. Пока он обновляется, поиск может не найти"
+            + " недавно добавленный текст, найти уже изменённый или показать вхождение по старому месту в тексте."
+            + " Чтобы результаты были точными, дождитесь окончания обновления и повторите поиск";
+
+        private final Label label;
+        private final Map<IDerivedDataManager, IDerivedDataStatusListener> listeners = new HashMap<>();
+        private WaitSpinner spinner;
+        private boolean refreshPending;
+
+        private IndexFreshness(Label label)
+        {
+            this.label = label;
+        }
+
+        static void install(Object page)
+        {
+            if (!(Global.invoke(page, "getControl") instanceof Composite root) || root.isDisposed() //$NON-NLS-1$
+                || !(root.getLayout() instanceof GridLayout grid))
+                return;
+            Label label = new Label(root, SWT.NONE);
+            label.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false, grid.numColumns, 1));
+            label.setToolTipText(TooltipText.wrap(label, TOOLTIP + Global.pluginSignForTooltip()));
+            IndexFreshness freshness = new IndexFreshness(label);
+            freshness.listen();
+            label.addDisposeListener(e -> freshness.unlisten());
+            freshness.startPolling();
+            freshness.startDiagnostics();
+        }
+
+        /** Начало отставания индекса событием статуса не сообщается — опрос, пока окно открыто. */
+        private void startPolling()
+        {
+            Display display = label.getDisplay();
+            display.timerExec(0, new Runnable()
+            {
+                @Override
+                public void run()
+                {
+                    if (label.isDisposed())
+                        return;
+                    refresh();
+                    display.timerExec(POLL_MS, this);
+                }
+            });
+        }
+
+        private void listen()
+        {
+            for (IDerivedDataManager manager : managers())
+            {
+                IDerivedDataStatusListener listener = status ->
+                {
+                    // #region agent log — временно (issue #800)
+                    Global.tempLog(DIAG_TOPIC, "statusChanged " + describe(status)); //$NON-NLS-1$
+                    // #endregion
+                    scheduleRefresh();
+                };
+                manager.addStatusListener(listener);
+                listeners.put(manager, listener);
+            }
+        }
+
+        // #region agent log — временно (issue #800): какие сигналы горят, пока индекс отстаёт от файлов.
+        private static final String DIAG_TOPIC = "fts-freshness-800"; //$NON-NLS-1$
+        private static final int DIAG_POLL_MS = 200;
+
+        private void startDiagnostics()
+        {
+            org.eclipse.core.resources.IResourceChangeListener files = event ->
+            {
+                if (event.getDelta() == null)
+                    return;
+                try
+                {
+                    event.getDelta().accept(delta ->
+                    {
+                        if (delta.getResource() instanceof IFile file && "bsl".equalsIgnoreCase(file.getFileExtension())) //$NON-NLS-1$
+                            Global.tempLog(DIAG_TOPIC, "fileChanged " + file.getFullPath() + " kind=" + delta.getKind() //$NON-NLS-1$ //$NON-NLS-2$
+                                + " flags=" + delta.getFlags()); //$NON-NLS-1$
+                        return true;
+                    });
+                }
+                catch (Exception e)
+                {
+                    Global.tempLog(DIAG_TOPIC, "fileChanged error " + e); //$NON-NLS-1$
+                }
+            };
+            org.eclipse.core.resources.ResourcesPlugin.getWorkspace().addResourceChangeListener(files,
+                org.eclipse.core.resources.IResourceChangeEvent.POST_CHANGE);
+            label.addDisposeListener(e -> org.eclipse.core.resources.ResourcesPlugin.getWorkspace()
+                .removeResourceChangeListener(files));
+            Display display = label.getDisplay();
+            display.timerExec(0, new Runnable()
+            {
+                @Override
+                public void run()
+                {
+                    if (label.isDisposed())
+                        return;
+                    StringBuilder line = new StringBuilder("poll label=[").append(label.getText()).append(']'); //$NON-NLS-1$
+                    Object indexManager = Global.getOsgiService(
+                        com._1c.g5.v8.dt.search.core.text.ITextSearchIndexProvider.class);
+                    Object entries = Global.getField(indexManager, "projectEntries"); //$NON-NLS-1$
+                    if (!(entries instanceof Map<?, ?>))
+                        line.append(" entries=null indexManager=") //$NON-NLS-1$
+                            .append(indexManager != null ? indexManager.getClass().getName() : "null"); //$NON-NLS-1$
+                    for (Map.Entry<IDerivedDataManager, IProject> project : PROJECTS.entrySet())
+                    {
+                        IDerivedDataManager manager = project.getKey();
+                        line.append(" | ").append(project.getValue().getName()) //$NON-NLS-1$
+                            .append(" idle=").append(safe(manager::isIdle)) //$NON-NLS-1$
+                            .append(" ftsComputed=").append(safe(() -> manager.isComputed("FTS_INDEXING_SEGMENT"))) //$NON-NLS-1$ //$NON-NLS-2$
+                            .append(" cleanerComputed=").append(safe(() -> manager.isComputed("FTS_CLEANER_SEGMENT"))) //$NON-NLS-1$ //$NON-NLS-2$
+                            .append(' ').append(describe(manager.getDerivedDataStatus()));
+                        Object entry = entries instanceof Map<?, ?> map ? map.get(project.getValue()) : null;
+                        Object batch = Global.getField(entry, "activeBatch"); //$NON-NLS-1$
+                        Object postponed = Global.getField(entry, "postponedFilesBatchs"); //$NON-NLS-1$
+                        line.append(" entry=").append(entry != null) //$NON-NLS-1$
+                            .append(" activeBatch=").append(batch == null ? "null" //$NON-NLS-1$ //$NON-NLS-2$
+                                : Global.getField(batch, "addedFiles") + "/" + Global.getField(batch, "removedFiles")) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                            .append(" postponed=").append(postponed instanceof java.util.Collection<?> list ? list.size() : -1) //$NON-NLS-1$
+                            .append(" syncAfterSnapshot=").append(Global.getField(entry, "synchronizingAfterSnapshotRestoration")); //$NON-NLS-1$ //$NON-NLS-2$
+                    }
+                    Global.tempLog(DIAG_TOPIC, line.toString());
+                    display.timerExec(DIAG_POLL_MS, this);
+                }
+            });
+        }
+
+        private static String safe(java.util.function.BooleanSupplier value)
+        {
+            try
+            {
+                return String.valueOf(value.getAsBoolean());
+            }
+            catch (RuntimeException e)
+            {
+                return "error:" + e; //$NON-NLS-1$
+            }
+        }
+
+        private static String describe(DerivedDataStatus status)
+        {
+            if (status == null)
+                return "status=null"; //$NON-NLS-1$
+            StringBuilder text = new StringBuilder("pipeline=").append(status.getPipelineStatus()) //$NON-NLS-1$
+                .append(" stage=").append(status.getActiveStage()) //$NON-NLS-1$
+                .append(" modelSync=").append(status.isModelSyncActive()).append(" active={"); //$NON-NLS-1$ //$NON-NLS-2$
+            Map<String, PipelineSegmentStatus> active = status.getActivePipelineSegments();
+            if (active != null)
+                active.forEach((id, segment) -> text.append(id).append(':')
+                    .append(segment != null ? segment.getRemainingUnitsOfWork() + "/" + segment.getTotalUnitsOfWork() : "null") //$NON-NLS-1$ //$NON-NLS-2$
+                    .append(' '));
+            return text.append('}').toString();
+        }
+
+        /** Проект каждого менеджера — для подписи строк диагностики. */
+        private static final Map<IDerivedDataManager, IProject> PROJECTS = new java.util.concurrent.ConcurrentHashMap<>();
+        // #endregion
+
+        private void unlisten()
+        {
+            listeners.forEach(IDerivedDataManager::removeStatusListener);
+            listeners.clear();
+        }
+
+        /** Слушатель зовётся из потоков конвейера часто — обновляем подпись не чаще раза за проход UI. */
+        private void scheduleRefresh()
+        {
+            synchronized (this)
+            {
+                if (refreshPending)
+                    return;
+                refreshPending = true;
+            }
+            Display display = label.isDisposed() ? null : label.getDisplay();
+            if (display == null || display.isDisposed())
+                return;
+            display.asyncExec(() ->
+            {
+                synchronized (this)
+                {
+                    refreshPending = false;
+                }
+                refresh();
+            });
+        }
+
+        private void refresh()
+        {
+            if (label.isDisposed())
+                return;
+            int remaining = 0;
+            boolean busy = false;
+            for (IDerivedDataManager manager : listeners.keySet())
+            {
+                // Отставание индекса после сохранения модуля: сегмент не досчитан, а карта активных
+                // сегментов при этом пуста и событий статуса нет (лог 17.10.2026, ~17 с).
+                if (!manager.isComputed(SEGMENTS.toArray(String[]::new)))
+                    busy = true;
+                DerivedDataStatus status = manager.getDerivedDataStatus();
+                Map<String, PipelineSegmentStatus> active = status != null ? status.getActivePipelineSegments() : null;
+                if (active == null)
+                    continue;
+                for (Map.Entry<String, PipelineSegmentStatus> segment : active.entrySet())
+                    if (SEGMENTS.contains(segment.getKey()) && segment.getValue() != null
+                        && segment.getValue().getRemainingUnitsOfWork() > 0)
+                    {
+                        busy = true;
+                        remaining += segment.getValue().getRemainingUnitsOfWork();
+                    }
+            }
+            String text = !busy ? "Полнотекстовый индекс актуален"
+                : remaining > 0 ? "Полнотекстовый индекс обновляется, осталось: " + remaining
+                : "Полнотекстовый индекс обновляется";
+            if (!text.equals(label.getText()))
+            {
+                label.setText(text);
+                label.getParent().layout(true, true);
+            }
+            if (busy && (spinner == null || spinner.isDisposed()))
+                spinner = WaitSpinner.attach(label, TOOLTIP);
+            if (spinner != null)
+                spinner.setActive(busy);
+        }
+
+        private static List<IDerivedDataManager> managers()
+        {
+            List<IDerivedDataManager> managers = new ArrayList<>();
+            IV8ProjectManager projects = Global.getOsgiService(IV8ProjectManager.class);
+            IDerivedDataManagerProvider provider = Global.getOsgiService(IDerivedDataManagerProvider.class);
+            if (projects == null || provider == null)
+                return managers;
+            for (IV8Project project : projects.getProjects())
+            {
+                IProject workspaceProject = project.getProject();
+                IDerivedDataManager manager = workspaceProject != null && workspaceProject.isAccessible()
+                    ? provider.get(workspaceProject) : null;
+                if (manager != null && !managers.contains(manager))
+                {
+                    managers.add(manager);
+                    PROJECTS.put(manager, workspaceProject); // agent log — временно (issue #800)
+                }
+            }
+            return managers;
+        }
+    }
+
+    /**
+     * Кнопка «Заменить…» на вкладке «Поиск в конфигурации» (issue #800). Штатная кнопка
+     * {@code SearchDialog} есть всегда, но видна только у страниц с {@code IReplacePage} — страница
+     * EDT его не реализует. Показываем её на нашей вкладке; штатные слушатели снимаются и
+     * вызываются из нашего на остальных вкладках (там нажатие ведёт в {@code performReplace}).
+     */
+    private static final class ReplaceButtonPatch
+    {
+        /** {@code SearchDialog.REPLACE_ID}: {@code SEARCH_ID + 1}, {@code SEARCH_ID = CLIENT_ID + 1}. */
+        private static final int REPLACE_ID = IDialogConstants.CLIENT_ID + 2;
+        private static final String INTERCEPTED_KEY = "tormozit.configSearchReplaceButton"; //$NON-NLS-1$
+        private static final String TOOLTIP = "Найти вхождения и заменить их текст с предпросмотром изменений";
+
+        private ReplaceButtonPatch()
+        {
+        }
+
+        static void sync(Object dialog, Object page)
+        {
+            if (!(Global.invoke(dialog, "getButton", Integer.valueOf(REPLACE_ID)) instanceof Button replace) //$NON-NLS-1$
+                || replace.isDisposed())
+                return;
+            boolean ours = page != null && PAGE_CLASS.equals(page.getClass().getName());
+            if (ours && replace.getData(INTERCEPTED_KEY) == null)
+                intercept(dialog, replace);
+            if (ours)
+            {
+                replace.setVisible(true);
+                replace.setToolTipText(TooltipText.wrap(replace, TOOLTIP + Global.pluginSignForTooltip()));
+            }
+            else if (replace.getData(INTERCEPTED_KEY) != null)
+                replace.setToolTipText(null); // видимость на чужой вкладке уже выставила штатная turnToPage
+        }
+
+        private static void intercept(Object dialog, Button replace)
+        {
+            replace.setData(INTERCEPTED_KEY, Boolean.TRUE);
+            Listener[] stock = replace.getListeners(SWT.Selection);
+            for (Listener listener : stock)
+                replace.removeListener(SWT.Selection, listener);
+            replace.addListener(SWT.Selection, event ->
+            {
+                Object page = getSelectedPage(dialog);
+                if (page == null || !PAGE_CLASS.equals(page.getClass().getName()))
+                {
+                    for (Listener listener : stock)
+                        listener.handleEvent(event);
+                    return;
+                }
+                if (ConfigSearchReplace.searchAndReplace(page))
+                    Global.invoke(dialog, "close"); //$NON-NLS-1$
+            });
+        }
+    }
+
     private static final class GitSearchPagePatch
     {
         static final String PAGE_CLASS = "org.eclipse.egit.ui.internal.search.CommitSearchPage"; //$NON-NLS-1$
@@ -1771,6 +2094,12 @@ public class ConfigSearchDialogHook implements IStartup
                             caseSensitive =
                                 Boolean.TRUE.equals(Global.invoke(input, "isCaseSensitive"));
                         }
+                        // #region agent log — временно (issue #800)
+                        Global.tempLog("config-search-800", "run search=[" //$NON-NLS-1$ //$NON-NLS-2$
+                            + Global.invoke(input, "getSearchString") + "] wholeWord=" + wholeWord //$NON-NLS-1$ //$NON-NLS-2$
+                            + " scopeRefs=" + scopeRefs + " nstr=" + (nstr != null) //$NON-NLS-1$ //$NON-NLS-2$
+                            + " wrapped=" + (wordFilter != null || scopeRefs != null || nstr != null)); //$NON-NLS-1$
+                        // #endregion
                         if (wordFilter != null || scopeRefs != null || nstr != null)
                             args[1] = createFilteredCollector(
                                 args[1], wordFilter, caseSensitive, scopeRefs, nstr, executorCL);
@@ -1832,11 +2161,22 @@ public class ConfigSearchDialogHook implements IStartup
     private static boolean accept(Object match, String searchString, boolean caseSensitive,
         SearchSetMembership membership, NStrCategory nstr) throws Exception
     {
-        if (searchString != null && !isWholeWordMatch(match, searchString, caseSensitive))
+        // #region agent log — временно (issue #800): что EDT отдаёт сборщику и что отсекают наши фильтры
+        boolean wholeWord = searchString == null || isWholeWordMatch(match, searchString, caseSensitive);
+        boolean nstrOk = nstr == null || nstr.allows(match);
+        boolean member = membership == null || membership.allows(match);
+        String where = match instanceof TextSearchFileMatch fm
+            ? fm.getFile().getFullPath() + " line=" + fm.getLineNumber() + " fileOffset=" + fm.getFileOffset() //$NON-NLS-1$ //$NON-NLS-2$
+                + " inLine=" + fm.getTextOffset() + " len=" + fm.getTextLength() + " text=[" + fm.getText() + "]" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            : String.valueOf(match);
+        Global.tempLog("config-search-800", "match " + where + " search=[" + searchString + "] wholeWord=" + wholeWord //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            + " nstr=" + nstrOk + " member=" + member); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
+        if (!wholeWord)
             return false;
-        if (nstr != null && !nstr.allows(match))
+        if (!nstrOk)
             return false;
-        if (membership != null && !membership.allows(match))
+        if (!member)
             return false;
         return true;
     }

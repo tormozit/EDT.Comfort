@@ -541,16 +541,20 @@ public final class RefactoringPreviewHook
                 ? BslOccurrenceContextResolver.parseSought(fqn) : null;
         }
 
+        private static final java.util.Set<String> TEXT_REPLACEMENT_WIZARDS = java.util.Set.of(
+            "org.eclipse.search.internal.ui.text.ReplaceAction$ReplaceWizard", //$NON-NLS-1$
+            ConfigSearchReplace.WIZARD_CLASS_NAME);
+
         private static boolean isTextReplacementWizard(Shell shell)
         {
             if (shell.getData() instanceof IWizardContainer container)
             {
                 IWizardPage page = container.getCurrentPage();
-                // Замена произвольного текста: имя активного модуля в заголовке не является
-                // искомым объектом. Без него скрыты «Подходит» и отбор «Только подходящие».
+                // Замена произвольного текста (поиск по файлам и поиск в конфигурации): имя активного
+                // модуля в заголовке не является искомым объектом. Без него скрыты «Подходит» и отбор
+                // «Только подходящие».
                 if (page != null && page.getWizard() != null
-                    && "org.eclipse.search.internal.ui.text.ReplaceAction$ReplaceWizard" //$NON-NLS-1$
-                        .equals(page.getWizard().getClass().getName()))
+                    && TEXT_REPLACEMENT_WIZARDS.contains(page.getWizard().getClass().getName()))
                     return true;
             }
             return false;
@@ -1916,11 +1920,13 @@ public final class RefactoringPreviewHook
             shell.setData(SIZE_MEMORY_KEY, Boolean.TRUE);
 
             // Размер запоминается по событию Resize: в DisposeListener окно ОС уже уничтожено
-            // и getSize() отдаёт неверные значения.
+            // и getSize() отдаёт неверные значения. Только на странице предпросмотра (как штатный
+            // RefactoringWizardDialog2.saveSize): иначе закрытие мастера на маленькой странице ввода
+            // («Заменить на») запоминает её размер, и предпросмотр потом открывается маленьким.
             Point[] lastSize = { null };
             shell.addListener(SWT.Resize, e ->
             {
-                if (shell.getMaximized() || shell.getMinimized())
+                if (shell.getMaximized() || shell.getMinimized() || !isPreviewPageCurrent(shell))
                     return;
                 Point size = shell.getSize();
                 if (size.x > 0 && size.y > 0)
@@ -1929,6 +1935,12 @@ public final class RefactoringPreviewHook
             shell.addDisposeListener(e -> saveShellSize(lastSize[0]));
 
             restoreShellSize(shell);
+        }
+
+        private static boolean isPreviewPageCurrent(Shell shell)
+        {
+            IWizardPage page = shell.getData() instanceof IWizardContainer container ? container.getCurrentPage() : null;
+            return page != null && page.getClass().getName().contains(PREVIEW_PAGE_NAME_PART);
         }
 
         private static void restoreShellSize(Shell shell)

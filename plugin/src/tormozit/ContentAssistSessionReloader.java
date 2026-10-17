@@ -1423,16 +1423,24 @@ boolean inLiteral = endCaret >= 0
                     withModelSyncHeld(doc, obsolete, () -> {
                         if (obsolete.getAsBoolean())
                             return null;
-                        request.ast = describeInvocationAt(caret, doc, syncRead);
-                        Global.tempLog("param-hint-info", "ast gen=" + gen + " caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                            + " description=" + request.ast + " model=" + describeModelState(doc) //$NON-NLS-1$ //$NON-NLS-2$
-                            + " around=" + SmartContentAssistProcessor.uiBlockAround(doc, caret)); //$NON-NLS-1$
-                        if (!obsolete.getAsBoolean())
-                            readOnlyForContentAssist(doc, resource -> {
-                                if (resource != null && !obsolete.getAsBoolean())
+                        // Описание вызова и ParameterInfo должны относиться к одному
+                        // чтению: первый read мог ещё видеть старый разбор, а второй — новый.
+                        IUnitOfWork<Void, XtextResource> prepare = resource -> {
+                            if (resource != null && !obsolete.getAsBoolean())
+                            {
+                                request.ast = describeInvocationAt(caret, doc, resource);
+                                Global.tempLog("param-hint-info", "ast gen=" + gen + " caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                                    + " description=" + request.ast + " model=" + describeModelState(doc) //$NON-NLS-1$ //$NON-NLS-2$
+                                    + " around=" + SmartContentAssistProcessor.uiBlockAround(doc, caret)); //$NON-NLS-1$
+                                if (!obsolete.getAsBoolean())
                                     request.hint.compute(resource, caret);
-                                return null;
-                            });
+                            }
+                            return null;
+                        };
+                        if (syncRead)
+                            doc.readOnly(prepare);
+                        else
+                            readOnlyForContentAssist(doc, prepare);
                         return null;
                     });
                     return org.eclipse.core.runtime.Status.OK_STATUS;
@@ -1675,6 +1683,13 @@ boolean inLiteral = endCaret >= 0
             && (hintKind == '(' ? ownOpen : nodeEndCoversCaret(astAt, desiredCaret));
         if (hintKind == '(' && ownOpen && isQueryOperatorOpenParen(desiredCaret))
             astReady = true;
+        Global.tempLog("param-hint-poll", "check gen=" + gen + " attempt=" + attempt //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " caret=" + caret + " kind=" + hintKind + " ownOpen=" + ownOpen //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " callCovers=" + callCovers + " astReady=" + astReady + " ast=" + astAt); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        // Разбор может догнать документ без изменения его stamp. Повторный опрос
+        // обязан подготовить новый ответ, а не ждать с тем же отрицательным AST.
+        if (!astReady || (hintKind == ',' && !callCovers))
+            prepared.used = true;
         waitMs = System.currentTimeMillis() - startedMs;
         if (hintKind == '(' && !ownOpen)
         {
@@ -1930,105 +1945,96 @@ boolean inLiteral = endCaret >= 0
     }
 
     /** Цепочка EObject от каретки. */
-    private static String describeInvocationAt(int caret, IXtextDocument xdoc, boolean syncRead)
+    private static String describeInvocationAt(int caret, IXtextDocument xdoc, XtextResource resource)
     {
-        // Вызывается только в фоновом задании: оба варианта чтения могут ждать
-        // монитор ресурса независимо от имени задания, которое его удерживает.
+        // Только в фоновом задании, внутри того же чтения ресурса, что и ParameterInfo.
         try
         {
-            IUnitOfWork<String, XtextResource> astWork = resource -> {
-                    if (resource == null)
-                        return "resourceNull"; //$NON-NLS-1$
-                    EObjectAtOffsetHelper helper = new EObjectAtOffsetHelper();
-                    EObject obj = helper.resolveContainedElementAt(resource, caret);
-                    if (obj == null && caret > 0)
-                        obj = helper.resolveContainedElementAt(resource, caret - 1);
-                    if (obj == null)
-                        return "none"; //$NON-NLS-1$
-                    StringBuilder sb = new StringBuilder();
-                    boolean foundCall = false;
-                    int entries = 0;
-                    int resolved = 0;
-                    int nodeEnd = 0;
-                    int openParen = -1;
-                    int depth = 0;
-                    IResourceServiceProvider rsp = resource.getURI() != null
-                        ? IResourceServiceProvider.Registry.INSTANCE.getResourceServiceProvider(
-                            resource.getURI())
-                        : null;
-                    DynamicFeatureAccessComputer computer = rsp != null
-                        ? rsp.get(DynamicFeatureAccessComputer.class) : null;
-                    for (EObject cur = obj; cur != null && depth < 12; cur = cur.eContainer(), depth++)
+            if (resource == null)
+                return "resourceNull"; //$NON-NLS-1$
+            EObjectAtOffsetHelper helper = new EObjectAtOffsetHelper();
+            EObject obj = helper.resolveContainedElementAt(resource, caret);
+            if (obj == null && caret > 0)
+                obj = helper.resolveContainedElementAt(resource, caret - 1);
+            if (obj == null)
+                return "none"; //$NON-NLS-1$
+            StringBuilder sb = new StringBuilder();
+            boolean foundCall = false;
+            int entries = 0;
+            int resolved = 0;
+            int nodeEnd = 0;
+            int openParen = -1;
+            int depth = 0;
+            IResourceServiceProvider rsp = resource.getURI() != null
+                ? IResourceServiceProvider.Registry.INSTANCE.getResourceServiceProvider(
+                    resource.getURI())
+                : null;
+            DynamicFeatureAccessComputer computer = rsp != null
+                ? rsp.get(DynamicFeatureAccessComputer.class) : null;
+            for (EObject cur = obj; cur != null && depth < 12; cur = cur.eContainer(), depth++)
+            {
+                String name = cur.eClass() != null ? cur.eClass().getName() : "?"; //$NON-NLS-1$
+                if (sb.length() > 0)
+                    sb.append('>');
+                sb.append(name);
+                if ("Invocation".equals(name)) //$NON-NLS-1$
+                {
+                    boolean innermost = !foundCall;
+                    foundCall = true;
+                    ICompositeNode node = NodeModelUtils.findActualNodeFor(cur);
+                    if (node != null)
+                        nodeEnd = Math.max(nodeEnd, node.getTotalEndOffset());
+                    Object access = Global.invoke(cur, "getMethodAccess"); //$NON-NLS-1$
+                    if (innermost && access instanceof EObject acc)
                     {
-                        String name = cur.eClass() != null ? cur.eClass().getName() : "?"; //$NON-NLS-1$
-                        if (sb.length() > 0)
-                            sb.append('>');
-                        sb.append(name);
-                        if ("Invocation".equals(name)) //$NON-NLS-1$
+                        ICompositeNode accNode = NodeModelUtils.findActualNodeFor(acc);
+                        if (accNode != null)
+                            openParen = firstOpenParenFrom(xdoc, accNode.getTotalEndOffset());
+                    }
+                    Object list = access != null
+                        ? Global.invoke(access, "getFeatureEntries") : null; //$NON-NLS-1$
+                    if (list instanceof List<?> feat && !feat.isEmpty())
+                        entries = feat.size();
+                    if (computer != null && access instanceof FeatureAccess fa)
+                    {
+                        Environmental env = EcoreUtil2.getContainerOfType(fa,
+                            Environmental.class);
+                        if (env != null)
                         {
-                            boolean innermost = !foundCall;
-                            foundCall = true;
-                            ICompositeNode node = NodeModelUtils.findActualNodeFor(cur);
-                            if (node != null)
-                                nodeEnd = Math.max(nodeEnd, node.getTotalEndOffset());
-                            Object access = Global.invoke(cur, "getMethodAccess"); //$NON-NLS-1$
-                            if (innermost && access instanceof EObject acc)
-                            {
-                                ICompositeNode accNode = NodeModelUtils.findActualNodeFor(acc);
-                                if (accNode != null)
-                                    openParen = firstOpenParenFrom(xdoc, accNode.getTotalEndOffset());
-                            }
-                            Object list = access != null
-                                ? Global.invoke(access, "getFeatureEntries") : null; //$NON-NLS-1$
-                            if (list instanceof List<?> feat && !feat.isEmpty())
-                                entries = feat.size();
-                            if (computer != null && access instanceof FeatureAccess fa)
-                            {
-                                Environmental env = EcoreUtil2.getContainerOfType(fa,
-                                    Environmental.class);
-                                if (env != null)
-                                {
-                                    List<?> resolvedList = computer.resolveObject(fa,
-                                        env.environments());
-                                    if (resolvedList != null)
-                                        resolved = Math.max(resolved, resolvedList.size());
-                                }
-                            }
-                        }
-                        else if ("OperatorStyleCreator".equals(name)) //$NON-NLS-1$
-                        {
-                            boolean innermost = !foundCall;
-                            foundCall = true;
-                            ICompositeNode node = NodeModelUtils.findActualNodeFor(cur);
-                            if (node != null)
-                                nodeEnd = Math.max(nodeEnd, node.getTotalEndOffset());
-                            Object type = Global.invoke(cur, "getType"); //$NON-NLS-1$
-                            if (innermost && type instanceof EObject typeObj)
-                            {
-                                ICompositeNode typeNode = NodeModelUtils.findActualNodeFor(typeObj);
-                                if (typeNode != null)
-                                    openParen = firstOpenParenFrom(xdoc, typeNode.getTotalEndOffset());
-                            }
-                            if (type != null)
-                            {
-                                entries = Math.max(entries, 1);
-                                resolved = Math.max(resolved, 1);
-                            }
+                            List<?> resolvedList = computer.resolveObject(fa,
+                                env.environments());
+                            if (resolvedList != null)
+                                resolved = Math.max(resolved, resolvedList.size());
                         }
                     }
-                    if (!foundCall)
-                        return "none:" + sb; //$NON-NLS-1$
-                    return sb.append("|entries:").append(entries) //$NON-NLS-1$
-                        .append("|resolved:").append(resolved) //$NON-NLS-1$
-                        .append("|nodeEnd:").append(nodeEnd) //$NON-NLS-1$
-                        .append("|open:").append(openParen).toString(); //$NON-NLS-1$
-                };
-            // В модуле нужна немедленная синхронизация: peek оставляет позицию текущего
-            // параметра протухшей до фонового reconciler. Обёртка ниже после быстрого
-            // чтения восстанавливает отменённую этим чтением живую проверку.
-            String described = syncRead ? xdoc.readOnly(astWork)
-                : readOnlyForContentAssist(xdoc, astWork);
-            return described != null ? described : "none"; //$NON-NLS-1$
+                }
+                else if ("OperatorStyleCreator".equals(name)) //$NON-NLS-1$
+                {
+                    boolean innermost = !foundCall;
+                    foundCall = true;
+                    ICompositeNode node = NodeModelUtils.findActualNodeFor(cur);
+                    if (node != null)
+                        nodeEnd = Math.max(nodeEnd, node.getTotalEndOffset());
+                    Object type = Global.invoke(cur, "getType"); //$NON-NLS-1$
+                    if (innermost && type instanceof EObject typeObj)
+                    {
+                        ICompositeNode typeNode = NodeModelUtils.findActualNodeFor(typeObj);
+                        if (typeNode != null)
+                            openParen = firstOpenParenFrom(xdoc, typeNode.getTotalEndOffset());
+                    }
+                    if (type != null)
+                    {
+                        entries = Math.max(entries, 1);
+                        resolved = Math.max(resolved, 1);
+                    }
+                }
+            }
+            if (!foundCall)
+                return "none:" + sb; //$NON-NLS-1$
+            return sb.append("|entries:").append(entries) //$NON-NLS-1$
+                .append("|resolved:").append(resolved) //$NON-NLS-1$
+                .append("|nodeEnd:").append(nodeEnd) //$NON-NLS-1$
+                .append("|open:").append(openParen).toString(); //$NON-NLS-1$
         }
         catch (Exception ex)
         {
@@ -2955,9 +2961,10 @@ boolean inLiteral = endCaret >= 0
             || Boolean.TRUE.equals(SmartCompletionProposal.IR_PROPOSAL_APPLY_IN_PROGRESS.get());
     }
 
-    /** No-op: раньше temp-log {@code param-hint}; точки вызова оставлены. */
+    /** Временная диагностика причин показа и отмены подсказки параметров. */
     static void logLinkedMode(String location, String json)
     {
+        Global.tempLog("param-hint-poll", location + " " + json); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     /**
@@ -3098,6 +3105,115 @@ boolean inLiteral = endCaret >= 0
         {
             return "err=" + t; //$NON-NLS-1$
         }
+    }
+
+    /**
+     * Временная диагностика пустого списка членов после частичного переразбора: что модель
+     * видит у вызова перед точкой ({@code ОписаниеУзла().}). Только чтение: прокси не
+     * разрешаются, модель берётся без синхронизации.
+     */
+    static String describeReceiverBeforeDot(IDocument doc, int offset)
+    {
+        if (!(doc instanceof IXtextDocument xtextDocument) || offset < 2)
+            return "receiver=noDoc"; //$NON-NLS-1$
+        try
+        {
+            String result = readOnlyPeekAst(xtextDocument, resource -> {
+                if (resource == null || resource.getParseResult() == null)
+                    return "receiver=noParse"; //$NON-NLS-1$
+                ICompositeNode root = resource.getParseResult().getRootNode();
+                StringBuilder text = new StringBuilder("receiver"); //$NON-NLS-1$
+                EObject dotObject = semanticAt(root, offset - 1);
+                EObject parenObject = semanticAt(root, offset - 2);
+                text.append(" atDot=").append(className(dotObject)) //$NON-NLS-1$
+                    .append(" atParen=").append(className(parenObject)); //$NON-NLS-1$
+                com._1c.g5.v8.dt.bsl.model.Invocation invocation = org.eclipse.xtext.EcoreUtil2
+                    .getContainerOfType(parenObject, com._1c.g5.v8.dt.bsl.model.Invocation.class);
+                if (invocation == null)
+                    return text.append(" invocation=null").toString(); //$NON-NLS-1$
+                ICompositeNode invocationNode = NodeModelUtils.findActualNodeFor(invocation);
+                text.append(" invocation=[") //$NON-NLS-1$
+                    .append(invocationNode == null ? "?" : invocationNode.getText().trim()) //$NON-NLS-1$
+                    .append("] invocationProxy=").append(invocation.eIsProxy()); //$NON-NLS-1$
+                EObject access = invocation.getMethodAccess();
+                text.append(" access=").append(className(access)); //$NON-NLS-1$
+                if (access instanceof com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess staticAccess)
+                {
+                    var entries = staticAccess.getFeatureEntries();
+                    text.append(" entries=").append(entries.size()); //$NON-NLS-1$
+                    for (int i = 0; i < entries.size(); i++)
+                    {
+                        EObject entry = entries.get(i);
+                        org.eclipse.emf.ecore.EStructuralFeature featureRef =
+                            entry.eClass().getEStructuralFeature("feature"); //$NON-NLS-1$
+                        Object feature = featureRef == null ? null : entry.eGet(featureRef, false);
+                        text.append(" [").append(i).append("] feature=").append(className(feature)); //$NON-NLS-1$ //$NON-NLS-2$
+                        if (feature instanceof EObject featureObject)
+                        {
+                            text.append(" proxy=").append(featureObject.eIsProxy()); //$NON-NLS-1$
+                            if (!featureObject.eIsProxy())
+                            {
+                                text.append(" sameResource=") //$NON-NLS-1$
+                                    .append(featureObject.eResource() == resource);
+                                Object collector = BslDocCommentDescriptionFix
+                                    .invokeCommentGetter(featureObject, "getFinalReturnState"); //$NON-NLS-1$
+                                text.append(" finalReturn=").append(collector == null ? "null" //$NON-NLS-1$ //$NON-NLS-2$
+                                    : finalReturnSizes(collector));
+                            }
+                            else
+                                text.append(" uri=").append(((org.eclipse.emf.ecore.InternalEObject)featureObject) //$NON-NLS-1$
+                                    .eProxyURI());
+                        }
+                    }
+                }
+                return text.toString();
+            });
+            return result == null ? "receiver=peekUnavailable" : result; //$NON-NLS-1$
+        }
+        catch (Throwable t)
+        {
+            return "receiver=err " + t; //$NON-NLS-1$
+        }
+    }
+
+    private static EObject semanticAt(ICompositeNode root, int offset)
+    {
+        if (root == null || offset < 0)
+            return null;
+        org.eclipse.xtext.nodemodel.ILeafNode leaf = NodeModelUtils.findLeafNodeAtOffset(root, offset);
+        return leaf == null ? null : NodeModelUtils.findActualSemanticObjectFor(leaf);
+    }
+
+    private static String className(Object object)
+    {
+        return object == null ? "null" : object.getClass().getSimpleName(); //$NON-NLS-1$
+    }
+
+    /** Размеры getLastState() у NORMAL и LIGHT: есть ли рассчитанный возврат функции. */
+    static String finalReturnSizes(Object collector)
+    {
+        StringBuilder text = new StringBuilder();
+        for (String modeName : new String[] { "NORMAL", "LIGHT" }) //$NON-NLS-1$ //$NON-NLS-2$
+        {
+            try
+            {
+                Class<?> modeClass = Class.forName("com._1c.g5.v8.dt.bsl.model.typesytem.TypeSystemMode", //$NON-NLS-1$
+                    true, ContentAssistSessionReloader.class.getClassLoader());
+                @SuppressWarnings({ "unchecked", "rawtypes" })
+                Object mode = Enum.valueOf((Class<Enum>)modeClass.asSubclass(Enum.class), modeName);
+                Object provider = Global.invoke(collector, "get", mode); //$NON-NLS-1$
+                Object states = provider == null ? null
+                    : BslDocCommentDescriptionFix.invokeCommentGetter(provider, "getLastState"); //$NON-NLS-1$
+                text.append(modeName).append('=').append(provider == null ? "noProvider" //$NON-NLS-1$
+                    : states instanceof java.util.List<?> list ? String.valueOf(list.size()) : className(states))
+                    .append(' ');
+            }
+            catch (Throwable t)
+            {
+                text.append(modeName).append("=err:").append(t.getClass().getSimpleName()).append(' '); //$NON-NLS-1$
+            }
+        }
+        return text.toString().trim();
     }
     // #endregion
 
