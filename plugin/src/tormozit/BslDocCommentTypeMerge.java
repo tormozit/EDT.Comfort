@@ -127,16 +127,28 @@ public final class BslDocCommentTypeMerge
     {
         if (comment == null)
             return;
+        String cn = comment.getClass().getName();
+        if (!TARGET_COMMENT.equals(cn))
+            return;
+        long started = System.nanoTime();
+        int parameters = 0;
+        int returns = 0;
         try
         {
-            String cn = comment.getClass().getName();
-            if (!TARGET_COMMENT.equals(cn))
-                return;
-            collectInParameters(comment);
-            collectInReturn(comment);
+            parameters = collectInParameters(comment);
+            returns = collectInReturn(comment);
         }
-        catch (Throwable ignored)
+        catch (Throwable t)
         {
+            Global.tempLogException("bsl-comment-cost", "merge", t); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        finally
+        {
+            Global.tempLog("bsl-comment-cost", "merge id=" //$NON-NLS-1$ //$NON-NLS-2$
+                + Integer.toHexString(System.identityHashCode(comment))
+                + " elapsedNs=" + (System.nanoTime() - started) //$NON-NLS-1$
+                + " parameters=" + parameters + " returns=" + returns //$NON-NLS-1$ //$NON-NLS-2$
+                + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
         }
     }
 
@@ -179,10 +191,10 @@ public final class BslDocCommentTypeMerge
 
     private static int collectInParameters(Object comment)
     {
-        Object section = Global.invoke(comment, "getParametersSection"); //$NON-NLS-1$
+        Object section = BslDocCommentDescriptionFix.invokeCommentGetter(comment, "getParametersSection"); //$NON-NLS-1$
         if (section == null)
             return 0;
-        Object fieldsObj = Global.invoke(section, "getParameterDefinitions"); //$NON-NLS-1$
+        Object fieldsObj = BslDocCommentDescriptionFix.invokeCommentGetter(section, "getParameterDefinitions"); //$NON-NLS-1$
         if (!(fieldsObj instanceof List<?> fields))
             return 0;
         int added = 0;
@@ -190,7 +202,7 @@ public final class BslDocCommentTypeMerge
         {
             if (field == null)
                 continue;
-            Object sectionsObj = Global.invoke(field, "getTypeSections"); //$NON-NLS-1$
+            Object sectionsObj = BslDocCommentDescriptionFix.invokeCommentGetter(field, "getTypeSections"); //$NON-NLS-1$
             if (sectionsObj instanceof List<?> sections && sections.isEmpty()
                 && fieldHasTypeParts(field))
             {
@@ -210,10 +222,10 @@ public final class BslDocCommentTypeMerge
 
     private static int collectInReturn(Object comment)
     {
-        Object section = Global.invoke(comment, "getReturnSection"); //$NON-NLS-1$
+        Object section = BslDocCommentDescriptionFix.invokeCommentGetter(comment, "getReturnSection"); //$NON-NLS-1$
         if (section == null)
             return 0;
-        return collectInTypeSections(Global.invoke(section, "getReturnTypes")); //$NON-NLS-1$
+        return collectInTypeSections(BslDocCommentDescriptionFix.invokeCommentGetter(section, "getReturnTypes")); //$NON-NLS-1$
     }
 
     private static int collectInTypeSections(Object sectionsObj)
@@ -277,8 +289,8 @@ public final class BslDocCommentTypeMerge
 
     private static int moveTypeDefinitions(Object from, Object to)
     {
-        Object fromDefsObj = Global.invoke(from, "getTypeDefinitions"); //$NON-NLS-1$
-        Object toDefsObj = Global.invoke(to, "getTypeDefinitions"); //$NON-NLS-1$
+        Object fromDefsObj = BslDocCommentDescriptionFix.invokeCommentGetter(from, "getTypeDefinitions"); //$NON-NLS-1$
+        Object toDefsObj = BslDocCommentDescriptionFix.invokeCommentGetter(to, "getTypeDefinitions"); //$NON-NLS-1$
         if (!(fromDefsObj instanceof List<?> fromDefs) || !(toDefsObj instanceof List<?>))
             return 0;
         @SuppressWarnings("unchecked")
@@ -322,7 +334,7 @@ public final class BslDocCommentTypeMerge
     {
         if (typeSection == null)
             return 0;
-        Object defsObj = Global.invoke(typeSection, "getTypeDefinitions"); //$NON-NLS-1$
+        Object defsObj = BslDocCommentDescriptionFix.invokeCommentGetter(typeSection, "getTypeDefinitions"); //$NON-NLS-1$
         if (!(defsObj instanceof List<?> defs))
             return 0;
         List<Object> parts = typeLineParts(typeSection);
@@ -333,7 +345,7 @@ public final class BslDocCommentTypeMerge
         // Сохраняем штатную структуру, в том числе для английского «Array of …».
         for (Object def : defs)
         {
-            Object contained = Global.invoke(def, "getContainTypes"); //$NON-NLS-1$
+            Object contained = BslDocCommentDescriptionFix.invokeCommentGetter(def, "getContainTypes"); //$NON-NLS-1$
             if (contained instanceof List<?> elements && !elements.isEmpty())
                 return 0;
         }
@@ -344,7 +356,7 @@ public final class BslDocCommentTypeMerge
     {
         if (typeSection == null || parts == null || parts.isEmpty())
             return 0;
-        Object defsObj = Global.invoke(typeSection, "getTypeDefinitions"); //$NON-NLS-1$
+        Object defsObj = BslDocCommentDescriptionFix.invokeCommentGetter(typeSection, "getTypeDefinitions"); //$NON-NLS-1$
         if (!(defsObj instanceof List<?>))
             return 0;
         @SuppressWarnings("unchecked")
@@ -368,7 +380,7 @@ public final class BslDocCommentTypeMerge
             }
             else if (TEXT_PART.equals(cn))
             {
-                String text = str(Global.invoke(part, "getText")); //$NON-NLS-1$
+                String text = str(BslDocCommentDescriptionFix.invokeCommentGetter(part, "getText")); //$NON-NLS-1$
                 if (text == null || text.isBlank())
                     continue;
                 for (String piece : text.split(",")) //$NON-NLS-1$
@@ -387,20 +399,20 @@ public final class BslDocCommentTypeMerge
 
     private static boolean fieldHasTypeParts(Object field)
     {
-        List<Object> parts = descriptionParts(Global.invoke(field, "getDescription")); //$NON-NLS-1$
+        List<Object> parts = descriptionParts(BslDocCommentDescriptionFix.invokeCommentGetter(field, "getDescription")); //$NON-NLS-1$
         return !parts.isEmpty() && isCommaSeparatedTypeLine(parts.subList(0, 1));
     }
 
     /** Передаём типы штатному разбору EDT, сохраняя наличие разделителя и координаты текста. */
     private static Object createNativeFieldTypeSection(Object comment, Object field)
     {
-        List<Object> parts = descriptionParts(Global.invoke(field, "getDescription")); //$NON-NLS-1$
+        List<Object> parts = descriptionParts(BslDocCommentDescriptionFix.invokeCommentGetter(field, "getDescription")); //$NON-NLS-1$
         if (parts.isEmpty())
             return null;
         Object first = parts.get(0);
         if (!TEXT_PART.equals(first.getClass().getName()))
             return null;
-        String raw = str(Global.invoke(first, "getText")); //$NON-NLS-1$
+        String raw = str(BslDocCommentDescriptionFix.invokeCommentGetter(first, "getText")); //$NON-NLS-1$
         if (raw == null)
             return null;
         String line = raw.trim();
@@ -410,8 +422,8 @@ public final class BslDocCommentTypeMerge
         // Последний аргумент createTypeSection означает «снять ведущий -», а не формат
         // комментария: без разделителя передаём false, чтобы не потерять первый символ типа.
         boolean hasLeadingDash = line.startsWith("-"); //$NON-NLS-1$
-        int lineNumber = intValue(Global.invoke(first, "getLineNumber")); //$NON-NLS-1$
-        int offset = intValue(Global.invoke(first, "getOffset")) + raw.indexOf(line); //$NON-NLS-1$
+        int lineNumber = intValue(BslDocCommentDescriptionFix.invokeCommentGetter(first, "getLineNumber")); //$NON-NLS-1$
+        int offset = intValue(BslDocCommentDescriptionFix.invokeCommentGetter(first, "getOffset")) + raw.indexOf(line); //$NON-NLS-1$
         String normalized = line.endsWith(":") //$NON-NLS-1$
             ? line.substring(0, line.length() - 1).trim() + " - :" //$NON-NLS-1$
             : line + " - "; //$NON-NLS-1$
@@ -430,13 +442,13 @@ public final class BslDocCommentTypeMerge
                 Object part = parts.get(i);
                 if (!TEXT_PART.equals(part.getClass().getName()))
                     continue;
-                String value = str(Global.invoke(part, "getText")); //$NON-NLS-1$
+                String value = str(BslDocCommentDescriptionFix.invokeCommentGetter(part, "getText")); //$NON-NLS-1$
                 if (value == null || !value.trim().startsWith("*")) //$NON-NLS-1$
                     continue;
                 String content = value.trim();
-                int partOffset = intValue(Global.invoke(part, "getOffset")) //$NON-NLS-1$
+                int partOffset = intValue(BslDocCommentDescriptionFix.invokeCommentGetter(part, "getOffset")) //$NON-NLS-1$
                     + value.indexOf(content);
-                int partLine = intValue(Global.invoke(part, "getLineNumber")); //$NON-NLS-1$
+                int partLine = intValue(BslDocCommentDescriptionFix.invokeCommentGetter(part, "getLineNumber")); //$NON-NLS-1$
                 Object contentTriple = Tuples.create(content, Integer.valueOf(partOffset),
                     Integer.valueOf(0));
                 while (!stack.isEmpty())
@@ -477,7 +489,7 @@ public final class BslDocCommentTypeMerge
             }
             if (!TEXT_PART.equals(cn))
                 continue;
-            String text = str(Global.invoke(part, "getText")); //$NON-NLS-1$
+            String text = str(BslDocCommentDescriptionFix.invokeCommentGetter(part, "getText")); //$NON-NLS-1$
             if (text != null && text.indexOf(',') >= 0)
                 return true;
         }
@@ -487,10 +499,10 @@ public final class BslDocCommentTypeMerge
     private static List<Object> typeLineParts(Object typeSection)
     {
         List<Object> out = new ArrayList<>();
-        appendDescriptionParts(out, Global.invoke(typeSection, "getSourceDescription")); //$NON-NLS-1$
+        appendDescriptionParts(out, BslDocCommentDescriptionFix.invokeCommentGetter(typeSection, "getSourceDescription")); //$NON-NLS-1$
         // У секции с «:» currentDescription содержит вложенные поля, а не имена типов.
-        if (!Boolean.TRUE.equals(Global.invoke(typeSection, "isExtensionPart"))) //$NON-NLS-1$
-            appendDescriptionParts(out, Global.invoke(typeSection, "getCurrentDescription")); //$NON-NLS-1$
+        if (!Boolean.TRUE.equals(BslDocCommentDescriptionFix.invokeCommentGetter(typeSection, "isExtensionPart"))) //$NON-NLS-1$
+            appendDescriptionParts(out, BslDocCommentDescriptionFix.invokeCommentGetter(typeSection, "getCurrentDescription")); //$NON-NLS-1$
         return out;
     }
 
@@ -498,7 +510,7 @@ public final class BslDocCommentTypeMerge
     {
         if (description == null)
             return;
-        Object partsObj = Global.invoke(description, "getParts"); //$NON-NLS-1$
+        Object partsObj = BslDocCommentDescriptionFix.invokeCommentGetter(description, "getParts"); //$NON-NLS-1$
         if (!(partsObj instanceof List<?> parts) || parts.isEmpty())
             return;
         for (Object part : parts)
@@ -510,7 +522,7 @@ public final class BslDocCommentTypeMerge
 
     private static Integer lineNumber(Object part)
     {
-        Object raw = Global.invoke(part, "getLineNumber"); //$NON-NLS-1$
+        Object raw = BslDocCommentDescriptionFix.invokeCommentGetter(part, "getLineNumber"); //$NON-NLS-1$
         if (raw instanceof Integer line && line.intValue() > 0)
             return line;
         return null;
@@ -596,10 +608,10 @@ public final class BslDocCommentTypeMerge
     {
         if (def == null)
             return null;
-        String name = str(Global.invoke(def, "getTypeName")); //$NON-NLS-1$
+        String name = str(BslDocCommentDescriptionFix.invokeCommentGetter(def, "getTypeName")); //$NON-NLS-1$
         if (name != null && !name.isBlank())
             return name.trim();
-        Object link = Global.invoke(def, "getLink"); //$NON-NLS-1$
+        Object link = BslDocCommentDescriptionFix.invokeCommentGetter(def, "getLink"); //$NON-NLS-1$
         return linkText(link);
     }
 
@@ -607,10 +619,10 @@ public final class BslDocCommentTypeMerge
     {
         if (linkPart == null)
             return null;
-        String text = str(Global.invoke(linkPart, "getInitialContent")); //$NON-NLS-1$
+        String text = str(BslDocCommentDescriptionFix.invokeCommentGetter(linkPart, "getInitialContent")); //$NON-NLS-1$
         if (text != null && !text.isBlank())
             return text.trim();
-        text = str(Global.invoke(linkPart, "getText")); //$NON-NLS-1$
+        text = str(BslDocCommentDescriptionFix.invokeCommentGetter(linkPart, "getText")); //$NON-NLS-1$
         return text == null ? null : text.trim();
     }
 

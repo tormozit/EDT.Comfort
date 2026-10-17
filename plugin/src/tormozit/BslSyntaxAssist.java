@@ -113,11 +113,17 @@ public final class BslSyntaxAssist
     /** Язык документации, выбранный в самой панели; при неудаче — язык среды. */
     public static String language()
     {
-        Object provider = injected(LANGUAGE_PROVIDER);
+        Object provider = languageProvider();
         Object language = provider != null ? Global.invoke(provider, "getLanguage") : null; //$NON-NLS-1$
         if (language instanceof String text && !text.isBlank())
             return text;
         return Locale.getDefault().getLanguage();
+    }
+
+    /** Штатный UI-сервис языка, с заполненными зависимостями Guice. */
+    static Object languageProvider()
+    {
+        return injected(LANGUAGE_PROVIDER);
     }
 
     /** Экземпляр из Guice-инжектора языка BSL по имени класса. */

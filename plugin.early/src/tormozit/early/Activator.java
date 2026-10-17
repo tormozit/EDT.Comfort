@@ -1469,8 +1469,9 @@ public final class Activator
                 try
                 {
                     java.lang.management.ThreadMXBean bean = java.lang.management.ManagementFactory.getThreadMXBean();
-                    java.lang.management.ThreadInfo[] threads = bean.dumpAllThreads(
-                        bean.isObjectMonitorUsageSupported(), bean.isSynchronizerUsageSupported());
+                    // Владельца ожидаемого монитора JVM сообщает и без дорогого
+                    // перечисления всех удерживаемых мониторов/синхронизаторов.
+                    java.lang.management.ThreadInfo[] threads = bean.dumpAllThreads(false, false);
                     java.util.Map<Long, java.lang.management.ThreadInfo> byId = new java.util.HashMap<>();
                     for (java.lang.management.ThreadInfo thread : threads)
                         byId.put(thread.getThreadId(), thread);
@@ -1554,7 +1555,7 @@ public final class Activator
                 try
                 {
                     entry.probe = LOCK_PROBES.scheduleWithFixedDelay(() -> probeLock(entry),
-                        150, 150, java.util.concurrent.TimeUnit.MILLISECONDS);
+                        150, 1000, java.util.concurrent.TimeUnit.MILLISECONDS);
                 }
                 catch (RuntimeException e)
                 {

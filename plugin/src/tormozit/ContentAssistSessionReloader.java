@@ -51,6 +51,7 @@ import org.eclipse.ui.IWorkbenchPartSite;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.commands.ICommandService;
 import org.eclipse.xtext.EcoreUtil2;
+import org.eclipse.xtext.linking.lazy.LazyLinkingResource;
 import org.eclipse.xtext.nodemodel.ICompositeNode;
 import org.eclipse.xtext.nodemodel.util.NodeModelUtils;
 import org.eclipse.xtext.resource.EObjectAtOffsetHelper;
@@ -61,6 +62,7 @@ import org.eclipse.xtext.util.concurrent.IUnitOfWork;
 
 import com._1c.g5.v8.dt.bsl.model.FeatureAccess;
 import com._1c.g5.v8.dt.bsl.resource.DynamicFeatureAccessComputer;
+import com._1c.g5.v8.dt.bsl.resource.BslResolveCrossReferencesJob;
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.mcore.Environmental;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
@@ -220,6 +222,31 @@ public final class ContentAssistSessionReloader
     private ICompletionProposal lastAssistSelection;
     /** Поколение отложенного param hint — отмена повторного timerExec. */
     private final AtomicInteger paramHintPostGen = new AtomicInteger();
+    /** Ссылка меняется только на UI; done публикует результат фонового чтения. */
+    private ParamHintPreparation paramHintPreparation;
+
+    private static final class ParamHintPreparation
+    {
+        final IXtextDocument document;
+        final int generation;
+        final int caret;
+        final long stamp;
+        final ParamHintHtmlModifier.PreparedParamHint hint;
+        org.eclipse.core.runtime.jobs.Job job;
+        volatile boolean done;
+        String ast;
+        boolean used;
+
+        ParamHintPreparation(IXtextDocument document, int generation, int caret, long stamp,
+            ParamHintHtmlModifier.PreparedParamHint hint)
+        {
+            this.document = document;
+            this.generation = generation;
+            this.caret = caret;
+            this.stamp = stamp;
+            this.hint = hint;
+        }
+    }
     /** Автооткрытие assist (порт ИР ПриНажатииКлавишиАвтодополнение). */
     private volatile boolean completionAutoOpenPending;
     private volatile int completionAutoOpenCaret = -1;
@@ -1355,17 +1382,188 @@ boolean inLiteral = endCaret >= 0
             paramHintPollActive = false;
             return;
         }
-        // Приоритет непрерывен от чтения AST до возврата команды показа. Вложенное
-        // readOnlyForContentAssist восстанавливает проверку аннотаций, но пока этот
-        // scope открыт, её запуск откладывается: она не захватит монитор перед командой.
-        try (AssistPriority priority = AssistPriority.begin(viewer != null ? viewer.getDocument() : null))
+        if (viewer == null || !(viewer.getDocument() instanceof IXtextDocument doc))
+            return;
+        StyledText widget = viewer.getTextWidget();
+        if (widget == null || widget.isDisposed())
+            return;
+        int desired = paramHintPollDesired >= 0 ? paramHintPollDesired : desiredCaretStart;
+        int live = modelCaretOffset();
+        if (live >= 0 && Math.abs(live - desired) <= 1)
+            desired = live;
+        final int caret = desired;
+        long stamp = paramHintDocumentStamp(doc);
+        ParamHintPreparation prepared = paramHintPreparation;
+        boolean matches = prepared != null && prepared.document == doc && prepared.generation == gen
+            && prepared.caret == caret && prepared.stamp == stamp;
+        if (!matches || prepared.used)
         {
-            pollAstReadyThenShowParamHintInternal(desiredCaretStart, gen, attempt, startedMs, lastExecMs, hintKind);
+            if (prepared != null && !prepared.done)
+            {
+                prepared.job.cancel();
+                deferParamHintForModel(caret, gen, attempt, startedMs, lastExecMs, hintKind, "cancelPrevious"); //$NON-NLS-1$
+                return;
+            }
+            ParamHintHtmlModifier.PreparedParamHint hint = ParamHintHtmlModifier.captureParamHint(viewer);
+            if (hint == null)
+            {
+                Global.tempLog("param-hint-background", "no handler gen=" + gen); //$NON-NLS-1$ //$NON-NLS-2$
+                paramHintPollActive = false;
+                paramHintPollDesired = -1;
+                return;
+            }
+            boolean syncRead = isExpressionFieldViewer();
+            ParamHintPreparation request = new ParamHintPreparation(doc, gen, caret, stamp, hint);
+            request.job = org.eclipse.core.runtime.jobs.Job.create("Комфорт: подготовка подсказки параметров", monitor -> { //$NON-NLS-1$
+                Global.tempLog("param-hint-background", "begin gen=" + gen + " caret=" + caret); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                java.util.function.BooleanSupplier obsolete = () -> monitor.isCanceled()
+                    || gen != paramHintPostGen.get() || paramHintDocumentStamp(doc) != request.stamp;
+                try
+                {
+                    withModelSyncHeld(doc, obsolete, () -> {
+                        if (obsolete.getAsBoolean())
+                            return null;
+                        request.ast = describeInvocationAt(caret, doc, syncRead);
+                        Global.tempLog("param-hint-info", "ast gen=" + gen + " caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                            + " description=" + request.ast + " model=" + describeModelState(doc) //$NON-NLS-1$ //$NON-NLS-2$
+                            + " around=" + SmartContentAssistProcessor.uiBlockAround(doc, caret)); //$NON-NLS-1$
+                        if (!obsolete.getAsBoolean())
+                            readOnlyForContentAssist(doc, resource -> {
+                                if (resource != null && !obsolete.getAsBoolean())
+                                    request.hint.compute(resource, caret);
+                                return null;
+                            });
+                        return null;
+                    });
+                    return org.eclipse.core.runtime.Status.OK_STATUS;
+                }
+                catch (Exception e)
+                {
+                    Global.tempLogException("param-hint-background", "prepare gen=" + gen, e); //$NON-NLS-1$ //$NON-NLS-2$
+                    return org.eclipse.core.runtime.Status.CANCEL_STATUS;
+                }
+                finally
+                {
+                    Global.tempLog("param-hint-background", "end gen=" + gen + " ready=" + hint.isReady() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        + " obsolete=" + obsolete.getAsBoolean()); //$NON-NLS-1$
+                    request.done = true;
+                }
+            });
+            request.job.setSystem(true);
+            request.job.setPriority(org.eclipse.core.runtime.jobs.Job.INTERACTIVE);
+            request.job.addJobChangeListener(new org.eclipse.core.runtime.jobs.JobChangeAdapter()
+            {
+                @Override
+                public void done(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
+                {
+                    // Отмена ещё не запущенного задания не входит в run/finally.
+                    request.done = true;
+                }
+            });
+            paramHintPreparation = prepared = request;
+            request.job.schedule();
+        }
+        if (!prepared.done)
+        {
+            if (System.currentTimeMillis() - startedMs >= PARAM_HINT_AST_TIMEOUT_MS)
+                prepared.job.cancel();
+            deferParamHintForModel(caret, gen, attempt, startedMs, lastExecMs, hintKind, "background"); //$NON-NLS-1$
+            return;
+        }
+        if (prepared.ast == null || !prepared.hint.isReady())
+        {
+            prepared.used = true;
+            deferParamHintForModel(caret, gen, attempt, startedMs, lastExecMs, hintKind, "noInfo"); //$NON-NLS-1$
+            return;
+        }
+        pollAstReadyThenShowParamHintInternal(caret, gen, attempt, startedMs, lastExecMs, hintKind, prepared);
+    }
+
+    private static long paramHintDocumentStamp(IDocument doc)
+    {
+        return doc instanceof IDocumentExtension4 stamped ? stamped.getModificationStamp() : doc.getLength();
+    }
+
+    /** Не ждать ни завершения разбора, ни освобождения правила на UI. */
+    private static String paramHintModelBusyReason(IDocument doc)
+    {
+        if (isModelSyncBusy(doc))
+            return "sync"; //$NON-NLS-1$
+        // Штатный locker ждёт эти задания отдельно от ContentAssistResourceSync.
+        // Проверяем тем же API EDT, без readOnly и без входа в монитор ресурса.
+        if (Global.getField(doc, "resource") instanceof LazyLinkingResource resource //$NON-NLS-1$
+            && !BslResolveCrossReferencesJob.findJobsByResource(resource).isEmpty())
+            return "crossReferences"; //$NON-NLS-1$
+        return null;
+    }
+
+    /** Не ждать ни завершения разбора, ни освобождения правила на UI. */
+    private static Boolean tryBeginParamHintModelHold(org.eclipse.core.runtime.jobs.Job sync)
+    {
+        if (sync == null)
+            return Boolean.FALSE;
+        synchronized (ASSIST_SYNC_HOLD)
+        {
+            if (sync.getState() != org.eclipse.core.runtime.jobs.Job.NONE)
+                return null;
+            if (sync.getRule() != ASSIST_SYNC_HOLD)
+            {
+                try
+                {
+                    sync.setRule(ASSIST_SYNC_HOLD);
+                }
+                catch (RuntimeException e)
+                {
+                    // EDT успела поставить задание между проверкой состояния и setRule.
+                    Global.tempLogException("param-hint-model-hold", "attach rule", e); //$NON-NLS-1$ //$NON-NLS-2$
+                    return null;
+                }
+            }
+        }
+        org.eclipse.core.runtime.jobs.IJobManager manager = org.eclipse.core.runtime.jobs.Job.getJobManager();
+        org.eclipse.core.runtime.NullProgressMonitor noWait = new org.eclipse.core.runtime.NullProgressMonitor();
+        noWait.setCanceled(true);
+        try
+        {
+            // Проверено в ImplicitJobs.begin/ThreadJob.joinRun: свободное правило
+            // берётся сразу; при конфликте отмена проверяется до начала ожидания.
+            manager.beginRule(ASSIST_SYNC_HOLD, noWait);
+            return Boolean.TRUE;
+        }
+        catch (org.eclipse.core.runtime.OperationCanceledException e)
+        {
+            // ImplicitJobs.begin регистрирует ThreadJob и при отмене (finally).
+            // Снять незавершённый beginRule нужно и в этом случае.
+            manager.endRule(ASSIST_SYNC_HOLD);
+            return null;
+        }
+        catch (RuntimeException e)
+        {
+            Global.tempLogException("param-hint-model-hold", "acquire rule", e); //$NON-NLS-1$ //$NON-NLS-2$
+            return null;
         }
     }
 
+    private void deferParamHintForModel(int desiredCaret, int gen, int attempt, long startedMs,
+        long lastExecMs, char hintKind, String reason)
+    {
+        long waitMs = System.currentTimeMillis() - startedMs;
+        boolean expired = waitMs >= PARAM_HINT_AST_TIMEOUT_MS;
+        Global.tempLog("param-hint-model-hold", "defer gen=" + gen + " attempt=" + attempt //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " reason=" + reason + " waitMs=" + waitMs + " expired=" + expired); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        StyledText st = viewer != null ? viewer.getTextWidget() : null;
+        if (expired || st == null || st.isDisposed())
+        {
+            paramHintPollActive = false;
+            paramHintPollDesired = -1;
+            return;
+        }
+        st.getDisplay().timerExec(PARAM_HINT_AST_POLL_MS,
+            () -> pollAstReadyThenShowParamHint(desiredCaret, gen, attempt + 1, startedMs, lastExecMs, hintKind));
+    }
+
     private void pollAstReadyThenShowParamHintInternal(int desiredCaretStart, int gen, int attempt,
-        long startedMs, long lastExecMs, char hintKind)
+        long startedMs, long lastExecMs, char hintKind, ParamHintPreparation prepared)
     {
         if (gen != paramHintPostGen.get())
         {
@@ -1454,16 +1652,23 @@ boolean inLiteral = endCaret >= 0
         // Идёт разбор EDT: чтение ниже ждало бы его в beginRule (withModelSyncHeld) на UI.
         // Опрашиваем дальше, UI не ждёт.
         IDocument pollDoc = viewer != null ? viewer.getDocument() : null;
-        if (isModelSyncBusy(pollDoc) && waitMs < PARAM_HINT_AST_TIMEOUT_MS)
+        String modelBusy = paramHintModelBusyReason(pollDoc);
+        if (modelBusy != null)
         {
-            if (attempt == 0)
-                logLinkedMode("poll.waitModelSync", "{\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            display.timerExec(PARAM_HINT_AST_POLL_MS,
-                () -> pollAstReadyThenShowParamHint(desiredCaret, gen, attempt + 1, startedMs,
-                    lastExecMs, hintKind));
+            deferParamHintForModel(desiredCaret, gen, attempt, startedMs, lastExecMs, hintKind,
+                "beforeAst:" + modelBusy); //$NON-NLS-1$
             return;
         }
-        String astAt = describeInvocationAt(desiredCaret);
+        String astAt = prepared.ast;
+        // Само чтение может поставить догоняющий разбор. Он ещё удерживается нашим
+        // правилом: отпустить его и повторить после разбора, не входить в штатный readOnly.
+        modelBusy = paramHintModelBusyReason(pollDoc);
+        if (modelBusy != null)
+        {
+            deferParamHintForModel(desiredCaret, gen, attempt, startedMs, lastExecMs, hintKind,
+                "afterAst:" + modelBusy); //$NON-NLS-1$
+            return;
+        }
         boolean ownOpen = isOwnCallOpenParen(astAt, desiredCaret);
         boolean callCovers = astHasCallNode(astAt) && nodeEndCoversCaret(astAt, desiredCaret);
         boolean astReady = isAstDescriptionReady(astAt)
@@ -1546,7 +1751,15 @@ boolean inLiteral = endCaret >= 0
             + ",\"ast\":\"" + ContentAssistDebug.jsonEscapeForLog(astAt) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
             + ",\"around\":\"" + ContentAssistDebug.jsonEscapeForLog(clipAroundCaret(caret)) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
             + ",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-        runInvocationParametersHoverCommand(desiredCaret, gen, attempt);
+        modelBusy = paramHintModelBusyReason(pollDoc);
+        if (modelBusy != null)
+        {
+            deferParamHintForModel(desiredCaret, gen, attempt, startedMs, lastExecMs, hintKind,
+                "beforeCommand:" + modelBusy); //$NON-NLS-1$
+            return;
+        }
+        prepared.used = true;
+        runInvocationParametersHoverCommand(desiredCaret, gen, attempt, prepared);
         if (isParamHoverShellVisible() || isParamHoverInfoControlVisible())
         {
             paramHintPollActive = false;
@@ -1717,16 +1930,10 @@ boolean inLiteral = endCaret >= 0
     }
 
     /** Цепочка EObject от каретки. */
-    private String describeInvocationAt(int caret)
+    private static String describeInvocationAt(int caret, IXtextDocument xdoc, boolean syncRead)
     {
-        IDocument doc = viewer != null ? viewer.getDocument() : null;
-        if (!(doc instanceof IXtextDocument xdoc))
-            return "noXtext"; //$NON-NLS-1$
-        // В поле кода BSL читаем модель синхронизированно: «peek»-чтение EDT
-        // (readOnlyDataModelWithoutSync) отдаёт состояние до нашей вставки, и показ ждал
-        // чужой синхронизации больше секунды (лог 22:08:28: waitMs=1130). Документ поля —
-        // это модуль ~5 КБ, синхронный разбор здесь стоит миллисекунды.
-        boolean syncRead = isExpressionFieldViewer();
+        // Вызывается только в фоновом задании: оба варианта чтения могут ждать
+        // монитор ресурса независимо от имени задания, которое его удерживает.
         try
         {
             IUnitOfWork<String, XtextResource> astWork = resource -> {
@@ -2025,7 +2232,8 @@ boolean inLiteral = endCaret >= 0
             || DebugInspectorHook.isInspectExpressionViewer(viewer);
     }
 
-    private void runInvocationParametersHoverCommand(int desiredCaret, int gen, int attempt)
+    private void runInvocationParametersHoverCommand(int desiredCaret, int gen, int attempt,
+        ParamHintPreparation prepared)
     {
         try (ContentAssistDebug.FillSpan phase = ContentAssistDebug.fillStart("paramHint.show", null))
         {
@@ -2097,14 +2305,20 @@ boolean inLiteral = endCaret >= 0
                     + ",\"caretDisp\":\"" + (caretDisp == null ? "null" : caretDisp.x + "," + caretDisp.y) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                     + "\",\"activeShell\":\"" + ContentAssistDebug.jsonEscapeForLog(
                         describeActiveShell()) + "\"}"); //$NON-NLS-1$
-                if (inspect)
+                // Активация редактора/фокус выше могли вызвать вложенные события UI.
+                if (gen != paramHintPostGen.get() || viewer.getDocument() != prepared.document
+                    || paramHintDocumentStamp(prepared.document) != prepared.stamp
+                    || modelCaretOffset() != prepared.caret)
                 {
-                    boolean opened = ParamHintHtmlModifier.tryOpenParamHintForViewer(viewer);
+                    Global.tempLog("param-hint-background", "skip stale before show gen=" + gen); //$NON-NLS-1$ //$NON-NLS-2$
+                    return;
+                }
+                try (ParamHintCommandTrace trace = new ParamHintCommandTrace())
+                {
+                    boolean opened = prepared.hint.show(viewer);
                     probe.execOk = opened;
                     probe.popupShown = opened || isParamHoverShellVisible();
                 }
-                else
-                    probe = executeInvocationParametersHoverCommand();
                 if (!probe.popupShown && isParamHoverShellVisible())
                     probe.popupShown = true;
                 // Пересчёт положения после загрузки содержимого — для любого пути показа,
@@ -2174,6 +2388,7 @@ boolean inLiteral = endCaret >= 0
         private final long threadId = Thread.currentThread().getId();
         private final long startedNs = System.nanoTime();
         private final java.util.Timer timer = new java.util.Timer("Comfort: parameter hint diagnostics", true); //$NON-NLS-1$
+        private final java.util.Map<Long, Long> previousCpuNs = new java.util.HashMap<>();
         private volatile boolean finished;
 
         ParamHintCommandTrace()
@@ -2186,7 +2401,7 @@ boolean inLiteral = endCaret >= 0
                 {
                     sample();
                 }
-            }, 150, 150);
+            }, 150, 1000);
         }
 
         private void sample()
@@ -2195,6 +2410,7 @@ boolean inLiteral = endCaret >= 0
                 return;
             try
             {
+                long captureStartedNs = System.nanoTime();
                 java.lang.management.ThreadMXBean bean = java.lang.management.ManagementFactory.getThreadMXBean();
                 StringBuilder text = new StringBuilder("sample request=").append(startedNs) //$NON-NLS-1$
                     .append(" elapsedNs=").append(System.nanoTime() - startedNs); //$NON-NLS-1$
@@ -2202,13 +2418,15 @@ boolean inLiteral = endCaret >= 0
                 long next = threadId;
                 while (next >= 0 && visited.add(next))
                 {
-                    java.lang.management.ThreadInfo info = bean.getThreadInfo(new long[] {next},
-                        bean.isObjectMonitorUsageSupported(), bean.isSynchronizerUsageSupported())[0];
+                    // Owned-monitor enumeration scans the JVM heap; measured capture was 0.7–2.4 s.
+                    // The plain stack query still reports the awaited lock and its Java owner.
+                    java.lang.management.ThreadInfo info = bean.getThreadInfo(next, Integer.MAX_VALUE);
                     if (info == null)
                         break;
                     text.append("\nthread=").append(next).append(' ').append(info.getThreadName()) //$NON-NLS-1$
                         .append(" state=").append(info.getThreadState()).append(" waitsFor=").append(info.getLockInfo()) //$NON-NLS-1$ //$NON-NLS-2$
                         .append(" ownerId=").append(info.getLockOwnerId()); //$NON-NLS-1$
+                    appendCpu(text, bean, next);
                     for (StackTraceElement frame : info.getStackTrace())
                         text.append("\n  at ").append(frame); //$NON-NLS-1$
                     for (java.lang.management.MonitorInfo monitor : info.getLockedMonitors())
@@ -2217,6 +2435,29 @@ boolean inLiteral = endCaret >= 0
                         text.append("\n  holdsSynchronizer ").append(lock); //$NON-NLS-1$
                     next = info.getLockOwnerId();
                 }
+                // COM waits have no Java lock owner. Include the IR/Jacob threads independently.
+                // Enumerate Thread references without requesting a JVM-wide ThreadInfo snapshot.
+                Thread[] threads = new Thread[Math.max(32, Thread.activeCount() * 2)];
+                int threadCount = Thread.enumerate(threads);
+                for (int i = 0; i < threadCount; i++)
+                {
+                    Thread candidate = threads[i];
+                    if (candidate == null || visited.contains(candidate.getId()))
+                        continue;
+                    String name = candidate.getName();
+                    if (!name.startsWith("IR-COMThread-") && !name.toLowerCase(java.util.Locale.ROOT).contains("jacob")) //$NON-NLS-1$ //$NON-NLS-2$
+                        continue;
+                    java.lang.management.ThreadInfo info = bean.getThreadInfo(candidate.getId(), Integer.MAX_VALUE);
+                    if (info == null)
+                        continue;
+                    text.append("\nirComThread=").append(info.getThreadId()).append(' ').append(name) //$NON-NLS-1$
+                        .append(" state=").append(info.getThreadState()).append(" waitsFor=").append(info.getLockInfo()) //$NON-NLS-1$ //$NON-NLS-2$
+                        .append(" ownerId=").append(info.getLockOwnerId()); //$NON-NLS-1$
+                    appendCpu(text, bean, info.getThreadId());
+                    for (StackTraceElement frame : info.getStackTrace())
+                        text.append("\n  at ").append(frame); //$NON-NLS-1$
+                }
+                text.append("\ncaptureNs=").append(System.nanoTime() - captureStartedNs); //$NON-NLS-1$
                 text.append("\nfinished=").append(finished); //$NON-NLS-1$
                 Global.tempLog("param-hint-ui", text.toString()); //$NON-NLS-1$
             }
@@ -2224,6 +2465,15 @@ boolean inLiteral = endCaret >= 0
             {
                 Global.tempLogException("param-hint-ui", "sample failed", t); //$NON-NLS-1$ //$NON-NLS-2$
             }
+        }
+
+        private void appendCpu(StringBuilder text, java.lang.management.ThreadMXBean bean, long id)
+        {
+            long cpu = bean.isThreadCpuTimeSupported() && bean.isThreadCpuTimeEnabled()
+                ? bean.getThreadCpuTime(id) : -1;
+            Long previous = cpu >= 0 ? previousCpuNs.put(id, cpu) : null;
+            text.append(" cpuNs=").append(cpu).append(" cpuDeltaNs=") //$NON-NLS-1$ //$NON-NLS-2$
+                .append(previous != null ? cpu - previous : -1);
         }
 
         @Override
@@ -5162,6 +5412,9 @@ boolean inLiteral = endCaret >= 0
     private void onDocumentChangedForCompletionAutoOpenImpl(DocumentEvent event)
     {
         String skipText = event == null ? null : event.getText();
+        if (skipText != null && skipText.endsWith(".") //$NON-NLS-1$
+            && Boolean.TRUE.equals(SmartCompletionProposal.IR_PROPOSAL_APPLY_IN_PROGRESS.get()))
+            scheduleAutoOpenAfterIrDot(event);
         boolean inLiteral = false;
         dotBeforeWordCaret = -1;
         if (".".equals(skipText) && event != null && viewer != null //$NON-NLS-1$
@@ -5318,6 +5571,53 @@ boolean inLiteral = endCaret >= 0
         {
             scheduleCompletionAutoOpen(caretAfter, seq);
         }
+    }
+
+    /** Точка из шаблона ИР должна пройти то же правило, что и набранная вручную. */
+    private void scheduleAutoOpenAfterIrDot(DocumentEvent event)
+    {
+        StyledText text = viewer != null ? viewer.getTextWidget() : null;
+        if (text == null || text.isDisposed())
+            return;
+        IDocument doc = event.getDocument();
+        int caret = event.getOffset() + event.getText().length();
+        Global.tempLog("assist-ir-dot", "schedule caret=" + caret); //$NON-NLS-1$ //$NON-NLS-2$
+        // JFace устанавливает выделение через getSelection уже после apply. До этого
+        // момента не открывать новый список и не менять состояние завершаемой сессии.
+        text.getDisplay().asyncExec(() ->
+        {
+            if (text.isDisposed() || viewer.getDocument() != doc || modelCaretOffset() != caret)
+            {
+                Global.tempLog("assist-ir-dot", "skip changed context caret=" + caret); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            }
+            ContentAssistSettings settings = ContentAssistSettings.getInstance();
+            if (!ComfortSettings.isReplaceListFiltersEnabled() || settings == null || !settings.isEnabled())
+            {
+                Global.tempLog("assist-ir-dot", "skip disabled caret=" + caret); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            }
+            try
+            {
+                if (caret <= 0 || caret > doc.getLength() || doc.getChar(caret - 1) != '.'
+                    || !CompletionAutoOpenTrigger.shouldFetchDocument(doc, '.', caret - 1, caret,
+                        ContentAssistPopupSync.isPopupVisible(assistant)))
+                {
+                    Global.tempLog("assist-ir-dot", "skip trigger caret=" + caret); //$NON-NLS-1$ //$NON-NLS-2$
+                    return;
+                }
+                pendingAutoOpen = false;
+                suppressDocumentAutoOpenAfterSession = false;
+                dotBeforeWordCaret = wordRightOfCaret(doc, caret).isEmpty() ? -1 : caret;
+                cancelPendingOrdinaryAssist("irDot"); //$NON-NLS-1$
+                Global.tempLog("assist-ir-dot", "open caret=" + caret); //$NON-NLS-1$ //$NON-NLS-2$
+                scheduleCompletionAutoOpen(caret, completionAutoOpenSeq.incrementAndGet());
+            }
+            catch (org.eclipse.jface.text.BadLocationException e)
+            {
+                Global.tempLogException("assist-ir-dot", "document changed", e); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        });
     }
 
     /** Следующий {@code assistSessionEnded} — закрытие из‑за устаревшего префикса, не apply. */

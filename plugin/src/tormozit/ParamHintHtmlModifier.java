@@ -744,6 +744,70 @@ public final class ParamHintHtmlModifier
      * показ — штатный {@code showControlInfo}. Если e4-обёртка не разворачивается —
      * запасной Direct-показ.
      */
+    /** UI захватывает handler/site; фон считает только модель, UI показывает готовые pages. */
+    static PreparedParamHint captureParamHint(ITextViewer viewer)
+    {
+        Object handler = resolveParamHoverHandlerForMiss();
+        if (handler == null || !PARAM_HOVER_HANDLER_CLASS.equals(handler.getClass().getName()))
+            return null;
+        ensureHandlerUiServices(handler);
+        org.eclipse.ui.IWorkbenchSite site = null;
+        IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+        if (window != null && window.getActivePage() != null
+            && window.getActivePage().getActivePart() != null)
+            site = window.getActivePage().getActivePart().getSite();
+        return new PreparedParamHint(handler, site);
+    }
+
+    static final class PreparedParamHint
+    {
+        private final Object handler;
+        private final org.eclipse.ui.IWorkbenchSite site;
+        private Object info;
+
+        private PreparedParamHint(Object handler, org.eclipse.ui.IWorkbenchSite site)
+        {
+            this.handler = handler;
+            this.site = site;
+        }
+
+        void compute(XtextResource resource, int caret)
+        {
+            Global.tempLog("param-hint-info", "compute caret=" + caret + " thread=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + Thread.currentThread().getName() + " resource=" + resource.getURI()); //$NON-NLS-1$
+            // Та же подготовка первого аргумента, что у openParamHintWithoutHighlight,
+            // но по уже захваченному ресурсу: без обращения к активному SWT-редактору.
+            EObject invocation = findInvocationLikeAt(resource, caret);
+            if (invocation != null && callSiteHasMultipleSignatures(resource, invocation))
+            {
+                EList<Expression> params = paramsOfInvocationLike(invocation);
+                if (params != null && !params.isEmpty() && params.get(0) != null)
+                    forceComputeExpressionTypes(resource, params.get(0), invocation);
+            }
+            info = stockParameterInfo(handler, resource, caret);
+            Global.tempLog("param-hint-info", "computed caret=" + caret + " info=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + (info != null ? info.getClass().getName() : "null")); //$NON-NLS-1$
+        }
+
+        boolean isReady()
+        {
+            return info != null;
+        }
+
+        boolean show(ITextViewer viewer)
+        {
+            if (info == null)
+                return false;
+            Object oldControl = Global.getField(handler, "infoControl"); //$NON-NLS-1$
+            if (oldControl != null)
+                Global.invoke(oldControl, "dispose"); //$NON-NLS-1$
+            Global.setFieldForce(handler, "infoControl", null); //$NON-NLS-1$
+            // Раньше этот флаг ставил preExecute штатной команды.
+            sigPickOnOpenPending.set(true);
+            return showParamInfoViaHandler(handler, viewer, info, site, true, false);
+        }
+    }
+
     static boolean openParamHintWithoutHighlight(ITextViewer viewer, int caret)
     {
         try
@@ -1062,10 +1126,17 @@ public final class ParamHintHtmlModifier
             ctor.setAccessible(true);
             Object unit = ctor.newInstance(handler, Integer.valueOf(caret));
             // exec(XtextResource) — чтение ресурса уже открыто вызывающим.
-            return Global.invoke(unit, "exec", resource); //$NON-NLS-1$
+            // Прямой вызов интерфейса сохраняет исключение; Global.invoke мог вернуть
+            // null из-за ошибки рефлексии, не отличая её от штатного отсутствия подсказки.
+            @SuppressWarnings("unchecked")
+            IUnitOfWork<Object, XtextResource> work = (IUnitOfWork<Object, XtextResource>) unit;
+            Object info = work.exec(resource);
+            Global.tempLog("param-hint-info", "stock result caret=" + caret + " present=" + (info != null)); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            return info;
         }
         catch (Exception | LinkageError ex)
         {
+            Global.tempLogException("param-hint-info", "stockParameterInfo caret=" + caret, ex); //$NON-NLS-1$ //$NON-NLS-2$
             ContentAssistSessionReloader.logLinkedMode("stockInfo.err", "{\"ex\":\"" //$NON-NLS-1$ //$NON-NLS-2$
                 + ContentAssistDebug.jsonEscapeForLog(String.valueOf(ex)) + "\"}"); //$NON-NLS-1$
             return null;
@@ -1080,6 +1151,7 @@ public final class ParamHintHtmlModifier
      */
     private static void ensureHandlerInjections(Object handler, XtextResource resource)
     {
+        ensureHandlerUiServices(handler);
         IResourceServiceProvider rsp = resource.getURI() != null
             ? IResourceServiceProvider.Registry.INSTANCE.getResourceServiceProvider(
                 resource.getURI())
@@ -1111,6 +1183,26 @@ public final class ParamHintHtmlModifier
         if (filled.length() > 0)
             ContentAssistSessionReloader.logLinkedMode("stockInfo.inject", "{\"filled\":\"" //$NON-NLS-1$ //$NON-NLS-2$
                 + filled.toString().trim() + "\"}"); //$NON-NLS-1$
+    }
+
+    /** UI-сервисы отсутствуют в ресурсном инжекторе; источник — UI-инжектор языка BSL. */
+    private static void ensureHandlerUiServices(Object handler)
+    {
+        if (Global.getField(handler, "documentation") == null) //$NON-NLS-1$
+        {
+            Object provider = BslSyntaxAssist.documentationProvider();
+            if (provider != null)
+                Global.setFieldForce(handler, "documentation", provider); //$NON-NLS-1$
+        }
+        if (Global.getField(handler, "languageProvider") == null) //$NON-NLS-1$
+        {
+            Object provider = BslSyntaxAssist.languageProvider();
+            if (provider != null)
+                Global.setFieldForce(handler, "languageProvider", provider); //$NON-NLS-1$
+        }
+        Global.tempLog("param-hint-info", "ui services documentation=" //$NON-NLS-1$ //$NON-NLS-2$
+            + (Global.getField(handler, "documentation") != null) //$NON-NLS-1$
+            + " languageProvider=" + (Global.getField(handler, "languageProvider") != null)); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private static void fillHandlerService(Object handler, IResourceServiceProvider rsp,

@@ -32,6 +32,7 @@ import org.eclipse.xtext.naming.IQualifiedNameConverter;
 import org.eclipse.xtext.nodemodel.ICompositeNode;
 import org.eclipse.xtext.nodemodel.util.NodeModelUtils;
 import org.eclipse.xtext.resource.IResourceServiceProvider;
+import org.eclipse.xtext.util.OnChangeEvictingCache;
 import org.eclipse.xtext.scoping.IScope;
 import org.eclipse.xtext.scoping.IScopeProvider;
 import org.eclipse.xtext.ui.editor.contentassist.ConfigurableCompletionProposal;
@@ -453,6 +454,23 @@ public final class BslStructureInsertCommentTypes
         }
     }
 
+    /** Досчёт метода с тем же контекстом BM, который требуется для разрешения ссылок EDT. */
+    static boolean lightInstallMethodTypeSystem(Method method, Variable gate)
+    {
+        Module module = EcoreUtil2.getContainerOfType(method, Module.class);
+        BslTreeTypeSystem tree = peekTreeTypeSystem();
+        IProject project = projectOf(module);
+        if (module == null || tree == null || project == null)
+            return false;
+        boolean[] completed = { false };
+        runInTransaction(tree, project, context ->
+        {
+            tree.lightInstallingTypeSystem(module, method, gate, null, 0, context);
+            completed[0] = true;
+        });
+        return completed[0];
+    }
+
     /**
      * Полный {@code installTypeSystem} чужого модуля из нашего прохода (модуль формы из
      * {@code см. …}, модуль цели ссылки).
@@ -635,15 +653,20 @@ public final class BslStructureInsertCommentTypes
     /** Описания из Pass; после перезапуска тип может быть восстановлен EDT раньше нашего прохода. */
     private static String propertyDescription(Property property, EObject context)
     {
+        return propertyDescription(property, context, false);
+    }
+
+    private static String propertyDescription(Property property, EObject context, boolean projectEnabled)
+    {
         if (!(property instanceof DerivedProperty derived)
             || !(derived.getSource() instanceof BslDerivedPropertySource source)
             || source.getModuleUri() == null
-            || !BslDocCommentComputedTypes.isExtendedTypesEnabled(context))
+            || (!projectEnabled && !BslDocCommentComputedTypes.isExtendedTypesEnabled(context)))
             return null;
         PropertyDescriptions descriptions = PropertyDescriptions.forModuleUri(URI.createURI(source.getModuleUri()));
         if (!descriptions.contains(property))
         {
-            readPropertySourceDescription(property, source, context);
+            return readPropertySourceDescription(property, source, context);
         }
         return descriptions.get(property);
     }
@@ -652,36 +675,87 @@ public final class BslStructureInsertCommentTypes
     private static String readPropertySourceDescription(Property property, BslDerivedPropertySource source,
         EObject context)
     {
+        long started = System.nanoTime();
         Module module = moduleFromSourceUri(URI.createURI(source.getModuleUri()), context);
+        long resolvedAt = System.nanoTime();
         if (module == null || !BslDocCommentComputedTypes.isExtendedTypesEnabled(module))
-            return null;
-        Block block = module;
-        if (source.getMethodName() != null && !source.getMethodName().isEmpty())
         {
-            block = null;
-            for (Method method : module.allMethods())
-                if (source.getMethodName().equalsIgnoreCase(method.getName()))
-                {
-                    block = method;
-                    break;
-                }
+            Global.tempLog("bsl-property-description-cost", "source uri=" + source.getModuleUri() //$NON-NLS-1$ //$NON-NLS-2$
+                + " method=" + source.getMethodName() + " offset=" + source.getLocalOffset() //$NON-NLS-1$ //$NON-NLS-2$
+                + " property=" + property.getName() //$NON-NLS-1$
+                + " outcome=" + (module == null ? "noModule" : "disabled") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " methodsScanned=0 resolveNs=" + (resolvedAt - started) //$NON-NLS-1$
+                + " elapsedNs=" + (System.nanoTime() - started) //$NON-NLS-1$
+                + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
+            return null;
         }
-        ICompositeNode node = block == null ? null : NodeModelUtils.findActualNodeFor(block);
-        if (node == null)
-            return null;
-        int offset = node.getTotalOffset() + source.getLocalOffset();
-        if (offset < node.getTotalOffset() || offset >= node.getTotalEndOffset())
-            return null;
-        var leaf = NodeModelUtils.findLeafNodeAtOffset(node, offset);
-        EObject semantic = leaf == null ? null : NodeModelUtils.findActualSemanticObjectFor(leaf);
-        Invocation invocation = EcoreUtil2.getContainerOfType(semantic, Invocation.class);
-        if (invocation == null || !property.getName().equalsIgnoreCase(insertedKey(invocation)))
-            return null;
-        Statement statement = EcoreUtil2.getContainerOfType(invocation, Statement.class);
-        List<String> lines = sideCommentLines(statement);
-        String description = sideCommentDescription(lines);
-        PropertyDescriptions.forModuleUri(URI.createURI(source.getModuleUri())).put(property, description);
-        return description;
+        // Источник есть и у полей документирующего комментария: там смещение указывает
+        // на комментарий, а не на Вставить/Добавить. Пустой результат тоже сохраняем.
+        // Кэш привязан к исходному Resource и сбрасывается Xtext при его изменении.
+        String key = "tormozit.bslPropertySourceDescription\n" + PropertyDescriptions.key(property); //$NON-NLS-1$
+        return PROPERTY_SOURCE_DESCRIPTIONS.get(key, module.eResource(),
+            () -> readPropertySourceDescription(property, source, module, started, resolvedAt));
+    }
+
+    private static final OnChangeEvictingCache PROPERTY_SOURCE_DESCRIPTIONS = new OnChangeEvictingCache();
+
+    private static String readPropertySourceDescription(Property property, BslDerivedPropertySource source,
+        Module module, long started, long resolvedAt)
+    {
+        int methodsScanned = 0;
+        String outcome = "failed"; //$NON-NLS-1$
+        try
+        {
+            Block block = module;
+            if (source.getMethodName() != null && !source.getMethodName().isEmpty())
+            {
+                block = null;
+                for (Method method : module.allMethods())
+                {
+                    methodsScanned++;
+                    if (source.getMethodName().equalsIgnoreCase(method.getName()))
+                    {
+                        block = method;
+                        break;
+                    }
+                }
+            }
+            ICompositeNode node = block == null ? null : NodeModelUtils.findActualNodeFor(block);
+            if (node == null)
+            {
+                outcome = block == null ? "noMethod" : "noNode"; //$NON-NLS-1$ //$NON-NLS-2$
+                return null;
+            }
+            int offset = node.getTotalOffset() + source.getLocalOffset();
+            if (offset < node.getTotalOffset() || offset >= node.getTotalEndOffset())
+            {
+                outcome = "offsetOutsideNode"; //$NON-NLS-1$
+                return null;
+            }
+            var leaf = NodeModelUtils.findLeafNodeAtOffset(node, offset);
+            EObject semantic = leaf == null ? null : NodeModelUtils.findActualSemanticObjectFor(leaf);
+            Invocation invocation = EcoreUtil2.getContainerOfType(semantic, Invocation.class);
+            if (invocation == null || !property.getName().equalsIgnoreCase(insertedKey(invocation)))
+            {
+                outcome = invocation == null ? "noInvocation" : "differentKey"; //$NON-NLS-1$ //$NON-NLS-2$
+                return null;
+            }
+            Statement statement = EcoreUtil2.getContainerOfType(invocation, Statement.class);
+            List<String> lines = sideCommentLines(statement);
+            String description = sideCommentDescription(lines);
+            PropertyDescriptions.forModuleUri(URI.createURI(source.getModuleUri())).put(property, description);
+            outcome = description == null ? "noDescription" : "found"; //$NON-NLS-1$ //$NON-NLS-2$
+            return description;
+        }
+        finally
+        {
+            Global.tempLog("bsl-property-description-cost", "source uri=" + source.getModuleUri() //$NON-NLS-1$ //$NON-NLS-2$
+                + " method=" + source.getMethodName() + " offset=" + source.getLocalOffset() //$NON-NLS-1$ //$NON-NLS-2$
+                + " property=" + property.getName() + " outcome=" + outcome //$NON-NLS-1$ //$NON-NLS-2$
+                + " methodsScanned=" + methodsScanned + " resolveNs=" + (resolvedAt - started) //$NON-NLS-1$ //$NON-NLS-2$
+                + " elapsedNs=" + (System.nanoTime() - started) //$NON-NLS-1$
+                + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
+        }
     }
 
     private static List<String> sideCommentLines(Statement statement)
@@ -926,25 +1000,44 @@ public final class BslStructureInsertCommentTypes
         {
             if (definition.getTypeName() == null)
                 continue;
-            List<Property> properties = new ArrayList<>();
+            java.util.Map<String, List<Property>> properties =
+                new java.util.TreeMap<>(String.CASE_INSENSITIVE_ORDER);
             for (Object item : types)
                 if (item instanceof Type type && type.getContextDef() != null
                     && (definition.getTypeName().equals(McoreUtil.getTypeName(type))
                         || definition.getTypeName().equals(McoreUtil.getTypeNameRu(type))))
-                    properties.addAll(type.getContextDef().allProperties());
-            for (var field : definition.getFieldDefinitionExtension())
-                for (Property property : properties)
-                    if (field.getName().equalsIgnoreCase(property.getName()))
+                {
+                    for (Property property : type.getContextDef().allProperties())
                     {
-                        String description = propertyDescription(property, context);
-                        if (description != null && field.getDescription().getParts().isEmpty())
+                        String name = property.getName();
+                        if (name != null)
+                            properties.computeIfAbsent(name, ignored -> new ArrayList<>()).add(property);
+                    }
+                }
+            for (var field : definition.getFieldDefinitionExtension())
+            {
+                List<Property> matching = properties.get(field.getName());
+                if (matching == null)
+                    continue;
+                // Сохраняем все совпадения и их порядок: одноимённые свойства могут
+                // приходить из нескольких контекстных типов и давать разные вложенные типы.
+                for (Property property : matching)
+                {
+                    if (field.getDescription().getParts().isEmpty())
+                    {
+                        // Вход из fillReturnSection уже проверил флажок проекта. Не ищем
+                        // тот же проект заново для каждого поля и каждой вложенной секции.
+                        String description = propertyDescription(property, context, true);
+                        if (description != null)
                             field.getDescription().addPart(new TextPart(field.getDescription(),
                                 field.getLineNumber(), description));
-                        List<TypeItem> nestedTypes = property.getTypeContainer() instanceof TypeContainerRef ref
-                            ? ref.getTypes() : property.getTypes();
-                        for (TypeSection nested : field.getTypeSections())
-                            fillPropertyDescriptions(nested, nestedTypes, context);
                     }
+                    List<TypeItem> nestedTypes = property.getTypeContainer() instanceof TypeContainerRef ref
+                        ? ref.getTypes() : property.getTypes();
+                    for (TypeSection nested : field.getTypeSections())
+                        fillPropertyDescriptions(nested, nestedTypes, context);
+                }
+            }
         }
     }
 

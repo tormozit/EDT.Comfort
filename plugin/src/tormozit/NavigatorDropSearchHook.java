@@ -1,12 +1,22 @@
 package tormozit;
 
+import java.lang.reflect.Field;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.List;
 import java.util.Set;
 import java.util.WeakHashMap;
+import java.util.function.Predicate;
 
+import org.eclipse.core.resources.IProject;
+import org.eclipse.core.runtime.IProgressMonitor;
+import org.eclipse.emf.ecore.EClass;
+import org.eclipse.emf.ecore.EObject;
+import org.eclipse.emf.ecore.EReference;
 import org.eclipse.jface.util.LocalSelectionTransfer;
 import org.eclipse.jface.viewers.IStructuredSelection;
+import org.eclipse.jface.viewers.StructuredSelection;
 import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.SWTError;
@@ -41,8 +51,19 @@ import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.forms.editor.IFormPage;
 import org.eclipse.ui.navigator.CommonViewer;
 
+import com._1c.g5.v8.bm.core.IBmTransaction;
+import com._1c.g5.v8.bm.integration.AbstractBmTask;
+import com._1c.g5.v8.bm.integration.IBmEditingContext;
 import com._1c.g5.v8.dt.common.ui.controls.search.SearchBox;
+import com._1c.g5.v8.dt.core.platform.IV8Project;
+import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
+import com._1c.g5.v8.dt.md.api.ExchangePlanContentTask;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
+import com._1c.g5.v8.dt.metadata.mdclass.AutoRegistrationChanges;
+import com._1c.g5.v8.dt.metadata.mdclass.ExchangePlan;
+import com._1c.g5.v8.dt.metadata.mdclass.MdClassPackage;
+import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
+import com._1c.g5.v8.dt.ui.util.ContentUtil;
 
 /**
  * DnD «навигатор → список», если состав списка нельзя менять перетаскиванием
@@ -53,6 +74,9 @@ import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
  * и запускается поиск. 
  *
  * <p>Иначе выделяется строка перетаскиваемого объекта в том списке, куда сбросили.
+ *
+ * <p>Исключение — «Состав» подсистемы, функциональной опции и плана обмена: сброс включает объекты в состав
+ * (см. {@link ContentPageDrop}).
  *
  * <p>Навигатор, наборы объектов и дерево сравнения сюда не входят: у них свой drop.
  */
@@ -238,6 +262,8 @@ public final class NavigatorDropSearchHook implements IStartup
         }
         else
             return;
+        if (list instanceof Tree tree && !tree.isDisposed() && ContentPageDrop.install(tree))
+            return;
         if (list == null || list.isDisposed() || isNavigatorList(list) || hasForeignDropTarget(list))
         {
             log("tryInstall skip origin=" + origin.getClass().getSimpleName() //$NON-NLS-1$
@@ -364,6 +390,430 @@ public final class NavigatorDropSearchHook implements IStartup
             acceptDrop = true;
             if (logKind != null)
                 log("drag " + logKind + " MOVE full=" + fullName); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    /**
+     * «Состав» подсистемы, функциональной опции и плана обмена ({@code editors.*.pages.content}): сброс объектов
+     * из навигатора включает их в состав в транзакции редактора и выделяет их в дереве.
+     * Допустимые виды объектов — те же, что у штатного выбора состава (см. {@link Kind}).
+     */
+    private static final class ContentPageDrop extends DropTargetAdapter
+    {
+        private enum Kind
+        {
+            /** Виды — публичный {@code SubsystemEditorContentPageModel.CONTAINED_CLASSES}. */
+            SUBSYSTEM("editors.subsystem.pages.content", "SubsystemEditorContentPageComponent", //$NON-NLS-1$ //$NON-NLS-2$
+                MdClassPackage.Literals.SUBSYSTEM__CONTENT, "Комфорт: состав подсистемы", null), //$NON-NLS-1$
+            FUNCTIONAL_OPTION("editors.functionalOption.pages.content", //$NON-NLS-1$
+                "FunctionalOptionEditorContentPageComponent", MdClassPackage.Literals.FUNCTIONAL_OPTION__CONTENT, //$NON-NLS-1$
+                "Комфорт: состав функциональной опции", "FUNCTIONAL_OPTION_CONTENT__CONTAINED_ECLASSES"), //$NON-NLS-1$ //$NON-NLS-2$
+            /** Состав — записи {@code ExchangePlanContentItem}, добавляются штатной {@code ExchangePlanContentTask}. */
+            EXCHANGE_PLAN("editors.exchangeplan.pages.content", "ExchangePlanContentComponent", //$NON-NLS-1$ //$NON-NLS-2$
+                MdClassPackage.Literals.EXCHANGE_PLAN__CONTENT, "Комфорт: состав плана обмена", //$NON-NLS-1$
+                "EXCHANGE_PLAN_CONTENT__CONTAINED_ECLASSES"); //$NON-NLS-1$
+
+            final String pageId;
+            final String componentClass;
+            final EReference feature;
+            final String taskName;
+            /** Приватное поле {@code NavigatorTreeDialogModelFactory} с видами штатного выбора состава. */
+            final String eClassesField;
+
+            Kind(String pageId, String componentClass, EReference feature, String taskName, String eClassesField)
+            {
+                this.pageId = pageId;
+                this.componentClass = componentClass;
+                this.feature = feature;
+                this.taskName = taskName;
+                this.eClassesField = eClassesField;
+            }
+
+            static Kind of(String pageId)
+            {
+                for (Kind kind : values())
+                {
+                    if (kind.pageId.equals(pageId))
+                        return kind;
+                }
+                return null;
+            }
+        }
+
+        private static final String KEY = "tormozit.navigatorDropContentPage"; //$NON-NLS-1$
+        private static final String SUBSYSTEM_MODEL_CLASS =
+            "com._1c.g5.v8.dt.internal.md.ui.editors.subsystem.SubsystemEditorContentPageModel"; //$NON-NLS-1$
+        private static final String DIALOG_MODEL_FACTORY_CLASS =
+            "com._1c.g5.v8.dt.md.ui.aef.models.NavigatorTreeDialogModelFactory"; //$NON-NLS-1$
+        /** Ключ, под которым {@code DtTreeView} кладёт свой {@code TreeViewer} в данные своего {@code Composite} — родителя дерева. */
+        private static final String DT_TREE_VIEWER_KEY =
+            "com._1c.g5.v8.dt.ui.aef.swt.views.DtTreeView.treeViewer"; //$NON-NLS-1$
+        /** Раскрытие пути к каждому объекту занимает свою попытку. */
+        private static final int SELECT_ATTEMPTS = 50;
+        /** Сколько проверок подряд выделение всех должно продержаться (по {@link #SELECT_DELAY_MS}). */
+        private static final int SETTLE_CHECKS = 10;
+        private static final int SELECT_DELAY_MS = 100;
+
+        private final DtGranularEditor<?> editor;
+        private final IFormPage page;
+        private final Kind kind;
+        private final Tree tree;
+        private final Predicate<EObject> allowed;
+        private final IProject project;
+
+        private ContentPageDrop(DtGranularEditor<?> editor, IFormPage page, Kind kind, Tree tree,
+            Predicate<EObject> allowed, IProject project)
+        {
+            this.editor = editor;
+            this.page = page;
+            this.kind = kind;
+            this.tree = tree;
+            this.allowed = allowed;
+            this.project = project;
+        }
+
+        /** {@code true}, если дерево — «Состав» подсистемы или опции и слушатель на нём стоит. */
+        static boolean install(Tree tree)
+        {
+            if (Boolean.TRUE.equals(tree.getData(KEY)))
+                return true;
+            DtGranularEditor<?> editor = MdEditorAttributeMenuHook.editorOf(tree);
+            IFormPage page = editor != null ? contentPageOf(editor, tree) : null;
+            Kind kind = page != null ? Kind.of(page.getId()) : null;
+            EObject owner = kind != null ? editor.getModel() : null;
+            if (owner == null || !kind.feature.getEContainingClass().isInstance(owner))
+                return false;
+            Predicate<EObject> allowed = allowedTypes(kind, page);
+            IProject project = projectOf(owner);
+            DropTarget target = allowed != null && project != null ? ensureDropTarget(tree) : null;
+            if (target == null)
+                return false;
+            ensureLocalSelectionTransfer(target);
+            target.addDropListener(new ContentPageDrop(editor, page, kind, tree, allowed, project));
+            tree.setData(KEY, Boolean.TRUE);
+            tree.setData(INSTALLED_KEY, Boolean.TRUE);
+            return true;
+        }
+
+        @Override
+        public void dragEnter(DropTargetEvent event)
+        {
+            updateDetail(event);
+        }
+
+        @Override
+        public void dragOperationChanged(DropTargetEvent event)
+        {
+            updateDetail(event);
+        }
+
+        @Override
+        public void dragOver(DropTargetEvent event)
+        {
+            updateDetail(event);
+        }
+
+        @Override
+        public void dropAccept(DropTargetEvent event)
+        {
+            updateDetail(event);
+        }
+
+        @Override
+        public void drop(DropTargetEvent event)
+        {
+            List<MdObject> objects = draggedObjects();
+            EObject owner = editor.getModel();
+            if (objects.isEmpty() || owner == null)
+                return;
+            IBmEditingContext context = editor.getEditingContext();
+            if (context == null)
+                return;
+            try
+            {
+                context.execute(new AbstractBmTask<Void>(kind.taskName)
+                {
+                    @Override
+                    public Void execute(IBmTransaction transaction, IProgressMonitor monitor)
+                    {
+                        EObject txOwner = transaction.toTransactionObject(owner);
+                        if (txOwner instanceof ExchangePlan plan)
+                        {
+                            addToExchangePlan(transaction, plan, objects, monitor);
+                            return null;
+                        }
+                        if (txOwner == null || !(txOwner.eGet(kind.feature) instanceof List<?> raw))
+                            return null;
+                        @SuppressWarnings("unchecked")
+                        List<Object> content = (List<Object>) raw;
+                        for (MdObject object : objects)
+                        {
+                            if (transaction.toTransactionObject(object) instanceof MdObject txObject
+                                && !content.contains(txObject))
+                                content.add(txObject);
+                        }
+                        return null;
+                    }
+                });
+            }
+            catch (RuntimeException e)
+            {
+                Global.logError("NavigatorDropSearchHook", "contentPageDrop", e); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            }
+            scheduleSelect(objects, 0, 0);
+        }
+
+        /**
+         * Как штатный выбор состава: новая запись с авторегистрацией «Разрешить» и штатной
+         * сортировкой. Уже входящий объект пропускаем — задача с {@code ALLOW} переписала бы
+         * его авторегистрацию.
+         */
+        private static void addToExchangePlan(IBmTransaction transaction, ExchangePlan plan, List<MdObject> objects,
+            IProgressMonitor monitor)
+        {
+            for (MdObject object : objects)
+            {
+                if (!(transaction.toTransactionObject(object) instanceof MdObject txObject)
+                    || plan.getContent().stream().anyMatch(item -> item.getMdObject() == txObject))
+                    continue;
+                new ExchangePlanContentTask(plan, txObject, AutoRegistrationChanges.ALLOW).execute(plan, monitor);
+            }
+        }
+
+        private void updateDetail(DropTargetEvent event)
+        {
+            if (draggedObjects().isEmpty())
+            {
+                event.detail = DND.DROP_NONE;
+                return;
+            }
+            preferLocalSelectionDataType(event);
+            event.detail = DND.DROP_MOVE;
+            event.feedback = DND.FEEDBACK_SCROLL;
+        }
+
+        /** Объекты допустимых видов из того же проекта, что и владелец состава. */
+        private List<MdObject> draggedObjects()
+        {
+            Object selection = LocalSelectionTransfer.getTransfer().getSelection();
+            if (!(selection instanceof IStructuredSelection structured))
+                return List.of();
+            List<MdObject> result = new ArrayList<>();
+            for (Object element : structured.toList())
+            {
+                if (element == null || NavigatorTreeElementLabels.isGroupNode(element))
+                    continue;
+                EObject model = NavigatorElementModels.resolveEObject(element);
+                EObject actual = model != null ? ContentUtil.getActualObject(model) : null;
+                if (actual instanceof MdObject object && allowed.test(object) && !result.contains(object)
+                    && project.equals(projectOf(object)))
+                    result.add(object);
+            }
+            return result;
+        }
+
+        /**
+         * Дерево перестраивается после транзакции не сразу — выделяем, когда строки появятся.
+         * После выделения всех строк ещё {@link #SETTLE_CHECKS} проверок следим за ним: события
+         * раскрытия, поставленные в очередь компонента AEF, доходят позже и выделяют в
+         * {@code DtTreeView} только первый элемент. Сузили до части наших — выделяем снова;
+         * пользователь выделил другое — не вмешиваемся.
+         * @param stable число проверок подряд, на которых были выделены все
+         */
+        private void scheduleSelect(List<MdObject> objects, int attempt, int stable)
+        {
+            if (tree.isDisposed())
+                return;
+            tree.getDisplay().timerExec(attempt == 0 ? 0 : SELECT_DELAY_MS, () ->
+            {
+                if (tree.isDisposed())
+                    return;
+                // Однострочное дерево всех сброшенных выделить не может — там хватает первого.
+                boolean multi = (tree.getStyle() & SWT.MULTI) != 0;
+                List<MdObject> wanted = multi ? objects : objects.subList(0, 1);
+                // Компонент AEF из переданного списка выделяет и раскрывает только первый объект,
+                // а строк в свёрнутых ветках ещё нет. Поэтому раскрываем путь к объектам по одному,
+                // а когда строки есть у всех — выделяем их разом через штатный TreeViewer.
+                List<Object> rows = new ArrayList<>();
+                MdObject missing = collectRows(wanted, rows);
+                if (missing != null)
+                    revealThroughComponent(missing);
+                else if (countSelected(wanted) < wanted.size())
+                {
+                    // Пользователь уже выделил другое — его выделение не трогаем.
+                    if (stable > 0 && !selectionWithin(wanted))
+                        return;
+                    TreeViewer viewer = viewerOf(tree);
+                    if (viewer != null)
+                        viewer.setSelection(new StructuredSelection(rows), true);
+                }
+                int selected = countSelected(wanted);
+                int nextStable = selected == wanted.size() ? stable + 1 : stable;
+                if (selected == wanted.size() && stable == 0)
+                    tree.setFocus();
+                if (nextStable < SETTLE_CHECKS && attempt + 1 < SELECT_ATTEMPTS)
+                    scheduleSelect(objects, attempt + 1, nextStable);
+            });
+        }
+
+        /** Выделены только строки сброшенных объектов (или ничего) — значит, выделение сузили не руками. */
+        private boolean selectionWithin(List<MdObject> objects)
+        {
+            for (TreeItem item : tree.getSelection())
+            {
+                EObject selected = objectOf(item);
+                if (objects.stream().noneMatch(object -> MdEditorAttributeMenuHook.sameObject(selected, object)))
+                    return false;
+            }
+            return true;
+        }
+
+        /** {@code TreeViewer} лежит не на самом {@link Tree}, а на {@code Composite} {@code DtTreeView} выше. */
+        private static TreeViewer viewerOf(Tree tree)
+        {
+            for (Control control = tree; control != null; control = control.getParent())
+            {
+                if (control.getData(DT_TREE_VIEWER_KEY) instanceof TreeViewer viewer && viewer.getTree() == tree)
+                    return viewer;
+            }
+            return null;
+        }
+
+        /** Штатный {@code setSelection} компонента раскрывает путь к объекту и создаёт его строку. */
+        private boolean revealThroughComponent(MdObject object)
+        {
+            Object component = findComponent(Global.getField(page, "pageComponent"), 0); //$NON-NLS-1$
+            if (component == null)
+                return false;
+            try
+            {
+                return Global.invokeVoid(component, "setSelection", List.of(object)); //$NON-NLS-1$
+            }
+            catch (RuntimeException e)
+            {
+                Global.logError("NavigatorDropSearchHook", "revealThroughComponent", e); //$NON-NLS-1$ //$NON-NLS-2$
+                return false;
+            }
+        }
+
+        private int countSelected(List<MdObject> objects)
+        {
+            int count = 0;
+            for (MdObject object : objects)
+            {
+                for (TreeItem item : tree.getSelection())
+                {
+                    if (MdEditorAttributeMenuHook.sameObject(objectOf(item), object))
+                    {
+                        count++;
+                        break;
+                    }
+                }
+            }
+            return count;
+        }
+
+        /**
+         * Собирает элементы созданных строк для объектов (выделение идёт через штатный
+         * {@code TreeViewer}, чтобы о нём узнали его слушатели и «Свойства»).
+         * @return первый объект, у которого строки ещё нет; {@code null} — строки есть у всех
+         */
+        private MdObject collectRows(List<MdObject> objects, List<Object> rows)
+        {
+            MdObject missing = null;
+            for (MdObject object : objects)
+            {
+                Object row = findRow(tree.getItems(), object);
+                if (row != null)
+                    rows.add(row);
+                else if (missing == null)
+                    missing = object;
+            }
+            return missing;
+        }
+
+        private Object findRow(TreeItem[] items, MdObject object)
+        {
+            for (TreeItem item : items)
+            {
+                if (item.isDisposed())
+                    continue;
+                if (item.getData() != null && MdEditorAttributeMenuHook.sameObject(objectOf(item), object))
+                    return item.getData();
+                Object nested = findRow(item.getItems(), object);
+                if (nested != null)
+                    return nested;
+            }
+            return null;
+        }
+
+        private EObject objectOf(TreeItem item)
+        {
+            return MdEditorAttributeMenuHook.mapViewModelToEObject(tree, item.getData());
+        }
+
+        private Object findComponent(Object component, int depth)
+        {
+            if (component == null || depth > 20)
+                return null;
+            if (component.getClass().getName().endsWith(kind.componentClass))
+                return component;
+            for (Object child : AefFieldFocus.childComponents(component))
+            {
+                Object found = findComponent(child, depth + 1);
+                if (found != null)
+                    return found;
+            }
+            return null;
+        }
+
+        /** Не активная страница: {@code SWT.Show} дерева приходит, пока страница ещё переключается. */
+        private static IFormPage contentPageOf(DtGranularEditor<?> editor, Tree tree)
+        {
+            if (!(Global.getField(editor, "pages") instanceof List<?> pages)) //$NON-NLS-1$
+                return null;
+            for (Object value : pages)
+            {
+                if (value instanceof IFormPage page && Kind.of(page.getId()) != null
+                    && page.getPartControl() != null && isUnder(page.getPartControl(), tree))
+                    return page;
+            }
+            return null;
+        }
+
+        /** Нет списка видов (поле переименовано в другой версии EDT) — {@code null}, сброс только выделяет строку. */
+        private static Predicate<EObject> allowedTypes(Kind kind, IFormPage page)
+        {
+            ClassLoader loader = page.getClass().getClassLoader();
+            try
+            {
+                if (kind == Kind.SUBSYSTEM)
+                {
+                    Class<?> model = Class.forName(SUBSYSTEM_MODEL_CLASS, true, loader);
+                    if (!(model.getField("CONTAINED_CLASSES").get(null) instanceof Class<?>[] classes)) //$NON-NLS-1$
+                        return null;
+                    return object -> Arrays.stream(classes).anyMatch(type -> type.isInstance(object));
+                }
+                Class<?> factory = Class.forName(DIALOG_MODEL_FACTORY_CLASS, true, loader);
+                Field field = factory.getDeclaredField(kind.eClassesField);
+                field.setAccessible(true);
+                if (!(field.get(null) instanceof EClass[] classes))
+                    return null;
+                return object -> Arrays.stream(classes).anyMatch(type -> type.isInstance(object));
+            }
+            catch (ReflectiveOperationException | LinkageError | RuntimeException e)
+            {
+                Global.logError("NavigatorDropSearchHook", "allowedTypes " + kind, e); //$NON-NLS-1$ //$NON-NLS-2$
+                return null;
+            }
+        }
+
+        private static IProject projectOf(EObject object)
+        {
+            IV8ProjectManager manager = Global.getOsgiService(IV8ProjectManager.class);
+            IV8Project v8Project = manager != null ? manager.getProject(object) : null;
+            return v8Project != null ? v8Project.getProject() : null;
         }
     }
 

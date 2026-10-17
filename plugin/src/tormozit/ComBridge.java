@@ -282,17 +282,37 @@ public final class ComBridge
 
     public static void initComThread()
     {
+        traceComThread("init.begin"); //$NON-NLS-1$
         requireJacob();
         try { methodComThreadInitSTA.invoke(null); }
         catch (Exception e) { throw new RuntimeException("ComThread.InitSTA(): " + e.getMessage(), e); } //$NON-NLS-1$
+        finally { traceComThread("init.end"); } //$NON-NLS-1$
     }
 
     public static void releaseComThread()
     {
         if (!available) return;
+        traceComThread("release.begin"); //$NON-NLS-1$
         try { methodComThreadRelease.invoke(null); }
         catch (Exception ignored) {}
+        finally { traceComThread("release.end"); } //$NON-NLS-1$
     }
+
+    // #region agent log
+    private static void traceComThread(String phase)
+    {
+        try
+        {
+            Thread thread = Thread.currentThread();
+            StringBuilder text = new StringBuilder(phase).append(" thread=").append(thread.getId()) //$NON-NLS-1$
+                .append(' ').append(thread.getName()).append(" swtUi=").append(Display.getCurrent() != null); //$NON-NLS-1$
+            for (StackTraceElement frame : thread.getStackTrace())
+                text.append("\n  at ").append(frame); //$NON-NLS-1$
+            Global.tempLog("ir-com-thread", text.toString()); //$NON-NLS-1$
+        }
+        catch (Throwable ignored) {}
+    }
+    // #endregion
 
     // -----------------------------------------------------------------------
     // Создание COM-объекта

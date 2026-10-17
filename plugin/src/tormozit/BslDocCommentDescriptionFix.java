@@ -150,20 +150,86 @@ public final class BslDocCommentDescriptionFix
         String cn = commentObj.getClass().getName();
         if (!TARGET_COMMENT.equals(cn))
             return;
+        long started = System.nanoTime();
+        long normalizedAt;
+        int moved = 0;
         try
         {
-            normalize(commentObj);
+            moved = normalize(commentObj);
         }
         catch (Throwable t)
         {
+            Global.tempLogException("bsl-comment-cost", "normalize", t); //$NON-NLS-1$ //$NON-NLS-2$
         }
+        normalizedAt = System.nanoTime();
         try
         {
             TypeSectionLinkRepair.repair(commentObj);
         }
         catch (Throwable t)
         {
+            Global.tempLogException("bsl-comment-cost", "repair", t); //$NON-NLS-1$ //$NON-NLS-2$
         }
+        finally
+        {
+            Global.tempLog("bsl-comment-cost", "description id=" //$NON-NLS-1$ //$NON-NLS-2$
+                + Integer.toHexString(System.identityHashCode(commentObj))
+                + " normalizeNs=" + (normalizedAt - started) //$NON-NLS-1$
+                + " repairNs=" + (System.nanoTime() - normalizedAt) //$NON-NLS-1$
+                + " moved=" + moved + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    /**
+     * Чтение свойств дерева комментария без повторного копирования всех Method класса.
+     * Поиск и обработка ошибок совпадают с Global.invoke для вызова без аргументов.
+     * ClassValue не удерживает загрузчик бандла после его выгрузки.
+     */
+    static Object invokeCommentGetter(Object object, String name)
+    {
+        if (object == null || name == null)
+            return null;
+        java.lang.reflect.Method method = CommentMethods.CACHE.get(object.getClass()).get(name);
+        if (method == null)
+            return null;
+        try
+        {
+            method.setAccessible(true);
+            return method.invoke(object);
+        }
+        catch (java.lang.reflect.InvocationTargetException e)
+        {
+            Throwable cause = e.getCause();
+            if (cause instanceof RuntimeException runtime)
+                throw runtime;
+            throw new RuntimeException(cause);
+        }
+        catch (Exception ignored)
+        {
+            return null;
+        }
+    }
+
+    private static final class CommentMethods
+    {
+        static final ClassValue<java.util.Map<String, java.lang.reflect.Method>> CACHE =
+            new ClassValue<>()
+            {
+                @Override
+                protected java.util.Map<String, java.lang.reflect.Method> computeValue(Class<?> type)
+                {
+                    java.util.Map<String, java.lang.reflect.Method> methods = new java.util.HashMap<>();
+                    for (Class<?> current = type; current != null; current = current.getSuperclass())
+                    {
+                        for (java.lang.reflect.Method method : current.getDeclaredMethods())
+                        {
+                            if (method.getParameterCount() == 0)
+                                methods.putIfAbsent(method.getName(), method);
+                        }
+                    }
+                    return java.util.Collections.unmodifiableMap(methods);
+                }
+            };
     }
 
     /** @return число параметров, у которых перенесли описание */
@@ -171,10 +237,10 @@ public final class BslDocCommentDescriptionFix
     {
         if (comment == null)
             return 0;
-        Object section = Global.invoke(comment, "getParametersSection"); //$NON-NLS-1$
+        Object section = invokeCommentGetter(comment, "getParametersSection"); //$NON-NLS-1$
         if (section == null)
             return 0;
-        Object fieldsObj = Global.invoke(section, "getParameterDefinitions"); //$NON-NLS-1$
+        Object fieldsObj = invokeCommentGetter(section, "getParameterDefinitions"); //$NON-NLS-1$
         if (!(fieldsObj instanceof List<?> fields) || fields.isEmpty())
             return 0;
 
@@ -183,10 +249,10 @@ public final class BslDocCommentDescriptionFix
         {
             if (field == null)
                 continue;
-            Object fieldDesc = Global.invoke(field, "getDescription"); //$NON-NLS-1$
+            Object fieldDesc = invokeCommentGetter(field, "getDescription"); //$NON-NLS-1$
             if (hasText(fieldDesc))
                 continue;
-            Object typeSectionsObj = Global.invoke(field, "getTypeSections"); //$NON-NLS-1$
+            Object typeSectionsObj = invokeCommentGetter(field, "getTypeSections"); //$NON-NLS-1$
             if (!(typeSectionsObj instanceof List<?> typeSections) || typeSections.isEmpty())
                 continue;
             if (fieldDesc == null)
@@ -200,10 +266,10 @@ public final class BslDocCommentDescriptionFix
                 // В old-format: имя типа → sourceDescription; хвост после 2-го «-» →
                 // TypeSection.getDescription() (Section). sourceDescription трогать нельзя —
                 // иначе в описание параметра попадают имена типов (дубль в param-hint).
-                Object source = Global.invoke(typeSection, "getDescription"); //$NON-NLS-1$
+                Object source = invokeCommentGetter(typeSection, "getDescription"); //$NON-NLS-1$
                 if (!hasText(source))
                     continue;
-                Object partsObj = Global.invoke(source, "getParts"); //$NON-NLS-1$
+                Object partsObj = invokeCommentGetter(source, "getParts"); //$NON-NLS-1$
                 if (!(partsObj instanceof List<?> parts) || parts.isEmpty())
                     continue;
                 @SuppressWarnings({ "unchecked", "rawtypes" }) //$NON-NLS-1$ //$NON-NLS-2$
@@ -290,30 +356,30 @@ public final class BslDocCommentDescriptionFix
         private static void boundLinks(Object comment)
         {
             List<Object> queue = new ArrayList<>();
-            queue.add(Global.invoke(comment, "getDescription")); //$NON-NLS-1$
-            Object parameters = Global.invoke(comment, "getParametersSection"); //$NON-NLS-1$
+            queue.add(invokeCommentGetter(comment, "getDescription")); //$NON-NLS-1$
+            Object parameters = invokeCommentGetter(comment, "getParametersSection"); //$NON-NLS-1$
             if (parameters != null)
             {
-                queue.add(Global.invoke(parameters, "getSourceDescription")); //$NON-NLS-1$
-                queue.add(Global.invoke(parameters, "getDescription")); //$NON-NLS-1$
-                if (Global.invoke(parameters, "getParameterDefinitions") instanceof List<?> fields) //$NON-NLS-1$
+                queue.add(invokeCommentGetter(parameters, "getSourceDescription")); //$NON-NLS-1$
+                queue.add(invokeCommentGetter(parameters, "getDescription")); //$NON-NLS-1$
+                if (invokeCommentGetter(parameters, "getParameterDefinitions") instanceof List<?> fields) //$NON-NLS-1$
                 {
                     for (Object field : fields)
                     {
                         if (field == null)
                             continue;
-                        queue.add(Global.invoke(field, "getDescription")); //$NON-NLS-1$
-                        if (Global.invoke(field, "getTypeSections") instanceof List<?> sections) //$NON-NLS-1$
+                        queue.add(invokeCommentGetter(field, "getDescription")); //$NON-NLS-1$
+                        if (invokeCommentGetter(field, "getTypeSections") instanceof List<?> sections) //$NON-NLS-1$
                             for (Object section : sections)
                                 addTypeSection(section, queue);
                     }
                 }
             }
-            Object returnSection = Global.invoke(comment, "getReturnSection"); //$NON-NLS-1$
+            Object returnSection = invokeCommentGetter(comment, "getReturnSection"); //$NON-NLS-1$
             if (returnSection != null)
             {
-                queue.add(Global.invoke(returnSection, "getDescription")); //$NON-NLS-1$
-                if (Global.invoke(returnSection, "getReturnTypes") instanceof List<?> sections) //$NON-NLS-1$
+                queue.add(invokeCommentGetter(returnSection, "getDescription")); //$NON-NLS-1$
+                if (invokeCommentGetter(returnSection, "getReturnTypes") instanceof List<?> sections) //$NON-NLS-1$
                     for (Object section : sections)
                         addTypeSection(section, queue);
             }
@@ -323,7 +389,7 @@ public final class BslDocCommentDescriptionFix
             {
                 Object description = queue.get(i);
                 if (description == null
-                    || !(Global.invoke(description, "getParts") instanceof List<?> parts)) //$NON-NLS-1$
+                    || !(invokeCommentGetter(description, "getParts") instanceof List<?> parts)) //$NON-NLS-1$
                     continue;
                 for (Object part : parts)
                 {
@@ -342,16 +408,16 @@ public final class BslDocCommentDescriptionFix
         {
             if (section == null)
                 return;
-            queue.add(Global.invoke(section, "getSourceDescription")); //$NON-NLS-1$
-            queue.add(Global.invoke(section, "getSourceExtensionDescription")); //$NON-NLS-1$
-            queue.add(Global.invoke(section, "getDescription")); //$NON-NLS-1$
+            queue.add(invokeCommentGetter(section, "getSourceDescription")); //$NON-NLS-1$
+            queue.add(invokeCommentGetter(section, "getSourceExtensionDescription")); //$NON-NLS-1$
+            queue.add(invokeCommentGetter(section, "getDescription")); //$NON-NLS-1$
         }
 
         private static void boundLink(Object link)
         {
             try
             {
-                String initial = asString(Global.invoke(link, "getInitialContent")); //$NON-NLS-1$
+                String initial = asString(invokeCommentGetter(link, "getInitialContent")); //$NON-NLS-1$
                 if (initial == null || initial.isEmpty() || initial.indexOf(')') >= 0)
                     return;
                 java.lang.reflect.Field field =
@@ -374,9 +440,9 @@ public final class BslDocCommentDescriptionFix
          */
         private static boolean isEnabled(Object comment)
         {
-            Object owner = Global.invoke(comment, "getMethod"); //$NON-NLS-1$
+            Object owner = invokeCommentGetter(comment, "getMethod"); //$NON-NLS-1$
             if (!(owner instanceof EObject))
-                owner = Global.invoke(comment, "getModule"); //$NON-NLS-1$
+                owner = invokeCommentGetter(comment, "getModule"); //$NON-NLS-1$
             if (!(owner instanceof EObject eObject))
                 return true;
             return BslDocCommentComputedTypes.isExtendedTypesEnabled(eObject);
@@ -385,20 +451,20 @@ public final class BslDocCommentDescriptionFix
         private static List<Object> collectTypeSections(Object comment)
         {
             List<Object> result = new ArrayList<>();
-            Object parameters = Global.invoke(comment, "getParametersSection"); //$NON-NLS-1$
+            Object parameters = invokeCommentGetter(comment, "getParametersSection"); //$NON-NLS-1$
             if (parameters != null
-                && Global.invoke(parameters, "getParameterDefinitions") instanceof List<?> fields) //$NON-NLS-1$
+                && invokeCommentGetter(parameters, "getParameterDefinitions") instanceof List<?> fields) //$NON-NLS-1$
             {
                 for (Object field : fields)
                 {
                     if (field != null
-                        && Global.invoke(field, "getTypeSections") instanceof List<?> sections) //$NON-NLS-1$
+                        && invokeCommentGetter(field, "getTypeSections") instanceof List<?> sections) //$NON-NLS-1$
                         result.addAll(sections);
                 }
             }
-            Object returnSection = Global.invoke(comment, "getReturnSection"); //$NON-NLS-1$
+            Object returnSection = invokeCommentGetter(comment, "getReturnSection"); //$NON-NLS-1$
             if (returnSection != null
-                && Global.invoke(returnSection, "getReturnTypes") instanceof List<?> sections) //$NON-NLS-1$
+                && invokeCommentGetter(returnSection, "getReturnTypes") instanceof List<?> sections) //$NON-NLS-1$
                 result.addAll(sections);
             return result;
         }
@@ -407,15 +473,15 @@ public final class BslDocCommentDescriptionFix
         private static boolean isBrokenLinkSection(Object section)
         {
             Object source = section == null
-                ? null : Global.invoke(section, "getSourceDescription"); //$NON-NLS-1$
+                ? null : invokeCommentGetter(section, "getSourceDescription"); //$NON-NLS-1$
             if (source == null
-                || !(Global.invoke(source, "getParts") instanceof List<?> parts) //$NON-NLS-1$
+                || !(invokeCommentGetter(source, "getParts") instanceof List<?> parts) //$NON-NLS-1$
                 || parts.size() != 1)
                 return false;
             Object only = parts.get(0);
             if (only == null || !TEXT_PART.equals(only.getClass().getName()))
                 return false;
-            return hasSeeToken(asString(Global.invoke(only, "getText"))); //$NON-NLS-1$
+            return hasSeeToken(asString(invokeCommentGetter(only, "getText"))); //$NON-NLS-1$
         }
 
         private static boolean hasSeeToken(String text)
@@ -439,18 +505,18 @@ public final class BslDocCommentDescriptionFix
         {
             try
             {
-                Object source = Global.invoke(section, "getSourceDescription"); //$NON-NLS-1$
-                if (!(Global.invoke(source, "getParts") instanceof List<?> parts) //$NON-NLS-1$
+                Object source = invokeCommentGetter(section, "getSourceDescription"); //$NON-NLS-1$
+                if (!(invokeCommentGetter(source, "getParts") instanceof List<?> parts) //$NON-NLS-1$
                     || parts.size() != 1)
                     return;
                 Object only = parts.get(0);
-                String text = asString(Global.invoke(only, "getText")); //$NON-NLS-1$
+                String text = asString(invokeCommentGetter(only, "getText")); //$NON-NLS-1$
                 if (text == null)
                     return;
 
                 // Штатный расчёт по сырому тексту — до подмены частей, чтобы имена типов
                 // посчитал сам EDT со всеми своими правилами.
-                if (!(Global.invoke(section, "getTypeDefinitions") instanceof List<?> stockTypes)) //$NON-NLS-1$
+                if (!(invokeCommentGetter(section, "getTypeDefinitions") instanceof List<?> stockTypes)) //$NON-NLS-1$
                     return;
 
                 ClassLoader loader = comment.getClass().getClassLoader();
@@ -460,8 +526,8 @@ public final class BslDocCommentDescriptionFix
                     String.class);
                 builder.setAccessible(true);
                 Object built = builder.invoke(comment, source,
-                    Integer.valueOf(intValue(Global.invoke(only, "getLineNumber"))), //$NON-NLS-1$
-                    Integer.valueOf(intValue(Global.invoke(only, "getOffset"))), text); //$NON-NLS-1$
+                    Integer.valueOf(intValue(invokeCommentGetter(only, "getLineNumber"))), //$NON-NLS-1$
+                    Integer.valueOf(intValue(invokeCommentGetter(only, "getOffset"))), text); //$NON-NLS-1$
                 if (!(built instanceof Collection<?> newParts))
                     return;
 
@@ -482,7 +548,7 @@ public final class BslDocCommentDescriptionFix
                 int next = 0;
                 for (Object type : stockTypes)
                 {
-                    String name = asString(Global.invoke(type, "getTypeName")); //$NON-NLS-1$
+                    String name = asString(invokeCommentGetter(type, "getTypeName")); //$NON-NLS-1$
                     if (startsWithSee(name) && next < links.size())
                         types.add(ctor.newInstance(section, links.get(next++)));
                     else
@@ -675,7 +741,7 @@ public final class BslDocCommentDescriptionFix
     {
         if (description == null)
             return null;
-        Object partsObj = Global.invoke(description, "getParts"); //$NON-NLS-1$
+        Object partsObj = invokeCommentGetter(description, "getParts"); //$NON-NLS-1$
         if (!(partsObj instanceof List<?> parts) || parts.isEmpty())
             return null;
         StringBuilder sb = new StringBuilder();
@@ -684,7 +750,7 @@ public final class BslDocCommentDescriptionFix
         {
             if (part == null)
                 continue;
-            Object lineObj = Global.invoke(part, "getLineNumber"); //$NON-NLS-1$
+            Object lineObj = invokeCommentGetter(part, "getLineNumber"); //$NON-NLS-1$
             if (lineObj instanceof Integer line)
             {
                 if (prevLine != null && !prevLine.equals(line))
@@ -694,13 +760,13 @@ public final class BslDocCommentDescriptionFix
             String cn = part.getClass().getName();
             if (TEXT_PART.equals(cn))
             {
-                String text = asString(Global.invoke(part, "getText")); //$NON-NLS-1$
+                String text = asString(invokeCommentGetter(part, "getText")); //$NON-NLS-1$
                 if (text != null)
                     sb.append(text);
             }
             else if (LINK_PART.equals(cn))
             {
-                String text = asString(Global.invoke(part, "getInitialContent")); //$NON-NLS-1$
+                String text = asString(invokeCommentGetter(part, "getInitialContent")); //$NON-NLS-1$
                 if (text != null)
                     sb.append(text);
             }

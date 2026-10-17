@@ -328,6 +328,10 @@ EDT 2026.1 (бандлы `23.0.1`, API местами несовместим): J
 
 При добавлении фильтра по подстроке — окрашивать его вхождения (`SmartMatcher.getHighlightRanges` + `SmartMatchHighlight.styler`, как в `ObjectSetsView.NameLabelProvider`). **Для колонки с такой подсветкой — только `SelectionAwareStyledCellLabelProvider`, НИКОГДА штатный `DelegatingStyledCellLabelProvider`** (см. класс-javadoc `SelectionAwareStyledCellLabelProvider`): у штатного нет способа передать `StyledCellLabelProvider.COLORS_ON_SELECTION`, и без этого флага JFace намеренно игнорирует цвета `StyleRange` на ВЫДЕЛЕННЫХ строках — подсветка вхождений пропадает именно на активной строке, независимо от `setOwnerDrawColumns` (тот нужен отдельно, для перерисовки самим `FormTableInteraction`, но саму проблему цвета не решает). Проверка перед сдачей: набрать фильтр → стрелками пройтись по всем видимым строкам → подсветка должна быть видна и на активной (выделенной) строке тоже, не только на невыделенных.
 
+## Сброс (drop) в список — выделять все сброшенные элементы
+
+После сброса нескольких элементов в список с множественным выделением (`SWT.MULTI`) выделять **все** сброшенные элементы, не только первый. Только первый — лишь в списке с одиночным выделением. Если штатный механизм выделения взял не всё — добирать через `TreeViewer`/`TableViewer.setSelection` и проверять, что выделены все. Эталон: `NavigatorDropSearchHook.ContentPageDrop.scheduleSelect`.
+
 ## SWT: Ctrl+<буква> не долетает до KeyDown (нативный акселератор Win32)
 
 Повторяется (`KeyBindingToastHook`/Ctrl+Shift+F, `PreferenceSearchFilterAugmenter.wireTreeCopy`/Ctrl+C): `SWT.KeyDown`, даже `Display.addFilter(SWT.KeyDown, …)`, не видит букву при зажатом Ctrl (только «чистые» модификаторы) — если сочетание совпадает с нативным Win32-акселератором меню (в т.ч. штатный Edit → Copy), Windows транслирует его в `WM_COMMAND` до создания SWT-события. Это системное ограничение, не баг конкретного хука — доп. диагностика через SWT-хуки бесполезна.

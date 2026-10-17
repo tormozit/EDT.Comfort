@@ -35,6 +35,7 @@ import org.osgi.framework.hooks.weaving.WeavingHook;
 import org.osgi.framework.hooks.weaving.WovenClass;
 
 import com._1c.g5.v8.dt.bsl.model.BslFactory;
+import com._1c.g5.v8.dt.bsl.model.Method;
 import com._1c.g5.v8.dt.bsl.model.Variable;
 import com._1c.g5.v8.dt.bsl.model.typesytem.VariableTypeStateProviderCollector;
 import com._1c.g5.v8.dt.mcore.ContextDef;
@@ -90,8 +91,6 @@ public final class BslDocCommentComputedTypes
     private static final String BSL_FUNCTION = "com._1c.g5.v8.dt.bsl.model.Function"; //$NON-NLS-1$
     private static final String TYPES_COMPUTER =
         "com._1c.g5.v8.dt.bsl.resource.TypesComputer"; //$NON-NLS-1$
-    private static final String TYPE_SYSTEM_PROVIDER =
-        "com._1c.g5.v8.dt.bsl.typesystem.BslTypeSystemProvider"; //$NON-NLS-1$
     /** Знак «не объединять рассчитанный тип с документирующим». */
     private static final String MARK_BAN_TEXT = "%"; //$NON-NLS-1$
     /** Знак «объединить рассчитанный тип с документирующим». */
@@ -609,12 +608,23 @@ public final class BslDocCommentComputedTypes
         }
         if (count == 0)
             return;
+        long descriptionsStarted = System.nanoTime();
         try
         {
             BslStructureInsertCommentTypes.fillPropertyDescriptions(typeSection, items, context);
         }
-        catch (Throwable ignored)
+        catch (Throwable t)
         {
+            Global.tempLogException("bsl-property-fill-cost", "fill target=" + methodLabel(context), t); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        finally
+        {
+            Global.tempLog("bsl-property-fill-cost", "fill target=" + methodLabel(context) //$NON-NLS-1$ //$NON-NLS-2$
+                + " commentId=" + Integer.toHexString(System.identityHashCode(comment)) //$NON-NLS-1$
+                + " computedId=" + Integer.toHexString(System.identityHashCode(computed)) //$NON-NLS-1$
+                + " types=" + items.size() + " definitions=" + count //$NON-NLS-1$ //$NON-NLS-2$
+                + " elapsedNs=" + (System.nanoTime() - descriptionsStarted) //$NON-NLS-1$
+                + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
         }
         Global.invoke(returnSection, "addTypeSection", typeSection); //$NON-NLS-1$
         if (existing == null)
@@ -645,48 +655,101 @@ public final class BslDocCommentComputedTypes
     /** {@code TypesComputer.computeTypes(EObject, Environments)} для целевой функции. */
     private static List<?> computeTypes(EObject target)
     {
-        Resource resource = target.eResource();
-        if (resource == null || resource.getURI() == null)
-            return null;
-        IResourceServiceProvider rsp = IResourceServiceProvider.Registry.INSTANCE
-            .getResourceServiceProvider(resource.getURI());
-        if (rsp == null)
-            return null;
+        long started = System.nanoTime();
+        long nativeNs = 0;
+        long lightNs = 0;
+        long fullNs = 0;
+        String phase = "resource"; //$NON-NLS-1$
+        List<?> result = null;
+        String label = methodLabel(target);
+        Global.tempLog("bsl-return-compute-cost", "begin call=" + started + " target=" + label //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " nestedLight=" + lightInstalling.get() + " forceLight=" + forceLightInstall.get() //$NON-NLS-1$ //$NON-NLS-2$
+            + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
         try
         {
-            Class<?> computerClass = Class.forName(TYPES_COMPUTER, true, bslClassLoader());
-            Object computer = rsp.get(computerClass);
-            if (computer == null)
+            Resource resource = target.eResource();
+            if (resource == null || resource.getURI() == null)
                 return null;
-            Object envs = Global.invoke(target, "environments"); //$NON-NLS-1$
-            if (envs == null)
+            IResourceServiceProvider rsp = IResourceServiceProvider.Registry.INSTANCE
+                .getResourceServiceProvider(resource.getURI());
+            if (rsp == null)
                 return null;
-            List<?> result = asTypeList(Global.invoke(computer, "computeTypes", target, envs)); //$NON-NLS-1$
-            if (result != null && !result.isEmpty())
-                return result;
-            // Пусто — FinalReturnState ещё нет. lightInstall пишет в LIGHT; TypesComputer
-            // при !isLinkedBatch предпочитает LIGHT даже пустой — NORMAL после полного
-            // installTypeSystem тогда не виден. Поэтому после досчёта читаем NORMAL сами.
-            boolean lit = lightInstallTypeSystem(rsp, target);
-            if (!lit)
-                return finalReturnTypes(target, envs);
-            result = finalReturnTypes(target, envs);
-            if (result != null && !result.isEmpty())
-                return result;
-            if (installTargetModuleTypeSystem(target))
+            try
             {
+                Class<?> computerClass = Class.forName(TYPES_COMPUTER, true, bslClassLoader());
+                Object computer = rsp.get(computerClass);
+                if (computer == null)
+                    return null;
+                Object envs = Global.invoke(target, "environments"); //$NON-NLS-1$
+                if (envs == null)
+                    return null;
+                phase = "native"; //$NON-NLS-1$
+                long nativeStarted = System.nanoTime();
+                result = asTypeList(Global.invoke(computer, "computeTypes", target, envs)); //$NON-NLS-1$
+                nativeNs = System.nanoTime() - nativeStarted;
+                if (result != null && !result.isEmpty())
+                    return result;
+                // TypesComputer может выбрать пустой LIGHT при уже готовом NORMAL.
+                // Читаем тот же результат, который брали после досчёта, до его запуска.
+                phase = "ready"; //$NON-NLS-1$
                 result = finalReturnTypes(target, envs);
                 if (result != null && !result.isEmpty())
                     return result;
-                result = asTypeList(Global.invoke(computer, "computeTypes", target, envs)); //$NON-NLS-1$
+                // Пусто — FinalReturnState ещё нет. lightInstall пишет в LIGHT; TypesComputer
+                // при !isLinkedBatch предпочитает LIGHT даже пустой — NORMAL после полного
+                // installTypeSystem тогда не виден. Поэтому после досчёта читаем NORMAL сами.
+                phase = "light"; //$NON-NLS-1$
+                long lightStarted = System.nanoTime();
+                boolean lit;
+                try
+                {
+                    lit = lightInstallTypeSystem(target);
+                }
+                finally
+                {
+                    lightNs = System.nanoTime() - lightStarted;
+                }
+                if (!lit)
+                    return result = finalReturnTypes(target, envs);
+                result = finalReturnTypes(target, envs);
                 if (result != null && !result.isEmpty())
                     return result;
+                phase = "full"; //$NON-NLS-1$
+                long fullStarted = System.nanoTime();
+                boolean installedTarget;
+                try
+                {
+                    installedTarget = installTargetModuleTypeSystem(target);
+                }
+                finally
+                {
+                    fullNs = System.nanoTime() - fullStarted;
+                }
+                if (installedTarget)
+                {
+                    result = finalReturnTypes(target, envs);
+                    if (result != null && !result.isEmpty())
+                        return result;
+                    result = asTypeList(Global.invoke(computer, "computeTypes", target, envs)); //$NON-NLS-1$
+                    if (result != null && !result.isEmpty())
+                        return result;
+                }
+                return result;
             }
-            return result;
+            catch (Throwable t)
+            {
+                Global.tempLogException("bsl-return-compute-cost", "compute failed target=" + label //$NON-NLS-1$ //$NON-NLS-2$
+                    + " phase=" + phase, t); //$NON-NLS-1$
+                return null;
+            }
         }
-        catch (Throwable ignored)
+        finally
         {
-            return null;
+            Global.tempLog("bsl-return-compute-cost", "end call=" + started + " target=" + label //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " phase=" + phase + " types=" + (result == null ? -1 : result.size()) //$NON-NLS-1$ //$NON-NLS-2$
+                + " nativeNs=" + nativeNs + " lightNs=" + lightNs + " fullNs=" + fullNs //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " elapsedNs=" + (System.nanoTime() - started) //$NON-NLS-1$
+                + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
         }
     }
 
@@ -857,7 +920,7 @@ public final class BslDocCommentComputedTypes
         forceLightInstall.remove();
     }
 
-    private static boolean lightInstallTypeSystem(IResourceServiceProvider rsp, EObject target)
+    private static boolean lightInstallTypeSystem(EObject target)
     {
         if (!resolvingDocLink() && !Boolean.TRUE.equals(forceLightInstall.get()))
         {
@@ -877,30 +940,16 @@ public final class BslDocCommentComputedTypes
         lightInstalling.set(Boolean.TRUE);
         try
         {
-            // ITypeSystem напрямую в инжекторе не связан, а getTypeSystem() без вида отдаёт
-            // SIMPLE, у которого в BslTypeSystemProvider жёстко null. Дерево — под видом TREE.
-            Class<?> providerClass = Class.forName(TYPE_SYSTEM_PROVIDER, true, bslClassLoader());
-            Object provider = rsp.get(providerClass);
-            Object typeSystem = provider == null ? null
-                : Global.invoke(provider, "getTypeSystem", treeTypeSystemKind()); //$NON-NLS-1$
-            if (typeSystem == null)
-                return false;
-            Object module = containerOfType(target, "com._1c.g5.v8.dt.bsl.model.Module"); //$NON-NLS-1$
-            if (module == null)
+            if (!(target instanceof Method method))
                 return false;
             Variable gate = BslFactory.eINSTANCE.createImplicitVariable();
             gate.setTypeStateProvider(new VariableTypeStateProviderCollector());
-            for (java.lang.reflect.Method m : typeSystem.getClass().getMethods())
-            {
-                if (!"lightInstallingTypeSystem".equals(m.getName()) //$NON-NLS-1$
-                    || m.getParameterCount() != 6)
-                    continue;
-                m.invoke(typeSystem, module, target, gate, null, Integer.valueOf(0), null);
-                return true;
-            }
+            return BslStructureInsertCommentTypes.lightInstallMethodTypeSystem(method, gate);
         }
-        catch (Throwable ignored)
+        catch (Throwable t)
         {
+            Global.tempLogException("bsl-return-compute-cost", //$NON-NLS-1$
+                "light failed target=" + methodLabel(target), t); //$NON-NLS-1$
         }
         finally
         {
@@ -918,15 +967,6 @@ public final class BslDocCommentComputedTypes
         return StackWalker.getInstance().walk(frames -> frames.limit(40)
             .anyMatch(frame -> LINK_RESOLVE_METHOD.equals(frame.getMethodName())
                 && frame.getClassName().equals(COMMENT_CLASS)));
-    }
-
-    /** Значение {@code BslTypeSystemProvider.BslTypeSystemKind.TREE}. */
-    @SuppressWarnings({ "unchecked", "rawtypes" })
-    private static Object treeTypeSystemKind() throws ClassNotFoundException
-    {
-        Class<?> kindClass =
-            Class.forName(TYPE_SYSTEM_PROVIDER + "$BslTypeSystemKind", true, bslClassLoader()); //$NON-NLS-1$
-        return Enum.valueOf((Class<Enum>)kindClass.asSubclass(Enum.class), "TREE"); //$NON-NLS-1$
     }
 
     private static Object containerOfType(EObject object, String className)

@@ -96,6 +96,8 @@ public final class MdEditorFunctionalOptionsCountHook implements IStartup
 
     private static final String LAYOUT_PENDING_KEY = "tormozit.foContentCountLayoutPending"; //$NON-NLS-1$
 
+    private static final String OBJECT_ONLY_WATCH_KEY = "tormozit.foObjectOnlyWatch"; //$NON-NLS-1$
+
     private static final int COUNT_COL_MIN_WIDTH = 32;
 
     private static final int NAME_COL_PAD = 12;
@@ -202,6 +204,8 @@ public final class MdEditorFunctionalOptionsCountHook implements IStartup
         Object root = Global.getField(page, "pageComponent"); //$NON-NLS-1$
         Object component = findComponentByClass(root, FO_CONTENT_COMPONENT_CLASS, 0);
         Object listComponent = findComponentByClass(root, FO_LIST_COMPONENT_CLASS, 0);
+        if (component == null && listComponent != null)
+            return installWithoutContent(editor, page);
         TreeViewer viewer = component != null ? findContentTreeViewer(component, page) : null;
         Tree tree = viewer != null ? viewer.getTree() : null;
         if (component == null || listComponent == null || viewer == null || tree == null || tree.isDisposed())
@@ -238,6 +242,89 @@ public final class MdEditorFunctionalOptionsCountHook implements IStartup
             return false;
         scheduleRebuild(index, configuration, viewer);
         return true;
+    }
+
+    /**
+     * Вкладка без дерева «Состав объекта» — только правый список опций. Число в
+     * заголовке — сколько функциональных опций содержат сам объект; пересчёт при
+     * изменении правого списка.
+     */
+    private static boolean installWithoutContent(DtGranularEditor<?> editor, IFormPage page)
+    {
+        Control partControl = page.getPartControl();
+        if (!(partControl instanceof Composite composite) || composite.isDisposed())
+            return false;
+        TreeViewer foListViewer = findOtherTreeViewer(page, null);
+        Tree foTree = foListViewer != null ? foListViewer.getTree() : null;
+        if (foTree == null || foTree.isDisposed())
+            return false;
+        Configuration configuration = configurationOf(editor);
+        EObject model = editor.getModel();
+        ObjectOnlyWatch watch = composite.getData(OBJECT_ONLY_WATCH_KEY) instanceof ObjectOnlyWatch existing
+            ? existing
+            : null;
+        if (watch == null)
+        {
+            ObjectOnlyWatch created = new ObjectOnlyWatch();
+            composite.setData(OBJECT_ONLY_WATCH_KEY, created);
+            created.sig = foListSignature(foTree);
+            foTree.addListener(SWT.Paint, event ->
+            {
+                if (created.pending)
+                    return;
+                created.pending = true;
+                foTree.getDisplay().timerExec(200, () ->
+                {
+                    created.pending = false;
+                    if (foTree.isDisposed() || composite.isDisposed())
+                        return;
+                    String sig = foListSignature(foTree);
+                    if (Objects.equals(sig, created.sig))
+                        return;
+                    created.sig = sig;
+                    scheduleObjectOnlyCount(editor, composite, configuration, model, created);
+                });
+            });
+            watch = created;
+        }
+        scheduleObjectOnlyCount(editor, composite, configuration, model, watch);
+        return true;
+    }
+
+    private static void scheduleObjectOnlyCount(DtGranularEditor<?> editor, Composite composite,
+        Configuration configuration, EObject model, ObjectOnlyWatch watch)
+    {
+        Job previous = watch.job;
+        if (previous != null)
+            previous.cancel();
+        Job job = new Job("Комфорт: число функциональных опций") //$NON-NLS-1$
+        {
+            @Override
+            protected IStatus run(IProgressMonitor monitor)
+            {
+                if (monitor.isCanceled())
+                    return Status.CANCEL_STATUS;
+                CountSnapshot snapshot = tryCompute(configuration);
+                Display display = Display.getDefault();
+                if (display == null || display.isDisposed())
+                    return Status.CANCEL_STATUS;
+                display.asyncExec(() ->
+                {
+                    if (monitor.isCanceled() || composite.isDisposed())
+                        return;
+                    CountSnapshot toApply = snapshot != null ? snapshot : tryCompute(configuration);
+                    if (toApply == null)
+                        return;
+                    composite.setData(SUM_KEY, toApply.countOf(model));
+                    MdEditorTabsHook.refreshFunctionalOptionsTitle(editor);
+                });
+                return Status.OK_STATUS;
+            }
+        };
+        job.setSystem(true);
+        job.setPriority(Job.DECORATE);
+        watch.job = job;
+        job.schedule();
     }
 
     /**
@@ -414,7 +501,11 @@ public final class MdEditorFunctionalOptionsCountHook implements IStartup
         TreeViewer viewer = component != null ? findContentTreeViewer(component, page) : null;
         Tree tree = viewer != null ? viewer.getTree() : null;
         if (tree == null || tree.isDisposed())
-            return null;
+        {
+            Control partControl = page.getPartControl();
+            return partControl != null && !partControl.isDisposed()
+                && partControl.getData(SUM_KEY) instanceof Integer count ? count : null;
+        }
         return tree.getData(SUM_KEY) instanceof Integer count ? count : null;
     }
 
@@ -1011,6 +1102,32 @@ public final class MdEditorFunctionalOptionsCountHook implements IStartup
             return new CountSnapshot(Map.copyOf(byBmId), Map.copyOf(byUri));
         }
 
+        Integer countOf(EObject object)
+        {
+            return lookup(byBmId, byUri, object);
+        }
+
+        static Integer lookup(Map<Long, Integer> byBmId, Map<String, Integer> byUri, EObject object)
+        {
+            if (!(object instanceof MdObject))
+                return null;
+            Long id = bmId(object);
+            if (id != null)
+            {
+                Integer count = byBmId.get(id);
+                if (count != null)
+                    return count;
+            }
+            String uri = uriKey(object);
+            if (uri != null)
+            {
+                Integer count = byUri.get(uri);
+                if (count != null)
+                    return count;
+            }
+            return Integer.valueOf(0);
+        }
+
         private static void bump(Map<Long, Integer> byBmId, Map<String, Integer> byUri, MdObject item)
         {
             if (item == null)
@@ -1051,23 +1168,16 @@ public final class MdEditorFunctionalOptionsCountHook implements IStartup
 
         Integer countOf(EObject object)
         {
-            if (!ready || !(object instanceof MdObject))
-                return null;
-            Long id = bmId(object);
-            if (id != null)
-            {
-                Integer count = byBmId.get(id);
-                if (count != null)
-                    return count;
-            }
-            String uri = uriKey(object);
-            if (uri != null)
-            {
-                Integer count = byUri.get(uri);
-                if (count != null)
-                    return count;
-            }
-            return Integer.valueOf(0);
+            return ready ? CountSnapshot.lookup(byBmId, byUri, object) : null;
         }
+    }
+
+    private static final class ObjectOnlyWatch
+    {
+        private boolean pending;
+
+        private String sig;
+
+        private Job job;
     }
 }
