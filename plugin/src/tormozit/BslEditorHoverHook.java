@@ -510,6 +510,31 @@ public final class BslEditorHoverHook implements IStartup
         }
     }
 
+    /**
+     * Боковая подсказка списка автодополнения (issue 828): тот же блок «: Конструктор()» с меню,
+     * что и в подсказке наведения. Возвращает исходное {@code info}, если добавлять нечего.
+     */
+    static Object decorateSideHintWithSeeLinks(Object info, org.eclipse.emf.ecore.EObject member,
+        ITextViewer viewer)
+    {
+        try
+        {
+            if (info == null || viewer == null || !IrBslHoverHtml.isBslBrowserInput(info)
+                || !(viewer.getDocument() instanceof IXtextDocument document))
+                return info;
+            var links = BslStructureInsertCommentTypes.seeLinksFor(member, viewer);
+            String block = ParamHintHtmlModifier.memberSeeLinksBlock(links, document.getResourceURI(),
+                MethodDefinitionLink::registerFormHandler);
+            String html = IrBslHoverHtml.readHtml(info);
+            String injected = ParamHintHtmlModifier.injectMemberSeeLinks(html, block);
+            return injected != null ? injected : info;
+        }
+        catch (Throwable ex)
+        {
+            return info;
+        }
+    }
+
     /** Мост клика без навигации браузера, как в подсказке параметров. */
     private static final class MethodDefinitionLink
     {
@@ -660,7 +685,7 @@ public final class BslEditorHoverHook implements IStartup
                     {
                         IrBslTextHoverWrapper wrapper =
                             new IrBslTextHoverWrapper(existing.delegate, existing.editor, false);
-                        wrapper.prepareHoverDecorations(region, info);
+                        wrapper.prepareHoverDecorations(viewer, region, info);
                         // Замыкание сохраняет и descriptor синтакс-помощника: реестр ссылок
                         // хранит его слабо, а подсказка должна владеть им до закрытия.
                         return control -> {
@@ -710,6 +735,8 @@ public final class BslEditorHoverHook implements IStartup
         private volatile String lastMethodName;
         private volatile Map<String, String> lastDefinedTypeLinks = Map.of();
         private volatile String lastFormHandlersHtml;
+        /** «: Конструктор()» с меню для свойства или параметра под указателем (issue 828). */
+        private volatile String lastMemberSeeLinksHtml;
         private volatile String lastPlatformAvailabilityHtml;
         private volatile Object lastDocumentationDescriptor;
         private volatile boolean lastCreationSite;
@@ -776,7 +803,7 @@ public final class BslEditorHoverHook implements IStartup
                 return info;
             final int offset = hoverRegion.getOffset();
             BslStructureInsertCommentTypes.completePropertyHover(info, textViewer, offset);
-            prepareHoverDecorations(hoverRegion, info);
+            prepareHoverDecorations(textViewer, hoverRegion, info);
             IRSession session = IrBslExpressionHtmlSupport.resolveConnectedSession(editor);
             if (session == null)
             {
@@ -799,7 +826,7 @@ public final class BslEditorHoverHook implements IStartup
             return maybeDecorateHoverInfo(info);
         }
 
-        private void prepareHoverDecorations(IRegion region, Object info)
+        private void prepareHoverDecorations(ITextViewer textViewer, IRegion region, Object info)
         {
             String directive = resolveHoverDirective(region.getOffset());
             lastDirective = (directive != null && !directive.isBlank()) ? directive : null;
@@ -807,6 +834,7 @@ public final class BslEditorHoverHook implements IStartup
             lastMethodLink = resolveMethodLink(region, info);
             lastDefinedTypeLinks = resolveDefinedTypeLinks(IrBslHoverHtml.readHtml(info));
             lastFormHandlersHtml = resolveFormHandlersHtml(region);
+            lastMemberSeeLinksHtml = resolveMemberSeeLinksHtml(textViewer, region);
             lastPlatformAvailabilityHtml = PlatformWordAvailability.hoverBlock(info, platformAvailabilityColor);
         }
 
@@ -1017,6 +1045,9 @@ public final class BslEditorHoverHook implements IStartup
                     ? result.substring(0, insertAt) + handlersHtml + result.substring(insertAt)
                     : result + handlersHtml;
             }
+            String withSeeLinks = ParamHintHtmlModifier.injectMemberSeeLinks(result, lastMemberSeeLinksHtml);
+            if (withSeeLinks != null)
+                result = withSeeLinks;
             return PlatformWordAvailability.injectHoverBlock(result, lastPlatformAvailabilityHtml);
         }
 
@@ -1026,6 +1057,22 @@ public final class BslEditorHoverHook implements IStartup
                 + "|<style\\b[^>]*>[\\s\\S]*?</style\\s*>|<[^>]*>)"
                 + "|((?<![\\p{L}\\p{N}_])(?:ОпределяемыйТип|DefinedType)\\.[\\p{L}_][\\p{L}\\p{N}_]*)",
             java.util.regex.Pattern.CASE_INSENSITIVE | java.util.regex.Pattern.UNICODE_CASE);
+
+        private String resolveMemberSeeLinksHtml(ITextViewer textViewer, IRegion region)
+        {
+            try
+            {
+                var links = BslStructureInsertCommentTypes.seeLinksAt(textViewer, region.getOffset());
+                if (links.isEmpty() || !(editor.getDocument() instanceof IXtextDocument document))
+                    return null;
+                return ParamHintHtmlModifier.memberSeeLinksBlock(links, document.getResourceURI(),
+                    MethodDefinitionLink::registerFormHandler);
+            }
+            catch (Throwable ex)
+            {
+                return null;
+            }
+        }
 
         private Map<String, String> resolveDefinedTypeLinks(String html)
         {

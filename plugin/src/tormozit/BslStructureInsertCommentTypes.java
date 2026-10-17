@@ -591,13 +591,67 @@ public final class BslStructureInsertCommentTypes
         IProject project = projectOf(module);
         if (module == null || tree == null || project == null)
             return false;
+        // Досчёт EDT пересчитывает в облегчённом режиме и другие методы модуля. Внутри полной
+        // установки их NORMAL считает она сама, а LIGHT из досчёта неполон (ссылки на цель в
+        // нём отсечены защитой от рекурсии) и при чтении заслоняет NORMAL.
+        List<Runnable> withoutLight =
+            FULL_INSTALL_MODULES.contains(module) ? collectorsWithoutLight(module, method) : null;
         boolean[] completed = { false };
         runInTransaction(tree, project, context ->
         {
             tree.lightInstallingTypeSystem(module, method, gate, null, 0, context);
             completed[0] = true;
         });
+        if (withoutLight != null)
+            withoutLight.forEach(Runnable::run);
         return completed[0];
+    }
+
+    /** Модули, которые сейчас проходят полный {@code installTypeSystem} ({@link ComfortTreeTypeSystem}). */
+    private static final java.util.Set<Module> FULL_INSTALL_MODULES =
+        java.util.Collections.newSetFromMap(new java.util.concurrent.ConcurrentHashMap<>());
+
+    /**
+     * Владельцы состояний модуля без LIGHT, кроме цели досчёта: переменные и параметры,
+     * возврат функций, входные и выходные параметры методов. Каждый владелец снимает
+     * появившийся LIGHT; накопитель берётся в момент снятия — досчёт может завести его заново.
+     */
+    private static List<Runnable> collectorsWithoutLight(Module module, Method target)
+    {
+        List<Runnable> owners = new ArrayList<>();
+        for (Variable variable : EcoreUtil2.getAllContentsOfType(module, Variable.class))
+            if (EcoreUtil2.getContainerOfType(variable, Method.class) != target && lacksLight(variable.getTypeStateProvider()))
+                owners.add(() -> dropLight(variable.getTypeStateProvider()));
+        for (Method method : module.allMethods())
+        {
+            if (method == target)
+                continue;
+            if (method instanceof com._1c.g5.v8.dt.bsl.model.Function function
+                && lacksLight(function.getFinalReturnState()))
+                owners.add(() -> dropLight(function.getFinalReturnState()));
+            if (method.getFinalInParamState().stream().allMatch(BslStructureInsertCommentTypes::lacksLight))
+                owners.add(() -> dropLight(method.getFinalInParamState()));
+            if (method.getFinalOutParamState().stream().allMatch(BslStructureInsertCommentTypes::lacksLight))
+                owners.add(() -> dropLight(method.getFinalOutParamState()));
+        }
+        return owners;
+    }
+
+    private static boolean lacksLight(VariableTypeStateProviderCollector collector)
+    {
+        return collector == null || collector.get(TypeSystemMode.LIGHT) == null;
+    }
+
+    private static void dropLight(VariableTypeStateProviderCollector collector)
+    {
+        if (!lacksLight(collector))
+            collector.removeMode(TypeSystemMode.LIGHT);
+    }
+
+    private static void dropLight(List<VariableTypeStateProviderCollector> collectors)
+    {
+        for (VariableTypeStateProviderCollector collector : collectors)
+            dropLight(collector);
     }
 
     /**
@@ -914,10 +968,8 @@ public final class BslStructureInsertCommentTypes
         {
             return commentFieldDescriptionImpl(property, source, method, module);
         }
-        catch (Throwable t)
+        catch (Throwable ignored)
         {
-            Global.tempLogException("bsl-property-description-cost", "commentField property=" //$NON-NLS-1$ //$NON-NLS-2$
-                + property.getName(), t);
             return null;
         }
         finally
@@ -931,6 +983,206 @@ public final class BslStructureInsertCommentTypes
     private static String commentFieldDescriptionImpl(Property property, BslDerivedPropertySource source,
         Method method, Module module)
     {
+        TypeSection.FieldDefinition field = commentField(property, source, method, module);
+        return field != null ? fieldDescriptionText(field) : null;
+    }
+
+    /** Ссылка «см. …» из типов поля комментария и метод, в области которого её разрешать. */
+    record PropertySeeLink(Method method, LinkPart link)
+    {
+    }
+
+    /**
+     * Ссылки «см. …» в типе свойства: из бокового комментария {@code Вставить/Добавить} или из поля
+     * документирующего комментария метода, по которому создано свойство (issue 828).
+     */
+    static List<PropertySeeLink> propertySeeLinks(Property property, EObject context)
+    {
+        if (!(property instanceof DerivedProperty derived)
+            || !(derived.getSource() instanceof BslDerivedPropertySource source)
+            || source.getModuleUri() == null || source.getMethodName() == null
+            || source.getMethodName().isEmpty()
+            || !BslDocCommentComputedTypes.isExtendedTypesEnabled(context))
+            return List.of();
+        Module module = moduleFromSourceUri(URI.createURI(source.getModuleUri()), context);
+        if (module == null)
+            return List.of();
+        Method method = null;
+        for (Method candidate : module.allMethods())
+            if (source.getMethodName().equalsIgnoreCase(candidate.getName()))
+            {
+                method = candidate;
+                break;
+            }
+        if (method == null)
+            return List.of();
+        COMMENT_FIELD_PARSE.set(Boolean.TRUE);
+        try
+        {
+            List<PropertySeeLink> result = new ArrayList<>();
+            java.util.Set<String> seen = new java.util.LinkedHashSet<>();
+            // Как readPropertySourceDescription: вызов в месте создания → боковой комментарий,
+            // нет вызова → поле документирующего комментария метода.
+            if (invocationAtSource(source, method) != null)
+                collectReturnSeeLinks(sideCommentReturnSection(property, source, method, module), method, seen, result);
+            else
+            {
+                TypeSection.FieldDefinition field = commentField(property, source, method, module);
+                if (field != null)
+                {
+                    collectSeeLinks(field.getDescription(), method, seen, result);
+                    for (TypeSection section : field.getTypeSections())
+                        collectSeeLinks(section, method, seen, result);
+                }
+            }
+            return result;
+        }
+        catch (Throwable ignored)
+        {
+            return List.of();
+        }
+        finally
+        {
+            COMMENT_FIELD_PARSE.remove();
+        }
+    }
+
+    private static void collectSeeLinks(TypeSection section, Method method, java.util.Set<String> seen,
+        List<PropertySeeLink> result)
+    {
+        // EDT кладёт «см. …» то в исходное, то в текущее описание раздела типов.
+        collectSeeLinks(section.getSourceDescription(), method, seen, result);
+        collectSeeLinks(section.getCurrentDescription(), method, seen, result);
+        collectSeeLinks(section.getSourceExtensionDescription(), method, seen, result);
+        // «Тип - см. Конструктор»: ссылка на состав лежит в самом определении типа.
+        for (var definition : section.getTypeDefinitions())
+            collectSeeLinks(definition, method, seen, result);
+    }
+
+    private static void collectSeeLinks(TypeSection.TypeDefinition definition, Method method,
+        java.util.Set<String> seen, List<PropertySeeLink> result)
+    {
+        LinkPart link = definition.getLinkToExtensionFields();
+        if (link != null && seen.add(link.getLinkText()))
+            result.add(new PropertySeeLink(method, link));
+        for (var nested : definition.getContainTypes())
+            collectSeeLinks(nested, method, seen, result);
+    }
+
+    private static void collectSeeLinks(BslDocumentationComment.Description description, Method method,
+        java.util.Set<String> seen, List<PropertySeeLink> result)
+    {
+        if (description != null)
+            for (Object part : description.getParts())
+                if (part instanceof LinkPart link && seen.add(link.getLinkText()))
+                    result.add(new PropertySeeLink(method, link));
+    }
+
+    /** Вызов {@code Вставить/Добавить} в месте создания свойства — то же чтение, что в описании свойства. */
+    private static Invocation invocationAtSource(BslDerivedPropertySource source, Method method)
+    {
+        ICompositeNode node = NodeModelUtils.findActualNodeFor(method);
+        if (node == null)
+            return null;
+        int offset = node.getTotalOffset() + source.getLocalOffset();
+        if (offset < node.getTotalOffset() || offset >= node.getTotalEndOffset())
+            return null;
+        var leaf = NodeModelUtils.findLeafNodeAtOffset(node, offset);
+        EObject semantic = leaf == null ? null : NodeModelUtils.findActualSemanticObjectFor(leaf);
+        return EcoreUtil2.getContainerOfType(semantic, Invocation.class);
+    }
+
+    /**
+     * Раздел возвращаемого значения бокового комментария {@code Структура.Вставить("Ключ", …); // см. Конструктор - …}.
+     * Комментарий разбирает сам EDT тем же путём, что и тип свойства ({@code TypeSystemUtil.computeCommentTypes}:
+     * {@code getCommentAfterObject} по узлу блока + {@code parseTemplateComment} в формате проекта);
+     * вызов ищется по месту создания свойства так же, как в {@link #readPropertySourceDescription}.
+     */
+    private static BslDocumentationComment.ReturnSection sideCommentReturnSection(Property property,
+        BslDerivedPropertySource source, Method method, Module module)
+    {
+        Invocation invocation = invocationAtSource(source, method);
+        if (invocation == null || !property.getName().equalsIgnoreCase(insertedKey(invocation)))
+            return null;
+        Statement statement = EcoreUtil2.getContainerOfType(invocation, Statement.class);
+        Block block = statement == null ? null : EcoreUtil2.getContainerOfType(statement, Block.class);
+        ICompositeNode blockNode = block == null ? null : NodeModelUtils.findActualNodeFor(block);
+        if (blockNode == null)
+            return null;
+        boolean oldFormat = oldCommentFormat(module);
+        List<String> lines = TypeSystemUtil.getCommentAfterObject(statement, blockNode, oldFormat);
+        BslDocumentationComment comment = lines == null || lines.isEmpty() ? null
+            : BslCommentUtils.parseTemplateComment(lines, oldFormat);
+        return comment == null ? null : comment.getReturnSection();
+    }
+
+    /**
+     * Ссылки «см. …» раздела возвращаемого значения — как {@code BslDocumentationComment.computeReturnTypes}:
+     * типы из разделов типов, а если их нет — из ссылок в описании самого раздела
+     * ({@code // см. Конструктор - описание} разбирается именно так).
+     */
+    private static void collectReturnSeeLinks(BslDocumentationComment.ReturnSection section, Method method,
+        java.util.Set<String> seen, List<PropertySeeLink> result)
+    {
+        if (section == null)
+            return;
+        for (TypeSection type : section.getReturnTypes())
+            collectSeeLinks(type, method, seen, result);
+        if (section.getReturnTypes().isEmpty())
+            collectSeeLinks(section.getDescription(), method, seen, result);
+    }
+
+    /** Ссылки «см. …» в типах параметра метода, на который указывает слово под указателем (issue 828). */
+    static List<PropertySeeLink> parameterSeeLinksAt(ITextViewer viewer, int offset)
+    {
+        if (viewer == null || !(viewer.getDocument() instanceof IXtextDocument document))
+            return List.of();
+        try
+        {
+            List<PropertySeeLink> links = ContentAssistSessionReloader.readOnlyPeekAst(document, resource -> {
+                EObject target = new org.eclipse.xtext.resource.EObjectAtOffsetHelper().resolveElementAt(resource, offset);
+                if (target instanceof com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess access)
+                {
+                    // Использование параметра в теле: ссылка — в записях обращения.
+                    target = null;
+                    for (var entry : access.getFeatureEntries())
+                        if (entry != null && entry.getFeature() instanceof com._1c.g5.v8.dt.bsl.model.FormalParam)
+                        {
+                            target = entry.getFeature();
+                            break;
+                        }
+                }
+                return parameterSeeLinks(target);
+            });
+            return links != null ? links : List.of();
+        }
+        catch (Throwable ignored)
+        {
+            return List.of();
+        }
+    }
+
+    /** Ссылки «см. …» в типах формального параметра из комментария его метода. */
+    private static List<PropertySeeLink> parameterSeeLinks(EObject target)
+    {
+        if (!(target instanceof com._1c.g5.v8.dt.bsl.model.FormalParam param)
+            || !(param.eContainer() instanceof Method method)
+            || !(method.eContainer() instanceof Module module))
+            return List.of();
+        BslDocumentationComment comment = parseMethodComment(method, module);
+        var definition = comment == null || comment.getParametersSection() == null ? null
+            : comment.getParametersSection().getParameterByName(param.getName());
+        if (definition == null)
+            return List.of();
+        List<PropertySeeLink> result = new ArrayList<>();
+        java.util.Set<String> seen = new java.util.LinkedHashSet<>();
+        for (TypeSection section : definition.getTypeSections())
+            collectSeeLinks(section, method, seen, result);
+        return result;
+    }
+
+    private static BslDocumentationComment parseMethodComment(Method method, Module module)
+    {
         Resource resource = module.eResource();
         IResourceServiceProvider rsp = resource == null || resource.getURI() == null ? null
             : IResourceServiceProvider.Registry.INSTANCE.getResourceServiceProvider(resource.getURI());
@@ -940,29 +1192,34 @@ public final class BslStructureInsertCommentTypes
             rsp.get(BslMultiLineCommentDocumentationProvider.class);
         if (commentProvider == null)
             return null;
+        return BslCommentUtils.parseTemplateComment(method, oldCommentFormat(module), commentProvider);
+    }
+
+    /** Флажок «старый формат комментария» проекта модуля, как его читает {@code BslTreeTypeSystem}. */
+    private static boolean oldCommentFormat(Module module)
+    {
+        Resource resource = module.eResource();
+        IResourceServiceProvider rsp = resource == null || resource.getURI() == null ? null
+            : IResourceServiceProvider.Registry.INSTANCE.getResourceServiceProvider(resource.getURI());
         IProject project = projectOf(module);
-        BslTreeTypeSystem typeSystem = null;
+        if (rsp == null || project == null)
+            return false;
         try
         {
-            typeSystem = rsp.get(BslTreeTypeSystem.class);
+            BslTreeTypeSystem typeSystem = rsp.get(BslTreeTypeSystem.class);
+            return typeSystem != null && isOldCommentFormat(typeSystem, project);
         }
         catch (RuntimeException ignored)
         {
             // Нет привязки — формат по умолчанию, как при ошибке чтения флажка.
+            return false;
         }
-        boolean oldFormat = project != null && typeSystem != null && isOldCommentFormat(typeSystem, project);
-        BslDocumentationComment comment = BslCommentUtils.parseTemplateComment(method, oldFormat, commentProvider);
-        // #region agent log
-        Global.tempLog("bsl-comment-field", "parse property=" + property.getName() //$NON-NLS-1$ //$NON-NLS-2$
-            + " method=" + method.getName() + " sourceOffset=" + source.getLocalOffset() //$NON-NLS-1$ //$NON-NLS-2$
-            + " oldFormat=" + oldFormat + " comment=" + (comment == null ? "null" : comment.getClass().getSimpleName()) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " lineOffsets=" + (comment == null ? "-" : java.util.Arrays.toString(comment.getLineGlobalOffsets())) //$NON-NLS-1$ //$NON-NLS-2$
-            + " params=" + (comment == null || comment.getParametersSection() == null ? "null" //$NON-NLS-1$ //$NON-NLS-2$
-                : comment.getParametersSection().getParameterDefinitions().size())
-            + " returns=" + (comment == null || comment.getReturnSection() == null ? "null" //$NON-NLS-1$ //$NON-NLS-2$
-                : comment.getReturnSection().getReturnTypes().size())
-            + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
-        // #endregion
+    }
+
+    private static TypeSection.FieldDefinition commentField(Property property, BslDerivedPropertySource source,
+        Method method, Module module)
+    {
+        BslDocumentationComment comment = parseMethodComment(method, module);
         if (comment == null)
             return null;
         int[] lineOffsets = comment.getLineGlobalOffsets();
@@ -974,49 +1231,15 @@ public final class BslStructureInsertCommentTypes
             sections.addAll(parameter.getTypeSections());
         if (comment.getReturnSection() != null)
             sections.addAll(comment.getReturnSection().getReturnTypes());
-        // #region agent log
-        for (TypeSection section : sections)
-            logCommentFields(section, lineOffsets, "  "); //$NON-NLS-1$
-        // #endregion
         for (TypeSection section : sections)
         {
             TypeSection.FieldDefinition field = findCommentField(section, property.getName(),
                 source.getLocalOffset(), lineOffsets);
             if (field != null)
-                return fieldDescriptionText(field);
+                return field;
         }
         return null;
     }
-
-    // #region agent log
-    private static void logCommentFields(TypeSection section, int[] lineOffsets, String indent)
-    {
-        for (var definition : section.getTypeDefinitions())
-        {
-            Global.tempLog("bsl-comment-field", indent + "type=" + definition.getTypeName() //$NON-NLS-1$ //$NON-NLS-2$
-                + " fields=" + definition.getFieldDefinitionExtension().size()); //$NON-NLS-1$
-            for (TypeSection.FieldDefinition field : definition.getFieldDefinitionExtension())
-            {
-                int line = field.getLineNumber();
-                int lineOffset = lineOffsets != null && line >= 0 && line < lineOffsets.length
-                    ? lineOffsets[line] : 0;
-                StringBuilder parts = new StringBuilder();
-                if (field.getDescription() != null)
-                    for (Object part : field.getDescription().getParts())
-                        parts.append('[').append(part.getClass().getSimpleName()).append(':')
-                            .append(part instanceof TextPart text ? text.getText() : String.valueOf(part)).append(']');
-                Global.tempLog("bsl-comment-field", indent + "  field=" + field.getName() //$NON-NLS-1$ //$NON-NLS-2$
-                    + " nameOffset=" + field.getNameOffset() + " offset=" + field.getOffset() //$NON-NLS-1$ //$NON-NLS-2$
-                    + " line=" + line + " lineOffset=" + lineOffset //$NON-NLS-1$ //$NON-NLS-2$
-                    + " sum=" + (field.getNameOffset() + lineOffset) //$NON-NLS-1$
-                    + " sections=" + field.getTypeSections().size() + " parts=" + parts //$NON-NLS-1$ //$NON-NLS-2$
-                    + " text=" + fieldDescriptionText(field)); //$NON-NLS-1$
-                for (TypeSection nested : field.getTypeSections())
-                    logCommentFields(nested, lineOffsets, indent + "    "); //$NON-NLS-1$
-            }
-        }
-    }
-    // #endregion
 
     private static TypeSection.FieldDefinition findCommentField(TypeSection section, String name, int localOffset,
         int[] lineOffsets)
@@ -1130,8 +1353,9 @@ public final class BslStructureInsertCommentTypes
             Object info = delegate.getHoverInfo(object, viewer, region);
             // У свойства ConfigurableCompletionProposal.viewer == null: EDT задаёт его
             // только в setSimpleLinkedMode. Контекст берём из расчёта списка.
-            completePropertyHover(info, object, viewer != null ? viewer : proposalViewer);
-            return info;
+            ITextViewer context = viewer != null ? viewer : proposalViewer;
+            completePropertyHover(info, object, context);
+            return BslEditorHoverHook.decorateSideHintWithSeeLinks(info, object, context);
         }
 
         @Override
@@ -1147,24 +1371,20 @@ public final class BslStructureInsertCommentTypes
         if (!(object instanceof Property property) || viewer == null
             || !(viewer.getDocument() instanceof IXtextDocument document))
             return;
-        // #region agent log
-        String step = "begin"; //$NON-NLS-1$
-        String description = null;
-        // #endregion
         try
         {
-            description = ContentAssistSessionReloader.readOnlyPeekAst(document, resource ->
+            // Как и остальные наши расчёты типов — только под флажком проекта.
+            if (!Boolean.TRUE.equals(ContentAssistSessionReloader.readOnlyPeekAst(document,
+                BslStructureInsertCommentTypes::isExtendedTypesEnabled)))
+                return;
+            String description = ContentAssistSessionReloader.readOnlyPeekAst(document, resource ->
                 resource == null || resource.getContents().isEmpty()
                     ? null : propertyDescription(property, resource.getContents().get(0)));
-            step = "described"; //$NON-NLS-1$
             Object page = Global.invoke(info, "getViewPage"); //$NON-NLS-1$
             Object value = Global.getField(page, "value"); //$NON-NLS-1$
             Object current = Global.invoke(value, "getDescription"); //$NON-NLS-1$
             if (value == null)
-            {
-                step = "noValue page=" + (page == null ? "null" : page.getClass().getSimpleName()); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
-            }
             String html = current instanceof String text ? text : null;
             if ((html == null || html.isBlank()) && description != null)
                 html = description.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
@@ -1172,26 +1392,10 @@ public final class BslStructureInsertCommentTypes
                 propertyTypeGroups(property, page, value, resource));
             Object replacement = value.getClass().getConstructor(String.class, List.class).newInstance(html, groups);
             Global.invokeVoid(page, "setValue", replacement); //$NON-NLS-1$
-            step = "set current=" + (current == null ? "null" : "\"" + current + "\"") + " html=" + html; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
         }
-        catch (Throwable t)
+        catch (Throwable ignored)
         {
-            step = "error " + t; //$NON-NLS-1$
         }
-        // #region agent log
-        finally
-        {
-            Global.tempLog("property-hover", "complete property=" + property.getName() //$NON-NLS-1$ //$NON-NLS-2$
-                + " class=" + property.getClass().getSimpleName() //$NON-NLS-1$
-                + " source=" + (property instanceof DerivedProperty derived && derived.getSource() instanceof BslDerivedPropertySource source //$NON-NLS-1$
-                    ? source.getMethodName() + "@" + source.getLocalOffset() //$NON-NLS-1$
-                    : property instanceof DerivedProperty derived2 ? String.valueOf(derived2.getSource()) : "-") //$NON-NLS-1$
-                + " description=" + description //$NON-NLS-1$
-                + " info=" + (info == null ? "null" : info.getClass().getSimpleName()) //$NON-NLS-1$ //$NON-NLS-2$
-                + " step=" + step //$NON-NLS-1$
-                + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
-        }
-        // #endregion
     }
 
     /** Как EDT getDocByDerivedProperty, но прокси типов разрешаются в ресурсе редактора. */
@@ -1260,13 +1464,7 @@ public final class BslStructureInsertCommentTypes
                 }
         }
         if (access == null)
-        {
-            // #region agent log
-            Global.tempLog("property-hover", "propertyAt offset=" + offset + " noAccess contained=" //$NON-NLS-1$ //$NON-NLS-2$
-                + (object == null ? "null" : object.getClass().getSimpleName())); //$NON-NLS-1$
-            // #endregion
             return null;
-        }
         IResourceServiceProvider rsp = IResourceServiceProvider.Registry.INSTANCE
             .getResourceServiceProvider(resource.getURI());
         DynamicFeatureAccessComputer computer = rsp == null ? null : rsp.get(DynamicFeatureAccessComputer.class);
@@ -1277,54 +1475,6 @@ public final class BslStructureInsertCommentTypes
             : computer == null ? List.of()
                 : DynamicFeatureAccessComputer.resolveDynamicFeatureAccess(access, computer, true);
         EObject context = resource.getContents().isEmpty() ? null : resource.getContents().get(0);
-        // #region agent log
-        StringBuilder features = new StringBuilder();
-        for (FeatureEntry entry : entries)
-        {
-            EObject feature = entry.getFeature();
-            features.append('[').append(feature == null ? "null" : feature.getClass().getSimpleName()) //$NON-NLS-1$
-                .append(feature != null && feature.eIsProxy() ? " proxy" : "") //$NON-NLS-1$ //$NON-NLS-2$
-                .append(feature instanceof Property p ? " " + p.getName() : "").append(']'); //$NON-NLS-1$ //$NON-NLS-2$
-        }
-        String compare = ""; //$NON-NLS-1$
-        if (entries.isEmpty() && access instanceof DynamicFeatureAccess dynamic)
-        {
-            try
-            {
-                Object docProvider = rsp.get(org.eclipse.core.runtime.Platform.getBundle("com._1c.g5.v8.dt.bsl.ui") //$NON-NLS-1$
-                    .loadClass("com._1c.g5.v8.dt.internal.bsl.ui.documentation.BslDocumentationProvider")); //$NON-NLS-1$
-                Object docComputer = Global.getField(docProvider, "dynamicComputer"); //$NON-NLS-1$
-                int docEntries = docComputer instanceof DynamicFeatureAccessComputer other
-                    ? DynamicFeatureAccessComputer.resolveDynamicFeatureAccess(access, other, true).size() : -1;
-                Object onOurs = Global.getField(computer, "computerTypes"); //$NON-NLS-1$
-                Object onDoc = Global.getField(docComputer, "computerTypes"); //$NON-NLS-1$
-                StringBuilder sourceTypes = new StringBuilder();
-                com._1c.g5.v8.dt.mcore.Environmental environmental =
-                    EcoreUtil2.getContainerOfType(access, com._1c.g5.v8.dt.mcore.Environmental.class);
-                TypesComputer typesComputer = rsp.get(TypesComputer.class);
-                if (environmental != null && typesComputer != null)
-                    for (TypeItem item : typesComputer.computeTypes(dynamic.getSource(), environmental.environments()))
-                        sourceTypes.append('[').append(McoreUtil.getTypeName(item))
-                            .append(item instanceof Type type && type.getContextDef() != null
-                                ? " props=" + type.getContextDef().allProperties().size() : "") //$NON-NLS-1$ //$NON-NLS-2$
-                            .append(']');
-                compare = " sameDfa=" + (docComputer == computer) //$NON-NLS-1$
-                    + " docEntries=" + docEntries //$NON-NLS-1$
-                    + " oursTypes=" + (onOurs == null ? "null" : onOurs.getClass().getSimpleName()) //$NON-NLS-1$ //$NON-NLS-2$
-                    + " docTypes=" + (onDoc == null ? "null" : onDoc.getClass().getSimpleName()) //$NON-NLS-1$ //$NON-NLS-2$
-                    + " sourceTypes=" + sourceTypes; //$NON-NLS-1$
-            }
-            catch (Throwable t)
-            {
-                compare = " compareError=" + t; //$NON-NLS-1$
-            }
-        }
-        Global.tempLog("property-hover", "propertyAt offset=" + offset //$NON-NLS-1$ //$NON-NLS-2$
-            + " contained=" + (object == null ? "null" : object.getClass().getSimpleName()) //$NON-NLS-1$ //$NON-NLS-2$
-            + " access=" + access.getClass().getSimpleName() + " name=" + access.getName() //$NON-NLS-1$ //$NON-NLS-2$
-            + " computer=" + (computer != null) + " entries=" + entries.size() + " " + features //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + compare + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
-        // #endregion
         Property first = null;
         for (FeatureEntry entry : entries)
         {
@@ -1338,6 +1488,78 @@ public final class BslStructureInsertCommentTypes
         return first;
     }
 
+    /** Флажок «Расширенный расчёт типов» проекта модуля, открытого в редакторе. */
+    private static Boolean isExtendedTypesEnabled(Resource resource)
+    {
+        return resource != null && !resource.getContents().isEmpty()
+            && BslDocCommentComputedTypes.isExtendedTypesEnabled(resource.getContents().get(0));
+    }
+
+    /**
+     * Единая точка для подсказки наведения и боковой подсказки списка (issue 828): ссылки
+     * «см. …» в типах свойства или параметра под указателем.
+     */
+    static List<PropertySeeLink> seeLinksAt(ITextViewer viewer, int offset)
+    {
+        List<PropertySeeLink> result = new ArrayList<>(propertySeeLinksAt(viewer, offset));
+        result.addAll(parameterSeeLinksAt(viewer, offset));
+        return result;
+    }
+
+    /** То же для члена, известного объектом (предложение списка): свойство или параметр. */
+    static List<PropertySeeLink> seeLinksFor(EObject object, ITextViewer viewer)
+    {
+        if (object == null || viewer == null || !(viewer.getDocument() instanceof IXtextDocument document))
+            return List.of();
+        try
+        {
+            List<PropertySeeLink> links = ContentAssistSessionReloader.readOnlyPeekAst(document, resource -> {
+                EObject context = resource.getContents().isEmpty() ? null : resource.getContents().get(0);
+                // Предложение списка — обёртка: настоящие члены лежат в её списке.
+                List<EObject> members = object instanceof com._1c.g5.v8.dt.bsl.model.ProposalElement proposal
+                    ? new ArrayList<>(proposal.getList()) : List.of(object);
+                for (EObject member : members)
+                {
+                    // Предложение переменной (параметра) — вхождение-фантом, сама переменная внутри.
+                    if (member instanceof com._1c.g5.v8.dt.bsl.model.FantomVariableOccurrence occurrence)
+                        member = occurrence.getVariable();
+                    List<PropertySeeLink> found = member instanceof Property property
+                        ? (context == null ? List.<PropertySeeLink>of() : propertySeeLinks(property, context))
+                        : parameterSeeLinks(member);
+                    if (!found.isEmpty())
+                        return found;
+                }
+                return List.<PropertySeeLink>of();
+            });
+            return links != null ? links : List.of();
+        }
+        catch (Throwable ex)
+        {
+            return List.of();
+        }
+    }
+
+    /** Ссылки «см. …» в типах свойства под указателем, см. {@link #propertySeeLinks}. */
+    static List<PropertySeeLink> propertySeeLinksAt(ITextViewer viewer, int offset)
+    {
+        if (viewer == null || !(viewer.getDocument() instanceof IXtextDocument document))
+            return List.of();
+        try
+        {
+            List<PropertySeeLink> links = ContentAssistSessionReloader.readOnlyPeekAst(document, resource -> {
+                Property property = Boolean.TRUE.equals(isExtendedTypesEnabled(resource))
+                    ? propertyAt(resource, offset) : null;
+                return property == null ? List.<PropertySeeLink>of()
+                    : propertySeeLinks(property, resource.getContents().get(0));
+            });
+            return links != null ? links : List.of();
+        }
+        catch (Throwable ignored)
+        {
+            return List.of();
+        }
+    }
+
     /** Слово под указателем: свойство обращения под указателем, см. {@link #propertyAt}. */
     static void completePropertyHover(Object info, ITextViewer viewer, int offset)
     {
@@ -1346,28 +1568,11 @@ public final class BslStructureInsertCommentTypes
         try
         {
             EObject object = ContentAssistSessionReloader.readOnlyPeekAst(document, resource ->
-                resource == null ? null : propertyAt(resource, offset));
-            // #region agent log
-            if (object == null)
-            {
-                // Как BslEditorHoverHook: обычное чтение (без отмены reconciler, в отличие от
-                // readOnlyForContentAssist).
-                object = document.readOnly(resource -> resource == null ? null : propertyAt(resource, offset));
-                Global.tempLog("property-hover", "pointer readOnly offset=" + offset //$NON-NLS-1$ //$NON-NLS-2$
-                    + " object=" + (object == null ? "null" : object.getClass().getSimpleName())); //$NON-NLS-1$ //$NON-NLS-2$
-            }
-            // #endregion
-            // #region agent log
-            Global.tempLog("property-hover", "pointer offset=" + offset //$NON-NLS-1$ //$NON-NLS-2$
-                + " object=" + (object == null ? "null" : object.getClass().getSimpleName() //$NON-NLS-1$ //$NON-NLS-2$
-                    + (object instanceof Property p ? " " + p.getName() : "")) //$NON-NLS-1$ //$NON-NLS-2$
-                + " info=" + (info == null ? "null" : info.getClass().getSimpleName())); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
+                isExtendedTypesEnabled(resource) ? propertyAt(resource, offset) : null);
             completePropertyHover(info, object, viewer);
         }
-        catch (Throwable t)
+        catch (Throwable ignored)
         {
-            Global.tempLog("property-hover", "pointer error " + t); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 
@@ -1584,15 +1789,13 @@ public final class BslStructureInsertCommentTypes
      * секции строк в тексте нет, смещение выходит 0 — начало метода, и подсказка не находит
      * описание из бокового комментария вставки. Ставится, только если вставка в том же
      * методе и модуле, что и комментарий: иначе смещение относилось бы к чужому методу.
-     *
-     * @return число полей, получивших место вставки
      */
-    static int alignFieldSources(Object section, Object comment, List<?> types, List<?> cacheTypes,
+    static void alignFieldSources(Object section, Object comment, List<?> types, List<?> cacheTypes,
         String cacheKey)
     {
         if (!(section instanceof TypeSection typeSection)
             || !(comment instanceof BslDocumentationComment documentation))
-            return 0;
+            return;
         FilledSources cached = cacheKey == null ? null : FILLED_SOURCES.get(cacheKey);
         List<FilledSource> parts;
         if (cached != null && cached.types() == cacheTypes)
@@ -1609,7 +1812,6 @@ public final class BslStructureInsertCommentTypes
                 FILLED_SOURCES.put(cacheKey, new FilledSources(cacheTypes, parts));
         }
         int[] lineOffsets = documentation.getLineGlobalOffsets();
-        int aligned = 0;
         for (FilledSource part : parts)
         {
             TypeSection.FieldDefinition field = fieldAt(typeSection, part.path());
@@ -1619,9 +1821,7 @@ public final class BslStructureInsertCommentTypes
             int lineOffset = lineOffsets != null && line >= 0 && line < lineOffsets.length
                 ? lineOffsets[line] : 0;
             field.setNameOffset(part.localOffset() - lineOffset);
-            aligned++;
         }
-        return aligned;
     }
 
     private static void collectFieldSources(TypeSection typeSection, List<?> types, String methodName,
@@ -2377,6 +2577,7 @@ public final class BslStructureInsertCommentTypes
             long started = System.nanoTime();
             String outcome = "ok"; //$NON-NLS-1$
             // #endregion
+            boolean installOwner = module != null && FULL_INSTALL_MODULES.add(module);
             try
             {
                 installTypeSystemInScope(module, cancelIndicator);
@@ -2390,6 +2591,8 @@ public final class BslStructureInsertCommentTypes
             }
             finally
             {
+                if (installOwner)
+                    FULL_INSTALL_MODULES.remove(module);
                 endExportVarsScope(scopeOwner);
                 // #region agent log
                 logInstallTypeSystem(module, cancelIndicator, started, outcome);

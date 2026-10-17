@@ -4320,6 +4320,48 @@ public final class ParamHintHtmlModifier
         return html.substring(0, headEnd) + style + html.substring(headEnd);
     }
 
+    /** Блок «: Конструктор()» с меню для подсказки члена; пустая строка — ссылок нет. */
+    static String memberSeeLinksBlock(List<BslStructureInsertCommentTypes.PropertySeeLink> links,
+        URI documentUri, java.util.function.Function<Runnable, String> register)
+    {
+        return links == null || links.isEmpty() ? "" //$NON-NLS-1$
+            : ParameterSeeLinks.memberHtml(links, documentUri, register);
+    }
+
+    /**
+     * Вставляет блок {@link #memberSeeLinksBlock} в заголовок подсказки члена: внутрь «&lt;Тип&gt;»
+     * сразу после типа, иначе в конец заголовка. Заголовок ищется так же, как в {@code BslEditorHoverHook}.
+     *
+     * @return изменённый HTML или {@code null}, если вставлять нечего или некуда
+     */
+    static String injectMemberSeeLinks(String html, String block)
+    {
+        if (html == null || block == null || block.isEmpty() || html.contains(PARAM_ENTRY_CLASS))
+            return null;
+        int heading = html.indexOf("infocontrol-heading"); //$NON-NLS-1$
+        if (heading < 0)
+            heading = html.indexOf("contentassist-heading-content"); //$NON-NLS-1$
+        int headingStart = heading < 0 ? -1 : html.indexOf('>', heading);
+        int headingEnd = headingStart < 0 ? -1 : html.indexOf("</div>", headingStart); //$NON-NLS-1$
+        if (headingEnd < 0)
+            return null;
+        // «Параметр <Тип> Имя»: конструктор — внутри угловых скобок, сразу после типа.
+        int insertAt = headingEnd;
+        int closing = html.indexOf("&gt;", headingStart); //$NON-NLS-1$
+        if (closing > headingStart && closing < headingEnd)
+            insertAt = closing;
+        String result = html.substring(0, insertAt) + block + html.substring(insertAt);
+        // Цвета читаются из SWT, а подсказку считает фоновый поток TextViewerHoverManager.
+        Display display = Display.getDefault();
+        String[] styled = new String[1];
+        final String withBlock = result;
+        if (display.getThread() == Thread.currentThread())
+            styled[0] = useClickableParameterStyle(withBlock);
+        else
+            display.syncExec(() -> styled[0] = useClickableParameterStyle(withBlock));
+        return styled[0] != null ? styled[0] : result;
+    }
+
     /** Имена параметров и появляющееся при наведении меню действий. */
     private static String useClickableParameterStyle(String html)
     {
@@ -5203,7 +5245,9 @@ public final class ParamHintHtmlModifier
             String suffix = buildMetaSuffix(defaultDescription, description);
             String seeLinks = !virtualParam && paramName != null
                 ? ParameterSeeLinks.html(ctx, paramName) : ""; //$NON-NLS-1$
-            String newTypeInner = directionPrefix + typeBase + seeLinks + suffix;
+            // Единый вид с подсказкой члена: «<Типы : Конструктор()>».
+            String newTypeInner = directionPrefix
+                + (seeLinks.isEmpty() ? typeBase + suffix : "&lt;" + typeBase + seeLinks + "&gt;" + suffix); //$NON-NLS-1$ //$NON-NLS-2$
             if (!virtualParam && (newTypeInner == null || newTypeInner.isEmpty()))
                 return null;
             boolean hasEnrichment = virtualParam
@@ -5294,8 +5338,100 @@ public final class ParamHintHtmlModifier
     }
 
     /** Штатная документация исходного метода, включая типы и ссылки параметров. */
-    private static final class ParameterSeeLinks
+    static final class ParameterSeeLinks
     {
+        /**
+         * «: Конструктор()» с меню «Открыть / Скопировать вызов» для подсказки члена в редакторе.
+         * Действия меню регистрирует вызывающий: подсказка живёт в своём браузере со своим мостом.
+         *
+         * @return пустую строку, если ссылок нет или ни одну не удалось разрешить
+         */
+        static String memberHtml(List<BslStructureInsertCommentTypes.PropertySeeLink> links, URI documentUri,
+            java.util.function.Function<Runnable, String> register)
+        {
+            StringBuilder html = new StringBuilder();
+            for (int linkIndex = 0; linkIndex < links.size(); linkIndex++)
+            {
+                var seeLink = links.get(linkIndex);
+                try
+                {
+                    EObject target = resolveTarget(seeLink.link(), seeLink.method());
+                    String call = hoverCallText(target, documentUri);
+                    String label = call != null ? call : seeLink.link().getLinkText();
+                    if (call == null && target instanceof Function)
+                        label += "()"; //$NON-NLS-1$
+                    html.append(linkIndex == 0 ? " : " : ", ").append("<span class=\"").append(PARAM_ENTRY_CLASS) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        .append("\" onmouseenter=\"comfortShowParamMenu(this)\"") //$NON-NLS-1$
+                        .append(" onmouseleave=\"comfortHideParamMenu(this)\">") //$NON-NLS-1$
+                        .append("<span class=\"").append(PARAM_LINK_CLASS).append("\">") //$NON-NLS-1$ //$NON-NLS-2$
+                        .append(escapeHtml(label)).append("</span><span class=\"") //$NON-NLS-1$
+                        .append(PARAM_MENU_CLASS).append("\">"); //$NON-NLS-1$
+                    if (target != null && !target.eIsProxy())
+                        appendMemberMenuItem(html, register.apply(() -> openTarget(target)), "Открыть"); //$NON-NLS-1$
+                    if (call != null)
+                        appendMemberMenuItem(html, register.apply(() -> copyText(call)), "Скопировать вызов"); //$NON-NLS-1$
+                    html.append("</span></span>"); //$NON-NLS-1$
+                }
+                catch (Exception | LinkageError ex)
+                {
+                    // ссылка не разрешилась — подсказка остаётся штатной
+                }
+            }
+            return html.toString();
+        }
+
+        private static void appendMemberMenuItem(StringBuilder html, String token, String text)
+        {
+            html.append("<span class=\"").append(PARAM_MENU_ITEM_CLASS) //$NON-NLS-1$
+                .append("\" onclick=\"comfortOpenMethodDefinition('").append(token) //$NON-NLS-1$
+                .append("');return false;\">").append(escapeHtml(text)).append("</span>"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        private static void copyText(String text)
+        {
+            Display display = Display.getDefault();
+            org.eclipse.swt.dnd.Clipboard clipboard = new org.eclipse.swt.dnd.Clipboard(display);
+            try
+            {
+                clipboard.setContents(new Object[] { text },
+                    new org.eclipse.swt.dnd.Transfer[] { org.eclipse.swt.dnd.TextTransfer.getInstance() });
+            }
+            finally
+            {
+                clipboard.dispose();
+            }
+        }
+
+        private static void openTarget(EObject target)
+        {
+            if (target instanceof com._1c.g5.v8.dt.bsl.model.Method)
+            {
+                // Как в perform: OpenHelper(EObject) для BSL Method может создать вход без документа.
+                var uri = EcoreUtil.getURI(target);
+                var provider = IResourceServiceProvider.Registry.INSTANCE
+                    .getResourceServiceProvider(uri.trimFragment());
+                IURIEditorOpener opener = provider != null ? provider.get(IURIEditorOpener.class) : null;
+                if (opener != null)
+                    opener.open(uri, true);
+            }
+            else
+                new OpenHelper().openEditor(target);
+        }
+
+        /** Вызов функции этого же модуля или экспортной функции модуля со стабильным именем ({@link #exportCallPrefix}). */
+        private static String hoverCallText(EObject target, URI documentUri)
+        {
+            if (!(target instanceof Function function) || target.eResource() == null || documentUri == null)
+                return null;
+            var targetUri = target.eResource().getURI();
+            if (targetUri.trimFragment().equals(documentUri.trimFragment()))
+                return function.getName() + "()"; //$NON-NLS-1$
+            if (!function.isExport())
+                return null;
+            String prefix = exportCallPrefix(targetUri);
+            return prefix != null ? prefix + function.getName() + "()" : null; //$NON-NLS-1$
+        }
+
         private static final ThreadLocal<DocumentationCapture> CAPTURE = new ThreadLocal<>();
         private static final Map<Object, NativeDocumentation> DOCUMENTATION =
             Collections.synchronizedMap(new WeakHashMap<>());
@@ -5462,7 +5598,11 @@ public final class ParamHintHtmlModifier
 
         private static EObject target(HoverContext ctx, LinkPart link)
         {
-            var method = documentedMethod(ctx);
+            return resolveTarget(link, documentedMethod(ctx));
+        }
+
+        private static EObject resolveTarget(LinkPart link, com._1c.g5.v8.dt.bsl.model.Method method)
+        {
             if (method == null || method.eResource() == null)
                 return null;
             var services = IResourceServiceProvider.Registry.INSTANCE
@@ -5536,25 +5676,44 @@ public final class ParamHintHtmlModifier
                 if (receiver != null && !receiver.isBlank())
                     return receiver + "." + function.getName() + "()"; //$NON-NLS-1$ //$NON-NLS-2$
             }
-            // Общий модуль имеет стабильное имя, пригодное и для глобального исходного вызова.
-            if (targetUri.isPlatformResource())
+            String prefix = exportCallPrefix(targetUri);
+            return prefix != null ? prefix + function.getName() + "()" : null; //$NON-NLS-1$
+        }
+
+        /**
+         * Получатель вызова экспортного метода чужого модуля, у которого есть стабильное имя:
+         * общий модуль — «ИмяМодуля.» (глобальный — без префикса), модуль менеджера —
+         * «Справочники.Имя.» / «Catalogs.Имя.» по варианту встроенного языка проекта.
+         * У модуля объекта, набора записей, формы получателя без экземпляра нет — {@code null}.
+         */
+        private static String exportCallPrefix(URI targetUri)
+        {
+            if (!targetUri.isPlatformResource())
+                return null;
+            // platform:/resource/<проект>/src/<Папка типа>/<Имя объекта>/<Файл модуля>
+            String[] segments = targetUri.segments();
+            if (segments.length < 3)
+                return null;
+            String folder = segments[segments.length - 3];
+            String objectName = segments[segments.length - 2];
+            String file = segments[segments.length - 1];
+            var projects = (IV8ProjectManager)Global.getServiceByClass(IV8ProjectManager.class);
+            var project = projects != null ? projects.getProject(targetUri) : null;
+            if ("CommonModules".equals(folder)) //$NON-NLS-1$
             {
-                String[] segments = targetUri.segments();
-                for (int i = 0; i + 2 < segments.length; i++)
-                    if ("CommonModules".equals(segments[i])) //$NON-NLS-1$
-                    {
-                        var projects = (IV8ProjectManager)
-                            Global.getServiceByClass(IV8ProjectManager.class);
-                        var project = projects != null ? projects.getProject(targetUri) : null;
-                        if (project instanceof IConfigurationAware aware
-                            && aware.getConfiguration() != null)
-                            for (var module : aware.getConfiguration().getCommonModules())
-                                if (segments[i + 1].equalsIgnoreCase(module.getName()))
-                                    return (module.isGlobal() ? "" : module.getName() + ".") //$NON-NLS-1$ //$NON-NLS-2$
-                                        + function.getName() + "()"; //$NON-NLS-1$
-                    }
+                if (project instanceof IConfigurationAware aware && aware.getConfiguration() != null)
+                    for (var module : aware.getConfiguration().getCommonModules())
+                        if (objectName.equalsIgnoreCase(module.getName()))
+                            return module.isGlobal() ? "" : module.getName() + "."; //$NON-NLS-1$ //$NON-NLS-2$
+                return null;
             }
-            return null;
+            if (!"ManagerModule.bsl".equals(file)) //$NON-NLS-1$
+                return null;
+            // Имя папки EDT совпадает с английским именем менеджера («Catalogs», «InformationRegisters»).
+            String manager = project != null
+                && project.getScriptVariant() == com._1c.g5.v8.dt.metadata.mdclass.ScriptVariant.ENGLISH
+                    ? folder : MdTypeMapping.ruToRuPlural(MdTypeMapping.folderToRu(folder));
+            return manager != null ? manager + "." + objectName + "." : null; //$NON-NLS-1$ //$NON-NLS-2$
         }
 
         static String html(HoverContext ctx, String name)
@@ -5571,7 +5730,8 @@ public final class ParamHintHtmlModifier
                     String label = call != null ? call : link.getLinkText();
                     if (call == null && target instanceof Function)
                         label += "()"; //$NON-NLS-1$
-                    html.append("<!--comfort-param-see--> (<span class=\"").append(PARAM_ENTRY_CLASS) //$NON-NLS-1$
+                    html.append("<!--comfort-param-see-->").append(i == 0 ? " : " : ", ") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        .append("<span class=\"").append(PARAM_ENTRY_CLASS) //$NON-NLS-1$
                         .append("\" onmouseenter=\"comfortShowParamMenu(this)\"") //$NON-NLS-1$
                         .append(" onmouseleave=\"comfortHideParamMenu(this)\">") //$NON-NLS-1$
                         .append("<span class=\"").append(PARAM_LINK_CLASS).append("\">") //$NON-NLS-1$ //$NON-NLS-2$
@@ -5583,7 +5743,7 @@ public final class ParamHintHtmlModifier
                         appendParameterMenuItem(html, "seeOpen:" + i, index, "Открыть", false); //$NON-NLS-1$ //$NON-NLS-2$
                     if (call != null)
                         appendParameterMenuItem(html, "seeInsert:" + i, index, "Вставить вызов", false); //$NON-NLS-1$ //$NON-NLS-2$
-                    html.append("</span></span>)<!--comfort-param-see-end-->"); //$NON-NLS-1$
+                    html.append("</span></span><!--comfort-param-see-end-->"); //$NON-NLS-1$
                 }
             }
             catch (Exception | LinkageError ex)
@@ -6103,7 +6263,9 @@ public final class ParamHintHtmlModifier
         idx = s.indexOf(" - "); //$NON-NLS-1$
         if (idx >= 0 && idx < cut)
             cut = idx;
-        return s.substring(0, cut);
+        s = s.substring(0, cut);
+        // «<Типы : Конструктор()>»: скобка открыта ради вида, к типам не относится.
+        return s.startsWith("&lt;") ? s.substring("&lt;".length()) : s; //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     /** HTML фрагмент типов (без подписи «Тип:»), со ссылками. */

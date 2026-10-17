@@ -175,9 +175,37 @@ public final class BslDocCommentComputedTypes
      * ссылке промахивался (лог: {@code afterLight Конструктор size=1}, затем
      * {@code stillEmpty} на другом инстансе → {@code commentTypes=0} у {@code КэшАФВ}).
      * Пустой результат не кэшируем.
+     * <p>
+     * Запись годна, пока не изменился ресурс метода: рядом с типами лежит метка ресурса
+     * ({@link #resourceStamp}), после правки модуля она другая, и тип считается заново.
      */
-    private static final java.util.Map<String, List<?>> typeCacheByKey =
+    private static final java.util.Map<String, CachedReturn> typeCacheByKey =
         new java.util.concurrent.ConcurrentHashMap<>();
+
+    private record CachedReturn(List<?> types, Object stamp)
+    {
+    }
+
+    /** Метка ресурса: один объект, пока Xtext не сбросил кэш ресурса при его изменении. */
+    private static final org.eclipse.xtext.util.OnChangeEvictingCache RESOURCE_STAMPS =
+        new org.eclipse.xtext.util.OnChangeEvictingCache();
+
+    private static Object resourceStamp(EObject method)
+    {
+        Resource resource = method.eResource();
+        return resource == null ? null
+            : RESOURCE_STAMPS.get("tormozit.returnTypesStamp", resource, Object::new); //$NON-NLS-1$
+    }
+
+    /** Типы из кэша, если ресурс метода с тех пор не менялся; иначе {@code null}. */
+    private static List<?> cachedReturnTypes(String cacheKey, EObject method)
+    {
+        CachedReturn cached = typeCacheByKey.get(cacheKey);
+        if (cached == null)
+            return null;
+        Object stamp = resourceStamp(method);
+        return stamp != null && stamp == cached.stamp() ? cached.types() : null;
+    }
 
     /**
      * Живые типы возврата метода из кэша (после {@code afterLight}/{@code afterParse}).
@@ -189,15 +217,16 @@ public final class BslDocCommentComputedTypes
         if (methodName == null || methodName.isEmpty())
             return List.of();
         String needle = methodName + "@"; //$NON-NLS-1$
-        for (java.util.Map.Entry<String, List<?>> entry : typeCacheByKey.entrySet())
+        for (java.util.Map.Entry<String, CachedReturn> entry : typeCacheByKey.entrySet())
         {
             String key = entry.getKey();
-            if (key == null || entry.getValue() == null || entry.getValue().isEmpty())
+            List<?> cached = entry.getValue() == null ? null : entry.getValue().types();
+            if (key == null || cached == null || cached.isEmpty())
                 continue;
             if (!key.regionMatches(true, 0, needle, 0, needle.length()))
                 continue;
             List<TypeItem> types = new ArrayList<>();
-            for (Object item : entry.getValue())
+            for (Object item : cached)
             {
                 if (item instanceof TypeItem typeItem)
                     types.add(typeItem);
@@ -372,7 +401,7 @@ public final class BslDocCommentComputedTypes
             if (!isExtendedTypesEnabled(resolveProject(methodObject)))
                 return comment;
             String cacheKey = methodLabel(methodObject);
-            List<?> computed = typeCacheByKey.get(cacheKey);
+            List<?> computed = cachedReturnTypes(cacheKey, methodObject);
             if (computed != null && !computed.isEmpty())
             {
                 fillReturnSection(comment, computed, methodObject);
@@ -387,7 +416,7 @@ public final class BslDocCommentComputedTypes
                 if (result == null || result.isEmpty())
                 {
                     // Повторный промах: вдруг другой инстанс уже посчитал тот же метод.
-                    computed = typeCacheByKey.get(cacheKey);
+                    computed = cachedReturnTypes(cacheKey, methodObject);
                     if (computed != null && !computed.isEmpty())
                     {
                         fillReturnSection(comment, computed, methodObject);
@@ -396,7 +425,7 @@ public final class BslDocCommentComputedTypes
                     return comment;
                 }
                 computed = result;
-                typeCacheByKey.put(cacheKey, computed);
+                typeCacheByKey.put(cacheKey, new CachedReturn(computed, resourceStamp(methodObject)));
             }
             finally
             {
@@ -598,15 +627,13 @@ public final class BslDocCommentComputedTypes
             return;
         // Место создания полей — и в сборке: из поля его берёт свойство, которое EDT создаёт
         // по секции, а без места вставки подсказка не найдёт описание свойства.
-        int sources = 0;
         try
         {
-            sources = BslStructureInsertCommentTypes.alignFieldSources(typeSection, documentation, items,
+            BslStructureInsertCommentTypes.alignFieldSources(typeSection, documentation, items,
                 computed, methodLabel(context));
         }
-        catch (Throwable t)
+        catch (Throwable ignored)
         {
-            Global.tempLogException("bsl-property-fill-cost", "sources target=" + methodLabel(context), t); //$NON-NLS-1$ //$NON-NLS-2$
         }
         long descriptionsStarted = System.nanoTime();
         // Описания полей — только текст для подсказок. Комментарий, разобранный сборкой, в
@@ -629,7 +656,7 @@ public final class BslDocCommentComputedTypes
             Global.tempLog("bsl-property-fill-cost", "fill target=" + methodLabel(context) //$NON-NLS-1$ //$NON-NLS-2$
                 + " commentId=" + Integer.toHexString(System.identityHashCode(comment)) //$NON-NLS-1$
                 + " computedId=" + Integer.toHexString(System.identityHashCode(computed)) //$NON-NLS-1$
-                + " types=" + items.size() + " definitions=" + count + " sources=" + sources //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " types=" + items.size() + " definitions=" + count //$NON-NLS-1$ //$NON-NLS-2$
                 + " inBuild=" + inBuild + " cached=" + cached //$NON-NLS-1$ //$NON-NLS-2$
                 + " sectionFillNs=" + (descriptionsStarted - sectionStarted) //$NON-NLS-1$
                 + " elapsedNs=" + (System.nanoTime() - descriptionsStarted) //$NON-NLS-1$
