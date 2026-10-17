@@ -872,8 +872,9 @@ public class MoxelEditorHook implements IStartup
          * EDT 2025/2026: SheetAccessor.onChange ставит needUpdatePositions. В doPaint штатный
          * positionViewPorts сбрасывает четыре области на точку фиксации. Для этого вызова
          * копируем метод без setViewPortsSheetPositions: correctViewPortsSheetPositions
-         * пересчитывает размеры от текущего begin каждой области. Первичная раскладка,
-         * изменение фиксации, масштаба и размера окна используют исходный метод.
+         * пересчитывает размеры от текущего begin каждой области. То же в onResize: при изменении
+         * размера контрола (например, высоты поля) штатный метод тоже возвращал прокрутку в начало.
+         * Первичная раскладка, изменение фиксации и масштаба используют исходный метод.
          */
         private static byte[] transform(byte[] bytes)
         {
@@ -887,8 +888,11 @@ public class MoxelEditorHook implements IStartup
                     String signature, String[] exceptions)
                 {
                     MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
-                    if (!"doPaint".equals(name) //$NON-NLS-1$
-                        || !"(Lorg/eclipse/swt/events/PaintEvent;)V".equals(descriptor)) //$NON-NLS-1$
+                    boolean paint = "doPaint".equals(name) //$NON-NLS-1$
+                        && "(Lorg/eclipse/swt/events/PaintEvent;)V".equals(descriptor); //$NON-NLS-1$
+                    boolean resize = "onResize".equals(name) //$NON-NLS-1$
+                        && "(Lorg/eclipse/swt/events/ControlEvent;)V".equals(descriptor); //$NON-NLS-1$
+                    if (!paint && !resize)
                         return mv;
                     return new MethodVisitor(Opcodes.ASM9, mv)
                     {
@@ -935,7 +939,7 @@ public class MoxelEditorHook implements IStartup
                     };
                 }
             }, 0);
-            return patched[0] == 1 && patched[1] == 1 ? writer.toByteArray() : null;
+            return patched[0] == 2 && patched[1] == 1 ? writer.toByteArray() : null;
         }
     }
 
